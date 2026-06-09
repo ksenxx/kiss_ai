@@ -312,6 +312,70 @@ const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-daemonhealth-'));
     assert.strictEqual(decision.skip, false);
   });
 
+  await test('decideRestart: skips restart when daemon is ALIVE and activeTasks probe failed (bug: task 3192 SIGTERM regression)', () => {
+    // Reproduces the bug behind the "Task interrupted by server
+    // restart/shutdown" failure of task_history row 3192.  The kiss-
+    // web daemon (pid 68477) was happily running a multi-minute
+    // ``uv run check --full`` step on behalf of an agent task when
+    // the extension's ``restartKissWebDaemon`` SIGTERMed it.  At the
+    // moment of the SIGTERM the daemon's own log line reported
+    // ``active_tasks=[a3b4ec24-...(task=3191)] rss=147.7MB`` —
+    // proof that the daemon WAS running a task and that the
+    // installer SHOULD have deferred.
+    //
+    // The pre-fix decision table restarted whenever
+    // ``fingerprintMatches=false`` regardless of the
+    // ``activeTasks.ok`` flag.  On an extension auto-update every
+    // ``.py`` mtime in the bundled ``kiss_project`` changes so the
+    // fingerprint never matches — and an in-flight task can make the
+    // 1500 ms UDS round-trip miss its deadline (``ok:false,
+    // reason:"timeout"``).  Those two failures combined SIGTERMed a
+    // perfectly healthy, BUSY daemon.
+    //
+    // The fix: an ALIVE daemon whose active-tasks status cannot be
+    // confirmed MUST NOT be SIGTERMed.  The fingerprint change is
+    // applied lazily on the next activation that can prove the
+    // daemon is idle (or has died on its own).
+    const decision = decideRestart({
+      fingerprintMatches: false, // extension auto-updated
+      health: 'alive', // TCP probe accepted the connection
+      activeTasks: {ok: false, reason: 'timeout'}, // UDS missed deadline
+    });
+    assert.strictEqual(decision.skip, true,
+      `expected to skip restart of an alive daemon with unknown ` +
+      `active-tasks status; got: ${JSON.stringify(decision)}`);
+    assert.ok(/alive-uncertain/.test(decision.reason),
+      `expected the skip reason to flag the uncertainty; got: ${decision.reason}`);
+  });
+
+  await test('decideRestart: skips restart when daemon is ALIVE and UDS socket is missing (transient startup window)', () => {
+    // Same defensive policy: when probeDaemonHealth says 'alive' but
+    // daemonHasActiveTasks could not even open the UDS, do NOT kill
+    // the daemon.  This guards a real production window where the
+    // daemon has just bound TCP but the UDS hasn't been (re-)created
+    // yet on the new path.
+    const decision = decideRestart({
+      fingerprintMatches: false,
+      health: 'alive',
+      activeTasks: {ok: false, reason: 'sock-missing'},
+    });
+    assert.strictEqual(decision.skip, true);
+  });
+
+  await test('decideRestart: still RESTARTS when the daemon is fully unreachable (health=unknown + activeTasks failed + fingerprint mismatched)', () => {
+    // Counter-test: the safety net must NOT block recovery when the
+    // daemon really has gone away.  ``health='unknown'`` (e.g.
+    // host overloaded, no ECONNREFUSED but no accept either) combined
+    // with an active-tasks probe that could not connect and a code
+    // change must still allow the installer to recycle the daemon.
+    const decision = decideRestart({
+      fingerprintMatches: false,
+      health: 'unknown',
+      activeTasks: {ok: false, reason: 'sock-missing'},
+    });
+    assert.strictEqual(decision.skip, false);
+  });
+
   await test('decideRestart: RESTARTS when daemon is confirmed dead even if fingerprint matches', () => {
     const decision = decideRestart({
       fingerprintMatches: true,
