@@ -639,6 +639,10 @@ body.remote-chat #welcome-config { display: none !important; }
 }
 .tr.err { background: color-mix(in srgb, var(--red) 4%, transparent); border-color: color-mix(in srgb, var(--red) 20%, transparent); }
 
+/* Informational server notice (e.g. runUpdate acknowledgement). */
+.tr.note { border-color: color-mix(in srgb, var(--green) 20%, transparent); }
+.tr.note strong { color: var(--green); }
+
 .tr .rl {
   font-size: var(--fs-sm); font-weight: 600; text-transform: uppercase;
   letter-spacing: .04em; margin-bottom: 4px;

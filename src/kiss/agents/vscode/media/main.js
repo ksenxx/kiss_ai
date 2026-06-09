@@ -2605,6 +2605,13 @@
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) break;
         addError(ev.text);
         break;
+      case 'notice':
+        // Informational (non-error) server notification — e.g. the
+        // remote webapp's runUpdate acknowledgement.  Counterpart of
+        // the extension's vscode.window.showInformationMessage().
+        if (ev.tabId !== undefined && ev.tabId !== activeTabId) break;
+        addNotice(ev.text);
+        break;
       case 'clear': {
         const clearTab =
           ev.tabId !== undefined
@@ -3554,6 +3561,14 @@
   function addError(text) {
     const div = mkEl('div', 'ev tr err');
     div.innerHTML = '<strong>Error:</strong> ' + esc(text);
+    O.appendChild(div);
+    sb();
+  }
+
+  /** Render an informational server notice (green-tinted banner). */
+  function addNotice(text) {
+    const div = mkEl('div', 'ev tr note');
+    div.innerHTML = '<strong>Note:</strong> ' + esc(text);
     O.appendChild(div);
     sb();
   }
