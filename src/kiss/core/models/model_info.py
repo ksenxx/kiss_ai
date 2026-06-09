@@ -132,6 +132,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "cc/haiku": _mi(200000, 0.00, 0.00),
     "cc/opus": _mi(200000, 0.00, 0.00),
     "cc/sonnet": _mi(200000, 0.00, 0.00),
+    "claude-fable-5": _mi(1000000, 10.00, 50.00),  # NEW
     "claude-haiku-4-5": _mi(200000, 1.00, 5.00),
     "claude-haiku-4-5-20251001": _mi(200000, 1.00, 5.00),
     "claude-opus-4": _mi(200000, 15.00, 75.00),
@@ -330,6 +331,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/anthropic/claude-3-haiku": _mi(200000, 0.25, 1.25),
     "openrouter/anthropic/claude-3.5-haiku": _mi(200000, 0.80, 4.00),
     "openrouter/anthropic/claude-3.7-sonnet:thinking": _mi(200000, 3.00, 15.00),
+    "openrouter/anthropic/claude-fable-5": _mi(1000000, 10.00, 50.00),  # NEW
     "openrouter/anthropic/claude-haiku-4.5": _mi(200000, 1.00, 5.00),
     "openrouter/anthropic/claude-opus-4": _mi(200000, 15.00, 75.00),
     "openrouter/anthropic/claude-opus-4.1": _mi(200000, 15.00, 75.00),
@@ -344,7 +346,6 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/anthropic/claude-sonnet-4.5": _mi(1000000, 3.00, 15.00),
     "openrouter/anthropic/claude-sonnet-4.6": _mi(1000000, 3.00, 15.00),
     "openrouter/arcee-ai/coder-large": _mi(32768, 0.50, 0.80, fc=False),
-    "openrouter/arcee-ai/maestro-reasoning": _mi(131072, 0.90, 3.30, fc=False),
     "openrouter/arcee-ai/trinity-large-thinking": _mi(262144, 0.22, 0.85),
     "openrouter/arcee-ai/trinity-mini": _mi(131072, 0.045, 0.15, fc=False),
     "openrouter/arcee-ai/virtuoso-large": _mi(131072, 0.75, 1.20),
@@ -428,8 +429,8 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/minimax/minimax-m2": _mi(204800, 0.255, 1.00, fc=False),
     "openrouter/minimax/minimax-m2-her": _mi(65536, 0.30, 1.20, fc=False),
     "openrouter/minimax/minimax-m2.1": _mi(204800, 0.29, 0.95),
-    "openrouter/minimax/minimax-m2.5": _mi(204800, 0.15, 1.15),
-    "openrouter/minimax/minimax-m2.7": _mi(204800, 0.279, 1.20),
+    "openrouter/minimax/minimax-m2.5": _mi(204800, 0.15, 0.90),
+    "openrouter/minimax/minimax-m2.7": _mi(204800, 0.27, 1.08),
     "openrouter/minimax/minimax-m3": _mi(1048576, 0.30, 1.20),  # NEW
     "openrouter/mistralai/codestral-2508": _mi(256000, 0.30, 0.90, fc=False),
     "openrouter/mistralai/devstral-2512": _mi(262144, 0.40, 2.00, fc=False),
@@ -620,6 +621,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/z-ai/glm-5-turbo": _mi(202752, 1.20, 4.00),
     "openrouter/z-ai/glm-5.1": _mi(202752, 0.98, 3.08),
     "openrouter/z-ai/glm-5v-turbo": _mi(202752, 1.20, 4.00),
+    "openrouter/~anthropic/claude-fable-latest": _mi(1000000, 10.00, 50.00),  # NEW
     "openrouter/~anthropic/claude-haiku-latest": _mi(200000, 1.00, 5.00),
     "openrouter/~anthropic/claude-opus-latest": _mi(1000000, 5.00, 25.00),
     "openrouter/~anthropic/claude-sonnet-latest": _mi(1000000, 3.00, 15.00),
