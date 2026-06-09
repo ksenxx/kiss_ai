@@ -175,12 +175,13 @@ def _clean_env(work_dir: str | None = None) -> dict[str, str]:
 
     Args:
         work_dir: Agent working directory to expose to child processes
-            via ``KISS_WORKDIR``.  ``None`` leaves the inherited value
-            untouched.
+            via ``KISS_WORKDIR``.  ``None`` or ``""`` (the unresolved
+            default on a freshly constructed agent) leaves the inherited
+            value untouched.
     """
     env = os.environ.copy()
     env.pop("VIRTUAL_ENV", None)
-    if work_dir is not None:
+    if work_dir:
         env["KISS_WORKDIR"] = work_dir
     return env
 
@@ -455,7 +456,7 @@ class UsefulTools:
                 text=True,
                 encoding="utf-8",
                 env=env,
-                cwd=self.work_dir,
+                cwd=self.work_dir or None,
             )
             done = threading.Event()
             monitor = None
@@ -498,7 +499,7 @@ class UsefulTools:
             text=True,
             encoding="utf-8",
             env=_clean_env(self.work_dir),
-            cwd=self.work_dir,
+            cwd=self.work_dir or None,
         )
         timed_out = False
         done = threading.Event()
