@@ -993,7 +993,7 @@ async function restartKissWebDaemon(
       // call: SIGTERMing an alive daemon whose task status is unknown
       // is exactly what aborted task_history row 3192 mid-flight.
       log(
-        `kiss-web alive but active-tasks probe inconclusive ` +
+        'kiss-web alive but active-tasks probe inconclusive ' +
           `(${decision.reason}) — deferring restart to next activation`,
       );
     } else {

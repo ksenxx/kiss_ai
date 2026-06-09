@@ -3660,10 +3660,11 @@
       return;
     }
     btn.classList.add('has-update');
-    const tip = latest && current
-      ? `New version ${latest} available (installed ${current}) ` +
-        '— click to update'
-      : 'A new version is available — click to update';
+    const tip =
+      latest && current
+        ? `New version ${latest} available (installed ${current}) ` +
+          '— click to update'
+        : 'A new version is available — click to update';
     btn.setAttribute('title', tip);
     // Build an inline SVG download-arrow icon (matches the 12px
     // visual weight of the autocommit button's circle icon).  Use
