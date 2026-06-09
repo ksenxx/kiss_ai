@@ -1493,82 +1493,11 @@
     addCopyButton(panelEl);
   }
 
-  // Outline+check icons reused for every panel copy button.
-  const PANEL_COPY_SVG =
-    '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" ' +
-    'stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
-    'stroke-linejoin="round" aria-hidden="true">' +
-    '<rect x="9" y="9" width="13" height="13" rx="2"/>' +
-    '<path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>';
-  const PANEL_CHECK_SVG =
-    '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" ' +
-    'stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
-    'stroke-linejoin="round" aria-hidden="true">' +
-    '<polyline points="20 6 9 17 4 12"/></svg>';
-
-  /**
-   * Attach a copy-to-clipboard button to a chat panel.
-   *
-   * The button is positioned absolutely in the top-right corner of
-   * ``panelEl`` (the helper adds the ``copyable`` class which sets
-   * ``position: relative`` on the panel) and copies the panel's plain
-   * visible text — excluding the button itself, the collapse chevron,
-   * and the collapse preview — to the system clipboard via
-   * ``navigator.clipboard.writeText``.  Clicking the button does not
-   * collapse/expand the panel: the click handler stops propagation
-   * before the collapsible-header listener runs.  After a successful
-   * copy the icon swaps to a check mark for 1.5 s as feedback.
-   *
-   * Idempotent: calling twice on the same panel is a no-op.
-   *
-   * @param {HTMLElement} panelEl - panel container to attach the
-   *   button to.
-   */
-  function addCopyButton(panelEl) {
-    if (!panelEl || panelEl.querySelector(':scope > .panel-copy-btn')) return;
-    panelEl.classList.add('copyable');
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'panel-copy-btn';
-    btn.title = 'Copy panel text';
-    btn.setAttribute('aria-label', 'Copy panel text');
-    btn.innerHTML = PANEL_COPY_SVG;
-    btn.addEventListener('click', e => {
-      e.stopPropagation();
-      e.preventDefault();
-      const text = collectText(panelEl)
-        .replace(/[ \t]+\n/g, '\n')
-        .replace(/\n{3,}/g, '\n\n')
-        .replace(/[ \t]{2,}/g, ' ')
-        .trim();
-      const done = () => {
-        btn.innerHTML = PANEL_CHECK_SVG;
-        btn.classList.add('copied');
-        setTimeout(() => {
-          btn.innerHTML = PANEL_COPY_SVG;
-          btn.classList.remove('copied');
-        }, 1500);
-      };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(text).then(done, () => {});
-      } else {
-        // Fallback for environments without the async clipboard API.
-        const ta = document.createElement('textarea');
-        ta.value = text;
-        ta.style.position = 'fixed';
-        ta.style.opacity = '0';
-        document.body.appendChild(ta);
-        ta.select();
-        try {
-          document.execCommand('copy');
-          done();
-        } finally {
-          document.body.removeChild(ta);
-        }
-      }
-    });
-    panelEl.appendChild(btn);
-  }
+  // Panel Copy button + raw-text walker live in media/panelCopy.js so
+  // they can be loaded both in the webview and from a Node + jsdom test.
+  const addCopyButton = window.PanelCopy.addCopyButton;
+  const PANEL_COPY_SVG = window.PanelCopy.PANEL_COPY_SVG;
+  const PANEL_CHECK_SVG = window.PanelCopy.PANEL_CHECK_SVG;
 
   function collapseAllExceptResult(container) {
     const panels = container.querySelectorAll('.collapsible');
@@ -1785,6 +1714,10 @@
               marked.parse(tState.txtBuf || ''),
             );
             hlBlock(tState.txtEl);
+            // Preserve raw markdown so the panel Copy button reproduces
+            // the original markdown rather than the rendered HTML's
+            // textContent (which loses #/`*/` markers).
+            tState.txtEl.dataset.rawText = tState.txtBuf || '';
           } else if (tState.txtNode && tState.txtPending) {
             tState.txtNode.appendData(tState.txtPending);
           }
@@ -1885,6 +1818,8 @@
             '<div class="rl fail">FAILED</div><div class="tr-content">' +
             esc(ev.content) +
             '</div>';
+          // Raw tool-result error text for the Copy button.
+          r.dataset.rawText = 'FAILED\n' + (ev.content || '');
           addCollapse(r, r.querySelector('.rl'));
           resultTarget.appendChild(r);
         } else {
@@ -1921,12 +1856,15 @@
       case 'result': {
         const rc = mkEl('div', 'ev rc');
         let rb = '';
+        let rawBody = '';
         if (ev.is_continue) {
           rb +=
             '<div style="color:var(--yellow);font-weight:700;font-size:var(--fs-xl);margin-bottom:10px">Status: Continue</div>';
+          rawBody += 'Status: Continue\n\n';
         } else if (ev.success === false) {
           rb +=
             '<div style="color:var(--red);font-weight:700;font-size:var(--fs-xl);margin-bottom:10px">Status: FAILED</div>';
+          rawBody += 'Status: FAILED\n\n';
         }
         let usePre = true;
         if (ev.summary) {
@@ -1937,11 +1875,18 @@
           } else {
             rb += esc(sum);
           }
+          rawBody += sum;
         } else {
-          rb += esc(
-            (ev.text || '(no result)').replace(/\n{3,}/g, '\n\n').trim(),
-          );
+          const txt = (ev.text || '(no result)')
+            .replace(/\n{3,}/g, '\n\n')
+            .trim();
+          rb += esc(txt);
+          rawBody += txt;
         }
+        // Preserve raw markdown/text result so the panel Copy button
+        // reproduces the agent-supplied markdown rather than the rendered
+        // HTML's textContent (which strips #/`*/` markers).
+        rc.dataset.rawText = rawBody;
         rc.innerHTML =
           '<div class="rc-h"><h3>Result</h3><div class="rs">' +
           '<span>Tokens <b>' +
@@ -1985,6 +1930,9 @@
           '-body md-body">' +
           body +
           '</div>';
+        // Preserve the raw markdown so the panel Copy button reproduces
+        // the original markdown rather than the rendered HTML.
+        el.dataset.rawText = ev.text || '';
         addCollapse(el, el.querySelector('.' + cls + '-h'));
         hlBlock(el);
         target.appendChild(el);
