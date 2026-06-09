@@ -146,8 +146,9 @@ def test_adopt_returns_none_when_metrics_unhealthy(
 
     Uses a real long-running ``sleep`` subprocess so the pid is alive,
     but the saved ``metrics_port=1`` is a port nothing is listening on,
-    so :func:`_probe_tunnel_ready` correctly returns ``False`` and the
-    adoption attempt is refused.
+    so :func:`_probe_tunnel_ready` correctly returns ``None`` (no
+    information — endpoint unreachable) and the adoption attempt is
+    refused because ``not None`` is truthy.
     """
     pidfile = tmp_path / "cloudflared.pid"
     monkeypatch.setattr(ws, "_CLOUDFLARED_PIDFILE", pidfile)
