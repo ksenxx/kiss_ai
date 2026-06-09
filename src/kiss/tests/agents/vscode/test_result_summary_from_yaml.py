@@ -155,7 +155,13 @@ def _run_and_wait(server: VSCodeServer, tab_id: str, prompt: str,
     })
     t = server._get_tab(tab_id).task_thread
     assert t is not None
-    t.join(timeout=10)
+    # 60s timeout: the end-to-end task flow (git-worktree setup,
+    # autocommit, persistence) easily exceeds 10s when other tests
+    # share the runner — observed wall time is ~6s per task in isolation
+    # and 15-30s under parallel load.  The 10s bound was the root cause
+    # of the flaky failure where the assert tripped before
+    # ``_run_task`` finished.
+    t.join(timeout=60)
     assert not t.is_alive()
 
 
