@@ -82,8 +82,10 @@ class _NtfyHandler(BaseHTTPRequestHandler):
         body = self.rfile.read(length).decode("utf-8") if length else ""
         store: dict[str, list[str]] = self.server.messages  # type: ignore[attr-defined]
         store.setdefault(topic, []).append(body)
-        posts: list[tuple[str, str]] = self.server.posts  # type: ignore[attr-defined]
-        posts.append((topic, body))
+        posts: list[tuple[str, str, dict[str, str]]] = (
+            self.server.posts  # type: ignore[attr-defined]
+        )
+        posts.append((topic, body, dict(self.headers)))
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
@@ -111,7 +113,7 @@ class _NtfyServerContext:
         self.thread.join(timeout=5)
 
     @property
-    def posts(self) -> list[tuple[str, str]]:
+    def posts(self) -> list[tuple[str, str, dict[str, str]]]:
         return self.server.posts  # type: ignore[attr-defined,no-any-return]
 
     @property
@@ -141,7 +143,7 @@ class TestNtfyDeduplication(unittest.TestCase):
         _post_url_to_message_board(url, base_url=self.ntfy.base_url)
         # Exactly one POST hit the server with the URL as body.
         self.assertEqual(len(self.ntfy.posts), 1)
-        topic, body = self.ntfy.posts[0]
+        topic, body, _headers = self.ntfy.posts[0]
         self.assertTrue(topic.startswith("kiss-"))
         self.assertEqual(body, url)
 
@@ -183,6 +185,30 @@ class TestNtfyDeduplication(unittest.TestCase):
         """Empty URLs are silently ignored."""
         _post_url_to_message_board("", base_url=self.ntfy.base_url)
         self.assertEqual(len(self.ntfy.posts), 0)
+
+    def test_click_header_is_set_to_url(self) -> None:
+        """The ``Click`` header makes the ntfy notification clickable.
+
+        Without this header, tapping the message in the ntfy.sh web UI
+        or the mobile app does nothing because the URL in the body is
+        rendered as plain text.  Per
+        https://docs.ntfy.sh/publish/#click-action, the ``Click``
+        header is the only supported way to attach a navigation
+        target to a message, so it must equal the URL we published.
+        """
+        url = "https://red-fox-1234.trycloudflare.com"
+        _post_url_to_message_board(url, base_url=self.ntfy.base_url)
+        self.assertEqual(len(self.ntfy.posts), 1)
+        _topic, body, headers = self.ntfy.posts[0]
+        self.assertEqual(body, url)
+        # HTTP headers are case-insensitive; the BaseHTTPRequestHandler
+        # preserves the on-the-wire casing, which our client sends as
+        # ``Click``.  Look it up case-insensitively to stay robust.
+        click = next(
+            (v for k, v in headers.items() if k.lower() == "click"),
+            None,
+        )
+        self.assertEqual(click, url)
 
 
 if __name__ == "__main__":  # pragma: no cover
