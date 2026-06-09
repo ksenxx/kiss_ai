@@ -93,6 +93,21 @@ TRAJECTORY_TEMPLATE = (
 
 TUNNEL_CHECK_INTERVAL = 30
 
+# How often the server polls PyPI to learn whether a newer
+# ``kiss-agent-framework`` release is available.  3600 s = once per
+# hour, matching the "every hour" requirement.  Tests override this
+# to a sub-second value to exercise the periodic loop quickly.
+_VERSION_CHECK_INTERVAL: float = 3600
+
+# PyPI JSON endpoint that reports the latest release of the project.
+# Tests override this to point at a local stub HTTP server so no
+# real network access is required.
+_PYPI_LATEST_URL = "https://pypi.org/pypi/kiss-agent-framework/json"
+
+# Timeout for the PyPI HTTP request — kept small so a slow PyPI
+# response cannot stall the periodic loop for long.
+_PYPI_FETCH_TIMEOUT = 5.0
+
 _WS_PING_TIMEOUT = 10
 
 _TUNNEL_UNHEALTHY_LIMIT_NAMED = 3
@@ -2024,6 +2039,73 @@ def _read_version() -> str:
     return ""
 
 
+def _version_tuple(v: str) -> tuple[int, ...] | None:
+    """Return ``v`` parsed as an int-tuple, or ``None`` on failure.
+
+    ``kiss-agent-framework`` uses CalVer ``YYYY.M.P`` so a simple
+    ``int`` split on ``.`` is sufficient; ``None`` is returned for
+    anything that cannot be parsed so a malformed PyPI payload never
+    triggers a false "update available" notification.
+    """
+    try:
+        parts = [int(p) for p in v.strip().split(".") if p != ""]
+    except (ValueError, AttributeError):
+        return None
+    return tuple(parts) if parts else None
+
+
+def _compare_versions(a: str, b: str) -> int:
+    """Compare two CalVer/SemVer-ish version strings.
+
+    Returns ``1`` when *a* > *b*, ``-1`` when *a* < *b*, ``0`` when
+    they compare equal (including the case where either is
+    unparseable — see :func:`_version_tuple`).  Shorter tuples are
+    right-padded with zeros so ``"2026.6"`` and ``"2026.6.0"`` are
+    equal.
+    """
+    ta, tb = _version_tuple(a), _version_tuple(b)
+    if ta is None or tb is None:
+        return 0
+    n = max(len(ta), len(tb))
+    ta = ta + (0,) * (n - len(ta))
+    tb = tb + (0,) * (n - len(tb))
+    if ta > tb:
+        return 1
+    if ta < tb:
+        return -1
+    return 0
+
+
+def _fetch_latest_version() -> str | None:
+    """Fetch the latest ``kiss-agent-framework`` version from PyPI.
+
+    Returns the version string on success, ``None`` on any error
+    (network failure, malformed JSON, missing key).  Callers must
+    treat ``None`` as "no information" — never as "no update".
+    """
+    try:
+        req = urllib.request.Request(
+            _PYPI_LATEST_URL,
+            headers={"Accept": "application/json"},
+        )
+        with urllib.request.urlopen(  # noqa: S310 — fixed PyPI URL
+            req, timeout=_PYPI_FETCH_TIMEOUT,
+        ) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        logger.debug("PyPI version fetch failed", exc_info=True)
+        return None
+    if not isinstance(data, dict):
+        return None
+    info = data.get("info")
+    if not isinstance(info, dict):
+        return None
+    version = info.get("version")
+    if not isinstance(version, str) or not version.strip():
+        return None
+    return version.strip()
+
+
 def _read_tricks() -> list[str]:
     """Parse ``src/kiss/INJECTIONS.md`` and return the trick texts.
 
@@ -2425,6 +2507,14 @@ class RemoteAccessServer:
         )
         self._uds_server: asyncio.Server | None = None
         self._watchdog_task: asyncio.Task[None] | None = None
+        # Cached PyPI version learned by :meth:`_check_for_update`.
+        # ``None`` until the first poll completes; ``""`` if PyPI is
+        # unreachable.  ``_send_welcome_info`` replays the cached
+        # ``update_available`` event so a client that connects between
+        # polls still learns the current state without waiting for
+        # the next hour's tick.
+        self._latest_version: str | None = None
+        self._version_check_task: asyncio.Task[None] | None = None
         # Set True by :meth:`_handle_shutdown_signal` the first time a
         # SIGTERM is caught.  Guards against a *second* SIGTERM (e.g.
         # an impatient ``pkill`` loop) re-raising ``KeyboardInterrupt``
@@ -2972,6 +3062,22 @@ class RemoteAccessServer:
         if ntfy_url:
             msg["ntfyUrl"] = ntfy_url
         self._printer.broadcast(msg)
+        # Replay the cached PyPI update-available state so a client
+        # that just (re)connected sees the green download badge on
+        # the Update button without having to wait for the next
+        # hourly poll.
+        latest = self._latest_version
+        if latest:
+            current = _read_version()
+            available = bool(current) and _compare_versions(
+                latest, current,
+            ) > 0
+            self._printer.broadcast({
+                "type": "update_available",
+                "available": available,
+                "latest": latest,
+                "current": current,
+            })
 
     @staticmethod
     async def _endpoint_send(endpoint: Any, data: str) -> None:
@@ -3674,6 +3780,59 @@ class RemoteAccessServer:
             except Exception:
                 pass
 
+    async def _check_for_update(self) -> None:
+        """Poll PyPI and broadcast an ``update_available`` event.
+
+        Fetches the latest ``kiss-agent-framework`` version (in a
+        background executor so the blocking ``urllib`` call cannot
+        stall the asyncio loop), caches it on ``self._latest_version``,
+        and broadcasts an ``update_available`` event of the form
+        ``{"type": "update_available", "available": bool,
+            "latest": str, "current": str}`` to every connected client.
+
+        Called both at startup and periodically by
+        :meth:`_version_check_loop`.
+        """
+        loop = self._loop
+        assert loop is not None
+        latest = await loop.run_in_executor(None, _fetch_latest_version)
+        if not latest:
+            # Network error or malformed payload — keep the previous
+            # cached state (if any) and do nothing.  Re-broadcasting
+            # a stale ``False`` would mask a genuine update.
+            return
+        current = _read_version()
+        available = bool(current) and _compare_versions(latest, current) > 0
+        self._latest_version = latest
+        self._printer.broadcast({
+            "type": "update_available",
+            "available": available,
+            "latest": latest,
+            "current": current,
+        })
+
+    async def _version_check_loop(self) -> None:
+        """Run :meth:`_check_for_update` every hour.
+
+        The very first check runs immediately so clients learn about
+        a pending upgrade as soon as the daemon starts, instead of
+        waiting an entire hour for the first tick.
+        """
+        try:
+            await self._check_for_update()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug("Initial version check failed", exc_info=True)
+        while True:
+            await asyncio.sleep(_VERSION_CHECK_INTERVAL)
+            try:
+                await self._check_for_update()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug("Periodic version check failed", exc_info=True)
+
     async def _watchdog(self) -> None:
         """Unified periodic watchdog (runs every :data:`TUNNEL_CHECK_INTERVAL`).
 
@@ -3903,6 +4062,9 @@ class RemoteAccessServer:
 
         self._last_ips = _get_local_ips()
         self._watchdog_task = asyncio.create_task(self._watchdog())
+        self._version_check_task = asyncio.create_task(
+            self._version_check_loop(),
+        )
 
     async def _serve_async(self) -> None:
         """Internal async entry point for the server."""
@@ -4200,6 +4362,13 @@ class RemoteAccessServer:
             except asyncio.CancelledError:
                 pass
             self._watchdog_task = None
+        if self._version_check_task is not None:
+            self._version_check_task.cancel()
+            try:
+                await self._version_check_task
+            except asyncio.CancelledError:
+                pass
+            self._version_check_task = None
         # Cancel any armed deferred-close timers so a server shutdown
         # does not leave dangling ``call_later`` handles in the loop.
         with self._pending_tab_closes_lock:
