@@ -2744,6 +2744,13 @@
       case 'remote_url':
         renderRemoteUrl(ev.url, ev.ntfyUrl, ev.tunnelActive);
         break;
+      case 'update_available':
+        renderUpdateAvailable(
+          !!ev.available,
+          ev.latest || '',
+          ev.current || '',
+        );
+        break;
       case 'followup_suggestion': {
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) break;
         const fu = mkEl('div', 'followup-bar');
@@ -3671,6 +3678,72 @@
           : !!tunnelActive;
       welcomeCfg.style.display = visible ? '' : 'none';
     }
+  }
+
+  /**
+   * Update the settings-panel "Update" button to advertise that a
+   * newer ``kiss-agent-framework`` release is available on PyPI.
+   *
+   * When ``available`` is true, the button receives the
+   * ``has-update`` CSS class and a green download SVG icon is
+   * injected before the "Update" label.  When false (or when called
+   * before the first PyPI poll completes) the icon is removed and
+   * the button reverts to its default appearance.
+   *
+   * The hourly poll runs in ``RemoteAccessServer._version_check_loop``
+   * on the kiss-web daemon and broadcasts an ``update_available``
+   * event over both UDS (VS Code webview) and WSS (remote-chat
+   * webview).
+   *
+   * @param {boolean} available - true when ``latest > current``.
+   * @param {string} latest - The latest version reported by PyPI.
+   * @param {string} current - The version installed locally.
+   */
+  function renderUpdateAvailable(available, latest, current) {
+    const btn = document.getElementById('cfg-update-btn');
+    if (!btn) return;
+    // Strip any previously-injected icon so repeated broadcasts do
+    // not stack badges on top of each other.
+    const prior = btn.querySelector('.update-available-icon');
+    if (prior) prior.remove();
+    if (!available) {
+      btn.classList.remove('has-update');
+      btn.removeAttribute('title');
+      return;
+    }
+    btn.classList.add('has-update');
+    const tip = latest && current
+      ? `New version ${latest} available (installed ${current}) ` +
+        '— click to update'
+      : 'A new version is available — click to update';
+    btn.setAttribute('title', tip);
+    // Build an inline SVG download-arrow icon (matches the 12px
+    // visual weight of the autocommit button's circle icon).  Use
+    // namespaced createElementNS so the browser parses it as SVG
+    // rather than HTML.
+    const svgNs = 'http://www.w3.org/2000/svg';
+    const icon = document.createElementNS(svgNs, 'svg');
+    icon.setAttribute('class', 'update-available-icon');
+    icon.setAttribute('width', '12');
+    icon.setAttribute('height', '12');
+    icon.setAttribute('viewBox', '0 0 24 24');
+    icon.setAttribute('fill', 'none');
+    icon.setAttribute('stroke', 'currentColor');
+    icon.setAttribute('stroke-width', '2');
+    icon.setAttribute('stroke-linecap', 'round');
+    icon.setAttribute('stroke-linejoin', 'round');
+    // Download arrow path (Feather "download" icon).
+    const parts = [
+      ['path', {d: 'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4'}],
+      ['polyline', {points: '7 10 12 15 17 10'}],
+      ['line', {x1: '12', y1: '15', x2: '12', y2: '3'}],
+    ];
+    for (const [tag, attrs] of parts) {
+      const el = document.createElementNS(svgNs, tag);
+      for (const k of Object.keys(attrs)) el.setAttribute(k, attrs[k]);
+      icon.appendChild(el);
+    }
+    btn.insertBefore(icon, btn.firstChild);
   }
 
   // --- Welcome suggestions (dynamic) ---
