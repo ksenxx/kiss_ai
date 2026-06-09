@@ -238,25 +238,120 @@ const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-daemonhealth-'));
     }
   });
 
-  await test('daemonHasActiveTasks: returns {ok:false, reason:"parse-failed"} on invalid JSON', async () => {
+  await test('daemonHasActiveTasks: skips non-JSON broadcast noise and times out instead of mis-reporting', async () => {
+    // Non-JSON noise can appear on the broadcast channel (future
+    // protocol extensions, partial flushes, etc.).  Misclassifying it
+    // as a fatal ``parse-failed`` would abort install.sh on a
+    // perfectly healthy daemon — the same family of bug as the
+    // ``Unknown command: activeTasksQuery`` regression.  The probe
+    // must drain the bad line and keep waiting.
     const sockPath = path.join(tmpRoot, 'gibberish.sock');
     const server = await listenUds(sockPath, 'gibberish');
     try {
-      const res = await daemonHasActiveTasks(sockPath, 1500);
+      const res = await daemonHasActiveTasks(sockPath, 200);
       assert.strictEqual(res.ok, false);
-      assert.strictEqual(res.reason, 'parse-failed');
+      assert.strictEqual(res.reason, 'timeout');
     } finally {
       await server.close();
     }
   });
 
-  await test('daemonHasActiveTasks: returns {ok:false, reason:"unexpected-type"} when the daemon replies with the wrong type', async () => {
+  await test('daemonHasActiveTasks: skips broadcast lines that are not the awaited response (times out instead of mis-reporting)', async () => {
+    // RemoteAccessServer._uds_handler registers every client as a
+    // broadcast destination, so unrelated event lines can arrive
+    // before the response.  We must NOT treat the first stray line
+    // as a fatal "unexpected-type" — that mis-classification caused
+    // the OLD-daemon install.sh abort.  Instead we skip and keep
+    // waiting; if nothing else ever comes, the outer timeout fires.
     const sockPath = path.join(tmpRoot, 'wrong.sock');
     const server = await listenUds(sockPath, {type: 'something-else'});
     try {
-      const res = await daemonHasActiveTasks(sockPath, 1500);
+      const res = await daemonHasActiveTasks(sockPath, 200);
       assert.strictEqual(res.ok, false);
-      assert.strictEqual(res.reason, 'unexpected-type');
+      assert.strictEqual(res.reason, 'timeout');
+    } finally {
+      await server.close();
+    }
+  });
+
+  await test('daemonHasActiveTasks: tolerates a stray broadcast line that precedes the real activeTasksResponse', async () => {
+    // RemoteAccessServer broadcasts unrelated events to every UDS
+    // client.  A race can put one of those events on the wire BEFORE
+    // our response; the probe must drain it and keep waiting rather
+    // than abort with "unexpected-type" — that misclassification was
+    // the root cause of the install.sh failure even when the daemon
+    // DID know about activeTasksQuery.
+    const sockPath = path.join(tmpRoot, 'prefixed.sock');
+    const server = await new Promise((resolve, reject) => {
+      try {
+        if (fs.existsSync(sockPath)) fs.unlinkSync(sockPath);
+      } catch {/* ignore */}
+      const srv = net.createServer(s => {
+        let inBuf = '';
+        s.setEncoding('utf-8');
+        s.on('data', c => {
+          inBuf += c;
+          const nl = inBuf.indexOf('\n');
+          if (nl < 0) return;
+          const line = inBuf.slice(0, nl);
+          let cmd;
+          try { cmd = JSON.parse(line); } catch { return; }
+          if (cmd && cmd.type === 'activeTasksQuery') {
+            // Stray broadcast first…
+            s.write(JSON.stringify({type: 'event', name: 'noise'}) + '\n');
+            // …then the real response.
+            s.write(JSON.stringify({
+              type: 'activeTasksResponse',
+              count: 0,
+              tabs: [],
+            }) + '\n');
+          }
+        });
+        s.on('error', () => {/* ignore */});
+      });
+      srv.once('error', reject);
+      srv.listen(sockPath, () => resolve({
+        close: () => new Promise(res => srv.close(() => {
+          try { if (fs.existsSync(sockPath)) fs.unlinkSync(sockPath); }
+          catch {/* ignore */}
+          res();
+        })),
+      }));
+    });
+    try {
+      const res = await daemonHasActiveTasks(sockPath, 1500);
+      assert.strictEqual(res.ok, true,
+        `expected to skip stray broadcast and parse the real ` +
+        `response; got: ${JSON.stringify(res)}`);
+      assert.strictEqual(res.count, 0);
+    } finally {
+      await server.close();
+    }
+  });
+
+  await test('daemonHasActiveTasks: treats an OLD-daemon "Unknown command: activeTasksQuery" error as count:0 (install.sh abort regression)', async () => {
+    // Reproduces the install.sh failure in the user report:
+    //
+    //   kiss-web UDS probe at ~/.kiss/sorcar.sock returned unexpected
+    //   message {'type': 'error', 'text': 'Unknown command:
+    //   activeTasksQuery'}; refusing to kill.
+    //
+    // A daemon that predates the activeTasksQuery handler cannot have
+    // in-flight-task accounting we need to defer to, so the only
+    // remaining safety question is "can we kill it?".  The answer
+    // must be "yes" or the user is stuck rerunning install.sh with
+    // KISS_FORCE_RESTART=1 forever just to upgrade past the bug.
+    const sockPath = path.join(tmpRoot, 'old-daemon.sock');
+    const server = await listenUds(sockPath, {
+      type: 'error',
+      text: 'Unknown command: activeTasksQuery',
+    });
+    try {
+      const res = await daemonHasActiveTasks(sockPath, 1500);
+      assert.strictEqual(res.ok, true,
+        `expected ok:true on old-daemon error; got: ${JSON.stringify(res)}`);
+      assert.strictEqual(res.count, 0);
+      assert.deepStrictEqual(res.tabs, []);
     } finally {
       await server.close();
     }
