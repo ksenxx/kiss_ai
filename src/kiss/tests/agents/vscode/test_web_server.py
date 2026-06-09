@@ -5926,17 +5926,25 @@ class TestProbeTunnelReady(unittest.TestCase):
         _FakeMetricsHandler.ready_connections = 0
         self.assertFalse(_probe_tunnel_ready(self.port))
 
-    def test_returns_false_when_endpoint_unreachable(self) -> None:
-        """Connection refused (no server listening) returns False."""
+    def test_returns_none_when_endpoint_unreachable(self) -> None:
+        """Connection refused (no server listening) returns None (unknown).
+
+        Before the spurious-restart fix this returned ``False``, which
+        callers conflated with confirmed-zero ready connections and
+        counted toward the unhealthy-tick streak — that is what
+        rotated quick-tunnel URLs every ~10 minutes whenever the
+        metrics socket briefly hiccuped.  ``None`` lets callers skip
+        the tick entirely.
+        """
         free_port = _pick_free_local_port()
-        self.assertFalse(_probe_tunnel_ready(free_port))
+        self.assertIsNone(_probe_tunnel_ready(free_port))
 
 
 class TestProbeTunnelReadyMalformedJson(unittest.TestCase):
     """``_probe_tunnel_ready`` must tolerate non-numeric or missing fields."""
 
     def test_missing_field_returns_false(self) -> None:
-        """When ``readyConnections`` is absent, treat as unhealthy."""
+        """When ``readyConnections`` is absent, treat as confirmed-zero."""
 
         class _Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:  # noqa: N802
@@ -5961,8 +5969,8 @@ class TestProbeTunnelReadyMalformedJson(unittest.TestCase):
             server.server_close()
             thread.join(timeout=5)
 
-    def test_non_numeric_field_returns_false(self) -> None:
-        """When ``readyConnections`` is non-numeric, treat as unhealthy."""
+    def test_non_numeric_field_returns_none(self) -> None:
+        """Non-numeric ``readyConnections`` returns None (schema unknown)."""
 
         class _Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:  # noqa: N802
@@ -5981,7 +5989,7 @@ class TestProbeTunnelReadyMalformedJson(unittest.TestCase):
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            self.assertFalse(_probe_tunnel_ready(port))
+            self.assertIsNone(_probe_tunnel_ready(port))
         finally:
             server.shutdown()
             server.server_close()

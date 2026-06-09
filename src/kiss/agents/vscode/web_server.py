@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import errno
 import hashlib
 import ipaddress
 import json
@@ -93,6 +94,49 @@ TRAJECTORY_TEMPLATE = (
 
 TUNNEL_CHECK_INTERVAL = 30
 
+# Number of consecutive watchdog ticks that must observe the *same*
+# new non-empty set of local IPs before the watchdog will treat it as
+# a genuine network change and restart the server.  Without this
+# debounce a single transient flake from :func:`_get_local_ips`
+# (briefly empty result, DHCP renewal, VPN flap, post-sleep DNS hiccup)
+# would force a spurious daemon restart on LAN-only deployments.  Four
+# ticks at :data:`TUNNEL_CHECK_INTERVAL` = 120 s of sustained change.
+# Earlier code used 2 ticks (60 s) which still let a real-but-brief
+# VPN-connect / Ethernet↔WiFi handover that holds a new consistent
+# IP set for ≥60 s trigger a daemon restart even if the address
+# reverted seconds later.  Tests override both knobs to drive the
+# loop faster.
+_IP_CHANGE_DEBOUNCE_TICKS = 4
+
+# Maximum number of attempts :meth:`RemoteAccessServer._setup_server`
+# will make to bind the WSS listener before giving up.  Each transient
+# ``OSError`` (most often ``EADDRINUSE`` lingering from a previous
+# instance still in ``TIME_WAIT``, or ``EADDRNOTAVAIL`` while an
+# interface is still coming up at boot / post-resume) is backed off
+# via :data:`_BIND_RETRY_BACKOFF` between attempts.  After exhausting
+# all retries the server exits with a structured ``SystemExit`` and a
+# single-line error message — *no* traceback — so that a supervisor
+# (launchd, systemd, the VS Code extension's respawn loop) sees a
+# clean non-zero exit and backs off naturally, rather than respawning
+# straight into the same OSError traceback in a tight flap loop.
+_BIND_RETRY_ATTEMPTS = 5
+# Per-attempt backoff in seconds; the value at index ``attempt`` is
+# slept *before* attempt ``attempt + 2`` (i.e. between attempts).  The
+# tuple is indexed by ``min(attempt, len(_BIND_RETRY_BACKOFF) - 1)``
+# so a shorter override (in tests) still terminates the loop.
+_BIND_RETRY_BACKOFF: tuple[float, ...] = (0.5, 1.0, 2.0, 4.0, 8.0)
+# ``OSError.errno`` values worth retrying.  ``EADDRINUSE`` covers the
+# common "previous kiss-web instance just SIGTERM'd, its port is in
+# TIME_WAIT" case; ``EADDRNOTAVAIL`` covers a slow interface coming up
+# at boot or after a network state change.  Other errnos (``EACCES``
+# = privileged port without permission, ``ENOENT`` = bad UDS path,
+# TLS load errors which surface as :class:`ssl.SSLError`, ...) are
+# *not* retried — they will not be fixed by waiting and would only
+# delay the inevitable failure exit.
+_BIND_RETRYABLE_ERRNOS: frozenset[int] = frozenset({
+    errno.EADDRINUSE, errno.EADDRNOTAVAIL,
+})
+
 # How often the server polls PyPI to learn whether a newer
 # ``kiss-agent-framework`` release is available.  3600 s = once per
 # hour, matching the "every hour" requirement.  Tests override this
@@ -137,6 +181,29 @@ _TUNNEL_BACKOFF_MAX = 1800
 _TUNNEL_RATE_LIMIT_BACKOFF = 900  # 15 minutes
 
 _TUNNEL_RATE_LIMIT_JITTER = 300  # 0..5 minutes additional jitter
+
+# After the watchdog force-restarts cloudflared because it observed
+# ``readyConnections == 0`` for the unhealthy-tick limit, wait at
+# least this many seconds before allowing another force-restart even
+# if the new cloudflared instance is *also* immediately unhealthy.
+# Without this cool-down a chronically-flaky cloudflared metrics
+# endpoint (or a Cloudflare edge that briefly drops every fresh
+# quick-tunnel registration) rotates the public ``*.trycloudflare.com``
+# URL every ~10 minutes (= quick-tunnel limit × tick interval) forever,
+# breaking long-lived browser sessions and pushing a steady stream of
+# stale URLs to the message board.  Each consecutive force-restart
+# without a sustained healthy period in between doubles the wait, up
+# to :data:`_TUNNEL_FORCE_RESTART_COOLDOWN_MAX`.
+_TUNNEL_FORCE_RESTART_COOLDOWN_INITIAL = 60
+
+_TUNNEL_FORCE_RESTART_COOLDOWN_MAX = 3600
+
+# Once a freshly-restarted cloudflared has been continuously healthy
+# for this many seconds since its ``_tunnel_started_at`` we consider
+# the chronic-flake episode over and reset the consecutive
+# force-restart counter so a future, *unrelated* event starts at the
+# minimum cool-down.
+_TUNNEL_FORCE_RESTART_RESET_AFTER_HEALTHY = 600
 
 # Substrings (case-insensitive) in cloudflared's stderr that indicate
 # trycloudflare.com is rate-limiting the local egress IP.  Matching is
@@ -737,8 +804,8 @@ def _try_adopt_existing_cloudflared() -> tuple[int, int, str] | None:
     return pid, metrics_port, url
 
 
-def _probe_tunnel_ready(metrics_port: int) -> bool:
-    """Return True if ``cloudflared`` has at least one live edge connection.
+def _probe_tunnel_ready(metrics_port: int) -> bool | None:
+    """Return tunnel readiness as a 3-valued result.
 
     Queries the ``cloudflared`` ``/ready`` metrics endpoint and parses
     the JSON ``readyConnections`` field.  Cloudflare's edge can
@@ -752,15 +819,29 @@ def _probe_tunnel_ready(metrics_port: int) -> bool:
     ``readyConnections`` reading is the canonical signal for this
     "process alive but tunnel deregistered" failure mode.
 
+    The previous version of this helper returned a plain ``bool`` and
+    folded every error (connection refused, timeout, parse error,
+    schema change) into ``False`` — which the watchdog then counted
+    as "unhealthy" and used to force-restart cloudflared.  On a slow
+    CPU after wake, during a post-sleep socket-rebind window, or just
+    a momentary 127.0.0.1 loopback hiccup, this conflated "endpoint
+    unreachable" with "tunnel deregistered" and was the single
+    biggest source of spurious quick-tunnel URL rotation.  Returning
+    ``None`` for "no information" lets callers skip the tick entirely
+    instead of incrementing their unhealthy-streak counter.
+
     Args:
         metrics_port: The port on which ``cloudflared`` is serving its
             metrics HTTP endpoint (passed via ``--metrics``).
 
     Returns:
-        True if the endpoint reports at least one ready connection.
-        False on any error (timeout, connection refused, parse error,
-        zero connections), so the caller can treat it as "unhealthy"
-        and increment its consecutive-failure counter.
+        ``True`` if the endpoint reports ``readyConnections > 0``.
+        ``False`` if the endpoint *successfully* reports
+        ``readyConnections == 0`` (confirmed deregistration).
+        ``None`` if the endpoint is unreachable, the response is not
+        valid JSON, or the value is non-numeric — callers should treat
+        this as "no information" and *not* count it toward an unhealthy
+        streak.
     """
     try:
         req = urllib.request.Request(
@@ -770,11 +851,11 @@ def _probe_tunnel_ready(metrics_port: int) -> bool:
         with urllib.request.urlopen(req, timeout=2) as resp:
             data = json.loads(resp.read())
     except Exception:
-        return False
+        return None
     try:
         return int(data.get("readyConnections", 0)) > 0
     except (TypeError, ValueError):
-        return False
+        return None
 
 
 def _stderr_reader_loop(
@@ -1170,16 +1251,31 @@ def _post_url_to_message_board(
 
 
 def _get_local_ips() -> frozenset[str]:
-    """Return the current non-loopback IPv4 addresses of the host machine.
+    """Return the current routable IPv4 addresses of the host machine.
 
     Uses a UDP connect to ``8.8.8.8`` (no packet is actually sent) to
     discover the default-route IP, plus :func:`socket.getaddrinfo` on
-    the hostname for any additional addresses.
+    the hostname for any additional addresses.  The raw discovery is
+    then filtered to drop addresses that should never trigger a
+    server restart:
+
+    *   ``127.0.0.0/8`` loopback — never a useful LAN address.
+    *   ``169.254.0.0/16`` link-local — auto-assigned when DHCP fails
+        or while an interface is still negotiating.  These addresses
+        come and go during boot, sleep/wake, captive portals and
+        VPN flaps, which used to surface as spurious "IP changed"
+        events from :meth:`RemoteAccessServer._watchdog`.
+    *   IPv4-mapped IPv6 addresses in dotted form (e.g.
+        ``"::ffff:1.2.3.4"``) — returned by :func:`socket.getaddrinfo`
+        on dual-stack hosts as the same underlying IPv4 address; the
+        ``::ffff:`` prefix would make them look like a *new* address
+        each time the family-preference oscillated, again causing
+        spurious change events.
 
     Returns:
-        A frozen set of IPv4 address strings (e.g.
+        A frozen set of routable IPv4 address strings (e.g.
         ``frozenset({"192.168.1.42"})``).  Returns an empty set when
-        no non-loopback addresses are found.
+        discovery failed or all discovered addresses were filtered.
     """
     ips: set[str] = set()
     try:
@@ -1192,11 +1288,19 @@ def _get_local_ips() -> frozenset[str]:
     try:
         for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
             addr = str(info[4][0])
-            if not addr.startswith("127."):
-                ips.add(addr)
+            ips.add(addr)
     except Exception:
         pass
-    return frozenset(ips)
+    filtered: set[str] = set()
+    for addr in ips:
+        if addr.startswith("127."):
+            continue
+        if addr.startswith("169.254."):
+            continue
+        if addr.startswith("::ffff:"):
+            continue
+        filtered.add(addr)
+    return frozenset(filtered)
 
 
 def _print_url() -> None:
@@ -2489,6 +2593,19 @@ class RemoteAccessServer:
         # to apply a much longer backoff than the regular exponential
         # one so the per-IP cooldown actually has time to clear.
         self._tunnel_rate_limited = False
+        # Counts consecutive force-restarts of cloudflared driven by
+        # the unhealthy-tick watchdog without a sustained healthy
+        # period in between.  Used together with
+        # ``_tunnel_force_restart_next_allowed`` to apply an
+        # exponentially-growing cool-down so a chronically-flaky
+        # metrics endpoint (or an edge that keeps dropping fresh
+        # quick-tunnel registrations) cannot rotate
+        # ``*.trycloudflare.com`` URLs every ~10 minutes forever.
+        # The counter is reset to 0 by the next ``healthy`` probe
+        # observed after ``_TUNNEL_FORCE_RESTART_RESET_AFTER_HEALTHY``
+        # seconds of post-restart uptime.
+        self._tunnel_force_restart_count = 0
+        self._tunnel_force_restart_next_allowed = 0.0
         # Last Cloudflare tunnel URL posted to the ntfy.sh message
         # board.  Tracked so a watchdog restart that yields the *same*
         # public hostname (e.g. an adopted cloudflared, or a named
@@ -2564,6 +2681,16 @@ class RemoteAccessServer:
         self._printer._merge_state_callback = self._register_merge_state
         self._active_url: str | None = None
         self._last_ips: frozenset[str] = frozenset()
+        # Debounce state for the IP-change watchdog.  ``_pending_ip_change``
+        # holds the most recent *candidate* new IP set observed by the
+        # watchdog (``None`` when no change is pending), and
+        # ``_pending_ip_change_count`` counts how many consecutive ticks
+        # have observed that same candidate.  Only when the count reaches
+        # :data:`_IP_CHANGE_DEBOUNCE_TICKS` does the watchdog accept the
+        # candidate as the new baseline and (in LAN mode) restart the
+        # server.  See :meth:`_watchdog` for the full state machine.
+        self._pending_ip_change: frozenset[str] | None = None
+        self._pending_ip_change_count: int = 0
         # Per-IP auth failure timestamps, used by _is_auth_locked.
         self._auth_failures: dict[str, list[float]] = {}
 
@@ -3616,8 +3743,26 @@ class RemoteAccessServer:
         healthy = await self._loop.run_in_executor(
             None, _probe_tunnel_ready, self._tunnel_metrics_port,
         )
+        if healthy is None:
+            # Metrics endpoint unreachable, response malformed, or
+            # schema changed.  This is "no information" — do NOT
+            # increment ``_tunnel_unhealthy_ticks`` (which would
+            # eventually force a brand-new ``*.trycloudflare.com``
+            # URL on every flake of the loopback metrics socket).
+            return
         if healthy:
             self._tunnel_unhealthy_ticks = 0
+            # After enough sustained healthy uptime, treat the prior
+            # chronic-flake episode as resolved and let a future,
+            # unrelated event start the cool-down ladder from rung 1.
+            if (
+                self._tunnel_force_restart_count > 0
+                and self._tunnel_started_at is not None
+                and now - self._tunnel_started_at
+                    > _TUNNEL_FORCE_RESTART_RESET_AFTER_HEALTHY
+            ):
+                self._tunnel_force_restart_count = 0
+                self._tunnel_force_restart_next_allowed = 0.0
             return
 
         self._tunnel_unhealthy_ticks += 1
@@ -3636,6 +3781,25 @@ class RemoteAccessServer:
         if self._tunnel_unhealthy_ticks < unhealthy_limit:
             return
 
+        if now < self._tunnel_force_restart_next_allowed:
+            # The watchdog already force-restarted cloudflared recently
+            # and the replacement is *still* unhealthy.  Skip the
+            # force-restart this tick: rotating the public URL every
+            # ~10 minutes for a problem that has not gone away just
+            # breaks every existing browser session without recovering
+            # the tunnel.  The cool-down grows exponentially so a
+            # genuinely-dead edge will eventually be force-restarted.
+            remaining = int(self._tunnel_force_restart_next_allowed - now)
+            logger.info(
+                "cloudflared tunnel still reports zero ready edge "
+                "connections, but a force-restart was attempted "
+                "recently; deferring the next force-restart for "
+                "~%ds (consecutive force-restarts: %d)",
+                remaining,
+                self._tunnel_force_restart_count,
+            )
+            return
+
         logger.warning(
             "cloudflared tunnel appears deregistered from Cloudflare's "
             "edge (readyConnections=0 for %d ticks); force-restarting",
@@ -3645,6 +3809,13 @@ class RemoteAccessServer:
         # we are replacing; leaving it running would leak metrics
         # ports and confuse the next adoption attempt.
         self._terminate_tunnel_proc(kill_adopted=True)
+        self._tunnel_force_restart_count += 1
+        cooldown = min(
+            _TUNNEL_FORCE_RESTART_COOLDOWN_INITIAL
+                * (2 ** (self._tunnel_force_restart_count - 1)),
+            _TUNNEL_FORCE_RESTART_COOLDOWN_MAX,
+        )
+        self._tunnel_force_restart_next_allowed = now + cooldown
         if now >= self._tunnel_next_retry:
             await self._restart_tunnel_url()
 
@@ -3879,35 +4050,84 @@ class RemoteAccessServer:
                 logger.debug("Watchdog URL-file check error", exc_info=True)
             try:
                 current_ips = _get_local_ips()
-                if current_ips != self._last_ips:
+                if not current_ips:
+                    # IP discovery failed (transient WiFi roam, DHCP
+                    # renewal, VPN flap, slow resolver, post-sleep DNS
+                    # hiccup).  Bare ``try/except: pass`` inside
+                    # :func:`_get_local_ips` swallows any error and
+                    # returns ``frozenset()``.  Treat this as "no
+                    # information" — do NOT compare it against
+                    # ``_last_ips`` (which would falsely look like a
+                    # network change and trigger a spurious restart),
+                    # and drop any in-flight debounce candidate so a
+                    # later real change starts its count from scratch.
+                    self._pending_ip_change = None
+                    self._pending_ip_change_count = 0
+                elif current_ips == self._last_ips:
+                    # IPs match the established baseline — clear any
+                    # in-flight candidate (the host's network briefly
+                    # diverged and recovered before reaching the
+                    # debounce threshold).
+                    self._pending_ip_change = None
+                    self._pending_ip_change_count = 0
+                elif not self._last_ips:
+                    # Initial discovery (or recovery after a sustained
+                    # failure) — adopt the first non-empty result as
+                    # the baseline without restarting.  Without this
+                    # branch a server that started before the network
+                    # came up would always trigger one spurious restart
+                    # on the first successful poll.
                     self._last_ips = current_ips
-                    if self.use_tunnel:
-                        # In tunnel mode, cloudflared handles edge
-                        # reconnection automatically.  Restarting the
-                        # entire daemon would assign a new random
-                        # *.trycloudflare.com URL — avoid that.  Just
-                        # log and let cloudflared recover on its own.
-                        # N.B. Check use_tunnel only — NOT
-                        # _tunnel_proc, which can be None during
-                        # startup, when remote_password is empty, or
-                        # between a force-restart.
-                        logger.info(
-                            "IP address changed: %s → %s; tunnel mode "
-                            "— cloudflared will re-register "
-                            "automatically",
-                            self._last_ips,
-                            current_ips,
-                        )
+                    self._pending_ip_change = None
+                    self._pending_ip_change_count = 0
+                else:
+                    # Real divergence from the established baseline.
+                    # Require :data:`_IP_CHANGE_DEBOUNCE_TICKS`
+                    # consecutive ticks observing the *same* candidate
+                    # set before acting.  A single divergent tick (the
+                    # most common spurious-restart trigger) is no
+                    # longer enough.
+                    if current_ips == self._pending_ip_change:
+                        self._pending_ip_change_count += 1
                     else:
-                        logger.info(
-                            "IP address changed: %s → %s, "
-                            "restarting server…",
-                            self._last_ips,
-                            current_ips,
-                        )
-                        if self._ws_server is not None:
-                            self._ws_server.close()
-                        return
+                        self._pending_ip_change = current_ips
+                        self._pending_ip_change_count = 1
+                    if (
+                        self._pending_ip_change_count
+                        >= _IP_CHANGE_DEBOUNCE_TICKS
+                    ):
+                        prev_ips = self._last_ips
+                        self._last_ips = current_ips
+                        self._pending_ip_change = None
+                        self._pending_ip_change_count = 0
+                        if self.use_tunnel:
+                            # In tunnel mode, cloudflared handles edge
+                            # reconnection automatically.  Restarting
+                            # the entire daemon would assign a new
+                            # random *.trycloudflare.com URL — avoid
+                            # that.  Just log and let cloudflared
+                            # recover on its own.
+                            # N.B. Check use_tunnel only — NOT
+                            # _tunnel_proc, which can be None during
+                            # startup, when remote_password is empty,
+                            # or between a force-restart.
+                            logger.info(
+                                "IP address changed: %s → %s; tunnel "
+                                "mode — cloudflared will re-register "
+                                "automatically",
+                                prev_ips,
+                                current_ips,
+                            )
+                        else:
+                            logger.info(
+                                "IP address changed: %s → %s, "
+                                "restarting server…",
+                                prev_ips,
+                                current_ips,
+                            )
+                            if self._ws_server is not None:
+                                self._ws_server.close()
+                            return
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -3956,17 +4176,79 @@ class RemoteAccessServer:
         self._loop = asyncio.get_running_loop()
         self._printer._loop = self._loop
 
-        self._ws_server = await serve(
-            self._ws_handler,
-            self.host,
-            self.port,
-            process_request=self._process_request,
-            ssl=self._ssl_context,
-            ping_interval=None,
-            ping_timeout=None,
-            max_size=_MAX_LINE_BYTES,
-            create_connection=_HeadAwareServerConnection,
-        )
+        # Bind the WSS listener with bounded retry on transient
+        # ``OSError`` (most often ``EADDRINUSE`` lingering from a
+        # previous instance still in ``TIME_WAIT`` during a fast
+        # launchd / extension respawn, or ``EADDRNOTAVAIL`` while the
+        # network interface is still coming up post-boot / post-
+        # resume).  Without retry, the first crash propagates an
+        # OSError traceback out of ``asyncio.run`` and the supervisor
+        # immediately respawns kiss-web into the same OSError, visible
+        # to the user as a flap loop.  After ``_BIND_RETRY_ATTEMPTS``
+        # we raise :class:`SystemExit` with a clean error message and
+        # no traceback so the supervisor backs off naturally.
+        last_err: OSError | None = None
+        for attempt in range(_BIND_RETRY_ATTEMPTS):
+            try:
+                self._ws_server = await serve(
+                    self._ws_handler,
+                    self.host,
+                    self.port,
+                    process_request=self._process_request,
+                    ssl=self._ssl_context,
+                    ping_interval=None,
+                    ping_timeout=None,
+                    max_size=_MAX_LINE_BYTES,
+                    create_connection=_HeadAwareServerConnection,
+                )
+                break
+            except OSError as exc:
+                # Permission errors (EACCES on a privileged port) and
+                # other non-transient errnos are not worth retrying —
+                # fail fast so the supervisor sees the error promptly.
+                if exc.errno not in _BIND_RETRYABLE_ERRNOS:
+                    logger.error(
+                        "WSS bind to %s:%d failed with non-retryable "
+                        "errno %s: %s",
+                        self.host, self.port, exc.errno, exc,
+                    )
+                    print(
+                        f"Error: cannot bind to {self.host}:{self.port}: "
+                        f"{exc}",
+                        file=sys.stderr,
+                    )
+                    raise SystemExit(2) from exc
+                last_err = exc
+                # Was this the final attempt?  Skip the sleep and
+                # fall through to the SystemExit below.
+                if attempt + 1 >= _BIND_RETRY_ATTEMPTS:
+                    break
+                delay = _BIND_RETRY_BACKOFF[
+                    min(attempt, len(_BIND_RETRY_BACKOFF) - 1)
+                ]
+                logger.warning(
+                    "WSS bind to %s:%d failed (attempt %d/%d, "
+                    "errno=%s): %s — retrying in %.1fs",
+                    self.host, self.port, attempt + 1,
+                    _BIND_RETRY_ATTEMPTS, exc.errno, exc, delay,
+                )
+                await asyncio.sleep(delay)
+        else:  # pragma: no cover — covered by the ``break`` paths above
+            pass
+        if self._ws_server is None:
+            # All retryable attempts exhausted.  Exit cleanly so the
+            # supervisor backs off naturally instead of respawning
+            # into the same OSError traceback in a flap loop.
+            logger.error(
+                "WSS bind to %s:%d failed after %d attempts: %s — exiting",
+                self.host, self.port, _BIND_RETRY_ATTEMPTS, last_err,
+            )
+            print(
+                f"Error: cannot bind to {self.host}:{self.port} after "
+                f"{_BIND_RETRY_ATTEMPTS} attempts: {last_err}",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
 
         # Bind the local Unix-domain socket for the VS Code extension.
         # File permissions (mode 0o600) restrict access to the owning
@@ -4104,11 +4386,44 @@ class RemoteAccessServer:
         sig_name = signal.Signals(signum).name
         from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 
+        # Snapshot the registry under its own lock before iterating.
+        # The signal handler runs synchronously on the main thread —
+        # interrupting whatever bytecode happened to be executing — so
+        # without the snapshot a concurrent worker thread mutating
+        # ``running_agent_states`` (registering a fresh tab, disposing
+        # a finished one) would race the ``items()`` iterator and
+        # raise ``RuntimeError: dictionary changed size during
+        # iteration`` *from inside the signal handler*.  That
+        # RuntimeError is not a ``KeyboardInterrupt``, so it would
+        # bypass the ``except KeyboardInterrupt`` arm in
+        # :meth:`start`, escape ``asyncio.run`` uncaught, and crash
+        # the daemon with an unhandled traceback (visible to the user
+        # as a kiss-web flap).  ``_registry_lock`` is a
+        # :class:`threading.RLock`, so re-entry from the same main
+        # thread is safe even if the signal interrupted a worker
+        # thread that holds the lock — re-acquisition will block
+        # until the worker releases it, but it cannot deadlock.
+        # Falling back to a best-effort unlocked snapshot mirrors the
+        # ``_handle_active_tasks_query`` pattern: if anything goes
+        # wrong inside the ``with`` (e.g. the lock object itself was
+        # GC'd during interpreter shutdown), we still produce a log
+        # rather than crash the signal handler.
         active_tabs = []
-        for tab_id, tab in _RunningAgentState.running_agent_states.items():
-            if tab.is_task_active:
-                task_id = tab.task_history_id or tab.last_task_id
-                active_tabs.append(f"{tab_id}(task={task_id})")
+        try:
+            with _RunningAgentState._registry_lock:
+                items = list(_RunningAgentState.running_agent_states.items())
+        except Exception:
+            items = list(_RunningAgentState.running_agent_states.items())
+        for tab_id, tab in items:
+            try:
+                if tab.is_task_active:
+                    task_id = tab.task_history_id or tab.last_task_id
+                    active_tabs.append(f"{tab_id}(task={task_id})")
+            except Exception:
+                logger.debug(
+                    "shutdown signal: skipping malformed tab entry",
+                    exc_info=True,
+                )
         try:
             rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
             rss_mb = (

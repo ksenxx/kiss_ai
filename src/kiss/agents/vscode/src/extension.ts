@@ -32,6 +32,16 @@ export function activate(context: vscode.ExtensionContext): void {
   );
   context.subscriptions.push({dispose: () => sidebarView?.dispose()});
 
+  // Synchronise the kiss-web daemon's ``work_dir`` with the workspace
+  // folder that VS Code launched in.  The daemon caches ``work_dir``
+  // once at process start; on the dependency-installer fast path the
+  // daemon is *not* restarted, so without this push the daemon retains
+  // the previous session's folder until the user first interacts with
+  // the sidebar.  ``AgentClient`` queues the command if the UDS socket
+  // is not yet connected and flushes it on connect, so calling this
+  // before ``ensureDependencies()`` is safe.
+  sidebarView.syncWorkDir();
+
   // --- Commands ---
 
   context.subscriptions.push(
