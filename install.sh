@@ -700,6 +700,25 @@ update_repo() {
     # interpreter path, NOT the literal name.  Kill by listening port instead.
     # The macOS LaunchAgent / Linux systemd unit's ``KeepAlive`` respawns a
     # clean daemon from the freshly-installed VSIX before the reload fires.
+    # Refuse to clobber a kiss-web daemon that is mid-task.  Without this
+    # guard the SIGTERM block below silently kills any in-flight agent run
+    # — the regression that turned task_history rows 3233/3234 into
+    # ``"Task interrupted by server restart/shutdown"``.  The check mirrors
+    # the bash-side guard in ``scripts/build-extension.sh`` and the
+    # ``daemonHasActiveTasks``-based guard in
+    # ``src/kiss/agents/vscode/src/DependencyInstaller.ts``.  Override with
+    # ``KISS_FORCE_RESTART=1`` for a knowingly destructive re-install.
+    if command -v python3 &>/dev/null; then
+        if ! python3 "$PROJECT_DIR/scripts/check-kiss-web-active-tasks.py"; then
+            if [ "${KISS_FORCE_RESTART:-}" = "1" ]; then
+                echo "   KISS_FORCE_RESTART=1 set; proceeding despite active tasks."
+            else
+                echo "   Aborting install.sh: kiss-web has in-flight tasks." >&2
+                echo "   Wait for them to finish, or rerun with KISS_FORCE_RESTART=1." >&2
+                exit 3
+            fi
+        fi
+    fi
     if command -v lsof &>/dev/null; then
         OLD_KISS_WEB_PIDS=$(lsof -ti :8787 2>/dev/null || true)
         if [ -n "$OLD_KISS_WEB_PIDS" ]; then
