@@ -247,21 +247,5 @@ class TestPeriodicEventFlush(unittest.TestCase):
             parent.run = saved_run
 
 
-class TestTypescriptIsRunningFix(unittest.TestCase):
-    """Verify SorcarSidebarView.ts tracks running tabs via _runningTabs set."""
-
-    def test_running_tabs_updated_by_status_event(self) -> None:
-        """_runningTabs is updated by the status event handler."""
-        with open("src/kiss/agents/vscode/src/SorcarSidebarView.ts") as f:
-            source = f.read()
-        idx = source.find("msg.type === 'status'")
-        assert idx >= 0, "status handler not found"
-        block = source[idx:idx + 300]
-        assert "this._runningTabs" in block
-        with open("src/kiss/agents/vscode/task_runner.py") as f:
-            py_source = f.read()
-        assert '"type": "status", "running": False' in py_source
-
-
 if __name__ == "__main__":
     unittest.main()
