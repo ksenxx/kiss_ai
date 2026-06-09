@@ -39,6 +39,7 @@ from pathlib import Path
 
 import pytest
 
+import kiss.agents.vscode.web_server as ws_mod
 from kiss.agents.vscode.vscode_config import CONFIG_PATH, save_config
 from kiss.agents.vscode.web_server import (
     _TUNNEL_BACKOFF_INITIAL,
@@ -122,8 +123,17 @@ class TestStartupGracePeriod(unittest.IsolatedAsyncioTestCase):
         self.server._loop = self._loop
         self.server._tunnel_proc = self._proc
         self.server._tunnel_metrics_port = 1
+        # ``_probe_tunnel_ready`` now distinguishes "unreachable" (None
+        # — no information, do not count as unhealthy) from "confirmed
+        # zero ready connections" (False — count toward unhealthy
+        # streak).  These tests verify the *grace window* logic, not
+        # the probe itself, so inject a deterministic False so a tick
+        # past the grace window is guaranteed to count as unhealthy.
+        self._orig_probe = ws_mod._probe_tunnel_ready
+        ws_mod._probe_tunnel_ready = lambda _port: False  # type: ignore[assignment]
 
     async def asyncTearDown(self) -> None:
+        ws_mod._probe_tunnel_ready = self._orig_probe  # type: ignore[assignment]
         self._proc.terminate()
         try:
             self._proc.wait(timeout=2)
