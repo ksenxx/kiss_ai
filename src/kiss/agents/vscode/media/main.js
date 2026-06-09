@@ -1493,82 +1493,11 @@
     addCopyButton(panelEl);
   }
 
-  // Outline+check icons reused for every panel copy button.
-  const PANEL_COPY_SVG =
-    '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" ' +
-    'stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
-    'stroke-linejoin="round" aria-hidden="true">' +
-    '<rect x="9" y="9" width="13" height="13" rx="2"/>' +
-    '<path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>';
-  const PANEL_CHECK_SVG =
-    '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" ' +
-    'stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
-    'stroke-linejoin="round" aria-hidden="true">' +
-    '<polyline points="20 6 9 17 4 12"/></svg>';
-
-  /**
-   * Attach a copy-to-clipboard button to a chat panel.
-   *
-   * The button is positioned absolutely in the top-right corner of
-   * ``panelEl`` (the helper adds the ``copyable`` class which sets
-   * ``position: relative`` on the panel) and copies the panel's plain
-   * visible text — excluding the button itself, the collapse chevron,
-   * and the collapse preview — to the system clipboard via
-   * ``navigator.clipboard.writeText``.  Clicking the button does not
-   * collapse/expand the panel: the click handler stops propagation
-   * before the collapsible-header listener runs.  After a successful
-   * copy the icon swaps to a check mark for 1.5 s as feedback.
-   *
-   * Idempotent: calling twice on the same panel is a no-op.
-   *
-   * @param {HTMLElement} panelEl - panel container to attach the
-   *   button to.
-   */
-  function addCopyButton(panelEl) {
-    if (!panelEl || panelEl.querySelector(':scope > .panel-copy-btn')) return;
-    panelEl.classList.add('copyable');
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'panel-copy-btn';
-    btn.title = 'Copy panel text';
-    btn.setAttribute('aria-label', 'Copy panel text');
-    btn.innerHTML = PANEL_COPY_SVG;
-    btn.addEventListener('click', e => {
-      e.stopPropagation();
-      e.preventDefault();
-      const text = collectText(panelEl)
-        .replace(/[ \t]+\n/g, '\n')
-        .replace(/\n{3,}/g, '\n\n')
-        .replace(/[ \t]{2,}/g, ' ')
-        .trim();
-      const done = () => {
-        btn.innerHTML = PANEL_CHECK_SVG;
-        btn.classList.add('copied');
-        setTimeout(() => {
-          btn.innerHTML = PANEL_COPY_SVG;
-          btn.classList.remove('copied');
-        }, 1500);
-      };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(text).then(done, () => {});
-      } else {
-        // Fallback for environments without the async clipboard API.
-        const ta = document.createElement('textarea');
-        ta.value = text;
-        ta.style.position = 'fixed';
-        ta.style.opacity = '0';
-        document.body.appendChild(ta);
-        ta.select();
-        try {
-          document.execCommand('copy');
-          done();
-        } finally {
-          document.body.removeChild(ta);
-        }
-      }
-    });
-    panelEl.appendChild(btn);
-  }
+  // Panel Copy button + raw-text walker live in media/panelCopy.js so
+  // they can be loaded both in the webview and from a Node + jsdom test.
+  const addCopyButton = window.PanelCopy.addCopyButton;
+  const PANEL_COPY_SVG = window.PanelCopy.PANEL_COPY_SVG;
+  const PANEL_CHECK_SVG = window.PanelCopy.PANEL_CHECK_SVG;
 
   function collapseAllExceptResult(container) {
     const panels = container.querySelectorAll('.collapsible');
@@ -1785,6 +1714,10 @@
               marked.parse(tState.txtBuf || ''),
             );
             hlBlock(tState.txtEl);
+            // Preserve raw markdown so the panel Copy button reproduces
+            // the original markdown rather than the rendered HTML's
+            // textContent (which loses #/`*/` markers).
+            tState.txtEl.dataset.rawText = tState.txtBuf || '';
           } else if (tState.txtNode && tState.txtPending) {
             tState.txtNode.appendData(tState.txtPending);
           }
@@ -1885,6 +1818,8 @@
             '<div class="rl fail">FAILED</div><div class="tr-content">' +
             esc(ev.content) +
             '</div>';
+          // Raw tool-result error text for the Copy button.
+          r.dataset.rawText = 'FAILED\n' + (ev.content || '');
           addCollapse(r, r.querySelector('.rl'));
           resultTarget.appendChild(r);
         } else {
@@ -1921,12 +1856,15 @@
       case 'result': {
         const rc = mkEl('div', 'ev rc');
         let rb = '';
+        let rawBody = '';
         if (ev.is_continue) {
           rb +=
             '<div style="color:var(--yellow);font-weight:700;font-size:var(--fs-xl);margin-bottom:10px">Status: Continue</div>';
+          rawBody += 'Status: Continue\n\n';
         } else if (ev.success === false) {
           rb +=
             '<div style="color:var(--red);font-weight:700;font-size:var(--fs-xl);margin-bottom:10px">Status: FAILED</div>';
+          rawBody += 'Status: FAILED\n\n';
         }
         let usePre = true;
         if (ev.summary) {
@@ -1937,11 +1875,18 @@
           } else {
             rb += esc(sum);
           }
+          rawBody += sum;
         } else {
-          rb += esc(
-            (ev.text || '(no result)').replace(/\n{3,}/g, '\n\n').trim(),
-          );
+          const txt = (ev.text || '(no result)')
+            .replace(/\n{3,}/g, '\n\n')
+            .trim();
+          rb += esc(txt);
+          rawBody += txt;
         }
+        // Preserve raw markdown/text result so the panel Copy button
+        // reproduces the agent-supplied markdown rather than the rendered
+        // HTML's textContent (which strips #/`*/` markers).
+        rc.dataset.rawText = rawBody;
         rc.innerHTML =
           '<div class="rc-h"><h3>Result</h3><div class="rs">' +
           '<span>Tokens <b>' +
@@ -1985,6 +1930,9 @@
           '-body md-body">' +
           body +
           '</div>';
+        // Preserve the raw markdown so the panel Copy button reproduces
+        // the original markdown rather than the rendered HTML.
+        el.dataset.rawText = ev.text || '';
         addCollapse(el, el.querySelector('.' + cls + '-h'));
         hlBlock(el);
         target.appendChild(el);
@@ -2743,6 +2691,13 @@
         break;
       case 'remote_url':
         renderRemoteUrl(ev.url, ev.ntfyUrl, ev.tunnelActive);
+        break;
+      case 'update_available':
+        renderUpdateAvailable(
+          !!ev.available,
+          ev.latest || '',
+          ev.current || '',
+        );
         break;
       case 'followup_suggestion': {
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) break;
@@ -3671,6 +3626,72 @@
           : !!tunnelActive;
       welcomeCfg.style.display = visible ? '' : 'none';
     }
+  }
+
+  /**
+   * Update the settings-panel "Update" button to advertise that a
+   * newer ``kiss-agent-framework`` release is available on PyPI.
+   *
+   * When ``available`` is true, the button receives the
+   * ``has-update`` CSS class and a green download SVG icon is
+   * injected before the "Update" label.  When false (or when called
+   * before the first PyPI poll completes) the icon is removed and
+   * the button reverts to its default appearance.
+   *
+   * The hourly poll runs in ``RemoteAccessServer._version_check_loop``
+   * on the kiss-web daemon and broadcasts an ``update_available``
+   * event over both UDS (VS Code webview) and WSS (remote-chat
+   * webview).
+   *
+   * @param {boolean} available - true when ``latest > current``.
+   * @param {string} latest - The latest version reported by PyPI.
+   * @param {string} current - The version installed locally.
+   */
+  function renderUpdateAvailable(available, latest, current) {
+    const btn = document.getElementById('cfg-update-btn');
+    if (!btn) return;
+    // Strip any previously-injected icon so repeated broadcasts do
+    // not stack badges on top of each other.
+    const prior = btn.querySelector('.update-available-icon');
+    if (prior) prior.remove();
+    if (!available) {
+      btn.classList.remove('has-update');
+      btn.removeAttribute('title');
+      return;
+    }
+    btn.classList.add('has-update');
+    const tip = latest && current
+      ? `New version ${latest} available (installed ${current}) ` +
+        '— click to update'
+      : 'A new version is available — click to update';
+    btn.setAttribute('title', tip);
+    // Build an inline SVG download-arrow icon (matches the 12px
+    // visual weight of the autocommit button's circle icon).  Use
+    // namespaced createElementNS so the browser parses it as SVG
+    // rather than HTML.
+    const svgNs = 'http://www.w3.org/2000/svg';
+    const icon = document.createElementNS(svgNs, 'svg');
+    icon.setAttribute('class', 'update-available-icon');
+    icon.setAttribute('width', '12');
+    icon.setAttribute('height', '12');
+    icon.setAttribute('viewBox', '0 0 24 24');
+    icon.setAttribute('fill', 'none');
+    icon.setAttribute('stroke', 'currentColor');
+    icon.setAttribute('stroke-width', '2');
+    icon.setAttribute('stroke-linecap', 'round');
+    icon.setAttribute('stroke-linejoin', 'round');
+    // Download arrow path (Feather "download" icon).
+    const parts = [
+      ['path', {d: 'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4'}],
+      ['polyline', {points: '7 10 12 15 17 10'}],
+      ['line', {x1: '12', y1: '15', x2: '12', y2: '3'}],
+    ];
+    for (const [tag, attrs] of parts) {
+      const el = document.createElementNS(svgNs, tag);
+      for (const k of Object.keys(attrs)) el.setAttribute(k, attrs[k]);
+      icon.appendChild(el);
+    }
+    btn.insertBefore(icon, btn.firstChild);
   }
 
   // --- Welcome suggestions (dynamic) ---

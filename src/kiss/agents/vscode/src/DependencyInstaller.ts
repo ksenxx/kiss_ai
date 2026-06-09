@@ -319,10 +319,10 @@ function findNodeDirWindows(baseDir: string): string {
  */
 export function getFallbackDefaultModel(): string {
   const env = process.env;
-  if (env.ANTHROPIC_API_KEY) return 'claude-opus-4-8';
+  if (env.ANTHROPIC_API_KEY) return 'claude-opus-4-7';
   if (env.OPENAI_API_KEY) return 'gpt-5.5';
   if (env.GEMINI_API_KEY) return 'gemini-3.1-pro-preview';
-  if (env.OPENROUTER_API_KEY) return 'openrouter/anthropic/claude-opus-4.8';
+  if (env.OPENROUTER_API_KEY) return 'openrouter/anthropic/claude-opus-4.7';
   if (env.TOGETHER_API_KEY) return 'Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8';
   const whichCmd = process.platform === 'win32' ? 'where' : 'which';
   try {
@@ -986,6 +986,15 @@ async function restartKissWebDaemon(
       log(
         `kiss-web has ${(activeTasks as {ok: true; count: number}).count} ` +
           'active task(s) — deferring restart to avoid aborting in-flight work',
+      );
+    } else if (decision.reason.startsWith('alive-uncertain')) {
+      // The daemon's TCP probe says ``alive`` but the UDS active-tasks
+      // round-trip could not be completed.  Deferring is the safe
+      // call: SIGTERMing an alive daemon whose task status is unknown
+      // is exactly what aborted task_history row 3192 mid-flight.
+      log(
+        `kiss-web alive but active-tasks probe inconclusive ` +
+          `(${decision.reason}) — deferring restart to next activation`,
       );
     } else {
       log(
