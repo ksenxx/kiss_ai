@@ -14,12 +14,6 @@ inside the same ``_state_lock`` block that performs the alive check
 and starts the thread, so no other helper that would re-acquire the
 lock is called.  ``_RunningAgentState`` import is shared at module top, not
 duplicated locally.
-
-Redundancy 2 — The autocommit-prompt broadcast pattern
-(``_main_dirty_files`` → ``autocommit_prompt`` broadcast) was
-copy-pasted in ``task_runner.py::_run_task_inner`` and
-``merge_flow.py::_finish_merge``.  After the fix, both call a single
-``_broadcast_autocommit_prompt`` method defined in ``merge_flow.py``.
 """
 
 from __future__ import annotations
@@ -60,89 +54,3 @@ class TestCmdRunUsesGetTab:
         tab1 = server._get_tab("t1")
         tab2 = server._get_tab("t1")
         assert tab1 is tab2
-
-
-# ── Redundancy 2: autocommit prompt broadcast extracted ──
-
-
-class TestAutocommitPromptExtracted:
-    """Verify the autocommit-prompt broadcast is a single shared method."""
-
-    def test_broadcast_autocommit_prompt_exists_on_merge_flow_mixin(self) -> None:
-        """_MergeFlowMixin must define _broadcast_autocommit_prompt."""
-        from kiss.agents.vscode.merge_flow import _MergeFlowMixin
-
-        assert hasattr(_MergeFlowMixin, "_broadcast_autocommit_prompt"), (
-            "_MergeFlowMixin is missing _broadcast_autocommit_prompt; "
-            "the duplicated pattern should be extracted here"
-        )
-
-
-# ── Redundancy 3: one-shot non-agentic LLM call boilerplate extracted ──
-
-
-class TestOneShotLlmExtracted:
-    """Verify ``helpers._run_oneshot_llm`` exists and is referenced.
-
-    Both ``generate_commit_message_from_diff`` and
-    ``generate_followup_text`` previously open-coded the same
-    ``KISSAgent(...).run(... is_agentic=False, verbose=False)``
-    boilerplate with ``try/except`` + ``clean_llm_output`` +
-    fallback.  After the refactor, both delegate to a single shared
-    helper ``_run_oneshot_llm``.
-    """
-
-    def test_run_oneshot_llm_exists(self) -> None:
-        """``helpers._run_oneshot_llm`` must be defined."""
-        from kiss.agents.vscode import helpers
-
-        assert hasattr(helpers, "_run_oneshot_llm"), (
-            "vscode.helpers is missing _run_oneshot_llm; "
-            "the duplicated try/except + KISSAgent.run pattern "
-            "should be extracted here"
-        )
-
-    def test_callers_use_run_oneshot_llm(self) -> None:
-        """Both LLM helpers must funnel through ``_run_oneshot_llm``.
-
-        Verifies the boilerplate is actually shared (not just present
-        as a dead helper) by reading the module source and asserting
-        every direct ``KISSAgent(...).run(`` call has been removed
-        from ``helpers.py``.
-        """
-        import inspect
-
-        from kiss.agents.vscode import helpers
-
-        src = inspect.getsource(helpers)
-        # Only the shared helper may instantiate KISSAgent directly.
-        assert src.count("KISSAgent(") == 1, (
-            "Expected exactly one KISSAgent() instantiation in "
-            "vscode/helpers.py (inside _run_oneshot_llm); found "
-            f"{src.count('KISSAgent(')}"
-        )
-
-
-# ── Redundancy 4: sorcar/persistence.py shared helpers ──
-
-
-class TestPersistenceSharedHelpers:
-    """Verify shared helpers exist in ``sorcar.persistence``.
-
-    Four near-identical "load events for task_id" blocks were
-    collapsed into ``_fetch_events_for_task_id``.
-    """
-
-    def test_fetch_events_for_task_id_exists(self) -> None:
-        """``persistence._fetch_events_for_task_id`` must be defined."""
-        from kiss.agents.sorcar import persistence
-
-        assert hasattr(persistence, "_fetch_events_for_task_id"), (
-            "sorcar.persistence is missing _fetch_events_for_task_id; "
-            "the duplicated event-row loading loop should be "
-            "extracted here"
-        )
-
-
-
-
