@@ -100,6 +100,9 @@ export function buildChatHtml(
   const scriptUri = webview.asWebviewUri(
     vscode.Uri.joinPath(extensionUri, 'media', 'main.js'),
   );
+  const panelCopyUri = webview.asWebviewUri(
+    vscode.Uri.joinPath(extensionUri, 'media', 'panelCopy.js'),
+  );
   const demoScriptUri = webview.asWebviewUri(
     vscode.Uri.joinPath(extensionUri, 'media', 'demo.js'),
   );
@@ -347,6 +350,7 @@ export function buildChatHtml(
   <script nonce="${nonce}" src="${hljsUri}"></script>
   <script nonce="${nonce}" src="${markedUri}"></script>
   <script nonce="${nonce}">window.__TRICKS__ = ${tricksJson};</script>
+  <script nonce="${nonce}" src="${panelCopyUri}"></script>
   <script nonce="${nonce}" src="${scriptUri}"></script>
   <script nonce="${nonce}" src="${demoScriptUri}"></script>
 </body>
