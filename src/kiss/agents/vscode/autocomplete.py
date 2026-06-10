@@ -36,9 +36,11 @@ class _AutocompleteMixin:
         printer: JsonPrinter
         work_dir: str
         _state_lock: threading.RLock
-        _complete_queue: queue.Queue[tuple[str, int, str, str, str]] | None
+        _complete_queue: (
+            queue.Queue[tuple[str, int, str, str, str, str]] | None
+        )
         _complete_worker: threading.Thread | None
-        _complete_seq_latest: int
+        _complete_seq_latest: dict[str, int]
         _file_cache: dict[str, list[str]]
 
     def _complete_from_active_file(
@@ -109,18 +111,26 @@ class _AutocompleteMixin:
         return best
 
     def _complete_worker_loop(self) -> None:
-        """Persistent worker that drains the complete queue."""
+        """Persistent worker that drains the complete queue.
+
+        Every queued item is handed to :meth:`_complete`, which drops
+        stale requests via the per-connection sequence check before
+        doing any real work.  The loop must NOT blindly collapse the
+        queue to its newest item: requests from *different*
+        connections (VS Code windows) are interleaved on this one
+        queue, and discarding everything but the newest would let one
+        window's keystroke swallow another window's still-fresh
+        request.
+        """
         assert self._complete_queue is not None
         q = self._complete_queue
         while True:
-            item = q.get()
-            while not q.empty():
-                try:
-                    item = q.get_nowait()
-                except queue.Empty:  # pragma: no cover — race guard
-                    break
-            query, seq, snapshot_file, snapshot_content, chat_id = item
-            self._complete(query, seq, snapshot_file, snapshot_content, chat_id)
+            query, seq, snapshot_file, snapshot_content, chat_id, conn_id = (
+                q.get()
+            )
+            self._complete(
+                query, seq, snapshot_file, snapshot_content, chat_id, conn_id,
+            )
 
     def _complete(
         self,
@@ -129,23 +139,29 @@ class _AutocompleteMixin:
         snapshot_file: str = "",
         snapshot_content: str = "",
         chat_id: str = "",
+        conn_id: str = "",
     ) -> None:
         """Ghost text autocomplete via fast local prefix matching.
 
         Args:
             query: Raw query text from the chat input.
-            seq: Sequence number for this request. If a newer request has
-                been issued (``seq`` no longer matches the counter), this
+            seq: Sequence number for this request. If a newer request
+                has been issued *on the same connection* (``seq`` no
+                longer matches that connection's latest counter), this
                 call exits early to avoid broadcasting stale results.
             snapshot_file: Atomically-captured active file path.
             snapshot_content: Atomically-captured active file content.
             chat_id: Current chat session id; passed through to the
                 active-file completion so previous tasks in the same
                 chat contribute identifier candidates.
+            conn_id: Connection id the request arrived on (``""`` for
+                direct callers).  Staleness is judged per connection so
+                concurrent typing in another VS Code window never
+                cancels this request.
         """
         if seq >= 0:
             with self._state_lock:
-                if seq != self._complete_seq_latest:
+                if seq != self._complete_seq_latest.get(conn_id, -1):
                     return
         if not query or len(query) < 2:
             self.printer.broadcast({"type": "ghost", "suggestion": "", "query": query})

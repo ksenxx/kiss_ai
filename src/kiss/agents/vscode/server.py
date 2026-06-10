@@ -202,8 +202,18 @@ class VSCodeServer(
         # a helper that itself tried to re-acquire the same lock.
         self._state_lock = _RunningAgentState._registry_lock
         self._complete_seq: int = 0
-        self._complete_seq_latest: int = -1
-        self._complete_queue: queue.Queue[tuple[str, int, str, str, str]] | None = None
+        # Latest autocomplete sequence number per connection, keyed by
+        # the ``connId`` that ``RemoteAccessServer`` stamps on every
+        # client command (``""`` for direct callers, e.g. tests).
+        # Staleness is tracked per connection so two VS Code windows
+        # typing concurrently never cancel each other's in-flight
+        # ghost-text requests (a single global counter let whichever
+        # window typed last mark every other window's pending request
+        # stale).
+        self._complete_seq_latest: dict[str, int] = {}
+        self._complete_queue: (
+            queue.Queue[tuple[str, int, str, str, str, str]] | None
+        ) = None
         self._complete_worker: threading.Thread | None = None
         # Per-work_dir file scan cache.  Keyed by the absolute work_dir
         # path the scan ran in so different chat tabs (each with their
@@ -212,8 +222,35 @@ class VSCodeServer(
         # "no cache" for the legacy single-dir cache; the dict form uses
         # "key absent" instead and is initialised empty.
         self._file_cache: dict[str, list[str]] = {}
-        self._last_active_file: str = ""
-        self._last_active_content: str = ""
+        # Last-seen active editor file path / content per connection,
+        # keyed by ``connId`` (``""`` for direct callers).  Each VS
+        # Code window reports its own active editor on ``complete``
+        # commands; keeping the fallback snapshot per connection means
+        # one window's active-file content can never leak into another
+        # window's ghost-text autocomplete context.
+        self._last_active_file: dict[str, str] = {}
+        self._last_active_content: dict[str, str] = {}
+
+    def drop_connection_state(self, conn_id: str) -> None:
+        """Discard per-connection autocomplete state for a closed connection.
+
+        Called by :class:`RemoteAccessServer` when a client connection
+        (one per VS Code window / browser tab) goes away, so the
+        per-connection active-file snapshots and autocomplete sequence
+        counters do not accumulate forever in a long-lived daemon.
+
+        Args:
+            conn_id: The connection id that was stamped (as ``connId``)
+                on every command from the departed connection.  An
+                empty id is ignored — it is the shared key used by
+                direct callers (tests) and must survive.
+        """
+        if not conn_id:
+            return
+        with self._state_lock:
+            self._last_active_file.pop(conn_id, None)
+            self._last_active_content.pop(conn_id, None)
+            self._complete_seq_latest.pop(conn_id, None)
 
     @property
     def _running_agent_states(self) -> dict[str, _RunningAgentState]:
