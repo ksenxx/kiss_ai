@@ -1599,6 +1599,15 @@ class WebPrinter(JsonPrinter):
         # VS Code extension viewer of the same chat tab observe an
         # identical event stream.
         self._uds_writers: set[asyncio.StreamWriter] = set()
+        # Per-connection endpoint registry, keyed by the ``conn_id``
+        # that the handlers stamp (as ``connId``) on every client
+        # command.  Request/reply events (``models``, ``history``,
+        # ``files``, ``ghost``, ``configData``, ...) carry the
+        # requesting connection's id back on the event so
+        # :meth:`broadcast` can deliver them ONLY to the window that
+        # asked — one VS Code window's webview activity must never
+        # change the UI of another window's webview.
+        self._conn_endpoints: dict[str, Any] = {}
         self._ws_lock = threading.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._merge_state_callback: (
@@ -1631,13 +1640,21 @@ class WebPrinter(JsonPrinter):
           currently subscribed the event is recorded / persisted but
           no copy is sent over the wire.
         * Events with neither ``tabId`` nor a resolvable ``taskId``
-          are global system events (``configData``, ``models``,
-          ``history``, ``inputHistory``, ``error``, etc.) and are
-          broadcast verbatim to every connected client.
+          are global system events (``tasks_updated``, ``remote_url``,
+          ``update_available``, etc.) and are broadcast verbatim to
+          every connected client.
+        * Events stamped with a non-empty ``connId`` are request/reply
+          events (``models``, ``history``, ``frequentTasks``,
+          ``inputHistory``, ``files``, ``ghost``, ``configData``,
+          unknown-command ``error``): the stamp is stripped and the
+          event is sent ONLY to the connection (= VS Code window /
+          browser tab) that issued the request, so one window's
+          webview activity can never change another window's UI.
 
         Args:
             event: The event dictionary to emit.
         """
+        conn_id = event.pop("connId", "")
         if event.get("type") == "configData":
             cfg = event.get("config")
             if isinstance(cfg, dict) and not cfg.get("work_dir"):
@@ -1647,6 +1664,15 @@ class WebPrinter(JsonPrinter):
                     or os.environ.get("KISS_WORKDIR", "")
                     or os.getcwd()
                 )
+
+        if conn_id:
+            # Targeted request/reply event — deliver only to the
+            # requesting connection.  Never recorded or persisted
+            # (these are transient UI replies, not task events).  A
+            # vanished endpoint (client disconnected before the reply
+            # was ready) silently drops the event.
+            self._send_to_conn(conn_id, json.dumps(event))
+            return
 
         if event.get("type") == "merge_data":
             event = _augment_merge_data(event)
@@ -1694,43 +1720,64 @@ class WebPrinter(JsonPrinter):
             data: The JSON payload (already encoded with ``json.dumps``).
         """
         with self._ws_lock:
-            clients = list(self._ws_clients)
-            writers = list(self._uds_writers)
+            endpoints = list(self._ws_clients) + list(self._uds_writers)
+        for endpoint in endpoints:
+            self._schedule_send(endpoint, data)
+
+    def _send_to_conn(self, conn_id: str, data: str) -> None:
+        """Send a pre-serialised JSON payload to ONE connection.
+
+        Used by :meth:`broadcast` for request/reply events stamped
+        with the requesting connection's ``connId``: the reply must
+        reach only the VS Code window (or browser tab) that issued
+        the request, never its sibling windows.
+
+        Args:
+            conn_id: The connection id registered via :meth:`bind_conn`.
+            data: The JSON payload (already encoded with ``json.dumps``).
+        """
+        with self._ws_lock:
+            endpoint = self._conn_endpoints.get(conn_id)
+        if endpoint is None:
+            return
+        self._schedule_send(endpoint, data)
+
+    def _schedule_send(self, endpoint: Any, data: str) -> None:
+        """Schedule one payload send to one endpoint on the event loop.
+
+        Shared by :meth:`_send_to_ws_clients` (fan-out) and
+        :meth:`_send_to_conn` (targeted reply).  ``endpoint`` is a
+        :class:`ServerConnection` (WSS) or an
+        :class:`asyncio.StreamWriter` (UDS).  The resulting future is
+        tracked in ``_pending_sends`` (M8) so a stuck/slow peer's
+        pending sends can be cancelled when the client disconnects.
+
+        Args:
+            endpoint: The client connection to write to.
+            data: The JSON payload (already encoded with ``json.dumps``).
+        """
         loop = self._loop
         if loop is None or not loop.is_running():
             return
-        for ws in clients:
-            try:
+        try:
+            if isinstance(endpoint, asyncio.StreamWriter):
                 fut = asyncio.run_coroutine_threadsafe(
-                    ws.send(data), loop,
+                    self._uds_send(endpoint, data), loop,
                 )
-            except Exception:
-                logger.debug("Failed to send to WS client", exc_info=True)
-                continue
-            # M8: track the future so a stuck/slow peer's pending
-            # sends can be cancelled when the client disconnects.
-            with self._ws_lock:
-                pending = self._pending_sends.get(ws)
-                if pending is not None:
-                    pending.add(fut)
-            fut.add_done_callback(
-                partial(self._discard_pending_send, ws),
-            )
-        for writer in writers:
-            try:
+            else:
                 fut = asyncio.run_coroutine_threadsafe(
-                    self._uds_send(writer, data), loop,
+                    endpoint.send(data), loop,
                 )
-            except Exception:
-                logger.debug("Failed to send to UDS client", exc_info=True)
-                continue
-            with self._ws_lock:
-                pending = self._pending_sends.get(writer)
-                if pending is not None:
-                    pending.add(fut)
-            fut.add_done_callback(
-                partial(self._discard_pending_send, writer),
-            )
+        except Exception:
+            logger.debug("Failed to send to client", exc_info=True)
+            return
+        with self._ws_lock:
+            pending = self._pending_sends.get(endpoint)
+            if pending is not None:
+                pending.add(fut)
+        fut.add_done_callback(
+            partial(self._discard_pending_send, endpoint),
+        )
 
     async def _uds_send(
         self, writer: asyncio.StreamWriter, data: str,
@@ -1780,6 +1827,31 @@ class WebPrinter(JsonPrinter):
                 fut.cancel()
             except Exception:
                 logger.debug("Failed to cancel pending send", exc_info=True)
+
+    def bind_conn(self, conn_id: str, endpoint: Any) -> None:
+        """Associate a connection id with its transport endpoint.
+
+        Called by the WSS / UDS handlers when a client connects, so
+        :meth:`broadcast` can route request/reply events (stamped
+        with ``connId``) back to ONLY the requesting connection.
+
+        Args:
+            conn_id: The unique id stamped (as ``connId``) on every
+                command from this connection.
+            endpoint: The :class:`ServerConnection` (WSS) or
+                :class:`asyncio.StreamWriter` (UDS) for the connection.
+        """
+        with self._ws_lock:
+            self._conn_endpoints[conn_id] = endpoint
+
+    def unbind_conn(self, conn_id: str) -> None:
+        """Drop the connection-id → endpoint binding for a closed peer.
+
+        Args:
+            conn_id: The connection id registered via :meth:`bind_conn`.
+        """
+        with self._ws_lock:
+            self._conn_endpoints.pop(conn_id, None)
 
     def add_uds_writer(self, writer: asyncio.StreamWriter) -> None:
         """Register a Unix-domain socket writer for event broadcasting.
@@ -2759,6 +2831,7 @@ class RemoteAccessServer:
         conn_state: dict[str, str] = {
             "work_dir": "", "conn_id": uuid.uuid4().hex,
         }
+        self._printer.bind_conn(conn_state["conn_id"], websocket)
         try:
             async for message in websocket:
                 try:
@@ -2785,6 +2858,7 @@ class RemoteAccessServer:
             for tab in tabs_seen:
                 self._schedule_tab_close(tab)
             self._vscode_server.drop_connection_state(conn_state["conn_id"])
+            self._printer.unbind_conn(conn_state["conn_id"])
             self._printer.remove_client(websocket)
 
     async def _uds_handler(
@@ -2821,6 +2895,7 @@ class RemoteAccessServer:
         conn_state: dict[str, str] = {
             "work_dir": "", "conn_id": uuid.uuid4().hex,
         }
+        self._printer.bind_conn(conn_state["conn_id"], writer)
         try:
             while True:
                 line = await reader.readline()
@@ -2841,6 +2916,7 @@ class RemoteAccessServer:
             for tab in tabs_seen:
                 self._schedule_tab_close(tab)
             self._vscode_server.drop_connection_state(conn_state["conn_id"])
+            self._printer.unbind_conn(conn_state["conn_id"])
             self._printer.remove_uds_writer(writer)
             try:
                 writer.close()
