@@ -102,6 +102,18 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   private _extensionUri: vscode.Uri;
   private _selectedModel: string;
   private _runningTabs: Set<string> = new Set();
+  /**
+   * Tab ids owned by THIS window's webview.  The daemon broadcasts
+   * tab-stamped events to every connected client (every VS Code
+   * window), so native side effects (merge editor, SCM repo open,
+   * notifications, sidebar reveal) must only fire for tabs this
+   * window actually owns — otherwise one window's agent activity
+   * would disturb every other window.  Populated from every
+   * webview → extension message that carries a ``tabId`` (plus the
+   * ``restoredTabs`` list on ``ready`` and adopted sub-agent tabs);
+   * pruned on ``closeTab``.
+   */
+  private _ownTabs: Set<string> = new Set();
   private _webviewHasFocus: boolean = false;
 
   /** Per-tab MergeManager instances — each tab gets its own merge review. */
@@ -317,15 +329,29 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         // shows another window's folder.
         msg.config.work_dir = this._getWorkDir();
       }
-      if (msg.type === 'commitMessage') {
+      if (msg.type === 'commitMessage' && this._isOwnTab(msg.tabId)) {
         this._onCommitMessage.fire({message: msg.message, error: msg.error});
       }
       if (msg.type === 'models' && msg.selected) {
         this._selectedModel = msg.selected;
       }
+      if (msg.type === 'openSubagentTab') {
+        // Adopt sub-agent tabs spawned under a parent tab this window
+        // owns: the webview materialises the tab from this very event
+        // without ever posting a command first, so ownership must be
+        // learned here for later tab-stamped events (merge, worktree,
+        // askUser) to pass the _isOwnTab gate.
+        const subMsg = msg as {tab_id?: string; parent_tab_id?: string};
+        if (
+          subMsg.tab_id &&
+          (!subMsg.parent_tab_id || this._ownTabs.has(subMsg.parent_tab_id))
+        ) {
+          this._ownTabs.add(subMsg.tab_id);
+        }
+      }
       if (msg.type === 'merge_data') {
         const mergeTabId = msg.tabId;
-        if (mergeTabId !== undefined) {
+        if (mergeTabId !== undefined && this._ownTabs.has(mergeTabId)) {
           const mgr = this._getOrCreateMergeManager(mergeTabId);
           this._restoreChain = this._restoreChain
             .then(async () => {
@@ -349,7 +375,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       if (msg.type === 'worktree_created' || msg.type === 'worktree_done') {
         const dir = msg.worktreeDir;
         const wtTabId = msg.tabId;
-        if (dir) {
+        if (dir && this._isOwnTab(wtTabId)) {
           if (wtTabId !== undefined) {
             this._worktreeDirs.set(wtTabId, dir);
           }
@@ -366,7 +392,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           progress.report({message: msg.message});
         }
       }
-      if (msg.type === 'worktree_result') {
+      if (msg.type === 'worktree_result' && this._isOwnTab(msg.tabId)) {
         const wrTabId = msg.tabId;
         if (wrTabId !== undefined) {
           const resolve = this._worktreeActionResolves.get(wrTabId);
@@ -406,7 +432,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           progress.report({message: msg.message});
         }
       }
-      if (msg.type === 'autocommit_done') {
+      if (msg.type === 'autocommit_done' && this._isOwnTab(msg.tabId)) {
         const adTabId = msg.tabId;
         if (adTabId !== undefined) {
           const resolve = this._autocommitActionResolves.get(adTabId);
@@ -426,8 +452,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       }
 
       // Reveal the sidebar when the agent asks a question so the user
-      // sees the modal even if they switched to another panel.
-      if (msg.type === 'askUser' && this._view) {
+      // sees the modal even if they switched to another panel.  Only
+      // for questions asked by a tab this window owns — another
+      // window's askUser must not yank this window's sidebar open.
+      if (msg.type === 'askUser' && this._view && this._isOwnTab(msg.tabId)) {
         this._view.show(true);
       }
 
@@ -447,10 +475,15 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       if (msg.type === 'status') {
         const statusTabId = msg.tabId;
         if (msg.running) {
-          if (statusTabId !== undefined) this._runningTabs.add(statusTabId);
+          // Track only this window's own tabs: _runningTabs drives
+          // stop-all and restart deferral for THIS window, and must
+          // not accumulate other windows' tab ids.
+          if (statusTabId !== undefined && this._ownTabs.has(statusTabId)) {
+            this._runningTabs.add(statusTabId);
+          }
         } else {
           if (statusTabId !== undefined) this._runningTabs.delete(statusTabId);
-          if (this._commitPendingTabs.size > 0) {
+          if (this._isOwnTab(statusTabId) && this._commitPendingTabs.size > 0) {
             this._onCommitMessage.fire({message: '', error: 'Process stopped'});
           }
         }
@@ -779,7 +812,31 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     });
   }
 
+  /**
+   * True when a daemon event targets a tab owned by this window's
+   * webview (or carries no tabId at all, i.e. is a global event).
+   * Tab-stamped events for tabs of OTHER windows reach this listener
+   * too (the daemon broadcasts to every client); they must not
+   * trigger native UI side effects here.
+   */
+  private _isOwnTab(tabId: string | undefined): boolean {
+    return tabId === undefined || this._ownTabs.has(tabId);
+  }
+
   private async _handleMessage(message: FromWebviewMessage): Promise<void> {
+    // Learn tab ownership from the webview's own traffic: any message
+    // carrying a tabId proves the tab lives in THIS window.  The
+    // ``ready`` message additionally announces every restored tab.
+    const msgTabId = (message as {tabId?: string}).tabId;
+    if (msgTabId) {
+      if (message.type === 'closeTab') this._ownTabs.delete(msgTabId);
+      else this._ownTabs.add(msgTabId);
+    }
+    if (message.type === 'ready' && message.restoredTabs) {
+      for (const rt of message.restoredTabs) {
+        if (rt.tabId) this._ownTabs.add(rt.tabId);
+      }
+    }
     const forwarded = FORWARDED_COMMANDS[message.type];
     if (forwarded) {
       const src = message as unknown as Record<string, unknown>;
