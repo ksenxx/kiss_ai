@@ -5564,6 +5564,22 @@
     if (configFormPopulated) {
       const data = collectConfigForm();
       vscode.postMessage({type: 'saveConfig', ...data});
+      // Standalone web client: editing the work_dir in Settings also
+      // re-pins THIS instance (sessionStorage via the WS shim + the
+      // server's per-connection work_dir), so the change applies to
+      // this browser tab immediately while other instances keep their
+      // own pinned folders.  saveConfig above still persists the value
+      // globally as the default for NEW instances.
+      if (
+        document.body.classList.contains('remote-chat') &&
+        typeof data.config.work_dir === 'string' &&
+        data.config.work_dir
+      ) {
+        vscode.postMessage({
+          type: 'setWorkDir',
+          workDir: data.config.work_dir,
+        });
+      }
     }
   }
 
@@ -5826,6 +5842,25 @@
         // may edit it.
         wdInp.readOnly = true;
         wdInp.title = 'Set by the workspace folder open in this window';
+      } else {
+        // Standalone web client: each browser tab (= one webapp
+        // instance) pins its own work_dir in sessionStorage under
+        // 'sorcar-work-dir' (written by the WS shim's postMessage
+        // hook and replayed to the server on every reconnect).
+        // Prefer the pinned value over the globally persisted one so
+        // another instance saving a different work_dir can never
+        // change what THIS instance displays or uses; when no pin
+        // exists yet (first configData after a fresh tab), adopt the
+        // global value as this instance's pin.
+        let pinned = '';
+        try {
+          pinned = sessionStorage.getItem('sorcar-work-dir') || '';
+        } catch (e) {}
+        if (pinned) {
+          wdInp.value = pinned;
+        } else if (cfg.work_dir) {
+          vscode.postMessage({type: 'setWorkDir', workDir: cfg.work_dir});
+        }
       }
     }
     el('cfg-max-budget').value = cfg.max_budget != null ? cfg.max_budget : 100;
