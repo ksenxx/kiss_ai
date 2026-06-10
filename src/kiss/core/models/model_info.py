@@ -132,7 +132,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "cc/haiku": _mi(200000, 0.00, 0.00),
     "cc/opus": _mi(200000, 0.00, 0.00),
     "cc/sonnet": _mi(200000, 0.00, 0.00),
-    "claude-fable-5": _mi(1000000, 10.00, 50.00),  # NEW
+    "claude-fable-5": _mi(200000, 10.00, 50.00),  # NEW
     "claude-haiku-4-5": _mi(200000, 1.00, 5.00),
     "claude-haiku-4-5-20251001": _mi(200000, 1.00, 5.00),
     "claude-opus-4": _mi(200000, 15.00, 75.00),
