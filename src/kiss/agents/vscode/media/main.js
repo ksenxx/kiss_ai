@@ -5799,6 +5799,20 @@
   let configFormPopulated = false;
   function populateConfigForm(cfg, apiKeys) {
     const el = id => document.getElementById(id);
+    const wdInp = el('cfg-work-dir');
+    if (wdInp) {
+      wdInp.value = cfg.work_dir || '';
+      if (!document.body.classList.contains('remote-chat')) {
+        // In VS Code each window's work_dir is ALWAYS the workspace
+        // folder open in that window (the extension overwrites
+        // ``configData.config.work_dir`` with its own folder before
+        // forwarding), so the field is informational and read-only.
+        // Only the standalone web client — which has no workspace —
+        // may edit it.
+        wdInp.readOnly = true;
+        wdInp.title = 'Set by the workspace folder open in this window';
+      }
+    }
     el('cfg-max-budget').value = cfg.max_budget != null ? cfg.max_budget : 100;
     el('cfg-custom-endpoint').value = cfg.custom_endpoint || '';
     el('cfg-custom-api-key').value = cfg.custom_api_key || '';
@@ -5836,6 +5850,14 @@
       demo_mode: el('cfg-demo-mode').checked,
       remote_password: el('cfg-remote-password').value.trim(),
     };
+    // Only the standalone web client may change the work_dir; in
+    // VS Code the field is read-only (the workspace folder is the
+    // work_dir) and is omitted so one window's save can never
+    // overwrite the persisted work_dir with its own folder.
+    const wdInp = el('cfg-work-dir');
+    if (wdInp && !wdInp.readOnly) {
+      cfg.work_dir = wdInp.value.trim();
+    }
     const apiKeys = {};
     const keyIds = [
       'GEMINI_API_KEY',
