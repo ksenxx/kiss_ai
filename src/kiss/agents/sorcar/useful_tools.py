@@ -33,9 +33,11 @@ def _expand_pwd_prefix(file_path: str, work_dir: str | None) -> str:
     literal path component (e.g. ``PWD/SORCAR.md``).  This helper
     rewrites such paths so the subsequent Read still works.
     """
-    if file_path.startswith("PWD/") or file_path == "PWD":
+    if file_path == "PWD":
+        return work_dir or os.getcwd()
+    if file_path.startswith("PWD/"):
         base = work_dir or os.getcwd()
-        suffix = file_path[len("PWD/") :] if file_path.startswith("PWD/") else ""
+        suffix = file_path[len("PWD/") :]
         return os.path.join(base, suffix) if suffix else base
     return file_path
 
@@ -267,6 +269,47 @@ class UsefulTools:
         self.stop_event = stop_event
         self.work_dir = work_dir
 
+    def _spawn(self, command: str) -> subprocess.Popen:
+        """Launch *command* with the shared Popen configuration.
+
+        Output (stdout + stderr combined) is captured as UTF-8 text and
+        the child runs in ``self.work_dir`` with a cleaned environment.
+
+        Args:
+            command: The shell command to execute.
+
+        Returns:
+            The started subprocess.
+        """
+        return subprocess.Popen(
+            **_popen_kwargs(command),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            env=_clean_env(self.work_dir),
+            cwd=self.work_dir or None,
+        )
+
+    def _start_stop_monitor(
+        self, process: subprocess.Popen, done: threading.Event,
+    ) -> None:
+        """Start a daemon thread that kills *process* if ``stop_event`` fires.
+
+        No-op when this instance has no ``stop_event``.  The monitor
+        exits when *done* is set (process finished normally).
+
+        Args:
+            process: The running subprocess to watch.
+            done: Event the caller sets once the process has finished.
+        """
+        if self.stop_event:
+            threading.Thread(
+                target=_stop_monitor,
+                args=(self.stop_event, process, done),
+                daemon=True,
+            ).start()
+
     def Read(  # noqa: N802
         self,
         file_path: str,
@@ -446,27 +489,10 @@ class UsefulTools:
         if self.stream_callback:
             return self._bash_streaming(command, timeout_seconds, max_output_chars)
 
-        env = _clean_env(self.work_dir)
-
         try:
-            process = subprocess.Popen(
-                **_popen_kwargs(command),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                env=env,
-                cwd=self.work_dir or None,
-            )
+            process = self._spawn(command)
             done = threading.Event()
-            monitor = None
-            if self.stop_event:
-                monitor = threading.Thread(
-                    target=_stop_monitor,
-                    args=(self.stop_event, process, done),
-                    daemon=True,
-                )
-                monitor.start()
+            self._start_stop_monitor(process, done)
             try:
                 stdout, _ = process.communicate(timeout=timeout_seconds)
             except subprocess.TimeoutExpired:
@@ -492,15 +518,7 @@ class UsefulTools:
 
     def _bash_streaming(self, command: str, timeout_seconds: float, max_output_chars: int) -> str:
         assert self.stream_callback is not None
-        process = subprocess.Popen(
-            **_popen_kwargs(command),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            env=_clean_env(self.work_dir),
-            cwd=self.work_dir or None,
-        )
+        process = self._spawn(command)
         timed_out = False
         done = threading.Event()
 
@@ -511,14 +529,7 @@ class UsefulTools:
 
         timer = threading.Timer(timeout_seconds, _kill)
         timer.start()
-        monitor = None
-        if self.stop_event:
-            monitor = threading.Thread(
-                target=_stop_monitor,
-                args=(self.stop_event, process, done),
-                daemon=True,
-            )
-            monitor.start()
+        self._start_stop_monitor(process, done)
         try:
             chunks: list[str] = []
             assert process.stdout is not None

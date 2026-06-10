@@ -47,7 +47,7 @@ from kiss.agents.sorcar.persistence import (
     _search_history,
     _set_task_favorite,
 )
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState, parse_task_tags
+from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.agents.vscode.autocomplete import _AutocompleteMixin
 from kiss.agents.vscode.commands import _CommandsMixin
@@ -63,7 +63,7 @@ from kiss.agents.vscode.helpers import (
 )
 from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.agents.vscode.merge_flow import _MergeFlowMixin
-from kiss.agents.vscode.task_runner import _TaskRunnerMixin
+from kiss.agents.vscode.task_runner import _TaskRunnerMixin, parse_task_tags
 from kiss.core.models.model_info import (
     MODEL_INFO,
     get_available_models,
@@ -78,6 +78,69 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+
+def _live_task_id(tab: _RunningAgentState) -> int | None:
+    """Return the live ``task_history`` row id for *tab*.
+
+    Prefers ``tab.agent._last_task_id`` (set by the agent the moment it
+    allocates the task row) and falls back to ``tab.task_history_id``
+    for the post-run window when the agent reference has already been
+    cleared.
+
+    Args:
+        tab: The per-tab state to inspect.
+
+    Returns:
+        The live task id, or ``None`` when neither source is set.
+    """
+    agent = tab.agent
+    if agent is not None and agent._last_task_id is not None:
+        return agent._last_task_id
+    return tab.task_history_id
+
+
+def _tab_busy(tab: _RunningAgentState) -> bool:
+    """True when *tab* must not be disposed yet.
+
+    A tab is busy while a task is active, a merge review is in
+    progress, or its worker thread is still alive.  Shared by the
+    immediate (``_close_tab``) and deferred (``_dispose_if_closed``)
+    disposal paths.
+
+    Args:
+        tab: The per-tab state to inspect.
+
+    Returns:
+        True when any lifecycle flag is still raised.
+    """
+    return (
+        tab.is_task_active
+        or tab.is_merging
+        or (tab.task_thread is not None and tab.task_thread.is_alive())
+    )
+
+
+def _subagent_is_done(sub_task_id: Any) -> bool:
+    """True when the sub-agent owning *sub_task_id* is no longer running.
+
+    Decided from the task-id-keyed :attr:`ChatSorcarAgent.running_agents`
+    map: presence under the sub-agent's own task id means its thread is
+    still running; absence means it finished.
+
+    Args:
+        sub_task_id: The sub-agent's ``task_history`` row id (any type;
+            non-int values are treated as done).
+
+    Returns:
+        True when no live agent is registered for *sub_task_id*.
+    """
+    from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+
+    return not (
+        isinstance(sub_task_id, int)
+        and sub_task_id in ChatSorcarAgent.running_agents
+    )
 
 
 class VSCodeServer(
@@ -194,10 +257,12 @@ class VSCodeServer(
             # / discard, worktree state inspection).  The agent is
             # transient — :meth:`_TaskRunnerMixin._run_task`'s outer
             # ``finally`` sets ``tab.agent = None`` once each task
-            # completes, and :meth:`_CommandsMixin._cmd_run` allocates
-            # a fresh agent before the worker thread starts.  So no
-            # agent state ever survives a task boundary; the slot
-            # populated here is a fresh, empty agent.
+            # completes, and the next task's
+            # :meth:`_TaskRunnerMixin._run_task_inner` re-enters here
+            # (via ``_get_tab``) to allocate a fresh agent before the
+            # run starts.  So no agent state ever survives a task
+            # boundary; the slot populated here is a fresh, empty
+            # agent.
             if tab.agent is None:
                 agent = WorktreeSorcarAgent("Sorcar VS Code")
                 if tab.chat_id:
@@ -296,13 +361,10 @@ class VSCodeServer(
     def _get_running_task_ids(self) -> set[int]:
         """Return the set of task_history row ids with alive worker threads.
 
-        Scans all per-tab ``_RunningAgentState`` entries and collects the
-        live task id of those whose ``task_thread`` is still alive.
-        Prefers ``tab.agent._last_task_id`` (set by the agent the moment
-        it allocates the task row) and falls back to
-        ``tab.task_history_id`` for the post-run window when the agent
-        reference has already been cleared.  Must be called WITHOUT
-        holding ``_state_lock`` — acquires it internally.
+        Scans all per-tab ``_RunningAgentState`` entries and collects
+        the live task id (see :func:`_live_task_id`) of those whose
+        ``task_thread`` is still alive.  Acquires ``_state_lock``
+        internally (re-entrant, so safe to call with it already held).
 
         Returns:
             Set of ``task_history.id`` values that are currently running.
@@ -310,11 +372,7 @@ class VSCodeServer(
         running: set[int] = set()
         with self._state_lock:
             for tab in _RunningAgentState.running_agent_states.values():
-                tid = (
-                    tab.agent._last_task_id
-                    if tab.agent is not None and tab.agent._last_task_id is not None
-                    else tab.task_history_id
-                )
+                tid = _live_task_id(tab)
                 if (
                     tid is not None
                     and tab.task_thread is not None
@@ -332,7 +390,8 @@ class VSCodeServer(
         live task id matches *task_id* and overwrites the ``tokens``,
         ``cost``, and ``steps`` fields in *session* with current values
         from the running agent, including the in-progress executor's
-        ``step_count``.  Must be called WITHOUT holding ``_state_lock``.
+        ``step_count``.  Acquires ``_state_lock`` internally
+        (re-entrant, so safe to call with it already held).
 
         Args:
             session: The history session dict to update in place.
@@ -343,12 +402,7 @@ class VSCodeServer(
                 agent = tab.agent
                 if agent is None:
                     continue
-                live_tid = (
-                    agent._last_task_id
-                    if agent._last_task_id is not None
-                    else tab.task_history_id
-                )
-                if live_tid != task_id:
+                if _live_task_id(tab) != task_id:
                     continue
                 session["tokens"] = int(
                     getattr(agent, "total_tokens_used", 0) or 0
@@ -438,26 +492,25 @@ class VSCodeServer(
                         pid = sub.get("parent_task_id")
                         if isinstance(pid, int):
                             session["parent_task_id"] = pid
+                    # Field-by-field numeric coercion: garbage values
+                    # fall back to the zero default, numeric strings
+                    # round-trip through the cast.
+                    for key, cast, default in (
+                        ("tokens", int, 0),
+                        ("cost", float, 0.0),
+                        ("steps", int, 0),
+                    ):
+                        try:
+                            session[key] = cast(extra_obj.get(key, default) or default)
+                        except (TypeError, ValueError):
+                            session[key] = default
                     try:
-                        session["tokens"] = int(extra_obj.get("tokens", 0) or 0)
+                        session["endTs"] = int(extra_obj.get("endTs", 0) or 0)
                     except (TypeError, ValueError):
-                        session["tokens"] = 0
-                    try:
-                        session["cost"] = float(extra_obj.get("cost", 0.0) or 0.0)
-                    except (TypeError, ValueError):
-                        session["cost"] = 0.0
-                    try:
-                        session["steps"] = int(extra_obj.get("steps", 0) or 0)
-                    except (TypeError, ValueError):
-                        session["steps"] = 0
+                        session["endTs"] = 0
                     session["is_favorite"] = bool(
                         extra_obj.get("is_favorite", False)
                     )
-                    try:
-                        end_ts_raw = extra_obj.get("endTs", 0)
-                        session["endTs"] = int(end_ts_raw or 0)
-                    except (TypeError, ValueError):
-                        session["endTs"] = 0
                     try:
                         start_ts_raw = extra_obj.get("startTs", 0)
                         if start_ts_raw:
@@ -600,11 +653,7 @@ class VSCodeServer(
         """
         with self._state_lock:
             tab = _RunningAgentState.running_agent_states.get(tab_id)
-            if tab is not None and (
-                tab.is_task_active
-                or tab.is_merging
-                or (tab.task_thread is not None and tab.task_thread.is_alive())
-            ):
+            if tab is not None and _tab_busy(tab):
                 tab.frontend_closed = True
                 return
             _RunningAgentState.running_agent_states.pop(tab_id, None)
@@ -628,11 +677,7 @@ class VSCodeServer(
             tab = _RunningAgentState.running_agent_states.get(tab_id)
             if tab is None or not tab.frontend_closed:
                 return
-            if (
-                tab.is_task_active
-                or tab.is_merging
-                or (tab.task_thread is not None and tab.task_thread.is_alive())
-            ):
+            if _tab_busy(tab):
                 return
             _RunningAgentState.running_agent_states.pop(tab_id, None)
         self._teardown_tab_resources(tab_id, tab)
@@ -834,20 +879,11 @@ class VSCodeServer(
             # description shown in the tab header is derived from the
             # row's own ``task`` column.
             #
-            # ``isDone`` is decided from the task-id-keyed
-            # ``ChatSorcarAgent.running_agents`` map: presence under
-            # the sub-agent's own task id means its thread is still
-            # running, absence means it finished.  This lets the
+            # ``isDone`` (see :func:`_subagent_is_done`) lets the
             # reopened tab render the same "done, no indicator" state
             # the original tab ended on (instead of pulsing ◉ purple
             # forever because no later ``subagentDone`` arrives).
-            from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-
-            sub_task_id = result.get("task_id")
-            is_done = not (
-                isinstance(sub_task_id, int)
-                and sub_task_id in ChatSorcarAgent.running_agents
-            )
+            is_done = _subagent_is_done(result.get("task_id"))
             # Look up the parent's frontend tab id so the frontend can
             # record the parent → child relationship.  Without this,
             # closing the parent tab would not cascade-close this
@@ -975,25 +1011,19 @@ class VSCodeServer(
 
             if parent_task_id is not None:
                 for st in non_sub_states:
-                    st_tid = (
-                        st.agent._last_task_id
-                        if st.agent is not None
-                        and st.agent._last_task_id is not None
-                        else st.task_history_id
-                    )
-                    if st_tid == parent_task_id:
+                    if _live_task_id(st) == parent_task_id:
                         return st.tab_id
 
             if chat_id:
-                # Exclude ``sub_tab_id`` itself: ``_replay_session``
-                # calls ``_get_tab(sub_tab_id)`` before this resolver
-                # runs, which pre-registers a non-subagent state for
-                # the freshly opened sub-tab and copies the resumed
-                # session's ``chat_id`` onto it.  Without the guard
-                # below, that state would match here and we'd return
-                # the sub-tab's own id, creating a self-referential
-                # parent_tab_id and a self-loop in the frontend's
-                # parent→child cascade-close registry.
+                # Exclude ``sub_tab_id`` itself: when a non-subagent
+                # state already exists for the freshly opened sub-tab
+                # (e.g. the user previously ran a task in that tab),
+                # ``_replay_session`` copies the resumed session's
+                # ``chat_id`` onto it before this resolver runs.
+                # Without the guard below, that state would match here
+                # and we'd return the sub-tab's own id, creating a
+                # self-referential parent_tab_id and a self-loop in
+                # the frontend's parent→child cascade-close registry.
                 chat_matches = [
                     st for st in non_sub_states
                     if st.chat_id == chat_id and st.tab_id != sub_tab_id
@@ -1028,29 +1058,24 @@ class VSCodeServer(
         webview's ``openSubagentTab`` handler is idempotent on
         ``tab_id``.
 
-        ``isDone`` is decided from
-        :attr:`ChatSorcarAgent.running_agents`: presence under the
-        sub-agent's own task id means its thread is still running so
-        the tab should pulse the ◉ indicator; absence means the
-        sub-agent has completed and the tab should render as a
-        finished tab without the indicator.
+        ``isDone`` is decided by :func:`_subagent_is_done`: presence in
+        :attr:`ChatSorcarAgent.running_agents` under the sub-agent's
+        own task id means its thread is still running so the tab
+        should pulse the ◉ indicator; absence means the sub-agent has
+        completed and the tab should render as a finished tab without
+        the indicator.
 
         Args:
             parent_task_id: ``task_history.id`` of the parent task.
             parent_tab_id: Frontend tab id of the parent tab.  Used
                 as the prefix for the deterministic sub-tab ids.
         """
-        from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-
         sub_rows = _load_subagent_rows_by_parent_task_id(parent_task_id)
         for idx, row in enumerate(sub_rows):
             sub_task_id = row["task_id"]
             sub_tab_id = f"{parent_tab_id}__sub_{sub_task_id}"
             description = str(row.get("task", "") or "")
-            is_done = not (
-                isinstance(sub_task_id, int)
-                and sub_task_id in ChatSorcarAgent.running_agents
-            )
+            is_done = _subagent_is_done(sub_task_id)
             self.printer.broadcast({
                 "type": "openSubagentTab",
                 "tab_id": sub_tab_id,
@@ -1143,12 +1168,7 @@ class VSCodeServer(
             # never reached.
             if task_id is not None:
                 for t in _RunningAgentState.running_agent_states.values():
-                    live_tid = (
-                        t.agent._last_task_id
-                        if t.agent is not None and t.agent._last_task_id is not None
-                        else t.task_history_id
-                    )
-                    if live_tid != task_id:
+                    if _live_task_id(t) != task_id:
                         continue
                     alive = (
                         t.task_thread is not None and t.task_thread.is_alive()
@@ -1179,11 +1199,7 @@ class VSCodeServer(
             if source is None:
                 return False
             source_tab_id = source.tab_id
-            source_task_id = (
-                source.agent._last_task_id if source.agent is not None else None
-            )
-            if source_task_id is None:
-                source_task_id = source.task_history_id
+            source_task_id = _live_task_id(source)
         # Subscribe the new viewer to the running task so live events
         # fan out to the freshly opened tab.  The caller still emits a
         # ``status running=true`` event before the ``task_events``
