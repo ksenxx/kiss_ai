@@ -103,6 +103,7 @@ export function buildChatHtml(
       .asWebviewUri(vscode.Uri.joinPath(extensionUri, 'media', name))
       .toString();
 
+  /* eslint-disable quotes */
   const csp =
     `<meta http-equiv="Content-Security-Policy" content="default-src 'none';` +
     ` style-src ${webview.cspSource} 'unsafe-inline';` +
