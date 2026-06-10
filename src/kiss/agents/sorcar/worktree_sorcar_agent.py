@@ -27,8 +27,7 @@ from kiss.agents.sorcar.cli_helpers import (
     _build_run_kwargs,
     _launch_work_dir,
     _print_recent_chats,
-    _print_result,
-    _print_run_stats,
+    print_outcome,
 )
 from kiss.agents.sorcar.git_worktree import (
     GitWorktree,
@@ -38,33 +37,25 @@ from kiss.agents.sorcar.git_worktree import (
 )
 from kiss.agents.sorcar.persistence import _allocate_chat_id
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+
+# ``_generate_commit_message`` is re-exported (and looked up from this
+# module's globals at call time) so tests can monkeypatch
+# ``worktree_sorcar_agent._generate_commit_message``.
+from kiss.agents.sorcar.sorcar_agent import (
+    SorcarAgent,
+    _generate_commit_message,
+    auto_commit_changes,
+)
 from kiss.core.kiss_error import KISSError
 
 logger = logging.getLogger(__name__)
 
-
-def _generate_commit_message(
-    wt_dir: Path, user_prompt: str | None = None,
-) -> str:
-    """Generate a commit message for worktree changes using an LLM.
-
-    Gets the staged diff and delegates to
-    :func:`~kiss.agents.vscode.helpers.generate_commit_message_from_diff`.
-    When *user_prompt* is provided, it is forwarded so the user's
-    task prompt is incorporated into the commit message.
-
-    Args:
-        wt_dir: The worktree directory containing staged changes.
-        user_prompt: The user's task prompt that produced these
-            staged changes, or ``None`` when not available.
-
-    Returns:
-        A commit message string.
-    """
-    from kiss.agents.vscode.helpers import generate_commit_message_from_diff
-
-    diff_text = GitWorktreeOps.staged_diff(wt_dir)
-    return generate_commit_message_from_diff(diff_text, user_prompt=user_prompt)
+# Result-specific middle lines for the manual-resolution command block
+# (see :func:`_merge_fix_steps`).
+_PRECOMMIT_FIX_LINES = (
+    "    # fix pre-commit issues, then:\n"
+    "    git commit --no-verify\n"
+)
 
 
 def _manual_merge_cmd(wt: GitWorktree) -> str:
@@ -86,6 +77,30 @@ def _manual_merge_cmd(wt: GitWorktree) -> str:
     return f"git merge --squash {wt.branch}"
 
 
+def _merge_fix_steps(wt: GitWorktree, fix_lines: str) -> str:
+    """Return the shell command block for manually completing a failed merge.
+
+    Shared by :meth:`WorktreeSorcarAgent._release_worktree` and
+    :meth:`WorktreeSorcarAgent.merge` so the checkout / merge / delete
+    instructions can never drift apart.
+
+    Args:
+        wt: The worktree state.
+        fix_lines: Result-specific middle lines (conflict resolution or
+            pre-commit fix steps), each ending in a newline.
+
+    Returns:
+        The indented multi-line command block (no trailing newline).
+    """
+    return (
+        f"    cd {wt.repo_root}\n"
+        f"    git checkout {wt.original_branch}\n"
+        f"    {_manual_merge_cmd(wt)}\n"
+        + fix_lines
+        + f"    git branch -d {wt.branch}"
+    )
+
+
 class WorktreeSorcarAgent(ChatSorcarAgent):
     """SorcarAgent that isolates every task in a git worktree.
 
@@ -99,6 +114,8 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
     Attributes:
         _wt: The current/pending worktree state, or ``None`` when idle.
     """
+
+    uses_worktree = True
 
     def __init__(self, name: str) -> None:
         super().__init__(name)
@@ -158,20 +175,11 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         """
         if self._wt is None or not self._wt.wt_dir.exists():
             return False
-        GitWorktreeOps.stage_all(self._wt.wt_dir)
-        user_prompt = self._last_user_prompt or None
-        try:
-            msg = _generate_commit_message(
-                self._wt.wt_dir, user_prompt=user_prompt,
-            )
-        except Exception:
-            logger.debug("LLM commit message generation failed; using fallback", exc_info=True)
-            msg = "kiss: auto-commit agent changes"
-            if user_prompt:
-                from kiss.agents.vscode.helpers import _append_user_prompt
-
-                msg = _append_user_prompt(msg, user_prompt)
-        return GitWorktreeOps.commit_staged(self._wt.wt_dir, msg)
+        return auto_commit_changes(
+            self._wt.wt_dir,
+            self._last_user_prompt or None,
+            _generate_commit_message,
+        )
 
 
     def _finalize_worktree(self) -> bool:
@@ -322,7 +330,13 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         if stash_warning:
             self._stash_pop_warning = stash_warning
 
-        merge_cmd = _manual_merge_cmd(wt)
+        # From here on the agent no longer tracks the worktree: on
+        # success it is fully merged; on failure the branch is kept in
+        # git for manual resolution (described by the warning below).
+        self._wt = None
+
+        if result == MergeResult.SUCCESS:
+            return wt.original_branch
 
         stash_suffix = ""
         if stash_warning:
@@ -334,52 +348,37 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                 f"'{wt.original_branch}'. The branch is kept for "
                 "manual resolution."
             )
-            self._wt = None
-            return None
-        if result == MergeResult.MERGE_FAILED:
+        elif result == MergeResult.MERGE_FAILED:
             self._merge_conflict_warning = (
                 f"Auto-merge of '{wt.branch}' into "
                 f"'{wt.original_branch}' applied cleanly but "
                 "the commit failed (a pre-commit hook may have "
                 "rejected it). The branch is kept for manual "
                 "resolution. Run:\n"
-                f"    cd {wt.repo_root}\n"
-                f"    git checkout {wt.original_branch}\n"
-                f"    {merge_cmd}\n"
-                "    # fix pre-commit issues, then:\n"
-                "    git commit --no-verify\n"
-                f"    git branch -d {wt.branch}" + stash_suffix
+                + _merge_fix_steps(wt, _PRECOMMIT_FIX_LINES) + stash_suffix
             )
             logger.warning(
                 "Auto-merge of '%s' into '%s': commit failed (pre-commit hook?); branch kept",
                 wt.branch,
                 wt.original_branch,
             )
-            self._wt = None
-            return None
-        if result == MergeResult.CONFLICT:
+        else:  # MergeResult.CONFLICT
             self._merge_conflict_warning = (
                 f"Auto-merge of '{wt.branch}' into "
                 f"'{wt.original_branch}' had conflicts. The "
                 "branch is kept for manual resolution. Run:\n"
-                f"    cd {wt.repo_root}\n"
-                f"    git checkout {wt.original_branch}\n"
-                f"    {merge_cmd}\n"
-                "    # resolve conflicts, then:\n"
-                "    git add . && git commit\n"
-                f"    git branch -d {wt.branch}" + stash_suffix
+                + _merge_fix_steps(
+                    wt,
+                    "    # resolve conflicts, then:\n"
+                    "    git add . && git commit\n",
+                ) + stash_suffix
             )
             logger.warning(
                 "Auto-merge of '%s' into '%s' had conflicts; branch kept for manual resolution",
                 wt.branch,
                 wt.original_branch,
             )
-            self._wt = None
-            return None
-
-        released_branch = wt.original_branch
-        self._wt = None
-        return released_branch
+        return None
 
 
     def new_chat(self) -> None:
@@ -569,11 +568,8 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             # ``_unregister_running_state``) can route by chat id
             # without depending on the dict key.
             state.chat_id = self._chat_id
-            state.selected_model = (
-                getattr(self, "model_name", "") or state.selected_model
-            )
             state.is_task_active = True
-            _RunningAgentState.running_agent_states[self._chat_id] = state
+            _RunningAgentState.register(self._chat_id, state)
             return True
 
     def _unregister_running_state(self) -> None:
@@ -638,26 +634,22 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         registered_here = self._register_running_state()
 
         try:
-            if not kwargs.pop("use_worktree", True):
-                self._flush_warnings(kwargs.get("printer"))
-                return super().run(prompt_template=prompt_template, **kwargs)
-
-            work_dir_str = kwargs.get("work_dir")
-            discovery_dir = Path(work_dir_str) if work_dir_str else Path.cwd()
-
-            repo = GitWorktreeOps.discover_repo(discovery_dir)
-            if repo is None:
-                logger.warning("Not a git repo, running task directly")
-                self._flush_warnings(kwargs.get("printer"))
-                return super().run(prompt_template=prompt_template, **kwargs)
-
-            wt_work_dir = self._try_setup_worktree(repo, work_dir_str)
-            if wt_work_dir is None:
-                self._flush_warnings(kwargs.get("printer"))
-                return super().run(prompt_template=prompt_template, **kwargs)
+            wt_work_dir: Path | None = None
+            if kwargs.pop("use_worktree", True):
+                work_dir_str = kwargs.get("work_dir")
+                discovery_dir = Path(work_dir_str) if work_dir_str else Path.cwd()
+                repo = GitWorktreeOps.discover_repo(discovery_dir)
+                if repo is None:
+                    logger.warning("Not a git repo, running task directly")
+                else:
+                    wt_work_dir = self._try_setup_worktree(repo, work_dir_str)
 
             printer = kwargs.get("printer")
             self._flush_warnings(printer)
+            if wt_work_dir is None:
+                # Fall back to direct execution (no worktree).
+                return super().run(prompt_template=prompt_template, **kwargs)
+
             if printer and hasattr(printer, "broadcast"):
                 printer.broadcast(
                     {
@@ -729,7 +721,6 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                 )
 
         result, stash_warning = self._do_merge(wt)
-        merge_cmd = _manual_merge_cmd(wt)
         stash_suffix = ""
         if stash_warning:
             stash_suffix = "\n\n⚠️  " + stash_warning
@@ -753,24 +744,20 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                 f"Merge of '{wt.branch}' applied cleanly but the commit "
                 "failed (a pre-commit hook may have rejected it). "
                 "The branch is kept — retry manually:\n"
-                f"    cd {wt.repo_root}\n"
-                f"    git checkout {wt.original_branch}\n"
-                f"    {merge_cmd}\n"
-                "    # fix pre-commit issues, then:\n"
-                "    git commit --no-verify\n"
-                f"    git branch -d {wt.branch}\n" + stash_step + "\nOr discard the branch:\n"
+                + _merge_fix_steps(wt, _PRECOMMIT_FIX_LINES)
+                + "\n" + stash_step + "\nOr discard the branch:\n"
                 "    agent.discard()" + stash_suffix
             )
 
         return (
             "Merge conflict detected.  Resolve manually:\n"
-            f"    cd {wt.repo_root}\n"
-            f"    git checkout {wt.original_branch}\n"
-            f"    {merge_cmd}\n"
-            "    # resolve conflicts in your editor\n"
-            "    git add .\n"
-            "    git commit\n"
-            f"    git branch -d {wt.branch}\n" + stash_step + "\nOr discard the branch:\n"
+            + _merge_fix_steps(
+                wt,
+                "    # resolve conflicts in your editor\n"
+                "    git add .\n"
+                "    git commit\n",
+            )
+            + "\n" + stash_step + "\nOr discard the branch:\n"
             "    agent.discard()"
         )
 
@@ -862,10 +849,6 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
     Uses ``--use-chat`` or ``--use-worktree`` to select the agent
     type.  Defaults to base SorcarAgent when neither flag is given.
     """
-    import time as time_mod
-
-    from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-
     parser = _build_arg_parser()
     args = parser.parse_args()
 
@@ -912,23 +895,10 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
     else:
         from kiss.agents.sorcar.cli_steering import run_with_steering
 
-        start_time = time_mod.time()
+        start_time = time.time()
         result = run_with_steering(agent, run_kwargs)
-        elapsed = time_mod.time() - start_time
-
-        # When the agent runs verbosely it already renders the green
-        # "Result" panel (whose subtitle carries tokens / cost / steps) to
-        # the console as the task ends; re-printing the summary and the run
-        # stats here would duplicate it.  Only print them when running
-        # quietly so the Result panel stays the last thing shown.
-        if not run_kwargs.get("verbose", True):
-            _print_result(result)
-            if isinstance(agent, ChatSorcarAgent):
-                _print_run_stats(agent, elapsed)
-            else:
-                print(f"\nTime: {elapsed:.1f}s")
-                print(f"Cost: ${agent.budget_used:.4f}")
-                print(f"Total tokens: {agent.total_tokens_used}")
+        elapsed = time.time() - start_time
+        print_outcome(agent, result, elapsed, run_kwargs.get("verbose", True))
 
     if isinstance(agent, WorktreeSorcarAgent) and agent._wt_pending:
         while True:

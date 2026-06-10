@@ -114,9 +114,7 @@ class _MergeFlowMixin:
             total_hunks = sum(len(f.get("hunks", [])) for f in files)
             if total_hunks == 0:
                 return False
-            resolved_tab_id = tab_id or getattr(
-                self.printer._thread_local, "tab_id", None,
-            )
+            resolved_tab_id = tab_id or None
             resolved_tab: _RunningAgentState | None = None
             with self._state_lock:
                 if resolved_tab_id is not None:
@@ -443,14 +441,12 @@ class _MergeFlowMixin:
         Worktrees are no longer associated with chat sessions, so
         there is no cross-process restoration to perform here.  This
         helper now simply delegates to :meth:`_present_pending_worktree`
-        when the tab's transient agent still holds a pending worktree.
+        (which itself no-ops unless the tab has ``use_worktree`` set
+        and its transient agent still holds a pending worktree).
 
         Args:
             tab_id: The tab to check for pending worktree.
         """
-        tab = self._get_tab(tab_id)
-        if not tab.use_worktree:
-            return
         self._present_pending_worktree(tab_id, try_merge_review=True)
 
     def _present_pending_worktree(
@@ -525,13 +521,15 @@ class _MergeFlowMixin:
             # ``git branch`` for manual inspection / cleanup, but
             # the user is not bothered with a meaningless prompt.
             return
+        # ``changed`` is provably non-empty here: both ``not changed``
+        # branches above return before reaching this point.
         event: dict[str, Any] = {
             "type": "worktree_done",
             "branch": wt_agent._wt_branch,
             "worktreeDir": str(wt_agent._wt_dir),
             "originalBranch": wt_agent._original_branch,
             "changedFiles": changed,
-            "hasConflict": self._check_merge_conflict(tab_id) if changed else False,
+            "hasConflict": self._check_merge_conflict(tab_id),
             "tabId": tab_id,
         }
         self.printer.broadcast(event)
@@ -770,11 +768,8 @@ class _MergeFlowMixin:
                 "message": "No pending worktree changes to act on",
             }
         wt = wt_agent
-        if action == "merge":
-            verb = "merging"
-        elif action == "discard":
-            verb = "discarding"
-        else:
+        verb = {"merge": "merging", "discard": "discarding"}.get(action)
+        if verb is None:
             return {"success": False, "message": f"Unknown action: {action}"}
         # RACE-1 / RACE-2 fix: atomically (a) verify nothing else is
         # touching the main tree, (b) claim it for this tab by setting
