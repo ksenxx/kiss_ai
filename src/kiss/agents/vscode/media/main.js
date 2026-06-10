@@ -5854,8 +5854,11 @@
         // global value as this instance's pin.
         let pinned = '';
         try {
+          // eslint-disable-next-line no-undef -- sessionStorage is a browser global
           pinned = sessionStorage.getItem('sorcar-work-dir') || '';
-        } catch (e) {}
+        } catch (_e) {
+          /* sessionStorage may be unavailable in VS Code webviews */
+        }
         if (pinned) {
           wdInp.value = pinned;
         } else if (cfg.work_dir) {
