@@ -148,7 +148,9 @@ const linePromise = new Promise((resolve) => {
   serverResolveLine = resolve;
 });
 
+let lastServerSock = null;
 const server = net.createServer((sock) => {
+  lastServerSock = sock;
   let buf = '';
   sock.on('data', (chunk) => {
     buf += chunk.toString();
@@ -248,6 +250,31 @@ async function runTests() {
     `idempotent syncWorkDir must not re-send; received ${received.length - beforeCount} extra messages: ${JSON.stringify(received.slice(beforeCount))}`);
   console.log('  ok - repeated syncWorkDir() is idempotent (no duplicate setWorkDir)');
 
+  // ------------------------------------------------------------------
+  // Test 4 — reconnect must re-send setWorkDir.
+  // The daemon tracks work_dir PER CONNECTION, so its state for this
+  // window starts empty on every new socket.  When the connection
+  // drops (daemon restart, transient error) and AgentClient
+  // auto-reconnects, the 'connect' preamble must push setWorkDir
+  // again — otherwise the window would fall back to the daemon-global
+  // work_dir, which another window may have pointed elsewhere.
+  // ------------------------------------------------------------------
+  const reconnectPromise = new Promise((resolve) => {
+    serverResolveLine = resolve;
+  });
+  assert.ok(lastServerSock, 'server never accepted a connection');
+  lastServerSock.destroy(); // simulate a daemon restart dropping the UDS
+
+  const reconnectMsg = await Promise.race([
+    reconnectPromise,
+    new Promise((_, rej) => setTimeout(() => rej(new Error('timeout waiting for setWorkDir after reconnect')), 5000)),
+  ]);
+  assert.strictEqual(reconnectMsg.type, 'setWorkDir',
+    `expected setWorkDir after reconnect, got ${JSON.stringify(reconnectMsg)}`);
+  assert.strictEqual(reconnectMsg.workDir, wsB,
+    `expected workDir=${wsB} after reconnect, got ${reconnectMsg.workDir}`);
+  console.log('  ok - reconnect re-sends setWorkDir (per-connection daemon state)');
+
   // Cleanup
   if (typeof view.dispose === 'function') view.dispose();
   fs.rmSync(wsA, {recursive: true, force: true});
@@ -260,7 +287,7 @@ runTests().then(
       try {fs.unlinkSync(sockPath);} catch {}
       fs.rmSync(tmpHome, {recursive: true, force: true});
       fs.rmSync(stubPath, {force: true});
-      console.log('\n3 passed, 0 failed');
+      console.log('\n4 passed, 0 failed');
       process.exit(0);
     });
   },

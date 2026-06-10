@@ -166,8 +166,10 @@ def test_get_history_emits_start_ts_per_session():
     ``timestamp`` column converted to ms) and ``endTs`` (from the
     persisted ``extra.endTs`` or 0 if still running)."""
     src = _read(SERVER_PY)
-    # Slice the body of _get_history.
-    m = re.search(r"def _get_history\(self,", src)
+    # Slice the body of _get_history.  ``\s*`` tolerates the
+    # multi-line signature (``conn_id`` pushed the params onto
+    # their own lines).
+    m = re.search(r"def _get_history\(\s*self,", src)
     assert m, "_get_history not found"
     rest = src[m.end():]
     next_def = re.search(r"\n    def\s", rest)

@@ -352,12 +352,10 @@ class WebUseTool:
             self._page.wait_for_load_state("domcontentloaded", timeout=5000)
         except Exception:  # pragma: no cover — page load timeout is timing-dependent
             logger.debug("Exception caught", exc_info=True)
-            pass
         try:
             self._page.wait_for_load_state("networkidle", timeout=3000)
         except Exception:  # pragma: no cover — network idle timeout is timing-dependent
             logger.debug("Exception caught", exc_info=True)
-            pass
 
     def _check_for_new_tab(self) -> None:
         if self._context is None:
@@ -581,17 +579,12 @@ class WebUseTool:
 
         Returns:
             "Browser closed." (always, even if nothing was open)."""
-        try:
-            if self._context:
-                self._context.close()
-            if self._browser:
-                self._browser.close()
-            if self._playwright:
+        self._close_browser_only()
+        if self._playwright:
+            try:
                 self._playwright.stop()
-        except Exception:  # pragma: no cover — Playwright close rarely fails
-            logger.debug("Exception caught", exc_info=True)
-            pass
-        self._on_browser_lost()
+            except Exception:  # pragma: no cover — Playwright stop rarely fails
+                logger.debug("Exception caught", exc_info=True)
         self._playwright = None
         return "Browser closed."
 

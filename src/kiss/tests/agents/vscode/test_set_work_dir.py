@@ -101,11 +101,13 @@ def test_set_work_dir_updates_field_and_invalidates_caches(
     """
     a, b = two_workspaces
     server = _make_server(a)
-    # Seed the caches with values that came from folder A.
+    # Seed the caches with values that came from folder A.  The
+    # active-file snapshots are keyed per connection (``connId``);
+    # direct calls use the shared "" key.
     with server._state_lock:
         server._file_cache = {a: ["alpha.txt"]}
-        server._last_active_file = os.path.join(a, "alpha.txt")
-        server._last_active_content = "alpha"
+        server._last_active_file[""] = os.path.join(a, "alpha.txt")
+        server._last_active_content[""] = "alpha"
 
     server._handle_command({"type": "setWorkDir", "workDir": b})
 
@@ -115,8 +117,8 @@ def test_set_work_dir_updates_field_and_invalidates_caches(
     assert server._file_cache == {}, (
         "file_cache holds folder-A files; must be cleared on folder change"
     )
-    assert server._last_active_file == ""
-    assert server._last_active_content == ""
+    assert server._last_active_file.get("", "") == ""
+    assert server._last_active_content.get("", "") == ""
 
 
 def test_set_work_dir_ignored_when_empty(two_workspaces: tuple[str, str]) -> None:

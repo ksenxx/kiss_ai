@@ -520,7 +520,7 @@ class TestServerCompleteEmptyQuery:
         """Sending complete command with empty query doesn't start thread."""
         server = VSCodeServer()
         server._handle_command({"type": "complete", "query": ""})
-        assert server._complete_seq_latest >= 0
+        assert server._complete_seq_latest.get("", -1) >= 0
 
 
 class TestSorcarAgentDockerBranch:

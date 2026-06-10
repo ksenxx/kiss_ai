@@ -46,7 +46,6 @@ export interface MergeFileData {
 }
 
 export interface MergeData {
-  branch?: string;
   files: MergeFileData[];
 }
 
@@ -89,18 +88,6 @@ export class MergeManager extends EventEmitter {
       void this._onDidSave(doc);
     });
     this._disposables.push(didSaveSub);
-  }
-
-  get isActive(): boolean {
-    return Object.keys(this._ms).length > 0;
-  }
-
-  get totalHunks(): number {
-    let count = 0;
-    for (const fp of Object.keys(this._ms)) {
-      count += this._ms[fp].hunks.length;
-    }
-    return count;
   }
 
   /**
@@ -285,7 +272,6 @@ export class MergeManager extends EventEmitter {
           }
         }
       }
-      this.emit('hunkProcessed');
       this._afterHunkAction(fp);
       return;
     }
@@ -314,7 +300,6 @@ export class MergeManager extends EventEmitter {
         await this._deleteNewFile(fp);
       }
     }
-    this.emit('hunkProcessed');
     this._afterHunkAction(fp);
   }
 
