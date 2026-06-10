@@ -292,6 +292,7 @@ class ChatSorcarAgent(SorcarAgent):
         """
         skip_persistence = kwargs.pop("_skip_persistence", False)
         subscribe_tab_id = kwargs.pop("_subscribe_tab_id", "")
+        on_task_id_allocated = kwargs.pop("_on_task_id_allocated", None)
         # Mint a fresh chat id only if no caller (or prior ``run()``)
         # already established one.  Resetting unconditionally here would
         # discard the ``chat_id`` that ``_run_tasks_parallel`` propagates
@@ -397,6 +398,19 @@ class ChatSorcarAgent(SorcarAgent):
             start_rec = getattr(printer, "start_recording", None)
             if start_rec is not None:
                 start_rec()
+        if on_task_id_allocated is not None:
+            # Tell the caller (the VS Code task runner) which
+            # ``task_history`` row id this run owns, BEFORE any agent
+            # event is broadcast.  The server uses the hook to
+            # subscribe every other tab that currently has this
+            # ``chat_id`` open (in any VS Code window / browser
+            # window) to the new task's event stream, so live events
+            # reach all viewers of the chat — not only the tab that
+            # launched the run.
+            try:
+                on_task_id_allocated(int(task_id), self._chat_id)
+            except Exception:
+                pass
         if self._subagent_info is None:
             _record_frequent_task(prompt_template)
 

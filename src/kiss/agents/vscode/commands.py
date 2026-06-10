@@ -81,6 +81,7 @@ class _CommandsMixin:
         _last_active_file: dict[str, str]
         _last_active_content: dict[str, str]
         _file_cache: dict[str, list[str]]
+        _tab_chat_views: dict[str, str]
 
         def _get_tab(self, tab_id: str) -> _RunningAgentState: ...
         def _run_task(self, cmd: dict[str, Any]) -> None: ...
@@ -174,6 +175,11 @@ class _CommandsMixin:
             if not tab.chat_id:
                 tab.chat_id = uuid.uuid4().hex
             chat_id = tab.chat_id
+            # The launching tab views this chat: record it so a later
+            # task started on the same chat from ANOTHER tab (in any
+            # window) streams its live events here too (see
+            # ``_subscribe_chat_viewers``).
+            self._tab_chat_views[tab_id] = chat_id
             thread = threading.Thread(
                 target=self._run_task, args=(cmd,), daemon=True
             )

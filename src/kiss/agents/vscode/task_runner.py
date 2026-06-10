@@ -22,6 +22,7 @@ import re
 import threading
 import time
 from contextlib import nullcontext
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -89,6 +90,7 @@ class _TaskRunnerMixin:
         printer: JsonPrinter
         work_dir: str
         _state_lock: threading.RLock
+        _tab_chat_views: dict[str, str]
 
         def _get_tab(self, tab_id: str) -> _RunningAgentState: ...
         def _any_non_wt_running(self) -> bool: ...
@@ -433,6 +435,18 @@ class _TaskRunnerMixin:
 
             _model_config = build_model_config(_vcfg)
 
+            # Invoked by ``ChatSorcarAgent.run`` the moment the run's
+            # ``task_history`` row id is allocated (before any agent
+            # event is broadcast): subscribes every OTHER tab that has
+            # this chat open — in any VS Code window or browser
+            # window — to the new task's event stream so all viewers
+            # of the chat see the live events, not only this tab.
+            on_task_id_allocated = partial(
+                self._subscribe_chat_viewers,
+                source_tab_id=tab_id,
+                start_ms=start_ms,
+            )
+
             for task_prompt in subtasks:
                 # Record the raw user prompt so the post-task
                 # auto-commit hooks can incorporate the user's intent
@@ -456,6 +470,7 @@ class _TaskRunnerMixin:
                         model_config=_model_config,
                         _skip_persistence=True,
                         _subscribe_tab_id=tab_id,
+                        _on_task_id_allocated=on_task_id_allocated,
                     )
                     # Prefer the summary embedded in the YAML the agent
                     # returned: ``ChatSorcarAgent.run``'s ``finally``
@@ -858,6 +873,66 @@ class _TaskRunnerMixin:
                 {"type": "task_interrupted"},
             )
         return ("Task stopped by user", {"type": "task_stopped"})
+
+    def _subscribe_chat_viewers(
+        self,
+        task_id: int,
+        chat_id: str,
+        *,
+        source_tab_id: str,
+        start_ms: int,
+    ) -> None:
+        """Subscribe every tab that has *chat_id* open to a new task's stream.
+
+        Invariant: when a task is running on a chat, every tab — in
+        any VS Code window or remote browser window — that has that
+        chat open must see the task's events streaming live.  Tabs
+        that open the chat WHILE the task is already running are
+        handled by ``_replay_session`` → ``_reattach_running_chat``;
+        this hook covers the tabs that opened the chat BEFORE the
+        task started (e.g. the tab that ran the previous task of the
+        chat, or a history viewer in a sibling window).
+
+        Called via ``_on_task_id_allocated`` from
+        :meth:`ChatSorcarAgent.run` as soon as the run's
+        ``task_history`` row id exists, before any agent event is
+        broadcast.  For each viewer tab (excluding the launcher,
+        which ``ChatSorcarAgent.run`` already subscribed via
+        ``_subscribe_tab_id``) it mirrors the launcher's start
+        sequence: ``clear`` (resets the viewer's replayed content and
+        per-tab stream state) followed by ``status running=True``
+        (flips the viewer's spinner / stop button), after which the
+        printer's per-subscriber fan-out delivers every live event.
+
+        Args:
+            task_id: The freshly allocated ``task_history`` row id.
+            chat_id: The chat id the task runs on.
+            source_tab_id: The tab that launched the task (skipped).
+            start_ms: The agent's start timestamp (ms since epoch),
+                echoed on the ``status`` broadcast so viewer tabs
+                anchor their "Running …" timer correctly.
+        """
+        if not chat_id:
+            return
+        with self._state_lock:
+            viewers = [
+                viewer_tab_id
+                for viewer_tab_id, viewed_chat_id in self._tab_chat_views.items()
+                if viewed_chat_id == chat_id and viewer_tab_id != source_tab_id
+            ]
+        for viewer_tab_id in viewers:
+            self.printer.subscribe_tab(task_id, viewer_tab_id)
+            self.printer.broadcast({
+                "type": "clear",
+                "chat_id": chat_id,
+                "tabId": viewer_tab_id,
+            })
+            self.printer.broadcast({
+                "type": "status",
+                "running": True,
+                "tabId": viewer_tab_id,
+                "startTs": start_ms,
+            })
 
     def _stop_task(self, tab_id: str = "") -> None:
         """Signal the agent to stop.
