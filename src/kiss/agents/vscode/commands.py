@@ -562,13 +562,21 @@ class _CommandsMixin:
             _restart_kiss_web_daemon()
 
     def _cmd_set_work_dir(self, cmd: dict[str, Any]) -> None:
-        """Update the server's working directory.
+        """Update the server's *fallback* working directory.
 
-        Sent by the VS Code extension whenever
-        ``vscode.workspace.workspaceFolders`` changes (i.e. the user
-        opens a different folder) and once at activation so a
+        Sent by the VS Code extension on every (re)connect of its UDS
+        client and whenever ``vscode.workspace.workspaceFolders``
+        changes (i.e. the user opens a different folder), so a
         freshly-attached extension synchronises the daemon even when
         the daemon was started with a different ``KISS_WORKDIR``.
+
+        Note that ``self.work_dir`` is only the last-resort fallback:
+        each connection (one per VS Code window) keeps its own
+        work_dir in ``RemoteAccessServer._dispatch_client_command``,
+        which stamps it onto every command from that connection that
+        lacks an explicit ``workDir``.  Two windows sharing this
+        daemon therefore never resolve to each other's folder even
+        though both of their ``setWorkDir`` commands also land here.
 
         Invalidates the autocomplete file cache and clears the
         ``_last_active_file`` snapshot — both refer to files from the
