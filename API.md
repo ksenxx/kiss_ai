@@ -115,6 +115,13 @@ ______________________________________________________________________
   - `ask_user_question_callback`: Optional callback used by the ask_user_question tool to collect a text response from the user.
   - **Returns:** YAML string with 'success' and 'summary' keys.
 
+**`auto_commit_changes`** — Stage all changes, generate a commit message, and commit. Stages all changes once, generates a commit message from the staged diff via *message_fn*, then commits the already-staged changes (without re-staging). Falls back to a generic commit message when *message_fn* raises (e.g. the LLM-based generator is unavailable).<br/>`def auto_commit_changes(commit_dir: Path, user_prompt: str | None, message_fn: Callable[[Path, str | None], str]) -> bool`
+
+- `commit_dir`: Directory whose changes are staged and committed.
+- `user_prompt`: The user's task prompt, woven into the commit message (or its fallback), or `None` when unavailable.
+- `message_fn`: Callable producing a commit message from `(commit_dir, user_prompt)`.
+- **Returns:** True if a commit was created, False if nothing to commit.
+
 **`run_tasks_parallel`** — Execute multiple SorcarAgent tasks concurrently using threads. Each task gets its own `ChatSorcarAgent` instance and runs in a separate thread via :class:`~concurrent.futures.ThreadPoolExecutor`. This is ideal for I/O-bound workloads (LLM API calls, network requests) where the GIL is released during I/O waits. This helper is a pure parallel executor: it has no knowledge of backend task ids or any frontend concepts. It simply marks each spawned agent as a sub-agent (via `_subagent_info`) and the sub-agent itself owns any sub-agent-specific behaviour (such as broadcasting `new_tab` to a browser-based frontend) inside its own `run()` method.<br/>`def run_tasks_parallel(tasks: list[str], max_workers: int | None = None, model_name: str | None = None, work_dir: str | None = None, printer: Printer | None = None, totals_out: dict[str, float] | None = None) -> list[str]`
 
 - `tasks`: List of task description strings. Each string is passed as the `prompt_template` argument to :meth:`SorcarAgent.run`. Example:: [ "Summarize file A", "Summarize file B", ]
@@ -123,11 +130,6 @@ ______________________________________________________________________
 - `work_dir`: Working directory for all parallel agents. `None` uses the default (`artifact_dir/kiss_workdir`).
 - `printer`: Optional printer from the parent agent. Forwarded verbatim to each sub-agent's `run` so live events continue to flow through the same channel. The executor itself does not call any printer methods.
 - **Returns:** List of YAML result strings in the **same order** as *tasks*. Each string contains `success` and `summary` keys. If a task raises an unhandled exception the corresponding entry is a YAML string with `success: false` and the traceback in `summary`.
-
-**`cli_ask_user_question`** — CLI callback for agent questions (prints and reads from stdin).<br/>`def cli_ask_user_question(question: str) -> str`
-
-- `question`: The question to display to the user.
-- **Returns:** The user's typed response text.
 
 ______________________________________________________________________
 

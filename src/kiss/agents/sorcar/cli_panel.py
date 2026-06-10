@@ -31,14 +31,25 @@ STEER_TITLE = " steer · type, then Enter to queue · Ctrl+C to abort "
 PLACEHOLDER = "Add an instruction for the agent while it works…"
 
 
+def _term_size() -> tuple[int, int]:
+    """Return ``(rows, cols)`` for the controlling terminal.
+
+    Falls back to ``(24, 80)`` when the size cannot be determined.
+
+    Returns:
+        A ``(rows, cols)`` tuple, both guaranteed ``>= 1``.
+    """
+    size = shutil.get_terminal_size(fallback=(80, 24))
+    return max(size.lines, 1), max(size.columns, 1)
+
+
 def panel_cols() -> int:
     """Return the current terminal width (>= 10), falling back to 80.
 
     Returns:
         The number of columns to draw the panel at.
     """
-    cols = shutil.get_terminal_size((80, 24)).columns
-    return max(cols, 10)
+    return max(_term_size()[1], 10)
 
 
 def panel_top(title: str, cols: int) -> str:

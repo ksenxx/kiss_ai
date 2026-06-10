@@ -18,8 +18,10 @@ import base64
 import ctypes
 import logging
 import queue
+import re
 import threading
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -33,8 +35,7 @@ from kiss.agents.sorcar.persistence import (
     _save_task_extra,
     _save_task_result,
 )
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState, parse_task_tags
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.vscode.diff_merge import (
     _capture_untracked,
     _parse_diff_hunks,
@@ -43,8 +44,36 @@ from kiss.agents.vscode.diff_merge import (
 )
 from kiss.core.models.model import Attachment
 from kiss.core.models.model_info import get_available_models
+from kiss.core.printer import parse_result_yaml
 
 logger = logging.getLogger(__name__)
+
+# Declare the C signature once so ``PyThreadState_SetAsyncExc`` calls in
+# :meth:`_TaskRunnerMixin._interrupt_thread` marshal arguments correctly.
+ctypes.pythonapi.PyThreadState_SetAsyncExc.argtypes = [
+    ctypes.c_ulong,
+    ctypes.py_object,
+]
+
+
+def parse_task_tags(text: str) -> list[str]:
+    """Parse ``<task>...</task>`` tags from *text* and return individual tasks.
+
+    When the input contains one or more ``<task>`` blocks with non-empty
+    content, each block's content is returned as a separate list element.
+    If no valid ``<task>`` blocks are found (or all are empty/whitespace),
+    the original *text* is returned as a single-element list so that
+    callers can always iterate without special-casing.
+
+    Args:
+        text: Input text potentially containing ``<task>...</task>`` tags.
+
+    Returns:
+        List of task strings.  Always contains at least one element.
+    """
+    tasks = [m.strip() for m in re.findall(r"<task>(.*?)</task>", text, re.DOTALL)]
+    tasks = [t for t in tasks if t]
+    return tasks if tasks else [text]
 
 # Sentinel pushed onto the user-answer queue by the stop-event watcher
 # in :meth:`_TaskRunnerMixin._await_user_response` so the blocking
@@ -141,7 +170,8 @@ class _TaskRunnerMixin:
                     # only meaningful while a task is in flight).
                     tab.interrupted_by_shutdown = False
                     # Dispose the transient agent — a fresh one is
-                    # built per task in ``_CommandsMixin._cmd_run``.
+                    # lazily allocated by ``_get_tab`` when the next
+                    # task's ``_run_task_inner`` starts.
                     # Preserve the agent when a worktree branch with
                     # changes is still pending user action (merge or
                     # discard).  Disposing it would destroy the
@@ -185,12 +215,7 @@ class _TaskRunnerMixin:
         Returns:
             ``(head_sha, hunks, untracked, file_hashes)`` tuple.
         """
-        def _do_snapshot() -> tuple[
-            str | None,
-            dict[str, list[tuple[int, int, int, int]]],
-            set[str],
-            dict[str, str] | None,
-        ]:
+        with repo_lock(repo) if repo else nullcontext():
             head = GitWorktreeOps.head_sha(repo) if repo else None
             hunks = _parse_diff_hunks(work_dir)
             untracked = _capture_untracked(work_dir)
@@ -202,17 +227,15 @@ class _TaskRunnerMixin:
             )
             return head, hunks, untracked, hashes
 
-        if repo:
-            with repo_lock(repo):
-                return _do_snapshot()
-        return _do_snapshot()
-
     def _run_task_inner(self, cmd: dict[str, Any]) -> None:
         """Inner implementation of _run_task (without the status guarantee)."""
         prompt = cmd.get("prompt", "")
         work_dir = cmd.get("workDir") or self.work_dir
         active_file = cmd.get("activeFile")
         raw_attachments = cmd.get("attachments", [])
+        # Agent start timestamp (ms since epoch), stamped on the cmd
+        # dict by ``_run_task``.  0 when absent (direct test calls).
+        start_ms = int(cmd.get("_start_ms") or 0)
 
         attachments: list[Attachment] | None = None
         if raw_attachments:
@@ -227,16 +250,16 @@ class _TaskRunnerMixin:
         tab = self._get_tab(tab_id)
         model = cmd.get("model") or tab.selected_model
 
-        # Build the per-task agent now (the previous agent was
-        # disposed at the end of the prior ``_run_task`` so there is
-        # no long-lived per-tab agent across distinct task
-        # executions).  Tests that need to inject a stub agent (e.g.
-        # patch ``tab.agent.run``) can pre-populate ``tab.agent``
-        # before calling ``_run_task`` — we honour any agent the
-        # caller has already attached.
-        if tab.agent is None:
-            agent = WorktreeSorcarAgent("Sorcar VS Code")
-            tab.agent = agent
+        # ``_get_tab`` above guarantees the agent slot is populated:
+        # it lazily allocates a fresh ``WorktreeSorcarAgent`` whenever
+        # ``tab.agent`` is ``None`` (the previous agent was disposed
+        # at the end of the prior ``_run_task``, so there is no
+        # long-lived per-tab agent across distinct task executions).
+        # Tests that need to inject a stub agent (e.g. patch
+        # ``tab.agent.run``) can pre-populate ``tab.agent`` before
+        # calling ``_run_task`` — we honour any agent the caller has
+        # already attached.
+        assert tab.agent is not None
         # Stash the frontend tab id on the agent so its
         # ``pre_step_hook`` (see ``SorcarAgent.run``) can resolve back
         # to the owning ``_RunningAgentState`` and drain
@@ -331,13 +354,8 @@ class _TaskRunnerMixin:
             # briefly here additionally blocks the task-start path
             # behind any in-flight ``_handle_worktree_action`` /
             # ``_try_setup_worktree`` body on the same repo.
-            repo_for_guard = GitWorktreeOps.discover_repo(Path(work_dir))
-            guard_lock: Any = (
-                repo_lock(repo_for_guard) if repo_for_guard else None
-            )
-            if guard_lock is not None:
-                guard_lock.acquire()
-            try:
+            repo = GitWorktreeOps.discover_repo(Path(work_dir))
+            with repo_lock(repo) if repo else nullcontext():
                 with self._state_lock:
                     if any(
                         t.is_merging and t.use_worktree
@@ -352,11 +370,7 @@ class _TaskRunnerMixin:
                         })
                         return
                     tab.is_running_non_wt = True
-            finally:
-                if guard_lock is not None:
-                    guard_lock.release()
             try:
-                repo = GitWorktreeOps.discover_repo(Path(work_dir))
                 pre_head_sha, pre_hunks, pre_untracked, pre_file_hashes = (
                     self._capture_pre_snapshot(work_dir, repo, tab_id)
                 )
@@ -425,6 +439,7 @@ class _TaskRunnerMixin:
                 # in the generated commit message (see
                 # :meth:`_MergeFlowMixin._handle_autocommit_action`).
                 tab.last_user_prompt = task_prompt
+                subtask_failed = False
                 try:
                     agent_returned = tab.agent.run(
                         prompt_template=task_prompt,
@@ -453,11 +468,8 @@ class _TaskRunnerMixin:
                     # to be persisted into ``task_history.result`` and
                     # later surfaced as the prior-task result inside
                     # the next task's ``build_chat_prompt`` preamble.
-                    from kiss.core.printer import (
-                        parse_result_yaml as _parse_run_yaml,
-                    )
                     _run_parsed = (
-                        _parse_run_yaml(agent_returned)
+                        parse_result_yaml(agent_returned)
                         if agent_returned else None
                     )
                     if _run_parsed and _run_parsed.get("summary"):
@@ -477,6 +489,7 @@ class _TaskRunnerMixin:
                     )
                 except KeyboardInterrupt:
                     result_summary, task_end_event = self._cancel_outcome(tab)
+                    subtask_failed = True
                     logger.info(
                         "%s: tab_id=%s task_id=%s",
                         result_summary,
@@ -486,6 +499,7 @@ class _TaskRunnerMixin:
                 except Exception as e:
                     result_summary = f"Task failed: {e}"
                     task_end_event = {"type": "task_error", "text": str(e)}
+                    subtask_failed = True
                     logger.warning(
                         "Task failed: tab_id=%s task_id=%s error=%s",
                         tab_id,
@@ -493,20 +507,19 @@ class _TaskRunnerMixin:
                         e,
                         exc_info=True,
                     )
-                else:
-                    continue
                 finally:
                     tab.task_history_id = tab.agent._last_task_id
-                self.printer.broadcast({
-                    "type": "result",
-                    "text": result_summary,
-                    "success": False,
-                    "total_tokens": tab.agent.total_tokens_used,
-                    "cost": f"${tab.agent.budget_used:.4f}",
-                    "step_count": tab.agent.step_count,
-                    "tabId": tab_id,
-                })
-                break
+                if subtask_failed:
+                    self.printer.broadcast({
+                        "type": "result",
+                        "text": result_summary,
+                        "success": False,
+                        "total_tokens": tab.agent.total_tokens_used,
+                        "cost": f"${tab.agent.budget_used:.4f}",
+                        "step_count": tab.agent.step_count,
+                        "tabId": tab_id,
+                    })
+                    break
         except BaseException as _outer_exc:
             # Catches every flow that the inner per-subtask handlers
             # do NOT cover:
@@ -552,7 +565,7 @@ class _TaskRunnerMixin:
                 # ``_check_worktree_busy`` guard and mutate
                 # ``tab.agent._wt`` while this thread is still
                 # inside ``_present_pending_worktree``.  The flag is
-                # cleared by ``_finalize_task_active`` at the very
+                # cleared (``tab.is_task_active = False``) at the very
                 # end of the cleanup block (and again in the BaseException
                 # branch below to keep failure recovery monotonic).
                 # When the task ended in failure or user-stop, behave
@@ -575,9 +588,8 @@ class _TaskRunnerMixin:
                 # this YAML re-parse the post-task workflow would treat
                 # such caught-and-suppressed failures as a success and
                 # auto-commit / auto-merge partial work.
-                from kiss.core.printer import parse_result_yaml as _parse_yaml
                 _agent_parsed = (
-                    _parse_yaml(agent_returned) if agent_returned else None
+                    parse_result_yaml(agent_returned) if agent_returned else None
                 )
                 _agent_reported_failure = bool(
                     _agent_parsed and _agent_parsed.get("success") is False
@@ -627,12 +639,17 @@ class _TaskRunnerMixin:
                     finally:
                         with self._state_lock:
                             tab.is_running_non_wt = False
-                if task_end_event:  # pragma: no branch — always set
-                    _append_chat_event(
-                        task_end_event,
-                        task_id=tab.task_history_id,
-                        task=prompt,
-                    )
+                # ``task_end_event`` is provably always set on entry to
+                # this cleanup: ``parse_task_tags`` returns at least one
+                # subtask, every per-subtask handler assigns the event,
+                # and the outer ``except BaseException`` rewrite covers
+                # every other unwind path.
+                assert task_end_event is not None
+                _append_chat_event(
+                    task_end_event,
+                    task_id=tab.task_history_id,
+                    task=prompt,
+                )
                 _save_task_result(
                     result=result_summary,
                     task_id=tab.task_history_id,
@@ -652,7 +669,6 @@ class _TaskRunnerMixin:
                 # for a live ``task_done`` event that may have
                 # already fired (and been missed) before the tab was
                 # opened.
-                start_ms = int(cmd.get("_start_ms") or 0)
                 end_ms = int(time.time() * 1000)
                 _save_task_extra(
                     {
@@ -740,27 +756,26 @@ class _TaskRunnerMixin:
                 # see ``_check_worktree_busy``.
                 with self._state_lock:
                     tab.is_task_active = False
-                if task_end_event:  # pragma: no branch — always set
-                    # Stamp the event with the owning tab so it reaches
-                    # only this tab's subscribers (not every connected
-                    # client).  ``ChatSorcarAgent.run()``'s finally
-                    # clears the thread-local ``task_id`` before we get
-                    # here, so without an explicit ``tabId`` the
-                    # printer would treat this as a global system event
-                    # and the frontend would apply it to whatever tab
-                    # happens to be active — e.g. a sub-agent tab
-                    # opened by ``run_parallel``'s ``new_tab`` broadcast
-                    # — instead of the parent tab that actually owns
-                    # the task.  ``startTs`` / ``endTs`` echo the
-                    # agent's true wall-clock so the frontend's
-                    # "Running …" / "Done (…)" label uses agent time
-                    # rather than the client's ``Date.now()``.
-                    self.printer.broadcast({
-                        **task_end_event,
-                        "tabId": tab_id,
-                        "startTs": start_ms,
-                        "endTs": end_ms,
-                    })
+                # Stamp the event with the owning tab so it reaches
+                # only this tab's subscribers (not every connected
+                # client).  ``ChatSorcarAgent.run()``'s finally
+                # clears the thread-local ``task_id`` before we get
+                # here, so without an explicit ``tabId`` the
+                # printer would treat this as a global system event
+                # and the frontend would apply it to whatever tab
+                # happens to be active — e.g. a sub-agent tab
+                # opened by ``run_parallel``'s ``new_tab`` broadcast
+                # — instead of the parent tab that actually owns
+                # the task.  ``startTs`` / ``endTs`` echo the
+                # agent's true wall-clock so the frontend's
+                # "Running …" / "Done (…)" label uses agent time
+                # rather than the client's ``Date.now()``.
+                self.printer.broadcast({
+                    **task_end_event,
+                    "tabId": tab_id,
+                    "startTs": start_ms,
+                    "endTs": end_ms,
+                })
                 logger.info(
                     "Task lifecycle complete: tab_id=%s task_id=%s "
                     "elapsed_ms=%d event_type=%s",
@@ -802,7 +817,7 @@ class _TaskRunnerMixin:
                     self.printer.broadcast({
                         **task_end_event,
                         "tabId": tab_id,
-                        "startTs": int(cmd.get("_start_ms") or 0),
+                        "startTs": start_ms,
                         "endTs": int(time.time() * 1000),
                     })
 
