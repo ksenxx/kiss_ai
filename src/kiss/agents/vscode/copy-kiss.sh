@@ -29,6 +29,7 @@ p.write_text(json.dumps(d, indent=2) + '\n')
     echo "Synced extension version to $VERSION"
 fi
 
+echo "Preparing kiss_project directory..."
 rm -rf "$DEST"
 mkdir -p "$DEST"
 
@@ -57,6 +58,7 @@ cp "$PROJECT_ROOT/LICENSE" "$SCRIPT_DIR/LICENSE"
 # Copy all git-tracked src/kiss/ files, excluding VS Code extension build
 # artifacts (tsconfig, TS sources, node configs) that would confuse the
 # TypeScript language server when nested inside kiss_project/.
+echo "Copying source files..."
 cd "$PROJECT_ROOT"
 git ls-files src/kiss/ | while IFS= read -r f; do
     [ -f "$f" ] || continue
