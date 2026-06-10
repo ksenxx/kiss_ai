@@ -1704,9 +1704,24 @@ class WebPrinter(JsonPrinter):
         # Fan out one stamped copy per subscribed tab.  The frontend
         # filters incoming events by ``tabId``; an event with no
         # subscriber is silently swallowed (which is correct: no UI
-        # is currently watching this task).
-        for tab_id in self._fanout_targets(event.get("taskId")):
-            self._send_to_ws_clients(json.dumps({**event, "tabId": tab_id}))
+        # is currently watching this task).  The event is serialised
+        # ONCE and the per-tab ``tabId`` stamp is spliced into the
+        # JSON string, instead of re-encoding the whole event for
+        # every subscribed tab — this path runs once per streamed
+        # token, so avoiding the redundant ``json.dumps`` calls keeps
+        # multi-viewer streaming cheap.
+        targets = self._fanout_targets(event.get("taskId"))
+        if not targets:
+            return
+        # ``event`` always carries at least ``type`` and ``taskId``
+        # here, so the serialised form ends with ``...}`` and the
+        # splice below produces exactly ``json.dumps({**event,
+        # "tabId": tab_id})`` (sans key ordering).
+        base = json.dumps(event)[:-1]
+        for tab_id in targets:
+            self._send_to_ws_clients(
+                f'{base}, "tabId": {json.dumps(tab_id)}}}'
+            )
 
     def _send_to_ws_clients(self, data: str) -> None:
         """Send a pre-serialised JSON payload to every connected client.
