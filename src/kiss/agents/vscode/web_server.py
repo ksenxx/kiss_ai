@@ -2754,8 +2754,11 @@ class RemoteAccessServer:
         # M6: track tab_ids seen on this connection so we can clean
         # up associated merge state when the connection drops.
         tabs_seen: set[str] = set()
-        # Per-connection work_dir (see _dispatch_client_command).
-        conn_state: dict[str, str] = {"work_dir": ""}
+        # Per-connection work_dir + unique connection id (see
+        # _dispatch_client_command).
+        conn_state: dict[str, str] = {
+            "work_dir": "", "conn_id": uuid.uuid4().hex,
+        }
         try:
             async for message in websocket:
                 try:
@@ -2781,6 +2784,7 @@ class RemoteAccessServer:
             # the grace window keeps the merge review intact.
             for tab in tabs_seen:
                 self._schedule_tab_close(tab)
+            self._vscode_server.drop_connection_state(conn_state["conn_id"])
             self._printer.remove_client(websocket)
 
     async def _uds_handler(
@@ -2810,8 +2814,13 @@ class RemoteAccessServer:
         # UDS connection, so recording the window's ``setWorkDir`` here
         # (instead of only on the daemon-global fallback) is what keeps
         # every window's work_dir == its own workspace folder even when
-        # several windows share this one daemon process.
-        conn_state: dict[str, str] = {"work_dir": ""}
+        # several windows share this one daemon process.  The unique
+        # ``conn_id`` is stamped (as ``connId``) on every command so
+        # ``VSCodeServer`` can key its per-connection autocomplete
+        # state (active-file snapshot, request staleness) by window.
+        conn_state: dict[str, str] = {
+            "work_dir": "", "conn_id": uuid.uuid4().hex,
+        }
         try:
             while True:
                 line = await reader.readline()
@@ -2831,6 +2840,7 @@ class RemoteAccessServer:
         finally:
             for tab in tabs_seen:
                 self._schedule_tab_close(tab)
+            self._vscode_server.drop_connection_state(conn_state["conn_id"])
             self._printer.remove_uds_writer(writer)
             try:
                 writer.close()
@@ -2868,20 +2878,27 @@ class RemoteAccessServer:
                 replies via :meth:`_endpoint_send`.
             tabs_seen: Per-connection set of tab ids, mutated in place.
             conn_state: Per-connection mutable state holding the
-                connection's own ``work_dir``.  Each VS Code window
-                owns exactly one connection and announces its
-                workspace folder via ``setWorkDir``; every later
-                command from the same connection that does not carry
-                an explicit ``workDir`` is stamped with it here.  This
-                is what guarantees the per-window work_dir invariant:
-                two windows sharing this daemon can never observe each
-                other's folder through the daemon-global fallback,
-                because their commands always arrive pre-stamped with
-                their own connection's work_dir.
+                connection's own ``work_dir`` and unique ``conn_id``.
+                Each VS Code window owns exactly one connection and
+                announces its workspace folder via ``setWorkDir``;
+                every later command from the same connection that does
+                not carry an explicit ``workDir`` is stamped with it
+                here.  This is what guarantees the per-window work_dir
+                invariant: two windows sharing this daemon can never
+                observe each other's folder through the daemon-global
+                fallback, because their commands always arrive
+                pre-stamped with their own connection's work_dir.  The
+                ``conn_id`` is stamped (as ``connId``) on EVERY command
+                — overwriting any client-supplied value so it cannot be
+                spoofed — and keys ``VSCodeServer``'s per-connection
+                autocomplete state (active-file snapshot and request
+                staleness), giving each window the same isolation for
+                ghost-text completions as for its work_dir.
         """
         tab_id = cmd.get("tabId", "")
         if isinstance(tab_id, str) and tab_id:
             tabs_seen.add(tab_id)
+        cmd["connId"] = conn_state["conn_id"]
         cmd_type = cmd.get("type", "")
         if cmd_type == "setWorkDir":
             new_wd = cmd.get("workDir", "")
