@@ -561,18 +561,21 @@ class _CommandsMixin:
     def _cmd_get_config(self, cmd: dict[str, Any]) -> None:
         """Send the current configuration to the frontend.
 
-        When the saved config has no explicit ``work_dir``, the
-        reported one is taken from the command's ``workDir`` — stamped
-        per connection by :class:`RemoteAccessServer` — so each VS Code
-        window's settings panel shows its *own* workspace folder rather
-        than whichever folder another window synced last (the
-        daemon-global fallback that :class:`WebPrinter` would otherwise
-        substitute).
+        The reported ``work_dir`` is taken from the command's
+        ``workDir`` — stamped per connection by
+        :class:`RemoteAccessServer` — whenever the connection has one,
+        falling back to the globally saved value only for connections
+        that never announced a folder.  Each connection (one per
+        VS Code window, one per webapp instance) runs its commands in
+        its own stamped work_dir (``task_runner`` resolves
+        ``cmd["workDir"]`` first), so the settings panel must show the
+        directory that will actually be used by *this* instance, not
+        whichever folder another instance persisted last.
         """
         from kiss.agents.vscode.vscode_config import get_current_api_keys, load_config
 
         cfg = load_config()
-        if not cfg.get("work_dir") and cmd.get("workDir"):
+        if cmd.get("workDir"):
             cfg["work_dir"] = cmd["workDir"]
         api_keys = get_current_api_keys()
         event: dict[str, Any] = {
