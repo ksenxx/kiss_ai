@@ -145,6 +145,7 @@ class TestReplaySessionStatusBeforeTaskEvents:
         srv._running_agent_states.clear()
         srv._state_lock = __import__("threading").RLock()  # type: ignore
         srv._default_model = "test"  # type: ignore[attr-defined]
+        srv._tab_chat_views = {}
         return srv, printer
 
     def test_status_true_broadcast_before_task_events(
