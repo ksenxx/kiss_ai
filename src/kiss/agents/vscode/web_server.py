@@ -2173,6 +2173,17 @@ _WS_SHIM_JS = r"""
   window.acquireVsCodeApi = function() {
     return {
       postMessage: function(msg) {
+        if (msg && msg.type === 'setWorkDir') {
+          // Pin this webapp instance's work_dir.  sessionStorage is
+          // scoped per browser tab, so each tab (= one webapp
+          // instance) keeps its own value across reloads, and the
+          // auth_ok handler below replays it on every reconnect —
+          // mirroring how each VS Code window re-announces its
+          // workspace folder on every UDS (re)connect.
+          try {
+            sessionStorage.setItem('sorcar-work-dir', msg.workDir || '');
+          } catch(e) {}
+        }
         var data = JSON.stringify(msg);
         if (_ws && _ws.readyState === WebSocket.OPEN && _authenticated) {
           _ws.send(data);
@@ -2203,6 +2214,18 @@ _WS_SHIM_JS = r"""
       if (msg.type === 'auth_ok') {
         _authenticated = true;
         _needsPassword = false;
+        // Re-establish this instance's pinned work_dir BEFORE flushing
+        // any queued commands: the server stamps each connection's
+        // work_dir onto later commands, so the pin must arrive first.
+        // Every reconnect creates a fresh server-side connection state
+        // with an empty work_dir; without this replay a reload or a
+        // dropped WebSocket would silently fall back to the
+        // daemon-global work_dir (possibly another instance's folder).
+        var _wd = '';
+        try { _wd = sessionStorage.getItem('sorcar-work-dir') || ''; } catch(e) {}
+        if (_wd) {
+          _ws.send(JSON.stringify({type: 'setWorkDir', workDir: _wd}));
+        }
         for (var i = 0; i < _pending.length; i++) _ws.send(_pending[i]);
         _pending = [];
         return;
