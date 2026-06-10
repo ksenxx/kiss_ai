@@ -185,6 +185,20 @@ class VSCodeServer(
                 "orphan-task recovery sweep failed; continuing startup",
             )
         self.work_dir = os.environ.get("KISS_WORKDIR", os.getcwd())
+        # ``_tab_chat_views`` maps every frontend tab id (from ANY
+        # VS Code window or browser window) to the chat id that tab
+        # currently has open.  Maintained by ``_cmd_run`` (launcher
+        # tabs), ``_replay_session`` (history / restored-tab viewers),
+        # ``_new_chat`` and ``_teardown_tab_resources``.  When a new
+        # task is allocated for a chat, ``_subscribe_chat_viewers``
+        # scans this map and subscribes every tab that has the chat
+        # open to the task's live event stream — the
+        # ``_RunningAgentState`` registry alone cannot serve this
+        # purpose because pure-viewer tabs deliberately have no
+        # registry entry after a daemon restart or deferred disposal
+        # (see the C2/C3 note in ``_replay_session``).  Guarded by
+        # ``_state_lock``.
+        self._tab_chat_views: dict[str, str] = {}
         persisted = _load_last_model()
         self._default_model = (
             persisted
@@ -799,6 +813,11 @@ class VSCodeServer(
         # thread and cleaned up by :meth:`_TaskRunnerMixin` /
         # :meth:`ChatSorcarAgent.run`.
         self.printer.cleanup_tab(tab_id)
+        # A disposed tab no longer views any chat: drop it from the
+        # chat-viewer map so future tasks on that chat do not fan
+        # events out to a tab that no longer exists.
+        with self._state_lock:
+            self._tab_chat_views.pop(tab_id, None)
         _cleanup_merge_data(str(_merge_data_dir(tab_id)))
 
     def _new_chat(self, tab_id: str) -> None:
@@ -832,6 +851,10 @@ class VSCodeServer(
             # else to reset here.
             tab.chat_id = ""
             tab.last_task_id = None
+            # A fresh chat has no chat id yet, so the tab views no
+            # chat until ``_cmd_run`` mints one or ``_replay_session``
+            # associates a resumed one.
+            self._tab_chat_views.pop(tab_id, None)
         self.printer.broadcast({
             "type": "showWelcome",
             "tabId": tab_id,
@@ -952,6 +975,20 @@ class VSCodeServer(
                     if isinstance(extra_raw, dict) else False,
                 )
                 tab.frontend_closed = False
+            # Record which chat this tab now displays so a task later
+            # started on the same chat (from any tab in any window)
+            # subscribes this tab to its live event stream (see
+            # :meth:`_TaskRunnerMixin._subscribe_chat_viewers`).
+            # Tracked independently of the ``_RunningAgentState``
+            # registry because viewer tabs may have no registry entry
+            # (C2/C3 above).  A tab converted into a sub-agent view
+            # is NOT a viewer of the (parent) chat: streaming the
+            # parent's follow-up tasks into a sub-agent tab would mix
+            # two different task streams in one webview.
+            if subagent_info is None and chat_id:
+                self._tab_chat_views[tab_id] = chat_id
+            else:
+                self._tab_chat_views.pop(tab_id, None)
 
         if subagent_info is not None:
             # Convert the freshly created regular tab into a sub-agent
