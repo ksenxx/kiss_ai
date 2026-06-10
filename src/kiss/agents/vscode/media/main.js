@@ -2479,8 +2479,12 @@
           // jump to "Done".
           endTs = 0;
         }
-        // Update UI only when the event targets the active tab (or no tabId)
-        if (!evTab || evTab.id === activeTabId) {
+        // Update UI only when the event targets the active tab (or no
+        // tabId).  A tabId that resolves to NO local tab belongs to a
+        // tab in another window (the daemon broadcasts tab-stamped
+        // events to every connected client) — it must not flip this
+        // window's running state.
+        if (ev.tabId === undefined || ev.tabId === activeTabId) {
           setRunningState(ev.running);
           // Refresh chevron-driven visibility so panels of the now-running
           // task become visible even if the chevron is collapsed.  Needed
