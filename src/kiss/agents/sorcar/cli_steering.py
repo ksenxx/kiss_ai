@@ -302,7 +302,20 @@ class _InputBox:
         while i < len(text):
             ch = text[i]
             if ch == "\x1b":
-                # Swallow CSI escape sequences (arrow keys, etc.).
+                # Shift+Enter (kitty CSI-u ``ESC[13;2u`` or xterm
+                # modifyOtherKeys ``ESC[27;2;13~``) inserts a newline
+                # into the buffer instead of submitting the line.
+                shift_enter = False
+                for seq in ("[13;2u", "[27;2;13~"):
+                    if text.startswith(seq, i + 1):
+                        self.buf += "\n"
+                        changed = True
+                        i += 1 + len(seq)
+                        shift_enter = True
+                        break
+                if shift_enter:
+                    continue
+                # Swallow other CSI escape sequences (arrow keys, etc.).
                 if i + 1 < len(text) and text[i + 1] == "[":
                     j = i + 2
                     while j < len(text) and not ("@" <= text[j] <= "~"):
