@@ -4795,7 +4795,7 @@
       submitAskForTab(tab);
     });
     i.addEventListener('keydown', e => {
-      if (e.key === 'Enter') {
+      if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         submitAskForTab(tab);
       }
