@@ -69,17 +69,24 @@ def _run_config_form_harness(
     body_classes: list[str],
     populate_cfg: dict[str, Any],
     edited_work_dir: str | None,
+    pinned_work_dir: str | None = None,
 ) -> dict[str, Any]:
     """Replay the real config-form functions in Node.
 
-    Builds a minimal DOM stub, runs ``populateConfigForm(populate_cfg)``,
-    optionally overwrites the ``#cfg-work-dir`` value (simulating the
-    user editing the field), runs ``collectConfigForm()``, and returns
-    the observed state as a dict.
+    Builds a minimal DOM stub (including ``sessionStorage`` and a
+    ``vscode.postMessage`` recorder), optionally pre-pins
+    *pinned_work_dir* under the ``sorcar-work-dir`` sessionStorage key
+    (simulating a webapp instance that already adopted a folder), runs
+    ``populateConfigForm(populate_cfg)``, optionally overwrites the
+    ``#cfg-work-dir`` value (simulating the user editing the field),
+    runs ``collectConfigForm()`` and ``saveSettingsIfPopulated()``, and
+    returns the observed state — including every message posted to the
+    backend — as a dict.
     """
     src = _MAIN_JS.read_text()
     populate = _extract_fn_body(src, "function populateConfigForm(")
     collect = _extract_fn_body(src, "function collectConfigForm()")
+    save = _extract_fn_body(src, "function saveSettingsIfPopulated()")
     script = f"""
 'use strict';
 const elements = {{}};
@@ -97,10 +104,20 @@ const document = {{
   getElementById: getEl,
   body: {{classList: {{contains: c => bodyClasses.indexOf(c) >= 0}}}},
 }};
+const _ss = {{}};
+const pinned = {json.dumps(pinned_work_dir)};
+if (pinned !== null) _ss['sorcar-work-dir'] = pinned;
+const sessionStorage = {{
+  getItem: k => (k in _ss ? _ss[k] : null),
+  setItem: (k, v) => {{ _ss[k] = String(v); }},
+}};
+const posted = [];
+const vscode = {{postMessage: m => posted.push(m)}};
 let demoMode = false;
 let configFormPopulated = false;
 {populate}
 {collect}
+{save}
 populateConfigForm({json.dumps(populate_cfg)}, {{}});
 const afterPopulate = {{
   value: getEl('cfg-work-dir').value,
@@ -109,10 +126,12 @@ const afterPopulate = {{
 const edited = {json.dumps(edited_work_dir)};
 if (edited !== null) getEl('cfg-work-dir').value = edited;
 const collected = collectConfigForm();
+saveSettingsIfPopulated();
 console.log(JSON.stringify({{
   afterPopulate,
   hasWorkDir: 'work_dir' in collected.config,
   collectedWorkDir: collected.config.work_dir,
+  posted,
 }}));
 """
     result = subprocess.run(
@@ -170,6 +189,68 @@ class TestSettingsPanelWorkDirField(unittest.TestCase):
         self.assertEqual(out["afterPopulate"]["value"], "")
         self.assertTrue(out["hasWorkDir"])
         self.assertEqual(out["collectedWorkDir"], "")
+
+    @staticmethod
+    def _set_work_dirs(out: dict[str, Any]) -> list[str]:
+        """Extract the workDir of every posted ``setWorkDir`` message."""
+        return [
+            str(m.get("workDir", ""))
+            for m in out["posted"]
+            if m.get("type") == "setWorkDir"
+        ]
+
+    def test_remote_instance_prefers_pinned_work_dir(self) -> None:
+        """A webapp instance with a pinned work_dir (sessionStorage
+        ``sorcar-work-dir``) displays the pin, NOT the globally
+        persisted ``config.work_dir`` another instance may have saved,
+        and does not re-adopt the global value."""
+        out = _run_config_form_harness(
+            body_classes=["remote-chat"],
+            populate_cfg={"work_dir": "/srv/other-instance"},
+            edited_work_dir=None,
+            pinned_work_dir="/srv/mine",
+        )
+        self.assertEqual(out["afterPopulate"]["value"], "/srv/mine")
+        self.assertNotIn("/srv/other-instance", self._set_work_dirs(out))
+
+    def test_remote_instance_adopts_global_work_dir_when_unpinned(
+        self,
+    ) -> None:
+        """A fresh webapp instance (no pin yet) adopts the globally
+        persisted work_dir as its own pin by posting ``setWorkDir``."""
+        out = _run_config_form_harness(
+            body_classes=["remote-chat"],
+            populate_cfg={"work_dir": "/srv/project"},
+            edited_work_dir=None,
+            pinned_work_dir=None,
+        )
+        self.assertEqual(out["afterPopulate"]["value"], "/srv/project")
+        adoption = out["posted"][0]
+        self.assertEqual(adoption.get("type"), "setWorkDir")
+        self.assertEqual(adoption.get("workDir"), "/srv/project")
+
+    def test_remote_save_repins_edited_work_dir(self) -> None:
+        """Saving an edited work_dir from the remote settings panel
+        re-pins THIS instance via ``setWorkDir`` (in addition to the
+        global ``saveConfig`` persistence)."""
+        out = _run_config_form_harness(
+            body_classes=["remote-chat"],
+            populate_cfg={"work_dir": "/srv/project"},
+            edited_work_dir="/srv/elsewhere",
+            pinned_work_dir="/srv/project",
+        )
+        self.assertIn("/srv/elsewhere", self._set_work_dirs(out))
+
+    def test_vscode_webview_never_posts_set_work_dir(self) -> None:
+        """The VS Code webview must not post ``setWorkDir`` from the
+        settings form — the extension itself announces the workspace
+        folder on connect; the form is read-only there."""
+        out = _run_config_form_harness(
+            body_classes=[],
+            populate_cfg={"work_dir": "/home/user/ws_a"},
+            edited_work_dir=None,
+        )
+        self.assertEqual(self._set_work_dirs(out), [])
 
 
 def _redirect_persistence(tmpdir: str) -> tuple[Path, object, Path]:
@@ -304,6 +385,33 @@ class TestWorkDirConfigRoundTrip(IsolatedAsyncioTestCase):
         await self._send(writer_b, {"type": "getConfig"})
         await self._drain_until(
             reader_b, self._config_data_with_work_dir(str(self.dir_b)),
+        )
+
+    async def test_get_config_prefers_connection_work_dir_over_persisted(
+        self,
+    ) -> None:
+        """A connection that announced its own folder via ``setWorkDir``
+        must see THAT folder in ``getConfig`` even when a different
+        work_dir is persisted globally (e.g. saved by another webapp
+        instance) — the stamped work_dir is what its commands actually
+        run in.  A connection that never announced a folder still sees
+        the persisted global value."""
+        vc.save_config({"work_dir": str(self.dir_a)})
+
+        reader_pinned, writer_pinned = await self._connect()
+        await self._send(
+            writer_pinned,
+            {"type": "setWorkDir", "workDir": str(self.dir_b)},
+        )
+        await self._send(writer_pinned, {"type": "getConfig"})
+        await self._drain_until(
+            reader_pinned, self._config_data_with_work_dir(str(self.dir_b)),
+        )
+
+        reader_fresh, writer_fresh = await self._connect()
+        await self._send(writer_fresh, {"type": "getConfig"})
+        await self._drain_until(
+            reader_fresh, self._config_data_with_work_dir(str(self.dir_a)),
         )
 
     async def test_save_config_work_dir_persists_and_updates_fallback(
