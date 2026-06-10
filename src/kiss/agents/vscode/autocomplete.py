@@ -13,7 +13,7 @@ from __future__ import annotations
 import queue
 import re
 import threading
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from kiss.agents.sorcar.persistence import (
     _load_chat_context_text,
@@ -164,7 +164,7 @@ class _AutocompleteMixin:
                 if seq != self._complete_seq_latest.get(conn_id, -1):
                     return
         if not query or len(query) < 2:
-            self.printer.broadcast({"type": "ghost", "suggestion": "", "query": query})
+            self._emit_ghost("", query, conn_id)
             return
 
         match = _prefix_match_task(query)
@@ -175,7 +175,27 @@ class _AutocompleteMixin:
                 query, snapshot_file, snapshot_content, chat_id,
             )
         fast = clip_autocomplete_suggestion(query, fast)
-        self.printer.broadcast({"type": "ghost", "suggestion": fast, "query": query})
+        self._emit_ghost(fast, query, conn_id)
+
+    def _emit_ghost(self, suggestion: str, query: str, conn_id: str) -> None:
+        """Emit one ``ghost`` autocomplete event.
+
+        Stamped with the requesting connection's ``conn_id`` (when
+        non-empty) so the suggestion is delivered only to the VS Code
+        window that is typing — never to a sibling window whose input
+        happens to hold the same text.
+
+        Args:
+            suggestion: The ghost-text suffix to suggest (may be ``""``).
+            query: The query string this suggestion answers.
+            conn_id: Requesting connection id (``""`` for direct callers).
+        """
+        event: dict[str, Any] = {
+            "type": "ghost", "suggestion": suggestion, "query": query,
+        }
+        if conn_id:
+            event["connId"] = conn_id
+        self.printer.broadcast(event)
 
     def _ensure_complete_worker(self) -> None:
         """Lazily start the autocomplete worker thread on first use.
@@ -213,6 +233,7 @@ class _AutocompleteMixin:
         self,
         then_emit_for_prefix: str | None = None,
         work_dir: str = "",
+        conn_id: str = "",
     ) -> None:
         """Refresh the file cache for *work_dir* in a background thread.
 
@@ -258,11 +279,38 @@ class _AutocompleteMixin:
                 ranked = rank_file_suggestions(
                     result, then_emit_for_prefix, usage,
                 )
-                self.printer.broadcast({"type": "files", "files": ranked})
+                self._emit_files(ranked, conn_id)
 
         threading.Thread(target=_do_refresh, daemon=True).start()
 
-    def _get_files(self, prefix: str, work_dir: str = "") -> None:
+    def _emit_files(
+        self,
+        ranked: list[dict[str, Any]],
+        conn_id: str,
+        loading: bool = False,
+    ) -> None:
+        """Emit one ``files`` event for the ``@``-mention picker.
+
+        Stamped with the requesting connection's ``conn_id`` (when
+        non-empty) so the file list pops the picker only in the VS
+        Code window that typed ``@`` — never in a sibling window.
+
+        Args:
+            ranked: Ranked file suggestion dicts to send.
+            conn_id: Requesting connection id (``""`` for direct callers).
+            loading: True for the immediate empty reply sent while a
+                background directory scan is still running.
+        """
+        event: dict[str, Any] = {"type": "files", "files": ranked}
+        if loading:
+            event["loading"] = True
+        if conn_id:
+            event["connId"] = conn_id
+        self.printer.broadcast(event)
+
+    def _get_files(
+        self, prefix: str, work_dir: str = "", conn_id: str = "",
+    ) -> None:
         """Send file list for the ``@``-mention picker, scoped to *work_dir*.
 
         ``work_dir`` selects the directory the picker is rooted at.  An
@@ -283,12 +331,10 @@ class _AutocompleteMixin:
             cache = self._file_cache.get(wd)
         if cache is None:
             self._refresh_file_cache(
-                then_emit_for_prefix=prefix, work_dir=wd,
+                then_emit_for_prefix=prefix, work_dir=wd, conn_id=conn_id,
             )
-            self.printer.broadcast(
-                {"type": "files", "files": [], "loading": True},
-            )
+            self._emit_files([], conn_id, loading=True)
             return
         usage = _load_file_usage()
         ranked = rank_file_suggestions(cache, prefix, usage)
-        self.printer.broadcast({"type": "files", "files": ranked})
+        self._emit_files(ranked, conn_id)
