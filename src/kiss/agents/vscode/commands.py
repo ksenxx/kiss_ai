@@ -85,16 +85,25 @@ class _CommandsMixin:
         def _get_tab(self, tab_id: str) -> _RunningAgentState: ...
         def _run_task(self, cmd: dict[str, Any]) -> None: ...
         def _stop_task(self, tab_id: str = "") -> None: ...
-        def _get_models(self) -> None: ...
+        def _get_models(self, conn_id: str = "") -> None: ...
         def _get_history(
-            self, query: str | None, offset: int = 0, generation: int = 0
+            self,
+            query: str | None,
+            offset: int = 0,
+            generation: int = 0,
+            conn_id: str = "",
         ) -> None: ...
-        def _get_frequent_tasks(self, limit: int = 50) -> None: ...
-        def _get_files(self, prefix: str, work_dir: str = "") -> None: ...
+        def _get_frequent_tasks(
+            self, limit: int = 50, conn_id: str = "",
+        ) -> None: ...
+        def _get_files(
+            self, prefix: str, work_dir: str = "", conn_id: str = "",
+        ) -> None: ...
         def _refresh_file_cache(
             self,
             then_emit_for_prefix: str | None = None,
             work_dir: str = "",
+            conn_id: str = "",
         ) -> None: ...
         def _replay_session(
             self, chat_id: str, tab_id: str = "", task_id: int | None = None,
@@ -105,7 +114,7 @@ class _CommandsMixin:
         def _new_chat(self, tab_id: str) -> None: ...
         def _close_tab(self, tab_id: str) -> None: ...
         def _ensure_complete_worker(self) -> None: ...
-        def _get_input_history(self) -> None: ...
+        def _get_input_history(self, conn_id: str = "") -> None: ...
         def _get_adjacent_task(
             self, chat_id: str, task_id: int | None, direction: str,
             tab_id: str = "",
@@ -187,8 +196,8 @@ class _CommandsMixin:
         self._stop_task(cmd.get("tabId", ""))
 
     def _cmd_get_models(self, cmd: dict[str, Any]) -> None:
-        """Send available models list."""
-        self._get_models()
+        """Send available models list to the requesting connection only."""
+        self._get_models(cmd.get("connId", ""))
 
     def _cmd_select_model(self, cmd: dict[str, Any]) -> None:
         """Update the selected model for a tab."""
@@ -201,12 +210,19 @@ class _CommandsMixin:
         _record_model_usage(model)
 
     def _cmd_get_history(self, cmd: dict[str, Any]) -> None:
-        """Send conversation history."""
-        self._get_history(cmd.get("query"), cmd.get("offset", 0), cmd.get("generation", 0))
+        """Send conversation history to the requesting connection only."""
+        self._get_history(
+            cmd.get("query"),
+            cmd.get("offset", 0),
+            cmd.get("generation", 0),
+            cmd.get("connId", ""),
+        )
 
     def _cmd_get_frequent_tasks(self, cmd: dict[str, Any]) -> None:
         """Send the top-N most-frequent tasks (default 50)."""
-        self._get_frequent_tasks(int(cmd.get("limit", 50)))
+        self._get_frequent_tasks(
+            int(cmd.get("limit", 50)), cmd.get("connId", ""),
+        )
 
     def _cmd_delete_task(self, cmd: dict[str, Any]) -> None:
         """Delete a task from the database and refresh history."""
@@ -237,8 +253,16 @@ class _CommandsMixin:
         daemon-wide default (which is shared across every tab and
         otherwise reflects whichever directory the daemon was launched
         from or last switched to via ``setWorkDir``).
+
+        The resulting ``files`` events are routed only to the
+        requesting connection (via ``connId``) so typing ``@`` in one
+        VS Code window never pops the file picker in another window.
         """
-        self._get_files(cmd.get("prefix", ""), cmd.get("workDir", ""))
+        self._get_files(
+            cmd.get("prefix", ""),
+            cmd.get("workDir", ""),
+            cmd.get("connId", ""),
+        )
 
     def _cmd_record_file_usage(self, cmd: dict[str, Any]) -> None:
         """Record a file access for usage-based sorting.
@@ -458,7 +482,7 @@ class _CommandsMixin:
 
     def _cmd_get_input_history(self, cmd: dict[str, Any]) -> None:
         """Send deduplicated task texts for arrow-key cycling."""
-        self._get_input_history()
+        self._get_input_history(cmd.get("connId", ""))
 
     def _cmd_get_adjacent_task(self, cmd: dict[str, Any]) -> None:
         """Send events for the adjacent task in the same chat session.
@@ -545,7 +569,16 @@ class _CommandsMixin:
         if not cfg.get("work_dir") and cmd.get("workDir"):
             cfg["work_dir"] = cmd["workDir"]
         api_keys = get_current_api_keys()
-        self.printer.broadcast({"type": "configData", "config": cfg, "apiKeys": api_keys})
+        event: dict[str, Any] = {
+            "type": "configData", "config": cfg, "apiKeys": api_keys,
+        }
+        conn_id = cmd.get("connId", "")
+        if conn_id:
+            # Reply only to the requesting window: another window may
+            # have its settings form open with unsaved edits, which an
+            # unsolicited configData repaint would clobber.
+            event["connId"] = conn_id
+        self.printer.broadcast(event)
 
     def _cmd_save_config(self, cmd: dict[str, Any]) -> None:
         """Save configuration and API keys from the frontend.
@@ -580,10 +613,14 @@ class _CommandsMixin:
             if key_value:
                 save_api_key_to_shell(key_name, key_value)
 
-        self._get_models()
+        conn_id = cmd.get("connId", "")
+        self._get_models(conn_id)
 
         new_cfg = load_config()
-        self.printer.broadcast({"type": "configData", "config": new_cfg})
+        event: dict[str, Any] = {"type": "configData", "config": new_cfg}
+        if conn_id:
+            event["connId"] = conn_id
+        self.printer.broadcast(event)
 
         if cfg.get("remote_password", ""):
             _restart_kiss_web_daemon()
