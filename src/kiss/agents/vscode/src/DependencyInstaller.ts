@@ -121,10 +121,10 @@ function sha256OfFile(filePath: string): string {
  * SHA256 file fetched from the same release URL, defending against
  * CDN/mirror corruption and accidental wrong-asset downloads.
  */
-async function verifyDownloadHash(
+function verifyDownloadHash(
   filePath: string,
   expectedHashHex: string | null,
-): Promise<void> {
+): void {
   const got = sha256OfFile(filePath);
   if (!expectedHashHex) {
     log(
@@ -211,28 +211,40 @@ function fetchNodeSha256(assetName: string): Promise<string | null> {
   });
 }
 
+/** Synchronous sleep that neither spawns a process nor spins the CPU. */
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
 /**
- * Run a child process without invoking a shell, capturing combined
- * stdout/stderr, and resolving with the trimmed stdout on exit code 0.
- * Used for ``tar``, ``mv``, etc. where a shell would be required only
- * to interpolate user-controlled paths.
+ * Core no-shell process runner: spawn ``cmd`` with ``args``, capture
+ * stdout and stderr, and resolve on exit (any code).  ``timeoutMs = 0``
+ * disables the kill timer.  Rejects only on spawn failure or timeout.
+ * Shared by :func:`spawnPromise` and :func:`runAsync`.
  */
-function spawnPromise(
+function spawnCollect(
   cmd: string,
   args: string[],
-  cwd?: string,
-  timeoutMs = 300_000,
-): Promise<string> {
+  opts: {cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number},
+): Promise<{code: number | null; stdout: string; stderr: string}> {
   return new Promise((resolve, reject) => {
-    const proc = spawn(cmd, args, {cwd, stdio: ['ignore', 'pipe', 'pipe']});
+    const proc = spawn(cmd, args, {
+      cwd: opts.cwd,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: opts.env,
+    });
     let stdout = '';
     let stderr = '';
-    const timer = setTimeout(() => {
-      proc.kill('SIGKILL');
-      reject(
-        new Error(`${cmd} ${args.join(' ')} timed out after ${timeoutMs}ms`),
-      );
-    }, timeoutMs);
+    const timer = opts.timeoutMs
+      ? setTimeout(() => {
+          proc.kill('SIGKILL');
+          reject(
+            new Error(
+              `${cmd} ${args.join(' ')} timed out after ${opts.timeoutMs}ms`,
+            ),
+          );
+        }, opts.timeoutMs)
+      : undefined;
     proc.stdout?.on('data', (d: Buffer) => {
       stdout += d.toString();
     });
@@ -240,20 +252,32 @@ function spawnPromise(
       stderr += d.toString();
     });
     proc.on('close', code => {
-      clearTimeout(timer);
-      if (code === 0) resolve(stdout.trim());
-      else
-        reject(
-          new Error(
-            `${cmd} ${args.join(' ')} exited ${code}: ${stderr.trim()}`,
-          ),
-        );
+      if (timer) clearTimeout(timer);
+      resolve({code, stdout, stderr});
     });
     proc.on('error', err => {
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       reject(err);
     });
   });
+}
+
+/**
+ * Run a child process without invoking a shell and resolve with the
+ * trimmed stdout on exit code 0.  Used for ``tar``, ``mv``, etc. where
+ * a shell would be required only to interpolate user-controlled paths.
+ */
+async function spawnPromise(
+  cmd: string,
+  args: string[],
+  cwd?: string,
+  timeoutMs = 300_000,
+): Promise<string> {
+  const r = await spawnCollect(cmd, args, {cwd, timeoutMs});
+  if (r.code === 0) return r.stdout.trim();
+  throw new Error(
+    `${cmd} ${args.join(' ')} exited ${r.code}: ${r.stderr.trim()}`,
+  );
 }
 
 /** Guard against concurrent ensureDependencies calls. */
@@ -274,17 +298,44 @@ function log(message: string): void {
 }
 
 /**
+ * Prepend *dir* to ``process.env.PATH`` so binaries in it are found by
+ * all child processes.  Safe to call multiple times — skips if already
+ * present.
+ */
+function prependToProcessPath(dir: string): void {
+  const parts = (process.env.PATH || '').split(path.delimiter);
+  if (!parts.includes(dir)) {
+    process.env.PATH = `${dir}${path.delimiter}${process.env.PATH || ''}`;
+  }
+}
+
+/**
  * Prepend ~/.local/bin to process.env.PATH so that binaries installed by
  * the extension (uv, node, sorcar) are found by all child processes.
- * Safe to call multiple times — skips if already present.
  */
 export function ensureLocalBinInPath(): void {
   if (!HOME_DIR) return;
-  const localBin = path.join(HOME_DIR, '.local', 'bin');
-  const parts = (process.env.PATH || '').split(path.delimiter);
-  if (!parts.includes(localBin)) {
-    process.env.PATH = `${localBin}${path.delimiter}${process.env.PATH || ''}`;
-  }
+  prependToProcessPath(path.join(HOME_DIR, '.local', 'bin'));
+}
+
+/**
+ * Windows install helper: download a zip with PowerShell, extract it
+ * into ``destDir``, run any ``extraPsCommands`` (e.g. Move-Item
+ * cleanup), and delete the zip — all in one PowerShell invocation.
+ */
+function windowsZipInstall(
+  url: string,
+  zipPath: string,
+  destDir: string,
+  extraPsCommands = '',
+): Promise<string> {
+  return execPromise(
+    'powershell -Command "' +
+      `Invoke-WebRequest -Uri '${url}' -OutFile '${zipPath}'; ` +
+      `Expand-Archive -Force -Path '${zipPath}' -DestinationPath '${destDir}'; ` +
+      extraPsCommands +
+      `Remove-Item -Force '${zipPath}'"`,
+  );
 }
 
 /**
@@ -484,7 +535,7 @@ async function ensureDependenciesImpl(): Promise<void> {
     findUvPath() &&
     fs.existsSync(path.join(kissProjectPath, '.venv')) &&
     isChromiumInstalled() &&
-    isDaemonRunning() &&
+    (await isDaemonRunning()) &&
     !fs.existsSync(updateMarker)
   ) {
     log('All dependencies satisfied and daemon running — nothing to do');
@@ -780,10 +831,10 @@ async function ensureDependenciesImpl(): Promise<void> {
  *
  * @param port - TCP port whose listening processes should be killed.
  */
-function killProcessOnPort(port: number): void {
-  let pids: string[] = [];
+/** PIDs of processes listening on *port* (empty when none / lsof fails). */
+function pidsOnPort(port: number): string[] {
   try {
-    pids = execFileSync('lsof', ['-ti', `:${port}`], {
+    return execFileSync('lsof', ['-ti', `:${port}`], {
       encoding: 'utf-8',
       timeout: 3000,
       stdio: ['ignore', 'pipe', 'ignore'],
@@ -792,45 +843,32 @@ function killProcessOnPort(port: number): void {
       .split('\n')
       .filter(Boolean);
   } catch {
-    return; // Nothing listening — ok.
+    return [];
   }
+}
+
+/** Send *signal* to every PID, ignoring already-gone processes. */
+function killPids(pids: string[], signal: NodeJS.Signals): void {
   for (const pid of pids) {
     try {
-      process.kill(parseInt(pid, 10), 'SIGTERM');
+      process.kill(parseInt(pid, 10), signal);
     } catch {
       /* already gone */
     }
   }
+}
+
+function killProcessOnPort(port: number): void {
+  const pids = pidsOnPort(port);
+  if (pids.length === 0) return; // Nothing listening — ok.
+  killPids(pids, 'SIGTERM');
   // Wait up to ~3 s for the port to free up.
   for (let i = 0; i < 6; i++) {
-    try {
-      execSync(`lsof -i :${port} -t`, {stdio: 'ignore', timeout: 2000});
-      execSync('sleep 0.5', {timeout: 2000});
-    } catch {
-      return; // Port is free.
-    }
+    if (pidsOnPort(port).length === 0) return; // Port is free.
+    sleepSync(500);
   }
   // Force-kill any survivors.
-  let stragglers: string[] = [];
-  try {
-    stragglers = execFileSync('lsof', ['-ti', `:${port}`], {
-      encoding: 'utf-8',
-      timeout: 3000,
-      stdio: ['ignore', 'pipe', 'ignore'],
-    })
-      .trim()
-      .split('\n')
-      .filter(Boolean);
-  } catch {
-    return;
-  }
-  for (const pid of stragglers) {
-    try {
-      process.kill(parseInt(pid, 10), 'SIGKILL');
-    } catch {
-      /* already gone */
-    }
-  }
+  killPids(pidsOnPort(port), 'SIGKILL');
 }
 
 /**
@@ -1383,12 +1421,13 @@ async function installUv(): Promise<string | null> {
     if (process.platform === 'win32') {
       // Windows: download zip and extract with PowerShell
       const zipPath = path.join(installDir, `${assetName}.zip`);
-      await execPromise(
-        `powershell -Command "Invoke-WebRequest -Uri '${url}' -OutFile '${zipPath}'; ` +
-          `Expand-Archive -Force -Path '${zipPath}' -DestinationPath '${installDir}'; ` +
-          `Move-Item -Force '${path.join(installDir, assetName, 'uv.exe')}' '${path.join(installDir, 'uv.exe')}'; ` +
+      await windowsZipInstall(
+        url,
+        zipPath,
+        installDir,
+        `Move-Item -Force '${path.join(installDir, assetName, 'uv.exe')}' '${path.join(installDir, 'uv.exe')}'; ` +
           `Move-Item -Force '${path.join(installDir, assetName, 'uvx.exe')}' '${path.join(installDir, 'uvx.exe')}'; ` +
-          `Remove-Item -Force '${zipPath}'; Remove-Item -Recurse -Force '${path.join(installDir, assetName)}'"`,
+          `Remove-Item -Recurse -Force '${path.join(installDir, assetName)}'; `,
       );
     } else {
       // macOS/Linux: download tar.gz and extract with tar (no shell so
@@ -1398,7 +1437,7 @@ async function installUv(): Promise<string | null> {
       const tarPath = path.join(installDir, `${assetName}.${asset.ext}`);
       await downloadFile(url, tarPath);
       const expectedHash = await fetchUvStyleSha256(url);
-      await verifyDownloadHash(tarPath, expectedHash);
+      verifyDownloadHash(tarPath, expectedHash);
       // Extract with argv-form spawn — no shell.
       await spawnPromise('tar', ['xzf', tarPath, '-C', installDir]);
       // Move uv / uvx into installDir, then remove the extracted folder.
@@ -1503,25 +1542,25 @@ function playwrightBrowsersPath(): string {
  * On Windows the daemon is not supported, so always returns false.
  *
  * The TCP probe is retried up to 3 times with 300 ms gaps before
- * returning false.  A single ``lsof`` call races with the
- * LaunchAgent's ~1-3 s respawn window after a previous kiss-web
- * restart; without the retry the extension would nuke a healthy
- * daemon that was merely mid-startup, burning the current Cloudflare
- * tunnel URL on every VS Code activation that lost that race.
+ * returning false.  A single probe races with the LaunchAgent's
+ * ~1-3 s respawn window after a previous kiss-web restart; without
+ * the retry the extension would nuke a healthy daemon that was merely
+ * mid-startup, burning the current Cloudflare tunnel URL on every
+ * VS Code activation that lost that race.
+ *
+ * Uses the non-blocking ``net`` probe from ``daemonHealth`` instead of
+ * shelling out to ``lsof`` — the old lsof+timeout pattern could block
+ * extension activation for up to ~10 s on a loaded host.
  */
-function isDaemonRunning(): boolean {
+async function isDaemonRunning(): Promise<boolean> {
   if (process.platform === 'win32') return false;
   const sockPath = path.join(HOME_DIR, '.kiss', 'sorcar.sock');
   for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      execSync('lsof -i :8787 -t', {stdio: 'ignore', timeout: 3000});
-      if (fs.existsSync(sockPath)) return true;
-      // TCP up but UDS missing — daemon still initialising; retry.
-    } catch {
-      // not listening yet; fall through to retry
-    }
+    const health = await probeDaemonHealth(8787);
+    if (health === 'alive' && fs.existsSync(sockPath)) return true;
+    // TCP not up (or UDS missing — daemon still initialising); retry.
     if (attempt < 2) {
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
+      await new Promise(r => setTimeout(r, 300));
     }
   }
   return false;
@@ -1694,20 +1733,12 @@ async function installMinGitWindows(): Promise<boolean> {
     fs.mkdirSync(gitDir, {recursive: true});
 
     const zipPath = path.join(gitDir, `${assetName}.zip`);
-    await execPromise(
-      'powershell -Command "' +
-        `Invoke-WebRequest -Uri '${url}' -OutFile '${zipPath}'; ` +
-        `Expand-Archive -Force -Path '${zipPath}' -DestinationPath '${gitDir}'; ` +
-        `Remove-Item -Force '${zipPath}'"`,
-    );
+    await windowsZipInstall(url, zipPath, gitDir);
 
     // Add MinGit's cmd directory to PATH so git.exe is found
     const gitCmdDir = path.join(gitDir, 'cmd');
     if (fs.existsSync(path.join(gitCmdDir, 'git.exe'))) {
-      const parts = (process.env.PATH || '').split(path.delimiter);
-      if (!parts.includes(gitCmdDir)) {
-        process.env.PATH = `${gitCmdDir}${path.delimiter}${process.env.PATH || ''}`;
-      }
+      prependToProcessPath(gitCmdDir);
       log('MinGit installed successfully');
       return true;
     }
@@ -1804,19 +1835,11 @@ async function installNode(): Promise<boolean> {
     try {
       fs.mkdirSync(installDir, {recursive: true});
       const zipPath = path.join(installDir, `${assetName}.zip`);
-      await execPromise(
-        'powershell -Command "' +
-          `Invoke-WebRequest -Uri '${url}' -OutFile '${zipPath}'; ` +
-          `Expand-Archive -Force -Path '${zipPath}' -DestinationPath '${installDir}'; ` +
-          `Remove-Item -Force '${zipPath}'"`,
-      );
+      await windowsZipInstall(url, zipPath, installDir);
       // Add node directory to PATH
       const nodeDir = path.join(installDir, assetName);
       if (fs.existsSync(path.join(nodeDir, 'node.exe'))) {
-        const parts = (process.env.PATH || '').split(path.delimiter);
-        if (!parts.includes(nodeDir)) {
-          process.env.PATH = `${nodeDir}${path.delimiter}${process.env.PATH || ''}`;
-        }
+        prependToProcessPath(nodeDir);
         log('Node.js installed successfully (Windows)');
         return true;
       }
@@ -1843,7 +1866,7 @@ async function installNode(): Promise<boolean> {
     const tarPath = path.join(installDir, `${assetName}.tar.gz`);
     await downloadFile(url, tarPath);
     const expectedHash = await fetchNodeSha256(`${assetName}.tar.gz`);
-    await verifyDownloadHash(tarPath, expectedHash);
+    verifyDownloadHash(tarPath, expectedHash);
     await spawnPromise('tar', [
       'xzf',
       tarPath,
@@ -1935,36 +1958,33 @@ async function installCodeCli(): Promise<boolean> {
 /**
  * Run a command with args and return a promise that resolves on exit code 0.
  */
-function runAsync(cmd: string, args: string[], cwd: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const cmdLine = `${cmd} ${args.join(' ')}`;
-    log(`Running: ${cmdLine}`);
-    const proc = spawn(cmd, args, {
+async function runAsync(
+  cmd: string,
+  args: string[],
+  cwd: string,
+): Promise<void> {
+  const cmdLine = `${cmd} ${args.join(' ')}`;
+  log(`Running: ${cmdLine}`);
+  let r: {code: number | null; stdout: string; stderr: string};
+  try {
+    // timeoutMs: 0 — installs (uv sync, Playwright download) can
+    // legitimately run for many minutes; never kill them.
+    r = await spawnCollect(cmd, args, {
       cwd,
-      stdio: 'pipe',
       env: {...process.env, PYTHONUNBUFFERED: '1'},
+      timeoutMs: 0,
     });
-    let output = '';
-    proc.stdout?.on('data', (d: Buffer) => {
-      output += d.toString();
-    });
-    proc.stderr?.on('data', (d: Buffer) => {
-      output += d.toString();
-    });
-    proc.on('close', code => {
-      if (output.trim()) log(`Output [${cmdLine}]:\n${output.trim()}`);
-      if (code === 0) {
-        log(`Completed: ${cmdLine}`);
-        resolve();
-      } else {
-        reject(new Error(`${cmdLine} failed (exit code ${code}): ${output}`));
-      }
-    });
-    proc.on('error', err => {
-      log(`Spawn error [${cmdLine}]: ${err.message}`);
-      reject(err);
-    });
-  });
+  } catch (err) {
+    log(`Spawn error [${cmdLine}]: ${(err as Error).message}`);
+    throw err;
+  }
+  const output = r.stdout + r.stderr;
+  if (output.trim()) log(`Output [${cmdLine}]:\n${output.trim()}`);
+  if (r.code === 0) {
+    log(`Completed: ${cmdLine}`);
+    return;
+  }
+  throw new Error(`${cmdLine} failed (exit code ${r.code}): ${output}`);
 }
 
 /**
@@ -2396,11 +2416,8 @@ function readKissConfig(): Record<string, unknown> {
       return {};
     }
     if (attempt < RETRIES - 1) {
-      // Busy-wait briefly to let any concurrent writer finish.
-      const deadline = Date.now() + BACKOFF_MS;
-      while (Date.now() < deadline) {
-        /* spin */
-      }
+      // Wait briefly (without spinning) for a concurrent writer to finish.
+      sleepSync(BACKOFF_MS);
     }
   }
   if (last.reason === 'empty') {

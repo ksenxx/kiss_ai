@@ -38,6 +38,7 @@ Everything degrades gracefully to a plain :func:`input` loop when
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import sys
@@ -47,10 +48,10 @@ from typing import TYPE_CHECKING, Any
 
 from kiss.agents.sorcar.cli_helpers import (
     _print_recent_chats,
-    _print_result,
-    _print_run_stats,
+    print_outcome,
 )
 from kiss.agents.sorcar.cli_panel import (
+    _ESC,
     CYAN,
     IDLE_TITLE,
     PROMPT_MARKER,
@@ -122,7 +123,6 @@ _MENTION_RE = re.compile(r"PWD/(\S+)")
 # Matches a ``/model <partial>`` line, capturing the partial model name so
 # the completer can fast-complete it from MODEL_INFO.
 _MODEL_CMD_RE = re.compile(r"^/model\s+(.*)$")
-_ESC = "\x1b"
 
 
 class CliCompleter:
@@ -207,8 +207,10 @@ class CliCompleter:
         Mirrors the extension's ghost text: prefer a prefix-matched prior
         task, falling back to an identifier from the active file.
         """
+        # ``_prefix_match_task`` already guarantees (via SQL) that any
+        # match starts with *line* and is strictly longer than it.
         task = _prefix_match_task(line)
-        if task and task != line and task.startswith(line):
+        if task:
             return [task]
         suffix = self._active_file_suffix(line)
         if suffix:
@@ -326,9 +328,13 @@ def _history_path(work_dir: str) -> Path:
 
     Claude Code stores input history per working directory; we do the
     same, keyed by a hash of the absolute work dir under the kiss dir.
+    The hash is a stable content digest (NOT the builtin ``hash()``,
+    which is randomized per process and would make every new process
+    look for a different history file).
     """
     _ensure_kiss_dir()
-    digest = abs(hash(str(Path(work_dir).resolve()))) % (10**12)
+    resolved = str(Path(work_dir).resolve())
+    digest = hashlib.sha256(resolved.encode("utf-8")).hexdigest()[:12]
     hist_dir = _default_kiss_dir() / "cli_history"
     try:
         hist_dir.mkdir(parents=True, exist_ok=True)
@@ -337,7 +343,7 @@ def _history_path(work_dir: str) -> Path:
     return hist_dir / f"{digest}"
 
 
-def _print_welcome(agent: SorcarAgent, work_dir: str, model_name: str) -> None:
+def _print_welcome(work_dir: str, model_name: str) -> None:
     """Print the Claude-Code-style welcome banner for the session."""
     print("\x1b[1m✦ KISS Sorcar\x1b[0m — interactive mode")
     print(f"  model: {model_name}")
@@ -366,12 +372,10 @@ def _record_mentions(line: str) -> None:
     files float to the top of future ``@``-mention suggestions.
     """
     for match in _MENTION_RE.finditer(line):
-        path = match.group(1)
-        if path:
-            try:
-                _record_file_usage(path)
-            except Exception:  # pragma: no cover - persistence guard
-                logger.debug("record_file_usage failed", exc_info=True)
+        try:
+            _record_file_usage(match.group(1))
+        except Exception:  # pragma: no cover - persistence guard
+            logger.debug("record_file_usage failed", exc_info=True)
 
 
 def _handle_slash(
@@ -503,14 +507,6 @@ def _print_usage(agent: SorcarAgent) -> None:
     print(f"Total tokens: {tokens}\n")
 
 
-def _stdout_isatty() -> bool:
-    """Return whether stdout is attached to an interactive terminal."""
-    try:
-        return bool(sys.stdout.isatty())
-    except Exception:  # pragma: no cover - defensive isatty guard
-        return False
-
-
 def _read_line(prompt: str) -> str | None:
     """Read one input line inside the shared rounded input panel.
 
@@ -539,7 +535,11 @@ def _read_line(prompt: str) -> str | None:
     bottom = f"{CYAN}{panel_bottom('', cols)}{RESET}"
     framed_prompt = f"{CYAN}│{RESET} {prompt}"
 
-    if not _stdout_isatty():
+    try:
+        isatty = bool(sys.stdout.isatty())
+    except Exception:  # pragma: no cover - defensive isatty guard
+        isatty = False
+    if not isatty:
         print(top)
         try:
             line = input(framed_prompt)
@@ -597,7 +597,7 @@ def run_repl(
     history_path = _history_path(work_dir)
     _setup_readline(completer, history_path)
 
-    _print_welcome(agent, work_dir, model_name)
+    _print_welcome(work_dir, model_name)
 
     interrupt_armed = False
     try:
@@ -640,8 +640,6 @@ def _run_one(
         prompt: The user's instruction for this turn.
         run_kwargs: Base run kwargs; a copy is made with the prompt set.
     """
-    from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-
     kwargs = dict(run_kwargs)
     kwargs["prompt_template"] = prompt
     start = time.time()
@@ -651,18 +649,10 @@ def _run_one(
         print("\n⏹  Task interrupted.\n")
         return
     elapsed = time.time() - start
-    # When the agent runs verbosely it already renders the green "Result"
-    # panel (whose subtitle carries tokens / cost / steps) to the console
-    # as the task ends.  Re-printing the summary and the run stats here
-    # would duplicate that panel, so stay completely silent and let the
-    # Result panel be the last thing on screen before the prompt returns.
-    if kwargs.get("verbose", True):
-        return
-    _print_result(result)
-    if isinstance(agent, ChatSorcarAgent):
-        _print_run_stats(agent, elapsed)
-    else:
-        print(f"\nTime: {elapsed:.1f}s")
-        print(f"Cost: ${getattr(agent, 'budget_used', 0.0):.4f}")
-        print(f"Total tokens: {getattr(agent, 'total_tokens_used', 0)}")
-    print()
+    # ``print_outcome`` stays silent when running verbosely (the green
+    # "Result" panel is then the last thing on screen) and prints the
+    # summary plus run stats when running quietly.
+    verbose = bool(kwargs.get("verbose", True))
+    print_outcome(agent, result, elapsed, verbose)
+    if not verbose:
+        print()

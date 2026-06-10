@@ -19,15 +19,51 @@ from typing import TYPE_CHECKING, Any
 import yaml
 
 from kiss.agents.sorcar.persistence import _list_recent_chats
-from kiss.agents.sorcar.sorcar_agent import (
-    _resolve_task,
-    cli_ask_user_question,
-)
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.models.model_info import get_default_model
 
 if TYPE_CHECKING:
     from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+    from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+
+_DEFAULT_TASK = """
+can you find what the current weather is in San Francisco and summarize it?
+"""
+
+
+def _resolve_task(args: argparse.Namespace) -> str:
+    """Determine the task description from parsed arguments.
+
+    Priority: -f file > --task string > default task.
+
+    Args:
+        args: Parsed argparse namespace with 'f' and 'task' attributes.
+
+    Returns:
+        The task description string.
+
+    Raises:
+        FileNotFoundError: If -f path does not exist.
+    """
+    if args.file is not None:
+        return Path(args.file).read_text()
+    if args.task is not None:
+        task: str = args.task
+        return task
+    return _DEFAULT_TASK
+
+
+def cli_ask_user_question(question: str) -> str:
+    """CLI callback for agent questions (prints and reads from stdin).
+
+    Args:
+        question: The question to display to the user.
+
+    Returns:
+        The user's typed response text.
+    """
+    print(f"\n>>> Agent asks: {question}")
+    return input("Your answer: ")
 
 
 def _print_recent_chats() -> None:
@@ -218,3 +254,33 @@ def _print_run_stats(agent: ChatSorcarAgent, elapsed: float) -> None:
     print(f"Time: {elapsed:.1f}s")
     print(f"Cost: ${agent.budget_used:.4f}")
     print(f"Total tokens: {agent.total_tokens_used}")
+
+
+def print_outcome(
+    agent: SorcarAgent, result: str, elapsed: float, verbose: bool,
+) -> None:
+    """Print a finished run's result summary and statistics.
+
+    No-op when *verbose*: a verbose agent already renders the green
+    "Result" panel (whose subtitle carries tokens / cost / steps) to
+    the console as the task ends, so re-printing the summary and the
+    run stats here would duplicate it.  Only prints when running
+    quietly so the Result panel stays the last thing shown.
+
+    Args:
+        agent: The agent that produced *result*.
+        result: The YAML result string returned by ``agent.run``.
+        elapsed: Wall-clock task duration in seconds.
+        verbose: Whether the agent ran verbosely (skip printing).
+    """
+    if verbose:
+        return
+    from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+
+    _print_result(result)
+    if isinstance(agent, ChatSorcarAgent):
+        _print_run_stats(agent, elapsed)
+    else:
+        print(f"\nTime: {elapsed:.1f}s")
+        print(f"Cost: ${getattr(agent, 'budget_used', 0.0):.4f}")
+        print(f"Total tokens: {getattr(agent, 'total_tokens_used', 0)}")

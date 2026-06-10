@@ -38,17 +38,18 @@ from __future__ import annotations
 import os
 import queue
 import select
-import shutil
 import sys
 import threading
 from typing import TYPE_CHECKING, Any, cast
 
 from kiss.agents.sorcar.cli_panel import (
+    _ESC,
     CYAN,
     DIM,
     PROMPT_MARKER,
     RESET,
     STEER_TITLE,
+    _term_size,
     body_cursor_col,
     panel_body,
     panel_bottom,
@@ -73,7 +74,6 @@ except ImportError:  # pragma: no cover - exercised only on Windows
 _BOX_H = 3
 # Minimum terminal height for which the anchored box is worthwhile.
 _MIN_ROWS = _BOX_H + 3
-_ESC = "\x1b"
 
 
 def supports_steering() -> bool:
@@ -91,18 +91,6 @@ def supports_steering() -> bool:
         return bool(sys.stdin.isatty() and sys.stdout.isatty())
     except Exception:
         return False
-
-
-def _term_size() -> tuple[int, int]:
-    """Return ``(rows, cols)`` for the controlling terminal.
-
-    Falls back to ``(24, 80)`` when the size cannot be determined.
-
-    Returns:
-        A ``(rows, cols)`` tuple, both guaranteed ``>= 1``.
-    """
-    size = shutil.get_terminal_size(fallback=(80, 24))
-    return max(size.lines, 1), max(size.columns, 1)
 
 
 class _StdoutProxy:
@@ -126,7 +114,7 @@ class _StdoutProxy:
     """
 
     def __init__(
-        self, stream: Any, lock: threading.RLock, box: _InputBox | None = None
+        self, stream: Any, lock: threading.RLock, box: _InputBox
     ) -> None:
         self._stream = stream
         self._lock = lock
@@ -142,7 +130,7 @@ class _StdoutProxy:
             The number of characters written.
         """
         with self._lock:
-            if self._box is not None and self._box._active:
+            if self._box._active:
                 # Restore the output cursor, emit, re-save it, then return
                 # the blinking caret to the box body.
                 self._stream.write(f"{_ESC}8")
@@ -362,9 +350,11 @@ class SteeringSession:
         state: _RunningAgentState,
         chat_id: str,
     ) -> None:
+        # ``chat_id`` is accepted for call-site symmetry with the
+        # registry entry but the session itself never needs it.
+        del chat_id
         self.agent = agent
         self.state = state
-        self.chat_id = chat_id
         self.lock = threading.RLock()
         # Capture the real stdout now (before :meth:`run` swaps in the
         # proxy) so box rendering writes straight to the terminal.

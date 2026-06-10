@@ -28,6 +28,7 @@ function isPathInside(target: string, root: string): boolean {
   return rel.length > 0 && !rel.startsWith('..') && !path.isAbsolute(rel);
 }
 import {AgentClient} from './AgentClient';
+import {getGitApi} from './gitApi';
 import {MergeManager} from './MergeManager';
 import {getDefaultModel} from './DependencyInstaller';
 import {buildChatHtml} from './SorcarTab';
@@ -38,6 +39,46 @@ import {
   Attachment,
   AgentCommand,
 } from './types';
+
+/**
+ * Webview messages forwarded verbatim to the daemon — message type →
+ * the fields copied onto the outgoing ``AgentCommand``.  Messages that
+ * need guards or extension-side side effects keep explicit ``case``
+ * handlers in ``_handleMessage``.
+ */
+/**
+ * Webview merge-action name → ``MergeManager`` method.  Also the single
+ * source of truth for the ``kissSorcar.<method>`` merge keyboard
+ * commands registered in ``extension.ts``.
+ */
+export const MERGE_ACTIONS = {
+  accept: 'acceptChange',
+  reject: 'rejectChange',
+  prev: 'prevChange',
+  next: 'nextChange',
+  'accept-all': 'acceptAll',
+  'reject-all': 'rejectAll',
+  'accept-file': 'acceptFile',
+  'reject-file': 'rejectFile',
+} as const;
+
+/** A MergeManager method name dispatchable via ``handleMergeCommand``. */
+export type MergeCommand = (typeof MERGE_ACTIONS)[keyof typeof MERGE_ACTIONS];
+
+const FORWARDED_COMMANDS: Record<string, readonly string[]> = {
+  appendUserMessage: ['prompt', 'tabId'],
+  getInputHistory: [],
+  newChat: ['tabId'],
+  getHistory: ['query', 'offset', 'generation'],
+  getFrequentTasks: ['limit'],
+  deleteTask: ['taskId'],
+  setFavorite: ['taskId', 'isFavorite'],
+  deleteFrequentTask: ['task'],
+  getFiles: ['prefix', 'workDir'],
+  getAdjacentTask: ['tabId', 'taskId', 'direction'],
+  getConfig: [],
+  saveConfig: ['config', 'apiKeys'],
+};
 
 /**
  * WebviewViewProvider for the KISS Sorcar chat in the secondary sidebar.
@@ -61,6 +102,18 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   private _extensionUri: vscode.Uri;
   private _selectedModel: string;
   private _runningTabs: Set<string> = new Set();
+  /**
+   * Tab ids owned by THIS window's webview.  The daemon broadcasts
+   * tab-stamped events to every connected client (every VS Code
+   * window), so native side effects (merge editor, SCM repo open,
+   * notifications, sidebar reveal) must only fire for tabs this
+   * window actually owns — otherwise one window's agent activity
+   * would disturb every other window.  Populated from every
+   * webview → extension message that carries a ``tabId`` (plus the
+   * ``restoredTabs`` list on ``ready`` and adopted sub-agent tabs);
+   * pruned on ``closeTab``.
+   */
+  private _ownTabs: Set<string> = new Set();
   private _webviewHasFocus: boolean = false;
 
   /** Per-tab MergeManager instances — each tab gets its own merge review. */
@@ -164,25 +217,25 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   }
 
   /**
-   * Eagerly push the current VS Code workspace folder to the daemon as
-   * its ``work_dir``.
+   * Eagerly push this window's VS Code workspace folder to the daemon
+   * as this connection's ``work_dir``.
    *
-   * The daemon caches ``self.work_dir`` once at process start from
-   * ``KISS_WORKDIR``/``getcwd()``.  When VS Code launches and re-uses an
-   * already-running daemon (the dependency-installer fast path), the
-   * daemon retains the previous session's work_dir until the user
-   * interacts with the sidebar (which lazily triggers ``_getClient()``).
+   * The daemon keeps one work_dir per client connection, and each VS
+   * Code window owns exactly one connection — so the work_dir pushed
+   * here is scoped to this window and can never be overwritten by
+   * another window opening a different workspace.
    *
    * Calling this method from ``activate()`` ensures the daemon's
-   * ``work_dir`` matches the open workspace folder *before* any backend
-   * call (autocomplete file-list, commit-message generation, etc.) is
-   * issued.  Safe to call repeatedly — the daemon ignores no-op
-   * updates and the client queues the command if the socket is not yet
-   * connected.
+   * work_dir for this window matches the open workspace folder
+   * *before* any backend call (autocomplete file-list, commit-message
+   * generation, etc.) is issued.  Safe to call repeatedly — the daemon
+   * ignores no-op updates and the client queues the command if the
+   * socket is not yet connected.
    */
   public syncWorkDir(): void {
-    // _getClient() lazily creates the AgentClient and sends the
-    // initial setWorkDir + installs the workspace-folders listener.
+    // _getClient() lazily creates the AgentClient, installs the
+    // on-connect setWorkDir preamble and the workspace-folders
+    // listener, and initiates the connection.
     this._getClient();
   }
 
@@ -234,15 +287,19 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     const client = new AgentClient();
     this._client = client;
     this._installClientListener(client);
+    // Sync the daemon's work_dir with this window's workspace folder
+    // on EVERY (re)connect, before any queued command is flushed.  The
+    // daemon keeps one work_dir per connection (= per VS Code window)
+    // and stamps it onto every command from this connection that does
+    // not carry an explicit ``workDir`` — so each window always
+    // operates on its own open workspace, even when several windows
+    // share the one kiss-web daemon.  Re-sending on reconnect (daemon
+    // restart, socket drop) is required because the daemon's
+    // per-connection state starts empty for each new socket.
+    client.on('connect', () => {
+      client.sendCommand({type: 'setWorkDir', workDir: this._getWorkDir()});
+    });
     client.connect();
-    // Sync the daemon's work_dir with the current workspace folder.
-    // The daemon caches ``self.work_dir`` once at process start from
-    // ``KISS_WORKDIR``/``getcwd()``; without this push, every backend
-    // path that does not receive an explicit ``workDir`` per command
-    // (autocomplete file-list, commit-message, worktree actions)
-    // keeps using the stale init value after the user opens a
-    // different folder in VS Code.
-    client.sendCommand({type: 'setWorkDir', workDir: this._getWorkDir()});
     // Keep the daemon in sync whenever the workspace folder set
     // changes (e.g. user opens a different folder in this window).
     this._workspaceFoldersSub = vscode.workspace.onDidChangeWorkspaceFolders(
@@ -263,15 +320,38 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
    */
   private _installClientListener(client: AgentClient): void {
     client.on('message', (msg: ToWebviewMessage) => {
-      if (msg.type === 'commitMessage') {
+      if (msg.type === 'configData' && msg.config) {
+        // ``configData`` is broadcast to every connected client, so
+        // the ``work_dir`` it carries may belong to whichever window
+        // requested it (or to the daemon-global fallback).  This
+        // window's work_dir is ALWAYS its own workspace folder —
+        // overwrite before forwarding so the settings panel never
+        // shows another window's folder.
+        msg.config.work_dir = this._getWorkDir();
+      }
+      if (msg.type === 'commitMessage' && this._isOwnTab(msg.tabId)) {
         this._onCommitMessage.fire({message: msg.message, error: msg.error});
       }
       if (msg.type === 'models' && msg.selected) {
         this._selectedModel = msg.selected;
       }
+      if (msg.type === 'openSubagentTab') {
+        // Adopt sub-agent tabs spawned under a parent tab this window
+        // owns: the webview materialises the tab from this very event
+        // without ever posting a command first, so ownership must be
+        // learned here for later tab-stamped events (merge, worktree,
+        // askUser) to pass the _isOwnTab gate.
+        const subMsg = msg as {tab_id?: string; parent_tab_id?: string};
+        if (
+          subMsg.tab_id &&
+          (!subMsg.parent_tab_id || this._ownTabs.has(subMsg.parent_tab_id))
+        ) {
+          this._ownTabs.add(subMsg.tab_id);
+        }
+      }
       if (msg.type === 'merge_data') {
         const mergeTabId = msg.tabId;
-        if (mergeTabId !== undefined) {
+        if (mergeTabId !== undefined && this._ownTabs.has(mergeTabId)) {
           const mgr = this._getOrCreateMergeManager(mergeTabId);
           this._restoreChain = this._restoreChain
             .then(async () => {
@@ -295,7 +375,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       if (msg.type === 'worktree_created' || msg.type === 'worktree_done') {
         const dir = msg.worktreeDir;
         const wtTabId = msg.tabId;
-        if (dir) {
+        if (dir && this._isOwnTab(wtTabId)) {
           if (wtTabId !== undefined) {
             this._worktreeDirs.set(wtTabId, dir);
           }
@@ -312,7 +392,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           progress.report({message: msg.message});
         }
       }
-      if (msg.type === 'worktree_result') {
+      if (msg.type === 'worktree_result' && this._isOwnTab(msg.tabId)) {
         const wrTabId = msg.tabId;
         if (wrTabId !== undefined) {
           const resolve = this._worktreeActionResolves.get(wrTabId);
@@ -352,7 +432,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           progress.report({message: msg.message});
         }
       }
-      if (msg.type === 'autocommit_done') {
+      if (msg.type === 'autocommit_done' && this._isOwnTab(msg.tabId)) {
         const adTabId = msg.tabId;
         if (adTabId !== undefined) {
           const resolve = this._autocommitActionResolves.get(adTabId);
@@ -372,8 +452,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       }
 
       // Reveal the sidebar when the agent asks a question so the user
-      // sees the modal even if they switched to another panel.
-      if (msg.type === 'askUser' && this._view) {
+      // sees the modal even if they switched to another panel.  Only
+      // for questions asked by a tab this window owns — another
+      // window's askUser must not yank this window's sidebar open.
+      if (msg.type === 'askUser' && this._view && this._isOwnTab(msg.tabId)) {
         this._view.show(true);
       }
 
@@ -393,10 +475,15 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       if (msg.type === 'status') {
         const statusTabId = msg.tabId;
         if (msg.running) {
-          if (statusTabId !== undefined) this._runningTabs.add(statusTabId);
+          // Track only this window's own tabs: _runningTabs drives
+          // stop-all and restart deferral for THIS window, and must
+          // not accumulate other windows' tab ids.
+          if (statusTabId !== undefined && this._ownTabs.has(statusTabId)) {
+            this._runningTabs.add(statusTabId);
+          }
         } else {
           if (statusTabId !== undefined) this._runningTabs.delete(statusTabId);
-          if (this._commitPendingTabs.size > 0) {
+          if (this._isOwnTab(statusTabId) && this._commitPendingTabs.size > 0) {
             this._onCommitMessage.fire({message: '', error: 'Process stopped'});
           }
         }
@@ -677,11 +764,8 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
   private async _openWorktreeInScm(worktreeDir: string): Promise<void> {
     try {
-      const gitExt = vscode.extensions.getExtension('vscode.git');
-      if (!gitExt) return;
-      const git = gitExt.isActive ? gitExt.exports : await gitExt.activate();
-      const api = git.getAPI(1);
-      if (api.openRepository) {
+      const api = await getGitApi();
+      if (api?.openRepository) {
         await api.openRepository(vscode.Uri.file(worktreeDir));
       }
     } catch (err) {
@@ -728,7 +812,39 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     });
   }
 
+  /**
+   * True when a daemon event targets a tab owned by this window's
+   * webview (or carries no tabId at all, i.e. is a global event).
+   * Tab-stamped events for tabs of OTHER windows reach this listener
+   * too (the daemon broadcasts to every client); they must not
+   * trigger native UI side effects here.
+   */
+  private _isOwnTab(tabId: string | undefined): boolean {
+    return tabId === undefined || this._ownTabs.has(tabId);
+  }
+
   private async _handleMessage(message: FromWebviewMessage): Promise<void> {
+    // Learn tab ownership from the webview's own traffic: any message
+    // carrying a tabId proves the tab lives in THIS window.  The
+    // ``ready`` message additionally announces every restored tab.
+    const msgTabId = (message as {tabId?: string}).tabId;
+    if (msgTabId) {
+      if (message.type === 'closeTab') this._ownTabs.delete(msgTabId);
+      else this._ownTabs.add(msgTabId);
+    }
+    if (message.type === 'ready' && message.restoredTabs) {
+      for (const rt of message.restoredTabs) {
+        if (rt.tabId) this._ownTabs.add(rt.tabId);
+      }
+    }
+    const forwarded = FORWARDED_COMMANDS[message.type];
+    if (forwarded) {
+      const src = message as unknown as Record<string, unknown>;
+      const cmd: Record<string, unknown> = {type: message.type};
+      for (const field of forwarded) cmd[field] = src[field];
+      this._getClient().sendCommand(cmd as unknown as AgentCommand);
+      return;
+    }
     switch (message.type) {
       case 'ready': {
         const readyTabId = message.tabId;
@@ -810,20 +926,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         break;
       }
 
-      case 'appendUserMessage': {
-        // Forward the queued user-message append to the backend so
-        // it can drop the text into the running agent's pending
-        // queue.  We do NOT add this tab to ``_runningTabs`` because
-        // the underlying task is already there.
-        const client = this._getClient();
-        client.sendCommand({
-          type: 'appendUserMessage',
-          prompt: message.prompt,
-          tabId: message.tabId,
-        });
-        break;
-      }
-
       case 'stop': {
         const stopTabId = message.tabId;
         const client = this._getClient();
@@ -849,63 +951,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         break;
       }
 
-      case 'getModels':
-      case 'getInputHistory':
-        this._getClient().sendCommand({type: message.type} as AgentCommand);
-        break;
-
-      case 'newChat': {
-        const newChatTabId = message.tabId;
-        this._getClient().sendCommand({type: 'newChat', tabId: newChatTabId});
-        break;
-      }
-
-      case 'getHistory':
-        this._getClient().sendCommand({
-          type: 'getHistory',
-          query: message.query,
-          offset: message.offset,
-          generation: message.generation,
-        });
-        break;
-
-      case 'getFrequentTasks':
-        this._getClient().sendCommand({
-          type: 'getFrequentTasks',
-          limit: message.limit,
-        });
-        break;
-
-      case 'deleteTask':
-        this._getClient().sendCommand({
-          type: 'deleteTask',
-          taskId: message.taskId,
-        });
-        break;
-
-      case 'setFavorite':
-        this._getClient().sendCommand({
-          type: 'setFavorite',
-          taskId: message.taskId,
-          isFavorite: message.isFavorite,
-        });
-        break;
-
-      case 'deleteFrequentTask':
-        this._getClient().sendCommand({
-          type: 'deleteFrequentTask',
-          task: message.task,
-        });
-        break;
-
-      case 'getFiles':
-        this._getClient().sendCommand({
-          type: 'getFiles',
-          prefix: message.prefix,
-          workDir: message.workDir,
-        });
-        break;
-
       case 'userAnswer': {
         const ansTabId = message.tabId;
         if (ansTabId !== undefined) {
@@ -913,18 +958,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
             type: 'userAnswer',
             answer: message.answer,
             tabId: ansTabId,
-          });
-        }
-        break;
-      }
-
-      case 'userActionDone': {
-        const doneTabId = this._activeTabId;
-        if (doneTabId) {
-          this._getClient().sendCommand({
-            type: 'userAnswer',
-            answer: 'done',
-            tabId: doneTabId,
           });
         }
         break;
@@ -994,17 +1027,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         break;
       }
 
-      case 'getAdjacentTask': {
-        const adjTabId = message.tabId;
-        this._getClient().sendCommand({
-          type: 'getAdjacentTask',
-          tabId: adjTabId,
-          taskId: message.taskId,
-          direction: message.direction,
-        });
-        break;
-      }
-
       case 'getWelcomeSuggestions':
         this._sendWelcomeSuggestions();
         this._sendRemoteUrl();
@@ -1036,28 +1058,14 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           }
           break;
         }
-        const mergeDispatch: Record<string, () => void> = {
-          accept: () => mgr.acceptChange(),
-          reject: () => mgr.rejectChange(),
-          prev: () => mgr.prevChange(),
-          next: () => mgr.nextChange(),
-          'accept-all': () => mgr.acceptAll(),
-          'reject-all': () => mgr.rejectAll(),
-          'accept-file': () => mgr.acceptFile(),
-          'reject-file': () => mgr.rejectFile(),
-        };
         const mAction = message.action;
-        const handler = mergeDispatch[mAction];
-        if (handler) handler();
+        const method = MERGE_ACTIONS[mAction as keyof typeof MERGE_ACTIONS];
+        if (method) void mgr[method]();
         else if (mAction === 'all-done') {
           this.sendMergeAllDone(mTabId);
         }
         break;
       }
-
-      case 'generateCommitMessage':
-        void this.generateCommitMessage(undefined, message.tabId ?? '');
-        break;
 
       case 'worktreeAction': {
         const wtAction = message.action;
@@ -1099,39 +1107,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           tabId: acTabId,
           workDir: message.workDir,
         });
-        break;
-      }
-
-      case 'getConfig':
-        this._getClient().sendCommand({type: 'getConfig'});
-        break;
-
-      case 'saveConfig':
-        this._getClient().sendCommand({
-          type: 'saveConfig',
-          config: message.config,
-          apiKeys: message.apiKeys,
-        });
-        break;
-
-      case 'pickFolder': {
-        const defaultUri =
-          message.currentPath && fs.existsSync(message.currentPath)
-            ? vscode.Uri.file(message.currentPath)
-            : undefined;
-        const result = await vscode.window.showOpenDialog({
-          canSelectFiles: false,
-          canSelectFolders: true,
-          canSelectMany: false,
-          openLabel: 'Select Working Directory',
-          defaultUri,
-        });
-        if (result && result.length > 0) {
-          this._sendToWebview({
-            type: 'folderPicked',
-            path: result[0].fsPath,
-          });
-        }
         break;
       }
 
@@ -1223,17 +1198,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
    * Used by extension.ts keyboard shortcuts that don't know the tab ID.
    * Routes to the MergeManager of ``_activeTabId``.
    */
-  public handleMergeCommand(
-    cmd:
-      | 'acceptChange'
-      | 'rejectChange'
-      | 'prevChange'
-      | 'nextChange'
-      | 'acceptAll'
-      | 'rejectAll'
-      | 'acceptFile'
-      | 'rejectFile',
-  ): void {
+  public handleMergeCommand(cmd: MergeCommand): void {
     const mgr = this._mergeManagers.get(this._activeTabId);
     if (mgr) void mgr[cmd]();
   }
@@ -1296,11 +1261,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   /** Start a new conversation in a new tab (without affecting running tabs). */
   public newConversation(): void {
     this._sendToWebview({type: 'clearChat'});
-  }
-
-  /** Ensure at least one chat tab exists; creates one only if there are none. */
-  public ensureChat(): void {
-    this._sendToWebview({type: 'ensureChat'});
   }
 
   /**

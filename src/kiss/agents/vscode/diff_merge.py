@@ -514,6 +514,51 @@ def _agent_file_hunks(
     return _file_as_new_hunks(fpath)
 
 
+def _write_base_copy(
+    work_dir: str,
+    merge_dir: Path,
+    ub_dir: Path,
+    fname: str,
+    base_ref: str,
+    *,
+    binary: bool,
+) -> Path:
+    """Write the pre-task "base" copy of *fname* into *merge_dir*.
+
+    Prefers the saved pre-task copy from *ub_dir* when one exists;
+    otherwise materialises ``git show {base_ref}:{fname}``.  When git
+    cannot produce the blob (e.g. a brand-new file), writes an empty
+    base so the merge view diffs against nothing.
+
+    Args:
+        work_dir: Repository root directory.
+        merge_dir: The merge-temp directory receiving the copy.
+        ub_dir: Directory containing saved pre-task file copies.
+        fname: File path relative to *work_dir*.
+        base_ref: Git ref the base content is read from.
+        binary: Whether to treat the content as raw bytes.
+
+    Returns:
+        The path of the written base copy inside *merge_dir*.
+    """
+    base_path = merge_dir / fname
+    base_path.parent.mkdir(parents=True, exist_ok=True)
+    saved_base = ub_dir / fname
+    if saved_base.is_file():
+        shutil.copy2(saved_base, base_path)
+    elif binary:
+        bin_result = _git_bytes(work_dir, "show", f"{base_ref}:{fname}")
+        base_path.write_bytes(
+            bin_result.stdout if bin_result.returncode == 0 else b"",
+        )
+    else:
+        base_result = _git(work_dir, "show", f"{base_ref}:{fname}")
+        base_path.write_text(
+            base_result.stdout if base_result.returncode == 0 else "",
+        )
+    return base_path
+
+
 def _prepare_merge_view(
     work_dir: str,
     data_dir: str,
@@ -612,16 +657,9 @@ def _prepare_merge_view(
             deleted_placeholder.parent.mkdir(parents=True, exist_ok=True)
             deleted_placeholder.write_text("")
             current_path = deleted_placeholder
-        base_path = merge_dir / fname
-        base_path.parent.mkdir(parents=True, exist_ok=True)
-        saved_base = ub_dir / fname
-        if saved_base.is_file():
-            shutil.copy2(saved_base, base_path)
-        else:
-            base_result = _git(work_dir, "show", f"{base_ref}:{fname}")
-            base_path.write_text(
-                base_result.stdout if base_result.returncode == 0 else "",
-            )
+        base_path = _write_base_copy(
+            work_dir, merge_dir, ub_dir, fname, base_ref, binary=False,
+        )
         manifest_files.append(
             {
                 "name": fname,
@@ -635,18 +673,9 @@ def _prepare_merge_view(
         current_path = Path(work_dir) / fname
         if not current_path.is_file():
             continue
-        base_path = merge_dir / fname
-        base_path.parent.mkdir(parents=True, exist_ok=True)
-        saved_base = ub_dir / fname
-        if saved_base.is_file():
-            shutil.copy2(saved_base, base_path)
-        else:
-            bin_result = _git_bytes(work_dir, "show", f"{base_ref}:{fname}")
-            if bin_result.returncode == 0:
-                base_path.write_bytes(bin_result.stdout)
-            else:
-                # New binary file: write an empty base
-                base_path.write_bytes(b"")
+        base_path = _write_base_copy(
+            work_dir, merge_dir, ub_dir, fname, base_ref, binary=True,
+        )
         manifest_files.append(
             {
                 "name": fname,

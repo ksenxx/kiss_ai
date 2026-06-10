@@ -17,6 +17,7 @@ from typing import Any
 
 import yaml
 
+from kiss._version import __version__
 from kiss.agents.sorcar.persistence import (
     _add_task,
     _load_chat_context,
@@ -26,7 +27,14 @@ from kiss.agents.sorcar.persistence import (
     _save_task_result,
 )
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent, _coerce_tasks
+from kiss.agents.sorcar.sorcar_agent import (
+    SorcarAgent,
+    _agent_usage,
+    _attribute_sub_usage,
+    _broadcast_subagent_done,
+    _coerce_tasks,
+    _yaml_failure,
+)
 
 MAX_TASKS = 10
 
@@ -111,6 +119,40 @@ class ChatSorcarAgent(SorcarAgent):
         parts.append("---\n")
         return "\n\n".join(parts) + "# Task (work on it now)\n\n" + prompt
 
+    def _build_extra_payload(
+        self,
+        model: str,
+        work_dir: str,
+        is_parallel: bool,
+        is_worktree: bool,
+    ) -> dict[str, object]:
+        """Build the task-history "extra" payload for persistence.
+
+        Shared by the early save (at task start, from the run kwargs)
+        and the final save (at task end, from the live agent state).
+        Includes the ``subagent`` marker when this agent is a parallel
+        sub-agent.
+
+        Args:
+            model: Model name to record.
+            work_dir: Working directory to record.
+            is_parallel: Whether parallel sub-agents are enabled.
+            is_worktree: Whether worktree isolation is in effect.
+
+        Returns:
+            The extra-payload dict.
+        """
+        payload: dict[str, object] = {
+            "model": model,
+            "work_dir": work_dir,
+            "version": __version__,
+            "is_parallel": is_parallel,
+            "is_worktree": is_worktree,
+        }
+        if self._subagent_info is not None:
+            payload["subagent"] = self._subagent_info
+        return payload
+
     def _run_tasks_parallel(
         self,
         tasks: list[str],
@@ -120,8 +162,8 @@ class ChatSorcarAgent(SorcarAgent):
 
         """
         tasks = _coerce_tasks(tasks)
-        model = getattr(self, "model_name", None)
-        work_dir = getattr(self, "work_dir", None)
+        model = self.model_name
+        work_dir = self.work_dir
         chat_id = self._chat_id
         parent_task_id = self._last_task_id
         # Resolve the parent's frontend tab id from the running-agent
@@ -183,17 +225,9 @@ class ChatSorcarAgent(SorcarAgent):
                 )
                 return result
             except Exception as exc:
-                error_result: str = yaml.dump(
-                    {"success": False, "summary": f"Unhandled exception: {exc}"},
-                    sort_keys=False,
-                )
-                return error_result
+                return _yaml_failure(exc)
             finally:
-                sub_usage[idx] = (
-                    float(getattr(agent, "budget_used", 0.0) or 0.0),
-                    int(getattr(agent, "total_tokens_used", 0) or 0),
-                    int(getattr(agent, "total_steps", 0) or 0),
-                )
+                sub_usage[idx] = _agent_usage(agent)
                 # Broadcast ``subagentDone`` so the frontend can stop
                 # the running indicator on the sub-agent tab.
                 #
@@ -210,52 +244,28 @@ class ChatSorcarAgent(SorcarAgent):
                 # for the ``_open_persisted_subagent_tabs`` path
                 # where the tab id is deterministic.
                 if printer is not None:
-                    broadcast = getattr(printer, "broadcast", None)
-                    if broadcast is not None:
-                        try:
-                            sub_task_id = getattr(
-                                agent, "_last_task_id", None,
-                            )
-                            fanout = getattr(
-                                printer, "_fanout_targets", None,
-                            )
-                            viewer_ids: list[str] = []
-                            if fanout and sub_task_id is not None:
-                                viewer_ids = fanout(sub_task_id)
-                            if sub_tab_id not in viewer_ids:
-                                viewer_ids.append(sub_tab_id)
-                            for vid in viewer_ids:
-                                broadcast({
-                                    "type": "subagentDone",
-                                    "tab_id": vid,
-                                    "tabId": "",
-                                })
-                        except Exception:
-                            pass
+                    try:
+                        sub_task_id = getattr(agent, "_last_task_id", None)
+                        fanout = getattr(printer, "_fanout_targets", None)
+                        viewer_ids: list[str] = []
+                        if fanout and sub_task_id is not None:
+                            viewer_ids = fanout(sub_task_id)
+                        if sub_tab_id not in viewer_ids:
+                            viewer_ids.append(sub_tab_id)
+                        _broadcast_subagent_done(printer, viewer_ids)
+                    except Exception:
+                        pass
                 _RunningAgentState.unregister(sub_tab_id)
 
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             results = list(pool.map(_run_single, enumerate(tasks)))
 
-        self.budget_used = (
-            float(getattr(self, "budget_used", 0.0) or 0.0)
-            + sum(u[0] for u in sub_usage)
+        _attribute_sub_usage(
+            self,
+            sum(u[0] for u in sub_usage),
+            sum(u[1] for u in sub_usage),
+            sum(u[2] for u in sub_usage),
         )
-        self.total_tokens_used = (
-            int(getattr(self, "total_tokens_used", 0) or 0)
-            + sum(u[1] for u in sub_usage)
-        )
-        self.total_steps = (
-            int(getattr(self, "total_steps", 0) or 0)
-            + sum(u[2] for u in sub_usage)
-        )
-        if self.printer is not None:
-            try:
-                self.printer.budget_offset = self.budget_used  # type: ignore[attr-defined]
-                self.printer.tokens_offset = self.total_tokens_used  # type: ignore[attr-defined]
-                self.printer.steps_offset = self.total_steps  # type: ignore[attr-defined]
-            except Exception:
-                pass
         return results
 
     def run(  # type: ignore[override]
@@ -282,6 +292,7 @@ class ChatSorcarAgent(SorcarAgent):
         """
         skip_persistence = kwargs.pop("_skip_persistence", False)
         subscribe_tab_id = kwargs.pop("_subscribe_tab_id", "")
+        on_task_id_allocated = kwargs.pop("_on_task_id_allocated", None)
         # Mint a fresh chat id only if no caller (or prior ``run()``)
         # already established one.  Resetting unconditionally here would
         # discard the ``chat_id`` that ``_run_tasks_parallel`` propagates
@@ -294,20 +305,14 @@ class ChatSorcarAgent(SorcarAgent):
 
         agent_prompt = self.build_chat_prompt(prompt_template)
 
-        from kiss._version import __version__
-
-        early_extra: dict[str, object] = {
-            "model": kwargs.get("model_name", "") or "",
-            "work_dir": kwargs.get("work_dir", "") or "",
-            "version": __version__,
-            "is_parallel": bool(kwargs.get("is_parallel", False)),
-            "is_worktree": (
-                bool(kwargs.get("use_worktree", False))
-                or type(self).__name__ == "WorktreeSorcarAgent"
+        early_extra = self._build_extra_payload(
+            model=kwargs.get("model_name", "") or "",
+            work_dir=kwargs.get("work_dir", "") or "",
+            is_parallel=bool(kwargs.get("is_parallel", False)),
+            is_worktree=(
+                bool(kwargs.get("use_worktree", False)) or self.uses_worktree
             ),
-        }
-        if self._subagent_info is not None:
-            early_extra["subagent"] = self._subagent_info
+        )
 
         task_id, self._chat_id = _add_task(
             prompt_template, chat_id=self._chat_id, extra=early_extra,
@@ -393,6 +398,19 @@ class ChatSorcarAgent(SorcarAgent):
             start_rec = getattr(printer, "start_recording", None)
             if start_rec is not None:
                 start_rec()
+        if on_task_id_allocated is not None:
+            # Tell the caller (the VS Code task runner) which
+            # ``task_history`` row id this run owns, BEFORE any agent
+            # event is broadcast.  The server uses the hook to
+            # subscribe every other tab that currently has this
+            # ``chat_id`` open (in any VS Code window / browser
+            # window) to the new task's event stream, so live events
+            # reach all viewers of the chat — not only the tab that
+            # launched the run.
+            try:
+                on_task_id_allocated(int(task_id), self._chat_id)
+            except Exception:
+                pass
         if self._subagent_info is None:
             _record_frequent_task(prompt_template)
 
@@ -429,19 +447,14 @@ class ChatSorcarAgent(SorcarAgent):
                     tl.task_id = ""
             if not skip_persistence:
                 _save_task_result(task_id=task_id, result=result_summary)
-                from kiss._version import __version__
-
-                extra_payload: dict[str, object] = {
-                    "model": getattr(self, "model_name", ""),
-                    "work_dir": getattr(self, "work_dir", ""),
-                    "version": __version__,
-                    "tokens": self.total_tokens_used,
-                    "cost": round(self.budget_used, 6),
-                    "is_parallel": self._is_parallel,
-                    "is_worktree": type(self).__name__ == "WorktreeSorcarAgent",
-                }
-                if self._subagent_info is not None:
-                    extra_payload["subagent"] = self._subagent_info
+                extra_payload = self._build_extra_payload(
+                    model=self.model_name,
+                    work_dir=self.work_dir,
+                    is_parallel=self._is_parallel,
+                    is_worktree=self.uses_worktree,
+                )
+                extra_payload["tokens"] = self.total_tokens_used
+                extra_payload["cost"] = round(self.budget_used, 6)
                 _save_task_extra(extra_payload, task_id=task_id)
 
 

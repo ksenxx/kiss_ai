@@ -112,15 +112,13 @@ _init_tables_lock = threading.Lock()
 
 _chat_context_text_cache: dict[str, str] = {}
 _chat_context_cache_lock = threading.Lock()
-# Per-chat invalidation generation counter.  Bumped on every cache
-# invalidation (and once-globally when the whole cache is cleared so
-# all in-flight readers see a generation change).  Readers capture the
-# generation *before* the SQL read and only store their result if the
-# generation hasn't advanced — preventing a slow reader from
-# overwriting a fresh cache entry that a faster reader produced after
-# a concurrent write+invalidate.
-_chat_context_cache_gen: dict[str, int] = {}
-_chat_context_cache_global_gen: int = 0
+# Invalidation generation counter.  Bumped on every cache invalidation
+# (per-chat or global).  Readers capture the generation *before* the
+# SQL read and only store their result if the generation hasn't
+# advanced — preventing a slow reader from overwriting a fresh cache
+# entry that a faster reader produced after a concurrent
+# write+invalidate.
+_chat_context_cache_gen: int = 0
 
 
 def _invalidate_chat_context_cache(chat_id: str = "") -> None:
@@ -129,17 +127,13 @@ def _invalidate_chat_context_cache(chat_id: str = "") -> None:
     When *chat_id* is empty, the entire cache is cleared (used by test
     fixtures that swap the underlying database file).
     """
-    global _chat_context_cache_global_gen
+    global _chat_context_cache_gen
     with _chat_context_cache_lock:
         if chat_id:
             _chat_context_text_cache.pop(chat_id, None)
-            _chat_context_cache_gen[chat_id] = (
-                _chat_context_cache_gen.get(chat_id, 0) + 1
-            )
         else:
             _chat_context_text_cache.clear()
-            _chat_context_cache_gen.clear()
-            _chat_context_cache_global_gen += 1
+        _chat_context_cache_gen += 1
 
 
 # ---------------------------------------------------------------------------
@@ -174,9 +168,6 @@ _HistoryEntry = dict[str, object]
 # Legacy backward-compat variable: tests save/restore/None-ify this.
 # Setting to None signals _get_db() to reconnect on the next call.
 _db_conn: sqlite3.Connection | None = None
-
-# Kept for backward compatibility — some callers import it directly.
-_db_lock = threading.Lock()
 
 # Per-thread connection storage.  Each thread gets its own
 # sqlite3.Connection keyed by (_db_generation, _DB_PATH).
@@ -503,17 +494,14 @@ def _delete_task(task_id: int) -> bool:
     _flush_chat_events()
     db = _get_db()
     with _rw_lock.write_lock():
-        row = db.execute(
-            "SELECT id FROM task_history WHERE id = ?", (task_id,)
-        ).fetchone()
-        if row is None:
-            return False
         db.execute("DELETE FROM events WHERE task_id = ?", (task_id,))
-        db.execute("DELETE FROM task_history WHERE id = ?", (task_id,))
+        cursor = db.execute(
+            "DELETE FROM task_history WHERE id = ?", (task_id,)
+        )
         _next_seq_cache.pop(task_id, None)
         _marked_has_events.discard(task_id)
         db.commit()
-        return True
+        return (cursor.rowcount or 0) > 0
 
 
 def _load_history(limit: int = 0, offset: int = 0) -> list[_HistoryEntry]:
@@ -632,6 +620,77 @@ def _resolve_task_id(
     return _most_recent_task_id(db, task)
 
 
+def _log_orphaned_task_forensics(
+    db: sqlite3.Connection,
+    not_in_clause: str,
+) -> None:
+    """Log diagnostic info for each row still carrying the orphan sentinel.
+
+    Called by :func:`_recover_orphaned_tasks` (under the write lock)
+    before it rewrites the sentinel rows, so the startup log captures
+    exactly which tasks were interrupted and their last recorded
+    state.  This is the primary forensic evidence when a kill
+    (SIGKILL / OOM / VS Code reload) prevents the normal
+    ``_save_task_result`` → ``_append_chat_event`` finally block from
+    running.
+
+    Args:
+        db: Active database connection.
+        not_in_clause: SQL fragment excluding still-active task ids
+            (``""`` or ``"AND id NOT IN (...)"``).
+    """
+    diag_rows = db.execute(
+        "SELECT id, task, chat_id, extra FROM task_history "
+        "WHERE result = ? " + not_in_clause,
+        ("Agent Failed Abruptly",),
+    ).fetchall()
+    for row in diag_rows:
+        task_id_val = row["id"]
+        # Fetch the last few events to show where the agent was
+        last_events = db.execute(
+            "SELECT seq, event_json, timestamp FROM events "
+            "WHERE task_id = ? ORDER BY seq DESC LIMIT 3",
+            (task_id_val,),
+        ).fetchall()
+        last_event_summaries = []
+        for ev in last_events:
+            try:
+                ev_data = json.loads(ev["event_json"])
+                ev_type = ev_data.get("type", "unknown")
+                ev_ts = ev["timestamp"]
+            except Exception:
+                ev_type = "parse_error"
+                ev_ts = 0
+            last_event_summaries.append(
+                f"seq={ev['seq']} type={ev_type} ts={ev_ts:.1f}"
+            )
+        extra_str = row["extra"] or "{}"
+        try:
+            extra = json.loads(extra_str)
+            model_name = extra.get("model", "unknown")
+            start_ts = extra.get("startTs", 0)
+            steps = extra.get("steps", "?")
+            cost = extra.get("cost", "?")
+        except Exception:
+            model_name = "unknown"
+            start_ts = 0
+            steps = "?"
+            cost = "?"
+        task_preview = (row["task"] or "")[:120]
+        logger.warning(
+            "Orphaned task recovered: id=%s chat_id=%s model=%s "
+            "startTs=%s steps=%s cost=%s task=%r last_events=[%s]",
+            task_id_val,
+            row["chat_id"] or "",
+            model_name,
+            start_ts,
+            steps,
+            cost,
+            task_preview,
+            "; ".join(last_event_summaries),
+        )
+
+
 def _recover_orphaned_tasks(active_task_ids: set[int]) -> int:
     """Replace the ``"Agent Failed Abruptly"`` sentinel on dead rows.
 
@@ -675,62 +734,7 @@ def _recover_orphaned_tasks(active_task_ids: set[int]) -> int:
         "UPDATE task_history SET result = ? WHERE result = ? " + not_in_clause
     )
     with _rw_lock.write_lock():
-        # Before updating, collect diagnostic info for each orphaned row
-        # so the startup log captures exactly which tasks were interrupted
-        # and their last recorded state.  This is the primary forensic
-        # evidence when a kill (SIGKILL / OOM / VS Code reload) prevents
-        # the normal ``_save_task_result`` → ``_append_chat_event``
-        # finally block from running.
-        diag_rows = db.execute(
-            "SELECT id, task, chat_id, extra FROM task_history "
-            "WHERE result = ? " + not_in_clause,
-            ("Agent Failed Abruptly",),
-        ).fetchall()
-        for row in diag_rows:
-            task_id_val = row["id"]
-            # Fetch the last few events to show where the agent was
-            last_events = db.execute(
-                "SELECT seq, event_json, timestamp FROM events "
-                "WHERE task_id = ? ORDER BY seq DESC LIMIT 3",
-                (task_id_val,),
-            ).fetchall()
-            last_event_summaries = []
-            for ev in last_events:
-                try:
-                    ev_data = json.loads(ev["event_json"])
-                    ev_type = ev_data.get("type", "unknown")
-                    ev_ts = ev["timestamp"]
-                except Exception:
-                    ev_type = "parse_error"
-                    ev_ts = 0
-                last_event_summaries.append(
-                    f"seq={ev['seq']} type={ev_type} ts={ev_ts:.1f}"
-                )
-            extra_str = row["extra"] or "{}"
-            try:
-                extra = json.loads(extra_str)
-                model_name = extra.get("model", "unknown")
-                start_ts = extra.get("startTs", 0)
-                steps = extra.get("steps", "?")
-                cost = extra.get("cost", "?")
-            except Exception:
-                model_name = "unknown"
-                start_ts = 0
-                steps = "?"
-                cost = "?"
-            task_preview = (row["task"] or "")[:120]
-            logger.warning(
-                "Orphaned task recovered: id=%s chat_id=%s model=%s "
-                "startTs=%s steps=%s cost=%s task=%r last_events=[%s]",
-                task_id_val,
-                row["chat_id"] or "",
-                model_name,
-                start_ts,
-                steps,
-                cost,
-                task_preview,
-                "; ".join(last_event_summaries),
-            )
+        _log_orphaned_task_forensics(db, not_in_clause)
         cursor = db.execute(
             sql,
             (
@@ -830,6 +834,46 @@ def _shutdown_persist_in_flight_results(task_ids: set[int]) -> int:
     return rowcount
 
 
+def _update_task_column(
+    column: str,
+    value: str,
+    task_id: int | None,
+    task: str | None,
+) -> str | None:
+    """Write *value* into *column* of the resolved ``task_history`` row.
+
+    Drains pending queued events first so the column update is ordered
+    after every event the task has emitted so far, then performs the
+    UPDATE under the process-wide write lock.
+
+    Args:
+        column: Column name to update.  Must be a trusted literal
+            (``"result"`` or ``"extra"``) — never user input.
+        value: The new column value.
+        task_id: Stable row id to update when available.
+        task: Fallback task description string for legacy callers.
+
+    Returns:
+        The updated row's ``chat_id`` (possibly ``""``), or ``None``
+        when no row could be resolved.
+    """
+    _flush_chat_events()
+    db = _get_db()
+    with _rw_lock.write_lock():
+        resolved = _resolve_task_id(db, task_id, task)
+        if resolved is None:
+            return None
+        db.execute(
+            f"UPDATE task_history SET {column} = ? WHERE id = ?",
+            (value, resolved),
+        )
+        row = db.execute(
+            "SELECT chat_id FROM task_history WHERE id = ?", (resolved,),
+        ).fetchone()
+        db.commit()
+        return (row["chat_id"] or "") if row is not None else ""
+
+
 def _save_task_result(
     result: str,
     task_id: int | None = None,
@@ -842,25 +886,9 @@ def _save_task_result(
         task_id: Stable row id to update when available.
         task: Fallback task description string for legacy callers.
     """
-    # Drain pending queued events so a history-replay sees the complete
-    # event stream alongside the new ``result`` value.
-    _flush_chat_events()
-    db = _get_db()
-    affected_chat_id = ""
-    with _rw_lock.write_lock():
-        resolved = _resolve_task_id(db, task_id, task)
-        if resolved is None:
-            return
-        db.execute(
-            "UPDATE task_history SET result = ? WHERE id = ?",
-            (result, resolved),
-        )
-        row = db.execute(
-            "SELECT chat_id FROM task_history WHERE id = ?", (resolved,),
-        ).fetchone()
-        if row is not None:
-            affected_chat_id = row["chat_id"] or ""
-        db.commit()
+    affected_chat_id = _update_task_column("result", result, task_id, task)
+    if affected_chat_id is None:
+        return
     # Invalidate the autocomplete chat-context cache so the updated
     # result text becomes visible to ghost-text suggestions on the next
     # keystroke.  Done outside the write lock to keep the critical
@@ -932,19 +960,7 @@ def _save_task_extra(
         task_id: Stable row id to update when available.
         task: Fallback task description string for legacy callers.
     """
-    # Drain pending queued events first so the extra metadata update is
-    # ordered after every event the task has emitted so far.
-    _flush_chat_events()
-    db = _get_db()
-    with _rw_lock.write_lock():
-        resolved = _resolve_task_id(db, task_id, task)
-        if resolved is None:
-            return
-        db.execute(
-            "UPDATE task_history SET extra = ? WHERE id = ?",
-            (json.dumps(extra), resolved),
-        )
-        db.commit()
+    _update_task_column("extra", json.dumps(extra), task_id, task)
 
 
 # ---------------------------------------------------------------------------
@@ -1179,35 +1195,19 @@ def _append_chat_event(
         task_id: Stable row id to update when available.
         task: Fallback task description string for legacy callers.
     """
-    # Drain pending queued events first so this synchronous append lands
-    # AFTER any earlier ``_queue_chat_event`` calls for the same task.
-    _flush_chat_events()
-    db = _get_db()
-    with _rw_lock.write_lock():
+    # Resolve (and validate) the row id up front — the queued write
+    # path requires a concrete, existing ``task_history`` id.
+    with _rw_lock.read_lock():
+        db = _get_db()
         resolved = _resolve_task_id(db, task_id, task)
-        if resolved is None:
-            return
-        cached = _next_seq_cache.get(resolved)
-        if cached is None:
-            row = db.execute(
-                "SELECT COALESCE(MAX(seq), -1) + 1 AS next_seq "
-                "FROM events WHERE task_id = ?",
-                (resolved,),
-            ).fetchone()
-            cached = row["next_seq"] if row else 0
-        db.execute(
-            "INSERT INTO events (task_id, seq, event_json, timestamp) "
-            "VALUES (?, ?, ?, ?)",
-            (resolved, cached, json.dumps(event), time.time()),
-        )
-        _next_seq_cache[resolved] = cached + 1
-        if resolved not in _marked_has_events:
-            db.execute(
-                "UPDATE task_history SET has_events = 1 WHERE id = ?",
-                (resolved,),
-            )
-            _marked_has_events.add(resolved)
-        db.commit()
+    if resolved is None:
+        return
+    # Reuse the single batched write path so the sync and async event
+    # writers can never diverge.  The FIFO queue guarantees this event
+    # lands AFTER any earlier ``_queue_chat_event`` calls for the same
+    # task; the flush makes the write synchronous.
+    _queue_chat_event(event, resolved)
+    _flush_chat_events()
 
 
 def _load_task_chat_id(task: str) -> str:
@@ -1221,11 +1221,10 @@ def _load_task_chat_id(task: str) -> str:
     """
     with _rw_lock.read_lock():
         db = _get_db()
-        task_id = _most_recent_task_id(db, task)
-        if task_id is None:
-            return ""
         row = db.execute(
-            "SELECT chat_id FROM task_history WHERE id = ?", (task_id,)
+            "SELECT chat_id FROM task_history WHERE task = ? "
+            "ORDER BY timestamp DESC LIMIT 1",
+            (task,),
         ).fetchone()
         return str(row["chat_id"]) if row and row["chat_id"] else ""
 
@@ -1320,6 +1319,39 @@ def _fetch_events_for_task_id(
     return events
 
 
+def _events_session_dict(
+    db: sqlite3.Connection,
+    task_id: int,
+    task: str,
+    chat_id: str,
+    extra: object,
+) -> dict[str, object]:
+    """Build the replay-session dict shared by both chat-events loaders.
+
+    Callers must hold ``_rw_lock.read_lock()`` (or ``write_lock()``)
+    because this fetches the event rows via
+    :func:`_fetch_events_for_task_id`.
+
+    Args:
+        db: Active database connection.
+        task_id: Primary key of the ``task_history`` row.
+        task: The row's task text.
+        chat_id: The session's chat id (possibly ``""``).
+        extra: The raw ``extra`` column value.
+
+    Returns:
+        Dict with ``task``, ``task_id``, ``events``, ``chat_id``, and
+        ``extra`` keys.
+    """
+    return {
+        "task": task,
+        "task_id": task_id,
+        "events": _fetch_events_for_task_id(db, task_id),
+        "chat_id": chat_id,
+        "extra": extra or "",
+    }
+
+
 def _load_latest_chat_events_by_chat_id(
     chat_id: str,
 ) -> dict[str, object] | None:
@@ -1348,14 +1380,7 @@ def _load_latest_chat_events_by_chat_id(
         ).fetchone()
         if not row:
             return None
-        task_id = row["id"]
-        return {
-            "task": row["task"],
-            "task_id": task_id,
-            "events": _fetch_events_for_task_id(db, task_id),
-            "chat_id": chat_id,
-            "extra": row["extra"] or "",
-        }
+        return _events_session_dict(db, row["id"], row["task"], chat_id, row["extra"])
 
 
 def _load_chat_events_by_task_id(
@@ -1383,13 +1408,9 @@ def _load_chat_events_by_task_id(
         ).fetchone()
         if not row:
             return None
-        return {
-            "task": row["task"],
-            "task_id": task_id,
-            "events": _fetch_events_for_task_id(db, task_id),
-            "chat_id": str(row["chat_id"] or ""),
-            "extra": row["extra"] or "",
-        }
+        return _events_session_dict(
+            db, task_id, row["task"], str(row["chat_id"] or ""), row["extra"]
+        )
 
 
 def _load_subagent_rows_by_parent_task_id(
@@ -1625,8 +1646,7 @@ def _load_chat_context_text(chat_id: str) -> str:
     # fresher value another reader may have just published.
     with _chat_context_cache_lock:
         cached = _chat_context_text_cache.get(chat_id)
-        snapshot_gen = _chat_context_cache_gen.get(chat_id, 0)
-        snapshot_global_gen = _chat_context_cache_global_gen
+        snapshot_gen = _chat_context_cache_gen
     if cached is not None:
         return cached
     parts: list[str] = []
@@ -1643,12 +1663,7 @@ def _load_chat_context_text(chat_id: str) -> str:
         # the pre-read snapshot and now.  Otherwise our data is
         # potentially stale — leave whatever fresher entry (or empty
         # slot) is already there alone.
-        current_gen = _chat_context_cache_gen.get(chat_id, 0)
-        current_global_gen = _chat_context_cache_global_gen
-        if (
-            current_gen == snapshot_gen
-            and current_global_gen == snapshot_global_gen
-        ):
+        if _chat_context_cache_gen == snapshot_gen:
             _chat_context_text_cache[chat_id] = text
     return text
 
@@ -1796,14 +1811,11 @@ def _delete_frequent_task(task: str) -> bool:
         return False
     db = _get_db()
     with _rw_lock.write_lock():
-        row = db.execute(
-            "SELECT 1 FROM frequent_tasks WHERE task = ?", (task,),
-        ).fetchone()
-        if row is None:
-            return False
-        db.execute("DELETE FROM frequent_tasks WHERE task = ?", (task,))
+        cursor = db.execute(
+            "DELETE FROM frequent_tasks WHERE task = ?", (task,)
+        )
         db.commit()
-        return True
+        return (cursor.rowcount or 0) > 0
 
 
 def _load_frequent_tasks(limit: int = 50) -> list[dict[str, object]]:
