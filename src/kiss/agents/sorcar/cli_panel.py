@@ -98,11 +98,12 @@ def clip_buf(buf: str, cols: int) -> str:
         The portion of *buf* that fits on the body row (possibly the
         whole buffer, or its tail when it would overflow).
     """
+    shown = buf.replace("\n", "⏎")
     inner_w = cols - 4  # room between "│ " and " │"
     avail = inner_w - len(PROMPT_MARKER)
-    if len(buf) > avail:
-        return buf[len(buf) - avail :]
-    return buf
+    if len(shown) > avail:
+        return shown[len(shown) - avail :]
+    return shown
 
 
 def panel_body(buf: str, cols: int) -> tuple[str, bool]:
