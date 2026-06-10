@@ -41,7 +41,6 @@ export type FromWebviewMessage =
   | {type: 'stop'; tabId?: string}
   | {type: 'appendUserMessage'; prompt: string; tabId?: string}
   | {type: 'selectModel'; model: string; tabId?: string}
-  | {type: 'getModels'}
   | {type: 'getHistory'; query?: string; offset?: number; generation?: number}
   | {type: 'getFrequentTasks'; limit?: number}
   | {type: 'deleteTask'; taskId: number}
@@ -49,7 +48,6 @@ export type FromWebviewMessage =
   | {type: 'setFavorite'; taskId: number; isFavorite: boolean}
   | {type: 'getFiles'; prefix: string; workDir?: string}
   | {type: 'userAnswer'; answer: string; tabId?: string}
-  | {type: 'userActionDone'}
   | {type: 'openFile'; path: string; line?: number}
   | {type: 'recordFileUsage'; path: string; workDir?: string}
   | {
@@ -62,7 +60,6 @@ export type FromWebviewMessage =
   | {type: 'complete'; query: string; tabId?: string}
   | {type: 'mergeAction'; action: string; tabId?: string; workDir?: string}
   | {type: 'newChat'; tabId?: string}
-  | {type: 'generateCommitMessage'; tabId?: string; workDir?: string}
   | {type: 'focusEditor'}
   | {type: 'closeTab'; tabId: string}
   | {type: 'getInputHistory'}
@@ -75,7 +72,6 @@ export type FromWebviewMessage =
     }
   | {type: 'resolveDroppedPaths'; uris: string[]}
   | {type: 'webviewFocusChanged'; focused: boolean}
-  | {type: 'pickFolder'; currentPath?: string}
   | {
       type: 'getAdjacentTask';
       tabId?: string;
@@ -137,7 +133,6 @@ type ToWebviewMessageBody =
   | {type: 'clear'; chat_id?: number}
   | {type: 'showWelcome'}
   | {type: 'clearChat'}
-  | {type: 'ensureChat'}
   | {type: 'task_done'}
   | {type: 'task_error'; text: string}
   | {type: 'task_stopped'}
@@ -210,7 +205,6 @@ type ToWebviewMessageBody =
       tabId?: string;
     }
   | {type: 'droppedPaths'; paths: string[]}
-  | {type: 'folderPicked'; path: string}
   | {
       type: 'adjacent_task_events';
       direction: string;
@@ -289,7 +283,6 @@ export interface AgentCommand {
   task?: string;
   direction?: 'prev' | 'next';
   tabId?: string;
-  skip?: boolean;
   config?: Record<string, unknown>;
   apiKeys?: Record<string, string>;
   isFavorite?: boolean;

@@ -204,24 +204,30 @@
     };
   }
 
+  /** Find a tab object by its id (null when absent). */
+  function getTab(id) {
+    return tabs.find(t => t.id === id) || null;
+  }
+
+  /** Create a fresh collapsible 'Thoughts' llm-panel. */
+  function mkThoughtsPanel() {
+    const panel = mkEl('div', 'llm-panel');
+    const hdr = mkEl('div', 'llm-panel-hdr');
+    hdr.textContent = 'Thoughts';
+    addCollapse(panel, hdr);
+    panel.appendChild(hdr);
+    return panel;
+  }
+
   /** Check if the active tab has a running task. */
   function isActiveTabRunning() {
-    const tab = tabs.find(t => {
-      return t.id === activeTabId;
-    });
+    const tab = getTab(activeTabId);
     return tab ? tab.isRunning : false;
   }
 
   /** Find the tab object that owns a backend message by tabId. */
   function findTabByEvt(ev) {
-    if (ev && ev.tabId !== undefined) {
-      return (
-        tabs.find(t => {
-          return t.id === ev.tabId;
-        }) || null
-      );
-    }
-    return null;
+    return ev && ev.tabId !== undefined ? getTab(ev.tabId) : null;
   }
 
   /**
@@ -233,16 +239,12 @@
    * than a possibly-stale daemon-wide directory.
    */
   function workDirForTab(tabId) {
-    const tab = tabs.find(t => {
-      return t.id === tabId;
-    });
+    const tab = getTab(tabId);
     return tab && tab.workDir ? tab.workDir : '';
   }
 
   function saveCurrentTab() {
-    const tab = tabs.find(t => {
-      return t.id === activeTabId;
-    });
+    const tab = getTab(activeTabId);
     if (!tab) return;
     // Save welcome visibility and detach from O before capturing fragment
     tab.welcomeVisible = welcome ? welcome.style.display !== 'none' : true;
@@ -493,9 +495,7 @@
       addBtn.addEventListener('click', () => {
         createNewTab();
       });
-      const firstActionBtn = tabBar.querySelector('.tab-bar-action-btn');
-      if (firstActionBtn) tabBar.insertBefore(addBtn, firstActionBtn);
-      else tabBar.appendChild(addBtn);
+      tabBar.appendChild(addBtn);
     }
 
     // Settings button (gear icon) sits to the right of the "+" button.
@@ -521,9 +521,7 @@
   function switchToTab(tabId) {
     if (tabId === activeTabId) return;
     saveCurrentTab();
-    const tab = tabs.find(t => {
-      return t.id === tabId;
-    });
+    const tab = getTab(tabId);
     if (!tab) return;
     restoreTab(tab);
     renderTabBar();
@@ -738,9 +736,7 @@
   }
 
   function updateActiveTabTitle(title) {
-    const tab = tabs.find(t => {
-      return t.id === activeTabId;
-    });
+    const tab = getTab(activeTabId);
     if (!tab) return;
     const t = (title || '').trim();
     tab.title = t
@@ -1001,9 +997,7 @@
   if (taskPanelChevron) {
     taskPanelChevron.addEventListener('click', e => {
       e.stopPropagation();
-      const tab = tabs.find(t => {
-        return t.id === activeTabId;
-      });
+      const tab = getTab(activeTabId);
       const visibleTask = getVisibleTaskName();
       const wasExpanded = tab ? !!tab.panelsExpandedMap[visibleTask] : false;
       const expanded = !wasExpanded;
@@ -1011,6 +1005,29 @@
       updateChevronIcon(expanded);
       applyChevronState(expanded, visibleTask);
     });
+  }
+
+  /**
+   * Copy *text* via a temporary textarea + ``document.execCommand('copy')``
+   * — fallback for environments without the async clipboard API.
+   * Returns true when ``execCommand`` ran without throwing.
+   */
+  function fallbackCopyText(text) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try {
+      document.execCommand('copy');
+      ok = true;
+    } catch {
+      /* ignore */
+    }
+    document.body.removeChild(ta);
+    return ok;
   }
 
   // Copy-task button: trims the visible task text and copies it to the
@@ -1025,19 +1042,7 @@
       try {
         await navigator.clipboard.writeText(text);
       } catch {
-        // Fallback for environments without async clipboard API.
-        const ta = document.createElement('textarea');
-        ta.value = text;
-        ta.style.position = 'fixed';
-        ta.style.opacity = '0';
-        document.body.appendChild(ta);
-        ta.select();
-        try {
-          document.execCommand('copy');
-        } catch {
-          /* ignore */
-        }
-        document.body.removeChild(ta);
+        fallbackCopyText(text);
       }
       const iconCopy = taskPanelCopy.querySelector('.icon-copy');
       const iconCheck = taskPanelCopy.querySelector('.icon-check');
@@ -1189,9 +1194,7 @@
       if (taskId !== undefined && taskId !== null && taskId !== '')
         newestLoadedTaskId = taskId;
     }
-    const tab = tabs.find(x => {
-      return x.id === activeTabId;
-    });
+    const tab = getTab(activeTabId);
     if (tab) applyChevronState(!!tab.panelsExpandedMap[task], task);
   }
 
@@ -1989,11 +1992,7 @@
       (t === 'thinking_start' || t === 'text_delta')
     ) {
       updateStepCount(stepCount + 1);
-      llmPanel = mkEl('div', 'llm-panel');
-      const lHdr = mkEl('div', 'llm-panel-hdr');
-      lHdr.textContent = 'Thoughts';
-      addCollapse(llmPanel, lHdr);
-      llmPanel.appendChild(lHdr);
+      llmPanel = mkThoughtsPanel();
       O.appendChild(llmPanel);
       collapseOlderPanels();
       llmPanelState = mkS();
@@ -2023,9 +2022,7 @@
     if (t === 'result') {
       collapseAllExceptResult(O);
       if (ev.success === false && !ev.is_continue) {
-        const rTab = tabs.find(x => {
-          return x.id === activeTabId;
-        });
+        const rTab = getTab(activeTabId);
         if (rTab) rTab.lastTaskFailed = true;
       }
       // After a result, the next thinking/text (e.g. from a new
@@ -2044,9 +2041,7 @@
     // Keep the chevron "right" state consistent across new panels added by streaming.
     // Skip during demo replay — demo mode never sets isRunning so
     // applyChevronState(false) would hide every non-result panel via chv-hidden.
-    const tab = tabs.find(x => {
-      return x.id === activeTabId;
-    });
+    const tab = getTab(activeTabId);
     if (tab && !tab.panelsExpandedMap[currentTaskName] && !_demoActive)
       applyChevronState(false, currentTaskName);
   }
@@ -2088,11 +2083,7 @@
     ) {
       bgStepCount++;
       tab.statusStepsText = 'Steps: ' + bgStepCount;
-      bgLlmPanel = mkEl('div', 'llm-panel');
-      const lHdr = mkEl('div', 'llm-panel-hdr');
-      lHdr.textContent = 'Thoughts';
-      addCollapse(bgLlmPanel, lHdr);
-      bgLlmPanel.appendChild(lHdr);
+      bgLlmPanel = mkThoughtsPanel();
       tab.outputFragment.appendChild(bgLlmPanel);
       bgLlmPanelState = mkS();
       bgPendingPanel = false;
@@ -2178,13 +2169,44 @@
     }
   }
 
+  /**
+   * Shared overscroll accumulator for wheel/touch adjacent-task loading.
+   * Accumulates |delta| while the user keeps overscrolling in `dir`
+   * ('prev' | 'next'); once OVERSCROLL_THRESHOLD is reached, resets the
+   * accumulator and requests the adjacent task relative to `taskId`.
+   */
+  function accumulateOverscroll(dir, delta, taskId) {
+    if (overscrollDir !== dir) {
+      overscrollAccum = 0;
+      overscrollDir = dir;
+    }
+    overscrollAccum += Math.abs(delta);
+    clearTimeout(overscrollTimer);
+    overscrollTimer = setTimeout(() => {
+      overscrollAccum = 0;
+      overscrollDir = '';
+    }, 500);
+    if (overscrollAccum >= OVERSCROLL_THRESHOLD) {
+      overscrollAccum = 0;
+      overscrollDir = '';
+      adjacentLoading = true;
+      showAdjacentLoader(dir);
+      vscode.postMessage({
+        type: 'getAdjacentTask',
+        tabId: activeTabId,
+        taskId: taskId,
+        direction: dir,
+      });
+    }
+  }
+
   O.addEventListener('wheel', e => {
     if (isRunning && e.deltaY < 0) _scrollLock = true;
 
     // Adjacent task loading via overscroll detection.  Sub-agent
     // tabs MUST NOT show siblings from the same chat_id — they
     // render exactly one task, the sub-agent's own row.
-    const _activeTabForAdj = tabs.find(t => t.id === activeTabId);
+    const _activeTabForAdj = getTab(activeTabId);
     const _isSubagentActive = !!(
       _activeTabForAdj && _activeTabForAdj.isSubagentTab
     );
@@ -2199,28 +2221,7 @@
 
       if (atTop && e.deltaY < 0 && !noPrevTask && oldestLoadedTaskId != null) {
         // Scrolling up at top — load task before the oldest loaded
-        if (overscrollDir !== 'prev') {
-          overscrollAccum = 0;
-          overscrollDir = 'prev';
-        }
-        overscrollAccum += Math.abs(e.deltaY);
-        clearTimeout(overscrollTimer);
-        overscrollTimer = setTimeout(() => {
-          overscrollAccum = 0;
-          overscrollDir = '';
-        }, 500);
-        if (overscrollAccum >= OVERSCROLL_THRESHOLD) {
-          overscrollAccum = 0;
-          overscrollDir = '';
-          adjacentLoading = true;
-          showAdjacentLoader('prev');
-          vscode.postMessage({
-            type: 'getAdjacentTask',
-            tabId: activeTabId,
-            taskId: oldestLoadedTaskId,
-            direction: 'prev',
-          });
-        }
+        accumulateOverscroll('prev', e.deltaY, oldestLoadedTaskId);
       } else if (
         atBottom &&
         e.deltaY > 0 &&
@@ -2228,28 +2229,7 @@
         newestLoadedTaskId != null
       ) {
         // Scrolling down at bottom — load task after the newest loaded
-        if (overscrollDir !== 'next') {
-          overscrollAccum = 0;
-          overscrollDir = 'next';
-        }
-        overscrollAccum += Math.abs(e.deltaY);
-        clearTimeout(overscrollTimer);
-        overscrollTimer = setTimeout(() => {
-          overscrollAccum = 0;
-          overscrollDir = '';
-        }, 500);
-        if (overscrollAccum >= OVERSCROLL_THRESHOLD) {
-          overscrollAccum = 0;
-          overscrollDir = '';
-          adjacentLoading = true;
-          showAdjacentLoader('next');
-          vscode.postMessage({
-            type: 'getAdjacentTask',
-            tabId: activeTabId,
-            taskId: newestLoadedTaskId,
-            direction: 'next',
-          });
-        }
+        accumulateOverscroll('next', e.deltaY, newestLoadedTaskId);
       } else {
         overscrollAccum = 0;
         overscrollDir = '';
@@ -2286,7 +2266,7 @@
       if (adjacentLoading || !activeTabId || !currentTaskName) return;
       // Sub-agent tabs MUST NOT load sibling tasks from the same
       // chat_id — they render exactly the sub-agent's own row.
-      const _activeTabT = tabs.find(t => t.id === activeTabId);
+      const _activeTabT = getTab(activeTabId);
       if (_activeTabT && _activeTabT.isSubagentTab) return;
 
       const atTop = O.scrollTop <= 0;
@@ -2299,28 +2279,7 @@
         oldestLoadedTaskId != null
       ) {
         // Pulling down at top — load previous task
-        if (overscrollDir !== 'prev') {
-          overscrollAccum = 0;
-          overscrollDir = 'prev';
-        }
-        overscrollAccum += Math.abs(touchDelta);
-        clearTimeout(overscrollTimer);
-        overscrollTimer = setTimeout(() => {
-          overscrollAccum = 0;
-          overscrollDir = '';
-        }, 500);
-        if (overscrollAccum >= OVERSCROLL_THRESHOLD) {
-          overscrollAccum = 0;
-          overscrollDir = '';
-          adjacentLoading = true;
-          showAdjacentLoader('prev');
-          vscode.postMessage({
-            type: 'getAdjacentTask',
-            tabId: activeTabId,
-            taskId: oldestLoadedTaskId,
-            direction: 'prev',
-          });
-        }
+        accumulateOverscroll('prev', touchDelta, oldestLoadedTaskId);
       } else if (
         atBottom &&
         touchDelta > 0 &&
@@ -2328,28 +2287,7 @@
         newestLoadedTaskId != null
       ) {
         // Pushing up at bottom — load next task
-        if (overscrollDir !== 'next') {
-          overscrollAccum = 0;
-          overscrollDir = 'next';
-        }
-        overscrollAccum += Math.abs(touchDelta);
-        clearTimeout(overscrollTimer);
-        overscrollTimer = setTimeout(() => {
-          overscrollAccum = 0;
-          overscrollDir = '';
-        }, 500);
-        if (overscrollAccum >= OVERSCROLL_THRESHOLD) {
-          overscrollAccum = 0;
-          overscrollDir = '';
-          adjacentLoading = true;
-          showAdjacentLoader('next');
-          vscode.postMessage({
-            type: 'getAdjacentTask',
-            tabId: activeTabId,
-            taskId: newestLoadedTaskId,
-            direction: 'next',
-          });
-        }
+        accumulateOverscroll('next', touchDelta, newestLoadedTaskId);
       } else {
         overscrollAccum = 0;
         overscrollDir = '';
@@ -2389,9 +2327,7 @@
     }
     setTaskText(visibleTask);
     // Sync chevron icon to the visible task's expanded state
-    const vTab = tabs.find(t => {
-      return t.id === activeTabId;
-    });
+    const vTab = getTab(activeTabId);
     if (vTab) updateChevronIcon(!!vTab.panelsExpandedMap[visibleTask]);
     // Update header metrics to match the visible task
     if (visibleContainer) {
@@ -2556,9 +2492,7 @@
           // ``inRunning`` branch, so subsequent live events from the
           // re-attached agent are visible immediately.
           if (ev.running) {
-            const aTab = tabs.find(t => {
-              return t.id === activeTabId;
-            });
+            const aTab = getTab(activeTabId);
             if (aTab) {
               applyChevronState(
                 !!aTab.panelsExpandedMap[currentTaskName],
@@ -2593,9 +2527,7 @@
         break;
       case 'askUser': {
         const askTabId = ev.tabId !== undefined ? ev.tabId : activeTabId;
-        const askTab = tabs.find(t => {
-          return t.id === askTabId;
-        });
+        const askTab = getTab(askTabId);
         if (!askTab) break;
         askTab.askPendingQuestion = ev.question || '';
         showAskForTab(askTab);
@@ -2614,13 +2546,7 @@
         break;
       case 'clear': {
         const clearTab =
-          ev.tabId !== undefined
-            ? tabs.find(t => {
-                return t.id === ev.tabId;
-              })
-            : tabs.find(t => {
-                return t.id === activeTabId;
-              });
+          ev.tabId !== undefined ? getTab(ev.tabId) : getTab(activeTabId);
         if (clearTab) {
           clearTab.lastTaskFailed = false;
           clearTab.hasRunTask = true;
@@ -2649,7 +2575,7 @@
         break;
       }
       case 'clearChat': {
-        const ccTab = tabs.find(t => t.id === activeTabId);
+        const ccTab = getTab(activeTabId);
         const ccWelcome =
           welcome && welcome.style.display !== 'none' && O.contains(welcome);
         if (ccTab && !ccTab.backendChatId && ccWelcome) {
@@ -2666,9 +2592,7 @@
         break;
       case 'showWelcome': {
         const swTabId = ev.tabId || activeTabId;
-        const swTab = tabs.find(t => {
-          return t.id === swTabId;
-        });
+        const swTab = getTab(swTabId);
         if (swTab) {
           // Update model picker to last user-picked model from DB
           if (ev.model) {
@@ -2778,9 +2702,7 @@
 
       case 'task_events': {
         const teTabId = ev.tabId || activeTabId;
-        const teTab = tabs.find(t => {
-          return t.id === teTabId;
-        });
+        const teTab = getTab(teTabId);
         if (ev.chat_id && teTab) {
           teTab.backendChatId = ev.chat_id;
           persistTabState();
@@ -2826,25 +2748,7 @@
           teTab.outputFragment = frag;
           teTab.welcomeVisible = false;
           // Count steps from replayed events
-          let bgSteps = 0,
-            bgPending = false,
-            bgLastTool = '';
-          (ev.events || []).forEach(e => {
-            const t = e.type;
-            if (t === 'tool_call') {
-              bgLastTool = e.name || '';
-              bgPending = true;
-            }
-            if (t === 'tool_result' && bgLastTool !== 'finish')
-              bgPending = true;
-            if (bgSteps === 0 && (t === 'thinking_start' || t === 'text_delta'))
-              bgSteps = 1;
-            if (bgPending && (t === 'thinking_start' || t === 'text_delta')) {
-              bgSteps++;
-              bgPending = false;
-            }
-            if (t === 'result' && e.step_count) bgSteps = e.step_count;
-          });
+          const bgSteps = countReplayedSteps(ev.events || []);
           if (bgSteps > 0) teTab.statusStepsText = 'Steps: ' + bgSteps;
           break;
         }
@@ -2884,15 +2788,11 @@
             if (extra.model) {
               selectedModel = extra.model;
               if (modelName) modelName.textContent = selectedModel;
-              const curTab = tabs.find(t => {
-                return t.id === activeTabId;
-              });
+              const curTab = getTab(activeTabId);
               if (curTab) curTab.selectedModel = selectedModel;
             }
             if (extra.work_dir) {
-              const wdTab = tabs.find(t => {
-                return t.id === activeTabId;
-              });
+              const wdTab = getTab(activeTabId);
               if (wdTab) wdTab.workDir = extra.work_dir;
             }
             if (worktreeToggleBtn) {
@@ -2939,9 +2839,7 @@
           setTaskText(ev.text || '');
         } else if (stt) {
           // Update background tab's saved title without touching active tab
-          const sttTab = tabs.find(t => {
-            return t.id === ev.tabId;
-          });
+          const sttTab = getTab(ev.tabId);
           if (sttTab) {
             sttTab.title =
               stt.length > 30 ? stt.substring(0, 30) + '\u2026' : stt;
@@ -2997,8 +2895,10 @@
         } else if (sKey === 'is_worktree' && worktreeToggleBtn) {
           worktreeToggleBtn.checked = !!sVal;
         } else if (sKey === 'model' && typeof sVal === 'string') {
-          const modelBtn = document.getElementById('model-btn');
-          if (modelBtn) modelBtn.textContent = sVal;
+          // Update #model-name (not #model-btn.textContent, which would
+          // destroy the button's SVG icon).
+          if (modelName) modelName.textContent = sVal;
+          selectedModel = sVal;
         } else if (sKey === 'max_budget') {
           // Budget updated server-side; UI may show in config panel
         } else if (sKey === 'use_web_browser') {
@@ -3052,7 +2952,7 @@
         const mdEl = renderMergeData(ev);
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
           // Background tab: append to saved output fragment
-          const bgMdTab = tabs.find(t => t.id === ev.tabId);
+          const bgMdTab = getTab(ev.tabId);
           if (bgMdTab && bgMdTab.outputFragment) {
             bgMdTab.outputFragment.appendChild(mdEl);
           }
@@ -3071,9 +2971,7 @@
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
           // Background tab's merge: mark it and auto-switch so the user
           // sees the merge/diff interface immediately.
-          const bgMergeTab = tabs.find(t => {
-            return t.id === ev.tabId;
-          });
+          const bgMergeTab = getTab(ev.tabId);
           if (bgMergeTab) {
             bgMergeTab.isMerging = true;
             switchToTab(ev.tabId);
@@ -3087,9 +2985,7 @@
         break;
       case 'merge_ended':
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
-          const mrt2 = tabs.find(t => {
-            return t.id === ev.tabId;
-          });
+          const mrt2 = getTab(ev.tabId);
           if (mrt2) {
             mrt2.isMerging = false;
             mrt2.mergeToolbarEl = null;
@@ -3115,7 +3011,7 @@
         const navHost =
           navTabId === activeTabId
             ? O
-            : (tabs.find(t => t.id === navTabId) || {}).outputFragment;
+            : (getTab(navTabId) || {}).outputFragment;
         if (!navHost) break;
         // Find the most recent merge-info panel that contains hunks.
         const mergePanels = navHost.querySelectorAll('.merge-info');
@@ -3162,7 +3058,7 @@
       case 'worktree_done':
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
           // Background tab: create bar and save on tab state for restoreTab
-          const bgWtTab = tabs.find(t => t.id === ev.tabId);
+          const bgWtTab = getTab(ev.tabId);
           if (bgWtTab) {
             bgWtTab.worktreeBarEl = createWorktreeBar(ev.tabId);
           }
@@ -3173,7 +3069,7 @@
       case 'worktree_result':
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
           // Background tab: clear saved bar and append result to fragment
-          const bgWrTab = tabs.find(t => t.id === ev.tabId);
+          const bgWrTab = getTab(ev.tabId);
           if (bgWrTab) {
             bgWrTab.worktreeBarEl = null;
             if (bgWrTab.outputFragment && !isSilentDiscardMessage(ev)) {
@@ -3190,7 +3086,7 @@
       case 'autocommit_prompt':
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
           // Background tab: create bar and save on tab state for restoreTab
-          const bgAcTab = tabs.find(t => t.id === ev.tabId);
+          const bgAcTab = getTab(ev.tabId);
           if (bgAcTab) {
             bgAcTab.autocommitBarEl = createAutocommitBar(ev);
           }
@@ -3201,7 +3097,7 @@
       case 'autocommit_done':
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
           // Background tab: clear saved bar and append result to fragment
-          const bgAdTab = tabs.find(t => t.id === ev.tabId);
+          const bgAdTab = getTab(ev.tabId);
           if (bgAdTab) {
             bgAdTab.autocommitBarEl = null;
             if (bgAdTab.outputFragment) {
@@ -3218,9 +3114,7 @@
       case 'task_done': {
         let doneT0 = t0;
         if (!doneT0 && ev.tabId !== undefined) {
-          const rt = tabs.find(t => {
-            return t.id === ev.tabId;
-          });
+          const rt = getTab(ev.tabId);
           if (rt) doneT0 = rt.t0;
         }
         const ms =
@@ -3320,7 +3214,7 @@
         // Idempotent: if a tab with the same id already exists, update
         // it in place rather than pushing a duplicate.  Defends against
         // accidental duplicate events from the backend.
-        let subTab = tabs.find(t => t.id === ev.tab_id);
+        let subTab = getTab(ev.tab_id);
         if (!subTab) {
           subTab = makeTab(title);
           subTab.id = ev.tab_id;
@@ -3380,7 +3274,7 @@
         break;
       }
       case 'subagentDone': {
-        const doneTab = tabs.find(t => t.id === ev.tab_id);
+        const doneTab = getTab(ev.tab_id);
         if (doneTab) {
           doneTab.isDone = true;
           doneTab.isRunning = false;
@@ -3437,7 +3331,7 @@
           ev.type !== 'result' &&
           ev.type !== 'usage_info'
         ) {
-          const adoptTab = tabs.find(t => t.id === activeTabId);
+          const adoptTab = getTab(activeTabId);
           if (
             adoptTab &&
             String(adoptTab.currentTaskId) !== String(ev.taskId)
@@ -3457,7 +3351,7 @@
           }
         }
         if (ev.taskId && (ev.type === 'result' || ev.type === 'usage_info')) {
-          const activeTab = tabs.find(t => t.id === activeTabId);
+          const activeTab = getTab(activeTabId);
           if (
             activeTab &&
             activeTab.currentTaskId !== undefined &&
@@ -3520,9 +3414,7 @@
 
   function markTabDone(tabId, failed) {
     const tid = tabId !== undefined ? tabId : activeTabId;
-    const tab = tabs.find(t => {
-      return t.id === tid;
-    });
+    const tab = getTab(tid);
     if (tab) {
       tab.hasRunTask = true;
       tab.lastTaskFailed = !!failed;
@@ -3533,9 +3425,7 @@
     // Mark the tab as no longer running
     let doneTab = null;
     if (tabId !== undefined) {
-      doneTab = tabs.find(t => {
-        return t.id === tabId;
-      });
+      doneTab = getTab(tabId);
       if (doneTab) {
         doneTab.isRunning = false;
         doneTab.t0 = null;
@@ -3781,11 +3671,7 @@
           rPendingPanel = true;
         }
         if (rPendingPanel && (t === 'thinking_start' || t === 'text_delta')) {
-          rLlmPanel = mkEl('div', 'llm-panel');
-          const lHdr = mkEl('div', 'llm-panel-hdr');
-          lHdr.textContent = 'Thoughts';
-          addCollapse(rLlmPanel, lHdr);
-          rLlmPanel.appendChild(lHdr);
+          rLlmPanel = mkThoughtsPanel();
           container.appendChild(rLlmPanel);
           rLlmPanelState = mkS();
           rPendingPanel = false;
@@ -3822,6 +3708,34 @@
     }
   }
 
+  /**
+   * Count agent steps from a replayed event list: step 1 = the first
+   * thinking/text event, each thinking/text following a tool call/result
+   * (other than `finish`) = +1; a final `result` event's step_count wins
+   * when present.
+   */
+  function countReplayedSteps(events) {
+    let steps = 0,
+      pending = false,
+      lastTool = '';
+    (events || []).forEach(ev => {
+      const t = ev.type;
+      if (t === 'tool_call') {
+        lastTool = ev.name || '';
+        pending = true;
+      }
+      if (t === 'tool_result' && lastTool !== 'finish') pending = true;
+      if (steps === 0 && (t === 'thinking_start' || t === 'text_delta'))
+        steps = 1;
+      if (pending && (t === 'thinking_start' || t === 'text_delta')) {
+        steps++;
+        pending = false;
+      }
+      if (t === 'result' && ev.step_count) steps = ev.step_count;
+    });
+    return steps;
+  }
+
   function replayTaskEvents(events) {
     clearOutput();
     resetOutputState();
@@ -3834,32 +3748,13 @@
       },
     });
     // Count steps from replayed events: step 1 = first thinking, each llm-panel = +1
-    let rSteps = 0,
-      rPending = false,
-      rLastTool = '';
-    events.forEach(ev => {
-      const t = ev.type;
-      if (t === 'tool_call') {
-        rLastTool = ev.name || '';
-        rPending = true;
-      }
-      if (t === 'tool_result' && rLastTool !== 'finish') rPending = true;
-      if (rSteps === 0 && (t === 'thinking_start' || t === 'text_delta'))
-        rSteps = 1;
-      if (rPending && (t === 'thinking_start' || t === 'text_delta')) {
-        rSteps++;
-        rPending = false;
-      }
-      if (t === 'result' && ev.step_count) rSteps = ev.step_count;
-    });
+    const rSteps = countReplayedSteps(events);
     if (rSteps > 0) updateStepCount(rSteps);
     // Snapshot the current task's metrics for adjacent-scroll restoration
     currentTaskMetrics.tokens = statusTokens ? statusTokens.textContent : '';
     currentTaskMetrics.budget = statusBudget ? statusBudget.textContent : '';
     currentTaskMetrics.steps = statusSteps ? statusSteps.textContent : '';
-    const tab = tabs.find(x => {
-      return x.id === activeTabId;
-    });
+    const tab = getTab(activeTabId);
     if (tab)
       applyChevronState(
         !!tab.panelsExpandedMap[currentTaskName],
@@ -3868,73 +3763,103 @@
     sb();
   }
 
-  // --- Worktree merge/discard UI ---
+  // --- Worktree merge/discard + autocommit bars (shared machinery) ---
+
+  /**
+   * Build a two-button action bar (shared by the worktree merge/discard
+   * bar and the autocommit bar).  Each button entry is
+   * `{cls, text, msg}` where `msg()` builds the postMessage payload at
+   * click time; clicking any button first disables all of the bar's
+   * buttons.
+   */
+  function createActionBar(labelText, buttons) {
+    const bar = mkEl('div', 'wt-bar');
+    const label = mkEl('span', 'wt-label');
+    label.textContent = labelText;
+    bar.appendChild(label);
+
+    const btns = mkEl('div', 'wt-btns');
+    buttons.forEach(b => {
+      const btn = mkEl('button', 'wt-btn ' + b.cls);
+      btn.textContent = b.text;
+      btn.addEventListener('click', () => {
+        disableActionBarBtns(bar);
+        vscode.postMessage(b.msg());
+      });
+      btns.appendChild(btn);
+    });
+    bar.appendChild(btns);
+    return bar;
+  }
+
+  /** Disable every button of an action bar (no-op when bar is null). */
+  function disableActionBarBtns(bar) {
+    if (!bar) return;
+    bar.querySelectorAll('.wt-btn').forEach(b => {
+      b.disabled = true;
+    });
+  }
+
+  /** Detach an action bar from the DOM and restore the input container. */
+  function detachActionBar(bar) {
+    if (bar && bar.parentNode) bar.parentNode.removeChild(bar);
+    if (inputContainer) inputContainer.style.display = '';
+  }
+
+  /** Hide the input container and show `bar` at the top of #input-area. */
+  function attachActionBar(bar) {
+    if (inputContainer) inputContainer.style.display = 'none';
+    const area = document.getElementById('input-area');
+    area.insertBefore(bar, area.firstChild);
+  }
+
+  /** Append a success/error result line for a worktree/autocommit action. */
+  function appendActionResult(ev) {
+    const cls = ev && ev.success ? 'wt-result-ok' : 'wt-result-err';
+    const div = mkEl('div', 'ev ' + cls);
+    div.textContent = (ev && ev.message) || '';
+    O.appendChild(div);
+    sb();
+  }
 
   let worktreeBar = null;
 
   function clearWorktreeBar() {
-    if (worktreeBar && worktreeBar.parentNode) {
-      worktreeBar.parentNode.removeChild(worktreeBar);
-    }
+    detachActionBar(worktreeBar);
     worktreeBar = null;
-    if (inputContainer) inputContainer.style.display = '';
   }
 
   /** Create a worktree merge/discard bar element. ownerTabId is captured
    *  in button closures so the correct tab is targeted even if the user
    *  switches tabs before clicking. */
   function createWorktreeBar(ownerTabId) {
-    const bar = mkEl('div', 'wt-bar');
-    const label = mkEl('span', 'wt-label');
-    label.textContent = 'Auto-commit and merge or Discard?';
-    bar.appendChild(label);
-
-    const btns = mkEl('div', 'wt-btns');
-    const mergeBtn = mkEl('button', 'wt-btn wt-merge');
-    mergeBtn.textContent = 'Auto-commit and merge';
-    mergeBtn.addEventListener('click', () => {
-      disableWtBtns();
-      vscode.postMessage({
-        type: 'worktreeAction',
-        action: 'merge',
-        tabId: ownerTabId,
-      });
-    });
-
-    const discardBtn = mkEl('button', 'wt-btn wt-discard');
-    discardBtn.textContent = 'Discard';
-    discardBtn.addEventListener('click', () => {
-      disableWtBtns();
-      vscode.postMessage({
-        type: 'worktreeAction',
-        action: 'discard',
-        tabId: ownerTabId,
-      });
-    });
-
-    btns.appendChild(mergeBtn);
-    btns.appendChild(discardBtn);
-    bar.appendChild(btns);
-    return bar;
+    return createActionBar('Auto-commit and merge or Discard?', [
+      {
+        cls: 'wt-merge',
+        text: 'Auto-commit and merge',
+        msg: () => ({
+          type: 'worktreeAction',
+          action: 'merge',
+          tabId: ownerTabId,
+        }),
+      },
+      {
+        cls: 'wt-discard',
+        text: 'Discard',
+        msg: () => ({
+          type: 'worktreeAction',
+          action: 'discard',
+          tabId: ownerTabId,
+        }),
+      },
+    ]);
   }
 
   function showWorktreeActions(ev) {
     clearWorktreeBar();
-    const ownerTabId = (ev && ev.tabId) || activeTabId;
-    const bar = createWorktreeBar(ownerTabId);
     // Hide the input container and show the worktree bar in its place
-    if (inputContainer) inputContainer.style.display = 'none';
-    const area = document.getElementById('input-area');
-    area.insertBefore(bar, area.firstChild);
-    worktreeBar = bar;
-  }
-
-  function disableWtBtns() {
-    if (!worktreeBar) return;
-    const btns = worktreeBar.querySelectorAll('.wt-btn');
-    btns.forEach(b => {
-      b.disabled = true;
-    });
+    worktreeBar = createWorktreeBar((ev && ev.tabId) || activeTabId);
+    attachActionBar(worktreeBar);
   }
 
   // Suppress the trivial "Discarded branch '<name>'." confirmation that
@@ -3956,12 +3881,7 @@
       sb();
       return;
     }
-    const cls = ev.success ? 'wt-result-ok' : 'wt-result-err';
-    const div = mkEl('div', 'ev ' + cls);
-    const msg = ev.message || '';
-    div.textContent = msg;
-    O.appendChild(div);
-    sb();
+    appendActionResult(ev);
   }
 
   // --- Autocommit prompt UI (non-worktree mode) ---
@@ -3973,81 +3893,40 @@
   let autocommitBar = null;
 
   function clearAutocommitBar() {
-    if (autocommitBar && autocommitBar.parentNode) {
-      autocommitBar.parentNode.removeChild(autocommitBar);
-    }
+    detachActionBar(autocommitBar);
     autocommitBar = null;
-    if (inputContainer) inputContainer.style.display = '';
   }
 
   /** Create an autocommit bar element. ownerTabId is captured in button
    *  closures so the correct tab is targeted even after a tab switch. */
   function createAutocommitBar(ev) {
     const ownerTabId = (ev && ev.tabId) || activeTabId;
-    const bar = mkEl('div', 'wt-bar');
-    const label = mkEl('span', 'wt-label');
     const n = (ev && ev.changedFiles && ev.changedFiles.length) || 0;
-    label.textContent =
+    const labelText =
       n === 1
         ? '1 uncommitted change on main. Auto commit?'
         : n + ' uncommitted changes on main. Auto commit?';
-    bar.appendChild(label);
-
-    const btns = mkEl('div', 'wt-btns');
-    const commitBtn = mkEl('button', 'wt-btn wt-merge');
-    commitBtn.textContent = 'Auto commit';
-    commitBtn.addEventListener('click', () => {
-      disableAutocommitBtns();
-      vscode.postMessage({
-        type: 'autocommitAction',
-        action: 'commit',
-        tabId: ownerTabId,
-        workDir: workDirForTab(ownerTabId),
-      });
+    const msgFor = action => () => ({
+      type: 'autocommitAction',
+      action: action,
+      tabId: ownerTabId,
+      workDir: workDirForTab(ownerTabId),
     });
-
-    const skipBtn = mkEl('button', 'wt-btn wt-discard');
-    skipBtn.textContent = 'Do nothing';
-    skipBtn.addEventListener('click', () => {
-      disableAutocommitBtns();
-      vscode.postMessage({
-        type: 'autocommitAction',
-        action: 'skip',
-        tabId: ownerTabId,
-        workDir: workDirForTab(ownerTabId),
-      });
-    });
-
-    btns.appendChild(commitBtn);
-    btns.appendChild(skipBtn);
-    bar.appendChild(btns);
-    return bar;
+    return createActionBar(labelText, [
+      {cls: 'wt-merge', text: 'Auto commit', msg: msgFor('commit')},
+      {cls: 'wt-discard', text: 'Do nothing', msg: msgFor('skip')},
+    ]);
   }
 
   function showAutocommitActions(ev) {
     clearAutocommitBar();
-    const bar = createAutocommitBar(ev);
-    if (inputContainer) inputContainer.style.display = 'none';
-    const area = document.getElementById('input-area');
-    area.insertBefore(bar, area.firstChild);
-    autocommitBar = bar;
-  }
-
-  function disableAutocommitBtns() {
-    if (!autocommitBar) return;
-    const btns = autocommitBar.querySelectorAll('.wt-btn');
-    btns.forEach(b => {
-      b.disabled = true;
-    });
+    autocommitBar = createAutocommitBar(ev);
+    attachActionBar(autocommitBar);
   }
 
   function handleAutocommitResult(ev) {
     clearAutocommitBar();
-    const cls = ev && ev.success ? 'wt-result-ok' : 'wt-result-err';
-    const div = mkEl('div', 'ev ' + cls);
-    div.textContent = (ev && ev.message) || '';
-    O.appendChild(div);
-    sb();
+    appendActionResult(ev);
     focusInputWithRetry();
   }
 
@@ -4835,9 +4714,7 @@
     if (histCache[0] !== prompt) {
       histCache.unshift(prompt);
     }
-    const curTab = tabs.find(t => {
-      return t.id === activeTabId;
-    });
+    const curTab = getTab(activeTabId);
 
     // If a task is already running for this tab, forward the prompt
     // to the backend as an ``appendUserMessage`` so it gets injected
@@ -4980,9 +4857,7 @@
    */
   function syncAskModalToActiveTab() {
     clearAskSlot();
-    const tab = tabs.find(t => {
-      return t.id === activeTabId;
-    });
+    const tab = getTab(activeTabId);
     if (!tab || tab.askPendingQuestion === null) return;
     ensureAskElementsForTab(tab);
     mountAskForTab(tab);
@@ -5132,19 +5007,8 @@
       const payload = String(text == null ? '' : text);
       if (navigator.clipboard && navigator.clipboard.writeText) {
         navigator.clipboard.writeText(payload).then(flash, () => {});
-      } else {
-        const ta = document.createElement('textarea');
-        ta.value = payload;
-        ta.style.position = 'fixed';
-        ta.style.opacity = '0';
-        document.body.appendChild(ta);
-        ta.select();
-        try {
-          document.execCommand('copy');
-          flash();
-        } finally {
-          document.body.removeChild(ta);
-        }
+      } else if (fallbackCopyText(payload)) {
+        flash();
       }
     });
 
