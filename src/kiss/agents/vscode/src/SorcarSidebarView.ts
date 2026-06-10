@@ -308,6 +308,15 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
    */
   private _installClientListener(client: AgentClient): void {
     client.on('message', (msg: ToWebviewMessage) => {
+      if (msg.type === 'configData' && msg.config) {
+        // ``configData`` is broadcast to every connected client, so
+        // the ``work_dir`` it carries may belong to whichever window
+        // requested it (or to the daemon-global fallback).  This
+        // window's work_dir is ALWAYS its own workspace folder —
+        // overwrite before forwarding so the settings panel never
+        // shows another window's folder.
+        msg.config.work_dir = this._getWorkDir();
+      }
       if (msg.type === 'commitMessage') {
         this._onCommitMessage.fire({message: msg.message, error: msg.error});
       }

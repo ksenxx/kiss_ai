@@ -131,6 +131,11 @@ body {
 
 .config-label textarea { resize: vertical; }
 
+/* In VS Code the work_dir field is read-only (it always shows the
+   window's open workspace folder); render it dimmed so it reads as
+   informational rather than editable. */
+.config-label input[readonly] { color: var(--dim); }
+
 .config-label input:focus,
 .config-label textarea:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
 .config-checkbox { display: flex; align-items: center; gap: 8px; flex-direction: row; }
