@@ -205,25 +205,25 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   }
 
   /**
-   * Eagerly push the current VS Code workspace folder to the daemon as
-   * its ``work_dir``.
+   * Eagerly push this window's VS Code workspace folder to the daemon
+   * as this connection's ``work_dir``.
    *
-   * The daemon caches ``self.work_dir`` once at process start from
-   * ``KISS_WORKDIR``/``getcwd()``.  When VS Code launches and re-uses an
-   * already-running daemon (the dependency-installer fast path), the
-   * daemon retains the previous session's work_dir until the user
-   * interacts with the sidebar (which lazily triggers ``_getClient()``).
+   * The daemon keeps one work_dir per client connection, and each VS
+   * Code window owns exactly one connection — so the work_dir pushed
+   * here is scoped to this window and can never be overwritten by
+   * another window opening a different workspace.
    *
    * Calling this method from ``activate()`` ensures the daemon's
-   * ``work_dir`` matches the open workspace folder *before* any backend
-   * call (autocomplete file-list, commit-message generation, etc.) is
-   * issued.  Safe to call repeatedly — the daemon ignores no-op
-   * updates and the client queues the command if the socket is not yet
-   * connected.
+   * work_dir for this window matches the open workspace folder
+   * *before* any backend call (autocomplete file-list, commit-message
+   * generation, etc.) is issued.  Safe to call repeatedly — the daemon
+   * ignores no-op updates and the client queues the command if the
+   * socket is not yet connected.
    */
   public syncWorkDir(): void {
-    // _getClient() lazily creates the AgentClient and sends the
-    // initial setWorkDir + installs the workspace-folders listener.
+    // _getClient() lazily creates the AgentClient, installs the
+    // on-connect setWorkDir preamble and the workspace-folders
+    // listener, and initiates the connection.
     this._getClient();
   }
 
@@ -275,15 +275,19 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     const client = new AgentClient();
     this._client = client;
     this._installClientListener(client);
+    // Sync the daemon's work_dir with this window's workspace folder
+    // on EVERY (re)connect, before any queued command is flushed.  The
+    // daemon keeps one work_dir per connection (= per VS Code window)
+    // and stamps it onto every command from this connection that does
+    // not carry an explicit ``workDir`` — so each window always
+    // operates on its own open workspace, even when several windows
+    // share the one kiss-web daemon.  Re-sending on reconnect (daemon
+    // restart, socket drop) is required because the daemon's
+    // per-connection state starts empty for each new socket.
+    client.on('connect', () => {
+      client.sendCommand({type: 'setWorkDir', workDir: this._getWorkDir()});
+    });
     client.connect();
-    // Sync the daemon's work_dir with the current workspace folder.
-    // The daemon caches ``self.work_dir`` once at process start from
-    // ``KISS_WORKDIR``/``getcwd()``; without this push, every backend
-    // path that does not receive an explicit ``workDir`` per command
-    // (autocomplete file-list, commit-message, worktree actions)
-    // keeps using the stale init value after the user opens a
-    // different folder in VS Code.
-    client.sendCommand({type: 'setWorkDir', workDir: this._getWorkDir()});
     // Keep the daemon in sync whenever the workspace folder set
     // changes (e.g. user opens a different folder in this window).
     this._workspaceFoldersSub = vscode.workspace.onDidChangeWorkspaceFolders(

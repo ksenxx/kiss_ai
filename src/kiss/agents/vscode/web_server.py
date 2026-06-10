@@ -2754,6 +2754,8 @@ class RemoteAccessServer:
         # M6: track tab_ids seen on this connection so we can clean
         # up associated merge state when the connection drops.
         tabs_seen: set[str] = set()
+        # Per-connection work_dir (see _dispatch_client_command).
+        conn_state: dict[str, str] = {"work_dir": ""}
         try:
             async for message in websocket:
                 try:
@@ -2762,7 +2764,9 @@ class RemoteAccessServer:
                     continue
                 if not isinstance(cmd, dict):
                     continue
-                await self._dispatch_client_command(cmd, websocket, tabs_seen)
+                await self._dispatch_client_command(
+                    cmd, websocket, tabs_seen, conn_state,
+                )
         except websockets.exceptions.ConnectionClosed:
             pass
         except Exception:
@@ -2802,6 +2806,12 @@ class RemoteAccessServer:
         """
         self._printer.add_uds_writer(writer)
         tabs_seen: set[str] = set()
+        # Per-connection work_dir: each VS Code window owns exactly one
+        # UDS connection, so recording the window's ``setWorkDir`` here
+        # (instead of only on the daemon-global fallback) is what keeps
+        # every window's work_dir == its own workspace folder even when
+        # several windows share this one daemon process.
+        conn_state: dict[str, str] = {"work_dir": ""}
         try:
             while True:
                 line = await reader.readline()
@@ -2813,7 +2823,9 @@ class RemoteAccessServer:
                     continue
                 if not isinstance(cmd, dict):
                     continue
-                await self._dispatch_client_command(cmd, writer, tabs_seen)
+                await self._dispatch_client_command(
+                    cmd, writer, tabs_seen, conn_state,
+                )
         except Exception:
             logger.debug("UDS handler error", exc_info=True)
         finally:
@@ -2831,6 +2843,7 @@ class RemoteAccessServer:
         cmd: dict[str, Any],
         endpoint: Any,
         tabs_seen: set[str],
+        conn_state: dict[str, str],
     ) -> None:
         """Dispatch one parsed client command from a WSS or UDS peer.
 
@@ -2854,11 +2867,28 @@ class RemoteAccessServer:
                 :class:`asyncio.StreamWriter` (UDS).  Used for direct
                 replies via :meth:`_endpoint_send`.
             tabs_seen: Per-connection set of tab ids, mutated in place.
+            conn_state: Per-connection mutable state holding the
+                connection's own ``work_dir``.  Each VS Code window
+                owns exactly one connection and announces its
+                workspace folder via ``setWorkDir``; every later
+                command from the same connection that does not carry
+                an explicit ``workDir`` is stamped with it here.  This
+                is what guarantees the per-window work_dir invariant:
+                two windows sharing this daemon can never observe each
+                other's folder through the daemon-global fallback,
+                because their commands always arrive pre-stamped with
+                their own connection's work_dir.
         """
         tab_id = cmd.get("tabId", "")
         if isinstance(tab_id, str) and tab_id:
             tabs_seen.add(tab_id)
         cmd_type = cmd.get("type", "")
+        if cmd_type == "setWorkDir":
+            new_wd = cmd.get("workDir", "")
+            if isinstance(new_wd, str) and new_wd:
+                conn_state["work_dir"] = new_wd
+        elif conn_state["work_dir"] and not cmd.get("workDir"):
+            cmd["workDir"] = conn_state["work_dir"]
         if cmd_type in _VSCODE_ONLY_COMMANDS:
             return
         if cmd_type == "activeTasksQuery":
@@ -3206,7 +3236,11 @@ class RemoteAccessServer:
             "type": "run",
             "prompt": prompt,
             "model": cmd.get("model", ""),
-            "workDir": cmd.get("workDir", self._vscode_server.work_dir),
+            # ``or`` (not ``dict.get`` default) so an explicit empty
+            # ``workDir`` also falls back to the daemon-wide default.
+            # Commands from VS Code windows arrive pre-stamped with the
+            # window's own work_dir by ``_dispatch_client_command``.
+            "workDir": cmd.get("workDir") or self._vscode_server.work_dir,
             "tabId": tab_id,
             "attachments": attachments,
             "useWorktree": cmd.get("useWorktree", False),
