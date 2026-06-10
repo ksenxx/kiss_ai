@@ -71,6 +71,13 @@ export class AgentClient extends EventEmitter {
 
     sock.on('connect', () => {
       this._connecting = false;
+      // Emit BEFORE flushing the queue so 'connect' listeners can send
+      // connection-preamble commands (e.g. SorcarSidebarView re-syncs
+      // the daemon's per-connection work_dir with setWorkDir) ahead of
+      // any commands queued while disconnected.  The daemon tracks
+      // work_dir per connection, so the preamble must be re-sent on
+      // every reconnect, not just once per AgentClient lifetime.
+      this.emit('connect');
       const pending = this._pendingSends;
       this._pendingSends = [];
       for (const line of pending) sock.write(line);
