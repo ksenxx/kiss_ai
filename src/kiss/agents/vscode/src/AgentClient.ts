@@ -35,11 +35,6 @@ import * as path from 'path';
 import {EventEmitter} from 'events';
 import {AgentCommand, ToWebviewMessage} from './types';
 
-/** Default UDS path, matches ``_UDS_PATH`` in ``web_server.py``. */
-export function defaultSocketPath(): string {
-  return path.join(os.homedir(), '.kiss', 'sorcar.sock');
-}
-
 /**
  * Cap on the per-line incoming buffer (matches ``AgentProcess``).  If
  * the daemon ever emits one huge JSON line without a newline we drop
@@ -61,12 +56,9 @@ export class AgentClient extends EventEmitter {
 
   constructor(sockPath?: string) {
     super();
-    this._sockPath = sockPath ?? defaultSocketPath();
-  }
-
-  /** True when an established TCP-ish connection is open. */
-  get isAlive(): boolean {
-    return this._socket !== null && !this._socket.connecting;
+    // Default UDS path, matches ``_UDS_PATH`` in ``web_server.py``.
+    this._sockPath =
+      sockPath ?? path.join(os.homedir(), '.kiss', 'sorcar.sock');
   }
 
   /** Initiate a connection.  Idempotent — repeated calls are no-ops. */
@@ -79,10 +71,16 @@ export class AgentClient extends EventEmitter {
 
     sock.on('connect', () => {
       this._connecting = false;
+      // Emit BEFORE flushing the queue so 'connect' listeners can send
+      // connection-preamble commands (e.g. SorcarSidebarView re-syncs
+      // the daemon's per-connection work_dir with setWorkDir) ahead of
+      // any commands queued while disconnected.  The daemon tracks
+      // work_dir per connection, so the preamble must be re-sent on
+      // every reconnect, not just once per AgentClient lifetime.
+      this.emit('connect');
       const pending = this._pendingSends;
       this._pendingSends = [];
       for (const line of pending) sock.write(line);
-      this.emit('connected');
     });
 
     sock.on('data', (data: Buffer) => this._handleData(data.toString()));
@@ -117,20 +115,6 @@ export class AgentClient extends EventEmitter {
     }
     this._pendingSends.push(line);
     this.connect();
-  }
-
-  /** Shutdown without notifying remote — see ``dispose`` for graceful end. */
-  destroy(): void {
-    this._disposed = true;
-    if (this._reconnectTimer) {
-      clearTimeout(this._reconnectTimer);
-      this._reconnectTimer = null;
-    }
-    if (this._socket) {
-      this._socket.destroy();
-      this._socket = null;
-    }
-    this.removeAllListeners();
   }
 
   /**
