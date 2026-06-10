@@ -74,10 +74,12 @@ class _CommandsMixin:
         _state_lock: threading.RLock
         _default_model: str
         _complete_seq: int
-        _complete_seq_latest: int
-        _complete_queue: queue.Queue[tuple[str, int, str, str, str]] | None
-        _last_active_file: str
-        _last_active_content: str
+        _complete_seq_latest: dict[str, int]
+        _complete_queue: (
+            queue.Queue[tuple[str, int, str, str, str, str]] | None
+        )
+        _last_active_file: dict[str, str]
+        _last_active_content: dict[str, str]
         _file_cache: dict[str, list[str]]
 
         def _get_tab(self, tab_id: str) -> _RunningAgentState: ...
@@ -414,10 +416,24 @@ class _CommandsMixin:
         self._new_chat(cmd.get("tabId", ""))
 
     def _cmd_complete(self, cmd: dict[str, Any]) -> None:
-        """Ghost text autocomplete request."""
+        """Ghost text autocomplete request.
+
+        All mutable autocomplete state is keyed by the command's
+        ``connId`` (stamped per client connection by
+        :class:`RemoteAccessServer`; ``""`` for direct callers):
+
+        * The active-file snapshot fallback — used when the current
+          command carries no ``activeFile`` (e.g. focus is inside the
+          webview) — is the *same connection's* last-reported editor
+          file, never another window's.
+        * Request staleness (``_complete_seq_latest``) is tracked per
+          connection so a window typing concurrently with another
+          window cannot mark the other window's pending request stale.
+        """
         query = cmd.get("query", "")
         active_file = cmd.get("activeFile")
         active_content = cmd.get("activeFileContent")
+        conn_id = cmd.get("connId", "")
         tab_id = cmd.get("tabId", "")
         chat_id = ""
         if tab_id:
@@ -426,18 +442,18 @@ class _CommandsMixin:
                 chat_id = tab.chat_id
         with self._state_lock:
             if active_file:
-                self._last_active_file = active_file
+                self._last_active_file[conn_id] = active_file
             if active_content is not None:
-                self._last_active_content = active_content
-            snapshot_file = self._last_active_file
-            snapshot_content = self._last_active_content
+                self._last_active_content[conn_id] = active_content
+            snapshot_file = self._last_active_file.get(conn_id, "")
+            snapshot_content = self._last_active_content.get(conn_id, "")
             self._complete_seq += 1
             seq = self._complete_seq
-            self._complete_seq_latest = seq
+            self._complete_seq_latest[conn_id] = seq
         if query:
             self._ensure_complete_worker()
             self._complete_queue.put(  # type: ignore[union-attr]
-                (query, seq, snapshot_file, snapshot_content, chat_id),
+                (query, seq, snapshot_file, snapshot_content, chat_id, conn_id),
             )
 
     def _cmd_get_input_history(self, cmd: dict[str, Any]) -> None:
@@ -513,10 +529,21 @@ class _CommandsMixin:
         )
 
     def _cmd_get_config(self, cmd: dict[str, Any]) -> None:
-        """Send the current configuration to the frontend."""
+        """Send the current configuration to the frontend.
+
+        When the saved config has no explicit ``work_dir``, the
+        reported one is taken from the command's ``workDir`` — stamped
+        per connection by :class:`RemoteAccessServer` — so each VS Code
+        window's settings panel shows its *own* workspace folder rather
+        than whichever folder another window synced last (the
+        daemon-global fallback that :class:`WebPrinter` would otherwise
+        substitute).
+        """
         from kiss.agents.vscode.vscode_config import get_current_api_keys, load_config
 
         cfg = load_config()
+        if not cfg.get("work_dir") and cmd.get("workDir"):
+            cfg["work_dir"] = cmd["workDir"]
         api_keys = get_current_api_keys()
         self.printer.broadcast({"type": "configData", "config": cfg, "apiKeys": api_keys})
 
@@ -578,14 +605,23 @@ class _CommandsMixin:
         daemon therefore never resolve to each other's folder even
         though both of their ``setWorkDir`` commands also land here.
 
-        Invalidates the autocomplete file cache and clears the
-        ``_last_active_file`` snapshot — both refer to files from the
-        previous workspace and must not leak across folders.
+        Clears the calling connection's ``_last_active_file`` snapshot
+        (it refers to a file from that window's previous workspace) and,
+        when the daemon-wide fallback actually changes, invalidates the
+        autocomplete file cache.
         """
         new_dir = cmd.get("workDir", "")
         if not new_dir:
             return
+        conn_id = cmd.get("connId", "")
         with self._state_lock:
+            # The calling window switched folders: its last-reported
+            # active editor file belongs to the previous workspace and
+            # must not feed that window's autocomplete any more.  Only
+            # the caller's own snapshot is dropped — other windows'
+            # snapshots stay valid (their folders did not change).
+            self._last_active_file.pop(conn_id, None)
+            self._last_active_content.pop(conn_id, None)
             if self.work_dir == new_dir:
                 return
             self.work_dir = new_dir
@@ -598,8 +634,6 @@ class _CommandsMixin:
             # while the daemon was pointed elsewhere), so wipe them
             # all and let subsequent ``getFiles`` rebuild lazily.
             self._file_cache = {}
-            self._last_active_file = ""
-            self._last_active_content = ""
         # Keep the printer's work_dir in sync so global ``configData``
         # events report the active folder (the ``WebPrinter`` used by
         # the remote server fills ``cfg["work_dir"]`` from its own

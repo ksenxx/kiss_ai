@@ -134,7 +134,7 @@ class TestH9AutocompleteNonBlocking(unittest.TestCase):
                 self._state_lock = threading.RLock()
                 self._complete_queue = None
                 self._complete_worker = None
-                self._complete_seq_latest = 0
+                self._complete_seq_latest = {}
                 self._file_cache = {}
 
         srv = FakeServer()
