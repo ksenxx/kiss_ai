@@ -292,28 +292,6 @@ body {
 }
 .chat-tab-settings svg { display: block; }
 
-.tab-bar-action-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 26px;
-  padding: 0;
-  margin: 0;
-  background: none;
-  border: none;
-  border-bottom: 2px solid transparent;
-  color: var(--dim);
-  cursor: pointer;
-  flex-shrink: 0;
-}
-
-.tab-bar-action-btn:hover {
-  color: var(--fg);
-  background: color-mix(in srgb, var(--fg) 6%, transparent);
-}
-.tab-bar-action-btn:last-child { margin-right: 10px; }
-
 /* ── Subagent Tabs ───────────────────────────────────── */
 
 /* Sub-agent tabs MUST be visually distinct from regular chat
@@ -731,28 +709,6 @@ body.remote-chat #welcome-config { display: none !important; }
 .llm-panel .txt { font-size: var(--fs-md); line-height: 1.5; color: color-mix(in srgb, var(--fg) 79%, transparent); }
 .llm-panel .think .cnt { font-size: var(--fs-md); }
 
-/* Usage info */
-.usage {
-  border: 1px solid var(--border); border-radius: 8px; margin: 6px 0;
-  padding: 4px 10px; background: var(--surface); font-size: var(--fs-sm);
-  color: var(--dim); font-style: italic;
-  font-family: var(--vscode-editor-font-family, monospace);
-  white-space: pre-wrap; word-break: break-word; overflow-wrap: break-word;
-}
-
-/* Spinner (output area) */
-.spinner {
-  display: flex; align-items: center; gap: 10px;
-  padding: 12px 0; color: var(--dim); font-size: var(--fs-base);
-  animation: fadeIn .3s ease;
-}
-
-.spinner::before {
-  content: ''; width: 14px; height: 14px;
-  border: 2px solid var(--border); border-top-color: var(--accent);
-  border-radius: 50%; flex-shrink: 0; animation: spin 0.8s linear infinite;
-}
-
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* Wait spinner (input actions) */
@@ -940,12 +896,6 @@ body.remote-chat #welcome-config { display: none !important; }
 .toggle-btn:disabled { opacity: 0.3; cursor: not-allowed; }
 .toggle-btn.active { color: var(--accent); }
 .toggle-btn.active:hover:not(:disabled) { color: color-mix(in srgb, var(--accent) 80%, transparent); }
-
-.menu-divider {
-  height: 1px;
-  background: var(--border);
-  margin: 4px 0;
-}
 
 #upload-btn:disabled { opacity: 0.3; cursor: not-allowed; }
 
@@ -1265,42 +1215,6 @@ body.remote-chat #welcome-config { display: none !important; }
 
 #sidebar-close:hover { color: color-mix(in srgb, var(--fg) 83%, transparent); background: color-mix(in srgb, var(--fg) 8%, transparent); }
 
-.sidebar-tabs {
-  display: flex;
-  gap: 4px;
-  margin: 24px 0 8px;
-  border-bottom: 1px solid var(--border);
-  overflow-x: auto;
-  overflow-y: hidden;
-  scrollbar-width: none;
-  -ms-overflow-style: none;
-  flex-wrap: nowrap;
-}
-
-.sidebar-tabs::-webkit-scrollbar { display: none; }
-
-.sidebar-tab {
-  background: none;
-  border: none;
-  color: color-mix(in srgb, var(--fg) 60%, transparent);
-  cursor: pointer;
-  padding: 8px 12px;
-  font-size: var(--fs-md);
-  border-bottom: 2px solid transparent;
-  margin-bottom: -1px;
-  flex-shrink: 0;
-  white-space: nowrap;
-}
-
-.sidebar-tab:hover {
-  color: var(--fg);
-}
-
-.sidebar-tab.active {
-  color: var(--fg);
-  border-bottom-color: var(--accent, var(--fg));
-}
-
 .sidebar-tab-panel {
   flex: 1;
   display: flex;
@@ -1388,12 +1302,6 @@ body.remote-chat #welcome-config { display: none !important; }
   display: flex; align-items: center; gap: 6px 8px; flex-wrap: wrap;
   margin-bottom: 10px; font-size: var(--fs-md);
   color: var(--fg);
-}
-
-/* Keep each date input together with its picker button when the
-   filter bar wraps onto multiple lines. */
-.history-filter-date-group {
-  display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto;
 }
 
 .history-filter-chk {
@@ -1997,16 +1905,6 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
   background: color-mix(in srgb, var(--red) 20%, transparent);
 }
 
-.wt-donothing {
-  background: color-mix(in srgb, var(--dim) 10%, transparent);
-  border-color: color-mix(in srgb, var(--dim) 20%, transparent);
-  color: var(--dim);
-}
-
-.wt-donothing:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--dim) 20%, transparent);
-}
-
 .wt-result-ok {
   color: var(--green); padding: 8px 12px;
   border-left: 3px solid var(--green); margin: 6px 0;
@@ -2093,14 +1991,6 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 .prompt.collapsed .prompt-body { display: none; }
 
 .tr.collapsed .tr-content { display: none; }
-
-.usage-hdr {
-  font-size: var(--fs-sm); font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
-  color: var(--dim);
-  display: flex; align-items: center;
-}
-.usage-hdr:hover { color: var(--fg); }
-.usage.collapsed .usage-content { display: none; }
 
 .merge-info.collapsed .merge-info-body { display: none; }
 

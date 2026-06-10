@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Per-tab state and small text helpers for the VS Code server.
+"""Per-tab state for the VS Code server.
 
 Originally split out of ``server.py`` for organisation; moved into
 the ``sorcar`` package so the per-tab state class lives alongside
@@ -16,40 +16,12 @@ own instances.
 
 from __future__ import annotations
 
-import ctypes
 import queue
-import re
 import threading
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-
-
-def parse_task_tags(text: str) -> list[str]:
-    """Parse ``<task>...</task>`` tags from *text* and return individual tasks.
-
-    When the input contains one or more ``<task>`` blocks with non-empty
-    content, each block's content is returned as a separate list element.
-    If no valid ``<task>`` blocks are found (or all are empty/whitespace),
-    the original *text* is returned as a single-element list so that
-    callers can always iterate without special-casing.
-
-    Args:
-        text: Input text potentially containing ``<task>...</task>`` tags.
-
-    Returns:
-        List of task strings.  Always contains at least one element.
-    """
-    tasks = [m.strip() for m in re.findall(r"<task>(.*?)</task>", text, re.DOTALL)]
-    tasks = [t for t in tasks if t]
-    return tasks if tasks else [text]
-
-
-ctypes.pythonapi.PyThreadState_SetAsyncExc.argtypes = [
-    ctypes.c_ulong,
-    ctypes.py_object,
-]
 
 
 class _RunningAgentState:
@@ -59,9 +31,10 @@ class _RunningAgentState:
     is actively running (or its post-task worktree-merge UI is still
     in flight) and reset back to ``None`` once the task lifecycle
     completes.  A fresh :class:`WorktreeSorcarAgent` is created at
-    :meth:`_CommandsMixin._cmd_run` before the worker thread starts
-    and disposed in :meth:`_TaskRunnerMixin._run_task`'s outer
-    ``finally``.  Each worktree task creates its own fresh worktree
+    :meth:`_TaskRunnerMixin._run_task_inner` (unless a caller
+    pre-populated ``tab.agent``) and disposed in
+    :meth:`_TaskRunnerMixin._run_task`'s outer ``finally``.
+    Each worktree task creates its own fresh worktree
     and branch independent of any chat id; there is no cross-task
     restoration of worktree state from git.
 
@@ -160,8 +133,8 @@ class _RunningAgentState:
         agent: WorktreeSorcarAgent | None = None,
     ) -> None:
         # ``agent`` is transient — the VS Code server flow leaves it
-        # ``None`` until :meth:`_CommandsMixin._cmd_run` constructs a
-        # fresh agent immediately before the worker thread starts.
+        # ``None`` until :meth:`_TaskRunnerMixin._run_task_inner`
+        # constructs a fresh agent at the start of each task run.
         # The standalone :meth:`WorktreeSorcarAgent.run` flow passes
         # ``agent=self`` so its own per-run registration entry points
         # back at the running agent.

@@ -273,18 +273,8 @@ class GitWorktreeOps:
             True if a commit was created, False if nothing to commit
             or the commit failed (e.g. pre-commit hook rejection).
         """
-        _git("add", "-A", cwd=wt_dir)
-        diff = _git("diff", "--cached", "--quiet", cwd=wt_dir)
-        if diff.returncode == 0:
-            return False
-        result = _git("commit", "-m", message, cwd=wt_dir)
-        if result.returncode != 0:
-            logger.warning(
-                "git commit failed: %s",
-                result.stderr.strip(),
-            )
-            return False
-        return True
+        GitWorktreeOps.stage_all(wt_dir)
+        return GitWorktreeOps.commit_staged(wt_dir, message)
 
     @staticmethod
     def commit_staged(
@@ -382,8 +372,7 @@ class GitWorktreeOps:
         Returns:
             True if a stash entry was created, False if the tree was clean.
         """
-        status = _git("status", "--porcelain", cwd=repo)
-        if not status.stdout.strip():
+        if not GitWorktreeOps.has_uncommitted_changes(repo):
             return False
         result = _git(
             "stash",
@@ -449,6 +438,37 @@ class GitWorktreeOps:
         return msg
 
     @staticmethod
+    def _commit_staged_merge(repo: Path, branch: str) -> MergeResult:
+        """Commit the staged result of a squash merge, if any.
+
+        Shared tail of :meth:`squash_merge_branch` and
+        :meth:`squash_merge_from_baseline`: when the merge staged any
+        changes, commit them with the message from
+        :meth:`_merge_commit_message`; on commit failure (e.g. a
+        rejecting pre-commit hook), reset hard and report
+        :attr:`MergeResult.MERGE_FAILED`.
+
+        Args:
+            repo: Git repo root path.
+            branch: The worktree branch the changes came from.
+
+        Returns:
+            :attr:`MergeResult.SUCCESS` or :attr:`MergeResult.MERGE_FAILED`.
+        """
+        diff = _git("diff", "--cached", "--quiet", cwd=repo)
+        if diff.returncode != 0:
+            msg = GitWorktreeOps._merge_commit_message(repo, branch)
+            commit_result = _git("commit", "-m", msg, cwd=repo)
+            if commit_result.returncode != 0:
+                logger.warning(
+                    "squash merge commit failed: %s",
+                    commit_result.stderr.strip(),
+                )
+                _git("reset", "--hard", "HEAD", cwd=repo)
+                return MergeResult.MERGE_FAILED
+        return MergeResult.SUCCESS
+
+    @staticmethod
     def squash_merge_branch(repo: Path, branch: str) -> MergeResult:
         """Squash-merge a branch and commit the result.
 
@@ -473,18 +493,15 @@ class GitWorktreeOps:
             )
             _git("reset", "--hard", "HEAD", cwd=repo)
             return MergeResult.CONFLICT
-        diff = _git("diff", "--cached", "--quiet", cwd=repo)
-        if diff.returncode != 0:
-            msg = GitWorktreeOps._merge_commit_message(repo, branch)
-            commit_result = _git("commit", "-m", msg, cwd=repo)
-            if commit_result.returncode != 0:
-                logger.warning(
-                    "squash merge commit failed: %s",
-                    commit_result.stderr.strip(),
-                )
-                _git("reset", "--hard", "HEAD", cwd=repo)
-                return MergeResult.MERGE_FAILED
-        return MergeResult.SUCCESS
+        return GitWorktreeOps._commit_staged_merge(repo, branch)
+
+    @staticmethod
+    def _diff_name_only(repo: Path, *flags: str) -> list[str]:
+        """Return ``git diff --name-only`` output lines (empty on failure)."""
+        result = _git("diff", "--name-only", *flags, cwd=repo)
+        if result.returncode != 0:
+            return []
+        return [f for f in result.stdout.strip().splitlines() if f]
 
     @staticmethod
     def unstaged_files(repo: Path) -> list[str]:
@@ -497,10 +514,7 @@ class GitWorktreeOps:
             List of files with uncommitted, unstaged modifications,
             or an empty list if the command fails.
         """
-        result = _git("diff", "--name-only", cwd=repo)
-        if result.returncode != 0:
-            return []
-        return [f for f in result.stdout.strip().splitlines() if f]
+        return GitWorktreeOps._diff_name_only(repo)
 
     @staticmethod
     def staged_files(repo: Path) -> list[str]:
@@ -513,10 +527,12 @@ class GitWorktreeOps:
             List of files staged for commit, or an empty list if the
             command fails.
         """
-        result = _git("diff", "--cached", "--name-only", cwd=repo)
-        if result.returncode != 0:
-            return []
-        return [f for f in result.stdout.strip().splitlines() if f]
+        return GitWorktreeOps._diff_name_only(repo, "--cached")
+
+    @staticmethod
+    def _remove_branch_config_section(repo: Path, branch: str) -> None:
+        """Remove the ``branch.<name>.*`` git config section (best-effort)."""
+        _git("config", "--remove-section", f"branch.{branch}", cwd=repo)
 
     @staticmethod
     def delete_branch(repo: Path, branch: str) -> bool:
@@ -535,22 +551,20 @@ class GitWorktreeOps:
             the branch is the current HEAD of a worktree and cannot
             be deleted without first switching away.
         """
-        safe = _git("branch", "-d", branch, cwd=repo)
-        if safe.returncode == 0:
-            _git("config", "--remove-section", f"branch.{branch}", cwd=repo)
-            return True
-        force = _git("branch", "-D", branch, cwd=repo)
-        if force.returncode == 0:
-            _git("config", "--remove-section", f"branch.{branch}", cwd=repo)
+        result = _git("branch", "-d", branch, cwd=repo)
+        if result.returncode != 0:
+            result = _git("branch", "-D", branch, cwd=repo)
+        if result.returncode == 0:
+            GitWorktreeOps._remove_branch_config_section(repo, branch)
             return True
         if GitWorktreeOps.branch_exists(repo, branch):
             logger.warning(
                 "Failed to delete branch '%s': %s",
                 branch,
-                force.stderr.strip(),
+                result.stderr.strip(),
             )
             return False
-        _git("config", "--remove-section", f"branch.{branch}", cwd=repo)
+        GitWorktreeOps._remove_branch_config_section(repo, branch)
         return True
 
     @staticmethod
@@ -592,6 +606,38 @@ class GitWorktreeOps:
             f.write(f"\n{entry}\n")
 
     @staticmethod
+    def _load_branch_config(repo: Path, branch: str, key: str) -> str | None:
+        """Read ``branch.<branch>.<key>`` from git config (None if unset)."""
+        result = _git("config", f"branch.{branch}.{key}", cwd=repo)
+        return result.stdout.strip() or None
+
+    @staticmethod
+    def _save_branch_config(
+        repo: Path, branch: str, key: str, value: str, what: str,
+    ) -> bool:
+        """Write ``branch.<branch>.<key>`` to git config.
+
+        Args:
+            repo: Git repo root path.
+            branch: The worktree branch name.
+            key: Config key under the branch section.
+            value: Value to store.
+            what: Human-readable description for the failure log.
+
+        Returns:
+            True if config was saved successfully, False otherwise.
+        """
+        result = _git("config", f"branch.{branch}.{key}", value, cwd=repo)
+        if result.returncode != 0:  # pragma: no cover — git config failure
+            logger.warning(
+                "Failed to store %s in git config: %s",
+                what,
+                result.stderr.strip(),
+            )
+            return False
+        return True
+
+    @staticmethod
     def load_original_branch(repo: Path, branch: str) -> str | None:
         """Load the original branch from git config.
 
@@ -602,8 +648,7 @@ class GitWorktreeOps:
         Returns:
             The original branch name, or ``None`` if not stored.
         """
-        result = _git("config", f"branch.{branch}.kiss-original", cwd=repo)
-        return result.stdout.strip() or None
+        return GitWorktreeOps._load_branch_config(repo, branch, "kiss-original")
 
     @staticmethod
     def save_original_branch(repo: Path, branch: str, original: str) -> bool:
@@ -617,14 +662,9 @@ class GitWorktreeOps:
         Returns:
             True if config was saved successfully, False otherwise.
         """
-        result = _git("config", f"branch.{branch}.kiss-original", original, cwd=repo)
-        if result.returncode != 0:  # pragma: no cover — git config failure
-            logger.warning(
-                "Failed to store original branch in git config: %s",
-                result.stderr.strip(),
-            )
-            return False
-        return True
+        return GitWorktreeOps._save_branch_config(
+            repo, branch, "kiss-original", original, "original branch"
+        )
 
     @staticmethod
     def save_baseline_commit(
@@ -646,19 +686,9 @@ class GitWorktreeOps:
         Returns:
             True if config was saved successfully, False otherwise.
         """
-        result = _git(
-            "config",
-            f"branch.{branch}.kiss-baseline",
-            sha,
-            cwd=repo,
+        return GitWorktreeOps._save_branch_config(
+            repo, branch, "kiss-baseline", sha, "baseline commit"
         )
-        if result.returncode != 0:  # pragma: no cover — git config failure
-            logger.warning(
-                "Failed to store baseline commit in git config: %s",
-                result.stderr.strip(),
-            )
-            return False
-        return True
 
     @staticmethod
     def load_baseline_commit(repo: Path, branch: str) -> str | None:
@@ -672,12 +702,7 @@ class GitWorktreeOps:
             The baseline commit SHA, or ``None`` if not stored (clean
             worktree or legacy worktree without baseline support).
         """
-        result = _git(
-            "config",
-            f"branch.{branch}.kiss-baseline",
-            cwd=repo,
-        )
-        return result.stdout.strip() or None
+        return GitWorktreeOps._load_branch_config(repo, branch, "kiss-baseline")
 
     @staticmethod
     def copy_dirty_state(repo: Path, wt_dir: Path) -> bool:
@@ -803,18 +828,7 @@ class GitWorktreeOps:
             _git("cherry-pick", "--abort", cwd=repo)
             return MergeResult.CONFLICT
 
-        diff_check = _git("diff", "--cached", "--quiet", cwd=repo)
-        if diff_check.returncode != 0:
-            msg = GitWorktreeOps._merge_commit_message(repo, branch)
-            commit_result = _git("commit", "-m", msg, cwd=repo)
-            if commit_result.returncode != 0:
-                logger.warning(
-                    "squash merge commit failed: %s",
-                    commit_result.stderr.strip(),
-                )
-                _git("reset", "--hard", "HEAD", cwd=repo)
-                return MergeResult.MERGE_FAILED
-        return MergeResult.SUCCESS
+        return GitWorktreeOps._commit_staged_merge(repo, branch)
 
     @staticmethod
     def cleanup_partial(repo: Path, branch: str, wt_dir: Path) -> None:
@@ -825,9 +839,8 @@ class GitWorktreeOps:
             branch: The branch name to delete.
             wt_dir: The worktree directory to remove.
         """
-        if wt_dir.exists():
-            _git("worktree", "remove", str(wt_dir), "--force", cwd=repo)
-        _git("worktree", "prune", cwd=repo)
+        GitWorktreeOps.remove(repo, wt_dir)
+        GitWorktreeOps.prune(repo)
         GitWorktreeOps.delete_branch(repo, branch)
 
     @staticmethod
@@ -892,7 +905,7 @@ class GitWorktreeOps:
             lines.append(f"Orphaned branches (no worktree): {orphan_branches}")
             for b in orphan_branches:
                 _git("branch", "-D", b, cwd=repo)
-                _git("config", "--remove-section", f"branch.{b}", cwd=repo)
+                GitWorktreeOps._remove_branch_config_section(repo, b)
                 lines.append(f"  Deleted: {b}")
 
         _git("worktree", "prune", cwd=repo)
