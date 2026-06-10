@@ -1,32 +1,31 @@
-# Task: Run all tests in parallel and report failure causes (no code modifications)
+# Progress
 
-## Steps
-1. Counted cores: 10 → used 10 - 2 = 8 parallel splits.
-2. Collected 3098 test node IDs (`uv run pytest --collect-only -q`, 72 deselected) into tmp/all_tests.txt.
-3. Split round-robin into 8 files tmp/split_0..7.txt (388/388/387×6 tests).
-4. Ran 8 sub-agents in parallel via run_parallel; each ran `uv run pytest -q -p no:cacheprovider --timeout=300` on its split.
+## Task: Fix update button failing in settings panel
 
-## Results
-- Total: 3096 ran → 3094 passed equivalent (2 failed), ~30 skipped, 0 errors.
-- Split 0: 384 passed, 4 skipped
-- Split 1: 385 passed, 3 skipped
-- Split 2: 381 passed, 1 FAILED, 5 skipped
-- Split 3: 383 passed, 4 skipped
-- Split 4: 383 passed, 1 FAILED, 3 skipped
-- Split 5: 383 passed, 4 skipped
-- Split 6: 383 passed, 4 skipped
-- Split 7: 384 passed, 3 skipped
+### Investigation
+- User clicks Update button → `SorcarSidebarView._runUpdate()` → opens VS Code terminal → runs `bash ~/kiss_ai/install.sh`
+- install.sh step [5/6] runs `npm run package` → `vscode:prepublish` → `npm run compile && npm run copy-kiss`
+- copy-kiss.sh prints "Synced extension version to 2026.6.15" then appears to hang
+- Tested copy-kiss.sh from both worktree and main repo: completes in ~2 seconds
+- Tested full `npm run package`: completes in ~4 seconds
+- No git lock files, no regex backtracking, python3 works fine
+- Root cause: copy-kiss.sh is completely silent during its ~2s file-copy phase (481 files), then `vsce package` adds ~2s more silence. The user sees no progress after "Synced extension version" and thinks it's stuck.
 
-## Failures (both flaky parallel-run races, pass in isolation)
-1. test_slack_agent.py::TestSlackAgent::test_authenticate_invalid_token
-   - AssertionError: 'xoxb-invalid-test-token-for-methods' is None (line 347).
-   - Cause: shared global token file ~/.kiss/third_party_agents/slack/token.json
-     written by TestSlackChannelBackendMethods.setup_method in a concurrent split.
-2. test_run_once.py::TestCLIOneShotMode::test_channel_with_invalid_token
-   - SystemExit: 1 instead of RuntimeError("Failed to connect").
-   - Cause: concurrent split's setup/teardown deleted the same shared token file
-     between _save_token() and main()'s _load_token().
-- Both re-ran in isolation and PASSED. No product-code bugs found.
+### Changes Made
 
-## Cleanup
-- Deleted tmp/all_tests.txt, tmp/split_*.txt, tmp/result_*.txt.
+**1. `src/kiss/agents/vscode/copy-kiss.sh`** — Added progress echo statements between major phases so the user sees continuous output during the build:
+```bash
+echo "Preparing kiss_project directory..."   # before rm -rf / mkdir
+echo "Copying source files..."                # before git ls-files loop
+```
+
+**2. `src/kiss/agents/vscode/media/main.js`** — Fixed 3 pre-existing ESLint errors:
+- `sessionStorage` no-undef → added `// eslint-disable-next-line no-undef` comment
+- Unused catch parameter `e` → renamed to `_e`
+- Empty catch block → added explanatory comment
+
+**3. `src/kiss/agents/vscode/src/SorcarTab.ts`** — Fixed pre-existing ESLint `quotes` warnings:
+- Added `/* eslint-disable quotes */` before CSP/placeholder template literals that necessarily embed single-quoted HTML attribute values
+
+### Verification
+- `uv run check --full` passes cleanly (all Python + TypeScript + ESLint + stylelint checks green)
