@@ -63,6 +63,7 @@ import uuid
 from collections.abc import Callable
 from concurrent.futures import Future as ConcurrentFuture
 from functools import partial
+from http import HTTPStatus
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
@@ -261,6 +262,10 @@ _MAX_LINE_BYTES = 64 * 1024 * 1024
 # letting an orphaned ``_RunningAgentState`` linger meaningfully.
 _TAB_CLOSE_GRACE = 10.0
 
+_KISS_HOME = Path(os.environ.get("KISS_HOME") or (Path.home() / ".kiss"))
+_TLS_DIR = _KISS_HOME / "tls"
+_URL_FILE = _KISS_HOME / "remote-url.json"
+
 # Path to the localhost Unix-domain socket exposed by
 # :class:`RemoteAccessServer` in addition to the public WSS port.
 # Local clients (the VS Code extension) connect to this socket over
@@ -270,7 +275,7 @@ _TAB_CLOSE_GRACE = 10.0
 # fresh ``RemoteAccessServer(uds_path=...)`` argument overrides this
 # location for tests so multiple instances do not race on the same
 # socket file.
-_UDS_PATH = Path.home() / ".kiss" / "sorcar.sock"
+_UDS_PATH = _KISS_HOME / "sorcar.sock"
 
 
 def _tunnel_backoff_delay(failure_count: int) -> int:
@@ -631,9 +636,35 @@ def _find_install_script(root: Path) -> Path | None:
     except OSError:
         return None
 
-_KISS_HOME = Path(os.environ.get("KISS_HOME") or (Path.home() / ".kiss"))
-_TLS_DIR = _KISS_HOME / "tls"
-_URL_FILE = _KISS_HOME / "remote-url.json"
+
+def _query_quicktunnel_hostname(metrics_port: int) -> str | None:
+    """Ask a cloudflared metrics endpoint for its quick-tunnel URL.
+
+    Queries ``http://127.0.0.1:{metrics_port}/quicktunnel`` and returns
+    the public ``https://`` URL built from the reported hostname, or
+    ``None`` when the endpoint is unreachable, the response is
+    malformed, or the hostname is empty / Cloudflare's ``api.``
+    endpoint (which cloudflared reports before the real tunnel URL).
+
+    Args:
+        metrics_port: Port of cloudflared's ``--metrics`` endpoint.
+
+    Returns:
+        The ``https://`` tunnel URL, or ``None`` if unavailable.
+    """
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{metrics_port}/quicktunnel",
+            headers={"User-Agent": "kiss-web"},
+        )
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            data = json.loads(resp.read())
+            hostname = data.get("hostname", "")
+            if hostname and not hostname.startswith("api."):
+                return f"https://{hostname}"
+    except Exception:
+        return None
+    return None
 
 
 def _discover_tunnel_url_from_metrics() -> str | None:
@@ -671,18 +702,9 @@ def _discover_tunnel_url_from_metrics() -> str | None:
     metrics_ports = list(dict.fromkeys(parsed + list(range(20240, 20260))))
 
     for port in metrics_ports:
-        try:
-            req = urllib.request.Request(
-                f"http://127.0.0.1:{port}/quicktunnel",
-                headers={"User-Agent": "kiss-web"},
-            )
-            with urllib.request.urlopen(req, timeout=2) as resp:
-                data = json.loads(resp.read())
-                hostname = data.get("hostname", "")
-                if hostname and not hostname.startswith("api."):
-                    return f"https://{hostname}"
-        except Exception:
-            continue
+        url = _query_quicktunnel_hostname(port)
+        if url:
+            return url
     return None
 
 
@@ -702,7 +724,7 @@ def _pick_free_local_port() -> int:
     return port
 
 
-_CLOUDFLARED_PIDFILE = Path.home() / ".kiss" / "cloudflared.pid"
+_CLOUDFLARED_PIDFILE = _KISS_HOME / "cloudflared.pid"
 
 
 def _is_pid_alive(pid: int) -> bool:
@@ -771,6 +793,20 @@ def _load_cloudflared_pidfile() -> dict[str, Any] | None:
     return data
 
 
+def _unlink_cloudflared_pidfile() -> None:
+    """Best-effort removal of the cloudflared pidfile.
+
+    Used once the recorded cloudflared process is known to be dead so
+    a later kiss-web does not try to adopt a stale pid.  Failures are
+    ignored — the worst case is a stale pidfile that the next adoption
+    attempt rejects via its pid-liveness check.
+    """
+    try:
+        _CLOUDFLARED_PIDFILE.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def _try_adopt_existing_cloudflared() -> tuple[int, int, str] | None:
     """Look for a healthy cloudflared started by a previous kiss-web.
 
@@ -812,19 +848,7 @@ def _try_adopt_existing_cloudflared() -> tuple[int, int, str] | None:
         return None
     # Prefer a freshly-probed URL so we recover from URL rotation
     # between adoption attempts; fall back to the saved one.
-    url: str | None = None
-    try:
-        req = urllib.request.Request(
-            f"http://127.0.0.1:{metrics_port}/quicktunnel",
-            headers={"User-Agent": "kiss-web"},
-        )
-        with urllib.request.urlopen(req, timeout=2) as resp:
-            doc = json.loads(resp.read())
-            hostname = doc.get("hostname", "")
-            if hostname and not hostname.startswith("api."):
-                url = f"https://{hostname}"
-    except Exception:
-        url = None
+    url = _query_quicktunnel_hostname(metrics_port)
     if url is None:
         saved = data.get("url")
         if isinstance(saved, str) and saved.startswith("https://"):
@@ -896,7 +920,6 @@ def _stderr_reader_loop(
     stderr: Any,
     parse: Callable[[str], str | None],
     result: list[str | None],
-    proc: subprocess.Popen[str],
     stop_event: threading.Event | None = None,
     rate_limit_flag: list[bool] | None = None,
     url_found_event: threading.Event | None = None,
@@ -928,8 +951,6 @@ def _stderr_reader_loop(
             recognised, otherwise ``None``.
         result: Single-element list used to communicate the URL back
             to the caller across the thread boundary.
-        proc: The subprocess being read; retained for API symmetry —
-            timeouts are enforced by :func:`_read_url_from_stderr`.
         stop_event: When set by the caller (after a timeout) the loop
             exits at its next iteration.  Used by H6 to bound the
             reader-thread lifetime: once a single additional line is
@@ -946,7 +967,6 @@ def _stderr_reader_loop(
             return the URL immediately while this thread keeps
             draining.
     """
-    del proc
     found = False
     for line in iter(stderr.readline, ""):
         if (
@@ -1004,7 +1024,7 @@ def _read_url_from_stderr(
     reader = threading.Thread(
         target=_stderr_reader_loop,
         args=(
-            stderr, parse, result, proc, stop_event, rate_limit_flag,
+            stderr, parse, result, stop_event, rate_limit_flag,
             url_found_event,
         ),
         daemon=True,
@@ -1351,16 +1371,64 @@ def _print_url() -> None:
     Exits with code 1 if the server is not running or the file is
     missing.
     """
-    try:
-        data = json.loads(_URL_FILE.read_text()) if _URL_FILE.is_file() else {}
-    except (json.JSONDecodeError, OSError):
-        data = {}
-    url = data.get("tunnel") or data.get("local")
+    url = _read_url_from_file(_URL_FILE)
     if url:
         print(url)
     else:
         print("KISS Sorcar web server is not running.", file=sys.stderr)
         sys.exit(1)
+
+
+def _snapshot_active_tabs() -> list[str]:
+    """Return ``"<tabId>(task=<task_id>)"`` strings for active tabs.
+
+    Snapshots the running-agent registry under its lock before
+    iterating so a concurrent worker thread mutating
+    ``running_agent_states`` (registering a fresh tab, disposing a
+    finished one) cannot race the iterator and raise ``RuntimeError:
+    dictionary changed size during iteration``.  ``_registry_lock`` is
+    a :class:`threading.RLock`, so re-entry from the same thread is
+    safe even when called from a signal handler that interrupted a
+    lock holder.  Falls back to a best-effort unlocked snapshot if the
+    lock itself is unusable (e.g. during interpreter shutdown), and
+    skips malformed tab entries rather than propagating, so callers —
+    the shutdown-signal logger and the ``activeTasksQuery`` handler —
+    always get a usable (possibly partial) report.
+    """
+    from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+
+    try:
+        with _RunningAgentState._registry_lock:
+            items = list(_RunningAgentState.running_agent_states.items())
+    except Exception:
+        items = list(_RunningAgentState.running_agent_states.items())
+    active_tabs: list[str] = []
+    for tab_id, tab in items:
+        try:
+            if tab.is_task_active:
+                task_id = tab.task_history_id or tab.last_task_id
+                active_tabs.append(f"{tab_id}(task={task_id})")
+        except Exception:
+            logger.debug(
+                "skipping malformed tab entry in active-task snapshot",
+                exc_info=True,
+            )
+    return active_tabs
+
+
+def _rss_mb() -> float:
+    """Return this process's peak RSS in megabytes, or ``-1.0`` on failure.
+
+    ``ru_maxrss`` is reported in bytes on macOS and in kilobytes on
+    Linux; both are normalised to MB.
+    """
+    try:
+        import resource
+
+        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return rss / (1024 * 1024) if sys.platform == "darwin" else rss / 1024
+    except Exception:
+        return -1.0
 
 
 def _generate_self_signed_cert(
@@ -2095,7 +2163,7 @@ def _http_response(status: int, content_type: str, body: bytes) -> Response:
     """
     return Response(
         status,
-        "OK" if status == 200 else "Not Found",
+        HTTPStatus(status).phrase,
         Headers([
             ("Content-Type", content_type),
             ("Content-Length", str(len(body))),
@@ -2286,8 +2354,6 @@ class RemoteAccessServer:
         self._url_file: Path = Path(url_file) if url_file else _URL_FILE
 
         if not work_dir:
-            from kiss.agents.vscode.vscode_config import load_config
-
             work_dir = load_config().get("work_dir", "") or None
         # M2: store work_dir on the instance instead of mutating the
         # global ``os.environ["KISS_WORKDIR"]`` (which would stomp on
@@ -2395,11 +2461,6 @@ class RemoteAccessServer:
         # Lazily created in :meth:`_merge_action_lock`; the dict itself
         # is guarded by ``self._merge_states_lock`` above.
         self._merge_action_locks: dict[str, asyncio.Lock] = {}
-        # M6: per-WebSocket set of tab IDs ever seen on this
-        # connection.  When the WS closes we delete merge states
-        # belonging to those tabs so the dict does not grow unbounded
-        # over many short-lived sessions.
-        self._ws_tabs: dict[ServerConnection, set[str]] = {}
         # Deferred-disposal state for tabs whose WebSocket connection
         # has dropped but whose backend ``_RunningAgentState`` should survive a
         # short grace window so a reload / transient reconnect can
@@ -2533,33 +2594,33 @@ class RemoteAccessServer:
             return False
         password = load_config().get("remote_password", "")
         try:
-            raw = await asyncio.wait_for(websocket.recv(), timeout=30)
-            msg = json.loads(raw)
-            if msg.get("type") != "auth":
-                await websocket.close()
-                return False
-            client_pw = msg.get("password", "")
-            if not isinstance(client_pw, str):
-                client_pw = ""
-            if not self._passwords_equal(password, client_pw):
-                self._record_auth_failure(ip)
-                await websocket.send(json.dumps({"type": "auth_required"}))
-                raw2 = await asyncio.wait_for(websocket.recv(), timeout=60)
-                msg2 = json.loads(raw2)
-                client_pw2 = msg2.get("password", "")
-                if not isinstance(client_pw2, str):
-                    client_pw2 = ""
-                if msg2.get("type") != "auth" or not self._passwords_equal(
-                    password, client_pw2,
+            # Two attempts: the first wrong password elicits an
+            # ``auth_required`` retry prompt; the second failure (or a
+            # non-auth message on the retry) closes the connection.
+            for is_retry, timeout in ((False, 30), (True, 60)):
+                raw = await asyncio.wait_for(websocket.recv(), timeout=timeout)
+                msg = json.loads(raw)
+                client_pw = msg.get("password", "")
+                if not isinstance(client_pw, str):
+                    client_pw = ""
+                if msg.get("type") == "auth" and self._passwords_equal(
+                    password, client_pw,
                 ):
-                    self._record_auth_failure(ip)
-                    await websocket.send(
-                        json.dumps({"type": "error", "text": "Authentication failed"})
-                    )
+                    await websocket.send(json.dumps({"type": "auth_ok"}))
+                    return True
+                if not is_retry and msg.get("type") != "auth":
+                    # First message was not an auth attempt at all:
+                    # close without counting it as a failed login.
                     await websocket.close()
                     return False
-            await websocket.send(json.dumps({"type": "auth_ok"}))
-            return True
+                self._record_auth_failure(ip)
+                if not is_retry:
+                    await websocket.send(json.dumps({"type": "auth_required"}))
+            await websocket.send(
+                json.dumps({"type": "error", "text": "Authentication failed"})
+            )
+            await websocket.close()
+            return False
         except Exception:
             logger.debug("WS auth failed", exc_info=True)
             try:
@@ -2692,7 +2753,7 @@ class RemoteAccessServer:
         self._printer.add_client(websocket)
         # M6: track tab_ids seen on this connection so we can clean
         # up associated merge state when the connection drops.
-        self._ws_tabs[websocket] = set()
+        tabs_seen: set[str] = set()
         try:
             async for message in websocket:
                 try:
@@ -2701,9 +2762,7 @@ class RemoteAccessServer:
                     continue
                 if not isinstance(cmd, dict):
                     continue
-                await self._dispatch_client_command(
-                    cmd, websocket, self._ws_tabs[websocket],
-                )
+                await self._dispatch_client_command(cmd, websocket, tabs_seen)
         except websockets.exceptions.ConnectionClosed:
             pass
         except Exception:
@@ -2716,8 +2775,7 @@ class RemoteAccessServer:
             # state is also popped lazily inside
             # :meth:`_fire_pending_tab_close` so a reconnect within
             # the grace window keeps the merge review intact.
-            tabs = self._ws_tabs.pop(websocket, set())
-            for tab in tabs:
+            for tab in tabs_seen:
                 self._schedule_tab_close(tab)
             self._printer.remove_client(websocket)
 
@@ -2909,25 +2967,7 @@ class RemoteAccessServer:
         ``tabs`` list, matching the format emitted by the signal-
         handler log line above.
         """
-        from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-
-        active_tabs: list[str] = []
-        try:
-            with _RunningAgentState._registry_lock:
-                items = list(_RunningAgentState.running_agent_states.items())
-        except Exception:
-            items = list(_RunningAgentState.running_agent_states.items())
-        for tab_id, tab in items:
-            try:
-                if not tab.is_task_active:
-                    continue
-                task_id = tab.task_history_id or tab.last_task_id
-                active_tabs.append(f"{tab_id}(task={task_id})")
-            except Exception:
-                logger.debug(
-                    "activeTasksQuery: skipping malformed tab entry",
-                    exc_info=True,
-                )
+        active_tabs = _snapshot_active_tabs()
         payload = json.dumps({
             "type": "activeTasksResponse",
             "count": len(active_tabs),
@@ -2940,6 +2980,62 @@ class RemoteAccessServer:
                 "activeTasksQuery: failed to write response", exc_info=True,
             )
 
+
+    def _broadcast_remote_url(self, url: str, tunnel_active: bool) -> None:
+        """Broadcast a ``remote_url`` event to every connected client.
+
+        Includes the ``ntfyUrl`` field only when both *url* is
+        non-empty and an ntfy topic is configured, matching the
+        contract pinned by the welcome-info and tunnel-restart tests.
+
+        Args:
+            url: The active URL (``""`` when none is known).
+            tunnel_active: True only when a real Cloudflare tunnel
+                URL is in effect (not the local fallback).
+        """
+        ntfy_url = _get_ntfy_url() if url else ""
+        msg: dict[str, object] = {
+            "type": "remote_url",
+            "url": url or "",
+            "tunnelActive": tunnel_active,
+        }
+        if ntfy_url:
+            msg["ntfyUrl"] = ntfy_url
+        self._printer.broadcast(msg)
+
+    def _broadcast_update_available(self) -> None:
+        """Broadcast the cached PyPI ``update_available`` state.
+
+        No-op until :meth:`_check_for_update` has cached a latest
+        version on :attr:`_latest_version`.
+        """
+        latest = self._latest_version
+        if not latest:
+            return
+        current = _read_version()
+        available = bool(current) and _compare_versions(latest, current) > 0
+        self._printer.broadcast({
+            "type": "update_available",
+            "available": available,
+            "latest": latest,
+            "current": current,
+        })
+
+    async def _post_url_if_changed(self) -> None:
+        """Post :attr:`_active_url` to the ntfy message board once.
+
+        Skips the post when tunneling is disabled or the URL is
+        unchanged since the last post, so a watchdog restart that
+        yields the same public hostname does not re-notify
+        subscribers.
+        """
+        url = self._active_url
+        if self.use_tunnel and url is not None and url != self._last_posted_url:
+            assert self._loop is not None
+            await self._loop.run_in_executor(
+                None, _post_url_to_message_board, url,
+            )
+            self._last_posted_url = url
 
     async def _send_welcome_info(self) -> None:
         """Broadcast the active remote URL to all connected clients.
@@ -2994,31 +3090,12 @@ class RemoteAccessServer:
         tunnel_active = bool(
             self.use_tunnel and url and url != self._local_url
         )
-        ntfy_url = _get_ntfy_url() if url else ""
-        msg: dict[str, object] = {
-            "type": "remote_url",
-            "url": url or "",
-            "tunnelActive": tunnel_active,
-        }
-        if ntfy_url:
-            msg["ntfyUrl"] = ntfy_url
-        self._printer.broadcast(msg)
+        self._broadcast_remote_url(url or "", tunnel_active)
         # Replay the cached PyPI update-available state so a client
         # that just (re)connected sees the green download badge on
         # the Update button without having to wait for the next
         # hourly poll.
-        latest = self._latest_version
-        if latest:
-            current = _read_version()
-            available = bool(current) and _compare_versions(
-                latest, current,
-            ) > 0
-            self._printer.broadcast({
-                "type": "update_available",
-                "available": available,
-                "latest": latest,
-                "current": current,
-            })
+        self._broadcast_update_available()
 
     @staticmethod
     async def _endpoint_send(endpoint: Any, data: str) -> None:
@@ -3683,22 +3760,8 @@ class RemoteAccessServer:
             self._tunnel_next_retry = time.monotonic() + delay
         _save_url_file(self._url_file, self._local_url, tunnel_url)
         self._active_url = tunnel_url or self._local_url
-        ntfy_url = _get_ntfy_url()
-        tunnel_active = bool(tunnel_url)
-        msg: dict[str, object] = {
-            "type": "remote_url",
-            "url": self._active_url,
-            "tunnelActive": tunnel_active,
-        }
-        if ntfy_url:
-            msg["ntfyUrl"] = ntfy_url
-        self._printer.broadcast(msg)
-        if self.use_tunnel and self._active_url != self._last_posted_url:
-            assert self._loop is not None
-            await self._loop.run_in_executor(
-                None, _post_url_to_message_board, self._active_url,
-            )
-            self._last_posted_url = self._active_url
+        self._broadcast_remote_url(self._active_url, bool(tunnel_url))
+        await self._post_url_if_changed()
 
     def _terminate_tunnel_proc(self, kill_adopted: bool = False) -> None:
         """Terminate ``_tunnel_proc`` and reset per-process state.
@@ -3728,10 +3791,7 @@ class RemoteAccessServer:
             except subprocess.TimeoutExpired:
                 proc.kill()
             # Pidfile is stale now that we killed our own cloudflared.
-            try:
-                _CLOUDFLARED_PIDFILE.unlink(missing_ok=True)
-            except OSError:
-                pass
+            _unlink_cloudflared_pidfile()
         elif kill_adopted and self._tunnel_adopted_pid is not None:
             adopted_pid = self._tunnel_adopted_pid
             try:
@@ -3748,10 +3808,7 @@ class RemoteAccessServer:
                         os.kill(adopted_pid, signal.SIGKILL)
                     except (ProcessLookupError, PermissionError, OSError):
                         pass
-            try:
-                _CLOUDFLARED_PIDFILE.unlink(missing_ok=True)
-            except OSError:
-                pass
+            _unlink_cloudflared_pidfile()
         self._tunnel_proc = None
         self._tunnel_adopted_pid = None
         self._tunnel_metrics_port = None
@@ -3790,15 +3847,8 @@ class RemoteAccessServer:
             # cached state (if any) and do nothing.  Re-broadcasting
             # a stale ``False`` would mask a genuine update.
             return
-        current = _read_version()
-        available = bool(current) and _compare_versions(latest, current) > 0
         self._latest_version = latest
-        self._printer.broadcast({
-            "type": "update_available",
-            "available": available,
-            "latest": latest,
-            "current": current,
-        })
+        self._broadcast_update_available()
 
     async def _version_check_loop(self) -> None:
         """Run :meth:`_check_for_update` every hour.
@@ -3851,117 +3901,152 @@ class RemoteAccessServer:
                 except Exception:
                     logger.debug("Watchdog tunnel check error", exc_info=True)
             try:
-                if not self._url_file.is_file():
-                    tunnel_url = (
-                        self._active_url
-                        if self._active_url and self._active_url != self._local_url
-                        else None
-                    )
-                    _save_url_file(self._url_file, self._local_url, tunnel_url)
-                    logger.info(
-                        "Re-wrote missing URL file %s (tunnel=%s)",
-                        self._url_file, tunnel_url,
-                    )
+                self._watchdog_check_url_file()
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.debug("Watchdog URL-file check error", exc_info=True)
             try:
-                current_ips = _get_local_ips()
-                if not current_ips:
-                    # IP discovery failed (transient WiFi roam, DHCP
-                    # renewal, VPN flap, slow resolver, post-sleep DNS
-                    # hiccup).  Bare ``try/except: pass`` inside
-                    # :func:`_get_local_ips` swallows any error and
-                    # returns ``frozenset()``.  Treat this as "no
-                    # information" — do NOT compare it against
-                    # ``_last_ips`` (which would falsely look like a
-                    # network change and trigger a spurious restart),
-                    # and drop any in-flight debounce candidate so a
-                    # later real change starts its count from scratch.
-                    self._pending_ip_change = None
-                    self._pending_ip_change_count = 0
-                elif current_ips == self._last_ips:
-                    # IPs match the established baseline — clear any
-                    # in-flight candidate (the host's network briefly
-                    # diverged and recovered before reaching the
-                    # debounce threshold).
-                    self._pending_ip_change = None
-                    self._pending_ip_change_count = 0
-                elif not self._last_ips:
-                    # Initial discovery (or recovery after a sustained
-                    # failure) — adopt the first non-empty result as
-                    # the baseline without restarting.  Without this
-                    # branch a server that started before the network
-                    # came up would always trigger one spurious restart
-                    # on the first successful poll.
-                    self._last_ips = current_ips
-                    self._pending_ip_change = None
-                    self._pending_ip_change_count = 0
-                else:
-                    # Real divergence from the established baseline.
-                    # Require :data:`_IP_CHANGE_DEBOUNCE_TICKS`
-                    # consecutive ticks observing the *same* candidate
-                    # set before acting.  A single divergent tick (the
-                    # most common spurious-restart trigger) is no
-                    # longer enough.
-                    if current_ips == self._pending_ip_change:
-                        self._pending_ip_change_count += 1
-                    else:
-                        self._pending_ip_change = current_ips
-                        self._pending_ip_change_count = 1
-                    if (
-                        self._pending_ip_change_count
-                        >= _IP_CHANGE_DEBOUNCE_TICKS
-                    ):
-                        prev_ips = self._last_ips
-                        self._last_ips = current_ips
-                        self._pending_ip_change = None
-                        self._pending_ip_change_count = 0
-                        if self.use_tunnel:
-                            # In tunnel mode, cloudflared handles edge
-                            # reconnection automatically.  Restarting
-                            # the entire daemon would assign a new
-                            # random *.trycloudflare.com URL — avoid
-                            # that.  Just log and let cloudflared
-                            # recover on its own.
-                            # N.B. Check use_tunnel only — NOT
-                            # _tunnel_proc, which can be None during
-                            # startup, when remote_password is empty,
-                            # or between a force-restart.
-                            logger.info(
-                                "IP address changed: %s → %s; tunnel "
-                                "mode — cloudflared will re-register "
-                                "automatically",
-                                prev_ips,
-                                current_ips,
-                            )
-                        else:
-                            logger.info(
-                                "IP address changed: %s → %s, "
-                                "restarting server…",
-                                prev_ips,
-                                current_ips,
-                            )
-                            if self._ws_server is not None:
-                                self._ws_server.close()
-                            return
+                if self._watchdog_check_ip_change():
+                    return
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.debug("Watchdog IP check error", exc_info=True)
             try:
-                if self._ws_server is not None:
-                    connections = list(self._ws_server.connections)
-                    if connections:
-                        await asyncio.gather(
-                            *[self._ping_one_ws(ws) for ws in connections],
-                            return_exceptions=True,
-                        )
+                await self._watchdog_ping_clients()
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.debug("Watchdog WS ping error", exc_info=True)
+
+    def _watchdog_check_url_file(self) -> None:
+        """Re-write ``~/.kiss/remote-url.json`` if it went missing.
+
+        A developer's pytest run that touches the real file, or an
+        unrelated cleanup, can remove it; without a re-write the VS
+        Code settings panel's 10-second poller cannot discover the
+        active URL.
+        """
+        if not self._url_file.is_file():
+            tunnel_url = (
+                self._active_url
+                if self._active_url and self._active_url != self._local_url
+                else None
+            )
+            _save_url_file(self._url_file, self._local_url, tunnel_url)
+            logger.info(
+                "Re-wrote missing URL file %s (tunnel=%s)",
+                self._url_file, tunnel_url,
+            )
+
+    def _watchdog_check_ip_change(self) -> bool:
+        """Detect a debounced local-IP change and initiate a restart.
+
+        Compares the current :func:`_get_local_ips` result against the
+        established baseline in :attr:`_last_ips`, requiring
+        :data:`_IP_CHANGE_DEBOUNCE_TICKS` consecutive ticks observing
+        the *same* new non-empty set before acting (see the module
+        docstring of ``test_web_server_ip_watchdog_debounce.py``).
+
+        Returns:
+            True when a restart was initiated (the WSS listener has
+            been closed and the watchdog loop must exit); False
+            otherwise.
+        """
+        current_ips = _get_local_ips()
+        if not current_ips:
+            # IP discovery failed (transient WiFi roam, DHCP
+            # renewal, VPN flap, slow resolver, post-sleep DNS
+            # hiccup).  Bare ``try/except: pass`` inside
+            # :func:`_get_local_ips` swallows any error and
+            # returns ``frozenset()``.  Treat this as "no
+            # information" — do NOT compare it against
+            # ``_last_ips`` (which would falsely look like a
+            # network change and trigger a spurious restart),
+            # and drop any in-flight debounce candidate so a
+            # later real change starts its count from scratch.
+            self._pending_ip_change = None
+            self._pending_ip_change_count = 0
+        elif current_ips == self._last_ips:
+            # IPs match the established baseline — clear any
+            # in-flight candidate (the host's network briefly
+            # diverged and recovered before reaching the
+            # debounce threshold).
+            self._pending_ip_change = None
+            self._pending_ip_change_count = 0
+        elif not self._last_ips:
+            # Initial discovery (or recovery after a sustained
+            # failure) — adopt the first non-empty result as
+            # the baseline without restarting.  Without this
+            # branch a server that started before the network
+            # came up would always trigger one spurious restart
+            # on the first successful poll.
+            self._last_ips = current_ips
+            self._pending_ip_change = None
+            self._pending_ip_change_count = 0
+        else:
+            # Real divergence from the established baseline.
+            # Require :data:`_IP_CHANGE_DEBOUNCE_TICKS`
+            # consecutive ticks observing the *same* candidate
+            # set before acting.  A single divergent tick (the
+            # most common spurious-restart trigger) is no
+            # longer enough.
+            if current_ips == self._pending_ip_change:
+                self._pending_ip_change_count += 1
+            else:
+                self._pending_ip_change = current_ips
+                self._pending_ip_change_count = 1
+            if self._pending_ip_change_count >= _IP_CHANGE_DEBOUNCE_TICKS:
+                prev_ips = self._last_ips
+                self._last_ips = current_ips
+                self._pending_ip_change = None
+                self._pending_ip_change_count = 0
+                if self.use_tunnel:
+                    # In tunnel mode, cloudflared handles edge
+                    # reconnection automatically.  Restarting
+                    # the entire daemon would assign a new
+                    # random *.trycloudflare.com URL — avoid
+                    # that.  Just log and let cloudflared
+                    # recover on its own.
+                    # N.B. Check use_tunnel only — NOT
+                    # _tunnel_proc, which can be None during
+                    # startup, when remote_password is empty,
+                    # or between a force-restart.
+                    logger.info(
+                        "IP address changed: %s → %s; tunnel "
+                        "mode — cloudflared will re-register "
+                        "automatically",
+                        prev_ips,
+                        current_ips,
+                    )
+                else:
+                    logger.info(
+                        "IP address changed: %s → %s, "
+                        "restarting server…",
+                        prev_ips,
+                        current_ips,
+                    )
+                    if self._ws_server is not None:
+                        self._ws_server.close()
+                    return True
+        return False
+
+    async def _watchdog_ping_clients(self) -> None:
+        """Ping every connected WSS client, closing unresponsive ones.
+
+        Delegates the per-connection timeout/close logic to
+        :meth:`_ping_one_ws`; exceptions from individual pings are
+        collected via ``return_exceptions`` so one bad client cannot
+        skip the rest.
+        """
+        if self._ws_server is not None:
+            connections = list(self._ws_server.connections)
+            if connections:
+                await asyncio.gather(
+                    *[self._ping_one_ws(ws) for ws in connections],
+                    return_exceptions=True,
+                )
 
     def _stop_tunnel(self) -> None:
         """Terminate the tunnel process and reset all tunnel state.
@@ -4051,8 +4136,6 @@ class RemoteAccessServer:
                     _BIND_RETRY_ATTEMPTS, exc.errno, exc, delay,
                 )
                 await asyncio.sleep(delay)
-        else:  # pragma: no cover — covered by the ``break`` paths above
-            pass
         if self._ws_server is None:
             # All retryable attempts exhausted.  Exit cleanly so the
             # supervisor backs off naturally instead of respawning
@@ -4154,11 +4237,7 @@ class RemoteAccessServer:
 
         _save_url_file(self._url_file, self._local_url, tunnel_url)
         self._active_url = tunnel_url or self._local_url
-        if self.use_tunnel and self._active_url != self._last_posted_url:
-            await self._loop.run_in_executor(
-                None, _post_url_to_message_board, self._active_url,
-            )
-            self._last_posted_url = self._active_url
+        await self._post_url_if_changed()
 
         self._last_ips = _get_local_ips()
         self._watchdog_task = asyncio.create_task(self._watchdog())
@@ -4176,12 +4255,15 @@ class RemoteAccessServer:
             print("Warning: cloudflared tunnel failed to start", file=sys.stderr)
         await self._ws_server.serve_forever()  # type: ignore[union-attr]
 
-    def _handle_shutdown_signal(self, signum: int) -> None:
+    def _handle_shutdown_signal(
+        self, signum: int, _frame: Any = None,
+    ) -> None:
         """React to a catchable termination signal (SIGTERM / SIGHUP).
 
         Logs the signal alongside a snapshot of in-flight agent tasks
-        and current memory.  For ``SIGTERM`` the *first* invocation
-        raises :class:`KeyboardInterrupt` so the ``asyncio.run`` loop in
+        (via :func:`_snapshot_active_tabs`, which is signal-safe) and
+        current memory.  For ``SIGTERM`` the *first* invocation raises
+        :class:`KeyboardInterrupt` so the ``asyncio.run`` loop in
         :meth:`start` unwinds through its existing
         ``except KeyboardInterrupt`` handler and runs its cleanup.
 
@@ -4198,63 +4280,18 @@ class RemoteAccessServer:
 
         Args:
             signum: The signal number delivered by the OS.
+            _frame: The interrupted stack frame (unused; present so
+                the method can be registered with ``signal.signal``
+                directly).
         """
-        import resource
-
         sig_name = signal.Signals(signum).name
-        from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-
-        # Snapshot the registry under its own lock before iterating.
-        # The signal handler runs synchronously on the main thread —
-        # interrupting whatever bytecode happened to be executing — so
-        # without the snapshot a concurrent worker thread mutating
-        # ``running_agent_states`` (registering a fresh tab, disposing
-        # a finished one) would race the ``items()`` iterator and
-        # raise ``RuntimeError: dictionary changed size during
-        # iteration`` *from inside the signal handler*.  That
-        # RuntimeError is not a ``KeyboardInterrupt``, so it would
-        # bypass the ``except KeyboardInterrupt`` arm in
-        # :meth:`start`, escape ``asyncio.run`` uncaught, and crash
-        # the daemon with an unhandled traceback (visible to the user
-        # as a kiss-web flap).  ``_registry_lock`` is a
-        # :class:`threading.RLock`, so re-entry from the same main
-        # thread is safe even if the signal interrupted a worker
-        # thread that holds the lock — re-acquisition will block
-        # until the worker releases it, but it cannot deadlock.
-        # Falling back to a best-effort unlocked snapshot mirrors the
-        # ``_handle_active_tasks_query`` pattern: if anything goes
-        # wrong inside the ``with`` (e.g. the lock object itself was
-        # GC'd during interpreter shutdown), we still produce a log
-        # rather than crash the signal handler.
-        active_tabs = []
-        try:
-            with _RunningAgentState._registry_lock:
-                items = list(_RunningAgentState.running_agent_states.items())
-        except Exception:
-            items = list(_RunningAgentState.running_agent_states.items())
-        for tab_id, tab in items:
-            try:
-                if tab.is_task_active:
-                    task_id = tab.task_history_id or tab.last_task_id
-                    active_tabs.append(f"{tab_id}(task={task_id})")
-            except Exception:
-                logger.debug(
-                    "shutdown signal: skipping malformed tab entry",
-                    exc_info=True,
-                )
-        try:
-            rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-            rss_mb = (
-                rss / (1024 * 1024) if sys.platform == "darwin" else rss / 1024
-            )
-        except Exception:
-            rss_mb = -1
+        active_tabs = _snapshot_active_tabs()
         logger.warning(
             "Signal %s received: pid=%d active_tasks=[%s] rss=%.1fMB",
             sig_name,
             os.getpid(),
             ", ".join(active_tabs) if active_tabs else "none",
-            rss_mb,
+            _rss_mb(),
         )
         # For SIGTERM: raise KeyboardInterrupt so the asyncio loop can
         # unwind cleanly through the existing try/except — but only on
@@ -4270,18 +4307,6 @@ class RemoteAccessServer:
                 return
             self._shutdown_initiated = True
             raise KeyboardInterrupt(f"Received {sig_name}")
-
-    def _signal_handler_entry(self, signum: int, _frame: Any) -> None:
-        """``signal.signal`` callback adapter for :meth:`_handle_shutdown_signal`.
-
-        Discards the unused stack-frame argument required by the
-        ``signal`` module and forwards the signal number.
-
-        Args:
-            signum: The signal number delivered by the OS.
-            _frame: The interrupted stack frame (unused).
-        """
-        self._handle_shutdown_signal(signum)
 
     def _stop_active_agent_tasks(self, timeout: float = 12.0) -> None:
         """Stop in-flight agent worker threads so they unwind cleanly.
@@ -4313,6 +4338,13 @@ class RemoteAccessServer:
                 for all active worker threads to unwind.
         """
         import ctypes
+
+        # Declare the C signature once so the ``PyThreadState_SetAsyncExc``
+        # calls below marshal arguments correctly.
+        ctypes.pythonapi.PyThreadState_SetAsyncExc.argtypes = [
+            ctypes.c_ulong,
+            ctypes.py_object,
+        ]
 
         from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 
@@ -4424,7 +4456,7 @@ class RemoteAccessServer:
         """
         for sig in (signal.SIGTERM, signal.SIGHUP):
             try:
-                signal.signal(sig, self._signal_handler_entry)
+                signal.signal(sig, self._handle_shutdown_signal)
             except (OSError, ValueError):
                 pass  # e.g. not main thread, or unsupported on this OS
 
@@ -4437,8 +4469,6 @@ class RemoteAccessServer:
             level=logging.INFO,
             format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         )
-        import resource
-
         pid = os.getpid()
         logger.info(
             "Server starting: pid=%d python=%s platform=%s "
@@ -4450,13 +4480,7 @@ class RemoteAccessServer:
             self.host,
             self.port,
         )
-        try:
-            rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-            # macOS reports bytes, Linux reports KB
-            rss_mb = rss / (1024 * 1024) if sys.platform == "darwin" else rss / 1024
-            logger.info("Initial memory: rss=%.1fMB pid=%d", rss_mb, pid)
-        except Exception:
-            pass
+        logger.info("Initial memory: rss=%.1fMB pid=%d", _rss_mb(), pid)
 
         self._install_signal_handlers()
 

@@ -6,8 +6,8 @@
 
 from __future__ import annotations
 
-import argparse
 import json
+import logging
 import os
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -16,6 +16,17 @@ from typing import Any
 
 import yaml
 
+# CLI plumbing lives in cli_helpers; re-exported here for backwards
+# compatibility (tests and callers import these from this module).
+from kiss.agents.sorcar.cli_helpers import (
+    _DEFAULT_TASK as _DEFAULT_TASK,
+)
+from kiss.agents.sorcar.cli_helpers import (
+    _resolve_task as _resolve_task,
+)
+from kiss.agents.sorcar.cli_helpers import (
+    cli_ask_user_question as cli_ask_user_question,
+)
 from kiss.agents.sorcar.persistence import _load_last_model
 from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.agents.sorcar.web_use_tool import WebUseTool
@@ -25,6 +36,8 @@ from kiss.core.models.model_info import get_default_model
 from kiss.core.models.model_info import model as _model_factory
 from kiss.core.printer import Printer
 from kiss.core.relentless_agent import RelentlessAgent
+
+logger = logging.getLogger(__name__)
 
 
 def _save_setting_to_config(key: str, value: Any) -> None:
@@ -52,12 +65,192 @@ def _save_setting_to_config(key: str, value: Any) -> None:
         pass
 
 
+def _apply_setting(
+    updated: list[str],
+    broadcast: Callable[[dict[str, Any]], None] | None,
+    key: str,
+    value: Any,
+    label: str | None = None,
+    broadcast_value: Any = None,
+) -> None:
+    """Record, persist, and broadcast a single settings update.
+
+    Appends a human-readable entry to *updated*, persists *value* under
+    *key* via :func:`_save_setting_to_config`, and broadcasts an
+    ``updateSetting`` event to the frontend when *broadcast* is set.
+
+    Args:
+        updated: Accumulator of "key=value" summary strings.
+        broadcast: Frontend broadcast callable, or ``None``.
+        key: The config / broadcast key.
+        value: The new value to persist.
+        label: Override for the summary entry (default ``"{key}={value}"``);
+            used to mask secrets (e.g. ``"remote_password=<updated>"``).
+        broadcast_value: Override for the broadcast payload value
+            (default *value*); used to avoid leaking secrets to the UI.
+    """
+    updated.append(label if label is not None else f"{key}={value}")
+    _save_setting_to_config(key, value)
+    if broadcast:
+        broadcast({
+            "type": "updateSetting",
+            "key": key,
+            "value": value if broadcast_value is None else broadcast_value,
+        })
+
+
+def _generate_commit_message(
+    commit_dir: Path, user_prompt: str | None = None,
+) -> str:
+    """Generate a commit message for staged changes using an LLM.
+
+    Gets the staged diff and delegates to
+    :func:`~kiss.agents.vscode.helpers.generate_commit_message_from_diff`.
+    When *user_prompt* is provided, it is forwarded so the user's
+    task prompt is incorporated into the commit message.
+
+    Args:
+        commit_dir: The directory containing staged changes.
+        user_prompt: The user's task prompt that produced these
+            staged changes, or ``None`` when not available.
+
+    Returns:
+        A commit message string.
+    """
+    from kiss.agents.sorcar.git_worktree import GitWorktreeOps
+    from kiss.agents.vscode.helpers import generate_commit_message_from_diff
+
+    diff_text = GitWorktreeOps.staged_diff(commit_dir)
+    return generate_commit_message_from_diff(diff_text, user_prompt=user_prompt)
+
+
+def auto_commit_changes(
+    commit_dir: Path,
+    user_prompt: str | None,
+    message_fn: Callable[[Path, str | None], str],
+) -> bool:
+    """Stage all changes, generate a commit message, and commit.
+
+    Stages all changes once, generates a commit message from the
+    staged diff via *message_fn*, then commits the already-staged
+    changes (without re-staging).  Falls back to a generic commit
+    message when *message_fn* raises (e.g. the LLM-based generator
+    is unavailable).
+
+    Args:
+        commit_dir: Directory whose changes are staged and committed.
+        user_prompt: The user's task prompt, woven into the commit
+            message (or its fallback), or ``None`` when unavailable.
+        message_fn: Callable producing a commit message from
+            ``(commit_dir, user_prompt)``.
+
+    Returns:
+        True if a commit was created, False if nothing to commit.
+    """
+    from kiss.agents.sorcar.git_worktree import GitWorktreeOps
+
+    GitWorktreeOps.stage_all(commit_dir)
+    try:
+        msg = message_fn(commit_dir, user_prompt)
+    except Exception:
+        logger.debug(
+            "LLM commit message generation failed; using fallback", exc_info=True,
+        )
+        msg = "kiss: auto-commit agent changes"
+        if user_prompt:
+            from kiss.agents.vscode.helpers import _append_user_prompt
+
+            msg = _append_user_prompt(msg, user_prompt)
+    return GitWorktreeOps.commit_staged(commit_dir, msg)
+
+
+def _yaml_failure(exc: BaseException) -> str:
+    """Return a YAML result string for an unhandled sub-agent exception."""
+    failure: str = yaml.dump(
+        {"success": False, "summary": f"Unhandled exception: {exc}"},
+        sort_keys=False,
+    )
+    return failure
+
+
+def _agent_usage(agent: Any) -> tuple[float, int, int]:
+    """Return ``(budget_used, total_tokens_used, total_steps)`` for *agent*."""
+    return (
+        float(getattr(agent, "budget_used", 0.0) or 0.0),
+        int(getattr(agent, "total_tokens_used", 0) or 0),
+        int(getattr(agent, "total_steps", 0) or 0),
+    )
+
+
+def _broadcast_subagent_done(printer: Any, tab_ids: list[str]) -> None:
+    """Broadcast ``subagentDone`` for each tab id so the frontend can
+    stop the running indicator on the sub-agent tab.  Errors are
+    swallowed (the broadcast is best-effort UI signalling)."""
+    broadcast = getattr(printer, "broadcast", None)
+    if broadcast is None:
+        return
+    for vid in tab_ids:
+        try:
+            broadcast({"type": "subagentDone", "tab_id": vid, "tabId": ""})
+        except Exception:
+            pass
+
+
+def _attribute_sub_usage(agent: Any, budget: float, tokens: int, steps: int) -> None:
+    """Attribute sub-agents' cost, tokens, and steps to the parent *agent*.
+
+    Without this, sub-agent budgets would be invisible to the parent
+    agent's global accounting and UI.  Also updates the printer offsets
+    so the live status line in the current sub-session reflects the
+    additional spend immediately (the offsets are otherwise
+    snapshotted only at session start).
+    """
+    agent.budget_used = float(getattr(agent, "budget_used", 0.0) or 0.0) + budget
+    agent.total_tokens_used = (
+        int(getattr(agent, "total_tokens_used", 0) or 0) + tokens
+    )
+    agent.total_steps = int(getattr(agent, "total_steps", 0) or 0) + steps
+    if agent.printer is not None:
+        try:
+            agent.printer.budget_offset = agent.budget_used
+            agent.printer.tokens_offset = agent.total_tokens_used
+            agent.printer.steps_offset = agent.total_steps
+        except Exception:
+            pass
+
+
+# Attachment MIME-type prefixes and the human-readable labels used when
+# describing attachments in the initial prompt, in display order.
+_ATTACHMENT_KINDS: tuple[tuple[str, str], ...] = (
+    ("image/", "image(s)"),
+    ("application/pdf", "PDF(s)"),
+    ("audio/", "audio file(s)"),
+    ("video/", "video file(s)"),
+)
+
+
+def _attachment_parts(attachments: list[Attachment]) -> list[str]:
+    """Return human-readable per-kind attachment counts (e.g. ``"2 image(s)"``)."""
+    parts: list[str] = []
+    for prefix, label in _ATTACHMENT_KINDS:
+        count = sum(1 for a in attachments if a.mime_type.startswith(prefix))
+        if count:
+            parts.append(f"{count} {label}")
+    return parts
+
+
 class SorcarAgent(RelentlessAgent):
     """Agent with both coding tools and browser automation for web + code tasks."""
+
+    # True only on subclasses that isolate every task in a git worktree
+    # (see :class:`~kiss.agents.sorcar.worktree_sorcar_agent.WorktreeSorcarAgent`).
+    uses_worktree: bool = False
 
     def __init__(self, name: str) -> None:
         super().__init__(name)
         self.web_use_tool: WebUseTool | None = None
+        # NOT redundant: the base class only sets ``docker_manager`` in
+        # ``_reset`` (called from ``run``); tools can be built earlier.
         self.docker_manager: Any = None
         self._use_web_tools: bool = True
         self._is_parallel: bool = False
@@ -96,23 +289,12 @@ class SorcarAgent(RelentlessAgent):
             printer=self.printer,
             totals_out=totals,
         )
-        # Attribute the sub-agents' cost, tokens, and steps to this
-        # (parent) agent so the global accounting and UI reflect the
-        # full work done.  Without this, sub-agent budgets would be
-        # invisible to the parent agent.
-        self.budget_used += float(totals.get("budget_used", 0.0))
-        self.total_tokens_used += int(totals.get("total_tokens_used", 0))
-        self.total_steps += int(totals.get("total_steps", 0))
-        # Update the printer offsets so the live status line in the
-        # current sub-session reflects the additional spend immediately
-        # (the offsets are otherwise snapshotted only at session start).
-        if self.printer is not None:
-            try:
-                self.printer.budget_offset = self.budget_used  # type: ignore[attr-defined]
-                self.printer.tokens_offset = self.total_tokens_used  # type: ignore[attr-defined]
-                self.printer.steps_offset = self.total_steps  # type: ignore[attr-defined]
-            except Exception:
-                pass
+        _attribute_sub_usage(
+            self,
+            float(totals.get("budget_used", 0.0)),
+            int(totals.get("total_tokens_used", 0)),
+            int(totals.get("total_steps", 0)),
+        )
         return results
 
     def _get_tools(self) -> list:
@@ -144,12 +326,6 @@ class SorcarAgent(RelentlessAgent):
                 return str(ask_callback(question))
             return "(ask_user_question not available in this environment)"
 
-        stop_event = getattr(self, "_stop_event", None)
-        useful_tools = UsefulTools(
-            stream_callback=_stream,
-            stop_event=stop_event,
-            work_dir=self.work_dir,
-        )
         if self.docker_manager:
             from kiss.docker.docker_tools import DockerTools
 
@@ -158,6 +334,11 @@ class SorcarAgent(RelentlessAgent):
                 self._docker_bash, docker_tools.Read, docker_tools.Edit, docker_tools.Write,
             ]
         else:
+            useful_tools = UsefulTools(
+                stream_callback=_stream,
+                stop_event=getattr(self, "_stop_event", None),
+                work_dir=self.work_dir,
+            )
             tools = [useful_tools.Bash, useful_tools.Read, useful_tools.Edit, useful_tools.Write]
         if self._use_web_tools and self.web_use_tool is None:
             self.web_use_tool = WebUseTool()
@@ -255,26 +436,14 @@ class SorcarAgent(RelentlessAgent):
 
             if is_parallel is not None:
                 self._is_parallel = bool(is_parallel)
-                updated.append(f"is_parallel={self._is_parallel}")
-                _save_setting_to_config("is_parallel", self._is_parallel)
-                if broadcast:
-                    broadcast({
-                        "type": "updateSetting",
-                        "key": "is_parallel",
-                        "value": self._is_parallel,
-                    })
+                _apply_setting(updated, broadcast, "is_parallel", self._is_parallel)
 
             if is_worktree is not None:
-                updated.append(f"is_worktree={bool(is_worktree)}")
-                _save_setting_to_config("is_worktree", bool(is_worktree))
-                if broadcast:
-                    broadcast({
-                        "type": "updateSetting",
-                        "key": "is_worktree",
-                        "value": bool(is_worktree),
-                    })
+                _apply_setting(updated, broadcast, "is_worktree", bool(is_worktree))
 
             if model_name is not None:
+                # Special-cased: the model is persisted via the last-model
+                # store (not the config file) and applied to the live agent.
                 self.model_name = model_name
                 updated.append(f"model={model_name}")
                 from kiss.agents.sorcar.persistence import _save_last_model
@@ -288,79 +457,38 @@ class SorcarAgent(RelentlessAgent):
 
             if max_budget is not None:
                 self.max_budget = float(max_budget)
-                updated.append(f"max_budget={self.max_budget}")
-                _save_setting_to_config("max_budget", self.max_budget)
-                if broadcast:
-                    broadcast({
-                        "type": "updateSetting",
-                        "key": "max_budget",
-                        "value": self.max_budget,
-                    })
+                _apply_setting(updated, broadcast, "max_budget", self.max_budget)
 
             if use_web_browser is not None:
                 self._use_web_tools = bool(use_web_browser)
-                updated.append(f"use_web_browser={self._use_web_tools}")
-                _save_setting_to_config(
-                    "use_web_browser", self._use_web_tools,
+                _apply_setting(
+                    updated, broadcast, "use_web_browser", self._use_web_tools,
                 )
-                if broadcast:
-                    broadcast({
-                        "type": "updateSetting",
-                        "key": "use_web_browser",
-                        "value": self._use_web_tools,
-                    })
 
             if remote_password is not None:
-                updated.append("remote_password=<updated>")
-                _save_setting_to_config("remote_password", remote_password)
-                if broadcast:
-                    broadcast({
-                        "type": "updateSetting",
-                        "key": "remote_password",
-                        "value": True,
-                    })
+                # Mask the secret in both the summary and the broadcast.
+                _apply_setting(
+                    updated, broadcast, "remote_password", remote_password,
+                    label="remote_password=<updated>", broadcast_value=True,
+                )
 
             if demo_mode is not None:
-                updated.append(f"demo_mode={bool(demo_mode)}")
-                _save_setting_to_config("demo_mode", bool(demo_mode))
-                if broadcast:
-                    broadcast({
-                        "type": "updateSetting",
-                        "key": "demo_mode",
-                        "value": bool(demo_mode),
-                    })
+                _apply_setting(updated, broadcast, "demo_mode", bool(demo_mode))
 
             if auto_commit is not None and bool(auto_commit):
+                # Special-cased: a one-shot action (commit pending changes),
+                # not a persisted config value.
                 updated.append("auto_commit=triggered")
                 try:
                     from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 
                     wd = Path(self.work_dir).resolve()
-                    repo = GitWorktreeOps.discover_repo(wd)
-                    if repo:
-                        commit_dir = wd if wd != repo else repo
-                        GitWorktreeOps.stage_all(commit_dir)
-                        user_prompt = (
-                            getattr(self, "_last_user_prompt", "") or None
+                    if GitWorktreeOps.discover_repo(wd):
+                        auto_commit_changes(
+                            wd,
+                            getattr(self, "_last_user_prompt", "") or None,
+                            _generate_commit_message,
                         )
-                        try:
-                            from kiss.agents.vscode.helpers import (
-                                generate_commit_message_from_diff,
-                            )
-
-                            diff = GitWorktreeOps.staged_diff(commit_dir)
-                            msg = generate_commit_message_from_diff(
-                                diff, user_prompt=user_prompt,
-                            )
-                        except Exception:
-                            msg = "kiss: auto-commit agent changes"
-                            if user_prompt:
-                                from kiss.agents.vscode.helpers import (
-                                    _append_user_prompt,
-                                )
-
-                                msg = _append_user_prompt(msg, user_prompt)
-                        GitWorktreeOps.commit_staged(commit_dir, msg)
                 except Exception:
                     pass
                 if broadcast:
@@ -371,24 +499,14 @@ class SorcarAgent(RelentlessAgent):
                     })
 
             if custom_endpoint is not None:
-                updated.append(f"custom_endpoint={custom_endpoint}")
-                _save_setting_to_config("custom_endpoint", custom_endpoint)
-                if broadcast:
-                    broadcast({
-                        "type": "updateSetting",
-                        "key": "custom_endpoint",
-                        "value": custom_endpoint,
-                    })
+                _apply_setting(updated, broadcast, "custom_endpoint", custom_endpoint)
 
             if custom_headers is not None:
-                updated.append("custom_headers=<updated>")
-                _save_setting_to_config("custom_headers", custom_headers)
-                if broadcast:
-                    broadcast({
-                        "type": "updateSetting",
-                        "key": "custom_headers",
-                        "value": True,
-                    })
+                # Mask the header values in both the summary and broadcast.
+                _apply_setting(
+                    updated, broadcast, "custom_headers", custom_headers,
+                    label="custom_headers=<updated>", broadcast_value=True,
+                )
 
             if not updated:
                 return "No settings were changed (all arguments were None)."
@@ -401,16 +519,10 @@ class SorcarAgent(RelentlessAgent):
             calling :func:`run_parallel`.
 
             Returns:
-                The number of CPU cores available to the process.  Falls
-                back to the total CPU count if the per-process affinity
-                is unavailable, and to ``1`` as a final fallback.
+                The number of CPU cores available to the process,
+                falling back to ``1`` when it cannot be determined.
             """
-            try:
-                affinity = os.sched_getaffinity(0)  # type: ignore[attr-defined]
-                return len(affinity)
-            except AttributeError:
-                pass
-            return os.cpu_count() or 1
+            return os.process_cpu_count() or 1
 
         def set_model(model_name: str) -> str:
             """Change the agent's LLM model dynamically.
@@ -607,19 +719,7 @@ class SorcarAgent(RelentlessAgent):
             )
             prompt = prompt_template
             if attachments:
-                pdf_count = sum(1 for a in attachments if a.mime_type == "application/pdf")
-                img_count = sum(1 for a in attachments if a.mime_type.startswith("image/"))
-                audio_count = sum(1 for a in attachments if a.mime_type.startswith("audio/"))
-                video_count = sum(1 for a in attachments if a.mime_type.startswith("video/"))
-                parts = []
-                if img_count:
-                    parts.append(f"{img_count} image(s)")
-                if pdf_count:
-                    parts.append(f"{pdf_count} PDF(s)")
-                if audio_count:
-                    parts.append(f"{audio_count} audio file(s)")
-                if video_count:
-                    parts.append(f"{video_count} video file(s)")
+                parts = _attachment_parts(attachments)
                 if parts:
                     prompt += (
                         f"\n\n# Important\n - User attached {', '.join(parts)}. "
@@ -829,34 +929,16 @@ def run_tasks_parallel(
             )
             return result
         except Exception as exc:
-            error_result: str = yaml.dump(
-                {"success": False, "summary": f"Unhandled exception: {exc}"},
-                sort_keys=False,
-            )
-            return error_result
+            return _yaml_failure(exc)
         finally:
-            sub_usage[idx] = (
-                float(getattr(agent, "budget_used", 0.0) or 0.0),
-                int(getattr(agent, "total_tokens_used", 0) or 0),
-                int(getattr(agent, "total_steps", 0) or 0),
-            )
-            # Broadcast ``subagentDone`` so the frontend can stop
-            # the running indicator on the sub-agent tab.
+            sub_usage[idx] = _agent_usage(agent)
             if printer is not None:
-                broadcast_fn = getattr(printer, "broadcast", None)
-                if broadcast_fn is not None:
-                    tl = getattr(printer, "_thread_local", None)
-                    parent_key = getattr(tl, "task_id", "") if tl else ""
-                    sub_tab = f"{parent_key}__sub_{idx}" if parent_key else ""
-                    if sub_tab:
-                        try:
-                            broadcast_fn({
-                                "type": "subagentDone",
-                                "tab_id": sub_tab,
-                                "tabId": "",
-                            })
-                        except Exception:
-                            pass
+                tl = getattr(printer, "_thread_local", None)
+                parent_key = getattr(tl, "task_id", "") if tl else ""
+                if parent_key:
+                    _broadcast_subagent_done(
+                        printer, [f"{parent_key}__sub_{idx}"],
+                    )
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         results = list(pool.map(_run_single, enumerate(tasks)))
@@ -868,43 +950,6 @@ def run_tasks_parallel(
     return results
 
 
-_DEFAULT_TASK = """
-can you find what the current weather is in San Francisco and summarize it?
-"""
 
-
-def _resolve_task(args: argparse.Namespace) -> str:
-    """Determine the task description from parsed arguments.
-
-    Priority: -f file > --task string > default task.
-
-    Args:
-        args: Parsed argparse namespace with 'f' and 'task' attributes.
-
-    Returns:
-        The task description string.
-
-    Raises:
-        FileNotFoundError: If -f path does not exist.
-    """
-    if args.file is not None:
-        return Path(args.file).read_text()
-    if args.task is not None:
-        task: str = args.task
-        return task
-    return _DEFAULT_TASK
-
-
-def cli_ask_user_question(question: str) -> str:
-    """CLI callback for agent questions (prints and reads from stdin).
-
-    Args:
-        question: The question to display to the user.
-
-    Returns:
-        The user's typed response text.
-    """
-    print(f"\n>>> Agent asks: {question}")
-    return input("Your answer: ")
 
 

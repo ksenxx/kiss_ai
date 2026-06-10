@@ -10,7 +10,8 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import {SorcarSidebarView} from './SorcarSidebarView';
+import {MERGE_ACTIONS, SorcarSidebarView} from './SorcarSidebarView';
+import {getGitApi} from './gitApi';
 import {isReloadReady} from './reloadGuard';
 
 import {ensureDependencies, ensureLocalBinInPath} from './DependencyInstaller';
@@ -124,14 +125,10 @@ export function activate(context: vscode.ExtensionContext): void {
   // Commit message generation — sets the Git SCM input box
   const setScmMessage = async (message: string) => {
     try {
-      const gitExt = vscode.extensions.getExtension('vscode.git');
-      if (gitExt) {
-        const git = gitExt.isActive ? gitExt.exports : await gitExt.activate();
-        const api = git.getAPI(1);
-        if (api.repositories.length > 0) {
-          api.repositories[0].inputBox.value = message;
-          vscode.commands.executeCommand('workbench.view.scm');
-        }
+      const api = await getGitApi();
+      if (api && api.repositories.length > 0) {
+        api.repositories[0].inputBox.value = message;
+        vscode.commands.executeCommand('workbench.view.scm');
       }
     } catch (err) {
       console.error('[kissSorcar] Failed to set SCM message:', err);
@@ -139,8 +136,9 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   // Countdown shown in the SCM input box while a commit message is being
-  // generated. Starts at 15s, decrements every second, stays at 0 if the
-  // agent is still generating. Cleared/replaced when the result arrives.
+  // generated. Starts at ``commitCountdownSeconds``, decrements every
+  // second, stays at 0 if the agent is still generating. Cleared/replaced
+  // when the result arrives.
   const commitCountdownSeconds = 20;
   let stopCommitCountdown: (() => void) | undefined;
   const startCommitCountdown = () => {
@@ -175,11 +173,9 @@ export function activate(context: vscode.ExtensionContext): void {
   // Returns true iff the first Git repository has at least one staged change.
   const hasStagedChanges = async (): Promise<boolean> => {
     try {
-      const gitExt = vscode.extensions.getExtension('vscode.git');
-      if (!gitExt) return true; // Can't check — let generation proceed.
-      const git = gitExt.isActive ? gitExt.exports : await gitExt.activate();
-      const api = git.getAPI(1);
-      if (api.repositories.length === 0) return true;
+      const api = await getGitApi();
+      // Can't check — let generation proceed.
+      if (!api || api.repositories.length === 0) return true;
       return api.repositories[0].state.indexChanges.length > 0;
     } catch (err) {
       console.error('[kissSorcar] Failed to check staged changes:', err);
@@ -222,16 +218,7 @@ export function activate(context: vscode.ExtensionContext): void {
   }
 
   // Merge commands — route to the active tab's MergeManager
-  for (const cmd of [
-    'acceptChange',
-    'rejectChange',
-    'prevChange',
-    'nextChange',
-    'acceptAll',
-    'rejectAll',
-    'acceptFile',
-    'rejectFile',
-  ] as const) {
+  for (const cmd of Object.values(MERGE_ACTIONS)) {
     context.subscriptions.push(
       vscode.commands.registerCommand(`kissSorcar.${cmd}`, () => {
         sidebarView!.handleMergeCommand(cmd);
