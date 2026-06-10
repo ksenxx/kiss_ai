@@ -41,9 +41,13 @@ NODE_VERSION="v22.16.0"
 DEP_INSTALLER_TS="$PROJECT_DIR/src/kiss/agents/vscode/src/DependencyInstaller.ts"
 VSCODE_PACKAGE_JSON="$PROJECT_DIR/src/kiss/agents/vscode/package.json"
 
-REQUIRED_GIT_VERSION=$(grep "const GIT_VERSION" "$DEP_INSTALLER_TS" 2>/dev/null | head -1 | sed "s/.*= '//;s/'.*//")
-REQUIRED_UV_VERSION=$(grep "const UV_VERSION" "$DEP_INSTALLER_TS" 2>/dev/null | head -1 | sed "s/.*= '//;s/'.*//")
-REQUIRED_VSCODE_VERSION=$(grep '"vscode"' "$VSCODE_PACKAGE_JSON" 2>/dev/null | head -1 | sed 's/[^0-9.]//g')
+# The trailing `|| true` matters: with `set -eo pipefail` an absent file or
+# renamed constant makes `grep` exit non-zero, which would otherwise kill the
+# whole script at these assignments before it printed anything.  An empty
+# version simply skips the corresponding version check below.
+REQUIRED_GIT_VERSION=$(grep "const GIT_VERSION" "$DEP_INSTALLER_TS" 2>/dev/null | head -1 | sed "s/.*= '//;s/'.*//" || true)
+REQUIRED_UV_VERSION=$(grep "const UV_VERSION" "$DEP_INSTALLER_TS" 2>/dev/null | head -1 | sed "s/.*= '//;s/'.*//" || true)
+REQUIRED_VSCODE_VERSION=$(grep '"vscode"' "$VSCODE_PACKAGE_JSON" 2>/dev/null | head -1 | sed 's/[^0-9.]//g' || true)
 REQUIRED_NODE_VERSION="${NODE_VERSION#v}"
 
 mkdir -p "$BIN_DIR" "$LOG_DIR"
@@ -64,6 +68,21 @@ esac
 if ! command -v curl &>/dev/null; then
     echo "ERROR: curl is required but not found. Please install curl first."
     exit 1
+fi
+
+# Make Homebrew visible even when this script runs detached from a login
+# shell.  The webapp's update button spawns install.sh from the kiss-web
+# daemon, whose launchd/systemd environment has a minimal PATH without
+# /opt/homebrew/bin (or /usr/local/bin on Intel Macs).  Without this,
+# `command -v brew` failed even though Homebrew was installed, so
+# `ensure_homebrew` tried to re-install it and `upgrade_git` aborted the
+# whole update with "Cannot upgrade git without Homebrew".
+if [ "$OS" = "Darwin" ] && ! command -v brew &>/dev/null; then
+    if [ -x /opt/homebrew/bin/brew ]; then
+        eval "$(/opt/homebrew/bin/brew shellenv)"
+    elif [ -x /usr/local/bin/brew ]; then
+        eval "$(/usr/local/bin/brew shellenv)"
+    fi
 fi
 
 # Returns 0 only if /dev/tty can actually be opened for reading.  A plain
@@ -89,12 +108,14 @@ ensure_xcode_clt() {
     local SENTINEL=/tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
     sudo touch "$SENTINEL" 2>/dev/null || true
     local PROD
+    # `|| true` keeps a failing `softwareupdate` (no network, managed Macs)
+    # from killing the script via `set -eo pipefail`.
     PROD="$(softwareupdate -l 2>/dev/null \
         | awk '/^[[:space:]]*\*.*Command Line Tools/ {
                  sub(/^[[:space:]]*\*[[:space:]]*(Label:[[:space:]]*)?/, "");
                  print
              }' \
-        | tail -n1)"
+        | tail -n1 || true)"
     if [ -n "$PROD" ]; then
         echo "   Installing: $PROD"
         sudo softwareupdate -i "$PROD" --verbose 2>&1 || true
@@ -114,7 +135,9 @@ ensure_xcode_clt() {
     echo "   A dialog has appeared to install the Xcode Command Line Tools."
     echo "   Complete the installation in that dialog, then return to this terminal."
     if can_read_tty; then
-        read -n 1 -s -r -p "   Press any key to continue with the rest of installation..." </dev/tty
+        # `|| true`: `read` fails on EOF/EIO even when /dev/tty opened fine;
+        # under `set -e` that would abort the install instead of continuing.
+        read -n 1 -s -r -p "   Press any key to continue with the rest of installation..." </dev/tty || true
     else
         echo "   Non-interactive shell detected — continuing without waiting."
     fi
@@ -144,7 +167,9 @@ ensure_homebrew() {
 
     local REPLY_BREW=""
     if can_read_tty; then
-        read -r -p "   Install the latest Homebrew now? [Y/n] " REPLY_BREW </dev/tty
+        # `read` can fail (EOF/EIO) even when /dev/tty opened fine; fall back
+        # to the non-interactive default instead of dying under `set -e`.
+        read -r -p "   Install the latest Homebrew now? [Y/n] " REPLY_BREW </dev/tty || REPLY_BREW=""
     else
         echo "   Non-interactive shell detected — defaulting to Yes."
     fi
@@ -152,12 +177,15 @@ ensure_homebrew() {
     case "$REPLY_BREW" in
         ""|y|Y|yes|YES|Yes)
             echo "   Installing Homebrew..."
+            # `|| true`: a failed Homebrew bootstrap (no sudo, no network)
+            # must not abort the install — the check below prints a warning
+            # and the script continues without brew.
             if can_read_tty; then
                 NONINTERACTIVE=1 /bin/bash -c \
-                    "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" </dev/tty
+                    "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh || true)" </dev/tty || true
             else
                 NONINTERACTIVE=1 /bin/bash -c \
-                    "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+                    "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh || true)" || true
             fi
             # Make brew available in the current shell session.
             if [ -x /opt/homebrew/bin/brew ]; then
@@ -401,8 +429,10 @@ version_gte() {
     # shellcheck disable=SC2206
     local i a=($1) b=($2)
     for ((i = 0; i < ${#b[@]}; i++)); do
-        local va=${a[i]:-0}
-        local vb=${b[i]:-0}
+        # Force base-10 so components with leading zeros (e.g. "08") are not
+        # parsed as invalid octal, which would error out the arithmetic.
+        local va=$((10#${a[i]:-0}))
+        local vb=$((10#${b[i]:-0}))
         if ((va > vb)); then return 0; fi
         if ((va < vb)); then return 1; fi
     done
@@ -419,7 +449,17 @@ prompt_upgrade_or_abort() {
     echo "   $name $current is older than the required version $required."
     local reply=""
     if can_read_tty; then
-        read -r -p "   Upgrade $name to $required or later? [Y/n] " reply </dev/tty
+        # `read` can still fail even when /dev/tty opens successfully — EOF
+        # when the terminal feeding it closes, or EIO when the script runs
+        # detached from a usable terminal (e.g. the update button spawning
+        # install.sh).  Under `set -e` an unguarded failure killed the whole
+        # update right at this question with no error message; fall back to
+        # the non-interactive default (Yes) instead.
+        if ! read -r -p "   Upgrade $name to $required or later? [Y/n] " reply </dev/tty; then
+            reply=""
+            echo ""
+            echo "   No interactive input available — defaulting to Yes."
+        fi
     else
         echo "   Non-interactive shell detected — defaulting to Yes."
     fi
@@ -438,45 +478,56 @@ prompt_upgrade_or_abort() {
 # Upgrade helpers — invoked only when the user accepts the upgrade prompt
 # ---------------------------------------------------------------------------
 
+# Upgrade failures are deliberately non-fatal: a missing package manager or
+# a flaky network must not abort the whole update (the previous behaviour —
+# `exit 1` / unguarded commands under `set -e` — made the update button fail
+# whenever the git-upgrade question fired in an environment without brew).
+# The caller re-checks the installed version afterwards and warns if it is
+# still too old.
 upgrade_git() {
     echo "   Upgrading git..."
     case "$OS" in
         Darwin)
             if command -v brew &>/dev/null; then
-                brew install git 2>/dev/null || brew upgrade git
+                brew install git 2>/dev/null || brew upgrade git \
+                    || echo "   WARNING: Homebrew could not upgrade git; continuing with the installed git."
             else
-                echo "   ERROR: Cannot upgrade git without Homebrew."
-                exit 1
+                echo "   WARNING: Cannot upgrade git without Homebrew; continuing with the installed git."
             fi
             ;;
         Linux)
             if command -v apt-get &>/dev/null; then
-                sudo apt-get update -y && sudo apt-get install -y --only-upgrade git
+                sudo apt-get update -y && sudo apt-get install -y --only-upgrade git || true
             elif command -v dnf &>/dev/null; then
-                sudo dnf upgrade -y git
+                sudo dnf upgrade -y git || true
             elif command -v yum &>/dev/null; then
-                sudo yum update -y git
+                sudo yum update -y git || true
             elif command -v pacman &>/dev/null; then
-                sudo pacman -Syu --noconfirm git
+                sudo pacman -Syu --noconfirm git || true
             elif command -v apk &>/dev/null; then
-                sudo apk upgrade git
+                sudo apk upgrade git || true
             else
-                echo "   ERROR: No supported package manager found to upgrade git."
-                exit 1
+                echo "   WARNING: No supported package manager found to upgrade git; continuing."
             fi
             ;;
     esac
+    # A freshly installed git may live at a new path (e.g. /opt/homebrew/bin)
+    # that bash's command hash still shadows with the old binary.
+    hash -r
 }
 
 upgrade_uv() {
     echo "   Upgrading uv to $REQUIRED_UV_VERSION..."
-    curl -LsSf "https://astral.sh/uv/${REQUIRED_UV_VERSION}/install.sh" | sh
+    curl -LsSf "https://astral.sh/uv/${REQUIRED_UV_VERSION}/install.sh" | sh \
+        || echo "   WARNING: uv upgrade failed; the VS Code extension will retry during setup."
     export PATH="$HOME/.local/bin:$PATH"
+    hash -r
 }
 
 upgrade_node() {
     echo "   Upgrading Node.js to $NODE_VERSION..."
-    install_node
+    install_node || echo "   WARNING: Node.js upgrade failed; continuing with the installed version."
+    hash -r
 }
 
 upgrade_vscode() {
@@ -488,36 +539,44 @@ upgrade_vscode() {
                 aarch64|arm64) ARCH_VS="darwin-arm64" ;;
                 x86_64)        ARCH_VS="darwin" ;;
             esac
-            local TMP_ZIP
+            local TMP_ZIP TMP_APP_DIR
             TMP_ZIP="$(mktemp /tmp/vscode-XXXXXX.zip)"
             osascript -e 'quit app "Visual Studio Code"' 2>/dev/null || true
             sleep 2
+            # Unpack into a temp dir FIRST and only then swap the app: the
+            # old code removed /Applications/Visual Studio Code.app before
+            # unzip, so a corrupt download crashed the script (`set -e`)
+            # AND left the user with no VS Code at all.
             if curl -fsSL "https://update.code.visualstudio.com/latest/${ARCH_VS}/stable" -o "$TMP_ZIP"; then
-                rm -rf "/Applications/Visual Studio Code.app"
-                unzip -q "$TMP_ZIP" -d /Applications/
-                rm -f "$TMP_ZIP"
-                echo "   VS Code upgraded in /Applications/"
-                local CODE_BIN="/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"
-                if [ -x "$CODE_BIN" ]; then
-                    ln -sf "$CODE_BIN" "$BIN_DIR/code"
+                TMP_APP_DIR="$(mktemp -d /tmp/vscode-app-XXXXXX)"
+                if unzip -q "$TMP_ZIP" -d "$TMP_APP_DIR" \
+                        && [ -d "$TMP_APP_DIR/Visual Studio Code.app" ]; then
+                    rm -rf "/Applications/Visual Studio Code.app"
+                    mv "$TMP_APP_DIR/Visual Studio Code.app" /Applications/
+                    echo "   VS Code upgraded in /Applications/"
+                    local CODE_BIN="/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"
+                    if [ -x "$CODE_BIN" ]; then
+                        ln -sf "$CODE_BIN" "$BIN_DIR/code"
+                    fi
+                else
+                    echo "   WARNING: Failed to unpack VS Code; continuing with the installed version."
                 fi
+                rm -rf "$TMP_ZIP" "$TMP_APP_DIR"
             else
                 rm -f "$TMP_ZIP"
-                echo "   ERROR: Failed to download VS Code."
-                exit 1
+                echo "   WARNING: Failed to download VS Code; continuing with the installed version."
             fi
             ;;
         Linux)
             if command -v snap &>/dev/null; then
-                sudo snap refresh code 2>&1
+                sudo snap refresh code 2>&1 || true
             elif command -v apt-get &>/dev/null; then
-                sudo apt-get update -y && sudo apt-get install -y --only-upgrade code 2>&1
+                sudo apt-get update -y && sudo apt-get install -y --only-upgrade code 2>&1 || true
             elif command -v dnf &>/dev/null; then
-                sudo dnf upgrade -y code 2>&1
+                sudo dnf upgrade -y code 2>&1 || true
             else
-                echo "   ERROR: Cannot upgrade VS Code automatically."
-                echo "   Please upgrade from https://code.visualstudio.com and re-run."
-                exit 1
+                echo "   WARNING: Cannot upgrade VS Code automatically."
+                echo "   Please upgrade from https://code.visualstudio.com if problems occur."
             fi
             ;;
     esac
@@ -567,7 +626,10 @@ update_repo() {
         fi
     fi
     echo "   Pulling latest changes..."
-    git -C "$PROJECT_DIR" pull --ff-only || git -C "$PROJECT_DIR" pull
+    # Non-fatal: offline machines must still be able to rebuild/reinstall
+    # from the current checkout instead of crashing under `set -e`.
+    git -C "$PROJECT_DIR" pull --ff-only || git -C "$PROJECT_DIR" pull \
+        || echo "   WARNING: git pull failed (offline or diverged); continuing with the current checkout."
 }
 
 {
@@ -590,12 +652,22 @@ update_repo() {
     echo ">>> [1/6] Checking git..."
     if ! command -v git &>/dev/null; then
         install_git
+        hash -r
     fi
-    INSTALLED_GIT=$(git --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    if ! command -v git &>/dev/null; then
+        echo "   ERROR: git is still not available after the install attempt."
+        exit 1
+    fi
+    # `|| true`: under `pipefail` a git that prints no parseable version
+    # would otherwise abort the script at this assignment.
+    INSTALLED_GIT=$(git --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
     if [ -n "$REQUIRED_GIT_VERSION" ] && [ -n "$INSTALLED_GIT" ] && ! version_gte "$INSTALLED_GIT" "$REQUIRED_GIT_VERSION"; then
         prompt_upgrade_or_abort "git" "$INSTALLED_GIT" "$REQUIRED_GIT_VERSION"
         upgrade_git
-        INSTALLED_GIT=$(git --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+        INSTALLED_GIT=$(git --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+        if [ -n "$INSTALLED_GIT" ] && ! version_gte "$INSTALLED_GIT" "$REQUIRED_GIT_VERSION"; then
+            echo "   WARNING: git is still $INSTALLED_GIT (< $REQUIRED_GIT_VERSION); some features may not work."
+        fi
     fi
     echo "   git $INSTALLED_GIT ready"
     echo ""
@@ -606,11 +678,11 @@ update_repo() {
 
     echo ">>> Checking uv..."
     if command -v uv &>/dev/null; then
-        INSTALLED_UV=$(uv --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+        INSTALLED_UV=$(uv --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
         if [ -n "$REQUIRED_UV_VERSION" ] && [ -n "$INSTALLED_UV" ] && ! version_gte "$INSTALLED_UV" "$REQUIRED_UV_VERSION"; then
             prompt_upgrade_or_abort "uv" "$INSTALLED_UV" "$REQUIRED_UV_VERSION"
             upgrade_uv
-            INSTALLED_UV=$(uv --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+            INSTALLED_UV=$(uv --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
         fi
         echo "   uv $INSTALLED_UV ready"
     else
@@ -623,11 +695,11 @@ update_repo() {
         install_node || true
     fi
     if command -v node &>/dev/null && command -v npm &>/dev/null && command -v npx &>/dev/null; then
-        INSTALLED_NODE=$(node --version | sed 's/^v//')
+        INSTALLED_NODE=$(node --version 2>/dev/null | sed 's/^v//' || true)
         if [ -n "$REQUIRED_NODE_VERSION" ] && [ -n "$INSTALLED_NODE" ] && ! version_gte "$INSTALLED_NODE" "$REQUIRED_NODE_VERSION"; then
             prompt_upgrade_or_abort "Node.js" "$INSTALLED_NODE" "$REQUIRED_NODE_VERSION"
             upgrade_node
-            INSTALLED_NODE=$(node --version | sed 's/^v//')
+            INSTALLED_NODE=$(node --version 2>/dev/null | sed 's/^v//' || true)
         fi
         echo "   node v$INSTALLED_NODE ready"
         echo "   npm $(npm --version) ready"
@@ -644,11 +716,11 @@ update_repo() {
         find_code_cli || true
     fi
     if [ -n "$CODE_CLI" ]; then
-        INSTALLED_VSCODE=$("$CODE_CLI" --version 2>/dev/null | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1)
+        INSTALLED_VSCODE=$("$CODE_CLI" --version 2>/dev/null | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1 || true)
         if [ -n "$REQUIRED_VSCODE_VERSION" ] && [ -n "$INSTALLED_VSCODE" ] && ! version_gte "$INSTALLED_VSCODE" "$REQUIRED_VSCODE_VERSION"; then
             prompt_upgrade_or_abort "VS Code" "$INSTALLED_VSCODE" "$REQUIRED_VSCODE_VERSION"
             upgrade_vscode
-            INSTALLED_VSCODE=$("$CODE_CLI" --version 2>/dev/null | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1)
+            INSTALLED_VSCODE=$("$CODE_CLI" --version 2>/dev/null | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1 || true)
         fi
         echo "   code CLI ready: $CODE_CLI (v$INSTALLED_VSCODE)"
     else
@@ -659,7 +731,9 @@ update_repo() {
     echo ""
 
     echo ">>> [4/6] Downloading official Claude Code skills..."
-    bash "$PROJECT_DIR/scripts/fetch-claude-skills.sh"
+    # Skills are optional content — a network hiccup must not abort the update.
+    bash "$PROJECT_DIR/scripts/fetch-claude-skills.sh" \
+        || echo "   WARNING: Claude skills download failed; continuing."
     echo ""
 
     echo ">>> [5/6] Building VS Code extension..."
@@ -677,7 +751,10 @@ update_repo() {
     echo ""
 
     echo ">>> [6/6] Installing VS Code extension..."
-    "$CODE_CLI" --install-extension "$VSIX" --force 2>&1
+    if ! "$CODE_CLI" --install-extension "$VSIX" --force 2>&1; then
+        echo "   ERROR: '$CODE_CLI --install-extension' failed; the update was not applied."
+        exit 1
+    fi
     echo "   Extension installed into VS Code"
     # The VSIX is a throwaway build artifact: VS Code copies the extension into
     # its own extensions directory during ``--install-extension``, so the file
