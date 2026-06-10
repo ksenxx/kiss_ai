@@ -246,7 +246,7 @@ class TestCmdSaveConfigHandlesHeaders(unittest.TestCase):
                 self._running_agent_states: dict[str, Any] = {}
                 self._default_model = ""
 
-            def _get_models(self) -> None:
+            def _get_models(self, conn_id: str = "") -> None:
                 pass
 
         server = FakeServer()

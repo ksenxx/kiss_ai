@@ -328,6 +328,12 @@ class VSCodeServer(
             tab_id = cmd.get("tabId")
             if tab_id is not None:
                 event["tabId"] = tab_id
+            conn_id = cmd.get("connId", "")
+            if conn_id:
+                # Reply only to the connection that sent the unknown
+                # command — other windows' webviews must not render
+                # an error banner for a command they never issued.
+                event["connId"] = conn_id
             self.printer.broadcast(event)
 
 
@@ -349,8 +355,17 @@ class VSCodeServer(
             {"type": "new_tab", "task_id": int(task_id), "taskId": ""},
         )
 
-    def _get_models(self) -> None:
-        """Send available models list with usage counts and pricing."""
+    def _get_models(self, conn_id: str = "") -> None:
+        """Send available models list with usage counts and pricing.
+
+        Stamped with the requesting connection's ``conn_id`` (when
+        non-empty) so the reply reaches only the window that asked —
+        one window refreshing its model picker must not repaint
+        another window's picker or change its selected model.
+
+        Args:
+            conn_id: Requesting connection id (``""`` for direct callers).
+        """
         usage = _load_model_usage()
         models_list: list[dict[str, Any]] = []
         sort_keys: dict[str, tuple[int, float]] = {}
@@ -389,11 +404,14 @@ class VSCodeServer(
             if refreshed in available_names:
                 self._default_model = refreshed
 
-        self.printer.broadcast({
+        event: dict[str, Any] = {
             "type": "models",
             "models": models_list,
             "selected": self._default_model,
-        })
+        }
+        if conn_id:
+            event["connId"] = conn_id
+        self.printer.broadcast(event)
 
     def _get_running_task_ids(self) -> set[int]:
         """Return the set of task_history row ids with alive worker threads.
@@ -454,8 +472,20 @@ class VSCodeServer(
                 session["steps"] = steps
                 break
 
-    def _get_history(self, query: str | None, offset: int = 0, generation: int = 0) -> None:
-        """Send conversation history with pagination support."""
+    def _get_history(
+        self,
+        query: str | None,
+        offset: int = 0,
+        generation: int = 0,
+        conn_id: str = "",
+    ) -> None:
+        """Send conversation history with pagination support.
+
+        The reply is stamped with the requesting connection's
+        ``conn_id`` (when non-empty) so it reaches only the VS Code
+        window / browser tab that asked — one window's history search
+        must not repaint another window's history panel.
+        """
         if query:
             entries = _search_history(query, limit=50, offset=offset)
         else:
@@ -561,10 +591,13 @@ class VSCodeServer(
             if session.get("is_running") and isinstance(entry_id, int):
                 self._overlay_live_metrics(session, entry_id)
             sessions.append(session)
-        self.printer.broadcast({
+        event: dict[str, Any] = {
             "type": "history", "sessions": sessions,
             "offset": offset, "generation": generation,
-        })
+        }
+        if conn_id:
+            event["connId"] = conn_id
+        self.printer.broadcast(event)
 
     def _handle_delete_task(self, task_id: int) -> None:
         """Delete a task and its associated events from the database
@@ -633,27 +666,38 @@ class VSCodeServer(
             return
         self._get_frequent_tasks()
 
-    def _get_frequent_tasks(self, limit: int = 50) -> None:
+    def _get_frequent_tasks(self, limit: int = 50, conn_id: str = "") -> None:
         """Send the top *limit* most-frequent tasks (highest count first).
 
-        Broadcasts a ``frequentTasks`` event whose ``tasks`` field is a
+        Emits a ``frequentTasks`` event whose ``tasks`` field is a
         list of ``{task, count, timestamp}`` dicts ordered by ``count``
-        descending.
+        descending.  Stamped with the requesting connection's
+        ``conn_id`` (when non-empty) so the reply reaches only the
+        window that asked.
 
         Args:
             limit: Maximum number of frequent tasks to return.
+            conn_id: Requesting connection id (``""`` for direct callers).
         """
-        self.printer.broadcast({
+        event: dict[str, Any] = {
             "type": "frequentTasks",
             "tasks": _load_frequent_tasks(limit=limit),
-        })
+        }
+        if conn_id:
+            event["connId"] = conn_id
+        self.printer.broadcast(event)
 
-    def _get_input_history(self) -> None:
+    def _get_input_history(self, conn_id: str = "") -> None:
         """Send deduplicated task texts for arrow-key cycling.
 
         Loads the full persisted history so ArrowUp can traverse every
         distinct task stored in ``sorcar.db``, not just an arbitrary
-        recent subset.
+        recent subset.  Stamped with the requesting connection's
+        ``conn_id`` (when non-empty) so the reply reaches only the
+        window that asked.
+
+        Args:
+            conn_id: Requesting connection id (``""`` for direct callers).
         """
         entries = _load_history()
         seen: set[str] = set()
@@ -663,7 +707,10 @@ class VSCodeServer(
             if task and task not in seen:
                 seen.add(task)
                 tasks.append(task)
-        self.printer.broadcast({"type": "inputHistory", "tasks": tasks})
+        event: dict[str, Any] = {"type": "inputHistory", "tasks": tasks}
+        if conn_id:
+            event["connId"] = conn_id
+        self.printer.broadcast(event)
 
     def _close_tab(self, tab_id: str) -> None:
         """Clean up all backend state for a closed tab.
