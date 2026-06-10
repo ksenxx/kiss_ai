@@ -21,7 +21,18 @@ request (stripping the stamp from the wire payload).
 
 These tests bind a temporary socket under a temp dir (not the
 production ``~/.kiss/sorcar.sock``) and open two real UDS client
-connections that simulate two VS Code windows.
+connections that simulate two windows.  The same
+``_dispatch_client_command`` body serves both the UDS transport (VS
+Code windows) and the WSS transport (remote browser windows), so the
+invariant proven here holds identically for two browser windows and
+for a browser window next to a VS Code window:
+
+* the ``ready`` handshake of a (re)connecting window fans out
+  ``getModels`` / ``getInputHistory`` / ``getConfig`` stamped with the
+  sender's ``connId``, so reloading one browser window never repaints
+  a sibling window's model picker or clobbers its settings form;
+* the ``runUpdate`` acknowledgement ``notice`` / ``error`` banners
+  reach only the window whose user clicked Update.
 """
 
 from __future__ import annotations
@@ -29,6 +40,8 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
+import socket
+import ssl
 import tempfile
 import time
 from collections.abc import Callable
@@ -36,8 +49,26 @@ from pathlib import Path
 from typing import Any
 from unittest import IsolatedAsyncioTestCase
 
+from websockets.asyncio.client import connect
+
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.vscode.web_server import RemoteAccessServer
+
+
+def _find_free_port() -> int:
+    """Find an available TCP port."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        port: int = s.getsockname()[1]
+        return port
+
+
+def _no_verify_ssl() -> ssl.SSLContext:
+    """Return an SSL client context that skips certificate verification."""
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
 
 # Event types that are direct replies to a single window's request and
 # must therefore never appear on another window's connection.
@@ -83,9 +114,10 @@ class TestPerWindowReplyIsolation(IsolatedAsyncioTestCase):
         _generate_self_signed_cert(certfile, keyfile)
 
         self.uds_path = Path(self.tmpdir) / "sorcar.sock"
+        self.port = _find_free_port()
         self.server = RemoteAccessServer(
             host="127.0.0.1",
-            port=0,
+            port=self.port,
             certfile=str(certfile),
             keyfile=str(keyfile),
             url_file=Path(self.tmpdir) / "remote-url.json",
@@ -276,6 +308,133 @@ class TestPerWindowReplyIsolation(IsolatedAsyncioTestCase):
             and "Unknown command" in str(m.get("text", ""))
         ]
         self.assertEqual(leaked, [], "error reply leaked to window B")
+
+    async def test_ready_init_replies_only_to_connecting_window(self) -> None:
+        """Opening/reloading one window must not repaint its siblings.
+
+        The ``ready`` handshake fans out into ``getModels`` /
+        ``getInputHistory`` / ``getConfig``; their replies (``models``,
+        ``inputHistory``, ``configData``) must reach ONLY the window
+        that sent ``ready`` — historically they were broadcast, so
+        opening a second browser window reset every other window's
+        selected model and clobbered any open settings form.
+        """
+        reader_a, writer_a = await self._connect()
+        reader_b, writer_b = await self._connect()
+
+        await self._send(writer_b, {"type": "ready", "tabId": "tab-b-1"})
+        # The connId-routed init replies are scheduled on the event
+        # loop, so their order relative to the directly-awaited
+        # ``focusInput`` is not guaranteed — collect all three in any
+        # order and verify the routing stamp never reaches the wire.
+        needed = {"models", "inputHistory", "configData"}
+
+        def _collect(msg: dict[str, Any]) -> bool:
+            self.assertNotIn("connId", msg)
+            needed.discard(str(msg.get("type", "")))
+            return not needed
+
+        await self._drain_until(reader_b, _collect)
+
+        await self._assert_no_reply_leak(reader_a, writer_a)
+
+    async def test_run_update_ack_only_to_clicking_window(self) -> None:
+        """Clicking Update in window A must not pop banners in window B.
+
+        Covers both acknowledgement paths of ``runUpdate``: the
+        ``error`` banner when ``install.sh`` is missing and the
+        ``notice`` banner when the updater is started.
+        """
+        install_root = Path(self.tmpdir) / "kiss_ai"
+        self.server._install_root = install_root
+        self.server._update_log_path = Path(self.tmpdir) / "update.log"
+
+        reader_a, writer_a = await self._connect()
+        reader_b, writer_b = await self._connect()
+
+        async def _assert_no_banner_on_b() -> None:
+            await self._send(writer_b, {"type": "activeTasksQuery"})
+            seen: list[dict[str, Any]] = []
+
+            def _probe(msg: dict[str, Any]) -> bool:
+                seen.append(msg)
+                return msg.get("type") == "activeTasksResponse"
+
+            await self._drain_until(reader_b, _probe)
+            leaked = [
+                m for m in seen if m.get("type") in ("notice", "error")
+            ]
+            self.assertEqual(
+                leaked, [],
+                f"runUpdate banner leaked to window B: {leaked}",
+            )
+
+        # Phase 1: install.sh missing — error banner only in window A.
+        await self._send(writer_a, {"type": "runUpdate"})
+        err = await self._drain_until(reader_a, _has_type("error"))
+        self.assertIn("install.sh not found", str(err.get("text", "")))
+        self.assertNotIn("connId", err)
+        await _assert_no_banner_on_b()
+
+        # Phase 2: install.sh present — notice banner only in window A.
+        install_root.mkdir(parents=True, exist_ok=True)
+        (install_root / "install.sh").write_text("#!/bin/bash\ntrue\n")
+        await self._send(writer_a, {"type": "runUpdate"})
+        notice = await self._drain_until(reader_a, _has_type("notice"))
+        self.assertIn(
+            "An update of KISS Sorcar is getting installed",
+            str(notice.get("text", "")),
+        )
+        self.assertNotIn("connId", notice)
+        await _assert_no_banner_on_b()
+
+    async def test_browser_window_replies_isolated_over_wss(self) -> None:
+        """Two remote BROWSER windows (real WSS connections) are isolated.
+
+        Browser window A's ``ready`` handshake replies (``models``,
+        ``inputHistory``, ``configData``, ``focusInput``) must reach
+        only window A — never browser window B, and never a VS Code
+        window (UDS connection) sharing the same daemon.  Global
+        system events (``remote_url``, ``update_available``) remain
+        broadcast to everyone.
+        """
+        url = f"wss://127.0.0.1:{self.port}/ws"
+        ctx = _no_verify_ssl()
+        reader_c, writer_c = await self._connect()  # VS Code window C
+        async with connect(url, ssl=ctx) as ws_a, connect(url, ssl=ctx) as ws_b:
+            for ws in (ws_a, ws_b):
+                await ws.send(json.dumps({"type": "auth", "password": ""}))
+                resp = json.loads(
+                    await asyncio.wait_for(ws.recv(), timeout=5),
+                )
+                self.assertEqual(resp["type"], "auth_ok")
+
+            await ws_a.send(json.dumps({"type": "ready", "tabId": "tab-a"}))
+            needed = {"models", "inputHistory", "configData", "focusInput"}
+            for _ in range(50):
+                ev = json.loads(await asyncio.wait_for(ws_a.recv(), timeout=10))
+                self.assertNotIn("connId", ev)
+                needed.discard(str(ev.get("type", "")))
+                if not needed:
+                    break
+            self.assertFalse(
+                needed, f"browser window A missing its own replies: {needed}",
+            )
+
+            # Browser window B must see none of A's replies.
+            await ws_b.send(json.dumps({"type": "activeTasksQuery"}))
+            banned = _REPLY_TYPES | {"focusInput"}
+            for _ in range(50):
+                ev = json.loads(await asyncio.wait_for(ws_b.recv(), timeout=10))
+                self.assertNotIn(
+                    str(ev.get("type", "")), banned,
+                    f"window A's reply leaked to browser window B: {ev}",
+                )
+                if ev.get("type") == "activeTasksResponse":
+                    break
+
+            # Neither must the VS Code window C on the UDS transport.
+            await self._assert_no_reply_leak(reader_c, writer_c)
 
     async def test_reply_routing_survives_other_window_disconnect(
         self,

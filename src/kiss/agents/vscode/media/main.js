@@ -3001,12 +3001,6 @@
         updateInputDisabled();
         break;
       case 'merge_nav': {
-        // Update merge toolbar with remaining hunk count
-        const mergeTitle = document.querySelector('.merge-toolbar-title');
-        if (mergeTitle && ev.remaining !== undefined) {
-          mergeTitle.textContent =
-            'Review Changes (' + ev.remaining + '/' + ev.total + ' remaining)';
-        }
         // Apply resolved-hunk styles + scroll/highlight the current hunk.
         // The most recent merge_data panel for the targeted tab owns the
         // hunk DOM; for the active tab it's in O, for a background tab
@@ -3017,6 +3011,23 @@
             ? O
             : (getTab(navTabId) || {}).outputFragment;
         if (!navHost) break;
+        // Update the merge toolbar's remaining-hunk count ONLY when
+        // the event targets the active tab.  The daemon broadcasts
+        // tab-stamped events to every connected client, and
+        // '.merge-toolbar-title' is the toolbar of THIS window's
+        // active tab — a merge_nav for a tab in another window (or a
+        // background tab here) must not overwrite its counts.
+        if (navTabId === activeTabId) {
+          const mergeTitle = document.querySelector('.merge-toolbar-title');
+          if (mergeTitle && ev.remaining !== undefined) {
+            mergeTitle.textContent =
+              'Review Changes (' +
+              ev.remaining +
+              '/' +
+              ev.total +
+              ' remaining)';
+          }
+        }
         // Find the most recent merge-info panel that contains hunks.
         const mergePanels = navHost.querySelectorAll('.merge-info');
         const mergePanel = mergePanels[mergePanels.length - 1];
