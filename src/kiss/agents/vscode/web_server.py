@@ -2997,7 +2997,7 @@ class RemoteAccessServer:
             await self._send_welcome_info()
             return
         if cmd_type == "runUpdate":
-            await self._handle_run_update()
+            await self._handle_run_update(conn_state["conn_id"])
             return
         if cmd_type == "mergeAction" and cmd.get("action", "") != "all-done":
             await self._handle_web_merge_action(cmd)
@@ -3005,7 +3005,7 @@ class RemoteAccessServer:
         cmd = _translate_webview_command(cmd)
         await self._run_cmd(cmd)
 
-    async def _handle_run_update(self) -> None:
+    async def _handle_run_update(self, conn_id: str = "") -> None:
         """Run ``~/kiss_ai/install.sh`` to update KISS Sorcar.
 
         Server-side twin of the VS Code extension's
@@ -3017,6 +3017,16 @@ class RemoteAccessServer:
         remote browser has no terminal.  Error/info wording matches
         the extension's ``showErrorMessage``/``showInformationMessage``
         so both frontends behave the same.
+
+        The acknowledgement ``notice`` / ``error`` events are stamped
+        with the requesting connection's ``connId`` (when non-empty)
+        so they reach ONLY the window whose user clicked "Update" —
+        the extension's twin shows its messages only in the clicking
+        window, and clicking Update in one browser window must not
+        pop a banner in every sibling window.
+
+        Args:
+            conn_id: Requesting connection id (``""`` to broadcast).
         """
         loop = self._loop
         assert loop is not None
@@ -3024,24 +3034,32 @@ class RemoteAccessServer:
             None, _find_install_script, self._install_root,
         )
         if script is None:
-            self._printer.broadcast({
+            event: dict[str, Any] = {
                 "type": "error",
                 "text": (
                     "Cannot update KISS Sorcar: install.sh not found "
                     f"in {self._install_root}."
                 ),
-            })
+            }
+            if conn_id:
+                event["connId"] = conn_id
+            self._printer.broadcast(event)
             return
-        self._printer.broadcast({
+        notice: dict[str, Any] = {
             "type": "notice",
             "text": (
                 "An update of KISS Sorcar is getting installed… "
                 f"(output: {self._update_log_path})"
             ),
-        })
-        await loop.run_in_executor(None, self._spawn_update_script, script)
+        }
+        if conn_id:
+            notice["connId"] = conn_id
+        self._printer.broadcast(notice)
+        await loop.run_in_executor(
+            None, self._spawn_update_script, script, conn_id,
+        )
 
-    def _spawn_update_script(self, script: Path) -> None:
+    def _spawn_update_script(self, script: Path, conn_id: str = "") -> None:
         """Start ``install.sh`` detached, logging to the update log.
 
         Runs in the executor so file I/O and process spawn never block
@@ -3050,11 +3068,14 @@ class RemoteAccessServer:
         ``stdin=DEVNULL`` detaches the script from the daemon's stdin so
         its interactive prompts (e.g. the git-upgrade question) fall
         back to their non-interactive defaults instead of failing a
-        ``read`` on a dead descriptor.  Failures are broadcast as
-        ``error`` events instead of raised.
+        ``read`` on a dead descriptor.  Failures are emitted as
+        ``error`` events instead of raised, stamped with the
+        requesting connection's ``connId`` (when non-empty) so only
+        the window that clicked "Update" renders the error banner.
 
         Args:
             script: Absolute path of the ``install.sh`` to execute.
+            conn_id: Requesting connection id (``""`` to broadcast).
         """
         try:
             self._update_log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3068,10 +3089,13 @@ class RemoteAccessServer:
                     start_new_session=True,
                 )
         except OSError as exc:
-            self._printer.broadcast({
+            event: dict[str, Any] = {
                 "type": "error",
                 "text": f"Failed to start KISS Sorcar update: {exc}",
-            })
+            }
+            if conn_id:
+                event["connId"] = conn_id
+            self._printer.broadcast(event)
 
     async def _handle_active_tasks_query(self, endpoint: Any) -> None:
         """Report in-flight agent tasks back to a single client.
@@ -3254,11 +3278,23 @@ class RemoteAccessServer:
         plus session replay for restored tabs.  The web server must do
         the same translation since there is no TypeScript middleman.
 
+        The three fanned-out init commands carry the ``ready``
+        sender's ``connId`` so their replies (``models``,
+        ``inputHistory``, ``configData``) reach ONLY the window that
+        just (re)connected.  Without the stamp the replies would be
+        broadcast to every connected client — opening or reloading
+        one browser window would repaint every sibling window's model
+        picker (resetting its selected model to the default), clobber
+        any open settings form, and reset its input-history cache.
+
         Args:
-            cmd: The ``ready`` message from the browser.
+            cmd: The ``ready`` message from the browser (already
+                stamped with the connection's ``connId`` by
+                :meth:`_dispatch_client_command`).
             websocket: The client connection (for direct replies).
         """
         tab_id = cmd.get("tabId", "")
+        conn_id = cmd.get("connId", "")
         # A fresh ``ready`` is the unambiguous signal that the
         # frontend has reconnected and is re-claiming whatever tab
         # ids it carries.  Cancel the deferred ``closeTab`` for the
@@ -3266,7 +3302,7 @@ class RemoteAccessServer:
         # within :data:`_TAB_CLOSE_GRACE` keeps the backend state.
         self._cancel_pending_tab_close(tab_id)
         for init_cmd in ("getModels", "getInputHistory", "getConfig"):
-            await self._run_cmd({"type": init_cmd})
+            await self._run_cmd({"type": init_cmd, "connId": conn_id})
         await self._send_welcome_info()
         try:
             await self._endpoint_send(
