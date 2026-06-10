@@ -2970,8 +2970,12 @@ class RemoteAccessServer:
 
         Runs in the executor so file I/O and process spawn never block
         the event loop.  ``start_new_session=True`` keeps the updater
-        alive when ``install.sh`` restarts this very daemon.  Failures
-        are broadcast as ``error`` events instead of raised.
+        alive when ``install.sh`` restarts this very daemon.
+        ``stdin=DEVNULL`` detaches the script from the daemon's stdin so
+        its interactive prompts (e.g. the git-upgrade question) fall
+        back to their non-interactive defaults instead of failing a
+        ``read`` on a dead descriptor.  Failures are broadcast as
+        ``error`` events instead of raised.
 
         Args:
             script: Absolute path of the ``install.sh`` to execute.
@@ -2982,6 +2986,7 @@ class RemoteAccessServer:
                 subprocess.Popen(
                     ["bash", str(script)],
                     cwd=str(script.parent),
+                    stdin=subprocess.DEVNULL,
                     stdout=log,
                     stderr=subprocess.STDOUT,
                     start_new_session=True,
