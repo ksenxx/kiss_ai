@@ -305,6 +305,12 @@ def _setup_readline(completer: CliCompleter, history_path: Path) -> None:
         readline.parse_and_bind("set show-all-if-ambiguous on")
         readline.parse_and_bind("tab: menu-complete")
         readline.parse_and_bind('"\\e[Z": menu-complete-backward')
+        # Shift+Enter (kitty CSI-u "\e[13;2u" / xterm modifyOtherKeys
+        # "\e[27;2;13~") types a backslash and accepts the line, which
+        # triggers _read_line's trailing-backslash continuation so the
+        # final message contains a real newline at that point.
+        readline.parse_and_bind('"\\e[13;2u": "\\\\\\n"')
+        readline.parse_and_bind('"\\e[27;2;13~": "\\\\\\n"')
     try:
         readline.read_history_file(str(history_path))
     except (FileNotFoundError, OSError):
@@ -524,8 +530,14 @@ def _read_line(prompt: str) -> str | None:
     steering box).  When stdout is not a TTY the bottom border is simply
     printed after the line is read.
 
+    A line ending in a backslash (typed directly, or injected by the
+    Shift+Enter readline macro bound in :func:`_setup_readline`)
+    continues on the next body row; the parts are joined with real
+    newlines so Shift+Enter inserts a line break into the message.
+
     Returns:
-        The line, or ``None`` to signal EOF (Ctrl+D) — the caller exits.
+        The (possibly multi-line) input, or ``None`` to signal EOF
+        (Ctrl+D) — the caller exits.
 
     Raises:
         KeyboardInterrupt: When the user presses Ctrl+C at the prompt.
@@ -546,6 +558,13 @@ def _read_line(prompt: str) -> str | None:
         except EOFError:
             print(bottom)
             return None
+        while line.endswith("\\"):
+            try:
+                more = input(framed_prompt)
+            except EOFError:
+                line = line[:-1]
+                break
+            line = line[:-1] + "\n" + more
         print(bottom)
         return line
 
@@ -566,6 +585,25 @@ def _read_line(prompt: str) -> str | None:
         sys.stdout.write("\n\n")
         sys.stdout.flush()
         return None
+    # A trailing backslash (typed directly, or injected by the
+    # Shift+Enter readline macro bound in :func:`_setup_readline`)
+    # continues the message on the next line; the joined parts are
+    # separated by real newlines.  The cursor currently sits on the old
+    # bottom-rule row: clear it, frame it as the next body row, redraw
+    # the bottom rule one line down, and read the continuation there.
+    while line.endswith("\\"):
+        sys.stdout.write(
+            f"\r{_ESC}[2K{_ESC}[{cols}G{CYAN}│{RESET}\r\n{bottom}{_ESC}[1A\r"
+        )
+        sys.stdout.flush()
+        try:
+            more = input(framed_prompt)
+        except EOFError:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+            line = line[:-1]
+            break
+        line = line[:-1] + "\n" + more
     # Enter already moved the cursor onto the bottom rule line; step past
     # it so following output never overwrites the closed box.
     sys.stdout.write("\n")
