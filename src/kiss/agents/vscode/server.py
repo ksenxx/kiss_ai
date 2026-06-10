@@ -26,7 +26,7 @@ import logging
 import os
 import queue
 import threading
-from typing import Any
+from typing import Any, cast
 
 from kiss.agents.sorcar.persistence import (
     _append_chat_event,
@@ -61,7 +61,7 @@ from kiss.agents.vscode.helpers import (
     generate_followup_text,
     model_vendor,
 )
-from kiss.agents.vscode.json_printer import JsonPrinter
+from kiss.agents.vscode.json_printer import JsonPrinter, _coalesce_events
 from kiss.agents.vscode.merge_flow import _MergeFlowMixin
 from kiss.agents.vscode.task_runner import _TaskRunnerMixin, parse_task_tags
 from kiss.core.models.model_info import (
@@ -78,6 +78,28 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+
+def _coalesced_replay_events(events: object) -> list[dict[str, Any]]:
+    """Coalesce a persisted event list for a replay broadcast.
+
+    Persisted streams store one row per streamed token; merging
+    consecutive same-type delta events (``thinking_delta`` /
+    ``text_delta`` / ``system_output``) before broadcasting shrinks the
+    ``task_events`` / ``adjacent_task_events`` payload and the
+    frontend's replay loop by orders of magnitude while rendering
+    identically.
+
+    Args:
+        events: The ``events`` value loaded from persistence (typed
+            ``object`` by the loaders; always a list of event dicts).
+
+    Returns:
+        The coalesced event list.  Empty when *events* is not a list.
+    """
+    if not isinstance(events, list):
+        return []
+    return _coalesce_events(cast("list[dict[str, Any]]", events))
 
 
 def _live_task_id(tab: _RunningAgentState) -> int | None:
@@ -1056,9 +1078,16 @@ class VSCodeServer(
                 "tabId": tab_id,
                 "startTs": start_ts_for_resume,
             })
+        # Coalesce consecutive per-token delta events before shipping
+        # the replay payload: persisted streams store one row per
+        # streamed token, so a long task can carry tens of thousands
+        # of tiny ``text_delta`` / ``thinking_delta`` events.  Merging
+        # them (same contract as ``JsonPrinter.stop_recording``)
+        # shrinks the JSON payload and the frontend's replay loop by
+        # orders of magnitude while rendering identically.
         self.printer.broadcast({
             "type": "task_events",
-            "events": result["events"],
+            "events": _coalesced_replay_events(result["events"]),
             "task": result["task"],
             "task_id": result.get("task_id"),
             "chat_id": chat_id,
@@ -1208,7 +1237,7 @@ class VSCodeServer(
             })
             self.printer.broadcast({
                 "type": "task_events",
-                "events": row["events"],
+                "events": _coalesced_replay_events(row["events"]),
                 "task": description,
                 "task_id": sub_task_id,
                 "chat_id": row.get("chat_id", ""),
@@ -1402,7 +1431,9 @@ class VSCodeServer(
             "direction": direction,
             "task": result["task"] if result else "",
             "task_id": result["task_id"] if result else None,
-            "events": result["events"] if result else [],
+            "events": (
+                _coalesced_replay_events(result["events"]) if result else []
+            ),
             "tabId": tab_id,
         }
         self.printer.broadcast(event)
