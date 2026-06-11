@@ -1107,6 +1107,65 @@ pass; `uv run check --full` green.
 - Iteration 5 still found bugs → launching iteration 6, same 7 groups, tests
   `test_bughunt6_*` / `bughunt6_*.test.js`. Stop when an iteration finds zero bugs.
 
+### Iteration 6 — Group G (vscode helpers + frontend consistency) — COMPLETE: 3 NEW bugs found+fixed
+
+- BUG 6G-1 (commit 94d7b422, media/main.js `case 'files'` + autocomplete.py
+  `_emit_files`/`_get_files` + types.ts): the `files` reply for a `getFiles`
+  cache miss arrives ASYNCHRONOUSLY after a background directory scan
+  (potentially seconds on a big work dir), and main.js rendered every `files`
+  event unconditionally — a late reply re-opened the @-mention picker (with
+  `acIdx = 0`) after the user had deleted the mention and typed a plain task,
+  so the next Enter was swallowed by the phantom picker instead of submitting.
+  Protocol gap: unlike `ghost` (echoes `query`), `files` carried no `prefix`,
+  so the frontend COULDN'T staleness-check. Fix: backend stamps `prefix` on
+  every files event; main.js ignores replies when no @-mention is being typed
+  (hideAC) and drops replies whose prefix no longer matches the typed query
+  (prefix-less events still render for back-compat); types.ts files event
+  gains `prefix?`/`loading?`. Tests: test/bughunt6_files_stale.test.js (4 JS
+  tests, 2 failed pre-fix) + test_bughunt6_files_prefix.py (2 tests, both
+  failed pre-fix).
+- BUG 6G-2 (commit ce1db9b0, helpers.py `clip_autocomplete_suggestion`):
+  vestigial `strip('"').strip("'")` from the LLM-suggestion era corrupted
+  history suffixes whose boundary holds a REAL quote character: history
+  `run "make test"` typed as `run "make` suggested ` test` instead of
+  ` test"` (accepting typed the unbalanced `run "make test` the user never
+  submitted); history `echo "hi" done` typed as `echo ` suggested `hi" done`.
+  Same invariant as the iter-3 echo-strip fix: accepting a history ghost must
+  reproduce the matched task exactly. Removed the quote-strip and the now
+  unused `_strip_surrounding_quotes` (quote-stripping belongs only to
+  `clean_llm_output`). Test: test_bughunt6_ghost_quote_suffix.py (3 tests,
+  2 failed pre-fix with exactly the corrupted completions; gap-normalisation
+  regression guard).
+- BUG 6G-3 (commit e83e54fa, vscode_config.py `apply_config_to_env`): bare
+  `float(cfg["max_budget"])` — the value comes from the user-editable
+  `~/.kiss/config.json` AND from any client's `saveConfig` payload; a
+  non-numeric value (`"abc"`, `None`) raised ValueError/TypeError out of
+  `_cmd_save_config` → `_handle_command` → transport receive loop, killing
+  the whole client connection (same escape path as the iter-3 unguarded-int
+  handler bugs); SorcarAgent's startup caller swallowed it (`except: pass`),
+  silently skipping budget application. Fix: fall back to
+  `DEFAULTS["max_budget"]` when not float-convertible (numeric strings still
+  apply). Test: test_bughunt6_budget_junk.py (4 tests, 3 failed pre-fix).
+- Investigated and verified NOT bugs this round (do NOT re-report):
+  `parse_result_yaml` guarantees the `summary` key (no KeyError in
+  `_broadcast_result`); `usage_info`(total_steps)/`result`(step_count) keys
+  match the frontend exactly (live + bg-tab paths); connId routing is
+  server-side (web_server.py:1751 pops connId and targets the requesting
+  connection; UDS per window) so main.js needn't filter ghost/files;
+  `autocommit_progress`/`worktree_progress`/`worktree_created` unhandled in
+  main.js are VS Code-native notifications handled by SorcarSidebarView
+  (browser drops them harmlessly via the default route — feature gap, not
+  incorrect behavior); demo.js read in full (grouping, result streaming,
+  esc/sanitize — consistent with post-iter-5 main.js contract); ghost clear
+  flow (requestGhost clears + 300ms debounce; cursor-at-end + @-ctx guards);
+  `acceptGhost` append assumes cursor-at-end (guaranteed by requestGhost);
+  extension relays whole backend messages so new fields pass through;
+  main.js default branch ignores unknown event types safely (taskId-adoption
+  guard intact).
+- Verification: all 13 JS test files pass (`node`), `npx tsc -p .` clean,
+  eslint clean on main.js, 25-test focused Python sweep + 105+251-test
+  impacted sweeps green, `uv run check --full` passes.
+
 ### Iteration 6 — Group B (git_worktree / worktree_sorcar_agent) — COMPLETE: 2 NEW bugs found+fixed
 
 - BUG-6B-1 (git_worktree.py `ensure_excluded`, ~line 668): the existing
@@ -1138,8 +1197,7 @@ pass; `uv run check --full` green.
   error. Root cause dates from the BUG-30 (audit 7) optimization,
   which never anticipated a repo switch. Fix: capture
   `prev_repo_root = self._wt.repo_root` before the release and use
-  `released_branch` only when `prev_repo_root.resolve() ==
-  repo.resolve()`; otherwise fall back to `current_branch(repo)`
+  `released_branch` only when `prev_repo_root.resolve() == repo.resolve()`; otherwise fall back to `current_branch(repo)`
   (read inside `repo_lock(repo)`, preserving the BUG-30 contract).
   Test: test_bughunt6_cross_repo_release.py (3 tests; 2 failed
   pre-fix + same-repo regression guard).
