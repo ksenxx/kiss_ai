@@ -3201,9 +3201,26 @@ class RemoteAccessServer:
         if cmd_type == "runUpdate":
             await self._handle_run_update(conn_state["conn_id"])
             return
-        if cmd_type == "mergeAction" and cmd.get("action", "") != "all-done":
-            await self._handle_web_merge_action(cmd)
-            return
+        if cmd_type == "mergeAction":
+            if cmd.get("action", "") != "all-done":
+                await self._handle_web_merge_action(cmd)
+                return
+            # An ``all-done`` arriving FROM a client is the VS Code
+            # extension's TS MergeManager finishing its editor-managed
+            # review (its per-hunk actions never reach the backend —
+            # see ``SorcarSidebarView.sendMergeAllDone``).  Drop the
+            # server-side shadow ``_WebMergeState`` registered when the
+            # ``merge_data`` event was broadcast: leaving it would
+            # replay a ZOMBIE review on the next webview reload
+            # (``ready`` → ``_replay_merge_review``), fire a spurious
+            # second all-done from the deferred-close path, and leak
+            # one state (with full file payloads) per finished review
+            # in the meantime.  The command still falls through to the
+            # backend ``_cmd_merge_action`` → ``_finish_merge`` below.
+            if isinstance(tab_id, str) and tab_id:
+                with self._merge_states_lock:
+                    self._merge_states.pop(tab_id, None)
+                    self._merge_action_locks.pop(tab_id, None)
         if (
             cmd_type == "closeTab"
             and isinstance(tab_id, str)
