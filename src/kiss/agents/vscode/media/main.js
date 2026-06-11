@@ -4339,6 +4339,17 @@
       'welcome-cfg-remote-password-toggle',
       'welcome-cfg-remote-password',
     );
+    // API keys are secret by default; each gets an eye toggle like the
+    // remote-password field.
+    [
+      'cfg-key-GEMINI_API_KEY',
+      'cfg-key-OPENAI_API_KEY',
+      'cfg-key-ANTHROPIC_API_KEY',
+      'cfg-key-TOGETHER_API_KEY',
+      'cfg-key-OPENROUTER_API_KEY',
+      'cfg-key-MINIMAX_API_KEY',
+      'cfg-custom-api-key',
+    ].forEach(setupSecretInput);
     // The welcome-page remote-password input and the settings-panel
     // input mirror each other so the existing collectConfigForm +
     // saveConfig flow keeps working without changes.  On Enter, blur,
@@ -5809,10 +5820,11 @@
    * function is a no-op if either DOM node is missing, so it is safe to
    * call unconditionally from setupEventListeners().
    */
-  function setupPasswordToggle(toggleId, inputId) {
+  function setupPasswordToggle(toggleId, inputId, secretName) {
     const btn = document.getElementById(toggleId);
     const inp = document.getElementById(inputId);
     if (!btn || !inp) return;
+    const noun = secretName || 'password';
     btn.addEventListener('click', () => {
       const showing = inp.type === 'text';
       inp.type = showing ? 'password' : 'text';
@@ -5821,10 +5833,43 @@
       if (eye) eye.style.display = showing ? '' : 'none';
       if (eyeOff) eyeOff.style.display = showing ? 'none' : '';
       btn.setAttribute('aria-pressed', showing ? 'false' : 'true');
-      const lbl = showing ? 'Show password' : 'Hide password';
+      const lbl = (showing ? 'Show ' : 'Hide ') + noun;
       btn.setAttribute('aria-label', lbl);
       btn.setAttribute('title', lbl);
     });
+  }
+
+  /**
+   * Make a settings-panel input secret (masked) by default with a
+   * show/hide eye toggle, matching the remote-password field.
+   *
+   * The input is switched to type="password", wrapped in a
+   * .config-password-wrap div, and an eye-toggle button cloned from
+   * the remote-password toggle is appended (so the SVG icon markup
+   * lives in exactly one place: chat.html).  Used for the API-key
+   * fields.  No-op when either DOM node is missing.
+   */
+  function setupSecretInput(inputId) {
+    const inp = document.getElementById(inputId);
+    const proto = document.getElementById('cfg-remote-password-toggle');
+    if (!inp || !proto) return;
+    inp.type = 'password';
+    inp.setAttribute('autocomplete', 'off');
+    const wrap = document.createElement('div');
+    wrap.className = 'config-password-wrap';
+    inp.parentNode.insertBefore(wrap, inp);
+    wrap.appendChild(inp);
+    const btn = proto.cloneNode(true);
+    btn.id = inputId + '-toggle';
+    btn.setAttribute('aria-pressed', 'false');
+    btn.setAttribute('aria-label', 'Show API key');
+    btn.setAttribute('title', 'Show API key');
+    const eye = btn.querySelector('.icon-eye');
+    const eyeOff = btn.querySelector('.icon-eye-off');
+    if (eye) eye.style.display = '';
+    if (eyeOff) eyeOff.style.display = 'none';
+    wrap.appendChild(btn);
+    setupPasswordToggle(btn.id, inputId, 'API key');
   }
 
   let configFormPopulated = false;
