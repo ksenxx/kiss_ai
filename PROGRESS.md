@@ -76,13 +76,15 @@ Read all 4 target files fully. Confirmed bugs to fix (failing test FIRST, then f
    PRAGMATIC: existing bughunt tests in repo DO use light monkeypatching of agent.run;
    check test_run_parallel_integration.py first and mirror its approach.)
 
-2. **CONFIRMED (known b)** `chat_sorcar_agent.py` `run()` (~line 405-412):
+1. **CONFIRMED (known b)** `chat_sorcar_agent.py` `run()` (~line 405-412):
+
    ```python
    result_yaml = yaml.safe_load(result)
    if isinstance(result_yaml, dict):
        result_summary = result_yaml.get("summary", "")
    except Exception: result_summary = result[:500] if result else ""
    ```
+
    When `result` parses as non-dict YAML (e.g. plain string "all done"), summary stays ""
    and `_save_task_result` persists '' — inconsistent with parse-failure fallback
    `result[:500]`. FIX: add `else: result_summary = result[:500] if result else ""`.
@@ -97,19 +99,19 @@ Read all 4 target files fully. Confirmed bugs to fix (failing test FIRST, then f
    (use temp KISS db via env var / persistence module's db path fixture used by
    test_persistence.py).
 
-3. **NEW candidate** `useful_tools.py::_expand_pwd_prefix`: `"PWD//foo"` →
+1. **NEW candidate** `useful_tools.py::_expand_pwd_prefix`: `"PWD//foo"` →
    `suffix = "/foo"` → `os.path.join(base, "/foo")` returns `"/foo"` (absolute!),
    escaping work_dir entirely. FIX: `suffix.lstrip("/")` before join (keep `PWD` and
    `PWD/` behavior). Test: `test_bughunt4_pwd_double_slash.py` asserts
    `_expand_pwd_prefix("PWD//sub/f.txt", "/base") == "/base/sub/f.txt"` and Read/Write
    round-trip through UsefulTools(work_dir=tmp) with "PWD//x.txt" lands inside tmp.
 
-4. Checked and found OK (do NOT re-report): `_truncate_output` marker math (dropped
-   count correct; max_chars<marker fallback returns plain head slice — documented-ish);
-   Read \r splitlines counts fine; Write parent-dir creation present; Edit guards
+1. Checked and found OK (do NOT re-report): `_truncate_output` marker math (dropped
+   count correct; max_chars\<marker fallback returns plain head slice — documented-ish);
+   Read \\r splitlines counts fine; Write parent-dir creation present; Edit guards
    (empty old_string, equal strings, count) all present from iter-3; `_coerce_tasks`
-   JSON handling fixed in iter-3; profile pid<=0 fixed; WebUseTool atexit re-arm +
-   unregister present; go_to_url tab:list/tab:N int errors caught; _resolve_locator
+   JSON handling fixed in iter-3; profile pid\<=0 fixed; WebUseTool atexit re-arm +
+   unregister present; go_to_url tab:list/tab:N int errors caught; \_resolve_locator
    re-snapshots; scroll invalid direction defaults down (minor, not fixing).
    Possible minor: `run_parallel` tool `int(max_workers)` raises on "0"/"-1"/junk →
    propagates to framework tool-error handling (decide in next session whether to
@@ -118,6 +120,7 @@ Read all 4 target files fully. Confirmed bugs to fix (failing test FIRST, then f
    restoring previous — investigate only if time permits (vscode runner may re-set).
 
 NEXT STEPS (exact):
+
 - Read src/kiss/tests/agents/sorcar/test_run_parallel_integration.py and
   test_stateful_sorcar_agent.py (or test_history_continuation_context.py) to copy the
   no-LLM ChatSorcarAgent test pattern + temp-db fixture.
@@ -127,6 +130,64 @@ NEXT STEPS (exact):
 - Apply the 3 fixes above. Verify tests pass.
 - Run impacted tests: `uv run pytest src/kiss/tests/agents/sorcar -k "bughunt4 or parallel or stateful or useful_tools or tools" -x -q` (count first; shard if >100).
 - `uv run check --full` must pass. Report with file:line.
+
+### Iteration 4 — Group F (web_server/diff_merge/merge_flow) — session 2 (CONTINUATION) — 2 NEW BUGS FOUND+FIXED
+
+Read in full: diff_merge.py, merge_flow.py, web_server.py merge regions (\_WebMergeState
+~396-520, \_restore_base_bytes/\_reject_hunk_in_file/\_reject_all_hunks_in_file ~530-670,
+\_apply_web_merge_action ~3625-3725, \_augment_merge_data ~2401, dispatch ~3144).
+
+**BUG F4-1 (fixed)**: `web_server._augment_merge_data` read `base_text`/`current_text`
+with `Path.read_text()` → universal-newline translation (CRLF→LF, lone CR→LF).
+Inconsistent with hunk math which splits preserved bytes on "\\n" only
+(`_read_lines_preserved`): CRLF files' displayed text differed from what reject writes
+back; lone-"\\r" files got MORE lines in the browser than hunk cs/cc coordinates →
+misaligned hunk highlighting. FIX: read with `open(path, newline="")`.
+Test: test_bughunt4_augment_newlines.py (2 tests, failed before fix, pass after).
+
+**BUG F4-2 (fixed, data loss)**: rejecting a merge entry whose workspace path is a
+SYMLINK wrote THROUGH the link (`open(write_to, "w")` / `Path.write_bytes`), truncating
+or overwriting the pointed-to file (possibly outside the repo) while the rejected link
+survived. Repro: agent creates untracked symlink link.txt→data.txt; \_prepare_merge_view
+lists it as a new file (is_file()/reads follow links); reject-all wrote "" through the
+link → data.txt emptied. Same for binary-flagged path via `_restore_base_bytes`.
+FIX: in `_reject_hunk_in_file` and `_restore_base_bytes`, unlink `write_to` first when
+`Path(write_to).is_symlink()` (git tracks the link, never write through it).
+Test: test_bughunt4_symlink_reject.py (3 tests: reject-all text, per-hunk, binary;
+all failed before fix, pass after).
+
+**Verified NOT bugs (do NOT re-report)**:
+
+- Interleaved/out-of-order per-hunk accept/reject offset bookkeeping in
+  `_apply_web_merge_action` ("reject" branch adjusts later UNRESOLVED hunks' cs by
+  bc-cc; `_reject_all_hunks_in_file` adjusts pending-only): verified correct end-to-end
+  with a real repo + RemoteAccessServer driving next/prev/reject sequences out of order
+  (4 hunks incl. insert/delete/append, delta != 0) — file restored byte-exact both
+  orders (scratch-verified, both cases OK).
+- `_reject_all_hunks_in_file` vs per-hunk reject delta consistency (pending-set vs
+  is_resolved): consistent because reject-all marks resolved BEFORE calling and passes
+  the previously-unresolved indices.
+- `_WebMergeState.current()` can never return a resolved hunk (advance() after every
+  resolution; remaining==0 → None); accept-file/reject-file/accept-all/reject-all
+  resolution bookkeeping consistent.
+- empty\<->nonempty transitions for pre-dirty untracked files (saved-base diff produces
+  correct {bs,bc,cs,cc} both directions, reject restores byte-exact).
+- cc==0 / bc==0 hunk start conventions (`_hunk_to_dict` 1-based→0-based with
+  count-0 exception) agree between git -U0 parse, `_diff_files` (difflib), and the
+  reject splice.
+
+Still-open candidates for a future session (NOT verified, NOT fixed):
+
+- merge_data replay to a reconnecting browser may carry stale hunks (cs mutated by
+  rejects) without resolved markers (needs reading replay path).
+- `_main_dirty_files` strips unquoted trailing-space filenames (git doesn't quote
+  trailing spaces) — very marginal.
+- new empty file / empty-file deletion invisible in merge view (documented behavior of
+  `_file_as_new_hunks`; deleting empty tracked file produces no hunks → not in
+  post_hunks) — by-design-ish.
+- rejecting an agent-created NEW file leaves an empty file rather than deleting it
+  (consistent VS Code-side? would need manifest flag to distinguish new-file vs
+  emptied-file) — deliberate-looking, did not change.
 
 ### Iteration 4 — Group G (vscode helpers + frontend consistency) — session 1 notes
 
@@ -140,36 +201,36 @@ Targeted greps done. Candidate bugs to verify next session (NOT yet confirmed/te
    `fcntl.flock` on a sidecar lock file (CONFIG_DIR/".config.lock") held across the whole
    load-merge-store in save_config. Test: spawn 2 subprocesses each saving a different
    key N times; assert both keys survive.
-2. **demo.js does NOT handle 'warning' events**: grep shows `warning` appears in
+1. **demo.js does NOT handle 'warning' events**: grep shows `warning` appears in
    media/main.js (case 'warning' at :2607, renderer :3552) and src/types.ts:208, but
    NOWHERE in media/demo.js (389 lines). Need to read demo.js to decide contract — if
    demo.js groups/replays recorded display events by type, iteration-3's new warning
    events may break/get dropped during demo replay. Also check: `warning` is NOT in
    json_printer.py `_DISPLAY_EVENT_TYPES` → warnings are never recorded/persisted, so
    chat history replay (viewer reopen) silently loses warnings even though live view
-   shows them. Decide contract: probably add "warning" to _DISPLAY_EVENT_TYPES + demo
+   shows them. Decide contract: probably add "warning" to \_DISPLAY_EVENT_TYPES + demo
    replay rendering.
-3. Autocomplete `_complete` in autocomplete.py: when `_prefix_match_task(query)` matches,
-   `fast = match[len(query):]` — verify _prefix_match_task case behaviour (if match is
+1. Autocomplete `_complete` in autocomplete.py: when `_prefix_match_task(query)` matches,
+   `fast = match[len(query):]` — verify \_prefix_match_task case behaviour (if match is
    case-insensitive, slicing by len(query) is fine but suggestion may duplicate case
    issues); also no dedup/ranking across history-vs-file sources (history always wins).
-   Check persistence._prefix_match_task.
-4. commands.py `_cmd_complete` (~:510-533) sets `self._complete_seq_latest[conn_id] = seq`
+   Check persistence.\_prefix_match_task.
+1. commands.py `_cmd_complete` (~:510-533) sets `self._complete_seq_latest[conn_id] = seq`
    — seq comes from frontend? Verify monotonicity: if frontend restarts (webview reload)
    seq resets to 0 < stale latest → all new requests dropped as stale? server.py:290 pops
    on disconnect — check webview reload uses same conn or new conn.
-5. extension.ts vs package.json: registers `kissSorcar.${cmd}` for Object.values(MERGE_ACTIONS)
+1. extension.ts vs package.json: registers `kissSorcar.${cmd}` for Object.values(MERGE_ACTIONS)
    — verify MERGE_ACTIONS values exactly match package.json contributes (acceptChange,
    rejectChange, prevChange, nextChange, acceptAll, rejectAll, acceptFile, rejectFile).
    Also `kissSorcar.focusEditor`/`runSelection`/`insertSelectionToChat`/`toggleFocus`
    present both sides per greps — looks consistent so far.
-6. Still to inspect: panelCopy.js copy formatting, status-bar/timer edges in main.js,
+1. Still to inspect: panelCopy.js copy formatting, status-bar/timer edges in main.js,
    settings fields in package.json `contributes.configuration` + webview settings UI vs
    vscode_config DEFAULTS, json_printer parallel sub-agent interleaved events.
 
-Test naming: Python src/kiss/tests/agents/vscode/test_bughunt4_<short>.py; JS
-src/kiss/agents/vscode/test/bughunt4_<short>.test.js (run `node <file>`, use
-_vscode-stub.js patterns). Failing test FIRST, then fix. Finish with JS tests +
+Test naming: Python src/kiss/tests/agents/vscode/test_bughunt4\_<short>.py; JS
+src/kiss/agents/vscode/test/bughunt4\_<short>.test.js (run `node <file>`, use
+\_vscode-stub.js patterns). Failing test FIRST, then fix. Finish with JS tests +
 `npx tsc -p .` (in src/kiss/agents/vscode) + impacted Python tests + `uv run check --full`.
 No code modified yet in this session.
 
@@ -193,8 +254,8 @@ No code modified yet in this session.
   and assert its own key == just-written; B same with "last_model"; any mismatch printed
   → parent asserts no mismatch (fails pre-fix with high probability, ~300 iters each).
 - NOT bugs (verified): autocomplete seq is server-generated monotonic global counter
-  (commands.py _cmd_complete, server.py 240-300) — webview reload safe; per-conn state
-  dropped via drop_connection_state. _prefix_match_task uses case-sensitive GLOB —
+  (commands.py \_cmd_complete, server.py 240-300) — webview reload safe; per-conn state
+  dropped via drop_connection_state. \_prefix_match_task uses case-sensitive GLOB —
   `match[len(query):]` slicing correct. MERGE_ACTIONS values (SorcarSidebarView.ts:54)
   exactly match package.json contributes (acceptChange/rejectChange/prevChange/
   nextChange/acceptAll/rejectAll/acceptFile/rejectFile); other commands
@@ -225,6 +286,53 @@ No code modified yet in this session.
   fine); settings DEFAULTS keys all referenced in main.js settings UI (last_model is
   backend-only); MERGE_ACTIONS/commands package.json parity OK.
 
-REMAINING: grep tests asserting on _DISPLAY_EVENT_TYPES contents (ensure no structural
+REMAINING: grep tests asserting on \_DISPLAY_EVENT_TYPES contents (ensure no structural
 test broke), run `uv run check --full`, git add+commit the two fixes + two tests +
 PROGRESS.md, then finish with bug report (2 NEW bugs).
+
+### Iteration 4 — Group A (sorcar persistence.py / running_agent_state.py) — COMPLETE: 2 NEW bugs fixed
+
+Read persistence.py (2052 lines) + running_agent_state.py in full; reviewed all prior
+persistence bughunt tests to avoid duplicates.
+
+1. **BUG (fixed)** `persistence.py:_delete_task` — cascade only deleted DIRECT
+   sub-agent rows (`_subagent_child_ids(db, task_id)`, one level). A sub-agent is a
+   full `ChatSorcarAgent` with the `run_parallel` tool, so nested fan-out creates
+   grandchild rows whose `extra.subagent.parent_task_id` points at the CHILD id.
+   Deleting the top-level parent leaked grandchildren + their events as permanently
+   unreachable zombies, and `_chat_has_tasks` kept reporting the visually-empty chat
+   as non-empty. Fix: breadth-first cascade over `_subagent_child_ids` with a `seen`
+   set (also defends against corrupt self/cyclic parent references).
+   Test: `src/kiss/tests/agents/sorcar/test_bughunt4_delete_nested_subagents.py` (3 tests).
+
+1. **BUG (fixed)** `persistence.py:_list_recent_chats` — chat-selection query
+   (`GROUP BY chat_id ... LIMIT ?`) selected the most recent *limit* chats BEFORE
+   sub-agent-only chats were dropped in Python (`continue`), so an omitted chat still
+   consumed a limit slot and a real older chat silently disappeared from the listing
+   (CLI `--list-chats`). Also chat recency was anchored to MAX(timestamp) including
+   sub-agent rows. Fix: added `AND {_HISTORY_NOT_SUBAGENT}` to the chat-selection
+   query so only chats with ≥1 real task count against the limit and recency uses the
+   latest REAL task.
+   Test: `src/kiss/tests/agents/sorcar/test_bughunt4_recent_chats_limit.py` (2 tests).
+
+Investigated and ruled NOT bugs (do not re-report):
+
+- `_recover_orphaned_tasks` multi-process clobber of another live process's sentinel
+  row: transient and self-healing — the live task's `_save_task_result` overwrites
+  unconditionally by row id at completion; if the task IS later killed the message is
+  accurate.
+- `_get_db` stale `-wal`/`-shm` unlink when DB file missing: only reachable when the
+  main DB file was externally deleted; the open-fd holder keeps its own inode; the
+  cross-process creation window is not deterministically testable and SQLite recreates
+  WAL on demand.
+- `_record_frequent_task` eviction at cap, `_prefix_match_task` GLOB escaping,
+  `_search_history` LIKE escaping, `_write_event_batch` dangling-event defense,
+  `_load_chat_context_text` generation-guarded cache, `_delete_task` rowcount
+  semantics (parent-row only — correct), `_shutdown_persist_in_flight_results`.
+- Pre-existing (NOT caused by these fixes): ordering flake in
+  `test_orphan_task_recovery.py::test_concurrent_boot_does_not_corrupt` when run after
+  the full persistence suite — fails identically with the fixes stashed; passes alone.
+
+Verification: 5 new tests fail pre-fix, pass post-fix; 120-test focused persistence
+regression suite green (only the pre-existing flake above, reproduced on pristine
+code); `uv run check --full` clean.

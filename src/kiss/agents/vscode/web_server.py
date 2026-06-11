@@ -537,8 +537,14 @@ def _restore_base_bytes(base_path: str, write_to: str) -> None:
         data = Path(base_path).read_bytes()
     except OSError:
         data = b""
-    Path(write_to).parent.mkdir(parents=True, exist_ok=True)
-    Path(write_to).write_bytes(data)
+    dest = Path(write_to)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    # Never write THROUGH a symlink: git tracks the link itself, not
+    # its target, and the target may be a precious file (possibly
+    # outside the repo) whose truncation would be silent data loss.
+    if dest.is_symlink():
+        dest.unlink()
+    dest.write_bytes(data)
 
 
 def _reject_hunk_in_file(
@@ -615,7 +621,13 @@ def _reject_hunk_in_file(
         + base_lines[hunk["bs"] : hunk["bs"] + hunk["bc"]]
         + cur_lines[hunk["cs"] + hunk["cc"] :]
     )
-    Path(write_to).parent.mkdir(parents=True, exist_ok=True)
+    dest = Path(write_to)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    # Replace a symlink instead of writing THROUGH it — writing through
+    # would clobber the pointed-to file (which may live outside the
+    # repo) while leaving the rejected link itself untouched.
+    if dest.is_symlink():
+        dest.unlink()
     with open(write_to, "w", newline="") as f:
         f.write("".join(new_lines))
 
@@ -2428,12 +2440,20 @@ def _augment_merge_data(event: dict[str, Any]) -> dict[str, Any]:
             f["current_text"] = ""
             files.append(f)
             continue
+        # Read WITHOUT newline translation: hunk coordinates are
+        # computed by splitting the on-disk bytes on "\n" only (see
+        # ``diff_merge._read_lines_preserved``), so a universal-newline
+        # read would hand the browser text whose CRLF endings are
+        # silently rewritten — and whose line COUNT differs for
+        # lone-"\r" content — misaligning hunk highlighting.
         try:
-            f["base_text"] = Path(f["base"]).read_text()
+            with open(f["base"], newline="") as bfh:
+                f["base_text"] = bfh.read()
         except (OSError, KeyError, UnicodeDecodeError):
             f["base_text"] = ""
         try:
-            f["current_text"] = Path(f["current"]).read_text()
+            with open(f["current"], newline="") as cfh:
+                f["current_text"] = cfh.read()
         except (OSError, KeyError, UnicodeDecodeError):
             f["current_text"] = ""
         files.append(f)
