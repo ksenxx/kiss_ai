@@ -86,7 +86,9 @@ class TestFlushChatEventsDeadWriter:
         th._event_writer_stop.clear()
         th._event_writer_thread = dead
         event = {"type": "result", "content": "hello"}
-        th._event_queue.put((task_id, json.dumps(event), time.time()))
+        th._event_queue.put((
+            task_id, json.dumps(event), time.time(), th._current_db_path(),
+        ))
         assert th._event_queue.unfinished_tasks == 1
 
         # Without the fix this join() blocks forever; run it in a helper
