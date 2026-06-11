@@ -64,7 +64,7 @@ class TestGhostSuffixQuotesSurvive(unittest.TestCase):
         self.saved = _redirect_persistence(self.tmpdir)
         self.server = VSCodeServer()
         self.events: list[dict[str, Any]] = []
-        self.server.printer.broadcast = self.events.append  # type: ignore[method-assign]
+        self.server.printer.broadcast = self.events.append  # type: ignore[assignment,method-assign]
 
     def tearDown(self) -> None:
         _RunningAgentState.running_agent_states.clear()
