@@ -590,6 +590,7 @@ def _reject_hunk_in_file(
     # Read from *write_to* (the real workspace target) when it exists
     # so that successive partial rejections accumulate against the
     # restored content rather than the (now-stale) placeholder.
+    cur_lines: list[str] = []
     try:
         try:
             cur_lines = _read_lines_preserved(write_to)
