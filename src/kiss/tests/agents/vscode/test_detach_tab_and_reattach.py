@@ -255,14 +255,14 @@ class TestResumeRunningTaskReattachesLiveEvents:
             "tabId": tab_id_b,
         })
 
-        # Both tab states exist: the source (still owns the running
-        # thread) AND the new viewer tab.  Multi-viewer fan-out keeps
-        # both alive instead of moving the stream.
+        # The source tab state survives (it still owns the running
+        # thread).  The new viewer tab is a PURE VIEWER: per the C2/C3
+        # invariant in ``_replay_session`` it gets NO registry entry —
+        # multi-viewer fan-out is wired through the printer's
+        # subscriber map, not through ``_running_agent_states``.
         assert tab_id_a in server._running_agent_states
-        assert tab_id_b in server._running_agent_states
+        assert tab_id_b not in server._running_agent_states
         assert server._running_agent_states[tab_id_a].task_thread is thread
-        # The new viewer tab does not own a task thread.
-        assert server._running_agent_states[tab_id_b].task_thread is None
 
         # Replay broadcast went to the new tab id.
         replays = [e for e in events if e.get("type") == "task_events"]
