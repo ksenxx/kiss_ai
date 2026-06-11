@@ -3642,11 +3642,14 @@ class RemoteAccessServer:
                 hunk = fd["hunks"][hi]
                 await self._loop.run_in_executor(
                     None,
-                    _reject_hunk_in_file,
-                    fd["current"],
-                    fd["base"],
-                    hunk,
-                    fd.get("target"),
+                    partial(
+                        _reject_hunk_in_file,
+                        fd["current"],
+                        fd["base"],
+                        hunk,
+                        fd.get("target"),
+                        binary=bool(fd.get("binary")),
+                    ),
                 )
                 delta = hunk["bc"] - hunk["cc"]
                 for later_hi in range(hi + 1, len(fd["hunks"])):
