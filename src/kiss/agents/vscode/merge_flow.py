@@ -410,7 +410,24 @@ class _MergeFlowMixin:
                         tab = _RunningAgentState.running_agent_states.get(tab_id)
                     task_id: int | None = None
                     if tab is not None:
-                        task_id = tab.last_task_id
+                        # Prefer the in-flight task id: when the
+                        # "Auto commit" toggle is ON this handler runs
+                        # from the task thread's post-task cleanup
+                        # (``_run_task_inner``'s finally) BEFORE
+                        # ``_run_task``'s outer finally refreshes
+                        # ``last_task_id`` — so on a follow-up task in
+                        # the same tab, ``last_task_id`` still holds
+                        # the PREVIOUS task's id and the commit
+                        # confirmation would be persisted into the
+                        # prior task's event stream.
+                        # ``task_history_id`` is the current task's
+                        # row id while a task is in flight and ``None``
+                        # otherwise (user-clicked prompt after task
+                        # end), in which case ``last_task_id`` is
+                        # already up to date.
+                        task_id = tab.task_history_id
+                        if task_id is None:
+                            task_id = tab.last_task_id
                         if task_id is None and tab.agent is not None:
                             # Fallback for legacy callers that wire
                             # the task id onto the agent (e.g. tests

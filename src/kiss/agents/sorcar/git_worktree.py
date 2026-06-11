@@ -780,19 +780,38 @@ class GitWorktreeOps:
             src = repo / fname
             dst = wt_dir / fname
 
+            if old_name is not None:
+                # The rename's old path is gone from the main worktree
+                # regardless of what happened to the new path, so it
+                # must be removed from the task worktree even when the
+                # new file was subsequently deleted (e.g. status "RD").
+                old_dst = wt_dir / old_name
+                if old_dst.is_dir():
+                    shutil.rmtree(str(old_dst))
+                    copied = True
+                elif old_dst.exists():
+                    old_dst.unlink()
+                    copied = True
+
             if src.is_file():
+                if dst.is_dir():
+                    # A tracked directory was replaced by a same-named
+                    # file; copy2 into the directory would create
+                    # dst/<basename> instead of replacing dst.
+                    shutil.rmtree(str(dst))
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(str(src), str(dst))
                 copied = True
-                if old_name is not None:
-                    old_dst = wt_dir / old_name
-                    if old_dst.exists():
-                        old_dst.unlink()
+            elif dst.is_dir():
+                if not src.exists():
+                    # The path was deleted in the main worktree but the
+                    # fresh checkout has a directory there (file/dir
+                    # type change); unlink() would raise on a dir.
+                    shutil.rmtree(str(dst))
+                    copied = True
             elif dst.exists():
                 dst.unlink()
                 copied = True
-            elif src.is_dir():
-                continue
 
         return copied
 
