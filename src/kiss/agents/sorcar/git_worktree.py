@@ -687,6 +687,41 @@ class GitWorktreeOps:
         return result.returncode == 0
 
     @staticmethod
+    def _append_info_line(repo: Path, filename: str, entry: str) -> None:
+        """Append *entry* to ``<git_common_dir>/info/<filename>`` once.
+
+        The ``info/`` directory holds repo-local, untracked plumbing
+        (``exclude``, ``attributes``) so the agent never modifies any
+        tracked file in the user's repo.  Idempotent: the line is only
+        appended when not already present.
+
+        Args:
+            repo: Git repo root path.
+            filename: File under ``info/`` (e.g. ``"exclude"``).
+            entry: The exact line to ensure is present.
+        """
+        result = _git("rev-parse", "--git-common-dir", cwd=repo)
+        git_common = Path(result.stdout.strip())
+        if not git_common.is_absolute():  # pragma: no branch
+            git_common = (repo / git_common).resolve()
+        info_file = git_common / "info" / filename
+        info_file.parent.mkdir(parents=True, exist_ok=True)
+        if info_file.exists():
+            # Git treats these files as raw bytes — non-UTF-8
+            # patterns/comments are legal, so a strict decode would
+            # raise UnicodeDecodeError and silently skip the entry
+            # (the caller swallows exceptions), e.g. leaving
+            # ``?? .kiss-worktrees/`` polluting the user's git status
+            # forever.  Mirror :func:`_git`'s surrogateescape policy.
+            content = info_file.read_bytes().decode(
+                "utf-8", errors="surrogateescape"
+            )
+            if entry in content.splitlines():
+                return
+        with open(info_file, "a", encoding="utf-8") as f:
+            f.write(f"\n{entry}\n")
+
+    @staticmethod
     def ensure_excluded(repo: Path) -> None:
         """Add ``.kiss-worktrees/`` to local git exclude (not .gitignore).
 
@@ -696,27 +731,43 @@ class GitWorktreeOps:
         Args:
             repo: Git repo root path.
         """
-        result = _git("rev-parse", "--git-common-dir", cwd=repo)
-        git_common = Path(result.stdout.strip())
-        if not git_common.is_absolute():  # pragma: no branch
-            git_common = (repo / git_common).resolve()
-        exclude_file = git_common / "info" / "exclude"
-        exclude_file.parent.mkdir(parents=True, exist_ok=True)
-        entry = ".kiss-worktrees/"
-        if exclude_file.exists():
-            # Git treats exclude files as raw bytes — non-UTF-8
-            # patterns/comments are legal, so a strict decode would
-            # raise UnicodeDecodeError and silently skip the
-            # exclusion (the caller swallows exceptions), leaving
-            # ``?? .kiss-worktrees/`` polluting the user's git status
-            # forever.  Mirror :func:`_git`'s surrogateescape policy.
-            content = exclude_file.read_bytes().decode(
-                "utf-8", errors="surrogateescape"
-            )
-            if entry in content.splitlines():
-                return
-        with open(exclude_file, "a", encoding="utf-8") as f:
-            f.write(f"\n{entry}\n")
+        GitWorktreeOps._append_info_line(repo, "exclude", ".kiss-worktrees/")
+
+    @staticmethod
+    def ensure_scratch_merge_driver(repo: Path) -> None:
+        """Install a merge driver that auto-resolves agent scratch files.
+
+        ``PROGRESS.md`` is a tracked per-task agent log that every task
+        wholesale rewrites ("clear PROGRESS.md when a new task begins").
+        Whenever main's copy diverged from the worktree's fork point,
+        the whole-file rewrite on both sides made every three-way merge
+        (``git merge --squash`` and ``git cherry-pick`` alike) conflict
+        — blocking the entire worktree merge over a scratch file.
+
+        This registers a repo-local ``kiss-scratch`` merge driver that
+        resolves content conflicts in such files by keeping the
+        incoming branch's version (``%B``): the newest task's log wins,
+        matching the clear-on-new-task convention.  Installation uses
+        only untracked plumbing — ``<git_common_dir>/info/attributes``
+        plus repo-local config — so no tracked file is ever modified,
+        and the driver equally fixes the *manual* merge/cherry-pick
+        commands suggested to the user on merge failure.
+
+        Args:
+            repo: Git repo root path.
+        """
+        GitWorktreeOps._append_info_line(
+            repo, "attributes", "PROGRESS.md merge=kiss-scratch"
+        )
+        _git(
+            "config",
+            "merge.kiss-scratch.name",
+            "KISS scratch file: keep the incoming task branch version",
+            cwd=repo,
+        )
+        # %A = temp file that must receive the merge result (starts as
+        # "ours"), %B = the other branch's version; exit 0 = resolved.
+        _git("config", "merge.kiss-scratch.driver", "cp -f %B %A", cwd=repo)
 
     @staticmethod
     def _load_branch_config(repo: Path, branch: str, key: str) -> str | None:
