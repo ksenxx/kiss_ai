@@ -24,6 +24,12 @@ extension precisely:
 * ``/`` slash commands matching Claude Code's quick commands
   (``/help``, ``/clear``, ``/resume``, ``/model``, ``/model list``,
   ``/cost``, ``/context``, ``/exit`` …).
+* custom slash commands defined as Markdown files in
+  ``~/.kiss/commands`` (user) and ``<project>/.kiss/commands``
+  (project) — see :mod:`kiss.agents.sorcar.custom_commands`.  The file
+  body is a prompt template (``$ARGUMENTS``/``$1``…/``@{file}``/shell
+  injection) that is expanded and run as a task; ``/commands`` lists
+  them and Tab completes their names.
 * ``/model``-name fast completion — :func:`rank_model_suggestions` over
   the generation-capable models in
   :mod:`kiss.core.models.model_info` (preferring providers whose API key
@@ -61,6 +67,11 @@ from kiss.agents.sorcar.cli_panel import (
     panel_top,
 )
 from kiss.agents.sorcar.cli_steering import run_with_steering
+from kiss.agents.sorcar.custom_commands import (
+    discover_commands,
+    expand_command,
+    format_command_listing,
+)
 from kiss.agents.sorcar.persistence import (
     _default_kiss_dir,
     _ensure_kiss_dir,
@@ -110,6 +121,8 @@ SLASH_COMMANDS: dict[str, str] = {
     "/cost": "Show cost and token usage for this session",
     "/usage": "Alias for /cost",
     "/context": "Show token usage for this session",
+    "/commands": "List custom commands (.md files in ~/.kiss/commands "
+                 "and <project>/.kiss/commands)",
     "/exit": "Exit the sorcar CLI",
     "/quit": "Alias for /exit",
 }
@@ -216,11 +229,25 @@ class CliCompleter:
         return [f"/model {name}" for name in rank_model_suggestions(query)]
 
     def _slash_matches(self, line: str) -> list[str]:
-        """Return slash-command completions for *line* (e.g. ``/he``)."""
+        """Return slash-command completions for *line* (e.g. ``/he``).
+
+        Built-in commands come first, then custom commands discovered
+        from ``~/.kiss/commands`` and ``<work_dir>/.kiss/commands``.
+        """
         token = line.strip()
-        return [
+        matches = [
             f"{cmd} " for cmd in SLASH_COMMANDS if cmd.startswith(token)
         ]
+        try:
+            custom = discover_commands(self.work_dir)
+        except Exception:  # pragma: no cover - defensive discovery guard
+            logger.debug("custom command discovery failed", exc_info=True)
+            custom = {}
+        matches.extend(
+            f"/{name} " for name in sorted(custom)
+            if f"/{name}".startswith(token) and f"/{name} " not in matches
+        )
+        return matches
 
     def _predictive_matches(self, line: str) -> list[str]:
         """Return a single whole-line predictive completion, if any.
@@ -380,11 +407,20 @@ def _print_welcome(work_dir: str, model_name: str) -> None:
     print("  /help for commands, /exit (or Ctrl+D) to quit.\n")
 
 
-def _print_help() -> None:
-    """Print the list of available slash commands."""
+def _print_help(work_dir: str = "") -> None:
+    """Print the list of available slash commands.
+
+    Args:
+        work_dir: Project directory whose custom commands to list; when
+            empty, only user-level custom commands are shown.
+    """
     print("\nCommands:")
     for cmd, desc in SLASH_COMMANDS.items():
         print(f"  {cmd:<10} {desc}")
+    custom = discover_commands(work_dir or ".")
+    if custom:
+        print("\nCustom commands:")
+        print(format_command_listing(custom))
     print(
         "\nInput fast-completes (Tab): @path mentions files, "
         "/ completes commands, /model <partial> completes model names, "
@@ -421,11 +457,15 @@ def _handle_slash(
     parts = line.strip().split(maxsplit=1)
     cmd = parts[0]
     arg = parts[1].strip() if len(parts) > 1 else ""
+    work_dir = str(run_kwargs.get("work_dir") or Path(".").resolve())
 
     if cmd in ("/exit", "/quit"):
         return True
     if cmd == "/help":
-        _print_help()
+        _print_help(work_dir)
+        return False
+    if cmd == "/commands":
+        print(f"\n{format_command_listing(discover_commands(work_dir))}\n")
         return False
     if cmd in ("/clear", "/new"):
         from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
@@ -442,6 +482,12 @@ def _handle_slash(
         return False
     if cmd in ("/cost", "/usage", "/context"):
         _print_usage(agent)
+        return False
+    custom = discover_commands(work_dir).get(cmd[1:])
+    if custom is not None:
+        prompt = expand_command(custom, arg, work_dir)
+        print(f"⚡ Running custom command {cmd} ({custom.source}:{custom.path})")
+        _run_one(agent, prompt, run_kwargs)
         return False
     print(f"Unknown command: {cmd}. Type /help for the list of commands.\n")
     return False
