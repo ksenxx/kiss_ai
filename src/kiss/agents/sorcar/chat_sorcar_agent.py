@@ -426,6 +426,12 @@ class ChatSorcarAgent(SorcarAgent):
                 result_yaml = yaml.safe_load(result)
                 if isinstance(result_yaml, dict):
                     result_summary = result_yaml.get("summary", "")
+                else:
+                    # Valid YAML but not a dict (plain string, list,
+                    # number): persist the raw text, consistent with
+                    # the parse-failure fallback below — otherwise the
+                    # task history records an empty result.
+                    result_summary = result[:500] if result else ""
             except Exception:
                 result_summary = result[:500] if result else ""
             return result

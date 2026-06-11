@@ -10,6 +10,7 @@ API key injection into shell RC files and the running environment.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import os
@@ -131,27 +132,39 @@ def save_config(data: dict[str, Any]) -> None:
     """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     # Serialize the whole read-modify-write so concurrent callers cannot
-    # each read the same old file and clobber one another's keys.
-    with _config_lock:
-        existing: dict[str, Any] = {}
-        if CONFIG_PATH.exists():
-            try:
-                with open(CONFIG_PATH) as f:
-                    stored = json.load(f)
-                if isinstance(stored, dict):
-                    existing = stored
-            except (json.JSONDecodeError, OSError):
-                pass
-        for k in DEFAULTS:
-            if k in data:
-                existing[k] = data[k]
-        serialized = json.dumps(existing, indent=2)
-        fd, tmp = tempfile.mkstemp(prefix=".kiss-config-", dir=str(CONFIG_DIR))
+    # each read the same old file and clobber one another's keys.  The
+    # threading lock covers callers inside this process; the ``flock``
+    # on a sidecar lock file covers concurrent *processes* (e.g. the
+    # kiss-web daemon persisting tunnel state while a VS Code window's
+    # service daemon persists ``last_model``) — without it, two daemons
+    # that each read the same old file and replace it would drop one
+    # another's keys.
+    with _config_lock, open(CONFIG_DIR / ".config.lock", "w") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
         try:
-            os.write(fd, serialized.encode("utf-8"))
+            existing: dict[str, Any] = {}
+            if CONFIG_PATH.exists():
+                try:
+                    with open(CONFIG_PATH) as f:
+                        stored = json.load(f)
+                    if isinstance(stored, dict):
+                        existing = stored
+                except (json.JSONDecodeError, OSError):
+                    pass
+            for k in DEFAULTS:
+                if k in data:
+                    existing[k] = data[k]
+            serialized = json.dumps(existing, indent=2)
+            fd, tmp = tempfile.mkstemp(
+                prefix=".kiss-config-", dir=str(CONFIG_DIR),
+            )
+            try:
+                os.write(fd, serialized.encode("utf-8"))
+            finally:
+                os.close(fd)
+            os.replace(tmp, CONFIG_PATH)
         finally:
-            os.close(fd)
-        os.replace(tmp, CONFIG_PATH)
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
 
 
 def _get_user_shell() -> str:
