@@ -329,13 +329,24 @@ def apply_config_to_env(cfg: dict[str, Any]) -> None:
 
     Sets ``max_budget`` on the default config.
 
+    A non-numeric value falls back to ``DEFAULTS['max_budget']``: the
+    value can come from the user-editable ``config.json`` (via
+    :func:`load_config`) or from any client's ``saveConfig`` payload,
+    and a bare ``float()`` raising out of the command handler would
+    kill the whole client connection.
+
     Args:
         cfg: The configuration dict (from :func:`load_config`).
     """
     from kiss.core import config as config_module
 
     budget = cfg.get("max_budget", DEFAULTS["max_budget"])
-    config_module.DEFAULT_CONFIG.max_budget = float(budget)
+    try:
+        budget_value = float(budget)
+    except (TypeError, ValueError):
+        logger.debug("Ignoring non-numeric max_budget %r", budget)
+        budget_value = float(DEFAULTS["max_budget"])
+    config_module.DEFAULT_CONFIG.max_budget = budget_value
 
 
 def get_custom_model_entry(cfg: dict[str, Any]) -> dict[str, Any] | None:
