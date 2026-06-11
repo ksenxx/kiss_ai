@@ -267,9 +267,9 @@ class TestReplaySessionOpensSubagentTab:
         # rebound to "tab-history-click".
         assert "tab-parent" in server._running_agent_states
         assert server._running_agent_states["tab-parent"] is parent_tab
-        # The new tab has its own (separate) state.
-        assert "tab-history-click" in server._running_agent_states
-        assert (
-            server._running_agent_states["tab-history-click"] is not parent_tab
-        )
+        # Replay is a VIEW operation: the viewer tab must NOT get its
+        # own ``_RunningAgentState`` registry entry (no agent runs
+        # there), and in particular the parent's state must not have
+        # been rebound under the new tab id.
+        assert "tab-history-click" not in server._running_agent_states
         parent_thread.join(timeout=1)
