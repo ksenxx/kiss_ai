@@ -52,21 +52,21 @@ Repeat until an iteration finds zero bugs.
      keys. Fix: enable `?2004h`/`?2004l` in start/stop, buffer paste content (incl.
      newlines, CRLF normalised, ANSI stripped, DEL/C0 dropped) with split-across-reads
      handling (`_pasting`, `_partial_suffix_len`). Tests: test_bughunt4_paste.py (9).
-  2. Tiny-terminal resize (`_draw_locked`/`stop`/`_park_cursor_locked`): rows <=
-     _BOX_H produced invalid `ESC[1;-1r`/`ESC[0;1H` (zero/negative rows). Fix:
+  1. Tiny-terminal resize (`_draw_locked`/`stop`/`_park_cursor_locked`): rows \<=
+     \_BOX_H produced invalid `ESC[1;-1r`/`ESC[0;1H` (zero/negative rows). Fix:
      `_box_top_row` clamp (>=1). Tests: test_bughunt4_tiny_resize.py (3).
-  3. No SIGCONT handler: after Ctrl+Z + fg the raw mode/paste mode/scroll region/box
+  1. No SIGCONT handler: after Ctrl+Z + fg the raw mode/paste mode/scroll region/box
      were stale until the next keypress. Fix: `_on_sigcont` re-applies raw termios,
      re-enables paste mode, forces scroll-region re-anchor + redraw; handler installed
      in start (main thread only), restored in stop. Test: test_bughunt4_sigcont.py
      (pty.fork end-to-end).
-  4. Worker leak on Ctrl+C outside select: `_loop` only caught KeyboardInterrupt
+  1. Worker leak on Ctrl+C outside select: `_loop` only caught KeyboardInterrupt
      around `select.select`; SIGINT while the main thread was blocked on the terminal
      RLock (feed→redraw vs a worker `_StdoutProxy` write blocked on a full pty)
      escaped without `_on_abort`, so `agent.run` kept executing in the background.
      Fix: `SteeringSession.run` catches KeyboardInterrupt from `_loop` → `_on_abort`.
      Test: test_bughunt4_interrupt_lock.py (deterministic pty flood + lock-park).
-  5. readline prompt width (`cli_repl._read_line`): ANSI SGR codes in the prompt
+  1. readline prompt width (`cli_repl._read_line`): ANSI SGR codes in the prompt
      lacked `\x01`/`\x02` ignore markers, so GNU readline thought the 4-col prompt
      was ~26 cols and redrew/scrolled after the 2nd typed char on narrow terminals
      (measured empirically). Fix: `_readline_prompt` wraps SGR runs in markers when
@@ -76,9 +76,8 @@ Repeat until an iteration finds zero bugs.
   - Regression sweep: all 1352 sorcar tests run in 8 parallel shards — only failure
     was test_print_to_browser lockdown missing the `warning` display type added by a
     parallel iter-4 group (expected set updated), plus a mypy error in group F's
-    untracked test_bughunt4_replay_worktree_flag.py (cast added). `uv run check
-    --full` passes.
-  - Verified NOT bugs this round: `_prefix_match_task` GLOB escaping ([,*,? escaped —
+    untracked test_bughunt4_replay_worktree_flag.py (cast added). `uv run check --full` passes.
+  - Verified NOT bugs this round: `_prefix_match_task` GLOB escaping (\[,\*,? escaped —
     no wildcard prefix-violation), combining-char backspace (width-0 consistent),
     history read/write guards, `/model list` precedence, `\r\n` double-submit
     (empty second submit ignored / Queue.Full guarded).
