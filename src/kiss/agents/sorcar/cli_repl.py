@@ -686,6 +686,13 @@ def _run_one(
     except KeyboardInterrupt:
         print("\n⏹  Task interrupted.\n")
         return
+    except Exception as exc:
+        # A failing task must not kill the interactive session: report
+        # the error and return to the prompt (the module contract is
+        # that the prompt waits for the next instruction after a task).
+        logger.debug("task failed", exc_info=True)
+        print(f"\n✗ Task failed: {exc}\n")
+        return
     elapsed = time.time() - start
     # ``print_outcome`` stays silent when running verbosely (the green
     # "Result" panel is then the last thing on screen) and prints the
