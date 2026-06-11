@@ -75,8 +75,20 @@ class TestClipAutocompleteUnaffected:
     def test_trailing_space_query_strips_leading(self) -> None:
         assert clip_autocomplete_suggestion("fix ", " the bug") == "the bug"
 
-    def test_echo_prefix_removed(self) -> None:
-        assert clip_autocomplete_suggestion("hello", "hello world") == " world"
+    def test_suffix_not_prefix_stripped(self) -> None:
+        """A suffix that itself begins with the query survives intact.
+
+        Both call sites strip the query before calling, so a suggestion
+        that starts with the query text is legitimate content (active
+        file holds ``quxqux_token``, user typed ``qux`` → suffix
+        ``qux_token``) — re-stripping it here would corrupt the accepted
+        completion (see ``clip_autocomplete_suggestion``'s docstring).
+        """
+        assert (
+            clip_autocomplete_suggestion("hello", "hello world")
+            == "hello world"
+        )
+        assert clip_autocomplete_suggestion("qux", "qux_token") == "qux_token"
 
     def test_multi_space_collapsed_to_one(self) -> None:
         assert clip_autocomplete_suggestion("parse", "  arguments") == " arguments"

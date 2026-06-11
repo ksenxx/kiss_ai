@@ -21,7 +21,12 @@ import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from kiss.agents.sorcar.git_worktree import GitWorktreeOps, repo_lock
+from kiss.agents.sorcar.git_worktree import (
+    GitWorktreeOps,
+    _split_rename_tail,
+    _unquote_git_path,
+    repo_lock,
+)
 from kiss.agents.sorcar.persistence import _append_chat_event
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
@@ -38,6 +43,27 @@ if TYPE_CHECKING:
     from kiss.agents.vscode.json_printer import JsonPrinter
 
 logger = logging.getLogger(__name__)
+
+
+def _unquoted_name_lines(output: str) -> list[str]:
+    """Parse ``git diff --name-only`` output into unquoted paths.
+
+    Even with ``core.quotepath=false``, git C-quotes any path that
+    contains a double-quote, backslash, or control character.  Without
+    unquoting, changed-file lists show bogus names and the conflict
+    file-overlap sets can never intersect the real on-disk paths.
+
+    Args:
+        output: Raw stdout from a ``--name-only`` git command.
+
+    Returns:
+        List of unquoted relative file paths.
+    """
+    return [
+        _unquote_git_path(line)
+        for line in output.strip().splitlines()
+        if line
+    ]
 
 
 def _is_valid_baseline(git_dir: str, sha: str) -> bool:
@@ -257,10 +283,16 @@ class _MergeFlowMixin:
         for line in result.stdout.splitlines():
             if len(line) < 4:
                 continue
-            path = line[3:]
-            if " -> " in path:
-                path = path.split(" -> ", 1)[1]
-            path = path.strip().strip('"')
+            tail = line[3:]
+            code = line[:2]
+            if ("R" in code or "C" in code) and " -> " in tail:
+                # Rename/copy entry: split the RAW tail on the
+                # `` -> `` boundary (respecting quoting) first, then
+                # unquote the new side exactly once.
+                _, new_raw = _split_rename_tail(tail)
+                path = _unquote_git_path(new_raw)
+            else:
+                path = _unquote_git_path(tail.strip())
             if path and path not in files:
                 files.append(path)
         return files
@@ -410,7 +442,24 @@ class _MergeFlowMixin:
                         tab = _RunningAgentState.running_agent_states.get(tab_id)
                     task_id: int | None = None
                     if tab is not None:
-                        task_id = tab.last_task_id
+                        # Prefer the in-flight task id: when the
+                        # "Auto commit" toggle is ON this handler runs
+                        # from the task thread's post-task cleanup
+                        # (``_run_task_inner``'s finally) BEFORE
+                        # ``_run_task``'s outer finally refreshes
+                        # ``last_task_id`` — so on a follow-up task in
+                        # the same tab, ``last_task_id`` still holds
+                        # the PREVIOUS task's id and the commit
+                        # confirmation would be persisted into the
+                        # prior task's event stream.
+                        # ``task_history_id`` is the current task's
+                        # row id while a task is in flight and ``None``
+                        # otherwise (user-clicked prompt after task
+                        # end), in which case ``last_task_id`` is
+                        # already up to date.
+                        task_id = tab.task_history_id
+                        if task_id is None:
+                            task_id = tab.last_task_id
                         if task_id is None and tab.agent is not None:
                             # Fallback for legacy callers that wire
                             # the task id onto the agent (e.g. tests
@@ -488,8 +537,18 @@ class _MergeFlowMixin:
                 branch if no files changed.  Post-task callers should
                 pass False to preserve the branch for manual action.
         """
-        tab = self._get_tab(tab_id)
-        if not tab.use_worktree:
+        # Non-creating lookup: viewing a chat must never mint a
+        # ``_RunningAgentState`` (the C2/C3 invariant documented in
+        # ``_replay_session``, whose ``_emit_pending_worktree`` call
+        # lands here for every history click).  A tab without a
+        # registry entry cannot have a pending worktree — the agent
+        # holding the worktree state lives on the entry — so skipping
+        # is behaviourally identical to the old eager ``_get_tab``
+        # (which created an entry with ``use_worktree=False`` and
+        # returned on the next line) minus the phantom entry + agent.
+        with self._state_lock:
+            tab = _RunningAgentState.running_agent_states.get(tab_id)
+        if tab is None or not tab.use_worktree:
             return
         wt_agent = self._ensure_wt_agent(tab)
         if wt_agent is None or not wt_agent._wt_pending:
@@ -582,18 +641,22 @@ class _MergeFlowMixin:
                 return False
             orig_fork = wt_fork = mb.stdout.strip()
 
+        # ``--no-renames`` so a rename contributes BOTH paths to the
+        # overlap sets: merging the worktree branch deletes the old
+        # path from the main tree, so a dirty main-tree edit of the
+        # old path must still be detected as a conflict.
         orig_diff = _git(
-            str(wt.repo_root), "diff", "--name-only",
+            str(wt.repo_root), "diff", "--name-only", "--no-renames",
             orig_fork, wt.original_branch,
         )
         orig_files = (
-            set(orig_diff.stdout.strip().splitlines())
+            set(_unquoted_name_lines(orig_diff.stdout))
             if orig_diff.returncode == 0 else set()
         )
 
-        wt_diff = _git(str(wt_dir), "diff", "--name-only", wt_fork)
+        wt_diff = _git(str(wt_dir), "diff", "--name-only", "--no-renames", wt_fork)
         wt_files = (
-            set(wt_diff.stdout.strip().splitlines())
+            set(_unquoted_name_lines(wt_diff.stdout))
             if wt_diff.returncode == 0 else set()
         )
         wt_files.update(_capture_untracked(str(wt_dir)))
@@ -671,13 +734,18 @@ class _MergeFlowMixin:
             base_ref = self._resolve_base_ref(
                 str(wt_dir), wt._baseline_commit, original_branch,
             )
-            tracked = _git(str(wt_dir), "diff", "--name-only", base_ref)
+            # ``--no-renames`` so a rename lists BOTH the old path
+            # (which the merge will delete from the main tree) and the
+            # new path, instead of collapsing into the new path only.
+            tracked = _git(
+                str(wt_dir), "diff", "--name-only", "--no-renames", base_ref,
+            )
             if tracked.returncode == 0:
-                files = tracked.stdout.strip().splitlines()
+                files = _unquoted_name_lines(tracked.stdout)
             else:
                 status = _git(str(wt_dir), "status", "--porcelain")
                 files = [
-                    line[3:].strip()
+                    _unquote_git_path(line[3:].strip())
                     for line in status.stdout.splitlines()
                     if len(line) >= 4 and line[3:].strip()
                 ]
@@ -690,10 +758,13 @@ class _MergeFlowMixin:
             repo_root, wt._baseline_commit, original_branch,
             tip=wt._wt_branch,
         )
-        result = _git(repo_root, "diff", "--name-only",
+        result = _git(repo_root, "diff", "--name-only", "--no-renames",
                       base_ref,
                       wt._wt_branch)
-        return result.stdout.strip().splitlines() if result.returncode == 0 else []
+        return (
+            _unquoted_name_lines(result.stdout)
+            if result.returncode == 0 else []
+        )
 
     def _check_worktree_busy(self, tab: _RunningAgentState, verb: str) -> dict[str, Any] | None:
         """Return an error dict if a worktree action should be refused, else None.
@@ -721,6 +792,24 @@ class _MergeFlowMixin:
                 "message": (
                     f"A worktree task is still running on this tab. "
                     f"Wait for it to finish (or stop it) before {verb}."
+                ),
+            }
+        if tab.is_merging:
+            # A merge review session or another worktree action is
+            # already in flight on this tab (e.g. a double click on
+            # the Merge button, or one click from each of two
+            # connected clients).  Without this check the second
+            # request passed the guard, queued behind ``repo_lock``,
+            # and re-ran ``wt.merge()`` / ``wt.discard()`` on the
+            # already-merged worktree — and whichever thread finished
+            # first cleared ``is_merging`` in its ``finally`` while
+            # the other was still merging, letting a non-worktree
+            # task start writing to the main tree mid-merge.
+            return {
+                "success": False,
+                "message": (
+                    "A merge or merge review is already in progress "
+                    f"on this tab. Wait for it to finish before {verb}."
                 ),
             }
         if self._any_non_wt_running():

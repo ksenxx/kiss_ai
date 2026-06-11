@@ -50,7 +50,6 @@ import os
 import platform
 import re
 import secrets
-import shutil
 import signal
 import socket
 import ssl
@@ -73,6 +72,7 @@ from websockets.asyncio.server import ServerConnection, serve
 from websockets.datastructures import Headers
 from websockets.http11 import Request, Response
 
+from kiss.agents.vscode.diff_merge import _read_lines_preserved
 from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.agents.vscode.server import VSCodeServer
 from kiss.agents.vscode.vscode_config import load_config, source_shell_env
@@ -409,6 +409,13 @@ class _WebMergeState:
     """
 
     def __init__(self, merge_data: dict[str, Any]) -> None:
+        # Full ``data`` payload of the opening ``merge_data`` event,
+        # kept so an in-flight review can be replayed verbatim to a
+        # client that reconnects mid-review (browser reload).  The
+        # ``hunks`` dicts inside are shared (not copied): reject
+        # actions adjust their ``cs`` offsets in place, so a replay
+        # always reflects the current on-disk line numbers.
+        self.data: dict[str, Any] = merge_data
         self.files: list[dict[str, Any]] = merge_data.get("files", [])
         # The tab's repository (or worktree) directory, stamped by the
         # backend ``_start_merge_session``.  Echoed back on the
@@ -520,17 +527,93 @@ class _WebMergeState:
         ]
 
 
+def _apply_exec_bit(path: str) -> None:
+    """Re-apply the executable bit to a restored file.
+
+    Mirrors git's checkout behavior for mode-``100755`` entries:
+    execute permission is granted wherever read permission is present.
+
+    Args:
+        path: File whose mode should gain exec bits.
+    """
+    mode = os.stat(path).st_mode
+    os.chmod(path, mode | ((mode & 0o444) >> 2))
+
+
+def _restore_base_bytes(
+    base_path: str,
+    write_to: str,
+    link_target: str | None = None,
+    *,
+    make_executable: bool = False,
+) -> None:
+    """Restore *write_to* to the exact bytes of *base_path*.
+
+    Used to reject changes to binary (or undecodable) files, whose
+    merge entries carry a single whole-file pseudo-hunk: line-based
+    splicing is meaningless for them, so the base copy is restored
+    wholesale.  A missing/unreadable base restores an empty file
+    (mirroring ``_write_base_copy``'s empty-base convention).
+
+    When *link_target* is given, the base of the entry is a SYMLINK
+    blob (the agent retargeted, deleted, or replaced a tracked
+    symlink): the link itself is recreated instead of writing the
+    blob's target string as regular-file content.
+
+    Args:
+        base_path: Path to the pre-task base copy.
+        write_to: Real workspace path to restore.
+        link_target: Target string of the base symlink, or ``None``
+            for regular content.
+        make_executable: True when the base mode is ``100755`` — the
+            restored file gets its exec bit back so rejecting a
+            deleted script leaves a clean tree and a runnable file.
+    """
+    dest = Path(write_to)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if link_target is not None:
+        if dest.is_symlink() or dest.exists():
+            dest.unlink()
+        os.symlink(link_target, write_to)
+        return
+    try:
+        data = Path(base_path).read_bytes()
+    except OSError:
+        data = b""
+    # Never write THROUGH a symlink: git tracks the link itself, not
+    # its target, and the target may be a precious file (possibly
+    # outside the repo) whose truncation would be silent data loss.
+    if dest.is_symlink():
+        dest.unlink()
+    dest.write_bytes(data)
+    if make_executable:
+        _apply_exec_bit(write_to)
+
+
 def _reject_hunk_in_file(
     current_path: str,
     base_path: str,
     hunk: dict[str, int],
     target_path: str | None = None,
+    *,
+    binary: bool = False,
+    link_target: str | None = None,
+    make_executable: bool = False,
 ) -> None:
     """Revert a single hunk in the current file to the base version.
 
     Reads both files, replaces the hunk's lines in the current file
     with the corresponding lines from the base file, and writes the
-    result back.
+    result back.  Files are read and written WITHOUT newline
+    translation (and split on ``\\n`` only) so rejecting one hunk of a
+    CRLF file does not silently rewrite every other line with LF
+    endings, and line numbering matches git's ``\\n``-based hunks.
+
+    When *binary* is true — or either file turns out not to be
+    decodable text — the base bytes are restored wholesale instead:
+    binary merge entries carry a single whole-file pseudo-hunk, so
+    line splicing does not apply (and used to raise
+    ``UnicodeDecodeError``, crashing the merge action).
 
     When *target_path* differs from *current_path* — which happens when
     the agent deleted a tracked file and the merge view uses a
@@ -548,20 +631,42 @@ def _reject_hunk_in_file(
             (0-based line positions).
         target_path: Real workspace path to write the rejection to.
             Defaults to *current_path* for backwards compatibility.
+        binary: True when the merge entry is flagged binary; restores
+            the base bytes wholesale.
+        link_target: Target string when the base is a symlink blob;
+            the link itself is restored (see ``_restore_base_bytes``).
+        make_executable: True when the base mode is ``100755``; the
+            rewritten file gets its exec bit re-applied.
     """
     write_to = target_path or current_path
+    if binary or link_target is not None:
+        _restore_base_bytes(
+            base_path, write_to, link_target,
+            make_executable=make_executable,
+        )
+        return
     # Read from *write_to* (the real workspace target) when it exists
     # so that successive partial rejections accumulate against the
     # restored content rather than the (now-stale) placeholder.
+    cur_lines: list[str] = []
     try:
-        cur_lines = Path(write_to).read_text().splitlines(keepends=True)
-    except OSError:
         try:
-            cur_lines = Path(current_path).read_text().splitlines(keepends=True)
+            cur_lines = _read_lines_preserved(write_to)
         except OSError:
-            cur_lines = []
-    try:
-        base_lines = Path(base_path).read_text().splitlines(keepends=True)
+            try:
+                cur_lines = _read_lines_preserved(current_path)
+            except OSError:
+                cur_lines = []
+        base_lines = _read_lines_preserved(base_path)
+    except UnicodeDecodeError:
+        # Undecodable content that slipped past the binary sniff
+        # (e.g. UTF-16 / latin-1 without NUL bytes in the first 8 KiB).
+        # Restoring the base bytes wholesale beats crashing the merge
+        # action with an exception.
+        _restore_base_bytes(
+            base_path, write_to, make_executable=make_executable,
+        )
+        return
     except OSError:
         base_lines = []
 
@@ -570,28 +675,69 @@ def _reject_hunk_in_file(
         + base_lines[hunk["bs"] : hunk["bs"] + hunk["bc"]]
         + cur_lines[hunk["cs"] + hunk["cc"] :]
     )
-    Path(write_to).parent.mkdir(parents=True, exist_ok=True)
-    Path(write_to).write_text("".join(new_lines))
+    dest = Path(write_to)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    # Replace a symlink instead of writing THROUGH it — writing through
+    # would clobber the pointed-to file (which may live outside the
+    # repo) while leaving the rejected link itself untouched.
+    if dest.is_symlink():
+        dest.unlink()
+    with open(write_to, "w", newline="") as f:
+        f.write("".join(new_lines))
+    if make_executable:
+        _apply_exec_bit(write_to)
 
 
-def _reject_all_hunks_in_file(file_data: dict[str, Any]) -> None:
-    """Revert an entire file to its base version.
+def _reject_all_hunks_in_file(
+    file_data: dict[str, Any], hunk_indices: list[int] | None = None,
+) -> None:
+    """Surgically revert the given hunks of a file to the base version.
 
-    Copies the base file content over the real workspace path
-    (``file_data["target"]`` when present, otherwise
-    ``file_data["current"]``).  Using ``target`` ensures that when the
-    agent deleted a tracked file and the user rejects all hunks, the
-    workspace file is actually restored on disk instead of being left
-    behind as a placeholder.
+    Reverts only the hunks named by *hunk_indices* (all hunks when
+    ``None``) via :func:`_reject_hunk_in_file`, applying the same
+    ``cs`` offset fix-ups to later pending hunks as the per-hunk
+    ``reject`` action.  Callers (``reject-file`` / ``reject-all``)
+    pass the file's UNRESOLVED hunk indices so content the user
+    already ACCEPTED stays on disk — a whole-file base copy here
+    would silently wipe accepted hunks while ``resolutions()`` still
+    reported them ``"accepted"``.
 
     Args:
         file_data: File entry from merge data with ``base``,
-            ``current`` and (optionally) ``target`` path strings.
+            ``current``, ``hunks`` and (optionally) ``target`` path
+            strings.
+        hunk_indices: Indices into ``file_data["hunks"]`` to revert;
+            ``None`` means every hunk.
     """
-    write_to = file_data.get("target") or file_data["current"]
-    if Path(file_data["base"]).is_file():
-        Path(write_to).parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(file_data["base"], write_to)
+    hunks = file_data.get("hunks", [])
+    if hunk_indices is None:
+        hunk_indices = list(range(len(hunks)))
+    if file_data.get("binary"):
+        # Binary entries carry a single whole-file pseudo-hunk; restore
+        # the base bytes wholesale (line splicing does not apply).
+        # ``link_target`` marks a symlink-base entry whose reject must
+        # recreate the link itself.
+        if hunk_indices:
+            _restore_base_bytes(
+                file_data["base"],
+                file_data.get("target") or file_data["current"],
+                file_data.get("link_target"),
+                make_executable=bool(file_data.get("exec")),
+            )
+        return
+    pending = set(hunk_indices)
+    for hi in sorted(hunk_indices):
+        hunk = hunks[hi]
+        _reject_hunk_in_file(
+            file_data["current"], file_data["base"], hunk,
+            file_data.get("target"),
+            make_executable=bool(file_data.get("exec")),
+        )
+        pending.discard(hi)
+        delta = hunk["bc"] - hunk["cc"]
+        for later_hi in range(hi + 1, len(hunks)):
+            if later_hi in pending:
+                hunks[later_hi]["cs"] += delta
 
 
 _VSCODE_ONLY_COMMANDS = frozenset({
@@ -1165,6 +1311,8 @@ def _read_url_from_file(url_file: Path) -> str | None:
     try:
         data = json.loads(url_file.read_text())
     except Exception:
+        return None
+    if not isinstance(data, dict):
         return None
     url = data.get("tunnel") or data.get("local", "")
     return url or None
@@ -2353,12 +2501,20 @@ def _augment_merge_data(event: dict[str, Any]) -> dict[str, Any]:
             f["current_text"] = ""
             files.append(f)
             continue
+        # Read WITHOUT newline translation: hunk coordinates are
+        # computed by splitting the on-disk bytes on "\n" only (see
+        # ``diff_merge._read_lines_preserved``), so a universal-newline
+        # read would hand the browser text whose CRLF endings are
+        # silently rewritten — and whose line COUNT differs for
+        # lone-"\r" content — misaligning hunk highlighting.
         try:
-            f["base_text"] = Path(f["base"]).read_text()
+            with open(f["base"], newline="") as bfh:
+                f["base_text"] = bfh.read()
         except (OSError, KeyError, UnicodeDecodeError):
             f["base_text"] = ""
         try:
-            f["current_text"] = Path(f["current"]).read_text()
+            with open(f["current"], newline="") as cfh:
+                f["current_text"] = cfh.read()
         except (OSError, KeyError, UnicodeDecodeError):
             f["current_text"] = ""
         files.append(f)
@@ -2390,7 +2546,14 @@ def _translate_webview_command(cmd: dict[str, Any]) -> dict[str, Any]:
     """
     cmd_type = cmd.get("type", "")
     if cmd_type == "userActionDone":
-        return {"type": "userAnswer", "answer": "done", "tabId": cmd.get("tabId", "")}
+        # Copy the command (like the resumeSession branch below) so the
+        # ``connId``/``workDir`` stamps from ``_dispatch_client_command``
+        # survive the translation.
+        out = dict(cmd)
+        out["type"] = "userAnswer"
+        out["answer"] = "done"
+        out["tabId"] = cmd.get("tabId", "")
+        return out
     if cmd_type == "resumeSession" and "id" in cmd and "chatId" not in cmd:
         out = dict(cmd)
         out["chatId"] = out.pop("id")
@@ -2671,9 +2834,16 @@ class RemoteAccessServer:
         """
         now = time.monotonic()
         fails = self._auth_failures.get(ip, [])
-        # Drop entries outside the window.
+        # Drop entries outside the window.  Only write the pruned list
+        # back for IPs that already have an entry (i.e. recorded at
+        # least one real failure) — unconditionally assigning here
+        # used to create a permanent empty-list entry for EVERY source
+        # IP that ever connected (including ones that always
+        # authenticated successfully), growing ``_auth_failures``
+        # without bound over the daemon's lifetime.
         fails = [t for t in fails if now - t <= _AUTH_FAIL_WINDOW]
-        self._auth_failures[ip] = fails
+        if fails or ip in self._auth_failures:
+            self._auth_failures[ip] = fails
         if len(fails) < _AUTH_FAIL_MAX:
             return False
         return (now - fails[-1]) <= _AUTH_LOCKOUT
@@ -2837,16 +3007,49 @@ class RemoteAccessServer:
         with self._pending_tab_closes_lock:
             self._pending_tab_closes.pop(tab_id, None)
         with self._merge_states_lock:
-            self._merge_states.pop(tab_id, None)
+            merge_state = self._merge_states.pop(tab_id, None)
             self._merge_action_locks.pop(tab_id, None)
         if self._loop is None or not self._loop.is_running():
             return
         task = asyncio.ensure_future(
-            self._run_cmd({"type": "closeTab", "tabId": tab_id}),
+            self._finish_merge_and_close_tab(tab_id, merge_state),
             loop=self._loop,
         )
         self._pending_close_tasks.add(task)
         task.add_done_callback(self._pending_close_tasks.discard)
+
+    async def _finish_merge_and_close_tab(
+        self, tab_id: str, merge_state: _WebMergeState | None,
+    ) -> None:
+        """End an in-flight merge review (if any) and close *tab_id*.
+
+        Companion of :meth:`_fire_pending_tab_close`.  When the close
+        grace elapsed while a merge review was still in flight, the
+        popped :class:`_WebMergeState` is the ONLY thing that could
+        ever drive the review to ``all-done`` — the backend
+        ``_close_tab`` sees ``is_merging=True`` (a busy lifecycle
+        flag), merely flips ``frontend_closed=True`` and waits for
+        the merge to end, which would now never happen.  Dispatching
+        ``all-done`` here treats the close as "accept the remaining
+        hunks" (no disk writes — the workspace already holds the
+        agent's content): ``_finish_merge`` clears ``is_merging``,
+        cleans the per-tab merge artifacts, presents any pending
+        worktree, and the subsequent ``closeTab`` disposes the
+        backend tab instead of leaking it forever.
+
+        Args:
+            tab_id: The frontend tab identifier being closed.
+            merge_state: The web-side merge state popped for the tab,
+                or ``None`` when no review was in flight.
+        """
+        if merge_state is not None:
+            await self._run_cmd({
+                "type": "mergeAction",
+                "action": "all-done",
+                "tabId": tab_id,
+                "workDir": merge_state.work_dir,
+            })
+        await self._run_cmd({"type": "closeTab", "tabId": tab_id})
 
     async def _ws_handler(self, websocket: ServerConnection) -> None:
         """Handle a WebSocket client connection.
@@ -2878,9 +3081,25 @@ class RemoteAccessServer:
                     continue
                 if not isinstance(cmd, dict):
                     continue
-                await self._dispatch_client_command(
-                    cmd, websocket, tabs_seen, conn_state,
-                )
+                try:
+                    await self._dispatch_client_command(
+                        cmd, websocket, tabs_seen, conn_state,
+                    )
+                except websockets.exceptions.ConnectionClosed:
+                    raise
+                except Exception:
+                    # Contain per-command failures (malformed fields,
+                    # unexpected I/O errors in handlers): one bad
+                    # message must not tear down the authenticated
+                    # connection — the ``finally`` below would arm
+                    # deferred closeTab timers for EVERY tab this
+                    # client touched, force-finishing in-flight merge
+                    # reviews as "accept remaining".
+                    logger.warning(
+                        "Error handling client command %r; "
+                        "connection kept",
+                        cmd.get("type", ""), exc_info=True,
+                    )
         except websockets.exceptions.ConnectionClosed:
             pass
         except Exception:
@@ -2945,9 +3164,21 @@ class RemoteAccessServer:
                     continue
                 if not isinstance(cmd, dict):
                     continue
-                await self._dispatch_client_command(
-                    cmd, writer, tabs_seen, conn_state,
-                )
+                try:
+                    await self._dispatch_client_command(
+                        cmd, writer, tabs_seen, conn_state,
+                    )
+                except (ConnectionError, asyncio.IncompleteReadError):
+                    raise
+                except Exception:
+                    # Same per-command containment as ``_ws_handler``:
+                    # one bad message (malformed field, handler I/O
+                    # error) must not drop the VS Code extension's
+                    # UDS connection and force-close its tabs.
+                    logger.warning(
+                        "Error handling UDS command %r; connection kept",
+                        cmd.get("type", ""), exc_info=True,
+                    )
         except Exception:
             logger.debug("UDS handler error", exc_info=True)
         finally:
@@ -3026,6 +3257,21 @@ class RemoteAccessServer:
             await self._handle_active_tasks_query(endpoint)
             return
         if cmd_type == "ready":
+            # The deferred-close contract (see ``_ws_handler``'s
+            # ``finally``) is "schedule a closeTab for every tab id
+            # this connection touched".  ``_handle_ready`` re-claims
+            # (cancels the pending close of, and resumes) every
+            # ``restoredTabs`` entry, so those tab ids are touched by
+            # this connection too — record them in ``tabs_seen`` or a
+            # later disconnect would never re-arm their deferred
+            # close, leaking the restored backend state forever.
+            restored = cmd.get("restoredTabs")
+            if isinstance(restored, list):
+                for rt in restored[:_MAX_RESTORED_TABS]:
+                    if isinstance(rt, dict):
+                        rt_id = rt.get("tabId", "")
+                        if isinstance(rt_id, str) and rt_id:
+                            tabs_seen.add(rt_id)
             await self._handle_ready(cmd, endpoint)
             return
         if cmd_type == "submit":
@@ -3037,8 +3283,47 @@ class RemoteAccessServer:
         if cmd_type == "runUpdate":
             await self._handle_run_update(conn_state["conn_id"])
             return
-        if cmd_type == "mergeAction" and cmd.get("action", "") != "all-done":
-            await self._handle_web_merge_action(cmd)
+        if cmd_type == "mergeAction":
+            if cmd.get("action", "") != "all-done":
+                await self._handle_web_merge_action(cmd)
+                return
+            # An ``all-done`` arriving FROM a client is the VS Code
+            # extension's TS MergeManager finishing its editor-managed
+            # review (its per-hunk actions never reach the backend —
+            # see ``SorcarSidebarView.sendMergeAllDone``).  Drop the
+            # server-side shadow ``_WebMergeState`` registered when the
+            # ``merge_data`` event was broadcast: leaving it would
+            # replay a ZOMBIE review on the next webview reload
+            # (``ready`` → ``_replay_merge_review``), fire a spurious
+            # second all-done from the deferred-close path, and leak
+            # one state (with full file payloads) per finished review
+            # in the meantime.  The command still falls through to the
+            # backend ``_cmd_merge_action`` → ``_finish_merge`` below.
+            if isinstance(tab_id, str) and tab_id:
+                with self._merge_states_lock:
+                    self._merge_states.pop(tab_id, None)
+                    self._merge_action_locks.pop(tab_id, None)
+        if (
+            cmd_type == "closeTab"
+            and isinstance(tab_id, str)
+            and tab_id
+            and not isinstance(endpoint, asyncio.StreamWriter)
+        ):
+            # A WEB client closing its chat tab destroys the only UI
+            # that could ever finish an in-flight (server-tracked)
+            # merge review for that tab: the backend ``_close_tab``
+            # would see ``is_merging=True``, flip ``frontend_closed``
+            # and wait forever for an ``all-done`` that no client can
+            # send any more.  End the review first (close = accept the
+            # remaining hunks; no disk writes) so the tab is disposed
+            # instead of leaking in ``is_merging`` limbo.  UDS (VS
+            # Code) clients are exempt: their TypeScript MergeManager
+            # owns the review in real editor tabs that survive the
+            # chat tab's closure and will still send ``all-done``.
+            with self._merge_states_lock:
+                merge_state = self._merge_states.pop(tab_id, None)
+                self._merge_action_locks.pop(tab_id, None)
+            await self._finish_merge_and_close_tab(tab_id, merge_state)
             return
         cmd = _translate_webview_command(cmd)
         await self._run_cmd(cmd)
@@ -3339,8 +3624,19 @@ class RemoteAccessServer:
         # current tab id (and every restored tab below) so a reload
         # within :data:`_TAB_CLOSE_GRACE` keeps the backend state.
         self._cancel_pending_tab_close(tab_id)
+        # Propagate the connection's stamped ``workDir`` (if any) onto
+        # the fanned-out init commands.  ``_cmd_get_config`` reports
+        # the command's ``workDir`` as ``config.work_dir`` so the
+        # settings panel shows the folder THIS instance actually uses;
+        # dropping the stamp here made every page-load ``configData``
+        # fall back to the daemon-global work_dir instead of the
+        # connection's pinned folder.
+        work_dir = cmd.get("workDir", "")
         for init_cmd in ("getModels", "getInputHistory", "getConfig"):
-            await self._run_cmd({"type": init_cmd, "connId": conn_id})
+            init: dict[str, Any] = {"type": init_cmd, "connId": conn_id}
+            if work_dir:
+                init["workDir"] = work_dir
+            await self._run_cmd(init)
         await self._send_welcome_info()
         try:
             await self._endpoint_send(
@@ -3349,6 +3645,13 @@ class RemoteAccessServer:
             )
         except Exception:
             pass
+        # Replay an in-flight merge review for the tab this connection
+        # claims directly (restored tabs are replayed in the loop
+        # below).  ``merge_data`` events are tab-stamped and never
+        # persisted, so without this a page reload mid-review loses
+        # the merge UI forever while the server-side ``_WebMergeState``
+        # (and the backend tab's ``is_merging`` flag) stay stuck.
+        await self._replay_merge_review(tab_id, websocket)
         # M7: cap the number of restored tabs a single client can ask
         # the server to resume so an authenticated-but-malicious or
         # buggy client cannot flood the executor with thousands of
@@ -3363,6 +3666,14 @@ class RemoteAccessServer:
             )
             restored = restored[:_MAX_RESTORED_TABS]
         for rt in restored:
+            # M7: the list itself is type-checked above, but a
+            # malformed (non-dict) ELEMENT must be skipped too — an
+            # ``AttributeError`` here would propagate out of
+            # ``_dispatch_client_command`` and tear down the whole
+            # authenticated connection over one bad field.
+            if not isinstance(rt, dict):
+                logger.warning("ignoring non-dict restoredTabs entry: %r", rt)
+                continue
             rt_id = rt.get("tabId", "")
             if rt_id:
                 self._cancel_pending_tab_close(rt_id)
@@ -3372,6 +3683,83 @@ class RemoteAccessServer:
                     {"type": "resumeSession", "chatId": chat_id,
                      "tabId": rt_id},
                 )
+            if isinstance(rt_id, str) and rt_id:
+                await self._replay_merge_review(rt_id, websocket)
+
+    async def _replay_merge_review(self, tab_id: str, websocket: Any) -> None:
+        """Re-send an in-flight merge review to a reconnecting client.
+
+        ``merge_data`` events are tab-stamped, so ``WebPrinter.broadcast``
+        forwards them to currently-connected clients only — they are
+        never recorded or persisted.  A browser that reloads mid-review
+        would therefore never see the merge UI again even though the
+        server still holds the unresolved :class:`_WebMergeState` (and
+        the backend tab stays ``is_merging``).  The VS Code extension's
+        ``MergeManager`` survives webview reloads in the extension
+        host; for the web client the server is the only source of
+        truth, so it replays ``merge_data`` + ``merge_started`` +
+        ``merge_nav`` (resolutions included) to the reconnecting
+        endpoint.  Sends are targeted at *websocket* only — sibling
+        windows already received the original broadcast.
+
+        Args:
+            tab_id: The tab the connection (re-)claimed.
+            websocket: The reconnecting client connection.
+        """
+        if not tab_id:
+            return
+        with self._merge_states_lock:
+            if tab_id not in self._merge_states:
+                return
+        # Serialise with in-flight merge actions: the reject branches
+        # of ``_apply_web_merge_action`` rewrite the reviewed files on
+        # disk (truncate + write) and mutate the shared hunk ``cs``
+        # offsets while holding this per-tab lock.  Reading the files
+        # (``_augment_merge_data``) and hunk dicts without it could
+        # hand the reconnecting client a torn ``current_text`` and
+        # mid-mutation offsets that no later ``merge_nav`` broadcast
+        # can repair (``merge_nav`` carries no file text).
+        async with self._merge_action_lock(tab_id):
+            # Re-check under the lock: the action we waited for may
+            # have resolved the final hunk and finished the review.
+            with self._merge_states_lock:
+                state = self._merge_states.get(tab_id)
+            if state is None or not state.remaining:
+                return
+            assert self._loop is not None
+            # ``_augment_merge_data`` reads every reviewed file from
+            # disk; do it off the event loop like the broadcast path's
+            # callers.
+            event = await self._loop.run_in_executor(
+                None,
+                _augment_merge_data,
+                {
+                    "type": "merge_data",
+                    "tabId": tab_id,
+                    "data": state.data,
+                    "hunk_count": state.total_hunks,
+                },
+            )
+            cur = state.current()
+            nav = {
+                "type": "merge_nav",
+                "tabId": tab_id,
+                "remaining": state.remaining,
+                "total": state.total_hunks,
+                "cur": (
+                    {"fi": cur[0], "hi": cur[1]} if cur is not None else None
+                ),
+                "resolved": state.resolutions(),
+            }
+            try:
+                await self._endpoint_send(websocket, json.dumps(event))
+                await self._endpoint_send(
+                    websocket,
+                    json.dumps({"type": "merge_started", "tabId": tab_id}),
+                )
+                await self._endpoint_send(websocket, json.dumps(nav))
+            except Exception:
+                logger.debug("Merge review replay failed", exc_info=True)
 
     async def _handle_submit(self, cmd: dict[str, Any]) -> None:
         """Translate the webview ``submit`` command into a backend ``run``.
@@ -3466,6 +3854,33 @@ class RemoteAccessServer:
                 self._merge_action_locks[tab_id] = lock
             return lock
 
+    def _broadcast_reject_failure(
+        self, tab_id: str, file_data: dict[str, Any], exc: OSError,
+    ) -> None:
+        """Report a failed hunk-rejection write to every client.
+
+        Called from the reject branches of
+        :meth:`_apply_web_merge_action` when restoring a file's base
+        content fails on disk (canonical trigger: the agent deleted a
+        tracked file and created a directory at the same path, so the
+        restore write raises ``IsADirectoryError``).  The hunks of the
+        affected file remain unresolved, the review stays open, and
+        the user sees an ``error`` chat event instead of a silently
+        dropped (or connection-killing) rejection.
+
+        Args:
+            tab_id: The tab whose merge review the action targeted.
+            file_data: The merge-data file entry whose restore failed.
+            exc: The ``OSError`` raised by the restore write.
+        """
+        fname = file_data.get("name") or file_data.get("target") or "file"
+        logger.warning("Merge reject failed for %s: %s", fname, exc)
+        self._printer.broadcast({
+            "type": "error",
+            "text": f"Failed to reject changes in {fname}: {exc}",
+            "tabId": tab_id,
+        })
+
     async def _handle_web_merge_action(self, cmd: dict[str, Any]) -> None:
         """Handle merge toolbar actions (accept/reject/navigate) server-side.
 
@@ -3519,20 +3934,36 @@ class RemoteAccessServer:
                 fi, hi = cur
                 fd = state.files[fi]
                 hunk = fd["hunks"][hi]
-                await self._loop.run_in_executor(
-                    None,
-                    _reject_hunk_in_file,
-                    fd["current"],
-                    fd["base"],
-                    hunk,
-                    fd.get("target"),
-                )
-                delta = hunk["bc"] - hunk["cc"]
-                for later_hi in range(hi + 1, len(fd["hunks"])):
-                    if not state.is_resolved(fi, later_hi):
-                        fd["hunks"][later_hi]["cs"] += delta
-                state.mark_resolved(fi, hi, "rejected")
-                state.advance()
+                try:
+                    await self._loop.run_in_executor(
+                        None,
+                        partial(
+                            _reject_hunk_in_file,
+                            fd["current"],
+                            fd["base"],
+                            hunk,
+                            fd.get("target"),
+                            binary=bool(fd.get("binary")),
+                            link_target=fd.get("link_target"),
+                            make_executable=bool(fd.get("exec")),
+                        ),
+                    )
+                except OSError as exc:
+                    # The restore write failed (e.g. the agent replaced
+                    # the deleted file with a DIRECTORY of the same
+                    # name → IsADirectoryError, or the target is not
+                    # writable).  Nothing landed on disk, so the hunk
+                    # must stay UNRESOLVED — and the failure must not
+                    # propagate, or the transport loop would tear down
+                    # the whole client connection over one bad hunk.
+                    self._broadcast_reject_failure(tab_id, fd, exc)
+                else:
+                    delta = hunk["bc"] - hunk["cc"]
+                    for later_hi in range(hi + 1, len(fd["hunks"])):
+                        if not state.is_resolved(fi, later_hi):
+                            fd["hunks"][later_hi]["cs"] += delta
+                    state.mark_resolved(fi, hi, "rejected")
+                    state.advance()
         elif action == "prev":
             state.go_prev()
         elif action == "next":
@@ -3541,27 +3972,50 @@ class RemoteAccessServer:
             if cur is not None:
                 fi = cur[0]
                 fd = state.files[fi]
+                resolve_file = True
                 if action == "reject-file":
-                    await self._loop.run_in_executor(
-                        None, _reject_all_hunks_in_file, fd,
+                    try:
+                        await self._loop.run_in_executor(
+                            None, _reject_all_hunks_in_file, fd,
+                            state.unresolved_in_file(fi),
+                        )
+                    except OSError as exc:
+                        # See the per-hunk ``reject`` branch: the
+                        # restore write failed, so the file's hunks
+                        # stay unresolved and the review survives.
+                        self._broadcast_reject_failure(tab_id, fd, exc)
+                        resolve_file = False
+                if resolve_file:
+                    file_status = (
+                        "rejected" if action == "reject-file" else "accepted"
                     )
-                file_status = "rejected" if action == "reject-file" else "accepted"
-                for hi in state.unresolved_in_file(fi):
-                    state.mark_resolved(fi, hi, file_status)
-                state.advance()
+                    for hi in state.unresolved_in_file(fi):
+                        state.mark_resolved(fi, hi, file_status)
+                    state.advance()
         elif action == "accept-all":
             for fi, hi in state.all_unresolved():
                 state.mark_resolved(fi, hi, "accepted")
         elif action == "reject-all":
-            unresolved_files: set[int] = set()
+            unresolved_by_file: dict[int, list[int]] = {}
             for fi, hi in state.all_unresolved():
-                unresolved_files.add(fi)
-                state.mark_resolved(fi, hi, "rejected")
-            for fi in unresolved_files:
+                unresolved_by_file.setdefault(fi, []).append(hi)
+            for fi, his in unresolved_by_file.items():
                 fd = state.files[fi]
-                await self._loop.run_in_executor(
-                    None, _reject_all_hunks_in_file, fd,
-                )
+                # Mark hunks resolved only AFTER their file's restore
+                # write succeeded: marking up-front would zombify the
+                # review on failure (remaining == 0 with the state
+                # never popped and all-done never dispatched), while a
+                # propagating exception killed the client connection
+                # AND left sibling files unrestored.
+                try:
+                    await self._loop.run_in_executor(
+                        None, _reject_all_hunks_in_file, fd, his,
+                    )
+                except OSError as exc:
+                    self._broadcast_reject_failure(tab_id, fd, exc)
+                    continue
+                for hi in his:
+                    state.mark_resolved(fi, hi, "rejected")
 
         cur_after = state.current()
         self._printer.broadcast({

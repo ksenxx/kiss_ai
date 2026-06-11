@@ -116,6 +116,10 @@ type ToWebviewMessageBody =
       text?: string;
       summary?: string;
       success?: boolean;
+      /** True when the agent paused to continue in a new session
+       *  (``json_printer`` copies ``is_continue`` onto result events;
+       *  main.js renders a "Status: Continue" banner for it). */
+      is_continue?: boolean;
       total_tokens?: number;
       cost?: string;
       step_count?: number;
@@ -138,7 +142,14 @@ type ToWebviewMessageBody =
   | {type: 'task_stopped'}
   | {type: 'task_interrupted'}
   // UI events
-  | {type: 'status'; running: boolean}
+  | {
+      type: 'status';
+      running: boolean;
+      /** Agent's true start timestamp (ms since epoch) supplied by the
+       *  backend (``task_runner`` / ``server._replay_session``) so the
+       *  webview's "Running …" timer is anchored to agent wall-clock. */
+      startTs?: number;
+    }
   | {
       type: 'models';
       models: Array<{
@@ -161,7 +172,12 @@ type ToWebviewMessageBody =
       offset?: number;
       generation?: number;
     }
-  | {type: 'files'; files: Array<{type: string; text: string}>}
+  | {
+      type: 'files';
+      files: Array<{type: string; text: string}>;
+      prefix?: string;
+      loading?: boolean;
+    }
   | {type: 'askUser'; question: string}
   | {type: 'error'; text: string}
   | {type: 'followup_suggestion'; text: string}
@@ -194,6 +210,7 @@ type ToWebviewMessageBody =
     }
   | {type: 'worktree_progress'; message: string}
   | {type: 'worktree_result'; success: boolean; message: string}
+  | {type: 'warning'; message: string; tabId?: string}
   | {type: 'autocommit_prompt'; changedFiles: string[]; tabId?: string}
   | {type: 'autocommit_progress'; message: string; tabId?: string}
   | {
@@ -224,8 +241,8 @@ type ToWebviewMessageBody =
       type: 'openSubagentTab';
       tab_id?: string;
       parent_tab_id?: string;
-      task_description?: string;
-      task_index?: number;
+      description?: string;
+      taskIndex?: number;
       isSubagentTab?: boolean;
       isDone?: boolean;
     }
