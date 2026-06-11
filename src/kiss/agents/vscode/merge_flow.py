@@ -21,7 +21,12 @@ import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from kiss.agents.sorcar.git_worktree import GitWorktreeOps, repo_lock
+from kiss.agents.sorcar.git_worktree import (
+    GitWorktreeOps,
+    _split_rename_tail,
+    _unquote_git_path,
+    repo_lock,
+)
 from kiss.agents.sorcar.persistence import _append_chat_event
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
@@ -38,6 +43,27 @@ if TYPE_CHECKING:
     from kiss.agents.vscode.json_printer import JsonPrinter
 
 logger = logging.getLogger(__name__)
+
+
+def _unquoted_name_lines(output: str) -> list[str]:
+    """Parse ``git diff --name-only`` output into unquoted paths.
+
+    Even with ``core.quotepath=false``, git C-quotes any path that
+    contains a double-quote, backslash, or control character.  Without
+    unquoting, changed-file lists show bogus names and the conflict
+    file-overlap sets can never intersect the real on-disk paths.
+
+    Args:
+        output: Raw stdout from a ``--name-only`` git command.
+
+    Returns:
+        List of unquoted relative file paths.
+    """
+    return [
+        _unquote_git_path(line)
+        for line in output.strip().splitlines()
+        if line
+    ]
 
 
 def _is_valid_baseline(git_dir: str, sha: str) -> bool:
@@ -257,10 +283,16 @@ class _MergeFlowMixin:
         for line in result.stdout.splitlines():
             if len(line) < 4:
                 continue
-            path = line[3:]
-            if " -> " in path:
-                path = path.split(" -> ", 1)[1]
-            path = path.strip().strip('"')
+            tail = line[3:]
+            code = line[:2]
+            if ("R" in code or "C" in code) and " -> " in tail:
+                # Rename/copy entry: split the RAW tail on the
+                # `` -> `` boundary (respecting quoting) first, then
+                # unquote the new side exactly once.
+                _, new_raw = _split_rename_tail(tail)
+                path = _unquote_git_path(new_raw)
+            else:
+                path = _unquote_git_path(tail.strip())
             if path and path not in files:
                 files.append(path)
         return files
@@ -608,13 +640,13 @@ class _MergeFlowMixin:
             orig_fork, wt.original_branch,
         )
         orig_files = (
-            set(orig_diff.stdout.strip().splitlines())
+            set(_unquoted_name_lines(orig_diff.stdout))
             if orig_diff.returncode == 0 else set()
         )
 
         wt_diff = _git(str(wt_dir), "diff", "--name-only", "--no-renames", wt_fork)
         wt_files = (
-            set(wt_diff.stdout.strip().splitlines())
+            set(_unquoted_name_lines(wt_diff.stdout))
             if wt_diff.returncode == 0 else set()
         )
         wt_files.update(_capture_untracked(str(wt_dir)))
@@ -699,11 +731,11 @@ class _MergeFlowMixin:
                 str(wt_dir), "diff", "--name-only", "--no-renames", base_ref,
             )
             if tracked.returncode == 0:
-                files = tracked.stdout.strip().splitlines()
+                files = _unquoted_name_lines(tracked.stdout)
             else:
                 status = _git(str(wt_dir), "status", "--porcelain")
                 files = [
-                    line[3:].strip()
+                    _unquote_git_path(line[3:].strip())
                     for line in status.stdout.splitlines()
                     if len(line) >= 4 and line[3:].strip()
                 ]
@@ -719,7 +751,10 @@ class _MergeFlowMixin:
         result = _git(repo_root, "diff", "--name-only", "--no-renames",
                       base_ref,
                       wt._wt_branch)
-        return result.stdout.strip().splitlines() if result.returncode == 0 else []
+        return (
+            _unquoted_name_lines(result.stdout)
+            if result.returncode == 0 else []
+        )
 
     def _check_worktree_busy(self, tab: _RunningAgentState, verb: str) -> dict[str, Any] | None:
         """Return an error dict if a worktree action should be refused, else None.
