@@ -149,6 +149,23 @@ def _default_kiss_dir() -> Path:
 _KISS_DIR = _default_kiss_dir()
 _DB_PATH = _KISS_DIR / "sorcar.db"
 
+
+def _current_db_path() -> str:
+    """Return the active database path as a string.
+
+    Used by asynchronous producers (the background event writer's
+    enqueue path, the VS Code server's fire-and-forget follow-up
+    thread) to stamp each pending write with the database it was
+    produced against, so a late write can never land in a *different*
+    database after ``_DB_PATH`` has been reassigned (test fixtures,
+    daemon restarts pointed at another home dir).  Numeric
+    ``task_history`` ids are only unique within one database file —
+    AUTOINCREMENT prevents reuse inside a database, but a swapped
+    database restarts the counter, so a stale id would otherwise
+    resolve to an unrelated task's row.
+    """
+    return str(_DB_PATH)
+
 _MAX_FILE_USAGE_ENTRIES = 10000
 
 _MAX_FREQUENT_TASKS = 100
@@ -1139,7 +1156,7 @@ def _event_writer_loop() -> None:
             if _event_writer_stop.is_set():
                 return
             continue
-        batch: list[tuple[int, str, float]] = [first]
+        batch: list[tuple[int, str, float, str]] = [first]
         deadline = time.monotonic() + _BATCH_WINDOW_S
         shutdown_pending = False
         while len(batch) < _BATCH_MAX:
@@ -1166,12 +1183,23 @@ def _event_writer_loop() -> None:
             return
 
 
-def _write_event_batch(batch: list[tuple[int, str, float]]) -> None:
-    """Persist a batch of (task_id, event_json, timestamp) rows."""
+def _write_event_batch(batch: list[tuple[int, str, float, str]]) -> None:
+    """Persist a batch of (task_id, event_json, timestamp, origin_db_path) rows.
+
+    Rows whose ``origin_db_path`` no longer matches the active
+    ``_DB_PATH`` are dropped: their numeric ``task_id`` belongs to the
+    database that was active when they were enqueued, so writing them
+    into the current database would attach them to an unrelated task
+    that merely shares the same row id.
+    """
+    if not batch:
+        return
+    current_path = _current_db_path()
+    batch = [row for row in batch if row[3] == current_path]
     if not batch:
         return
     db = _get_db()
-    task_ids = {tid for (tid, _ej, _ts) in batch}
+    task_ids = {tid for (tid, _ej, _ts, _op) in batch}
     with _rw_lock.write_lock():
         # Initialise next-seq cache for any new task_ids.  All inserts for
         # a given task_id are serialised through this single writer thread,
@@ -1194,7 +1222,7 @@ def _write_event_batch(batch: list[tuple[int, str, float]]) -> None:
                 ).fetchone()
                 _next_seq_cache[tid] = row["next_seq"] if row else 0
         rows: list[tuple[int, int, str, float]] = []
-        for tid, ev_json, ts in batch:
+        for tid, ev_json, ts, _op in batch:
             seq = _next_seq_cache.get(tid)
             if seq is None:
                 # Task row deleted — drop the dangling event, keep the rest.
@@ -1224,6 +1252,7 @@ def _write_event_batch(batch: list[tuple[int, str, float]]) -> None:
 def _queue_chat_event(
     event: dict[str, object],
     task_id: int,
+    origin_db_path: str | None = None,
 ) -> None:
     """Asynchronously persist an event for a known task_id.
 
@@ -1238,8 +1267,19 @@ def _queue_chat_event(
     Args:
         event: The event dict to persist.
         task_id: Stable ``task_history`` row id.  Must be non-None.
+        origin_db_path: Database path *task_id* was resolved against.
+            Defaults to the active ``_DB_PATH``.  The background
+            writer drops the event if the active database has changed
+            since, because the numeric id would then point at an
+            unrelated task in the new database (see
+            :func:`_current_db_path`).
     """
-    _event_queue.put((task_id, json.dumps(event), time.time()))
+    _event_queue.put((
+        task_id,
+        json.dumps(event),
+        time.time(),
+        origin_db_path or _current_db_path(),
+    ))
     if _event_writer_thread is None or not _event_writer_thread.is_alive():
         _start_event_writer()
 
@@ -1290,6 +1330,7 @@ def _append_chat_event(
     event: dict[str, object],
     task_id: int | None = None,
     task: str | None = None,
+    origin_db_path: str | None = None,
 ) -> None:
     """Append a single event to the saved chat events for a task.
 
@@ -1301,7 +1342,15 @@ def _append_chat_event(
         event: The event dict to append.
         task_id: Stable row id to update when available.
         task: Fallback task description string for legacy callers.
+        origin_db_path: Database path *task_id* was resolved against
+            (see :func:`_queue_chat_event`).  Late asynchronous
+            callers (e.g. the follow-up suggestion thread) pass the
+            path captured when the task completed so the event is
+            dropped — instead of attached to an unrelated task with
+            the same row id — if the active database has changed.
     """
+    if origin_db_path is not None and origin_db_path != _current_db_path():
+        return
     # Resolve (and validate) the row id up front — the queued write
     # path requires a concrete, existing ``task_history`` id.
     with _rw_lock.read_lock():
@@ -1313,7 +1362,7 @@ def _append_chat_event(
     # writers can never diverge.  The FIFO queue guarantees this event
     # lands AFTER any earlier ``_queue_chat_event`` calls for the same
     # task; the flush makes the write synchronous.
-    _queue_chat_event(event, resolved)
+    _queue_chat_event(event, resolved, origin_db_path)
     _flush_chat_events()
 
 
