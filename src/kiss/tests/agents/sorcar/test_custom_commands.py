@@ -31,10 +31,23 @@ from kiss.agents.sorcar.custom_commands import (
 
 @pytest.fixture
 def kiss_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Point KISS_HOME at an isolated directory and return it."""
+    """Point KISS_HOME (and CLAUDE_CONFIG_DIR) at isolated directories.
+
+    CLAUDE_CONFIG_DIR is redirected so discovery never picks up the
+    developer's real ``~/.claude/commands`` files during tests.
+    """
     home = tmp_path / ".kisshome"
     home.mkdir()
     monkeypatch.setenv("KISS_HOME", str(home))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claudehome"))
+    return home
+
+
+@pytest.fixture
+def claude_home(tmp_path: Path, kiss_home: Path) -> Path:
+    """Return the isolated Claude Code config directory set by kiss_home."""
+    home = tmp_path / ".claudehome"
+    home.mkdir(exist_ok=True)
     return home
 
 
@@ -101,6 +114,62 @@ def test_empty_and_unparseable_files_are_skipped(kiss_home: Path, tmp_path: Path
 def test_no_command_dirs_yields_empty(kiss_home: Path, tmp_path: Path) -> None:
     """Discovery returns an empty mapping when no commands exist."""
     assert discover_commands(str(tmp_path)) == {}
+
+
+def test_discovers_claude_user_and_project_commands(
+    claude_home: Path, tmp_path: Path,
+) -> None:
+    """Claude Code .claude/commands files become commands too."""
+    _write(claude_home / "commands" / "review.md", "Review the diff.")
+    project = tmp_path / "proj"
+    _write(project / ".claude" / "commands" / "ship.md", "Ship it.")
+    commands = discover_commands(str(project))
+    assert commands["review"].source == "claude-user"
+    assert commands["review"].template == "Review the diff."
+    assert commands["ship"].source == "claude-project"
+    assert commands["ship"].template == "Ship it."
+
+
+def test_kiss_command_overrides_claude_command_same_level(
+    claude_home: Path, kiss_home: Path, tmp_path: Path,
+) -> None:
+    """At the same level a native .kiss command wins over a .claude one."""
+    _write(claude_home / "commands" / "lint.md", "claude user version")
+    _write(kiss_home / "commands" / "lint.md", "kiss user version")
+    project = tmp_path / "proj"
+    _write(project / ".claude" / "commands" / "fmt.md", "claude project version")
+    _write(project / ".kiss" / "commands" / "fmt.md", "kiss project version")
+    commands = discover_commands(str(project))
+    assert commands["lint"].source == "user"
+    assert commands["lint"].template == "kiss user version"
+    assert commands["fmt"].source == "project"
+    assert commands["fmt"].template == "kiss project version"
+
+
+def test_claude_project_overrides_kiss_user(
+    claude_home: Path, kiss_home: Path, tmp_path: Path,
+) -> None:
+    """Any project command wins over any user command with the same name."""
+    _write(kiss_home / "commands" / "deploy.md", "kiss user version")
+    project = tmp_path / "proj"
+    _write(project / ".claude" / "commands" / "deploy.md", "claude project version")
+    commands = discover_commands(str(project))
+    assert commands["deploy"].source == "claude-project"
+    assert commands["deploy"].template == "claude project version"
+
+
+def test_claude_commands_namespace_and_frontmatter(
+    claude_home: Path, tmp_path: Path,
+) -> None:
+    """Claude commands get :-namespacing and frontmatter like kiss ones."""
+    _write(
+        claude_home / "commands" / "git" / "pr.md",
+        "---\ndescription: Open a PR\nargument-hint: '[title]'\n---\nOpen a PR: $1.",
+    )
+    cmd = discover_commands(str(tmp_path))["git:pr"]
+    assert cmd.source == "claude-user"
+    assert cmd.description == "Open a PR"
+    assert cmd.argument_hint == "[title]"
 
 
 # ---------------------------------------------------------------------------
@@ -277,6 +346,23 @@ def test_repl_commands_lists_custom_commands(kiss_home: Path, tmp_path: Path) ->
     assert "Greet the user" in proc.stdout
     assert "/build" in proc.stdout
     assert "(project)" in proc.stdout
+
+
+def test_repl_commands_lists_claude_commands(
+    claude_home: Path, kiss_home: Path, tmp_path: Path,
+) -> None:
+    """``/commands`` includes commands from .claude/commands directories."""
+    _write(
+        claude_home / "commands" / "review.md",
+        "---\ndescription: Review the diff\n---\nReview it.",
+    )
+    _write(tmp_path / ".claude" / "commands" / "ship.md", "Ship it.")
+    proc = _run_repl_subprocess(tmp_path, kiss_home, "/commands\n/exit\n")
+    assert proc.returncode == 0, proc.stderr
+    assert "/review" in proc.stdout
+    assert "(claude-user) Review the diff" in proc.stdout
+    assert "/ship" in proc.stdout
+    assert "(claude-project)" in proc.stdout
 
 
 def test_repl_commands_empty_hint(kiss_home: Path, tmp_path: Path) -> None:

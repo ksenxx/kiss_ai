@@ -12,6 +12,12 @@ by Claude Code, OpenCode, and Gemini CLI:
 * **Project commands** live in ``<work_dir>/.kiss/commands/*.md`` and can
   be checked into version control; they override user commands with the
   same name.
+* **Claude Code commands** are picked up too, so existing
+  ``~/.claude/commands/*.md`` (respecting ``CLAUDE_CONFIG_DIR``) and
+  ``<work_dir>/.claude/commands/*.md`` files work unchanged.  On a name
+  conflict the native ``.kiss`` command wins at the same level, and any
+  project command wins over any user command — precedence (low → high):
+  claude-user → user → claude-project → project.
 * The file name (without ``.md``) becomes the command name:
   ``test.md`` → ``/test``.  Subdirectories namespace the name with ``:``
   — ``git/commit.md`` → ``/git:commit``.
@@ -38,6 +44,7 @@ The template supports the placeholder syntax common to those tools:
 from __future__ import annotations
 
 import logging
+import os
 import re
 import shlex
 import subprocess
@@ -95,6 +102,22 @@ def user_commands_dir() -> Path:
 def project_commands_dir(work_dir: str) -> Path:
     """Return the project-level commands directory for *work_dir*."""
     return Path(work_dir) / ".kiss" / "commands"
+
+
+def claude_user_commands_dir() -> Path:
+    """Return Claude Code's user commands directory (``~/.claude/commands``).
+
+    Honours the ``CLAUDE_CONFIG_DIR`` environment variable, the same
+    override Claude Code itself uses for its ``~/.claude`` directory.
+    """
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    base = Path(config_dir) if config_dir else Path.home() / ".claude"
+    return base / "commands"
+
+
+def claude_project_commands_dir(work_dir: str) -> Path:
+    """Return Claude Code's project commands directory for *work_dir*."""
+    return Path(work_dir) / ".claude" / "commands"
 
 
 def _parse_command_file(path: Path, root: Path, source: str) -> CustomCommand | None:
@@ -155,9 +178,13 @@ def _load_commands_dir(root: Path, source: str) -> dict[str, CustomCommand]:
 def discover_commands(work_dir: str) -> dict[str, CustomCommand]:
     """Discover all custom commands visible from *work_dir*.
 
-    User commands (``~/.kiss/commands``) load first; project commands
-    (``<work_dir>/.kiss/commands``) load second and override user
-    commands with the same name, mirroring Gemini CLI's precedence.
+    Claude Code command files (``~/.claude/commands`` and
+    ``<work_dir>/.claude/commands``) are included alongside the native
+    ``.kiss`` directories.  Later directories override earlier ones on a
+    name conflict; the load order (low → high precedence) is:
+    claude-user, user, claude-project, project — so project commands win
+    over user commands, and a native ``.kiss`` command wins over a
+    Claude Code command at the same level.
 
     Args:
         work_dir: The project directory whose commands to include.
@@ -165,7 +192,11 @@ def discover_commands(work_dir: str) -> dict[str, CustomCommand]:
     Returns:
         Mapping of command name → :class:`CustomCommand`.
     """
-    commands = _load_commands_dir(user_commands_dir(), "user")
+    commands = _load_commands_dir(claude_user_commands_dir(), "claude-user")
+    commands.update(_load_commands_dir(user_commands_dir(), "user"))
+    commands.update(
+        _load_commands_dir(claude_project_commands_dir(work_dir), "claude-project")
+    )
     commands.update(_load_commands_dir(project_commands_dir(work_dir), "project"))
     return commands
 
@@ -265,7 +296,9 @@ def format_command_listing(commands: dict[str, CustomCommand]) -> str:
         return (
             "No custom commands found.\n"
             f"Create Markdown files in {user_commands_dir()} (user) or "
-            "<project>/.kiss/commands (project) to define them."
+            "<project>/.kiss/commands (project) to define them.\n"
+            "Claude Code commands in ~/.claude/commands and "
+            "<project>/.claude/commands are picked up too."
         )
     entries = sorted(commands.values(), key=lambda c: c.name)
     width = max(len(f"/{c.name} {c.argument_hint}".rstrip()) for c in entries)
