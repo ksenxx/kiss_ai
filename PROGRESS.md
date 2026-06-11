@@ -512,3 +512,20 @@ Candidates investigated and closed as NOT bugs:
   `cleanup_tab`: intentional (documented) — the tab now renders a different chat.
 
 Also: formatted PROGRESS.md (mdformat was failing `uv run check --full`).
+
+## Iteration 4 — COMPLETE (verified by orchestrator)
+
+19 NEW bugs found+fixed across 7 groups (A:2 nested-subagent delete cascade +
+recent-chats limit slots; B:2 stash-failure merge data loss + baseline-commit-failure
+fallback; C:5 bracketed paste, tiny-resize clamps, SIGCONT, Ctrl+C-under-lock leak,
+readline prompt markers; D:3 parallel stop_event propagation, non-dict-YAML summary,
+PWD// escape; E:2 empty-tabId run phantom, replay clobbering use_worktree; F:3
+merge-view newline translation, symlink write-through on reject, merge replay on
+reconnect; G:2 warning not in \_DISPLAY_EVENT_TYPES, cross-process config lost update).
+All 50 Python bughunt4 tests pass; `uv run check --full` green; committed through
+cedf3fcf + PROGRESS.md format commit.
+
+## Iteration 5 (current)
+
+- Iteration 4 still found bugs → launching iteration 5, same 7 groups, tests
+  `test_bughunt5_*` / `bughunt5_*.test.js`. Stop when an iteration finds zero bugs.
