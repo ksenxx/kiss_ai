@@ -201,7 +201,15 @@ def _parse_diff_hunks(
     Returns:
         Dict mapping filename to list of (old_start, old_count, new_start, new_count).
     """
-    result = _git(work_dir, "diff", "-U0", base_ref, "--no-color")
+    # ``--no-renames`` decomposes a rename into a full deletion of the
+    # old path plus a full addition of the new path.  With rename
+    # detection on (git's default), the hunks of the OLD file would be
+    # keyed under the NEW name, whose blob does not exist at
+    # ``base_ref`` — ``_write_base_copy``'s ``git show`` would then
+    # produce an empty base while the hunks still reference old-file
+    # line numbers, and the old path's deletion would be invisible in
+    # the merge review entirely.
+    result = _git(work_dir, "diff", "-U0", "--no-renames", base_ref, "--no-color")
     hunks: dict[str, list[tuple[int, int, int, int]]] = {}
     current_file = ""
     for line in result.stdout.split("\n"):

@@ -1183,6 +1183,8 @@ def _read_url_from_file(url_file: Path) -> str | None:
         data = json.loads(url_file.read_text())
     except Exception:
         return None
+    if not isinstance(data, dict):
+        return None
     url = data.get("tunnel") or data.get("local", "")
     return url or None
 
@@ -3057,6 +3059,21 @@ class RemoteAccessServer:
             await self._handle_active_tasks_query(endpoint)
             return
         if cmd_type == "ready":
+            # The deferred-close contract (see ``_ws_handler``'s
+            # ``finally``) is "schedule a closeTab for every tab id
+            # this connection touched".  ``_handle_ready`` re-claims
+            # (cancels the pending close of, and resumes) every
+            # ``restoredTabs`` entry, so those tab ids are touched by
+            # this connection too — record them in ``tabs_seen`` or a
+            # later disconnect would never re-arm their deferred
+            # close, leaking the restored backend state forever.
+            restored = cmd.get("restoredTabs")
+            if isinstance(restored, list):
+                for rt in restored[:_MAX_RESTORED_TABS]:
+                    if isinstance(rt, dict):
+                        rt_id = rt.get("tabId", "")
+                        if isinstance(rt_id, str) and rt_id:
+                            tabs_seen.add(rt_id)
             await self._handle_ready(cmd, endpoint)
             return
         if cmd_type == "submit":

@@ -134,8 +134,17 @@
     header.appendChild(rs);
     rc.appendChild(header);
 
-    // Failure banner
-    if (ev.success === false) {
+    // Status banner — mirrors handleOutputEvent's 'result' case in
+    // main.js: ``is_continue`` (agent paused to continue in a new
+    // session) takes precedence over the failure banner, because the
+    // backend emits continue-results with ``success: false``.
+    if (ev.is_continue) {
+      const contDiv = document.createElement('div');
+      contDiv.style.cssText =
+        'color:var(--yellow);font-weight:700;font-size:var(--fs-xl);margin-bottom:10px';
+      contDiv.textContent = 'Status: Continue';
+      rc.appendChild(contDiv);
+    } else if (ev.success === false) {
       const failDiv = document.createElement('div');
       failDiv.style.cssText =
         'color:var(--red);font-weight:700;font-size:var(--fs-xl);margin-bottom:10px';

@@ -599,8 +599,12 @@ class _MergeFlowMixin:
                 return False
             orig_fork = wt_fork = mb.stdout.strip()
 
+        # ``--no-renames`` so a rename contributes BOTH paths to the
+        # overlap sets: merging the worktree branch deletes the old
+        # path from the main tree, so a dirty main-tree edit of the
+        # old path must still be detected as a conflict.
         orig_diff = _git(
-            str(wt.repo_root), "diff", "--name-only",
+            str(wt.repo_root), "diff", "--name-only", "--no-renames",
             orig_fork, wt.original_branch,
         )
         orig_files = (
@@ -608,7 +612,7 @@ class _MergeFlowMixin:
             if orig_diff.returncode == 0 else set()
         )
 
-        wt_diff = _git(str(wt_dir), "diff", "--name-only", wt_fork)
+        wt_diff = _git(str(wt_dir), "diff", "--name-only", "--no-renames", wt_fork)
         wt_files = (
             set(wt_diff.stdout.strip().splitlines())
             if wt_diff.returncode == 0 else set()
@@ -688,7 +692,12 @@ class _MergeFlowMixin:
             base_ref = self._resolve_base_ref(
                 str(wt_dir), wt._baseline_commit, original_branch,
             )
-            tracked = _git(str(wt_dir), "diff", "--name-only", base_ref)
+            # ``--no-renames`` so a rename lists BOTH the old path
+            # (which the merge will delete from the main tree) and the
+            # new path, instead of collapsing into the new path only.
+            tracked = _git(
+                str(wt_dir), "diff", "--name-only", "--no-renames", base_ref,
+            )
             if tracked.returncode == 0:
                 files = tracked.stdout.strip().splitlines()
             else:
@@ -707,7 +716,7 @@ class _MergeFlowMixin:
             repo_root, wt._baseline_commit, original_branch,
             tip=wt._wt_branch,
         )
-        result = _git(repo_root, "diff", "--name-only",
+        result = _git(repo_root, "diff", "--name-only", "--no-renames",
                       base_ref,
                       wt._wt_branch)
         return result.stdout.strip().splitlines() if result.returncode == 0 else []

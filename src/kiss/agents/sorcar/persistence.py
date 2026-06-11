@@ -477,11 +477,55 @@ def _chat_has_tasks(chat_id: str) -> bool:
         return row is not None
 
 
+def _subagent_child_ids(
+    db: sqlite3.Connection, parent_task_id: int,
+) -> list[int]:
+    """Return ids of persisted sub-agent rows whose parent is *parent_task_id*.
+
+    A sub-agent row carries ``{"subagent": {"parent_task_id": <id>}}``
+    in its ``extra`` JSON (written by
+    ``ChatSorcarAgent._run_tasks_parallel``).  The SQL ``LIKE``
+    pre-filter is re-validated by ``json.loads`` — the same
+    false-positive defense as
+    :func:`_load_subagent_rows_by_parent_task_id`.  Callers must hold
+    ``_rw_lock`` (read or write).
+
+    Args:
+        db: Active database connection.
+        parent_task_id: Primary key of the parent ``task_history`` row.
+
+    Returns:
+        List of child row ids (possibly empty).
+    """
+    like = f'%"parent_task_id": {parent_task_id}%'
+    rows = db.execute(
+        "SELECT id, extra FROM task_history WHERE extra LIKE ?", (like,),
+    ).fetchall()
+    out: list[int] = []
+    for r in rows:
+        try:
+            parsed = json.loads(r["extra"] or "")
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        sub = parsed.get("subagent")
+        if isinstance(sub, dict) and sub.get("parent_task_id") == parent_task_id:
+            out.append(int(r["id"]))
+    return out
+
+
 def _delete_task(task_id: int) -> bool:
-    """Delete a task and its associated events from the database.
+    """Delete a task, its events, and its persisted sub-agent rows.
 
     Removes the events table rows that reference the given task_id,
-    then removes the task_history row itself.
+    then removes the task_history row itself.  Sub-agent rows spawned
+    by this task's ``run_parallel`` call
+    (``extra.subagent.parent_task_id == task_id``) are cascade-deleted
+    together with their events: they are reachable only through the
+    parent (via :func:`_load_subagent_rows_by_parent_task_id`), so
+    leaving them behind would leak unreachable rows and make
+    :func:`_chat_has_tasks` report a visually-empty chat as non-empty.
 
     Args:
         task_id: The primary key of the task_history row to delete.
@@ -499,12 +543,19 @@ def _delete_task(task_id: int) -> bool:
             "SELECT chat_id FROM task_history WHERE id = ?", (task_id,),
         ).fetchone()
         chat_id = (row["chat_id"] or "") if row is not None else ""
-        db.execute("DELETE FROM events WHERE task_id = ?", (task_id,))
+        doomed_ids = [task_id]
+        if row is not None:
+            doomed_ids.extend(_subagent_child_ids(db, task_id))
+        for did in doomed_ids:
+            db.execute("DELETE FROM events WHERE task_id = ?", (did,))
         cursor = db.execute(
             "DELETE FROM task_history WHERE id = ?", (task_id,)
         )
-        _next_seq_cache.pop(task_id, None)
-        _marked_has_events.discard(task_id)
+        for did in doomed_ids[1:]:
+            db.execute("DELETE FROM task_history WHERE id = ?", (did,))
+        for did in doomed_ids:
+            _next_seq_cache.pop(did, None)
+            _marked_has_events.discard(did)
         db.commit()
         deleted = (cursor.rowcount or 0) > 0
     # Invalidate the autocomplete chat-context cache so the deleted
@@ -1307,6 +1358,13 @@ def _list_recent_chats(limit: int = 10) -> list[dict[str, object]]:
     of ``tasks`` (each with ``task``, ``result``, ``timestamp``) in
     chronological order.
 
+    Sub-agent rows (``extra.subagent``, see :func:`_is_subagent_row`)
+    are excluded — they are an internal implementation detail of the
+    parent's ``run_parallel`` tool call, exactly as in every other
+    chat/history reader (:func:`_load_history`,
+    :func:`_load_chat_context`, ...).  A chat whose only rows are
+    sub-agent rows is omitted entirely.
+
     Args:
         limit: Maximum number of chat sessions to return.
 
@@ -1326,18 +1384,19 @@ def _list_recent_chats(limit: int = 10) -> list[dict[str, object]]:
         for cr in chat_rows:
             cid = cr["chat_id"]
             tasks = db.execute(
-                "SELECT task, result, timestamp FROM task_history "
+                "SELECT task, result, timestamp, extra FROM task_history "
                 "WHERE chat_id = ? ORDER BY timestamp ASC",
                 (cid,),
             ).fetchall()
-            result.append({
-                "chat_id": cid,
-                "tasks": [
-                    {"task": t["task"], "result": t["result"],
-                     "timestamp": t["timestamp"]}
-                    for t in tasks
-                ],
-            })
+            task_dicts = [
+                {"task": t["task"], "result": t["result"],
+                 "timestamp": t["timestamp"]}
+                for t in tasks
+                if not _is_subagent_row(t["extra"])
+            ]
+            if not task_dicts:
+                continue
+            result.append({"chat_id": cid, "tasks": task_dicts})
         return result
 
 
@@ -1589,21 +1648,29 @@ def _get_adjacent_task_by_chat_id(
         # out at the SQL level so the LIMIT 1 lands on the next *parent*
         # row rather than a sub-agent that happens to sit between two
         # parent tasks chronologically.
+        # Adjacency uses the total order ``(timestamp, id)`` — the same
+        # id tiebreak as ``_load_latest_chat_events_by_chat_id``'s
+        # ``ORDER BY timestamp DESC, id DESC`` — so rows that share a
+        # timestamp value (concurrent inserts, imported databases)
+        # remain mutually reachable instead of strict ``<`` / ``>``
+        # timestamp comparison silently skipping them.
         if direction == "prev":
             adj = db.execute(
                 "SELECT id, task FROM task_history "
-                "WHERE chat_id = ? AND timestamp < ? "
+                "WHERE chat_id = ? "
+                "AND (timestamp < ? OR (timestamp = ? AND id < ?)) "
                 f"AND {_HISTORY_NOT_SUBAGENT} "
-                "ORDER BY timestamp DESC LIMIT 1",
-                (chat_id, ts),
+                "ORDER BY timestamp DESC, id DESC LIMIT 1",
+                (chat_id, ts, ts, row["id"]),
             ).fetchone()
         else:
             adj = db.execute(
                 "SELECT id, task FROM task_history "
-                "WHERE chat_id = ? AND timestamp > ? "
+                "WHERE chat_id = ? "
+                "AND (timestamp > ? OR (timestamp = ? AND id > ?)) "
                 f"AND {_HISTORY_NOT_SUBAGENT} "
-                "ORDER BY timestamp ASC LIMIT 1",
-                (chat_id, ts),
+                "ORDER BY timestamp ASC, id ASC LIMIT 1",
+                (chat_id, ts, ts, row["id"]),
             ).fetchone()
 
         if not adj:

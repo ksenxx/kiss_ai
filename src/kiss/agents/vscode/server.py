@@ -880,6 +880,16 @@ class VSCodeServer(
             # chat until ``_cmd_run`` mints one or ``_replay_session``
             # associates a resumed one.
             self._tab_chat_views.pop(tab_id, None)
+        # Drop any live-task subscriptions this tab carried from the
+        # chat it previously displayed (e.g. a still-running task it
+        # was viewing via ``_reattach_running_chat``).  The webview now
+        # shows the welcome screen, so the old task's streaming events
+        # must no longer fan out to this tab.  Resolved via ``getattr``
+        # because some duck-typed test printers implement only the
+        # broadcast/subscribe subset of the printer protocol.
+        cleanup_tab = getattr(self.printer, "cleanup_tab", None)
+        if cleanup_tab is not None:
+            cleanup_tab(tab_id)
         self.printer.broadcast({
             "type": "showWelcome",
             "tabId": tab_id,
@@ -967,6 +977,18 @@ class VSCodeServer(
         rebound_task_id = result.get("task_id") if result else None
         if not isinstance(rebound_task_id, int):
             rebound_task_id = None
+        # The tab is navigating to (possibly) another chat: drop every
+        # live-task subscription it carried from whatever it displayed
+        # before, so the previous chat's still-running task does not
+        # keep streaming its events into a webview that now renders a
+        # different conversation.  When the loaded chat itself is
+        # backed by a running task, ``_reattach_running_chat`` below
+        # re-subscribes this tab to the correct stream.  Resolved via
+        # ``getattr`` because some duck-typed test printers implement
+        # only the broadcast/subscribe subset of the printer protocol.
+        cleanup_tab = getattr(self.printer, "cleanup_tab", None)
+        if cleanup_tab is not None:
+            cleanup_tab(tab_id)
         rebound_running = self._reattach_running_chat(
             chat_id,
             tab_id,
@@ -1406,7 +1428,6 @@ class VSCodeServer(
                         break
             if source is None:
                 return False
-            source_tab_id = source.tab_id
             source_task_id = _live_task_id(source)
         # Subscribe the new viewer to the running task so live events
         # fan out to the freshly opened tab.  The caller still emits a
@@ -1414,7 +1435,12 @@ class VSCodeServer(
         # replay so the webview's ``isRunning`` flag is set before
         # ``replayTaskEvents`` runs; otherwise ``applyChevronState``
         # would mark every replayed panel ``.chv-hidden``.
-        if source_task_id is not None and source_tab_id != new_tab_id:
+        # ``source_tab_id == new_tab_id`` (the launcher tab replaying
+        # its OWN running chat, e.g. a webview restore) is subscribed
+        # too: ``_replay_session`` just dropped the tab's previous
+        # subscriptions via ``cleanup_tab``, so the owner must be
+        # re-registered.  ``subscribe_tab`` is idempotent.
+        if source_task_id is not None:
             self.printer.subscribe_tab(source_task_id, new_tab_id)
         return True
 
