@@ -240,6 +240,16 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         if wt.original_branch is None:
             return (MergeResult.CHECKOUT_FAILED, "")
         with repo_lock(wt.repo_root):
+            # Re-ensure the PROGRESS.md merge driver right before the
+            # merge so pending worktrees created by older agent
+            # versions (or repos whose local config was wiped) still
+            # auto-resolve scratch-file conflicts.
+            try:
+                GitWorktreeOps.ensure_scratch_merge_driver(wt.repo_root)
+            except Exception:  # pragma: no cover — filesystem permission error
+                logger.warning(
+                    "Failed to install scratch merge driver", exc_info=True
+                )
             # Stash BEFORE the checkout: dirty user edits on a
             # different branch would otherwise make the checkout fail
             # ("local changes would be overwritten") even though
@@ -504,6 +514,7 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
 
             try:
                 GitWorktreeOps.ensure_excluded(repo)
+                GitWorktreeOps.ensure_scratch_merge_driver(repo)
             except Exception:  # pragma: no cover — filesystem permission error
                 logger.warning("Failed to update git exclude", exc_info=True)
 
