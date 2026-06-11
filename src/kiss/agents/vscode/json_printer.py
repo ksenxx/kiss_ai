@@ -40,6 +40,11 @@ _DISPLAY_EVENT_TYPES = frozenset({
     "task_done", "task_error", "task_stopped", "task_interrupted",
     "followup_suggestion",
     "autocommit_done",
+    # Backend warnings the user must see (e.g. the worktree agent's
+    # stash-pop failure / merge-conflict warnings).  They are rendered
+    # live by the frontend, so they must also be recorded/persisted or
+    # they silently vanish when the task is reopened or replayed.
+    "warning",
 })
 
 

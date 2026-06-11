@@ -37,7 +37,10 @@ def _expand_pwd_prefix(file_path: str, work_dir: str | None) -> str:
         return work_dir or os.getcwd()
     if file_path.startswith("PWD/"):
         base = work_dir or os.getcwd()
-        suffix = file_path[len("PWD/") :]
+        # Strip extra leading slashes (e.g. "PWD//etc/passwd"):
+        # os.path.join discards *base* when the second component is
+        # absolute, which would silently escape the working directory.
+        suffix = file_path[len("PWD/") :].lstrip("/")
         return os.path.join(base, suffix) if suffix else base
     return file_path
 
