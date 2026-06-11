@@ -446,6 +446,15 @@ class UsefulTools:
                 return f"Error: File not found: {file_path}"
             if old_string == new_string:
                 return "Error: new_string must be different from old_string"
+            if old_string == "":
+                # str.count("") == len(content) + 1, so an empty
+                # old_string would interleave new_string between every
+                # character (replace_all) or silently overwrite an empty
+                # file.  Reject it explicitly instead.
+                return (
+                    "Error: old_string must not be empty. "
+                    "Use the Write tool to create or overwrite a file."
+                )
             content = resolved.read_text()
             count = content.count(old_string)
             if count == 0:

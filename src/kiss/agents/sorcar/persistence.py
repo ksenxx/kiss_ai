@@ -222,7 +222,21 @@ _HISTORY_SELECT = (
     "FROM task_history "
 )
 
-_HISTORY_NOT_SUBAGENT = 'COALESCE(extra, \'\') NOT LIKE \'%"subagent"%\''
+# SQL predicate that is TRUE for every row that is NOT a sub-agent row.
+# Must match :func:`_is_subagent_row` exactly: a sub-agent row is a row
+# whose ``extra`` column is valid JSON whose TOP-LEVEL object carries a
+# ``subagent`` key.  A raw substring test (``NOT LIKE '%"subagent"%'``)
+# would wrongly hide regular rows whose extra merely *contains* the
+# quoted word — e.g. a nested ``{"opts": {"subagent": false}}`` or a
+# legacy malformed value.  ``CASE`` guarantees ``json_type`` is only
+# evaluated on valid JSON (it raises on malformed input); for non-object
+# top-level JSON, ``json_type(extra, '$.subagent')`` is NULL, matching
+# ``_is_subagent_row``'s ``isinstance(parsed, dict)`` guard.
+_HISTORY_NOT_SUBAGENT = (
+    "(CASE WHEN json_valid(COALESCE(extra, '')) "
+    "THEN json_type(COALESCE(extra, ''), '$.subagent') IS NULL "
+    "ELSE 1 END)"
+)
 
 
 def _is_failed_result(result: str) -> bool:
@@ -373,16 +387,23 @@ def _get_db() -> sqlite3.Connection:
 
 
 def _most_recent_task_id(db: sqlite3.Connection, task: str | None) -> int | None:
-    """Return the row id of the most recent run of *task*, or the latest row."""
+    """Return the row id of the most recent run of *task*, or the latest row.
+
+    Uses the total order ``(timestamp, id)`` — the ``id`` tiebreak keeps
+    rows with equal timestamps (coarse clock ticks, imported databases)
+    resolving to the genuinely latest insert, consistent with
+    :func:`_load_latest_chat_events_by_chat_id`.
+    """
     if task is not None:
         row = db.execute(
             "SELECT id FROM task_history WHERE task = ? "
-            "ORDER BY timestamp DESC LIMIT 1",
+            "ORDER BY timestamp DESC, id DESC LIMIT 1",
             (task,),
         ).fetchone()
     else:
         row = db.execute(
-            "SELECT id FROM task_history ORDER BY timestamp DESC LIMIT 1"
+            "SELECT id FROM task_history "
+            "ORDER BY timestamp DESC, id DESC LIMIT 1"
         ).fetchone()
     return row["id"] if row else None
 
@@ -601,7 +622,7 @@ def _load_history(limit: int = 0, offset: int = 0) -> list[_HistoryEntry]:
         sql = (
             _HISTORY_SELECT
             + f"WHERE {_HISTORY_NOT_SUBAGENT} "
-            + "ORDER BY timestamp DESC LIMIT ? OFFSET ?"
+            + "ORDER BY timestamp DESC, id DESC LIMIT ? OFFSET ?"
         )
         rows = db.execute(sql, (effective_limit, offset)).fetchall()
         return [dict(r) for r in rows]
@@ -628,7 +649,7 @@ def _prefix_match_task(query: str) -> str:
             "SELECT task FROM task_history "
             "WHERE task GLOB ? AND LENGTH(task) > ? "
             f"AND {_HISTORY_NOT_SUBAGENT} "
-            "ORDER BY timestamp DESC LIMIT 1",
+            "ORDER BY timestamp DESC, id DESC LIMIT 1",
             (escaped + "*", len(query)),
         ).fetchone()
         return row["task"] if row else ""
@@ -656,7 +677,7 @@ def _search_history(
             _HISTORY_SELECT
             + "WHERE task LIKE ? ESCAPE '\\' "
             + f"AND {_HISTORY_NOT_SUBAGENT} "
-            + "ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+            + "ORDER BY timestamp DESC, id DESC LIMIT ? OFFSET ?",
             (f"%{escaped}%", limit, offset),
         ).fetchall()
         return [dict(r) for r in rows]
@@ -673,7 +694,7 @@ def _get_history_entry(idx: int) -> _HistoryEntry | None:
         row = db.execute(
             _HISTORY_SELECT
             + f"WHERE {_HISTORY_NOT_SUBAGENT} "
-            + "ORDER BY timestamp DESC LIMIT 1 OFFSET ?",
+            + "ORDER BY timestamp DESC, id DESC LIMIT 1 OFFSET ?",
             (idx,),
         ).fetchone()
         return dict(row) if row else None
@@ -1379,7 +1400,7 @@ def _load_task_chat_id(task: str) -> str:
         db = _get_db()
         row = db.execute(
             "SELECT chat_id FROM task_history WHERE task = ? "
-            "ORDER BY timestamp DESC LIMIT 1",
+            "ORDER BY timestamp DESC, id DESC LIMIT 1",
             (task,),
         ).fetchone()
         return str(row["chat_id"]) if row and row["chat_id"] else ""
@@ -1394,7 +1415,8 @@ def _load_last_chat_id() -> str:
     with _rw_lock.read_lock():
         db = _get_db()
         row = db.execute(
-            "SELECT chat_id FROM task_history ORDER BY timestamp DESC LIMIT 1"
+            "SELECT chat_id FROM task_history "
+            "ORDER BY timestamp DESC, id DESC LIMIT 1"
         ).fetchone()
         return str(row["chat_id"]) if row and row["chat_id"] else ""
 
@@ -1434,7 +1456,7 @@ def _list_recent_chats(limit: int = 10) -> list[dict[str, object]]:
             cid = cr["chat_id"]
             tasks = db.execute(
                 "SELECT task, result, timestamp, extra FROM task_history "
-                "WHERE chat_id = ? ORDER BY timestamp ASC",
+                "WHERE chat_id = ? ORDER BY timestamp ASC, id ASC",
                 (cid,),
             ).fetchall()
             task_dicts = [
@@ -1761,7 +1783,7 @@ def _load_chat_context(chat_id: str) -> list[_HistoryEntry]:
         db = _get_db()
         rows = db.execute(
             "SELECT task, result, extra FROM task_history "
-            "WHERE chat_id = ? ORDER BY timestamp ASC",
+            "WHERE chat_id = ? ORDER BY timestamp ASC, id ASC",
             (chat_id,),
         ).fetchall()
         entries: list[_HistoryEntry] = []
