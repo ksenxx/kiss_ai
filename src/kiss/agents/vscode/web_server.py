@@ -527,8 +527,25 @@ class _WebMergeState:
         ]
 
 
+def _apply_exec_bit(path: str) -> None:
+    """Re-apply the executable bit to a restored file.
+
+    Mirrors git's checkout behavior for mode-``100755`` entries:
+    execute permission is granted wherever read permission is present.
+
+    Args:
+        path: File whose mode should gain exec bits.
+    """
+    mode = os.stat(path).st_mode
+    os.chmod(path, mode | ((mode & 0o444) >> 2))
+
+
 def _restore_base_bytes(
-    base_path: str, write_to: str, link_target: str | None = None,
+    base_path: str,
+    write_to: str,
+    link_target: str | None = None,
+    *,
+    make_executable: bool = False,
 ) -> None:
     """Restore *write_to* to the exact bytes of *base_path*.
 
@@ -548,6 +565,9 @@ def _restore_base_bytes(
         write_to: Real workspace path to restore.
         link_target: Target string of the base symlink, or ``None``
             for regular content.
+        make_executable: True when the base mode is ``100755`` — the
+            restored file gets its exec bit back so rejecting a
+            deleted script leaves a clean tree and a runnable file.
     """
     dest = Path(write_to)
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -566,6 +586,8 @@ def _restore_base_bytes(
     if dest.is_symlink():
         dest.unlink()
     dest.write_bytes(data)
+    if make_executable:
+        _apply_exec_bit(write_to)
 
 
 def _reject_hunk_in_file(
@@ -576,6 +598,7 @@ def _reject_hunk_in_file(
     *,
     binary: bool = False,
     link_target: str | None = None,
+    make_executable: bool = False,
 ) -> None:
     """Revert a single hunk in the current file to the base version.
 
@@ -612,10 +635,15 @@ def _reject_hunk_in_file(
             the base bytes wholesale.
         link_target: Target string when the base is a symlink blob;
             the link itself is restored (see ``_restore_base_bytes``).
+        make_executable: True when the base mode is ``100755``; the
+            rewritten file gets its exec bit re-applied.
     """
     write_to = target_path or current_path
     if binary or link_target is not None:
-        _restore_base_bytes(base_path, write_to, link_target)
+        _restore_base_bytes(
+            base_path, write_to, link_target,
+            make_executable=make_executable,
+        )
         return
     # Read from *write_to* (the real workspace target) when it exists
     # so that successive partial rejections accumulate against the
@@ -635,7 +663,9 @@ def _reject_hunk_in_file(
         # (e.g. UTF-16 / latin-1 without NUL bytes in the first 8 KiB).
         # Restoring the base bytes wholesale beats crashing the merge
         # action with an exception.
-        _restore_base_bytes(base_path, write_to)
+        _restore_base_bytes(
+            base_path, write_to, make_executable=make_executable,
+        )
         return
     except OSError:
         base_lines = []
@@ -654,6 +684,8 @@ def _reject_hunk_in_file(
         dest.unlink()
     with open(write_to, "w", newline="") as f:
         f.write("".join(new_lines))
+    if make_executable:
+        _apply_exec_bit(write_to)
 
 
 def _reject_all_hunks_in_file(
@@ -690,6 +722,7 @@ def _reject_all_hunks_in_file(
                 file_data["base"],
                 file_data.get("target") or file_data["current"],
                 file_data.get("link_target"),
+                make_executable=bool(file_data.get("exec")),
             )
         return
     pending = set(hunk_indices)
@@ -698,6 +731,7 @@ def _reject_all_hunks_in_file(
         _reject_hunk_in_file(
             file_data["current"], file_data["base"], hunk,
             file_data.get("target"),
+            make_executable=bool(file_data.get("exec")),
         )
         pending.discard(hi)
         delta = hunk["bc"] - hunk["cc"]
@@ -3911,6 +3945,7 @@ class RemoteAccessServer:
                             fd.get("target"),
                             binary=bool(fd.get("binary")),
                             link_target=fd.get("link_target"),
+                            make_executable=bool(fd.get("exec")),
                         ),
                     )
                 except OSError as exc:
