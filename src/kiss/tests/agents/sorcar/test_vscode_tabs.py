@@ -394,13 +394,26 @@ class TestAskUserQuestion(unittest.TestCase):
     def test_ask_user_broadcasts_question(self) -> None:
         """_ask_user_question broadcasts the question."""
         q: queue.Queue[str] = queue.Queue(maxsize=1)
-        q.put("yes")
         self.server._get_tab("8").user_answer_queue = q
         self.server.printer._thread_local.task_id = "8"
         self.server.printer.subscribe_tab("8", "8")
         self.server.printer._thread_local.stop_event = threading.Event()
 
+        # The answer must arrive AFTER the question is asked: answers
+        # already queued before the askUser broadcast are stale
+        # duplicates from a previous question and are now drained by
+        # ``_ask_user_question`` (bughunt5 stale-answer fix).
+        def _answer_when_asked() -> None:
+            for _ in range(500):
+                if any(e["type"] == "askUser" for e in list(self.events)):
+                    q.put("yes")
+                    return
+                time.sleep(0.01)
+
+        answerer = threading.Thread(target=_answer_when_asked, daemon=True)
+        answerer.start()
         result = self.server._ask_user_question("Continue?")
+        answerer.join(timeout=10)
 
         asks = [e for e in self.events if e["type"] == "askUser"]
         assert len(asks) == 1
