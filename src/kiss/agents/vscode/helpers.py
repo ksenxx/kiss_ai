@@ -29,18 +29,6 @@ def clean_llm_output(text: str) -> str:
     return text.strip().strip('"').strip("'").strip()
 
 
-def _strip_surrounding_quotes(text: str) -> str:
-    """Strip only surrounding quote characters, preserving whitespace.
-
-    Used by :func:`clip_autocomplete_suggestion`, whose inputs are
-    history-/identifier-derived continuations (never raw LLM output) and
-    whose leading whitespace is a *meaningful* cursor-to-ghost separator
-    that must survive cleaning — so it must not be whitespace-stripped
-    the way :func:`clean_llm_output` is.
-    """
-    return text.strip('"').strip("'")
-
-
 def _run_oneshot_llm(
     agent_name: str,
     prompt_template: str,
@@ -88,10 +76,27 @@ def _run_oneshot_llm(
 
 
 def clip_autocomplete_suggestion(query: str, suggestion: str) -> str:
-    """Return the autocomplete continuation, stripped of the query prefix.
+    """Normalise an autocomplete continuation suffix for ghost display.
 
-    Removes the query prefix if the LLM echoed it, strips surrounding
-    whitespace, and stops at newlines.
+    *suggestion* is always a continuation **suffix** (a prefix-matched
+    history task minus the query, or an identifier candidate minus the
+    typed partial) — both call sites (``_AutocompleteMixin._complete``
+    and ``CliCompleter._active_file_suffix``) strip the query before
+    calling.  It must therefore NOT be prefix-stripped again here: a
+    legitimate suffix can itself begin with the query text (active file
+    holds ``quxqux_token``, user typed ``qux`` → suffix ``qux_token``),
+    and re-stripping would corrupt the accepted completion (``qux`` +
+    ``_token`` types the non-existent ``qux_token``).
+
+    For the same reason it must NOT strip quote characters at the
+    suffix boundary: they are real characters of the matched history
+    task, not LLM decoration (history ``run "make test"`` typed as
+    ``run "make`` continues with `` test"`` — stripping the closing
+    quote would make the accepted completion diverge from the task).
+    Quote-stripping belongs only to :func:`clean_llm_output`, which
+    handles raw LLM responses.
+
+    Stops at newlines.
 
     Normalises the cursor-to-ghost gap so the overlay (which uses
     ``white-space: pre-wrap``) never renders visible extra spaces
@@ -114,11 +119,9 @@ def clip_autocomplete_suggestion(query: str, suggestion: str) -> str:
       separator prepended (e.g. identifier completion ``"os.pa"`` →
       ``"th"``).
     """
-    s = _strip_surrounding_quotes(suggestion)
+    s = suggestion
     if not s:
         return ""
-    if s.lower().startswith(query.lower()):
-        s = s[len(query) :]
     s = s.split("\n")[0]
     if not query or (query[-1:].isspace()):
         s = s.lstrip()

@@ -341,7 +341,7 @@ class SorcarAgent(RelentlessAgent):
             )
             tools = [useful_tools.Bash, useful_tools.Read, useful_tools.Edit, useful_tools.Write]
         if self._use_web_tools and self.web_use_tool is None:
-            self.web_use_tool = WebUseTool()
+            self.web_use_tool = WebUseTool(work_dir=self.work_dir)
             tools.extend(self.web_use_tool.get_tools())
         def run_parallel(tasks: str, max_workers: str = "") -> str:
             """Run multiple independent tasks concurrently using parallel agents.
@@ -475,7 +475,12 @@ class SorcarAgent(RelentlessAgent):
             if demo_mode is not None:
                 _apply_setting(updated, broadcast, "demo_mode", bool(demo_mode))
 
-            if auto_commit is not None and bool(auto_commit):
+            if auto_commit is not None and not auto_commit:
+                # ``auto_commit`` is a one-shot action: ``False`` requests no
+                # commit, but it is still a provided argument and must be
+                # reported accurately (not as "all arguments were None").
+                updated.append("auto_commit=not triggered (False)")
+            elif auto_commit is not None and bool(auto_commit):
                 # Special-cased: a one-shot action (commit pending changes),
                 # not a persisted config value.
                 updated.append("auto_commit=triggered")
@@ -823,12 +828,11 @@ def _coerce_tasks(tasks: Any) -> list[str]:
                 parsed = json.loads(stripped)
             except (ValueError, TypeError):
                 parsed = None
-            if (
-                isinstance(parsed, list)
-                and parsed
-                and all(isinstance(t, str) for t in parsed)
-            ):
-                return parsed
+            if isinstance(parsed, list):
+                # A JSON empty list means zero tasks (NOT one task whose
+                # text is "[]"); non-string elements (e.g. '[1, 2]') are
+                # coerced to one task string per element.
+                return [t if isinstance(t, str) else str(t) for t in parsed]
         return [tasks]
     if isinstance(tasks, list) and all(isinstance(t, str) for t in tasks):
         return tasks
@@ -902,8 +906,27 @@ def run_tasks_parallel(
     # ``(budget_used, total_tokens_used, total_steps)``.
     sub_usage: list[tuple[float, int, int]] = [(0.0, 0, 0)] * len(tasks)
 
+    # Capture the parent's thread-local ``task_id`` HERE, in the calling
+    # thread.  ``printer._thread_local`` is a real ``threading.local``,
+    # so reading it inside a worker thread would never see the parent
+    # thread's value (and ``ChatSorcarAgent.run`` clears the worker's
+    # own id before ``_run_single``'s ``finally`` runs) — the
+    # ``subagentDone`` broadcast would then never fire.
+    parent_tl = getattr(printer, "_thread_local", None) if printer else None
+    parent_key = getattr(parent_tl, "task_id", "") if parent_tl else ""
+    # Capture the parent's stop_event HERE too (same thread-local
+    # reasoning as ``task_id`` above): ``SorcarAgent.run`` resolves
+    # ``self._stop_event`` from the *worker* thread's
+    # ``printer._thread_local``, so unless the event is copied into
+    # each worker thread-local below, sub-agents never see the parent
+    # stop request and Stop cannot kill their Bash process groups.
+    parent_stop_event = getattr(parent_tl, "stop_event", None) if parent_tl else None
+
     def _run_single(args: tuple[int, str]) -> str:
         idx, task = args
+        tl = getattr(printer, "_thread_local", None) if printer else None
+        if tl is not None:
+            tl.stop_event = parent_stop_event
         agent = ChatSorcarAgent(f"Parallel-{task[:40]}")
         # Mark the spawned agent as a sub-agent.  ``ChatSorcarAgent.run``
         # reads this marker to drive its own sub-agent-specific
@@ -932,13 +955,10 @@ def run_tasks_parallel(
             return _yaml_failure(exc)
         finally:
             sub_usage[idx] = _agent_usage(agent)
-            if printer is not None:
-                tl = getattr(printer, "_thread_local", None)
-                parent_key = getattr(tl, "task_id", "") if tl else ""
-                if parent_key:
-                    _broadcast_subagent_done(
-                        printer, [f"{parent_key}__sub_{idx}"],
-                    )
+            if printer is not None and parent_key:
+                _broadcast_subagent_done(
+                    printer, [f"{parent_key}__sub_{idx}"],
+                )
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         results = list(pool.map(_run_single, enumerate(tasks)))

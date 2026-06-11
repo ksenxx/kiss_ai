@@ -112,7 +112,17 @@ def _is_profile_in_use(profile_dir: str) -> bool:
         target = os.readlink(str(lock_path))
         pid_str = target.rsplit("-", 1)[-1]
         pid = int(pid_str)
+        if pid <= 0:
+            # A corrupt/stale lock (e.g. "host-0").  os.kill(0, 0)
+            # signals the CALLER'S OWN process group and always
+            # succeeds, which would mark the profile permanently in
+            # use and silently escalate to <dir>_1, <dir>_2, …
+            return False
         os.kill(pid, 0)
+        return True
+    except PermissionError:
+        # EPERM: the process exists but is owned by another user (or
+        # root), so the profile IS locked by a live Chromium.
         return True
     except (OSError, ValueError, IndexError):
         return False
@@ -153,11 +163,16 @@ class WebUseTool:
         viewport: tuple[int, int] = (1280, 900),
         user_data_dir: str | None = _DEFAULT_USER_DATA_DIR,
         headless: bool = False,
+        work_dir: str | None = None,
         **_kwargs: Any,
     ) -> None:
         self.viewport = viewport
         self.user_data_dir = user_data_dir
         self._headless = headless
+        # Agent working directory: relative screenshot paths (and the
+        # literal ``PWD/`` prefix the system prompt mandates) are
+        # anchored here, consistent with the Read/Write/Edit/Bash tools.
+        self.work_dir = work_dir
         self._playwright: Any = None
         self._browser: Any = None
         self._context: Any = None
@@ -232,6 +247,11 @@ class WebUseTool:
         """
         if self._is_alive():
             return
+        # Re-arm the atexit safety net (close() unregisters it).  The
+        # unregister-then-register pattern keeps exactly one entry even
+        # when the browser is relaunched many times.
+        atexit.unregister(self.close)
+        atexit.register(self.close)
         self._close_browser_only()
         from playwright.sync_api import sync_playwright
 
@@ -544,7 +564,16 @@ class WebUseTool:
             "Error taking screenshot: <message>" on error."""
         self._ensure_browser()
         try:
-            path = Path(file_path).resolve()
+            from kiss.agents.sorcar.useful_tools import _expand_pwd_prefix
+
+            # Anchor the path the same way the file tools do: expand a
+            # literal ``PWD/`` prefix and resolve relative paths against
+            # the agent work_dir (NOT the daemon process cwd — in
+            # worktree mode that would silently escape the worktree).
+            path = Path(_expand_pwd_prefix(file_path, self.work_dir))
+            if not path.is_absolute() and self.work_dir:
+                path = Path(self.work_dir) / path
+            path = path.resolve()
             path.parent.mkdir(parents=True, exist_ok=True)
             self._page.screenshot(path=str(path), full_page=False)
             return f"Screenshot saved to {path}"
@@ -586,6 +615,10 @@ class WebUseTool:
             except Exception:  # pragma: no cover — Playwright stop rarely fails
                 logger.debug("Exception caught", exc_info=True)
         self._playwright = None
+        # Drop the atexit registration so closed tools are not retained
+        # for the process lifetime (one leaked entry per agent run).
+        # ``_ensure_browser`` re-registers if this tool is revived.
+        atexit.unregister(self.close)
         return "Browser closed."
 
     def get_tools(self) -> list[Callable[..., str]]:

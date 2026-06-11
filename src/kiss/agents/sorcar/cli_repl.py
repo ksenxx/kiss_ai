@@ -123,6 +123,27 @@ _MENTION_RE = re.compile(r"PWD/(\S+)")
 # Matches a ``/model <partial>`` line, capturing the partial model name so
 # the completer can fast-complete it from MODEL_INFO.
 _MODEL_CMD_RE = re.compile(r"^/model\s+(.*)$")
+# ANSI SGR (colour) sequences embedded in the input prompt.
+_ANSI_SGR_RE = re.compile(r"(\x1b\[[0-9;]*m)")
+
+
+def _readline_prompt(prompt: str) -> str:
+    """Bracket ANSI sequences in *prompt* with readline ignore markers.
+
+    GNU readline counts every prompt byte as a printed column unless
+    non-printing runs are wrapped in ``\\x01``/``\\x02``
+    (``RL_PROMPT_START_IGNORE``/``RL_PROMPT_END_IGNORE``).  Without the
+    markers readline believes the colour codes occupy screen columns,
+    so it redraws/wraps the input line ~20 columns early, garbling the
+    input panel on narrow terminals.
+
+    Args:
+        prompt: The prompt string, possibly containing SGR sequences.
+
+    Returns:
+        The prompt with every SGR sequence wrapped in the markers.
+    """
+    return _ANSI_SGR_RE.sub("\x01\\1\x02", prompt)
 
 
 class CliCompleter:
@@ -569,6 +590,16 @@ def _read_line(prompt: str) -> str | None:
         return line
 
     # Interactive: pre-draw the closed box, then edit on the body line.
+    # ``input`` hands the prompt to readline only when stdin is also a
+    # TTY; readline needs its colour codes bracketed with the
+    # \x01/\x02 ignore markers to compute the prompt width correctly
+    # (raw markers would be echoed verbatim in the non-readline path).
+    try:
+        stdin_tty = bool(sys.stdin.isatty())
+    except Exception:  # pragma: no cover - defensive isatty guard
+        stdin_tty = False
+    if _HAVE_READLINE and stdin_tty:
+        framed_prompt = _readline_prompt(framed_prompt)
     print(top)
     # Draw the body line's right border at the far column so the box is
     # fully framed (left ``│`` comes from ``framed_prompt`` below), then
@@ -585,6 +616,14 @@ def _read_line(prompt: str) -> str | None:
         sys.stdout.write("\n\n")
         sys.stdout.flush()
         return None
+    except KeyboardInterrupt:
+        # Ctrl+C leaves the cursor on the body line; step onto the
+        # bottom rule and erase it so the caller's interrupt message is
+        # not printed over the border (which would leave a garbled
+        # "…quit)────╯" row on screen).
+        sys.stdout.write(f"\n{_ESC}[2K")
+        sys.stdout.flush()
+        raise
     # A trailing backslash (typed directly, or injected by the
     # Shift+Enter readline macro bound in :func:`_setup_readline`)
     # continues the message on the next line; the joined parts are
@@ -603,6 +642,11 @@ def _read_line(prompt: str) -> str | None:
             sys.stdout.flush()
             line = line[:-1]
             break
+        except KeyboardInterrupt:
+            # Same bottom-rule cleanup as the first input() above.
+            sys.stdout.write(f"\n{_ESC}[2K")
+            sys.stdout.flush()
+            raise
         line = line[:-1] + "\n" + more
     # Enter already moved the cursor onto the bottom rule line; step past
     # it so following output never overwrites the closed box.
@@ -659,8 +703,16 @@ def run_repl(
             if text in _EXIT_WORDS:
                 break
             if text.startswith("/"):
-                if _handle_slash(agent, line, run_kwargs):
-                    break
+                # A failing command must not kill the interactive
+                # session (mirrors the task-error guard in _run_one):
+                # e.g. /resume listing chats from a corrupt database
+                # raises sqlite3.DatabaseError — report and re-prompt.
+                try:
+                    if _handle_slash(agent, line, run_kwargs):
+                        break
+                except Exception as exc:
+                    logger.debug("slash command failed", exc_info=True)
+                    print(f"\n✗ Command failed: {exc}\n")
                 continue
             _record_mentions(line)
             _run_one(agent, line, run_kwargs)
@@ -685,6 +737,13 @@ def _run_one(
         result = run_with_steering(agent, kwargs)
     except KeyboardInterrupt:
         print("\n⏹  Task interrupted.\n")
+        return
+    except Exception as exc:
+        # A failing task must not kill the interactive session: report
+        # the error and return to the prompt (the module contract is
+        # that the prompt waits for the next instruction after a task).
+        logger.debug("task failed", exc_info=True)
+        print(f"\n✗ Task failed: {exc}\n")
         return
     elapsed = time.time() - start
     # ``print_outcome`` stays silent when running verbosely (the green

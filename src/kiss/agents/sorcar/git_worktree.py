@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import enum
 import logging
+import os
 import shutil
 import subprocess
 import threading
@@ -23,6 +24,29 @@ logger = logging.getLogger(__name__)
 
 _repo_locks: dict[str, threading.RLock] = {}
 _repo_locks_guard = threading.Lock()
+
+# Repo-scoped git environment variables that OVERRIDE ``git -C``-based
+# repository discovery.  When KISS is launched from a context that
+# exports them — e.g. a git hook (``post-commit`` starting an agent),
+# ``git rebase --exec``, or a user shell export — every git call would
+# silently target the WRONG repository (the hook's repo) instead of the
+# ``cwd`` passed to :func:`_git`.  This mirrors the list git itself
+# clears before crossing repo boundaries (``local_repo_env`` — see
+# ``git submodule``).  Author/committer/SSH/config-file variables are
+# intentionally kept.
+_REPO_SCOPED_GIT_ENV = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_PREFIX",
+    "GIT_NAMESPACE",
+    "GIT_GRAFT_FILE",
+    "GIT_SHALLOW_FILE",
+)
 
 
 def repo_lock(repo: Path) -> threading.RLock:
@@ -82,7 +106,25 @@ def _git(
         str(cwd),
         *args,
     ]
-    return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
+    # Scrub repo-scoped GIT_* variables so an inherited GIT_DIR /
+    # GIT_WORK_TREE / GIT_INDEX_FILE (e.g. from a git hook that
+    # launched this process) cannot redirect the command away from
+    # ``cwd`` (see :data:`_REPO_SCOPED_GIT_ENV`).
+    env = {k: v for k, v in os.environ.items() if k not in _REPO_SCOPED_GIT_ENV}
+    # ``errors="surrogateescape"``: git paths are byte strings and may
+    # be invalid UTF-8 (e.g. Latin-1 filenames committed on Linux);
+    # with ``core.quotepath=false`` such bytes are emitted verbatim and
+    # a strict decode would raise UnicodeDecodeError out of EVERY git
+    # call.  Surrogate escapes round-trip through ``os.fsencode`` for
+    # filesystem operations, matching :func:`_unquote_git_path`.
+    return subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
+        env=env,
+    )
 
 
 @dataclass(frozen=True)
@@ -115,6 +157,7 @@ class MergeResult(enum.Enum):
     CONFLICT = "conflict"
     CHECKOUT_FAILED = "checkout_failed"
     MERGE_FAILED = "merge_failed"
+    STASH_FAILED = "stash_failed"
 
 
 def _unquote_git_path(path: str) -> str:
@@ -171,6 +214,40 @@ def _unquote_git_path(path: str) -> str:
             raw.extend(inner[i].encode("utf-8"))
             i += 1
     return raw.decode("utf-8", errors="surrogateescape")
+
+
+def _split_rename_tail(tail: str) -> tuple[str, str]:
+    """Split a porcelain rename/copy tail ``old -> new`` into raw sides.
+
+    Each side may independently be C-style quoted (git quotes a path
+    when it contains control characters, double-quotes, or
+    backslashes), so the split must respect quoting and happen BEFORE
+    any unquoting.  The returned sides are still raw (possibly quoted)
+    and must each be passed through :func:`_unquote_git_path` exactly
+    once.
+
+    Args:
+        tail: The raw status-line tail after the two status characters
+            and the separating space (e.g. ``"a\\tb" -> "c\\td"``).
+
+    Returns:
+        ``(old_raw, new_raw)`` — the two sides of the rename, unsplit
+        quoting intact.
+    """
+    if tail.startswith('"'):
+        i = 1
+        while i < len(tail):
+            if tail[i] == "\\":
+                i += 2
+            elif tail[i] == '"':
+                rest = tail[i + 1 :]
+                if rest.startswith(" -> "):
+                    return tail[: i + 1], rest[4:]
+                break
+            else:
+                i += 1
+    idx = tail.index(" -> ")
+    return tail[:idx], tail[idx + 4 :]
 
 
 class GitWorktreeOps:
@@ -234,14 +311,36 @@ class GitWorktreeOps:
     def remove(repo: Path, wt_dir: Path) -> None:
         """Remove a worktree directory (best-effort, force).
 
+        Every caller (``discard``, ``cleanup_partial``,
+        ``_finalize_worktree``) intends permanent removal of an
+        agent-owned directory, so failures of ``git worktree remove``
+        are escalated rather than abandoned:
+
+        1. Plain ``--force`` (handles dirty/untracked content).
+        2. ``--force --force`` (git requires force twice for worktrees
+           locked via ``git worktree lock``).
+        3. Direct ``rmtree`` + ``git worktree prune`` (handles
+           corrupted worktrees — e.g. a deleted ``.git`` link file —
+           that fail git's removal validation entirely).
+
         Args:
             repo: Git repo root path.
             wt_dir: Worktree directory to remove.
         """
-        if wt_dir.exists():
-            result = _git("worktree", "remove", str(wt_dir), "--force", cwd=repo)
-            if result.returncode != 0:  # pragma: no cover — lock/perm
-                logger.warning("worktree remove failed: %s", result.stderr.strip())
+        if not wt_dir.exists():
+            return
+        result = _git("worktree", "remove", str(wt_dir), "--force", cwd=repo)
+        if result.returncode != 0:
+            result = _git(
+                "worktree", "remove", "--force", "--force", str(wt_dir), cwd=repo
+            )
+        if result.returncode != 0:
+            logger.warning(
+                "worktree remove failed: %s; deleting directory directly",
+                result.stderr.strip(),
+            )
+            shutil.rmtree(str(wt_dir), ignore_errors=True)
+            GitWorktreeOps.prune(repo)
 
     @staticmethod
     def prune(repo: Path) -> None:
@@ -497,11 +596,17 @@ class GitWorktreeOps:
 
     @staticmethod
     def _diff_name_only(repo: Path, *flags: str) -> list[str]:
-        """Return ``git diff --name-only`` output lines (empty on failure)."""
+        """Return ``git diff --name-only`` output lines (empty on failure).
+
+        Paths are unquoted via :func:`_unquote_git_path`: even with
+        ``core.quotepath=false`` git C-quotes any path containing a
+        double-quote, backslash, or control character, and callers
+        compare these names against real on-disk paths.
+        """
         result = _git("diff", "--name-only", *flags, cwd=repo)
         if result.returncode != 0:
             return []
-        return [f for f in result.stdout.strip().splitlines() if f]
+        return [_unquote_git_path(f) for f in result.stdout.strip().splitlines() if f]
 
     @staticmethod
     def unstaged_files(repo: Path) -> list[str]:
@@ -582,6 +687,41 @@ class GitWorktreeOps:
         return result.returncode == 0
 
     @staticmethod
+    def _append_info_line(repo: Path, filename: str, entry: str) -> None:
+        """Append *entry* to ``<git_common_dir>/info/<filename>`` once.
+
+        The ``info/`` directory holds repo-local, untracked plumbing
+        (``exclude``, ``attributes``) so the agent never modifies any
+        tracked file in the user's repo.  Idempotent: the line is only
+        appended when not already present.
+
+        Args:
+            repo: Git repo root path.
+            filename: File under ``info/`` (e.g. ``"exclude"``).
+            entry: The exact line to ensure is present.
+        """
+        result = _git("rev-parse", "--git-common-dir", cwd=repo)
+        git_common = Path(result.stdout.strip())
+        if not git_common.is_absolute():  # pragma: no branch
+            git_common = (repo / git_common).resolve()
+        info_file = git_common / "info" / filename
+        info_file.parent.mkdir(parents=True, exist_ok=True)
+        if info_file.exists():
+            # Git treats these files as raw bytes — non-UTF-8
+            # patterns/comments are legal, so a strict decode would
+            # raise UnicodeDecodeError and silently skip the entry
+            # (the caller swallows exceptions), e.g. leaving
+            # ``?? .kiss-worktrees/`` polluting the user's git status
+            # forever.  Mirror :func:`_git`'s surrogateescape policy.
+            content = info_file.read_bytes().decode(
+                "utf-8", errors="surrogateescape"
+            )
+            if entry in content.splitlines():
+                return
+        with open(info_file, "a", encoding="utf-8") as f:
+            f.write(f"\n{entry}\n")
+
+    @staticmethod
     def ensure_excluded(repo: Path) -> None:
         """Add ``.kiss-worktrees/`` to local git exclude (not .gitignore).
 
@@ -591,19 +731,43 @@ class GitWorktreeOps:
         Args:
             repo: Git repo root path.
         """
-        result = _git("rev-parse", "--git-common-dir", cwd=repo)
-        git_common = Path(result.stdout.strip())
-        if not git_common.is_absolute():  # pragma: no branch
-            git_common = (repo / git_common).resolve()
-        exclude_file = git_common / "info" / "exclude"
-        exclude_file.parent.mkdir(parents=True, exist_ok=True)
-        entry = ".kiss-worktrees/"
-        if exclude_file.exists():
-            content = exclude_file.read_text()
-            if entry in content.splitlines():
-                return
-        with open(exclude_file, "a") as f:
-            f.write(f"\n{entry}\n")
+        GitWorktreeOps._append_info_line(repo, "exclude", ".kiss-worktrees/")
+
+    @staticmethod
+    def ensure_scratch_merge_driver(repo: Path) -> None:
+        """Install a merge driver that auto-resolves agent scratch files.
+
+        ``PROGRESS.md`` is a tracked per-task agent log that every task
+        wholesale rewrites ("clear PROGRESS.md when a new task begins").
+        Whenever main's copy diverged from the worktree's fork point,
+        the whole-file rewrite on both sides made every three-way merge
+        (``git merge --squash`` and ``git cherry-pick`` alike) conflict
+        — blocking the entire worktree merge over a scratch file.
+
+        This registers a repo-local ``kiss-scratch`` merge driver that
+        resolves content conflicts in such files by keeping the
+        incoming branch's version (``%B``): the newest task's log wins,
+        matching the clear-on-new-task convention.  Installation uses
+        only untracked plumbing — ``<git_common_dir>/info/attributes``
+        plus repo-local config — so no tracked file is ever modified,
+        and the driver equally fixes the *manual* merge/cherry-pick
+        commands suggested to the user on merge failure.
+
+        Args:
+            repo: Git repo root path.
+        """
+        GitWorktreeOps._append_info_line(
+            repo, "attributes", "PROGRESS.md merge=kiss-scratch"
+        )
+        _git(
+            "config",
+            "merge.kiss-scratch.name",
+            "KISS scratch file: keep the incoming task branch version",
+            cwd=repo,
+        )
+        # %A = temp file that must receive the merge result (starts as
+        # "ours"), %B = the other branch's version; exit 0 = resolved.
+        _git("config", "merge.kiss-scratch.driver", "cp -f %B %A", cwd=repo)
 
     @staticmethod
     def _load_branch_config(repo: Path, branch: str, key: str) -> str | None:
@@ -705,6 +869,21 @@ class GitWorktreeOps:
         return GitWorktreeOps._load_branch_config(repo, branch, "kiss-baseline")
 
     @staticmethod
+    def _remove_path(path: Path) -> None:
+        """Remove *path* whatever it is (symlink, dir, file, or absent).
+
+        Checks ``is_symlink()`` first because ``is_dir()``/``exists()``
+        follow symlinks: a symlink to a directory must be unlinked, not
+        rmtree'd, and a broken symlink reports ``exists() == False``.
+        """
+        if path.is_symlink():
+            path.unlink()
+        elif path.is_dir():
+            shutil.rmtree(str(path))
+        elif path.exists():
+            path.unlink()
+
+    @staticmethod
     def copy_dirty_state(repo: Path, wt_dir: Path) -> bool:
         """Copy uncommitted/staged/untracked files from main worktree.
 
@@ -730,29 +909,78 @@ class GitWorktreeOps:
         for line in status.stdout.splitlines():
             if len(line) < 4:
                 continue
-            fname = _unquote_git_path(line[3:])
+            code = line[:2]
+            tail = line[3:]
             old_name: str | None = None
-            if " -> " in fname:
-                old_name, fname = fname.split(" -> ", 1)
-                old_name = _unquote_git_path(old_name)
-                fname = _unquote_git_path(fname)
+            if ("R" in code or "C" in code) and " -> " in tail:
+                # Rename/copy entry: split the RAW tail on the
+                # ``" -> "`` boundary (respecting quoting) first, then
+                # unquote each side exactly once.
+                old_raw, new_raw = _split_rename_tail(tail)
+                old_name = _unquote_git_path(old_raw)
+                fname = _unquote_git_path(new_raw)
+            else:
+                fname = _unquote_git_path(tail)
 
             src = repo / fname
             dst = wt_dir / fname
 
-            if src.is_file():
+            if old_name is not None:
+                # The rename's old path is gone from the main worktree
+                # regardless of what happened to the new path, so it
+                # must be removed from the task worktree even when the
+                # new file was subsequently deleted (e.g. status "RD").
+                old_dst = wt_dir / old_name
+                # Check is_symlink() FIRST: is_dir()/exists() follow
+                # symlinks, so a symlink to a directory would crash
+                # rmtree and a broken symlink would be left behind.
+                if old_dst.is_symlink():
+                    old_dst.unlink()
+                    copied = True
+                elif old_dst.is_dir():
+                    shutil.rmtree(str(old_dst))
+                    copied = True
+                elif old_dst.exists():
+                    old_dst.unlink()
+                    copied = True
+
+            if src.is_symlink():
+                # Mirror the symlink itself (possibly broken); is_file()
+                # and copy2 would follow the link instead.
+                GitWorktreeOps._remove_path(dst)
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                os.symlink(os.readlink(src), dst)
+                copied = True
+            elif src.is_file():
+                if dst.is_symlink():
+                    # A symlink was replaced by a regular file; copy2
+                    # onto the link would write THROUGH it into the
+                    # link's target inside the worktree.
+                    dst.unlink()
+                elif dst.is_dir():
+                    # A tracked directory was replaced by a same-named
+                    # file; copy2 into the directory would create
+                    # dst/<basename> instead of replacing dst.
+                    shutil.rmtree(str(dst))
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(str(src), str(dst))
                 copied = True
-                if old_name is not None:
-                    old_dst = wt_dir / old_name
-                    if old_dst.exists():
-                        old_dst.unlink()
+            elif dst.is_symlink():
+                # The path is gone in the main worktree but the fresh
+                # checkout has a (possibly broken) symlink there;
+                # exists() follows the link and would miss it.
+                dst.unlink()
+                copied = True
+            elif dst.is_dir():
+                if not src.exists():
+                    # The path was deleted in the main worktree but the
+                    # fresh checkout has a directory there (file/dir
+                    # type change); unlink() would raise on a dir.
+                    shutil.rmtree(str(dst))
+                    copied = True
             elif dst.exists():
                 dst.unlink()
                 copied = True
-            elif src.is_dir():
-                continue
 
         return copied
 
@@ -846,6 +1074,27 @@ class GitWorktreeOps:
     @staticmethod
     def cleanup_orphans(repo: Path) -> str:
         """Scan for orphaned ``kiss/wt-*`` branches and worktrees.
+
+        Serialized under :func:`repo_lock`: the scan snapshots
+        ``git worktree list`` and later deletes branches and rmtree's
+        unregistered directories under ``.kiss-worktrees/``.  Without
+        the lock, a worktree registered by a concurrent task start
+        (``_try_setup_worktree``) after the snapshot would look like
+        an orphan directory and be deleted out from under the active
+        task.
+
+        Args:
+            repo: Root of the git repository to scan.
+
+        Returns:
+            Summary of findings and any cleanup actions taken.
+        """
+        with repo_lock(repo):
+            return GitWorktreeOps._cleanup_orphans_locked(repo)
+
+    @staticmethod
+    def _cleanup_orphans_locked(repo: Path) -> str:
+        """Do the orphan scan/cleanup; caller must hold :func:`repo_lock`.
 
         Cleans up three distinct forms of stale state:
 

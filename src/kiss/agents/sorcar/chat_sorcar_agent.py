@@ -309,8 +309,13 @@ class ChatSorcarAgent(SorcarAgent):
             model=kwargs.get("model_name", "") or "",
             work_dir=kwargs.get("work_dir", "") or "",
             is_parallel=bool(kwargs.get("is_parallel", False)),
+            # ``pop`` (not ``get``): ``SorcarAgent.run()`` has no
+            # ``use_worktree`` parameter, so forwarding it via
+            # ``**kwargs`` would raise ``TypeError``.  Only
+            # ``WorktreeSorcarAgent`` consumes this kwarg (and pops it
+            # before delegating here).
             is_worktree=(
-                bool(kwargs.get("use_worktree", False)) or self.uses_worktree
+                bool(kwargs.pop("use_worktree", False)) or self.uses_worktree
             ),
         )
 
@@ -420,12 +425,47 @@ class ChatSorcarAgent(SorcarAgent):
             try:
                 result_yaml = yaml.safe_load(result)
                 if isinstance(result_yaml, dict):
-                    result_summary = result_yaml.get("summary", "")
+                    summary_val = result_yaml.get("summary", "")
+                    if isinstance(summary_val, str):
+                        result_summary = summary_val
+                    elif summary_val is None:
+                        result_summary = ""
+                    else:
+                        # LLMs sometimes emit a YAML list/mapping under
+                        # ``summary``.  Persist its text form — passing
+                        # the raw object to ``_save_task_result`` would
+                        # raise sqlite3.ProgrammingError from the
+                        # ``finally`` block below, destroying the task's
+                        # successful return value.
+                        result_summary = yaml.safe_dump(
+                            summary_val, sort_keys=False,
+                        ).strip()
+                else:
+                    # Valid YAML but not a dict (plain string, list,
+                    # number): persist the raw text, consistent with
+                    # the parse-failure fallback below — otherwise the
+                    # task history records an empty result.
+                    result_summary = result[:500] if result else ""
             except Exception:
                 result_summary = result[:500] if result else ""
             return result
         except Exception:
             result_summary = "Task failed"
+            raise
+        except BaseException:
+            # KeyboardInterrupt (user Stop / graceful daemon shutdown),
+            # SystemExit, etc. are NOT matched by ``except Exception``.
+            # Persisting the initial ``""`` here would overwrite the
+            # "Agent Failed Abruptly" sentinel with an empty string —
+            # which the startup orphan sweep (matching the sentinel
+            # exactly) can never repair, leaving the row permanently
+            # blank (incident: task_history row 3624, killed by the
+            # 2026-06-11 00:37:45 daemon restart mid-run).  Persist an
+            # explicit marker instead.  Top-level VS Code runs pass
+            # ``_skip_persistence=True`` and are unaffected (the task
+            # runner's ``_cancel_outcome`` owns their result); this
+            # covers sub-agents and CLI/standalone runs.
+            result_summary = "Task interrupted"
             raise
         finally:
             ChatSorcarAgent.running_agents.pop(task_id, None)

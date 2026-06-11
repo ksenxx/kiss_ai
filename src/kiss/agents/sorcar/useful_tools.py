@@ -37,7 +37,10 @@ def _expand_pwd_prefix(file_path: str, work_dir: str | None) -> str:
         return work_dir or os.getcwd()
     if file_path.startswith("PWD/"):
         base = work_dir or os.getcwd()
-        suffix = file_path[len("PWD/") :]
+        # Strip extra leading slashes (e.g. "PWD//etc/passwd"):
+        # os.path.join discards *base* when the second component is
+        # absolute, which would silently escape the working directory.
+        suffix = file_path[len("PWD/") :].lstrip("/")
         return os.path.join(base, suffix) if suffix else base
     return file_path
 
@@ -274,6 +277,11 @@ class UsefulTools:
 
         Output (stdout + stderr combined) is captured as UTF-8 text and
         the child runs in ``self.work_dir`` with a cleaned environment.
+        Invalid UTF-8 bytes in the output (e.g. ``cat`` of a binary,
+        ``grep`` on a binary file) are replaced with U+FFFD instead of
+        raising ``UnicodeDecodeError`` — strict decoding would lose the
+        ENTIRE output (and, on the streaming path, leak the exception
+        out of the tool) even when the command itself succeeded.
 
         Args:
             command: The shell command to execute.
@@ -287,6 +295,7 @@ class UsefulTools:
             stderr=subprocess.STDOUT,
             text=True,
             encoding="utf-8",
+            errors="replace",
             env=_clean_env(self.work_dir),
             cwd=self.work_dir or None,
         )
@@ -336,6 +345,18 @@ class UsefulTools:
 
             if resolved.is_dir():
                 return self._read_directory_listing(file_path, resolved)
+
+            # Non-regular files (FIFOs, devices, sockets): opening a FIFO
+            # with no writer blocks FOREVER, and /dev/zero-style devices
+            # stream endlessly — either would hang the agent with no
+            # timeout.  Refuse them up front.
+            if resolved.exists() and not resolved.is_file():
+                return (
+                    f"Error: {file_path} is not a regular file "
+                    f"(FIFO/device/socket); reading it could block forever. "
+                    f"Use Bash (which has a timeout) if you really need its "
+                    f"contents."
+                )
 
             try:
                 text = resolved.read_text()
@@ -414,6 +435,14 @@ class UsefulTools:
         try:
             expanded = _expand_pwd_prefix(file_path, self.work_dir)
             resolved = Path(expanded).resolve()
+            # Refuse existing non-regular targets: opening a FIFO for
+            # writing blocks forever when it has no reader, hanging the
+            # agent with no timeout (directories/devices are also wrong).
+            if resolved.exists() and not resolved.is_file():
+                return (
+                    f"Error: {file_path} exists and is not a regular file "
+                    f"(directory/FIFO/device/socket); refusing to write to it."
+                )
             resolved.parent.mkdir(parents=True, exist_ok=True)
             resolved.write_text(content)
             return f"Successfully wrote {len(content)} characters to {file_path}"
@@ -446,8 +475,32 @@ class UsefulTools:
                 return f"Error: File not found: {file_path}"
             if old_string == new_string:
                 return "Error: new_string must be different from old_string"
-            content = resolved.read_text()
+            if old_string == "":
+                # str.count("") == len(content) + 1, so an empty
+                # old_string would interleave new_string between every
+                # character (replace_all) or silently overwrite an empty
+                # file.  Reject it explicitly instead.
+                return (
+                    "Error: old_string must not be empty. "
+                    "Use the Write tool to create or overwrite a file."
+                )
+            # Read WITHOUT universal-newline translation: reading the
+            # translated text and writing it back would silently rewrite
+            # EVERY line ending in a CRLF file as LF (huge spurious
+            # diffs) even for a one-character edit.
+            content = resolved.read_text(newline="")
             count = content.count(old_string)
+            if count == 0 and "\r\n" in content and "\r\n" not in old_string:
+                # Models see files through Read(), which translates CRLF
+                # to LF — so old_string/new_string carry LF even when the
+                # file on disk uses CRLF.  Retry with CRLF-normalised
+                # strings so the edit applies and the replacement keeps
+                # the file's CRLF convention.
+                old_string = old_string.replace("\n", "\r\n")
+                # Collapse-then-expand so a new_string that already
+                # carries some CRLFs is not corrupted into "\r\r\n".
+                new_string = new_string.replace("\r\n", "\n").replace("\n", "\r\n")
+                count = content.count(old_string)
             if count == 0:
                 return "Error: String not found in file"
             if not replace_all and count > 1:
@@ -459,7 +512,9 @@ class UsefulTools:
                 new_content = content.replace(old_string, new_string)
             else:
                 new_content = content.replace(old_string, new_string, 1)
-            resolved.write_text(new_content)
+            # newline="" prevents os.linesep translation on write so the
+            # preserved (untranslated) line endings round-trip verbatim.
+            resolved.write_text(new_content, newline="")
             replaced = count if replace_all else 1
             return f"Successfully replaced {replaced} occurrence(s) in {file_path}"
         except Exception as e:
