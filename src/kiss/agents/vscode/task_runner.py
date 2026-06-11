@@ -153,6 +153,30 @@ class _TaskRunnerMixin:
                 },
             )
             self._run_task_inner(cmd)
+        except Exception as exc:
+            # ``_run_task_inner`` handles failures of the agent run
+            # itself, but an exception raised BEFORE its big ``try``
+            # block (malformed command fields, a git failure re-raised
+            # by the pre-snapshot guard) used to unwind straight
+            # through this worker thread: the spinner stopped (the
+            # ``finally`` below broadcasts ``running=False``) but no
+            # ``result``/``task_error`` event was ever emitted — the
+            # task silently vanished from the user's point of view.
+            logger.warning(
+                "Task setup failed: tab_id=%s error=%s",
+                tab_id,
+                exc,
+                exc_info=True,
+            )
+            self.printer.broadcast({
+                "type": "result",
+                "text": f"Task failed: {type(exc).__name__}: {exc}",
+                "success": False,
+                "total_tokens": 0,
+                "cost": "$0.0000",
+                "step_count": 0,
+                "tabId": tab_id,
+            })
         finally:
             with self._state_lock:
                 tab = _RunningAgentState.running_agent_states.get(tab_id)
@@ -235,6 +259,16 @@ class _TaskRunnerMixin:
         work_dir = cmd.get("workDir") or self.work_dir
         active_file = cmd.get("activeFile")
         raw_attachments = cmd.get("attachments", [])
+        if not isinstance(raw_attachments, list):
+            # Iteration 3 made malformed attachment ENTRIES skippable;
+            # a non-iterable attachments FIELD (e.g. an int) still
+            # raised TypeError at the ``for`` below and killed the
+            # task thread before even the model check.
+            logger.warning(
+                "Ignoring malformed attachments field of type %s",
+                type(raw_attachments).__name__,
+            )
+            raw_attachments = []
         # Agent start timestamp (ms since epoch), stamped on the cmd
         # dict by ``_run_task``.  0 when absent (direct test calls).
         start_ms = int(cmd.get("_start_ms") or 0)

@@ -1106,3 +1106,266 @@ pass; `uv run check --full` green.
 
 - Iteration 5 still found bugs → launching iteration 6, same 7 groups, tests
   `test_bughunt6_*` / `bughunt6_*.test.js`. Stop when an iteration finds zero bugs.
+
+### Iteration 6 — Group D (sorcar agents/tools) — COMPLETE: 1 NEW bug found+fixed
+
+All four files read IN FULL this session (sorcar_agent.py, chat_sorcar_agent.py,
+useful_tools.py, web_use_tool.py).
+
+- BUG-6D-1 (useful_tools.py `Edit`, ~line 463): `Edit` read the file with
+  universal-newline translation (`Path.read_text()` turns `\r\n` into `\n`)
+  and wrote the edited text back as-is — a ONE-LINE edit on a CRLF file
+  silently rewrote EVERY line ending in the file as LF (massive spurious git
+  diffs; breaks CRLF-required files like `.bat`). Reproduced: Edit of
+  `b"line one\r\nline two\r\nline three\r\n"` left `b"line one\nLINE 2\nline three\n"`.
+  Fix: read with `read_text(newline="")` (no translation); when the raw match
+  fails AND the file contains `\r\n` AND old_string carries only LF (what the
+  model sees through Read's translated output), retry with CRLF-normalised
+  old/new strings (new_string normalised collapse-then-expand,
+  `replace("\r\n","\n").replace("\n","\r\n")`, so a partially-CRLF new_string
+  is not corrupted into `\r\r\n`); write back with `write_text(..., newline="")`.
+  Only the edited region changes; mixed-ending files keep every untouched
+  byte. Test: test_bughunt6_edit_crlf.py (8 tests; 5 failed pre-fix, 3
+  regression guards: LF-file unchanged, CRLF-verbatim old_string, uniqueness
+  count after normalisation).
+- Investigated and verified NOT bugs (do not re-report): Edit on lone-`\r`
+  (classic-Mac) files now returns "String not found" instead of silently
+  destroying the CR endings (safer; no normalisation attempted); Write
+  `write_text` newline translation (identity on POSIX; Windows-only concern,
+  untestable without mocks); Read translating CRLF→LF for display (standard
+  text-mode semantics, now consistent with Edit's normalisation); Read
+  binary fallback for UTF-16 text files (extension-based mime guess —
+  by-design limit of the attachment whitelist); `_bash_streaming` unbounded
+  `chunks` accumulation before truncation (inherent to output capture, same
+  as non-streaming `communicate()`); `scroll(amount=huge)` long-but-finite
+  loop (model-controlled, bounded, no corruption); `go_to_url("tab:-1")`
+  message wording; `update_settings(use_web_browser=True)` only effective
+  next run (documented "subsequent sub-sessions"); ChatSorcarAgent
+  KeyboardInterrupt persisting `result_summary=""` (overwritten by the task
+  runner's cancel outcome); stale `self.printer` fallback in
+  `ChatSorcarAgent.run` (callers consistent); `Read(max_lines<=0)` /
+  `Bash(max_output_chars<=0)` degenerate inputs (model never emits them;
+  framework coerces types).
+- Verification: 8/8 new tests pass post-fix; all 219 tests across the 23
+  test files importing useful_tools/UsefulTools pass; `uv run check --full`
+  clean (also auto-fixed parallel group files: ruff UP037 in
+  test_bughunt6_malformed_fields.py, mypy ignore-code in
+  test_bughunt6_files_prefix.py — both untracked files from concurrent
+  iteration-6 sessions).
+
+### Iteration 6 — Group C (sorcar CLI) — session 1 (in progress)
+
+All four files read IN FULL (cli_repl.py, cli_steering.py, cli_helpers.py,
+cli_panel.py). 2 NEW bugs found, reproduced (failing tests first), FIXED:
+
+- BUG-6C-1 (cli_steering.py `SteeringSession.run`): only `sys.stdout` was
+  swapped for the lock-guarded `_StdoutProxy`; `sys.stderr` was NOT. Any
+  worker/library stderr write (logging default handlers incl.
+  `logging.lastResort`, `warnings`, LLM SDK noise) was emitted at the VISIBLE
+  cursor parked inside the box body row — pty capture showed
+  `ESC[23;5H XSTDERRNOISEX` overprinting the panel body, outside the scroll
+  region. Fix: capture `_real_stderr` in `__init__`; `run()` swaps stderr with
+  a second `_StdoutProxy` (same lock/box) and restores it in `finally`.
+  Test: test_bughunt6_stderr_proxy.py (pty.fork end-to-end; asserts the marker
+  is wire-prefixed by ESC 8 i.e. routed via the restore/emit/re-save dance, and
+  stderr restored after the session). Failed pre-fix, passes post-fix.
+- BUG-6C-2 (cli_repl.py `run_repl`): `_handle_slash` was called bare in the
+  REPL loop while task errors were guarded (`_run_one`). `/resume` (lists
+  recent chats) over a corrupt `sorcar.db` raised
+  `sqlite3.DatabaseError: file is not a database` (from `_get_db`'s PRAGMA —
+  no corruption recovery exists) and KILLED the whole interactive session
+  with a traceback. Fix: wrap the `_handle_slash` call in try/except
+  Exception → `✗ Command failed: {exc}` + re-prompt (mirrors `_run_one`).
+  Test: test_bughunt6_slash_survives_error.py (subprocess run_repl, corrupt
+  db, `/resume` then `/help` then `exit`; asserts /help output + clean exit).
+  Failed pre-fix, passes post-fix.
+
+Investigated and ruled NOT bugs this session (do NOT re-report):
+
+- `/resume <bogus-id>` prints "Resumed chat" without validating existence —
+  `resume_chat_by_id` just sets `_chat_id` (attach semantics, same as `-c`);
+  borderline UX, not incorrect behavior.
+- CliCompleter `_file_cache` cached forever → files created by a task are not
+  @-mentionable later; CONSISTENT with the extension (vscode `_file_cache` is
+  only wiped on work_dir switch, commands.py:766) — not an inconsistency.
+- `/clear` prints "Started a new chat" even for non-Chat agents — unreachable:
+  run_repl only ever receives ChatSorcarAgent/WorktreeSorcarAgent (main() in
+  worktree_sorcar_agent.py forces use_chat in interactive mode).
+- stale `_answer_q` item race (CLI analog of vscode BUG-5E-3): single input
+  source; double-Enter in one chunk hits `queue.Full` → dropped; the
+  get()-to-clear() window is microseconds and unreachable by a human — the
+  realistic multi-viewer path of 5E-3 does not exist in the CLI.
+- X10 mouse-report bytes (ESC\[M + 3 raw bytes) could type 3 garbage chars,
+  but the box never enables mouse reporting — unreachable without external
+  terminal state corruption.
+- `_partial_suffix_len`/pending-paste clamp math re-verified; ESC-at-chunk-end
+  inside paste consistent with unsplit stripping; CSI param/intermediate/final
+  byte ranges correct; `stop()` erase-row math correct for \_BOX_H.
+- panel_top/panel_bottom use len() not display width — only ASCII titles ever
+  passed (STEER_TITLE/IDLE_TITLE/queued-status/answer-title), prior iterations
+  already ruled this OK.
+- cli_helpers `_print_recent_chats` timestamp float() — values come from the
+  DB REAL column (NaN extra sanitised in 5A-1); `_build_run_kwargs`,
+  `_print_result`, `print_outcome` re-checked clean.
+
+REMAINING (next session): run full CLI test sweep (all test_cli\_\* +
+test_bughunt*cli*/paste/sigcont/tiny_resize/prompt_markers/interrupt_lock/
+c1_controls/ctrlc_prompt_border + the 2 new bughunt6 files), `uv run check --full`, commit. Optionally probe: anything in `_read_line` continuation
+cursor math under resize (deemed marginal), Ctrl+C during `_handle_slash`
+prints no Goodbye (marginal, not fixing).
+
+### Iteration 6 — Group F (web_server/diff_merge/merge_flow) — session 1 notes
+
+- Read all PROGRESS history for groups F (iter 3/4/5 fixed + verified-not-bug lists).
+- Read diff_merge.py IN FULL (827 lines). Candidate leads from this read (NOT yet
+  verified — verify with throwaway repos next session before writing tests):
+  1. `_load_gitignore_dirs`: negation lines (`!keep/`) are skipped entirely — but a
+     PRIOR broad ignore (e.g. `build`) still hides re-included dirs in `_scan_files`;
+     also an ignore entry like `foo` matches dirs at ANY depth by name — files named
+     in .gitignore (not dirs) also added to skip → harmless for dirs[:] filter but
+     `skip` only filters DIRS, never files: a .gitignore'd FILE (e.g. `secret.env`)
+     still appears in `_scan_files` output (inconsistency vs docstring "respecting
+     .gitignore"). Marginal — check who consumes `_scan_files` (autocomplete file
+     list?) before deciding.
+  1. `_prepare_merge_view` deleted-TEXT-file placeholder is written with
+     `write_text("")` BEFORE `_write_base_copy` — fine. But `current` placeholder for
+     deleted text file = empty file; `hunks` were computed from git diff (post_hunks)
+     coordinates of base vs EMPTY — check reject-single-hunk on a DELETED file via
+     web_server `_reject_hunk_in_file(write_to=target)` writes to target (restores) —
+     iter-3 covered deleted-binary; deleted-text per-hunk reject probably covered.
+  1. `_file_changed` compares md5 but `pre_file_hashes` may contain hash for file
+     that agent DELETED: `(Path/work_dir/fname).read_bytes()` raises OSError →
+     `return True` (treated changed) — ok.
+  1. `_capture_untracked` with `core.quotepath=false` + `_unquote_git_path` — covered
+     iter 3.
+  1. `_save_untracked_base` atomic swap: on os.replace(staging→base_dir) failure
+     rolls back; but `shutil.copy2` of a file with size check TOCTOU — marginal.
+  1. `_parse_diff_hunks`: mode-only changes produce `diff --git` header with NO hunks
+     and NO "Binary files" line → fname never enters post_hunks (current_file set but
+     no hunk lines) — wait, it DOES enter only via hunks.setdefault on Binary/hunk
+     lines; mode-only → absent → invisible. By-design-ish (nothing to review?) but a
+     chmod +x by agent is silently unreviewable and merge view says "No changes" if
+     that's the only change. CHECK: worktree flow would still commit it. Candidate.
+  1. `_diff_header_path` fallback `^diff --git a/.* b/(.*)` — for rename with
+     " b/" inside OLD name could mis-split, but --no-renames is used in
+     \_parse_diff_hunks... ub_dir copy `saved_base.is_file()` follows symlinks —
+     symlink handling fixed iter-4 on reject path only.
+- NOT yet read this session: merge_flow.py (904 L), web_server.py merge regions.
+  web_server regions of interest (line refs from iter-5 notes): \_WebMergeState +
+  reject helpers 396-710, pending-close 2865-3081, ready/replay/submit/merge-action
+  3440-3815, \_augment_merge_data ~2401.
+- Next session plan: read merge_flow.py + web_server merge regions; probe candidates
+  6 (mode-only change invisible ⇒ "No changes") and 1 (gitignored FILES leak into
+  \_scan_files) with real repos; then untested surfaces: merge view with agent
+  changing file→directory or directory→file; concurrent merges in two TABS same
+  work_dir (per-tab data dirs exist since iter-3); reject of file whose parent dir
+  agent deleted (target dir missing on restore — does _reject_hunk_in_file mkdir
+  parents?); `_handle_submit` upload path. Tests:
+  src/kiss/tests/agents/vscode/test_bughunt6_<short>.py, failing-first.
+- Git state: clean tree at fd65f0eb (iteration-5 complete, all committed).
+
+### Iter 6 group E (vscode server/commands/task_runner) — session 1 notes (context exhausted early)
+
+- Working tree clean at fd65f0eb. Read IN FULL: commands.py (802 lines).
+  Read server.py lines 1-560 only. NOT yet read: server.py 560-1625,
+  task_runner.py (1189), merge_flow.py routing regions.
+- Existing bughunt tests listed (3/4/5 series in src/kiss/tests/agents/vscode/);
+  do not duplicate anything in PROGRESS history above.
+- Candidate leads from commands.py + server.py(1-560) — NONE verified yet:
+  1. `_cmd_select_model` with a tabId but EMPTY model: model falls back to
+     tab.selected_model, then `_record_model_usage(model)` runs → inflates
+     usage count without a real user selection? Check what frontend sends
+     (test_model_usage_on_select_only.py exists — read it first; may be
+     covered/by-design).
+  1. `_resolve_user_answer_queue` multi-viewer fallback: candidate_tabs
+     iteration order arbitrary; if a viewer tab shares subscriptions with TWO
+     owner tabs (stale subscription to an old task id + current), answer could
+     route to the WRONG owner's queue. Check whether cleanup of `_subscribers`
+     on task end (bughunt-srv2 stale-subscriptions fix) makes this impossible.
+  1. `_cmd_complete` with empty query still bumps `_complete_seq_latest[conn]`
+     → marks an in-flight request stale with no replacement (ghost text never
+     arrives). Probably by design (input cleared) — verify worker behavior.
+  1. `_cmd_get_adjacent_task`: falls back to `_tab_chat_views` — fine; but
+     `raw_task_id` parse duplicated instead of `_parse_int` (cosmetic only).
+  1. `_cmd_save_config`: `self.work_dir = new_work_dir` without `_state_lock`
+     (other mutations of work_dir take the lock in `_cmd_set_work_dir`) —
+     benign str assignment? Also `cfg` may contain non-dict (cmd.get("config",
+     {}) could be a list) → `cfg.get` raises AttributeError → kills transport
+     receive loop? CHECK: `_handle_command` callers wrap exceptions? (verify
+     how web_server dispatches — if no try/except, malformed saveConfig kills
+     the connection: would mirror iter-3 unhashable-type bug class).
+  1. `_cmd_record_file_usage`: `path` unvalidated non-str (e.g. dict) →
+     `_record_file_usage` may raise → same transport-kill class. Check
+     guards in persistence.
+  1. `_cmd_user_answer` with ans_tab="" — registry.get("") None → fallback
+     scans subscriber sets for "" membership; harmless? verify.
+- SESSION 1 (continued) RESULTS — 3 NEW bug classes CONFIRMED + FIXED, tests
+  written FIRST (all failed pre-fix, all pass post-fix):
+  - **BUG-6E-1** (server.py `_handle_command` + commands.py handlers): the
+    ws/uds receive loops wrap the whole `async for` in ONE try — any exception
+    escaping `_handle_command` kills the ENTIRE client connection. 15+
+    malformed payloads still raised (probe-verified): non-str `tabId` ([1])
+    in run/userAnswer/appendUserMessage/selectModel/complete/closeTab/newChat/
+    stop/getAdjacentTask/mergeAction (TypeError unhashable);
+    `selectModel` non-str model corrupted tab.selected_model/_default_model
+    to a list BEFORE raising sqlite ProgrammingError; `setWorkDir` non-str
+    workDir silently corrupted daemon-global self.work_dir+printer.work_dir;
+    `recordFileUsage` non-str path (ProgrammingError); `saveConfig` non-dict
+    config/apiKeys (AttributeError); `getHistory` non-str query
+    (AttributeError) / non-int offset (IntegrityError); `getFiles` non-str
+    workDir (unhashable cache key). FIXES: dispatch-boundary coercion in
+    `_handle_command` (non-str tabId/workDir/connId → ""), isinstance guards
+    in _cmd_select_model/_cmd_record_file_usage/_cmd_save_config/
+    _cmd_get_history (uses `_parse_int` for offset/generation)/_cmd_get_files
+    (prefix)/_cmd_complete (query/activeFile/activeFileContent).
+    Test: test_bughunt6_malformed_fields.py (8 tests; 7 failed pre-fix).
+  - **BUG-6E-2** (autocomplete.py `_complete_worker_loop`): the lazily-started
+    SINGLETON worker had no try/except — one malformed `complete` query (dict
+    with ≥2 keys passes the `len(query)<2` guard, AttributeError in
+    `_prefix_match_task`) killed the thread; `_ensure_complete_worker` never
+    restarts it (non-None check) → ghost-text autocomplete dead for the
+    daemon's WHOLE lifetime, all windows. Also `getFiles` non-str prefix
+    crashed the per-request `_do_refresh` thread (TypeError in
+    rank_file_suggestions) → file picker never replied. FIX: try/except in
+    worker loop (+ logger added to autocomplete.py) + the query/prefix guards
+    above. Tests: same file (worker-kill test uses distinct connIds so the
+    per-conn staleness check doesn't skip the poisoned item).
+  - **BUG-6E-3** (task_runner.py `_run_task`): NO exception handler around
+    `_run_task_inner` — any exception raised before its big `try` (non-list
+    `attachments` field → TypeError at `for att in raw_attachments` before
+    even the model check; non-str prompt → TypeError at `prompt[:200]` in
+    the "Task started" log; a git failure re-raised by the
+    `_capture_pre_snapshot` guard) killed the worker thread SILENTLY:
+    spinner stopped (finally broadcasts running=False) but NO
+    result/task_error/task_done event was broadcast or persisted. FIXES:
+    (a) `except Exception` in `_run_task` broadcasting a
+    `result success=False "Task failed: ..."` event; (b) isinstance-list
+    guard on `raw_attachments` (iter-3 only fixed malformed ENTRIES).
+    Test: test_bughunt6_silent_task_death.py (2 tests, both failed pre-fix;
+    prompt test skips when no models available).
+- Verified in passing (not bugs): `_finish_merge` guards empty tab_id;
+  attachments malformed ENTRIES skipped (iter-3); `deleteFrequentTask`
+  non-str task guarded; `_cmd_worktree_action`/`_cmd_autocommit_action`
+  wrap/route safely; `_translate_webview_command` non-str type safe;
+  `_resolve_user_answer_queue` multi-owner mis-route requires stale
+  subscriptions already fixed in bughunt-srv2.
+- REMAINING for this iteration: run impacted vscode test sweep + `uv run
+  check --full`, commit. (Candidate leads list below was session-1 planning;
+  items 1-7 are now resolved by the fixes/probes above except: model-usage
+  inflation on empty selectModel (verified harmless — `_record_model_usage`
+  only runs when a model string exists; empty model returns early), complete
+  empty-query staleness bump (by design: clears pending ghost).)
+- OLD SESSION-1 PLAN (superseded): (a) check how `_handle_command` exceptions are handled by
+  web_server dispatch (UDS + WS) — if unprotected, malformed-payload bugs in
+  6/7 above are real (write tests per bughunt3_dispatch_malformed.py recipe,
+  which may already cover some — READ IT FIRST); (b) read server.py 560-1625
+  (esp. \_stop_task, \_close_tab, \_new_chat, \_replay_session,
+  \_teardown_tab_resources, \_generate_commit_message/\_generate_followup_async,
+  \_subscribe_chat_viewers, \_get_adjacent_task); (c) read task_runner.py fully
+  (pending_user_messages drain, _ask_user_question, attachments, autocommit,
+  result persistence); (d) write failing tests
+  src/kiss/tests/agents/vscode/test_bughunt6_<short>.py (harness recipe:
+  VSCodeServer(); override printer.broadcast; stub SorcarAgent.__mro__[1].run;
+  stub \_server_module.generate_followup_text; tearDown clears
+  \_RunningAgentState.running_agent_states); (e) fix, verify, run impacted
+  tests, `uv run check --full`, commit.

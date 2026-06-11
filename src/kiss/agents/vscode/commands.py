@@ -257,6 +257,13 @@ class _CommandsMixin:
         """
         tab_id = cmd.get("tabId", "")
         model = cmd.get("model", "")
+        if not isinstance(model, str):
+            # A non-string model (malformed payload) must neither
+            # corrupt ``tab.selected_model`` / ``self._default_model``
+            # nor raise ``sqlite3.ProgrammingError`` out of
+            # ``_record_model_usage`` (which would kill the client
+            # connection).  Treat it as "no model supplied".
+            model = ""
         with self._state_lock:
             if tab_id:
                 tab = self._get_tab(tab_id)
@@ -270,10 +277,18 @@ class _CommandsMixin:
 
     def _cmd_get_history(self, cmd: dict[str, Any]) -> None:
         """Send conversation history to the requesting connection only."""
+        query = cmd.get("query")
+        if not isinstance(query, str):
+            # A non-string query raises AttributeError inside
+            # ``_search_history``'s LIKE escaping and kills the
+            # connection; treat it as "no filter".
+            query = None
+        offset = _parse_int(cmd.get("offset", 0))
+        generation = _parse_int(cmd.get("generation", 0))
         self._get_history(
-            cmd.get("query"),
-            cmd.get("offset", 0),
-            cmd.get("generation", 0),
+            query,
+            0 if offset is None else offset,
+            0 if generation is None else generation,
             cmd.get("connId", ""),
         )
 
@@ -318,8 +333,14 @@ class _CommandsMixin:
         requesting connection (via ``connId``) so typing ``@`` in one
         VS Code window never pops the file picker in another window.
         """
+        prefix = cmd.get("prefix", "")
+        if not isinstance(prefix, str):
+            # A non-string prefix crashes the background refresh
+            # thread (TypeError in ``rank_file_suggestions``) and the
+            # file picker never receives its reply.
+            prefix = ""
         self._get_files(
-            cmd.get("prefix", ""),
+            prefix,
             cmd.get("workDir", ""),
             cmd.get("connId", ""),
         )
@@ -335,7 +356,9 @@ class _CommandsMixin:
         without conditional branching.
         """
         path = cmd.get("path", "")
-        if path:
+        if isinstance(path, str) and path:
+            # A non-string path would raise sqlite3.ProgrammingError
+            # from the parameter binding and kill the connection.
             _record_file_usage(path)
 
     def _cmd_user_answer(self, cmd: dict[str, Any]) -> None:
@@ -520,8 +543,18 @@ class _CommandsMixin:
           window cannot mark the other window's pending request stale.
         """
         query = cmd.get("query", "")
+        if not isinstance(query, str):
+            # A non-string query queued to the singleton autocomplete
+            # worker killed the worker thread (AttributeError inside
+            # ``_prefix_match_task``); the worker is never restarted,
+            # so ghost text would die for the daemon's whole lifetime.
+            query = ""
         active_file = cmd.get("activeFile")
         active_content = cmd.get("activeFileContent")
+        if active_file is not None and not isinstance(active_file, str):
+            active_file = ""
+        if active_content is not None and not isinstance(active_content, str):
+            active_content = ""
         conn_id = cmd.get("connId", "")
         tab_id = cmd.get("tabId", "")
         chat_id = ""
@@ -683,6 +716,10 @@ class _CommandsMixin:
 
         prev_password = load_config().get("remote_password", "")
         cfg = cmd.get("config", {})
+        if not isinstance(cfg, dict):
+            # A non-dict config (malformed payload) raises
+            # AttributeError below and kills the connection.
+            cfg = {}
         # Guard: never overwrite a non-empty remote_password with an
         # empty one from the frontend.  An empty value typically comes
         # from a race condition (config sidebar closed before the async
@@ -697,8 +734,10 @@ class _CommandsMixin:
             self.work_dir = new_work_dir
 
         api_keys = cmd.get("apiKeys", {})
+        if not isinstance(api_keys, dict):
+            api_keys = {}
         for key_name, key_value in api_keys.items():
-            if key_value:
+            if isinstance(key_name, str) and isinstance(key_value, str) and key_value:
                 save_api_key_to_shell(key_name, key_value)
 
         conn_id = cmd.get("connId", "")
