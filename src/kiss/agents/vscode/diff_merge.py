@@ -18,9 +18,50 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from kiss.agents.sorcar.git_worktree import _unquote_git_path
 from kiss.core import config as config_module
 
 logger = logging.getLogger(__name__)
+
+
+def _split_lines_keepends(text: str) -> list[str]:
+    """Split *text* on ``\\n`` only, keeping the newline on each line.
+
+    Unlike ``str.splitlines``, this does NOT split on ``\\r``, ``\\v``,
+    ``\\f``, ``\\u2028`` etc., so line numbering matches git's (and the
+    browser's) ``\\n``-based counting, and CRLF endings stay attached
+    to their lines instead of being lost.
+
+    Args:
+        text: File content (read with newline translation disabled).
+
+    Returns:
+        List of lines, each (except possibly the last) ending in ``\\n``.
+    """
+    if not text:
+        return []
+    lines = text.split("\n")
+    out = [ln + "\n" for ln in lines[:-1]]
+    if lines[-1]:
+        out.append(lines[-1])
+    return out
+
+
+def _read_lines_preserved(path: str | Path) -> list[str]:
+    """Read a text file without newline translation and split into lines.
+
+    Args:
+        path: File to read.
+
+    Returns:
+        Lines with their original line endings (CRLF preserved).
+
+    Raises:
+        OSError: If the file cannot be read.
+        UnicodeDecodeError: If the content is not decodable text.
+    """
+    with open(path, newline="") as f:
+        return _split_lines_keepends(f.read())
 
 
 def _load_gitignore_dirs(work_dir: str) -> set[str]:
@@ -186,6 +227,47 @@ def _parse_hunk_line(line: str) -> tuple[int, int, int, int] | None:
     )
 
 
+_QUOTED_PAIR_HEADER_RE = re.compile(
+    r'^diff --git "a/(?:[^"\\]|\\.)*" "b/((?:[^"\\]|\\.)*)"$',
+)
+_QUOTED_B_HEADER_RE = re.compile(r'^diff --git .* "b/((?:[^"\\]|\\.)*)"$')
+
+
+def _diff_header_path(line: str) -> str | None:
+    """Extract the (new-side) file path from a ``diff --git`` header line.
+
+    Handles git's C-quoted form: even with ``core.quotepath=false``,
+    git quotes a path containing double-quotes, backslashes, or control
+    characters — e.g. ``diff --git "a/qu\\"ote.txt" "b/qu\\"ote.txt"``.
+    Without quote handling, such a header matches neither plain regex,
+    so the previous file's name stays current and the quoted file's
+    hunks are misattributed to it.
+
+    Args:
+        line: A line beginning with ``diff --git ``.
+
+    Returns:
+        The unquoted path of the ``b/`` side, or ``None`` when the
+        line cannot be parsed.
+    """
+    # Prefer the unambiguous symmetric form ``a/<path> b/<path>``
+    # (a backreference forces both sides to be identical).  A path
+    # containing the substring " b/" — e.g. a file inside a
+    # directory named "x b" — makes the greedy fallback regex
+    # consume up to the LAST " b/" and return a bogus suffix, so
+    # the fallback is only used when the sides differ (renames).
+    dm = re.match(r"^diff --git a/(.*) b/\1$", line)
+    if dm:
+        return dm.group(1)
+    qm = _QUOTED_PAIR_HEADER_RE.match(line) or _QUOTED_B_HEADER_RE.match(line)
+    if qm:
+        return _unquote_git_path('"' + qm.group(1) + '"')
+    dm = re.match(r"^diff --git a/.* b/(.*)", line)
+    if dm:
+        return dm.group(1)
+    return None
+
+
 def _parse_diff_hunks(
     work_dir: str,
     base_ref: str = "HEAD",
@@ -213,18 +295,11 @@ def _parse_diff_hunks(
     hunks: dict[str, list[tuple[int, int, int, int]]] = {}
     current_file = ""
     for line in result.stdout.split("\n"):
-        # Prefer the unambiguous symmetric form ``a/<path> b/<path>``
-        # (a backreference forces both sides to be identical).  A path
-        # containing the substring " b/" — e.g. a file inside a
-        # directory named "x b" — makes the greedy fallback regex
-        # consume up to the LAST " b/" and return a bogus suffix, so
-        # the fallback is only used when the sides differ (renames).
-        dm = re.match(r"^diff --git a/(.*) b/\1$", line)
-        if dm is None:
-            dm = re.match(r"^diff --git a/.* b/(.*)", line)
-        if dm:
-            current_file = dm.group(1)
-            continue
+        if line.startswith("diff --git "):
+            header_path = _diff_header_path(line)
+            if header_path is not None:
+                current_file = header_path
+                continue
         # Detect binary files: git outputs "Binary files ... differ"
         if current_file and line.startswith("Binary files "):
             hunks.setdefault(current_file, [])
@@ -245,7 +320,15 @@ def _capture_untracked(work_dir: str) -> set[str]:
         Set of untracked file paths relative to work_dir.
     """
     result = _git(work_dir, "ls-files", "--others", "--exclude-standard")
-    return {line.strip() for line in result.stdout.split("\n") if line.strip()}
+    # Unquote git's C-quoted form: even with ``core.quotepath=false``,
+    # paths containing double-quotes, backslashes, or control chars
+    # come back quoted (e.g. ``"new\"file.txt"``) and would not match
+    # any path on disk.
+    return {
+        _unquote_git_path(line.strip())
+        for line in result.stdout.split("\n")
+        if line.strip()
+    }
 
 
 def _snapshot_files(work_dir: str, fnames: set[str]) -> dict[str, str]:
@@ -406,12 +489,16 @@ def _diff_files(base_path: str, current_path: str) -> list[tuple[int, int, int, 
     # (or UTF-16) file would otherwise propagate and break merge for the
     # whole tab — match the more permissive guard already used in
     # ``_file_as_new_hunks``.
+    # Lines are read without newline translation and split on ``\n``
+    # only (see ``_read_lines_preserved``) so the hunk line numbers
+    # agree with git's ``\n``-based counting and with the reject path
+    # in ``web_server``, which writes the preserved endings back.
     try:
-        base_lines = Path(base_path).read_text().splitlines(keepends=True)
+        base_lines = _read_lines_preserved(base_path)
     except (OSError, UnicodeDecodeError):
         base_lines = []
     try:
-        current_lines = Path(current_path).read_text().splitlines(keepends=True)
+        current_lines = _read_lines_preserved(current_path)
     except (OSError, UnicodeDecodeError):
         current_lines = []
     hunks: list[tuple[int, int, int, int]] = []
@@ -487,7 +574,10 @@ def _file_as_new_hunks(fpath: Path) -> list[dict[str, int]]:
     try:
         if not fpath.is_file() or fpath.stat().st_size > 2_000_000:
             return []
-        line_count = len(fpath.read_text().splitlines())
+        # ``\n``-based counting (not ``splitlines``) so the count
+        # matches git's and the browser's line numbering even for
+        # content containing ``\r``/``\f``/``\u2028`` characters.
+        line_count = len(_read_lines_preserved(fpath))
         return [{"bs": 0, "bc": 0, "cs": 0, "cc": line_count}] if line_count else []
     except (OSError, UnicodeDecodeError):
         logger.debug("Exception caught", exc_info=True)
@@ -625,7 +715,13 @@ def _prepare_merge_view(
         if not _file_changed(fname):
             continue
         fpath = Path(work_dir) / fname
-        if not hunks and fpath.is_file() and _is_binary_file(fpath):
+        if not hunks and (not fpath.is_file() or _is_binary_file(fpath)):
+            # An empty hunk list means git printed "Binary files …
+            # differ" (or a mode-only change, excluded by the binary
+            # sniff).  When the file is MISSING on disk this is a
+            # deleted binary — text deletions always produce hunks —
+            # which must still be reviewable (and restorable on
+            # reject), like deleted text files are.
             binary_files.add(fname)
             continue
         filtered = _agent_file_hunks(work_dir, fname, ub_dir, pre_hunks, hunks)
@@ -690,9 +786,18 @@ def _prepare_merge_view(
             },
         )
     for fname in sorted(binary_files):
-        current_path = Path(work_dir) / fname
+        target_path = Path(work_dir) / fname
+        current_path = target_path
         if not current_path.is_file():
-            continue
+            # The agent deleted a tracked binary file.  Like deleted
+            # text files above, use an empty ``.deleted`` placeholder
+            # as the visible "current" so the review UI has something
+            # to render, while ``target`` keeps the real workspace
+            # path so rejecting the deletion restores the file there.
+            deleted_placeholder = merge_dir / ".deleted" / fname
+            deleted_placeholder.parent.mkdir(parents=True, exist_ok=True)
+            deleted_placeholder.write_bytes(b"")
+            current_path = deleted_placeholder
         base_path = _write_base_copy(
             work_dir, merge_dir, ub_dir, fname, base_ref, binary=True,
         )
@@ -701,7 +806,7 @@ def _prepare_merge_view(
                 "name": fname,
                 "base": str(base_path),
                 "current": str(current_path),
-                "target": str(current_path),
+                "target": str(target_path),
                 "hunks": [{"bs": 0, "bc": 0, "cs": 0, "cc": 0}],
                 "binary": True,
             },

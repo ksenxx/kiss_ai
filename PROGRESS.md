@@ -1,181 +1,93 @@
 # Task: Bug-hunt iteration 3, group E (vscode backend: server.py / commands.py / task_runner.py)
 
-Find NEW bugs (16 already fixed in rounds 1-2 — do not re-report), reproduce each with a
-failing-first integration test `src/kiss/tests/agents/vscode/test_bughunt3_<short>.py`,
-then fix root cause, run impacted tests + `uv run check --full`.
+## Session 2 state — ALL 6 BUGS FIXED, tests written failing-first and now passing
 
-## Session 1 state (context exhausted at investigation phase — NO code changes made yet)
+### Bugs fixed (file:line, root cause, fix, test)
 
-### Files fully read & understood
-- src/kiss/agents/vscode/server.py (1595 lines)
-- src/kiss/agents/vscode/commands.py (743 lines)
-- src/kiss/agents/vscode/task_runner.py (1148 lines)
-- src/kiss/agents/sorcar/running_agent_state.py
-- web_server.py dispatch path: `_ws_handler`/`_uds_handler` loop → `_dispatch_client_command`
-  → `_run_cmd` → executor → `VSCodeServer._handle_command`. The `try` in both handlers wraps
-  the whole `async for` receive loop, so ANY exception escaping `_handle_command`
-  **terminates the entire client connection** (whole VS Code window / browser tab) and
-  triggers deferred closeTab of every tab on it.
+1. **BUG-A** server.py `_handle_command`: unhashable `type` (`{"type": []}`) raised
+   TypeError out of the dispatcher → killed the whole client connection.
+   Fix: `self._HANDLERS.get(cmd_type) if isinstance(cmd_type, str) else None` →
+   routes to the unknown-command error branch.
+   Test: test_bughunt3_dispatch_malformed.py::test_unhashable_type_field_does_not_raise
+1. **BUG-B** commands.py: unguarded `int()` in `_cmd_delete_task`, `_cmd_set_favorite`,
+   `_cmd_resume_session`, `_cmd_get_frequent_tasks` → ValueError on `"abc"` killed the
+   connection. Fix: new module-level `_parse_int(value) -> int | None` helper used by
+   all four (limit falls back to 50).
+   Tests: test_bughunt3_dispatch_malformed.py (4 tests).
+1. **BUG-C** commands.py `_cmd_run`: busy guard `task_thread is not None and is_alive()`
+   raced the post-lock `thread.start()` — a concurrent second submit saw a created-but-
+   unstarted thread, passed the guard, clobbered stop_event/user_answer_queue/task_thread.
+   Fix: guard is now `task_thread is not None` (non-None ⇔ task in flight; `_run_task`'s
+   finally always resets it to None).
+   Test: test_bughunt3_run_start_race.py (deterministic via blocking broadcast).
+1. **BUG-D** task_runner.py `_run_task_inner`: malformed attachment (bad base64 /
+   non-dict) raised binascii.Error/AttributeError before the big try; `_run_task` has no
+   except → task thread died silently. Fix: per-attachment try/except, skip + log.
+   Test: test_bughunt3_bad_attachment.py (2 tests).
+1. **BUG-E** server.py `_new_chat` + commands.py `_cmd_select_model`: empty tabId minted a
+   permanent phantom registry entry keyed "" (undisposable — `_cmd_close_tab` guards empty
+   ids). Fix: `_new_chat` early-returns on empty tab_id; `_cmd_select_model` only touches
+   the registry when tab_id is non-empty (still updates `_default_model` when a model is
+   supplied). Test: test_bughunt3_newchat_phantom_tab.py (2 tests).
+1. **BUG-F** commands.py `_cmd_user_answer`: non-string `answer` (None/number) was put on
+   `Queue[str]` → `ask_user_question` returned None where str promised. Fix: coerce
+   (None → "", other non-str → str(x)). Test: test_bughunt3_useranswer_nonstring.py (2 tests).
 
-### CONFIRMED new bugs (reproduced via tmp/repro1.py, since deleted; output below)
+### Verification status
 
-1. **BUG-A — server.py `_handle_command` (~line 330): unhashable `type` field kills connection.**
-   `cmd_type = cmd.get("type", "")` then `self._HANDLERS.get(cmd_type)` raises
-   `TypeError: unhashable type` for `{"type": []}` / `{"type": {}}`.
-   Repro output: `A: RAISED TypeError cannot use 'list' as a dict key`.
-   Fix: `if not isinstance(cmd_type, str):` route to the existing unknown-command error
-   branch (use `f"Unknown command: {cmd_type!r}"`-safe formatting).
+- All 5 new test files: 11 failed pre-fix → 12/12 pass post-fix. (The threaded
+  excepthook test originally used `"!!!"` which b64decode silently ignores — data
+  strengthened to `"%%%not-b64%%%"`.)
+- TODO (this session, in order): run existing impacted tests
+  (src/kiss/tests/agents/vscode + src/kiss/tests/agents/sorcar/test_vscode_tabs.py),
+  fix regressions; `uv run check --full`; clean tmp/; final per-bug report.
+  NOTE: `_cmd_select_model` semantics changed slightly — watch
+  test_vscode_tabs.py selectModel tests for regressions.
 
-2. **BUG-B — commands.py: 4 handlers crash (→ connection death) on malformed numeric fields,
-   inconsistent with `_cmd_get_adjacent_task` which guards its `int()` with try/except.**
-   - `_cmd_delete_task`: `int(task_id)` — `{"taskId": "abc"}` → ValueError
-   - `_cmd_set_favorite`: `int(task_id)` — same
-   - `_cmd_resume_session`: `int(raw_task_id)` — same
-   - `_cmd_get_frequent_tasks`: `int(cmd.get("limit", 50))` — same
-   All confirmed raising ValueError. Fix: guarded int parse (small shared helper in
-   commands.py, e.g. `_parse_int(value) -> int | None`), ignore/None on garbage like
-   `_cmd_get_adjacent_task` does (for limit fall back to 50).
+# Task: Bug-hunt iteration 3, group C (sorcar CLI: cli_repl.py / cli_steering.py / cli_helpers.py / cli_panel.py)
 
-3. **BUG-C — commands.py `_cmd_run` concurrent-start race (NOT yet repro'd, by code reading).**
-   Guard is `if tab.task_thread is not None and tab.task_thread.is_alive(): return`,
-   but `tab.task_thread = thread` is set under `_state_lock` while `thread.start()`
-   happens AFTER releasing the lock and after `printer.broadcast({"type":"clear",...})`
-   (network I/O — wide window). A created-but-not-started thread has `is_alive() == False`,
-   so a second concurrent `_cmd_run` for the same tab passes the guard, **clobbers
-   `tab.stop_event` / `tab.user_answer_queue` / `tab.task_thread`** and both threads then
-   start → two concurrent tasks on one tab/chat; first task becomes unstoppable
-   (its stop_event/task_thread references were overwritten; `_run_task`'s finally then
-   nulls the second task's state while it still runs).
-   Fix: treat the tab as busy whenever `tab.task_thread is not None` (the `_run_task`
-   outer finally always resets it to None under the lock, so non-None ⇔ task in flight
-   or about to start). Verified no other production code assigns `task_thread` besides
-   `_cmd_run` (commands.py:186) and the finally (task_runner.py:160).
-   Test idea (deterministic, no mocks): duck-typed printer whose `broadcast` blocks on
-   the first "clear" event until a second `_cmd_run` (from another thread) has executed;
-   pre-fix both runs proceed (2 "clear" events / task_thread clobbered), post-fix the
-   second submit is silently dropped (1 "clear"). Stub agent via the existing precedent
-   `SorcarAgent.__mro__[1].run` replacement (see test_bughunt_server_runner.py `_BugHuntBase`).
+## Final state — ALL 4 NEW BUGS FIXED, tests written failing-first and now passing
 
-4. **BUG-D — task_runner.py `_run_task_inner` (~line 240): malformed attachment kills the
-   task thread with no user-visible error.** `base64.b64decode(att.get("data",""))` raises
-   `binascii.Error` (and non-dict att → AttributeError) BEFORE the big try; `_run_task`
-   has try/finally but **no except**, so the exception propagates to threading excepthook:
-   user sees spinner stop (`status running:false` from the finally) with no result/error
-   event, nothing persisted. Fix: wrap per-attachment decode in try/except, skip bad
-   attachments (log) — or broadcast an error result; pick skip+log as root-cause-minimal.
-   Test: call `server._run_task({...,"attachments":[{"data":"%%%not-b64%%%","mimeType":"x"}]})`
-   synchronously with capture printer; pre-fix raises binascii.Error out of `_run_task`.
+### Bugs fixed (file:line, root cause, fix, test)
 
-5. **BUG-E — server.py `_new_chat` / commands.py `_cmd_new_chat`: empty tabId creates a
-   permanent phantom registry entry keyed `""` (+ a WorktreeSorcarAgent via `_get_tab`).**
-   Confirmed: `{"type": "newChat"}` → registry gains key `''`. `_cmd_close_tab` guards
-   empty tabId, so the phantom can NEVER be disposed. Inconsistent with `_stop_task` /
-   `_replay_session`, which both no-op on empty tab_id. Fix: early-return in `_new_chat`
-   when `not tab_id` (mirror `_replay_session`'s logger.debug pattern). Check whether
-   `_cmd_select_model` has the same hole (it calls `_get_tab(cmd.get("tabId",""))` —
-   confirm and fix consistently, but check existing tests that may call selectModel
-   without tabId first: `grep -rn selectModel src/kiss/tests`).
+1. **BUG-A** cli_steering.py `_InputBox.feed`: multi-byte UTF-8 split across
+   `os.read` chunks was destroyed (`data.decode("utf-8", "ignore")` per chunk),
+   so a pasted emoji/é arriving in two reads silently vanished. Fix: instance
+   `codecs.getincrementaldecoder("utf-8")(errors="ignore")` buffers partial
+   trailing bytes across feed() calls. Test: test_bughunt3_utf8_split.py (3 tests).
+1. **BUG-B** cli_steering.py `_InputBox.feed`: escape sequences split across
+   reads typed garbage — `ESC` then `[A` typed literal `[A`; split Shift+Enter
+   (`ESC[13;2` + `u`) typed `u` instead of newline; split SS3/Ctrl+arrow typed
+   the final byte. Fix: incomplete ESC/CSI/SS3 tails are saved in
+   `_pending_esc` and prepended to the next chunk (capped at 64 chars).
+   Test: test_bughunt3_split_escape.py (7 tests).
+1. **BUG-C** cli_panel.py `clip_buf`/`panel_body`/`body_cursor_col`: width math
+   used `len()` (code points), not display columns — CJK/emoji buffers rendered
+   a body row wider than the panel (right border pushed off the line) and
+   parked the caret in the wrong column. Fix: new `char_width`/`display_width`
+   helpers (east_asian_width W/F → 2, combining → 0) + `_clip_pad`; all three
+   call sites converted. ASCII geometry unchanged.
+   Test: test_bughunt3_wide_chars.py (7 tests).
+1. **BUG-D** cli_steering.py: terminal resize never re-anchored the box —
+   `start()` emitted the DECSTBM scroll region once; after a resize the box
+   drew at the new bottom rows while output kept scrolling in the stale region,
+   corrupting the box. Fix: `_InputBox._rows` tracks the region's rows;
+   `_draw_locked` re-emits `ESC[1;{rows-3}r` + re-saves the output cursor on
+   change; `SteeringSession._loop` polls `_term_size()` each 100 ms select
+   timeout and redraws on change. Test: test_bughunt3_resize.py (3 tests).
 
-6. **BUG-F — commands.py `_cmd_user_answer`: non-string `answer` (e.g. None) is put on the
-   `queue.Queue[str]`** and returned verbatim by `_await_user_response` → agent's
-   `ask_user_question` callback returns None where str promised. Confirmed: queue item
-   `None`. Fix: coerce — `ans = cmd.get("answer"); ans = "" if ans is None else str(ans) if not isinstance(ans, str) else ans`.
+### Non-bugs verified (do NOT revisit)
 
-### Plan for next session (chronological)
-1. Re-read the exact regions before editing (Read-before-Edit rule): server.py
-   `_handle_command` + `_new_chat`; commands.py `_cmd_delete_task`/`_cmd_set_favorite`/
-   `_cmd_resume_session`/`_cmd_get_frequent_tasks`/`_cmd_run`/`_cmd_user_answer`/
-   `_cmd_select_model`; task_runner.py attachment-decode block in `_run_task_inner`.
-2. Write failing-first tests (one file per bug, style of test_bughunt_server_runner.py:
-   `VSCodeServer()` + capture-printer, `_RunningAgentState.running_agent_states.clear()`
-   in tearDown; root tests/conftest.py already isolates KISS_HOME):
-   - test_bughunt3_dispatch_malformed.py  (BUG-A + BUG-B: assert `_handle_command` does
-     not raise and, for BUG-A, emits an "error" event; for BUG-B handlers assert no raise)
-   - test_bughunt3_run_start_race.py      (BUG-C, blocking duck-typed printer)
-   - test_bughunt3_bad_attachment.py      (BUG-D)
-   - test_bughunt3_newchat_phantom_tab.py (BUG-E)
-   - test_bughunt3_useranswer_nonstring.py(BUG-F)
-   Run each, confirm FAIL pre-fix.
-3. Apply fixes listed above; confirm tests pass.
-4. Run impacted existing tests: `uv run pytest src/kiss/tests/agents/vscode -v` (count
-   tests first; if >100 split across cores-2 via run_parallel) plus
-   `src/kiss/tests/agents/sorcar` if persistence-adjacent (not expected).
-5. `uv run check --full`; fix all errors.
-6. Update this PROGRESS.md with results; clean tmp/ (tmp/repro1.py already created —
-   DELETE it); finish with per-bug report (file:line, root cause, fix, test name).
+resume_chat_by_id never raises on unknown id; `_on_submit` redraw via feed's
+changed flag; panel_top/panel_bottom math; empty-line submit ignored; Ctrl+D in
+box ignored; mouse/CSI-u modes never enabled; `_StdoutProxy` delegation;
+registry pop atomicity; print_outcome contract; `_history_path` digest;
+readline prompt \\001/\\002 markers and KeyboardInterrupt race deemed not
+deterministically testable. cli_repl.py and cli_helpers.py needed NO changes.
 
-### Notes
-- NO source edits made yet; only tmp/repro1.py scratch (delete it).
-- Conventions: tests live in src/kiss/tests/agents/vscode/; existing precedent allows
-  replacing `SorcarAgent.__mro__[1].run` with a stub fn and assigning
-  `server.printer.broadcast = capture` (duck-typed), per `_BugHuntBase`.
-- Previous rounds' bugs (do not re-report): see list earlier in git history of this file
-  (16 bugs, tests named test_bughunt_* / test_bughunt*2*).
+### Verification status
 
----
-
-# Bug-hunt iteration 3, group G (vscode helpers + frontend protocol consistency)
-
-Scope: autocomplete.py, helpers.py, json_printer.py, vscode_config.py,
-media/*.js, src/*.ts vs Python backend protocol. New tests: Python
-src/kiss/tests/agents/vscode/test_bughunt3_<short>.py, JS
-src/kiss/agents/vscode/test/bughunt3_<short>.test.js (jsdom pattern of
-bughunt2_status_timer.test.js: load chat.html + panelCopy.js + main.js, stub
-acquireVsCodeApi, dispatch MessageEvent; run `node <file>`).
-
-## Session 1 (investigation, no code changes yet)
-
-Fully read: autocomplete.py, helpers.py, json_printer.py, vscode_config.py,
-core/printer.py helpers (parse_result_yaml guarantees 'summary' key →
-`_broadcast_result`'s `parsed["summary"]` is safe). Diffed backend-emitted
-event types (grep '"type": "..."' in vscode/sorcar *.py) against main.js
-`case` list (lines 1674-3354), types.ts union, SorcarSidebarView.ts handlers.
-Handled elsewhere (NOT bugs): activeTasksResponse/auth_* (web/extension layer),
-autocommit_progress + worktree_created/progress (SorcarSidebarView.ts:375-425),
-closeTab (SorcarSidebarView.ts:1150).
-
-### CONFIRMED BUG G1 — helpers.clip_autocomplete_suggestion echo-strips
-already-suffix suggestions. Only 2 call sites, both pass pure suffixes
-(autocomplete.py:180 `fast`; cli_repl.py:240 via `_active_file_suffix`), no
-LLM in pipeline anymore. `if s.lower().startswith(query.lower()): s =
-s[len(query):]` double-strips suffixes that begin with the query: active file
-"x = quxqux_token", query "qux" → suffix "qux_token" → clipped "_token" →
-accepting ghost yields "qux_token" instead of "quxqux_token". Same for
-history tasks with doubled words ("do it " + "do it do it again").
-Fix plan: remove echo-strip + fix docstring; update stale unit test
-src/kiss/tests/agents/sorcar/test_remaining_branches.py:184
-(test_clip_autocomplete_suggestion_echo_prefix: ("hello","hello world") must
-now expect "hello world").
-Tests: test_bughunt3_autocomplete_echo_strip.py —
-(a) UDS e2e modeled on test_per_window_autocomplete.py (RemoteAccessServer,
-temp uds_path, _generate_self_signed_cert, redirect th._DB_PATH/_db_conn/
-_KISS_DIR; send {"type":"complete","query":"qux","activeFile":...,
-"activeFileContent":"x = quxqux_token\n"}; expect ghost "qux_token");
-(b) CliCompleter._predictive_matches with real temp active_file → expect
-["quxqux_token"].
-
-### CONFIRMED BUG G2 — backend `warning` events silently dropped by frontend.
-worktree_sorcar_agent.py:531-539 `_flush_warnings` broadcasts
-{"type":"warning","message":...} (stash-pop failure + merge-conflict
-warnings) but NO handler exists in main.js / demo.js / types.ts /
-SorcarSidebarView.ts. main.js has error→addError(ev.text) ~2596,
-notice→addNotice(ev.text) ~2600; renderers main.js:3529 ('ev tr err',
-'<strong>Error:</strong> '+esc) / 3537 ('ev tr note'); CSS main.css:623
-(.tr.err), 626 (.tr.note). Warning uses field `message` (not `text`).
-Fix plan: main.js `case 'warning':` (tabId-gated like notice) →
-addWarning(ev.message || ev.text); addWarning renderer 'ev tr warn'
-'<strong>Warning:</strong> '; CSS .tr.warn amber mirror of .tr.err;
-types.ts union `| {type: 'warning'; message: string; tabId?: string}`.
-demo.js unaffected (warning not in _DISPLAY_EVENT_TYPES → never persisted).
-Test: bughunt3_warning_event.test.js (assert .ev element with warning text
-appears; also assert foreign-tabId warning does NOT render).
-
-### TODO next
-- Verify SorcarSidebarView forwards all backend events to webview (grep
-  postMessage) — needed for G2 to reach main.js in the VS Code path.
-- Write failing tests → verify fail → fix → verify pass.
-- Still uninspected: json_printer malformed/streaming/unicode rendering paths
-  in main.js (~1674-2050, esc()/XSS), vscode_config round-trips,
-  rank_file_suggestions edge cases.
-- Then: `npx tsc -p .`, node JS tests (all bughunt* + existing 6), impacted
-  Python tests, `uv run check --full`.
+- 20 bughunt3 group-C tests: 15 failed pre-fix → 20/20 pass post-fix.
+- Full CLI suite (test_cli_panel/repl/steering, test_bughunt_cli\*,
+  test_shift_enter_newline): 74/74 pass, no regressions.
+- `uv run check --full`: passes (after mdformat of this file).

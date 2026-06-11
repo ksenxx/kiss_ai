@@ -189,7 +189,7 @@ ______________________________________________________________________
   - `wt_dir`: Directory for the new worktree.
   - **Returns:** True if worktree was created successfully, False otherwise.
 
-- **remove** — Remove a worktree directory (best-effort, force).<br/>`remove(repo: Path, wt_dir: Path) -> None`
+- **remove** — Remove a worktree directory (best-effort, force). Every caller (`discard`, `cleanup_partial`, `_finalize_worktree`) intends permanent removal of an agent-owned directory, so failures of `git worktree remove` are escalated rather than abandoned: 1. Plain `--force` (handles dirty/untracked content). 2. `--force --force` (git requires force twice for worktrees locked via `git worktree lock`). 3. Direct `rmtree` + `git worktree prune` (handles corrupted worktrees — e.g. a deleted `.git` link file — that fail git's removal validation entirely).<br/>`remove(repo: Path, wt_dir: Path) -> None`
 
   - `repo`: Git repo root path.
   - `wt_dir`: Worktree directory to remove.

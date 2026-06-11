@@ -65,6 +65,27 @@ def _restart_kiss_web_daemon() -> None:
     threading.Thread(target=_do_restart, daemon=True).start()
 
 
+def _parse_int(value: Any) -> int | None:
+    """Parse a frontend-supplied JSON value as an int.
+
+    Mirrors ``_cmd_get_adjacent_task``'s guarded parse so malformed
+    payloads (e.g. ``"taskId": "abc"``) never raise out of a command
+    handler — an escaping exception terminates the transport's whole
+    receive loop and with it the client connection.
+
+    Args:
+        value: Arbitrary value taken from a client command dict.
+
+    Returns:
+        The parsed int, or ``None`` when the value is missing or not
+        int-coercible.
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 class _CommandsMixin:
     """Methods that implement frontend command handlers."""
 
@@ -155,9 +176,21 @@ class _CommandsMixin:
             if tab is None:
                 tab = _RunningAgentState(tab_id, self._default_model)
                 _RunningAgentState.running_agent_states[tab_id] = tab
-            if tab.task_thread is not None and tab.task_thread.is_alive():
-                # A task is already running for this tab — silently drop
-                # the new submit so the user sees no visible effect.
+            if tab.task_thread is not None:
+                # A task is already running — or has been created and is
+                # about to start — for this tab: silently drop the new
+                # submit so the user sees no visible effect.  Checking
+                # ``is_alive()`` here was racy: the winning submit
+                # assigns ``task_thread`` under the lock but calls
+                # ``thread.start()`` only after releasing it (and after
+                # the ``clear`` broadcast — network I/O), so a
+                # concurrent submit could observe a created-but-
+                # unstarted thread (``is_alive() == False``), pass the
+                # guard, and clobber ``stop_event`` /
+                # ``user_answer_queue`` / ``task_thread`` — leaving two
+                # tasks running on one tab with the first unstoppable.
+                # ``_run_task``'s outer finally always resets
+                # ``task_thread`` to None, so non-None ⇔ task in flight.
                 return
             tab.stop_event = threading.Event()
             tab.user_answer_queue = queue.Queue(maxsize=1)
@@ -206,12 +239,24 @@ class _CommandsMixin:
         self._get_models(cmd.get("connId", ""))
 
     def _cmd_select_model(self, cmd: dict[str, Any]) -> None:
-        """Update the selected model for a tab."""
+        """Update the selected model for a tab.
+
+        An empty ``tabId`` (malformed payload) must not mint a phantom
+        registry entry keyed ``""`` via ``_get_tab`` — such an entry
+        could never be disposed because ``_cmd_close_tab`` guards
+        against empty ids.  In that case only the daemon-wide default
+        model is updated (when a model was actually supplied).
+        """
         tab_id = cmd.get("tabId", "")
-        tab = self._get_tab(tab_id)
-        model = cmd.get("model", tab.selected_model)
+        model = cmd.get("model", "")
         with self._state_lock:
-            tab.selected_model = model
+            if tab_id:
+                tab = self._get_tab(tab_id)
+                if not model:
+                    model = tab.selected_model
+                tab.selected_model = model
+            if not model:
+                return
             self._default_model = model
         _record_model_usage(model)
 
@@ -226,15 +271,16 @@ class _CommandsMixin:
 
     def _cmd_get_frequent_tasks(self, cmd: dict[str, Any]) -> None:
         """Send the top-N most-frequent tasks (default 50)."""
+        limit = _parse_int(cmd.get("limit", 50))
         self._get_frequent_tasks(
-            int(cmd.get("limit", 50)), cmd.get("connId", ""),
+            50 if limit is None else limit, cmd.get("connId", ""),
         )
 
     def _cmd_delete_task(self, cmd: dict[str, Any]) -> None:
         """Delete a task from the database and refresh history."""
-        task_id = cmd.get("taskId")
+        task_id = _parse_int(cmd.get("taskId"))
         if task_id is not None:
-            self._handle_delete_task(int(task_id))
+            self._handle_delete_task(task_id)
 
     def _cmd_delete_frequent_task(self, cmd: dict[str, Any]) -> None:
         """Delete a row from the ``frequent_tasks`` table by task text."""
@@ -244,11 +290,11 @@ class _CommandsMixin:
 
     def _cmd_set_favorite(self, cmd: dict[str, Any]) -> None:
         """Persist the favourite flag on a task history row."""
-        task_id = cmd.get("taskId")
+        task_id = _parse_int(cmd.get("taskId"))
         if task_id is None:
             return
         is_favorite = bool(cmd.get("isFavorite", False))
-        self._handle_set_favorite(int(task_id), is_favorite)
+        self._handle_set_favorite(task_id, is_favorite)
 
     def _cmd_get_files(self, cmd: dict[str, Any]) -> None:
         """Send file list for autocomplete, scoped to the tab's work_dir.
@@ -307,8 +353,14 @@ class _CommandsMixin:
                     q.get_nowait()
                 except queue.Empty:  # pragma: no cover — race guard
                     break
+            answer = cmd.get("answer", "")
+            if not isinstance(answer, str):
+                # A non-string answer (e.g. null from a malformed
+                # client) must not leak through the ``Queue[str]`` into
+                # the agent — ``ask_user_question`` promises ``str``.
+                answer = "" if answer is None else str(answer)
             try:
-                q.put_nowait(cmd.get("answer", ""))
+                q.put_nowait(answer)
             except queue.Full:  # pragma: no cover — drained immediately above
                 pass
 
@@ -416,8 +468,7 @@ class _CommandsMixin:
         """
         raw_id = cmd.get("chatId")
         chat_id = str(raw_id) if raw_id else ""
-        raw_task_id = cmd.get("taskId")
-        task_id = int(raw_task_id) if raw_task_id is not None else None
+        task_id = _parse_int(cmd.get("taskId"))
         if chat_id or task_id is not None:
             self._replay_session(
                 chat_id, cmd.get("tabId", ""), task_id=task_id,
