@@ -26,7 +26,9 @@ extension precisely:
   ``/cost``, ``/context``, ``/exit`` …).
 * custom slash commands defined as Markdown files in
   ``~/.kiss/commands`` (user) and ``<project>/.kiss/commands``
-  (project) — see :mod:`kiss.agents.sorcar.custom_commands`.  The file
+  (project), plus Claude Code's ``~/.claude/commands`` and
+  ``<project>/.claude/commands`` — see
+  :mod:`kiss.agents.sorcar.custom_commands`.  The file
   body is a prompt template (``$ARGUMENTS``/``$1``…/``@{file}``/shell
   injection) that is expanded and run as a task; ``/commands`` lists
   them and Tab completes their names.
