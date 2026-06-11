@@ -1372,6 +1372,20 @@ prints no Goodbye (marginal, not fixing).
   these (no corruption; full TS symlink recreation out of scope). Test:
   test_bughunt6_symlink_typechange.py (5 tests; 4 failed pre-fix). Commit
   e30e8505.
+- **BUG-6F-3 FIXED** (diff_merge.py `_prepare_merge_view` + web_server reject
+  path): rejecting the deletion of a mode-100755 file re-created it with
+  default permissions — after a full reject-all the tree was still dirty
+  (`old mode 100755 / new mode 100644`) and the restored script was no longer
+  runnable. Fix: `_symlink_base_paths` generalized to `_base_modes` (one
+  `git ls-tree -z` call); manifest entries with base mode 100755 carry
+  `exec: true`; new `_apply_exec_bit` (read-bits>>2, mirrors git checkout)
+  applied after restore writes in `_restore_base_bytes`/`_reject_hunk_in_file`,
+  plumbed through `_reject_all_hunks_in_file`/`_apply_web_merge_action`.
+  Test: test_bughunt6_exec_bit_reject.py (3 tests; 2 failed pre-fix, non-exec
+  control pinned). Commit 1ca5e47b. (TS MergeManager exec-bit parity out of
+  group-F scope — VS Code native flow loses the bit the same way pre-fix.)
+- Verification: 182 tests across all 24 diff_merge/web_server-importing suites
+  - 432 subtests pass post-fixes; `uv run check --full` clean.
 - Verified NOT bugs / ruled out this round (do NOT re-chase): extension never
   forwards webview `ready` over UDS (no VS Code review-replay duplication —
   `_handle_ready` fan-out is web-only); `_handle_submit` premature
