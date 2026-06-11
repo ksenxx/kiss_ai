@@ -1604,3 +1604,22 @@ prints no Goodbye (marginal, not fixing).
   `htmlhint ... || true` (commit e57db0dd); chat.html is committed/clean and
   vscode-group territory, left untouched.
 - Iteration 6 group A result: 1 NEW bug (6A-1) ⇒ loop continues.
+
+## Iteration 6 — COMPLETE (verified by orchestrator)
+
+15 NEW bugs found+fixed across 7 groups (A:1 favorite-toggle on legacy corrupt-extra
+row flipped subagent classification → chat vanished; B:2 ensure_excluded strict-UTF-8
+crash + cross-repo released_branch reuse merging into wrong branch; C:2 stderr not
+proxied corrupting steering box + slash-command exception killing REPL; D:1 Edit
+rewriting every line ending in CRLF files; E:3 malformed non-string command fields
+killing connections (15+ shapes), poisoned complete query permanently killing the
+autocomplete worker, exceptions escaping \_run_task_inner dying silently; F:3 failing
+reject write killing connection + force-accepting review, tracked-symlink typechange
+reject corruption, exec bit lost on deleted-executable reject; G:3 stale files reply
+re-opening @-picker, ghost quote-strip corrupting completions, non-numeric max_budget
+killing connection). All 51 Python bughunt6 tests + JS test pass; `uv run check --full` green.
+
+## Iteration 7 (current)
+
+- Iteration 6 still found bugs → launching iteration 7, same 7 groups, tests
+  `test_bughunt7_*` / `bughunt7_*.test.js`. Stop when an iteration finds zero bugs.
