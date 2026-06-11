@@ -592,9 +592,17 @@ class _CommandsMixin:
     def _cmd_save_config(self, cmd: dict[str, Any]) -> None:
         """Save configuration and API keys from the frontend.
 
-        When a non-empty ``remote_password`` is saved, restarts the
-        ``kiss-web`` daemon so it picks up the new password and starts
-        (or restarts) its Cloudflare tunnel.
+        When the ``remote_password`` actually *changes* to a non-empty
+        value, restarts the ``kiss-web`` daemon so it picks up the new
+        password and starts (or restarts) its Cloudflare tunnel.
+
+        The change comparison is essential: the webview passively
+        flushes the settings form (settings-panel close, blur/change/
+        Enter on the password inputs), echoing back the already-saved
+        password verbatim.  Restarting on every such echo SIGTERMed the
+        daemon mid-task with no user action — the regression that
+        persisted ``"Task interrupted by server restart/shutdown"`` for
+        in-flight tasks (e.g. task_history row 3515).
         """
         from kiss.agents.vscode.vscode_config import (
             apply_config_to_env,
@@ -603,12 +611,13 @@ class _CommandsMixin:
             save_config,
         )
 
+        prev_password = load_config().get("remote_password", "")
         cfg = cmd.get("config", {})
         # Guard: never overwrite a non-empty remote_password with an
         # empty one from the frontend.  An empty value typically comes
         # from a race condition (config sidebar closed before the async
         # getConfig response populated the form fields).
-        if not cfg.get("remote_password") and load_config().get("remote_password"):
+        if not cfg.get("remote_password") and prev_password:
             cfg.pop("remote_password", None)
         save_config(cfg)
         apply_config_to_env(cfg)
@@ -631,7 +640,12 @@ class _CommandsMixin:
             event["connId"] = conn_id
         self.printer.broadcast(event)
 
-        if cfg.get("remote_password", ""):
+        # Restart only on a genuine password change.  A daemon restart
+        # kills every in-flight agent task, and the frontend re-posts
+        # the unchanged password on passive UI events (panel close,
+        # input blur), so an unconditional restart here is destructive.
+        new_password = cfg.get("remote_password", "")
+        if new_password and new_password != prev_password:
             _restart_kiss_web_daemon()
 
     def _cmd_set_work_dir(self, cmd: dict[str, Any]) -> None:
