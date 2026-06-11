@@ -173,6 +173,40 @@ def _unquote_git_path(path: str) -> str:
     return raw.decode("utf-8", errors="surrogateescape")
 
 
+def _split_rename_tail(tail: str) -> tuple[str, str]:
+    """Split a porcelain rename/copy tail ``old -> new`` into raw sides.
+
+    Each side may independently be C-style quoted (git quotes a path
+    when it contains control characters, double-quotes, or
+    backslashes), so the split must respect quoting and happen BEFORE
+    any unquoting.  The returned sides are still raw (possibly quoted)
+    and must each be passed through :func:`_unquote_git_path` exactly
+    once.
+
+    Args:
+        tail: The raw status-line tail after the two status characters
+            and the separating space (e.g. ``"a\\tb" -> "c\\td"``).
+
+    Returns:
+        ``(old_raw, new_raw)`` — the two sides of the rename, unsplit
+        quoting intact.
+    """
+    if tail.startswith('"'):
+        i = 1
+        while i < len(tail):
+            if tail[i] == "\\":
+                i += 2
+            elif tail[i] == '"':
+                rest = tail[i + 1 :]
+                if rest.startswith(" -> "):
+                    return tail[: i + 1], rest[4:]
+                break
+            else:
+                i += 1
+    idx = tail.index(" -> ")
+    return tail[:idx], tail[idx + 4 :]
+
+
 class GitWorktreeOps:
     """Stateless helper class with all git worktree operations.
 
@@ -730,12 +764,18 @@ class GitWorktreeOps:
         for line in status.stdout.splitlines():
             if len(line) < 4:
                 continue
-            fname = _unquote_git_path(line[3:])
+            code = line[:2]
+            tail = line[3:]
             old_name: str | None = None
-            if " -> " in fname:
-                old_name, fname = fname.split(" -> ", 1)
-                old_name = _unquote_git_path(old_name)
-                fname = _unquote_git_path(fname)
+            if ("R" in code or "C" in code) and " -> " in tail:
+                # Rename/copy entry: split the RAW tail on the
+                # ``" -> "`` boundary (respecting quoting) first, then
+                # unquote each side exactly once.
+                old_raw, new_raw = _split_rename_tail(tail)
+                old_name = _unquote_git_path(old_raw)
+                fname = _unquote_git_path(new_raw)
+            else:
+                fname = _unquote_git_path(tail)
 
             src = repo / fname
             dst = wt_dir / fname

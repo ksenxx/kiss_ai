@@ -2456,14 +2456,41 @@ class TestRejectAllHunksInFile(unittest.TestCase):
     """Test _reject_all_hunks_in_file."""
 
     def test_copies_base_over_current(self) -> None:
-        """Rejecting all hunks copies base file to current."""
+        """Rejecting all hunks restores the base content in current."""
         with tempfile.TemporaryDirectory() as td:
             cur_path = os.path.join(td, "current.py")
             base_path = os.path.join(td, "base.py")
             Path(cur_path).write_text("modified\n")
             Path(base_path).write_text("original\n")
-            _reject_all_hunks_in_file({"current": cur_path, "base": base_path})
+            _reject_all_hunks_in_file({
+                "current": cur_path,
+                "base": base_path,
+                "hunks": [{"cs": 0, "cc": 1, "bs": 0, "bc": 1}],
+            })
             self.assertEqual(Path(cur_path).read_text(), "original\n")
+
+    def test_reverts_only_listed_hunks(self) -> None:
+        """Only the hunk indices passed in are reverted; an accepted
+        hunk's content stays on disk (F2 lost-update fix)."""
+        with tempfile.TemporaryDirectory() as td:
+            cur_path = os.path.join(td, "current.py")
+            base_path = os.path.join(td, "base.py")
+            Path(cur_path).write_text("l1\nNEW2\nl3\nNEW4\nl5\n")
+            Path(base_path).write_text("l1\nold2\nl3\nold4\nl5\n")
+            _reject_all_hunks_in_file(
+                {
+                    "current": cur_path,
+                    "base": base_path,
+                    "hunks": [
+                        {"cs": 1, "cc": 1, "bs": 1, "bc": 1},
+                        {"cs": 3, "cc": 1, "bs": 3, "bc": 1},
+                    ],
+                },
+                [1],
+            )
+            self.assertEqual(
+                Path(cur_path).read_text(), "l1\nNEW2\nl3\nold4\nl5\n",
+            )
 
     def test_missing_base_is_noop(self) -> None:
         """When base file doesn't exist, current file is unchanged."""
@@ -2493,6 +2520,7 @@ class TestRejectAllHunksInFile(unittest.TestCase):
                 "current": placeholder,
                 "base": base_path,
                 "target": target,
+                "hunks": [{"cs": 0, "cc": 0, "bs": 0, "bc": 2}],
             })
             # The workspace path must be restored.
             self.assertTrue(Path(target).is_file())

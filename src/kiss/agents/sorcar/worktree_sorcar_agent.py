@@ -210,7 +210,7 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         self,
         wt: GitWorktree,
     ) -> tuple[MergeResult, str]:
-        """Checkout, stash, squash-merge, pop for a worktree branch.
+        """Stash, checkout, squash-merge, pop for a worktree branch.
 
         Serialized under ``repo_lock`` to prevent concurrent tabs from
         interleaving operations on the main repository.
@@ -222,12 +222,18 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             ``(result, stash_warning)`` where *result* is the merge
             outcome and *stash_warning* is a non-empty string if
             stash-pop failed.  Checkout failures return
-            ``(MergeResult.CHECKOUT_FAILED, "")``.
+            ``MergeResult.CHECKOUT_FAILED`` (with a stash warning only
+            when the pre-checkout stash could not be restored).
         """
         stash_warning = ""
         if wt.original_branch is None:
             return (MergeResult.CHECKOUT_FAILED, "")
         with repo_lock(wt.repo_root):
+            # Stash BEFORE the checkout: dirty user edits on a
+            # different branch would otherwise make the checkout fail
+            # ("local changes would be overwritten") even though
+            # merge()'s contract promises they are stashed first.
+            did_stash = GitWorktreeOps.stash_if_dirty(wt.repo_root)
             current = GitWorktreeOps.current_branch(wt.repo_root)
             if current != wt.original_branch:
                 ok, err = GitWorktreeOps.checkout(
@@ -240,9 +246,15 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                         wt.original_branch,
                         err,
                     )
-                    return (MergeResult.CHECKOUT_FAILED, "")
+                    if did_stash and not GitWorktreeOps.stash_pop(wt.repo_root):
+                        stash_warning = (
+                            "Your uncommitted changes were stashed "
+                            "before the failed checkout and could not "
+                            "be auto-restored. Run 'git stash pop' to "
+                            "recover them."
+                        )
+                    return (MergeResult.CHECKOUT_FAILED, stash_warning)
 
-            did_stash = GitWorktreeOps.stash_if_dirty(wt.repo_root)
             if wt.baseline_commit:
                 result = GitWorktreeOps.squash_merge_from_baseline(
                     wt.repo_root,
