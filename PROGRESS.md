@@ -185,7 +185,7 @@ Repeat until an iteration finds zero bugs.
   incl. a clip_buf end-to-end render check).
 - BUG-5C-2 (cli_repl.py `_read_line`): Ctrl+C at the idle prompt escaped
   `input()` with the cursor still on the panel's BODY row; `run_repl`'s
-  handler then printed "\n(Press Ctrl+C again …)" over the bottom border row
+  handler then printed "\\n(Press Ctrl+C again …)" over the bottom border row
   without erasing it — the screen showed
   `(Press Ctrl+C again or type /exit to quit)────────…────╯` (and the second
   Ctrl+C's `Goodbye.` overprinted the next panel's rule the same way). Fix:
@@ -203,11 +203,11 @@ Repeat until an iteration finds zero bugs.
   cols-4, cursor col in [1, cols-1]) for emoji/CJK/combining/multi-line/tab
   buffers at cols 10..80 — all exact; wide-char paste split byte-by-byte
   across reads + backspaces — buffer exact; SIGINT during paste covered by
-  the bughunt4 KeyboardInterrupt path (\x03 bytes inside a paste dropped,
+  the bughunt4 KeyboardInterrupt path (\\x03 bytes inside a paste dropped,
   already tested); prompt text with `{braces}` is used verbatim (no .format);
   `box.start()` failure leaving the proxy installed has no realistic trigger
   after supports_steering() (not reproducible without test doubles).
-- Verification: 141/141 CLI tests pass (every test_cli_* / CLI bughunt file,
+- Verification: 141/141 CLI tests pass (every test_cli\_\* / CLI bughunt file,
   incl. the 5 new bughunt5 tests); `uv run check --full` passes.
 
 Superseded session-1 scratch notes (kept for audit; conclusions above):
@@ -812,6 +812,18 @@ endpoints (`not isinstance(endpoint, asyncio.StreamWriter)`), pop merge state + 
 lock, delegate to `_finish_merge_and_close_tab`. UDS (VS Code) exempt: TS MergeManager
 owns reviews in real editor tabs that survive chat-tab closure and still sends
 all-done. Test: ::test_explicit_close_tab_mid_review_ends_merge (failed pre-fix).
+
+**BUG 5F-3 FIXED (web_server.\_replay_merge_review)**: the reconnect/reload replay
+read the reviewed files (`_augment_merge_data`) and the shared hunk dicts WITHOUT the
+per-tab `_merge_action_lock` that serialises every merge action — a browser reloading
+while another client's reject/reject-all was mid file-rewrite received a torn
+`current_text` (open(w) truncates before writing) and/or mid-mutation cs offsets that
+no later merge_nav can repair (merge_nav carries no text). Fix: wrap the replay body
+in `async with self._merge_action_lock(tab_id)` with a state re-check under the lock
+(review may have finished while waiting). Tests:
+test_bughunt5_replay_action_race.py (2 tests: replay must not emit while the action
+lock is held + must emit after release; post-wait re-check sends nothing for a
+finished review; both failed pre-fix).
 
 ORIGINAL 5F-1 analysis: when the
 deferred tab-close grace fires while a merge review is STILL IN FLIGHT, it silently
