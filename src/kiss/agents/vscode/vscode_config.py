@@ -10,6 +10,7 @@ API key injection into shell RC files and the running environment.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import os
@@ -95,11 +96,65 @@ def get_current_api_keys() -> dict[str, str]:
     return {k: os.environ.get(k, "") for k in API_KEY_ENV_VARS}
 
 
+def sanitize_config(data: dict[str, Any]) -> dict[str, Any]:
+    """Coerce every :data:`DEFAULTS`-keyed value to its expected type.
+
+    Config values arrive from two untrusted sources — the ``saveConfig``
+    payload of any connected client and the user-editable
+    ``config.json``.  A junk-typed value used to escape deep into
+    handlers: a non-string ``custom_endpoint`` raised
+    ``AttributeError`` out of :func:`get_custom_model_entry` (killing
+    the ``models`` reply in every window), ``custom_headers`` as a JSON
+    list crashed ``splitlines``, a non-string ``work_dir`` corrupted
+    the daemon-global working directory, and a truthy non-string
+    ``remote_password`` was treated as a genuine password change —
+    restarting the kiss-web daemon and killing every in-flight task.
+
+    Coercion rules (per the type of the key's default): booleans accept
+    any truthy/falsy value; numbers accept ints/floats and numeric
+    strings (falling back to the default otherwise); strings keep only
+    genuine ``str`` values (falling back to the default otherwise).
+    Non-DEFAULTS keys (e.g. ``tunnel_token``, ``email``) pass through
+    untouched.
+
+    Args:
+        data: Raw configuration dict.
+
+    Returns:
+        A new dict with sanitized values; *data* is not modified.
+    """
+    result = dict(data)
+    for key, default in DEFAULTS.items():
+        if key not in result:
+            continue
+        value = result[key]
+        if isinstance(default, bool):
+            if not isinstance(value, bool):
+                result[key] = bool(value)
+        elif isinstance(default, int | float):
+            if isinstance(value, bool) or not isinstance(value, int | float):
+                try:
+                    result[key] = float(value)
+                except (TypeError, ValueError):
+                    logger.debug(
+                        "Ignoring non-numeric config value %s=%r", key, value,
+                    )
+                    result[key] = default
+        elif not isinstance(value, str):
+            logger.debug(
+                "Ignoring non-string config value %s=%r", key, value,
+            )
+            result[key] = default
+    return result
+
+
 def load_config() -> dict[str, Any]:
     """Load configuration from ``~/.kiss/config.json``.
 
     Returns a dict with all keys from :data:`DEFAULTS`, falling back to
-    default values for any missing keys.
+    default values for any missing keys.  Values of DEFAULTS keys are
+    type-sanitized via :func:`sanitize_config` so a hand-edited junk
+    value cannot break downstream consumers.
     """
     result = dict(DEFAULTS)
     if CONFIG_PATH.exists():
@@ -110,7 +165,7 @@ def load_config() -> dict[str, Any]:
                 result.update(stored)
         except (json.JSONDecodeError, OSError):
             logger.debug("Failed to read config", exc_info=True)
-    return result
+    return sanitize_config(result)
 
 
 def save_config(data: dict[str, Any]) -> None:
@@ -129,29 +184,42 @@ def save_config(data: dict[str, Any]) -> None:
     Args:
         data: Configuration dict.
     """
+    data = sanitize_config(data)
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     # Serialize the whole read-modify-write so concurrent callers cannot
-    # each read the same old file and clobber one another's keys.
-    with _config_lock:
-        existing: dict[str, Any] = {}
-        if CONFIG_PATH.exists():
-            try:
-                with open(CONFIG_PATH) as f:
-                    stored = json.load(f)
-                if isinstance(stored, dict):
-                    existing = stored
-            except (json.JSONDecodeError, OSError):
-                pass
-        for k in DEFAULTS:
-            if k in data:
-                existing[k] = data[k]
-        serialized = json.dumps(existing, indent=2)
-        fd, tmp = tempfile.mkstemp(prefix=".kiss-config-", dir=str(CONFIG_DIR))
+    # each read the same old file and clobber one another's keys.  The
+    # threading lock covers callers inside this process; the ``flock``
+    # on a sidecar lock file covers concurrent *processes* (e.g. the
+    # kiss-web daemon persisting tunnel state while a VS Code window's
+    # service daemon persists ``last_model``) — without it, two daemons
+    # that each read the same old file and replace it would drop one
+    # another's keys.
+    with _config_lock, open(CONFIG_DIR / ".config.lock", "w") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
         try:
-            os.write(fd, serialized.encode("utf-8"))
+            existing: dict[str, Any] = {}
+            if CONFIG_PATH.exists():
+                try:
+                    with open(CONFIG_PATH) as f:
+                        stored = json.load(f)
+                    if isinstance(stored, dict):
+                        existing = stored
+                except (json.JSONDecodeError, OSError):
+                    pass
+            for k in DEFAULTS:
+                if k in data:
+                    existing[k] = data[k]
+            serialized = json.dumps(existing, indent=2)
+            fd, tmp = tempfile.mkstemp(
+                prefix=".kiss-config-", dir=str(CONFIG_DIR),
+            )
+            try:
+                os.write(fd, serialized.encode("utf-8"))
+            finally:
+                os.close(fd)
+            os.replace(tmp, CONFIG_PATH)
         finally:
-            os.close(fd)
-        os.replace(tmp, CONFIG_PATH)
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
 
 
 def _get_user_shell() -> str:
@@ -316,13 +384,24 @@ def apply_config_to_env(cfg: dict[str, Any]) -> None:
 
     Sets ``max_budget`` on the default config.
 
+    A non-numeric value falls back to ``DEFAULTS['max_budget']``: the
+    value can come from the user-editable ``config.json`` (via
+    :func:`load_config`) or from any client's ``saveConfig`` payload,
+    and a bare ``float()`` raising out of the command handler would
+    kill the whole client connection.
+
     Args:
         cfg: The configuration dict (from :func:`load_config`).
     """
     from kiss.core import config as config_module
 
     budget = cfg.get("max_budget", DEFAULTS["max_budget"])
-    config_module.DEFAULT_CONFIG.max_budget = float(budget)
+    try:
+        budget_value = float(budget)
+    except (TypeError, ValueError):
+        logger.debug("Ignoring non-numeric max_budget %r", budget)
+        budget_value = float(DEFAULTS["max_budget"])
+    config_module.DEFAULT_CONFIG.max_budget = budget_value
 
 
 def get_custom_model_entry(cfg: dict[str, Any]) -> dict[str, Any] | None:

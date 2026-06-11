@@ -129,6 +129,11 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         # the owning :class:`_RunningAgentState` and pull queued
         # follow-up prompts before each model call.
         self._tab_id: str = ""
+        # Wall-clock start of the current task in epoch milliseconds,
+        # stamped by the VS Code ``task_runner`` just before the run
+        # starts; read (via ``getattr`` with a 0 default) by
+        # ``server._live_task_start_ms`` for resume timelines.
+        self._task_start_ms: int = 0
 
 
     @property
@@ -210,7 +215,7 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         self,
         wt: GitWorktree,
     ) -> tuple[MergeResult, str]:
-        """Checkout, stash, squash-merge, pop for a worktree branch.
+        """Stash, checkout, squash-merge, pop for a worktree branch.
 
         Serialized under ``repo_lock`` to prevent concurrent tabs from
         interleaving operations on the main repository.
@@ -222,12 +227,40 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             ``(result, stash_warning)`` where *result* is the merge
             outcome and *stash_warning* is a non-empty string if
             stash-pop failed.  Checkout failures return
-            ``(MergeResult.CHECKOUT_FAILED, "")``.
+            ``MergeResult.CHECKOUT_FAILED`` (with a stash warning only
+            when the pre-checkout stash could not be restored).  A
+            dirty main tree whose ``git stash push`` itself failed
+            (e.g. an unreadable untracked file) returns
+            ``MergeResult.STASH_FAILED`` without touching the repo:
+            proceeding would commit the user's staged changes into
+            the squash-merge commit and the conflict-path
+            ``git reset --hard`` would destroy their edits.
         """
         stash_warning = ""
         if wt.original_branch is None:
             return (MergeResult.CHECKOUT_FAILED, "")
         with repo_lock(wt.repo_root):
+            # Re-ensure the PROGRESS.md merge driver right before the
+            # merge so pending worktrees created by older agent
+            # versions (or repos whose local config was wiped) still
+            # auto-resolve scratch-file conflicts.
+            try:
+                GitWorktreeOps.ensure_scratch_merge_driver(wt.repo_root)
+            except Exception:  # pragma: no cover — filesystem permission error
+                logger.warning(
+                    "Failed to install scratch merge driver", exc_info=True
+                )
+            # Stash BEFORE the checkout: dirty user edits on a
+            # different branch would otherwise make the checkout fail
+            # ("local changes would be overwritten") even though
+            # merge()'s contract promises they are stashed first.
+            did_stash = GitWorktreeOps.stash_if_dirty(wt.repo_root)
+            if not did_stash and GitWorktreeOps.has_uncommitted_changes(
+                wt.repo_root
+            ):
+                # The tree is dirty but ``git stash push`` FAILED
+                # (returncode != 0) — abort before any mutation.
+                return (MergeResult.STASH_FAILED, "")
             current = GitWorktreeOps.current_branch(wt.repo_root)
             if current != wt.original_branch:
                 ok, err = GitWorktreeOps.checkout(
@@ -240,9 +273,15 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                         wt.original_branch,
                         err,
                     )
-                    return (MergeResult.CHECKOUT_FAILED, "")
+                    if did_stash and not GitWorktreeOps.stash_pop(wt.repo_root):
+                        stash_warning = (
+                            "Your uncommitted changes were stashed "
+                            "before the failed checkout and could not "
+                            "be auto-restored. Run 'git stash pop' to "
+                            "recover them."
+                        )
+                    return (MergeResult.CHECKOUT_FAILED, stash_warning)
 
-            did_stash = GitWorktreeOps.stash_if_dirty(wt.repo_root)
             if wt.baseline_commit:
                 result = GitWorktreeOps.squash_merge_from_baseline(
                     wt.repo_root,
@@ -348,6 +387,24 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                 f"'{wt.original_branch}'. The branch is kept for "
                 "manual resolution."
             )
+        elif result == MergeResult.STASH_FAILED:
+            self._merge_conflict_warning = (
+                f"Auto-merge of '{wt.branch}' into "
+                f"'{wt.original_branch}' was aborted: your "
+                "uncommitted changes in the main repository could "
+                "not be stashed (git stash push failed). The branch "
+                "is kept for manual resolution. Commit or clean up "
+                "your changes, then run:\n"
+                + _merge_fix_steps(
+                    wt,
+                    "    git commit\n",
+                )
+            )
+            logger.warning(
+                "Auto-merge of '%s' into '%s' aborted: stash of dirty main tree failed",
+                wt.branch,
+                wt.original_branch,
+            )
         elif result == MergeResult.MERGE_FAILED:
             self._merge_conflict_warning = (
                 f"Auto-merge of '{wt.branch}' into "
@@ -424,10 +481,21 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         # ``_do_merge`` invoked by ``_release_worktree`` re-acquires
         # it cleanly on the same thread.
         with repo_lock(repo):
+            # The released worktree may live in a DIFFERENT repo (the
+            # user changed ``work_dir`` between runs).  Its original
+            # branch name must then not leak into *repo*: a same-named
+            # branch there would silently become the merge target
+            # (wrong merge result) and ``merge()`` would switch the
+            # user's checkout to it.
+            prev_repo_root = self._wt.repo_root if self._wt is not None else None
             released_branch = self._release_worktree()
 
             original_branch: str | None
-            if released_branch is not None:
+            if (
+                released_branch is not None
+                and prev_repo_root is not None
+                and prev_repo_root.resolve() == repo.resolve()
+            ):
                 original_branch = released_branch
             else:
                 original_branch = GitWorktreeOps.current_branch(repo)
@@ -446,6 +514,7 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
 
             try:
                 GitWorktreeOps.ensure_excluded(repo)
+                GitWorktreeOps.ensure_scratch_merge_driver(repo)
             except Exception:  # pragma: no cover — filesystem permission error
                 logger.warning("Failed to update git exclude", exc_info=True)
 
@@ -469,8 +538,24 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                 GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
                 return None
 
+            try:
+                dirty_copied = GitWorktreeOps.copy_dirty_state(repo, wt_dir)
+            except OSError:
+                # E.g. a dirty file the process cannot read (mode 000)
+                # makes shutil.copy2 raise PermissionError.  Honor
+                # run()'s fallback contract: clean up the half-created
+                # worktree/branch and run the task directly instead of
+                # crashing the whole task.
+                logger.warning(
+                    "Failed to copy dirty state into worktree; "
+                    "falling back to direct execution",
+                    exc_info=True,
+                )
+                GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
+                return None
+
             baseline_commit: str | None = None
-            if GitWorktreeOps.copy_dirty_state(repo, wt_dir):
+            if dirty_copied:
                 GitWorktreeOps.stage_all(wt_dir)
                 if GitWorktreeOps.commit_staged(
                     wt_dir,
@@ -484,6 +569,22 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                             branch,
                             baseline_commit,
                         )
+                elif GitWorktreeOps.has_uncommitted_changes(wt_dir):
+                    # The baseline commit FAILED (e.g. a
+                    # prepare-commit-msg hook — which --no-verify does
+                    # NOT skip — or a stale index.lock): the user's
+                    # dirty state would sit uncommitted in the
+                    # worktree and later be auto-committed as (and
+                    # attributed to) agent work, then squash-merged
+                    # back — duplicating the user's edits.  Honor
+                    # run()'s fallback contract instead: clean up and
+                    # run the task directly.
+                    logger.warning(
+                        "Baseline commit failed in new worktree; "
+                        "falling back to direct execution"
+                    )
+                    GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
+                    return None
 
             self._wt = GitWorktree(
                 repo_root=repo,
@@ -604,8 +705,9 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         Creates a new worktree and branch, redirects ``work_dir`` into
         the worktree, and delegates to ``ChatSorcarAgent.run()``.
         Each call starts a fresh worktree; any previously pending
-        branch from an earlier run is left as-is in git for the user
-        to merge or discard later.
+        branch from an earlier run is auto-committed and squash-merged
+        into its original branch first (kept in git for manual
+        resolution only when that auto-merge fails or conflicts).
 
         Falls back to direct execution (no worktree) when:
         - ``use_worktree`` kwarg is explicitly ``False``
@@ -708,17 +810,21 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                 f"    git checkout <branch> && {merge_cmd}"
             )
 
-        if wt.wt_dir.exists():
-            if not self._finalize_worktree():
-                return (
-                    f"Cannot merge: auto-commit for '{wt.branch}' failed "
-                    "(a pre-commit hook may have rejected the commit). "
-                    f"The worktree is preserved at: {wt.wt_dir}\n\n"
-                    "Fix the issue, then commit manually:\n"
-                    f"    cd {wt.wt_dir}\n"
-                    "    git add -A && git commit -m 'agent work'\n\n"
-                    "Then retry: agent.merge()"
-                )
+        # Always finalize, even when the worktree directory is already
+        # gone: ``_finalize_worktree`` runs ``git worktree prune``,
+        # without which a stale registration (deleted dir, bookkeeping
+        # kept) makes ``git branch -d/-D`` refuse to delete the task
+        # branch after a successful merge.
+        if not self._finalize_worktree():
+            return (
+                f"Cannot merge: auto-commit for '{wt.branch}' failed "
+                "(a pre-commit hook may have rejected the commit). "
+                f"The worktree is preserved at: {wt.wt_dir}\n\n"
+                "Fix the issue, then commit manually:\n"
+                f"    cd {wt.wt_dir}\n"
+                "    git add -A && git commit -m 'agent work'\n\n"
+                "Then retry: agent.merge()"
+            )
 
         result, stash_warning = self._do_merge(wt)
         stash_suffix = ""
@@ -729,6 +835,17 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             return (
                 f"Cannot checkout '{wt.original_branch}'.\n"
                 "Fix the issue and retry merge(), or call discard()."
+                + stash_suffix
+            )
+
+        if result == MergeResult.STASH_FAILED:
+            return (
+                "Cannot merge: your uncommitted changes in the main "
+                "repository could not be stashed (git stash push "
+                "failed), so the merge was aborted to avoid mixing "
+                "them into the merge commit.\n"
+                "Commit or clean up the changes, then retry merge(), "
+                "or call discard()." + stash_suffix
             )
 
         if result == MergeResult.SUCCESS:

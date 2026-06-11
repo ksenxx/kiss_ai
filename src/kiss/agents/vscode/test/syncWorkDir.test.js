@@ -110,8 +110,11 @@ Module._resolveFilename = function (request, parent, ...rest) {
   return origResolve.call(this, request, parent, ...rest);
 };
 
-// Write the stub to disk in the same dir as this test so the resolver
-// can locate it via the override above.  Keeps the test self-contained.
+// (Re)write the stub to disk in the same dir as this test so the
+// resolver can locate it via the override above.  NOTE: _vscode-stub.js
+// is a git-tracked file shared with other tests — the content written
+// here is byte-identical to the committed copy, and cleanup must NOT
+// delete it.
 const stubPath = path.join(__dirname, '_vscode-stub.js');
 fs.writeFileSync(
   stubPath,
@@ -138,7 +141,6 @@ const sockPath = path.join(tmpHome, '.kiss', 'sorcar.sock');
 if (process.platform === 'win32') {
   console.log('  skipped on win32 (UDS test)');
   fs.rmSync(tmpHome, {recursive: true, force: true});
-  fs.rmSync(stubPath, {force: true});
   process.exit(0);
 }
 
@@ -286,7 +288,6 @@ runTests().then(
     server.close(() => {
       try {fs.unlinkSync(sockPath);} catch {}
       fs.rmSync(tmpHome, {recursive: true, force: true});
-      fs.rmSync(stubPath, {force: true});
       console.log('\n4 passed, 0 failed');
       process.exit(0);
     });
@@ -296,7 +297,6 @@ runTests().then(
     server.close(() => {
       try {fs.unlinkSync(sockPath);} catch {}
       fs.rmSync(tmpHome, {recursive: true, force: true});
-      fs.rmSync(stubPath, {force: true});
       process.exit(1);
     });
   },

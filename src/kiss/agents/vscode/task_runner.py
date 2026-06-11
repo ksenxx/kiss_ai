@@ -153,6 +153,30 @@ class _TaskRunnerMixin:
                 },
             )
             self._run_task_inner(cmd)
+        except Exception as exc:
+            # ``_run_task_inner`` handles failures of the agent run
+            # itself, but an exception raised BEFORE its big ``try``
+            # block (malformed command fields, a git failure re-raised
+            # by the pre-snapshot guard) used to unwind straight
+            # through this worker thread: the spinner stopped (the
+            # ``finally`` below broadcasts ``running=False``) but no
+            # ``result``/``task_error`` event was ever emitted — the
+            # task silently vanished from the user's point of view.
+            logger.warning(
+                "Task setup failed: tab_id=%s error=%s",
+                tab_id,
+                exc,
+                exc_info=True,
+            )
+            self.printer.broadcast({
+                "type": "result",
+                "text": f"Task failed: {type(exc).__name__}: {exc}",
+                "success": False,
+                "total_tokens": 0,
+                "cost": "$0.0000",
+                "step_count": 0,
+                "tabId": tab_id,
+            })
         finally:
             with self._state_lock:
                 tab = _RunningAgentState.running_agent_states.get(tab_id)
@@ -235,6 +259,16 @@ class _TaskRunnerMixin:
         work_dir = cmd.get("workDir") or self.work_dir
         active_file = cmd.get("activeFile")
         raw_attachments = cmd.get("attachments", [])
+        if not isinstance(raw_attachments, list):
+            # Iteration 3 made malformed attachment ENTRIES skippable;
+            # a non-iterable attachments FIELD (e.g. an int) still
+            # raised TypeError at the ``for`` below and killed the
+            # task thread before even the model check.
+            logger.warning(
+                "Ignoring malformed attachments field of type %s",
+                type(raw_attachments).__name__,
+            )
+            raw_attachments = []
         # Agent start timestamp (ms since epoch), stamped on the cmd
         # dict by ``_run_task``.  0 when absent (direct test calls).
         start_ms = int(cmd.get("_start_ms") or 0)
@@ -243,9 +277,22 @@ class _TaskRunnerMixin:
         if raw_attachments:
             attachments = []
             for att in raw_attachments:
-                data_b64 = att.get("data", "")
-                mime = att.get("mimeType", "application/octet-stream")
-                data = base64.b64decode(data_b64)
+                try:
+                    data_b64 = att.get("data", "")
+                    mime = att.get("mimeType", "application/octet-stream")
+                    data = base64.b64decode(data_b64)
+                except Exception:
+                    # A malformed attachment (non-dict entry, invalid
+                    # base64) must not kill the task thread:
+                    # ``_run_task`` has no except clause, so an
+                    # escaping ``binascii.Error`` would silently end
+                    # the task — spinner stops with no result/error
+                    # event broadcast or persisted.  Skip the bad
+                    # attachment and run the task with the rest.
+                    logger.warning(
+                        "Skipping malformed attachment", exc_info=True,
+                    )
+                    continue
                 attachments.append(Attachment(data=data, mime_type=mime))
 
         tab_id = cmd.get("tabId", "")
@@ -267,6 +314,14 @@ class _TaskRunnerMixin:
         # to the owning ``_RunningAgentState`` and drain
         # ``pending_user_messages`` before each model call.
         tab.agent._tab_id = tab_id
+        # Stamp the agent's true start timestamp (ms since epoch) on
+        # the live agent so ``VSCodeServer._replay_session`` can anchor
+        # the "Running …" header of a tab that opens this chat WHILE
+        # the task is still running.  The persisted ``extra`` JSON only
+        # gains ``startTs`` at task END (``_save_task_extra`` in the
+        # cleanup finally below), so during the run the live agent is
+        # the only source of truth for the start time.
+        tab.agent._task_start_ms = start_ms
         # Sync the agent's chat id to the tab's chat id BEFORE the run
         # starts.  ``_RunningAgentState._get_tab`` eagerly populates
         # ``tab.agent`` (for merge / discard / worktree state callers
@@ -531,7 +586,16 @@ class _TaskRunnerMixin:
                         "success": False,
                         "total_tokens": tab.agent.total_tokens_used,
                         "cost": f"${tab.agent.budget_used:.4f}",
-                        "step_count": tab.agent.step_count,
+                        # RelentlessAgent-derived agents accumulate
+                        # completed steps into ``total_steps`` and leave
+                        # ``step_count`` at 0 — mirror the persisted
+                        # ``extra`` metrics below.  Fall back to
+                        # ``step_count`` for plain agents whose
+                        # ``total_steps`` is 0.
+                        "step_count": (
+                            int(getattr(tab.agent, "total_steps", 0) or 0)
+                            or int(getattr(tab.agent, "step_count", 0) or 0)
+                        ),
                         "tabId": tab_id,
                     })
                     break
@@ -1061,21 +1125,7 @@ class _TaskRunnerMixin:
         stop = getattr(self.printer._thread_local, "stop_event", None)
         if stop is None:
             raise KeyboardInterrupt("No stop event set")
-        # Resolve the answer queue via the printer's task-id ->
-        # subscriber-tabs mapping: pick the first subscribed tab that
-        # has a live ``user_answer_queue``.  Any tab subscribed to
-        # this task can answer.
-        task_key = getattr(self.printer._thread_local, "task_id", None)
-        q = None
-        if task_key:
-            with self.printer._lock:
-                tab_ids = list(self.printer._subscribers.get(task_key, ()))
-            with self._state_lock:
-                for tab_id in tab_ids:
-                    tab = _RunningAgentState.running_agent_states.get(tab_id)
-                    if tab is not None and tab.user_answer_queue is not None:
-                        q = tab.user_answer_queue
-                        break
+        q = self._resolve_task_answer_queue()
         # M4 — when the tab has no answer queue (e.g. the tab was closed
         # mid-question) there is no path that can ever return a response.
         # Refuse to busy-loop forever; raise immediately so the agent
@@ -1122,8 +1172,50 @@ class _TaskRunnerMixin:
             raise KeyboardInterrupt("Stopped while waiting for user")
         return item
 
+    def _resolve_task_answer_queue(self) -> queue.Queue[str] | None:
+        """Resolve the current task's user-answer queue.
+
+        Resolves via the printer's task-id → subscriber-tabs mapping:
+        picks the first subscribed tab that has a live
+        ``user_answer_queue``.  Any tab subscribed to this task can
+        answer, but the queue always lives on the task-owner tab.
+
+        Returns:
+            The owner tab's answer queue, or ``None`` when the
+            thread-local ``task_id`` is unset or no subscribed tab
+            carries a live queue (e.g. the tab was closed).
+        """
+        task_key = getattr(self.printer._thread_local, "task_id", None)
+        if not task_key:
+            return None
+        with self.printer._lock:
+            tab_ids = list(self.printer._subscribers.get(task_key, ()))
+        with self._state_lock:
+            for tab_id in tab_ids:
+                tab = _RunningAgentState.running_agent_states.get(tab_id)
+                if tab is not None and tab.user_answer_queue is not None:
+                    return tab.user_answer_queue
+        return None
+
     def _ask_user_question(self, question: str) -> str:
         """Callback for agent questions."""
+        # Discard any answer already sitting in the queue: it predates
+        # this question, so it can only be a stale duplicate — e.g. a
+        # second viewer tab's still-open ``askUser`` modal for the
+        # PREVIOUS question submitted after the agent had consumed the
+        # first viewer's answer (nothing closes the other viewers'
+        # modals).  Without the drain, that stale answer would answer
+        # THIS question instantly and the user would never see it.
+        # Held under ``_state_lock`` so the drain cannot interleave
+        # with ``_cmd_user_answer``'s drain-then-put sequence.
+        q = self._resolve_task_answer_queue()
+        if q is not None:
+            with self._state_lock:
+                while not q.empty():
+                    try:
+                        q.get_nowait()
+                    except queue.Empty:  # pragma: no cover — race guard
+                        break
         self.printer.broadcast({
             "type": "askUser",
             "question": question,

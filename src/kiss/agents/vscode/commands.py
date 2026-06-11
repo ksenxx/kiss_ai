@@ -33,14 +33,55 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _restart_kiss_web_daemon() -> None:
+def _kiss_home_is_default() -> bool:
+    """Return True when this process operates on the default ``~/.kiss``.
+
+    ``KISS_HOME`` redirects all KISS state (config.json, sorcar.db) to a
+    private directory — the test suite (``src/kiss/tests/conftest.py``)
+    and sandboxed runs rely on it for isolation.  Read at call time (not
+    import time) so callers see the current environment.
+    """
+    custom = os.environ.get("KISS_HOME", "")
+    if not custom:
+        return True
+    try:
+        from pathlib import Path
+
+        return Path(custom).resolve() == (Path.home() / ".kiss").resolve()
+    except OSError:
+        return False
+
+
+def _restart_kiss_web_daemon() -> bool:
     """Restart the ``kiss-web`` daemon so it picks up config changes.
 
     On macOS, uses ``launchctl kickstart -k`` to restart the
     ``com.kiss.web-server`` LaunchAgent.  On Linux, uses
     ``systemctl --user restart kiss-web``.  Runs asynchronously in
     a background thread so the caller does not block.
+
+    SAFETY: when this process operates on a NON-default ``KISS_HOME``
+    (tests, sandboxes), the system LaunchAgent serves a *different*
+    home whose config this process never touched — kick-starting it
+    could only destroy unrelated in-flight work.  Incident 2026-06-11
+    00:37:45: a pytest process exercising ``_cmd_save_config`` with a
+    changed ``remote_password`` SIGTERMed the developer's live
+    kiss-web daemon (pid 2884), killing the very agent task tree
+    (task_history rows 3556, 3618-3624) that had launched the test.
+    The guard below makes that impossible.
+
+    Returns:
+        True when a restart was dispatched; False when skipped because
+        ``KISS_HOME`` points at a non-default location.
     """
+    if not _kiss_home_is_default():
+        logger.warning(
+            "Skipping kiss-web daemon restart: KISS_HOME=%r is not the "
+            "default ~/.kiss — the system daemon serves a different home",
+            os.environ.get("KISS_HOME", ""),
+        )
+        return False
+
     def _do_restart() -> None:
         try:
             if sys.platform == "darwin":
@@ -63,6 +104,28 @@ def _restart_kiss_web_daemon() -> None:
             logger.debug("Failed to restart kiss-web daemon", exc_info=True)
 
     threading.Thread(target=_do_restart, daemon=True).start()
+    return True
+
+
+def _parse_int(value: Any) -> int | None:
+    """Parse a frontend-supplied JSON value as an int.
+
+    Mirrors ``_cmd_get_adjacent_task``'s guarded parse so malformed
+    payloads (e.g. ``"taskId": "abc"``) never raise out of a command
+    handler — an escaping exception terminates the transport's whole
+    receive loop and with it the client connection.
+
+    Args:
+        value: Arbitrary value taken from a client command dict.
+
+    Returns:
+        The parsed int, or ``None`` when the value is missing or not
+        int-coercible.
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 class _CommandsMixin:
@@ -150,14 +213,34 @@ class _CommandsMixin:
         thread's first broadcast.
         """
         tab_id = cmd.get("tabId", "")
+        if not tab_id:
+            # An empty tab id would mint a phantom registry entry (and
+            # start a real task thread) that no other code path can
+            # ever address: ``_stop_task``, ``_cmd_close_tab`` and
+            # ``_dispose_if_closed`` all treat an empty id as "no tab",
+            # so the task would be unstoppable and undisposable.
+            logger.debug("Ignoring run command without tabId")
+            return
         with self._state_lock:
             tab = _RunningAgentState.running_agent_states.get(tab_id)
             if tab is None:
                 tab = _RunningAgentState(tab_id, self._default_model)
                 _RunningAgentState.running_agent_states[tab_id] = tab
-            if tab.task_thread is not None and tab.task_thread.is_alive():
-                # A task is already running for this tab — silently drop
-                # the new submit so the user sees no visible effect.
+            if tab.task_thread is not None:
+                # A task is already running — or has been created and is
+                # about to start — for this tab: silently drop the new
+                # submit so the user sees no visible effect.  Checking
+                # ``is_alive()`` here was racy: the winning submit
+                # assigns ``task_thread`` under the lock but calls
+                # ``thread.start()`` only after releasing it (and after
+                # the ``clear`` broadcast — network I/O), so a
+                # concurrent submit could observe a created-but-
+                # unstarted thread (``is_alive() == False``), pass the
+                # guard, and clobber ``stop_event`` /
+                # ``user_answer_queue`` / ``task_thread`` — leaving two
+                # tasks running on one tab with the first unstoppable.
+                # ``_run_task``'s outer finally always resets
+                # ``task_thread`` to None, so non-None ⇔ task in flight.
                 return
             tab.stop_event = threading.Event()
             tab.user_answer_queue = queue.Queue(maxsize=1)
@@ -206,35 +289,63 @@ class _CommandsMixin:
         self._get_models(cmd.get("connId", ""))
 
     def _cmd_select_model(self, cmd: dict[str, Any]) -> None:
-        """Update the selected model for a tab."""
+        """Update the selected model for a tab.
+
+        An empty ``tabId`` (malformed payload) must not mint a phantom
+        registry entry keyed ``""`` via ``_get_tab`` — such an entry
+        could never be disposed because ``_cmd_close_tab`` guards
+        against empty ids.  In that case only the daemon-wide default
+        model is updated (when a model was actually supplied).
+        """
         tab_id = cmd.get("tabId", "")
-        tab = self._get_tab(tab_id)
-        model = cmd.get("model", tab.selected_model)
+        model = cmd.get("model", "")
+        if not isinstance(model, str):
+            # A non-string model (malformed payload) must neither
+            # corrupt ``tab.selected_model`` / ``self._default_model``
+            # nor raise ``sqlite3.ProgrammingError`` out of
+            # ``_record_model_usage`` (which would kill the client
+            # connection).  Treat it as "no model supplied".
+            model = ""
         with self._state_lock:
-            tab.selected_model = model
+            if tab_id:
+                tab = self._get_tab(tab_id)
+                if not model:
+                    model = tab.selected_model
+                tab.selected_model = model
+            if not model:
+                return
             self._default_model = model
         _record_model_usage(model)
 
     def _cmd_get_history(self, cmd: dict[str, Any]) -> None:
         """Send conversation history to the requesting connection only."""
+        query = cmd.get("query")
+        if not isinstance(query, str):
+            # A non-string query raises AttributeError inside
+            # ``_search_history``'s LIKE escaping and kills the
+            # connection; treat it as "no filter".
+            query = None
+        offset = _parse_int(cmd.get("offset", 0))
+        generation = _parse_int(cmd.get("generation", 0))
         self._get_history(
-            cmd.get("query"),
-            cmd.get("offset", 0),
-            cmd.get("generation", 0),
+            query,
+            0 if offset is None else offset,
+            0 if generation is None else generation,
             cmd.get("connId", ""),
         )
 
     def _cmd_get_frequent_tasks(self, cmd: dict[str, Any]) -> None:
         """Send the top-N most-frequent tasks (default 50)."""
+        limit = _parse_int(cmd.get("limit", 50))
         self._get_frequent_tasks(
-            int(cmd.get("limit", 50)), cmd.get("connId", ""),
+            50 if limit is None else limit, cmd.get("connId", ""),
         )
 
     def _cmd_delete_task(self, cmd: dict[str, Any]) -> None:
         """Delete a task from the database and refresh history."""
-        task_id = cmd.get("taskId")
+        task_id = _parse_int(cmd.get("taskId"))
         if task_id is not None:
-            self._handle_delete_task(int(task_id))
+            self._handle_delete_task(task_id)
 
     def _cmd_delete_frequent_task(self, cmd: dict[str, Any]) -> None:
         """Delete a row from the ``frequent_tasks`` table by task text."""
@@ -244,11 +355,11 @@ class _CommandsMixin:
 
     def _cmd_set_favorite(self, cmd: dict[str, Any]) -> None:
         """Persist the favourite flag on a task history row."""
-        task_id = cmd.get("taskId")
+        task_id = _parse_int(cmd.get("taskId"))
         if task_id is None:
             return
         is_favorite = bool(cmd.get("isFavorite", False))
-        self._handle_set_favorite(int(task_id), is_favorite)
+        self._handle_set_favorite(task_id, is_favorite)
 
     def _cmd_get_files(self, cmd: dict[str, Any]) -> None:
         """Send file list for autocomplete, scoped to the tab's work_dir.
@@ -264,8 +375,14 @@ class _CommandsMixin:
         requesting connection (via ``connId``) so typing ``@`` in one
         VS Code window never pops the file picker in another window.
         """
+        prefix = cmd.get("prefix", "")
+        if not isinstance(prefix, str):
+            # A non-string prefix crashes the background refresh
+            # thread (TypeError in ``rank_file_suggestions``) and the
+            # file picker never receives its reply.
+            prefix = ""
         self._get_files(
-            cmd.get("prefix", ""),
+            prefix,
             cmd.get("workDir", ""),
             cmd.get("connId", ""),
         )
@@ -281,7 +398,9 @@ class _CommandsMixin:
         without conditional branching.
         """
         path = cmd.get("path", "")
-        if path:
+        if isinstance(path, str) and path:
+            # A non-string path would raise sqlite3.ProgrammingError
+            # from the parameter binding and kill the connection.
             _record_file_usage(path)
 
     def _cmd_user_answer(self, cmd: dict[str, Any]) -> None:
@@ -307,8 +426,14 @@ class _CommandsMixin:
                     q.get_nowait()
                 except queue.Empty:  # pragma: no cover — race guard
                     break
+            answer = cmd.get("answer", "")
+            if not isinstance(answer, str):
+                # A non-string answer (e.g. null from a malformed
+                # client) must not leak through the ``Queue[str]`` into
+                # the agent — ``ask_user_question`` promises ``str``.
+                answer = "" if answer is None else str(answer)
             try:
-                q.put_nowait(cmd.get("answer", ""))
+                q.put_nowait(answer)
             except queue.Full:  # pragma: no cover — drained immediately above
                 pass
 
@@ -416,8 +541,7 @@ class _CommandsMixin:
         """
         raw_id = cmd.get("chatId")
         chat_id = str(raw_id) if raw_id else ""
-        raw_task_id = cmd.get("taskId")
-        task_id = int(raw_task_id) if raw_task_id is not None else None
+        task_id = _parse_int(cmd.get("taskId"))
         if chat_id or task_id is not None:
             self._replay_session(
                 chat_id, cmd.get("tabId", ""), task_id=task_id,
@@ -461,8 +585,18 @@ class _CommandsMixin:
           window cannot mark the other window's pending request stale.
         """
         query = cmd.get("query", "")
+        if not isinstance(query, str):
+            # A non-string query queued to the singleton autocomplete
+            # worker killed the worker thread (AttributeError inside
+            # ``_prefix_match_task``); the worker is never restarted,
+            # so ghost text would die for the daemon's whole lifetime.
+            query = ""
         active_file = cmd.get("activeFile")
         active_content = cmd.get("activeFileContent")
+        if active_file is not None and not isinstance(active_file, str):
+            active_file = ""
+        if active_content is not None and not isinstance(active_content, str):
+            active_content = ""
         conn_id = cmd.get("connId", "")
         tab_id = cmd.get("tabId", "")
         chat_id = ""
@@ -501,10 +635,21 @@ class _CommandsMixin:
         The current task is identified by its DB row id (``taskId``);
         navigating by id (rather than the task description text)
         unambiguously handles duplicate task texts within a chat.
+
+        Pure-viewer tabs (opened from the history sidebar by
+        ``_replay_session``) deliberately have NO
+        ``_RunningAgentState`` registry entry (C2/C3 fix) — only a
+        ``_tab_chat_views`` association.  Resolve the chat id from the
+        registry entry when one exists, falling back to the
+        chat-viewer map, and never CREATE a registry entry here:
+        navigation is a read-only view operation.
         """
         tab_id = cmd.get("tabId", "")
-        adj_tab = self._get_tab(tab_id)
-        chat_id = adj_tab.chat_id
+        with self._state_lock:
+            adj_tab = _RunningAgentState.running_agent_states.get(tab_id)
+            chat_id = adj_tab.chat_id if adj_tab is not None else ""
+            if not chat_id:
+                chat_id = self._tab_chat_views.get(tab_id, "")
         raw_task_id = cmd.get("taskId")
         try:
             task_id = int(raw_task_id) if raw_task_id is not None else None
@@ -592,23 +737,43 @@ class _CommandsMixin:
     def _cmd_save_config(self, cmd: dict[str, Any]) -> None:
         """Save configuration and API keys from the frontend.
 
-        When a non-empty ``remote_password`` is saved, restarts the
-        ``kiss-web`` daemon so it picks up the new password and starts
-        (or restarts) its Cloudflare tunnel.
+        When the ``remote_password`` actually *changes* to a non-empty
+        value, restarts the ``kiss-web`` daemon so it picks up the new
+        password and starts (or restarts) its Cloudflare tunnel.
+
+        The change comparison is essential: the webview passively
+        flushes the settings form (settings-panel close, blur/change/
+        Enter on the password inputs), echoing back the already-saved
+        password verbatim.  Restarting on every such echo SIGTERMed the
+        daemon mid-task with no user action — the regression that
+        persisted ``"Task interrupted by server restart/shutdown"`` for
+        in-flight tasks (e.g. task_history row 3515).
         """
         from kiss.agents.vscode.vscode_config import (
             apply_config_to_env,
             load_config,
+            sanitize_config,
             save_api_key_to_shell,
             save_config,
         )
 
+        prev_password = load_config().get("remote_password", "")
         cfg = cmd.get("config", {})
+        if not isinstance(cfg, dict):
+            # A non-dict config (malformed payload) raises
+            # AttributeError below and kills the connection.
+            cfg = {}
+        # Coerce junk-typed values BEFORE any decision is made on them:
+        # a non-string ``work_dir`` must not corrupt ``self.work_dir``
+        # and a truthy non-string ``remote_password`` must not count as
+        # a genuine password change (which restarts the kiss-web
+        # daemon, killing every in-flight task).
+        cfg = sanitize_config(cfg)
         # Guard: never overwrite a non-empty remote_password with an
         # empty one from the frontend.  An empty value typically comes
         # from a race condition (config sidebar closed before the async
         # getConfig response populated the form fields).
-        if not cfg.get("remote_password") and load_config().get("remote_password"):
+        if not cfg.get("remote_password") and prev_password:
             cfg.pop("remote_password", None)
         save_config(cfg)
         apply_config_to_env(cfg)
@@ -618,8 +783,10 @@ class _CommandsMixin:
             self.work_dir = new_work_dir
 
         api_keys = cmd.get("apiKeys", {})
+        if not isinstance(api_keys, dict):
+            api_keys = {}
         for key_name, key_value in api_keys.items():
-            if key_value:
+            if isinstance(key_name, str) and isinstance(key_value, str) and key_value:
                 save_api_key_to_shell(key_name, key_value)
 
         conn_id = cmd.get("connId", "")
@@ -631,7 +798,12 @@ class _CommandsMixin:
             event["connId"] = conn_id
         self.printer.broadcast(event)
 
-        if cfg.get("remote_password", ""):
+        # Restart only on a genuine password change.  A daemon restart
+        # kills every in-flight agent task, and the frontend re-posts
+        # the unchanged password on passive UI events (panel close,
+        # input blur), so an unconditional restart here is destructive.
+        new_password = cfg.get("remote_password", "")
+        if new_password and new_password != prev_password:
             _restart_kiss_web_daemon()
 
     def _cmd_set_work_dir(self, cmd: dict[str, Any]) -> None:

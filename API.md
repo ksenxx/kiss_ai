@@ -189,7 +189,7 @@ ______________________________________________________________________
   - `wt_dir`: Directory for the new worktree.
   - **Returns:** True if worktree was created successfully, False otherwise.
 
-- **remove** — Remove a worktree directory (best-effort, force).<br/>`remove(repo: Path, wt_dir: Path) -> None`
+- **remove** — Remove a worktree directory (best-effort, force). Every caller (`discard`, `cleanup_partial`, `_finalize_worktree`) intends permanent removal of an agent-owned directory, so failures of `git worktree remove` are escalated rather than abandoned: 1. Plain `--force` (handles dirty/untracked content). 2. `--force --force` (git requires force twice for worktrees locked via `git worktree lock`). 3. Direct `rmtree` + `git worktree prune` (handles corrupted worktrees — e.g. a deleted `.git` link file — that fail git's removal validation entirely).<br/>`remove(repo: Path, wt_dir: Path) -> None`
 
   - `repo`: Git repo root path.
   - `wt_dir`: Worktree directory to remove.
@@ -273,6 +273,10 @@ ______________________________________________________________________
 
   - `repo`: Git repo root path.
 
+- **ensure_scratch_merge_driver** — Install a merge driver that auto-resolves agent scratch files. `PROGRESS.md` is a tracked per-task agent log that every task wholesale rewrites ("clear PROGRESS.md when a new task begins"). Whenever main's copy diverged from the worktree's fork point, the whole-file rewrite on both sides made every three-way merge (`git merge --squash` and `git cherry-pick` alike) conflict — blocking the entire worktree merge over a scratch file. This registers a repo-local `kiss-scratch` merge driver that resolves content conflicts in such files by keeping the incoming branch's version (`%B`): the newest task's log wins, matching the clear-on-new-task convention. Installation uses only untracked plumbing — `<git_common_dir>/info/attributes` plus repo-local config — so no tracked file is ever modified, and the driver equally fixes the *manual* merge/cherry-pick commands suggested to the user on merge failure.<br/>`ensure_scratch_merge_driver(repo: Path) -> None`
+
+  - `repo`: Git repo root path.
+
 - **load_original_branch** — Load the original branch from git config.<br/>`load_original_branch(repo: Path, branch: str) -> str | None`
 
   - `repo`: Git repo root path.
@@ -323,7 +327,7 @@ ______________________________________________________________________
   - `branch`: The branch name to delete.
   - `wt_dir`: The worktree directory to remove.
 
-- **cleanup_orphans** — Scan for orphaned `kiss/wt-*` branches and worktrees. Cleans up three distinct forms of stale state: 1. `kiss/wt-*` branches with no active git worktree and no `kiss-original` config (true orphan branches). 2. Registered worktree bookkeeping entries whose directory is gone (`git worktree prune`). 3. Directories under `.kiss-worktrees/` that are not registered as git worktrees (orphan directories — e.g. leftover files from a crashed agent session or a manually unlinked worktree). Pending-merge branches (those with `kiss-original` set) are never removed — BUG-58.<br/>`cleanup_orphans(repo: Path) -> str`
+- **cleanup_orphans** — Scan for orphaned `kiss/wt-*` branches and worktrees. Serialized under :func:`repo_lock`: the scan snapshots `git worktree list` and later deletes branches and rmtree's unregistered directories under `.kiss-worktrees/`. Without the lock, a worktree registered by a concurrent task start (`_try_setup_worktree`) after the snapshot would look like an orphan directory and be deleted out from under the active task.<br/>`cleanup_orphans(repo: Path) -> str`
 
   - `repo`: Root of the git repository to scan.
   - **Returns:** Summary of findings and any cleanup actions taken.
@@ -343,7 +347,7 @@ ______________________________________________________________________
 
 - **new_chat** — Reset to a new chat session, auto-merging any pending worktree. If a worktree task is pending from the previous session, it is auto-committed with a detailed LLM message and squash-merged into the original branch before the chat state is reset.<br/>`new_chat() -> None`
 
-- **run** — Run a task on an isolated git worktree branch. Creates a new worktree and branch, redirects `work_dir` into the worktree, and delegates to `ChatSorcarAgent.run()`. Each call starts a fresh worktree; any previously pending branch from an earlier run is left as-is in git for the user to merge or discard later. Falls back to direct execution (no worktree) when: - `use_worktree` kwarg is explicitly `False` - `work_dir` is not inside a git repo - The repo has no commits - HEAD is detached (no merge target) - Any git command fails during setup<br/>`run(prompt_template: str = '', **kwargs: Any) -> str`
+- **run** — Run a task on an isolated git worktree branch. Creates a new worktree and branch, redirects `work_dir` into the worktree, and delegates to `ChatSorcarAgent.run()`. Each call starts a fresh worktree; any previously pending branch from an earlier run is auto-committed and squash-merged into its original branch first (kept in git for manual resolution only when that auto-merge fails or conflicts). Falls back to direct execution (no worktree) when: - `use_worktree` kwarg is explicitly `False` - `work_dir` is not inside a git repo - The repo has no commits - HEAD is detached (no merge target) - Any git command fails during setup<br/>`run(prompt_template: str = '', **kwargs: Any) -> str`
 
   - `prompt_template`: The task prompt.
   - `**kwargs`: All other arguments forwarded to `ChatSorcarAgent.run()`. The optional `use_worktree` kwarg (default `True`) gates the worktree behavior — when `False` the call is equivalent to `ChatSorcarAgent.run()`.

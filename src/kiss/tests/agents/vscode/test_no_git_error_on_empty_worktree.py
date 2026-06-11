@@ -183,6 +183,13 @@ class TestNoGitRepoErrorOnEmptyWorktree(unittest.TestCase):
         assert tab.agent is not None, "Agent should be preserved when worktree has changes"
         assert tab.agent._wt_pending, "Worktree should still be pending"
 
+        # The post-task flow opened a hunk merge review for the
+        # worktree changes (``is_merging`` is held until the review
+        # finishes).  The frontend only offers Merge/Discard after the
+        # review's ``all-done`` mergeAction, which routes to
+        # ``_finish_merge`` — mirror that here.
+        self.server._finish_merge(tab_id)
+
         # Discard should work (not error).
         result = self.server._handle_worktree_action("discard", tab_id)
         assert result["success"], f"Discard should succeed: {result}"

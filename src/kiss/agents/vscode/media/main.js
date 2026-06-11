@@ -209,6 +209,31 @@
     return tabs.find(t => t.id === id) || null;
   }
 
+  /**
+   * Place *subTab* immediately to the RIGHT of its parent tab — after
+   * any sub-agent tabs of the same parent already sitting there — so
+   * fan-out layouts always read parent → sub-agents left-to-right.
+   * When the parent tab is not present locally, the sub tab is
+   * appended at the end (matching the old behavior).  *subTab* may or
+   * may not already be in ``tabs``; it is (re)inserted exactly once.
+   */
+  function placeSubagentTabAfterParent(subTab, parentId) {
+    const curIdx = tabs.indexOf(subTab);
+    if (curIdx >= 0) tabs.splice(curIdx, 1);
+    const parentIdx = tabs.findIndex(t => {
+      return t.id === parentId;
+    });
+    if (parentIdx < 0) {
+      tabs.push(subTab);
+      return;
+    }
+    let insertAt = parentIdx + 1;
+    while (insertAt < tabs.length && tabs[insertAt].parentTabId === parentId) {
+      insertAt += 1;
+    }
+    tabs.splice(insertAt, 0, subTab);
+  }
+
   /** Create a fresh collapsible 'Thoughts' llm-panel. */
   function mkThoughtsPanel() {
     const panel = mkEl('div', 'llm-panel');
@@ -750,21 +775,42 @@
 
   /** Persist lightweight tab metadata via vscode.setState for cross-restart restore. */
   function persistTabState() {
-    const serialized = tabs.map(t => {
+    // Sub-agent tabs are NOT persisted.  They share the parent's
+    // backend chat id, so a chat-id-only resumeSession after a
+    // restart cannot identify which sub-agent row a restored sub tab
+    // should replay.  Instead, the parent tab's own resumeSession
+    // deterministically reopens one sub-agent tab per persisted
+    // sub-agent row — with that row's own events — to the right of
+    // the parent (see _open_persisted_subagent_tabs in server.py and
+    // the 'openSubagentTab' handler below).  Persisting sub tabs
+    // would duplicate those reopened tabs and load the parent's
+    // events into them.
+    const persistable = tabs.filter(t => {
+      return !t.isSubagentTab;
+    });
+    const serialized = persistable.map(t => {
       // Always use activeTabId for the active tab so the persisted
       // chatId stays in sync even when saveCurrentTab() hasn't run.
       return {
         title: t.title,
         chatId: t.id,
         backendChatId: t.backendChatId || '',
-        isSubagentTab: !!t.isSubagentTab,
-        isDone: !!t.isDone,
         parentTabId: t.parentTabId || '',
       };
     });
-    const activeIdx = tabs.findIndex(t => {
+    let activeIdx = persistable.findIndex(t => {
       return t.id === activeTabId;
     });
+    if (activeIdx < 0) {
+      // The active tab is a sub-agent tab (filtered out above): fall
+      // back to its parent so the restored window focuses the chat
+      // the user was working in.
+      const active = getTab(activeTabId);
+      const parentId = active && active.parentTabId ? active.parentTabId : '';
+      activeIdx = persistable.findIndex(t => {
+        return t.id === parentId;
+      });
+    }
     vscode.setState({
       tabs: serialized,
       activeTabIndex: activeIdx,
@@ -778,21 +824,23 @@
     if (saved && saved.tabs && saved.tabs.length > 0) {
       tabs = [];
       saved.tabs.forEach(st => {
+        // Sub-agent tabs (persisted by older versions of
+        // persistTabState) are dropped: they cannot be resumed by
+        // their (shared, parent-owned) chat id.  The parent tab's
+        // resumeSession reopens one fresh sub-agent tab per persisted
+        // sub-agent row, with the row's own events, right of the
+        // parent.
+        if (st.isSubagentTab) return;
         const tab = makeTab(st.title);
         // Restore tab.id from persisted chatId (frontend tab identifier)
         if (st.chatId) tab.id = st.chatId;
         if (st.backendChatId) tab.backendChatId = st.backendChatId;
-        // Preserve subagent flag so subagent tabs aren't reclassified
-        // as regular tabs on webview reload.
-        if (st.isSubagentTab) {
-          tab.isSubagentTab = true;
-          tab.isDone = !!st.isDone;
-          tab.isRunning = !st.isDone;
-        }
         if (st.parentTabId) tab.parentTabId = st.parentTabId;
         tabs.push(tab);
       });
-      const idx = saved.activeTabIndex || 0;
+    }
+    if (tabs.length > 0) {
+      const idx = (saved && saved.activeTabIndex) || 0;
       if (idx >= 0 && idx < tabs.length) {
         activeTabId = tabs[idx].id;
         // Tab IDs restored from persisted state
@@ -1896,7 +1944,7 @@
           fmtN(ev.total_tokens || 0) +
           '</b></span>' +
           '<span>Cost <b>' +
-          (ev.cost || 'N/A') +
+          esc(ev.cost || 'N/A') +
           '</b></span>' +
           '</div></div><div class="rc-body md-body' +
           (usePre ? ' pre' : '') +
@@ -1961,6 +2009,20 @@
         const acDiv = mkEl('div', 'ev ' + cls2);
         acDiv.textContent = (ev && ev.message) || '';
         target.appendChild(acDiv);
+        break;
+      }
+      case 'warning': {
+        // Persisted backend warning (e.g. the worktree agent's
+        // stash-pop failure) replayed from the stored event stream —
+        // ``warning`` is in json_printer's ``_DISPLAY_EVENT_TYPES``
+        // so it survives a chat reopen / demo replay.  Rendered
+        // identically to the live banner (``addWarning``); the LIVE
+        // path never reaches here because the top-level message
+        // switch handles ``case 'warning'`` and breaks.
+        const warnDiv = mkEl('div', 'ev tr warn');
+        warnDiv.innerHTML =
+          '<strong>Warning:</strong> ' + esc(ev.message || ev.text || '');
+        target.appendChild(warnDiv);
         break;
       }
     }
@@ -2471,13 +2533,21 @@
         // chat resumed from history would show "Running 0s" no
         // matter how long the agent has actually been running.
         if (ev.running && typeof ev.startTs === 'number' && ev.startTs > 0) {
-          t0 = ev.startTs;
           if (evTab) evTab.t0 = ev.startTs;
-          // A freshly-running task on this tab has no recorded end
-          // yet — clear any stale ``endTs`` captured from a prior
-          // task's ``task_events`` so the timer doesn't immediately
-          // jump to "Done".
-          endTs = 0;
+          // Anchor the GLOBAL timer only when the event targets the
+          // active tab (or carries no tabId).  The daemon broadcasts
+          // tab-stamped status events for background tabs and for
+          // tabs owned by OTHER VS Code windows; those must not
+          // clobber the active tab's running clock (same routing
+          // rule as the UI-update gate below).
+          if (ev.tabId === undefined || ev.tabId === activeTabId) {
+            t0 = ev.startTs;
+            // A freshly-running task on this tab has no recorded end
+            // yet — clear any stale ``endTs`` captured from a prior
+            // task's ``task_events`` so the timer doesn't immediately
+            // jump to "Done".
+            endTs = 0;
+          }
         }
         // Update UI only when the event targets the active tab (or no
         // tabId).  A tabId that resolves to NO local tab belongs to a
@@ -2526,9 +2596,26 @@
       case 'frequentTasks':
         renderFrequentTasks(ev.tasks || []);
         break;
-      case 'files':
+      case 'files': {
+        // Staleness guard (mirrors the ``ghost`` handler's
+        // ``ev.query === inp.value`` check): the populated reply for
+        // a cache miss arrives asynchronously after a background
+        // directory scan — potentially seconds later — so only render
+        // it while the user is still typing the @-mention it answers.
+        // Without this, a late reply re-opened the picker over the
+        // input (with acIdx = 0) after the user had deleted the
+        // mention, and the phantom picker swallowed the next Enter.
+        const filesCtx = getAtCtx();
+        if (!filesCtx) {
+          hideAC();
+          break;
+        }
+        if (ev.prefix !== undefined && ev.prefix !== filesCtx.query) {
+          break; // reply ranked for an older prefix — a fresh one is coming
+        }
         renderAutocomplete(ev.files || []);
         break;
+      }
       case 'askUser': {
         const askTabId = ev.tabId !== undefined ? ev.tabId : activeTabId;
         const askTab = getTab(askTabId);
@@ -2548,6 +2635,23 @@
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) break;
         addNotice(ev.text);
         break;
+      case 'warning': {
+        // Backend warning the user must see — e.g. the worktree
+        // agent's stash-pop failure or merge-conflict warning
+        // (WorktreeSorcarAgent._flush_warnings broadcasts
+        // {type: 'warning', message: ...}).
+        if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
+          // Route to the owning BACKGROUND tab's saved fragment
+          // (mirrors the default display-event route) so the warning
+          // is visible when the user switches to that tab.  Unknown
+          // tab ids (other VS Code windows) are dropped as before.
+          const bgWarnTab = findTabByEvt(ev);
+          if (bgWarnTab) processOutputEventForBgTab(ev, bgWarnTab);
+          break;
+        }
+        addWarning(ev.message || ev.text || '');
+        break;
+      }
       case 'clear': {
         const clearTab =
           ev.tabId !== undefined ? getTab(ev.tabId) : getTab(activeTabId);
@@ -3226,25 +3330,32 @@
           typeof ev.taskIndex === 'number' ? ev.taskIndex + 1 : null;
         const titlePrefix = subIdx !== null ? subIdx + '. ' : '';
         const title = titlePrefix + subDesc.substring(0, 40);
+        // ``ev.parent_tab_id`` is set by the sorcar/server emitters;
+        // for the chat_sorcar broadcast path the daemon stamps
+        // ``ev.tabId`` with the subscriber's (= parent's) tab id, so we
+        // fall back to that.
+        const parentId = ev.parent_tab_id || ev.tabId || '';
         // Idempotent: if a tab with the same id already exists, update
         // it in place rather than pushing a duplicate.  Defends against
         // accidental duplicate events from the backend.
         let subTab = getTab(ev.tab_id);
+        const needsPlacement = !subTab || !subTab.isSubagentTab;
         if (!subTab) {
           subTab = makeTab(title);
           subTab.id = ev.tab_id;
-          tabs.push(subTab);
         } else {
           subTab.title = title;
+        }
+        if (needsPlacement) {
+          // First conversion of this tab into a sub-agent tab: anchor
+          // it immediately to the right of its parent tab so restored
+          // and history-reopened fan-outs mirror the live layout.
+          placeSubagentTabAfterParent(subTab, parentId);
         }
         subTab.isSubagentTab = true;
         // Remember the parent → child relationship so closing the parent
         // tab can recursively close every (nested) sub-agent tab it
-        // spawned.  ``ev.parent_tab_id`` is set by the sorcar/server
-        // emitters; for the chat_sorcar broadcast path the daemon stamps
-        // ``ev.tabId`` with the subscriber's (= parent's) tab id, so we
-        // fall back to that.
-        const parentId = ev.parent_tab_id || ev.tabId || '';
+        // spawned.
         if (parentId && parentId !== subTab.id) {
           subTab.parentTabId = parentId;
         }
@@ -3474,6 +3585,14 @@
   function addNotice(text) {
     const div = mkEl('div', 'ev tr note');
     div.innerHTML = '<strong>Note:</strong> ' + esc(text);
+    O.appendChild(div);
+    sb();
+  }
+
+  /** Render a backend warning (amber-tinted banner). */
+  function addWarning(text) {
+    const div = mkEl('div', 'ev tr warn');
+    div.innerHTML = '<strong>Warning:</strong> ' + esc(text);
     O.appendChild(div);
     sb();
   }
@@ -4339,6 +4458,17 @@
       'welcome-cfg-remote-password-toggle',
       'welcome-cfg-remote-password',
     );
+    // API keys are secret by default; each gets an eye toggle like the
+    // remote-password field.
+    [
+      'cfg-key-GEMINI_API_KEY',
+      'cfg-key-OPENAI_API_KEY',
+      'cfg-key-ANTHROPIC_API_KEY',
+      'cfg-key-TOGETHER_API_KEY',
+      'cfg-key-OPENROUTER_API_KEY',
+      'cfg-key-MINIMAX_API_KEY',
+      'cfg-custom-api-key',
+    ].forEach(setupSecretInput);
     // The welcome-page remote-password input and the settings-panel
     // input mirror each other so the existing collectConfigForm +
     // saveConfig flow keeps working without changes.  On Enter, blur,
@@ -5809,10 +5939,11 @@
    * function is a no-op if either DOM node is missing, so it is safe to
    * call unconditionally from setupEventListeners().
    */
-  function setupPasswordToggle(toggleId, inputId) {
+  function setupPasswordToggle(toggleId, inputId, secretName) {
     const btn = document.getElementById(toggleId);
     const inp = document.getElementById(inputId);
     if (!btn || !inp) return;
+    const noun = secretName || 'password';
     btn.addEventListener('click', () => {
       const showing = inp.type === 'text';
       inp.type = showing ? 'password' : 'text';
@@ -5821,10 +5952,43 @@
       if (eye) eye.style.display = showing ? '' : 'none';
       if (eyeOff) eyeOff.style.display = showing ? 'none' : '';
       btn.setAttribute('aria-pressed', showing ? 'false' : 'true');
-      const lbl = showing ? 'Show password' : 'Hide password';
+      const lbl = (showing ? 'Show ' : 'Hide ') + noun;
       btn.setAttribute('aria-label', lbl);
       btn.setAttribute('title', lbl);
     });
+  }
+
+  /**
+   * Make a settings-panel input secret (masked) by default with a
+   * show/hide eye toggle, matching the remote-password field.
+   *
+   * The input is switched to type="password", wrapped in a
+   * .config-password-wrap div, and an eye-toggle button cloned from
+   * the remote-password toggle is appended (so the SVG icon markup
+   * lives in exactly one place: chat.html).  Used for the API-key
+   * fields.  No-op when either DOM node is missing.
+   */
+  function setupSecretInput(inputId) {
+    const inp = document.getElementById(inputId);
+    const proto = document.getElementById('cfg-remote-password-toggle');
+    if (!inp || !proto) return;
+    inp.type = 'password';
+    inp.setAttribute('autocomplete', 'off');
+    const wrap = document.createElement('div');
+    wrap.className = 'config-password-wrap';
+    inp.parentNode.insertBefore(wrap, inp);
+    wrap.appendChild(inp);
+    const btn = proto.cloneNode(true);
+    btn.id = inputId + '-toggle';
+    btn.setAttribute('aria-pressed', 'false');
+    btn.setAttribute('aria-label', 'Show API key');
+    btn.setAttribute('title', 'Show API key');
+    const eye = btn.querySelector('.icon-eye');
+    const eyeOff = btn.querySelector('.icon-eye-off');
+    if (eye) eye.style.display = '';
+    if (eyeOff) eyeOff.style.display = 'none';
+    wrap.appendChild(btn);
+    setupPasswordToggle(btn.id, inputId, 'API key');
   }
 
   let configFormPopulated = false;
