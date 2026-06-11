@@ -43,13 +43,41 @@ values:
 
 from __future__ import annotations
 
+import os
+import tempfile
 import threading
 import time
 import unittest
+from collections.abc import Generator
 from typing import Any
 
+import pytest
+
+from kiss.agents.sorcar.persistence import _close_db
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.vscode.server import VSCodeServer
+
+
+@pytest.fixture(autouse=True)
+def _isolate_db(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
+    """Point persistence/config at a temp dir (pattern from
+    test_model_usage_on_select_only.py) — ``selectModel``/``saveConfig``
+    payloads in these tests must not persist ``last_model``/config
+    values into the process-shared KISS_HOME and pollute later tests."""
+    import kiss.agents.sorcar.persistence as pm
+    import kiss.agents.vscode.vscode_config as vc
+
+    _close_db()
+    tmpdir = tempfile.mkdtemp()
+    monkeypatch.setattr(pm, "_KISS_DIR", type(pm._KISS_DIR)(tmpdir))
+    monkeypatch.setattr(
+        pm, "_DB_PATH", type(pm._DB_PATH)(os.path.join(tmpdir, "sorcar.db")),
+    )
+    cfg_path = os.path.join(tmpdir, "config.json")
+    monkeypatch.setattr(vc, "CONFIG_DIR", type(vc.CONFIG_DIR)(tmpdir))
+    monkeypatch.setattr(vc, "CONFIG_PATH", type(vc.CONFIG_PATH)(cfg_path))
+    yield
+    _close_db()
 
 
 class _ThreadCrashRecorder:
