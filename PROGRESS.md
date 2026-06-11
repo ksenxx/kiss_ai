@@ -1307,7 +1307,7 @@ prints no Goodbye (marginal, not fixing).
     malformed payloads still raised (probe-verified): non-str `tabId` ([1])
     in run/userAnswer/appendUserMessage/selectModel/complete/closeTab/newChat/
     stop/getAdjacentTask/mergeAction (TypeError unhashable);
-    `selectModel` non-str model corrupted tab.selected_model/_default_model
+    `selectModel` non-str model corrupted tab.selected_model/\_default_model
     to a list BEFORE raising sqlite ProgrammingError; `setWorkDir` non-str
     workDir silently corrupted daemon-global self.work_dir+printer.work_dir;
     `recordFileUsage` non-str path (ProgrammingError); `saveConfig` non-dict
@@ -1315,9 +1315,9 @@ prints no Goodbye (marginal, not fixing).
     (AttributeError) / non-int offset (IntegrityError); `getFiles` non-str
     workDir (unhashable cache key). FIXES: dispatch-boundary coercion in
     `_handle_command` (non-str tabId/workDir/connId → ""), isinstance guards
-    in _cmd_select_model/_cmd_record_file_usage/_cmd_save_config/
-    _cmd_get_history (uses `_parse_int` for offset/generation)/_cmd_get_files
-    (prefix)/_cmd_complete (query/activeFile/activeFileContent).
+    in \_cmd_select_model/\_cmd_record_file_usage/\_cmd_save_config/
+    \_cmd_get_history (uses `_parse_int` for offset/generation)/\_cmd_get_files
+    (prefix)/\_cmd_complete (query/activeFile/activeFileContent).
     Test: test_bughunt6_malformed_fields.py (8 tests; 7 failed pre-fix).
   - **BUG-6E-2** (autocomplete.py `_complete_worker_loop`): the lazily-started
     SINGLETON worker had no try/except — one malformed `complete` query (dict
@@ -1349,8 +1349,7 @@ prints no Goodbye (marginal, not fixing).
   wrap/route safely; `_translate_webview_command` non-str type safe;
   `_resolve_user_answer_queue` multi-owner mis-route requires stale
   subscriptions already fixed in bughunt-srv2.
-- REMAINING for this iteration: run impacted vscode test sweep + `uv run
-  check --full`, commit. (Candidate leads list below was session-1 planning;
+- REMAINING for this iteration: run impacted vscode test sweep + `uv run check --full`, commit. (Candidate leads list below was session-1 planning;
   items 1-7 are now resolved by the fixes/probes above except: model-usage
   inflation on empty selectModel (verified harmless — `_record_model_usage`
   only runs when a model string exists; empty model returns early), complete
@@ -1369,3 +1368,44 @@ prints no Goodbye (marginal, not fixing).
   stub \_server_module.generate_followup_text; tearDown clears
   \_RunningAgentState.running_agent_states); (e) fix, verify, run impacted
   tests, `uv run check --full`, commit.
+
+## Iteration 6 — group A (sorcar persistence/running_agent_state)
+
+- Scope: persistence.py (2147 lines, read in full) + running_agent_state.py
+  (read in full; pure state container, no logic to break — consistent with
+  prior verdicts). ~50 candidate surfaces audited.
+- **BUG 6A-1 (FIXED)** — `persistence.py:_set_task_favorite` (~line 1100):
+  parsed stored `extra` with lenient default `json.loads` (accepts bare NaN).
+  A legacy corrupt row (e.g. `'{"subagent": {...}, "cost": NaN, ...}'`,
+  written pre-iter-5) is uniformly classified NOT-subagent (strict
+  `_parse_extra_dict` and the SQL `json_valid` predicate both reject it) and
+  is VISIBLE in the history sidebar. Starring it merged `is_favorite` into
+  the leniently-recovered dict — including the never-effective `subagent`
+  key — and re-encoded via `_dumps_extra` as VALID JSON, so the row flipped
+  to subagent classification and permanently VANISHED from
+  `_load_history`/`_search_history`/`_list_recent_chats`.
+  Fix: parse stored extra with strict `_parse_extra_dict` first; when
+  strict-invalid, recover metadata leniently (the sidebar displays extra via
+  lenient json.loads in server.py) but `extra_obj.pop("subagent", None)` so
+  the rewrite can never change the row's classification.
+  Test: test_bughunt6_favorite_corrupt_extra.py (5 tests; 3 failed pre-fix:
+  star-stays-visible, keeps-chat-in-recent-chats, unstar-stays-visible;
+  2 controls passed: metadata-preserved, valid-subagent-stays-hidden).
+  Regression: 116 impacted persistence/favorite/history tests pass (2
+  parallel shards 46+70); mypy/pyright 0 errors.
+- Ruled out (verified NOT bugs — do NOT re-chase): LIKE prefilter false
+  negatives (all writers use json.dumps default separators); `_load_history`
+  `LIMIT -1 OFFSET` semantics (verified in sqlite); RWLock nesting/deadlock
+  paths (no caller flushes events while holding read lock);
+  `_write_event_batch` seq-cache vs `_delete_task` interleavings (all under
+  write lock); `_event_writer` shutdown sentinel; chat-context cache
+  generation race; `_record_file_usage`/`_record_frequent_task` eviction
+  ties; `_get_history_entry` negative idx (no production callers);
+  `_save_task_extra` lenient `is_favorite` preservation (payload is
+  caller-controlled; cannot flip classification).
+- Note: the htmlhint errors printed by `uv run check --full` for
+  src/kiss/agents/vscode/media/chat.html (`{{NONCE_ATTR}}` template
+  placeholders) are non-blocking BY DESIGN — package.json `lint:html` is
+  `htmlhint ... || true` (commit e57db0dd); chat.html is committed/clean and
+  vscode-group territory, left untouched.
+- Iteration 6 group A result: 1 NEW bug (6A-1) ⇒ loop continues.
