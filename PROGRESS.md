@@ -1,33 +1,17 @@
-# Progress
+# Task: Features/ideas to make Sorcar CLI comparable with OpenCode (internet research)
 
-## Task: Research — features/ideas to make Sorcar CLI comparable with Claude Code and OpenCode
-
-### Steps Done
-
-1. Read SORCAR.md (empty), README.md (CLI section), `src/kiss/agents/sorcar/cli_repl.py`
-   and listed `src/kiss/agents/sorcar/` to inventory current Sorcar CLI features:
-   REPL with @-mentions, ghost completion, slash commands (/help /clear /new /resume
-   /model /cost /usage /context /commands /exit), custom markdown commands
-   (~/.kiss/commands, .kiss/commands, ~/.claude/commands compat), steering, git
-   worktrees, browser, parallel sub-agents, budget flag, chat resume.
-1. Web research — visited 10 sites with go_to_url, tracked in
-   tmp/information-sorcarcli.md (deleted at end):
-   1. Claude Code CLI reference (code.claude.com/docs/en/cli-reference)
-   1. Claude Code Interactive mode reference
-   1. OpenCode intro docs (opencode.ai/docs)
-   1. OpenCode CLI reference (opencode.ai/docs/cli)
-   1. Claude Code Checkpointing docs
-   1. OpenCode LSP Servers docs
-   1. DuckDuckGo search: opencode vs claude code comparisons
-   1. Firecrawl deep comparison blog (June 2026)
-   1. Claude Code Commands reference (full slash-command list)
-   1. OpenCode Agents docs (primary/subagent system, permissions)
-1. Synthesized a prioritized feature-gap list for Sorcar CLI (delivered in the final
-   answer): headless -p/pipe mode + JSON output, checkpoint/rewind (/undo /redo),
-   permission modes + fine-grained tool permission rules, background session
-   management (bg/attach/logs/stop + agent view), ! shell mode, MCP support, hooks,
-   session export/import/fork/branch, LSP diagnostics, /init memory generation,
-   /compact + /context visualization, image paste, vim mode, custom subagents with
-   per-agent models, /goal validator loop, code-review skills, stats, self-update,
-   server/SDK mode, plugins, etc.
-1. No code changes were made; research-only task. Temp research file removed.
+## Steps done
+1. Read SORCAR.md (empty). Created tmp/information-opencode2.md research log.
+2. Visited 10 sites with go_to_url, logging findings after each (counter 10/10):
+   1. opencode.ai/docs/ (intro: /init, plan/build Tab toggle, /undo //redo, /share, image drag-drop)
+   2. opencode.ai/docs/cli/ (run, serve, attach, agent create, mcp, models, session, stats, export/import, web, acp, plugin, pr, db, uninstall, upgrade, --pure, env vars)
+   3. opencode.ai/docs/tui/ (! bash mode, leader-key keybinds, /compact /details /editor /export /thinking, tui.json, attention sounds/notifications)
+   4. opencode.ai/docs/lsp/ (34 built-in LSP servers, lazy start, diagnostics fed to agent)
+   5. opencode.ai/docs/permissions/ (allow/ask/deny, glob rules on tool input, external_directory, doom_loop, .env deny default, "always" session patterns)
+   6. opencode.ai/docs/agents/ (primary vs subagent, build/plan/general/explore/scout, markdown agents, steps limit, task permissions, child-session navigation)
+   7. opencode.ai/docs/commands/ ($ARGUMENTS/$1..$N, !`cmd` injection, @file refs, agent/model/subtask per command)
+   8. opencode.ai/docs/plugins/ (JS/TS hook plugins, npm auto-install, tool.execute.before/after, shell.env, custom tools, compaction hook)
+   9. opencode.ai/docs/skills/ (SKILL.md on-demand loading, .claude/skills compat, skill permissions)
+   10. opencode.ai/docs/share/ (manual/auto/disabled share modes, /unshare deletes data, enterprise self-host)
+3. Verified Sorcar CLI current commands via grep on src/kiss/agents/sorcar/cli_repl.py: /help /clear /new /resume /model /cost /usage /context /commands /exit /quit.
+4. Synthesized OpenCode-vs-Sorcar gap analysis; delivered in finish summary. Cleaned tmp/.
