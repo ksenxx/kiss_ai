@@ -116,6 +116,7 @@ class MergeResult(enum.Enum):
     CONFLICT = "conflict"
     CHECKOUT_FAILED = "checkout_failed"
     MERGE_FAILED = "merge_failed"
+    STASH_FAILED = "stash_failed"
 
 
 def _unquote_git_path(path: str) -> str:
