@@ -519,17 +519,49 @@ class _WebMergeState:
         ]
 
 
+def _restore_base_bytes(base_path: str, write_to: str) -> None:
+    """Restore *write_to* to the exact bytes of *base_path*.
+
+    Used to reject changes to binary (or undecodable) files, whose
+    merge entries carry a single whole-file pseudo-hunk: line-based
+    splicing is meaningless for them, so the base copy is restored
+    wholesale.  A missing/unreadable base restores an empty file
+    (mirroring ``_write_base_copy``'s empty-base convention).
+
+    Args:
+        base_path: Path to the pre-task base copy.
+        write_to: Real workspace path to restore.
+    """
+    try:
+        data = Path(base_path).read_bytes()
+    except OSError:
+        data = b""
+    Path(write_to).parent.mkdir(parents=True, exist_ok=True)
+    Path(write_to).write_bytes(data)
+
+
 def _reject_hunk_in_file(
     current_path: str,
     base_path: str,
     hunk: dict[str, int],
     target_path: str | None = None,
+    *,
+    binary: bool = False,
 ) -> None:
     """Revert a single hunk in the current file to the base version.
 
     Reads both files, replaces the hunk's lines in the current file
     with the corresponding lines from the base file, and writes the
-    result back.
+    result back.  Files are read and written WITHOUT newline
+    translation (and split on ``\\n`` only) so rejecting one hunk of a
+    CRLF file does not silently rewrite every other line with LF
+    endings, and line numbering matches git's ``\\n``-based hunks.
+
+    When *binary* is true — or either file turns out not to be
+    decodable text — the base bytes are restored wholesale instead:
+    binary merge entries carry a single whole-file pseudo-hunk, so
+    line splicing does not apply (and used to raise
+    ``UnicodeDecodeError``, crashing the merge action).
 
     When *target_path* differs from *current_path* — which happens when
     the agent deleted a tracked file and the merge view uses a
@@ -547,20 +579,32 @@ def _reject_hunk_in_file(
             (0-based line positions).
         target_path: Real workspace path to write the rejection to.
             Defaults to *current_path* for backwards compatibility.
+        binary: True when the merge entry is flagged binary; restores
+            the base bytes wholesale.
     """
     write_to = target_path or current_path
+    if binary:
+        _restore_base_bytes(base_path, write_to)
+        return
     # Read from *write_to* (the real workspace target) when it exists
     # so that successive partial rejections accumulate against the
     # restored content rather than the (now-stale) placeholder.
     try:
-        cur_lines = Path(write_to).read_text().splitlines(keepends=True)
-    except OSError:
         try:
-            cur_lines = Path(current_path).read_text().splitlines(keepends=True)
+            cur_lines = _read_lines_preserved(write_to)
         except OSError:
-            cur_lines = []
-    try:
-        base_lines = Path(base_path).read_text().splitlines(keepends=True)
+            try:
+                cur_lines = _read_lines_preserved(current_path)
+            except OSError:
+                cur_lines = []
+        base_lines = _read_lines_preserved(base_path)
+    except UnicodeDecodeError:
+        # Undecodable content that slipped past the binary sniff
+        # (e.g. UTF-16 / latin-1 without NUL bytes in the first 8 KiB).
+        # Restoring the base bytes wholesale beats crashing the merge
+        # action with an exception.
+        _restore_base_bytes(base_path, write_to)
+        return
     except OSError:
         base_lines = []
 
@@ -570,7 +614,8 @@ def _reject_hunk_in_file(
         + cur_lines[hunk["cs"] + hunk["cc"] :]
     )
     Path(write_to).parent.mkdir(parents=True, exist_ok=True)
-    Path(write_to).write_text("".join(new_lines))
+    with open(write_to, "w", newline="") as f:
+        f.write("".join(new_lines))
 
 
 def _reject_all_hunks_in_file(
@@ -597,6 +642,15 @@ def _reject_all_hunks_in_file(
     hunks = file_data.get("hunks", [])
     if hunk_indices is None:
         hunk_indices = list(range(len(hunks)))
+    if file_data.get("binary"):
+        # Binary entries carry a single whole-file pseudo-hunk; restore
+        # the base bytes wholesale (line splicing does not apply).
+        if hunk_indices:
+            _restore_base_bytes(
+                file_data["base"],
+                file_data.get("target") or file_data["current"],
+            )
+        return
     pending = set(hunk_indices)
     for hi in sorted(hunk_indices):
         hunk = hunks[hi]
