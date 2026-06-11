@@ -554,11 +554,17 @@ class GitWorktreeOps:
 
     @staticmethod
     def _diff_name_only(repo: Path, *flags: str) -> list[str]:
-        """Return ``git diff --name-only`` output lines (empty on failure)."""
+        """Return ``git diff --name-only`` output lines (empty on failure).
+
+        Paths are unquoted via :func:`_unquote_git_path`: even with
+        ``core.quotepath=false`` git C-quotes any path containing a
+        double-quote, backslash, or control character, and callers
+        compare these names against real on-disk paths.
+        """
         result = _git("diff", "--name-only", *flags, cwd=repo)
         if result.returncode != 0:
             return []
-        return [f for f in result.stdout.strip().splitlines() if f]
+        return [_unquote_git_path(f) for f in result.stdout.strip().splitlines() if f]
 
     @staticmethod
     def unstaged_files(repo: Path) -> list[str]:
