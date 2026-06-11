@@ -726,9 +726,13 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                 f"    git checkout <branch> && {merge_cmd}"
             )
 
-        if wt.wt_dir.exists():
-            if not self._finalize_worktree():
-                return (
+        # Always finalize, even when the worktree directory is already
+        # gone: ``_finalize_worktree`` runs ``git worktree prune``,
+        # without which a stale registration (deleted dir, bookkeeping
+        # kept) makes ``git branch -d/-D`` refuse to delete the task
+        # branch after a successful merge.
+        if not self._finalize_worktree():
+            return (
                     f"Cannot merge: auto-commit for '{wt.branch}' failed "
                     "(a pre-commit hook may have rejected the commit). "
                     f"The worktree is preserved at: {wt.wt_dir}\n\n"
