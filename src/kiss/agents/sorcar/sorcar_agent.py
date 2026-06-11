@@ -28,6 +28,7 @@ from kiss.agents.sorcar.cli_helpers import (
     cli_ask_user_question as cli_ask_user_question,
 )
 from kiss.agents.sorcar.persistence import _load_last_model
+from kiss.agents.sorcar.skills import make_skill_tool
 from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.agents.sorcar.web_use_tool import WebUseTool
 from kiss.core.base import SYSTEM_PROMPT
@@ -594,6 +595,13 @@ class SorcarAgent(RelentlessAgent):
             _save_last_model(model_name)
             return f"Model changed from {previous_name} to {model_name}."
 
+        # Agent Skills (https://agentskills.io): the tool's docstring
+        # carries only each skill's name + description (token-efficient
+        # progressive disclosure); full SKILL.md bodies load on demand.
+        # No tool is registered when no skills are discovered.
+        skill_tool = make_skill_tool(self.work_dir or ".")
+        if skill_tool is not None:
+            tools.append(skill_tool)
         tools.append(ask_user_question)
         tools.append(update_settings)
         tools.append(set_model)
