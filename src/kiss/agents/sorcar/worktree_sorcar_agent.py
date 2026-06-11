@@ -129,6 +129,11 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         # the owning :class:`_RunningAgentState` and pull queued
         # follow-up prompts before each model call.
         self._tab_id: str = ""
+        # Wall-clock start of the current task in epoch milliseconds,
+        # stamped by the VS Code ``task_runner`` just before the run
+        # starts; read (via ``getattr`` with a 0 default) by
+        # ``server._live_task_start_ms`` for resume timelines.
+        self._task_start_ms: int = 0
 
 
     @property
@@ -616,8 +621,9 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         Creates a new worktree and branch, redirects ``work_dir`` into
         the worktree, and delegates to ``ChatSorcarAgent.run()``.
         Each call starts a fresh worktree; any previously pending
-        branch from an earlier run is left as-is in git for the user
-        to merge or discard later.
+        branch from an earlier run is auto-committed and squash-merged
+        into its original branch first (kept in git for manual
+        resolution only when that auto-merge fails or conflicts).
 
         Falls back to direct execution (no worktree) when:
         - ``use_worktree`` kwarg is explicitly ``False``
@@ -741,6 +747,7 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             return (
                 f"Cannot checkout '{wt.original_branch}'.\n"
                 "Fix the issue and retry merge(), or call discard()."
+                + stash_suffix
             )
 
         if result == MergeResult.SUCCESS:

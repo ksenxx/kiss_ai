@@ -1075,6 +1075,19 @@ class VSCodeServer(
                     start_ts_for_resume = int(extra_raw.get("startTs", 0) or 0)
                 except (TypeError, ValueError):
                     start_ts_for_resume = 0
+            # ``extra.startTs`` is only persisted at task END
+            # (``_save_task_extra`` in ``_run_task_inner``'s cleanup
+            # finally) — for a STILL-RUNNING task (the only case this
+            # branch handles) it is therefore always absent and the
+            # value above stays 0, which the frontend ignores
+            # (``ev.startTs > 0`` guard) before mis-anchoring the
+            # "Running …" timer at the client's ``Date.now()``.  Fall
+            # back to the live agent's in-memory start timestamp,
+            # stamped by ``_TaskRunnerMixin._run_task_inner``.
+            if start_ts_for_resume <= 0:
+                start_ts_for_resume = self._live_task_start_ms(
+                    rebound_task_id, chat_id,
+                )
             self.printer.broadcast({
                 "type": "status",
                 "running": True,
@@ -1247,6 +1260,48 @@ class VSCodeServer(
                 "extra": row.get("extra", ""),
                 "tabId": sub_tab_id,
             })
+
+    def _live_task_start_ms(
+        self, task_id: int | None, chat_id: str,
+    ) -> int:
+        """Return the start timestamp (ms since epoch) of a live task.
+
+        Scans :attr:`_RunningAgentState.running_agent_states` for the
+        state owning the running task and reads the
+        ``_task_start_ms`` attribute that
+        :meth:`_TaskRunnerMixin._run_task_inner` stamps on the live
+        agent at run start.  Matching mirrors
+        :meth:`_reattach_running_chat`: an exact ``task_history`` row
+        id match when *task_id* is given, otherwise a non-subagent
+        ``chat_id`` match.
+
+        Args:
+            task_id: The ``task_history`` row id of the task, or
+                ``None`` to match by chat id only.
+            chat_id: The chat id of the task (used when *task_id* is
+                ``None``).
+
+        Returns:
+            The agent's start timestamp in ms since epoch, or ``0``
+            when no live agent (or no stamped timestamp) is found.
+        """
+        with self._state_lock:
+            for tab in _RunningAgentState.running_agent_states.values():
+                if task_id is not None:
+                    if _live_task_id(tab) != task_id:
+                        continue
+                elif (
+                    not chat_id
+                    or tab.chat_id != chat_id
+                    or tab.is_subagent
+                ):
+                    continue
+                start_ms = int(
+                    getattr(tab.agent, "_task_start_ms", 0) or 0
+                )
+                if start_ms > 0:
+                    return start_ms
+        return 0
 
     def _reattach_running_chat(
         self,

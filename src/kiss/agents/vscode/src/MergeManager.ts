@@ -723,8 +723,22 @@ export class MergeManager extends EventEmitter {
         }
       }
 
-      const isNewFile =
-        processed.length > 0 && processed.every(h => h.oc === 0);
+      // A file is "new" only when its pre-task base copy is empty:
+      // ``diff_merge._write_base_copy`` writes an empty base exactly
+      // when git has no blob for the file (brand-new file).  The old
+      // ``every(h => h.oc === 0)`` heuristic also matched EXISTING
+      // files whose only changes were insertions (e.g. an appended
+      // function produces hunks with bc=0 ⇒ oc=0), so rejecting such
+      // a change deleted the user's pre-existing file from disk.
+      // Mirrors the ``hasBase`` check used for binary files above.
+      const hasTextBase = (() => {
+        try {
+          return fs.statSync(f.base).size > 0;
+        } catch {
+          return false;
+        }
+      })();
+      const isNewFile = processed.length > 0 && !hasTextBase;
       this._ms[f.current] = {
         basePath: f.base,
         hunks: processed,

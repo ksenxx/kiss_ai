@@ -54,10 +54,12 @@ const fs = require('fs');
  *
  *   - ``'alive'``    — a TCP server accepted our connection within
  *                      ``timeoutMs``.
- *   - ``'dead'``     — the connect was actively refused (ECONNREFUSED)
- *                      or the host explicitly said "no such address"
- *                      (ECONNRESET on the very first packet); the
- *                      caller may treat the daemon as gone.
+ *   - ``'dead'``     — the connect was actively refused (ECONNREFUSED);
+ *                      the caller may treat the daemon as gone.  Note
+ *                      that ECONNRESET is deliberately NOT treated as
+ *                      dead: a reset mid-handshake can happen to a
+ *                      live-but-overloaded daemon, so it maps to
+ *                      ``'unknown'`` below.
  *   - ``'unknown'``  — the probe could not be completed (timeout,
  *                      ENETUNREACH, EHOSTUNREACH, EACCES, spawn failure,
  *                      etc.).  Callers MUST NOT conflate this with
