@@ -2953,16 +2953,49 @@ class RemoteAccessServer:
         with self._pending_tab_closes_lock:
             self._pending_tab_closes.pop(tab_id, None)
         with self._merge_states_lock:
-            self._merge_states.pop(tab_id, None)
+            merge_state = self._merge_states.pop(tab_id, None)
             self._merge_action_locks.pop(tab_id, None)
         if self._loop is None or not self._loop.is_running():
             return
         task = asyncio.ensure_future(
-            self._run_cmd({"type": "closeTab", "tabId": tab_id}),
+            self._finish_merge_and_close_tab(tab_id, merge_state),
             loop=self._loop,
         )
         self._pending_close_tasks.add(task)
         task.add_done_callback(self._pending_close_tasks.discard)
+
+    async def _finish_merge_and_close_tab(
+        self, tab_id: str, merge_state: _WebMergeState | None,
+    ) -> None:
+        """End an in-flight merge review (if any) and close *tab_id*.
+
+        Companion of :meth:`_fire_pending_tab_close`.  When the close
+        grace elapsed while a merge review was still in flight, the
+        popped :class:`_WebMergeState` is the ONLY thing that could
+        ever drive the review to ``all-done`` — the backend
+        ``_close_tab`` sees ``is_merging=True`` (a busy lifecycle
+        flag), merely flips ``frontend_closed=True`` and waits for
+        the merge to end, which would now never happen.  Dispatching
+        ``all-done`` here treats the close as "accept the remaining
+        hunks" (no disk writes — the workspace already holds the
+        agent's content): ``_finish_merge`` clears ``is_merging``,
+        cleans the per-tab merge artifacts, presents any pending
+        worktree, and the subsequent ``closeTab`` disposes the
+        backend tab instead of leaking it forever.
+
+        Args:
+            tab_id: The frontend tab identifier being closed.
+            merge_state: The web-side merge state popped for the tab,
+                or ``None`` when no review was in flight.
+        """
+        if merge_state is not None:
+            await self._run_cmd({
+                "type": "mergeAction",
+                "action": "all-done",
+                "tabId": tab_id,
+                "workDir": merge_state.work_dir,
+            })
+        await self._run_cmd({"type": "closeTab", "tabId": tab_id})
 
     async def _ws_handler(self, websocket: ServerConnection) -> None:
         """Handle a WebSocket client connection.

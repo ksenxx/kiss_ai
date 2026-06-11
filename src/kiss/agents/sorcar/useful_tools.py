@@ -277,6 +277,11 @@ class UsefulTools:
 
         Output (stdout + stderr combined) is captured as UTF-8 text and
         the child runs in ``self.work_dir`` with a cleaned environment.
+        Invalid UTF-8 bytes in the output (e.g. ``cat`` of a binary,
+        ``grep`` on a binary file) are replaced with U+FFFD instead of
+        raising ``UnicodeDecodeError`` — strict decoding would lose the
+        ENTIRE output (and, on the streaming path, leak the exception
+        out of the tool) even when the command itself succeeded.
 
         Args:
             command: The shell command to execute.
@@ -290,6 +295,7 @@ class UsefulTools:
             stderr=subprocess.STDOUT,
             text=True,
             encoding="utf-8",
+            errors="replace",
             env=_clean_env(self.work_dir),
             cwd=self.work_dir or None,
         )
@@ -339,6 +345,18 @@ class UsefulTools:
 
             if resolved.is_dir():
                 return self._read_directory_listing(file_path, resolved)
+
+            # Non-regular files (FIFOs, devices, sockets): opening a FIFO
+            # with no writer blocks FOREVER, and /dev/zero-style devices
+            # stream endlessly — either would hang the agent with no
+            # timeout.  Refuse them up front.
+            if resolved.exists() and not resolved.is_file():
+                return (
+                    f"Error: {file_path} is not a regular file "
+                    f"(FIFO/device/socket); reading it could block forever. "
+                    f"Use Bash (which has a timeout) if you really need its "
+                    f"contents."
+                )
 
             try:
                 text = resolved.read_text()
@@ -417,6 +435,14 @@ class UsefulTools:
         try:
             expanded = _expand_pwd_prefix(file_path, self.work_dir)
             resolved = Path(expanded).resolve()
+            # Refuse existing non-regular targets: opening a FIFO for
+            # writing blocks forever when it has no reader, hanging the
+            # agent with no timeout (directories/devices are also wrong).
+            if resolved.exists() and not resolved.is_file():
+                return (
+                    f"Error: {file_path} exists and is not a regular file "
+                    f"(directory/FIFO/device/socket); refusing to write to it."
+                )
             resolved.parent.mkdir(parents=True, exist_ok=True)
             resolved.write_text(content)
             return f"Successfully wrote {len(content)} characters to {file_path}"

@@ -817,6 +817,29 @@ workDir plumbing).
       `_on_task_id_allocated` to sub-agent run()? (line ~219 agent.run(...) — check
       kwargs). If YES → viewer tabs of parent chat get 'clear' wiping parent view.
       If NO → hint (i) is N/A.
+- CONFIRMED CANDIDATE BUG-5E-1 (merge_flow.py:759 `_check_worktree_busy`): the guard
+  checks `tab.is_task_active` and `_any_non_wt_running()` but NEVER `tab.is_merging`.
+  Double-click on Merge (or merge+discard concurrently) on the SAME tab: thread 1
+  sets is_merging=True, releases _state_lock, blocks in repo_lock/wt.merge() (slow:
+  LLM commit message); thread 2 passes busy check (is_merging not checked), sets
+  is_merging=True again, queues on repo_lock, then re-runs wt.merge()/wt.discard()
+  on the already-merged worktree; ALSO whichever finishes first clears is_merging in
+  its finally while the other is still merging → non-wt task can start mid-merge.
+  FIX: add `if tab.is_merging: return {...refused...}` to `_check_worktree_busy`
+  (check happens under _state_lock in `_handle_worktree_action`, so check+set
+  atomic). TEST plan: VSCodeServer harness; tab with use_worktree=True and a stub
+  agent (real WorktreeSorcarAgent with _wt_pending=True and merge() overridden via
+  subclass to block on an Event + count calls); thread1 worktreeAction merge,
+  wait until inside merge(), thread2 worktreeAction merge → assert second result
+  success=False/"already in progress" and merge called exactly once.
+  NOTE: sub-checks also needed? `_check_worktree_busy` is also used elsewhere?
+  (grep: only _handle_worktree_action). Also `_run_task_inner`'s non-wt start guard
+  scans `t.is_merging and t.use_worktree` for ALL tabs — already fine.
+- Also noted: `_finish_merge` uses `_get_tab` (mints registry entry+agent for unknown
+  tab id) — phantom but disposable (non-empty id) — marginal, skip.
+- mf1/mf2/mf3 extracts in tmp/: merge_flow regions; tmp/server_part2/3.txt = server.py
+  820-1625; tmp/csa_parallel.txt = chat_sorcar_agent _run_single (sub-agents do NOT
+  forward _on_task_id_allocated → candidate (i) N/A).
 - Harness recipe (test_bughunt3_run_start_race.py): VSCodeServer(); override
   server.printer.broadcast with recording fn; stub SorcarAgent.__mro__[1].run to
   return "success: true\nsummary: ok\n"; stub _server_module.generate_followup_text;
