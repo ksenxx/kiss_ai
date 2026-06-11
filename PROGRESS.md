@@ -41,15 +41,15 @@ newest task's log wins, matching the clear-on-new-task convention.
 `src/kiss/tests/agents/sorcar/test_progress_md_merge_conflict.py`:
 
 1. ops-level squash-merge with divergent PROGRESS.md → SUCCESS, branch wins
-2. ops-level baseline/cherry-pick path (exact incident replay) → SUCCESS
-3. genuine conflict in a real source file → still CONFLICT
-4. driver installation is idempotent
-5. agent-level: WorktreeSorcarAgent.run + divergent PROGRESS.md + merge()
+1. ops-level baseline/cherry-pick path (exact incident replay) → SUCCESS
+1. genuine conflict in a real source file → still CONFLICT
+1. driver installation is idempotent
+1. agent-level: WorktreeSorcarAgent.run + divergent PROGRESS.md + merge()
    → "Successfully merged" (fails pre-fix with "Merge conflict detected")
 
 ## Status
 
 - [x] Analysis
-- [ ] Test written, confirmed failing pre-fix
-- [ ] Fix implemented
-- [ ] Tests pass, uv run check --full clean
+- [x] Test written, confirmed failing pre-fix (6 tests; ops + agent-level)
+- [x] Fix implemented (git_worktree.py, worktree_sorcar_agent.py)
+- [x] Tests pass (6/6 new; 401/401 worktree/merge sweep), uv run check --full clean
