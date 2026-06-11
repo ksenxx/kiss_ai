@@ -68,3 +68,54 @@ and fixed. None overlap the 16 bugs from rounds 1-2 or the 18 worktree audit rou
   pass. 100 coverage-branch tests pass. 200 vscode merge/web_server tests pass.
 - `uv run check --full`: all checks pass.
 - tmp/probe, tmp/shards scratch dirs deleted before finish.
+
+# Task: Bug-hunt iteration 3, group D (sorcar_agent.py / chat_sorcar_agent.py / useful_tools.py / web_use_tool.py) — COMPLETE
+
+4 NEW bugs found, reproduced failing-first (10 failing assertions pre-fix), fixed;
+12/12 new tests pass. Changes auto-committed in 437303f9; fixes verified intact at
+HEAD after sibling-group merges.
+
+### Bugs (file, root cause, fix, test)
+
+1. **D-1** `useful_tools.py::Edit` (~line 450): empty `old_string` —
+   `str.count("") == len+1`, so `replace_all=True` interleaved `new_string` between
+   EVERY character (silent file corruption); on an empty file it silently acted as
+   Write. Fix: explicit `old_string == ""` → Error suggesting the Write tool.
+   Test: `test_bughunt3_edit_empty_oldstring.py` (3 tests).
+1. **D-2** `sorcar_agent.py::_coerce_tasks` (~line 830): JSON `"[]"` fell through the
+   `and parsed` guard → wrapped as `["[]"]` (one garbage sub-agent LLM run); JSON
+   lists with non-string elements (`'[1, 2]'`) were treated as ONE task string.
+   Fix: any parsed JSON list is accepted — `[]` → zero tasks, non-str elements
+   str()-coerced one-per-task. Test: `test_bughunt3_coerce_tasks_json.py` (4 tests).
+1. **D-3** `web_use_tool.py::_is_profile_in_use` (~line 113): corrupt/stale
+   `SingletonLock` target `host-0` → `os.kill(0, 0)` signals the CALLER'S OWN process
+   group and always succeeds → profile permanently "in use" →
+   `_resolve_user_data_dir` escalated to `_1`, `_2`, … silently losing the user's
+   logged-in browser profile. Fix: `if pid <= 0: return False` before `os.kill`.
+   Test: `test_bughunt3_profile_pid0.py` (3 tests).
+1. **D-4** `web_use_tool.py::WebUseTool`: `atexit.register(self.close)` per instance,
+   never unregistered → one retained tool object + atexit entry leaked per agent run
+   (`SorcarAgent.run` builds a fresh WebUseTool every run). Fix:
+   `atexit.unregister(self.close)` in `close()`; unregister+register re-arm at top of
+   `_ensure_browser` (keeps exactly one entry across relaunches).
+   Test: `test_bughunt3_webuse_atexit_leak.py` (2 tests).
+
+### Deliberately skipped (not testable without real LLM calls or mocks/fakes)
+
+- Module-level `run_tasks_parallel` doesn't copy the parent `stop_event` into worker
+  thread-locals (the ChatSorcarAgent override does — asymmetry).
+- `chat_sorcar_agent.py::run` finally: result parsing as non-dict YAML persists
+  summary `""` instead of the `result[:500]` fallback used on parse failure.
+
+### Verification
+
+- 12/12 new group-D tests pass; 196 directly-affected tests pass (useful_tools,
+  web_use_tool, run_parallel\*, read_tool robustness, pwd_prefix, read_binary,
+  bughunt_agent\*, update_settings\*, sorcar_agent, stateful, bash_worktree_cwd,
+  change_model); 155 coverage/parallel tests pass.
+- Full sorcar test dir in 4 shards: 1293 passed. Two shard-level failures
+  (`test_bughunt_cli` ctrl-c forkpty flake — documented pre-existing — and
+  `test_new_chat_hang` ordering under concurrent sibling-session load) both pass in
+  isolation → not regressions.
+- `uv run check --full`: All checks passed.
+- tmp/shard\* scratch files deleted before finish.
