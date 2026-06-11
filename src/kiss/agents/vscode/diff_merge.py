@@ -43,7 +43,10 @@ def _load_gitignore_dirs(work_dir: str) -> set[str]:
             line = raw_line.strip()
             if not line or line.startswith("#") or line.startswith("!"):
                 continue
-            name = line.rstrip("/")
+            # Strip the leading "/" too: a root-anchored entry like
+            # ``/node_modules`` must match the directory name
+            # ``node_modules`` during the scan.
+            name = line.strip("/")
             if "*" in name or "?" in name:
                 continue
             skip.add(name)
@@ -546,15 +549,16 @@ def _write_base_copy(
     saved_base = ub_dir / fname
     if saved_base.is_file():
         shutil.copy2(saved_base, base_path)
-    elif binary:
+    else:
+        # Use the bytes path for text files too: a text-mode ``git
+        # show`` (universal newlines) would translate CRLF to LF, so a
+        # CRLF file's base copy would differ from the working file on
+        # every line and the merge view would show spurious
+        # whole-file hunks.  Preserving the exact committed bytes is
+        # correct for both binary and text content.
         bin_result = _git_bytes(work_dir, "show", f"{base_ref}:{fname}")
         base_path.write_bytes(
             bin_result.stdout if bin_result.returncode == 0 else b"",
-        )
-    else:
-        base_result = _git(work_dir, "show", f"{base_ref}:{fname}")
-        base_path.write_text(
-            base_result.stdout if base_result.returncode == 0 else "",
         )
     return base_path
 
