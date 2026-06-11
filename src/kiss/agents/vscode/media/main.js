@@ -2596,9 +2596,26 @@
       case 'frequentTasks':
         renderFrequentTasks(ev.tasks || []);
         break;
-      case 'files':
+      case 'files': {
+        // Staleness guard (mirrors the ``ghost`` handler's
+        // ``ev.query === inp.value`` check): the populated reply for
+        // a cache miss arrives asynchronously after a background
+        // directory scan — potentially seconds later — so only render
+        // it while the user is still typing the @-mention it answers.
+        // Without this, a late reply re-opened the picker over the
+        // input (with acIdx = 0) after the user had deleted the
+        // mention, and the phantom picker swallowed the next Enter.
+        const filesCtx = getAtCtx();
+        if (!filesCtx) {
+          hideAC();
+          break;
+        }
+        if (ev.prefix !== undefined && ev.prefix !== filesCtx.query) {
+          break; // reply ranked for an older prefix — a fresh one is coming
+        }
         renderAutocomplete(ev.files || []);
         break;
+      }
       case 'askUser': {
         const askTabId = ev.tabId !== undefined ? ev.tabId : activeTabId;
         const askTab = getTab(askTabId);

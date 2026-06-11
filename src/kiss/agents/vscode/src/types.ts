@@ -172,7 +172,12 @@ type ToWebviewMessageBody =
       offset?: number;
       generation?: number;
     }
-  | {type: 'files'; files: Array<{type: string; text: string}>}
+  | {
+      type: 'files';
+      files: Array<{type: string; text: string}>;
+      prefix?: string;
+      loading?: boolean;
+    }
   | {type: 'askUser'; question: string}
   | {type: 'error'; text: string}
   | {type: 'followup_suggestion'; text: string}
