@@ -616,6 +616,14 @@ def _read_line(prompt: str) -> str | None:
         sys.stdout.write("\n\n")
         sys.stdout.flush()
         return None
+    except KeyboardInterrupt:
+        # Ctrl+C leaves the cursor on the body line; step onto the
+        # bottom rule and erase it so the caller's interrupt message is
+        # not printed over the border (which would leave a garbled
+        # "…quit)────╯" row on screen).
+        sys.stdout.write(f"\n{_ESC}[2K")
+        sys.stdout.flush()
+        raise
     # A trailing backslash (typed directly, or injected by the
     # Shift+Enter readline macro bound in :func:`_setup_readline`)
     # continues the message on the next line; the joined parts are
@@ -634,6 +642,11 @@ def _read_line(prompt: str) -> str | None:
             sys.stdout.flush()
             line = line[:-1]
             break
+        except KeyboardInterrupt:
+            # Same bottom-rule cleanup as the first input() above.
+            sys.stdout.write(f"\n{_ESC}[2K")
+            sys.stdout.flush()
+            raise
         line = line[:-1] + "\n" + more
     # Enter already moved the cursor onto the bottom rule line; step past
     # it so following output never overwrites the closed box.
