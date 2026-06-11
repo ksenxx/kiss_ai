@@ -66,7 +66,7 @@ class TestJunkBudgetDoesNotRaise(unittest.TestCase):
         """End-to-end: the ``saveConfig`` command path must survive junk."""
         server = VSCodeServer()
         events: list[dict[str, Any]] = []
-        server.printer.broadcast = events.append  # type: ignore[method-assign]
+        server.printer.broadcast = events.append  # type: ignore[assignment]
         # Pre-fix this raised ValueError out of _handle_command, which
         # in production kills the transport's receive loop (the whole
         # client connection).
