@@ -560,9 +560,12 @@ def _delete_task(task_id: int) -> bool:
     then removes the task_history row itself.  Sub-agent rows spawned
     by this task's ``run_parallel`` call
     (``extra.subagent.parent_task_id == task_id``) are cascade-deleted
-    together with their events: they are reachable only through the
-    parent (via :func:`_load_subagent_rows_by_parent_task_id`), so
-    leaving them behind would leak unreachable rows and make
+    together with their events — recursively, because a sub-agent is a
+    full ``ChatSorcarAgent`` that can itself fan out nested sub-agents
+    whose rows point at the *child's* id, not the top-level parent's.
+    They are reachable only through the parent chain (via
+    :func:`_load_subagent_rows_by_parent_task_id`), so leaving any
+    level behind would leak unreachable rows and make
     :func:`_chat_has_tasks` report a visually-empty chat as non-empty.
 
     Args:
@@ -583,7 +586,22 @@ def _delete_task(task_id: int) -> bool:
         chat_id = (row["chat_id"] or "") if row is not None else ""
         doomed_ids = [task_id]
         if row is not None:
-            doomed_ids.extend(_subagent_child_ids(db, task_id))
+            # Breadth-first walk: a sub-agent is a full ChatSorcarAgent
+            # that can itself call ``run_parallel``, so grandchildren
+            # (and deeper) rows exist and must be cascade-deleted too.
+            # The ``seen`` set guards against corrupt self/cyclic
+            # ``parent_task_id`` references.
+            seen = {task_id}
+            frontier = [task_id]
+            while frontier:
+                next_frontier: list[int] = []
+                for parent_id in frontier:
+                    for child_id in _subagent_child_ids(db, parent_id):
+                        if child_id not in seen:
+                            seen.add(child_id)
+                            next_frontier.append(child_id)
+                doomed_ids.extend(next_frontier)
+                frontier = next_frontier
         for did in doomed_ids:
             db.execute("DELETE FROM events WHERE task_id = ?", (did,))
         cursor = db.execute(
@@ -1445,9 +1463,15 @@ def _list_recent_chats(limit: int = 10) -> list[dict[str, object]]:
     """
     with _rw_lock.read_lock():
         db = _get_db()
+        # Filter sub-agent rows inside the chat-selection query itself:
+        # a chat whose only rows are sub-agent rows must not consume one
+        # of the *limit* slots (it would then be skipped below, silently
+        # returning fewer chats than exist), and a chat's recency must
+        # be anchored to its latest REAL task, not a sub-agent row.
         chat_rows = db.execute(
             "SELECT chat_id, MAX(timestamp) AS latest "
             "FROM task_history WHERE chat_id != '' "
+            f"AND {_HISTORY_NOT_SUBAGENT} "
             "GROUP BY chat_id ORDER BY latest DESC LIMIT ?",
             (limit,),
         ).fetchall()
