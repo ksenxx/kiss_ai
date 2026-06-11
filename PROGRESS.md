@@ -49,29 +49,29 @@ Repeat until an iteration finds zero bugs.
 
 - BUG-4B-1 (worktree_sorcar_agent.py `_do_merge`, was ~line 247): a FAILED
   `git stash push` was indistinguishable from "tree clean" — `stash_if_dirty`
-  returns False for both.  `_do_merge` then ran `git merge --squash` on a still
+  returns False for both. `_do_merge` then ran `git merge --squash` on a still
   dirty main tree, (a) silently committing the USER's staged changes into the
   agent's squash-merge commit, and (b) on merge failure running
   `git reset --hard HEAD`, permanently DESTROYING the user's staged+unstaged
-  edits.  Reproduced with a mode-000 untracked file (makes stash push fail:
-  "Cannot save the untracked files") plus a staged user edit.  Fix: new
+  edits. Reproduced with a mode-000 untracked file (makes stash push fail:
+  "Cannot save the untracked files") plus a staged user edit. Fix: new
   `MergeResult.STASH_FAILED`; `_do_merge` aborts before any mutation when
   `not did_stash and has_uncommitted_changes(repo)`; `merge()` returns a
   "Cannot merge: ... could not be stashed" message (keeps `_wt` for retry;
   merge_flow.py's `"Successfully merged" in msg` check yields success=False);
   `_release_worktree` sets a stash-failure `_merge_conflict_warning` and keeps
-  the branch.  Tests: test_bughunt4_stash_fail_merge.py (3 tests, all failed
+  the branch. Tests: test_bughunt4_stash_fail_merge.py (3 tests, all failed
   pre-fix).
 - BUG-4B-2 (worktree_sorcar_agent.py `_try_setup_worktree` baseline commit):
   `commit_staged(..., no_verify=True)` can still fail — `--no-verify` skips
   only pre-commit/commit-msg, NOT prepare-commit-msg (also: stale index.lock,
-  missing identity).  The old code silently continued with
+  missing identity). The old code silently continued with
   `baseline_commit=None` while the user's dirty files sat UNCOMMITTED in the
   worktree → later auto-committed as (and attributed to) agent work and
   squash-merged back, duplicating the user's edits into the original branch.
   Fix: when the baseline commit fails AND the worktree still has uncommitted
   changes, `cleanup_partial` + return None (run()'s documented direct-execution
-  fallback).  The `elif has_uncommitted_changes` guard keeps the phantom-dirty
+  fallback). The `elif has_uncommitted_changes` guard keeps the phantom-dirty
   case (e.g. CRLF-smudge: stage_all stages nothing) on the worktree path.
   Tests: test_bughunt4_baseline_commit_fail.py (failing test failed pre-fix +
   clean-tree control test).
@@ -93,12 +93,48 @@ Repeat until an iteration finds zero bugs.
   failed under load, passes in isolation); `uv run check --full` passes.
 - NOTE: the working tree also contains UNRELATED in-progress group-C (CLI)
   changes from a previously crashed session (cli_steering.py paste/SIGCONT
-  work + test_bughunt4_{paste,sigcont,prompt_markers,interrupt_lock}.py,
+  work + test_bughunt4\_{paste,sigcont,prompt_markers,interrupt_lock}.py,
   test_bughunt4_parallel_stop_event.py); left untouched and uncommitted.
 
-### Iteration 4 — Group D (sorcar agents/tools) — session 1 findings (source read, fixes NOT yet applied)
+### Iteration 4 — Group D (sorcar agents/tools) — COMPLETE: 3 NEW bugs found+fixed
 
-Read all 4 target files fully. Confirmed bugs to fix (failing test FIRST, then fix):
+- BUG-4D-1 (sorcar_agent.py `run_tasks_parallel`, ~line 916): module-level
+  parallel executor never copied the parent thread's
+  `printer._thread_local.stop_event` into worker thread-locals (the
+  `ChatSorcarAgent._run_tasks_parallel` override did) — sub-agents spawned via
+  plain `SorcarAgent` resolved `self._stop_event = None`, so Stop could not
+  kill their Bash process groups. Fix: capture `parent_stop_event` next to
+  `parent_key` and set `tl.stop_event = parent_stop_event` at the top of
+  `_run_single`. Test: test_bughunt4_parallel_stop_event.py (failed pre-fix).
+- BUG-4D-2 (chat_sorcar_agent.py `run()`, ~line 427): result strings that
+  parse as valid NON-dict YAML (plain string / list / number) persisted
+  `result_summary = ""` to task history, while unparseable results fell back
+  to `result[:500]`. Fix: added `else: result_summary = result[:500]` branch.
+  Test: test_bughunt4_summary_nondict_yaml.py (2 of 3 tests failed pre-fix;
+  dict-result regression guard passed).
+- BUG-4D-3 (useful_tools.py `_expand_pwd_prefix`, ~line 40): `"PWD//etc/x"`
+  computed `os.path.join(base, "/etc/x")` → `os.path.join` discards *base*
+  when the 2nd component is absolute, silently ESCAPING the work_dir. Fix:
+  `lstrip("/")` on the suffix (`PWD//` alone still → work_dir). Test:
+  test_bughunt4_pwd_double_slash.py (4 of 5 tests failed pre-fix).
+- Investigated, NOT bugs (do not re-report): `_truncate_output` marker math
+  (dropped-count exact; `max_chars < marker` head-slice fallback is the
+  documented degenerate case); Read `\r`/splitlines counting + truncation
+  marker; Write parent-dir creation; Edit guards (iter-3); `_coerce_tasks`
+  JSON forms (iter-3); profile-lock pid\<=0 + WebUseTool atexit re-arm
+  (iter-3); go_to_url tab:list / tab:N int() errors caught per-call;
+  `_resolve_locator` re-snapshot path; `run_parallel` tool `int(max_workers)`
+  on junk/`"0"` raises but kiss_agent.py:412 wraps every tool call in
+  try/except → clean error string to the model; update_settings round-trips
+  (each key persists via `_apply_setting`; auto_commit one-shot semantics
+  correct); `number_of_cores` (`os.process_cpu_count() or 1`).
+- Verification: 9/9 bughunt4 group-D tests pass; all 758 impacted sorcar
+  tests (88 files importing useful_tools/sorcar_agent/chat_sorcar_agent) pass
+  in 8 parallel shards (90+64+114+70+125+71+104+120, zero failures);
+  `uv run check --full` passes (also auto-fixed an unrelated pre-existing
+  ruff UP041 in test_bughunt4_merge_replay_on_reconnect.py).
+
+Original session-1 findings (now all fixed above, kept for context):
 
 1. **CONFIRMED (known a)** `sorcar_agent.py` module-level `run_tasks_parallel()`:
    `_run_single` does NOT set `tl.stop_event = parent_stop_event` on the worker
