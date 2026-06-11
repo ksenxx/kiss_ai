@@ -475,7 +475,12 @@ class SorcarAgent(RelentlessAgent):
             if demo_mode is not None:
                 _apply_setting(updated, broadcast, "demo_mode", bool(demo_mode))
 
-            if auto_commit is not None and bool(auto_commit):
+            if auto_commit is not None and not auto_commit:
+                # ``auto_commit`` is a one-shot action: ``False`` requests no
+                # commit, but it is still a provided argument and must be
+                # reported accurately (not as "all arguments were None").
+                updated.append("auto_commit=not triggered (False)")
+            elif auto_commit is not None and bool(auto_commit):
                 # Special-cased: a one-shot action (commit pending changes),
                 # not a persisted config value.
                 updated.append("auto_commit=triggered")

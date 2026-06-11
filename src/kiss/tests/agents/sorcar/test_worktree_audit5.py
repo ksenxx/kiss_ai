@@ -153,10 +153,14 @@ class TestBug20ReleaseCheckoutWarning:
             _git("checkout", "feature", cwd=repo)
             (repo / "README.md").write_text("dirty local change\n")
 
+            # NOTE: a dirty tree alone no longer fails the checkout —
+            # _do_merge now stashes BEFORE checking out (B3 fix).  Use
+            # a nonexistent original branch so the checkout genuinely
+            # fails and the BUG-20 warning path is exercised.
             agent._wt = GitWorktree(
                 repo_root=wt.repo_root,
                 branch=wt.branch,
-                original_branch="main",
+                original_branch="no-such-branch",
                 wt_dir=wt.wt_dir,
                 baseline_commit=wt.baseline_commit,
             )

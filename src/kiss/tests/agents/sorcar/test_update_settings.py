@@ -300,12 +300,13 @@ class TestAutoCommit:
         assert evts[0]["key"] == "auto_commit"
         assert evts[0]["value"] is True
 
-    def test_false_does_nothing(self) -> None:
+    def test_false_does_not_commit_but_is_reported(self) -> None:
         _agent, printer, tools = _make_agent_and_printer()
         update = _find_tool(tools, "update_settings")
 
         result = update(auto_commit=False)
-        assert "No settings were changed" in result
+        assert "No settings were changed" not in result
+        assert "auto_commit=not triggered (False)" in result
         assert _setting_events(printer) == []
 
 

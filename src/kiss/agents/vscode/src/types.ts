@@ -224,8 +224,8 @@ type ToWebviewMessageBody =
       type: 'openSubagentTab';
       tab_id?: string;
       parent_tab_id?: string;
-      task_description?: string;
-      task_index?: number;
+      description?: string;
+      taskIndex?: number;
       isSubagentTab?: boolean;
       isDone?: boolean;
     }
