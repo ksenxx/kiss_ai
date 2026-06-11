@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import enum
 import logging
+import os
 import shutil
 import subprocess
 import threading
@@ -739,6 +740,21 @@ class GitWorktreeOps:
         return GitWorktreeOps._load_branch_config(repo, branch, "kiss-baseline")
 
     @staticmethod
+    def _remove_path(path: Path) -> None:
+        """Remove *path* whatever it is (symlink, dir, file, or absent).
+
+        Checks ``is_symlink()`` first because ``is_dir()``/``exists()``
+        follow symlinks: a symlink to a directory must be unlinked, not
+        rmtree'd, and a broken symlink reports ``exists() == False``.
+        """
+        if path.is_symlink():
+            path.unlink()
+        elif path.is_dir():
+            shutil.rmtree(str(path))
+        elif path.exists():
+            path.unlink()
+
+    @staticmethod
     def copy_dirty_state(repo: Path, wt_dir: Path) -> bool:
         """Copy uncommitted/staged/untracked files from main worktree.
 
@@ -786,21 +802,45 @@ class GitWorktreeOps:
                 # must be removed from the task worktree even when the
                 # new file was subsequently deleted (e.g. status "RD").
                 old_dst = wt_dir / old_name
-                if old_dst.is_dir():
+                # Check is_symlink() FIRST: is_dir()/exists() follow
+                # symlinks, so a symlink to a directory would crash
+                # rmtree and a broken symlink would be left behind.
+                if old_dst.is_symlink():
+                    old_dst.unlink()
+                    copied = True
+                elif old_dst.is_dir():
                     shutil.rmtree(str(old_dst))
                     copied = True
                 elif old_dst.exists():
                     old_dst.unlink()
                     copied = True
 
-            if src.is_file():
-                if dst.is_dir():
+            if src.is_symlink():
+                # Mirror the symlink itself (possibly broken); is_file()
+                # and copy2 would follow the link instead.
+                GitWorktreeOps._remove_path(dst)
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                os.symlink(os.readlink(src), dst)
+                copied = True
+            elif src.is_file():
+                if dst.is_symlink():
+                    # A symlink was replaced by a regular file; copy2
+                    # onto the link would write THROUGH it into the
+                    # link's target inside the worktree.
+                    dst.unlink()
+                elif dst.is_dir():
                     # A tracked directory was replaced by a same-named
                     # file; copy2 into the directory would create
                     # dst/<basename> instead of replacing dst.
                     shutil.rmtree(str(dst))
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(str(src), str(dst))
+                copied = True
+            elif dst.is_symlink():
+                # The path is gone in the main worktree but the fresh
+                # checkout has a (possibly broken) symlink there;
+                # exists() follows the link and would miss it.
+                dst.unlink()
                 copied = True
             elif dst.is_dir():
                 if not src.exists():
