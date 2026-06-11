@@ -1056,10 +1056,30 @@ workDir plumbing).
   `_present_pending_worktree` now uses non-creating registry lookup instead of
   `_get_tab` (test_bughunt5_replay_phantom_state.py, 2 tests, failed pre-fix, pass
   post-fix; C2/C3 invariant restored for history-click viewer tabs).
-  TODO next: run impacted vscode tests (worktree/merge/replay/close_tab/autocommit),
-  `uv run check --full`, commit, then continue remaining candidates (a) followup
-  broadcast after tab close leak (WebPrinter.broadcast fallback semantics), (c)
-  \_finish_merge double all-done, (g) shutdown w/ running tasks, (h) attachment size.
+  Committed as cab64b7e (incl. updates to test_detach_tab_and_reattach.py and
+  test_no_git_error_on_empty_worktree.py which had codified pre-fix behavior).
+- BUG-5E-3 FIXED (task_runner.py `_ask_user_question`, commit 2a81b4b1): a stale
+  multi-viewer duplicate answer (viewer B's still-open askUser modal submitted after
+  viewer A's answer was consumed) sat in the maxsize=1 queue and instantly answered
+  the NEXT ask_user_question — the user never saw question 2. Fix: extracted
+  `_resolve_task_answer_queue()`; `_ask_user_question` drains the queue (under
+  \_state_lock) BEFORE broadcasting the new question. Test:
+  test_bughunt5_stale_user_answer.py (failed pre-fix). Updated
+  test_vscode_tabs.py::test_ask_user_broadcasts_question which pre-seeded the
+  answer before asking (now delivers it after the askUser broadcast).
+- Verified NOT bugs in iter-5 group E (do NOT re-report): followup_suggestion after
+  tab close (WebPrinter fan-out is subscriber-only — no global leak; origin-db-path
+  guard present); attachment size (64MB `_MAX_LINE_BYTES` cap on both WS max_size
+  and UDS readline is a deliberate transport limit); `_wt_pending` vs daemon
+  restart (documented design: "no cross-process restoration", branch deliberately
+  preserved for manual resolution); double mergeAction all-done (`_finish_merge`
+  idempotent); `_save_task_extra` vs setFavorite on a running task (is_favorite
+  explicitly merged back, persistence.py:1102); sub-agents do not forward
+  `_on_task_id_allocated` (no viewer-wipe path for subagent task allocation);
+  `_handle_command` non-string type; getFrequentTasks limit parse.
+- Verification: full vscode suite (991 tests) green in 8 parallel shards post-fixes;
+  ask-flow tests (sorcar+vscode) green; `uv run check --full` passes.
+- Iter-5 group E result: 3 NEW bugs found+fixed (BUG-5E-1, BUG-5E-2, BUG-5E-3).
 - mf1/mf2/mf3 extracts in tmp/: merge_flow regions; tmp/server_part2/3.txt = server.py
   820-1625; tmp/csa_parallel.txt = chat_sorcar_agent \_run_single (sub-agents do NOT
   forward \_on_task_id_allocated → candidate (i) N/A).
