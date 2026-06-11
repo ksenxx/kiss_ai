@@ -1032,10 +1032,26 @@ class VSCodeServer(
             tab = _RunningAgentState.running_agent_states.get(tab_id)
             if tab is not None:
                 tab.chat_id = chat_id
-                tab.use_worktree = bool(
-                    extra_raw.get("is_worktree")
-                    if isinstance(extra_raw, dict) else False,
+                # Do NOT clobber ``use_worktree`` while a task is in
+                # flight on this tab or while a finished worktree run
+                # is awaiting the user's merge/discard decision
+                # (``agent._wt_pending``): the end-of-task cleanup in
+                # ``_TaskRunnerMixin._run_task`` keeps the agent alive
+                # only when ``tab.use_worktree and tab.agent._wt_pending``,
+                # and the merge-busy guard scans ``t.is_merging and
+                # t.use_worktree`` — flipping the flag mid-flight would
+                # dispose the agent that still holds the pending
+                # worktree state (breaking merge/discard and leaking
+                # the worktree branch).
+                wt_pending = bool(
+                    tab.agent is not None
+                    and getattr(tab.agent, "_wt_pending", False),
                 )
+                if not tab.is_task_active and not wt_pending:
+                    tab.use_worktree = bool(
+                        extra_raw.get("is_worktree")
+                        if isinstance(extra_raw, dict) else False,
+                    )
                 tab.frontend_closed = False
             # Record which chat this tab now displays so a task later
             # started on the same chat (from any tab in any window)

@@ -44,6 +44,44 @@ Repeat until an iteration finds zero bugs.
 - Since iteration 3 still found bugs, launching iteration 4: same 7 functional groups,
   parallel sub-agents, tests named `test_bughunt4_*` / `bughunt4_*.test.js`.
   Stop condition: an iteration that finds zero new bugs.
+- Group C (sorcar CLI: cli_repl/cli_steering/cli_helpers/cli_panel) DONE — 5 NEW bugs
+  found + fixed, each with a failing-first integration test (commit 4f3390cd):
+  1. Bracketed paste (`cli_steering._InputBox`): mode 2004 never enabled and
+     `ESC[200~`/`ESC[201~` swallowed as generic CSI — a multi-line paste submitted
+     every line as a separate queued instruction; pasted ANSI/control chars acted as
+     keys. Fix: enable `?2004h`/`?2004l` in start/stop, buffer paste content (incl.
+     newlines, CRLF normalised, ANSI stripped, DEL/C0 dropped) with split-across-reads
+     handling (`_pasting`, `_partial_suffix_len`). Tests: test_bughunt4_paste.py (9).
+  2. Tiny-terminal resize (`_draw_locked`/`stop`/`_park_cursor_locked`): rows <=
+     _BOX_H produced invalid `ESC[1;-1r`/`ESC[0;1H` (zero/negative rows). Fix:
+     `_box_top_row` clamp (>=1). Tests: test_bughunt4_tiny_resize.py (3).
+  3. No SIGCONT handler: after Ctrl+Z + fg the raw mode/paste mode/scroll region/box
+     were stale until the next keypress. Fix: `_on_sigcont` re-applies raw termios,
+     re-enables paste mode, forces scroll-region re-anchor + redraw; handler installed
+     in start (main thread only), restored in stop. Test: test_bughunt4_sigcont.py
+     (pty.fork end-to-end).
+  4. Worker leak on Ctrl+C outside select: `_loop` only caught KeyboardInterrupt
+     around `select.select`; SIGINT while the main thread was blocked on the terminal
+     RLock (feed→redraw vs a worker `_StdoutProxy` write blocked on a full pty)
+     escaped without `_on_abort`, so `agent.run` kept executing in the background.
+     Fix: `SteeringSession.run` catches KeyboardInterrupt from `_loop` → `_on_abort`.
+     Test: test_bughunt4_interrupt_lock.py (deterministic pty flood + lock-park).
+  5. readline prompt width (`cli_repl._read_line`): ANSI SGR codes in the prompt
+     lacked `\x01`/`\x02` ignore markers, so GNU readline thought the 4-col prompt
+     was ~26 cols and redrew/scrolled after the 2nd typed char on narrow terminals
+     (measured empirically). Fix: `_readline_prompt` wraps SGR runs in markers when
+     stdin+stdout are TTYs and readline is active. Test:
+     test_bughunt4_prompt_markers.py (pty, 30 cols, clean 10-char echo).
+  - Also: `cli_panel.clip_buf` renders tabs (now reachable via paste) as a space.
+  - Regression sweep: all 1352 sorcar tests run in 8 parallel shards — only failure
+    was test_print_to_browser lockdown missing the `warning` display type added by a
+    parallel iter-4 group (expected set updated), plus a mypy error in group F's
+    untracked test_bughunt4_replay_worktree_flag.py (cast added). `uv run check
+    --full` passes.
+  - Verified NOT bugs this round: `_prefix_match_task` GLOB escaping ([,*,? escaped —
+    no wildcard prefix-violation), combining-char backspace (width-0 consistent),
+    history read/write guards, `/model list` precedence, `\r\n` double-submit
+    (empty second submit ignored / Queue.Full guarded).
 
 ### Iteration 4, group B (git_worktree / worktree_sorcar_agent): 2 NEW bugs found+fixed
 
@@ -248,7 +286,7 @@ are tab-stamped → `WebPrinter.broadcast` forwards to connected clients only, n
 persisted/replayed; `_handle_ready` re-claimed reloaded tabs (cancel deferred close +
 resumeSession) but never re-emitted the in-flight review. Result: after a mid-review
 page reload the merge UI is gone, the unresolved server-side `_WebMergeState` and the
-backend tab's `is_merging` stay stuck, all-done/_finish_merge/autocommit never fire.
+backend tab's `is_merging` stay stuck, all-done/\_finish_merge/autocommit never fire.
 (VS Code extension unaffected: its TS MergeManager survives webview reloads.)
 FIX: `_WebMergeState` now keeps the full `data` payload (`self.data`, hunks shared so
 reject cs-offset mutations stay live); new `RemoteAccessServer._replay_merge_review`
@@ -439,3 +477,39 @@ Investigated and ruled NOT bugs (do not re-report):
 Verification: 5 new tests fail pre-fix, pass post-fix; 120-test focused persistence
 regression suite green (only the pre-existing flake above, reproduced on pristine
 code); `uv run check --full` clean.
+
+## Iteration 4 — group E (vscode server.py / commands.py / task_runner.py)
+
+Bugs found and fixed (failing test first, then fix, then verified pass):
+
+1. `_cmd_run` phantom run on empty/missing `tabId` (commands.py ~175): registered a
+   `_RunningAgentState` under key `""` and started a real task thread, but
+   `_stop_task`, `_cmd_close_tab` and `_dispose_if_closed` all ignore empty ids, so
+   the task was unstoppable/undisposable. Fix: early-return guard mirroring
+   `_stop_task`. Tests: `test_bughunt4_run_empty_tabid.py` (committed in 7188834b).
+1. `_replay_session` clobbered `use_worktree` mid-flight (server.py ~1035): resuming a
+   different chat into a tab unconditionally overwrote `tab.use_worktree` with the
+   loaded chat's `is_worktree`, even while a worktree task was running on the tab or
+   while a finished worktree run awaited merge/discard (`agent._wt_pending`). The
+   end-of-task cleanup (task_runner.py ~187) keeps the agent alive only when
+   `tab.use_worktree and tab.agent._wt_pending`, so the flip disposed the agent
+   holding the pending worktree (merge/discard then fails; worktree branch leaks);
+   the merge-busy guard (`t.is_merging and t.use_worktree`) broke the same way.
+   Fix: skip the `use_worktree` overwrite when `tab.is_task_active` or `_wt_pending`;
+   idle tabs still adopt the resumed chat's flag.
+   Tests: `test_bughunt4_replay_worktree_flag.py` (3 tests; 2 fail pre-fix).
+
+Candidates investigated and closed as NOT bugs:
+
+- Stop-during-startup window: a pre-start `_stop_task` sets the cooperative
+  `stop_event`; `JsonPrinter._check_stop` raises `KeyboardInterrupt` at the agent's
+  very first `print` — honored immediately.
+- `selectModel` persistence vs `_new_chat` `_load_last_model()` re-read: consistent.
+- Lock-order inversion state_lock↔printer.\_lock: only state→printer nesting exists.
+- task_runner exception paths: failure broadcasts `result(success=False)` live and
+  persists exactly ONE end event via `_append_chat_event(task_end_event)` — no
+  duplicated persisted events; symmetric with the success flow.
+- `_replay_session` dropping the owner tab's own-task subscription via
+  `cleanup_tab`: intentional (documented) — the tab now renders a different chat.
+
+Also: formatted PROGRESS.md (mdformat was failing `uv run check --full`).
