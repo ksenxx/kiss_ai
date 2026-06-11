@@ -425,7 +425,21 @@ class ChatSorcarAgent(SorcarAgent):
             try:
                 result_yaml = yaml.safe_load(result)
                 if isinstance(result_yaml, dict):
-                    result_summary = result_yaml.get("summary", "")
+                    summary_val = result_yaml.get("summary", "")
+                    if isinstance(summary_val, str):
+                        result_summary = summary_val
+                    elif summary_val is None:
+                        result_summary = ""
+                    else:
+                        # LLMs sometimes emit a YAML list/mapping under
+                        # ``summary``.  Persist its text form — passing
+                        # the raw object to ``_save_task_result`` would
+                        # raise sqlite3.ProgrammingError from the
+                        # ``finally`` block below, destroying the task's
+                        # successful return value.
+                        result_summary = yaml.safe_dump(
+                            summary_val, sort_keys=False,
+                        ).strip()
                 else:
                     # Valid YAML but not a dict (plain string, list,
                     # number): persist the raw text, consistent with

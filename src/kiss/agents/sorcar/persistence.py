@@ -179,6 +179,88 @@ _HistoryEntry = dict[str, object]
 
 
 # ---------------------------------------------------------------------------
+# ``extra`` JSON encoding / decoding
+# ---------------------------------------------------------------------------
+#
+# The ``task_history.extra`` column must always hold *valid RFC 8259*
+# JSON: the SQL predicate ``_HISTORY_NOT_SUBAGENT`` classifies rows
+# with SQLite's ``json_valid``/``json_type``, which reject the bare
+# ``NaN`` / ``Infinity`` / ``-Infinity`` tokens that Python's
+# ``json.dumps`` emits by default (``allow_nan=True``) and that
+# ``json.loads`` accepts by default.  A non-finite float (e.g. a NaN
+# ``cost``) written through plain ``json.dumps`` would therefore make
+# the SQL-side and Python-side sub-agent detectors disagree — a
+# sub-agent row would leak into the history sidebar while
+# ``_list_recent_chats`` burned a limit slot on its chat.  All writers
+# go through :func:`_dumps_extra` and all sub-agent classification
+# goes through :func:`_parse_extra_dict` so the two sides can never
+# diverge.
+
+def _sanitize_non_finite(value: object) -> object:
+    """Recursively replace non-finite floats (NaN/±Inf) with ``None``."""
+    import math
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {k: _sanitize_non_finite(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_sanitize_non_finite(v) for v in value]
+    return value
+
+
+def _dumps_extra(extra: dict[str, object]) -> str:
+    """JSON-encode *extra* guaranteeing valid RFC 8259 output.
+
+    Non-finite floats anywhere in the payload are replaced with
+    ``None`` — plain ``json.dumps`` would serialise them as the bare
+    ``NaN``/``Infinity`` tokens, which SQLite's ``json_valid`` (used by
+    ``_HISTORY_NOT_SUBAGENT``) rejects.
+
+    Args:
+        extra: Metadata dict to serialise.
+
+    Returns:
+        A valid JSON object string.
+    """
+    try:
+        return json.dumps(extra, allow_nan=False)
+    except ValueError:
+        sanitized = _sanitize_non_finite(extra)
+        return json.dumps(sanitized, allow_nan=False)
+
+
+def _reject_json_constant(token: str) -> object:
+    """``parse_constant`` hook: reject ``NaN``/``Infinity`` tokens."""
+    raise ValueError(f"non-RFC8259 JSON constant: {token}")
+
+
+def _parse_extra_dict(extra: object) -> dict[str, object] | None:
+    """Parse an ``extra`` column value as a strict-JSON dict.
+
+    Mirrors SQLite's ``json_valid`` semantics (used by the
+    ``_HISTORY_NOT_SUBAGENT`` predicate): the bare ``NaN`` /
+    ``Infinity`` / ``-Infinity`` tokens — accepted by default by
+    Python's ``json.loads`` but invalid RFC 8259 — are rejected, so a
+    legacy corrupt row is classified identically by the SQL side and
+    the Python side.
+
+    Args:
+        extra: The raw column value (``None``, ``""``, or a string).
+
+    Returns:
+        The parsed dict, or ``None`` when *extra* is empty, not a
+        string, malformed, non-strict, or not a JSON object.
+    """
+    if not extra or not isinstance(extra, str):
+        return None
+    try:
+        parsed = json.loads(extra, parse_constant=_reject_json_constant)
+    except (ValueError, TypeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+# ---------------------------------------------------------------------------
 # Per-thread connection management
 # ---------------------------------------------------------------------------
 
@@ -440,7 +522,7 @@ def _add_task(
     """
     import uuid
     db = _get_db()
-    extra_str = json.dumps(extra) if extra else ""
+    extra_str = _dumps_extra(extra) if extra else ""
     with _rw_lock.write_lock():
         if chat_id == "":
             chat_id = uuid.uuid4().hex
@@ -541,11 +623,8 @@ def _subagent_child_ids(
     ).fetchall()
     out: list[int] = []
     for r in rows:
-        try:
-            parsed = json.loads(r["extra"] or "")
-        except (json.JSONDecodeError, TypeError):
-            continue
-        if not isinstance(parsed, dict):
+        parsed = _parse_extra_dict(r["extra"])
+        if parsed is None:
             continue
         sub = parsed.get("subagent")
         if isinstance(sub, dict) and sub.get("parent_task_id") == parent_task_id:
@@ -1059,7 +1138,7 @@ def _set_task_favorite(task_id: int, is_favorite: bool) -> bool:
         extra_obj["is_favorite"] = bool(is_favorite)
         db.execute(
             "UPDATE task_history SET extra = ? WHERE id = ?",
-            (json.dumps(extra_obj), task_id),
+            (_dumps_extra(extra_obj), task_id),
         )
         db.commit()
         return True
@@ -1108,7 +1187,7 @@ def _save_task_extra(
                 merged["is_favorite"] = existing["is_favorite"]
         db.execute(
             "UPDATE task_history SET extra = ? WHERE id = ?",
-            (json.dumps(merged), resolved),
+            (_dumps_extra(merged), resolved),
         )
         db.commit()
 
@@ -1681,11 +1760,8 @@ def _load_subagent_rows_by_parent_task_id(
         ).fetchall()
         for r in rows:
             extra_str = r["extra"] or ""
-            try:
-                parsed = json.loads(extra_str)
-            except (json.JSONDecodeError, TypeError):
-                continue
-            if not isinstance(parsed, dict):
+            parsed = _parse_extra_dict(extra_str)
+            if parsed is None:
                 continue
             sub = parsed.get("subagent")
             if not isinstance(sub, dict):
@@ -1838,13 +1914,8 @@ def _is_subagent_row(extra: object) -> bool:
         ``True`` if *extra* parses as a dict containing a ``subagent``
         key, ``False`` otherwise.
     """
-    if not extra or not isinstance(extra, str):
-        return False
-    try:
-        parsed = json.loads(extra)
-    except (json.JSONDecodeError, TypeError):
-        return False
-    return isinstance(parsed, dict) and "subagent" in parsed
+    parsed = _parse_extra_dict(extra)
+    return parsed is not None and "subagent" in parsed
 
 
 def _load_chat_context_text(chat_id: str) -> str:
