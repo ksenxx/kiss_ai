@@ -31,6 +31,7 @@ from typing import Any, cast
 from kiss.agents.sorcar.persistence import (
     _append_chat_event,
     _chat_has_tasks,
+    _current_db_path,
     _delete_frequent_task,
     _delete_task,
     _get_adjacent_task_by_chat_id,
@@ -1466,6 +1467,12 @@ class VSCodeServer(
         # subscriber map.  ``task_id`` is the parameter the caller
         # passes in (the completed task's ``task_history.id``).
         owner_task_key = str(task_id) if task_id is not None else None
+        # Capture the database the task id belongs to NOW: this thread
+        # outlives the request (LLM call takes seconds), and a stale
+        # numeric id must never be written into a *different* database
+        # (swapped by test fixtures / a daemon restart) where it would
+        # resolve to an unrelated task's row.
+        origin_db_path = _current_db_path()
 
         def _run() -> None:
             if owner_task_key is not None:
@@ -1475,12 +1482,19 @@ class VSCodeServer(
                     task, result, get_fast_model()
                 )
                 if suggestion:  # pragma: no cover — requires LLM API call
+                    if _current_db_path() != origin_db_path:
+                        return
                     event: dict[str, object] = {
                         "type": "followup_suggestion",
                         "text": suggestion,
                     }
                     self.printer.broadcast(event)
-                    _append_chat_event(event, task_id=task_id, task=task)
+                    _append_chat_event(
+                        event,
+                        task_id=task_id,
+                        task=task,
+                        origin_db_path=origin_db_path,
+                    )
             except Exception:  # pragma: no cover — LLM API error handler
                 logger.debug("Async followup generation failed", exc_info=True)
 
