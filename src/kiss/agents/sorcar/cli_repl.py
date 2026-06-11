@@ -39,6 +39,13 @@ extension precisely:
   cross-client ``.agents/skills`` convention, and the skills bundled
   with Sorcar; ``/skills`` lists them and ``/skills <name>`` shows one
   — see :mod:`kiss.agents.sorcar.skills`.
+* MCP servers configured in ``~/.kiss/mcp.json``,
+  ``<project>/.kiss/mcp.json``, and Claude Code's ``<project>/.mcp.json``
+  — ``/mcp`` lists them with live connection status; management
+  (``add``/``list``/``get``/``remove``/``auth``/``logout``/``debug``)
+  lives in the ``sorcar mcp`` subcommand — see
+  :mod:`kiss.agents.sorcar.mcp_servers` and
+  :mod:`kiss.agents.sorcar.mcp_cli`.
 * ``/model``-name fast completion — :func:`rank_model_suggestions` over
   the generation-capable models in
   :mod:`kiss.core.models.model_info` (preferring providers whose API key
@@ -135,6 +142,9 @@ SLASH_COMMANDS: dict[str, str] = {
     "/skills": "List agent skills (SKILL.md dirs in ~/.kiss/skills, "
                "<project>/.kiss/skills, .claude/skills, .agents/skills); "
                "/skills <name> shows one",
+    "/mcp": "List MCP servers (~/.kiss/mcp.json, <project>/.kiss/mcp.json, "
+            "<project>/.mcp.json) with live status; manage with "
+            "`sorcar mcp add/list/auth/debug`",
     "/exit": "Exit the sorcar CLI",
     "/quit": "Alias for /exit",
 }
@@ -495,6 +505,11 @@ def _handle_slash(
                 print(f"\n{load_skill_content(found)}\n")
         else:
             print(f"\n{format_skill_listing(skills)}\n")
+        return False
+    if cmd == "/mcp":
+        from kiss.agents.sorcar.mcp_servers import format_mcp_listing
+
+        print(f"\n{format_mcp_listing(work_dir, connect=True)}\n")
         return False
     if cmd in ("/clear", "/new"):
         from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
