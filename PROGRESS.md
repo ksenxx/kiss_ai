@@ -1107,6 +1107,69 @@ pass; `uv run check --full` green.
 - Iteration 5 still found bugs → launching iteration 6, same 7 groups, tests
   `test_bughunt6_*` / `bughunt6_*.test.js`. Stop when an iteration finds zero bugs.
 
+### Iteration 6 — Group B (git_worktree / worktree_sorcar_agent) — COMPLETE: 2 NEW bugs found+fixed
+
+- BUG-6B-1 (git_worktree.py `ensure_excluded`, ~line 668): the existing
+  `<git_common_dir>/info/exclude` was read with STRICT
+  `Path.read_text()`. Git treats exclude files as raw BYTES — non-UTF-8
+  patterns/comments (e.g. a Latin-1 filename pattern, the exact
+  use-case of BUG-5B-2) are legal and honored by git. The
+  UnicodeDecodeError was swallowed by `_try_setup_worktree`'s broad
+  except, so the `.kiss-worktrees/` entry was silently NEVER added:
+  `?? .kiss-worktrees/...` polluted the user's `git status` forever,
+  `has_uncommitted_changes(repo)` misreported a clean repo as dirty,
+  and every merge ran a junk "kiss: auto-stash before merge"
+  push/pop cycle (git prints "Ignoring path .kiss-worktrees/...").
+  Fix: read via `read_bytes().decode("utf-8", errors="surrogateescape")`
+  (mirrors `_git`'s policy); append opened with explicit utf-8.
+  Test: test_bughunt6_exclude_nonutf8.py (3 tests; 2 failed pre-fix,
+  idempotency guard).
+- BUG-6B-2 (worktree_sorcar_agent.py `_try_setup_worktree`, ~line 460):
+  `released_branch` (the ORIGINAL branch of the PREVIOUS pending
+  worktree, returned by `_release_worktree()`) was reused as the new
+  worktree's `original_branch` even when the new task targets a
+  DIFFERENT git repo (the user changed `work_dir` between two runs of
+  the same agent). Reproduced WRONG MERGE RESULT: task 1 in repoA
+  (original branch `develop`), task 2 run from repoB's `main` —
+  `merge()` checked out repoB's unrelated `develop` branch,
+  squash-merged the agent's work into it (work missing from `main`)
+  and left the user's checkout switched to `develop`; when repoB has
+  no same-named branch, merge failed with a bogus "Cannot checkout"
+  error. Root cause dates from the BUG-30 (audit 7) optimization,
+  which never anticipated a repo switch. Fix: capture
+  `prev_repo_root = self._wt.repo_root` before the release and use
+  `released_branch` only when `prev_repo_root.resolve() ==
+  repo.resolve()`; otherwise fall back to `current_branch(repo)`
+  (read inside `repo_lock(repo)`, preserving the BUG-30 contract).
+  Test: test_bughunt6_cross_repo_release.py (3 tests; 2 failed
+  pre-fix + same-repo regression guard).
+- Investigated and verified NOT bugs this round (do NOT re-report):
+  `_split_rename_tail` " -> "-in-filename ambiguity (git C-quotes ANY
+  rename side containing a space, so the unquoted-side first-index
+  split is provably unambiguous — verified with real repos);
+  `git worktree list --porcelain` path quoting vs `cleanup_orphans`
+  resolve-matching (paths emitted verbatim even with `"` in them);
+  cherry-pick of an already-applied/empty agent commit
+  (`--no-commit` exits 0, nothing staged → SUCCESS, no bogus
+  conflict); partial multi-commit cherry-pick conflict → `--abort`
+  restores byte-exact incl. staged first pick; typechange (`T`)
+  status codes in copy_dirty_state (handled by the symlink/file
+  branches); untracked nested-repo stash push (creates a no-op stash
+  entry, pop clean — noise only, and only reachable post-6B-1 fix
+  failure); `status.showUntrackedFiles=no` (merge --squash refuses
+  overwrite, reset --hard never deletes untracked); user on a
+  different branch at auto-release time (stash→checkout→pop contract
+  explicitly documented in `_do_merge`); `has_uncommitted_changes`
+  ignoring git-status returncode and `worktree list` failure in
+  `_cleanup_orphans_locked` (no realistic trigger without manual
+  gitdir corruption); `ensure_excluded` rev-parse returncode
+  (unreachable after discover_repo succeeded); save_baseline_commit
+  failure ignored (in-memory GitWorktree keeps the SHA; config never
+  read back cross-process by design).
+- Verification: 6/6 new tests (2 bug tests each failed pre-fix); 806
+  worktree/bughunt/git/baseline/autocommit sorcar tests run in 8
+  parallel shards — ZERO failures; `uv run check --full` passes.
+
 ### Iteration 6 — Group D (sorcar agents/tools) — COMPLETE: 1 NEW bug found+fixed
 
 All four files read IN FULL this session (sorcar_agent.py, chat_sorcar_agent.py,
