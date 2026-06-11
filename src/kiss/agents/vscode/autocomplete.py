@@ -10,6 +10,7 @@ autocomplete feature.  Split out of ``server.py`` for organisation.
 
 from __future__ import annotations
 
+import logging
 import queue
 import re
 import threading
@@ -27,6 +28,8 @@ from kiss.agents.vscode.helpers import (
 
 if TYPE_CHECKING:
     from kiss.agents.vscode.json_printer import JsonPrinter
+
+logger = logging.getLogger(__name__)
 
 
 class _AutocompleteMixin:
@@ -131,9 +134,18 @@ class _AutocompleteMixin:
             query, seq, snapshot_file, snapshot_content, chat_id, conn_id = (
                 q.get()
             )
-            self._complete(
-                query, seq, snapshot_file, snapshot_content, chat_id, conn_id,
-            )
+            try:
+                self._complete(
+                    query, seq, snapshot_file, snapshot_content, chat_id,
+                    conn_id,
+                )
+            except Exception:
+                # This worker is a lazily-started singleton with no
+                # restart path (``_ensure_complete_worker`` sees the
+                # dead thread object as "already started"), so one
+                # poisoned request must never kill ghost-text
+                # autocomplete for the daemon's remaining lifetime.
+                logger.debug("autocomplete request failed", exc_info=True)
 
     def _complete(
         self,
@@ -282,7 +294,7 @@ class _AutocompleteMixin:
                 ranked = rank_file_suggestions(
                     result, then_emit_for_prefix, usage,
                 )
-                self._emit_files(ranked, conn_id)
+                self._emit_files(ranked, conn_id, prefix=then_emit_for_prefix)
 
         threading.Thread(target=_do_refresh, daemon=True).start()
 
@@ -291,6 +303,7 @@ class _AutocompleteMixin:
         ranked: list[dict[str, Any]],
         conn_id: str,
         loading: bool = False,
+        prefix: str = "",
     ) -> None:
         """Emit one ``files`` event for the ``@``-mention picker.
 
@@ -298,13 +311,25 @@ class _AutocompleteMixin:
         non-empty) so the file list pops the picker only in the VS
         Code window that typed ``@`` — never in a sibling window.
 
+        Every event also echoes the ``prefix`` it was ranked for —
+        the picker's analogue of the ``ghost`` event's echoed
+        ``query``.  The populated reply for a cache miss arrives
+        asynchronously after a background directory scan, so the
+        frontend needs the prefix to drop late replies for an
+        ``@``-mention the user has since edited or abandoned (a
+        prefix-less reply used to re-open the picker over the input
+        and swallow the next Enter keystroke).
+
         Args:
             ranked: Ranked file suggestion dicts to send.
             conn_id: Requesting connection id (``""`` for direct callers).
             loading: True for the immediate empty reply sent while a
                 background directory scan is still running.
+            prefix: The ``@``-mention query this reply was ranked for.
         """
-        event: dict[str, Any] = {"type": "files", "files": ranked}
+        event: dict[str, Any] = {
+            "type": "files", "files": ranked, "prefix": prefix,
+        }
         if loading:
             event["loading"] = True
         if conn_id:
@@ -336,8 +361,8 @@ class _AutocompleteMixin:
             self._refresh_file_cache(
                 then_emit_for_prefix=prefix, work_dir=wd, conn_id=conn_id,
             )
-            self._emit_files([], conn_id, loading=True)
+            self._emit_files([], conn_id, loading=True, prefix=prefix)
             return
         usage = _load_file_usage()
         ranked = rank_file_suggestions(cache, prefix, usage)
-        self._emit_files(ranked, conn_id)
+        self._emit_files(ranked, conn_id, prefix=prefix)
