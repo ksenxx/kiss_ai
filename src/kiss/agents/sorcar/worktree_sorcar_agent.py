@@ -965,7 +965,15 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
 
     Uses ``--use-chat`` or ``--use-worktree`` to select the agent
     type.  Defaults to base SorcarAgent when neither flag is given.
+
+    ``sorcar mcp ...`` is dispatched to the MCP management subcommand
+    (:mod:`kiss.agents.sorcar.mcp_cli`) before normal argument parsing.
     """
+    if len(sys.argv) > 1 and sys.argv[1] == "mcp":
+        from kiss.agents.sorcar.mcp_cli import run_mcp_cli
+
+        sys.exit(run_mcp_cli(sys.argv[2:], str(Path.cwd())))
+
     parser = _build_arg_parser()
     args = parser.parse_args()
 
