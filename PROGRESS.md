@@ -204,8 +204,27 @@ No code modified yet in this session.
   contributes.configuration (only kissSorcar.defaultModel + kissSorcar.kissProjectPath)
   vs webview settings, json_printer interleaved sub-agent events.
 
-NEXT STEPS: write the two failing tests, verify they fail, apply fixes
-(json_printer.py frozenset + vscode_config.py flock), verify pass, run impacted tests
-(test_replay_event_coalescing, test_printer_equivalence, test_config_race,
-test_config_save_on_close, test_bughunt3*), `npx tsc -p .` not needed (no TS change),
-`uv run check --full`, commit.
+### Session-1 DONE (steps 16-27)
+
+- Wrote failing tests FIRST, verified failures:
+  - `src/kiss/tests/agents/vscode/test_bughunt4_warning_persist.py` (3 tests) —
+    failed: warning dropped by stop_recording/peek_recording.
+  - `src/kiss/tests/agents/vscode/test_bughunt4_config_cross_process.py` — failed
+    with genuine "LOST UPDATE: wrote 'last_model-…' read back …" from real
+    2-subprocess hammer.
+- FIX A: json_printer.py — added "warning" (with comment) to `_DISPLAY_EVENT_TYPES`.
+- FIX B: vscode_config.py — `import fcntl`; save_config now holds
+  `fcntl.flock(CONFIG_DIR/".config.lock", LOCK_EX)` (inside `_config_lock`, released
+  in finally) across the whole read-merge-replace.
+- Post-fix: all 4 new tests pass. Impacted tests pass: test_replay_event_coalescing,
+  test_printer_equivalence, test_config_race, test_config_save_on_close,
+  test_bughunt3_autocomplete_echo_strip (28 passed); JS: bughunt3_warning_event.test.js
+  PASS, bughunt2_demo_continue.test.js PASS. demo.js/main.js need no change (warning
+  falls into current panel group; main.js case 'warning' renders it on replay).
+- Verified NOT bugs additionally: panelCopy.js (getRawText/normalise/clipboard fallback
+  fine); settings DEFAULTS keys all referenced in main.js settings UI (last_model is
+  backend-only); MERGE_ACTIONS/commands package.json parity OK.
+
+REMAINING: grep tests asserting on _DISPLAY_EVENT_TYPES contents (ensure no structural
+test broke), run `uv run check --full`, git add+commit the two fixes + two tests +
+PROGRESS.md, then finish with bug report (2 NEW bugs).
