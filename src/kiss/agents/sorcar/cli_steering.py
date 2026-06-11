@@ -35,6 +35,7 @@ runs the agent normally with no box.
 
 from __future__ import annotations
 
+import codecs
 import ctypes
 import os
 import queue
@@ -177,6 +178,18 @@ class _InputBox:
         self._fd = -1
         self._old_term: Any = None
         self._active = False
+        # Rows for which the DECSTBM scroll region was last emitted; a
+        # mismatch on redraw means the terminal was resized and the
+        # region must be re-anchored (see :meth:`_draw_locked`).
+        self._rows = 0
+        # Multi-byte UTF-8 characters and escape sequences can be split
+        # across ``os.read`` chunks; the decoder buffers partial bytes
+        # and ``_pending_esc`` carries an incomplete escape sequence
+        # tail into the next :meth:`feed` call.
+        self._decoder = codecs.getincrementaldecoder("utf-8")(
+            errors="ignore"
+        )
+        self._pending_esc = ""
 
     def start(self) -> None:
         """Enter raw mode, reserve the scroll region and draw the box."""
@@ -206,6 +219,7 @@ class _InputBox:
             out.write(f"{_ESC}[?25h")
             out.flush()
             self._active = True
+            self._rows = rows
             self._draw_locked()
 
     def stop(self) -> None:
@@ -245,6 +259,14 @@ class _InputBox:
         cols = panel_cols()
         top_row = rows - _BOX_H + 1
         out = self._out
+        if rows != self._rows:
+            # The terminal was resized: re-anchor the scroll region and
+            # re-save the output cursor inside the new region so agent
+            # output cannot scroll over the relocated box.
+            out.write(f"{_ESC}[1;{rows - _BOX_H}r")
+            out.write(f"{_ESC}[{rows - _BOX_H};1H")
+            out.write(f"{_ESC}7")
+            self._rows = rows
 
         top = panel_top(self.title, cols)
         bottom = panel_bottom(self.status, cols)
@@ -297,7 +319,8 @@ class _InputBox:
             on_submit: Callable invoked with each completed line (string).
             on_abort: Callable invoked when Ctrl+C is pressed.
         """
-        text = data.decode("utf-8", "ignore")
+        text = self._pending_esc + self._decoder.decode(data)
+        self._pending_esc = ""
         i = 0
         changed = False
         while i < len(text):
@@ -316,17 +339,29 @@ class _InputBox:
                         break
                 if shift_enter:
                     continue
+                # A chunk ending right at the ESC may be the first half
+                # of a sequence split across reads; defer it so the next
+                # chunk can complete (and swallow) the sequence.
+                if i + 1 >= len(text):
+                    self._pending_esc = text[i:]
+                    break
                 # Swallow other CSI escape sequences (arrow keys, etc.).
-                if i + 1 < len(text) and text[i + 1] == "[":
+                if text[i + 1] == "[":
                     j = i + 2
                     while j < len(text) and not ("@" <= text[j] <= "~"):
                         j += 1
+                    if j >= len(text):  # split mid-sequence
+                        self._pending_esc = text[i:]
+                        break
                     i = j + 1
                     continue
                 # Swallow SS3 sequences (``ESC O <final>``): arrow keys
                 # in application cursor mode (DECCKM) and F1–F4, whose
                 # printable bytes must not be typed into the buffer.
-                if i + 1 < len(text) and text[i + 1] == "O":
+                if text[i + 1] == "O":
+                    if i + 2 >= len(text):  # split mid-sequence
+                        self._pending_esc = text[i:]
+                        break
                     i += 3
                     continue
                 i += 1
@@ -351,6 +386,10 @@ class _InputBox:
                 self.buf += ch
                 changed = True
             i += 1
+        if len(self._pending_esc) > 64:
+            # Not a real escape sequence (no terminal sends one this
+            # long); drop it rather than buffering forever.
+            self._pending_esc = ""
         if changed:
             self.redraw()
 
@@ -507,6 +546,7 @@ class SteeringSession:
 
     def _loop(self) -> None:
         fd = sys.stdin.fileno()
+        last_size = _term_size()
         while not self._done.is_set():
             try:
                 ready, _, _ = select.select([fd], [], [], 0.1)
@@ -516,6 +556,12 @@ class SteeringSession:
                 self._on_abort()
                 return
             if not ready:
+                # Poll for terminal resizes so the box re-anchors within
+                # one select timeout even when no key is pressed.
+                size = _term_size()
+                if size != last_size:
+                    last_size = size
+                    self.box.redraw()
                 continue
             try:
                 data = os.read(fd, 4096)

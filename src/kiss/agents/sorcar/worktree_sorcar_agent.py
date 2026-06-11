@@ -486,8 +486,24 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                 GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
                 return None
 
+            try:
+                dirty_copied = GitWorktreeOps.copy_dirty_state(repo, wt_dir)
+            except OSError:
+                # E.g. a dirty file the process cannot read (mode 000)
+                # makes shutil.copy2 raise PermissionError.  Honor
+                # run()'s fallback contract: clean up the half-created
+                # worktree/branch and run the task directly instead of
+                # crashing the whole task.
+                logger.warning(
+                    "Failed to copy dirty state into worktree; "
+                    "falling back to direct execution",
+                    exc_info=True,
+                )
+                GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
+                return None
+
             baseline_commit: str | None = None
-            if GitWorktreeOps.copy_dirty_state(repo, wt_dir):
+            if dirty_copied:
                 GitWorktreeOps.stage_all(wt_dir)
                 if GitWorktreeOps.commit_staged(
                     wt_dir,
@@ -733,14 +749,14 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         # branch after a successful merge.
         if not self._finalize_worktree():
             return (
-                    f"Cannot merge: auto-commit for '{wt.branch}' failed "
-                    "(a pre-commit hook may have rejected the commit). "
-                    f"The worktree is preserved at: {wt.wt_dir}\n\n"
-                    "Fix the issue, then commit manually:\n"
-                    f"    cd {wt.wt_dir}\n"
-                    "    git add -A && git commit -m 'agent work'\n\n"
-                    "Then retry: agent.merge()"
-                )
+                f"Cannot merge: auto-commit for '{wt.branch}' failed "
+                "(a pre-commit hook may have rejected the commit). "
+                f"The worktree is preserved at: {wt.wt_dir}\n\n"
+                "Fix the issue, then commit manually:\n"
+                f"    cd {wt.wt_dir}\n"
+                "    git add -A && git commit -m 'agent work'\n\n"
+                "Then retry: agent.merge()"
+            )
 
         result, stash_warning = self._do_merge(wt)
         stash_suffix = ""
