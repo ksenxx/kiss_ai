@@ -471,10 +471,21 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         # ``_do_merge`` invoked by ``_release_worktree`` re-acquires
         # it cleanly on the same thread.
         with repo_lock(repo):
+            # The released worktree may live in a DIFFERENT repo (the
+            # user changed ``work_dir`` between runs).  Its original
+            # branch name must then not leak into *repo*: a same-named
+            # branch there would silently become the merge target
+            # (wrong merge result) and ``merge()`` would switch the
+            # user's checkout to it.
+            prev_repo_root = self._wt.repo_root if self._wt is not None else None
             released_branch = self._release_worktree()
 
             original_branch: str | None
-            if released_branch is not None:
+            if (
+                released_branch is not None
+                and prev_repo_root is not None
+                and prev_repo_root.resolve() == repo.resolve()
+            ):
                 original_branch = released_branch
             else:
                 original_branch = GitWorktreeOps.current_branch(repo)

@@ -704,10 +704,18 @@ class GitWorktreeOps:
         exclude_file.parent.mkdir(parents=True, exist_ok=True)
         entry = ".kiss-worktrees/"
         if exclude_file.exists():
-            content = exclude_file.read_text()
+            # Git treats exclude files as raw bytes — non-UTF-8
+            # patterns/comments are legal, so a strict decode would
+            # raise UnicodeDecodeError and silently skip the
+            # exclusion (the caller swallows exceptions), leaving
+            # ``?? .kiss-worktrees/`` polluting the user's git status
+            # forever.  Mirror :func:`_git`'s surrogateescape policy.
+            content = exclude_file.read_bytes().decode(
+                "utf-8", errors="surrogateescape"
+            )
             if entry in content.splitlines():
                 return
-        with open(exclude_file, "a") as f:
+        with open(exclude_file, "a", encoding="utf-8") as f:
             f.write(f"\n{entry}\n")
 
     @staticmethod

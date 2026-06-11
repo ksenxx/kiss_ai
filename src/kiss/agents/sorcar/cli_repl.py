@@ -703,8 +703,16 @@ def run_repl(
             if text in _EXIT_WORDS:
                 break
             if text.startswith("/"):
-                if _handle_slash(agent, line, run_kwargs):
-                    break
+                # A failing command must not kill the interactive
+                # session (mirrors the task-error guard in _run_one):
+                # e.g. /resume listing chats from a corrupt database
+                # raises sqlite3.DatabaseError — report and re-prompt.
+                try:
+                    if _handle_slash(agent, line, run_kwargs):
+                        break
+                except Exception as exc:
+                    logger.debug("slash command failed", exc_info=True)
+                    print(f"\n✗ Command failed: {exc}\n")
                 continue
             _record_mentions(line)
             _run_one(agent, line, run_kwargs)

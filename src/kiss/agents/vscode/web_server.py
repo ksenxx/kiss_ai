@@ -3027,9 +3027,25 @@ class RemoteAccessServer:
                     continue
                 if not isinstance(cmd, dict):
                     continue
-                await self._dispatch_client_command(
-                    cmd, websocket, tabs_seen, conn_state,
-                )
+                try:
+                    await self._dispatch_client_command(
+                        cmd, websocket, tabs_seen, conn_state,
+                    )
+                except websockets.exceptions.ConnectionClosed:
+                    raise
+                except Exception:
+                    # Contain per-command failures (malformed fields,
+                    # unexpected I/O errors in handlers): one bad
+                    # message must not tear down the authenticated
+                    # connection — the ``finally`` below would arm
+                    # deferred closeTab timers for EVERY tab this
+                    # client touched, force-finishing in-flight merge
+                    # reviews as "accept remaining".
+                    logger.warning(
+                        "Error handling client command %r; "
+                        "connection kept",
+                        cmd.get("type", ""), exc_info=True,
+                    )
         except websockets.exceptions.ConnectionClosed:
             pass
         except Exception:
@@ -3094,9 +3110,21 @@ class RemoteAccessServer:
                     continue
                 if not isinstance(cmd, dict):
                     continue
-                await self._dispatch_client_command(
-                    cmd, writer, tabs_seen, conn_state,
-                )
+                try:
+                    await self._dispatch_client_command(
+                        cmd, writer, tabs_seen, conn_state,
+                    )
+                except (ConnectionError, asyncio.IncompleteReadError):
+                    raise
+                except Exception:
+                    # Same per-command containment as ``_ws_handler``:
+                    # one bad message (malformed field, handler I/O
+                    # error) must not drop the VS Code extension's
+                    # UDS connection and force-close its tabs.
+                    logger.warning(
+                        "Error handling UDS command %r; connection kept",
+                        cmd.get("type", ""), exc_info=True,
+                    )
         except Exception:
             logger.debug("UDS handler error", exc_info=True)
         finally:
@@ -3772,6 +3800,33 @@ class RemoteAccessServer:
                 self._merge_action_locks[tab_id] = lock
             return lock
 
+    def _broadcast_reject_failure(
+        self, tab_id: str, file_data: dict[str, Any], exc: OSError,
+    ) -> None:
+        """Report a failed hunk-rejection write to every client.
+
+        Called from the reject branches of
+        :meth:`_apply_web_merge_action` when restoring a file's base
+        content fails on disk (canonical trigger: the agent deleted a
+        tracked file and created a directory at the same path, so the
+        restore write raises ``IsADirectoryError``).  The hunks of the
+        affected file remain unresolved, the review stays open, and
+        the user sees an ``error`` chat event instead of a silently
+        dropped (or connection-killing) rejection.
+
+        Args:
+            tab_id: The tab whose merge review the action targeted.
+            file_data: The merge-data file entry whose restore failed.
+            exc: The ``OSError`` raised by the restore write.
+        """
+        fname = file_data.get("name") or file_data.get("target") or "file"
+        logger.warning("Merge reject failed for %s: %s", fname, exc)
+        self._printer.broadcast({
+            "type": "error",
+            "text": f"Failed to reject changes in {fname}: {exc}",
+            "tabId": tab_id,
+        })
+
     async def _handle_web_merge_action(self, cmd: dict[str, Any]) -> None:
         """Handle merge toolbar actions (accept/reject/navigate) server-side.
 
@@ -3825,23 +3880,34 @@ class RemoteAccessServer:
                 fi, hi = cur
                 fd = state.files[fi]
                 hunk = fd["hunks"][hi]
-                await self._loop.run_in_executor(
-                    None,
-                    partial(
-                        _reject_hunk_in_file,
-                        fd["current"],
-                        fd["base"],
-                        hunk,
-                        fd.get("target"),
-                        binary=bool(fd.get("binary")),
-                    ),
-                )
-                delta = hunk["bc"] - hunk["cc"]
-                for later_hi in range(hi + 1, len(fd["hunks"])):
-                    if not state.is_resolved(fi, later_hi):
-                        fd["hunks"][later_hi]["cs"] += delta
-                state.mark_resolved(fi, hi, "rejected")
-                state.advance()
+                try:
+                    await self._loop.run_in_executor(
+                        None,
+                        partial(
+                            _reject_hunk_in_file,
+                            fd["current"],
+                            fd["base"],
+                            hunk,
+                            fd.get("target"),
+                            binary=bool(fd.get("binary")),
+                        ),
+                    )
+                except OSError as exc:
+                    # The restore write failed (e.g. the agent replaced
+                    # the deleted file with a DIRECTORY of the same
+                    # name → IsADirectoryError, or the target is not
+                    # writable).  Nothing landed on disk, so the hunk
+                    # must stay UNRESOLVED — and the failure must not
+                    # propagate, or the transport loop would tear down
+                    # the whole client connection over one bad hunk.
+                    self._broadcast_reject_failure(tab_id, fd, exc)
+                else:
+                    delta = hunk["bc"] - hunk["cc"]
+                    for later_hi in range(hi + 1, len(fd["hunks"])):
+                        if not state.is_resolved(fi, later_hi):
+                            fd["hunks"][later_hi]["cs"] += delta
+                    state.mark_resolved(fi, hi, "rejected")
+                    state.advance()
         elif action == "prev":
             state.go_prev()
         elif action == "next":
@@ -3850,15 +3916,26 @@ class RemoteAccessServer:
             if cur is not None:
                 fi = cur[0]
                 fd = state.files[fi]
+                resolve_file = True
                 if action == "reject-file":
-                    await self._loop.run_in_executor(
-                        None, _reject_all_hunks_in_file, fd,
-                        state.unresolved_in_file(fi),
+                    try:
+                        await self._loop.run_in_executor(
+                            None, _reject_all_hunks_in_file, fd,
+                            state.unresolved_in_file(fi),
+                        )
+                    except OSError as exc:
+                        # See the per-hunk ``reject`` branch: the
+                        # restore write failed, so the file's hunks
+                        # stay unresolved and the review survives.
+                        self._broadcast_reject_failure(tab_id, fd, exc)
+                        resolve_file = False
+                if resolve_file:
+                    file_status = (
+                        "rejected" if action == "reject-file" else "accepted"
                     )
-                file_status = "rejected" if action == "reject-file" else "accepted"
-                for hi in state.unresolved_in_file(fi):
-                    state.mark_resolved(fi, hi, file_status)
-                state.advance()
+                    for hi in state.unresolved_in_file(fi):
+                        state.mark_resolved(fi, hi, file_status)
+                    state.advance()
         elif action == "accept-all":
             for fi, hi in state.all_unresolved():
                 state.mark_resolved(fi, hi, "accepted")
@@ -3866,12 +3943,23 @@ class RemoteAccessServer:
             unresolved_by_file: dict[int, list[int]] = {}
             for fi, hi in state.all_unresolved():
                 unresolved_by_file.setdefault(fi, []).append(hi)
-                state.mark_resolved(fi, hi, "rejected")
             for fi, his in unresolved_by_file.items():
                 fd = state.files[fi]
-                await self._loop.run_in_executor(
-                    None, _reject_all_hunks_in_file, fd, his,
-                )
+                # Mark hunks resolved only AFTER their file's restore
+                # write succeeded: marking up-front would zombify the
+                # review on failure (remaining == 0 with the state
+                # never popped and all-done never dispatched), while a
+                # propagating exception killed the client connection
+                # AND left sibling files unrestored.
+                try:
+                    await self._loop.run_in_executor(
+                        None, _reject_all_hunks_in_file, fd, his,
+                    )
+                except OSError as exc:
+                    self._broadcast_reject_failure(tab_id, fd, exc)
+                    continue
+                for hi in his:
+                    state.mark_resolved(fi, hi, "rejected")
 
         cur_after = state.current()
         self._printer.broadcast({

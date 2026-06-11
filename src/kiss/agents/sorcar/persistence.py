@@ -1128,11 +1128,27 @@ def _set_task_favorite(task_id: int, is_favorite: bool) -> bool:
         extra_raw = row["extra"] or ""
         extra_obj: dict[str, object]
         if extra_raw:
-            try:
-                parsed = json.loads(extra_raw)
-            except (json.JSONDecodeError, TypeError):
-                parsed = None
-            extra_obj = parsed if isinstance(parsed, dict) else {}
+            strict = _parse_extra_dict(extra_raw)
+            if strict is not None:
+                extra_obj = strict
+            else:
+                # Legacy corrupt extra (e.g. a bare ``NaN`` token written
+                # by the pre-``_dumps_extra`` code path): strict parsing
+                # fails, so every reader and the ``_HISTORY_NOT_SUBAGENT``
+                # SQL predicate classify this row as NOT a sub-agent row.
+                # Recover the metadata leniently (the history sidebar
+                # displays it via plain ``json.loads``) but drop the
+                # never-effective top-level ``subagent`` key — otherwise
+                # re-encoding through ``_dumps_extra`` would mint VALID
+                # JSON whose ``subagent`` key suddenly starts classifying,
+                # and starring the row would make it vanish from
+                # ``_load_history`` / ``_list_recent_chats``.
+                try:
+                    parsed = json.loads(extra_raw)
+                except (json.JSONDecodeError, TypeError):
+                    parsed = None
+                extra_obj = parsed if isinstance(parsed, dict) else {}
+                extra_obj.pop("subagent", None)
         else:
             extra_obj = {}
         extra_obj["is_favorite"] = bool(is_favorite)

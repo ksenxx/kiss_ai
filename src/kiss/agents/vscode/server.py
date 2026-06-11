@@ -356,6 +356,20 @@ class VSCodeServer(
 
     def _handle_command(self, cmd: dict[str, Any]) -> None:
         """Dispatch a command from VS Code to the appropriate handler."""
+        # The shared routing fields are used as dict keys (tab
+        # registry, per-work_dir file cache, per-connection
+        # autocomplete state) throughout the handlers: a non-string
+        # value (e.g. ``"tabId": [1]`` from a malformed client) raises
+        # ``TypeError: unhashable type`` out of a registry lookup — or
+        # silently corrupts daemon-global state (``setWorkDir`` would
+        # assign the list to ``self.work_dir``) — and an exception
+        # escaping this method kills the transport's whole receive
+        # loop, i.e. the entire client connection.  Coerce them to
+        # ``""``, the neutral value every handler already guards.
+        for field in ("tabId", "workDir", "connId"):
+            value = cmd.get(field)
+            if value is not None and not isinstance(value, str):
+                cmd[field] = ""
         cmd_type = cmd.get("type", "")
         # A non-string ``type`` (e.g. a list) is unhashable: using it
         # as a dict key would raise TypeError, which escapes to the
