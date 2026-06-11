@@ -536,6 +536,9 @@ class VSCodeServer(
             chat_id = str(entry.get("chat_id", "") or "")
             result = str(entry.get("result", "") or "")
             entry_id = entry.get("id")
+            is_running = (
+                isinstance(entry_id, int) and entry_id in running_task_ids
+            )
             session: dict[str, Any] = {
                 "id": chat_id,
                 "task_id": entry_id,
@@ -543,11 +546,11 @@ class VSCodeServer(
                 "timestamp": entry.get("timestamp", 0),
                 "preview": task,
                 "has_events": has_events,
-                "failed": _is_failed_result(result),
-                "is_running": (
-                    isinstance(entry_id, int)
-                    and entry_id in running_task_ids
-                ),
+                # A running task's row still holds the "Agent Failed
+                # Abruptly" sentinel result — don't paint it as failed
+                # while it is alive.
+                "failed": _is_failed_result(result) and not is_running,
+                "is_running": is_running,
                 "tokens": 0,
                 "cost": 0.0,
                 "steps": 0,
