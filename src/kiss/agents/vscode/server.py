@@ -356,8 +356,14 @@ class VSCodeServer(
 
     def _handle_command(self, cmd: dict[str, Any]) -> None:
         """Dispatch a command from VS Code to the appropriate handler."""
-        cmd_type: str = cmd.get("type", "")
-        handler = self._HANDLERS.get(cmd_type)
+        cmd_type = cmd.get("type", "")
+        # A non-string ``type`` (e.g. a list) is unhashable: using it
+        # as a dict key would raise TypeError, which escapes to the
+        # transport's receive loop and kills the whole client
+        # connection.  Route it to the unknown-command branch instead.
+        handler = (
+            self._HANDLERS.get(cmd_type) if isinstance(cmd_type, str) else None
+        )
         if handler is not None:
             handler(self, cmd)
         else:
@@ -864,6 +870,14 @@ class VSCodeServer(
         Args:
             tab_id: The frontend tab identifier (a freshly-minted uuid).
         """
+        if not tab_id:
+            # A malformed ``newChat`` without a tabId must not mint a
+            # phantom registry entry keyed "" via ``_get_tab`` —
+            # ``_cmd_close_tab`` guards against empty ids, so such an
+            # entry (and its eagerly-created agent) could never be
+            # disposed.  Mirror ``_replay_session``'s empty-id no-op.
+            logger.debug("newChat ignored: empty tabId")
+            return
         persisted = _load_last_model()
         if persisted:
             self._default_model = persisted

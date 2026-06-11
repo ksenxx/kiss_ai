@@ -16,6 +16,7 @@ a task) or running (queuing follow-up instructions).
 from __future__ import annotations
 
 import shutil
+import unicodedata
 
 _ESC = "\x1b"
 # ANSI styling shared by every panel render.
@@ -41,6 +42,54 @@ def _term_size() -> tuple[int, int]:
     """
     size = shutil.get_terminal_size(fallback=(80, 24))
     return max(size.lines, 1), max(size.columns, 1)
+
+
+def char_width(ch: str) -> int:
+    """Return the terminal display width (columns) of a single character.
+
+    Args:
+        ch: A single character.
+
+    Returns:
+        ``0`` for combining marks, ``2`` for East-Asian wide/fullwidth
+        characters (CJK, emoji), and ``1`` otherwise.
+    """
+    if unicodedata.combining(ch):
+        return 0
+    return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+
+
+def display_width(text: str) -> int:
+    """Return the terminal display width (columns) of *text*.
+
+    Args:
+        text: The string to measure.
+
+    Returns:
+        The number of terminal columns *text* occupies when printed.
+    """
+    return sum(char_width(ch) for ch in text)
+
+
+def _clip_pad(text: str, width: int) -> str:
+    """Clip *text* to at most *width* display columns and pad with spaces.
+
+    Args:
+        text: The text to fit.
+        width: The exact display width of the returned string.
+
+    Returns:
+        A string occupying exactly *width* terminal columns.
+    """
+    w = 0
+    kept: list[str] = []
+    for ch in text:
+        cw = char_width(ch)
+        if w + cw > width:
+            break
+        kept.append(ch)
+        w += cw
+    return "".join(kept) + " " * (width - w)
 
 
 def panel_cols() -> int:
@@ -100,10 +149,18 @@ def clip_buf(buf: str, cols: int) -> str:
     """
     shown = buf.replace("\n", "⏎")
     inner_w = cols - 4  # room between "│ " and " │"
-    avail = inner_w - len(PROMPT_MARKER)
-    if len(shown) > avail:
-        return shown[len(shown) - avail :]
-    return shown
+    avail = inner_w - display_width(PROMPT_MARKER)
+    if display_width(shown) <= avail:
+        return shown
+    w = 0
+    idx = len(shown)
+    for k in range(len(shown) - 1, -1, -1):
+        cw = char_width(shown[k])
+        if w + cw > avail:
+            break
+        w += cw
+        idx = k
+    return shown[idx:]
 
 
 def panel_body(buf: str, cols: int) -> tuple[str, bool]:
@@ -131,9 +188,8 @@ def panel_body(buf: str, cols: int) -> tuple[str, bool]:
     inner_w = cols - 4  # room between "│ " and " │"
     if buf:
         body = PROMPT_MARKER + clip_buf(buf, cols)
-        return body[:inner_w].ljust(inner_w), False
-    body = PROMPT_MARKER + PLACEHOLDER
-    return body[:inner_w].ljust(inner_w), True
+        return _clip_pad(body, inner_w), False
+    return _clip_pad(PROMPT_MARKER + PLACEHOLDER, inner_w), True
 
 
 def body_cursor_col(buf: str, cols: int) -> int:
@@ -153,4 +209,4 @@ def body_cursor_col(buf: str, cols: int) -> int:
         The column (1-based) at which to park the blinking cursor.
     """
     shown = clip_buf(buf, cols) if buf else ""
-    return 3 + len(PROMPT_MARKER) + len(shown)
+    return 3 + display_width(PROMPT_MARKER) + display_width(shown)

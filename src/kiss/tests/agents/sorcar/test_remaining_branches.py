@@ -181,10 +181,16 @@ class TestUsefulToolsBranches:
 class TestHelpersBranches:
     """Cover remaining branches in helpers.py."""
 
-    def test_clip_autocomplete_suggestion_echo_prefix(self) -> None:
-        """clip_autocomplete_suggestion strips query prefix when echoed."""
+    def test_clip_autocomplete_suggestion_keeps_suffix_prefix(self) -> None:
+        """A suffix that itself begins with the query is NOT re-stripped.
+
+        Suggestions are always continuation suffixes (the call sites
+        strip the query before calling), so a suffix starting with the
+        query text — e.g. completing ``hellohello world`` after typing
+        ``hello`` — must survive intact.
+        """
         result = clip_autocomplete_suggestion("hello", "hello world")
-        assert result == " world"
+        assert result == "hello world"
 
     def test_generate_followup_text_failure(self) -> None:
         """generate_followup_text returns empty string on LLM failure (lines 104-106)."""
