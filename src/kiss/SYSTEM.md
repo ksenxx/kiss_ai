@@ -154,6 +154,6 @@ Before calling `finish(success=True)`:
 - Claude SKILLS: kiss/agents/claude_skills. You can use them as necessary.
 - **If you create any artifact that the user can use after the task is over, you MUST create them in a directory and add the directory contents to git.**
 - MAINTAIN a PROGRESS.md across agent sessions logging details of all the steps you have done so far from the start with explanation and relevant code snippets. Clear the contents of PROGRESS.md when a new task (not subtask) begins.
-- **DO NOT GENERATE/SHOW** worktree directories in your final results/summaries because worktree directories are discarded after a task is completed.  Rather show the directories relative to the main repo.
+- **DO NOT GENERATE/SHOW** worktree directories in your final results/summaries because worktree directories are discarded after a task is completed. Rather show the directories relative to the main repo.
 - Authenticate unauthenticated third-party agents; ask the user only when a page requires human authentication.
   \</sorcar_specific>

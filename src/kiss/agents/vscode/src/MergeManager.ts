@@ -768,7 +768,7 @@ export class MergeManager extends EventEmitter {
 
     const fileCount = (data.files || []).length;
     vscode.window.showInformationMessage(
-      `Reviewing ${fileCount} file(s). Red = old, Blue = new. Use Accept / Reject.`,
+      `Reviewing ${fileCount} file(s). Red = old, Green = new. Use Accept / Reject.`,
     );
   }
 

@@ -386,7 +386,8 @@ def _add_task(
     creation time (model, work_dir, version, toggles) are immediately
     visible in the history sidebar — even before the task completes.
     Callers that need to add post-completion values (tokens, cost) can
-    later call :func:`_save_task_extra` which overwrites the column.
+    later call :func:`_save_task_extra` which rewrites the column
+    (preserving any ``is_favorite`` flag set in the meantime).
 
     Thread-safe: all writes are protected by ``_rw_lock.write_lock()``.
 
@@ -494,6 +495,10 @@ def _delete_task(task_id: int) -> bool:
     _flush_chat_events()
     db = _get_db()
     with _rw_lock.write_lock():
+        row = db.execute(
+            "SELECT chat_id FROM task_history WHERE id = ?", (task_id,),
+        ).fetchone()
+        chat_id = (row["chat_id"] or "") if row is not None else ""
         db.execute("DELETE FROM events WHERE task_id = ?", (task_id,))
         cursor = db.execute(
             "DELETE FROM task_history WHERE id = ?", (task_id,)
@@ -501,7 +506,13 @@ def _delete_task(task_id: int) -> bool:
         _next_seq_cache.pop(task_id, None)
         _marked_has_events.discard(task_id)
         db.commit()
-        return (cursor.rowcount or 0) > 0
+        deleted = (cursor.rowcount or 0) > 0
+    # Invalidate the autocomplete chat-context cache so the deleted
+    # task/result text stops being served to ghost-text suggestions.
+    # Done outside the write lock to keep the critical section short.
+    if deleted:
+        _invalidate_chat_context_cache(chat_id)
+    return deleted
 
 
 def _load_history(limit: int = 0, offset: int = 0) -> list[_HistoryEntry]:
@@ -548,6 +559,7 @@ def _prefix_match_task(query: str) -> str:
         row = db.execute(
             "SELECT task FROM task_history "
             "WHERE task GLOB ? AND LENGTH(task) > ? "
+            f"AND {_HISTORY_NOT_SUBAGENT} "
             "ORDER BY timestamp DESC LIMIT 1",
             (escaped + "*", len(query)),
         ).fetchone()
@@ -591,7 +603,9 @@ def _get_history_entry(idx: int) -> _HistoryEntry | None:
     with _rw_lock.read_lock():
         db = _get_db()
         row = db.execute(
-            _HISTORY_SELECT + "ORDER BY timestamp DESC LIMIT 1 OFFSET ?",
+            _HISTORY_SELECT
+            + f"WHERE {_HISTORY_NOT_SUBAGENT} "
+            + "ORDER BY timestamp DESC LIMIT 1 OFFSET ?",
             (idx,),
         ).fetchone()
         return dict(row) if row else None
@@ -955,12 +969,41 @@ def _save_task_extra(
     ``task_history``.  Typical keys: ``model``, ``work_dir``,
     ``version``, ``tokens``, ``cost``, ``is_parallel``, ``is_worktree``.
 
+    The ``is_favorite`` flag written by :func:`_set_task_favorite` is
+    preserved: when the stored ``extra`` JSON carries ``is_favorite``
+    and the new *extra* payload does not, the stored value is merged
+    into the payload before writing.  Otherwise starring a task while
+    it is still running would be silently undone by the
+    completion-time extra write.
+
     Args:
         extra: Dictionary of metadata to persist.
         task_id: Stable row id to update when available.
         task: Fallback task description string for legacy callers.
     """
-    _update_task_column("extra", json.dumps(extra), task_id, task)
+    _flush_chat_events()
+    db = _get_db()
+    merged = dict(extra)
+    with _rw_lock.write_lock():
+        resolved = _resolve_task_id(db, task_id, task)
+        if resolved is None:
+            return
+        row = db.execute(
+            "SELECT extra FROM task_history WHERE id = ?", (resolved,),
+        ).fetchone()
+        existing_raw = (row["extra"] or "") if row is not None else ""
+        if existing_raw and "is_favorite" not in merged:
+            try:
+                existing = json.loads(existing_raw)
+            except (json.JSONDecodeError, TypeError):
+                existing = None
+            if isinstance(existing, dict) and "is_favorite" in existing:
+                merged["is_favorite"] = existing["is_favorite"]
+        db.execute(
+            "UPDATE task_history SET extra = ? WHERE id = ?",
+            (json.dumps(merged), resolved),
+        )
+        db.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -1085,7 +1128,14 @@ def _write_event_batch(batch: list[tuple[int, str, float]]) -> None:
         for tid in task_ids:
             if tid not in _next_seq_cache:
                 # Validate the task_id exists in task_history; skip events
-                # whose task row was deleted.
+                # whose task row was deleted.  Inserting a dangling event
+                # would raise an IntegrityError (FK violation) that aborts
+                # the whole batch, losing every other task's events.
+                exists = db.execute(
+                    "SELECT 1 FROM task_history WHERE id = ?", (tid,),
+                ).fetchone()
+                if exists is None:
+                    continue
                 row = db.execute(
                     "SELECT COALESCE(MAX(seq), -1) + 1 AS next_seq "
                     "FROM events WHERE task_id = ?",
@@ -1094,7 +1144,10 @@ def _write_event_batch(batch: list[tuple[int, str, float]]) -> None:
                 _next_seq_cache[tid] = row["next_seq"] if row else 0
         rows: list[tuple[int, int, str, float]] = []
         for tid, ev_json, ts in batch:
-            seq = _next_seq_cache[tid]
+            seq = _next_seq_cache.get(tid)
+            if seq is None:
+                # Task row deleted — drop the dangling event, keep the rest.
+                continue
             _next_seq_cache[tid] = seq + 1
             rows.append((tid, seq, ev_json, ts))
         db.executemany(
@@ -1102,7 +1155,10 @@ def _write_event_batch(batch: list[tuple[int, str, float]]) -> None:
             "VALUES (?, ?, ?, ?)",
             rows,
         )
-        to_mark = [tid for tid in task_ids if tid not in _marked_has_events]
+        to_mark = [
+            tid for tid in task_ids
+            if tid in _next_seq_cache and tid not in _marked_has_events
+        ]
         if to_mark:
             placeholders = ",".join("?" * len(to_mark))
             db.execute(

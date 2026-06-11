@@ -1896,7 +1896,7 @@
           fmtN(ev.total_tokens || 0) +
           '</b></span>' +
           '<span>Cost <b>' +
-          (ev.cost || 'N/A') +
+          esc(ev.cost || 'N/A') +
           '</b></span>' +
           '</div></div><div class="rc-body md-body' +
           (usePre ? ' pre' : '') +

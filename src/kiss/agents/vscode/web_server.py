@@ -50,7 +50,6 @@ import os
 import platform
 import re
 import secrets
-import shutil
 import signal
 import socket
 import ssl
@@ -574,24 +573,42 @@ def _reject_hunk_in_file(
     Path(write_to).write_text("".join(new_lines))
 
 
-def _reject_all_hunks_in_file(file_data: dict[str, Any]) -> None:
-    """Revert an entire file to its base version.
+def _reject_all_hunks_in_file(
+    file_data: dict[str, Any], hunk_indices: list[int] | None = None,
+) -> None:
+    """Surgically revert the given hunks of a file to the base version.
 
-    Copies the base file content over the real workspace path
-    (``file_data["target"]`` when present, otherwise
-    ``file_data["current"]``).  Using ``target`` ensures that when the
-    agent deleted a tracked file and the user rejects all hunks, the
-    workspace file is actually restored on disk instead of being left
-    behind as a placeholder.
+    Reverts only the hunks named by *hunk_indices* (all hunks when
+    ``None``) via :func:`_reject_hunk_in_file`, applying the same
+    ``cs`` offset fix-ups to later pending hunks as the per-hunk
+    ``reject`` action.  Callers (``reject-file`` / ``reject-all``)
+    pass the file's UNRESOLVED hunk indices so content the user
+    already ACCEPTED stays on disk — a whole-file base copy here
+    would silently wipe accepted hunks while ``resolutions()`` still
+    reported them ``"accepted"``.
 
     Args:
         file_data: File entry from merge data with ``base``,
-            ``current`` and (optionally) ``target`` path strings.
+            ``current``, ``hunks`` and (optionally) ``target`` path
+            strings.
+        hunk_indices: Indices into ``file_data["hunks"]`` to revert;
+            ``None`` means every hunk.
     """
-    write_to = file_data.get("target") or file_data["current"]
-    if Path(file_data["base"]).is_file():
-        Path(write_to).parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(file_data["base"], write_to)
+    hunks = file_data.get("hunks", [])
+    if hunk_indices is None:
+        hunk_indices = list(range(len(hunks)))
+    pending = set(hunk_indices)
+    for hi in sorted(hunk_indices):
+        hunk = hunks[hi]
+        _reject_hunk_in_file(
+            file_data["current"], file_data["base"], hunk,
+            file_data.get("target"),
+        )
+        pending.discard(hi)
+        delta = hunk["bc"] - hunk["cc"]
+        for later_hi in range(hi + 1, len(hunks)):
+            if later_hi in pending:
+                hunks[later_hi]["cs"] += delta
 
 
 _VSCODE_ONLY_COMMANDS = frozenset({
@@ -2390,7 +2407,14 @@ def _translate_webview_command(cmd: dict[str, Any]) -> dict[str, Any]:
     """
     cmd_type = cmd.get("type", "")
     if cmd_type == "userActionDone":
-        return {"type": "userAnswer", "answer": "done", "tabId": cmd.get("tabId", "")}
+        # Copy the command (like the resumeSession branch below) so the
+        # ``connId``/``workDir`` stamps from ``_dispatch_client_command``
+        # survive the translation.
+        out = dict(cmd)
+        out["type"] = "userAnswer"
+        out["answer"] = "done"
+        out["tabId"] = cmd.get("tabId", "")
+        return out
     if cmd_type == "resumeSession" and "id" in cmd and "chatId" not in cmd:
         out = dict(cmd)
         out["chatId"] = out.pop("id")
@@ -3363,6 +3387,14 @@ class RemoteAccessServer:
             )
             restored = restored[:_MAX_RESTORED_TABS]
         for rt in restored:
+            # M7: the list itself is type-checked above, but a
+            # malformed (non-dict) ELEMENT must be skipped too — an
+            # ``AttributeError`` here would propagate out of
+            # ``_dispatch_client_command`` and tear down the whole
+            # authenticated connection over one bad field.
+            if not isinstance(rt, dict):
+                logger.warning("ignoring non-dict restoredTabs entry: %r", rt)
+                continue
             rt_id = rt.get("tabId", "")
             if rt_id:
                 self._cancel_pending_tab_close(rt_id)
@@ -3544,6 +3576,7 @@ class RemoteAccessServer:
                 if action == "reject-file":
                     await self._loop.run_in_executor(
                         None, _reject_all_hunks_in_file, fd,
+                        state.unresolved_in_file(fi),
                     )
                 file_status = "rejected" if action == "reject-file" else "accepted"
                 for hi in state.unresolved_in_file(fi):
@@ -3553,14 +3586,14 @@ class RemoteAccessServer:
             for fi, hi in state.all_unresolved():
                 state.mark_resolved(fi, hi, "accepted")
         elif action == "reject-all":
-            unresolved_files: set[int] = set()
+            unresolved_by_file: dict[int, list[int]] = {}
             for fi, hi in state.all_unresolved():
-                unresolved_files.add(fi)
+                unresolved_by_file.setdefault(fi, []).append(hi)
                 state.mark_resolved(fi, hi, "rejected")
-            for fi in unresolved_files:
+            for fi, his in unresolved_by_file.items():
                 fd = state.files[fi]
                 await self._loop.run_in_executor(
-                    None, _reject_all_hunks_in_file, fd,
+                    None, _reject_all_hunks_in_file, fd, his,
                 )
 
         cur_after = state.current()
