@@ -1087,3 +1087,22 @@ workDir plumbing).
   server.printer.broadcast with recording fn; stub SorcarAgent.__mro__[1].run to
   return "success: true\\nsummary: ok\\n"; stub \_server_module.generate_followup_text;
   tearDown: \_RunningAgentState.running_agent_states.clear().
+
+## Iteration 5 — COMPLETE (verified by orchestrator)
+
+18 NEW bugs found+fixed across 7 groups (A:1 NaN/Infinity in `extra` JSON breaking
+SQL-vs-Python subagent classification; B:2 GIT\_\* env leakage in `_git` + strict UTF-8
+decode crash on non-UTF-8 paths; C:2 C1 control chars passing input filters + Ctrl+C
+overprinting panel border; D:4 Bash strict-UTF-8 output loss, Read/Write FIFO/device
+hang, non-string summary sqlite crash in finally, screenshot escaping work_dir; E:3
+double-merge-click guard missing is_merging, \_present_pending_worktree phantom
+registry entries, stale multi-viewer user answers; F:4 deferred close mid-merge-review
+leak, explicit web closeTab mid-review limbo, replay racing in-flight merge actions,
+zombie merge state after client all-done; G:2 persisted warnings dropped on replay,
+live warnings for background tabs dropped). All 44 Python bughunt5 tests + 2 JS tests
+pass; `uv run check --full` green.
+
+## Iteration 6 (current)
+
+- Iteration 5 still found bugs → launching iteration 6, same 7 groups, tests
+  `test_bughunt6_*` / `bughunt6_*.test.js`. Stop when an iteration finds zero bugs.
