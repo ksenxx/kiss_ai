@@ -607,12 +607,42 @@ tl.stop_event each task (pool thread reuse safe); _coerce_tasks (iter-3/4);
 sub_usage aggregation order (results from pool.map are input-ordered;
 sub_usage indexed by idx — ordering correct).
 
-STILL TO DO in this group-D session (next session if out of context):
-read chat_sorcar_agent.py (471 lines: chat-context construction/token
-budgeting vs persistence, _run_tasks_parallel override, model-switch
-plumbing, tl.task_id restore in finally) and web_use_tool.py (624 lines:
-screenshot/get_page_content error paths, profile lock, _resolve_locator,
-tab switching); then run impacted tests + `uv run check --full`, commit.
+- BUG-5D-3 (chat_sorcar_agent.py `run()` summary extraction): when the
+  result YAML is a dict whose `summary` value is a LIST or nested MAPPING
+  (LLMs routinely emit `summary:\n  - did x\n  - did y`), the raw Python
+  object was passed to `_save_task_result` → sqlite3.ProgrammingError
+  ("type 'list' is not supported") raised FROM THE `finally` BLOCK,
+  replacing the task's successful return value with an exception and
+  skipping `_save_task_extra` (tokens/cost lost). Fix: coerce non-string
+  summary — str kept, None → "", list/dict → `yaml.safe_dump(...).strip()`.
+  Test: test_bughunt5_summary_nonstring.py (4 tests; list+dict cases
+  failed pre-fix with ProgrammingError; None + plain-string guards).
+- BUG-5D-4 (web_use_tool.py `screenshot` + sorcar_agent.py `_get_tools`):
+  screenshot resolved paths against the DAEMON PROCESS cwd, not the agent
+  work_dir, and had no `PWD/` expansion — inconsistent with
+  Read/Write/Edit (`_expand_pwd_prefix`) and Bash (`cwd=work_dir`). In
+  worktree mode `screenshot("shot.png")` silently escaped the worktree;
+  `screenshot("PWD/tmp/x.png")` created a junk literal `PWD/` dir in the
+  process cwd (the `**_kwargs` swallowed any work_dir). Fix: WebUseTool
+  gains explicit `work_dir` param; screenshot expands PWD/ and anchors
+  relative paths at work_dir; `_get_tools` passes
+  `WebUseTool(work_dir=self.work_dir)`. Test:
+  test_bughunt5_screenshot_workdir.py (real headless Chromium, 3 tests;
+  2 failed pre-fix; absolute-path regression guard).
+
+Examined in chat_sorcar_agent.py / web_use_tool.py, NOT bugs (do not
+re-report): build_chat_prompt MAX_TASKS middle-deletion (keeps first 2 +
+last 8, intentional) and renumbering; tl.task_id restore-to-"" in finally
+(guarded by == task_key; nested same-thread chat runs don't exist);
+go_to_url tab:N int() inside try; tab:list crashed-page title() caught;
+_check_for_new_tab; _resolve_locator re-snapshot + visibility scan;
+scroll negative amount (empty range); close() idempotent + atexit
+unregister; _is_profile_in_use EPERM=true / pid<=0=false (iter-3);
+_clean_singleton_locks unconditional-safe; ask_user_question callback
+plumbing (str() coercion; queue semantics live in vscode group E scope).
+
+DONE this session: all 14 bughunt5 group-D tests pass. REMAINING: run
+impacted test sweep (shards), `uv run check --full`, commit.
 
 ### Iteration 5 — Group G (vscode helpers + frontend) — session 1: 1 NEW bug found+fixed
 
@@ -664,7 +694,25 @@ handlers (2865-3081), \_handle_ready/\_replay_merge_review/\_handle_submit/
 \_http_response/trajectory responses/\_augment_merge_data/\_translate_webview_command
 (2357-2510), \_process_request + auth (2716-2865).
 
-**CANDIDATE BUG 5F-1 (web_server.\_fire_pending_tab_close ~line 2956)**: when the
+**BUG 5F-1 FIXED (web_server.\_fire_pending_tab_close ~line 2956)**: fix = new
+`_finish_merge_and_close_tab(tab_id, merge_state)` coroutine: when a merge state was
+popped, dispatch `mergeAction all-done` (workDir=state.work_dir) BEFORE `closeTab`
+(all-done first so a non-busy tab isn't popped then re-created as a phantom by
+`_finish_merge`'s `_get_tab`). Test
+test_bughunt5_close_mid_merge.py::test_deferred_close_mid_review_ends_merge_and_disposes
+failed pre-fix (leaked is_merging=True frontend_closed=True tab), passes post-fix;
+reconnect-within-grace control test passes.
+
+**BUG 5F-2 FIXED (web_server.\_dispatch_client_command)**: explicit `closeTab` from a
+STILL-CONNECTED web client mid-review left `_merge_states[tab_id]` registered and the
+backend tab stuck is_merging/frontend_closed forever (web UI lets you close a chat tab
+any time; closing destroys the only review UI). Fix: intercept `closeTab` for non-UDS
+endpoints (`not isinstance(endpoint, asyncio.StreamWriter)`), pop merge state + action
+lock, delegate to `_finish_merge_and_close_tab`. UDS (VS Code) exempt: TS MergeManager
+owns reviews in real editor tabs that survive chat-tab closure and still sends
+all-done. Test: ::test_explicit_close_tab_mid_review_ends_merge (failed pre-fix).
+
+ORIGINAL 5F-1 analysis: when the
 deferred tab-close grace fires while a merge review is STILL IN FLIGHT, it silently
 pops `_merge_states[tab_id]` + `_merge_action_locks` and dispatches `closeTab`.
 Backend `_close_tab` sees `is_merging=True` → flips `frontend_closed=True` and defers
@@ -722,12 +770,46 @@ workDir plumbing).
     with sanitisation, or make readers consistent).
   - running_agent_state.py: pure state container + registry with RLock; no logic
     to break — confirms prior "not a bug" verdict.
-  - Still TODO: favorites round-trip consumers (commands.py/server.py/main.js
-    `is_favorite` shaping), \_search_history shaping vs frontend, chat title
-    paths, event replay ordering (events ORDER BY seq vs FIFO queue under
-    writer restart), concurrent reader/writer under `_close_db` swap
-    (`_add_task` captures `db = _get_db()` BEFORE write lock — stale conn write
-    after swap?), `_record_frequent_task` eviction already ruled NOT bug.
+- Session 2 results — BUG 5A-1 CONFIRMED, REPRODUCED, FIXED:
+  - **BUG 5A-1** (persistence.py): every `extra` write (`_add_task`,
+    `_save_task_extra`, `_set_task_favorite`) used plain `json.dumps`
+    (`allow_nan=True`) → a non-finite float (NaN cost, e.g.
+    `round(tab.agent.budget_used, 6)` in task_runner.py:724) serialises as the
+    bare `NaN` token = INVALID RFC-8259 JSON. SQLite `json_valid` (used by
+    `_HISTORY_NOT_SUBAGENT`) rejects it ⇒ SQL says "not subagent"; Python
+    `json.loads` (in `_is_subagent_row`) ACCEPTS NaN ⇒ Python says "subagent".
+    Effects reproduced: NaN-cost subagent row leaks into `_load_history`
+    sidebar; subagent-only chat with NaN cost eats a `_list_recent_chats`
+    limit slot (resurrects iter-4 bug); legacy NaN rows classified
+    inconsistently end-to-end.
+  - Fix: new `_dumps_extra` (json.dumps allow_nan=False; on ValueError
+    recursively replaces non-finite floats with None via
+    `_sanitize_non_finite`) used by all 3 extra writers; new strict
+    `_parse_extra_dict` (json.loads with `parse_constant` raising → mirrors
+    `json_valid` semantics) now used by `_is_subagent_row`,
+    `_subagent_child_ids`, `_load_subagent_rows_by_parent_task_id` so legacy
+    corrupt rows are classified identically by SQL and Python sides.
+  - Test: src/kiss/tests/agents/sorcar/test_bughunt5_nan_extra.py — 6 tests,
+    ALL 6 failed pre-fix, all pass post-fix.
+  - Investigated and ruled NOT bugs this session (do not re-chase):
+    favorites round-trip (`_cmd_set_favorite` uses guarded `_parse_int`;
+    `_save_task_extra` preserves is_favorite; `_get_history` shapes
+    is_favorite from extra correctly; delete/search interactions clean);
+    `_search_history` shaping identical to `_load_history`, consumed by
+    `server._get_history` with per-field guarded coercion; chat title = task
+    text (no separate title path in persistence); event replay ordering
+    (single FIFO queue + single writer thread + per-task seq cache seeded
+    under write lock ⇒ `ORDER BY seq` replay matches enqueue order; sync
+    `_append_chat_event` funnels through the same queue);
+    `_event_writer_loop` shutdown-sentinel handling; `_get_history`'s
+    is_subagent marking is dead code (rows pre-filtered by SQL) — harmless;
+    `_record_frequent_task` eviction + `_load_frequent_tasks` ranking
+    (count DESC, timestamp DESC — consistent with eviction order);
+    `_log_orphaned_task_forensics` malformed-extra tolerance (broad except);
+    db-swap stale-conn write in `_add_task` (test-fixture-only scenario,
+    previously ruled under RW-lock discipline).
+  - REMAINING before finish: regression-run persistence-importing tests,
+    `uv run check --full`, commit.
 - TODO for next session (remaining surface from task spec):
   favorites round-trip (`_set_task_favorite` L1020, `_save_task_extra` L1068
   preserve-is_favorite path) and interaction with delete/search; frequent-task

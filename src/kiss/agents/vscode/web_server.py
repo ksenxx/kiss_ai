@@ -3204,6 +3204,28 @@ class RemoteAccessServer:
         if cmd_type == "mergeAction" and cmd.get("action", "") != "all-done":
             await self._handle_web_merge_action(cmd)
             return
+        if (
+            cmd_type == "closeTab"
+            and isinstance(tab_id, str)
+            and tab_id
+            and not isinstance(endpoint, asyncio.StreamWriter)
+        ):
+            # A WEB client closing its chat tab destroys the only UI
+            # that could ever finish an in-flight (server-tracked)
+            # merge review for that tab: the backend ``_close_tab``
+            # would see ``is_merging=True``, flip ``frontend_closed``
+            # and wait forever for an ``all-done`` that no client can
+            # send any more.  End the review first (close = accept the
+            # remaining hunks; no disk writes) so the tab is disposed
+            # instead of leaking in ``is_merging`` limbo.  UDS (VS
+            # Code) clients are exempt: their TypeScript MergeManager
+            # owns the review in real editor tabs that survive the
+            # chat tab's closure and will still send ``all-done``.
+            with self._merge_states_lock:
+                merge_state = self._merge_states.pop(tab_id, None)
+                self._merge_action_locks.pop(tab_id, None)
+            await self._finish_merge_and_close_tab(tab_id, merge_state)
+            return
         cmd = _translate_webview_command(cmd)
         await self._run_cmd(cmd)
 

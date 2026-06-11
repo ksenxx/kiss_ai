@@ -254,6 +254,49 @@ class TestCloseTabMidMergeReview(IsolatedAsyncioTestCase):
         with self.server._merge_states_lock:
             self.assertNotIn(tab_id, self.server._merge_states)
 
+    async def test_explicit_close_tab_mid_review_ends_merge(self) -> None:
+        """An explicit web ``closeTab`` mid-review must end the merge too.
+
+        The web UI lets the user close a chat tab at any time, sending
+        ``closeTab`` over the still-open WebSocket.  That destroys the
+        only UI that could ever finish the review, so the server must
+        end the merge lifecycle (all-done) instead of leaving the
+        backend tab in ``is_merging`` limbo until the whole connection
+        eventually drops.
+        """
+        tab_id = "tab-explicit-close-merge"
+        await self._start_review(tab_id)
+
+        ws = await self._connect_ok()
+        await ws.send(json.dumps({
+            "type": "ready", "tabId": tab_id, "restoredTabs": [],
+        }))
+        self.assertIsNotNone(await self._wait_for_event(ws, "merge_started"))
+
+        # The user closes the chat tab in the web UI; the connection
+        # itself stays open (no deferred-close timer is involved).
+        await ws.send(json.dumps({"type": "closeTab", "tabId": tab_id}))
+
+        deadline = time.monotonic() + 8.0
+        while time.monotonic() < deadline:
+            with self.server._merge_states_lock:
+                state_gone = tab_id not in self.server._merge_states
+            if state_gone and tab_id not in _RunningAgentState.running_agent_states:
+                break
+            await asyncio.sleep(0.1)
+        leaked = _RunningAgentState.running_agent_states.get(tab_id)
+        self.assertIsNone(
+            leaked,
+            "BUG: explicit closeTab mid-merge-review left the backend tab "
+            f"stuck (is_merging={getattr(leaked, 'is_merging', None)}, "
+            f"frontend_closed={getattr(leaked, 'frontend_closed', None)})",
+        )
+        with self.server._merge_states_lock:
+            self.assertNotIn(
+                tab_id, self.server._merge_states,
+                "BUG: web merge state leaked after explicit closeTab",
+            )
+
     async def test_reconnect_within_grace_keeps_review_alive(self) -> None:
         """A reload within the grace window must keep tab + review intact."""
         tab_id = "tab-reload-mid-merge"
