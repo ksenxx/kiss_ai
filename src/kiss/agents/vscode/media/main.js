@@ -2618,14 +2618,23 @@
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) break;
         addNotice(ev.text);
         break;
-      case 'warning':
+      case 'warning': {
         // Backend warning the user must see — e.g. the worktree
         // agent's stash-pop failure or merge-conflict warning
         // (WorktreeSorcarAgent._flush_warnings broadcasts
         // {type: 'warning', message: ...}).
-        if (ev.tabId !== undefined && ev.tabId !== activeTabId) break;
+        if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
+          // Route to the owning BACKGROUND tab's saved fragment
+          // (mirrors the default display-event route) so the warning
+          // is visible when the user switches to that tab.  Unknown
+          // tab ids (other VS Code windows) are dropped as before.
+          const bgWarnTab = findTabByEvt(ev);
+          if (bgWarnTab) processOutputEventForBgTab(ev, bgWarnTab);
+          break;
+        }
         addWarning(ev.message || ev.text || '');
         break;
+      }
       case 'clear': {
         const clearTab =
           ev.tabId !== undefined ? getTab(ev.tabId) : getTab(activeTabId);
