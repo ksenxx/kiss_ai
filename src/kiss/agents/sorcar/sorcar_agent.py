@@ -914,9 +914,19 @@ def run_tasks_parallel(
     # ``subagentDone`` broadcast would then never fire.
     parent_tl = getattr(printer, "_thread_local", None) if printer else None
     parent_key = getattr(parent_tl, "task_id", "") if parent_tl else ""
+    # Capture the parent's stop_event HERE too (same thread-local
+    # reasoning as ``task_id`` above): ``SorcarAgent.run`` resolves
+    # ``self._stop_event`` from the *worker* thread's
+    # ``printer._thread_local``, so unless the event is copied into
+    # each worker thread-local below, sub-agents never see the parent
+    # stop request and Stop cannot kill their Bash process groups.
+    parent_stop_event = getattr(parent_tl, "stop_event", None) if parent_tl else None
 
     def _run_single(args: tuple[int, str]) -> str:
         idx, task = args
+        tl = getattr(printer, "_thread_local", None) if printer else None
+        if tl is not None:
+            tl.stop_event = parent_stop_event
         agent = ChatSorcarAgent(f"Parallel-{task[:40]}")
         # Mark the spawned agent as a sub-agent.  ``ChatSorcarAgent.run``
         # reads this marker to drive its own sub-agent-specific

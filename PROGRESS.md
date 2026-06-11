@@ -1,198 +1,211 @@
-# Task: Bug-hunt iteration 3, group B (sorcar worktree: git_worktree.py / worktree_sorcar_agent.py) — COMPLETE
+# Task: Repeatedly bug-hunt src/kiss/agents/vscode/ + src/kiss/agents/sorcar/ until no new bugs
 
-(Previous session: group E — vscode backend — completed 6 bugs; see git history of
-PROGRESS.md @ bec2996e for its full log.)
+Find/reproduce inconsistencies and obvious bugs via integration tests, then fix them.
+Repeat until an iteration finds zero bugs.
 
-## Final results (group B)
+## History
 
-4 NEW bugs found, reproduced failing-first with real-git integration tests (no mocks),
-and fixed. None overlap the 16 bugs from rounds 1-2 or the 18 worktree audit rounds.
+- Rounds 1-2 (commits up to 13f9516f): 16 bugs found+fixed; tests `test_bughunt_*`,
+  `test_bughunt2_*`, JS `bughunt2_*.test.js`. See git history of PROGRESS.md.
+- Iteration 3 (7 parallel groups, commits ad7cd058..19c75837): 26 NEW bugs found+fixed,
+  each with a failing-first integration test (`test_bughunt3_*`, `bughunt3_*.test.js`):
+  - Group A (persistence/running_agent_state): 2 bugs — subagent SQL LIKE filter false
+    positives vs `_is_subagent_row` (fixed with JSON1 predicate); timestamp-tie wrong-row
+    resolution in `_most_recent_task_id`/`_load_task_chat_id` (added `id` tiebreaks).
+  - Group B (git_worktree/worktree_sorcar_agent): 4 bugs — merge() skipped
+    `_finalize_worktree` for vanished wt dirs (leaked branches); unguarded
+    copy_dirty_state PermissionError killed task + leaked half worktree; `remove()`
+    failed on corrupt/locked worktrees (escalate --force --force → rmtree+prune);
+    cleanup_orphans ran without repo_lock (race vs task start).
+  - Group C (CLI): 4 bugs — UTF-8 chars split across reads destroyed; CSI/SS3 escapes
+    split across reads typed garbage (`_pending_esc` buffer); cli_panel width math used
+    len() not display columns (CJK/emoji broke box); terminal resize never re-emitted
+    DECSTBM scroll region.
+  - Group D (agents/tools): 4 bugs — Edit with empty old_string corrupted files;
+    `_coerce_tasks` treated JSON `[]`/non-str lists as one literal task; profile-lock
+    pid 0 ⇒ os.kill(0,0) always "in use"; WebUseTool atexit registration leak.
+  - Group E (vscode server/commands/task_runner): 6 bugs — unhashable `type` killed
+    connection; unguarded int() in 4 handlers; `_cmd_run` busy-guard race vs
+    thread.start(); malformed attachment killed task thread silently; empty tabId
+    phantom registry entries; non-string user answers on Queue[str].
+  - Group F (web_server/diff_merge/merge_flow): 4 bug classes — git C-quoted paths
+    misattributed hunks/invisible files/missed conflicts; deleted binary file invisible
+    in merge view; rejecting binary merge entry crashed (UnicodeDecodeError) /
+    truncated; rejecting one hunk rewrote CRLF file with LF.
+  - Group G (helpers/frontend): 2 bugs — autocomplete echo-strip corrupted suffixes
+    starting with the query; backend `warning` events silently dropped by main.js /
+    types.ts (now rendered, HTML-escaped).
+  - Verification: all 68 Python bughunt3 tests + JS test pass; full vscode+sorcar
+    suites green in shards (only documented pre-existing forkpty/load flakes);
+    `uv run check --full` passes.
 
-### Bugs (file, root cause, fix, test)
+## Iteration 4 (current)
 
-1. **BUG-WT-A** `worktree_sorcar_agent.py::merge()`: when `wt_dir` was already deleted
-   from disk (crashed cleanup, manual `rm -rf`) but still registered in git's worktree
-   bookkeeping, `merge()` skipped `_finalize_worktree()` (the only step that runs
-   `git worktree prune`). `git branch -d/-D` then refused deletion ("used by worktree
-   at ..."), `_do_merge` ignores `delete_branch`'s result on SUCCESS → every such merge
-   silently leaked a permanent `kiss/wt-*` branch. Fix: call `_finalize_worktree()`
-   unconditionally (it internally guards on dir existence and always prunes).
-   Test: `test_bughunt3_merge_stale_worktree.py` (2 tests: squash path + baseline
-   cherry-pick path).
-1. **BUG-WT-B** `worktree_sorcar_agent.py::_try_setup_worktree`: unguarded
-   `GitWorktreeOps.copy_dirty_state` — a dirty file the process cannot read (mode 000)
-   made `shutil.copy2` raise PermissionError which propagated out of `run()` (killing
-   the task) and left a half-created worktree dir + branch behind, violating run()'s
-   documented fallback contract. Fix: wrap in try/except OSError → log,
-   `cleanup_partial`, return None (fall back to direct execution).
-   Test: `test_bughunt3_unreadable_dirty_file.py` (skipped when euid==0).
-1. **BUG-WT-C** `git_worktree.py::GitWorktreeOps.remove`: single
-   `git worktree remove --force` attempt; corrupted worktrees (deleted `.git` link
-   file) fail git's validation and LOCKED worktrees (`git worktree lock`) need
-   `--force` twice — in both cases the directory survived forever while `discard()`
-   reported success (corrupt) or left branch + registration + dir behind (locked).
-   Fix: escalate — `--force` → `--force --force` → `rmtree(ignore_errors)` + prune.
-   Test: `test_bughunt3_discard_corrupt_locked.py` (2 tests).
-1. **BUG-WT-D** `git_worktree.py::cleanup_orphans`: mutated the repo (force-deletes
-   branches, rmtrees every dir under `.kiss-worktrees/` missing from a point-in-time
-   `git worktree list` snapshot) WITHOUT holding `repo_lock`, while
-   `_try_setup_worktree`/`_do_merge`/`discard` all serialize under it (RACE-2
-   invariant). A cleanup racing a concurrent task start could rmtree a worktree
-   registered after the snapshot. Fix: public `cleanup_orphans` now wraps
-   `_cleanup_orphans_locked` in `with repo_lock(repo)`.
-   Test: `test_bughunt3_cleanup_repo_lock.py` (real threads: cleanup must block while
-   another thread holds the lock, then proceed).
+- Since iteration 3 still found bugs, launching iteration 4: same 7 functional groups,
+  parallel sub-agents, tests named `test_bughunt4_*` / `bughunt4_*.test.js`.
+  Stop condition: an iteration that finds zero new bugs.
 
-### Not-bugs verified by probes (real git repos under tmp/probe, since deleted)
+### Iteration 4 — Group D (sorcar agents/tools) — session 1 findings (source read, fixes NOT yet applied)
 
-- cherry-pick `-n` of redundant/already-applied commits: exits 0 (no false CONFLICT).
-- cherry-pick `-n` multi-commit conflict: `--abort` restores a fully clean tree.
-- Renames of files whose names contain literal `" -> "`: git quotes the side, and
-  `_split_rename_tail` + `_unquote_git_path` parse it correctly.
-- copy_dirty_state: dirty submodules (skipped cleanly, no crash), unicode + space
-  paths, exec-bit-only changes, no-trailing-newline/CRLF files — all mirrored
-  correctly. Unborn-branch and detached-HEAD repos fall back to direct execution;
-  shallow clones work end-to-end.
+Read all 4 target files fully. Confirmed bugs to fix (failing test FIRST, then fix):
 
-### Also fixed (pre-existing, found by `uv run check --full`)
+1. **CONFIRMED (known a)** `sorcar_agent.py` module-level `run_tasks_parallel()`:
+   `_run_single` does NOT set `tl.stop_event = parent_stop_event` on the worker
+   thread-local, while `ChatSorcarAgent._run_tasks_parallel._run_single` DOES
+   (chat_sorcar_agent.py ~line 195: `if tl is not None: tl.stop_event = parent_stop_event`).
+   Module-level only captures `parent_key = getattr(parent_tl, "task_id", "")`.
+   Effect: sub-agents spawned via plain `SorcarAgent` never see the parent stop event
+   (`SorcarAgent.run` reads `self._stop_event = getattr(tl, "stop_event", None)` in the
+   worker thread) so Stop doesn't kill sub-agent Bash process groups.
+   FIX: in `run_tasks_parallel`, capture `parent_stop_event = getattr(parent_tl, "stop_event", None)`
+   next to `parent_key`, and at top of `_run_single` do
+   `tl = getattr(printer, "_thread_local", None) if printer else None; if tl is not None: tl.stop_event = parent_stop_event`.
+   Test: `test_bughunt4_parallel_stop_event.py` — build a real Printer-like object with
+   `_thread_local = threading.local()`; set `stop_event` in calling thread; instead of a
+   real agent run, the test must exercise the plumbing: pattern — see how existing
+   tests test this for the chat override (grep `stop_event` in
+   test_race_conditions.py / test_run_parallel_integration.py / test_vscode_stop.py and
+   copy the no-LLM pattern, e.g. monkeypatching is NOT allowed (no mocks); existing
+   tests likely subclass ChatSorcarAgent overriding run() — subclassing in the test to
+   record `getattr(tl, "stop_event", None)` inside worker run() is acceptable since
+   module-level run_tasks_parallel hardcodes ChatSorcarAgent — alternative: assert via
+   the worker thread-local directly by passing a printer and a task list and overriding
+   ChatSorcarAgent? Module-level imports ChatSorcarAgent inside the function, so test
+   can't substitute class without patching. Simplest no-mock test: call
+   run_tasks_parallel with tasks=[] is useless; instead test via SorcarAgent subclass?
+   PRAGMATIC: existing bughunt tests in repo DO use light monkeypatching of agent.run;
+   check test_run_parallel_integration.py first and mirror its approach.)
 
-- `vscode/web_server.py::_reject_hunk_in_file`: pyright `reportPossiblyUnboundVariable`
-  on `cur_lines` (false positive, but real lint failure blocking CI) — initialize
-  `cur_lines: list[str] = []` before the try. Behavior unchanged; 200 impacted
-  vscode tests pass.
+2. **CONFIRMED (known b)** `chat_sorcar_agent.py` `run()` (~line 405-412):
+   ```python
+   result_yaml = yaml.safe_load(result)
+   if isinstance(result_yaml, dict):
+       result_summary = result_yaml.get("summary", "")
+   except Exception: result_summary = result[:500] if result else ""
+   ```
+   When `result` parses as non-dict YAML (e.g. plain string "all done"), summary stays ""
+   and `_save_task_result` persists '' — inconsistent with parse-failure fallback
+   `result[:500]`. FIX: add `else: result_summary = result[:500] if result else ""`.
+   Also consider: dict but summary is None → persists None; coerce to "" or str.
+   Test: `test_bughunt4_summary_nondict_yaml.py` — subclass ChatSorcarAgent whose
+   SorcarAgent.run returns a plain-string YAML (override `SorcarAgent.run` via subclass
+   method calling object-level shim — pattern: define subclass with
+   `def run(self, ...)`? No — ChatSorcarAgent.run calls super().run; so subclass
+   overriding nothing won't help. Existing tests (e.g. test_stateful_sorcar_agent.py,
+   test_history_continuation_context.py) already run ChatSorcarAgent without LLM —
+   COPY THEIR PATTERN. Then assert sqlite task_history row's result == "all done"
+   (use temp KISS db via env var / persistence module's db path fixture used by
+   test_persistence.py).
 
-### Verification
+3. **NEW candidate** `useful_tools.py::_expand_pwd_prefix`: `"PWD//foo"` →
+   `suffix = "/foo"` → `os.path.join(base, "/foo")` returns `"/foo"` (absolute!),
+   escaping work_dir entirely. FIX: `suffix.lstrip("/")` before join (keep `PWD` and
+   `PWD/` behavior). Test: `test_bughunt4_pwd_double_slash.py` asserts
+   `_expand_pwd_prefix("PWD//sub/f.txt", "/base") == "/base/sub/f.txt"` and Read/Write
+   round-trip through UsefulTools(work_dir=tmp) with "PWD//x.txt" lands inside tmp.
 
-- All 7 new tests failed pre-fix, pass post-fix.
-- 387 impacted sorcar worktree/autocommit/workflow tests run in 8 parallel shards: all
-  pass. 100 coverage-branch tests pass. 200 vscode merge/web_server tests pass.
-- `uv run check --full`: all checks pass.
-- tmp/probe, tmp/shards scratch dirs deleted before finish.
+4. Checked and found OK (do NOT re-report): `_truncate_output` marker math (dropped
+   count correct; max_chars<marker fallback returns plain head slice — documented-ish);
+   Read \r splitlines counts fine; Write parent-dir creation present; Edit guards
+   (empty old_string, equal strings, count) all present from iter-3; `_coerce_tasks`
+   JSON handling fixed in iter-3; profile pid<=0 fixed; WebUseTool atexit re-arm +
+   unregister present; go_to_url tab:list/tab:N int errors caught; _resolve_locator
+   re-snapshots; scroll invalid direction defaults down (minor, not fixing).
+   Possible minor: `run_parallel` tool `int(max_workers)` raises on "0"/"-1"/junk →
+   propagates to framework tool-error handling (decide in next session whether to
+   guard with friendly error — leaning yes, cheap: validate and return error string).
+   Possible minor: ChatSorcarAgent.run finally sets `tl.task_id = ""` instead of
+   restoring previous — investigate only if time permits (vscode runner may re-set).
 
-# Task: Bug-hunt iteration 3, group D (sorcar_agent.py / chat_sorcar_agent.py / useful_tools.py / web_use_tool.py) — COMPLETE
+NEXT STEPS (exact):
+- Read src/kiss/tests/agents/sorcar/test_run_parallel_integration.py and
+  test_stateful_sorcar_agent.py (or test_history_continuation_context.py) to copy the
+  no-LLM ChatSorcarAgent test pattern + temp-db fixture.
+- Write failing tests: test_bughunt4_parallel_stop_event.py,
+  test_bughunt4_summary_nondict_yaml.py, test_bughunt4_pwd_double_slash.py
+  (in src/kiss/tests/agents/sorcar/). Verify each fails.
+- Apply the 3 fixes above. Verify tests pass.
+- Run impacted tests: `uv run pytest src/kiss/tests/agents/sorcar -k "bughunt4 or parallel or stateful or useful_tools or tools" -x -q` (count first; shard if >100).
+- `uv run check --full` must pass. Report with file:line.
 
-4 NEW bugs found, reproduced failing-first (10 failing assertions pre-fix), fixed;
-12/12 new tests pass. Changes auto-committed in 437303f9; fixes verified intact at
-HEAD after sibling-group merges.
+### Iteration 4 — Group G (vscode helpers + frontend consistency) — session 1 notes
 
-### Bugs (file, root cause, fix, test)
+Files read in full: autocomplete.py, helpers.py, json_printer.py, vscode_config.py.
+Targeted greps done. Candidate bugs to verify next session (NOT yet confirmed/tested):
 
-1. **D-1** `useful_tools.py::Edit` (~line 450): empty `old_string` —
-   `str.count("") == len+1`, so `replace_all=True` interleaved `new_string` between
-   EVERY character (silent file corruption); on an empty file it silently acted as
-   Write. Fix: explicit `old_string == ""` → Error suggesting the Write tool.
-   Test: `test_bughunt3_edit_empty_oldstring.py` (3 tests).
-1. **D-2** `sorcar_agent.py::_coerce_tasks` (~line 830): JSON `"[]"` fell through the
-   `and parsed` guard → wrapped as `["[]"]` (one garbage sub-agent LLM run); JSON
-   lists with non-string elements (`'[1, 2]'`) were treated as ONE task string.
-   Fix: any parsed JSON list is accepted — `[]` → zero tasks, non-str elements
-   str()-coerced one-per-task. Test: `test_bughunt3_coerce_tasks_json.py` (4 tests).
-1. **D-3** `web_use_tool.py::_is_profile_in_use` (~line 113): corrupt/stale
-   `SingletonLock` target `host-0` → `os.kill(0, 0)` signals the CALLER'S OWN process
-   group and always succeeds → profile permanently "in use" →
-   `_resolve_user_data_dir` escalated to `_1`, `_2`, … silently losing the user's
-   logged-in browser profile. Fix: `if pid <= 0: return False` before `os.kill`.
-   Test: `test_bughunt3_profile_pid0.py` (3 tests).
-1. **D-4** `web_use_tool.py::WebUseTool`: `atexit.register(self.close)` per instance,
-   never unregistered → one retained tool object + atexit entry leaked per agent run
-   (`SorcarAgent.run` builds a fresh WebUseTool every run). Fix:
-   `atexit.unregister(self.close)` in `close()`; unregister+register re-arm at top of
-   `_ensure_browser` (keeps exactly one entry across relaunches).
-   Test: `test_bughunt3_webuse_atexit_leak.py` (2 tests).
+1. **vscode_config cross-process lost update** (explicitly hinted in task): `_config_lock`
+   in vscode_config.py is a `threading.Lock` — serialises save_config only within ONE
+   process. Two daemons (e.g. kiss-web daemon + a VS Code window daemon) doing concurrent
+   read-merge-replace of `~/.kiss/config.json` can drop each other's keys. Likely fix:
+   `fcntl.flock` on a sidecar lock file (CONFIG_DIR/".config.lock") held across the whole
+   load-merge-store in save_config. Test: spawn 2 subprocesses each saving a different
+   key N times; assert both keys survive.
+2. **demo.js does NOT handle 'warning' events**: grep shows `warning` appears in
+   media/main.js (case 'warning' at :2607, renderer :3552) and src/types.ts:208, but
+   NOWHERE in media/demo.js (389 lines). Need to read demo.js to decide contract — if
+   demo.js groups/replays recorded display events by type, iteration-3's new warning
+   events may break/get dropped during demo replay. Also check: `warning` is NOT in
+   json_printer.py `_DISPLAY_EVENT_TYPES` → warnings are never recorded/persisted, so
+   chat history replay (viewer reopen) silently loses warnings even though live view
+   shows them. Decide contract: probably add "warning" to _DISPLAY_EVENT_TYPES + demo
+   replay rendering.
+3. Autocomplete `_complete` in autocomplete.py: when `_prefix_match_task(query)` matches,
+   `fast = match[len(query):]` — verify _prefix_match_task case behaviour (if match is
+   case-insensitive, slicing by len(query) is fine but suggestion may duplicate case
+   issues); also no dedup/ranking across history-vs-file sources (history always wins).
+   Check persistence._prefix_match_task.
+4. commands.py `_cmd_complete` (~:510-533) sets `self._complete_seq_latest[conn_id] = seq`
+   — seq comes from frontend? Verify monotonicity: if frontend restarts (webview reload)
+   seq resets to 0 < stale latest → all new requests dropped as stale? server.py:290 pops
+   on disconnect — check webview reload uses same conn or new conn.
+5. extension.ts vs package.json: registers `kissSorcar.${cmd}` for Object.values(MERGE_ACTIONS)
+   — verify MERGE_ACTIONS values exactly match package.json contributes (acceptChange,
+   rejectChange, prevChange, nextChange, acceptAll, rejectAll, acceptFile, rejectFile).
+   Also `kissSorcar.focusEditor`/`runSelection`/`insertSelectionToChat`/`toggleFocus`
+   present both sides per greps — looks consistent so far.
+6. Still to inspect: panelCopy.js copy formatting, status-bar/timer edges in main.js,
+   settings fields in package.json `contributes.configuration` + webview settings UI vs
+   vscode_config DEFAULTS, json_printer parallel sub-agent interleaved events.
 
-### Deliberately skipped (not testable without real LLM calls or mocks/fakes)
+Test naming: Python src/kiss/tests/agents/vscode/test_bughunt4_<short>.py; JS
+src/kiss/agents/vscode/test/bughunt4_<short>.test.js (run `node <file>`, use
+_vscode-stub.js patterns). Failing test FIRST, then fix. Finish with JS tests +
+`npx tsc -p .` (in src/kiss/agents/vscode) + impacted Python tests + `uv run check --full`.
+No code modified yet in this session.
 
-- Module-level `run_tasks_parallel` doesn't copy the parent `stop_event` into worker
-  thread-locals (the ChatSorcarAgent override does — asymmetry).
-- `chat_sorcar_agent.py::run` finally: result parsing as non-dict YAML persists
-  summary `""` instead of the `result[:500]` fallback used on parse failure.
+### Session-1 verification results (step 12)
 
-### Verification
+- CONFIRMED BUG A: `warning` missing from `_DISPLAY_EVENT_TYPES` in json_printer.py
+  (~line 38). Live view renders warnings (main.js:2607) but `_persist_event`,
+  `stop_recording`, `peek_recording` all filter to `_DISPLAY_EVENT_TYPES` → warnings
+  vanish on viewer reopen / chat-history replay / demo replay. Fix: add "warning" to
+  the frozenset. demo.js + main.js need NO change (warning falls into current group in
+  groupEventsIntoPanels; processEvent/handleOutputEvent has case 'warning'). Test:
+  src/kiss/tests/agents/vscode/test_bughunt4_warning_persist.py — JsonPrinter:
+  set `printer._thread_local.task_id = "t1"`, start_recording(), broadcast
+  {"type":"warning","message":"x"} + a text_delta, stop_recording() must include the
+  warning event (fails pre-fix). Also peek_recording variant.
+- CONFIRMED BUG B: vscode_config.save_config `_config_lock` is threading-only; two
+  daemon PROCESSES doing read-merge-replace on config.json lose updates. Fix: fcntl.flock
+  on CONFIG_DIR/".config.lock" held across load-merge-store inside save_config (keep
+  threading lock too). Test: test_bughunt4_config_cross_process.py — KISS_HOME=tmp,
+  spawn 2 subprocesses; A repeatedly save_config({"work_dir": str(i)}) then load_config
+  and assert its own key == just-written; B same with "last_model"; any mismatch printed
+  → parent asserts no mismatch (fails pre-fix with high probability, ~300 iters each).
+- NOT bugs (verified): autocomplete seq is server-generated monotonic global counter
+  (commands.py _cmd_complete, server.py 240-300) — webview reload safe; per-conn state
+  dropped via drop_connection_state. _prefix_match_task uses case-sensitive GLOB —
+  `match[len(query):]` slicing correct. MERGE_ACTIONS values (SorcarSidebarView.ts:54)
+  exactly match package.json contributes (acceptChange/rejectChange/prevChange/
+  nextChange/acceptAll/rejectAll/acceptFile/rejectFile); other commands
+  (openPanel/newConversation/stopTask/toggleFocus/focusEditor/runSelection/
+  insertSelectionToChat/generateCommitMessage) all registered both sides.
+- Still optionally check (lower priority): panelCopy.js formatting, package.json
+  contributes.configuration (only kissSorcar.defaultModel + kissSorcar.kissProjectPath)
+  vs webview settings, json_printer interleaved sub-agent events.
 
-- 12/12 new group-D tests pass; 196 directly-affected tests pass (useful_tools,
-  web_use_tool, run_parallel\*, read_tool robustness, pwd_prefix, read_binary,
-  bughunt_agent\*, update_settings\*, sorcar_agent, stateful, bash_worktree_cwd,
-  change_model); 155 coverage/parallel tests pass.
-- Full sorcar test dir in 4 shards: 1293 passed. Two shard-level failures
-  (`test_bughunt_cli` ctrl-c forkpty flake — documented pre-existing — and
-  `test_new_chat_hang` ordering under concurrent sibling-session load) both pass in
-  isolation → not regressions.
-- `uv run check --full`: All checks passed.
-- tmp/shard\* scratch files deleted before finish.
-
-# Task: Bug-hunt iteration 3, group F (vscode web_server.py / diff_merge.py / merge_flow.py) — COMPLETE
-
-## Final results (group F)
-
-4 NEW bug classes found, reproduced failing-first with real-git integration tests
-(no mocks/patches/fakes), and fixed. Plus 1 cross-test pollution bug fixed in a
-sibling group's new test. None overlap the 16 bugs from rounds 1-2.
-
-### Bugs (file, root cause, fix, test)
-
-1. **BUG-F1 — git C-quoted paths bug class** (`diff_merge.py`, `merge_flow.py`,
-   `git_worktree.py`): even with `core.quotepath=false`, git C-quotes paths containing
-   `"`/backslash/control chars in `diff --git` headers, `--name-only`, `ls-files --others`, and `status --porcelain` output. Effects: `_parse_diff_hunks` matched
-   neither header regex so the quoted file's hunks were MISATTRIBUTED to the previous
-   file in the diff; `_capture_untracked` returned names that don't exist on disk
-   (file invisible in merge view); `_main_dirty_files` stripped quotes without
-   unescaping; `_get_worktree_changed_files`/`_check_merge_conflict` overlap sets
-   could never intersect real paths (missed conflicts); `GitWorktreeOps._diff_name_only`
-   (dirty-set source for the conflict check) had the same hole. Fix: new
-   `_diff_header_path()` in diff_merge.py handling the quoted header forms via
-   `_unquote_git_path` (reused from git_worktree.py); unquoting applied in
-   `_capture_untracked`, `_main_dirty_files` (with `_split_rename_tail`), all 4
-   `--name-only` sites in merge_flow.py (new `_unquoted_name_lines` helper), and
-   `_diff_name_only`. Test: `test_bughunt3_quoted_paths.py` (5 tests, incl. real
-   worktree conflict-overlap scenario).
-1. **BUG-F2 — deleted tracked binary invisible in merge view**
-   (`diff_merge.py::_prepare_merge_view`): a binary deletion emits `Binary files … differ` with no hunks; the binary branch required `fpath.is_file()` (false when
-   deleted) so the deletion fell through every branch — unreviewable and
-   unrestorable, while deleted TEXT files get a `.deleted` placeholder. Fix: classify
-   empty-hunk + missing-file entries as binary; binary manifest loop now creates a
-   `.deleted` placeholder as `current` and keeps the real workspace path as `target`.
-   Test: `test_bughunt3_deleted_binary.py` (manifest entry + end-to-end reject
-   restores the original bytes).
-1. **BUG-F3 — rejecting a binary merge entry crashed / would truncate**
-   (`web_server.py::_reject_hunk_in_file` / `_reject_all_hunks_in_file`): binary
-   entries point current/target at the real binary file; `read_text()` raised
-   `UnicodeDecodeError` (NOT the caught `OSError`), crashing the merge action.
-   Fix: new `_restore_base_bytes()`; `binary=True` keyword plumbed from
-   `fd.get("binary")` in `_apply_web_merge_action` (via functools.partial) and
-   `_reject_all_hunks_in_file`; `UnicodeDecodeError` fallback restores base bytes
-   wholesale. Test: `test_bughunt3_binary_reject.py`.
-1. **BUG-F4 — rejecting one hunk rewrote entire CRLF file as LF**
-   (`web_server.py::_reject_hunk_in_file`): `read_text()` universal-newline
-   translation + `write_text()` converted EVERY line ending to LF on any reject —
-   inconsistent with `_write_base_copy`'s M5 CRLF-preservation fix. Fix: new
-   `diff_merge._read_lines_preserved()`/`_split_lines_keepends()` (newline=''
-   reads, \\n-only splitting matching git's line numbering); reject now writes with
-   `newline=''`; `_diff_files` and `_file_as_new_hunks` switched to the same
-   helpers so hunk numbering is consistent for files containing `\r`/`\f`/`\u2028`.
-   Test: `test_bughunt3_crlf_reject.py` (byte-exact restoration).
-1. **Cross-test pollution fix** (`test_bughunt3_newchat_phantom_tab.py`, written by
-   sibling group E): its `selectModel m-x` persisted `last_model: "m-x"` into
-   config.json via `_record_model_usage`, poisoning every later `SorcarAgent` run in
-   the same pytest process (`model_name or _load_last_model()`) — deterministically
-   broke `test_no_git_error_on_empty_worktree` under shard ordering (bisected to the
-   single polluter file). Fix: snapshot/restore `last_model` in setUp/tearDown.
-
-### Explicitly checked, not bugs
-
-- `_check_merge_conflict` `baseline^` on a root commit: unreachable — the baseline is
-  always committed on top of the original branch tip in the worktree.
-- Mode-only changes (old/new mode, no hunks): excluded from merge view by design,
-  worktree flow falls back to `worktree_done` consistently.
-- `/media/` static serving path traversal: guarded by `resolve().is_relative_to`;
-  absolute-path join trick also rejected. Malformed JSON / non-dict WS + UDS frames:
-  skipped safely. `_trajectory_job_response`: job names with `/`, `\`, `..` rejected.
-
-### Verification
-
-- All 8 new group-F tests fail pre-fix (7 directly; conflict-overlap test passed
-  pre-fix only because BOTH sides kept quoted names — kept as regression guard) and
-  pass post-fix.
-- Full vscode+sorcar suite (284 files) in 8 parallel shards: all pass after the
-  pollution fix; only `test_bughunt_cli` ctrl-c forkpty flake (documented
-  pre-existing) failed once under load, passes in isolation.
-- `uv run check --full`: All checks passed.
+NEXT STEPS: write the two failing tests, verify they fail, apply fixes
+(json_printer.py frozenset + vscode_config.py flock), verify pass, run impacted tests
+(test_replay_event_coalescing, test_printer_equivalence, test_config_race,
+test_config_save_on_close, test_bughunt3*), `npx tsc -p .` not needed (no TS change),
+`uv run check --full`, commit.
