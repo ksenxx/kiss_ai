@@ -171,12 +171,46 @@ Repeat until an iteration finds zero bugs.
   `uv run check --full` passes (also auto-fixed an unrelated pre-existing
   ruff UP041 in test_bughunt4_merge_replay_on_reconnect.py).
 
-### Iteration 5 — Group C (sorcar CLI) — session 1 (context exhausted, CONTINUE)
+### Iteration 5 — Group C (sorcar CLI) — COMPLETE: 2 NEW bugs found+fixed
 
-Read in full: cli_steering.py, cli_panel.py, cli_repl.py, cli_helpers.py. No test
-written yet. Candidate bugs to REPRODUCE next session (write failing test first,
-src/kiss/tests/agents/sorcar/test_bughunt5\_<short>.py; check existing test_bughunt4_paste.py
-style for harness — real \_InputBox with a fake out stream / pyte / pty.fork):
+- BUG-5C-1 (cli_steering.py `_append_paste` + `feed` typed path): C1 control
+  characters U+0080–U+009F (category Cc) passed both input filters — the
+  `ch >= " "` guards only exclude C0/DEL (`"\x9b" >= " "` is True). U+009B is
+  the one-character CSI introducer; once in `buf` it is emitted RAW to the
+  terminal by `cli_panel.clip_buf` (which only rewrites newline/tab),
+  corrupting the box row, and the queued instruction carries the raw C1
+  bytes. Fix: paste filter excludes `"\x7f" <= ch <= "\x9f"`; typed path
+  excludes `"\x80" <= ch <= "\x9f"` (DEL already eaten by the backspace
+  branch). Test: test_bughunt5_c1_controls.py (4 tests, all failed pre-fix,
+  incl. a clip_buf end-to-end render check).
+- BUG-5C-2 (cli_repl.py `_read_line`): Ctrl+C at the idle prompt escaped
+  `input()` with the cursor still on the panel's BODY row; `run_repl`'s
+  handler then printed "\n(Press Ctrl+C again …)" over the bottom border row
+  without erasing it — the screen showed
+  `(Press Ctrl+C again or type /exit to quit)────────…────╯` (and the second
+  Ctrl+C's `Goodbye.` overprinted the next panel's rule the same way). Fix:
+  both interactive `input()` calls in `_read_line` now catch
+  KeyboardInterrupt, write `"\n" + ESC[2K` (step onto the rule row, erase
+  it), flush, and re-raise. Test: test_bughunt5_ctrlc_prompt_border.py —
+  pty.fork end-to-end `run_repl`, child byte stream replayed through a mini
+  VT100 screen model; asserts the "(Press Ctrl+C" and "Goodbye." screen rows
+  carry no `─`/`╯` remnants. Failed pre-fix with exactly the garbled row.
+- Additionally investigated and ruled out this round (do NOT re-report):
+  leftover pending_user_messages when the task finishes mid-typing are
+  dropped by documented design (vscode task_runner.py ~line 167 clears them
+  the same way — CLI consistent); ⏎ (U+23CE) is EAW=N width 1 so multi-line
+  buf cursor math is exact; property sweep over panel math (body width ==
+  cols-4, cursor col in [1, cols-1]) for emoji/CJK/combining/multi-line/tab
+  buffers at cols 10..80 — all exact; wide-char paste split byte-by-byte
+  across reads + backspaces — buffer exact; SIGINT during paste covered by
+  the bughunt4 KeyboardInterrupt path (\x03 bytes inside a paste dropped,
+  already tested); prompt text with `{braces}` is used verbatim (no .format);
+  `box.start()` failure leaving the proxy installed has no realistic trigger
+  after supports_steering() (not reproducible without test doubles).
+- Verification: 141/141 CLI tests pass (every test_cli_* / CLI bughunt file,
+  incl. the 5 new bughunt5 tests); `uv run check --full` passes.
+
+Superseded session-1 scratch notes (kept for audit; conclusions above):
 
 1. C1 control chars pass `_append_paste` filter (cli_steering.py `_append_paste`:
    `ch >= " "` keeps U+0080–U+009F, e.g. U+009B = single-char CSI) → pasted C1
