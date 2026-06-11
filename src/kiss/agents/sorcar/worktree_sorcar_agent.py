@@ -228,7 +228,13 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             outcome and *stash_warning* is a non-empty string if
             stash-pop failed.  Checkout failures return
             ``MergeResult.CHECKOUT_FAILED`` (with a stash warning only
-            when the pre-checkout stash could not be restored).
+            when the pre-checkout stash could not be restored).  A
+            dirty main tree whose ``git stash push`` itself failed
+            (e.g. an unreadable untracked file) returns
+            ``MergeResult.STASH_FAILED`` without touching the repo:
+            proceeding would commit the user's staged changes into
+            the squash-merge commit and the conflict-path
+            ``git reset --hard`` would destroy their edits.
         """
         stash_warning = ""
         if wt.original_branch is None:
@@ -239,6 +245,12 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             # ("local changes would be overwritten") even though
             # merge()'s contract promises they are stashed first.
             did_stash = GitWorktreeOps.stash_if_dirty(wt.repo_root)
+            if not did_stash and GitWorktreeOps.has_uncommitted_changes(
+                wt.repo_root
+            ):
+                # The tree is dirty but ``git stash push`` FAILED
+                # (returncode != 0) — abort before any mutation.
+                return (MergeResult.STASH_FAILED, "")
             current = GitWorktreeOps.current_branch(wt.repo_root)
             if current != wt.original_branch:
                 ok, err = GitWorktreeOps.checkout(
@@ -364,6 +376,24 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                 f"Auto-merge of '{wt.branch}' could not checkout "
                 f"'{wt.original_branch}'. The branch is kept for "
                 "manual resolution."
+            )
+        elif result == MergeResult.STASH_FAILED:
+            self._merge_conflict_warning = (
+                f"Auto-merge of '{wt.branch}' into "
+                f"'{wt.original_branch}' was aborted: your "
+                "uncommitted changes in the main repository could "
+                "not be stashed (git stash push failed). The branch "
+                "is kept for manual resolution. Commit or clean up "
+                "your changes, then run:\n"
+                + _merge_fix_steps(
+                    wt,
+                    "    git commit\n",
+                )
+            )
+            logger.warning(
+                "Auto-merge of '%s' into '%s' aborted: stash of dirty main tree failed",
+                wt.branch,
+                wt.original_branch,
             )
         elif result == MergeResult.MERGE_FAILED:
             self._merge_conflict_warning = (
@@ -517,6 +547,22 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                             branch,
                             baseline_commit,
                         )
+                elif GitWorktreeOps.has_uncommitted_changes(wt_dir):
+                    # The baseline commit FAILED (e.g. a
+                    # prepare-commit-msg hook — which --no-verify does
+                    # NOT skip — or a stale index.lock): the user's
+                    # dirty state would sit uncommitted in the
+                    # worktree and later be auto-committed as (and
+                    # attributed to) agent work, then squash-merged
+                    # back — duplicating the user's edits.  Honor
+                    # run()'s fallback contract instead: clean up and
+                    # run the task directly.
+                    logger.warning(
+                        "Baseline commit failed in new worktree; "
+                        "falling back to direct execution"
+                    )
+                    GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
+                    return None
 
             self._wt = GitWorktree(
                 repo_root=repo,
@@ -768,6 +814,16 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                 f"Cannot checkout '{wt.original_branch}'.\n"
                 "Fix the issue and retry merge(), or call discard()."
                 + stash_suffix
+            )
+
+        if result == MergeResult.STASH_FAILED:
+            return (
+                "Cannot merge: your uncommitted changes in the main "
+                "repository could not be stashed (git stash push "
+                "failed), so the merge was aborted to avoid mixing "
+                "them into the merge commit.\n"
+                "Commit or clean up the changes, then retry merge(), "
+                "or call discard()." + stash_suffix
             )
 
         if result == MergeResult.SUCCESS:
