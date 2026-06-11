@@ -19,6 +19,7 @@ from typing import Any
 
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.vscode.server import VSCodeServer
+from kiss.agents.vscode.vscode_config import load_config, save_config
 
 
 class TestEmptyTabIdPhantom(unittest.TestCase):
@@ -27,6 +28,11 @@ class TestEmptyTabIdPhantom(unittest.TestCase):
     def setUp(self) -> None:
         self.server = VSCodeServer()
         self.events: list[dict[str, Any]] = []
+        # ``selectModel`` persists ``last_model`` into config.json via
+        # ``_record_model_usage``; snapshot it so the bogus test model
+        # ("m-x") does not poison every later ``SorcarAgent`` run in
+        # this process (``model_name or _load_last_model()``).
+        self._saved_last_model = load_config().get("last_model")
 
         def capture(event: dict[str, Any]) -> None:
             self.events.append(event)
@@ -35,6 +41,12 @@ class TestEmptyTabIdPhantom(unittest.TestCase):
 
     def tearDown(self) -> None:
         _RunningAgentState.running_agent_states.clear()
+        cfg = load_config()
+        if self._saved_last_model is None:
+            cfg.pop("last_model", None)
+        else:
+            cfg["last_model"] = self._saved_last_model
+        save_config(cfg)
 
     def test_new_chat_empty_tab_id_creates_no_phantom(self) -> None:
         self.server._handle_command({"type": "newChat"})
