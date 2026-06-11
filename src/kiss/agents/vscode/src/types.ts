@@ -116,6 +116,10 @@ type ToWebviewMessageBody =
       text?: string;
       summary?: string;
       success?: boolean;
+      /** True when the agent paused to continue in a new session
+       *  (``json_printer`` copies ``is_continue`` onto result events;
+       *  main.js renders a "Status: Continue" banner for it). */
+      is_continue?: boolean;
       total_tokens?: number;
       cost?: string;
       step_count?: number;
@@ -138,7 +142,14 @@ type ToWebviewMessageBody =
   | {type: 'task_stopped'}
   | {type: 'task_interrupted'}
   // UI events
-  | {type: 'status'; running: boolean}
+  | {
+      type: 'status';
+      running: boolean;
+      /** Agent's true start timestamp (ms since epoch) supplied by the
+       *  backend (``task_runner`` / ``server._replay_session``) so the
+       *  webview's "Running …" timer is anchored to agent wall-clock. */
+      startTs?: number;
+    }
   | {
       type: 'models';
       models: Array<{

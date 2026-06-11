@@ -907,6 +907,15 @@ def run_tasks_parallel(
     # ``(budget_used, total_tokens_used, total_steps)``.
     sub_usage: list[tuple[float, int, int]] = [(0.0, 0, 0)] * len(tasks)
 
+    # Capture the parent's thread-local ``task_id`` HERE, in the calling
+    # thread.  ``printer._thread_local`` is a real ``threading.local``,
+    # so reading it inside a worker thread would never see the parent
+    # thread's value (and ``ChatSorcarAgent.run`` clears the worker's
+    # own id before ``_run_single``'s ``finally`` runs) — the
+    # ``subagentDone`` broadcast would then never fire.
+    parent_tl = getattr(printer, "_thread_local", None) if printer else None
+    parent_key = getattr(parent_tl, "task_id", "") if parent_tl else ""
+
     def _run_single(args: tuple[int, str]) -> str:
         idx, task = args
         agent = ChatSorcarAgent(f"Parallel-{task[:40]}")
@@ -937,13 +946,10 @@ def run_tasks_parallel(
             return _yaml_failure(exc)
         finally:
             sub_usage[idx] = _agent_usage(agent)
-            if printer is not None:
-                tl = getattr(printer, "_thread_local", None)
-                parent_key = getattr(tl, "task_id", "") if tl else ""
-                if parent_key:
-                    _broadcast_subagent_done(
-                        printer, [f"{parent_key}__sub_{idx}"],
-                    )
+            if printer is not None and parent_key:
+                _broadcast_subagent_done(
+                    printer, [f"{parent_key}__sub_{idx}"],
+                )
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         results = list(pool.map(_run_single, enumerate(tasks)))
