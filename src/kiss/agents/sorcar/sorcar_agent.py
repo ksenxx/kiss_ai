@@ -602,6 +602,16 @@ class SorcarAgent(RelentlessAgent):
         skill_tool = make_skill_tool(self.work_dir or ".")
         if skill_tool is not None:
             tools.append(skill_tool)
+        # MCP servers: every tool of every configured server becomes a
+        # ``<server>_<tool>`` function (filtered by the
+        # ``mcp_permissions`` wildcard rules).  A broken server is
+        # logged and skipped so it can never break agent startup.
+        try:
+            from kiss.agents.sorcar.mcp_servers import make_mcp_tools
+
+            tools.extend(make_mcp_tools(self.work_dir or "."))
+        except Exception:
+            logger.warning("MCP tool setup failed", exc_info=True)
         tools.append(ask_user_question)
         tools.append(update_settings)
         tools.append(set_model)
