@@ -527,7 +527,9 @@ class _WebMergeState:
         ]
 
 
-def _restore_base_bytes(base_path: str, write_to: str) -> None:
+def _restore_base_bytes(
+    base_path: str, write_to: str, link_target: str | None = None,
+) -> None:
     """Restore *write_to* to the exact bytes of *base_path*.
 
     Used to reject changes to binary (or undecodable) files, whose
@@ -536,16 +538,28 @@ def _restore_base_bytes(base_path: str, write_to: str) -> None:
     wholesale.  A missing/unreadable base restores an empty file
     (mirroring ``_write_base_copy``'s empty-base convention).
 
+    When *link_target* is given, the base of the entry is a SYMLINK
+    blob (the agent retargeted, deleted, or replaced a tracked
+    symlink): the link itself is recreated instead of writing the
+    blob's target string as regular-file content.
+
     Args:
         base_path: Path to the pre-task base copy.
         write_to: Real workspace path to restore.
+        link_target: Target string of the base symlink, or ``None``
+            for regular content.
     """
+    dest = Path(write_to)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if link_target is not None:
+        if dest.is_symlink() or dest.exists():
+            dest.unlink()
+        os.symlink(link_target, write_to)
+        return
     try:
         data = Path(base_path).read_bytes()
     except OSError:
         data = b""
-    dest = Path(write_to)
-    dest.parent.mkdir(parents=True, exist_ok=True)
     # Never write THROUGH a symlink: git tracks the link itself, not
     # its target, and the target may be a precious file (possibly
     # outside the repo) whose truncation would be silent data loss.
@@ -561,6 +575,7 @@ def _reject_hunk_in_file(
     target_path: str | None = None,
     *,
     binary: bool = False,
+    link_target: str | None = None,
 ) -> None:
     """Revert a single hunk in the current file to the base version.
 
@@ -595,10 +610,12 @@ def _reject_hunk_in_file(
             Defaults to *current_path* for backwards compatibility.
         binary: True when the merge entry is flagged binary; restores
             the base bytes wholesale.
+        link_target: Target string when the base is a symlink blob;
+            the link itself is restored (see ``_restore_base_bytes``).
     """
     write_to = target_path or current_path
-    if binary:
-        _restore_base_bytes(base_path, write_to)
+    if binary or link_target is not None:
+        _restore_base_bytes(base_path, write_to, link_target)
         return
     # Read from *write_to* (the real workspace target) when it exists
     # so that successive partial rejections accumulate against the
@@ -666,10 +683,13 @@ def _reject_all_hunks_in_file(
     if file_data.get("binary"):
         # Binary entries carry a single whole-file pseudo-hunk; restore
         # the base bytes wholesale (line splicing does not apply).
+        # ``link_target`` marks a symlink-base entry whose reject must
+        # recreate the link itself.
         if hunk_indices:
             _restore_base_bytes(
                 file_data["base"],
                 file_data.get("target") or file_data["current"],
+                file_data.get("link_target"),
             )
         return
     pending = set(hunk_indices)
@@ -3890,6 +3910,7 @@ class RemoteAccessServer:
                             hunk,
                             fd.get("target"),
                             binary=bool(fd.get("binary")),
+                            link_target=fd.get("link_target"),
                         ),
                     )
                 except OSError as exc:
