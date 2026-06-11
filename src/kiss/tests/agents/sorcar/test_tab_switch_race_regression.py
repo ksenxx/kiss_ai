@@ -163,6 +163,18 @@ def _make_test_script(test_body: str) -> str:
     return _JS_PREAMBLE + "\n" + test_body
 
 
+def _extract_function(js: str, name: str) -> str:
+    """Extract a top-level (IIFE-scope) function's full source from main.js.
+
+    Slices from ``function <name>(`` up to the next sibling function
+    declaration so the real implementation can be evaluated in Node.js
+    behavior tests instead of asserting on source-code substrings.
+    """
+    idx = js.index("function " + name + "(")
+    end = js.index("\n  function ", idx + 1)
+    return js[idx:end]
+
+
 class TestStatusRunningTabIdGuard(unittest.TestCase):
     """status handler: per-tab isRunning via findTabByEvt + ev.tabId routing."""
 
@@ -873,7 +885,8 @@ class TestMultipleTabsMultipleMessages(unittest.TestCase):
 
 
 class TestSetReadyResetsRunningTabId(unittest.TestCase):
-    """setReady() always resets runningTabId to -1 regardless of active tab."""
+    """setReady() clears the target tab's running state regardless of
+    which tab is active."""
 
     js: str
 
@@ -882,10 +895,58 @@ class TestSetReadyResetsRunningTabId(unittest.TestCase):
         cls.js = _MAIN_JS.read_text()
 
     def test_set_ready_resets_tab_running_state(self) -> None:
-        idx = self.js.index("function setReady(")
-        block = self.js[idx : idx + 400]
-        assert "doneTab.isRunning = false" in block
-        assert "doneTab.t0 = null" in block
+        """Behavior (real ``setReady`` evaluated in Node): completing a
+        BACKGROUND tab flips that tab's ``isRunning`` to false and
+        anchors its ``t0``/``endTs`` to the agent-supplied wall-clock
+        timestamps, without touching the active tab's UI state."""
+        set_ready_src = _extract_function(self.js, "setReady")
+        result = _run_node(_make_test_script(
+            r"""
+            var tabs = [
+                { id: 1, isRunning: false },
+                { id: 7, isRunning: true, t0: 111, endTs: 0 },
+            ];
+            var activeTabId = 1;
+            var t0 = null;
+            var endTs = 0;
+            function getTab(id) {
+                return tabs.find(function(t) { return t.id === id; }) || null;
+            }
+            var uiCalls = [];
+            function setRunningState(r) { uiCalls.push('setRunningState:' + r); }
+            function stopTimer() { uiCalls.push('stopTimer'); }
+            function removeSpinner() { uiCalls.push('removeSpinner'); }
+            function renderTabBar() {}
+            var statusText = { textContent: '' };
+            var inp = { focus: function() {} };
+            """
+            + set_ready_src
+            + r"""
+            setReady('Done (4s)', 7, 1000, 5000);
+            var bg = getTab(7);
+            if (bg.isRunning !== false) {
+                process.stdout.write('FAIL: background tab still running');
+                process.exit(1);
+            }
+            if (bg.t0 !== 1000 || bg.endTs !== 5000) {
+                process.stdout.write(
+                    'FAIL: t0/endTs not anchored: ' + bg.t0 + '/' + bg.endTs);
+                process.exit(1);
+            }
+            if (bg.statusTextContent !== 'Done (4s)') {
+                process.stdout.write('FAIL: done label not persisted on tab');
+                process.exit(1);
+            }
+            // Event targeted a background tab: active-tab UI untouched.
+            if (uiCalls.length !== 0 || statusText.textContent !== '') {
+                process.stdout.write('FAIL: active tab UI touched: ' + uiCalls);
+                process.exit(1);
+            }
+            process.stdout.write('PASS');
+            """,
+        ))
+        assert result.returncode == 0, result.stderr
+        assert "PASS" in result.stdout
 
     def test_task_done_calls_set_ready(self) -> None:
         idx = self.js.index("case 'task_done':")
@@ -1282,17 +1343,139 @@ class TestPerTabT0(unittest.TestCase):
         assert "t0 = tab.t0" in body
 
     def test_switch_to_non_running_tab_clears_t0(self) -> None:
-        idx = self.js.index("function switchToTab(tabId)")
-        end = self.js.index("\n  function ", idx + 1)
-        body = self.js[idx:end]
-        assert "t0 = null" in body
+        """Behavior (real ``switchToTab`` evaluated in Node): switching
+        to a non-running tab stops the live timer and flips the running
+        state to false, while the restored ``t0``/``endTs`` anchors are
+        KEPT so the tab can render "Done (Xm Ys)" from agent
+        wall-clock."""
+        switch_src = _extract_function(self.js, "switchToTab")
+        result = _run_node(_make_test_script(
+            r"""
+            var tabs = [
+                { id: 1, isRunning: true, panelsExpandedMap: {} },
+                { id: 2, isRunning: false, t0: 1000, endTs: 5000,
+                  panelsExpandedMap: {} },
+            ];
+            var activeTabId = 1;
+            var isRunning = true;
+            var timerRunning = true;
+            var t0 = 999;
+            var endTs = 0;
+            var currentTaskName = 'task';
+            function getTab(id) {
+                return tabs.find(function(t) { return t.id === id; }) || null;
+            }
+            function saveCurrentTab() {}
+            function restoreTab(tab) {
+                // Mirrors the real restoreTab contract (covered by
+                // test_restore_restores_t0): per-tab anchors restored.
+                activeTabId = tab.id;
+                t0 = tab.t0;
+                endTs = tab.endTs;
+            }
+            function renderTabBar() {}
+            function persistTabState() {}
+            function setRunningState(r) {
+                isRunning = r;
+                if (r) timerRunning = true;
+            }
+            function stopTimer() { timerRunning = false; }
+            function removeSpinner() {}
+            function applyChevronState() {}
+            function focusInputWithRetry() {}
+            """
+            + switch_src
+            + r"""
+            switchToTab(2);
+            if (isRunning !== false) {
+                process.stdout.write('FAIL: running state not cleared');
+                process.exit(1);
+            }
+            if (timerRunning) {
+                process.stdout.write('FAIL: timer still ticking');
+                process.exit(1);
+            }
+            // Restored anchors must be preserved (not nulled) so the
+            // idle tab renders its done duration.
+            if (t0 !== 1000 || endTs !== 5000) {
+                process.stdout.write(
+                    'FAIL: restored anchors clobbered: ' + t0 + '/' + endTs);
+                process.exit(1);
+            }
+            process.stdout.write('PASS');
+            """,
+        ))
+        assert result.returncode == 0, result.stderr
+        assert "PASS" in result.stdout
 
     def test_set_ready_clears_running_tab_t0(self) -> None:
-        idx = self.js.index("function setReady(label, tabId)")
-        end = self.js.index("\n  function ", idx + 1)
-        body = self.js[idx:end]
-        assert "doneTab" in body
-        assert "doneTab.t0 = null" in body
+        """Behavior (real ``setReady`` evaluated in Node): completing
+        the ACTIVE tab stops the timer and re-anchors the global
+        ``t0``/``endTs`` to the agent-supplied timestamps; without
+        timestamps the existing ``t0`` is preserved and ``endTs``
+        falls back to the local clock."""
+        set_ready_src = _extract_function(self.js, "setReady")
+        result = _run_node(_make_test_script(
+            r"""
+            var tabs = [{ id: 1, isRunning: true, t0: 111, endTs: 0 }];
+            var activeTabId = 1;
+            var t0 = 111;
+            var endTs = 0;
+            function getTab(id) {
+                return tabs.find(function(t) { return t.id === id; }) || null;
+            }
+            var timerRunning = true;
+            var isRunning = true;
+            function setRunningState(r) { isRunning = r; }
+            function stopTimer() { timerRunning = false; }
+            function removeSpinner() {}
+            function renderTabBar() {}
+            var statusText = { textContent: '' };
+            var inp = { focus: function() {} };
+            """
+            + set_ready_src
+            + r"""
+            setReady('Done (4s)', 1, 1000, 5000);
+            if (tabs[0].isRunning !== false || isRunning !== false) {
+                process.stdout.write('FAIL: running state not cleared');
+                process.exit(1);
+            }
+            if (timerRunning) {
+                process.stdout.write('FAIL: timer still ticking');
+                process.exit(1);
+            }
+            if (t0 !== 1000 || endTs !== 5000) {
+                process.stdout.write(
+                    'FAIL: anchors not re-anchored: ' + t0 + '/' + endTs);
+                process.exit(1);
+            }
+            if (statusText.textContent !== 'Done (4s)') {
+                process.stdout.write('FAIL: status label not rendered');
+                process.exit(1);
+            }
+            // Legacy fallback: no agent timestamps — keep t0, anchor
+            // endTs to the local clock.
+            tabs[0].isRunning = true;
+            timerRunning = true;
+            endTs = 0;
+            setReady('Done', 1);
+            if (t0 !== 1000) {
+                process.stdout.write('FAIL: t0 not preserved: ' + t0);
+                process.exit(1);
+            }
+            if (!(endTs > 0)) {
+                process.stdout.write('FAIL: endTs fallback missing');
+                process.exit(1);
+            }
+            if (tabs[0].isRunning !== false || timerRunning) {
+                process.stdout.write('FAIL: second completion not applied');
+                process.exit(1);
+            }
+            process.stdout.write('PASS');
+            """,
+        ))
+        assert result.returncode == 0, result.stderr
+        assert "PASS" in result.stdout
 
     def test_task_done_uses_running_tab_t0(self) -> None:
         idx = self.js.index("case 'task_done':")
