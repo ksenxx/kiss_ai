@@ -171,6 +171,14 @@ class _CommandsMixin:
         thread's first broadcast.
         """
         tab_id = cmd.get("tabId", "")
+        if not tab_id:
+            # An empty tab id would mint a phantom registry entry (and
+            # start a real task thread) that no other code path can
+            # ever address: ``_stop_task``, ``_cmd_close_tab`` and
+            # ``_dispose_if_closed`` all treat an empty id as "no tab",
+            # so the task would be unstoppable and undisposable.
+            logger.debug("Ignoring run command without tabId")
+            return
         with self._state_lock:
             tab = _RunningAgentState.running_agent_states.get(tab_id)
             if tab is None:
