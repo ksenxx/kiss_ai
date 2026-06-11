@@ -123,6 +123,27 @@ _MENTION_RE = re.compile(r"PWD/(\S+)")
 # Matches a ``/model <partial>`` line, capturing the partial model name so
 # the completer can fast-complete it from MODEL_INFO.
 _MODEL_CMD_RE = re.compile(r"^/model\s+(.*)$")
+# ANSI SGR (colour) sequences embedded in the input prompt.
+_ANSI_SGR_RE = re.compile(r"(\x1b\[[0-9;]*m)")
+
+
+def _readline_prompt(prompt: str) -> str:
+    """Bracket ANSI sequences in *prompt* with readline ignore markers.
+
+    GNU readline counts every prompt byte as a printed column unless
+    non-printing runs are wrapped in ``\\x01``/``\\x02``
+    (``RL_PROMPT_START_IGNORE``/``RL_PROMPT_END_IGNORE``).  Without the
+    markers readline believes the colour codes occupy screen columns,
+    so it redraws/wraps the input line ~20 columns early, garbling the
+    input panel on narrow terminals.
+
+    Args:
+        prompt: The prompt string, possibly containing SGR sequences.
+
+    Returns:
+        The prompt with every SGR sequence wrapped in the markers.
+    """
+    return _ANSI_SGR_RE.sub("\x01\\1\x02", prompt)
 
 
 class CliCompleter:
@@ -569,6 +590,16 @@ def _read_line(prompt: str) -> str | None:
         return line
 
     # Interactive: pre-draw the closed box, then edit on the body line.
+    # ``input`` hands the prompt to readline only when stdin is also a
+    # TTY; readline needs its colour codes bracketed with the
+    # \x01/\x02 ignore markers to compute the prompt width correctly
+    # (raw markers would be echoed verbatim in the non-readline path).
+    try:
+        stdin_tty = bool(sys.stdin.isatty())
+    except Exception:  # pragma: no cover - defensive isatty guard
+        stdin_tty = False
+    if _HAVE_READLINE and stdin_tty:
+        framed_prompt = _readline_prompt(framed_prompt)
     print(top)
     # Draw the body line's right border at the far column so the box is
     # fully framed (left ``│`` comes from ``framed_prompt`` below), then

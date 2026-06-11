@@ -77,7 +77,7 @@ def test_module_level_run_tasks_parallel_propagates_stop_event(
     printer._thread_local.task_id = "42"
     try:
         results = run_tasks_parallel(
-            ["task one"], max_workers=1, printer=printer,
+            ["task one"], max_workers=1, printer=cast(Any, printer),
         )
     finally:
         parent_class.run = original_run
