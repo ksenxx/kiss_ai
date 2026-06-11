@@ -310,17 +310,17 @@ def _parse_diff_hunks(
     return hunks
 
 
-def _symlink_base_paths(
+def _base_modes(
     work_dir: str, base_ref: str, fnames: set[str],
-) -> set[str]:
-    """Return the subset of *fnames* stored as symlinks at *base_ref*.
+) -> dict[str, str]:
+    """Return the git file mode at *base_ref* for each of *fnames*.
 
-    git records a symlink as a mode-``120000`` blob whose content is
-    the target string.  Such paths cannot be reviewed line-by-line:
-    a typechange diff emits two non-composing entries for the same
-    path, and reads of the working copy follow the link.  Callers use
-    this to route symlink-based entries through the whole-file review
-    path instead.
+    Used by :func:`_prepare_merge_view` to detect paths that need
+    non-line-based review handling: mode ``120000`` marks a symlink
+    blob (whose content is the target string and whose working copy is
+    read THROUGH the link), and mode ``100755`` marks an executable
+    whose exec bit must be restored when a rejected deletion re-creates
+    the file.
 
     Args:
         work_dir: Repository root directory.
@@ -328,23 +328,24 @@ def _symlink_base_paths(
         fnames: Candidate relative paths.
 
     Returns:
-        The paths whose blob at *base_ref* has mode ``120000``.
+        Dict mapping each path present at *base_ref* to its mode
+        string (e.g. ``"100644"``, ``"100755"``, ``"120000"``).
     """
     if not fnames:
-        return set()
+        return {}
     result = _git(work_dir, "ls-tree", "-z", base_ref, "--", *sorted(fnames))
     if result.returncode != 0:
-        return set()
-    links: set[str] = set()
+        return {}
+    modes: dict[str, str] = {}
     for entry in result.stdout.split("\0"):
         if not entry:
             continue
         # "<mode> <type> <sha>\t<path>" — with ``-z`` the path is raw
         # (never C-quoted).
         meta, _, path = entry.partition("\t")
-        if meta.startswith("120000 ") and path:
-            links.add(path)
-    return links
+        if path:
+            modes[path] = meta.split(" ", 1)[0]
+    return modes
 
 
 def _capture_untracked(work_dir: str) -> set[str]:
@@ -800,9 +801,17 @@ def _prepare_merge_view(
     # whose ``link_target`` lets the reject path restore the symlink
     # itself.
     link_targets: dict[str, str] = {}
-    for fname in _symlink_base_paths(
+    base_modes = _base_modes(
         work_dir, base_ref, set(file_hunks) | binary_files,
-    ):
+    )
+    # Executables (mode 100755) need their exec bit re-applied when a
+    # rejected deletion re-creates the file — otherwise a full
+    # reject-all leaves the tree dirty (old mode 100755 / new mode
+    # 100644) and the restored script is no longer runnable.
+    exec_files = {f for f, mode in base_modes.items() if mode == "100755"}
+    for fname, mode in base_modes.items():
+        if mode != "120000":
+            continue
         blob = _git_bytes(work_dir, "show", f"{base_ref}:{fname}")
         if blob.returncode != 0:
             continue
@@ -837,15 +846,16 @@ def _prepare_merge_view(
         base_path = _write_base_copy(
             work_dir, merge_dir, ub_dir, fname, base_ref, binary=False,
         )
-        manifest_files.append(
-            {
-                "name": fname,
-                "base": str(base_path),
-                "current": str(current_path),
-                "target": str(target_path),
-                "hunks": fh,
-            },
-        )
+        text_entry: dict[str, Any] = {
+            "name": fname,
+            "base": str(base_path),
+            "current": str(current_path),
+            "target": str(target_path),
+            "hunks": fh,
+        }
+        if fname in exec_files:
+            text_entry["exec"] = True
+        manifest_files.append(text_entry)
     for fname in sorted(binary_files):
         target_path = Path(work_dir) / fname
         current_path = target_path
@@ -874,6 +884,8 @@ def _prepare_merge_view(
             # Rejecting this entry must restore the symlink itself,
             # not write the blob's target string as file content.
             entry["link_target"] = link_targets[fname]
+        if fname in exec_files:
+            entry["exec"] = True
         manifest_files.append(entry)
     if not manifest_files:
         return {"error": "No changes"}

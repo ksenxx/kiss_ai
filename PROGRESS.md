@@ -1335,6 +1335,56 @@ c1_controls/ctrlc_prompt_border + the 2 new bughunt6 files), `uv run check --ful
 cursor math under resize (deemed marginal), Ctrl+C during `_handle_slash`
 prints no Goodbye (marginal, not fixing).
 
+### Iteration 6 — Group F — 2 NEW BUGS FOUND+FIXED so far (session 2)
+
+- **BUG-6F-1 FIXED** (web_server.py `_apply_web_merge_action` + transport loops):
+  a failing reject write — canonical trigger: agent deleted a tracked file and
+  created a DIRECTORY at the same path → `open(write_to,"w")` raises
+  IsADirectoryError in `_reject_hunk_in_file` — propagated out through
+  `_dispatch_client_command` into `_ws_handler`/`_uds_handler`'s message loop
+  `except Exception`, TEARING DOWN the whole authenticated connection; the
+  disconnect then armed deferred closeTab timers that force-finished the
+  in-flight review as "accept remaining". Also ANY malformed client field that
+  raises (e.g. unhashable tabId → `_cancel_pending_tab_close` pop TypeError)
+  killed the connection. Fix: (a) reject/reject-file/reject-all executor calls
+  wrapped in try/except OSError → new `_broadcast_reject_failure` (error event;
+  failed hunks stay UNRESOLVED; review survives); reject-all now marks hunks
+  resolved only AFTER the per-file write succeeds (was before → zombie review
+  with remaining==0, state never popped, no all-done); (b) per-message dispatch
+  guards in `_ws_handler` (re-raises ConnectionClosed) and `_uds_handler`
+  (re-raises ConnectionError/IncompleteReadError). Test:
+  test_bughunt6_reject_write_failure.py (3 tests, all failed pre-fix with
+  ConnectionClosedOK). Committed (swept into parallel commit 7344d939).
+- **BUG-6F-2 FIXED** (diff_merge.py `_prepare_merge_view` + web_server reject
+  path): rejecting changes to a TRACKED symlink corrupted the path. git stores
+  a symlink as a mode-120000 blob (content = target string); a typechange diff
+  emits TWO non-composing `diff --git` entries for the SAME path which
+  `_parse_diff_hunks` merged into one hunk list, and the working copy is read
+  THROUGH the link. Reproduced: symlink→file reject-all left
+  b"data.txtagent content\\n"; retarget left b"data.txtx2\\nx3\\n"; deleted-link
+  reject left a REGULAR file "data.txt" (status " T"). Fix: new
+  `_symlink_base_paths` (git ls-tree -z, mode 120000); `_prepare_merge_view`
+  routes base-symlink paths to single whole-file binary-style entries with
+  `link_target`; `_restore_base_bytes(link_target=)` recreates the symlink on
+  reject (plumbed via `_reject_hunk_in_file`/`_reject_all_hunks_in_file`/
+  `_apply_web_merge_action`). file→symlink direction (already correct) pinned
+  as control; VS Code TS MergeManager now takes its binary restore path for
+  these (no corruption; full TS symlink recreation out of scope). Test:
+  test_bughunt6_symlink_typechange.py (5 tests; 4 failed pre-fix). Commit
+  e30e8505.
+- Verified NOT bugs / ruled out this round (do NOT re-chase): extension never
+  forwards webview `ready` over UDS (no VS Code review-replay duplication —
+  `_handle_ready` fan-out is web-only); `_handle_submit` premature
+  status-running broadcast (frontends guard re-submit; `_cmd_run` silent-drop
+  leaves an accurate spinner); mode-only chmod change invisible in merge view
+  (worktree_done/autocommit still fire); >2MB text file skipped from review
+  (documented cap); `_merge_action_locks` entry leak (iter-5 marginal);
+  gitignored FILES leak into `_scan_files` (autocomplete-only, marginal);
+  submitting during an open review replaces the review (frontend prevents:
+  input is the merge toolbar); `_check_merge_conflict` root-commit baseline
+  edge (unreachable); second merge_data for same tab overwrites state (only
+  reachable via prevented mid-review submit).
+
 ### Iteration 6 — Group F (web_server/diff_merge/merge_flow) — session 1 notes
 
 - Read all PROGRESS history for groups F (iter 3/4/5 fixed + verified-not-bug lists).
