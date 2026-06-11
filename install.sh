@@ -756,12 +756,9 @@ update_repo() {
         exit 1
     fi
     echo "   Extension installed into VS Code"
-    # The VSIX is a throwaway build artifact: VS Code copies the extension into
-    # its own extensions directory during ``--install-extension``, so the file
-    # in the checkout is no longer needed.  Remove it to keep the working tree
-    # clean and avoid shipping a stale VSIX on the next build.
-    rm -f "$VSIX"
-    echo "   Removed build artifact $VSIX"
+    # NOTE: do NOT delete the VSIX.  ``kiss-sorcar.vsix`` is a git-tracked
+    # file in this checkout, so removing it would leave the working tree
+    # dirty (a pending deletion) after every install.
 
     # Stop the old kiss-web daemon BEFORE the extension auto-reloads.  The
     # ``--install-extension --force`` above replaced the extension directory

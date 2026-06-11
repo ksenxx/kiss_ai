@@ -91,8 +91,10 @@ rm -f "$HOME/.kiss/sorcar.sock"
 mkdir -p "$HOME/.kiss"
 date -u +%Y-%m-%dT%H:%M:%SZ > "$HOME/.kiss/.extension-updated"
 
+# NOTE: do NOT delete kiss-sorcar.vsix here — it is a git-tracked file, so
+# removing it would leave the working tree dirty after every build/install.
 echo "==> Cleaning up build artifacts..."
-rm -rf "$EXT_DIR/out" "$EXT_DIR/kiss_project" "$EXT_DIR/kiss-sorcar.vsix"
+rm -rf "$EXT_DIR/out" "$EXT_DIR/kiss_project"
 
 echo "==> Done. KISS Sorcar extension installed successfully."
 
