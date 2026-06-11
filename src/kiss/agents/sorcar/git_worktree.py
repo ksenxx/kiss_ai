@@ -25,6 +25,29 @@ logger = logging.getLogger(__name__)
 _repo_locks: dict[str, threading.RLock] = {}
 _repo_locks_guard = threading.Lock()
 
+# Repo-scoped git environment variables that OVERRIDE ``git -C``-based
+# repository discovery.  When KISS is launched from a context that
+# exports them — e.g. a git hook (``post-commit`` starting an agent),
+# ``git rebase --exec``, or a user shell export — every git call would
+# silently target the WRONG repository (the hook's repo) instead of the
+# ``cwd`` passed to :func:`_git`.  This mirrors the list git itself
+# clears before crossing repo boundaries (``local_repo_env`` — see
+# ``git submodule``).  Author/committer/SSH/config-file variables are
+# intentionally kept.
+_REPO_SCOPED_GIT_ENV = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_PREFIX",
+    "GIT_NAMESPACE",
+    "GIT_GRAFT_FILE",
+    "GIT_SHALLOW_FILE",
+)
+
 
 def repo_lock(repo: Path) -> threading.RLock:
     """Return a per-repo re-entrant lock for multi-step git operations.
@@ -83,7 +106,25 @@ def _git(
         str(cwd),
         *args,
     ]
-    return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
+    # Scrub repo-scoped GIT_* variables so an inherited GIT_DIR /
+    # GIT_WORK_TREE / GIT_INDEX_FILE (e.g. from a git hook that
+    # launched this process) cannot redirect the command away from
+    # ``cwd`` (see :data:`_REPO_SCOPED_GIT_ENV`).
+    env = {k: v for k, v in os.environ.items() if k not in _REPO_SCOPED_GIT_ENV}
+    # ``errors="surrogateescape"``: git paths are byte strings and may
+    # be invalid UTF-8 (e.g. Latin-1 filenames committed on Linux);
+    # with ``core.quotepath=false`` such bytes are emitted verbatim and
+    # a strict decode would raise UnicodeDecodeError out of EVERY git
+    # call.  Surrogate escapes round-trip through ``os.fsencode`` for
+    # filesystem operations, matching :func:`_unquote_git_path`.
+    return subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
+        env=env,
+    )
 
 
 @dataclass(frozen=True)
