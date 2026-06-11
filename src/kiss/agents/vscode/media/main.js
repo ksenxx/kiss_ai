@@ -2519,13 +2519,21 @@
         // chat resumed from history would show "Running 0s" no
         // matter how long the agent has actually been running.
         if (ev.running && typeof ev.startTs === 'number' && ev.startTs > 0) {
-          t0 = ev.startTs;
           if (evTab) evTab.t0 = ev.startTs;
-          // A freshly-running task on this tab has no recorded end
-          // yet — clear any stale ``endTs`` captured from a prior
-          // task's ``task_events`` so the timer doesn't immediately
-          // jump to "Done".
-          endTs = 0;
+          // Anchor the GLOBAL timer only when the event targets the
+          // active tab (or carries no tabId).  The daemon broadcasts
+          // tab-stamped status events for background tabs and for
+          // tabs owned by OTHER VS Code windows; those must not
+          // clobber the active tab's running clock (same routing
+          // rule as the UI-update gate below).
+          if (ev.tabId === undefined || ev.tabId === activeTabId) {
+            t0 = ev.startTs;
+            // A freshly-running task on this tab has no recorded end
+            // yet — clear any stale ``endTs`` captured from a prior
+            // task's ``task_events`` so the timer doesn't immediately
+            // jump to "Done".
+            endTs = 0;
+          }
         }
         // Update UI only when the event targets the active tab (or no
         // tabId).  A tabId that resolves to NO local tab belongs to a

@@ -501,10 +501,21 @@ class _CommandsMixin:
         The current task is identified by its DB row id (``taskId``);
         navigating by id (rather than the task description text)
         unambiguously handles duplicate task texts within a chat.
+
+        Pure-viewer tabs (opened from the history sidebar by
+        ``_replay_session``) deliberately have NO
+        ``_RunningAgentState`` registry entry (C2/C3 fix) — only a
+        ``_tab_chat_views`` association.  Resolve the chat id from the
+        registry entry when one exists, falling back to the
+        chat-viewer map, and never CREATE a registry entry here:
+        navigation is a read-only view operation.
         """
         tab_id = cmd.get("tabId", "")
-        adj_tab = self._get_tab(tab_id)
-        chat_id = adj_tab.chat_id
+        with self._state_lock:
+            adj_tab = _RunningAgentState.running_agent_states.get(tab_id)
+            chat_id = adj_tab.chat_id if adj_tab is not None else ""
+            if not chat_id:
+                chat_id = self._tab_chat_views.get(tab_id, "")
         raw_task_id = cmd.get("taskId")
         try:
             task_id = int(raw_task_id) if raw_task_id is not None else None
