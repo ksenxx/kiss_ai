@@ -437,7 +437,8 @@ class _InputBox:
         cleaned = "".join(
             ch
             for ch in chunk
-            if (ch >= " " and ch != "\x7f") or ch in ("\n", "\t")
+            if (ch >= " " and not ("\x7f" <= ch <= "\x9f"))
+            or ch in ("\n", "\t")
         )
         if not cleaned:
             return False
@@ -540,7 +541,11 @@ class _InputBox:
             elif ch == "\x03":  # Ctrl+C
                 on_abort()
                 return
-            elif ch >= " ":
+            elif ch >= " " and not ("\x80" <= ch <= "\x9f"):
+                # The C1 control range (U+0080–U+009F) must never reach
+                # the buffer: U+009B is a one-character CSI introducer
+                # and would corrupt the terminal when redrawn.  DEL
+                # (\x7f) is already consumed by the backspace branch.
                 self.buf += ch
                 changed = True
             i += 1
