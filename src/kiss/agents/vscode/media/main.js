@@ -186,6 +186,11 @@
       autocommitBarEl: null,
       mergeToolbarEl: null,
       t0: null,
+      // Agent-recorded end timestamp (ms since epoch) of this tab's
+      // last task; 0 while running / unknown.  Together with ``t0``
+      // it lets every tab render "Done (Xm Ys)" as endTs - t0 no
+      // matter when the user switches to the tab.
+      endTs: 0,
       workDir: '',
       streamState: null,
       streamLlmPanel: null,
@@ -293,6 +298,7 @@
     tab.isMerging = isMerging;
     tab.isRunning = isActiveTabRunning();
     tab.t0 = t0;
+    tab.endTs = endTs;
     // Save streaming state (DOM refs preserved via fragment)
     tab.streamState = state;
     tab.streamLlmPanel = llmPanel;
@@ -379,6 +385,7 @@
     inp.style.height = inp.scrollHeight + 'px';
     isMerging = tab.isMerging || false;
     t0 = tab.t0 || null;
+    endTs = tab.endTs || 0;
     // Restore streaming state (DOM refs valid since fragment preserves elements)
     state = tab.streamState || mkS();
     llmPanel = tab.streamLlmPanel || null;
@@ -551,10 +558,11 @@
     restoreTab(tab);
     renderTabBar();
     persistTabState();
-    // Restore running state for the target tab
+    // Restore running state for the target tab.  Keep the restored
+    // ``t0``/``endTs`` anchors: a finished tab needs them to render
+    // "Done (Xm Ys)" as agent end - start wall-clock.
     setRunningState(tab.isRunning);
     if (!tab.isRunning) {
-      t0 = null;
       stopTimer();
       removeSpinner();
     }
@@ -606,10 +614,10 @@
       const newIdx = Math.min(origIdx, tabs.length - 1);
       const newTab = tabs[newIdx];
       restoreTab(newTab);
-      // Restore running state for the new tab
+      // Restore running state for the new tab.  Keep the restored
+      // ``t0``/``endTs`` anchors (see switchToTab).
       setRunningState(newTab.isRunning);
       if (!newTab.isRunning) {
-        t0 = null;
         stopTimer();
         removeSpinner();
       }
@@ -2428,6 +2436,12 @@
   // Zero means "no recorded end yet" (still running, or a legacy
   // row that pre-dates endTs persistence).
   let endTs = 0;
+  /** Format a "Done (Xm Ys)" label from start/end timestamps (ms). */
+  function doneLabelFor(startMs, endMs) {
+    const ds = Math.max(0, Math.floor((endMs - startMs) / 1000));
+    const dm = Math.floor(ds / 60);
+    return 'Done (' + (dm > 0 ? dm + 'm ' : '') + (ds % 60) + 's)';
+  }
   function _renderTimerTick() {
     // If the agent's persisted end timestamp has already passed,
     // surface "Done (Xm Ys)" computed from agent wall-clock
@@ -2436,10 +2450,7 @@
     // while the client was disconnected would render
     // "Running …" forever.
     if (endTs > 0 && t0 && Date.now() >= endTs) {
-      const ds = Math.max(0, Math.floor((endTs - t0) / 1000));
-      const dm = Math.floor(ds / 60);
-      statusText.textContent =
-        'Done (' + (dm > 0 ? dm + 'm ' : '') + (ds % 60) + 's)';
+      statusText.textContent = doneLabelFor(t0, endTs);
       stopTimer();
       setRunningState(false);
       return;
@@ -2533,7 +2544,12 @@
         // chat resumed from history would show "Running 0s" no
         // matter how long the agent has actually been running.
         if (ev.running && typeof ev.startTs === 'number' && ev.startTs > 0) {
-          if (evTab) evTab.t0 = ev.startTs;
+          if (evTab) {
+            evTab.t0 = ev.startTs;
+            // A freshly-running task has no recorded end yet — clear
+            // any endTs left over from the tab's previous task.
+            evTab.endTs = 0;
+          }
           // Anchor the GLOBAL timer only when the event targets the
           // active tab (or carries no tabId).  The daemon broadcasts
           // tab-stamped status events for background tabs and for
@@ -2841,6 +2857,21 @@
               const bgExtra = JSON.parse(ev.extra);
               if (bgExtra.model) teTab.selectedModel = bgExtra.model;
               if (bgExtra.work_dir) teTab.workDir = bgExtra.work_dir;
+              // Capture the agent's persisted start / end timestamps
+              // so switching to this background tab renders
+              // "Running …" / "Done (Xm Ys)" from agent wall-clock.
+              if (typeof bgExtra.startTs === 'number' && bgExtra.startTs > 0)
+                teTab.t0 = bgExtra.startTs;
+              if (typeof bgExtra.endTs === 'number' && bgExtra.endTs > 0) {
+                teTab.endTs = bgExtra.endTs;
+                // Finished task: pre-render the done label so a later
+                // switch to this tab shows the agent's end - start
+                // duration (mirrors _renderTimerTick's Done branch).
+                if (teTab.t0) {
+                  teTab.statusTextContent = doneLabelFor(teTab.t0, teTab.endTs);
+                  teTab.statusTextColor = 'var(--green)';
+                }
+              }
             } catch (_e) {
               /* ignore */
             }
@@ -3246,6 +3277,8 @@
         setReady(
           'Done (' + (em > 0 ? em + 'm ' : '') + (el % 60) + 's)',
           ev.tabId,
+          ev.startTs,
+          ev.endTs,
         );
         break;
       }
@@ -3263,7 +3296,7 @@
             : t === 'task_interrupted'
               ? 'Interrupted'
               : 'Stopped';
-        setReady(label, ev.tabId);
+        setReady(label, ev.tabId, ev.startTs, ev.endTs);
         break;
       }
       case 'new_tab': {
@@ -3533,7 +3566,11 @@
       stopTimer();
       removeSpinner();
       if (statusText.textContent.startsWith('Running')) {
-        statusText.textContent = 'Done';
+        // Render the done duration from the agent's wall-clock
+        // anchors when they are known; plain "Done" only as a
+        // legacy fallback (no recorded timestamps).
+        statusText.textContent =
+          t0 && endTs > 0 ? doneLabelFor(t0, endTs) : 'Done';
       }
     }
   }
@@ -3547,24 +3584,36 @@
     }
   }
 
-  function setReady(label, tabId) {
-    // Mark the tab as no longer running
+  function setReady(label, tabId, doneStartTs, doneEndTs) {
+    // Mark the tab as no longer running.  Keep (and refine) the tab's
+    // ``t0`` / ``endTs`` anchors instead of discarding them: every tab
+    // must be able to re-render its done duration as ``endTs - t0``
+    // (agent wall-clock) whenever the user switches back to it.
+    const hasStart = typeof doneStartTs === 'number' && doneStartTs > 0;
+    const hasEnd = typeof doneEndTs === 'number' && doneEndTs > 0;
     let doneTab = null;
     if (tabId !== undefined) {
       doneTab = getTab(tabId);
       if (doneTab) {
         doneTab.isRunning = false;
-        doneTab.t0 = null;
+        if (hasStart) doneTab.t0 = doneStartTs;
+        doneTab.endTs = hasEnd ? doneEndTs : Date.now();
+        // Persist the final label + colour so restoreTab paints them
+        // when the user switches back to a tab that finished while it
+        // was in the background.
+        doneTab.statusTextContent = label || 'Ready';
+        doneTab.statusTextColor = 'var(--green)';
       }
     }
     // Update UI only if the event targets the active tab (or no tabId)
     if (tabId === undefined || tabId === activeTabId) {
-      t0 = null;
-      // Clear the previously-captured endTs so the next task on
-      // the same tab starts with a fresh "still running" tick
-      // (endTs===0 short-circuits the Done-by-clock branch in
-      // ``_renderTimerTick``).
-      endTs = 0;
+      if (hasStart) t0 = doneStartTs;
+      // Record the end timestamp so the timer-tick / tab-switch logic
+      // renders "Done (Xm Ys)" from agent wall-clock.  The next task
+      // on this tab resets both anchors (submit path and the
+      // ``status running:true`` handler clear ``endTs`` and re-anchor
+      // ``t0``).
+      endTs = hasEnd ? doneEndTs : Date.now();
       setRunningState(false);
       stopTimer();
       removeSpinner();
@@ -4897,6 +4946,17 @@
     };
     if (curTab && curTab.workDir) msg.workDir = curTab.workDir;
     vscode.postMessage(msg);
+    // Fresh local run: anchor the optimistic timer at submit time and
+    // clear the previous task's end timestamp (the extension host
+    // sends a startTs-less ``status running:true`` right away; the
+    // daemon's tab-stamped status re-anchors ``t0`` to the agent's
+    // true startTs moments later).
+    t0 = Date.now();
+    endTs = 0;
+    if (curTab) {
+      curTab.t0 = t0;
+      curTab.endTs = 0;
+    }
     inp.value = '';
     inp.style.height = 'auto';
     attachments = [];
