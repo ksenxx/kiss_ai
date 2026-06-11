@@ -323,6 +323,12 @@ class _InputBox:
                         j += 1
                     i = j + 1
                     continue
+                # Swallow SS3 sequences (``ESC O <final>``): arrow keys
+                # in application cursor mode (DECCKM) and F1–F4, whose
+                # printable bytes must not be typed into the buffer.
+                if i + 1 < len(text) and text[i + 1] == "O":
+                    i += 3
+                    continue
                 i += 1
                 continue
             if ch in ("\r", "\n"):

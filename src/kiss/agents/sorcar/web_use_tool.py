@@ -114,6 +114,10 @@ def _is_profile_in_use(profile_dir: str) -> bool:
         pid = int(pid_str)
         os.kill(pid, 0)
         return True
+    except PermissionError:
+        # EPERM: the process exists but is owned by another user (or
+        # root), so the profile IS locked by a live Chromium.
+        return True
     except (OSError, ValueError, IndexError):
         return False
 
