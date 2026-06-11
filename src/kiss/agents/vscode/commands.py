@@ -33,14 +33,55 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _restart_kiss_web_daemon() -> None:
+def _kiss_home_is_default() -> bool:
+    """Return True when this process operates on the default ``~/.kiss``.
+
+    ``KISS_HOME`` redirects all KISS state (config.json, sorcar.db) to a
+    private directory — the test suite (``src/kiss/tests/conftest.py``)
+    and sandboxed runs rely on it for isolation.  Read at call time (not
+    import time) so callers see the current environment.
+    """
+    custom = os.environ.get("KISS_HOME", "")
+    if not custom:
+        return True
+    try:
+        from pathlib import Path
+
+        return Path(custom).resolve() == (Path.home() / ".kiss").resolve()
+    except OSError:
+        return False
+
+
+def _restart_kiss_web_daemon() -> bool:
     """Restart the ``kiss-web`` daemon so it picks up config changes.
 
     On macOS, uses ``launchctl kickstart -k`` to restart the
     ``com.kiss.web-server`` LaunchAgent.  On Linux, uses
     ``systemctl --user restart kiss-web``.  Runs asynchronously in
     a background thread so the caller does not block.
+
+    SAFETY: when this process operates on a NON-default ``KISS_HOME``
+    (tests, sandboxes), the system LaunchAgent serves a *different*
+    home whose config this process never touched — kick-starting it
+    could only destroy unrelated in-flight work.  Incident 2026-06-11
+    00:37:45: a pytest process exercising ``_cmd_save_config`` with a
+    changed ``remote_password`` SIGTERMed the developer's live
+    kiss-web daemon (pid 2884), killing the very agent task tree
+    (task_history rows 3556, 3618-3624) that had launched the test.
+    The guard below makes that impossible.
+
+    Returns:
+        True when a restart was dispatched; False when skipped because
+        ``KISS_HOME`` points at a non-default location.
     """
+    if not _kiss_home_is_default():
+        logger.warning(
+            "Skipping kiss-web daemon restart: KISS_HOME=%r is not the "
+            "default ~/.kiss — the system daemon serves a different home",
+            os.environ.get("KISS_HOME", ""),
+        )
+        return False
+
     def _do_restart() -> None:
         try:
             if sys.platform == "darwin":
@@ -63,6 +104,7 @@ def _restart_kiss_web_daemon() -> None:
             logger.debug("Failed to restart kiss-web daemon", exc_info=True)
 
     threading.Thread(target=_do_restart, daemon=True).start()
+    return True
 
 
 def _parse_int(value: Any) -> int | None:
@@ -710,6 +752,7 @@ class _CommandsMixin:
         from kiss.agents.vscode.vscode_config import (
             apply_config_to_env,
             load_config,
+            sanitize_config,
             save_api_key_to_shell,
             save_config,
         )
@@ -720,6 +763,12 @@ class _CommandsMixin:
             # A non-dict config (malformed payload) raises
             # AttributeError below and kills the connection.
             cfg = {}
+        # Coerce junk-typed values BEFORE any decision is made on them:
+        # a non-string ``work_dir`` must not corrupt ``self.work_dir``
+        # and a truthy non-string ``remote_password`` must not count as
+        # a genuine password change (which restarts the kiss-web
+        # daemon, killing every in-flight task).
+        cfg = sanitize_config(cfg)
         # Guard: never overwrite a non-empty remote_password with an
         # empty one from the frontend.  An empty value typically comes
         # from a race condition (config sidebar closed before the async

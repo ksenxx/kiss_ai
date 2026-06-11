@@ -96,11 +96,65 @@ def get_current_api_keys() -> dict[str, str]:
     return {k: os.environ.get(k, "") for k in API_KEY_ENV_VARS}
 
 
+def sanitize_config(data: dict[str, Any]) -> dict[str, Any]:
+    """Coerce every :data:`DEFAULTS`-keyed value to its expected type.
+
+    Config values arrive from two untrusted sources — the ``saveConfig``
+    payload of any connected client and the user-editable
+    ``config.json``.  A junk-typed value used to escape deep into
+    handlers: a non-string ``custom_endpoint`` raised
+    ``AttributeError`` out of :func:`get_custom_model_entry` (killing
+    the ``models`` reply in every window), ``custom_headers`` as a JSON
+    list crashed ``splitlines``, a non-string ``work_dir`` corrupted
+    the daemon-global working directory, and a truthy non-string
+    ``remote_password`` was treated as a genuine password change —
+    restarting the kiss-web daemon and killing every in-flight task.
+
+    Coercion rules (per the type of the key's default): booleans accept
+    any truthy/falsy value; numbers accept ints/floats and numeric
+    strings (falling back to the default otherwise); strings keep only
+    genuine ``str`` values (falling back to the default otherwise).
+    Non-DEFAULTS keys (e.g. ``tunnel_token``, ``email``) pass through
+    untouched.
+
+    Args:
+        data: Raw configuration dict.
+
+    Returns:
+        A new dict with sanitized values; *data* is not modified.
+    """
+    result = dict(data)
+    for key, default in DEFAULTS.items():
+        if key not in result:
+            continue
+        value = result[key]
+        if isinstance(default, bool):
+            if not isinstance(value, bool):
+                result[key] = bool(value)
+        elif isinstance(default, int | float):
+            if isinstance(value, bool) or not isinstance(value, int | float):
+                try:
+                    result[key] = float(value)
+                except (TypeError, ValueError):
+                    logger.debug(
+                        "Ignoring non-numeric config value %s=%r", key, value,
+                    )
+                    result[key] = default
+        elif not isinstance(value, str):
+            logger.debug(
+                "Ignoring non-string config value %s=%r", key, value,
+            )
+            result[key] = default
+    return result
+
+
 def load_config() -> dict[str, Any]:
     """Load configuration from ``~/.kiss/config.json``.
 
     Returns a dict with all keys from :data:`DEFAULTS`, falling back to
-    default values for any missing keys.
+    default values for any missing keys.  Values of DEFAULTS keys are
+    type-sanitized via :func:`sanitize_config` so a hand-edited junk
+    value cannot break downstream consumers.
     """
     result = dict(DEFAULTS)
     if CONFIG_PATH.exists():
@@ -111,7 +165,7 @@ def load_config() -> dict[str, Any]:
                 result.update(stored)
         except (json.JSONDecodeError, OSError):
             logger.debug("Failed to read config", exc_info=True)
-    return result
+    return sanitize_config(result)
 
 
 def save_config(data: dict[str, Any]) -> None:
@@ -130,6 +184,7 @@ def save_config(data: dict[str, Any]) -> None:
     Args:
         data: Configuration dict.
     """
+    data = sanitize_config(data)
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     # Serialize the whole read-modify-write so concurrent callers cannot
     # each read the same old file and clobber one another's keys.  The
