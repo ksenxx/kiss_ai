@@ -1413,8 +1413,16 @@ def _load_latest_chat_events_by_chat_id(
 ) -> dict[str, object] | None:
     """Load the latest task and its events for a chat session.
 
-    Finds the most recent task in the given chat session and returns
-    its task description string and recorded events.
+    Finds the most recent NON-sub-agent task in the given chat session
+    and returns its task description string and recorded events.
+    Sub-agent rows (``extra.subagent`` present, see
+    :func:`_is_subagent_row`) share the parent's ``chat_id`` and are
+    persisted AFTER the parent row, so a chat-id-only lookup (e.g. the
+    webview's post-restart ``resumeSession``) must skip them —
+    otherwise a restored parent tab would replay the last sub-agent's
+    events and be styled as a sub-agent tab.  Sub-agent rows are only
+    ever loaded explicitly by task id
+    (:func:`_load_chat_events_by_task_id`).
 
     Args:
         chat_id: The string chat session identifier.
@@ -1423,20 +1431,24 @@ def _load_latest_chat_events_by_chat_id(
         A dict with ``task`` (str), ``task_id`` (int), ``events``
         (list of event dicts), ``chat_id`` (str), and ``extra`` (str,
         JSON metadata), or ``None`` if chat_id is ``""`` or has no
-        tasks.
+        non-sub-agent tasks.
     """
     if not chat_id:
         return None
     with _rw_lock.read_lock():
         db = _get_db()
-        row = db.execute(
+        rows = db.execute(
             "SELECT id, task, extra FROM task_history "
-            "WHERE chat_id = ? ORDER BY timestamp DESC LIMIT 1",
+            "WHERE chat_id = ? ORDER BY timestamp DESC, id DESC",
             (chat_id,),
-        ).fetchone()
-        if not row:
-            return None
-        return _events_session_dict(db, row["id"], row["task"], chat_id, row["extra"])
+        ).fetchall()
+        for row in rows:
+            if _is_subagent_row(row["extra"]):
+                continue
+            return _events_session_dict(
+                db, row["id"], row["task"], chat_id, row["extra"]
+            )
+        return None
 
 
 def _load_chat_events_by_task_id(
