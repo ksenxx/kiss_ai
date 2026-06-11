@@ -2011,6 +2011,20 @@
         target.appendChild(acDiv);
         break;
       }
+      case 'warning': {
+        // Persisted backend warning (e.g. the worktree agent's
+        // stash-pop failure) replayed from the stored event stream —
+        // ``warning`` is in json_printer's ``_DISPLAY_EVENT_TYPES``
+        // so it survives a chat reopen / demo replay.  Rendered
+        // identically to the live banner (``addWarning``); the LIVE
+        // path never reaches here because the top-level message
+        // switch handles ``case 'warning'`` and breaks.
+        const warnDiv = mkEl('div', 'ev tr warn');
+        warnDiv.innerHTML =
+          '<strong>Warning:</strong> ' + esc(ev.message || ev.text || '');
+        target.appendChild(warnDiv);
+        break;
+      }
     }
   }
 
