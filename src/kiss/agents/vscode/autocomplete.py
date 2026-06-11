@@ -80,7 +80,10 @@ class _AutocompleteMixin:
                 try:
                     with open(active_path) as f:
                         content = f.read(50000)
-                except OSError:
+                except (OSError, UnicodeDecodeError):
+                    # UnicodeDecodeError (a binary / non-UTF-8 active
+                    # file) must not escape: it would kill the single
+                    # autocomplete worker thread permanently.
                     content = ""
 
         if query and not (query[-1].isalnum() or query[-1] == "_" or query[-1] == "."):

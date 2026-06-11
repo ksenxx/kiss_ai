@@ -205,7 +205,15 @@ def _parse_diff_hunks(
     hunks: dict[str, list[tuple[int, int, int, int]]] = {}
     current_file = ""
     for line in result.stdout.split("\n"):
-        dm = re.match(r"^diff --git a/.* b/(.*)", line)
+        # Prefer the unambiguous symmetric form ``a/<path> b/<path>``
+        # (a backreference forces both sides to be identical).  A path
+        # containing the substring " b/" — e.g. a file inside a
+        # directory named "x b" — makes the greedy fallback regex
+        # consume up to the LAST " b/" and return a bogus suffix, so
+        # the fallback is only used when the sides differ (renames).
+        dm = re.match(r"^diff --git a/(.*) b/\1$", line)
+        if dm is None:
+            dm = re.match(r"^diff --git a/.* b/(.*)", line)
         if dm:
             current_file = dm.group(1)
             continue
