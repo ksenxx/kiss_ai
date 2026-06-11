@@ -531,7 +531,16 @@ class _TaskRunnerMixin:
                         "success": False,
                         "total_tokens": tab.agent.total_tokens_used,
                         "cost": f"${tab.agent.budget_used:.4f}",
-                        "step_count": tab.agent.step_count,
+                        # RelentlessAgent-derived agents accumulate
+                        # completed steps into ``total_steps`` and leave
+                        # ``step_count`` at 0 — mirror the persisted
+                        # ``extra`` metrics below.  Fall back to
+                        # ``step_count`` for plain agents whose
+                        # ``total_steps`` is 0.
+                        "step_count": (
+                            int(getattr(tab.agent, "total_steps", 0) or 0)
+                            or int(getattr(tab.agent, "step_count", 0) or 0)
+                        ),
                         "tabId": tab_id,
                     })
                     break
