@@ -72,10 +72,23 @@ class TestSaveConfigDaemonRestart(unittest.TestCase):
         self._orig_env_path = os.environ.get("PATH", "")
         os.environ["PATH"] = str(self._stub_bin)
 
+        # Simulate a production daemon: `_restart_kiss_web_daemon` only
+        # dispatches when KISS_HOME is the default ~/.kiss (the guard
+        # added after the 2026-06-11 incident where a test process
+        # SIGTERMed the live daemon).  Config reads/writes stay fully
+        # isolated via the patched vc.CONFIG_DIR/CONFIG_PATH above, and
+        # the restart subprocess only ever reaches the PATH stubs.
+        self._orig_kiss_home = os.environ.get("KISS_HOME")
+        os.environ["KISS_HOME"] = str(Path.home() / ".kiss")
+
     def tearDown(self) -> None:
         import kiss.agents.vscode.vscode_config as vc
 
         os.environ["PATH"] = self._orig_env_path
+        if self._orig_kiss_home is None:
+            os.environ.pop("KISS_HOME", None)
+        else:
+            os.environ["KISS_HOME"] = self._orig_kiss_home
         vc.CONFIG_DIR = self._orig_dir
         vc.CONFIG_PATH = self._orig_path
         shutil.rmtree(self._tmpdir, ignore_errors=True)
