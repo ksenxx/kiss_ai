@@ -1470,11 +1470,21 @@ prints no Goodbye (marginal, not fixing).
   wrap/route safely; `_translate_webview_command` non-str type safe;
   `_resolve_user_answer_queue` multi-owner mis-route requires stale
   subscriptions already fixed in bughunt-srv2.
-- REMAINING for this iteration: run impacted vscode test sweep + `uv run check --full`, commit. (Candidate leads list below was session-1 planning;
+- (Candidate leads list below was session-1 planning;
   items 1-7 are now resolved by the fixes/probes above except: model-usage
   inflation on empty selectModel (verified harmless — `_record_model_usage`
   only runs when a model string exists; empty model returns early), complete
   empty-query staleness bump (by design: clears pending ghost).)
+- Iter 6 group E COMPLETE — 3 bug classes (BUG-6E-1/2/3) fixed, 10 new tests
+  (test_bughunt6_malformed_fields.py: 8, test_bughunt6_silent_task_death.py:
+  2), all failed pre-fix, all pass post-fix. Verification: full vscode suite
+  (1014 collected) run in 8 parallel shards — all green after adding a
+  per-test persistence/config isolation fixture to
+  test_bughunt6_malformed_fields.py (the selectModel test was persisting
+  last_model into the process-shared KISS_HOME and order-flaking
+  test_model_picker_refresh / test_no_model_available — both reproduced and
+  fixed; commit 840c7bba). `uv run check --full` passes. Fixes were swept
+  into the shared parallel commit 7344d939 (groups B, C, D, E).
 - OLD SESSION-1 PLAN (superseded): (a) check how `_handle_command` exceptions are handled by
   web_server dispatch (UDS + WS) — if unprotected, malformed-payload bugs in
   6/7 above are real (write tests per bughunt3_dispatch_malformed.py recipe,
