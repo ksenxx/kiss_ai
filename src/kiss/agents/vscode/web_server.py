@@ -3610,42 +3610,57 @@ class RemoteAccessServer:
         if not tab_id:
             return
         with self._merge_states_lock:
-            state = self._merge_states.get(tab_id)
-        if state is None or not state.remaining:
-            return
-        assert self._loop is not None
-        # ``_augment_merge_data`` reads every reviewed file from disk;
-        # do it off the event loop like the broadcast path's callers.
-        event = await self._loop.run_in_executor(
-            None,
-            _augment_merge_data,
-            {
-                "type": "merge_data",
-                "tabId": tab_id,
-                "data": state.data,
-                "hunk_count": state.total_hunks,
-            },
-        )
-        cur = state.current()
-        nav = {
-            "type": "merge_nav",
-            "tabId": tab_id,
-            "remaining": state.remaining,
-            "total": state.total_hunks,
-            "cur": (
-                {"fi": cur[0], "hi": cur[1]} if cur is not None else None
-            ),
-            "resolved": state.resolutions(),
-        }
-        try:
-            await self._endpoint_send(websocket, json.dumps(event))
-            await self._endpoint_send(
-                websocket,
-                json.dumps({"type": "merge_started", "tabId": tab_id}),
+            if tab_id not in self._merge_states:
+                return
+        # Serialise with in-flight merge actions: the reject branches
+        # of ``_apply_web_merge_action`` rewrite the reviewed files on
+        # disk (truncate + write) and mutate the shared hunk ``cs``
+        # offsets while holding this per-tab lock.  Reading the files
+        # (``_augment_merge_data``) and hunk dicts without it could
+        # hand the reconnecting client a torn ``current_text`` and
+        # mid-mutation offsets that no later ``merge_nav`` broadcast
+        # can repair (``merge_nav`` carries no file text).
+        async with self._merge_action_lock(tab_id):
+            # Re-check under the lock: the action we waited for may
+            # have resolved the final hunk and finished the review.
+            with self._merge_states_lock:
+                state = self._merge_states.get(tab_id)
+            if state is None or not state.remaining:
+                return
+            assert self._loop is not None
+            # ``_augment_merge_data`` reads every reviewed file from
+            # disk; do it off the event loop like the broadcast path's
+            # callers.
+            event = await self._loop.run_in_executor(
+                None,
+                _augment_merge_data,
+                {
+                    "type": "merge_data",
+                    "tabId": tab_id,
+                    "data": state.data,
+                    "hunk_count": state.total_hunks,
+                },
             )
-            await self._endpoint_send(websocket, json.dumps(nav))
-        except Exception:
-            logger.debug("Merge review replay failed", exc_info=True)
+            cur = state.current()
+            nav = {
+                "type": "merge_nav",
+                "tabId": tab_id,
+                "remaining": state.remaining,
+                "total": state.total_hunks,
+                "cur": (
+                    {"fi": cur[0], "hi": cur[1]} if cur is not None else None
+                ),
+                "resolved": state.resolutions(),
+            }
+            try:
+                await self._endpoint_send(websocket, json.dumps(event))
+                await self._endpoint_send(
+                    websocket,
+                    json.dumps({"type": "merge_started", "tabId": tab_id}),
+                )
+                await self._endpoint_send(websocket, json.dumps(nav))
+            except Exception:
+                logger.debug("Merge review replay failed", exc_info=True)
 
     async def _handle_submit(self, cmd: dict[str, Any]) -> None:
         """Translate the webview ``submit`` command into a backend ``run``.

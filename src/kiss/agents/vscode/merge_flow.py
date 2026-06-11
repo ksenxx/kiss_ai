@@ -537,8 +537,18 @@ class _MergeFlowMixin:
                 branch if no files changed.  Post-task callers should
                 pass False to preserve the branch for manual action.
         """
-        tab = self._get_tab(tab_id)
-        if not tab.use_worktree:
+        # Non-creating lookup: viewing a chat must never mint a
+        # ``_RunningAgentState`` (the C2/C3 invariant documented in
+        # ``_replay_session``, whose ``_emit_pending_worktree`` call
+        # lands here for every history click).  A tab without a
+        # registry entry cannot have a pending worktree — the agent
+        # holding the worktree state lives on the entry — so skipping
+        # is behaviourally identical to the old eager ``_get_tab``
+        # (which created an entry with ``use_worktree=False`` and
+        # returned on the next line) minus the phantom entry + agent.
+        with self._state_lock:
+            tab = _RunningAgentState.running_agent_states.get(tab_id)
+        if tab is None or not tab.use_worktree:
             return
         wt_agent = self._ensure_wt_agent(tab)
         if wt_agent is None or not wt_agent._wt_pending:
@@ -782,6 +792,24 @@ class _MergeFlowMixin:
                 "message": (
                     f"A worktree task is still running on this tab. "
                     f"Wait for it to finish (or stop it) before {verb}."
+                ),
+            }
+        if tab.is_merging:
+            # A merge review session or another worktree action is
+            # already in flight on this tab (e.g. a double click on
+            # the Merge button, or one click from each of two
+            # connected clients).  Without this check the second
+            # request passed the guard, queued behind ``repo_lock``,
+            # and re-ran ``wt.merge()`` / ``wt.discard()`` on the
+            # already-merged worktree — and whichever thread finished
+            # first cleared ``is_merging`` in its ``finally`` while
+            # the other was still merging, letting a non-worktree
+            # task start writing to the main tree mid-merge.
+            return {
+                "success": False,
+                "message": (
+                    "A merge or merge review is already in progress "
+                    f"on this tab. Wait for it to finish before {verb}."
                 ),
             }
         if self._any_non_wt_running():
