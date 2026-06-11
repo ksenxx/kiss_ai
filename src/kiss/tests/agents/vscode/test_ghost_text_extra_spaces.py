@@ -104,12 +104,14 @@ class TestGhostTextNoExtraSpaces:
         result = clip_autocomplete_suggestion("", "  hello")
         assert result == "hello"
 
-    def test_existing_echo_prefix_behaviour_preserved(self) -> None:
-        """The pre-existing behaviour — stripping a fully echoed query
-        prefix — must still work after the leading-whitespace fix.
+    def test_suffix_starting_with_query_not_restripped(self) -> None:
+        """A continuation suffix that itself begins with the query text
+        must survive intact: suggestions are always suffixes (the call
+        sites strip the query), so re-stripping here would corrupt
+        completions like ``hellohello world`` typed as ``hello``.
         """
         result = clip_autocomplete_suggestion("hello", "hello world")
-        assert result == " world"
+        assert result == "hello world"
 
     def test_identifier_query_with_multi_space_history_collapses_to_one(
         self,

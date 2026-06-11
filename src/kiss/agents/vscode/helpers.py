@@ -88,10 +88,19 @@ def _run_oneshot_llm(
 
 
 def clip_autocomplete_suggestion(query: str, suggestion: str) -> str:
-    """Return the autocomplete continuation, stripped of the query prefix.
+    """Normalise an autocomplete continuation suffix for ghost display.
 
-    Removes the query prefix if the LLM echoed it, strips surrounding
-    whitespace, and stops at newlines.
+    *suggestion* is always a continuation **suffix** (a prefix-matched
+    history task minus the query, or an identifier candidate minus the
+    typed partial) — both call sites (``_AutocompleteMixin._complete``
+    and ``CliCompleter._active_file_suffix``) strip the query before
+    calling.  It must therefore NOT be prefix-stripped again here: a
+    legitimate suffix can itself begin with the query text (active file
+    holds ``quxqux_token``, user typed ``qux`` → suffix ``qux_token``),
+    and re-stripping would corrupt the accepted completion (``qux`` +
+    ``_token`` types the non-existent ``qux_token``).
+
+    Strips surrounding quotes and stops at newlines.
 
     Normalises the cursor-to-ghost gap so the overlay (which uses
     ``white-space: pre-wrap``) never renders visible extra spaces
@@ -117,8 +126,6 @@ def clip_autocomplete_suggestion(query: str, suggestion: str) -> str:
     s = _strip_surrounding_quotes(suggestion)
     if not s:
         return ""
-    if s.lower().startswith(query.lower()):
-        s = s[len(query) :]
     s = s.split("\n")[0]
     if not query or (query[-1:].isspace()):
         s = s.lstrip()

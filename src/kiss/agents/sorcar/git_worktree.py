@@ -269,14 +269,36 @@ class GitWorktreeOps:
     def remove(repo: Path, wt_dir: Path) -> None:
         """Remove a worktree directory (best-effort, force).
 
+        Every caller (``discard``, ``cleanup_partial``,
+        ``_finalize_worktree``) intends permanent removal of an
+        agent-owned directory, so failures of ``git worktree remove``
+        are escalated rather than abandoned:
+
+        1. Plain ``--force`` (handles dirty/untracked content).
+        2. ``--force --force`` (git requires force twice for worktrees
+           locked via ``git worktree lock``).
+        3. Direct ``rmtree`` + ``git worktree prune`` (handles
+           corrupted worktrees — e.g. a deleted ``.git`` link file —
+           that fail git's removal validation entirely).
+
         Args:
             repo: Git repo root path.
             wt_dir: Worktree directory to remove.
         """
-        if wt_dir.exists():
-            result = _git("worktree", "remove", str(wt_dir), "--force", cwd=repo)
-            if result.returncode != 0:  # pragma: no cover — lock/perm
-                logger.warning("worktree remove failed: %s", result.stderr.strip())
+        if not wt_dir.exists():
+            return
+        result = _git("worktree", "remove", str(wt_dir), "--force", cwd=repo)
+        if result.returncode != 0:
+            result = _git(
+                "worktree", "remove", "--force", "--force", str(wt_dir), cwd=repo
+            )
+        if result.returncode != 0:
+            logger.warning(
+                "worktree remove failed: %s; deleting directory directly",
+                result.stderr.strip(),
+            )
+            shutil.rmtree(str(wt_dir), ignore_errors=True)
+            GitWorktreeOps.prune(repo)
 
     @staticmethod
     def prune(repo: Path) -> None:
@@ -945,6 +967,27 @@ class GitWorktreeOps:
     @staticmethod
     def cleanup_orphans(repo: Path) -> str:
         """Scan for orphaned ``kiss/wt-*`` branches and worktrees.
+
+        Serialized under :func:`repo_lock`: the scan snapshots
+        ``git worktree list`` and later deletes branches and rmtree's
+        unregistered directories under ``.kiss-worktrees/``.  Without
+        the lock, a worktree registered by a concurrent task start
+        (``_try_setup_worktree``) after the snapshot would look like
+        an orphan directory and be deleted out from under the active
+        task.
+
+        Args:
+            repo: Root of the git repository to scan.
+
+        Returns:
+            Summary of findings and any cleanup actions taken.
+        """
+        with repo_lock(repo):
+            return GitWorktreeOps._cleanup_orphans_locked(repo)
+
+    @staticmethod
+    def _cleanup_orphans_locked(repo: Path) -> str:
+        """Do the orphan scan/cleanup; caller must hold :func:`repo_lock`.
 
         Cleans up three distinct forms of stale state:
 

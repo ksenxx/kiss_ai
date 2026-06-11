@@ -189,8 +189,7 @@ class TestCliCompleterSuffixNotEchoStripped(TestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_predictive_match_completes_full_identifier(self) -> None:
-        completer = CliCompleter()
-        completer.active_file = str(self.active)
+        completer = CliCompleter(self.tmpdir, active_file=str(self.active))
         matches = completer._predictive_matches("qux")
         self.assertEqual(
             matches, ["quxqux_token"],
