@@ -713,25 +713,44 @@ impacted test sweep (shards), `uv run check --full`, commit.
   into current panel group → processEvent renders them post-fix);
   package.json contributes.configuration only has kissSorcar.defaultModel +
   kissSorcar.kissProjectPath (no DEFAULTS overlap → no drift).
-- REMAINING for session 2 (not yet checked): run eslint + `npx tsc -p .` + full
-  JS test dir + `uv run check --full`; commit. Then continue surfaces:
-  (a) autocomplete multi-line/unicode (`_complete` slicing vs `_prefix_match_task`
-  on multi-line queries; `[A-Za-z_]`-anchored candidate regex vs unicode `\w`
-  partials in `_complete_from_active_file` — a unicode-start partial like "héllo"
-  can never match candidates anchored at `[A-Za-z_]` BUT partial regex `[\w][\w.]*`
-  accepts it → always returns "" (probably fine), check instead a partial whose
-  matched candidate slice misbehaves with astral chars in JS frontend accept path);
-  (b) helpers.rank_file_suggestions Windows separators (marginal);
-  (c) vscode_config save_config on read-only HOME (open of .config.lock raises
-  OSError — does any caller crash a handler? grep save_config callers);
-  (d) json_printer sub-agent panel interleaving with warning/persisted types
-  (openSubagentTab :3268 / subagentDone :3362 replay fragments — covered by 5G-1
-  fix? verify warning inside subagent tab fragment renders);
-  (e) src/\*.ts daemonHealth/restart flows vs iter 3-5 server changes
-  (daemonHealth.js, AgentClient.ts reconnect/restart, reloadGuard).
-  Then: 'clear' persisted event dropped by replay paths — likely by design
-  (replay starts with fresh container), do NOT report without demonstrating
-  user-visible inconsistency.
+- **BUG 5G-2 (fixed)** media/main.js top-level `case 'warning'` dropped LIVE
+  warnings stamped for a BACKGROUND tab (`if tabId !== activeTabId break`),
+  while every other display event reaches the owning tab's `outputFragment`
+  via the `default:` route → `processOutputEventForBgTab`. A worktree task
+  finishing with a stash-pop warning while the user viewed another tab lost
+  the warning forever (tab switch showed the result but not the warning).
+  FIX: tabId-mismatch now mirrors the default route (`findTabByEvt` →
+  `processOutputEventForBgTab`, which renders via the new handleOutputEvent
+  warning case); unknown/foreign-window tab ids still dropped.
+  Test: src/kiss/agents/vscode/test/bughunt5_warning_bgtab.test.js (3 tests:
+  bg-tab warning survives tab switch (failed pre-fix; control system_output
+  passed), foreign-window drop guard, active-tab single-render guard).
+- Group G iteration-5 COMPLETE: 2 NEW bugs (commits 8e170445, c037fd12).
+  Investigated, NOT bugs (do not re-report):
+  (a) autocomplete multi-line/unicode — ghost flow is exact-echo
+  (`ev.query === inp.value` string compare, unicode/astral-safe; backend
+  `match[len(query):]` slices code points; `clip_autocomplete_suggestion`
+  stops at the first newline, whitespace-gap rules hold for newline-ending
+  queries);
+  (b) helpers.rank_file_suggestions separators — substring match against
+  paths produced by the same `_scan_files` cache the user picks from,
+  separator-agnostic;
+  (c) vscode_config save_config on read-only HOME — `.config.lock` open
+  fails at the same point pre-flock `mkstemp` already did (no regression;
+  load_config catches OSError);
+  (d) package.json contributes.configuration (kissSorcar.defaultModel,
+  kissSorcar.kissProjectPath) has zero overlap with vscode_config DEFAULTS —
+  no drift;
+  (e) demo.js grouping of persisted warning/autocommit_done — they stay in
+  the current panel group and render via processEvent post-5G-1;
+  (f) src/\*.ts daemon health/restart — iters 3-5 changed handler robustness
+  only, no protocol/response shape change; all 21 daemonHealth tests pass;
+  (g) persisted 'clear' not replayed by replayEventsInto — by design (replay
+  starts with a fresh container).
+  Verification: all 11 JS test files pass (`node`), `npx tsc -p .` clean,
+  eslint clean on main.js, impacted Python tests pass
+  (test_bughunt4_warning_persist.py, test_replay_event_coalescing.py),
+  `uv run check --full` passes.
 
 ### Iteration 5 — Group F (web_server/diff_merge/merge_flow) — session notes
 
