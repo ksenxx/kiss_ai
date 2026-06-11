@@ -323,7 +323,7 @@ ______________________________________________________________________
   - `branch`: The branch name to delete.
   - `wt_dir`: The worktree directory to remove.
 
-- **cleanup_orphans** — Scan for orphaned `kiss/wt-*` branches and worktrees. Cleans up three distinct forms of stale state: 1. `kiss/wt-*` branches with no active git worktree and no `kiss-original` config (true orphan branches). 2. Registered worktree bookkeeping entries whose directory is gone (`git worktree prune`). 3. Directories under `.kiss-worktrees/` that are not registered as git worktrees (orphan directories — e.g. leftover files from a crashed agent session or a manually unlinked worktree). Pending-merge branches (those with `kiss-original` set) are never removed — BUG-58.<br/>`cleanup_orphans(repo: Path) -> str`
+- **cleanup_orphans** — Scan for orphaned `kiss/wt-*` branches and worktrees. Serialized under :func:`repo_lock`: the scan snapshots `git worktree list` and later deletes branches and rmtree's unregistered directories under `.kiss-worktrees/`. Without the lock, a worktree registered by a concurrent task start (`_try_setup_worktree`) after the snapshot would look like an orphan directory and be deleted out from under the active task.<br/>`cleanup_orphans(repo: Path) -> str`
 
   - `repo`: Root of the git repository to scan.
   - **Returns:** Summary of findings and any cleanup actions taken.
