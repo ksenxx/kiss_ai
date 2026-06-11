@@ -175,46 +175,46 @@ Repeat until an iteration finds zero bugs.
 
 Read in full: cli_steering.py, cli_panel.py, cli_repl.py, cli_helpers.py. No test
 written yet. Candidate bugs to REPRODUCE next session (write failing test first,
-src/kiss/tests/agents/sorcar/test_bughunt5_<short>.py; check existing test_bughunt4_paste.py
-style for harness — real _InputBox with a fake out stream / pyte / pty.fork):
+src/kiss/tests/agents/sorcar/test_bughunt5\_<short>.py; check existing test_bughunt4_paste.py
+style for harness — real \_InputBox with a fake out stream / pyte / pty.fork):
 
 1. C1 control chars pass `_append_paste` filter (cli_steering.py `_append_paste`:
    `ch >= " "` keeps U+0080–U+009F, e.g. U+009B = single-char CSI) → pasted C1
    lands in buf and is written RAW to the terminal in the body row (clip_buf only
-   replaces \n and \t) → can corrupt the box/terminal. Same hole in `feed`'s typed
-   path (`elif ch >= " ": buf += ch`). Test: paste b"\x1b[200~a\xc2\x9bXb\x1b[201~",
+   replaces \\n and \\t) → can corrupt the box/terminal. Same hole in `feed`'s typed
+   path (`elif ch >= " ": buf += ch`). Test: paste b"\\x1b\[200~a\\xc2\\x9bXb\\x1b\[201~",
    assert buf has no U+009B / rendered body has no raw C1.
-2. `clip_buf` "⏎" replacement char U+23CE: verify `char_width("⏎")` —
+1. `clip_buf` "⏎" replacement char U+23CE: verify `char_width("⏎")` —
    unicodedata.east_asian_width(U+23CE) is "W"?? If char_width=2 but real terminals
    render 1 col, `body_cursor_col` parks the caret off-by-one per newline in buf
    (multi-line paste). MUST check actual EAW value in python first; compare with
    wcwidth if available. If EAW=N width 1, fine — drop.
-3. `clip_buf` tail-clip can return a slice STARTING with a combining mark (backward
+1. `clip_buf` tail-clip can return a slice STARTING with a combining mark (backward
    loop keeps cw=0 combining char, breaks on its base char) → mark combines with the
    border space on screen. Check severity; width math itself is consistent.
-4. `_pending_esc` 64-cap drop (feed end): pending dropped wholesale; if next chunk
+1. `_pending_esc` 64-cap drop (feed end): pending dropped wholesale; if next chunk
    then begins with the CONTINUATION of that escape, its tail bytes are typed as
    literal buf text. Per code comment this is by-design for absurd sequences —
    probably NOT bug; only pursue if a real ≤64 sequence (paste marker straddling
    the cap with a long preceding CSI) can trigger it.
-5. `SteeringSession.run`: if `box.start()` raises (termios.error race: tty closed
-   after supports_steering()), the _StdoutProxy stays installed (sys.stdout never
+1. `SteeringSession.run`: if `box.start()` raises (termios.error race: tty closed
+   after supports_steering()), the \_StdoutProxy stays installed (sys.stdout never
    restored) and termios state half-applied — start() is called OUTSIDE the
    try/finally. Fix: move start() inside try or wrap. Verify reproducible: call
    run() with stdin not a real tty so tcgetattr raises.
-6. `_on_submit` when task just finished (`_done` set between draw and Enter):
+1. `_on_submit` when task just finished (`_done` set between draw and Enter):
    message appended to state.pending_user_messages but never drained → silently
    lost (no warning). Compare with VS Code path behavior; maybe print "task
    already finished" or run queued as new task. Decide if bug.
-7. `CliCompleter._model_matches`: `/model name extra` → query "name extra"; minor.
+1. `CliCompleter._model_matches`: `/model name extra` → query "name extra"; minor.
    `_build_matches` at-mention regex `@([^\s]*)$` only matches at EOL (cursor at
    end) — readline passes text up-to-cursor, so fine.
-Ruled out by reading (do NOT re-report): paste-start/Shift+Enter/CSI split across
-reads (pending_esc covers all; verified by trace); partial _PASTE_END suffix len
-clamp; `keep` math; ESC-as-paste-content stripping consistent with unsplit; \x7f
-ordering in elif chain; body_cursor_col ≤ cols-1 incl. wide chars; panel_top/bottom
-ASCII-only inputs; Ctrl+C-during-question unblock (covered by _interrupt_worker);
-resize-while-pasting; tab typed directly swallowed (by design).
+   Ruled out by reading (do NOT re-report): paste-start/Shift+Enter/CSI split across
+   reads (pending_esc covers all; verified by trace); partial \_PASTE_END suffix len
+   clamp; `keep` math; ESC-as-paste-content stripping consistent with unsplit; \\x7f
+   ordering in elif chain; body_cursor_col ≤ cols-1 incl. wide chars; panel_top/bottom
+   ASCII-only inputs; Ctrl+C-during-question unblock (covered by \_interrupt_worker);
+   resize-while-pasting; tab typed directly swallowed (by design).
 
 Original session-1 findings (now all fixed above, kept for context):
 
@@ -575,6 +575,54 @@ cedf3fcf + PROGRESS.md format commit.
 - Iteration 4 still found bugs → launching iteration 5, same 7 groups, tests
   `test_bughunt5_*` / `bughunt5_*.test.js`. Stop when an iteration finds zero bugs.
 
+### Iteration 5 — Group B (git_worktree / worktree_sorcar_agent) — COMPLETE: 2 NEW bugs found+fixed
+
+- BUG-5B-1 (git_worktree.py `_git`, ~line 95): repo-scoped `GIT_*` environment
+  variables (GIT_DIR / GIT_WORK_TREE / GIT_INDEX_FILE / GIT_OBJECT_DIRECTORY /
+  GIT_COMMON_DIR / ...) inherited from the parent process — e.g. when KISS is
+  launched from a git hook (`post-commit` starting an agent), `git rebase --exec`, or a user shell export — OVERRIDE git's `-C <cwd>` repository
+  discovery, so EVERY worktree git call silently targeted the WRONG repo:
+  `discover_repo(B)` returned the hook repo A, `has_uncommitted_changes(B)`
+  reported A's state (dirty B → "clean" → user dirty state never copied into
+  the worktree), `stage_all`/commits mutated A's index, kiss branches were
+  created in A. Reproduced with two real repos + real env vars. Fix: `_git`
+  now scrubs the repo-scoped variable list (mirrors git's own
+  `local_repo_env` cleared by `git submodule`; author/committer/config vars
+  kept) from the subprocess env. Test: test_bughunt5_git_env_leak.py
+  (4 tests, all failed pre-fix).
+- BUG-5B-2 (git_worktree.py `_git`): stdout/stderr decoded with STRICT
+  `encoding="utf-8"` while `-c core.quotepath=false` makes git emit bytes
+  > 0x7F verbatim — a legal non-UTF-8 path in the repo (e.g. a Latin-1
+  > filename committed on Linux; injectable via `git update-index --cacheinfo`
+  > with bytes argv even on macOS) made EVERY git call whose output mentions
+  > the path raise UnicodeDecodeError: `has_uncommitted_changes`,
+  > `copy_dirty_state`, `stash_if_dirty`... The error (a ValueError, NOT the
+  > OSError that `_try_setup_worktree` guards) propagated out of
+  > `WorktreeSorcarAgent.run()` and killed the whole task. Also internally
+  > inconsistent: `_unquote_git_path` already decodes with surrogateescape.
+  > Fix: `errors="surrogateescape"` in `_git` (round-trips through
+  > `os.fsencode` for filesystem ops, matching `_unquote_git_path`). Test:
+  > test_bughunt5_invalid_utf8_path.py (3 tests, all failed pre-fix).
+- Investigated and verified NOT bugs (do not re-report): autocommit message
+  paths (empty LLM output → `clean_llm_output(raw) or fallback`, empty diff →
+  fallback, so `commit_staged -m ""` is unreachable); smudge/clean filter
+  failure during worktree staging (stage_all stages nothing → BUG-4B-2's
+  has_uncommitted_changes fallback catches it); promisor/partial-clone offline
+  (`worktree add` fails → create() False → documented direct-execution
+  fallback); branch checked out in a user-made second worktree (delete_branch
+  returns False → discard() emits the existing delete_warning); merge()
+  CONFLICT keeps `_wt` for retry and `_finalize_worktree` is idempotent on a
+  vanished wt dir (iter-3/4 coverage); wt-dir name collisions after
+  crash-restart impossible in practice (time + uuid4-hex8 slug, and
+  cleanup_orphans holds repo_lock).
+- Verification: 7/7 new tests fail pre-fix, pass post-fix; 513 impacted
+  worktree/bughunt/autocommit/baseline/git sorcar tests run in 8 parallel
+  shards — only failures were the documented pre-existing forkpty/pty load
+  flakes (test_bughunt_cli ctrl-c, test_bughunt4_interrupt_lock; both pass in
+  isolation) and parallel group A's test_bughunt5_nan_extra order-dependent
+  flake (passes in isolation, persistence-only, unrelated); `uv run check --full` clean. Fixes+tests committed (with parallel groups' work) in
+  1de07413.
+
 ### Iteration 5 — Group D (sorcar agents/tools) — session 1 (in progress)
 
 Files fully read so far: useful_tools.py, sorcar_agent.py. 2 NEW bugs found+fixed
@@ -602,8 +650,8 @@ Files fully read so far: useful_tools.py, sorcar_agent.py. 2 NEW bugs found+fixe
 Examined in sorcar_agent.py, NOT bugs (do not re-report): update_settings
 max_budget float() / framework arg coercion; set_model deferred path +
 schema rebuild + conversation hand-off; run() finally cleanup
-(web_use_tool.close, callback/pre_step_hook reset); _run_single sets
-tl.stop_event each task (pool thread reuse safe); _coerce_tasks (iter-3/4);
+(web_use_tool.close, callback/pre_step_hook reset); \_run_single sets
+tl.stop_event each task (pool thread reuse safe); \_coerce_tasks (iter-3/4);
 sub_usage aggregation order (results from pool.map are input-ordered;
 sub_usage indexed by idx — ordering correct).
 
@@ -635,10 +683,10 @@ re-report): build_chat_prompt MAX_TASKS middle-deletion (keeps first 2 +
 last 8, intentional) and renumbering; tl.task_id restore-to-"" in finally
 (guarded by == task_key; nested same-thread chat runs don't exist);
 go_to_url tab:N int() inside try; tab:list crashed-page title() caught;
-_check_for_new_tab; _resolve_locator re-snapshot + visibility scan;
+\_check_for_new_tab; \_resolve_locator re-snapshot + visibility scan;
 scroll negative amount (empty range); close() idempotent + atexit
-unregister; _is_profile_in_use EPERM=true / pid<=0=false (iter-3);
-_clean_singleton_locks unconditional-safe; ask_user_question callback
+unregister; \_is_profile_in_use EPERM=true / pid\<=0=false (iter-3);
+\_clean_singleton_locks unconditional-safe; ask_user_question callback
 plumbing (str() coercion; queue semantics live in vscode group E scope).
 
 DONE this session: all 14 bughunt5 group-D tests pass. REMAINING: run
@@ -679,7 +727,7 @@ impacted test sweep (shards), `uv run check --full`, commit.
   (d) json_printer sub-agent panel interleaving with warning/persisted types
   (openSubagentTab :3268 / subagentDone :3362 replay fragments — covered by 5G-1
   fix? verify warning inside subagent tab fragment renders);
-  (e) src/*.ts daemonHealth/restart flows vs iter 3-5 server changes
+  (e) src/\*.ts daemonHealth/restart flows vs iter 3-5 server changes
   (daemonHealth.js, AgentClient.ts reconnect/restart, reloadGuard).
   Then: 'clear' persisted event dropped by replay paths — likely by design
   (replay starts with fresh container), do NOT report without demonstrating
@@ -723,8 +771,7 @@ forever, agent leak, `_merge_data_dir(tab_id)` artifacts never cleaned,
 `_present_pending_worktree` never fires (pending worktree orphaned), and a stuck
 `is_merging` (worktree) tab can block other tabs' merges via busy guards.
 FIX IDEA: in `_fire_pending_tab_close`, when a merge state was present, after the
-`closeTab` cmd also dispatch `{"type":"mergeAction","action":"all-done","tabId":...,
-"workDir": state.work_dir}` via `_run_cmd` (treat close-mid-review as accept-remaining:
+`closeTab` cmd also dispatch `{"type":"mergeAction","action":"all-done","tabId":..., "workDir": state.work_dir}` via `_run_cmd` (treat close-mid-review as accept-remaining:
 no disk writes needed) so `_finish_merge` clears is_merging, cleans merge dir,
 presents pending worktree, and `_dispose_if_closed` disposes the closed tab.
 Need failing test first: real RemoteAccessServer + wss client, start merge via
@@ -744,7 +791,7 @@ all — looks consistent since broadcast goes to everyone); \_merge_action_locks
 for unknown tabIds (marginal); external file change mid-review (reject splices on
 stale coordinates — likely wontfix/marginal); websocket backpressure on huge diffs
 (\_schedule_send / \_discard_pending_send); upload/attachment handling in \_handle_submit
-(clamps look fine); commands.py mergeAction all-done routing (verify _finish_merge
+(clamps look fine); commands.py mergeAction all-done routing (verify \_finish_merge
 workDir plumbing).
 
 ### Iteration 5 — Group A (persistence.py / running_agent_state.py) — IN PROGRESS
@@ -824,7 +871,7 @@ workDir plumbing).
   malformed `extra` JSON tolerance in every reader (`_is_subagent_row` L1821,
   `_load_history`, `_list_recent_chats` L1442, `_get_adjacent_task_by_chat_id`
   L1706, `_load_subagent_rows_by_parent_task_id` L1638). Write failing tests
-  first in src/kiss/tests/agents/sorcar/test_bughunt5_<short>.py; no mocks;
+  first in src/kiss/tests/agents/sorcar/test_bughunt5\_<short>.py; no mocks;
   `uv run check --full` at the end. Do NOT re-report items listed as already
   fixed / already-verified-not-bugs in the task description above.
 
@@ -833,34 +880,34 @@ workDir plumbing).
 - Read in full: commands.py (802 lines), task_runner.py (1161 lines),
   test_bughunt3_run_start_race.py (harness recipe: VSCodeServer(), override
   printer.broadcast, stub SorcarAgent.__mro__[1].run, stub
-  _server_module.generate_followup_text, clear _RunningAgentState.running_agent_states
+  \_server_module.generate_followup_text, clear \_RunningAgentState.running_agent_states
   in tearDown). server.py (1625 lines) NOT yet read — read next.
 - Candidate leads spotted while reading (NOT yet verified — verify in next session):
   1. `_cmd_merge_action` only handles "all-done" and ignores workDir-less calls;
      check `_finish_merge` with empty tabId / double all-done (double-click) — does
      `_finish_merge` guard re-entry / missing tab?
-  2. `_cmd_worktree_action`: no busy/empty-tabId guard at the command layer — relies
+  1. `_cmd_worktree_action`: no busy/empty-tabId guard at the command layer — relies
      on `_handle_worktree_action`'s `_check_worktree_busy`; check double merge clicks
      (two threads both passing busy check before `is_merging` set?) and empty tabId
      minting phantom via `_get_tab` inside `_handle_worktree_action` (server.py —
      must read).
-  3. `_cmd_append_user_message`: broadcasts "prompt" event AFTER releasing state lock
+  1. `_cmd_append_user_message`: broadcasts "prompt" event AFTER releasing state lock
      — task may end between append and broadcast (benign?); also no size limit.
-  4. Attachments: no size limit on base64 data (task mentions "attachment size
+  1. Attachments: no size limit on base64 data (task mentions "attachment size
      limits") — a huge attachment could OOM; check what frontend limits.
-  5. `_run_task_inner`: `tab.chat_id = tab.agent.chat_id or tab.chat_id` — agent
+  1. `_run_task_inner`: `tab.chat_id = tab.agent.chat_id or tab.chat_id` — agent
      property; check stale agent chat_id from a kept-alive `_wt_pending` agent after
-     `_new_chat` (new chat id on tab, old agent kept? does _new_chat dispose agent?)
-  6. `_await_user_response`: q.get() with no timeout; if tab closed after queue
+     `_new_chat` (new chat id on tab, old agent kept? does \_new_chat dispose agent?)
+  1. `_await_user_response`: q.get() with no timeout; if tab closed after queue
      resolution, watcher only wakes on stop event — closeTab does not set stop_event?
      (check `_close_tab` in server.py).
-  7. `_subscribe_chat_viewers` broadcasts clear+status to viewers — viewer tabs of
+  1. `_subscribe_chat_viewers` broadcasts clear+status to viewers — viewer tabs of
      SUBAGENT events surface (task hint) — check subscribe of subagent task ids.
-  8. Task hints remaining: _wt_pending vs daemon restart/crash recovery; resume of
+  1. Task hints remaining: \_wt_pending vs daemon restart/crash recovery; resume of
      chat whose worktree branch deleted; daemon shutdown with running tasks;
      getFrequentTasks/favorites vs iter-4/5 persistence semantics.
-- Next session: Read server.py fully (esp. _handle_worktree_action,
-  _check_worktree_busy, _finish_merge, _close_tab, _new_chat, _replay_session,
+- Next session: Read server.py fully (esp. \_handle_worktree_action,
+  \_check_worktree_busy, \_finish_merge, \_close_tab, \_new_chat, \_replay_session,
   _present_pending_worktree, merge_flow imports), then write failing tests
   test_bughunt5_<short>.py.
 - UPDATE (session 1b): server.py now read IN FULL (all 1625 lines). Ruled out:
@@ -869,60 +916,70 @@ workDir plumbing).
   `_replay_session` use_worktree guard present (iter4 fix).
 - VERIFY NEXT (concrete candidates, none confirmed yet):
   (a) `_generate_followup_async`: worker sets thread_local.task_id then broadcasts
-      followup_suggestion. If tab closed (printer.cleanup_tab dropped subscribers)
-      BEFORE LLM returns, broadcast with task_id having NO subscribers — check
-      WebPrinter.broadcast: does it fall back to global fan-out (leak into unrelated
-      active tabs) or drop? Also JsonPrinter path.
+  followup_suggestion. If tab closed (printer.cleanup_tab dropped subscribers)
+  BEFORE LLM returns, broadcast with task_id having NO subscribers — check
+  WebPrinter.broadcast: does it fall back to global fan-out (leak into unrelated
+  active tabs) or drop? Also JsonPrinter path.
   (b) double worktree merge click race: two `_cmd_worktree_action("merge")` threads —
-      read merge_flow.py `_handle_worktree_action`/`_check_worktree_busy`: is busy
-      check + is_merging set atomic under _state_lock? Window between check and set?
+  read merge_flow.py `_handle_worktree_action`/`_check_worktree_busy`: is busy
+  check + is_merging set atomic under \_state_lock? Window between check and set?
   (c) `_cmd_merge_action` all-done with empty tabId → `_finish_merge("")` behavior;
-      double all-done (double click) re-entry.
-  (d) `_new_chat` on a tab with pending worktree (_wt_pending agent kept alive):
-      resets chat_id but keeps agent? does NOT release worktree and does not guard
-      busy tab — docstring claims newChat only arrives for fresh tab ids; check
-      main.js/extension whether newChat can target an existing tab (e.g. "New chat"
-      button on existing tab) → leaked _wt_pending agent + use_worktree flag kept?
-  (e) `_teardown_tab_resources` releases _wt_pending via _ensure_wt_agent(tab) — but
-      `_close_tab` busy path defers; OK. Check _ensure_wt_agent for resurrect bugs.
+  double all-done (double click) re-entry.
+  (d) `_new_chat` on a tab with pending worktree (\_wt_pending agent kept alive):
+  resets chat_id but keeps agent? does NOT release worktree and does not guard
+  busy tab — docstring claims newChat only arrives for fresh tab ids; check
+  main.js/extension whether newChat can target an existing tab (e.g. "New chat"
+  button on existing tab) → leaked \_wt_pending agent + use_worktree flag kept?
+  (e) `_teardown_tab_resources` releases \_wt_pending via \_ensure_wt_agent(tab) — but
+  `_close_tab` busy path defers; OK. Check \_ensure_wt_agent for resurrect bugs.
   (f) resume chat whose worktree BRANCH deleted externally: `_emit_pending_worktree`
-      (merge_flow.py) on _replay_session; and `_present_pending_worktree` after task.
+  (merge_flow.py) on \_replay_session; and `_present_pending_worktree` after task.
   (g) daemon shutdown with running tasks: web_server `_stop_active_agent_tasks` sets
-      interrupted_by_shutdown; check task_runner._cancel_outcome path persists; and
-      check _wt_pending lifecycle vs daemon restart (worktree branch left, on restart
-      _recover_orphaned_tasks only fixes result rows — replay of wt-pending chat after
-      restart: tab.agent gone, `_emit_pending_worktree` reads agent=None → user loses
-      merge/discard ability silently? expected: warning).
-  (h) attachments: no size cap on base64 decode in _run_task_inner (hint: "attachment
-      size limits") — check web_server max message size; UDS transport unbounded?
-  (i) `_subscribe_chat_viewers`: does ChatSorcarAgent._run_tasks_parallel forward
-      `_on_task_id_allocated` to sub-agent run()? (line ~219 agent.run(...) — check
-      kwargs). If YES → viewer tabs of parent chat get 'clear' wiping parent view.
-      If NO → hint (i) is N/A.
+  interrupted_by_shutdown; check task_runner.\_cancel_outcome path persists; and
+  check \_wt_pending lifecycle vs daemon restart (worktree branch left, on restart
+  \_recover_orphaned_tasks only fixes result rows — replay of wt-pending chat after
+  restart: tab.agent gone, `_emit_pending_worktree` reads agent=None → user loses
+  merge/discard ability silently? expected: warning).
+  (h) attachments: no size cap on base64 decode in \_run_task_inner (hint: "attachment
+  size limits") — check web_server max message size; UDS transport unbounded?
+  (i) `_subscribe_chat_viewers`: does ChatSorcarAgent.\_run_tasks_parallel forward
+  `_on_task_id_allocated` to sub-agent run()? (line ~219 agent.run(...) — check
+  kwargs). If YES → viewer tabs of parent chat get 'clear' wiping parent view.
+  If NO → hint (i) is N/A.
 - CONFIRMED CANDIDATE BUG-5E-1 (merge_flow.py:759 `_check_worktree_busy`): the guard
   checks `tab.is_task_active` and `_any_non_wt_running()` but NEVER `tab.is_merging`.
   Double-click on Merge (or merge+discard concurrently) on the SAME tab: thread 1
-  sets is_merging=True, releases _state_lock, blocks in repo_lock/wt.merge() (slow:
+  sets is_merging=True, releases \_state_lock, blocks in repo_lock/wt.merge() (slow:
   LLM commit message); thread 2 passes busy check (is_merging not checked), sets
   is_merging=True again, queues on repo_lock, then re-runs wt.merge()/wt.discard()
   on the already-merged worktree; ALSO whichever finishes first clears is_merging in
   its finally while the other is still merging → non-wt task can start mid-merge.
   FIX: add `if tab.is_merging: return {...refused...}` to `_check_worktree_busy`
-  (check happens under _state_lock in `_handle_worktree_action`, so check+set
+  (check happens under \_state_lock in `_handle_worktree_action`, so check+set
   atomic). TEST plan: VSCodeServer harness; tab with use_worktree=True and a stub
-  agent (real WorktreeSorcarAgent with _wt_pending=True and merge() overridden via
+  agent (real WorktreeSorcarAgent with \_wt_pending=True and merge() overridden via
   subclass to block on an Event + count calls); thread1 worktreeAction merge,
   wait until inside merge(), thread2 worktreeAction merge → assert second result
   success=False/"already in progress" and merge called exactly once.
   NOTE: sub-checks also needed? `_check_worktree_busy` is also used elsewhere?
-  (grep: only _handle_worktree_action). Also `_run_task_inner`'s non-wt start guard
+  (grep: only \_handle_worktree_action). Also `_run_task_inner`'s non-wt start guard
   scans `t.is_merging and t.use_worktree` for ALL tabs — already fine.
 - Also noted: `_finish_merge` uses `_get_tab` (mints registry entry+agent for unknown
   tab id) — phantom but disposable (non-empty id) — marginal, skip.
+- STATUS (session 1b): BUG-5E-1 FIXED — merge_flow.py `_check_worktree_busy` now
+  refuses when `tab.is_merging` (test_bughunt5_double_merge_click.py, 2 tests,
+  failed pre-fix, pass post-fix). BUG-5E-2 FIXED — merge_flow.py
+  `_present_pending_worktree` now uses non-creating registry lookup instead of
+  `_get_tab` (test_bughunt5_replay_phantom_state.py, 2 tests, failed pre-fix, pass
+  post-fix; C2/C3 invariant restored for history-click viewer tabs).
+  TODO next: run impacted vscode tests (worktree/merge/replay/close_tab/autocommit),
+  `uv run check --full`, commit, then continue remaining candidates (a) followup
+  broadcast after tab close leak (WebPrinter.broadcast fallback semantics), (c)
+  \_finish_merge double all-done, (g) shutdown w/ running tasks, (h) attachment size.
 - mf1/mf2/mf3 extracts in tmp/: merge_flow regions; tmp/server_part2/3.txt = server.py
-  820-1625; tmp/csa_parallel.txt = chat_sorcar_agent _run_single (sub-agents do NOT
-  forward _on_task_id_allocated → candidate (i) N/A).
+  820-1625; tmp/csa_parallel.txt = chat_sorcar_agent \_run_single (sub-agents do NOT
+  forward \_on_task_id_allocated → candidate (i) N/A).
 - Harness recipe (test_bughunt3_run_start_race.py): VSCodeServer(); override
   server.printer.broadcast with recording fn; stub SorcarAgent.__mro__[1].run to
-  return "success: true\nsummary: ok\n"; stub _server_module.generate_followup_text;
-  tearDown: _RunningAgentState.running_agent_states.clear().
+  return "success: true\\nsummary: ok\\n"; stub \_server_module.generate_followup_text;
+  tearDown: \_RunningAgentState.running_agent_states.clear().
