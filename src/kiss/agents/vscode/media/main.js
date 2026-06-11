@@ -209,6 +209,31 @@
     return tabs.find(t => t.id === id) || null;
   }
 
+  /**
+   * Place *subTab* immediately to the RIGHT of its parent tab — after
+   * any sub-agent tabs of the same parent already sitting there — so
+   * fan-out layouts always read parent → sub-agents left-to-right.
+   * When the parent tab is not present locally, the sub tab is
+   * appended at the end (matching the old behavior).  *subTab* may or
+   * may not already be in ``tabs``; it is (re)inserted exactly once.
+   */
+  function placeSubagentTabAfterParent(subTab, parentId) {
+    const curIdx = tabs.indexOf(subTab);
+    if (curIdx >= 0) tabs.splice(curIdx, 1);
+    const parentIdx = tabs.findIndex(t => {
+      return t.id === parentId;
+    });
+    if (parentIdx < 0) {
+      tabs.push(subTab);
+      return;
+    }
+    let insertAt = parentIdx + 1;
+    while (insertAt < tabs.length && tabs[insertAt].parentTabId === parentId) {
+      insertAt += 1;
+    }
+    tabs.splice(insertAt, 0, subTab);
+  }
+
   /** Create a fresh collapsible 'Thoughts' llm-panel. */
   function mkThoughtsPanel() {
     const panel = mkEl('div', 'llm-panel');
@@ -750,21 +775,42 @@
 
   /** Persist lightweight tab metadata via vscode.setState for cross-restart restore. */
   function persistTabState() {
-    const serialized = tabs.map(t => {
+    // Sub-agent tabs are NOT persisted.  They share the parent's
+    // backend chat id, so a chat-id-only resumeSession after a
+    // restart cannot identify which sub-agent row a restored sub tab
+    // should replay.  Instead, the parent tab's own resumeSession
+    // deterministically reopens one sub-agent tab per persisted
+    // sub-agent row — with that row's own events — to the right of
+    // the parent (see _open_persisted_subagent_tabs in server.py and
+    // the 'openSubagentTab' handler below).  Persisting sub tabs
+    // would duplicate those reopened tabs and load the parent's
+    // events into them.
+    const persistable = tabs.filter(t => {
+      return !t.isSubagentTab;
+    });
+    const serialized = persistable.map(t => {
       // Always use activeTabId for the active tab so the persisted
       // chatId stays in sync even when saveCurrentTab() hasn't run.
       return {
         title: t.title,
         chatId: t.id,
         backendChatId: t.backendChatId || '',
-        isSubagentTab: !!t.isSubagentTab,
-        isDone: !!t.isDone,
         parentTabId: t.parentTabId || '',
       };
     });
-    const activeIdx = tabs.findIndex(t => {
+    let activeIdx = persistable.findIndex(t => {
       return t.id === activeTabId;
     });
+    if (activeIdx < 0) {
+      // The active tab is a sub-agent tab (filtered out above): fall
+      // back to its parent so the restored window focuses the chat
+      // the user was working in.
+      const active = getTab(activeTabId);
+      const parentId = active && active.parentTabId ? active.parentTabId : '';
+      activeIdx = persistable.findIndex(t => {
+        return t.id === parentId;
+      });
+    }
     vscode.setState({
       tabs: serialized,
       activeTabIndex: activeIdx,
@@ -778,21 +824,23 @@
     if (saved && saved.tabs && saved.tabs.length > 0) {
       tabs = [];
       saved.tabs.forEach(st => {
+        // Sub-agent tabs (persisted by older versions of
+        // persistTabState) are dropped: they cannot be resumed by
+        // their (shared, parent-owned) chat id.  The parent tab's
+        // resumeSession reopens one fresh sub-agent tab per persisted
+        // sub-agent row, with the row's own events, right of the
+        // parent.
+        if (st.isSubagentTab) return;
         const tab = makeTab(st.title);
         // Restore tab.id from persisted chatId (frontend tab identifier)
         if (st.chatId) tab.id = st.chatId;
         if (st.backendChatId) tab.backendChatId = st.backendChatId;
-        // Preserve subagent flag so subagent tabs aren't reclassified
-        // as regular tabs on webview reload.
-        if (st.isSubagentTab) {
-          tab.isSubagentTab = true;
-          tab.isDone = !!st.isDone;
-          tab.isRunning = !st.isDone;
-        }
         if (st.parentTabId) tab.parentTabId = st.parentTabId;
         tabs.push(tab);
       });
-      const idx = saved.activeTabIndex || 0;
+    }
+    if (tabs.length > 0) {
+      const idx = (saved && saved.activeTabIndex) || 0;
       if (idx >= 0 && idx < tabs.length) {
         activeTabId = tabs[idx].id;
         // Tab IDs restored from persisted state
@@ -3226,25 +3274,32 @@
           typeof ev.taskIndex === 'number' ? ev.taskIndex + 1 : null;
         const titlePrefix = subIdx !== null ? subIdx + '. ' : '';
         const title = titlePrefix + subDesc.substring(0, 40);
+        // ``ev.parent_tab_id`` is set by the sorcar/server emitters;
+        // for the chat_sorcar broadcast path the daemon stamps
+        // ``ev.tabId`` with the subscriber's (= parent's) tab id, so we
+        // fall back to that.
+        const parentId = ev.parent_tab_id || ev.tabId || '';
         // Idempotent: if a tab with the same id already exists, update
         // it in place rather than pushing a duplicate.  Defends against
         // accidental duplicate events from the backend.
         let subTab = getTab(ev.tab_id);
+        const needsPlacement = !subTab || !subTab.isSubagentTab;
         if (!subTab) {
           subTab = makeTab(title);
           subTab.id = ev.tab_id;
-          tabs.push(subTab);
         } else {
           subTab.title = title;
+        }
+        if (needsPlacement) {
+          // First conversion of this tab into a sub-agent tab: anchor
+          // it immediately to the right of its parent tab so restored
+          // and history-reopened fan-outs mirror the live layout.
+          placeSubagentTabAfterParent(subTab, parentId);
         }
         subTab.isSubagentTab = true;
         // Remember the parent → child relationship so closing the parent
         // tab can recursively close every (nested) sub-agent tab it
-        // spawned.  ``ev.parent_tab_id`` is set by the sorcar/server
-        // emitters; for the chat_sorcar broadcast path the daemon stamps
-        // ``ev.tabId`` with the subscriber's (= parent's) tab id, so we
-        // fall back to that.
-        const parentId = ev.parent_tab_id || ev.tabId || '';
+        // spawned.
         if (parentId && parentId !== subTab.id) {
           subTab.parentTabId = parentId;
         }
