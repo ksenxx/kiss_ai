@@ -2695,9 +2695,16 @@ class RemoteAccessServer:
         """
         now = time.monotonic()
         fails = self._auth_failures.get(ip, [])
-        # Drop entries outside the window.
+        # Drop entries outside the window.  Only write the pruned list
+        # back for IPs that already have an entry (i.e. recorded at
+        # least one real failure) — unconditionally assigning here
+        # used to create a permanent empty-list entry for EVERY source
+        # IP that ever connected (including ones that always
+        # authenticated successfully), growing ``_auth_failures``
+        # without bound over the daemon's lifetime.
         fails = [t for t in fails if now - t <= _AUTH_FAIL_WINDOW]
-        self._auth_failures[ip] = fails
+        if fails or ip in self._auth_failures:
+            self._auth_failures[ip] = fails
         if len(fails) < _AUTH_FAIL_MAX:
             return False
         return (now - fails[-1]) <= _AUTH_LOCKOUT
@@ -3363,8 +3370,19 @@ class RemoteAccessServer:
         # current tab id (and every restored tab below) so a reload
         # within :data:`_TAB_CLOSE_GRACE` keeps the backend state.
         self._cancel_pending_tab_close(tab_id)
+        # Propagate the connection's stamped ``workDir`` (if any) onto
+        # the fanned-out init commands.  ``_cmd_get_config`` reports
+        # the command's ``workDir`` as ``config.work_dir`` so the
+        # settings panel shows the folder THIS instance actually uses;
+        # dropping the stamp here made every page-load ``configData``
+        # fall back to the daemon-global work_dir instead of the
+        # connection's pinned folder.
+        work_dir = cmd.get("workDir", "")
         for init_cmd in ("getModels", "getInputHistory", "getConfig"):
-            await self._run_cmd({"type": init_cmd, "connId": conn_id})
+            init: dict[str, Any] = {"type": init_cmd, "connId": conn_id}
+            if work_dir:
+                init["workDir"] = work_dir
+            await self._run_cmd(init)
         await self._send_welcome_info()
         try:
             await self._endpoint_send(

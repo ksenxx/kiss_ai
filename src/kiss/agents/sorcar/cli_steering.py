@@ -35,6 +35,7 @@ runs the agent normally with no box.
 
 from __future__ import annotations
 
+import ctypes
 import os
 import queue
 import select
@@ -429,6 +430,35 @@ class SteeringSession:
         self._aborted.set()
         self._done.set()
 
+    def _interrupt_worker(self, worker: threading.Thread) -> None:
+        """Stop the abandoned worker thread after a Ctrl+C abort.
+
+        Aborting only stops the *waiting* loop; without this the worker
+        thread would keep running ``agent.run`` in the background —
+        printing over the next idle prompt and spending budget after the
+        user had already been told the task was interrupted.  Any
+        pending ``ask_user_question`` is first unblocked with an empty
+        answer (a thread parked in ``Queue.get`` blocks at C level, where
+        an async exception cannot be delivered), then a
+        ``KeyboardInterrupt`` is injected into the worker — the same
+        mechanism the VS Code server uses to stop a running task — and
+        the worker is given a short grace period to unwind.
+
+        Args:
+            worker: The thread running ``agent.run``.
+        """
+        if self._question_pending.is_set():
+            try:
+                self._answer_q.put_nowait("")
+            except queue.Full:  # pragma: no cover - waiter already fed
+                pass
+        if worker.is_alive() and worker.ident is not None:
+            ctypes.pythonapi.PyThreadState_SetAsyncExc(
+                ctypes.c_ulong(worker.ident),
+                ctypes.py_object(KeyboardInterrupt),
+            )
+            worker.join(timeout=5.0)
+
     def _worker(self, run_kwargs: dict[str, Any]) -> None:
         try:
             self._result = self.agent.run(**run_kwargs)
@@ -463,6 +493,7 @@ class SteeringSession:
             self.box.stop()
             sys.stdout = real_stdout
         if self._aborted.is_set():
+            self._interrupt_worker(worker)
             raise KeyboardInterrupt
         if self._error is not None:
             raise self._error
@@ -533,6 +564,11 @@ def run_with_steering(
     try:
         return session.run(kwargs)
     finally:
-        if _RunningAgentState.running_agent_states.get(chat_id) is state:
-            state.is_task_active = False
-            _RunningAgentState.unregister(chat_id)
+        # The check-then-remove must be atomic against peer producers
+        # (the registry's documented locking discipline), so another
+        # component re-registering this chat id between the check and
+        # the removal can never have its fresh entry popped.
+        with _RunningAgentState._registry_lock:
+            if _RunningAgentState.running_agent_states.get(chat_id) is state:
+                state.is_task_active = False
+                _RunningAgentState.unregister(chat_id)

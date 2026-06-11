@@ -309,8 +309,13 @@ class ChatSorcarAgent(SorcarAgent):
             model=kwargs.get("model_name", "") or "",
             work_dir=kwargs.get("work_dir", "") or "",
             is_parallel=bool(kwargs.get("is_parallel", False)),
+            # ``pop`` (not ``get``): ``SorcarAgent.run()`` has no
+            # ``use_worktree`` parameter, so forwarding it via
+            # ``**kwargs`` would raise ``TypeError``.  Only
+            # ``WorktreeSorcarAgent`` consumes this kwarg (and pops it
+            # before delegating here).
             is_worktree=(
-                bool(kwargs.get("use_worktree", False)) or self.uses_worktree
+                bool(kwargs.pop("use_worktree", False)) or self.uses_worktree
             ),
         )
 

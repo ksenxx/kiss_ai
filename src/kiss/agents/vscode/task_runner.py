@@ -267,6 +267,14 @@ class _TaskRunnerMixin:
         # to the owning ``_RunningAgentState`` and drain
         # ``pending_user_messages`` before each model call.
         tab.agent._tab_id = tab_id
+        # Stamp the agent's true start timestamp (ms since epoch) on
+        # the live agent so ``VSCodeServer._replay_session`` can anchor
+        # the "Running …" header of a tab that opens this chat WHILE
+        # the task is still running.  The persisted ``extra`` JSON only
+        # gains ``startTs`` at task END (``_save_task_extra`` in the
+        # cleanup finally below), so during the run the live agent is
+        # the only source of truth for the start time.
+        tab.agent._task_start_ms = start_ms
         # Sync the agent's chat id to the tab's chat id BEFORE the run
         # starts.  ``_RunningAgentState._get_tab`` eagerly populates
         # ``tab.agent`` (for merge / discard / worktree state callers
