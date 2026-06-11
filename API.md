@@ -273,6 +273,10 @@ ______________________________________________________________________
 
   - `repo`: Git repo root path.
 
+- **ensure_scratch_merge_driver** — Install a merge driver that auto-resolves agent scratch files. `PROGRESS.md` is a tracked per-task agent log that every task wholesale rewrites ("clear PROGRESS.md when a new task begins"). Whenever main's copy diverged from the worktree's fork point, the whole-file rewrite on both sides made every three-way merge (`git merge --squash` and `git cherry-pick` alike) conflict — blocking the entire worktree merge over a scratch file. This registers a repo-local `kiss-scratch` merge driver that resolves content conflicts in such files by keeping the incoming branch's version (`%B`): the newest task's log wins, matching the clear-on-new-task convention. Installation uses only untracked plumbing — `<git_common_dir>/info/attributes` plus repo-local config — so no tracked file is ever modified, and the driver equally fixes the *manual* merge/cherry-pick commands suggested to the user on merge failure.<br/>`ensure_scratch_merge_driver(repo: Path) -> None`
+
+  - `repo`: Git repo root path.
+
 - **load_original_branch** — Load the original branch from git config.<br/>`load_original_branch(repo: Path, branch: str) -> str | None`
 
   - `repo`: Git repo root path.
