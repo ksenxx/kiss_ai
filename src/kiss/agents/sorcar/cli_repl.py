@@ -32,6 +32,13 @@ extension precisely:
   body is a prompt template (``$ARGUMENTS``/``$1``…/``@{file}``/shell
   injection) that is expanded and run as a task; ``/commands`` lists
   them and Tab completes their names.
+* agent skills (``<name>/SKILL.md`` directories) following the
+  `Agent Skills <https://agentskills.io>`_ standard — discovered from
+  ``~/.kiss/skills``, ``<project>/.kiss/skills``, Claude Code's
+  ``~/.claude/skills`` and ``<project>/.claude/skills``, the
+  cross-client ``.agents/skills`` convention, and the skills bundled
+  with Sorcar; ``/skills`` lists them and ``/skills <name>`` shows one
+  — see :mod:`kiss.agents.sorcar.skills`.
 * ``/model``-name fast completion — :func:`rank_model_suggestions` over
   the generation-capable models in
   :mod:`kiss.core.models.model_info` (preferring providers whose API key
@@ -125,6 +132,9 @@ SLASH_COMMANDS: dict[str, str] = {
     "/context": "Show token usage for this session",
     "/commands": "List custom commands (.md files in ~/.kiss/commands "
                  "and <project>/.kiss/commands)",
+    "/skills": "List agent skills (SKILL.md dirs in ~/.kiss/skills, "
+               "<project>/.kiss/skills, .claude/skills, .agents/skills); "
+               "/skills <name> shows one",
     "/exit": "Exit the sorcar CLI",
     "/quit": "Alias for /exit",
 }
@@ -468,6 +478,23 @@ def _handle_slash(
         return False
     if cmd == "/commands":
         print(f"\n{format_command_listing(discover_commands(work_dir))}\n")
+        return False
+    if cmd == "/skills":
+        from kiss.agents.sorcar.skills import (
+            discover_skills,
+            format_skill_listing,
+            load_skill_content,
+        )
+
+        skills = discover_skills(work_dir)
+        if arg:
+            found = skills.get(arg)
+            if found is None:
+                print(f"\nUnknown skill: {arg}. /skills lists them.\n")
+            else:
+                print(f"\n{load_skill_content(found)}\n")
+        else:
+            print(f"\n{format_skill_listing(skills)}\n")
         return False
     if cmd in ("/clear", "/new"):
         from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
