@@ -409,6 +409,13 @@ class _WebMergeState:
     """
 
     def __init__(self, merge_data: dict[str, Any]) -> None:
+        # Full ``data`` payload of the opening ``merge_data`` event,
+        # kept so an in-flight review can be replayed verbatim to a
+        # client that reconnects mid-review (browser reload).  The
+        # ``hunks`` dicts inside are shared (not copied): reject
+        # actions adjust their ``cs`` offsets in place, so a replay
+        # always reflects the current on-disk line numbers.
+        self.data: dict[str, Any] = merge_data
         self.files: list[dict[str, Any]] = merge_data.get("files", [])
         # The tab's repository (or worktree) directory, stamped by the
         # backend ``_start_merge_session``.  Echoed back on the
@@ -3484,6 +3491,13 @@ class RemoteAccessServer:
             )
         except Exception:
             pass
+        # Replay an in-flight merge review for the tab this connection
+        # claims directly (restored tabs are replayed in the loop
+        # below).  ``merge_data`` events are tab-stamped and never
+        # persisted, so without this a page reload mid-review loses
+        # the merge UI forever while the server-side ``_WebMergeState``
+        # (and the backend tab's ``is_merging`` flag) stay stuck.
+        await self._replay_merge_review(tab_id, websocket)
         # M7: cap the number of restored tabs a single client can ask
         # the server to resume so an authenticated-but-malicious or
         # buggy client cannot flood the executor with thousands of
@@ -3515,6 +3529,68 @@ class RemoteAccessServer:
                     {"type": "resumeSession", "chatId": chat_id,
                      "tabId": rt_id},
                 )
+            if isinstance(rt_id, str) and rt_id:
+                await self._replay_merge_review(rt_id, websocket)
+
+    async def _replay_merge_review(self, tab_id: str, websocket: Any) -> None:
+        """Re-send an in-flight merge review to a reconnecting client.
+
+        ``merge_data`` events are tab-stamped, so ``WebPrinter.broadcast``
+        forwards them to currently-connected clients only — they are
+        never recorded or persisted.  A browser that reloads mid-review
+        would therefore never see the merge UI again even though the
+        server still holds the unresolved :class:`_WebMergeState` (and
+        the backend tab stays ``is_merging``).  The VS Code extension's
+        ``MergeManager`` survives webview reloads in the extension
+        host; for the web client the server is the only source of
+        truth, so it replays ``merge_data`` + ``merge_started`` +
+        ``merge_nav`` (resolutions included) to the reconnecting
+        endpoint.  Sends are targeted at *websocket* only — sibling
+        windows already received the original broadcast.
+
+        Args:
+            tab_id: The tab the connection (re-)claimed.
+            websocket: The reconnecting client connection.
+        """
+        if not tab_id:
+            return
+        with self._merge_states_lock:
+            state = self._merge_states.get(tab_id)
+        if state is None or not state.remaining:
+            return
+        assert self._loop is not None
+        # ``_augment_merge_data`` reads every reviewed file from disk;
+        # do it off the event loop like the broadcast path's callers.
+        event = await self._loop.run_in_executor(
+            None,
+            _augment_merge_data,
+            {
+                "type": "merge_data",
+                "tabId": tab_id,
+                "data": state.data,
+                "hunk_count": state.total_hunks,
+            },
+        )
+        cur = state.current()
+        nav = {
+            "type": "merge_nav",
+            "tabId": tab_id,
+            "remaining": state.remaining,
+            "total": state.total_hunks,
+            "cur": (
+                {"fi": cur[0], "hi": cur[1]} if cur is not None else None
+            ),
+            "resolved": state.resolutions(),
+        }
+        try:
+            await self._endpoint_send(websocket, json.dumps(event))
+            await self._endpoint_send(
+                websocket,
+                json.dumps({"type": "merge_started", "tabId": tab_id}),
+            )
+            await self._endpoint_send(websocket, json.dumps(nav))
+        except Exception:
+            logger.debug("Merge review replay failed", exc_info=True)
 
     async def _handle_submit(self, cmd: dict[str, Any]) -> None:
         """Translate the webview ``submit`` command into a backend ``run``.

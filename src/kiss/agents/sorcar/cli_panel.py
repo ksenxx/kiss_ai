@@ -147,7 +147,9 @@ def clip_buf(buf: str, cols: int) -> str:
         The portion of *buf* that fits on the body row (possibly the
         whole buffer, or its tail when it would overflow).
     """
-    shown = buf.replace("\n", "⏎")
+    # Newlines (from Shift+Enter or a bracketed paste) render as ⏎ and
+    # tabs as a space so the one-row body never emits control chars.
+    shown = buf.replace("\n", "⏎").replace("\t", " ")
     inner_w = cols - 4  # room between "│ " and " │"
     avail = inner_w - display_width(PROMPT_MARKER)
     if display_width(shown) <= avail:

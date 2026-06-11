@@ -37,9 +37,12 @@ from __future__ import annotations
 
 import codecs
 import ctypes
+import logging
 import os
 import queue
+import re
 import select
+import signal
 import sys
 import threading
 from typing import TYPE_CHECKING, Any, cast
@@ -64,6 +67,8 @@ from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 if TYPE_CHECKING:
     from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 
+logger = logging.getLogger(__name__)
+
 try:  # POSIX-only terminal control; absent on Windows.
     import termios
 
@@ -76,6 +81,48 @@ except ImportError:  # pragma: no cover - exercised only on Windows
 _BOX_H = 3
 # Minimum terminal height for which the anchored box is worthwhile.
 _MIN_ROWS = _BOX_H + 3
+
+# Bracketed-paste markers (the terminal wraps pasted text in these once
+# mode 2004 is enabled), and a pattern stripping ANSI escape sequences
+# that may be embedded in pasted content.
+_PASTE_START = f"{_ESC}[200~"
+_PASTE_END = f"{_ESC}[201~"
+_PASTE_SEQ_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b.")
+
+
+def _box_top_row(rows: int) -> int:
+    """Return the box's first screen row (1-based) for *rows* total rows.
+
+    Clamped so a terminal shrunk below the box height never produces
+    zero or negative row coordinates (which would render as invalid
+    control sequences).
+
+    Args:
+        rows: Total terminal rows.
+
+    Returns:
+        The 1-based row of the box's top border, always ``>= 1``.
+    """
+    return max(rows - _BOX_H, 1) + 1
+
+
+def _partial_suffix_len(text: str, seq: str) -> int:
+    """Return the length of the longest proper prefix of *seq* ending *text*.
+
+    Used to detect a paste terminator split across ``os.read`` chunks.
+
+    Args:
+        text: The processed input chunk.
+        seq: The full sequence whose prefix may dangle at the chunk end.
+
+    Returns:
+        The number of trailing characters of *text* that form a proper
+        prefix of *seq* (``0`` when none do).
+    """
+    for k in range(len(seq) - 1, 0, -1):
+        if text.endswith(seq[:k]):
+            return k
+    return 0
 
 
 def supports_steering() -> bool:
@@ -190,6 +237,14 @@ class _InputBox:
             errors="ignore"
         )
         self._pending_esc = ""
+        # Inside a bracketed paste (between ``ESC[200~`` and
+        # ``ESC[201~``): newlines are inserted into the buffer instead
+        # of submitting, and control chars lose their key meaning.
+        self._pasting = False
+        # The raw termios settings applied by :meth:`start`, re-applied
+        # by the SIGCONT handler after a suspend/resume cycle.
+        self._raw_term: Any = None
+        self._prev_sigcont: Any = None
 
     def start(self) -> None:
         """Enter raw mode, reserve the scroll region and draw the box."""
@@ -203,17 +258,33 @@ class _InputBox:
         new[6][termios.VMIN] = 1
         new[6][termios.VTIME] = 0
         termios.tcsetattr(self._fd, termios.TCSANOW, new)
+        self._raw_term = new
+        # Re-assert the raw mode, paste mode, scroll region and box
+        # after a Ctrl+Z suspend is resumed (``fg``); without this the
+        # screen stays corrupted until the next keypress or resize.
+        # ``signal.signal`` only works in the main thread — skip the
+        # handler elsewhere rather than failing.
+        try:
+            self._prev_sigcont = signal.signal(
+                signal.SIGCONT, self._on_sigcont
+            )
+        except ValueError:  # pragma: no cover - non-main-thread start
+            self._prev_sigcont = None
         with self.lock:
             out = self._out
             # Push existing content up so the box does not overwrite it.
             out.write("\n" * _BOX_H)
             # Scroll region = everything above the box.
-            out.write(f"{_ESC}[1;{rows - _BOX_H}r")
+            out.write(f"{_ESC}[1;{max(rows - _BOX_H, 1)}r")
             # Park the output cursor on the last region row and save that
             # position; agent output is later written by restoring to it
             # (see :class:`_StdoutProxy`).
-            out.write(f"{_ESC}[{rows - _BOX_H};1H")
+            out.write(f"{_ESC}[{max(rows - _BOX_H, 1)};1H")
             out.write(f"{_ESC}7")
+            # Bracketed paste: pasted text arrives wrapped in
+            # ``ESC[200~ … ESC[201~`` so embedded newlines insert line
+            # breaks instead of submitting partial instructions.
+            out.write(f"{_ESC}[?2004h")
             # Keep the real cursor *visible*: it rests (blinking) in the
             # box body, mirroring the idle ``sorcar`` prompt's caret.
             out.write(f"{_ESC}[?25h")
@@ -228,9 +299,16 @@ class _InputBox:
             return
         assert termios is not None
         rows, _ = _term_size()
-        top_row = rows - _BOX_H + 1
+        top_row = _box_top_row(rows)
+        if self._prev_sigcont is not None:
+            try:
+                signal.signal(signal.SIGCONT, self._prev_sigcont)
+            except ValueError:  # pragma: no cover - non-main-thread stop
+                pass
+            self._prev_sigcont = None
         with self.lock:
             out = self._out
+            out.write(f"{_ESC}[?2004l")  # leave bracketed-paste mode
             out.write(f"{_ESC}[r")  # reset scroll region to full screen
             # Erase the box's rows so the steering panel does not linger
             # once the task ends.  Otherwise the idle REPL prompt would
@@ -248,6 +326,33 @@ class _InputBox:
             termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old_term)
             self._old_term = None
 
+    def _on_sigcont(self, signum: int, frame: Any) -> None:
+        """Restore the box after the process is resumed (``fg``).
+
+        A Ctrl+Z suspend hands the terminal back to the shell, which
+        prints over the box and may reset the tty modes; the scroll
+        region and bracketed-paste mode are also not guaranteed to
+        survive.  Re-apply the raw mode and force a full re-anchor +
+        redraw so the session continues seamlessly.
+
+        Args:
+            signum: The delivered signal number (``SIGCONT``).
+            frame: The interrupted stack frame (unused).
+        """
+        del signum, frame
+        if not self._active:  # pragma: no cover - resumed after stop()
+            return
+        if termios is not None and self._raw_term is not None and self._fd >= 0:
+            try:
+                termios.tcsetattr(self._fd, termios.TCSANOW, self._raw_term)
+            except termios.error:  # pragma: no cover - tty went away
+                logger.debug("could not re-apply raw mode", exc_info=True)
+        with self.lock:
+            self._out.write(f"{_ESC}[?2004h")
+            # Force _draw_locked to re-emit the scroll region.
+            self._rows = 0
+            self._draw_locked()
+
     def redraw(self) -> None:
         """Redraw the box, preserving the output cursor position."""
         with self.lock:
@@ -257,14 +362,16 @@ class _InputBox:
     def _draw_locked(self) -> None:
         rows, _ = _term_size()
         cols = panel_cols()
-        top_row = rows - _BOX_H + 1
+        top_row = _box_top_row(rows)
         out = self._out
         if rows != self._rows:
             # The terminal was resized: re-anchor the scroll region and
             # re-save the output cursor inside the new region so agent
-            # output cannot scroll over the relocated box.
-            out.write(f"{_ESC}[1;{rows - _BOX_H}r")
-            out.write(f"{_ESC}[{rows - _BOX_H};1H")
+            # output cannot scroll over the relocated box.  Row values
+            # are clamped to >= 1 so a terminal shrunk below the box
+            # height never receives invalid control sequences.
+            out.write(f"{_ESC}[1;{max(rows - _BOX_H, 1)}r")
+            out.write(f"{_ESC}[{max(rows - _BOX_H, 1)};1H")
             out.write(f"{_ESC}7")
             self._rows = rows
 
@@ -307,9 +414,35 @@ class _InputBox:
             rows, _ = _term_size()
         if cols is None:
             cols = panel_cols()
-        top_row = rows - _BOX_H + 1
+        top_row = _box_top_row(rows)
         col = body_cursor_col(self.buf, cols)
         self._out.write(f"{_ESC}[{top_row + 1};{col}H")
+
+    def _append_paste(self, chunk: str) -> bool:
+        """Append bracketed-paste content to the edit buffer.
+
+        Newlines are kept (normalised to ``\\n``) so a multi-line paste
+        stays one instruction, ANSI escape sequences embedded in the
+        pasted text are stripped, and other control characters are
+        dropped so they cannot act as editing keys.
+
+        Args:
+            chunk: Decoded pasted text (without the paste markers).
+
+        Returns:
+            ``True`` when the buffer changed.
+        """
+        chunk = chunk.replace("\r\n", "\n").replace("\r", "\n")
+        chunk = _PASTE_SEQ_RE.sub("", chunk)
+        cleaned = "".join(
+            ch
+            for ch in chunk
+            if (ch >= " " and ch != "\x7f") or ch in ("\n", "\t")
+        )
+        if not cleaned:
+            return False
+        self.buf += cleaned
+        return True
 
     def feed(self, data: bytes, on_submit: Any, on_abort: Any) -> None:
         """Process a chunk of raw keyboard input.
@@ -324,8 +457,33 @@ class _InputBox:
         i = 0
         changed = False
         while i < len(text):
+            if self._pasting:
+                # Everything up to the paste terminator is content; the
+                # terminator itself may be split across reads, so a
+                # dangling prefix of it is deferred to the next chunk.
+                end = text.find(_PASTE_END, i)
+                if end < 0:
+                    keep = min(
+                        _partial_suffix_len(text, _PASTE_END), len(text) - i
+                    )
+                    if self._append_paste(text[i : len(text) - keep]):
+                        changed = True
+                    self._pending_esc = text[len(text) - keep :] if keep else ""
+                    i = len(text)
+                    break
+                if self._append_paste(text[i:end]):
+                    changed = True
+                self._pasting = False
+                i = end + len(_PASTE_END)
+                continue
             ch = text[i]
             if ch == "\x1b":
+                # Bracketed paste start: buffer the pasted block (with
+                # its newlines) instead of treating it as keystrokes.
+                if text.startswith(_PASTE_START[1:], i + 1):
+                    self._pasting = True
+                    i += len(_PASTE_START)
+                    continue
                 # Shift+Enter (kitty CSI-u ``ESC[13;2u`` or xterm
                 # modifyOtherKeys ``ESC[27;2;13~``) inserts a newline
                 # into the buffer instead of submitting the line.
@@ -534,6 +692,14 @@ class SteeringSession:
         worker.start()
         try:
             self._loop()
+        except KeyboardInterrupt:
+            # SIGINT can interrupt the main thread *outside* the
+            # select call guarded inside ``_loop`` — e.g. while it is
+            # blocked on the shared terminal lock in ``box.feed`` →
+            # ``redraw`` waiting for a worker write to finish.  Treat
+            # it exactly like an in-loop Ctrl+C so the worker is still
+            # interrupted below instead of leaking in the background.
+            self._on_abort()
         finally:
             self.box.stop()
             sys.stdout = real_stdout
