@@ -452,6 +452,21 @@ class ChatSorcarAgent(SorcarAgent):
         except Exception:
             result_summary = "Task failed"
             raise
+        except BaseException:
+            # KeyboardInterrupt (user Stop / graceful daemon shutdown),
+            # SystemExit, etc. are NOT matched by ``except Exception``.
+            # Persisting the initial ``""`` here would overwrite the
+            # "Agent Failed Abruptly" sentinel with an empty string —
+            # which the startup orphan sweep (matching the sentinel
+            # exactly) can never repair, leaving the row permanently
+            # blank (incident: task_history row 3624, killed by the
+            # 2026-06-11 00:37:45 daemon restart mid-run).  Persist an
+            # explicit marker instead.  Top-level VS Code runs pass
+            # ``_skip_persistence=True`` and are unaffected (the task
+            # runner's ``_cancel_outcome`` owns their result); this
+            # covers sub-agents and CLI/standalone runs.
+            result_summary = "Task interrupted"
+            raise
         finally:
             ChatSorcarAgent.running_agents.pop(task_id, None)
             if printer is not None:
