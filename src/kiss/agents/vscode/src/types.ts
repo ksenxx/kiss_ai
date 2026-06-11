@@ -205,6 +205,7 @@ type ToWebviewMessageBody =
     }
   | {type: 'worktree_progress'; message: string}
   | {type: 'worktree_result'; success: boolean; message: string}
+  | {type: 'warning'; message: string; tabId?: string}
   | {type: 'autocommit_prompt'; changedFiles: string[]; tabId?: string}
   | {type: 'autocommit_progress'; message: string; tabId?: string}
   | {

@@ -2604,6 +2604,14 @@
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) break;
         addNotice(ev.text);
         break;
+      case 'warning':
+        // Backend warning the user must see — e.g. the worktree
+        // agent's stash-pop failure or merge-conflict warning
+        // (WorktreeSorcarAgent._flush_warnings broadcasts
+        // {type: 'warning', message: ...}).
+        if (ev.tabId !== undefined && ev.tabId !== activeTabId) break;
+        addWarning(ev.message || ev.text || '');
+        break;
       case 'clear': {
         const clearTab =
           ev.tabId !== undefined ? getTab(ev.tabId) : getTab(activeTabId);
@@ -3537,6 +3545,14 @@
   function addNotice(text) {
     const div = mkEl('div', 'ev tr note');
     div.innerHTML = '<strong>Note:</strong> ' + esc(text);
+    O.appendChild(div);
+    sb();
+  }
+
+  /** Render a backend warning (amber-tinted banner). */
+  function addWarning(text) {
+    const div = mkEl('div', 'ev tr warn');
+    div.innerHTML = '<strong>Warning:</strong> ' + esc(text);
     O.appendChild(div);
     sb();
   }

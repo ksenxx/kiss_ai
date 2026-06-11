@@ -243,9 +243,22 @@ class _TaskRunnerMixin:
         if raw_attachments:
             attachments = []
             for att in raw_attachments:
-                data_b64 = att.get("data", "")
-                mime = att.get("mimeType", "application/octet-stream")
-                data = base64.b64decode(data_b64)
+                try:
+                    data_b64 = att.get("data", "")
+                    mime = att.get("mimeType", "application/octet-stream")
+                    data = base64.b64decode(data_b64)
+                except Exception:
+                    # A malformed attachment (non-dict entry, invalid
+                    # base64) must not kill the task thread:
+                    # ``_run_task`` has no except clause, so an
+                    # escaping ``binascii.Error`` would silently end
+                    # the task — spinner stops with no result/error
+                    # event broadcast or persisted.  Skip the bad
+                    # attachment and run the task with the rest.
+                    logger.warning(
+                        "Skipping malformed attachment", exc_info=True,
+                    )
+                    continue
                 attachments.append(Attachment(data=data, mime_type=mime))
 
         tab_id = cmd.get("tabId", "")
