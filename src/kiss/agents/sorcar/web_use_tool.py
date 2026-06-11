@@ -112,6 +112,12 @@ def _is_profile_in_use(profile_dir: str) -> bool:
         target = os.readlink(str(lock_path))
         pid_str = target.rsplit("-", 1)[-1]
         pid = int(pid_str)
+        if pid <= 0:
+            # A corrupt/stale lock (e.g. "host-0").  os.kill(0, 0)
+            # signals the CALLER'S OWN process group and always
+            # succeeds, which would mark the profile permanently in
+            # use and silently escalate to <dir>_1, <dir>_2, …
+            return False
         os.kill(pid, 0)
         return True
     except PermissionError:
@@ -236,6 +242,11 @@ class WebUseTool:
         """
         if self._is_alive():
             return
+        # Re-arm the atexit safety net (close() unregisters it).  The
+        # unregister-then-register pattern keeps exactly one entry even
+        # when the browser is relaunched many times.
+        atexit.unregister(self.close)
+        atexit.register(self.close)
         self._close_browser_only()
         from playwright.sync_api import sync_playwright
 
@@ -590,6 +601,10 @@ class WebUseTool:
             except Exception:  # pragma: no cover — Playwright stop rarely fails
                 logger.debug("Exception caught", exc_info=True)
         self._playwright = None
+        # Drop the atexit registration so closed tools are not retained
+        # for the process lifetime (one leaked entry per agent run).
+        # ``_ensure_browser`` re-registers if this tool is revived.
+        atexit.unregister(self.close)
         return "Browser closed."
 
     def get_tools(self) -> list[Callable[..., str]]:
