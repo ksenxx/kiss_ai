@@ -243,6 +243,22 @@ FIX: in `_reject_hunk_in_file` and `_restore_base_bytes`, unlink `write_to` firs
 Test: test_bughunt4_symlink_reject.py (3 tests: reject-all text, per-hunk, binary;
 all failed before fix, pass after).
 
+**BUG F4-3 (fixed)**: merge review lost forever on browser reload. `merge_data` events
+are tab-stamped → `WebPrinter.broadcast` forwards to connected clients only, never
+persisted/replayed; `_handle_ready` re-claimed reloaded tabs (cancel deferred close +
+resumeSession) but never re-emitted the in-flight review. Result: after a mid-review
+page reload the merge UI is gone, the unresolved server-side `_WebMergeState` and the
+backend tab's `is_merging` stay stuck, all-done/_finish_merge/autocommit never fire.
+(VS Code extension unaffected: its TS MergeManager survives webview reloads.)
+FIX: `_WebMergeState` now keeps the full `data` payload (`self.data`, hunks shared so
+reject cs-offset mutations stay live); new `RemoteAccessServer._replay_merge_review`
+re-sends augmented `merge_data` + `merge_started` + `merge_nav` (with resolutions and
+current position) TARGETED at the reconnecting endpoint; called from `_handle_ready`
+for the claimed tabId and every restoredTabs entry.
+Test: test_bughunt4_merge_replay_on_reconnect.py (real wss:// reconnect; 2 tests:
+replay with one hunk pre-accepted via real action handler asserts remaining=2 +
+resolved list; clean reconnect asserts NO merge events; failed before fix, pass after).
+
 **Verified NOT bugs (do NOT re-report)**:
 
 - Interleaved/out-of-order per-hunk accept/reject offset bookkeeping in
