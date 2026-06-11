@@ -143,7 +143,7 @@ def supports_steering() -> bool:
 
 
 class _StdoutProxy:
-    """A ``sys.stdout`` replacement that serialises writes with box redraws.
+    """A ``sys.stdout``/``sys.stderr`` replacement serialising writes with box redraws.
 
     All attribute access other than :meth:`write`/:meth:`flush` is
     delegated to the real stream so Rich still detects the TTY, colour
@@ -581,6 +581,11 @@ class SteeringSession:
         # Capture the real stdout now (before :meth:`run` swaps in the
         # proxy) so box rendering writes straight to the terminal.
         self._real_stdout = sys.stdout
+        # stderr is swapped too: logging handlers, ``warnings`` and
+        # library noise write there, and an unproxied write would land
+        # at the visible cursor parked inside the box body row,
+        # overprinting the input panel instead of scrolling above it.
+        self._real_stderr = sys.stderr
         self.box = _InputBox(self.lock, self._real_stdout)
         self._done = threading.Event()
         self._aborted = threading.Event()
@@ -688,8 +693,12 @@ class SteeringSession:
             KeyboardInterrupt: If the user aborts with Ctrl+C.
         """
         real_stdout = self._real_stdout
+        real_stderr = self._real_stderr
         proxy = _StdoutProxy(real_stdout, self.lock, self.box)
         sys.stdout = cast(Any, proxy)
+        sys.stderr = cast(
+            Any, _StdoutProxy(real_stderr, self.lock, self.box)
+        )
         self.box.start()
         worker = threading.Thread(
             target=self._worker, args=(run_kwargs,), daemon=True
@@ -708,6 +717,7 @@ class SteeringSession:
         finally:
             self.box.stop()
             sys.stdout = real_stdout
+            sys.stderr = real_stderr
         if self._aborted.is_set():
             self._interrupt_worker(worker)
             raise KeyboardInterrupt

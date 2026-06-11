@@ -484,8 +484,23 @@ class UsefulTools:
                     "Error: old_string must not be empty. "
                     "Use the Write tool to create or overwrite a file."
                 )
-            content = resolved.read_text()
+            # Read WITHOUT universal-newline translation: reading the
+            # translated text and writing it back would silently rewrite
+            # EVERY line ending in a CRLF file as LF (huge spurious
+            # diffs) even for a one-character edit.
+            content = resolved.read_text(newline="")
             count = content.count(old_string)
+            if count == 0 and "\r\n" in content and "\r\n" not in old_string:
+                # Models see files through Read(), which translates CRLF
+                # to LF — so old_string/new_string carry LF even when the
+                # file on disk uses CRLF.  Retry with CRLF-normalised
+                # strings so the edit applies and the replacement keeps
+                # the file's CRLF convention.
+                old_string = old_string.replace("\n", "\r\n")
+                # Collapse-then-expand so a new_string that already
+                # carries some CRLFs is not corrupted into "\r\r\n".
+                new_string = new_string.replace("\r\n", "\n").replace("\n", "\r\n")
+                count = content.count(old_string)
             if count == 0:
                 return "Error: String not found in file"
             if not replace_all and count > 1:
@@ -497,7 +512,9 @@ class UsefulTools:
                 new_content = content.replace(old_string, new_string)
             else:
                 new_content = content.replace(old_string, new_string, 1)
-            resolved.write_text(new_content)
+            # newline="" prevents os.linesep translation on write so the
+            # preserved (untranslated) line endings round-trip verbatim.
+            resolved.write_text(new_content, newline="")
             replaced = count if replace_all else 1
             return f"Successfully replaced {replaced} occurrence(s) in {file_path}"
         except Exception as e:
