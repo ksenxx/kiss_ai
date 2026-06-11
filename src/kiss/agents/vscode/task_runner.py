@@ -1091,21 +1091,7 @@ class _TaskRunnerMixin:
         stop = getattr(self.printer._thread_local, "stop_event", None)
         if stop is None:
             raise KeyboardInterrupt("No stop event set")
-        # Resolve the answer queue via the printer's task-id ->
-        # subscriber-tabs mapping: pick the first subscribed tab that
-        # has a live ``user_answer_queue``.  Any tab subscribed to
-        # this task can answer.
-        task_key = getattr(self.printer._thread_local, "task_id", None)
-        q = None
-        if task_key:
-            with self.printer._lock:
-                tab_ids = list(self.printer._subscribers.get(task_key, ()))
-            with self._state_lock:
-                for tab_id in tab_ids:
-                    tab = _RunningAgentState.running_agent_states.get(tab_id)
-                    if tab is not None and tab.user_answer_queue is not None:
-                        q = tab.user_answer_queue
-                        break
+        q = self._resolve_task_answer_queue()
         # M4 — when the tab has no answer queue (e.g. the tab was closed
         # mid-question) there is no path that can ever return a response.
         # Refuse to busy-loop forever; raise immediately so the agent
@@ -1152,8 +1138,50 @@ class _TaskRunnerMixin:
             raise KeyboardInterrupt("Stopped while waiting for user")
         return item
 
+    def _resolve_task_answer_queue(self) -> queue.Queue[str] | None:
+        """Resolve the current task's user-answer queue.
+
+        Resolves via the printer's task-id → subscriber-tabs mapping:
+        picks the first subscribed tab that has a live
+        ``user_answer_queue``.  Any tab subscribed to this task can
+        answer, but the queue always lives on the task-owner tab.
+
+        Returns:
+            The owner tab's answer queue, or ``None`` when the
+            thread-local ``task_id`` is unset or no subscribed tab
+            carries a live queue (e.g. the tab was closed).
+        """
+        task_key = getattr(self.printer._thread_local, "task_id", None)
+        if not task_key:
+            return None
+        with self.printer._lock:
+            tab_ids = list(self.printer._subscribers.get(task_key, ()))
+        with self._state_lock:
+            for tab_id in tab_ids:
+                tab = _RunningAgentState.running_agent_states.get(tab_id)
+                if tab is not None and tab.user_answer_queue is not None:
+                    return tab.user_answer_queue
+        return None
+
     def _ask_user_question(self, question: str) -> str:
         """Callback for agent questions."""
+        # Discard any answer already sitting in the queue: it predates
+        # this question, so it can only be a stale duplicate — e.g. a
+        # second viewer tab's still-open ``askUser`` modal for the
+        # PREVIOUS question submitted after the agent had consumed the
+        # first viewer's answer (nothing closes the other viewers'
+        # modals).  Without the drain, that stale answer would answer
+        # THIS question instantly and the user would never see it.
+        # Held under ``_state_lock`` so the drain cannot interleave
+        # with ``_cmd_user_answer``'s drain-then-put sequence.
+        q = self._resolve_task_answer_queue()
+        if q is not None:
+            with self._state_lock:
+                while not q.empty():
+                    try:
+                        q.get_nowait()
+                    except queue.Empty:  # pragma: no cover — race guard
+                        break
         self.printer.broadcast({
             "type": "askUser",
             "question": question,
