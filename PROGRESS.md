@@ -874,8 +874,13 @@ workDir plumbing).
     `_log_orphaned_task_forensics` malformed-extra tolerance (broad except);
     db-swap stale-conn write in `_add_task` (test-fixture-only scenario,
     previously ruled under RW-lock discipline).
-  - REMAINING before finish: regression-run persistence-importing tests,
-    `uv run check --full`, commit.
+  - Verification: all 6 new tests pass; 1284-test regression sweep (all 127
+    test files importing persistence, 8 parallel shards) — only failures were
+    2 tests in a PARALLEL group-E commit's
+    test_bughunt5_replay_phantom_state.py that pass in isolation
+    (shared-registry ordering flake, unrelated to persistence);
+    `uv run check --full` clean. Code+tests landed in commit 1de07413.
+  - Group A iteration 5: COMPLETE — 1 new bug (BUG 5A-1) found and fixed.
 - TODO for next session (remaining surface from task spec):
   favorites round-trip (`_set_task_favorite` L1020, `_save_task_extra` L1068
   preserve-is_favorite path) and interaction with delete/search; frequent-task
