@@ -45,6 +45,57 @@ Repeat until an iteration finds zero bugs.
   parallel sub-agents, tests named `test_bughunt4_*` / `bughunt4_*.test.js`.
   Stop condition: an iteration that finds zero new bugs.
 
+### Iteration 4, group B (git_worktree / worktree_sorcar_agent): 2 NEW bugs found+fixed
+
+- BUG-4B-1 (worktree_sorcar_agent.py `_do_merge`, was ~line 247): a FAILED
+  `git stash push` was indistinguishable from "tree clean" — `stash_if_dirty`
+  returns False for both.  `_do_merge` then ran `git merge --squash` on a still
+  dirty main tree, (a) silently committing the USER's staged changes into the
+  agent's squash-merge commit, and (b) on merge failure running
+  `git reset --hard HEAD`, permanently DESTROYING the user's staged+unstaged
+  edits.  Reproduced with a mode-000 untracked file (makes stash push fail:
+  "Cannot save the untracked files") plus a staged user edit.  Fix: new
+  `MergeResult.STASH_FAILED`; `_do_merge` aborts before any mutation when
+  `not did_stash and has_uncommitted_changes(repo)`; `merge()` returns a
+  "Cannot merge: ... could not be stashed" message (keeps `_wt` for retry;
+  merge_flow.py's `"Successfully merged" in msg` check yields success=False);
+  `_release_worktree` sets a stash-failure `_merge_conflict_warning` and keeps
+  the branch.  Tests: test_bughunt4_stash_fail_merge.py (3 tests, all failed
+  pre-fix).
+- BUG-4B-2 (worktree_sorcar_agent.py `_try_setup_worktree` baseline commit):
+  `commit_staged(..., no_verify=True)` can still fail — `--no-verify` skips
+  only pre-commit/commit-msg, NOT prepare-commit-msg (also: stale index.lock,
+  missing identity).  The old code silently continued with
+  `baseline_commit=None` while the user's dirty files sat UNCOMMITTED in the
+  worktree → later auto-committed as (and attributed to) agent work and
+  squash-merged back, duplicating the user's edits into the original branch.
+  Fix: when the baseline commit fails AND the worktree still has uncommitted
+  changes, `cleanup_partial` + return None (run()'s documented direct-execution
+  fallback).  The `elif has_uncommitted_changes` guard keeps the phantom-dirty
+  case (e.g. CRLF-smudge: stage_all stages nothing) on the worktree path.
+  Tests: test_bughunt4_baseline_commit_fail.py (failing test failed pre-fix +
+  clean-tree control test).
+- Investigated and verified NOT bugs (with throwaway-repo experiments):
+  rename old-path recreated as untracked (`R a -> b` precedes `?? a` in
+  porcelain → removal happens before re-copy, final state correct); untracked
+  nested git repo shown as `?? nested/` is skipped by copy_dirty_state (kin to
+  the iter-3 "dirty submodules" not-bug; git cannot merge it back anyway);
+  sparse-checkout main repo (new worktree inherits sparseness — mirrors the
+  user's view; merges handled by git); merge while main branch moved ahead
+  (cherry-pick baseline..branch / squash merge both do proper 3-way merges,
+  user dirty state not duplicated); post-checkout hook failure during checkout
+  (self-heals on merge retry); index.lock contention (all git calls fail
+  gracefully, no partial mutation).
+- Verification: 5/5 bughunt4 group-B tests pass; all 475 worktree/bughunt/
+  autocommit/workflow/baseline sorcar tests pass in 8 parallel shards (only
+  the documented pre-existing forkpty pty flake
+  test_bughunt_cli.py::test_ctrl_c_abort_actually_stops_the_running_agent
+  failed under load, passes in isolation); `uv run check --full` passes.
+- NOTE: the working tree also contains UNRELATED in-progress group-C (CLI)
+  changes from a previously crashed session (cli_steering.py paste/SIGCONT
+  work + test_bughunt4_{paste,sigcont,prompt_markers,interrupt_lock}.py,
+  test_bughunt4_parallel_stop_event.py); left untouched and uncommitted.
+
 ### Iteration 4 — Group D (sorcar agents/tools) — session 1 findings (source read, fixes NOT yet applied)
 
 Read all 4 target files fully. Confirmed bugs to fix (failing test FIRST, then fix):
