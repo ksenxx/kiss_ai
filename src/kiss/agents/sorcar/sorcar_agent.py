@@ -828,12 +828,11 @@ def _coerce_tasks(tasks: Any) -> list[str]:
                 parsed = json.loads(stripped)
             except (ValueError, TypeError):
                 parsed = None
-            if (
-                isinstance(parsed, list)
-                and parsed
-                and all(isinstance(t, str) for t in parsed)
-            ):
-                return parsed
+            if isinstance(parsed, list):
+                # A JSON empty list means zero tasks (NOT one task whose
+                # text is "[]"); non-string elements (e.g. '[1, 2]') are
+                # coerced to one task string per element.
+                return [t if isinstance(t, str) else str(t) for t in parsed]
         return [tasks]
     if isinstance(tasks, list) and all(isinstance(t, str) for t in tasks):
         return tasks
