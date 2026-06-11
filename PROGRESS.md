@@ -825,6 +825,20 @@ test_bughunt5_replay_action_race.py (2 tests: replay must not emit while the act
 lock is held + must emit after release; post-wait re-check sends nothing for a
 finished review; both failed pre-fix).
 
+**BUG 5F-4 FIXED (web_server.\_dispatch_client_command mergeAction all-done)**: the
+VS Code TS MergeManager runs per-hunk review entirely in the extension host and sends
+ONLY `mergeAction all-done` to the backend (SorcarSidebarView.sendMergeAllDone); the
+dispatch path forwarded it to `_cmd_merge_action`/`_finish_merge` but never popped the
+server-side shadow `_WebMergeState` registered at merge_data-broadcast time. The
+stale fully-unresolved state (a) replayed a ZOMBIE merge review to the VS Code webview
+on the next reload (`ready` → `_replay_merge_review`), (b) leaked one state with full
+file payloads per finished review, (c) made the deferred-close path fire a spurious
+second all-done (phantom `_get_tab` + spurious autocommit_prompt). Fix: when
+`mergeAction action=all-done` arrives from a client, pop `_merge_states[tab_id]` +
+`_merge_action_locks[tab_id]` before falling through to the backend command. Test:
+test_bughunt5_stale_state_after_all_done.py (real UDS transport like the extension;
+zombie-replay test failed pre-fix; web-driven-review control passed).
+
 ORIGINAL 5F-1 analysis: when the
 deferred tab-close grace fires while a merge review is STILL IN FLIGHT, it silently
 pops `_merge_states[tab_id]` + `_merge_action_locks` and dispatches `closeTab`.
