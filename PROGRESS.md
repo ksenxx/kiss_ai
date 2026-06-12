@@ -1,80 +1,36 @@
-# Task: Diagnose and fix `claude-fable-5` silent task death ("(no result)")
+# Task: Deep ICSE 2027 review of ~/Downloads/RECEIPT.pdf (continuation 1)
 
-## Symptom
+## State on resume
 
-Four `task_history` rows in `~/.kiss/sorcar.db` (ids 3706, 3707, 3708,
-3710), all running the same RECEIPT.pdf review prompt on model
-`claude-fable-5`, terminated after 5-6 steps with persisted summary
-`"No summary available"`. The same prompt on `claude-opus-4-7` (task
-3709\) completed normally in 29 steps. Event log for task 3710 shows
-4 successful tool_call+tool_result pairs followed by:
+- Attempt 1 (model `claude-fable-5`) died at step 7 with consecutive empty
+  responses. Before dying it had extracted the PDF text to
+  `tmp/receipt.txt` (1,229 lines).
+- A complete review report `reports/receipt-review.html` already existed in
+  the repo, committed in `9abb43bb` ("docs: add deep technical review of
+  RECEIPT paper for ICSE 2027 with concrete improvement roadmap") by a prior
+  successful run of the same prompt (task 3709 on claude-opus-4-7, 29 steps,
+  which included the extensive web research — Black Widow S&P'21,
+  Spider-Scents USENIX'24, YuraScanner NDSS'25, Atropos USENIX Sec'24,
+  IRIS ICLR'25, CVE-Bench ICML'25, HPTSA, XBOW posts, Anthropic
+  Glasswing/reward-hacking material).
 
-```
-seq 16: text_end
-seq 17: {"type":"result","text":"(no result)","step_count":5}
-seq 18: {"type":"task_done"}
-```
+## Steps performed in this continuation
 
-## Root cause
+1. Read SORCAR.md (empty) and inspected worktree state, git log, and
+   `reports/` contents — found the committed `receipt-review.html`.
+1. Read `reports/receipt-review.html` in full to confirm it satisfies every
+   task requirement: improvement-oriented (not a verdict-style review),
+   honest layered novelty assessment, related-work grounded, human voice.
+1. Verified the report's factual claims against the extracted paper text
+   (`grep` over `tmp/receipt.txt`): 7% baseline = 1 of 14 sampled replays,
+   25/50 zero-day confirmations, 87% one-day exploitation, $1,850 total
+   campaign cost, L1/L4 ablations described as "planned" (E5/E6 tracker),
+   full 50-target browser replay "pending". All match — no redo needed.
+1. Opened `/Users/ksen/work/kiss/reports/receipt-review.html` in the user's
+   default browser via `open`.
+1. Deleted the temporary `tmp/receipt.txt` created by attempt 1.
 
-The `claude-fable-5` provider adapter occasionally returns an
-assistant turn with empty `content` and no `tool_calls` after a
-tool_result (likely a streaming/reasoning-block parsing issue).
+## Outcome
 
-In `src/kiss/core/kiss_agent.py::_execute_step`, when `function_calls`
-is empty, the agent increments `_consecutive_no_tool_calls`. Once
-that counter reaches `MAX_CONSECUTIVE_NO_TOOL_CALLS` (=2), the loop
-treats the last text-only response as an implicit finish and returns
-`str(response_text)`. For `claude-fable-5` empty turns,
-`response_text` is `""`, so an empty string propagates outward:
-
-- `JsonPrinter._broadcast_result` substitutes the literal
-  `"(no result)"` for empty body (json_printer.py:547).
-- `RelentlessAgent.perform_task` parses the empty YAML
-  (`yaml.safe_load("") -> None -> {}`), returns `""`.
-- `task_runner._run_task_inner` falls back to the string
-  `"No summary available"` and persists that.
-
-The user sees nothing actionable.
-
-## Fix
-
-In `_execute_step` at the `_consecutive_no_tool_calls >= MAX`
-branch, when `response_text` is empty or whitespace-only, raise a
-`KISSError` with a clear diagnostic instead of returning `""`.
-`RelentlessAgent` already routes `KISSError` into a `success=False`
-result event with the exception message as summary, so the user
-sees the actual cause and can act on it.
-
-Non-empty text-only responses still trigger the implicit-finish
-behavior (covered by the existing
-`test_no_tool_call_loop.py::test_agent_returns_after_consecutive_no_tool_call_responses`).
-
-## Integration test
-
-New file
-`src/kiss/tests/core/test_empty_response_silent_death.py`:
-
-- `test_always_empty_response_raises_kiss_error` — `HTTPServer`
-  always returns `{"content": ""}` with no `tool_calls`. Asserts
-  `KISSError` raised with "empty" in the message within ≤2 steps.
-- `test_empty_after_tool_call_raises_kiss_error` — exact production
-  shape: step 1 model issues a `Bash` tool_call, all subsequent
-  turns are empty. Asserts `KISSError` raised within ≤3 steps.
-
-Both tests use the real `KISSAgent.run` end-to-end against a real
-`http.server.HTTPServer` returning OpenAI-compatible JSON — no
-mocks, per testing rules. Both tests **fail** before the fix
-(reproducing the bug) and **pass** after the fix.
-
-## Verification
-
-- `uv run pytest -v src/kiss/tests/core/test_empty_response_silent_death.py src/kiss/tests/core/test_no_tool_call_loop.py` → 4 passed.
-- `uv run check --full` → all checks pass after `mdformat` re-formats `PROGRESS.md`.
-
-## Files modified
-
-- `src/kiss/core/kiss_agent.py` — added empty-response guard at the
-  `MAX_CONSECUTIVE_NO_TOOL_CALLS` branch.
-- `src/kiss/tests/core/test_empty_response_silent_death.py` — new
-  integration test reproducing the claude-fable-5 silent death.
+Report delivered at `reports/receipt-review.html` (already in git) and
+opened in the default browser. No source files modified; no redone work.
