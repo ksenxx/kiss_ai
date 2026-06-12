@@ -243,7 +243,12 @@ build_vscode_extension() {
     # --no-audit/--no-fund: silence post-install audit summary and funding nag
     # (vulnerabilities live in transitive dev-deps of gts/inquirer with no fix
     # available; users were seeing the audit summary at the end of every release).
-    npm ci --no-audit --no-fund
+    # --ignore-scripts: keytar (optional vsce dep, publish-credentials only) and
+    # @vscode/vsce-sign are the lockfile's only packages with install scripts;
+    # keytar's `prebuild-install || node-gyp rebuild` can hang forever on
+    # network/toolchain issues and neither script is needed to package the VSIX
+    # (mirrors install.sh).
+    npm ci --ignore-scripts --no-audit --no-fund
     npm run package
 
     if [[ ! -f "kiss-sorcar.vsix" ]]; then
