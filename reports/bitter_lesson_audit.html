@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Audit Report — "A Bitter Lesson for Data Filtering" (arXiv:2605.19407)</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --card:#ffffff; --ink:#1a2233; --muted:#5b6678; --line:#e3e7ee;
+    --accent:#1f4e8c; --ok:#1e7d4f; --okbg:#e7f5ec; --warn:#9a6700; --warnbg:#fff4d6;
+    --bad:#b3261e; --badbg:#fdecea; --info:#175ea8; --infobg:#e8f1fb;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:Georgia,'Times New Roman',serif;background:var(--bg);color:var(--ink);line-height:1.55}
+  header{background:#14213d;color:#fff;padding:42px 24px 34px}
+  .wrap{max-width:1060px;margin:0 auto;padding:0 18px}
+  header h1{font-size:1.7rem;margin:0 0 8px}
+  header .sub{color:#cdd6e6;font-size:1.02rem}
+  header .meta{margin-top:14px;font-size:.88rem;color:#9fb0cc;font-family:Verdana,sans-serif}
+  main{padding:30px 0 60px}
+  section{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:26px 30px;margin:22px 0}
+  h2{font-size:1.28rem;color:var(--accent);margin:0 0 14px;border-bottom:2px solid var(--line);padding-bottom:8px}
+  h3{font-size:1.05rem;margin:20px 0 6px}
+  p{margin:9px 0}
+  .small{font-size:.88rem;color:var(--muted)}
+  .pill{display:inline-block;font-family:Verdana,sans-serif;font-size:.72rem;font-weight:bold;padding:3px 10px;border-radius:999px;margin-left:8px;vertical-align:middle}
+  .p-ok{background:var(--okbg);color:var(--ok)} .p-warn{background:var(--warnbg);color:var(--warn)}
+  .p-bad{background:var(--badbg);color:var(--bad)} .p-info{background:var(--infobg);color:var(--info)}
+  table{width:100%;border-collapse:collapse;margin:14px 0;font-size:.92rem}
+  th{background:#eef1f6;text-align:left;font-family:Verdana,sans-serif;font-size:.78rem;letter-spacing:.02em}
+  th,td{border:1px solid var(--line);padding:8px 10px;vertical-align:top}
+  tr:nth-child(even) td{background:#fafbfd}
+  code,.mono{font-family:'SF Mono',Menlo,Consolas,monospace;font-size:.86em;background:#f0f2f7;padding:1px 5px;border-radius:4px}
+  blockquote{border-left:4px solid var(--accent);margin:10px 0;padding:6px 16px;background:#f4f7fb;font-style:italic}
+  a{color:var(--accent)}
+  .verdict-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));gap:14px;margin-top:10px}
+  .vcard{border:1px solid var(--line);border-radius:8px;padding:14px 16px;background:#fbfcfe}
+  .vcard b{font-family:Verdana,sans-serif;font-size:.86rem}
+  ul{margin:8px 0 8px 22px;padding:0}
+  li{margin:6px 0}
+  .footnote{font-size:.82rem;color:var(--muted);border-top:1px solid var(--line);padding-top:10px;margin-top:18px}
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <h1>Independent Audit: “A Bitter Lesson for Data Filtering”</h1>
+    <div class="sub">Christopher Mohri, John Duchi, Tatsunori Hashimoto (Stanford) — arXiv:2605.19407v1, submitted 19 May 2026</div>
+    <div class="meta">Audit scope: wrong assumptions · cheating · irreproducibility · fraud · potential for cheating in evaluation · AI slop · security vulnerabilities.<br>
+    Method: full read of the paper (main text + appendices), clone &amp; line-by-line inspection of the authors' released code, and independent verification against 12 external sources (arXiv records, GitHub, Epoch AI, xAI model card, search engines). Audit date: 12 June 2026.</div>
+  </div>
+</header>
+
+<main class="wrap">
+
+<section>
+  <h2>Executive Summary</h2>
+  <p>The paper argues that, with enough compute, <em>“the best data filter is no data filter”</em>: large models trained long enough on a fixed pool of raw Common Crawl (CC) eventually achieve lower validation loss than models trained on filtered versions (RefinedWeb, DCLM-Baseline, and individual heuristic filters), and even tolerate or benefit from injected “junk” data. It predicts the full 240-trillion-token DCLM-Pool would beat RefinedWeb at roughly 10<sup>30</sup> FLOPs.</p>
+  <p><b>Bottom line:</b> this is a <b>legitimate, internally consistent academic preprint from verified Stanford researchers — we found no evidence of fraud, fabrication, or AI-generated slop</b>. However, the audit identified <b>substantive methodological weaknesses</b> that limit the headline claim: the choice of evaluation metric structurally favors the paper's conclusion; many measured benchmarks went unreported; the marquee 10<sup>30</sup>-FLOPs prediction rests on a ~4-order-of-magnitude extrapolation through a regime its own cited prior work says is unreliable; reproduction is effectively gated on ~20,000 H200 GPU-hours and a mutable Google Drive folder; and the paper's practical advice (don't filter) ignores the well-documented data-poisoning attack surface of raw web crawls.</p>
+  <div class="verdict-grid">
+    <div class="vcard"><b>Fraud / fabrication</b><span class="pill p-ok">NOT FOUND</span><p class="small">Authors, code, data sources, and all spot-checked numbers and citations are real and internally consistent.</p></div>
+    <div class="vcard"><b>Outright cheating</b><span class="pill p-ok">NOT FOUND</span><p class="small">No evidence of manipulated results or test-set training.</p></div>
+    <div class="vcard"><b>Potential for cheating in evaluation</b><span class="pill p-bad">HIGH CONCERN</span><p class="small">Metric choice favors the conclusion; selective benchmark reporting; best-of-5-checkpoints reporting; no error bars.</p></div>
+    <div class="vcard"><b>Wrong assumptions</b><span class="pill p-warn">SEVERAL FOUND</span><p class="small">Unconstrained-compute objective, loss↔capability conflation, junk≠adversarial, 100+-epoch extrapolation.</p></div>
+    <div class="vcard"><b>Irreproducibility</b><span class="pill p-warn">MODERATE</span><p class="small">Configs/scripts released (good faith), but compute-gated, single-commit repo, mutable Google Drive data, no license.</p></div>
+    <div class="vcard"><b>AI slop</b><span class="pill p-ok">NOT FOUND</span><p class="small">All checked references exist and are mostly accurately characterized; two sloppy citations noted.</p></div>
+    <div class="vcard"><b>Security vulnerabilities</b><span class="pill p-bad">SIGNIFICANT BLIND SPOT</span><p class="small">“No filtering” advice ignores practical poisoning attacks; <code>trust_remote_code: true</code> in eval configs; unversioned data distribution.</p></div>
+  </div>
+</section>
+
+<section>
+  <h2>1. What the Paper Claims (verified summary)</h2>
+  <ul>
+    <li><b>Setup:</b> random CC subsets (670M–10B tokens) from DCLM-Pool; Llama-style dense transformers (15M–7B params) trained with Meta Lingua; context 1024; batch 2<sup>19</sup> tokens; steps swept in powers of 2; weight decay tuned; &gt;20,000 H200 GPU-hours.</li>
+    <li><b>Headline metric:</b> average negative log-likelihood (NLL) on C4-English, FineWeb-Edu, and Cosmopedia. Three downstream benchmarks (ARC-Easy, PIQA, SocialIQA) appear only in Appendix B.</li>
+    <li><b>Result 1:</b> at ≥330M params with enough epochs, unfiltered CC achieves lower avg NLL (best 3.37 at 1B) than all five filtered variants (DCLM-Baseline worst at 5.29 — it retains only 2.1% of the pool).</li>
+    <li><b>Result 2:</b> injecting up to +200% random-string data or +800% shuffled-word documents barely hurts large models; shuffled injections even <em>beat</em> the clean pool at 330M/1B (e.g., 3.36 vs 3.40).</li>
+    <li><b>Result 3:</b> two scaling-law fits predict raw 240T-token CC overtakes RefinedWeb near 10<sup>30</sup> FLOPs (fits: 9.0×10<sup>29</sup> and 3.6×10<sup>30</sup>).</li>
+    <li><b>Supporting analyses:</b> a GPT5-mini corpus study claiming CC documents “supporting” MMLU answers outnumber “refuting” ones ~10–60×, and a correct low-rank matrix-factorization proposition showing capacity-limited models suffer task interference while high-rank models absorb orthogonal “junk” tasks for free.</li>
+  </ul>
+</section>
+
+<section>
+  <h2>2. Wrong Assumptions <span class="pill p-warn">SEVERAL FOUND</span></h2>
+  <h3>2.1 “Best achievable loss regardless of computational cost” is an economically vacuous objective</h3>
+  <p>The core objective L*(D) = min<sub>M,N</sub> ℓ(A(D,M,N)) deliberately ignores cost. By the paper's <em>own</em> Pareto analysis (Figure 2), at every compute budget actually tested (≤ ~10<sup>20</sup> FLOPs), filtered data dominates raw CC for most of the frontier; raw CC only wins at the very end. The paper concedes (“Compute” limitation) that below ~10<sup>30</sup> FLOPs filtering still matters — i.e., for every training run any organization can afford today (frontier ≈ 5×10<sup>26</sup> FLOPs) and for the next several years, the practical recommendation implied by the title is wrong by the paper's own data.</p>
+  <h3>2.2 Validation loss on web-derived corpora is assumed to track capability</h3>
+  <p>The paper asserts NLL “is known to correlate with downstream performance.” But its own cited reference, Saada et al. (arXiv:2510.00866, verified), shows the exact opposite decoupling for quality filtering: <em>“while CQF [classifier-based quality filtering] improves downstream task performance, it does not necessarily enhance language modeling”</em> on high-quality text. Quality filters like DCLM-Baseline were tuned to maximize benchmark accuracy (DCLM's 53-task suite, MMLU CORE), not C4 perplexity. Judging filters by perplexity on lightly-filtered web text is therefore an assumption that bakes in the conclusion (see §4).</p>
+  <h3>2.3 Extrapolating crossings through a regime their own sources call unreliable</h3>
+  <p>Empirical loss crossings used to fit the scaling law occur at up to <b>121.6 epochs</b> of data repetition. Muennighoff et al. (arXiv:2305.16264, verified) — the paper's own anchor for the 4-epoch fit — found that repeating data beyond ~4 epochs gives rapidly diminishing returns and that with high repetition <em>“the value of adding compute eventually decays to zero.”</em> The authors acknowledge non-monotone validation losses at 100+ epochs and shade those regions as unreliable, yet the headline 10<sup>30</sup>-FLOPs forecast is built by fitting second-degree polynomials (in log-log space) to a handful of points, then extrapolating pool size by &gt;4 orders of magnitude (10B → 240T tokens). An R² &gt; 0.99 on ~4–5 fitted points is not meaningful evidence of out-of-range validity.</p>
+  <h3>2.4 “Junk data” is assumed to be random, not adversarial</h3>
+  <p>The robustness experiments use <em>statistically random</em> noise (random strings, shuffled words). The security literature shows the dangerous case is <em>adversarial</em> data, which is the primary thing filters remove on purpose (see §7). The paper's only counterargument — a GPT5-mini study of 4 MMLU subjects finding more “supporting” than “refuting” CC documents — is an LLM-as-judge analysis with no human validation, no judge-calibration, unclear denominators (“average judgements” per keyword-matched sample), and covers only naturally occurring misinformation, not injected attacks.</p>
+  <h3>2.5 Smaller technical assumptions</h3>
+  <ul>
+    <li><b>Contamination dismissal:</b> “Since our experiments use pool sizes of only up to 10B tokens, we do not expect to suffer from test set contamination.” Contamination probability scales with sample size but is not eliminated; more importantly the validation sets themselves (C4 = filtered CC; FineWeb-Edu = filtered CC) overlap the training distribution by construction, which is a train/eval distribution-match advantage for the unfiltered pool independent of contamination.</li>
+    <li><b>MoE-derived ratio applied to dense models:</b> the 600 tokens-per-parameter anchor “following DeepSeek V4” is taken from a Mixture-of-Experts model (1.6T total / 49B active params — verified released 24 Apr 2026) while all experiments are dense; the paper itself warns MoE behavior may differ. The ratio also has no bibliography entry and could not be independently verified (see §6).</li>
+    <li><b>Within-noise “benefits”:</b> claims that models “in fact benefit” from poor data rest on margins like +20% random 3.38 vs pool 3.40, or +400% shuffled 3.36 vs 3.40, from <b>single runs with no error bars, no repeated seeds, and no significance testing</b>. The benchmark appendix shows rank reshuffling across panels consistent with noise.</li>
+  </ul>
+</section>
+
+<section>
+  <h2>3. Cheating &amp; Fraud <span class="pill p-ok">NOT FOUND</span></h2>
+  <ul>
+    <li><b>Authors verified real:</b> Christopher Mohri is a Stanford CS PhD student (verified via Google Scholar profile with verified stanford.edu email, John Duchi's group page <span class="mono">web.stanford.edu/~jduchi/group.html</span>, and the Stanford NLP people page). John Duchi and Tatsunori Hashimoto are established Stanford professors. The self-citation pattern (Awasthi–Cortes–Mohri AISTATS 2023; Cheng–Asi–Duchi) matches the authors' real prior work.</li>
+    <li><b>Internal consistency checks passed:</b> e.g., Figure 1's 1B-model values (CC 3.37, RW 3.93) match Figure 5's 700M-pool panel; the claimed batch size of 2<sup>19</sup> = 524,288 tokens matches the released sweep script (64 batch × 1024 seq × 8 GPUs); the claimed vocabulary giving −log(1/V) ≈ 10.8 matches the released r50k_base tokenizer (ln 50257 = 10.825); Table 2 architecture/hyperparameters match the released YAML configs.</li>
+    <li><b>Theory verified:</b> Proposition 7.1's proof (Appendix C) is a standard and correct Eckart–Young–Mirsky argument; Fact C.2's algebra checks out.</li>
+    <li><b>Code matches paper:</b> the junk-data generator in the repo implements exactly the described 10,000-word random vocabulary (3–8 lowercase chars, 2,000 words/doc) and document-level word shuffling.</li>
+    <li>No test-on-train, no manipulated figures, no fabricated references were found.</li>
+  </ul>
+</section>
+
+<section>
+  <h2>4. Potential for Cheating in Evaluation <span class="pill p-bad">HIGH CONCERN</span></h2>
+  <p>While we found no dishonesty, the evaluation design contains three mechanisms that systematically favor the paper's thesis. Reviewers and readers should treat the headline comparison as metric-dependent.</p>
+  <h3>4.1 The headline metric is biased toward the unfiltered pool</h3>
+  <p>“Dataset value” is measured almost entirely by NLL on C4-English, FineWeb-Edu and Cosmopedia averages. C4 and FineWeb-Edu are themselves <em>filtered Common Crawl</em> — distributionally far closer to raw CC than to DCLM-Baseline's heavily classifier-selected text. A model trained on raw CC gets an automatic distribution-match advantage on web-text perplexity that says little about knowledge or reasoning. The independently verified Saada et al. result (§2.2) shows precisely this dissociation, and DCLM itself (arXiv:2406.11794, verified: 240T-token pool, model-based filtering “key” to its results) was validated on 53 downstream tasks, not web perplexity. Conclusion-flipping risk: on MMLU-style evaluations, DCLM-Baseline-trained models are known to dominate at these scales, and the paper never tests that.</p>
+  <h3>4.2 Measured-but-unreported benchmarks</h3>
+  <p>The authors' released eval config (<span class="mono">llama_*_dataless.yaml</span>) computes <code>hellaswag, boolq, piqa, social_iqa, winogrande, openbookqa, arc_easy, arc_challenge, race, commonsense_qa, gpqa_main_n_shot, truthfulqa_mc2</code> on every run — and <code>mmlu</code> is present but commented out. The paper reports only <b>3 of ~12</b> measured benchmarks (ARC-Easy, PIQA, SocialIQA), justified as the ones “easy enough … to provide signal at our scale.” That justification is plausible, but the selection was made post hoc by the authors, and the unreported results are not provided even in an appendix. This is the single largest selective-reporting risk in the paper.</p>
+  <h3>4.3 Weak downstream evidence presented as confirmation</h3>
+  <p>The three reported benchmarks sit barely above chance (SocialIQA 0.34–0.39 vs 0.333 random; ARC-Easy 0.26–0.42 vs 0.25; PIQA 0.52–0.64 vs 0.50), are described by the authors themselves as “much noisier,” and show rank reshuffling across model sizes. They cannot meaningfully confirm that “the trends are roughly the same.” Additionally, the paper reports the <b>best of 5 checkpoints</b> per run (a mild optimistic-selection bias) and contains no repeated-seed variance for any headline number.</p>
+</section>
+
+<section>
+  <h2>5. Irreproducibility Issues <span class="pill p-warn">MODERATE</span></h2>
+  <p>The release is a genuine good-faith reproducibility effort, but several gaps remain:</p>
+  <table>
+    <tr><th>Item</th><th>Status</th><th>Detail (verified by cloning <span class="mono">github.com/chrismohrii/bitter-lesson-data-filtering</span>)</th></tr>
+    <tr><td>Code</td><td><span class="pill p-warn">PARTIAL</span></td><td>Repo exists (6 stars, single commit <span class="mono">21b295b</span>, 16 May 2026). Contains only sweep/config/data-gen glue; training and filtering live in external repos (Meta Lingua, DCLM) with <b>no pinned commit hashes or version tags</b> — future upstream changes can silently change results. No development history to audit.</td></tr>
+    <tr><td>Data</td><td><span class="pill p-warn">FRAGILE</span></td><td>Pre-processed pools are distributed via a <b>personal Google Drive folder</b> — mutable, unversioned, no checksums, no DOI, can vanish or be altered at any time. DCLM-Pool sampling seed for the original 670M/2B/10B draws is not recorded in the repo.</td></tr>
+    <tr><td>Seeds</td><td><span class="pill p-ok">MOSTLY OK</span></td><td>Training sweeps fix <code>seed=1 model.seed=1 data.seed=1</code>; but the junk-data generators default to <code>--seed None</code> (unseeded RNG) unless the flag is passed.</td></tr>
+    <tr><td>Configs</td><td><span class="pill p-ok">OK</span></td><td>Hyperparameters in repo match Table 2; <code>!!!CHANGE_THIS!!!</code> placeholders for cluster paths are normal practice. Note: the “tuned weight decay in [0.1, 0.5]” is in fact a 2-point grid {0.1, 0.5}.</td></tr>
+    <tr><td>Compute</td><td><span class="pill p-bad">GATED</span></td><td>&gt;20,000 H200 GPU-hours (≈ low-six-figure USD) to replicate; the central 10<sup>30</sup>-FLOPs claim is, by construction, unfalsifiable for ~years (frontier runs are ~5×10<sup>26</sup> FLOPs today).</td></tr>
+    <tr><td>License</td><td><span class="pill p-warn">MISSING</span></td><td>The repo has <b>no license file</b>, so third parties technically have no right to reuse or modify the code (the paper itself is CC-BY-4.0).</td></tr>
+    <tr><td>LLM-judge study</td><td><span class="pill p-bad">NOT REPRODUCIBLE</span></td><td>Table 1 depends on GPT5-mini (a closed, version-drifting commercial model); prompts/temperature/document sample lists are not in the repo.</td></tr>
+  </table>
+</section>
+
+<section>
+  <h2>6. AI Slop &amp; Citation Accuracy <span class="pill p-ok">NOT FOUND</span> <span class="pill p-warn">2 SLOPPY CITATIONS</span></h2>
+  <p>The paper shows none of the hallmarks of LLM-generated content: prose is coherent and specific, the theory is correct, figures are mutually consistent, and <b>every reference we spot-checked exists</b> (DCLM 2406.11794; Muennighoff 2305.16264; Villalobos 2211.04325; Saada 2510.00866; Allen-Zhu &amp; Li 2404.05405; Ru 2502.06604; Kim 2509.14786; Li 2505.04741; Fang 2503.07879; Goyal 2404.07177; Sardana 2401.00448; Sutton's Bitter Lesson; Meta Lingua repo; Epoch AI report). Two citation problems were found by checking the primary sources ourselves:</p>
+  <ul>
+    <li><b>The xAI citation does not contain the claimed number.</b> The paper states frontier pretraining compute is “near 5e26 [xAI, 2025],” citing the Grok 4 model card (<span class="mono">data.x.ai/2025-08-20-grok-4-model-card.pdf</span>). We downloaded that PDF: it contains <b>no FLOPs figure at all</b>. The ~5×10<sup>26</sup> estimate for Grok 4 originates from Epoch AI's third-party estimates. The number itself is defensible; the attribution is wrong.</li>
+    <li><b>“600:1 following DeepSeek V4” is unreferenced and ambiguous.</b> DeepSeek V4 is real (preview released 24 Apr 2026; 1.6T-parameter MoE with 49B active), but no DeepSeek reference appears in the bibliography, no public document we found states a 600 tokens-per-parameter training ratio, and for an MoE the ratio differs by ~33× depending on whether total or active parameters are counted. One of the paper's two scaling-law anchors therefore rests on an unverifiable figure.</li>
+    <li class="small">Minor: Epoch AI's “1e29 FLOP training runs by 2030” citation was verified accurate against <span class="mono">epoch.ai/publications/what-will-ai-look-like-in-2030</span> (David Owen, Sep 2025). The 240T DCLM-Pool figure and ≈300T-token internet-stock attribution (Villalobos et al.) were also verified accurate. The Allen-Zhu &amp; Li citation is fairly made but glosses over a tension: that work shows junk data sharply reduces <em>factual knowledge capacity</em> — a quantity this paper never measures.</li>
+  </ul>
+</section>
+
+<section>
+  <h2>7. Security Vulnerabilities <span class="pill p-bad">SIGNIFICANT BLIND SPOT</span></h2>
+  <h3>7.1 “Train on everything” ignores practical data poisoning (the big one)</h3>
+  <p>The paper's recommendation — that at scale one should train directly on raw Common Crawl — addresses only <em>random</em> junk and never engages with <em>adversarial</em> data, despite two independently verified results that directly undercut the safety of that advice:</p>
+  <ul>
+    <li><b>Souly et al., arXiv:2510.07192</b> (Anthropic / UK AISI / Turing Institute, Oct 2025 — verified): backdoor poisoning needs a <em>near-constant</em> number of documents; <b>~250 poisoned documents compromised every model tested (600M→13B params)</b> regardless of how much clean data surrounded them. Scale does not dilute poison — the opposite of the paper's “more compute fixes bad data” intuition.</li>
+    <li><b>Carlini et al., arXiv:2302.10149</b> (verified): poisoning crawled web datasets is <em>practical today</em> — e.g., controlling 0.01% of LAION-400M-scale crawled data cost about <b>$60</b> via expired domains (split-view poisoning) and snapshot frontrunning.</li>
+  </ul>
+  <p>Filtering pipelines are one of the few existing (if imperfect) defenses against exactly this. Notably, the very Grok 4 model card the paper cites states that xAI applies processes to “ensure data quality and safety prior to training.” A paper advising “no filter” should, at minimum, scope its claim to non-adversarial settings; it does not, and its only factuality audit (GPT5-mini on 4 MMLU subjects) measures naturally occurring misinformation, not attacks. Raw CC also contains PII, CSAM-adjacent material, and toxic content that filters are legally and ethically required to remove — entirely unaddressed.</p>
+  <h3>7.2 Concrete issues in the released artifacts</h3>
+  <ul>
+    <li><b><code>trust_remote_code: true</code></b> is set for the <code>boolq</code> and <code>social_iqa</code> eval tasks in every released training config. This causes the HuggingFace datasets library to download and <em>execute arbitrary Python</em> from the dataset repos at eval time — a known supply-chain code-execution vector for anyone replicating the work.</li>
+    <li><b>Mutable data distribution:</b> replication data is served from a personal Google Drive folder with no checksums or signatures; a compromised or silently edited folder would be undetectable — ironically, the same “split-view” trust gap Carlini et al. exploit.</li>
+    <li><b>Unpinned external dependencies:</b> training (Lingua) and filtering (DCLM) repos are referenced at floating <code>main</code>, so replicators execute whatever code those repos contain at clone time.</li>
+    <li class="small">No credentials, secrets, or malicious code were found in the repository itself.</li>
+  </ul>
+</section>
+
+<section>
+  <h2>8. Fact-Check Ledger</h2>
+  <table>
+    <tr><th>Claim in paper</th><th>Verdict</th><th>Evidence</th></tr>
+    <tr><td>DCLM-Pool is 240T tokens of pre-2023 CC</td><td><span class="pill p-ok">TRUE</span></td><td>DCLM abstract, arXiv:2406.11794 (“standardized corpus of 240T tokens extracted from Common Crawl”)</td></tr>
+    <tr><td>DCLM-Baseline ≈ 3.8T tokens, “~1%” of CC</td><td><span class="pill p-ok">≈TRUE</span></td><td>3.8T/240T = 1.6%; consistent with DCLM dataset release</td></tr>
+    <tr><td>Muennighoff et al.: ~4 epochs before diminishing returns</td><td><span class="pill p-ok">TRUE</span></td><td>arXiv:2305.16264 abstract (verified); same source warns repeated-data value → 0, which undercuts the paper's 121-epoch extrapolations</td></tr>
+    <tr><td>Internet text stock 200–500T tokens (Villalobos et al.)</td><td><span class="pill p-ok">CONSISTENT</span></td><td>arXiv:2211.04325 (Epoch AI; median ≈300T tokens)</td></tr>
+    <tr><td>Epoch AI forecasts 1e29-FLOP runs by 2030</td><td><span class="pill p-ok">TRUE</span></td><td>epoch.ai “What will AI look like in 2030?” (D. Owen, Sep 2025): clusters “could support training runs of about 10^29 FLOP”</td></tr>
+    <tr><td>Frontier compute ≈ 5e26 FLOPs “[xAI 2025]”</td><td><span class="pill p-warn">NUMBER PLAUSIBLE, SOURCE WRONG</span></td><td>Cited Grok-4 model card PDF (downloaded) contains no FLOPs figure; 5e26 is Epoch AI's third-party estimate</td></tr>
+    <tr><td>600 tokens/param “following DeepSeek V4”</td><td><span class="pill p-bad">UNVERIFIABLE</span></td><td>DeepSeek V4 exists (24 Apr 2026, MoE 1.6T/49B-active) but no source for 600:1; no bibliography entry; active-vs-total ambiguity</td></tr>
+    <tr><td>Config files released on GitHub</td><td><span class="pill p-ok">TRUE</span></td><td>github.com/chrismohrii/bitter-lesson-data-filtering (cloned &amp; inspected; matches Table 2)</td></tr>
+    <tr><td>Tokenizer NLL of uniform-random ≈ 10.8</td><td><span class="pill p-ok">TRUE</span></td><td>repo ships tiktoken r50k_base; ln(50257) = 10.825</td></tr>
+    <tr><td>Batch size 2<sup>19</sup> tokens; wd “tuned in [0.1,0.5]”</td><td><span class="pill p-ok">TRUE (caveat)</span></td><td>Sweep script: 64×1024×8 = 524,288 ✓; weight decay is a 2-point grid {0.1, 0.5}, not a continuous tune</td></tr>
+    <tr><td>“NLL is known to correlate with downstream performance”</td><td><span class="pill p-warn">CONTESTED</span></td><td>Saada et al. arXiv:2510.00866 (verified): quality filtering improves benchmarks <em>without</em> improving NLL — direct counterexample for this paper's setting</td></tr>
+    <tr><td>Benchmarks “trends are roughly the same” as loss</td><td><span class="pill p-warn">OVERSTATED</span></td><td>Appendix B values are near chance; 9 of ~12 measured benchmarks (incl. commented-out MMLU) unreported</td></tr>
+    <tr><td>Junk-robustness implies raw CC is safe to train on</td><td><span class="pill p-bad">UNSUPPORTED</span></td><td>arXiv:2510.07192 (250-doc backdoors, any scale); arXiv:2302.10149 ($60 CC-style poisoning) — adversarial case untested</td></tr>
+    <tr><td>Authors are Stanford researchers</td><td><span class="pill p-ok">TRUE</span></td><td>Google Scholar (verified stanford.edu email), Duchi group page, Stanford NLP people page</td></tr>
+  </table>
+</section>
+
+<section>
+  <h2>9. Overall Assessment</h2>
+  <p>This is a real, competent, and honestly-limited research preprint — <b>not fraud, not AI slop, and not deliberate cheating</b>. Its core empirical observation (within these pools and this metric, big patient models close the gap with filtered data, and the paper's own Pareto frontier still shows filters winning at practical budgets) appears genuine and is backed by released, internally consistent code.</p>
+  <p>However, the memorable headline — <em>“the best data filter is no data filter”</em> — outruns the evidence in four specific, verifiable ways: (1) it holds only under a compute-unbounded objective the paper's own figures show is irrelevant below ~10<sup>30</sup> FLOPs; (2) it is demonstrated on a perplexity metric that structurally favors unfiltered web data, while most of the measured benchmark suite (including MMLU, where quality-filtered data is known to excel) went unreported; (3) the 10<sup>30</sup>-FLOPs forecast extrapolates 4+ orders of magnitude through an epoching regime its own cited prior work labels unreliable; and (4) “no filtering” is unsafe advice in an adversarial web where ~250 planted documents can backdoor a model of any size. Readers should treat the paper as evidence that <em>aggressive quality filtering has compute-dependent costs on web-text loss</em>, not as evidence that data curation is obsolete.</p>
+  <p class="footnote"><b>Audit provenance:</b> Paper read in full (main text + Appendices A–C) from the arXiv v1 PDF. Code audit: full clone of <span class="mono">chrismohrii/bitter-lesson-data-filtering</span> @ 21b295b. External sources visited and verified directly (12): arXiv:2605.19407 abstract page · GitHub repo · arXiv:2406.11794 (DCLM) · arXiv:2305.16264 (Muennighoff) · arXiv:2211.04325 (Villalobos) · arXiv:2510.00866 (Saada) · arXiv:2510.07192 (Souly/Anthropic-AISI) · arXiv:2302.10149 (Carlini) · arXiv:2404.05405 (Allen-Zhu &amp; Li) · epoch.ai AI-2030 report · DeepSeek V4 release coverage &amp; api-docs.deepseek.com · author-identity searches (Google Scholar / Stanford pages); plus the downloaded xAI Grok-4 model-card PDF. Every external factual statement in this report was checked against these primary sources on 12 June 2026. Statements about figure values reflect the v1 PDF text layer; minor PDF-extraction imprecision is possible for graphical elements.</p>
+</section>
+
+</main>
+</body>
+</html>
