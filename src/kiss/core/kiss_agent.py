@@ -355,6 +355,30 @@ class KISSAgent(Base):
                 "model", response_text + "\n```text\n" + usage_info + "\n```\n", start_timestamp
             )
             if self._consecutive_no_tool_calls >= MAX_CONSECUTIVE_NO_TOOL_CALLS:
+                # When the model returns text content but no tool calls,
+                # treat it as an implicit finish (covered by
+                # test_no_tool_call_loop.py).  But if the response is
+                # empty/whitespace-only, returning it would surface to the
+                # user as the literal string "(no result)" (substituted by
+                # JsonPrinter._broadcast_result) and be persisted as
+                # "No summary available" — a silent task death.  This was
+                # the production failure mode for claude-fable-5 (task
+                # history ids 3706/3707/3708/3710 in ~/.kiss/sorcar.db),
+                # where the provider adapter dropped reasoning blocks and
+                # left an empty assistant turn.  Raise a visible diagnostic
+                # so RelentlessAgent can route it into a success=False
+                # result the user can act on.
+                if not response_text or not response_text.strip():
+                    raise KISSError(
+                        f"Agent {self.name} aborted: model "
+                        f"{self.model_name} returned "
+                        f"{self._consecutive_no_tool_calls} consecutive "
+                        f"empty responses (no text and no tool calls) at "
+                        f"step {self.step_count}. This often indicates a "
+                        f"streaming or reasoning-block parsing issue in "
+                        f"the model adapter. Try a different model or "
+                        f"restart the task."
+                    )
                 return str(response_text)
             retry_msg = (
                 "**Your response MUST have at least one function call. "
