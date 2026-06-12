@@ -17,10 +17,13 @@ extension precisely:
   :func:`_scan_files`, inserting ``PWD/<path>`` and recording file usage
   through :func:`_record_file_usage` (mirrors the webview's
   ``insertAtMention`` + ``recordFileUsage``).
-* predictive ghost completion — :func:`_prefix_match_task` then
-  active-file identifiers, clipped with
+* predictive whole-line completion — :func:`_prefix_match_tasks` lists
+  every recent task starting with the typed prefix, falling back to an
+  active-file identifier clipped with
   :func:`clip_autocomplete_suggestion` (mirrors the webview ``ghost``
-  event produced by ``_AutocompleteMixin._complete``).
+  event produced by ``_AutocompleteMixin._complete``).  In the
+  prompt_toolkit input these matches pop as a live dropdown menu so
+  Up/Down + Tab/Enter pick the desired completion without re-typing.
 * ``/`` slash commands matching Claude Code's quick commands
   (``/help``, ``/clear``, ``/resume``, ``/model``, ``/model list``,
   ``/cost``, ``/context``, ``/exit`` …).
@@ -51,11 +54,16 @@ extension precisely:
   :mod:`kiss.core.models.model_info` (preferring providers whose API key
   is configured), so ``/model <partial>`` completes to a real model name.
 
-TAB triggers completion via :mod:`readline`, which also provides
-command history (Up/Down), reverse search (Ctrl+R), and emacs-style line
-editing for free — matching Claude Code's interactive-mode shortcuts.
-Everything degrades gracefully to a plain :func:`input` loop when
-``readline`` is unavailable (e.g. Windows) or stdin is not a TTY.
+On an interactive TTY the input line is read through
+:mod:`prompt_toolkit` (see :mod:`kiss.agents.sorcar.cli_prompt`): typing
+``@`` immediately pops the file/folder picker under the line, Up/Down
+navigate it, and Tab/Enter insert the highlighted ``PWD/<path>``
+mention; the same live menu serves ``/`` commands and ``/model`` names,
+with history (Up/Down), reverse search (Ctrl+R), and emacs-style line
+editing built in.  Off-TTY (or if prompt_toolkit fails to initialise)
+the loop falls back to :mod:`readline`, where TAB triggers the same
+completions, and finally to a plain :func:`input` loop when
+``readline`` is unavailable too (e.g. stock Windows).
 """
 
 from __future__ import annotations
@@ -63,6 +71,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -82,6 +91,7 @@ from kiss.agents.sorcar.cli_panel import (
     panel_cols,
     panel_top,
 )
+from kiss.agents.sorcar.cli_prompt import _AT_RE, _MODEL_CMD_RE, PtkLineReader
 from kiss.agents.sorcar.cli_steering import run_with_steering
 from kiss.agents.sorcar.custom_commands import (
     discover_commands,
@@ -92,7 +102,7 @@ from kiss.agents.sorcar.persistence import (
     _default_kiss_dir,
     _ensure_kiss_dir,
     _load_file_usage,
-    _prefix_match_task,
+    _prefix_match_tasks,
     _record_file_usage,
 )
 from kiss.agents.vscode.helpers import (
@@ -145,6 +155,8 @@ SLASH_COMMANDS: dict[str, str] = {
     "/mcp": "List MCP servers (~/.kiss/mcp.json, <project>/.kiss/mcp.json, "
             "<project>/.mcp.json) with live status; manage with "
             "`sorcar mcp add/list/auth/debug`",
+    "/autocommit": "Stage all changes, auto-generate a commit message, "
+                   "and commit (same as the extension's Auto-commit)",
     "/exit": "Exit the sorcar CLI",
     "/quit": "Alias for /exit",
 }
@@ -153,11 +165,7 @@ SLASH_COMMANDS: dict[str, str] = {
 _EXIT_WORDS = {"exit", "quit"}
 
 _PROMPT = f"{CYAN}{PROMPT_MARKER}{RESET}"
-_AT_RE = re.compile(r"@([^\s]*)$")
 _MENTION_RE = re.compile(r"PWD/(\S+)")
-# Matches a ``/model <partial>`` line, capturing the partial model name so
-# the completer can fast-complete it from MODEL_INFO.
-_MODEL_CMD_RE = re.compile(r"^/model\s+(.*)$")
 # ANSI SGR (colour) sequences embedded in the input prompt.
 _ANSI_SGR_RE = re.compile(r"(\x1b\[[0-9;]*m)")
 
@@ -272,16 +280,18 @@ class CliCompleter:
         return matches
 
     def _predictive_matches(self, line: str) -> list[str]:
-        """Return a single whole-line predictive completion, if any.
+        """Return whole-line predictive completions, best match first.
 
-        Mirrors the extension's ghost text: prefer a prefix-matched prior
-        task, falling back to an identifier from the active file.
+        Mirrors the extension's ghost text but returns the full list so
+        the prompt_toolkit dropdown can show every prefix-matched prior
+        task; an identifier suffix from the active file is appended as
+        a final candidate when no history match is found.
         """
-        # ``_prefix_match_task`` already guarantees (via SQL) that any
-        # match starts with *line* and is strictly longer than it.
-        task = _prefix_match_task(line)
-        if task:
-            return [task]
+        # ``_prefix_match_tasks`` already guarantees (via SQL) that
+        # every match starts with *line* and is strictly longer than it.
+        tasks = _prefix_match_tasks(line)
+        if tasks:
+            return tasks
         suffix = self._active_file_suffix(line)
         if suffix:
             return [line + suffix]
@@ -527,6 +537,9 @@ def _handle_slash(
     if cmd in ("/cost", "/usage", "/context"):
         _print_usage(agent)
         return False
+    if cmd == "/autocommit":
+        _handle_autocommit(agent, work_dir)
+        return False
     custom = discover_commands(work_dir).get(cmd[1:])
     if custom is not None:
         prompt = expand_command(custom, arg, work_dir)
@@ -535,6 +548,64 @@ def _handle_slash(
         return False
     print(f"Unknown command: {cmd}. Type /help for the list of commands.\n")
     return False
+
+
+def _handle_autocommit(agent: SorcarAgent, work_dir: str) -> None:
+    """Stage all changes, generate a commit message, and commit.
+
+    Mirrors the VS Code extension's ``Auto-commit`` action (see
+    :mod:`kiss.agents.vscode.merge_flow`) by delegating to
+    :func:`kiss.agents.sorcar.sorcar_agent.auto_commit_changes` with the
+    same LLM-backed
+    :func:`~kiss.agents.sorcar.sorcar_agent._generate_commit_message`
+    and the agent's last user prompt (if any), and falls back to a
+    generic message when the LLM call fails.
+
+    Args:
+        agent: The live agent (its ``_last_user_prompt`` is forwarded
+            to the commit message generator for context).
+        work_dir: The current working directory; used to locate the
+            git repository.
+    """
+    from kiss.agents.sorcar.git_worktree import GitWorktreeOps, repo_lock
+    from kiss.agents.sorcar.sorcar_agent import (
+        _generate_commit_message,
+        auto_commit_changes,
+    )
+
+    wd = Path(work_dir).resolve()
+    repo = GitWorktreeOps.discover_repo(wd)
+    if repo is None:
+        print("Not a git repository.\n")
+        return
+    try:
+        with repo_lock(repo):
+            GitWorktreeOps.stage_all(repo)
+            if not GitWorktreeOps.staged_diff(repo):
+                print("Nothing to commit.\n")
+                return
+            print("⚡ Generating commit message…")
+            committed = auto_commit_changes(
+                repo,
+                getattr(agent, "_last_user_prompt", "") or None,
+                _generate_commit_message,
+            )
+    except Exception as exc:  # pragma: no cover - defensive
+        print(f"✗ Auto-commit failed: {exc}\n")
+        return
+    if not committed:
+        print("✗ git commit failed (pre-commit hook?).\n")
+        return
+    # Show the resulting commit's subject line for confirmation.
+    result = subprocess.run(
+        ["git", "log", "-1", "--pretty=%s"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    subject = result.stdout.strip() or "(unknown)"
+    print(f"✓ Committed: {subject}\n")
 
 
 def _handle_resume(agent: SorcarAgent, arg: str) -> None:
@@ -624,8 +695,92 @@ def _print_usage(agent: SorcarAgent) -> None:
     print(f"Total tokens: {tokens}\n")
 
 
-def _read_line(prompt: str) -> str | None:
+def _make_ptk_reader(
+    completer: CliCompleter, history_path: Path,
+) -> PtkLineReader | None:
+    """Build the prompt_toolkit line reader, or ``None`` off-TTY.
+
+    The live dropdown (``@`` file picker with Up/Down navigation and
+    Tab/Enter selection) needs full-screen control of the terminal, so
+    it is only used when both stdin and stdout are TTYs; every other
+    case falls back to the readline/plain-:func:`input` path.
+
+    Args:
+        completer: The shared completion backend.
+        history_path: Per-working-directory readline history file; the
+            prompt_toolkit history lives next to it.
+
+    Returns:
+        A ready :class:`PtkLineReader`, or ``None`` when unavailable.
+    """
+    try:
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            return None
+    except Exception:  # pragma: no cover - defensive isatty guard
+        return None
+    try:
+        return PtkLineReader(completer, history_path)
+    except Exception:  # pragma: no cover - terminal init failure
+        logger.debug("prompt_toolkit init failed", exc_info=True)
+        return None
+
+
+def _read_line_ptk(reader: PtkLineReader, prompt: str) -> str | None:
+    """Read one input line via prompt_toolkit inside the input panel.
+
+    The panel's top border is printed above the prompt and the bottom
+    border after the line is accepted; while the user types, the rows
+    below the input stay free so the live completion dropdown (the
+    ``@`` file/folder picker, slash-command and ``/model`` menus) can
+    render there.
+
+    A line ending in a backslash continues on the next row, joined with
+    real newlines, matching the readline path.
+
+    Args:
+        reader: The prompt_toolkit session wrapper.
+        prompt: The (coloured) prompt marker to show inside the panel.
+
+    Returns:
+        The (possibly multi-line) input, or ``None`` on EOF (Ctrl+D).
+
+    Raises:
+        KeyboardInterrupt: When the user presses Ctrl+C at the prompt.
+    """
+    cols = panel_cols()
+    top = f"{CYAN}{panel_top(IDLE_TITLE, cols)}{RESET}"
+    bottom = f"{CYAN}{panel_bottom('', cols)}{RESET}"
+    framed_prompt = f"{CYAN}│{RESET} {prompt}"
+    print(top)
+    try:
+        line = reader.read(framed_prompt)
+    except EOFError:
+        print(bottom)
+        return None
+    except KeyboardInterrupt:
+        print(bottom)
+        raise
+    while line.endswith("\\"):
+        try:
+            more = reader.read(framed_prompt)
+        except EOFError:
+            line = line[:-1]
+            break
+        except KeyboardInterrupt:
+            print(bottom)
+            raise
+        line = line[:-1] + "\n" + more
+    print(bottom)
+    return line
+
+
+def _read_line(prompt: str, reader: PtkLineReader | None = None) -> str | None:
     """Read one input line inside the shared rounded input panel.
+
+    When *reader* is given (interactive TTY), the line is read through
+    prompt_toolkit via :func:`_read_line_ptk`, which pops the live
+    ``@``-mention file/folder dropdown while typing.  Otherwise the
+    readline/plain-:func:`input` path below is used.
 
     The idle prompt is drawn inside the very same rounded-border panel
     that the steering box (:mod:`kiss.agents.sorcar.cli_steering`) uses
@@ -653,6 +808,8 @@ def _read_line(prompt: str) -> str | None:
     Raises:
         KeyboardInterrupt: When the user presses Ctrl+C at the prompt.
     """
+    if reader is not None:
+        return _read_line_ptk(reader, prompt)
     cols = panel_cols()
     top = f"{CYAN}{panel_top(IDLE_TITLE, cols)}{RESET}"
     bottom = f"{CYAN}{panel_bottom('', cols)}{RESET}"
@@ -767,7 +924,10 @@ def run_repl(
 
     completer = CliCompleter(work_dir, active_file)
     history_path = _history_path(work_dir)
-    _setup_readline(completer, history_path)
+    reader = _make_ptk_reader(completer, history_path)
+    using_readline = reader is None
+    if using_readline:
+        _setup_readline(completer, history_path)
 
     _print_welcome(work_dir, model_name)
 
@@ -775,7 +935,7 @@ def run_repl(
     try:
         while True:
             try:
-                line = _read_line(_PROMPT)
+                line = _read_line(_PROMPT, reader)
             except KeyboardInterrupt:
                 if interrupt_armed:
                     print("\nGoodbye.")
@@ -807,7 +967,12 @@ def run_repl(
             _record_mentions(line)
             _run_one(agent, line, run_kwargs)
     finally:
-        _save_history(history_path)
+        # prompt_toolkit's FileHistory persists as it goes; writing the
+        # (empty) in-process readline history here would clobber the
+        # existing readline history file, so save only when readline
+        # was actually set up for this session.
+        if using_readline:
+            _save_history(history_path)
 
 
 def _run_one(
