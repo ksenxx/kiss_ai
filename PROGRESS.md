@@ -1,82 +1,62 @@
-# TASK: Audit arXiv 2605.19407 "A Bitter Lesson for Data Filtering"
+# Task: Deep review of ~/Downloads/paper.pdf for SIGOPS ATC 2026
+Goal: NOT a typical review — suggest improvements to paper+results, judge novelty, check related work via extensive internet search, produce HTML report in PWD/reports and open in default browser.
 
-User task: Read https://arxiv.org/pdf/2605.19407 and thoroughly check for **wrong assumptions, cheating, irreproducibility, fraud, potential for cheating in evaluation, AI slop, security vulnerabilities**. Use internet search extensively (MUST visit >=10 sites via go_to_url, tracked in tmp/information-bitterlesson.md). Generate an HTML report in PWD/reports/ and open in user's default browser (use `open reports/<file>.html` on macOS). Fact check everything.
+## Status — COMPLETE
+- [x] Extracted PDF text to tmp/paper.txt (pdftotext); split into tmp/chunk_aa..ae
+- [x] Read main body fully (chunks aa, ab, ac) + appendix A–D partially (chunk_ad first 400 lines)
+- [x] Web research 10/10 sites via go_to_url (ATC'25 CFP, TACCL arXiv, MSCCL++ GitHub, SimAI NSDI'25, ForestColl arXiv, OpenXLA op-semantics docs, AlphaEvolve arXiv, Google search AWS Neuron collectives/NKI/TorchNeuron, KernelBench arXiv, DuckDuckGo Centauri ASPLOS'24 best paper) — logged in tmp/information-overlayccl.md
+- [x] Synthesized deep review; wrote reports/overlayccl_review.html (TL;DR verdict, paper summary, novelty judgment, 10 ranked improvement actions, related-work table, writing fixes, reviewer-risk table, experiment ranking); git added; opened in default browser via `open`
+- [x] Cleaned my tmp files (paper.txt, chunk_*, information-overlayccl.md)
 
-## Status: paper fully read (main text + Appendix A/B partially). Web research: 1/10 sites visited. NEXT: do web verification (9+ more sites), then write report.
+## Paper summary (detailed — next session can rely on this, no need to re-read paper)
+**Title**: "OverlayCCL: Composing Collectives Above a Vendor Library via a Closed-Stack Search Loop" (anonymous, targets ATC-style venue, 2026)
 
-## Paper summary (already extracted — do NOT re-read the whole PDF; full text is at tmp/paper.txt, chunks at tmp/chunk_aa..ae; I read chunk_aa(implicitly via paper.txt first 600 lines), chunk_ab, chunk_ac. chunk_ad and chunk_ae remain UNREAD (likely Appendix B figures, Appendix C theory/proofs, MMLU prompt details))
+**Problem**: Picking fastest collective-communication strategy for distributed training on CLOSED vendor stacks (AWS Trainium / Google TPU / Meta MTIA). Microbenchmarks mispredict in-training cost ("cross-scope inversion"); end-to-end trials too expensive; existing simulators (SimAI, ASTRA-sim) drift across machines/models/library versions. Two challenges: (C1) no runtime visibility; (C2) no schedule-level control (no MSCCL/TACCL-style IR).
 
-- Authors: Christopher Mohri (xmohri@stanford.edu), John Duchi, Tatsunori Hashimoto — all Stanford. Submitted 19 May 2026, v1 only, CC-BY 4.0, cs.LG/cs.AI. NeurIPS-style "Preprint".
-- Claim: with enough compute, "the best data filter is no data filter". Unfiltered Common Crawl (DCLM-Pool, 240T GPT-NeoX tokens) eventually beats filtered versions (RefinedWeb, DCLM-Baseline, English/Repetition/StopWords filters) in best-achievable loss L*(D)=min_{M,N} loss, unconstrained compute.
-- Setup: random CC subsets 670M–10B tokens; Llama-style models 15M–7B params (Table 2: hidden 128/512/1024/2048/4096; layers 8/8/18/17/32; LRs 1e-2,5e-3,5e-3,5e-3,1e-3; wd tuned in [0.1,0.5]); Meta Lingua repo; ctx 1024; batch 2^19 tokens; 500-step warmup; steps in powers of 2; eval 5x during training, report BEST checkpoint; H200s, single 8-GPU node (7B uses FSDP); >20,000 H200 GPU-hours total.
-- Metrics: avg NLL on C4-English, FineWeb-Edu, Cosmopedia. Benchmarks (ARC-Easy, PIQA, SocialIQA) only in Appendix B, "much noisier", "trends roughly the same".
-- Filter retention on their pool (by tokens): English 28.2%, Repetition 45.3%, StopWords 50.4%, RefinedWeb 13%, DCLM-Baseline 2.1%.
-- Fig1: 1B model best losses CC 3.37 < SW 3.46 < RP 3.58 < EN 3.59 < RW 3.93 < D-B 5.29. At 15M model the pool is NOT best (EN 4.15 best, CC 4.44).
-- Junk injection: +random strings (10k fake words, 3-8 chars) and +shuffled-word CC docs up to +800%. Large models close gap; shuffled even BEATS pool on 330M/1B (e.g. 1B: +400% shuffled 3.36 vs CC 3.40).
-- Scaling-law prediction: crossing point for 240T pool vs RefinedWeb at ~1e30 FLOPs (two fits: 600 tok/param "following DeepSeek V4" -> 3.6e30; 4-epoch constraint per Muennighoff -> 9.0e29). Cites xAI Grok-4 model card for frontier ~5e26 FLOPs; cites Epoch AI (David Owen, epoch.ai/files/AI_2030.pdf) for 1e29 by 2030.
-- Fig5: crossing-epoch counts up to 121.6 epochs; extrapolations from second-degree polynomial fits in log-log space; hollow points = extrapolated (power-law fit of decaying loss) NOT empirical; 80M model has NO crossing at 10B pool.
-- Table 1: GPT5-mini judgments of keyword-matched CC docs for 4 MMLU categories: support >> refute (e.g. world_religions 5.89 vs 0.00) — used to argue CC has little actively-harmful misinformation.
-- Sec 6: shuffled data hurts first-token prediction (Fig 7) but they dismiss it.
-- Sec 7: Proposition 7.1 low-rank matrix-factorization model: with rank r >= k tasks (orthogonal inputs), junk tasks absorbed w/o penalty; cites Baldi-Hornik 1988, Zhu et al 2018, Lee et al 2016.
-- Limitations they admit: dense-only, no curricula/post-training, MoE may differ; dup docs; 1e30 FLOPs needed; AI-generated content post-2023 unclear; factuality edge cases.
-- Code: https://github.com/chrismohrii/bitter-lesson-data-filtering (claims config files released).
+**Approach**: OverlayCCL = LLM-agent closed-stack search loop, 5 phases:
+- Phase 1: LLM agent calibrates a 6-term cost-model simulator via on-device probe tools (Table 2: m_collective_lat, m_p2p_transfer, m_xla_op_overhead, m_compilation_cost, m_launch_overhead, m_memcopy_thru, m_b2b_amortization). 8–12 min once per (hw, sw-version). Agent designs probe campaign; tools prevent fabrication.
+- Phase 2: score seed library (incl. AWS production baseline written by 5 AWS engineers; LLM not told which is baseline).
+- Phase 3: "strategy-enumerate" search: 1 LLM call enumerates K=5 distinct strategy sketches, K calls implement, 2R=4 calls refine top-2 by simulator score. Alternatives ablated: cc-react (Claude Code ReAct), multi-island GA (AlphaEvolve-like). All converge to same winner; strategy-enumerate ~25% less wall time, ~20% fewer tokens. Total 10 LLM calls/problem.
+- Phase 4: HW validation gates (20-iter microbench + 10-step TV harness on synthetic 8-layer LM); crashes/OOM/NaN excluded; LLM recovery up to 2 attempts. HW timing NOT the ranking signal.
+- Phase 5: deploy lowest-simulator-score survivor passing gates. One-line import swap.
 
-## My candidate findings so far (TO VERIFY via web)
-1. **Evaluation-choice bias (potential cheating in evaluation)**: C4/FineWeb/Cosmopedia NLL favors training distribution closer to raw web; NLL != downstream ability. Their own cited Saada et al. 2025 (2510.00866) makes exactly this point. Benchmarks relegated to appendix and "noisier"; on ARC-Easy/PIQA at small scales DCLM-Baseline is known (from DCLM paper) to be much better — check Fig 8 numbers: CC usually top at 1B but margins tiny (e.g. ARC-Easy 1B: CC 0.409 vs RW 0.344? note RW *worse*) and SocialIQA values ~0.35-0.39 are near random (3-class, random=0.333). ARC-Easy random = 0.25, values 0.30-0.41. PIQA random=0.5, values 0.55-0.64. So benchmarks barely above chance => weak evidence.
-2. **Best-checkpoint reporting**: "report the best checkpoint" of 5 evals = mild selection bias on val loss.
-3. **Unconstrained-compute objective L*** assumes min over M,N approximated by grid up to 1B/7B params; "best achieved" with no error bars / no seeds mentioned — single runs? No variance reported.
-4. **Massive extrapolation**: from <=10B-token pools to 240T (4+ orders of magnitude) and 1e30 FLOPs (~3-4 OOM above frontier); 121.6-epoch crossings; quadratic fits in log-log; they themselves shade regions as unreliable but headline claim relies on extrapolation. R^2>0.99 on a scaling law fitted to ~4-5 points.
-5. **Contamination claim**: "pool sizes only up to 10B tokens so no test-set contamination expected" — weak: contamination possible at any size; also val sets (C4, FineWeb-Edu, Cosmopedia-style) overlap CC distribution by construction (C4 IS filtered CC; FineWeb-Edu IS filtered CC) -> train/test distribution overlap inflates pool advantage. Cosmopedia is synthetic (HuggingFace).
-6. **"DeepSeek V4" 600:1 ratio** — verify existence/ratio. Possibly unpublished/rumor-based citation (no reference entry given for DeepSeek V4! Check references — none listed). If no citation -> unverifiable claim.
-7. **Tokenizer**: GPT-NeoX tokenizer w/ vocab giving -log(1/V)~10.8 => V~e^10.8~49k ≈ 50257/50304 plausible (GPT-NeoX vocab 50277/50304). OK.
-8. **DCLM facts to verify**: DCLM-Pool = 240T tokens; DCLM-Baseline = 3.8T tokens / ~1% of CC; resiliparse extraction; Bevendorff et al. 2018 citation is for ChatNoir not resiliparse (common miscitation — actually resiliparse canonical cite IS Bevendorff 2018 ECIR per its docs — verify).
-9. **Muennighoff et al. 2023/2025 "Scaling Data-Constrained LMs"**: ~4 epochs diminishing returns — verify; also note repetition value drops to zero ~16 epochs in that paper, while this paper relies on crossings at up to 121 epochs — tension/wrong assumption.
-10. **Villalobos et al.: 200-500T tokens internet stock** — verify (Epoch "Will we run out of data": ~300T tokens median, 100T-1000T range? check).
-11. **xAI Grok 4 model card 5e26 FLOPs** — verify URL/number.
-12. **GPT5-mini judge**: LLM-as-judge for Table 1, no human validation, no calibration; keyword matching for 4 MMLU subjects only; counts per what denominator? "Average judgements" unclear units. Weak factuality audit, support/refute asymmetry could reflect judge bias.
-13. **Security vulnerabilities angle**: recommending NO data filtering ignores data-poisoning literature: Anthropic/UK AISI Oct 2025 "Poisoning attacks require near-constant number of documents" (arXiv 2510.07192) showed ~250 docs can backdoor models regardless of size — directly contradicts "junk data harmless" w.r.t. adversarial data; also CC poisoning feasibility (Carlini et al. 2023/2024 "Poisoning Web-Scale Training Datasets is Practical", arXiv 2302.10149 — expired domains in CC). Paper only considers random/shuffled junk, not adversarial. VERIFY both papers.
-14. Fig 3 oddity: +20% random BEATS pool on 330M/1B (3.38 vs 3.40) — they hand-wave "regularization effect"; within-noise? no error bars.
-15. Check GitHub repo: does it exist? configs only or full pipeline? data subsets released? exact subset seeds? If only configs -> irreproducible w/o 20k H200 hours + DCLM-Pool access (240T tokens, huge download).
-16. AI slop check: paper reads coherent, low slop probability; check for hallucinated refs (Saada 2510.00866, Ru 2502.06604, Kim 2509.14786, Li 2505.04741, Fang 2503.07879, Owen AI_2030.pdf, Sardana 2401.00448, Cheng 2206.12041 "How many labelers do you have?" by Cheng/Asi/Duchi — self-cite, verify title matches).
-17. Authors legitimacy: Christopher Mohri = Stanford PhD student (son of Mehryar Mohri?), prior work w/ Hashimoto on conformal LM factuality. Verify via Stanford/Google Scholar/openreview.
-18. Note: cited "Awasthi, Cortes, Mohri (Christopher)" AISTATS 2023 — self-cite consistent w/ identity.
-19. Sinha et al. 2021 — shuffled-word MLM paper, real (2104.06644).
-20. Goyal et al. 2024 (2404.07177) "Scaling laws for data filtering" CVPR 2024 — real; check their claim characterization.
-21. Allen-Zhu & Li capacity laws (2404.05405): "junk data significantly reduces knowledge capacity" — paper says it "aligns with our findings on sufficient model sizes" — actually A-Z&Li found junk HURTS capacity even for big models unless tokens repeated more — possible mischaracterization; verify abstract.
-22. Wrong assumption candidate: "loss on C4/FW-Edu/Cosmo correlates with downstream performance" — contested in literature (e.g., Saada et al; DCLM paper used CORE benchmarks not perplexity).
-23. Fraud check: numbers internally consistent so far (Fig1 CC 3.37 on 1B; Fig5 700M pool CC 3.37 vs RW 3.93 consistent w/ Fig1 RW 3.93 ✓). 6ND compute: 670M pool 1B model 100B tokens => 6*1e9*1e11=6e20... Fig2 x-axis only goes to 1e19?? CHECK: Fig2 axis 1e17–1e19; but 1B model @ up to 1e11 tokens = 6e20 FLOPs — axis seems truncated/preview may differ; verify in chunk_ad/ae or HTML version. Could be mis-extraction by pdftotext. Don't accuse without checking figure directly (open https://arxiv.org/html/2605.19407v1).
-24. "1 trillion parameter Chinchilla budget" — Chinchilla ~20 tok/param => 20T tokens; DCLM-Baseline 3.8T < 20T ✓ internally fine.
+**Search space**: Python functions composing xm.* primitives {all_gather, reduce_scatter, all_reduce, collective_permute, all_to_all} + local XLA ops (reshape/pad/slice). "Strategy layer" vs MSCCL/TACCL "schedule layer". Correctness: byte-equality vs pure-Python ref at ws∈{4,8} in CPU sandbox (monkey-patched xm.*, NumPy), fp32 byte-equal + bf16 tolerance.
 
-## STATUS UPDATE (step ~29): Research COMPLETE — 12/12 sites visited, all key facts verified and logged in tmp/information-bitterlesson.md. READ THAT FILE for all findings. Appendix chunks ad/ae read (benchmarks near chance; proofs OK).
+**Cost model (Eq.1)**: T_step = T_local + T_bw + T_coll(back-to-back amortization) + T_launch (mark_step tax, AST-derived loop multiplier) + T_NEFF (cache reload amortized) + T_net. Plus reward-hacking-resistant structural terms: fusion-credit pass, smooth quadratic HBM-overrun penalty (16GB/core), primitive-viability +∞ (collective_permute compiler abort at large ws; all_reduce payload limit). NEURON_NUM_RECENT_MODELS_TO_KEEP=1 setting.
 
-Key verified findings for report:
-1. Authors real (C. Mohri Stanford PhD in Duchi group; Scholar verified). No fraud indicators; numbers internally consistent; theory proofs correct.
-2. Repo real, 1 commit, configs+scripts only; data via mutable Google Drive; no LICENSE; seeds present (seed=1 in sweep; data-gen --seed optional default None).
-3. Eval-metric bias: headline = NLL on C4/FineWeb-Edu/Cosmopedia (all CC-derived/synthetic); Saada 2510.00866 verified: CQF improves downstream but not HQ-set NLL → metric choice favors "no filter". MMLU commented out in repo eval config; many measured benchmarks (hellaswag, winogrande, race, truthfulqa, gpqa, boolq, commonsense_qa, arc_challenge, openbookqa) unreported; reported 3 are near chance (SocialIQA 0.34-0.39 vs 0.333; ARC-E 0.26-0.42 vs 0.25; PIQA 0.52-0.64 vs 0.5).
-4. Best-checkpoint of 5 evals reporting = mild selection. Single runs, no error bars/seeds variance.
-5. Extrapolation: crossings up to 121.6 epochs vs Muennighoff (verified) "value of compute decays to zero" beyond ~4-16 epochs; 240T/1e30 FLOPs prediction = 4 OOM extrapolation; R²>0.99 on ~4-5 fitted points (quadratic in log-log).
-6. DCLM 240T verified ✓; 3.8T DCLM-Baseline ≈1.6% ("~1%" ok); DeepSeek V4 real (Apr 24 2026, MoE 1.6T/49B active) but 600:1 ratio unreferenced & ambiguous for MoE; xAI Grok-4 model card EXISTS but contains NO 5e26 figure → citation doesn't support claim; Epoch 1e29-by-2030 verified ✓; Villalobos verified ✓; Allen-Zhu&Li verified (knowledge-capacity tension); GPT5-mini real (GPT-5 mini, Aug 2025).
-7. Security: paper ignores adversarial poisoning. Verified: Souly et al. 2510.07192 (~250 docs backdoor any size model); Carlini 2302.10149 ($60 poisons 0.01% LAION; split-view/frontrunning attacks on crawled corpora). Unfiltered CC maximizes poisoning surface + PII/CSAM/toxicity concerns not addressed. Grok-4 model card itself says xAI filters for "data quality and safety".
-8. AI slop: none — coherent, well-written, real refs (all checked refs exist), real code, honest limitations section. Fig 4 shuffled-text example consistent.
-9. Wrong assumptions list: L* unconstrained-compute objective economically unrealistic (their own Fig2 Pareto shows filters win at all practical compute ≤1e19-1e20); "best filter is no filter" depends on NLL metric; "junk≠adversarial" blind spot; assumes loss↔downstream correlation (contested, Saada); contamination dismissal weak (val sets ARE CC-derived → distribution overlap, not contamination per se); +20% random "beats" pool within noise (no error bars); MoE-derived 600:1 ratio applied to dense models.
+**Evaluation**: 7× trn1.32xlarge (224 ranks, 8 EFA×12.5GB/s per node), Claude Sonnet 4.5. 8 collective problems (Table 1): MoE-side AllToAllV, Uniform AllToAll, Ring KV, distributed cross-entropy; Llama-side PP cross-stage, TP MLP all-reduce, FSDP weight prefetch, layer-block AR.
+- Headline: OLMoE-10B (~11.5B params) 1.40–1.41× end-to-end steady-step speedup (4407→3126 ms) on 2500-step real OpenWebText run w/ matched loss (baseline 6.843 vs agent 6.945, ±0.15 per 50-step checkpoint, attributed to bf16 non-associativity). Llama-7B 3.24× (71.3→22.0 ms steady) with random-token loop, bit-identical normalized loss 4.970.
+- Cross-scope inversion (Fig 2/Table 5): baseline wins 1-node and often 7-node microbench but agent wins per-step in real training for most primitives (per-step contribution ratios ~4–6× on Llama prims due to per-microbatch dispatch tax; bundled-vs-per_mb is the key Llama trick: M dispatches → 1 fused graph; speedup tracks M: 1.19/1.71/2.86/4.99× at M=2/4/8/16).
+- Config sweep: OLMoE robust 1.39–1.41× across seqlen/dim/layers; Llama tracks M.
+- Cluster-size generalization: redeploy 7-node strategies at 3-node (96 ranks) and 5-node (160): OLMoE speedup widens (1.40→1.50→1.79×); Llama compresses (3.58→2.74→2.49×).
+- No-simulator ablation: hide sim from Phase-3/5, LLM-judge ranks by HW microbench → picks structurally-baseline patterns → OLMoE collapses to 1.00×, Llama 1.01×. Central ablation claim.
+- Cost: search 56–78 min, ~$19 LLM per style; vs ~$6,000/40h for E2E trials of K=5×8 problems. Table 3.
 
-## Remaining TODO (next session)
-1. Read tmp/chunk_ad and tmp/chunk_ae (appendix B figures/numbers, Appendix C theory, MMLU-judge prompt details, Table 1 methodology denominator).
-2. Web research via go_to_url, updating tmp/information-bitterlesson.md counter to >=10:
-   - GitHub repo chrismohrii/bitter-lesson-data-filtering (existence, contents, license, commit history)
-   - arXiv HTML version (check Fig 2 axis / numbers) https://arxiv.org/html/2605.19407v1
-   - DCLM paper page (2406.11794 abstract) for 240T/3.8T/1% claims
-   - Muennighoff 2305.16264 abstract (4 epochs, 16 epochs->zero value)
-   - Villalobos 2211.04325 abstract (token stock estimate)
-   - xAI Grok-4 model card PDF (5e26)
-   - Epoch AI AI_2030 (1e29 by 2030)
-   - Anthropic poisoning blog or arXiv 2510.07192 (250 docs backdoor)
-   - Carlini 2302.10149 (poisoning CC practical)
-   - Saada 2510.00866 abstract (data-quality illusion)
-   - Allen-Zhu & Li 2404.05405 abstract (junk data capacity)
-   - DeepSeek V4 600 tok/param — search; likely cite-less
-   - Christopher Mohri Stanford page / scholar
-   - Goyal 2404.07177 abstract
-3. Optionally clone/inspect GitHub repo via Bash for reproducibility + security (e.g., creds, unsafe code).
-4. Write reports/bitter_lesson_audit.html (self-contained, professional, with severity ratings per category: wrong assumptions / cheating / irreproducibility / fraud / eval-gaming potential / AI slop / security). Every claim must cite verified source w/ URL. Be fair: paper appears to be legit Stanford work; likely verdict = no fraud, but heavy extrapolation, eval-metric choice favors conclusion, limited reproducibility (compute), and security blind spot re: data poisoning.
-5. `open` the HTML in default browser. git add reports dir. Clean tmp files (paper.pdf, paper.txt, chunk_*, information file). Then finish with full summary.
+**Related work cited**: MSCCL/MSCCLang, TACCL, SCCL, AutoCCL (NSDI'25), Blink, CoCoNet; SimAI (NSDI'25), ASTRA-sim 1/2; ZeRO/DeepSpeed/Megatron/FSDP/GPipe/PipeDream/Horovod/BytePS/FlexFlow; FunSearch, AlphaEvolve, ShinkaEvolve, AlphaTensor, AlphaDev, Codex/AlphaCode/Self-Refine/Reflexion/ToT; TVM/AutoTVM/Ansor/Halide/Triton/TASO/MLIR; LLM kernel systems STARK, K-Search, Astra, KernelEvolve; MoE lineage GShard/Switch/expert-choice/OLMoE; anonymized code at github.com/OverlayCCL/OverlayCCL.
+
+**Appendices**: A loss-match; B methodology (probe gating via .item() late-window, add_step_closure for OLMoE; $150.50/h cluster cost calculus); C per-problem ablation tables; D "compositions discovered" (strategy vs algorithm distinction; ~100 LOC to add a problem); E case study AG+RS vs pack-and-gather + reward-hacking; F cost-model details; G tool API; H prompts; I seed code. (Chunks ad tail + ae not fully read — mostly tables/code boxes.)
+
+## My initial critical observations (to merge with web research)
+1. Single-platform validation (Trainium only) despite repeated TPU/MTIA generalization claims — no TPU experiment at all; claim "we observe the same pattern on Google TPU and Meta MTIA" unsupported.
+2. Llama-7B 3.24× headline is essentially ONE trick (bundle M microbatch collectives into one graph = known fusion/bucketing idea, cf. DDP gradient bucketing, FSDP); baseline "per_mb" may be a weak baseline — AWS NXD recipes; reviewers will ask whether a hand-tuned bundled baseline exists (a one-line dev fix). The paper admits practitioners use per_mb for memory/compile-time reasons; need evidence bundled wasn't already known/rejected.
+3. Llama-7B end-to-end run is only 200 steps with random tokens; wall-clock 2.5 vs 5.9 min in Table 6 (agent wall WORSE? — baseline 2.5 min, agent 5.9 min: presumably compile time dominates; paper should explain).
+4. Loss gap 6.843 vs 6.945 (agent ~0.1 worse final loss) — claimed within noise but no seed-variance study (need N-seed baseline-vs-baseline noise band to substantiate ±0.15 claim).
+5. Cost model has many hand-designed structural terms (fusion credit, HBM penalty, viability regexes, AST loop rules) — "LLM builds the simulator" is overstated; LLM only fits constants; the term structure is hand-engineered & Trainium-specific. Generality unclear.
+6. Simulator fidelity never directly evaluated: no scatter plot of predicted vs measured step time across candidates; only the no-sim ablation. Should report rank correlation (Spearman) of Sim vs ground truth.
+7. K=5, R=2, 10 LLM calls — tiny search budget; no sensitivity to K/R; no variance across LLM seeds/reruns (stochastic proposer, single run reported?). Should run search N times and report variance.
+8. Correctness at ws∈{4,8} only via CPU NumPy sandbox; deployed at 224 ranks — admits a correctness gap; TV gate is only 10 steps. Padding/slicing strategies can have subtle wrong-at-scale behaviors (e.g., non-divisible shapes). Also fixed I/O shapes — dynamic shapes (AllToAllV with varying counts!) — expert-choice sidesteps variable counts; so "AllToAllV" tested under deterministic counts only.
+9. Baseline characterization: "internal-AWS-optimized production strategy by 5 experienced AWS developers" — not externally verifiable; anonymity vs AWS-internal claim tension; should compare also vs public NeuronX-Distributed release.
+10. trn1 (Trainium1) is aging; trn2 exists (different topology, NeuronLink-v3) — results may not carry; at least discuss.
+11. No comparison against simply running each of the K=5 candidates end-to-end once (the $6k figure assumes 1h per candidate; but a 250-step steady measurement may take minutes, not 1h — Table 4 says end-to-end 250 steps; the cost-calculus may be inflated).
+12. Cross-scope inversion: interesting but mechanism = mark_step/graph-launch tax + NEFF cache + fusion; mostly XLA/lazy-tensor artifacts, arguably known to PyTorch/XLA practitioners; novelty of the *finding* should be positioned against pjrt/lazy-tensor literature.
+13. Eight problems but end-to-end only exercises 2 (OLMoE: AllToAllV+dxe) + 4 (Llama block). Ring KV & Uniform A2A only microbench-level per-step probes.
+14. ATC fit: SIGOPS/USENIX ATC likes systems+artifacts: codebase anonymized ✓; but heavy LLM dependency raises reproducibility (Sonnet 4.5 nondeterminism, API cost); should pin prompts+cache responses, report multi-run variance.
+15. Statistical rigor: medians reported; no CIs/error bars mentioned for step times.
+16. Related work gaps to check online: NCCL tuner plugins, MSCCL++, TE/transformer-engine comm overlap, Centauri, Syndicate, TACOS, "LLM for systems" (e.g., NVIDIA kernel-gen blogs), AI Metropolis?, CommGPT?, anything on Trainium collectives (AWS Neuron "cc-overlap"), Google's GSPMD/XLA collective combiner passes (latency hiding scheduler, async collectives, collective-combine = the SAME bundling trick inside XLA!) — XLA already has CollectiveCombiner passes; check whether Neuron exposes flags; that would undercut novelty of bundling.
+17. Also check: ForestColl?, TE-CCL (Microsoft, traffic engineering for collectives), "MultiCCL"?, OpalCCL? etc. And LLM-agent-for-perf papers: "KernelBench", "Mirage", "SakanaAI CUDA engineer" (known reward-hacking cautionary tale → relevant to their anti-reward-hacking design).
+
+## Next session TODO
+1. Web research: use go_to_url on ≥10 sites (arxiv/MSCCL++/TACCL/AutoCCL NSDI25/SimAI NSDI25/XLA collective-combiner docs/AWS Neuron docs on collectives & NEFF cache/trn2/KernelBench/AlphaEvolve/Sakana CUDA reward hacking/ATC 2026 CFP for fit+page/format). Maintain tmp/information-<id>.md with counter per protocol.
+2. Synthesize: novelty judgment (what's new: LLM-calibrated per-deployment cost model + strategy-layer search above closed API + cross-scope-inversion measurement study; what's not: bundling≈collective-combining, LLM-evolution loop≈AlphaEvolve, cost models≈ASTRA-sim).
+3. Write reports/overlayccl_review.html — sections: TL;DR, novelty assessment, strengths, improvement suggestions (experiments to add, baselines, stats, writing), related-work additions w/ links, ATC-fit & reviewer-risk table, actionable checklist. Style it nicely (self-contained CSS).
+4. git add reports/; open with `open reports/overlayccl_review.html`; rm tmp/chunk_*, tmp/paper.txt, tmp/information-*.md; finish with full review summary text.

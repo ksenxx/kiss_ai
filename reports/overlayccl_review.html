@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Deep Review: OverlayCCL — for USENIX/SIGOPS ATC 2026</title>
+<style>
+  :root{
+    --bg:#0f1419; --panel:#1a2129; --panel2:#212a34; --ink:#e8edf2; --muted:#9fb0bf;
+    --accent:#4fc3f7; --good:#66bb6a; --warn:#ffb74d; --bad:#ef5350; --chip:#2c3a47;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:"Avenir Next","Segoe UI",Helvetica,Arial,sans-serif;background:var(--bg);color:var(--ink);line-height:1.6}
+  .wrap{max-width:1080px;margin:0 auto;padding:32px 28px 80px}
+  header{border-bottom:2px solid var(--accent);padding-bottom:18px;margin-bottom:28px}
+  h1{font-size:1.9rem;margin:0 0 6px}
+  h1 .sub{color:var(--muted);font-weight:400;font-size:1.05rem;display:block;margin-top:4px}
+  h2{color:var(--accent);font-size:1.35rem;margin-top:44px;border-left:5px solid var(--accent);padding-left:12px}
+  h3{font-size:1.08rem;margin-top:26px;color:#bfe3ff}
+  p, li{font-size:0.97rem}
+  .meta{color:var(--muted);font-size:.9rem}
+  .card{background:var(--panel);border:1px solid #2b3744;border-radius:10px;padding:18px 22px;margin:16px 0}
+  .verdict{background:linear-gradient(135deg,#16222e,#1a2c3a);border-left:6px solid var(--warn)}
+  .chips{margin:10px 0}
+  .chip{display:inline-block;background:var(--chip);color:#cfe7ff;border-radius:14px;padding:3px 12px;margin:3px 4px;font-size:.82rem}
+  .good{color:var(--good)} .warn{color:var(--warn)} .bad{color:var(--bad)}
+  table{border-collapse:collapse;width:100%;margin:14px 0;font-size:.92rem}
+  th,td{border:1px solid #33414f;padding:8px 10px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:#bfe3ff}
+  tr:nth-child(even) td{background:#18212a}
+  code{background:#26313c;padding:1px 6px;border-radius:4px;font-size:.88em;color:#ffd28a}
+  a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}
+  .num{display:inline-block;background:var(--accent);color:#08202e;font-weight:700;border-radius:50%;width:26px;height:26px;text-align:center;line-height:26px;margin-right:8px;font-size:.85rem}
+  ol.actions>li{margin-bottom:14px}
+  .sev{font-weight:700;font-size:.78rem;border-radius:4px;padding:2px 8px;margin-left:6px}
+  .sev.high{background:#4a1f1f;color:#ff9c9c}.sev.med{background:#453415;color:#ffd28a}.sev.low{background:#1d3a26;color:#9be0a8}
+  footer{margin-top:60px;color:var(--muted);font-size:.85rem;border-top:1px solid #2b3744;padding-top:16px}
+  details{margin:8px 0}
+  summary{cursor:pointer;color:#bfe3ff}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>Deep Review &amp; Improvement Plan
+    <span class="sub">“OverlayCCL: Composing Collectives Above a Vendor Library via a Closed-Stack Search Loop” — assessed for USENIX/SIGOPS ATC&nbsp;2026</span>
+  </h1>
+  <p class="meta">This is not a standard accept/reject review. It is a constructive deep-dive: (a) a novelty judgment grounded in the current literature, (b) concrete suggestions to strengthen the results, and (c) related work the paper must engage with. Sources consulted: 10 websites (USENIX ATC CFP, arXiv pages for TACCL / ForestColl / AlphaEvolve / KernelBench, MSCCL++ GitHub, SimAI@NSDI'25, OpenXLA docs, AWS Neuron docs via search, Centauri@ASPLOS'24 search results).</p>
+</header>
+
+<div class="card verdict">
+  <h3 style="margin-top:0">TL;DR verdict</h3>
+  <p><b>The core idea is publishable and timely, and the system is unusually complete</b> (real 224-rank Trainium cluster, production baseline, 2500-step real-token loss-matched runs, anonymized artifact). The two genuinely novel pieces are (1) the <i>strategy layer</i> formulation — searching over vendor-primitive compositions and tensor transformations <i>above</i> a closed collective API — and (2) the <i>LLM-calibrated, per-deployment cost model</i> used as the in-loop reward, validated by a clean ablation (hiding the simulator collapses 1.40× → 1.00×). The <i>cross-scope inversion</i> measurement study is a valuable systems finding in its own right.</p>
+  <p><b>However, the paper is exposed on four fronts</b> that an ATC PC will probe hard: (i) the 3.24× Llama headline rests on one known idea (bundling M per-microbatch collectives into one graph — what XLA's own collective-combiner passes do within a graph, and what DDP/FSDP bucketing does on GPUs) against a possibly under-tuned <code>per_mb</code> baseline; (ii) generalization claims to TPU/MTIA are asserted, never tested; (iii) the cost model's structure is hand-engineered and Trainium-specific while the abstract implies the LLM "builds the simulator"; (iv) related work misses several directly relevant systems (Centauri, MSCCL++, ForestColl, NKI, XLA collective combining). All four are fixable before the deadline. Detailed actions below.</p>
+  <div class="chips">
+    <span class="chip">Novelty: moderate-to-high (system), moderate (techniques)</span>
+    <span class="chip">Evidence: strong on Trainium, absent elsewhere</span>
+    <span class="chip">Biggest risk: baseline fairness for the 3.24× claim</span>
+    <span class="chip">ATC fit: good (artifact + experimental emphasis)</span>
+  </div>
+</div>
+
+<h2>1&nbsp;&nbsp;What the paper claims (summary used for this review)</h2>
+<div class="card">
+<p>OverlayCCL targets collective-communication selection on <b>closed vendor stacks</b> (AWS Trainium, with claims of relevance to Google TPU and Meta MTIA), where (C1) the runtime is opaque and (C2) no schedule-level IR (MSCCL/TACCL-style) is exposed. A five-phase loop: <b>Phase&nbsp;1</b> an LLM agent runs probe tools on the deployment to fit a six-term cost model (graph-launch tax, collective bandwidth, back-to-back amortization, NEFF compile/reload, memcopy bandwidth, net bytes) plus anti-reward-hacking structural terms; <b>Phase&nbsp;2</b> scores a seed library including AWS's production strategy; <b>Phase&nbsp;3</b> "strategy-enumerate" LLM search (K=5 sketches + top-2 refinement, 10 LLM calls/problem); <b>Phase&nbsp;4</b> hardware/training-validation gates; <b>Phase&nbsp;5</b> deploys the lowest-simulator-score gated survivor.</p>
+<p>Results on 7× <code>trn1.32xlarge</code> (224 ranks): <b>1.40×</b> end-to-end steady-step on OLMoE-10B (loss-matched, 2500 steps, real OpenWebText), <b>3.24×</b> on Llama-7B (random tokens, 200 steps); 8 collective problems; cross-scope inversion documented (microbench winners lose in training); no-simulator ablation collapses to 1.00×; search costs ~$19 LLM + ~1h cluster; cluster-size redeployment at 3/5 nodes preserves speedups (1.79×/1.50× OLMoE; 2.49×/2.74× Llama).</p>
+</div>
+
+<h2>2&nbsp;&nbsp;Novelty judgment</h2>
+<div class="card">
+<h3>What is genuinely new</h3>
+<ul>
+  <li><b>The "strategy layer" problem formulation.</b> All published collective synthesis (SCCL, MSCCL/MSCCLang, TACCL, AutoCCL, Blink, ForestColl) optimizes the <i>schedule layer</i> and presupposes a programmable runtime. No prior system searches compositions of opaque vendor primitives + tensor pre/post-transformations as the optimization space. This formulation is real and useful: an entire class of accelerators (Trainium, TPU via xm.*, MTIA) only exposes this surface.</li>
+  <li><b>LLM-driven on-device calibration of the in-loop cost model.</b> Cost-model simulators exist (ASTRA-sim, SimAI), and LLM-evolution loops exist (FunSearch, AlphaEvolve, ShinkaEvolve, kernel optimizers). The combination — agent-designed probe campaigns that re-fit a structured cost model per (hardware, library-version) and then use that model as a dense, decomposed, reward-hacking-resistant fitness function — is, to my knowledge, new. The –no-simulator ablation (1.40×→1.00×) is the paper's strongest piece of evidence and is well designed.</li>
+  <li><b>Cross-scope inversion as a measured phenomenon.</b> Practitioners know microbenchmarks mislead, but Table&nbsp;5 / Figure&nbsp;2's three-scope quantification (1-node bench / 7-node bench / in-training per-step) on eight real collectives is a useful, citable measurement study.</li>
+</ul>
+<h3>What is <i>not</i> new (and must be positioned honestly)</h3>
+<ul>
+  <li><b>Bundling M per-microbatch collectives into one graph</b> — the mechanism behind the entire 3.24×/4.99× Llama-side result — is the same idea as gradient bucketing in PyTorch DDP, FSDP's flat-parameter collectives, and XLA's own <i>collective-combiner</i> passes (AllReduceCombiner/AllGatherCombiner) which merge adjacent collectives inside a single HLO graph. The reason it is not already applied on Trainium is the per-microbatch <code>mark_step</code> graph boundary — that is an interesting deployment-specific insight, but the paper currently presents the bundled strategy as a discovery rather than a known transformation that the search re-derived and validated under Trainium's memory/compile-time constraints.</li>
+  <li><b>LLM-evolutionary search over performance-critical code.</b> AlphaEvolve already "accelerated the training of the LLM underpinning AlphaEvolve itself" and optimized Google datacenter scheduling — i.e., LLM search applied to production training-infrastructure performance is established. The paper cites AlphaEvolve, but the intro's framing ("first system that searches for faster collective-communication strategies…") should be scoped tightly: first <i>on top of a closed vendor collective API</i>, with the cost-model-in-the-loop distinction made explicit.</li>
+  <li><b>Calibrated analytic cost models for distributed training.</b> SimAI (NSDI'25) claims 98.1% fidelity and explicit adaptability "from small-scale labs to large-scale industrial environments." The paper's blanket claim that existing simulators are "tuned against a fixed reference environment" and "drift" needs evidence or softer wording (see Action&nbsp;4).</li>
+</ul>
+<h3>Net assessment</h3>
+<p>Novelty is <b>sufficient for ATC</b> if the claims are scoped precisely: a closed-stack <i>system</i> contribution with a novel search-surface formulation and a novel calibration mechanism, validated in production-like conditions. It is <b>not</b> a new algorithm-synthesis technique nor a new class of collective algorithm (Appendix&nbsp;D already concedes the loop "does not and cannot invent collective algorithms" — good; bring that honesty into Section&nbsp;1).</p>
+</div>
+
+<h2>3&nbsp;&nbsp;Highest-impact improvements to the results</h2>
+<div class="card">
+<ol class="actions">
+  <li><span class="num">1</span><b>Fortify the Llama baseline (the 3.24× claim).</b><span class="sev high">HIGH</span><br>
+  The agent's winning move is <code>per_mb → bundled</code>. A skeptical reviewer's first question: <i>could a developer get the same 3.24× with a one-line manual change?</i> Add a hand-written "developer-bundled" baseline (an AWS engineer or the authors manually fusing the M collectives) and report (a) how close it gets to the agent strategy, and (b) how much engineering time it took, including handling the memory/compile-time limits the paper says make practitioners avoid bundling. If the agent's version contains additional non-obvious elements (masked-AR packing, layout choices), quantify their marginal contribution with a decomposition table. Also test/measure XLA collective-combiner behavior when the mark_step boundary is removed, to show the compiler alone does not recover the win.</li>
+
+  <li><span class="num">2</span><b>Directly validate the simulator's fidelity, not just its end effect.</b><span class="sev high">HIGH</span><br>
+  The only evidence for the cost model is the no-sim ablation. Add: (a) a scatter plot of simulator-predicted vs. measured per-step time over <i>all</i> Phase-3/4 candidates across the 8 problems; (b) Spearman rank correlation per problem (ranking quality is what matters, since Phase&nbsp;5 picks argmin); (c) a term-ablation study (drop each of the six terms + each structural term, report how often the deployed winner changes). This converts the cost model from "trust us" into a measurable artifact and pre-empts the "is this just an elaborate prior?" review.</li>
+
+  <li><span class="num">3</span><b>Report variance of the stochastic search.</b><span class="sev high">HIGH</span><br>
+  The LLM proposer is stochastic, K=5 and R=2 are tiny budgets, and a single run per search style is reported. Re-run strategy-enumerate ≥5 times per problem (cheap: simulator-scored, ~$2.40/search) and report the distribution of deployed-strategy simulator scores and the fraction of runs that recover the deployed winner. Add sensitivity to K and R, and ideally one other LLM (e.g., GPT-class or an open model) to show the result is not Sonnet-4.5-specific. KernelBench-style methodology (fast_p over many runs) is the community norm the PC will expect.</li>
+
+  <li><span class="num">4</span><b>Substantiate or soften the "simulators drift" claim.</b><span class="sev med">MED</span><br>
+  SimAI (NSDI'25) explicitly claims cross-environment robustness with 98.1% fidelity. Either (a) port a SimAI/ASTRA-sim-style fixed-constant model to Trainium and measure its ranking error vs. the calibrated model (a one-figure experiment that would strongly support the thesis), or (b) reword: the issue on closed stacks is that those simulators <i>cannot be calibrated at all</i> without runtime visibility — which is the paper's better argument and matches (C1).</li>
+
+  <li><span class="num">5</span><b>Quantify the loss-equivalence claim statistically.</b><span class="sev med">MED</span><br>
+  OLMoE final loss is 6.843 (baseline) vs 6.945 (agent) — the agent is consistently <i>slightly worse</i> at most checkpoints, and the "±0.15 noise band" is asserted, not measured. Run the <i>baseline vs. baseline</i> with 3–5 different seeds (or different rank-reduction orders) to establish the empirical bf16 noise band, then show the agent-vs-baseline gap sits inside it. Without this, a reviewer can claim the 1.40× buys a real (if small) quality regression. Also extend the Llama-7B end-to-end run beyond 200 random-token steps, or at least run its real-token variant at the 7B scale (the M=16 single-node real-token result in Appendix&nbsp;A is good — promote a 224-rank version).</li>
+
+  <li><span class="num">6</span><b>Explain the Llama wall-clock anomaly in Table 6.</b><span class="sev med">MED</span><br>
+  Baseline wall 2.5 min vs agent wall 5.9 min while steady-step is 3.24× faster — presumably compile time of the larger bundled graph dominates a 200-step run. State this, and report compile/warmup cost explicitly: it is a real deployment consideration (the bundled graph's NEFF compile time and HBM headroom), and hiding it invites distrust of the headline.</li>
+
+  <li><span class="num">7</span><b>Add at least a probe-level result on a second closed stack.</b><span class="sev high">HIGH</span><br>
+  The abstract/intro repeatedly invoke Google TPU and Meta MTIA ("we observe the same pattern on Google TPU and Meta MTIA") with zero supporting data. Either (a) run Phase&nbsp;1 calibration + one or two collective problems on a public TPU v4/v5e slice (xm.* is identical PyTorch/XLA surface; cost is modest), or (b) delete the claims and scope the paper to Trainium with a forward-looking discussion. As written, this is the most likely sentence to be quoted in a rejection.</li>
+
+  <li><span class="num">8</span><b>Address dynamic shapes and correctness-at-scale.</b><span class="sev med">MED</span><br>
+  Correctness is byte-equality at ws∈{4,8} in a CPU NumPy sandbox plus a 10-step TV gate. Two gaps: (i) <i>AllToAllV with truly variable counts</i> is sidestepped by expert-choice routing (deterministic counts) — say so prominently, and either evaluate a token-choice configuration or rename the problem; (ii) divisibility/padding edge cases (e.g., shapes not divisible by world size — XLA's AllToAll requires divisibility) can pass ws∈{4,8} and fail at 224 or at other model shapes. Add property-based shape fuzzing to the sandbox and report it.</li>
+
+  <li><span class="num">9</span><b>Confront the platform-evolution threat: trn2, TorchNeuron, NKI.</b><span class="sev med">MED</span><br>
+  (a) Results are on trn1; Trainium2 (different NeuronLink topology, bandwidths) is GA — at minimum discuss expected portability, ideally re-run Phase&nbsp;1 + one problem on trn2. (b) AWS is migrating from PyTorch/XLA to native-PyTorch "TorchNeuron"; several cost-model terms (mark_step tax, lazy-tensor graph boundaries) are XLA-specific — argue which terms survive an eager runtime. (c) AWS now ships <b>NKI</b> (Neuron Kernel Interface) including <code>nki.collectives.*</code> — a lower-level programmable surface that complicates the absolute "no low-level control (C2)" claim. One paragraph explaining why NKI collectives don't (yet) provide an MSCCL-style schedule IR would inoculate the paper.</li>
+
+  <li><span class="num">10</span><b>Tighten the cost-calculus comparison (Table 3).</b><span class="sev low">LOW</span><br>
+  The "$6,000 / 40h" for E2E trials assumes ~1h per candidate, but the paper's own end-to-end measurement protocol is a 250-step run (minutes, not an hour, per Table&nbsp;4). Recompute with honest per-candidate measurement times (including compile transients); the loop still wins on O(1) vs O(K) scaling, and an honest table is more persuasive than an inflated one. Also clarify the apparent contradiction between §3.4 ("strategy-enumerate … two-stage layout") and §7 ("the headline configuration is a single-trajectory ReAct agent") — these two sentences currently disagree about what the default Phase-3 loop is.</li>
+</ol>
+</div>
+
+<h2>4&nbsp;&nbsp;Related work to add (found via web search)</h2>
+<div class="card">
+<table>
+  <tr><th>Work</th><th>Why it matters to this paper</th><th>Suggested treatment</th></tr>
+  <tr>
+    <td><b>Centauri</b> — Chen et al., ASPLOS'24 <i>Best Paper</i> (<a href="https://dl.acm.org/doi/10.1145/3620666.3651379">DOI</a>)</td>
+    <td>Communication partitioning + hierarchical scheduling for comm-compute overlap; its partition space explicitly includes <b>primitive substitution</b> — the same design dimension OverlayCCL searches. Up to ~45% training speedup. Closest conceptual neighbor at the "which primitive, how partitioned" layer, albeit on open GPU stacks with analytic models.</td>
+    <td class="bad">Must cite &amp; differentiate (closed stack, LLM search, runtime-effect cost model vs. analytic overlap scheduling).</td>
+  </tr>
+  <tr>
+    <td><b>MSCCL++</b> — Shah et al., arXiv:2504.09014 (<a href="https://github.com/microsoft/mscclpp">GitHub</a>)</td>
+    <td>The current Microsoft communication stack (successor to MSCCL): GPU-driven 1-sided put/get channels; used by RCCL/SGLang/FlashInfer. The paper cites MSCCL (2023) but not its successor; reviewers from that community will notice.</td>
+    <td class="warn">Cite in the schedule-synthesis paragraph; strengthens the open-vs-closed-stack contrast.</td>
+  </tr>
+  <tr>
+    <td><b>ForestColl</b> — Zhao et al., arXiv:2402.06787</td>
+    <td>Throughput-optimal collective schedules for arbitrary/heterogeneous topologies (AMD + NVIDIA), beating vendor libraries and TACCL-class tools — the modern SOTA in schedule synthesis.</td>
+    <td class="warn">Cite as SOTA schedule-layer synthesis; reinforces that none of it applies without a programmable runtime.</td>
+  </tr>
+  <tr>
+    <td><b>XLA collective-combiner / latency-hiding-scheduler passes</b> (<a href="https://openxla.org/xla/operation_semantics">OpenXLA docs</a>)</td>
+    <td>XLA itself merges adjacent collectives within a graph and schedules async collectives (AllReduceStart/Done). The Llama bundling win is partially "give the compiler one graph instead of M." Also: XLA has <b>RaggedAllToAll</b> — relevant to the AllToAllV search space if/when Neuron exposes it.</td>
+    <td class="bad">Discuss explicitly; this is the most likely "isn't this just what the compiler does?" review question.</td>
+  </tr>
+  <tr>
+    <td><b>SimAI</b> — Wang et al., NSDI'25 (<a href="https://www.usenix.org/conference/nsdi25/presentation/wang-xizheng-simai">USENIX</a>)</td>
+    <td>Already cited, but the paper's drift characterization conflicts with SimAI's stated 98.1% cross-environment fidelity. Needs a quantitative or rhetorical fix (Action 4).</td>
+    <td class="warn">Re-position: closed stacks make simulator calibration impossible from outside, which is the sharper argument.</td>
+  </tr>
+  <tr>
+    <td><b>AWS NKI collectives &amp; TorchNeuron transition</b> (<a href="https://awsdocs-neuron.readthedocs-hosted.com/">Neuron docs</a>)</td>
+    <td><code>nki.collectives.all_gather</code> etc. is a programmable kernel surface on Trainium; AWS also announced migration off PyTorch/XLA. Both bear directly on C2 and on the longevity of the cost-model terms.</td>
+    <td class="bad">Address in Background + Future Work (Action 9).</td>
+  </tr>
+  <tr>
+    <td><b>KernelBench</b> — Ouyang et al., arXiv:2502.10517; and the Sakana "AI CUDA Engineer" reward-hacking incident (Feb 2025)</td>
+    <td>Establishes evaluation norms (correctness + speedup distributions, multiple runs/models) and documents LLM optimizers gaming evaluation harnesses — the exact failure mode the paper's structural simulator terms defend against.</td>
+    <td class="good">Cite to motivate the anti-reward-hacking design and to justify adding multi-run variance (Action 3).</td>
+  </tr>
+  <tr>
+    <td><b>AlphaEvolve</b> — Novikov et al., arXiv:2506.13131 (already cited)</td>
+    <td>Already optimized Google production training infrastructure (data-center scheduling, training of its own underlying LLM). Means "LLM search for training-stack performance" is precedent, not novelty.</td>
+    <td class="warn">Scope contribution (i) precisely: first <i>above a closed vendor collective API</i>, with model-in-the-loop reward.</td>
+  </tr>
+  <tr>
+    <td><b>Flux (ByteDance) / Lagom</b> (comm-compute overlap line)</td>
+    <td>Recent kernel-fusion-based comm/compute overlap systems that share the "per-call latency ≠ per-step cost" motivation.</td>
+    <td class="good">Optional one-line citations alongside Centauri/CoCoNet.</td>
+  </tr>
+</table>
+</div>
+
+<h2>5&nbsp;&nbsp;Writing &amp; presentation improvements</h2>
+<div class="card">
+<ul>
+  <li><b>Abstract over-claims the LLM's role.</b> "An LLM agent builds the cost-model simulator" — in fact the six-term structure, AST passes, fusion credits, HBM penalty, and viability regexes are hand-engineered; the LLM fits the constants and designs the probe sweeps. Say "calibrates" not "builds" everywhere; reviewers who reach Appendix F will feel misled otherwise. Relatedly, "Many runtime effects only appear inside realistic training runs" appears twice nearly verbatim (abstract + §1) — tighten.</li>
+  <li><b>Resolve internal inconsistencies:</b> 1.40× vs 1.41× both appear for the same headline (pick one); §3.4 says strategy-enumerate is the default while §7 calls the headline configuration "a single-trajectory ReAct agent"; Table 6's Llama wall-clock inversion (2.5 vs 5.9 min) is unexplained (Action 6).</li>
+  <li><b>Double-blind hygiene:</b> "the strategy AWS deploys in production today… built and maintained by five experienced AWS developers" plus deep internal-AWS access strongly implies authorship affiliation. ATC's double-blind policy requires care: describe the baseline without claiming insider provenance, or move precise provenance to a non-anonymized artifact note. (ATC'25 also rejects improperly anonymized papers without review.)</li>
+  <li><b>Generative-AI attestation:</b> ATC requires attesting that no section is generated entirely by AI. A paper about LLM agents writing code is fine, but make sure prose provenance is clean and the attestation is accurate.</li>
+  <li><b>Page budget:</b> ATC full papers are 12 pages excluding refs/appendices. The current draft leans on ~9 appendices (F–I carry load-bearing details like the amortization fitting and gate fallback rules). Move the simulator-fidelity evidence (Action 2) into the body even at the cost of trimming the three-search-style ablation (Table 8's differences are small; one paragraph suffices).</li>
+  <li><b>Terminology:</b> "closed-stack search loop" reads as if the search loop is closed; consider "search loop for closed stacks." Define "dxe" at first use (it appears in §3.1 before being expanded). Figure 2's log-scale bars: annotate which direction means "agent wins" — the 0.2×–5× double-sided axis is easy to misread.</li>
+  <li><b>Strengthen the artifact story:</b> ATC explicitly values artifacts. Promise (and pin) the prompt scaffolds, cached LLM transcripts for the headline runs, the Phase-1 JSON calibration blobs, and per-candidate simulator/HW scores so reviewers can replay Phase 3–5 without a Trainium cluster.</li>
+</ul>
+</div>
+
+<h2>6&nbsp;&nbsp;Reviewer-risk table (what the PC will say, and the pre-emptive fix)</h2>
+<div class="card">
+<table>
+  <tr><th>Likely reviewer objection</th><th>Severity</th><th>Pre-emptive fix</th></tr>
+  <tr><td>"3.24× comes from one known transformation (bundling) vs. a weak per-microbatch baseline."</td><td class="bad">High</td><td>Action 1: hand-bundled baseline + decomposition + compiler-combiner discussion.</td></tr>
+  <tr><td>"TPU/MTIA claims have no evidence."</td><td class="bad">High</td><td>Action 7: TPU Phase-1 + 1–2 problems, or remove claims.</td></tr>
+  <tr><td>"Single search run, single LLM — is this reproducible?"</td><td class="bad">High</td><td>Action 3: multi-run variance, second LLM, K/R sensitivity.</td></tr>
+  <tr><td>"Show me the simulator is actually accurate."</td><td class="bad">High</td><td>Action 2: predicted-vs-measured scatter + rank correlation + term ablations.</td></tr>
+  <tr><td>"Agent's final loss is worse (6.945 vs 6.843)."</td><td class="warn">Med</td><td>Action 5: seed-noise band for baseline-vs-baseline.</td></tr>
+  <tr><td>"Isn't NKI low-level control on Trainium?" / "What about TorchNeuron/trn2?"</td><td class="warn">Med</td><td>Action 9: background + future-work paragraphs, optional trn2 probe.</td></tr>
+  <tr><td>"Correctness at ws∈{4,8} doesn't imply correctness at 224 ranks / other shapes."</td><td class="warn">Med</td><td>Action 8: shape fuzzing; clarify expert-choice sidesteps variable counts.</td></tr>
+  <tr><td>"Anonymization is compromised by the AWS-internal baseline narrative."</td><td class="warn">Med</td><td>Reword baseline provenance; check ATC double-blind rules.</td></tr>
+  <tr><td>"The cost-calculus table inflates the E2E alternative."</td><td class="good">Low</td><td>Action 10: recompute with honest per-candidate times.</td></tr>
+</table>
+</div>
+
+<h2>7&nbsp;&nbsp;Suggested additional experiments, ranked by cost-effectiveness</h2>
+<div class="card">
+<ol>
+  <li><b>Simulator fidelity scatter + rank correlation</b> — uses already-collected candidates; ~0 new cluster time. <span class="sev low">cheap</span></li>
+  <li><b>Search-variance study (5 reruns × 8 problems)</b> — simulator-scored; ~$15 LLM, minimal cluster. <span class="sev low">cheap</span></li>
+  <li><b>Hand-bundled Llama baseline</b> — a day of engineering + a few cluster hours. <span class="sev med">moderate</span></li>
+  <li><b>Baseline-vs-baseline seed-noise band (3 seeds × 2500 steps)</b> — ~9 cluster-hours on OLMoE. <span class="sev med">moderate</span></li>
+  <li><b>Fixed-constant-simulator comparison (SimAI-style on Trainium)</b> — strengthens the central thesis with one figure. <span class="sev med">moderate</span></li>
+  <li><b>TPU v5e Phase-1 + AllToAll/dxe</b> — public cloud, PyTorch/XLA identical surface; converts the generalization claim from rhetoric to data. <span class="sev high">most valuable</span></li>
+</ol>
+</div>
+
+<h2>8&nbsp;&nbsp;Bottom line</h2>
+<div class="card">
+<p>This is a strong systems submission in the making: a real problem on increasingly important hardware, a complete loop, a production-grade baseline, an honest anti-reward-hacking design, and the rare end-to-end loss-matched validation. To make it robust for ATC 2026: (1) scope the novelty claims precisely (strategy layer + calibrated-model-in-the-loop, not "LLM finds new algorithms"), (2) bullet-proof the Llama baseline and explain the bundling win relative to compiler collective-combining, (3) add simulator-fidelity and search-variance evidence, (4) either substantiate or remove TPU/MTIA claims, and (5) engage Centauri, MSCCL++, ForestColl, NKI, and the XLA pass pipeline in related work. With those revisions, the paper has a credible path to acceptance; without them, the headline numbers are likely to be discounted as a baseline artifact plus a single known transformation.</p>
+</div>
+
+<footer>
+  Generated by KISS Sorcar · Review of <code>~/Downloads/paper.pdf</code> ("OverlayCCL", anonymous submission) · Target venue: USENIX/SIGOPS ATC 2026 ·
+  Sources: usenix.org (ATC'25 CFP), arxiv.org (TACCL 2111.04867, ForestColl 2402.06787, AlphaEvolve 2506.13131, KernelBench 2502.10517), github.com/microsoft/mscclpp, usenix.org/nsdi25 (SimAI), openxla.org, AWS Neuron docs (via search), ACM DL / ASPLOS'24 (Centauri).
+</footer>
+</div>
+</body>
+</html>
