@@ -740,7 +740,17 @@ update_repo() {
     VSCODE_EXT_DIR="$PROJECT_DIR/src/kiss/agents/vscode"
     VSIX="$VSCODE_EXT_DIR/kiss-sorcar.vsix"
     cd "$VSCODE_EXT_DIR"
-    npm ci
+    # --ignore-scripts: the lockfile's only packages with install scripts are
+    # `keytar` (an *optional*, lazily-imported dep of @vscode/vsce used solely
+    # for publish credentials — never by `vsce package`) and
+    # `@vscode/vsce-sign` (signing only).  keytar's install script runs
+    # `prebuild-install || node-gyp rebuild`, which downloads from the
+    # archived atom/node-keytar GitHub releases (or compiles natively) and can
+    # block forever with no output — hanging the Update button's install at
+    # "[5/6] Building VS Code extension..." right after npm's deprecation
+    # warnings.  Neither script is needed to compile and package the VSIX.
+    # --no-audit --no-fund skip more network round-trips and noise.
+    npm ci --ignore-scripts --no-audit --no-fund
     npm run package
     cd "$PROJECT_DIR"
     if [ ! -f "$VSIX" ]; then
