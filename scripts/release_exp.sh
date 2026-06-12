@@ -77,7 +77,10 @@ build_vscode_extension() {
     print_info "Set extension name to 'kiss-sorcar-buggy', displayName to 'KISS Sorcar Buggy', version to '$EXP_VERSION'"
 
     cd "$VSCODE_EXT_DIR"
-    npm ci
+    # --ignore-scripts: skip keytar/@vscode/vsce-sign install scripts — keytar's
+    # `prebuild-install || node-gyp rebuild` can hang forever and neither script
+    # is needed to package the VSIX (mirrors install.sh and release.sh).
+    npm ci --ignore-scripts --no-audit --no-fund
     npm run package
 
     # npm run package hardcodes -o kiss-sorcar.vsix; rename to match the buggy name
