@@ -1,56 +1,38 @@
-# Task: Deep review of ~/Downloads/revelio2.pdf for S&P 2027 — suggest improvements (not a typical review). Use internet search extensively (10 sites via go_to_url, tracked in tmp/information-\*.md).
+# Task: Repeatedly run bug-hunt (find/reproduce/fix bugs in src/kiss/agents/vscode/, src/kiss/agents/sorcar/, src/kiss/core/ via integration tests) until an iteration finds no bugs.
 
-Final deliverable: an improvement-focused review. User's open editor file: /Users/ksen/work/kiss/reviews/revelio2_review.md — likely where the review should be written (confirm/write there).
+## Result: COMPLETE (loop terminated after iteration 2 reported NO BUGS FOUND)
 
-## Status
+### Iteration 1 — BUGS FOUND: 3 (fixed in commit 5ddd1398)
 
-- [x] Extracted PDF text to tmp/revelio2.txt (19 pages); split into tmp/part_aa..part_ae (450 lines each)
-- [x] Read part_aa (pages 1-5), part_ab (pages 5-9), part_ac (pages 9-14 incl. related work, references start)
-- [ ] Read part_ad, part_ae (references + Appendix A prompts, Appendix B.1 recent-CVE table 11, Appendix C.1 pilot sweep)
-- [ ] Web research (10 sites, information file, counter)
-- [ ] Write improvement-focused review to /Users/ksen/work/kiss/reviews/revelio2_review.md
-- [ ] Cleanup tmp files, finish
+1. `src/kiss/agents/sorcar/custom_commands.py` `expand_command()` — positional
+   `$1..$9` and `$ARGUMENTS` substituted in two separate `re.sub` passes, so an
+   argument value literally containing `$ARGUMENTS`/`$N` got re-expanded by the
+   later pass. Fixed with a single-pass combined `_PLACEHOLDER_RE` substitution.
+   Test: `src/kiss/tests/agents/sorcar/test_bughunt7_expand_args_reinjection.py`.
+2. `src/kiss/core/utils.py` `escape_invalid_template_field_names()` — nested
+   format spec `{a:{b}}` with valid `a` but invalid `b` produced `{a:{{b}}}`,
+   which crashes `str.format` (ValueError: Invalid format specifier); the
+   inverse case double-escaped the nested braces. Fixed: a placeholder is
+   escaped whole (original spec preserved) if its field OR any field nested in
+   its spec is invalid. Test: `src/kiss/tests/core/test_bughunt7_escape_nested_spec.py`.
+3. `src/kiss/core/kiss_agent.py` `_set_prompt()` — sequential per-key
+   `str.replace` allowed one argument's value containing another key's
+   placeholder to be re-expanded (order-dependent value leakage). Fixed with a
+   single-pass regex substitution. Test:
+   `src/kiss/tests/core/test_bughunt7_prompt_arg_reinjection.py`.
 
-## Paper summary (REVELIO)
+All 16 tests across the 3 new test files pass; `uv run check --full` green.
 
-- Two-stage agentic framework for memory-safety vuln detection in C/C++ repos with sanitizer-grounded PoV.
-  - Stage 1 Hypothesis Generation: per-file scan with cheap LLM (Haiku 4.5) + tree-sitter static preprocessing (function boundaries, param-validation summaries); multi-pass per file (file summary, feature interactions, memory safety conditions, unchecked args, per-function); JSON hypothesis schema (Table 1: hypo_id, title, description, file_path, function, references, severity, primitive, attacker_controls, sanitizers, cwe_ids, reachable, harnesses, confidence). Triage/filter (in-scope memory-safety, attacker-controlled, dedup via line-overlap+CWE then LLM pair judgment), harness reachability via symbol table lookup in binaries. Ranked by reachability/severity/confidence.
-  - Stage 2 Confirmation: stronger LLM (Sonnet 4.6) agent with shell/validation/finish tools; writes Python script generating PoV bytes; validation tool runs harness under ASan/UBSan/MSan; independent re-execution in fresh subprocess; reporter sub-agent writes report. PoV must go through existing fuzz harness (public attack surface).
-- Implementation: 4.1K LoC Python; DefaultAgent class; YAML Jinja prompts; Docker execution. Anonymous repo: anonymous.4open.science/r/revelio-submission.
-- RQ1 zero-day hunt: 7 OSS-Fuzz projects (DNSMasq 25k, OpenEXR 58k, assimp 125k, cairo 176k, sleuthkit 218k, libheif 559k, Poppler 911k LoC; 5-8y OSS-Fuzz tenure). Found 19 zero-days (7 CVEs assigned/requested), e.g., OpenEXR IDManifest::init() OOB read (2-byte prefix-length decode unguarded, present 10 years). Config: 5 hypotheses/file, 5 PoV tries/hypothesis. Median $42/project, 65 min/project, $300 total, ~$16/vuln. CWE distribution: CWE-190 x7, CWE-122 x7, CWE-125 x3, CWE-191 x1, CWE-787 x1. They omitted 16 NULL-deref + leaks/OOM from reporting ("zero FP rate" claim for reported ones).
-- RQ2 CyberGym: 100 randomly sampled Arvo cases (memory-safety only). ORACLE-FILE protocol: vulnerable file given to all systems (easier than Level-0, harder than Level-1). Baselines: Claude Code v2.1.133 + Opus 4.7, Codex v0.125.0 + GPT 5.5, Sorcar v2026.05.35 + Opus 4.7 (chosen via 10-case pilot sweep). Results Table 8: REVELIO 175 vulns found, 69% recall of targeted vulns, 0% FP, $9.10/vuln, 19.2M tokens/vuln; Claude Code 55/53%/49% FP/$16.20; Codex 39/39%/60% FP/$8.96; Sorcar 31/31%/28% FP/$6.27. 122 vulns only REVELIO found. "Vulns Found" counts non-targeted extra vulns validated by independent rerun + sanitizer.
-- Recent-CVE eval: 10 post-cutoff CVEs, web search disabled; REVELIO best (details Appendix B.1 Table 11).
-- RQ3 ablation (Table 9): T1 bare prompt, T2 pipeline described in NL, T2.5 structured <HYPOTHESES> handoff self-enforced, T3 full harness. Haiku: T1 30%/0%FP/$1.31, T2 20%, T2.5 20% w/ 25% FP, T3 30%/0%/$18.52. Sonnet: T1/T2/T2.5 60% recall w/ 22-33% FP, T3 80%/0%/$8.43. Asymmetric Haiku→Sonnet: 90% recall, 0% FP, $6.42. (NOTE: appears to be on 10-case subset — verify in appendix.)
-- Discussion: scope = sanitizer-observable C/C++ memory safety; complementary to fuzzing/static analysis; triage under maintainer threat models; AI-safety dual-use discussion (PoV vs exploit line is blurry); threats to validity acknowledge oracle-file protocol narrowness.
-- Related work mentions: RepoAudit, AnyPoC, Co-RedTeam, AgentFlow, SIVA, OpenSage, Aardvark, Claude Security ("Project Glasswing", "Mythos Preview" = fictional future Anthropic model names), IRIS, Artemis, KNighter, LLMxCPG, Vul-RAG, CTX-Coder, SecureReviewer, HogVul, CyberGym, ARVO, SEC-bench, AFL++, OSS-Fuzz, Magma (AFL++ best-of-13 found 37/112), ChatAFL, Fuzz4All, TitanFuzz, KernelGPT, V1SCAN, KernelMem, Lipp et al. (SAST miss 47-80%), Charoenwet, Firouzi (CodeQL recall 0.34).
-- Note: paper is set in fictional future (2026 dates, Opus 4.7, GPT 5.5, CVE-2026-XXXXX, Sorcar agent). Treat as-is.
+### Iteration 2 — NO BUGS FOUND
 
-## Preliminary improvement ideas (from my own reading; to be enriched by web research)
+Deep-probed and ruled out: web_server.py tunnel-metrics parsing &
+`_is_pid_alive`, server.py sub-tab parent resolution under `_state_lock`,
+relentless_agent.py summarizer/budget/result-broadcast paths, cli_steering.py
+escape/paste deferral + registry locking + async-exc interruption,
+mcp_servers.py connection lifecycle under `_lock`, useful_tools.py,
+diff_merge.py C-quoted path parsing, git_worktree/merge_flow rename parsing
+(git C-quotes paths with spaces — unambiguous), config_builder argparse bool
+semantics, plus grep sweeps for mutable defaults, bare except, identity-vs-
+equality, naive datetimes, and path-prefix startswith misuse — zero hits.
 
-1. **No fuzzing baseline in RQ1/RQ2.** Claim "missed by years of fuzzing" needs a controlled comparison: run AFL++/libFuzzer with same wall-clock/$ budget on same 7 projects/100 CyberGym tasks; also compare vs directed fuzzing (AFLGo, Beacon) given hypothesis locations. Also compare LLM-fuzzing hybrids (Fuzz4All, ChatAFL) and OSS-Fuzz-gen.
-1. **Oracle-file protocol weakens repo-scale claim in RQ2.** Add a full-repo (CyberGym Level-0) arm for at least a subset (e.g., 30 tasks) to show the funnel works end-to-end vs baselines; report localization accuracy of Stage 1 (does ranked list contain the known vuln file/function? at what rank?).
-1. **"Zero FP" framing is fragile.** By construction FP=0 (only sanitizer-confirmed reported). The interesting metric is precision of *hypotheses* and yield per stage (funnel numbers: raw hypotheses → post-triage → PoV attempts → confirmed). Report per-stage attrition and cost. Also "zero FP" vs the 16 NULL-derefs they chose not to report — define FP carefully (security-relevance FP vs reproducibility FP).
-1. **Recall denominator issue.** 69% recall on CyberGym with oracle file; report confidence intervals; report whether the 175 "found" vulns include duplicates of same root cause across tasks; dedup by root cause; "extra" vulns in ARVO old builds may already be known/fixed upstream — check novelty.
-1. **Ablation scale too small** (appears 10 cases ⇒ 90% = 9/10). Run ablation on the full 100; add ablations: no static preprocessing, no multi-pass, no dedup, no ranking (random order), no harness-reachability annotation, single-stage strong model everywhere, cheap model everywhere (T3 uniform exists), vary K and iters. Report variance across repeated runs (LLM nondeterminism) — at least 3 seeds.
-1. **Baseline fairness.** Baselines are general coding agents with a prompt; stronger baselines needed: RepoAudit, AnyPoC (give it Stage-1 hypotheses), IRIS, KNighter, Aardvark/Claude Security if accessible, and CyberGym's own agent baselines (e.g., OpenHands+EnIGMA etc.). Also give baselines the same validation tool/sanitizer feedback loop to isolate harness contribution.
-1. **Statistical rigor**: no error bars, single run per config; LLM agents have high variance. McNemar's test / bootstrap CIs on recall diffs.
-1. **Cost accounting**: include compute (Docker builds, sanitizer runs) not just tokens; report wall-clock parallelism; compare to OSS-Fuzz CPU-years for context.
-1. **Harness dependency**: method requires existing fuzz harnesses; OSS-Fuzz projects already have them — limits generality. Discuss/measure coverage of harnesses (what fraction of hypotheses unreachable via any harness?); potential integration of harness synthesis (AgentFlow) as future work or extra stage.
-1. **Severity inflation risk**: many findings are integer overflows/UBSan shift exponent issues — maintainers may dispute severity ("Moderate"); CVSS self-assigned. Get CNA-assigned severity or temper claims; clarify which 7 CVEs are *assigned* vs *requested*. Discuss UBSan-only findings being weaker than ASan memory corruption.
-1. **Reproducibility**: model snapshots pinned but APIs drift; release full trajectories, hypothesis pools, PoVs, seeds; the anonymous repo should include exact CyberGym task IDs (verify appendix has it).
-1. **Security of running PoVs / dual-use**: Docker isolation mentioned; expand responsible-disclosure ethics section per IEEE S&P requirements (they do have disclosure log; check ethics section presence — appears missing as separate section! S&P 2027 requires ethics considerations section).
-1. **Writing issues**: Figure 2 vs Table 8 same data redundancy; "we don't need Mythos" informal; typos ("Y AML", "deferences", "keeps to achieve"); Bitter Lesson citation usage; Table 9 cost/vuln for Haiku T3 $18.52 anomaly deserves explanation; clarify whether RQ3 'recall' is on 10 cases.
-1. **Comparison with CRS systems** from AIxCC (Trail of Bits Buttercup, Theori RoboDuck, team Atlanta Atlantis) — AIxCC finals systems do exactly hypothesis→PoV with sanitizers; paper doesn't cite AIxCC at all (verify). This is a major related-work gap; S&P reviewers will flag.
-1. **MSan support**: MSan needs all deps instrumented — did they actually run MSan? Clarify.
-1. **Scan determinism/cost scaling**: per-file scan is O(files); 911k LoC Poppler at $11.70 implies aggressive batching — give tokens/file and how context window limits whole-file analysis for big files; cross-file/interprocedural bugs (UAF across files) — per-file scanning likely misses temporal bugs spanning modules: CWE-416 absent from findings! Point this out: no UAF/double-free found; suggest interprocedural hypothesis passes or call-graph-slice contexts.
-1. **CWE-457/MSan absent** in findings too. Distribution skewed to integer overflow — easiest class. Suggest stratified analysis of which classes Stage-1 proposes vs which get confirmed (confirmation bias toward shallow bugs).
-1. **PoV flakiness**: ASLR, allocator nondeterminism — independent rerun helps; suggest N-times reproduction and minimization (afl-tmin-like) + root-cause dedup of crashes.
-1. **Contamination**: ARVO/CyberGym vulns are in training data of models; recent-CVE eval is only 10 cases — expand; also evaluate on truly post-cutoff OSS-Fuzz issues continuously.
-1. **Compare token-matched fuzzing**: $42 ≈ many CPU-hours of fuzzing; head-to-head budget-matched comparison strengthens cost claims.
-
-## Next steps for new session
-
-1. Read tmp/part_ad and tmp/part_ae (refs + appendices A/B/C) — extract: prompts overview, Table 11 recent-CVE numbers, pilot sweep details (Appendix C.1), CyberGym task list presence.
-1. Web research (10 sites with go_to_url, tmp/information-\*.md counter): CyberGym paper details (levels, baselines, prior SOTA numbers), ARVO, AIxCC finals CRS reports, RepoAudit, AnyPoC, IRIS, Big Sleep (Google Project Zero), Aardvark details, OSS-Fuzz-gen, S&P 2027 CFP (ethics requirements, open science policy), Magma/fuzzing eval guidance (Klees et al. statistical rigor), maybe "Naptime/Big Sleep" blog.
-1. Write review (improvement suggestions organized: Evaluation, Method, Claims/Framing, Related Work, Presentation, Open Science/Ethics) to /Users/ksen/work/kiss/reviews/revelio2_review.md.
-1. rm tmp files (revelio2.txt, part\_*, information-*.md), ls tmp, finish with full review in summary.
+Loop terminated per the task's stop condition.
