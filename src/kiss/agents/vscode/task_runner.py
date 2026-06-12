@@ -635,6 +635,38 @@ class _TaskRunnerMixin:
                     }
             else:
                 task_end_event = task_end_event or {"type": "task_stopped"}
+            # Mirror the per-subtask failure broadcast in the for-loop:
+            # the cleanup ``finally`` only broadcasts ``task_end_event``
+            # (``task_stopped`` / ``task_error`` / ``task_interrupted``)
+            # — NOT a ``type: result`` event.  Without this broadcast
+            # the VS Code webview never receives a result event for
+            # tasks that died in this outer-BaseException path (e.g.
+            # ``SystemExit`` / ``asyncio.CancelledError`` from the
+            # streaming context manager, or a ``KeyboardInterrupt``
+            # arriving BETWEEN the outer ``try:`` and the for-loop
+            # body), and ``main.js`` falls back to rendering
+            # ``"(no result)"`` even when ``result_summary`` carries a
+            # meaningful recovered summary.  ``tab.agent`` may be
+            # ``None`` when the outer exception fired before agent
+            # assignment, so all metric reads are defensive.
+            _agent_for_metrics = getattr(tab, "agent", None)
+            self.printer.broadcast({
+                "type": "result",
+                "text": result_summary,
+                "success": False,
+                "total_tokens": int(
+                    getattr(_agent_for_metrics, "total_tokens_used", 0) or 0
+                ),
+                "cost": (
+                    "$"
+                    f"{float(getattr(_agent_for_metrics, 'budget_used', 0.0) or 0.0):.4f}"
+                ),
+                "step_count": (
+                    int(getattr(_agent_for_metrics, "total_steps", 0) or 0)
+                    or int(getattr(_agent_for_metrics, "step_count", 0) or 0)
+                ),
+                "tabId": tab_id,
+            })
         finally:
             try:
                 # RACE-3 fix: keep ``is_task_active = True`` through
