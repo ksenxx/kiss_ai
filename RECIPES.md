@@ -5,3 +5,6 @@ Can you create a cron job with name prefixed with "kiss-" which will check every
 can you authenticate me with the imessages agent?
 
 can you send "Hello" to 5102893391?
+
+
+can you read the paper at ~/Downloads/paper.pdf and review it deeply and thoroughly for SIGOPS ATC 2026 conference.  Look at related work.  Do not write a typical review, but suggest how to improve the paper and results. Use internet search extensively.  Judge the novelty of the work. Can you create an html report in PWD/reports and open it in the user's default browser?
