@@ -1,57 +1,22 @@
-# Task: sorcar CLI — pressing `@` must show a live file/folder picker (Up/Down navigate, Tab/Enter select)
+# Task: Deep review of ~/Downloads/revelio2.pdf for S&P 2027 — suggest improvements (not a typical review). Use internet search extensively (10 sites, go_to_url, tmp/information-*.md).
 
-## Progress log
+## Done so far
+1. Extracted PDF text: tmp/revelio2.txt (19 pages, via pypdf in tmp/pdfenv venv). Split into tmp/part_aa..part_ae.
+2. Read pages 1-14 (intro through references). Key facts:
+   - REVELIO: two-stage agentic memory-safety vuln detection. Stage 1: cheap model (Haiku 4.5) per-file hypothesis generation + tree-sitter static preprocessing + triage/dedup/harness-reachability ranking. Stage 2: stronger model (Sonnet 4.6) iterative PoV construction, sanitizer (ASan/UBSan/MSan) validated, independent re-execution. Zero FP claim.
+   - Eval: 7 OSS-Fuzz projects (DNSMasq, OpenEXR, assimp, cairo, Sleuth Kit, libheif, Poppler) -> 19 zero-days, 7 CVEs, ~$42/project, ~65min median, $300 total. 16 NULL-deref omitted from FP accounting.
+   - CyberGym/ARVO 100 cases, oracle-file protocol (vulnerable file given!). REVELIO 175 vulns found, 69% recall, 0% FP vs Claude Code (55, 53%, 49% FP), Codex (39), Sorcar (31). Tokens/vuln REVELIO 19.2M (highest!).
+   - Recent-CVE eval: 10 post-cutoff CVEs, details in Appendix B.1.
+   - Ablation T1/T2/T2.5/T3: prompting alone doesn't help (T2/T2.5 worse than T1 for Haiku); harness enforcement + asymmetric routing -> 90% recall, 0 FP, $6.42/vuln. Ablation on only 10 cases.
+   - Config: top-5 hypotheses/file, 5 PoV iters per hypothesis; pilot sweep on 10 cases to pick baselines' models.
+   - Limitations acknowledged: oracle-file protocol, sanitizer-observable scope only, triage under maintainer threat models.
+   - Related work: RepoAudit, AnyPoC, Co-RedTeam, AgentFlow, IRIS, KNighter, CyberGym, ARVO, Magma, Big-picture fuzzing/SAST comparisons.
+   - Fictional-future names in paper (Opus 4.7, GPT 5.5, Mythos, Glasswing, CVE-2026-*) — paper is set in 2026.
+3. Read appendix fragment (part_ae start): ablation extra metrics (Hyp->PoV rate 53%, stage-2 cost share ~58%). Have NOT fully read appendices (part_ad = references + Appendix A prompts; part_ae = appendix tables B/C).
 
-1. Diagnosis: the REPL (`src/kiss/agents/sorcar/cli_repl.py`) used `readline`, which
-   only completes on Tab and cannot render an arrow-navigable dropdown. Solution:
-   use `prompt_toolkit` on interactive TTYs, keep readline as off-TTY fallback.
-1. `pyproject.toml`: added `prompt_toolkit>=3.0.0` to dependencies; `uv sync` OK
-   (prompt-toolkit 3.0.52 installed).
-1. NEW file `src/kiss/agents/sorcar/cli_prompt.py`:
-   - `_AT_RE` / `_MODEL_CMD_RE` moved here (single source; cli_repl imports them).
-   - `PtkCompleter(Completer)` adapts `CliCompleter`: `@query` → `rank_file_suggestions`
-     entries displayed as bare path with meta folder/recent/file, inserted as
-     `PWD/<path> ` with `start_position=-(len(query)+1)`; `/model <partial>` →
-     `rank_model_suggestions`; `/cmd` → `cli._slash_matches` with SLASH_COMMANDS help
-     meta (lazy import of cli_repl to avoid circularity); whole-line predictive
-     matches only when `complete_event.completion_requested` (Tab).
-   - `_KEY_BINDINGS`: Enter and Tab with `completion_is_selected` set
-     `buffer.complete_state = None` → confirm highlighted item without submitting.
-   - `_migrate_readline_history`: one-time seed of `<hist>.ptk` (FileHistory format
-     `+line`) from old readline history.
-   - `PtkLineReader`: `PromptSession(completer=PtkCompleter, complete_while_typing=True, key_bindings=_KEY_BINDINGS, history=FileHistory(<hist>.ptk), reserve_space_for_menu=8)`;
-     `read(prompt)` wraps prompt in `ANSI(...)`.
-1. `cli_repl.py` changes:
-   - module docstring updated (prompt_toolkit primary, readline fallback).
-   - imports `_AT_RE`, `_MODEL_CMD_RE`, `PtkLineReader` from cli_prompt; local regex
-     definitions removed.
-   - NEW `_make_ptk_reader(completer, history_path)` → PtkLineReader only when
-     stdin AND stdout are TTYs, else None.
-   - NEW `_read_line_ptk(reader, prompt)` → prints panel top, reads via
-     reader.read(framed prompt), backslash continuation preserved, prints bottom
-     after (also on EOF/Ctrl+C; EOF→None, Ctrl+C re-raised).
-   - `_read_line(prompt, reader=None)` delegates to `_read_line_ptk` when reader set.
-   - `run_repl`: `reader = _make_ptk_reader(...)`; `_setup_readline` only when
-     reader is None; `_save_history` guarded by `using_readline` (else empty
-     in-process readline history would clobber the history file).
-1. Smoke test: `from kiss.agents.sorcar import cli_repl, cli_prompt` imports OK.
-
-## Verification (all done)
-
-1. NEW tests `src/kiss/tests/agents/sorcar/test_at_mention_picker.py` (9 tests, all
-   pass): @ pops files+folders immediately; @query filters and replaces the whole
-   token; folder meta; slash menu with help; /model partial; predictive gated to
-   Tab; end-to-end pipe-input tests (real PromptSession via `create_pipe_input` +
-   `create_app_session`): `@` + Down + Enter inserts the mention without
-   submitting, and `@alp` + Down + Tab confirms (final submitted lines
-   `look at PWD/<file>  please` and `PWD/alpha.py now`); readline→ptk history
-   migration is idempotent.
-1. Existing REPL tests: 99 passed; `test_bughunt4_prompt_markers.py` fails
-   identically on pre-change code (verified via `git stash`) — pre-existing
-   environment flake, not a regression.
-1. `uv run check --full` → ✅ All checks passed (after `mdformat PROGRESS.md`).
-1. PTY sanity script (real terminal): typing `@` rendered the dropdown with
-   `alpha.py`/`subdir/`, Down+Enter inserted `PWD/alpha.py` without submitting,
-   final submitted line was `see PWD/alpha.py now`. Temp script deleted.
-1. New files `cli_prompt.py` and `test_at_mention_picker.py` added to the git
-   index.
+## Remaining TODO
+1. (Optional) skim part_ad/part_ae appendices cheaply (low priority).
+2. Web research: visit 10 sites via go_to_url, log in tmp/information-1.md with counter header. Suggested targets: CyberGym paper/GitHub, ARVO paper, RepoAudit, Google Project Zero Big Sleep, OSS-Fuzz-Gen / AI in OSS-Fuzz blog, Anthropic security research, AnyPoC arXiv, IRIS, Magma benchmark, S&P 2027 CFP (review criteria), recent LLM vuln-agent papers (e.g., Naptime, VulnHuntr, A1), SEC-bench.
+3. Synthesize "how to improve the paper and results" review: experimental-design weaknesses (oracle-file vs repo-scale comparison fairness; baselines not given REVELIO's validation tool; 'Vulnerabilities Found' metric counts unknown extra crashes—need ground truth/dedup verification; zero-FP definition excludes 16 null-derefs; ablation N=10; pilot sweep selection bias; single run, no variance; cost accounting fairness re: tokens/vuln being highest; recall vs CyberGym leaderboard comparisons missing; missing baselines: RepoAudit, AnyPoC, fuzzing-with-equal-budget baseline, OSS-Fuzz-Gen; no coverage analysis; no comparison vs Big Sleep; dedup of 175 vulns—are they distinct root causes?; harness reachability via symbol table is weak—suggest call-graph; suggest measuring FN on full repo scan; suggest reporting variance, statistical tests; presentation issues; ethics/disclosure section placement for S&P; artifact availability).
+4. Write final improvement-focused review in finish(summary=...). Also save the full review to a git-added file (e.g., reviews/revelio2_review.md) per SORCAR.md artifact rule, git add it.
+5. Cleanup tmp files (revelio2.txt, part_*, pdfenv, information-*.md) before finish.
