@@ -737,19 +737,51 @@ def _prefix_match_task(query: str) -> str:
     Returns:
         The full task string of the most recent match, or ``""`` if none.
     """
-    if not query:
-        return ""
+    matches = _prefix_match_tasks(query, limit=1)
+    return matches[0] if matches else ""
+
+
+def _prefix_match_tasks(query: str, limit: int = 8) -> list[str]:
+    """Find recent unique tasks starting with *query* (case-sensitive).
+
+    The SQL ``GLOB`` filter does case-sensitive prefix matching server
+    side; in Python we then deduplicate identical task strings while
+    preserving their most-recent-first ordering so the dropdown menu
+    never shows the same suggestion twice.
+
+    Args:
+        query: The prefix string to match against task text.
+        limit: Maximum number of distinct matches to return.
+
+    Returns:
+        Up to *limit* full task strings, most recent first.  Empty when
+        *query* is empty or no task matches.
+    """
+    if not query or limit <= 0:
+        return []
     with _rw_lock.read_lock():
         db = _get_db()
         escaped = query.replace("[", "[[]").replace("*", "[*]").replace("?", "[?]")
-        row = db.execute(
+        # Over-fetch so that duplicate task strings (a single task run
+        # many times) still leave room for *limit* distinct entries.
+        rows = db.execute(
             "SELECT task FROM task_history "
             "WHERE task GLOB ? AND LENGTH(task) > ? "
             f"AND {_HISTORY_NOT_SUBAGENT} "
-            "ORDER BY timestamp DESC, id DESC LIMIT 1",
-            (escaped + "*", len(query)),
-        ).fetchone()
-        return row["task"] if row else ""
+            "ORDER BY timestamp DESC, id DESC LIMIT ?",
+            (escaped + "*", len(query), limit * 4),
+        ).fetchall()
+    seen: set[str] = set()
+    out: list[str] = []
+    for row in rows:
+        task = row["task"]
+        if task in seen:
+            continue
+        seen.add(task)
+        out.append(task)
+        if len(out) >= limit:
+            break
+    return out
 
 
 def _search_history(

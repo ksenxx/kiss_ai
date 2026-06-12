@@ -52,10 +52,17 @@ dependencies = [
     "harbor>=0.3.0",
     "websockets>=15.0",
     "cryptography>=44.0.0",
+    # Official MCP SDK: client transports + OAuth used by the
+    # ``sorcar mcp`` subcommand and the MCP tool integration.
+    "mcp>=1.20.0",
     # GNU readline for the sorcar CLI: enables Tab/Shift-Tab completion
     # cycling (menu-complete) on macOS, whose stock Python otherwise
     # links readline against libedit, which cannot cycle candidates.
     "gnureadline>=8.0.0; sys_platform == 'darwin'",
+    # Interactive input line for the sorcar CLI: pops the @-mention
+    # file/folder picker as you type, navigable with Up/Down and
+    # selectable with Tab/Enter (readline cannot render such a menu).
+    "prompt_toolkit>=3.0.0",
 ]
 
 [build-system]
