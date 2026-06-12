@@ -63,6 +63,12 @@ _FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
 _ARGUMENTS_RE = re.compile(r"\$ARGUMENTS\b")
 # ``$1`` … ``$9`` positional-argument placeholders.
 _POSITIONAL_RE = re.compile(r"\$([1-9])\b")
+# Combined placeholder pattern for the single-pass substitution in
+# :func:`expand_command`.  One pass is essential: placeholder-looking
+# text inside a *user-supplied argument value* (e.g. an argument that
+# literally contains ``$ARGUMENTS`` or ``$1``) must never be
+# re-expanded by a later pass.
+_PLACEHOLDER_RE = re.compile(r"\$ARGUMENTS\b|\$([1-9])\b")
 # ``@{path}`` file-content injection.
 _FILE_INJECT_RE = re.compile(r"@\{([^{}]+)\}")
 # ``!`command``` shell-output injection.
@@ -270,12 +276,17 @@ def expand_command(command: CustomCommand, args_text: str, work_dir: str) -> str
     except ValueError:
         positional = args_text.split()
 
-    def positional_repl(match: re.Match[str]) -> str:
+    def placeholder_repl(match: re.Match[str]) -> str:
+        if match.group(1) is None:
+            return args_text
         index = int(match.group(1)) - 1
         return positional[index] if index < len(positional) else ""
 
-    text = _POSITIONAL_RE.sub(positional_repl, text)
-    text = _ARGUMENTS_RE.sub(lambda _m: args_text, text)
+    # Single pass over the template: replacement text (the user's
+    # argument values) is never rescanned, so a value that literally
+    # contains ``$ARGUMENTS`` or ``$N`` is inserted verbatim instead of
+    # being re-expanded by a subsequent substitution pass.
+    text = _PLACEHOLDER_RE.sub(placeholder_repl, text)
     if args_text and not has_placeholder:
         text = f"{text}\n\n{args_text}"
     return text
