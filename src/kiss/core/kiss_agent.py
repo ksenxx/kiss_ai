@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import re
 import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
@@ -130,8 +131,22 @@ class KISSAgent(Base):
         self.arguments = dict(arguments) if arguments is not None else {}
         self.prompt_template = prompt_template
         full_prompt = self.prompt_template
-        for key, value in self.arguments.items():
-            full_prompt = full_prompt.replace("{" + key + "}", str(value))
+        if self.arguments:
+            # Substitute every ``{key}`` token in a SINGLE pass over the
+            # template.  Sequential per-key ``str.replace`` calls would
+            # rescan previously substituted values, so an argument value
+            # that literally contains another key's placeholder (e.g. a
+            # task string quoting ``{result}``) would be re-expanded —
+            # leaking the other argument into it, dependent on dict
+            # insertion order.
+            pattern = re.compile(
+                "|".join(
+                    re.escape("{" + key + "}") for key in self.arguments
+                )
+            )
+            full_prompt = pattern.sub(
+                lambda m: str(self.arguments[m.group(0)[1:-1]]), full_prompt
+            )
 
         self._add_message("user", full_prompt)
         self.model.initialize(full_prompt, attachments=attachments)
