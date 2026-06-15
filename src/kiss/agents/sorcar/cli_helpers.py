@@ -145,8 +145,31 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Disable browser/web tools (terminal-only mode)",
     )
     parser.add_argument(
-        "-p", "--parallel", action="store_true", default=False,
-        help="Enable parallel subagents",
+        "-p", "--parallel", action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Enable parallel subagents (default: enabled). "
+            "Use --no-parallel to disable."
+        ),
+    )
+    parser.add_argument(
+        "--worktree", action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Isolate every task in a git worktree branch "
+            "(default: enabled). Use --no-worktree to run directly "
+            "in the working tree (chat mode)."
+        ),
+    )
+    parser.add_argument(
+        "--auto-commit", dest="auto_commit",
+        action=argparse.BooleanOptionalAction, default=True,
+        help=(
+            "Auto-commit worktree changes when a task finishes "
+            "(default: enabled). Use --no-auto-commit to skip the "
+            "automatic commit and preserve the worktree for manual "
+            "review."
+        ),
     )
     parser.add_argument(
         "-t", "--task", type=str, default=None, help="Task description"
@@ -172,11 +195,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     group = parser.add_mutually_exclusive_group()
     group.add_argument(
         "--use-chat", action="store_true",
-        help="Use chat mode",
+        help="Legacy alias for --no-worktree (chat mode).",
     )
     group.add_argument(
         "--use-worktree", action="store_true",
-        help="Use both chat mode and git worktree for isolation (for advanced users)",
+        help="Legacy alias for --worktree (git worktree isolation).",
     )
     return parser
 
