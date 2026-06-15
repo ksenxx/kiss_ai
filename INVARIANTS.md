@@ -220,10 +220,6 @@ ______________________________________________________________________
 
 ## Other components
 
-- In `src/kiss/channels/cron_manager_daemon.py`, submitted cron jobs MUST NOT be
-  parsed/managed or run with daemon threads — the `cron` command MUST be used
-  instead; the SOCKS interface MUST NOT be removed (the file must be a thin
-  client to cron). (55, 57)
 - Papers that have been modified MUST always be rebuilt. (768)
 - In the code-size claim, empty lines and lines with comments or private
   function/method docstrings MUST be ignored. (3125)
