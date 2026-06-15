@@ -64,18 +64,17 @@ def _connect() -> socket.socket | None:
     return s
 
 
-def send_event(event: dict[str, Any]) -> None:
-    """Forward *event* to the daemon for live fan-out to webviews.
+def _send_envelope(envelope: dict[str, Any]) -> None:
+    """Write one newline-delimited JSON envelope on the cached UDS socket.
 
-    Wraps *event* in a ``cliEvent`` envelope and writes one newline-
-    delimited JSON line on the cached UDS connection.  Lazily opens
-    the connection on first use.  On any write error, closes and
-    drops the cached socket so the next call will try to reconnect
-    (one-shot retry semantics: a transient daemon restart resumes
-    streaming on the next event).
+    Shared transport for :func:`send_event`, :func:`send_cli_task_start`,
+    and :func:`send_cli_task_end`: lazily opens the connection on first
+    use, drops it on any write error (one-shot reconnect on the next
+    call), and swallows all I/O failures so the CLI keeps working when
+    no daemon is listening.
     """
     global _WRITER
-    payload = json.dumps({"type": "cliEvent", "event": event}).encode() + b"\n"
+    payload = json.dumps(envelope).encode() + b"\n"
     with _LOCK:
         if _WRITER is None:
             _WRITER = _connect()
@@ -89,6 +88,39 @@ def send_event(event: dict[str, Any]) -> None:
             except OSError:
                 pass
             _WRITER = None
+
+
+def send_event(event: dict[str, Any]) -> None:
+    """Forward *event* to the daemon for live fan-out to webviews.
+
+    Wraps *event* in a ``cliEvent`` envelope so the daemon's
+    :meth:`RemoteAccessServer._relay_cli_event` can fan it out over
+    WSS / UDS to every subscribed chat webview.
+    """
+    _send_envelope({"type": "cliEvent", "event": event})
+
+
+def send_cli_task_start(task_id: int) -> None:
+    """Announce that the CLI process has begun running *task_id*.
+
+    The daemon records the task id in
+    :attr:`RemoteAccessServer._cli_running_tasks` so a webview tab
+    later resuming the task from the history panel can be subscribed
+    to the live event stream and shown the blinking-green-circle
+    "running" indicator in its tab title.
+    """
+    _send_envelope({"type": "cliTaskStart", "taskId": int(task_id)})
+
+
+def send_cli_task_end(task_id: int) -> None:
+    """Announce that the CLI process has finished running *task_id*.
+
+    The daemon drops the task id from
+    :attr:`RemoteAccessServer._cli_running_tasks` and broadcasts a
+    ``status:running=false`` event to every subscribed webview so
+    the blinking-green-circle indicator stops.
+    """
+    _send_envelope({"type": "cliTaskEnd", "taskId": int(task_id)})
 
 
 def reset_for_tests() -> None:
