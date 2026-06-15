@@ -2789,6 +2789,24 @@ class RemoteAccessServer:
         # closure captures both the set and its lock so the read is
         # atomic with respect to mutations from the UDS handler.
         self._vscode_server.set_cli_running_lookup(self._is_cli_task_running)
+        # Companion snapshot hook used by
+        # :meth:`VSCodeServer._get_running_task_ids` to UNION CLI-
+        # launched running task ids into the per-row ``is_running``
+        # flag the History panel uses to render the pulsing-green-dot
+        # indicator.
+        self._vscode_server.set_cli_running_task_ids_lookup(
+            self._snapshot_cli_running_task_ids,
+        )
+
+    def _snapshot_cli_running_task_ids(self) -> set[int]:
+        """Return a thread-safe copy of the CLI-running task id set.
+
+        Returned set is a fresh copy so callers can iterate / mutate
+        without taking ``_cli_running_lock`` (or racing the UDS
+        handler that mutates the underlying set).
+        """
+        with self._cli_running_lock:
+            return set(self._cli_running_tasks)
 
     def _is_cli_task_running(self, task_id: int) -> bool:
         """Return ``True`` when *task_id* is being run by the CLI.
