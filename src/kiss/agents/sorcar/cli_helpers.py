@@ -213,7 +213,7 @@ def _build_run_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         if headers:
             model_config["extra_headers"] = headers
 
-    return {
+    run_kwargs: dict[str, Any] = {
         "prompt_template": task_description,
         "model_name": args.model_name,
         "max_budget": args.max_budget,
@@ -224,6 +224,18 @@ def _build_run_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         "verbose": args.verbose,
         "ask_user_question_callback": cli_ask_user_question,
     }
+    # When the CLI runs verbosely (the default), install a recording
+    # console printer.  The plain ``ConsolePrinter`` renders Rich
+    # panels but does NOT persist events, so the chat webview shows a
+    # blank session for CLI-launched tasks.  ``RecordingConsolePrinter``
+    # both records every display event to the chat DB AND renders the
+    # Rich panels to the terminal, so the same run is visible live in
+    # the terminal and replayable later in the chat webview.
+    if args.verbose:
+        from kiss.agents.sorcar.cli_printer import RecordingConsolePrinter
+
+        run_kwargs["printer"] = RecordingConsolePrinter()
+    return run_kwargs
 
 
 def _print_result(result: str) -> None:
