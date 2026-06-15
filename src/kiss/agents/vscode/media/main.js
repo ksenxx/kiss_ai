@@ -921,6 +921,7 @@
   const parallelToggleBtn = document.getElementById('cfg-use-parallel');
   const demoToggleBtn = document.getElementById('cfg-demo-mode');
   const updateBtn = document.getElementById('cfg-update-btn');
+  const serverResetBtn = document.getElementById('cfg-server-reset-btn');
   const autocommitToggleBtn = document.getElementById('cfg-auto-commit');
   const taskPanel = document.getElementById('task-panel');
   const taskPanelText = document.getElementById('task-panel-text');
@@ -4582,6 +4583,14 @@
         e.preventDefault();
         e.stopPropagation();
         vscode.postMessage({type: 'runUpdate'});
+      });
+    }
+
+    if (serverResetBtn) {
+      serverResetBtn.addEventListener('click', e => {
+        e.preventDefault();
+        e.stopPropagation();
+        vscode.postMessage({type: 'serverReset'});
       });
     }
 

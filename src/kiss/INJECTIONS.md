@@ -29,4 +29,3 @@ Why did this the last task got interrupted? Thoroughly and precisely analyze the
 ## Trick
 
 Can you create an html report with diagrams and illustrations in PWD/reports and open it in the user's default browser?
-
