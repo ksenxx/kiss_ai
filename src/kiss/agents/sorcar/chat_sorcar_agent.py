@@ -20,11 +20,13 @@ import yaml
 from kiss._version import __version__
 from kiss.agents.sorcar.persistence import (
     _add_task,
+    _append_chat_event,
     _load_chat_context,
     _load_task_chat_id,
     _record_frequent_task,
     _save_task_extra,
     _save_task_result,
+    _task_has_events,
 )
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.sorcar_agent import (
@@ -35,6 +37,7 @@ from kiss.agents.sorcar.sorcar_agent import (
     _coerce_tasks,
     _yaml_failure,
 )
+from kiss.core.printer import parse_result_yaml
 
 MAX_TASKS = 10
 
@@ -152,6 +155,62 @@ class ChatSorcarAgent(SorcarAgent):
         if self._subagent_info is not None:
             payload["subagent"] = self._subagent_info
         return payload
+
+    def _persist_replay_events_if_missing(
+        self,
+        task_id: int,
+        prompt: str,
+        result_raw: str,
+        result_summary: str,
+    ) -> None:
+        """Persist a minimal replayable event stream when none was recorded.
+
+        Runs that happen inside a chat webview stream every agent event
+        through a recording printer (the VS Code server's ``JsonPrinter``
+        / ``WebPrinter``), which persists them to the ``events`` table.
+        Runs that happen OUTSIDE a chat webview — the CLI, the
+        third-party channel agents, or a remote webapp invocation with a
+        non-recording printer — leave the ``events`` table empty, so the
+        chat webview would load a blank session even though the task and
+        its result are in ``task_history``.
+
+        This synthesizes the two events the webview needs to render the
+        exchange — a ``prompt`` event (the user's task) and a ``result``
+        event (the agent's summary / success / cost) — but only when the
+        task has no events yet, so a recording printer's full event
+        stream is never duplicated.
+
+        Args:
+            task_id: Stable ``task_history`` row id for this run.
+            prompt: The prompt the agent actually ran with (chat-context
+                augmented), mirroring the ``prompt`` event a recording
+                printer would have persisted.
+            result_raw: The raw YAML result string returned by the run
+                (used to recover ``success`` / ``is_continue``).
+            result_summary: The extracted human-readable summary text.
+        """
+        if _task_has_events(task_id):
+            return
+        prompt_text = prompt or ""
+        if prompt_text:
+            _append_chat_event(
+                {"type": "prompt", "text": prompt_text}, task_id=task_id,
+            )
+        event: dict[str, object] = {
+            "type": "result",
+            "text": result_summary or "(no result)",
+            "total_tokens": int(self.total_tokens_used),
+            "cost": f"${self.budget_used:.4f}",
+            "step_count": int(getattr(self, "total_steps", 0) or 0),
+        }
+        parsed = parse_result_yaml(result_raw) if result_raw else None
+        if parsed:
+            event["success"] = parsed.get("success")
+            event["is_continue"] = bool(parsed.get("is_continue", False))
+            event["summary"] = str(parsed["summary"])
+        else:
+            event["summary"] = result_summary or ""
+        _append_chat_event(event, task_id=task_id)
 
     def _run_tasks_parallel(
         self,
@@ -420,8 +479,13 @@ class ChatSorcarAgent(SorcarAgent):
             _record_frequent_task(prompt_template)
 
         result_summary = ""
+        # Captured for the synthesized result event persisted in the
+        # ``finally`` block when this run produced no live event stream
+        # (i.e. ran outside a chat webview, with no recording printer).
+        result_raw = ""
         try:
             result = super().run(prompt_template=agent_prompt, **kwargs)
+            result_raw = result if isinstance(result, str) else ""
             try:
                 result_yaml = yaml.safe_load(result)
                 if isinstance(result_yaml, dict):
@@ -496,5 +560,23 @@ class ChatSorcarAgent(SorcarAgent):
                 extra_payload["tokens"] = self.total_tokens_used
                 extra_payload["cost"] = round(self.budget_used, 6)
                 _save_task_extra(extra_payload, task_id=task_id)
+                # When this run produced NO live event stream — i.e. it
+                # ran outside a chat webview (CLI, third-party channel
+                # agent, remote webapp) with a printer that does not
+                # record/persist events — the ``events`` table is empty
+                # for this task and the chat webview would load a blank
+                # session.  Synthesize a minimal replayable event stream
+                # (the user prompt followed by the result) so the run can
+                # still be opened and replayed in the chat webview.  A
+                # recording printer (VS Code server's JsonPrinter /
+                # WebPrinter) already persisted the full event stream, so
+                # ``_task_has_events`` returns True and we skip — no
+                # duplication.
+                self._persist_replay_events_if_missing(
+                    task_id=task_id,
+                    prompt=agent_prompt,
+                    result_raw=result_raw,
+                    result_summary=result_summary,
+                )
 
 
