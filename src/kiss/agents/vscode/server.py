@@ -278,6 +278,16 @@ class VSCodeServer(
         # blinking-green-circle "running" indicator.  ``None`` in
         # tests that construct ``VSCodeServer`` standalone.
         self._cli_running_lookup: Callable[[int], bool] | None = None
+        # Companion snapshot hook installed by ``RemoteAccessServer``
+        # via :meth:`set_cli_running_task_ids_lookup`.  Returns the
+        # full set of task ids the local ``sorcar`` CLI has announced
+        # as running (via ``cliTaskStart``).  Used by
+        # :meth:`_get_running_task_ids` to UNION the CLI-launched
+        # running tasks with the UI-launched ones, so the History
+        # panel's pulsing-green-dot ``is_running`` flag is set on
+        # CLI tasks too (the in-process ``_RunningAgentState``
+        # registry only tracks UI-launched tasks).
+        self._cli_running_task_ids_lookup: Callable[[], set[int]] | None = None
 
     def set_cli_running_lookup(
         self, lookup: Callable[[int], bool] | None,
@@ -294,6 +304,23 @@ class VSCodeServer(
                 ``True`` when the CLI is running it.
         """
         self._cli_running_lookup = lookup
+
+    def set_cli_running_task_ids_lookup(
+        self, lookup: Callable[[], set[int]] | None,
+    ) -> None:
+        """Install the CLI-running-task-id snapshot used by ``_get_history``.
+
+        Called by :class:`RemoteAccessServer` so the history listing
+        can union the CLI-launched running task ids with the
+        in-process UI-launched ones, making the History panel render
+        the pulsing-green-dot indicator on CLI tasks as well.
+        Passing ``None`` clears the hook.
+
+        Args:
+            lookup: Zero-arg callable returning a fresh snapshot set
+                of CLI-launched running ``task_history`` row ids.
+        """
+        self._cli_running_task_ids_lookup = lookup
 
     def drop_connection_state(self, conn_id: str) -> None:
         """Discard per-connection autocomplete state for a closed connection.
@@ -518,6 +545,19 @@ class VSCodeServer(
                     and tab.task_thread.is_alive()
                 ):
                     running.add(tid)
+        # CLI-launched tasks run in a separate ``sorcar`` process and
+        # have no ``_RunningAgentState`` entry on the daemon, but the
+        # ``RemoteAccessServer`` tracks them via ``cliTaskStart`` /
+        # ``cliTaskEnd`` envelopes.  Merge that set in so the History
+        # panel renders the pulsing-green-dot running indicator on
+        # CLI-launched rows too.
+        if self._cli_running_task_ids_lookup is not None:
+            try:
+                running.update(self._cli_running_task_ids_lookup())
+            except Exception:  # pragma: no cover — defensive
+                logger.exception(
+                    "cli running-task lookup failed; continuing",
+                )
         return running
 
     def _overlay_live_metrics(
