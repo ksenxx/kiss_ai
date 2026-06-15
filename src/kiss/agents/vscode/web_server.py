@@ -3198,6 +3198,39 @@ class RemoteAccessServer:
                 logger.debug("UDS writer close failed", exc_info=True)
 
 
+    def _relay_cli_event(self, ev: dict[str, Any]) -> None:
+        """Fan a CLI-originated event out to subscribed webview tabs.
+
+        The ``sorcar`` CLI's :class:`RecordingConsolePrinter` ships
+        every display event over the daemon's UDS endpoint wrapped in
+        a ``cliEvent`` envelope (see
+        :mod:`kiss.agents.sorcar.cli_daemon_bridge`).  The CLI process
+        has ALREADY recorded the event into its per-task recording
+        and persisted it to the chat DB via
+        :meth:`JsonPrinter.broadcast`, so this method must NOT call
+        ``_record_event`` or ``_persist_event`` again — doing so would
+        produce duplicate rows in the ``events`` table.  It only
+        mirrors the tail of :meth:`WebPrinter.broadcast`: look up the
+        viewer tabs currently subscribed to the event's task id and
+        splice each ``tabId`` into the pre-serialised JSON, then push
+        to every WSS / UDS client in lockstep.  Any chat webview
+        that opened the task's chat id therefore receives the event
+        live, without waiting for a page reload to replay it from
+        the database.
+
+        Args:
+            ev: The event dictionary the CLI emitted; expected to
+                carry at least ``type`` and ``taskId``.
+        """
+        targets = self._printer._fanout_targets(ev.get("taskId"))
+        if not targets:
+            return
+        base = json.dumps(ev)[:-1]
+        for tab_id in targets:
+            self._printer._send_to_ws_clients(
+                f'{base}, "tabId": {json.dumps(tab_id)}}}'
+            )
+
     async def _dispatch_client_command(
         self,
         cmd: dict[str, Any],
@@ -3250,6 +3283,16 @@ class RemoteAccessServer:
             tabs_seen.add(tab_id)
         cmd["connId"] = conn_state["conn_id"]
         cmd_type = cmd.get("type", "")
+        if cmd_type == "cliEvent":
+            # CLI -> daemon live-stream bridge.  The sorcar CLI
+            # forwards every display event here so any chat webview
+            # subscribed to the task's chat id sees the event
+            # immediately instead of having to reload to replay it
+            # from the events DB.  See ``_relay_cli_event``.
+            ev = cmd.get("event")
+            if isinstance(ev, dict):
+                self._relay_cli_event(ev)
+            return
         if cmd_type == "setWorkDir":
             new_wd = cmd.get("workDir", "")
             if isinstance(new_wd, str) and new_wd:
