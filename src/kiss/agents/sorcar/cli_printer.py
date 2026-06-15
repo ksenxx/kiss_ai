@@ -24,6 +24,8 @@ chat webview without losing the live terminal experience.
 
 from __future__ import annotations
 
+import atexit
+import threading
 from typing import Any
 
 from kiss.agents.sorcar import cli_daemon_bridge
@@ -49,6 +51,20 @@ class RecordingConsolePrinter(JsonPrinter):
     def __init__(self) -> None:
         super().__init__()
         self._console = ConsolePrinter()
+        # Task ids for which we've already announced a
+        # ``cliTaskStart`` envelope to the daemon — only the FIRST
+        # event for a fresh task triggers the announce.  Set of int
+        # task ids.  Guarded by ``_cli_task_lock`` because the printer
+        # may be invoked from the agent loop AND the agent's
+        # background worker threads concurrently.
+        self._cli_task_lock = threading.Lock()
+        self._cli_running_task_ids: set[int] = set()
+        # Process-exit safety net: if the CLI dies (Ctrl+C, crash,
+        # uncaught exception) without broadcasting a ``result``
+        # event, we still need to tell the daemon the task is no
+        # longer running so subscribed webviews stop showing the
+        # blinking-green-circle indicator.
+        atexit.register(self._cli_atexit_end_all)
 
     def broadcast(self, event: dict[str, Any]) -> None:
         """Record + persist the event AND forward it to the daemon.
@@ -61,13 +77,68 @@ class RecordingConsolePrinter(JsonPrinter):
         the event live instead of having to wait for the next page
         reload to pick it up from the DB.
 
+        On the FIRST event seen for a fresh ``taskId``, also emits
+        a ``cliTaskStart`` envelope so the daemon records the task
+        as running in its ``_cli_running_tasks`` set — that is what
+        lets a chat webview later resuming the task from the
+        history sidebar be (a) subscribed to the live stream and
+        (b) shown the blinking-green-circle "running" indicator in
+        its tab title.  When a terminal ``result`` event arrives,
+        emits a matching ``cliTaskEnd`` envelope so the daemon
+        clears the indicator on every subscribed tab.
+
         Args:
             event: The event dictionary to broadcast.
         """
         super().broadcast(event)
         injected = self._inject_task_id(event)
-        if injected.get("taskId"):
-            cli_daemon_bridge.send_event(injected)
+        raw_task_id = injected.get("taskId")
+        if not raw_task_id:
+            return
+        # Only the ``int`` ``task_history.id`` form participates in
+        # the ``cliTaskStart`` / ``cliTaskEnd`` lifecycle — the
+        # blinking-green-circle indicator and the resume-from-history
+        # path key off real task ids that the chat webview can map
+        # back to a sidebar row.  Free-form string keys (used by
+        # tests, sub-agents, and pre-mint synthetic events) still
+        # need their events forwarded for live streaming but cannot
+        # be tracked as "running" against the history sidebar.
+        task_id: int | None
+        try:
+            task_id = int(raw_task_id)
+        except (TypeError, ValueError):
+            task_id = None
+        if task_id is not None:
+            with self._cli_task_lock:
+                is_new = task_id not in self._cli_running_task_ids
+                if is_new:
+                    self._cli_running_task_ids.add(task_id)
+            if is_new:
+                cli_daemon_bridge.send_cli_task_start(task_id)
+        cli_daemon_bridge.send_event(injected)
+        if task_id is not None and injected.get("type") == "result":
+            with self._cli_task_lock:
+                still_running = task_id in self._cli_running_task_ids
+                self._cli_running_task_ids.discard(task_id)
+            if still_running:
+                cli_daemon_bridge.send_cli_task_end(task_id)
+
+    def _cli_atexit_end_all(self) -> None:
+        """Announce ``cliTaskEnd`` for any task id still marked running.
+
+        Safety net for the case where the CLI process exits before
+        broadcasting a terminal ``result`` event (Ctrl+C, crash,
+        uncaught exception): without this, the daemon would keep the
+        task id in its ``_cli_running_tasks`` set forever, and any
+        webview later resuming the task would mis-display the
+        blinking-green-circle "running" indicator for a task that
+        is no longer actually running anywhere.
+        """
+        with self._cli_task_lock:
+            pending = list(self._cli_running_task_ids)
+            self._cli_running_task_ids.clear()
+        for task_id in pending:
+            cli_daemon_bridge.send_cli_task_end(task_id)
 
     @property
     def tokens_offset(self) -> int:
