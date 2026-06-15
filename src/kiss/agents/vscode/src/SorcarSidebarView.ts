@@ -1147,6 +1147,14 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         this._runUpdate();
         break;
 
+      case 'serverReset':
+        // Forward to the kiss-web daemon, which SIGTERMs itself so the
+        // supervising LaunchAgent/systemd unit respawns a fresh
+        // process.  The AgentClient transparently reconnects over the
+        // UDS once the new daemon is listening.
+        this._getClient().sendCommand({type: 'serverReset'});
+        break;
+
       case 'closeTab': {
         const closeTabId = message.tabId;
         if (closeTabId) {
