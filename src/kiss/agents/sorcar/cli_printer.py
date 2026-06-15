@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from kiss.agents.sorcar import cli_daemon_bridge
 from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.core.print_to_console import ConsolePrinter
 
@@ -48,6 +49,25 @@ class RecordingConsolePrinter(JsonPrinter):
     def __init__(self) -> None:
         super().__init__()
         self._console = ConsolePrinter()
+
+    def broadcast(self, event: dict[str, Any]) -> None:
+        """Record + persist the event AND forward it to the daemon.
+
+        Inherits :meth:`JsonPrinter.broadcast` for the in-process
+        record/persist side effects.  After persistence, forwards a
+        copy of the (task-id-injected) event to the local daemon's
+        UDS endpoint via :mod:`cli_daemon_bridge`, so any chat
+        webview currently subscribed to the task's chat id receives
+        the event live instead of having to wait for the next page
+        reload to pick it up from the DB.
+
+        Args:
+            event: The event dictionary to broadcast.
+        """
+        super().broadcast(event)
+        injected = self._inject_task_id(event)
+        if injected.get("taskId"):
+            cli_daemon_bridge.send_event(injected)
 
     @property
     def tokens_offset(self) -> int:
