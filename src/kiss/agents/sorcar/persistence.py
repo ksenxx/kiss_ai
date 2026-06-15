@@ -1532,6 +1532,33 @@ def _append_chat_event(
     _flush_chat_events()
 
 
+def _task_has_events(task_id: int) -> bool:
+    """Return whether any chat events are persisted for *task_id*.
+
+    Flushes the asynchronous event queue first so events enqueued by a
+    recording printer (which land on the events table via the background
+    writer) are visible before the check.  Used by
+    :meth:`ChatSorcarAgent.run` to decide whether it must synthesize a
+    minimal replayable event stream (prompt + result) for runs that
+    happened outside a chat webview — i.e. without a recording printer
+    that would have persisted the live event stream.
+
+    Args:
+        task_id: Stable ``task_history`` row id.
+
+    Returns:
+        ``True`` if at least one row exists in ``events`` for *task_id*.
+    """
+    _flush_chat_events()
+    with _rw_lock.read_lock():
+        db = _get_db()
+        row = db.execute(
+            "SELECT 1 FROM events WHERE task_id = ? LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        return row is not None
+
+
 def _load_task_chat_id(task: str) -> str:
     """Return the chat_id for the most recent run of *task*, or ``""``.
 
