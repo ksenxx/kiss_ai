@@ -36,7 +36,6 @@ from kiss.agents.sorcar.git_worktree import (
     repo_lock,
 )
 from kiss.agents.sorcar.persistence import _allocate_chat_id
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 
 # ``_generate_commit_message`` is re-exported (and looked up from this
 # module's globals at call time) so tests can monkeypatch
@@ -623,77 +622,6 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             )
             self._merge_conflict_warning = None
 
-
-    def _register_running_state(self) -> bool:
-        """Publish ``self`` in :attr:`_RunningAgentState.running_agent_states` for this chat.
-
-        Skips registration when an entry whose ``chat_id`` matches
-        ``self._chat_id`` is already present: the VS Code server
-        pre-populates a ``_RunningAgentState`` keyed by the frontend
-        tab id ahead of run-start, with ``chat_id`` set on the state;
-        re-registering here would clobber the server's task-lifecycle
-        flags.  In standalone / CLI runs no such pre-population
-        happens, and the entry is added here keyed by ``self._chat_id``
-        (the only routing key available — there is no separate tab).
-        Sub-agents launched by
-        :meth:`ChatSorcarAgent._run_tasks_parallel` are plain
-        :class:`ChatSorcarAgent` instances and never call this method;
-        they register themselves in the printer's ``_persist_agents``
-        map keyed by their own ``task_id`` (the string form of
-        ``task_history.id``) from inside
-        :meth:`ChatSorcarAgent.run`.
-
-        Returns:
-            ``True`` when a fresh entry was added (and the caller must
-            remove it in its own ``finally``); ``False`` when an entry
-            was already present (the existing owner is responsible
-            for cleanup).
-        """
-        # Acquire the shared ``_registry_lock`` for the whole
-        # scan-then-modify so a concurrent sub-agent thread cannot
-        # resize ``running_agent_states`` while we iterate, and so
-        # the insertion is atomic w.r.t. the VS Code server's
-        # iteration loops (which hold the very same lock under the
-        # ``_state_lock`` alias).
-        with _RunningAgentState._registry_lock:
-            for state in _RunningAgentState.running_agent_states.values():
-                if state.chat_id == self._chat_id:
-                    return False
-            state = _RunningAgentState(
-                self._chat_id,
-                getattr(self, "model_name", "") or "",
-                agent=self,
-            )
-            # Tag the state with the canonical chat id so subsequent
-            # lookups (e.g. multi-viewer subscribe,
-            # ``_unregister_running_state``) can route by chat id
-            # without depending on the dict key.
-            state.chat_id = self._chat_id
-            state.is_task_active = True
-            _RunningAgentState.register(self._chat_id, state)
-            return True
-
-    def _unregister_running_state(self) -> None:
-        """Remove ``self``'s entry from :attr:`_RunningAgentState.running_agent_states`.
-
-        Only removes the entry we ourselves added.  A different code
-        path (e.g. the VS Code server) may have replaced it mid-run;
-        in that case the new owner is responsible for its own cleanup.
-        """
-        # Scan-then-pop must be atomic w.r.t. concurrent producers
-        # (parallel sub-agents in :meth:`ChatSorcarAgent._run_tasks_parallel`,
-        # the VS Code server's tab lifecycle handlers) so the dict is
-        # never resized between the lookup and the pop.
-        with _RunningAgentState._registry_lock:
-            target_key: str | None = None
-            for key, state in _RunningAgentState.running_agent_states.items():
-                if state.agent is self and state.chat_id == self._chat_id:
-                    target_key = key
-                    break
-            if target_key is not None:
-                current = _RunningAgentState.running_agent_states[target_key]
-                current.is_task_active = False
-                _RunningAgentState.running_agent_states.pop(target_key, None)
 
     def run(  # type: ignore[override]
         self,
