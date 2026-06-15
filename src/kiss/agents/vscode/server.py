@@ -26,6 +26,7 @@ import logging
 import os
 import queue
 import threading
+from collections.abc import Callable
 from typing import Any, cast
 
 from kiss.agents.sorcar.persistence import (
@@ -267,6 +268,32 @@ class VSCodeServer(
         # window's ghost-text autocomplete context.
         self._last_active_file: dict[str, str] = {}
         self._last_active_content: dict[str, str] = {}
+        # Optional hook the owning ``RemoteAccessServer`` installs via
+        # :meth:`set_cli_running_lookup`.  Returns ``True`` when a
+        # given task id is currently being executed by the local
+        # ``sorcar`` CLI (announced via ``cliTaskStart`` envelopes).
+        # Used by :meth:`_replay_session` to subscribe a freshly
+        # resumed webview tab to the live event stream and broadcast
+        # a ``status:running`` event so the tab title shows the
+        # blinking-green-circle "running" indicator.  ``None`` in
+        # tests that construct ``VSCodeServer`` standalone.
+        self._cli_running_lookup: Callable[[int], bool] | None = None
+
+    def set_cli_running_lookup(
+        self, lookup: Callable[[int], bool] | None,
+    ) -> None:
+        """Install the CLI-task running-lookup used by :meth:`_replay_session`.
+
+        Called by :class:`RemoteAccessServer` so the resume path can
+        detect tasks the local ``sorcar`` CLI is currently running
+        and subscribe the freshly opened webview tab to their live
+        event stream.  Passing ``None`` clears the hook.
+
+        Args:
+            lookup: Callable taking the task id and returning
+                ``True`` when the CLI is running it.
+        """
+        self._cli_running_lookup = lookup
 
     def drop_connection_state(self, conn_id: str) -> None:
         """Discard per-connection autocomplete state for a closed connection.
@@ -1024,6 +1051,29 @@ class VSCodeServer(
             task_id=rebound_task_id,
             is_subagent=subagent_info is not None,
         )
+        # Tasks launched by the local ``sorcar`` CLI never have a
+        # :class:`_RunningAgentState` registry entry in this process
+        # (the CLI agent runs in a separate Python process and only
+        # talks to the daemon over UDS).  ``_reattach_running_chat``
+        # therefore returns ``False`` for them and a webview tab
+        # opened from the history sidebar would not be subscribed to
+        # the live event stream and not get the blinking-green-circle
+        # "running" indicator.  Consult the CLI-running-task hook the
+        # :class:`RemoteAccessServer` installed via
+        # :meth:`set_cli_running_lookup` and, when the click resolved
+        # to a still-running CLI task, subscribe this tab under the
+        # task id (so subsequent ``cliEvent`` relays fan out to it)
+        # AND broadcast a ``status:running=true`` event to start the
+        # indicator.  Mirrors the tail of the rebound-running branch
+        # below.
+        if (
+            not rebound_running
+            and rebound_task_id is not None
+            and self._cli_running_lookup is not None
+            and self._cli_running_lookup(rebound_task_id)
+        ):
+            self.printer.subscribe_tab(str(rebound_task_id), tab_id)
+            rebound_running = True
 
         # Loading a (completed or running-elsewhere) task into this
         # tab is a VIEW operation — no agent will run here, so we

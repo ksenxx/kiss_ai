@@ -64,7 +64,7 @@ from concurrent.futures import Future as ConcurrentFuture
 from functools import partial
 from http import HTTPStatus
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import unquote
 
 import websockets
@@ -2770,7 +2770,90 @@ class RemoteAccessServer:
         # to temp paths.
         self._install_root: Path = _KISS_AI_ROOT
         self._update_log_path: Path = _KISS_HOME / "update.log"
+        # Task ids the local ``sorcar`` CLI has announced as running
+        # via ``cliTaskStart`` envelopes (see
+        # :meth:`_handle_cli_task_start`).  Consulted by
+        # :meth:`VSCodeServer._replay_session` (read through the
+        # ``_is_cli_task_running`` hook) so a chat webview tab that
+        # later resumes a CLI-launched task from the history sidebar
+        # can be subscribed to the live event stream and shown the
+        # blinking-green-circle "running" indicator in its tab title.
+        # Guarded by ``_cli_running_lock`` because the UDS handler
+        # mutates it from the asyncio thread and ``_replay_session``
+        # reads it from agent / handler threads.
+        self._cli_running_tasks: set[int] = set()
+        self._cli_running_lock = threading.Lock()
+        # Expose the running-set lookup to ``VSCodeServer`` so its
+        # ``_replay_session`` can subscribe a freshly opened webview
+        # tab to a CLI-launched task that is still running.  The
+        # closure captures both the set and its lock so the read is
+        # atomic with respect to mutations from the UDS handler.
+        self._vscode_server.set_cli_running_lookup(self._is_cli_task_running)
 
+    def _is_cli_task_running(self, task_id: int) -> bool:
+        """Return ``True`` when *task_id* is being run by the CLI.
+
+        Used by :meth:`VSCodeServer._replay_session` to decide whether
+        to subscribe a freshly opened webview tab to a CLI-launched
+        task's live event stream and broadcast a ``status:running``
+        event so the tab title shows the blinking-green-circle
+        indicator.
+        """
+        with self._cli_running_lock:
+            return task_id in self._cli_running_tasks
+
+    def _handle_cli_task_start(self, task_id: int, conn_state: dict[str, Any]) -> None:
+        """Record *task_id* as a CLI-launched running task.
+
+        Also stamps the task id into the UDS connection's per-conn
+        ``cli_tasks`` set so :meth:`_uds_handler` can clean it up if
+        the CLI process disconnects without sending a matching
+        ``cliTaskEnd`` (Ctrl+C, crash, abrupt termination).
+        """
+        with self._cli_running_lock:
+            self._cli_running_tasks.add(task_id)
+        cli_tasks = conn_state.setdefault("cli_tasks", set())
+        if isinstance(cli_tasks, set):
+            cli_tasks.add(task_id)
+
+    def _handle_cli_task_end(self, task_id: int, conn_state: dict[str, Any]) -> None:
+        """Mark *task_id* as no longer running and stop the indicator.
+
+        Drops the task id from :attr:`_cli_running_tasks` and from
+        the connection's per-conn ``cli_tasks`` set, then broadcasts
+        a ``status:running=false`` event to every webview tab
+        currently subscribed to the task id so the
+        blinking-green-circle "running" indicator stops on the tab
+        title.
+        """
+        with self._cli_running_lock:
+            self._cli_running_tasks.discard(task_id)
+        cli_tasks = conn_state.get("cli_tasks")
+        if isinstance(cli_tasks, set):
+            cli_tasks.discard(task_id)
+        self._fanout_cli_status(task_id, running=False)
+
+    def _fanout_cli_status(self, task_id: int, *, running: bool) -> None:
+        """Send ``status:running`` to every tab subscribed to *task_id*.
+
+        Mirrors the per-tab fan-out idiom from
+        :meth:`WebPrinter.broadcast` /
+        :meth:`_relay_cli_event`: looks up the viewer tabs currently
+        subscribed to the task id, then for each one writes a
+        ``status`` event with that tab's ``tabId`` spliced in.  Used
+        when a CLI task ends so the blinking-green-circle indicator
+        clears on every webview that was watching it.
+        """
+        targets = self._printer._fanout_targets(task_id)
+        if not targets:
+            return
+        for tab_id in targets:
+            payload = json.dumps({
+                "type": "status",
+                "running": running,
+                "tabId": tab_id,
+            })
+            self._printer._send_to_ws_clients(payload)
 
     async def _process_request(
         self, _connection: ServerConnection, request: Request
@@ -3189,6 +3272,20 @@ class RemoteAccessServer:
         finally:
             for tab in tabs_seen:
                 self._schedule_tab_close(tab)
+            # Clean up any CLI task ids announced on this connection
+            # but never closed (CLI crash, Ctrl+C, abrupt SIGKILL):
+            # without this the daemon would keep them in
+            # ``_cli_running_tasks`` forever and a webview later
+            # resuming the task would mis-display the
+            # blinking-green-circle "running" indicator for a task
+            # that is no longer actually running anywhere.
+            stale_cli_tasks = cast("Any", conn_state.get("cli_tasks"))
+            if isinstance(stale_cli_tasks, set):
+                for task_id in list(stale_cli_tasks):
+                    if isinstance(task_id, int):
+                        self._handle_cli_task_end(
+                            task_id, cast("dict[str, Any]", conn_state),
+                        )
             self._vscode_server.drop_connection_state(conn_state["conn_id"])
             self._printer.unbind_conn(conn_state["conn_id"])
             self._printer.remove_uds_writer(writer)
@@ -3292,6 +3389,33 @@ class RemoteAccessServer:
             ev = cmd.get("event")
             if isinstance(ev, dict):
                 self._relay_cli_event(ev)
+            return
+        if cmd_type == "cliTaskStart":
+            # CLI announces a fresh task is now running so a webview
+            # tab later resuming the task from the history sidebar
+            # can be subscribed to the live stream and shown the
+            # blinking-green-circle "running" indicator in its tab
+            # title.  See ``_handle_cli_task_start``.
+            raw_id = cmd.get("taskId")
+            try:
+                task_id_int = int(raw_id)  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                logger.debug("cliTaskStart with bad taskId %r", raw_id)
+                return
+            self._handle_cli_task_start(task_id_int, conn_state)
+            return
+        if cmd_type == "cliTaskEnd":
+            # CLI announces a previously-running task has finished
+            # so the daemon stops the blinking-green-circle indicator
+            # on every subscribed webview tab.  See
+            # ``_handle_cli_task_end``.
+            raw_id = cmd.get("taskId")
+            try:
+                task_id_int = int(raw_id)  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                logger.debug("cliTaskEnd with bad taskId %r", raw_id)
+                return
+            self._handle_cli_task_end(task_id_int, conn_state)
             return
         if cmd_type == "setWorkDir":
             new_wd = cmd.get("workDir", "")
