@@ -156,6 +156,14 @@
   let tabs = []; // array of tab objects (see makeTab for fields)
   let activeTabId = '';
 
+  // Configured work directory reported by the backend's ``getConfig``
+  // reply (``configData`` → ``populateConfigForm``).  Used as the
+  // fallback repo path for ``workDirForTab`` when a tab has not yet
+  // learned its own ``workDir`` from a background-task event, so
+  // commands like the settings-panel "git commit" act on the
+  // configured repo rather than the daemon-wide ``self.work_dir``.
+  let configWorkDir = '';
+
   function makeTab(title) {
     const _id = genTabId();
     return {
@@ -263,14 +271,18 @@
   /**
    * Resolve the working directory for a given tab id.  Returns the
    * tab's own ``workDir`` (set from background-task events) when known,
-   * else an empty string so the backend falls back to its global
+   * else falls back to ``configWorkDir`` — the configured work
+   * directory the backend reports via ``getConfig`` (``configData`` →
+   * ``populateConfigForm``).  Returns an empty string only when neither
+   * is known, in which case the backend falls back to its global
    * ``work_dir``.  Used to stamp ``workDir`` on commands (e.g.
    * ``autocommitAction``) so they act on the tab's actual repo rather
    * than a possibly-stale daemon-wide directory.
    */
   function workDirForTab(tabId) {
     const tab = getTab(tabId);
-    return tab && tab.workDir ? tab.workDir : '';
+    if (tab && tab.workDir) return tab.workDir;
+    return configWorkDir || '';
   }
 
   function saveCurrentTab() {
@@ -6063,6 +6075,10 @@
   let configFormPopulated = false;
   function populateConfigForm(cfg, apiKeys) {
     const el = id => document.getElementById(id);
+    // Remember the configured work directory so ``workDirForTab`` can
+    // fall back to it when a tab has not yet learned its own
+    // ``workDir`` from a background-task event.
+    configWorkDir = cfg.work_dir || '';
     const wdInp = el('cfg-work-dir');
     if (wdInp) {
       wdInp.value = cfg.work_dir || '';
@@ -6094,6 +6110,10 @@
         }
         if (pinned) {
           wdInp.value = pinned;
+          // The pinned per-instance folder overrides the global
+          // default for this browser tab, so prefer it as the
+          // ``workDirForTab`` fallback too.
+          configWorkDir = pinned;
         } else if (cfg.work_dir) {
           vscode.postMessage({type: 'setWorkDir', workDir: cfg.work_dir});
         }
