@@ -99,6 +99,89 @@ class ChatSorcarAgent(SorcarAgent):
         if chat_id:
             self._chat_id = chat_id
 
+    def _register_running_state(self) -> bool:
+        """Publish ``self`` in :attr:`_RunningAgentState.running_agent_states` for this chat.
+
+        Maintains the *registered-with-the-server* invariant: every
+        live :class:`ChatSorcarAgent` instance must be discoverable
+        through some entry of
+        :attr:`_RunningAgentState.running_agent_states` whose
+        ``state.agent is self``.  Consumers that rely on this
+        invariant include
+        :meth:`VSCodeServer._reattach_running_chat`,
+        :meth:`VSCodeServer._get_running_task_ids` (the History-
+        sidebar running indicator), and the parent-tab-id scan inside
+        :meth:`ChatSorcarAgent._run_tasks_parallel`.
+
+        Skips registration when an entry whose ``chat_id`` matches
+        ``self._chat_id`` is already present: the VS Code server
+        pre-populates a ``_RunningAgentState`` keyed by the frontend
+        tab id ahead of run-start (with ``chat_id`` set on the
+        state); :class:`WorktreeSorcarAgent.run` registers its own
+        entry before delegating to :meth:`ChatSorcarAgent.run`; and
+        :meth:`ChatSorcarAgent._run_tasks_parallel` registers each
+        sub-agent's per-thread state before invoking its ``run()``.
+        Re-registering on top of any of those would either clobber
+        lifecycle flags (server flow) or shadow the per-tab routing
+        key (worktree / sub-agent flow).  In CLI / third-party
+        invocations of plain :class:`ChatSorcarAgent` (no
+        pre-population), this method adds the missing entry keyed by
+        ``self._chat_id``.
+
+        Returns:
+            ``True`` when a fresh entry was added (and the caller
+            must remove it in its own ``finally``); ``False`` when an
+            entry was already present (the existing owner is
+            responsible for cleanup).
+        """
+        # Acquire the shared ``_registry_lock`` for the whole
+        # scan-then-modify so a concurrent sub-agent thread cannot
+        # resize ``running_agent_states`` while we iterate, and so
+        # the insertion is atomic w.r.t. the VS Code server's
+        # iteration loops (which hold the very same lock under the
+        # ``_state_lock`` alias).
+        with _RunningAgentState._registry_lock:
+            for state in _RunningAgentState.running_agent_states.values():
+                if state.chat_id == self._chat_id:
+                    return False
+            state = _RunningAgentState(
+                self._chat_id,
+                getattr(self, "model_name", "") or "",
+                agent=self,  # type: ignore[arg-type]
+            )
+            # Tag the state with the canonical chat id so subsequent
+            # lookups (e.g. multi-viewer subscribe,
+            # ``_unregister_running_state``) can route by chat id
+            # without depending on the dict key.
+            state.chat_id = self._chat_id
+            state.is_task_active = True
+            _RunningAgentState.register(self._chat_id, state)
+            return True
+
+    def _unregister_running_state(self) -> None:
+        """Remove ``self``'s entry from :attr:`_RunningAgentState.running_agent_states`.
+
+        Only removes the entry we ourselves added (matched by both
+        ``state.agent is self`` and ``state.chat_id == self._chat_id``).
+        A different code path (e.g. the VS Code server) may have
+        replaced it mid-run; in that case the new owner is
+        responsible for its own cleanup.
+        """
+        # Scan-then-pop must be atomic w.r.t. concurrent producers
+        # (parallel sub-agents in :meth:`_run_tasks_parallel`, the
+        # VS Code server's tab lifecycle handlers) so the dict is
+        # never resized between the lookup and the pop.
+        with _RunningAgentState._registry_lock:
+            target_key: str | None = None
+            for key, state in _RunningAgentState.running_agent_states.items():
+                if state.agent is self and state.chat_id == self._chat_id:
+                    target_key = key
+                    break
+            if target_key is not None:
+                current = _RunningAgentState.running_agent_states[target_key]
+                current.is_task_active = False
+                _RunningAgentState.running_agent_states.pop(target_key, None)
+
     def build_chat_prompt(self, prompt: str) -> str:
         """Load chat context and augment prompt with previous tasks/results.
 
@@ -358,6 +441,18 @@ class ChatSorcarAgent(SorcarAgent):
         # from the parent via ``resume_chat_by_id``.
         if self._chat_id == "":
             self._chat_id = uuid.uuid4().hex
+        # Self-register in the per-tab state registry so the
+        # *registered-with-the-server* invariant holds for CLI /
+        # third-party / remote-webapp invocations that never go through
+        # :meth:`VSCodeServer._TaskRunnerMixin._run_task_inner`.  UI
+        # launches, sub-agent runs, and
+        # :class:`WorktreeSorcarAgent.run` already pre-populate an
+        # entry for ``self._chat_id`` (or an equivalent tab id with
+        # ``state.agent is self``); ``_register_running_state``
+        # detects the existing entry and returns ``False`` so we do
+        # not double-register and the existing owner remains
+        # responsible for cleanup.
+        registered_here = self._register_running_state()
         self._last_task_id = None
 
         self._last_user_prompt = prompt_template
@@ -533,6 +628,12 @@ class ChatSorcarAgent(SorcarAgent):
             raise
         finally:
             ChatSorcarAgent.running_agents.pop(task_id, None)
+            if registered_here:
+                # Mirror the registration above — only the frame that
+                # added the entry removes it.  Frames that observed an
+                # existing owner (server / worktree / parent
+                # sub-agent register) leave cleanup to that owner.
+                self._unregister_running_state()
             if printer is not None:
                 stop_rec = getattr(printer, "stop_recording", None)
                 if stop_rec is not None:
