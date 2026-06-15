@@ -236,6 +236,11 @@ _MAX_RESTORED_TABS = 32
 
 _MAX_ATTACHMENTS = 32
 
+# Seconds to wait after acknowledging a "Server reset" request before
+# SIGTERMing this daemon, so the ``notice`` event flushes to the
+# clicking window before its socket drops on shutdown.
+_SERVER_RESET_DELAY = 0.4
+
 # M7: cap the prompt size echoed back via ``setTaskText`` so a giant
 # JSON payload cannot push tens of MB through the broadcast pipeline.
 _MAX_PROMPT_BYTES = 1_000_000
@@ -3283,6 +3288,9 @@ class RemoteAccessServer:
         if cmd_type == "runUpdate":
             await self._handle_run_update(conn_state["conn_id"])
             return
+        if cmd_type == "serverReset":
+            await self._handle_server_reset(conn_state["conn_id"])
+            return
         if cmd_type == "mergeAction":
             if cmd.get("action", "") != "all-done":
                 await self._handle_web_merge_action(cmd)
@@ -3327,6 +3335,54 @@ class RemoteAccessServer:
             return
         cmd = _translate_webview_command(cmd)
         await self._run_cmd(cmd)
+
+    async def _handle_server_reset(self, conn_id: str = "") -> None:
+        """Restart the ``kiss-web`` daemon at the user's request.
+
+        Server-side handler for the settings-panel "Server reset"
+        button.  Broadcasts an acknowledgement ``notice`` to the
+        requesting window (stamped with its ``connId`` so siblings do
+        not pop a banner), then schedules a ``SIGTERM`` to this very
+        process after a short delay so the notice flushes to the client
+        before its socket drops.  The ``SIGTERM`` is caught by
+        :meth:`_handle_shutdown_signal`, which raises
+        :class:`KeyboardInterrupt` to unwind the ``asyncio.run`` loop in
+        :meth:`start` through its existing graceful-shutdown path
+        (stopping in-flight agent tasks and the tunnel).  The process
+        then exits and the supervising macOS LaunchAgent (``KeepAlive``)
+        / Linux systemd unit (``Restart=always``) respawns a fresh
+        ``kiss-web`` that re-adopts the same port and ``cloudflared``
+        tunnel — so the public URL is preserved across the reset.
+
+        Args:
+            conn_id: Requesting connection id (``""`` to broadcast).
+        """
+        loop = self._loop
+        assert loop is not None
+        notice: dict[str, Any] = {
+            "type": "notice",
+            "text": "Restarting the KISS Sorcar web server…",
+        }
+        if conn_id:
+            notice["connId"] = conn_id
+        self._printer.broadcast(notice)
+        loop.call_later(_SERVER_RESET_DELAY, self._trigger_server_reset)
+
+    def _trigger_server_reset(self) -> None:
+        """Send ``SIGTERM`` to this process to trigger a clean restart.
+
+        Runs as a delayed event-loop callback on the main thread (see
+        :meth:`_handle_server_reset`).  Delivering ``SIGTERM`` to the
+        daemon's own pid routes through :meth:`_handle_shutdown_signal`
+        exactly like an external ``pkill``/supervisor stop, so the
+        established graceful-shutdown path runs and the supervisor
+        respawns a fresh daemon.
+        """
+        logger.warning(
+            "Server reset requested: pid=%d sending SIGTERM to self",
+            os.getpid(),
+        )
+        os.kill(os.getpid(), signal.SIGTERM)
 
     async def _handle_run_update(self, conn_id: str = "") -> None:
         """Run ``~/kiss_ai/install.sh`` to update KISS Sorcar.
