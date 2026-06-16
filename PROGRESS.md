@@ -38,21 +38,22 @@ if isinstance(wd_raw, str):
 ```
 
 `work_dir` is already persisted on every completed task by
-`_TaskRunnerMixin._run_task_inner` via `_save_task_extra({"work_dir":
-work_dir, ...})` (task_runner.py:842).
+`_TaskRunnerMixin._run_task_inner` via `_save_task_extra({"work_dir": work_dir, ...})` (task_runner.py:842).
 
 ### 3. `src/kiss/agents/vscode/media/main.js`
 
-* `renderHistory()` stamps each row with `div.dataset.workDir = s.work_dir
-  || ''` so the filter helper can use plain DOM lookups.
-* The filter-bar listener wiring now includes `hf-workspace`.
-* `applyHistoryFilterVisibility()` reads `hfWorkspace` + `configWorkDir`
+- `renderHistory()` stamps each row with `div.dataset.workDir = s.work_dir || ''` so the filter helper can use plain DOM lookups.
+
+- The filter-bar listener wiring now includes `hf-workspace`.
+
+- `applyHistoryFilterVisibility()` reads `hfWorkspace` + `configWorkDir`
   and applies a strict-equality filter:
 
   ```js
   const wsOk = !onlyWorkspace || rowWorkDir === clientWorkDir;
   ```
-* `populateConfigForm()` re-runs `applyHistoryFilterVisibility()` when
+
+- `populateConfigForm()` re-runs `applyHistoryFilterVisibility()` when
   `configWorkDir` actually changes so an in-place reconfiguration of
   the client work_dir immediately re-filters the already-rendered
   history list.
@@ -61,11 +62,11 @@ work_dir, ...})` (task_runner.py:842).
 
 Updated structural test:
 
-* Asserts the `Workspace` checkbox (`hf-workspace`) is rendered between
+- Asserts the `Workspace` checkbox (`hf-workspace`) is rendered between
   the search box and the history list AND sits immediately before the
   Favorites checkbox.
-* Asserts `Workspace` is `checked` by default.
-* Asserts the JS listener-binding array references `hf-workspace`.
+- Asserts `Workspace` is `checked` by default.
+- Asserts the JS listener-binding array references `hf-workspace`.
 
 ### 5. `src/kiss/agents/vscode/test/historyWorkspaceFilter.test.js`
 
@@ -74,22 +75,20 @@ production `media/main.js` and `media/chat.html` and verifies:
 
 1. Workspace checkbox markup, default `checked` state, ordering before
    Favorites.
-2. With Workspace ON and `configWorkDir=/repo/alpha`, only the two
+1. With Workspace ON and `configWorkDir=/repo/alpha`, only the two
    `/repo/alpha` rows are visible (the `/repo/beta` and legacy
    empty-work_dir rows are hidden).
-3. Unchecking Workspace reveals every row.
-4. Reconfiguring `configWorkDir` to `/repo/beta` re-filters the
+1. Unchecking Workspace reveals every row.
+1. Reconfiguring `configWorkDir` to `/repo/beta` re-filters the
    already-rendered list in place.
-5. An empty client `work_dir` matches only legacy rows whose persisted
+1. An empty client `work_dir` matches only legacy rows whose persisted
    `work_dir` is empty.
 
 Wired into the `npm test` script next to the other jsdom E2E tests.
 
 ## Verification
 
-* `node test/historyWorkspaceFilter.test.js` → `5 passed, 0 failed`.
-* `uv run pytest -v -k "history or workspace or favorite"
-  src/kiss/tests/agents/vscode/` → `38 passed`.
-* `uv run pytest -q -k "server or vscode"
-  src/kiss/tests/agents/vscode/` → `1050 passed`.
-* `uv run check --full` → `All checks passed!`
+- `node test/historyWorkspaceFilter.test.js` → `5 passed, 0 failed`.
+- `uv run pytest -v -k "history or workspace or favorite" src/kiss/tests/agents/vscode/` → `38 passed`.
+- `uv run pytest -q -k "server or vscode" src/kiss/tests/agents/vscode/` → `1050 passed`.
+- `uv run check --full` → `All checks passed!`
