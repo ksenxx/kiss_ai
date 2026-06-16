@@ -86,7 +86,7 @@ Write simple, clean, readable code with minimal indirection. These rules exist b
 
 Read relevant source files when the task depends on existing architecture. If referenced files, commands, or config don't exist, stop and ask the user rather than guessing.
 
-**When fixing bugs, issues, or race conditions: write an integration test that reproduces the problem first, then fix the code, then verify the test passes.**
+**When fixing bugs, issues, or race conditions: write an end-to-end test that reproduces the problem first, then fix the code, then verify the test passes.**
 
 ## Deep Work
 
@@ -121,7 +121,7 @@ Interact with desktop applications using screenshots, keyboard, and mouse. Do no
 
 - Run lint and typecheckers; fix all errors including pre-existing ones.
 - Aim for 100% branch coverage on new and modified code.
-- Write integration and end-to-end tests only. Do not use mocks, patches, fakes, or test doubles. Each test must be independent and verify actual behavior.
+- Write end-to-end tests only. Do not use mocks, patches, fakes, or test doubles. Each test must be independent and verify actual behavior.
 - **DO NOT** write structural tests which assert on the source code.
 - After modifications, run only the impacted tests.
 - To confirm race conditions: add a random sleep (\<0.1s) before the suspected racing statements.
