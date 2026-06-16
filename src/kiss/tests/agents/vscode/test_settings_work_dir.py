@@ -115,6 +115,9 @@ const posted = [];
 const vscode = {{postMessage: m => posted.push(m)}};
 let demoMode = false;
 let configFormPopulated = false;
+// Module-scope declaration (main.js line 165) that the extracted
+// populateConfigForm/getCurrentWorkDir bodies assign to and read.
+let configWorkDir = '';
 {populate}
 {collect}
 {save}

@@ -11,6 +11,7 @@ is never modified.  After the task the user chooses **merge** or
 
 from __future__ import annotations
 
+import argparse
 import logging
 import sys
 import time
@@ -36,7 +37,6 @@ from kiss.agents.sorcar.git_worktree import (
     repo_lock,
 )
 from kiss.agents.sorcar.persistence import _allocate_chat_id
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 
 # ``_generate_commit_message`` is re-exported (and looked up from this
 # module's globals at call time) so tests can monkeypatch
@@ -122,6 +122,13 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         self._wt: GitWorktree | None = None
         self._stash_pop_warning: str | None = None
         self._merge_conflict_warning: str | None = None
+        # When False, ``_auto_commit_worktree`` is a no-op so the
+        # worktree's uncommitted changes are preserved for manual
+        # review (and ``_finalize_worktree`` returns False, keeping
+        # the worktree directory in place).  Mirrors the sorcar CLI
+        # ``--auto-commit`` / ``--no-auto-commit`` flag, which
+        # defaults to True.
+        self.auto_commit_enabled: bool = True
         # Frontend tab id, stamped by
         # :meth:`_TaskRunnerMixin._run_task_inner` immediately after
         # constructing the agent.  Consumed by
@@ -179,6 +186,8 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             True if a commit was created, False if nothing to commit.
         """
         if self._wt is None or not self._wt.wt_dir.exists():
+            return False
+        if not self.auto_commit_enabled:
             return False
         return auto_commit_changes(
             self._wt.wt_dir,
@@ -624,77 +633,6 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             self._merge_conflict_warning = None
 
 
-    def _register_running_state(self) -> bool:
-        """Publish ``self`` in :attr:`_RunningAgentState.running_agent_states` for this chat.
-
-        Skips registration when an entry whose ``chat_id`` matches
-        ``self._chat_id`` is already present: the VS Code server
-        pre-populates a ``_RunningAgentState`` keyed by the frontend
-        tab id ahead of run-start, with ``chat_id`` set on the state;
-        re-registering here would clobber the server's task-lifecycle
-        flags.  In standalone / CLI runs no such pre-population
-        happens, and the entry is added here keyed by ``self._chat_id``
-        (the only routing key available — there is no separate tab).
-        Sub-agents launched by
-        :meth:`ChatSorcarAgent._run_tasks_parallel` are plain
-        :class:`ChatSorcarAgent` instances and never call this method;
-        they register themselves in the printer's ``_persist_agents``
-        map keyed by their own ``task_id`` (the string form of
-        ``task_history.id``) from inside
-        :meth:`ChatSorcarAgent.run`.
-
-        Returns:
-            ``True`` when a fresh entry was added (and the caller must
-            remove it in its own ``finally``); ``False`` when an entry
-            was already present (the existing owner is responsible
-            for cleanup).
-        """
-        # Acquire the shared ``_registry_lock`` for the whole
-        # scan-then-modify so a concurrent sub-agent thread cannot
-        # resize ``running_agent_states`` while we iterate, and so
-        # the insertion is atomic w.r.t. the VS Code server's
-        # iteration loops (which hold the very same lock under the
-        # ``_state_lock`` alias).
-        with _RunningAgentState._registry_lock:
-            for state in _RunningAgentState.running_agent_states.values():
-                if state.chat_id == self._chat_id:
-                    return False
-            state = _RunningAgentState(
-                self._chat_id,
-                getattr(self, "model_name", "") or "",
-                agent=self,
-            )
-            # Tag the state with the canonical chat id so subsequent
-            # lookups (e.g. multi-viewer subscribe,
-            # ``_unregister_running_state``) can route by chat id
-            # without depending on the dict key.
-            state.chat_id = self._chat_id
-            state.is_task_active = True
-            _RunningAgentState.register(self._chat_id, state)
-            return True
-
-    def _unregister_running_state(self) -> None:
-        """Remove ``self``'s entry from :attr:`_RunningAgentState.running_agent_states`.
-
-        Only removes the entry we ourselves added.  A different code
-        path (e.g. the VS Code server) may have replaced it mid-run;
-        in that case the new owner is responsible for its own cleanup.
-        """
-        # Scan-then-pop must be atomic w.r.t. concurrent producers
-        # (parallel sub-agents in :meth:`ChatSorcarAgent._run_tasks_parallel`,
-        # the VS Code server's tab lifecycle handlers) so the dict is
-        # never resized between the lookup and the pop.
-        with _RunningAgentState._registry_lock:
-            target_key: str | None = None
-            for key, state in _RunningAgentState.running_agent_states.items():
-                if state.agent is self and state.chat_id == self._chat_id:
-                    target_key = key
-                    break
-            if target_key is not None:
-                current = _RunningAgentState.running_agent_states[target_key]
-                current.is_task_active = False
-                _RunningAgentState.running_agent_states.pop(target_key, None)
-
     def run(  # type: ignore[override]
         self,
         prompt_template: str = "",
@@ -960,11 +898,56 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         return GitWorktreeOps.cleanup_orphans(Path(repo_root))
 
 
-def main() -> None:  # pragma: no cover – CLI entry point requires API
-    """Run SorcarAgent, ChatSorcarAgent, or WorktreeSorcarAgent from the CLI.
+def _resolve_cli_modes(args: argparse.Namespace) -> None:
+    """Apply legacy ``--use-chat`` / ``--use-worktree`` aliases.
 
-    Uses ``--use-chat`` or ``--use-worktree`` to select the agent
-    type.  Defaults to base SorcarAgent when neither flag is given.
+    The CLI now exposes ``--worktree`` / ``--no-worktree`` as the
+    primary toggle (defaulting to True).  The older ``--use-chat`` and
+    ``--use-worktree`` flags are kept for backward compatibility and
+    here override ``args.worktree`` when the user passes them
+    explicitly.
+
+    Args:
+        args: The parsed argparse namespace; mutated in place so that
+            ``args.worktree`` reflects the effective mode.
+    """
+    if getattr(args, "use_chat", False):
+        args.worktree = False
+    if getattr(args, "use_worktree", False):
+        args.worktree = True
+
+
+def _build_cli_agent(args: argparse.Namespace) -> SorcarAgent:
+    """Construct the agent the sorcar CLI should run.
+
+    With worktree mode on (the default) returns a
+    :class:`WorktreeSorcarAgent`, whose ``auto_commit_enabled`` flag is
+    set from ``args.auto_commit`` (also defaulting to True).  Otherwise
+    returns a plain :class:`ChatSorcarAgent` for direct (no-worktree)
+    chat mode.
+
+    Args:
+        args: The parsed argparse namespace, already passed through
+            :func:`_resolve_cli_modes`.
+
+    Returns:
+        The agent instance to run.
+    """
+    if args.worktree:
+        wt_agent = WorktreeSorcarAgent("Worktree Sorcar Agent")
+        wt_agent.auto_commit_enabled = bool(args.auto_commit)
+        return wt_agent
+    return ChatSorcarAgent("Stateful Sorcar Agent")
+
+
+def main() -> None:  # pragma: no cover – CLI entry point requires API
+    """Run a ChatSorcarAgent or WorktreeSorcarAgent from the CLI.
+
+    Defaults: worktree mode ON, parallel sub-agents ON, auto-commit
+    ON.  Use ``--no-worktree`` (or the legacy ``--use-chat`` alias)
+    to run in chat mode (no git isolation), ``--no-parallel`` to
+    disable parallel sub-agents, and ``--no-auto-commit`` to skip
+    the automatic worktree commit at task end.
 
     ``sorcar mcp ...`` is dispatched to the MCP management subcommand
     (:mod:`kiss.agents.sorcar.mcp_cli`) before normal argument parsing.
@@ -992,19 +975,12 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
         sys.exit(0)
 
     # Claude-Code parity: with no -t/--task and no -f/--file the user
-    # wants an interactive session.  Turn on chat mode (unless worktree
-    # isolation was explicitly requested) and drive a REPL that waits
-    # for the next instruction after each task finishes.
+    # wants an interactive session.  Worktree mode is the default for
+    # both interactive and one-shot runs (see ``_resolve_cli_modes``);
+    # ``interactive`` is still tracked so we know to drive the REPL.
     interactive = args.task is None and args.file is None
-    if interactive and not args.use_worktree:
-        args.use_chat = True
-
-    if args.use_worktree:
-        agent: SorcarAgent = WorktreeSorcarAgent("Worktree Sorcar Agent")
-    elif args.use_chat:
-        agent = ChatSorcarAgent("Stateful Sorcar Agent")
-    else:
-        agent = SorcarAgent("Sorcar Agent")
+    _resolve_cli_modes(args)
+    agent: SorcarAgent = _build_cli_agent(args)
 
     run_kwargs = _build_run_kwargs(args)
     # In interactive mode the prompt is read from the REPL, so do not

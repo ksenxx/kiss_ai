@@ -500,6 +500,14 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     _token: vscode.CancellationToken,
   ): void {
     this._view = webviewView;
+    // A fresh webview is being (re)resolved — clear the disposed flag so
+    // _sendToWebview resumes forwarding daemon events.  Closing the tab
+    // fires the per-webview onDidDispose below (which sets _disposed),
+    // and without resetting it here a re-opened tab would silently drop
+    // every daemon->webview message (status, task_events, …): it would
+    // never learn the task is still running, leave isRunning=false, and
+    // ignore the user's next message (sent as a dropped ``submit``).
+    this._disposed = false;
 
     webviewView.webview.options = {
       enableScripts: true,
@@ -526,7 +534,28 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     });
 
     webviewView.onDidDispose(() => {
-      this._disposed = true;
+      // The webview was torn down (tab closed).  Mark disposed and drop
+      // the stale view reference so _sendToWebview no-ops until the tab
+      // is re-opened (which re-resolves the view and clears _disposed).
+      // The daemon connection (AgentClient) is intentionally kept alive
+      // so the running task survives the close/reopen cycle.
+      //
+      // CRITICAL: only mutate _disposed / _view when the webview being
+      // disposed is still the ACTIVE one.  VS Code does not guarantee
+      // dispose-before-resolve ordering: when a sidebar view is
+      // re-shown, the fresh webview is commonly resolved FIRST
+      // (resolveWebviewView clears _disposed and repoints _view) and
+      // only THEN does the stale OLD webview's onDidDispose fire.  An
+      // unconditional ``_disposed = true`` here would clobber that flag
+      // back to true and silence the newly-resolved webview — the
+      // reopened tab would again drop every daemon->webview message
+      // (status, task_events, …), keep isRunning=false, and ignore the
+      // user's next message (sent as a dropped ``submit``).  Guarding on
+      // identity makes a stale webview's late dispose a no-op.
+      if (this._view === webviewView) {
+        this._view = undefined;
+        this._disposed = true;
+      }
       this._resolveAllWorktreeActions();
     });
 
@@ -884,7 +913,26 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       case 'submit': {
         const tabId = message.tabId;
         if (tabId) this._activeTabId = tabId;
-        if (tabId !== undefined && this._runningTabs.has(tabId)) return;
+        if (tabId !== undefined && this._runningTabs.has(tabId)) {
+          // This window already knows a task is live for this tab, yet
+          // the webview sent a ``submit`` (not an ``appendUserMessage``)
+          // — a transient desync that happens after a close/reopen when
+          // the re-opened webview has not yet re-learned the running
+          // state.  NEVER silently drop the user's text: forward it to
+          // the daemon as a follow-up user message so it is injected
+          // into the running agent, exactly like a tab that loaded the
+          // task.  The daemon's ``_cmd_append_user_message`` ignores it
+          // only when no live task actually exists.
+          const followUp = message.prompt.trim();
+          if (followUp) {
+            this._getClient().sendCommand({
+              type: 'appendUserMessage',
+              prompt: message.prompt,
+              tabId,
+            });
+          }
+          return;
+        }
 
         const tabWorkDir = message.workDir;
         const effectiveWorkDir = tabWorkDir || this._getWorkDir();
@@ -1145,6 +1193,14 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
       case 'runUpdate':
         this._runUpdate();
+        break;
+
+      case 'serverReset':
+        // Forward to the kiss-web daemon, which SIGTERMs itself so the
+        // supervising LaunchAgent/systemd unit respawns a fresh
+        // process.  The AgentClient transparently reconnects over the
+        // UDS once the new daemon is listening.
+        this._getClient().sendCommand({type: 'serverReset'});
         break;
 
       case 'closeTab': {

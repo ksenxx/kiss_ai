@@ -85,7 +85,8 @@ export type FromWebviewMessage =
       apiKeys: Record<string, string>;
     }
   | {type: 'sizeReport'; innerWidth: number; screenWidth: number}
-  | {type: 'runUpdate'};
+  | {type: 'runUpdate'}
+  | {type: 'serverReset'};
 
 /** Messages from extension to webview (matches browser event protocol) */
 export type ToWebviewMessage = ToWebviewMessageBody & {tabId?: string};
@@ -277,7 +278,8 @@ export interface AgentCommand {
     | 'getAdjacentTask'
     | 'setWorkDir'
     | 'getConfig'
-    | 'saveConfig';
+    | 'saveConfig'
+    | 'serverReset';
   prompt?: string;
   model?: string;
   workDir?: string;

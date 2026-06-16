@@ -19,9 +19,11 @@ import asyncio
 import inspect
 import json
 import os
+import pty
 import subprocess
 import sys
 import urllib.request
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -114,6 +116,52 @@ def mcp_permission_rules() -> object:
         CONFIG_PATH.unlink(missing_ok=True)
     else:
         CONFIG_PATH.write_text(original)
+
+
+@pytest.fixture
+def real_stdin(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> Iterator[None]:
+    """Give ``sys.stdin`` (and the MCP errlog) a real file descriptor.
+
+    The MCP stdio client transport spawns the server subprocess through
+    anyio's ``open_process``, passing ``stderr=errlog`` where ``errlog``
+    defaults to ``sys.stderr``; ``subprocess`` then calls
+    ``errlog.fileno()`` on it.  Under pytest the std streams are replaced
+    by in-memory capture objects (and ``sys.stdin`` by the
+    ``DontReadFromInput`` stub) whose ``.fileno()`` raises
+    ``io.UnsupportedOperation: fileno``, so the transport fails to start
+    and the server is reported unavailable.
+
+    This fixture opens a pseudo-terminal with :func:`pty.openpty` and
+    points ``sys.stdin`` at its slave end, giving stdin a real OS file
+    descriptor.  The server's stderr (the ``errlog``) is sent to a plain
+    file: a regular file always has a real ``fileno`` and, unlike a pipe
+    or pty, never blocks the child no matter how much it logs.
+
+    ``mcp.client.stdio.stdio_client`` binds ``errlog=sys.stderr`` as a
+    *default argument* at import time, so monkeypatching ``sys.stderr``
+    afterwards does not reach that already-captured object; the bound
+    default is therefore repointed at the same file.  ``sys.stdout`` is
+    left untouched so ``capsys`` still captures the command's output.
+    Everything is restored and every descriptor closed afterwards.
+    """
+    master_fd, slave_fd = pty.openpty()
+    stdin_stream = os.fdopen(slave_fd, "r", closefd=True)
+    errlog = (tmp_path / "mcp_errlog.txt").open("w", encoding="utf-8")
+    monkeypatch.setattr(sys, "stdin", stdin_stream)
+    monkeypatch.setattr(sys, "stderr", errlog)
+
+    from mcp.client.stdio import stdio_client
+
+    wrapped = stdio_client.__wrapped__  # type: ignore[attr-defined]
+    monkeypatch.setattr(wrapped, "__defaults__", (errlog,))
+    try:
+        yield
+    finally:
+        errlog.close()
+        stdin_stream.close()
+        os.close(master_fd)
 
 
 # ---------------------------------------------------------------------------
@@ -488,6 +536,7 @@ def test_cli_auth_stdio_is_noop(
 def test_cli_debug_live_server(
     isolated_homes: Path, tmp_path: Path,
     capsys: pytest.CaptureFixture[str], mcp_permission_rules,
+    real_stdin: None,
 ) -> None:
     """``debug`` connects for real and dumps tools with permissions."""
     mcp_permission_rules({"testsrv_secret*": "deny"})
@@ -589,7 +638,7 @@ def test_repl_help_mentions_mcp(isolated_homes: Path) -> None:
 
 
 def test_agent_get_tools_includes_mcp_tools(
-    isolated_homes: Path, tmp_path: Path,
+    isolated_homes: Path, tmp_path: Path, real_stdin: None,
 ) -> None:
     """``SorcarAgent._get_tools`` exposes MCP tools to the agent."""
     from kiss.agents.sorcar.sorcar_agent import SorcarAgent
