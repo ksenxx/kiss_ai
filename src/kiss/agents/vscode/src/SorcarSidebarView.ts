@@ -913,7 +913,26 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       case 'submit': {
         const tabId = message.tabId;
         if (tabId) this._activeTabId = tabId;
-        if (tabId !== undefined && this._runningTabs.has(tabId)) return;
+        if (tabId !== undefined && this._runningTabs.has(tabId)) {
+          // This window already knows a task is live for this tab, yet
+          // the webview sent a ``submit`` (not an ``appendUserMessage``)
+          // — a transient desync that happens after a close/reopen when
+          // the re-opened webview has not yet re-learned the running
+          // state.  NEVER silently drop the user's text: forward it to
+          // the daemon as a follow-up user message so it is injected
+          // into the running agent, exactly like a tab that loaded the
+          // task.  The daemon's ``_cmd_append_user_message`` ignores it
+          // only when no live task actually exists.
+          const followUp = message.prompt.trim();
+          if (followUp) {
+            this._getClient().sendCommand({
+              type: 'appendUserMessage',
+              prompt: message.prompt,
+              tabId,
+            });
+          }
+          return;
+        }
 
         const tabWorkDir = message.workDir;
         const effectiveWorkDir = tabWorkDir || this._getWorkDir();
