@@ -4777,10 +4777,19 @@
     const hfRunning = document.getElementById('hf-running');
     const hfErrors = document.getElementById('hf-errors');
     const hfCompleted = document.getElementById('hf-completed');
+    const hfWorkspace = document.getElementById('hf-workspace');
     const hfFavorite = document.getElementById('hf-favorite');
     const hfFrom = document.getElementById('hf-from');
     const hfTo = document.getElementById('hf-to');
-    [hfRunning, hfErrors, hfCompleted, hfFavorite, hfFrom, hfTo].forEach(el => {
+    [
+      hfRunning,
+      hfErrors,
+      hfCompleted,
+      hfWorkspace,
+      hfFavorite,
+      hfFrom,
+      hfTo,
+    ].forEach(el => {
       if (el) el.addEventListener('change', applyHistoryFilterVisibility);
     });
     // The calendar selector buttons sit next to each date textbox and
@@ -5290,6 +5299,11 @@
       // so ``applyHistoryFilterVisibility()`` can include/exclude the
       // row when the Favorite checkbox in the filter bar is toggled.
       div.dataset.favorite = s.is_favorite ? '1' : '0';
+      // ``data-work-dir`` mirrors the persisted ``extra.work_dir``
+      // so ``applyHistoryFilterVisibility()`` can hide rows whose
+      // ``work_dir`` differs from the client's currently-configured
+      // workspace when the Workspace filter checkbox is checked.
+      div.dataset.workDir = s.work_dir || '';
       const itemText = s.title || s.preview || 'Untitled';
       div.dataset.tooltip = s.preview || itemText;
       div.style.backgroundColor = chatIdBgColor(String(s.id));
@@ -5711,6 +5725,7 @@
     const hfRunning = document.getElementById('hf-running');
     const hfErrors = document.getElementById('hf-errors');
     const hfCompleted = document.getElementById('hf-completed');
+    const hfWorkspace = document.getElementById('hf-workspace');
     const hfFavorite = document.getElementById('hf-favorite');
     const hfFrom = document.getElementById('hf-from');
     const hfTo = document.getElementById('hf-to');
@@ -5719,6 +5734,15 @@
     const showErrors = hfErrors.checked;
     const showCompleted = hfCompleted.checked;
     const onlyFavorite = hfFavorite && hfFavorite.checked;
+    // Workspace filter — when checked, only show rows whose
+    // ``data-work-dir`` (mirroring ``extra.work_dir`` set at task
+    // completion) equals the client's currently-configured work
+    // directory.  An empty client work_dir or an empty row work_dir
+    // both pass the filter so the user sees rows that pre-date the
+    // ``extra.work_dir`` persistence change and rows running in the
+    // "no folder open" state.
+    const onlyWorkspace = hfWorkspace && hfWorkspace.checked;
+    const clientWorkDir = configWorkDir || '';
     // Date inputs are <input type=date> with value="YYYY-MM-DD".
     // Convert to local-midnight epoch seconds for inclusive bounds.
     let fromTs = -Infinity;
@@ -5742,7 +5766,9 @@
       else if (cat === 'completed') catOk = showCompleted;
       const dateOk = ts >= fromTs && ts <= toTs;
       const favOk = !onlyFavorite || row.dataset.favorite === '1';
-      if (catOk && dateOk && favOk) {
+      const rowWorkDir = row.dataset.workDir || '';
+      const wsOk = !onlyWorkspace || rowWorkDir === clientWorkDir;
+      if (catOk && dateOk && favOk && wsOk) {
         row.style.display = '';
         visible++;
       } else {
@@ -6078,7 +6104,19 @@
     // Remember the configured work directory so ``workDirForTab`` can
     // fall back to it when a tab has not yet learned its own
     // ``workDir`` from a background-task event.
+    const prevConfigWorkDir = configWorkDir;
     configWorkDir = cfg.work_dir || '';
+    // The history sidebar's Workspace filter compares each row's
+    // ``data-work-dir`` against ``configWorkDir`` — a change here
+    // must re-run the visibility pass so already-rendered rows
+    // immediately reflect the new client work_dir.
+    if (prevConfigWorkDir !== configWorkDir) {
+      try {
+        applyHistoryFilterVisibility();
+      } catch (_e) {
+        /* history list not yet rendered */
+      }
+    }
     const wdInp = el('cfg-work-dir');
     if (wdInp) {
       wdInp.value = cfg.work_dir || '';

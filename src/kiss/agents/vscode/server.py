@@ -643,6 +643,15 @@ class VSCodeServer(
                 "cost": 0.0,
                 "steps": 0,
                 "is_favorite": False,
+                # ``work_dir`` persisted on this task's row at
+                # completion time (see ``_TaskRunnerMixin`` →
+                # ``_save_task_extra``).  Surfaced so the history
+                # sidebar's Workspace filter checkbox can hide rows
+                # whose ``work_dir`` differs from the client's
+                # currently-configured workspace.  Empty string when
+                # the task pre-dates the persistence change or is
+                # still running.
+                "work_dir": "",
                 # Agent start / end timestamps in ms since epoch.
                 # ``startTs`` comes from the row's own ``timestamp``
                 # column (set on INSERT in ``_add_task``), ``endTs``
@@ -705,6 +714,9 @@ class VSCodeServer(
                     session["is_favorite"] = bool(
                         extra_obj.get("is_favorite", False)
                     )
+                    wd_raw = extra_obj.get("work_dir", "")
+                    if isinstance(wd_raw, str):
+                        session["work_dir"] = wd_raw
                     try:
                         start_ts_raw = extra_obj.get("startTs", 0)
                         if start_ts_raw:
