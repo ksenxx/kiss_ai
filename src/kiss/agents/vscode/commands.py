@@ -149,6 +149,9 @@ class _CommandsMixin:
         def _get_tab(self, tab_id: str) -> _RunningAgentState: ...
         def _run_task(self, cmd: dict[str, Any]) -> None: ...
         def _stop_task(self, tab_id: str = "") -> None: ...
+        def _find_source_tab_for_viewer(
+            self, viewer_tab_id: str,
+        ) -> str | None: ...
         def _get_models(self, conn_id: str = "") -> None: ...
         def _get_history(
             self,
@@ -547,11 +550,26 @@ class _CommandsMixin:
         pre-step hook can drain and inject the messages into the model
         conversation before the next model call.
 
-        The append is silently ignored when the tab has no live task —
-        attempting to queue a follow-up against an idle tab would be a
-        no-op (no pre-step hook to drain it).  We also echo the queued
-        prompt back to every viewer of the tab as a ``prompt`` event so
-        the user sees their queued message in the chat surface.
+        When the tab itself has no live task (the common case for a
+        VIEWER tab opened from the history sidebar while a task runs
+        in ANOTHER tab — the viewer is subscribed to the source tab's
+        event stream but the live agent runs in the source tab's
+        ``_RunningAgentState``) the prompt is routed to the source
+        tab's queue via the printer's per-task subscriber map.  This
+        is what makes a history-resumed viewer tab accept follow-up
+        input while the underlying task is still running: without it,
+        the typed text would be silently dropped (because the viewer
+        tab's own state has ``is_task_active=False``) and the user
+        would watch their message disappear from the input box with
+        no effect on the running agent.
+
+        The append is silently ignored only when neither the tab nor
+        any peer tab the viewer is subscribed to has a live task —
+        attempting to queue a follow-up against a truly idle tab
+        would be a no-op (no pre-step hook to drain it).  We also
+        echo the queued prompt back to every viewer of the tab as a
+        ``prompt`` event so the user sees their queued message in
+        the chat surface.
         """
         tab_id = cmd.get("tabId", "")
         prompt = cmd.get("prompt", "")
@@ -559,13 +577,40 @@ class _CommandsMixin:
             return
         with self._state_lock:
             tab = _RunningAgentState.running_agent_states.get(tab_id)
-            if tab is None or not tab.is_task_active:
-                logger.debug(
-                    "appendUserMessage dropped: tab %s has no live task",
-                    tab_id,
+            if tab is not None and tab.is_task_active:
+                tab.pending_user_messages.append(prompt)
+            else:
+                # Viewer-tab fallback: a tab opened from the history
+                # sidebar while a task runs in ANOTHER tab carries no
+                # live ``_RunningAgentState`` of its own — the live
+                # agent (and its ``pending_user_messages`` queue) lives
+                # on the source tab the viewer was subscribed to via
+                # ``_reattach_running_chat`` /
+                # ``_subscribe_chat_viewers``.  Resolve the source tab
+                # through the printer's per-task subscriber map and
+                # route the prompt there instead of dropping it.
+                source_tab_id = self._find_source_tab_for_viewer(tab_id)
+                if not source_tab_id:
+                    logger.debug(
+                        "appendUserMessage dropped: tab %s has no "
+                        "live task and is not a viewer of one",
+                        tab_id,
+                    )
+                    return
+                source = _RunningAgentState.running_agent_states.get(
+                    source_tab_id,
                 )
-                return
-            tab.pending_user_messages.append(prompt)
+                if source is None or not source.is_task_active:
+                    logger.debug(
+                        "appendUserMessage dropped: viewer tab %s "
+                        "source tab %s has no live task",
+                        tab_id, source_tab_id,
+                    )
+                    return
+                source.pending_user_messages.append(prompt)
+        # Echo on the originating tab id — that's the tab whose
+        # transcript the user is looking at, so the prompt panel must
+        # appear there even when the live agent is owned by a peer.
         self.printer.broadcast({
             "type": "prompt",
             "text": prompt,
