@@ -140,7 +140,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "claude-opus-4-5": _mi(200000, 5.00, 25.00),
     "claude-opus-4-5-20251101": _mi(200000, 5.00, 25.00),
     "claude-opus-4-6": _mi(200000, 5.00, 25.00),
-    "claude-opus-4-7": _mi(200000, 5.00, 25.00),
+    "claude-opus-4-7": _mi(500000, 5.00, 25.00),
     "claude-opus-4-8": _mi(200000, 5.00, 25.00),
     "claude-sonnet-4-5": _mi(200000, 3.00, 15.00),
     "claude-sonnet-4-5-20250929": _mi(200000, 3.00, 15.00),
