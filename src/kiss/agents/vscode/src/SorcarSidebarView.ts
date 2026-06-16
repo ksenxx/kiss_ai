@@ -500,6 +500,14 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     _token: vscode.CancellationToken,
   ): void {
     this._view = webviewView;
+    // A fresh webview is being (re)resolved — clear the disposed flag so
+    // _sendToWebview resumes forwarding daemon events.  Closing the tab
+    // fires the per-webview onDidDispose below (which sets _disposed),
+    // and without resetting it here a re-opened tab would silently drop
+    // every daemon->webview message (status, task_events, …): it would
+    // never learn the task is still running, leave isRunning=false, and
+    // ignore the user's next message (sent as a dropped ``submit``).
+    this._disposed = false;
 
     webviewView.webview.options = {
       enableScripts: true,
@@ -526,6 +534,14 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     });
 
     webviewView.onDidDispose(() => {
+      // The webview was torn down (tab closed).  Mark disposed and drop
+      // the stale view reference so _sendToWebview no-ops until the tab
+      // is re-opened (which re-resolves the view and clears _disposed).
+      // The daemon connection (AgentClient) is intentionally kept alive
+      // so the running task survives the close/reopen cycle.
+      if (this._view === webviewView) {
+        this._view = undefined;
+      }
       this._disposed = true;
       this._resolveAllWorktreeActions();
     });
