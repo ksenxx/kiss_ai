@@ -99,8 +99,6 @@ ______________________________________________________________________
   translation is not required. (1708, 1709, 1824)
 - The file picker in the input textbox of both the extension and webapp chat
   webviews MUST be relative to `work_dir`. (3163)
-- The input chatbox MUST NOT be disabled while a task runs; the user MUST be able
-  to queue any number of tasks while a task is running. (267, 268)
 
 ## Sub-agents & run_parallel
 
