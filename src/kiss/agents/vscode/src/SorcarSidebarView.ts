@@ -539,10 +539,23 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       // is re-opened (which re-resolves the view and clears _disposed).
       // The daemon connection (AgentClient) is intentionally kept alive
       // so the running task survives the close/reopen cycle.
+      //
+      // CRITICAL: only mutate _disposed / _view when the webview being
+      // disposed is still the ACTIVE one.  VS Code does not guarantee
+      // dispose-before-resolve ordering: when a sidebar view is
+      // re-shown, the fresh webview is commonly resolved FIRST
+      // (resolveWebviewView clears _disposed and repoints _view) and
+      // only THEN does the stale OLD webview's onDidDispose fire.  An
+      // unconditional ``_disposed = true`` here would clobber that flag
+      // back to true and silence the newly-resolved webview — the
+      // reopened tab would again drop every daemon->webview message
+      // (status, task_events, …), keep isRunning=false, and ignore the
+      // user's next message (sent as a dropped ``submit``).  Guarding on
+      // identity makes a stale webview's late dispose a no-op.
       if (this._view === webviewView) {
         this._view = undefined;
+        this._disposed = true;
       }
-      this._disposed = true;
       this._resolveAllWorktreeActions();
     });
 
