@@ -55,14 +55,6 @@ class ChatSorcarAgent(SorcarAgent):
 
     def __init__(self, name: str) -> None:
         super().__init__(name)
-        # These four attributes are initialized once at construction and
-        # must NOT be reset at the start of ``run()``.  The parallel
-        # executor (``_run_tasks_parallel``) constructs a fresh
-        # sub-agent and pre-sets ``_subagent_info`` (and ``_chat_id``
-        # via ``resume_chat_by_id``) BEFORE calling ``run()``; a
-        # per-run reset would clobber them and silently disable the
-        # ``new_tab`` broadcast that wires the sub-agent's event stream
-        # to a fresh frontend tab.
         self._chat_id: str = ""
         self._subagent_info: dict[str, object] | None = None
         self._last_task_id: int | None = None
