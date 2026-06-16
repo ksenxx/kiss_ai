@@ -213,12 +213,67 @@ class _TaskRunnerMixin:
                         else:
                             tab.agent = None
                             tab.use_worktree = False
+                # Snapshot the finished task's id so we can broadcast
+                # ``status running=False`` to every viewer tab that
+                # was subscribed to it (in addition to the launcher
+                # tab).  ``status`` events carry an explicit
+                # ``tabId`` and are routed verbatim by the printer
+                # — i.e. they do NOT pass through the per-task
+                # subscriber fan-out — so without an explicit per-
+                # subscriber broadcast the viewer tabs would never
+                # observe the running→idle transition, leaving their
+                # tab-title spinner pulsing forever and their input
+                # box stuck in "queue follow-up" mode after the task
+                # had ended.  Mirrors the start-time per-viewer
+                # broadcast in :meth:`_subscribe_chat_viewers`.
+                task_id_for_end = (
+                    tab.last_task_id if tab is not None else None
+                )
                 self.printer.broadcast(
                     {"type": "status", "running": False, "tabId": tab_id},
                 )
+            self._broadcast_status_end_to_viewers(task_id_for_end, tab_id)
             # If the user clicked closeTab while this task was still
             # running, dispose the now-idle _RunningAgentState.  No-op otherwise.
             self._dispose_if_closed(tab_id)
+
+    def _broadcast_status_end_to_viewers(
+        self, task_id: int | None, launcher_tab_id: str,
+    ) -> None:
+        """Broadcast ``status running=False`` to every viewer subscribed
+        to *task_id*, excluding the launcher tab.
+
+        ``status`` events carry an explicit ``tabId`` and are routed
+        verbatim by the printer's transport (no per-task subscriber
+        fan-out).  Without an explicit per-viewer broadcast, a tab
+        that joined the running task via ``_replay_session`` /
+        ``_reattach_running_chat`` (history-resume click) or via
+        ``_subscribe_chat_viewers`` (idle viewer of the chat) would
+        never receive a ``running=False`` event stamped with its own
+        tab id — its frontend would keep ``isRunning=true`` forever,
+        the pulsing tab-title indicator would not stop, and follow-up
+        user input would keep being routed as ``appendUserMessage``
+        against a now-finished task (and dropped).
+
+        Args:
+            task_id: The finished task's ``task_history`` row id.
+                ``None`` when the worker thread unwound before a task
+                id was allocated (very early failure path); in that
+                case there is nothing to fan out.
+            launcher_tab_id: The tab the task was launched in — its
+                ``running=False`` broadcast is emitted directly by
+                the caller, so skip it here to avoid duplication.
+        """
+        if task_id is None:
+            return
+        for viewer_tab_id in self.printer._fanout_targets(task_id):
+            if viewer_tab_id == launcher_tab_id:
+                continue
+            self.printer.broadcast({
+                "type": "status",
+                "running": False,
+                "tabId": viewer_tab_id,
+            })
 
     @staticmethod
     def _capture_pre_snapshot(
