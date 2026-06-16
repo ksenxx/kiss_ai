@@ -1025,6 +1025,51 @@ class VSCodeServer(
         if not result:
             result = _load_latest_chat_events_by_chat_id(chat_id)
         if not result:
+            # The persisted ``task_history`` row may not exist yet —
+            # ``ChatSorcarAgent.run`` writes it inside the worker
+            # thread, and a tab that STARTED a task and is immediately
+            # closed+reopened (or VS Code reload) can race the writer.
+            # Without a row there are no events to replay, but a live
+            # ``_RunningAgentState`` may still exist for this
+            # ``chat_id`` / ``tab_id`` — re-subscribe the re-opened
+            # webview to its stream and broadcast ``status running:true``
+            # so the webview learns the task is running.  Otherwise the
+            # re-opened tab would silently keep ``isRunning=false``,
+            # the user's next message would be sent as a ``submit``
+            # (→ ``run``) that the daemon would have to inject (the
+            # tab is busy) — and after the task finishes the tab would
+            # appear idle, but any input would NEVER reach the
+            # appendUserMessage path because the webview never learned
+            # the task was running in the first place.  Worst case is
+            # silent: the user types and nothing happens.
+            cleanup_tab = getattr(self.printer, "cleanup_tab", None)
+            if cleanup_tab is not None:
+                cleanup_tab(tab_id)
+            rebound_running = self._reattach_running_chat(
+                chat_id,
+                tab_id,
+                task_id=task_id,
+                is_subagent=False,
+            )
+            if rebound_running:
+                start_ts = self._live_task_start_ms(task_id, chat_id)
+                self.printer.broadcast({
+                    "type": "status",
+                    "running": True,
+                    "tabId": tab_id,
+                    "startTs": start_ts,
+                })
+                # Empty task_events so the webview's replay loop
+                # transitions out of its "loading" state cleanly.
+                self.printer.broadcast({
+                    "type": "task_events",
+                    "events": [],
+                    "task": "",
+                    "task_id": task_id,
+                    "chat_id": chat_id,
+                    "extra": "",
+                    "tabId": tab_id,
+                })
             return
         # NOTE: do NOT early-return on empty ``events``.  When a
         # sub-agent has just been spawned by ``run_parallel`` and
