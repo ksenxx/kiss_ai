@@ -49,14 +49,32 @@ class TestHistoryFilterPanel(unittest.TestCase):
         assert m is not None
         bar = m.group("bar")
         self.assertIn('class="history-filter-bar"', bar)
-        for cid in ("hf-running", "hf-errors", "hf-completed"):
+        for cid in (
+            "hf-running",
+            "hf-errors",
+            "hf-completed",
+            "hf-workspace",
+        ):
             self.assertIn(f'id="{cid}"', bar)
             self.assertIn("checked", bar.split(f'id="{cid}"', 1)[1][:40])
         self.assertIn('id="hf-favorite"', bar)
+        # Workspace checkbox sits immediately before Favorites in
+        # the filter bar — its <input> must appear earlier than the
+        # Favorites <input>.
+        self.assertLess(
+            bar.index('id="hf-workspace"'),
+            bar.index('id="hf-favorite"'),
+        )
         for did in ("hf-from", "hf-to"):
             self.assertIn(f'id="{did}"', bar)
             self.assertIn('type="date"', bar)
-        for label in ("Running", "Errored", "Succeeded", "Favorites"):
+        for label in (
+            "Running",
+            "Errored",
+            "Succeeded",
+            "Workspace",
+            "Favorites",
+        ):
             self.assertIn(label, bar)
 
     def test_css_styles_filter_bar(self) -> None:
@@ -88,6 +106,7 @@ class TestHistoryFilterPanel(unittest.TestCase):
             "hf-running",
             "hf-errors",
             "hf-completed",
+            "hf-workspace",
             "hf-favorite",
             "hf-from",
             "hf-to",
