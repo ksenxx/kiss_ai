@@ -14,7 +14,7 @@ Frontend (`media/main.js`) flow on history-row click:
 
 1. `createNewTab()` allocates a fresh `tab_id_new`, posts
    `{type: 'newChat', tabId: tab_id_new}`.
-2. Posts `{type: 'resumeSession', id: chat_id, taskId, tabId: tab_id_new}`.
+1. Posts `{type: 'resumeSession', id: chat_id, taskId, tabId: tab_id_new}`.
 
 Backend (`server.py::_replay_session`) on `resumeSession`:
 
@@ -23,8 +23,8 @@ Backend (`server.py::_replay_session`) on `resumeSession`:
    whose `_live_task_id == task_id` (or `chat_id` matches), then
    `printer.subscribe_tab(source_task_id, tab_id_new)` to add tab B as
    a viewer of source tab's task event stream.
-2. Broadcasts `{type: 'status', running: True, tabId: tab_id_new, startTs}`.
-3. Broadcasts `task_events` replay.
+1. Broadcasts `{type: 'status', running: True, tabId: tab_id_new, startTs}`.
+1. Broadcasts `task_events` replay.
 
 Tab B's `_RunningAgentState[tab_id_new]` was created by `_new_chat`
 with `is_task_active=False` — the live agent runs in `tab_id_a`'s
@@ -95,10 +95,10 @@ Three tests:
    running, send `appendUserMessage` from tab-viewer, assert the
    prompt lands in `launcher_state.pending_user_messages` (and the
    prompt echo carries `tabId == tab_viewer`).
-2. `test_viewer_tab_receives_running_false_when_task_ends` — start
+1. `test_viewer_tab_receives_running_false_when_task_ends` — start
    the task, open the viewer, release the task, assert the viewer
    receives a `status running=False` stamped with the VIEWER's tabId.
-3. `test_new_run_from_viewer_tab_after_task_ends` — start, open
+1. `test_new_run_from_viewer_tab_after_task_ends` — start, open
    viewer, release, end first task, send a fresh `run` from
    tab-viewer, assert the new task reaches the agent.
 
