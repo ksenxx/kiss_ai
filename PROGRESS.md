@@ -1,88 +1,95 @@
-# PROGRESS — settings-panel "Git Commit" failed with "Not a git repository" after worktree task
+# PROGRESS — History panel "Workspace" filter checkbox
 
 ## Task
 
-User report:
+Add a new "Workspace" checkbox at the top of the task history panel,
+positioned BEFORE the "Favorites" checkbox, checked by default. When
+checked, only show tasks whose `work_dir` matches the client's
+configured `work_dir`. Write an end-to-end test for the feature.
 
-> in the last task when I pressed "git commit" it says
-> "Not a git repository."
+## Changes
 
-The previous task ran in worktree mode and the worktree directory
-under `<repo>/.kiss-worktrees/kiss_wt-*` was removed on cleanup.
-When the user then clicked the settings-panel **Git Commit** button,
-the autocommit flow rejected with "Not a git repository." even
-though the main working tree IS a git repo with uncommitted
-changes.
+### 1. `src/kiss/agents/vscode/media/chat.html`
 
-## Investigation
+Added the `Workspace` checkbox in the history filter bar, immediately
+before the `Favorites` checkbox. `checked` by default.
 
-1. Frontend (`media/main.js`) wires the **Git Commit** button to
-   post `autocommitAction` with
-   `workDir: workDirForTab(activeTabId)`.
-1. `workDirForTab` returns `tab.workDir` — set from each task event's
-   `extra.work_dir`. For a worktree task `extra.work_dir` points at
-   `<repo>/.kiss-worktrees/kiss_wt-<…>/<offset>`.
-1. After the worktree task ends (merge or discard),
-   `git worktree remove` deletes that directory, but **the tab's
-   `workDir` is never reset to the parent repo**.
-1. Server-side `_MergeFlowMixin._handle_autocommit_action`
-   (`merge_flow.py`) ran
-   `GitWorktreeOps.discover_repo(Path(work_dir))` → `git -C <stale>`
-   which fails because the directory no longer exists; the handler
-   then broadcasts `autocommit_done` with `"Not a git repository."`.
-
-`useful_tools.py` already has `_stale_worktree_fallback(resolved)`
-that strips a `.kiss-worktrees/kiss_wt-*` segment from a path. The
-read-path in `useful_tools.py` uses it to recover from stale
-worktree paths after cleanup. The autocommit flow did not.
-
-## Fix
-
-`src/kiss/agents/vscode/merge_flow.py` —
-`_handle_autocommit_action`:
-
-- Before `discover_repo`, if `Path(work_dir)` does not exist, try
-  `_stale_worktree_fallback`. When it returns a non-None equivalent
-  path inside the parent repo, rewrite `work_dir` (and `work_path`)
-  so all subsequent `_git(work_dir, …)` calls — `add -A`,
-  `diff --cached`, `commit` via `repo_lock` — operate on the main
-  working tree.
-
-```python
-work_path = Path(work_dir)
-if not work_path.exists():
-    fallback = _stale_worktree_fallback(work_path)
-    if fallback is not None:
-        work_dir = str(fallback)
-        work_path = fallback
-repo = GitWorktreeOps.discover_repo(work_path)
+```html
+<label class="history-filter-chk" title="...">
+  <input type="checkbox" id="hf-workspace" checked>Workspace
+</label>
+<label class="history-filter-chk" title="...">
+  <input type="checkbox" id="hf-favorite">Favorites
+</label>
 ```
 
-Also added the import:
+### 2. `src/kiss/agents/vscode/server.py`
+
+`_get_history()` now propagates the persisted `extra.work_dir` to the
+session payload so the client can apply the Workspace filter without
+re-querying:
 
 ```python
-from kiss.agents.sorcar.useful_tools import _stale_worktree_fallback
+"work_dir": "",  # default
+...
+wd_raw = extra_obj.get("work_dir", "")
+if isinstance(wd_raw, str):
+    session["work_dir"] = wd_raw
 ```
 
-## Test
+`work_dir` is already persisted on every completed task by
+`_TaskRunnerMixin._run_task_inner` via `_save_task_extra({"work_dir":
+work_dir, ...})` (task_runner.py:842).
 
-New integration test
-`src/kiss/tests/agents/vscode/test_git_commit_after_worktree_cleanup.py`
-reproduces the bug and verifies the fix:
+### 3. `src/kiss/agents/vscode/media/main.js`
 
-1. Init a real git repo with a seed commit.
-1. Dirty `edited.txt` in the main working tree.
-1. Call
-   `server._handle_autocommit_action("commit", tab_id="t-stale", work_dir=<repo>/.kiss-worktrees/kiss_wt-…)`
-   where the worktree path does NOT exist on disk.
-1. Assert (a) no "Not a git repository" message, (b) `autocommit_done`
-   reports `success=True, committed=True`, (c) HEAD advanced, and
-   (d) `git status --porcelain` is clean afterward.
+* `renderHistory()` stamps each row with `div.dataset.workDir = s.work_dir
+  || ''` so the filter helper can use plain DOM lookups.
+* The filter-bar listener wiring now includes `hf-workspace`.
+* `applyHistoryFilterVisibility()` reads `hfWorkspace` + `configWorkDir`
+  and applies a strict-equality filter:
+
+  ```js
+  const wsOk = !onlyWorkspace || rowWorkDir === clientWorkDir;
+  ```
+* `populateConfigForm()` re-runs `applyHistoryFilterVisibility()` when
+  `configWorkDir` actually changes so an in-place reconfiguration of
+  the client work_dir immediately re-filters the already-rendered
+  history list.
+
+### 4. `src/kiss/tests/agents/vscode/test_history_filter_panel.py`
+
+Updated structural test:
+
+* Asserts the `Workspace` checkbox (`hf-workspace`) is rendered between
+  the search box and the history list AND sits immediately before the
+  Favorites checkbox.
+* Asserts `Workspace` is `checked` by default.
+* Asserts the JS listener-binding array references `hf-workspace`.
+
+### 5. `src/kiss/agents/vscode/test/historyWorkspaceFilter.test.js`
+
+New jsdom end-to-end test (`5 passed, 0 failed`). It drives the
+production `media/main.js` and `media/chat.html` and verifies:
+
+1. Workspace checkbox markup, default `checked` state, ordering before
+   Favorites.
+2. With Workspace ON and `configWorkDir=/repo/alpha`, only the two
+   `/repo/alpha` rows are visible (the `/repo/beta` and legacy
+   empty-work_dir rows are hidden).
+3. Unchecking Workspace reveals every row.
+4. Reconfiguring `configWorkDir` to `/repo/beta` re-filters the
+   already-rendered list in place.
+5. An empty client `work_dir` matches only legacy rows whose persisted
+   `work_dir` is empty.
+
+Wired into the `npm test` script next to the other jsdom E2E tests.
 
 ## Verification
 
-- `uv run pytest src/kiss/tests/agents/vscode/test_git_commit_after_worktree_cleanup.py … test_merge_autocommit_lifecycle.py -v` →
-  55 passed (1 new + 54 pre-existing related tests).
-- `uv run check --full` → ✅ All checks passed (install, generate
-  API docs, compileall, ruff, mypy, pyright, npm vscode check,
-  mdformat).
+* `node test/historyWorkspaceFilter.test.js` → `5 passed, 0 failed`.
+* `uv run pytest -v -k "history or workspace or favorite"
+  src/kiss/tests/agents/vscode/` → `38 passed`.
+* `uv run pytest -q -k "server or vscode"
+  src/kiss/tests/agents/vscode/` → `1050 passed`.
+* `uv run check --full` → `All checks passed!`
