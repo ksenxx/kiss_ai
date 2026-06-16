@@ -252,11 +252,21 @@ class TestConcurrentTabs(unittest.TestCase):
 
         assert done[0] and done[1], f"Both tasks should have run: {done}"
 
-    def test_duplicate_run_on_same_tab_dropped_silently(self) -> None:
-        """A second run on the same tab is silently dropped while first is running.
+    def test_duplicate_run_on_same_tab_injects_instead_of_dropping(
+        self,
+    ) -> None:
+        """A second run on the same tab while the first is still running
+        must NOT start a second task — but it must NOT silently discard
+        the user's text either.  The prompt is injected into the running
+        agent's ``pending_user_messages`` (and echoed back as a ``prompt``
+        event), exactly like an ``appendUserMessage``.
 
-        The user-visible behaviour is that nothing happens: no error
-        broadcast, no new task thread, no status flap.
+        This is the fix for "input ignored during the task" after a
+        close+reopen: a re-opened webview can momentarily still believe
+        the task is idle and send the typed text as a ``submit`` (→
+        ``run``); the daemon — the source of truth for whether a task is
+        live — injects it rather than dropping it.  There must still be
+        no error broadcast and no second task thread.
         """
         started = threading.Event()
         release = threading.Event()
@@ -264,6 +274,12 @@ class TestConcurrentTabs(unittest.TestCase):
 
         def slow_run(cmd: dict) -> None:
             call_count[0] += 1
+            # The real ``_run_task_inner`` (stubbed here) flips
+            # ``is_task_active`` True while the agent runs; mirror that so
+            # the injection guard behaves as in production.
+            self.server._running_agent_states[
+                cmd.get("tabId", "")
+            ].is_task_active = True
             started.set()
             release.wait(timeout=5)
 
@@ -279,10 +295,22 @@ class TestConcurrentTabs(unittest.TestCase):
             "type": "run", "prompt": "task2", "model": "m", "tabId": "1",
         })
 
-        # No error broadcast, no status broadcast, no new run.
+        # No error broadcast and no new task thread started.
         new_events = self.events[events_before:]
         assert all(e.get("type") != "error" for e in new_events)
         assert call_count[0] == 1
+        # The second run's prompt is injected into the live agent rather
+        # than dropped, and echoed back so the user sees it in chat.
+        tab = self.server._running_agent_states["1"]
+        assert tab.pending_user_messages == ["task2"]
+        echoes = [
+            e
+            for e in new_events
+            if e.get("type") == "prompt"
+            and e.get("tabId") == "1"
+            and e.get("text") == "task2"
+        ]
+        assert len(echoes) == 1
 
         release.set()
         time.sleep(0.5)
