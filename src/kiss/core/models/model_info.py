@@ -364,11 +364,10 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/deepseek/deepseek-r1": _mi(163840, 0.70, 2.50),
     "openrouter/deepseek/deepseek-r1-0528": _mi(163840, 0.50, 2.15),
     "openrouter/deepseek/deepseek-r1-distill-llama-70b": _mi(128000, 0.80, 0.80),
-    "openrouter/deepseek/deepseek-r1-distill-qwen-32b": _mi(128000, 0.29, 0.29),
     "openrouter/deepseek/deepseek-v3.1-terminus": _mi(163840, 0.27, 0.95, fc=False, gen=False),
     "openrouter/deepseek/deepseek-v3.2": _mi(131072, 0.229, 0.343),
     "openrouter/deepseek/deepseek-v3.2-exp": _mi(163840, 0.27, 0.41),
-    "openrouter/deepseek/deepseek-v4-flash": _mi(1048576, 0.10, 0.20),
+    "openrouter/deepseek/deepseek-v4-flash": _mi(1048576, 0.09, 0.18),
     "openrouter/deepseek/deepseek-v4-pro": _mi(1048576, 0.435, 0.87, fc=False),
     "openrouter/essentialai/rnj-1-instruct": _mi(32768, 0.15, 0.15, fc=False),
     "openrouter/google/gemini-2.5-flash": _mi(1048576, 0.30, 2.50),
@@ -453,7 +452,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/moonshotai/kimi-k2-thinking": _mi(262144, 0.60, 2.50, fc=False),
     "openrouter/moonshotai/kimi-k2.5": _mi(262144, 0.375, 2.025),
     "openrouter/moonshotai/kimi-k2.6": _mi(262144, 0.684, 3.41),
-    "openrouter/moonshotai/kimi-k2.7-code": _mi(262144, 0.75, 3.50),  # NEW
+    "openrouter/moonshotai/kimi-k2.7-code": _mi(262144, 0.74, 3.50),  # NEW
     "openrouter/morph/morph-v3-fast": _mi(81920, 0.80, 1.20, fc=False),
     "openrouter/morph/morph-v3-large": _mi(262144, 0.90, 1.90, fc=False),
     "openrouter/nousresearch/hermes-3-llama-3.1-405b": _mi(131072, 1.00, 1.00, fc=False),
@@ -591,7 +590,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/stepfun/step-3.7-flash": _mi(256000, 0.20, 1.15),  # NEW
     "openrouter/switchpoint/router": _mi(131072, 0.85, 3.40, fc=False),
     "openrouter/tencent/hunyuan-a13b-instruct": _mi(131072, 0.14, 0.57, fc=False),
-    "openrouter/tencent/hy3-preview": _mi(262144, 0.066, 0.21),  # NEW
+    "openrouter/tencent/hy3-preview": _mi(262144, 0.066, 0.26),  # NEW
     "openrouter/thedrummer/cydonia-24b-v4.1": _mi(131072, 0.30, 0.50, fc=False),
     "openrouter/thedrummer/rocinante-12b": _mi(32768, 0.17, 0.43),
     "openrouter/thedrummer/skyfall-36b-v2": _mi(32768, 0.55, 0.80, fc=False),
@@ -607,7 +606,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/xiaomi/mimo-v2.5": _mi(1048576, 0.14, 0.28),
     "openrouter/xiaomi/mimo-v2.5-pro": _mi(1048576, 0.435, 0.87),
     "openrouter/z-ai/glm-4.5": _mi(131072, 0.60, 2.20),
-    "openrouter/z-ai/glm-4.5-air": _mi(131072, 0.125, 0.85),
+    "openrouter/z-ai/glm-4.5-air": _mi(131072, 0.13, 0.85),
     "openrouter/z-ai/glm-4.5v": _mi(65536, 0.60, 1.80, fc=False),
     "openrouter/z-ai/glm-4.6": _mi(202752, 0.43, 1.74, fc=False),
     "openrouter/z-ai/glm-4.6v": _mi(131072, 0.30, 0.90),
@@ -616,6 +615,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/z-ai/glm-5": _mi(202752, 0.60, 1.92),
     "openrouter/z-ai/glm-5-turbo": _mi(262144, 1.20, 4.00),
     "openrouter/z-ai/glm-5.1": _mi(202752, 0.98, 3.08),
+    "openrouter/z-ai/glm-5.2": _mi(1048576, 1.40, 4.40),  # NEW
     "openrouter/~anthropic/claude-fable-latest": _mi(1000000, 10.00, 50.00),  # NEW
     "openrouter/~anthropic/claude-haiku-latest": _mi(200000, 1.00, 5.00),
     "openrouter/~anthropic/claude-opus-latest": _mi(1000000, 5.00, 25.00),
