@@ -191,7 +191,7 @@ class TestModelInfo:
 
 class TestCachePricing:
     def test_anthropic_model_has_cache_pricing(self):
-        info = MODEL_INFO["claude-sonnet-4"]
+        info = MODEL_INFO["claude-sonnet-4-5"]
         assert info.cache_read_price_per_1M == pytest.approx(0.30)
         assert info.cache_write_price_per_1M == pytest.approx(3.75)
         assert info.cache_write_1h_price_per_1M == pytest.approx(6.00)
