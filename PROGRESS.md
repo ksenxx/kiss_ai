@@ -1,86 +1,144 @@
-# Task
+# PROGRESS — Reopen running tab ignores user input (Task 3)
 
-The bug ("when a task runs in an extension tab, the tab is closed then reopened while running, user input is ignored during/after the task; a tab where a task started MUST behave exactly like a tab that loads the task") is NOT fixed by the previous attempt. Reproduce with an integration test, then fix.
+## Task
 
-## Previous attempt (commit 89617d34 "fix: ensure reopened task tabs receive daemon events")
+Bug NOT fixed after 2 prior attempts: a Sorcar extension tab that started a running task,
+when closed and reopened while running, ignores user input during/after the task.
+Must reproduce with an integration test, then fix.
 
-- In `src/kiss/agents/vscode/src/SorcarSidebarView.ts`:
-  - `resolveWebviewView()` now sets `this._disposed = false`.
-  - `onDidDispose()` clears `this._view = undefined` and sets `this._disposed = true`.
-- Added test `src/kiss/agents/vscode/test/bughunt_reopen_running_tab.test.js`.
+## Prior fixes (already in tree, on SorcarSidebarView.ts)
 
-## Why it's likely STILL broken (my hypothesis — NOT yet confirmed)
+1. `resolveWebviewView` sets `_disposed = false` on reopen.
+1. `onDidDispose` guards `_view === webviewView` before setting `_disposed=true` / clearing `_view`
+   (handles late dispose of stale webview).
+   Both prior reproduction tests STUB the daemon and only assert the EXTENSION forwards
+   `status`/`task_events` to the new webview. They pass. So the remaining bug is NOT pure
+   extension forwarding.
 
-The previous test is ARTIFICIAL: after reopen it has the daemon manually emit `status running:true`, which makes the test pass. But in the REAL flow, on reopen the webview reloads fresh, sends `ready` with `restoredTabs`, and the extension issues `resumeSession`. The real question: does the daemon RE-EMIT `status running:true` to the reopened tab on `resumeSession` for a still-running task? If NOT, the reopened webview's `isRunning` stays false, so the user's next message is sent as `submit` (not `appendUserMessage`), and the extension's `submit` handler DROPS it because the tab is still in `this._runningTabs` (see SorcarSidebarView `_handleMessage` 'submit' case: `if (tabId !== undefined && this._runningTabs.has(tabId)) return;`).
+## Key architecture facts learned
 
-So the bug likely lives in the daemon's `_replay_session` / resume path (server.py) not sending a running-status to a reopened/resumed live tab, OR in the webview restore logic in `media/main.js`.
+- Extension: `src/kiss/agents/vscode/src/SorcarSidebarView.ts` (compiled to out/SorcarSidebarView.js).
+- Webview JS: `media/main.js` (6377 lines).
+  - line ~79 `isRunning`; ~263 isActiveTabRunning; ~2551 `evTab.isRunning = !!ev.running` on status.
+  - line ~4935-4960: on send, if `isRunning` -> sends `appendUserMessage`, else `submit`.
+  - line ~4369 builds `restoredTabs` for `ready`; ~5475 resumeSession for sub-agents.
+- Extension `_handleMessage`:
+  - `submit` handler: `if (tabId in _runningTabs) return;` (DROPS submit while running).
+  - `appendUserMessage` is in FORWARDED_COMMANDS -> forwarded to daemon.
+  - `ready` with restoredTabs -> sends `resumeSession {chatId, tabId}` per tab.
+- Extension registered with `retainContextWhenHidden: true` (extension.ts:31).
+- Daemon: `server.py` `_replay_session` (line 995), `_reattach_running_chat` (1463),
+  `_cmd_resume_session`. These reattach a still-running chat and broadcast status+task_events.
 
-## Key code locations found
+## Hypothesis for remaining bug (NEEDS VERIFICATION)
 
-- Extension: `src/kiss/agents/vscode/src/SorcarSidebarView.ts`
-  - `_handleMessage` 'submit' case drops messages when `_runningTabs.has(tabId)`.
-  - 'ready' case issues `resumeSession` for each `restoredTabs` entry.
-  - `_runningTabs` populated on `status running:true` only when `_ownTabs.has(tabId)`.
-- Webview: `src/kiss/agents/vscode/media/main.js` (6377 lines)
-  - line ~79 `let isRunning = false`
-  - line ~2551 `evTab.isRunning = !!ev.running` (status handler)
-  - line ~3566 `isRunning = running`
-  - line ~4935-4957: decides `appendUserMessage` (if isRunning) vs `submit`
-  - line ~4369 builds `restoredTabs` for `ready`
-- Daemon: `src/kiss/agents/.../server.py` `_replay_session`, `_cmd_resume_session` (need to read). Search: `grep -rn "_replay_session\|_cmd_resume_session\|def _replay" src/kiss/agents/*/server.py`
+The prior tests stub the daemon, so they don't test the REAL daemon replay OR the webview JS
+state machine. Likely remaining bug is one of:
+(a) Daemon `_replay_session`/`_reattach_running_chat`: for a tab that STARTED the task and
+resumes its OWN running chat, it may NOT re-broadcast `status running:true` / re-subscribe,
+so reopened tab keeps isRunning=false -> next input sent as `submit` -> dropped by
+`_runningTabs`. OR after task finishes the desync persists.
+(b) Webview JS: after reopen + restore, the restored tab's `isRunning` and the global
+`isRunning` may desync, or `_runningTabs` in extension never cleared.
 
-## Next steps
+## NEXT STEPS (do in fresh context)
 
-1. Read the daemon server.py `_replay_session` / resume to see if running status is re-broadcast to a resumed live tab. Find file: likely `src/kiss/agents/sorcar/server.py` or similar (grep).
-1. Read media/main.js restore + submit/appendUserMessage logic (lines 4360-4400, 4920-4960, 2540-2600, 3540-3620).
-1. Write an integration test that drives the REAL flow: open tab, start task, daemon marks running, close (onDidDispose), reopen (resolveWebviewView + ready with restoredTabs), then the extension issues resumeSession — assert that WITHOUT artificial status injection the reopened webview learns isRunning and that a subsequent user message reaches the daemon (as appendUserMessage) rather than being dropped. The existing test cheats by manually sending status; the new test must NOT.
-1. Fix root cause (likely: daemon re-emit running status on resume of a live task, OR webview should treat restored tab with a live session as running). Verify a follow-up user message is forwarded to daemon, not dropped.
-1. Run `cd src/kiss/agents/vscode && npm run compile && npm run test`; then `uv run check --full`.
+1. Write a REAL integration test against the actual daemon (server.py) — NOT a stub — that:
+   starts a task, closes the tab (webview dispose, keep AgentClient), reopens (new webview +
+   ready+restoredTabs+resumeSession), then sends user input and asserts it reaches the agent
+   (during running -> appendUserMessage injected; after finish -> submit accepted).
+   Look at existing python daemon tests for harness; or extend the JS harness to spawn the
+   real `python -m kiss ... web server` daemon instead of net.createServer stub.
+1. Confirm which layer drops the input. Add sleeps to expose races if needed.
+1. Fix root cause. Re-run `npm run compile`, `npm run test`, `uv run check --full`.
+1. Clean up tmp files.
 
-## IMPORTANT efficiency note
+## Daemon dispatch map (commands.py)
 
-- server.py is ~1729 lines. The `Read` tool has NO offset param and always returns from the TOP, wasting huge context. To view a specific line range (e.g. `_replay_session` at line 995), extract it to a temp file first: `sed -n '995,1180p' src/kiss/agents/vscode/server.py > tmp/replay_session.txt` then `Read(tmp/replay_session.txt)`. (This sed usage is to enable offset reading, since Read lacks offset; the actual viewing is via Read on the temp file. Delete temp after.)
-- `_replay_session` is defined at server.py:995. Also relevant: commands.py `_cmd_resume_session` at line 536, `_cmd_run` ~199, `_cmd_append_user_message`/`appendUserMessage` ~501-536.
-- KEY QUESTION still unanswered: does `_replay_session` (called on resumeSession for a still-running tab) broadcast a `status running:true` event to the resumed tab? Read server.py:995-1180 to confirm. If it does NOT, that's the root cause: the reopened webview never learns the task is running.
+- Dispatch table: `commands.py:863 _HANDLERS` (mixed into server via server.py:433).
+- `_cmd_append_user_message` = commands.py:500-535. Line ~525 logs
+  "appendUserMessage dropped: tab %s has no live task" — KEY: if reopened tab's
+  appendUserMessage arrives but daemon has no live task for that tab, it's DROPPED.
+- `_cmd_run` = commands.py:202; `_cmd_resume_session` = commands.py:536; `_cmd_stop`=283.
+- task_runner.py:191 `tab.pending_user_messages.clear()`; :315 drains pending_user_messages
+  before each model call. So appendUserMessage -> tab.pending_user_messages -> injected.
+- \_replay_session=server.py:995, \_reattach_running_chat=server.py:1463.
 
-## ROOT CAUSE IDENTIFIED (confirmed by reading code)
+## STRONG hypothesis (verify next)
 
-Daemon side is FINE: `_replay_session` (server.py:995) calls `_reattach_running_chat` (server.py:1463) which returns True even when the SAME tab replays its own still-running chat (pass-2 chat-id match, thread alive). When rebound_running is True, `_replay_session` broadcasts `status running:true` (server.py ~1247) before task_events. So on resumeSession the daemon DOES tell the reopened tab the task is running.
+The reopened tab's appendUserMessage is keyed by tabId. After reopen, if the daemon's running
+task/tab state is keyed under a DIFFERENT tab identity (or \_reattach rebinds chat but the live
+task's tab object that \_cmd_append_user_message looks up is not the same one running the loop),
+the appendUserMessage is dropped at commands.py:525 ("has no live task"). Need to read
+\_cmd_append_user_message + how it resolves the tab + \_reattach_running_chat to confirm the tab
+object identity / chat_id linkage survives close+reopen for a tab that STARTED the task.
 
-The REMAINING extension bug (previous fix incomplete): in `SorcarSidebarView.ts` `onDidDispose` sets `this._disposed = true` UNCONDITIONALLY. VS Code does NOT guarantee dispose-before-resolve ordering: when a sidebar webview view is re-shown, the NEW webview is commonly resolved FIRST (resolveWebviewView clears \_disposed, sets \_view=new), and THEN the stale OLD webview's onDidDispose fires LATE — clobbering \_disposed back to true and silencing the new webview. So the reopened tab again drops all daemon->webview msgs (status/task_events), isRunning stays false, user input sent as `submit` and dropped by `_runningTabs` guard.
+## NEXT (fresh context)
 
-### FIX (planned, not yet applied)
+1. Read commands.py 500-560 (\_cmd_append_user_message, \_cmd_resume_session) fully.
+1. Read server.py 995-1140 (\_replay_session) and 1463-1600 (\_reattach_running_chat).
+1. Determine where reopened-tab input is dropped; likely daemon tab/chat rebinding.
+1. Write integration test spawning REAL daemon (look at existing pytest daemon harness in
+   src/kiss/agents/vscode/ or repo) reproducing close+reopen+input-during-run + input-after-finish.
+1. Fix root cause; npm run compile; npm run test; uv run check --full; clean tmp.
 
-In `src/kiss/agents/vscode/src/SorcarSidebarView.ts` onDidDispose: guard the disposed/\_view mutation so a stale webview's late dispose can't clobber the active one:
+## Files
 
-```
-webviewView.onDidDispose(() => {
-  if (this._view === webviewView) {
-    this._view = undefined;
-    this._disposed = true;
-  }
-  this._resolveAllWorktreeActions();
-});
-```
+- src/kiss/agents/vscode/src/SorcarSidebarView.ts
+- src/kiss/agents/vscode/media/main.js
+- src/kiss/agents/vscode/server.py
+- existing tests: test/bughunt_reopen_running_tab.test.js, test/bughunt_reopen_late_dispose.test.js
+- package.json `test` script wires the bughunt tests.
 
-(Move `this._disposed = true;` INSIDE the `if (this._view === webviewView)` block. Currently it's outside/unconditional.)
+## UPDATE (session 2 findings)
 
-### TEST written (reproduces bug; currently failing to RUN due to missing build)
+- npm deps installed in src/kiss/agents/vscode (node_modules now present). `npm run compile` works.
+- Both existing reopen tests PASS (extension forwarding fixed by prior commits).
+- jsdom harness exists (see test/tab_timer_per_tab.test.js): loads real chat.html+panelCopy.js+main.js,
+  stub acquireVsCodeApi. main.js exposes window.\_\_kissTest exports (setRunningState, getActiveTabId,...).
+- WROTE test/bughunt_reopen_input_webview.test.js: real main.js, carries vscode.getState across two
+  webviews (close+reopen). It PASSES: after reopen, during-run typed msg -> appendUserMessage; after
+  status running:false -> submit. So webview layer alone is CORRECT too.
+- GOTCHA: assert.deepStrictEqual on jsdom-realm objects fails on prototype mismatch; use JSON.stringify compare.
+- sendMessage() in main.js (line ~4925): uses GLOBAL isRunning; isRunning -> appendUserMessage else submit.
+- restoredTabs builder (main.js ~4369): filters tabs with backendChatId, sends {tabId:t.id, chatId:t.backendChatId}.
+- backendChatId set in 'clear' handler (main.js 2691-2693) which DOES call persistTabState() right after.
+- Daemon \_replay_session broadcasts status running:true (rebound_running branch) BEFORE task_events when
+  \_reattach_running_chat finds a live source (chat-id fallback matches the started tab's own running_agent_states).
+- \_cmd_append_user_message (commands.py 500): looks up running_agent_states.get(tab_id); drops if tab None
+  or not is_task_active.
 
-New test: `src/kiss/agents/vscode/test/bughunt_reopen_late_dispose.test.js` — resolves the NEW webview FIRST, then fires OLD webview dispose LATE, then daemon streams status+task_events; asserts NEW webview receives them. Must add it to package.json `test` script after verifying.
+## CONCLUSION: bug is a CROSS-LAYER gap, not in either layer alone.
 
-## BLOCKER: no node_modules / tsc
+NEXT: build a COMBINED integration test: real SorcarSidebarView (out/) + real main.js (jsdom) wired together
+(webview.postMessage -> view.\_handleMessage; view.\_sendToWebview -> webview 'message' event) + stub UDS daemon.
+Do full close+reopen-during-run and assert the DAEMON receives appendUserMessage (during) and run (after finish).
+This should expose the real drop. Then fix root cause.
 
-`src/kiss/agents/vscode` has NO node_modules (tsc not found). `out/SorcarSidebarView.js` may or may not exist. Options:
+## ROOT CAUSE FOUND + FIXED (session 2)
 
-- Check `ls out/` — if compiled JS exists, can run node tests directly (the .test.js loads `out/SorcarSidebarView.js`). The fix is in `.ts`; must recompile to `out/`. Need tsc.
-- Run `npm ci` / `npm install` in that dir (may be slow) to get tsc, OR `uv run check --full` which runs the extension check and likely installs/compiles.
-- Try: `cd src/kiss/agents/vscode && npm install` then `npm run compile`.
-  NEXT: check if `out/SorcarSidebarView.js` already exists; if yes, manually verify whether it has the old or new onDidDispose; decide whether to npm install.
+Reproduction probe test_reopen_started_tab_resume.py::test_run_for_busy_tab_injects_prompt_instead_of_dropping
+FAILED on original code -> confirmed bug: daemon \_cmd_run SILENTLY DROPS a `run` for a tab whose
+task_thread is not None. After close+reopen, a re-opened webview can momentarily still think the task
+is idle (before resume's status:true arrives) and send the typed text as submit->run; the daemon dropped it.
 
-## Build/test commands
+FIXES:
 
-- Compile extension: `cd src/kiss/agents/vscode && npm run compile`
-- Run extension tests: `cd src/kiss/agents/vscode && npm run test`
-- Python tests for daemon: `uv run pytest -v src/kiss/tests/agents/sorcar/...`
-- Full check: `uv run check --full`
+1. commands.py \_cmd_run: when tab.task_thread is not None, instead of `return`, inject the prompt into
+   tab.pending_user_messages (if non-blank and is_task_active) and broadcast a `prompt` echo OUTSIDE the
+   lock; never start a 2nd task. Restructured guard into if-busy/else-normal with thread/inject_prompt
+   locals; broadcast clear+thread.start() only on the normal path.
+1. src/SorcarSidebarView.ts submit handler: instead of `return` when tabId in \_runningTabs, forward the
+   text to the daemon as appendUserMessage (if non-blank). Belt-and-suspenders for the extension-layer
+   desync. Recompiled.
+
+NEW TESTS (all pass):
+
+- src/kiss/tests/agents/sorcar/test_reopen_started_tab_resume.py (2 tests: resume broadcasts running+accepts
+  append; run-for-busy-tab injects).
+- src/kiss/agents/vscode/test/bughunt_reopen_input_webview.test.js (jsdom real main.js close+reopen).
+- src/kiss/agents/vscode/test/bughunt_reopen_input_e2e.test.js (real ext + real webview jsdom + UDS daemon).
+- src/kiss/agents/vscode/test/bughunt_submit_while_running.test.js (submit-while-running -> appendUserMessage).
+  All 3 JS tests wired into package.json `test` script. `npm run test` PASSES fully.
+
+REMAINING: run python tests + `uv run check --full`; clean tmp; finish.
