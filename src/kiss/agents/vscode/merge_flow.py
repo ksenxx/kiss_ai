@@ -29,6 +29,7 @@ from kiss.agents.sorcar.git_worktree import (
 )
 from kiss.agents.sorcar.persistence import _append_chat_event
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.agents.sorcar.useful_tools import _stale_worktree_fallback
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.agents.vscode.diff_merge import (
     _capture_untracked,
@@ -385,7 +386,23 @@ class _MergeFlowMixin:
             )
             return
         try:
-            repo = GitWorktreeOps.discover_repo(Path(work_dir))
+            # When ``work_dir`` lives under a now-deleted
+            # ``.kiss-worktrees/kiss_wt-*`` directory (the frontend
+            # stamped this tab's ``workDir`` from the agent's
+            # ``extra.work_dir`` during a worktree task, and the
+            # worktree directory was removed on merge/discard),
+            # rewrite it to the equivalent path inside the parent
+            # repo so the settings-panel "Git Commit" button can
+            # still commit the user's dirty main working tree
+            # instead of reporting a misleading "Not a git
+            # repository." error.
+            work_path = Path(work_dir)
+            if not work_path.exists():
+                fallback = _stale_worktree_fallback(work_path)
+                if fallback is not None:
+                    work_dir = str(fallback)
+                    work_path = fallback
+            repo = GitWorktreeOps.discover_repo(work_path)
             if repo is None:
                 self._broadcast_autocommit_done(
                     tab_id, success=False, committed=False,
