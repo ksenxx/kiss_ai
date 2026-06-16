@@ -1,140 +1,88 @@
-# PROGRESS — history-resumed running tab follow-up input
+# PROGRESS — settings-panel "Git Commit" failed with "Not a git repository" after worktree task
 
 ## Task
 
-When a task running in tab A is loaded into a fresh tab B from the
-task-history panel, the chat webview in tab B does not accept input
-messages from the user, the pulsing green circle in tab B's title
-stays even after the task finishes, and messages get lost. Reproduce
-with an integration test, then fix the root cause.
+User report:
+
+> in the last task when I pressed "git commit" it says
+> "Not a git repository."
+
+The previous task ran in worktree mode and the worktree directory
+under `<repo>/.kiss-worktrees/kiss_wt-*` was removed on cleanup.
+When the user then clicked the settings-panel **Git Commit** button,
+the autocommit flow rejected with "Not a git repository." even
+though the main working tree IS a git repo with uncommitted
+changes.
 
 ## Investigation
 
-Frontend (`media/main.js`) flow on history-row click:
+1. Frontend (`media/main.js`) wires the **Git Commit** button to
+   post `autocommitAction` with
+   `workDir: workDirForTab(activeTabId)`.
+1. `workDirForTab` returns `tab.workDir` — set from each task event's
+   `extra.work_dir`. For a worktree task `extra.work_dir` points at
+   `<repo>/.kiss-worktrees/kiss_wt-<…>/<offset>`.
+1. After the worktree task ends (merge or discard),
+   `git worktree remove` deletes that directory, but **the tab's
+   `workDir` is never reset to the parent repo**.
+1. Server-side `_MergeFlowMixin._handle_autocommit_action`
+   (`merge_flow.py`) ran
+   `GitWorktreeOps.discover_repo(Path(work_dir))` → `git -C <stale>`
+   which fails because the directory no longer exists; the handler
+   then broadcasts `autocommit_done` with `"Not a git repository."`.
 
-1. `createNewTab()` allocates a fresh `tab_id_new`, posts
-   `{type: 'newChat', tabId: tab_id_new}`.
-1. Posts `{type: 'resumeSession', id: chat_id, taskId, tabId: tab_id_new}`.
-
-Backend (`server.py::_replay_session`) on `resumeSession`:
-
-1. Calls `_reattach_running_chat(chat_id, tab_id_new, task_id=...)`
-   which scans `_RunningAgentState.running_agent_states` for a state
-   whose `_live_task_id == task_id` (or `chat_id` matches), then
-   `printer.subscribe_tab(source_task_id, tab_id_new)` to add tab B as
-   a viewer of source tab's task event stream.
-1. Broadcasts `{type: 'status', running: True, tabId: tab_id_new, startTs}`.
-1. Broadcasts `task_events` replay.
-
-Tab B's `_RunningAgentState[tab_id_new]` was created by `_new_chat`
-with `is_task_active=False` — the live agent runs in `tab_id_a`'s
-state. Tab B is only a *viewer* (a subscriber in
-`printer._subscribers[task_id]`).
-
-### Bug 1 — follow-up input is dropped
-
-User types in tab B's input box while task is running. Frontend
-`sendMessage` sees `isRunning=true` and posts
-`{type: 'appendUserMessage', prompt, tabId: tab_id_new}`. Backend
-`_cmd_append_user_message` (commands.py) looks up
-`_running_agent_states[tab_id_new]`, sees `is_task_active=False`, and
-silently drops the message with a debug log:
-
-```python
-if tab is None or not tab.is_task_active:
-    logger.debug("appendUserMessage dropped: tab %s has no live task", tab_id)
-    return
-```
-
-The live agent's `pending_user_messages` queue, which the agent's
-pre-step hook drains, lives on the source tab. The viewer's typed
-text never reaches the agent.
-
-### Bug 2 — `status running=False` never reaches the viewer
-
-When the task ends, `_run_task`'s `finally` (task_runner.py) broadcasts:
-
-```python
-self.printer.broadcast(
-    {"type": "status", "running": False, "tabId": tab_id},  # tab_id == source/launcher tab id
-)
-```
-
-`WebPrinter.broadcast` sees `tabId` is present and routes the event
-verbatim to all WS clients — it does NOT iterate the per-task
-subscriber map for tabId-stamped "system" events. Tab B receives the
-event but its frontend filters by `ev.tabId === activeTabId`; since
-`ev.tabId == source_tab_id ≠ tab_id_new`, `setRunningState(false)` is
-never called. Tab B's `isRunning` stays `true`, the tab-title pulse
-animation never stops, the input box stays in "queue follow-up"
-mode, and subsequent user messages are still routed as
-`appendUserMessage` against a now-finished task — getting dropped
-again (cascading from bug 1).
-
-## Integration test
-
-`src/kiss/tests/agents/vscode/test_resume_running_followup_input.py`:
-
-End-to-end test driving the real `VSCodeServer` through
-`_handle_command`, the real `_replay_session` /
-`_reattach_running_chat` path, and the real `_TaskRunnerMixin` worker
-thread. Only the innermost LLM-driven `run` is stubbed — it broadcasts
-a sentinel `text_delta`, signals a `started` Event so the test knows
-the worker is provably inside the run loop, then blocks on a `release`
-Event so follow-up actions happen while the task is STILL running.
-
-The captured `broadcast` mirrors `WebPrinter.broadcast` fan-out
-exactly: events with explicit `tabId` pass verbatim, task events go
-through the per-task subscriber fan-out and are duplicated once per
-subscriber with the viewer's tab id stamped.
-
-Three tests:
-
-1. `test_append_user_message_from_viewer_tab_reaches_live_agent` —
-   start a task in tab-launcher, open the chat in tab-viewer while
-   running, send `appendUserMessage` from tab-viewer, assert the
-   prompt lands in `launcher_state.pending_user_messages` (and the
-   prompt echo carries `tabId == tab_viewer`).
-1. `test_viewer_tab_receives_running_false_when_task_ends` — start
-   the task, open the viewer, release the task, assert the viewer
-   receives a `status running=False` stamped with the VIEWER's tabId.
-1. `test_new_run_from_viewer_tab_after_task_ends` — start, open
-   viewer, release, end first task, send a fresh `run` from
-   tab-viewer, assert the new task reaches the agent.
-
-Pre-fix: tests 1 and 2 FAIL with the expected symptoms.
+`useful_tools.py` already has `_stale_worktree_fallback(resolved)`
+that strips a `.kiss-worktrees/kiss_wt-*` segment from a path. The
+read-path in `useful_tools.py` uses it to recover from stale
+worktree paths after cleanup. The autocommit flow did not.
 
 ## Fix
 
-### `src/kiss/agents/vscode/commands.py::_cmd_append_user_message`
+`src/kiss/agents/vscode/merge_flow.py` —
+`_handle_autocommit_action`:
 
-When `tab_id` has no active task, look up the source tab via the
-existing `_find_source_tab_for_viewer` helper (scans
-`printer._subscribers` for any task `tab_id` is subscribed to, then
-finds the peer tab with a live `stop_event` — i.e. the launcher
-that owns the running agent). Route the prompt to the source tab's
-`pending_user_messages`. The prompt echo still carries the VIEWER's
-`tabId` so it appears in the viewer's chat surface (the user typed
-it there).
+- Before `discover_repo`, if `Path(work_dir)` does not exist, try
+  `_stale_worktree_fallback`. When it returns a non-None equivalent
+  path inside the parent repo, rewrite `work_dir` (and `work_path`)
+  so all subsequent `_git(work_dir, …)` calls — `add -A`,
+  `diff --cached`, `commit` via `repo_lock` — operate on the main
+  working tree.
 
-### `src/kiss/agents/vscode/task_runner.py::_run_task`
+```python
+work_path = Path(work_dir)
+if not work_path.exists():
+    fallback = _stale_worktree_fallback(work_path)
+    if fallback is not None:
+        work_dir = str(fallback)
+        work_path = fallback
+repo = GitWorktreeOps.discover_repo(work_path)
+```
 
-After broadcasting `status running=False` to the launcher tab, also
-broadcast a copy to every viewer tab subscribed to this task's id
-via the new `_broadcast_status_end_to_viewers` helper. Mirrors the
-start-time per-viewer broadcast in `_subscribe_chat_viewers` and the
-per-viewer broadcast in `_replay_session`.
+Also added the import:
 
-### `src/kiss/agents/vscode/commands.py` TYPE_CHECKING
+```python
+from kiss.agents.sorcar.useful_tools import _stale_worktree_fallback
+```
 
-Added `_find_source_tab_for_viewer` declaration to `_CommandsMixin`'s
-`TYPE_CHECKING` block (it's implemented by sibling `_TaskRunnerMixin`).
+## Test
+
+New integration test
+`src/kiss/tests/agents/vscode/test_git_commit_after_worktree_cleanup.py`
+reproduces the bug and verifies the fix:
+
+1. Init a real git repo with a seed commit.
+1. Dirty `edited.txt` in the main working tree.
+1. Call
+   `server._handle_autocommit_action("commit", tab_id="t-stale", work_dir=<repo>/.kiss-worktrees/kiss_wt-…)`
+   where the worktree path does NOT exist on disk.
+1. Assert (a) no "Not a git repository" message, (b) `autocommit_done`
+   reports `success=True, committed=True`, (c) HEAD advanced, and
+   (d) `git status --porcelain` is clean afterward.
 
 ## Verification
 
-- `uv run pytest src/kiss/tests/agents/vscode/test_resume_running_followup_input.py`
-  — all 3 tests pass.
-- `uv run pytest src/kiss/tests/agents/vscode/` — 1049 passed, no
-  regressions.
-- `uv run check --full` — all checks pass (ruff, mypy, pyright,
+- `uv run pytest src/kiss/tests/agents/vscode/test_git_commit_after_worktree_cleanup.py … test_merge_autocommit_lifecycle.py -v` →
+  55 passed (1 new + 54 pre-existing related tests).
+- `uv run check --full` → ✅ All checks passed (install, generate
+  API docs, compileall, ruff, mypy, pyright, npm vscode check,
   mdformat).
