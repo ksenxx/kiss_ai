@@ -149,6 +149,9 @@ class _CommandsMixin:
         def _get_tab(self, tab_id: str) -> _RunningAgentState: ...
         def _run_task(self, cmd: dict[str, Any]) -> None: ...
         def _stop_task(self, tab_id: str = "") -> None: ...
+        def _find_source_tab_for_viewer(
+            self, viewer_tab_id: str,
+        ) -> str | None: ...
         def _get_models(self, conn_id: str = "") -> None: ...
         def _get_history(
             self,
@@ -221,6 +224,9 @@ class _CommandsMixin:
             # so the task would be unstoppable and undisposable.
             logger.debug("Ignoring run command without tabId")
             return
+        inject_prompt: str | None = None
+        thread: threading.Thread | None = None
+        chat_id = ""
         with self._state_lock:
             tab = _RunningAgentState.running_agent_states.get(tab_id)
             if tab is None:
@@ -228,45 +234,81 @@ class _CommandsMixin:
                 _RunningAgentState.running_agent_states[tab_id] = tab
             if tab.task_thread is not None:
                 # A task is already running — or has been created and is
-                # about to start — for this tab: silently drop the new
-                # submit so the user sees no visible effect.  Checking
-                # ``is_alive()`` here was racy: the winning submit
-                # assigns ``task_thread`` under the lock but calls
-                # ``thread.start()`` only after releasing it (and after
-                # the ``clear`` broadcast — network I/O), so a
-                # concurrent submit could observe a created-but-
-                # unstarted thread (``is_alive() == False``), pass the
-                # guard, and clobber ``stop_event`` /
+                # about to start — for this tab.  We must NOT start a
+                # second task here.  Checking ``is_alive()`` would be
+                # racy: the winning submit assigns ``task_thread`` under
+                # the lock but calls ``thread.start()`` only after
+                # releasing it (and after the ``clear`` broadcast —
+                # network I/O), so a concurrent submit could observe a
+                # created-but-unstarted thread (``is_alive() == False``),
+                # pass the guard, and clobber ``stop_event`` /
                 # ``user_answer_queue`` / ``task_thread`` — leaving two
                 # tasks running on one tab with the first unstoppable.
                 # ``_run_task``'s outer finally always resets
                 # ``task_thread`` to None, so non-None ⇔ task in flight.
-                return
-            tab.stop_event = threading.Event()
-            tab.user_answer_queue = queue.Queue(maxsize=1)
-            # Establish the canonical chat id for this run.  When
-            # :meth:`_replay_session` has already populated ``tab.chat_id``
-            # with the chat id of a resumed history row, preserve it —
-            # otherwise the follow-up task would be cut off from the
-            # prior chat context (``ChatSorcarAgent.build_chat_prompt``
-            # would query history for the tab id, find nothing, and
-            # send the LLM an empty preamble).  Otherwise allocate a
-            # fresh chat id.  ``tab_id`` (the frontend routing key)
-            # and ``chat_id`` (the persistence key) are kept
-            # orthogonal: every run gets its own chat id, regardless
-            # of which tab launched it.
-            if not tab.chat_id:
-                tab.chat_id = uuid.uuid4().hex
-            chat_id = tab.chat_id
-            # The launching tab views this chat: record it so a later
-            # task started on the same chat from ANOTHER tab (in any
-            # window) streams its live events here too (see
-            # ``_subscribe_chat_viewers``).
-            self._tab_chat_views[tab_id] = chat_id
-            thread = threading.Thread(
-                target=self._run_task, args=(cmd,), daemon=True
-            )
-            tab.task_thread = thread
+                #
+                # The user's text must NOT be silently dropped, though.
+                # A ``run`` that arrives while a task is in flight is
+                # routed into the live agent as a follow-up user message
+                # — identical to ``appendUserMessage``.  This is the root
+                # cause of "input ignored during the task" after a
+                # close+reopen: a re-opened webview can momentarily still
+                # believe the task is idle (before the resume's
+                # ``status running:true`` arrives) and therefore send the
+                # typed text as a ``submit`` (→ ``run``) rather than an
+                # ``appendUserMessage``.  The daemon is the source of
+                # truth for whether a task is live, so it must inject the
+                # prompt here instead of discarding it.  A tab that
+                # started a task then behaves exactly like a tab that
+                # loaded one: typed input never vanishes.
+                prompt = cmd.get("prompt", "")
+                if (
+                    isinstance(prompt, str)
+                    and prompt.strip()
+                    and tab.is_task_active
+                ):
+                    tab.pending_user_messages.append(prompt)
+                    inject_prompt = prompt
+            else:
+                tab.stop_event = threading.Event()
+                tab.user_answer_queue = queue.Queue(maxsize=1)
+                # Establish the canonical chat id for this run.  When
+                # :meth:`_replay_session` has already populated
+                # ``tab.chat_id`` with the chat id of a resumed history
+                # row, preserve it — otherwise the follow-up task would
+                # be cut off from the prior chat context
+                # (``ChatSorcarAgent.build_chat_prompt`` would query
+                # history for the tab id, find nothing, and send the LLM
+                # an empty preamble).  Otherwise allocate a fresh chat
+                # id.  ``tab_id`` (the frontend routing key) and
+                # ``chat_id`` (the persistence key) are kept orthogonal:
+                # every run gets its own chat id, regardless of which tab
+                # launched it.
+                if not tab.chat_id:
+                    tab.chat_id = uuid.uuid4().hex
+                chat_id = tab.chat_id
+                # The launching tab views this chat: record it so a later
+                # task started on the same chat from ANOTHER tab (in any
+                # window) streams its live events here too (see
+                # ``_subscribe_chat_viewers``).
+                self._tab_chat_views[tab_id] = chat_id
+                thread = threading.Thread(
+                    target=self._run_task, args=(cmd,), daemon=True
+                )
+                tab.task_thread = thread
+        if thread is None:
+            # Busy tab: the run was routed into the running agent (or
+            # ignored as blank).  Echo the injected follow-up so the user
+            # sees their queued message in the chat surface, mirroring
+            # ``_cmd_append_user_message``.  Broadcast OUTSIDE the lock
+            # (network I/O) and never start a second task.
+            if inject_prompt is not None:
+                self.printer.broadcast({
+                    "type": "prompt",
+                    "text": inject_prompt,
+                    "tabId": tab_id,
+                })
+            return
         # Emit ``clear`` synchronously (outside the state lock) so the
         # extension layer's chat_id → tab_id index is populated before
         # this command returns.  Without this, a ``resumeSession``
@@ -508,11 +550,26 @@ class _CommandsMixin:
         pre-step hook can drain and inject the messages into the model
         conversation before the next model call.
 
-        The append is silently ignored when the tab has no live task —
-        attempting to queue a follow-up against an idle tab would be a
-        no-op (no pre-step hook to drain it).  We also echo the queued
-        prompt back to every viewer of the tab as a ``prompt`` event so
-        the user sees their queued message in the chat surface.
+        When the tab itself has no live task (the common case for a
+        VIEWER tab opened from the history sidebar while a task runs
+        in ANOTHER tab — the viewer is subscribed to the source tab's
+        event stream but the live agent runs in the source tab's
+        ``_RunningAgentState``) the prompt is routed to the source
+        tab's queue via the printer's per-task subscriber map.  This
+        is what makes a history-resumed viewer tab accept follow-up
+        input while the underlying task is still running: without it,
+        the typed text would be silently dropped (because the viewer
+        tab's own state has ``is_task_active=False``) and the user
+        would watch their message disappear from the input box with
+        no effect on the running agent.
+
+        The append is silently ignored only when neither the tab nor
+        any peer tab the viewer is subscribed to has a live task —
+        attempting to queue a follow-up against a truly idle tab
+        would be a no-op (no pre-step hook to drain it).  We also
+        echo the queued prompt back to every viewer of the tab as a
+        ``prompt`` event so the user sees their queued message in
+        the chat surface.
         """
         tab_id = cmd.get("tabId", "")
         prompt = cmd.get("prompt", "")
@@ -520,13 +577,40 @@ class _CommandsMixin:
             return
         with self._state_lock:
             tab = _RunningAgentState.running_agent_states.get(tab_id)
-            if tab is None or not tab.is_task_active:
-                logger.debug(
-                    "appendUserMessage dropped: tab %s has no live task",
-                    tab_id,
+            if tab is not None and tab.is_task_active:
+                tab.pending_user_messages.append(prompt)
+            else:
+                # Viewer-tab fallback: a tab opened from the history
+                # sidebar while a task runs in ANOTHER tab carries no
+                # live ``_RunningAgentState`` of its own — the live
+                # agent (and its ``pending_user_messages`` queue) lives
+                # on the source tab the viewer was subscribed to via
+                # ``_reattach_running_chat`` /
+                # ``_subscribe_chat_viewers``.  Resolve the source tab
+                # through the printer's per-task subscriber map and
+                # route the prompt there instead of dropping it.
+                source_tab_id = self._find_source_tab_for_viewer(tab_id)
+                if not source_tab_id:
+                    logger.debug(
+                        "appendUserMessage dropped: tab %s has no "
+                        "live task and is not a viewer of one",
+                        tab_id,
+                    )
+                    return
+                source = _RunningAgentState.running_agent_states.get(
+                    source_tab_id,
                 )
-                return
-            tab.pending_user_messages.append(prompt)
+                if source is None or not source.is_task_active:
+                    logger.debug(
+                        "appendUserMessage dropped: viewer tab %s "
+                        "source tab %s has no live task",
+                        tab_id, source_tab_id,
+                    )
+                    return
+                source.pending_user_messages.append(prompt)
+        # Echo on the originating tab id — that's the tab whose
+        # transcript the user is looking at, so the prompt panel must
+        # appear there even when the live agent is owned by a peer.
         self.printer.broadcast({
             "type": "prompt",
             "text": prompt,

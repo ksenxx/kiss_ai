@@ -156,6 +156,14 @@
   let tabs = []; // array of tab objects (see makeTab for fields)
   let activeTabId = '';
 
+  // Configured work directory reported by the backend's ``getConfig``
+  // reply (``configData`` → ``populateConfigForm``).  Used as the
+  // fallback repo path for ``workDirForTab`` when a tab has not yet
+  // learned its own ``workDir`` from a background-task event, so
+  // commands like the settings-panel "git commit" act on the
+  // configured repo rather than the daemon-wide ``self.work_dir``.
+  let configWorkDir = '';
+
   function makeTab(title) {
     const _id = genTabId();
     return {
@@ -263,14 +271,18 @@
   /**
    * Resolve the working directory for a given tab id.  Returns the
    * tab's own ``workDir`` (set from background-task events) when known,
-   * else an empty string so the backend falls back to its global
+   * else falls back to ``configWorkDir`` — the configured work
+   * directory the backend reports via ``getConfig`` (``configData`` →
+   * ``populateConfigForm``).  Returns an empty string only when neither
+   * is known, in which case the backend falls back to its global
    * ``work_dir``.  Used to stamp ``workDir`` on commands (e.g.
    * ``autocommitAction``) so they act on the tab's actual repo rather
    * than a possibly-stale daemon-wide directory.
    */
   function workDirForTab(tabId) {
     const tab = getTab(tabId);
-    return tab && tab.workDir ? tab.workDir : '';
+    if (tab && tab.workDir) return tab.workDir;
+    return configWorkDir || '';
   }
 
   function saveCurrentTab() {
@@ -921,6 +933,7 @@
   const parallelToggleBtn = document.getElementById('cfg-use-parallel');
   const demoToggleBtn = document.getElementById('cfg-demo-mode');
   const updateBtn = document.getElementById('cfg-update-btn');
+  const serverResetBtn = document.getElementById('cfg-server-reset-btn');
   const autocommitToggleBtn = document.getElementById('cfg-auto-commit');
   const taskPanel = document.getElementById('task-panel');
   const taskPanelText = document.getElementById('task-panel-text');
@@ -4585,6 +4598,14 @@
       });
     }
 
+    if (serverResetBtn) {
+      serverResetBtn.addEventListener('click', e => {
+        e.preventDefault();
+        e.stopPropagation();
+        vscode.postMessage({type: 'serverReset'});
+      });
+    }
+
     if (autocommitBtn) {
       autocommitBtn.addEventListener('click', e => {
         // The button now lives inside the cfg-auto-commit <label>; stop
@@ -4756,10 +4777,19 @@
     const hfRunning = document.getElementById('hf-running');
     const hfErrors = document.getElementById('hf-errors');
     const hfCompleted = document.getElementById('hf-completed');
+    const hfWorkspace = document.getElementById('hf-workspace');
     const hfFavorite = document.getElementById('hf-favorite');
     const hfFrom = document.getElementById('hf-from');
     const hfTo = document.getElementById('hf-to');
-    [hfRunning, hfErrors, hfCompleted, hfFavorite, hfFrom, hfTo].forEach(el => {
+    [
+      hfRunning,
+      hfErrors,
+      hfCompleted,
+      hfWorkspace,
+      hfFavorite,
+      hfFrom,
+      hfTo,
+    ].forEach(el => {
       if (el) el.addEventListener('change', applyHistoryFilterVisibility);
     });
     // The calendar selector buttons sit next to each date textbox and
@@ -5269,6 +5299,11 @@
       // so ``applyHistoryFilterVisibility()`` can include/exclude the
       // row when the Favorite checkbox in the filter bar is toggled.
       div.dataset.favorite = s.is_favorite ? '1' : '0';
+      // ``data-work-dir`` mirrors the persisted ``extra.work_dir``
+      // so ``applyHistoryFilterVisibility()`` can hide rows whose
+      // ``work_dir`` differs from the client's currently-configured
+      // workspace when the Workspace filter checkbox is checked.
+      div.dataset.workDir = s.work_dir || '';
       const itemText = s.title || s.preview || 'Untitled';
       div.dataset.tooltip = s.preview || itemText;
       div.style.backgroundColor = chatIdBgColor(String(s.id));
@@ -5690,6 +5725,7 @@
     const hfRunning = document.getElementById('hf-running');
     const hfErrors = document.getElementById('hf-errors');
     const hfCompleted = document.getElementById('hf-completed');
+    const hfWorkspace = document.getElementById('hf-workspace');
     const hfFavorite = document.getElementById('hf-favorite');
     const hfFrom = document.getElementById('hf-from');
     const hfTo = document.getElementById('hf-to');
@@ -5698,6 +5734,15 @@
     const showErrors = hfErrors.checked;
     const showCompleted = hfCompleted.checked;
     const onlyFavorite = hfFavorite && hfFavorite.checked;
+    // Workspace filter — when checked, only show rows whose
+    // ``data-work-dir`` (mirroring ``extra.work_dir`` set at task
+    // completion) equals the client's currently-configured work
+    // directory.  An empty client work_dir or an empty row work_dir
+    // both pass the filter so the user sees rows that pre-date the
+    // ``extra.work_dir`` persistence change and rows running in the
+    // "no folder open" state.
+    const onlyWorkspace = hfWorkspace && hfWorkspace.checked;
+    const clientWorkDir = configWorkDir || '';
     // Date inputs are <input type=date> with value="YYYY-MM-DD".
     // Convert to local-midnight epoch seconds for inclusive bounds.
     let fromTs = -Infinity;
@@ -5721,7 +5766,9 @@
       else if (cat === 'completed') catOk = showCompleted;
       const dateOk = ts >= fromTs && ts <= toTs;
       const favOk = !onlyFavorite || row.dataset.favorite === '1';
-      if (catOk && dateOk && favOk) {
+      const rowWorkDir = row.dataset.workDir || '';
+      const wsOk = !onlyWorkspace || rowWorkDir === clientWorkDir;
+      if (catOk && dateOk && favOk && wsOk) {
         row.style.display = '';
         visible++;
       } else {
@@ -6054,6 +6101,22 @@
   let configFormPopulated = false;
   function populateConfigForm(cfg, apiKeys) {
     const el = id => document.getElementById(id);
+    // Remember the configured work directory so ``workDirForTab`` can
+    // fall back to it when a tab has not yet learned its own
+    // ``workDir`` from a background-task event.
+    const prevConfigWorkDir = configWorkDir;
+    configWorkDir = cfg.work_dir || '';
+    // The history sidebar's Workspace filter compares each row's
+    // ``data-work-dir`` against ``configWorkDir`` — a change here
+    // must re-run the visibility pass so already-rendered rows
+    // immediately reflect the new client work_dir.
+    if (prevConfigWorkDir !== configWorkDir) {
+      try {
+        applyHistoryFilterVisibility();
+      } catch (_e) {
+        /* history list not yet rendered */
+      }
+    }
     const wdInp = el('cfg-work-dir');
     if (wdInp) {
       wdInp.value = cfg.work_dir || '';
@@ -6085,6 +6148,10 @@
         }
         if (pinned) {
           wdInp.value = pinned;
+          // The pinned per-instance folder overrides the global
+          // default for this browser tab, so prefer it as the
+          // ``workDirForTab`` fallback too.
+          configWorkDir = pinned;
         } else if (cfg.work_dir) {
           vscode.postMessage({type: 'setWorkDir', workDir: cfg.work_dir});
         }

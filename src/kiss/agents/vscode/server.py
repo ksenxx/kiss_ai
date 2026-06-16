@@ -26,6 +26,7 @@ import logging
 import os
 import queue
 import threading
+from collections.abc import Callable
 from typing import Any, cast
 
 from kiss.agents.sorcar.persistence import (
@@ -267,6 +268,59 @@ class VSCodeServer(
         # window's ghost-text autocomplete context.
         self._last_active_file: dict[str, str] = {}
         self._last_active_content: dict[str, str] = {}
+        # Optional hook the owning ``RemoteAccessServer`` installs via
+        # :meth:`set_cli_running_lookup`.  Returns ``True`` when a
+        # given task id is currently being executed by the local
+        # ``sorcar`` CLI (announced via ``cliTaskStart`` envelopes).
+        # Used by :meth:`_replay_session` to subscribe a freshly
+        # resumed webview tab to the live event stream and broadcast
+        # a ``status:running`` event so the tab title shows the
+        # blinking-green-circle "running" indicator.  ``None`` in
+        # tests that construct ``VSCodeServer`` standalone.
+        self._cli_running_lookup: Callable[[int], bool] | None = None
+        # Companion snapshot hook installed by ``RemoteAccessServer``
+        # via :meth:`set_cli_running_task_ids_lookup`.  Returns the
+        # full set of task ids the local ``sorcar`` CLI has announced
+        # as running (via ``cliTaskStart``).  Used by
+        # :meth:`_get_running_task_ids` to UNION the CLI-launched
+        # running tasks with the UI-launched ones, so the History
+        # panel's pulsing-green-dot ``is_running`` flag is set on
+        # CLI tasks too (the in-process ``_RunningAgentState``
+        # registry only tracks UI-launched tasks).
+        self._cli_running_task_ids_lookup: Callable[[], set[int]] | None = None
+
+    def set_cli_running_lookup(
+        self, lookup: Callable[[int], bool] | None,
+    ) -> None:
+        """Install the CLI-task running-lookup used by :meth:`_replay_session`.
+
+        Called by :class:`RemoteAccessServer` so the resume path can
+        detect tasks the local ``sorcar`` CLI is currently running
+        and subscribe the freshly opened webview tab to their live
+        event stream.  Passing ``None`` clears the hook.
+
+        Args:
+            lookup: Callable taking the task id and returning
+                ``True`` when the CLI is running it.
+        """
+        self._cli_running_lookup = lookup
+
+    def set_cli_running_task_ids_lookup(
+        self, lookup: Callable[[], set[int]] | None,
+    ) -> None:
+        """Install the CLI-running-task-id snapshot used by ``_get_history``.
+
+        Called by :class:`RemoteAccessServer` so the history listing
+        can union the CLI-launched running task ids with the
+        in-process UI-launched ones, making the History panel render
+        the pulsing-green-dot indicator on CLI tasks as well.
+        Passing ``None`` clears the hook.
+
+        Args:
+            lookup: Zero-arg callable returning a fresh snapshot set
+                of CLI-launched running ``task_history`` row ids.
+        """
+        self._cli_running_task_ids_lookup = lookup
 
     def drop_connection_state(self, conn_id: str) -> None:
         """Discard per-connection autocomplete state for a closed connection.
@@ -491,6 +545,19 @@ class VSCodeServer(
                     and tab.task_thread.is_alive()
                 ):
                     running.add(tid)
+        # CLI-launched tasks run in a separate ``sorcar`` process and
+        # have no ``_RunningAgentState`` entry on the daemon, but the
+        # ``RemoteAccessServer`` tracks them via ``cliTaskStart`` /
+        # ``cliTaskEnd`` envelopes.  Merge that set in so the History
+        # panel renders the pulsing-green-dot running indicator on
+        # CLI-launched rows too.
+        if self._cli_running_task_ids_lookup is not None:
+            try:
+                running.update(self._cli_running_task_ids_lookup())
+            except Exception:  # pragma: no cover — defensive
+                logger.exception(
+                    "cli running-task lookup failed; continuing",
+                )
         return running
 
     def _overlay_live_metrics(
@@ -576,6 +643,15 @@ class VSCodeServer(
                 "cost": 0.0,
                 "steps": 0,
                 "is_favorite": False,
+                # ``work_dir`` persisted on this task's row at
+                # completion time (see ``_TaskRunnerMixin`` →
+                # ``_save_task_extra``).  Surfaced so the history
+                # sidebar's Workspace filter checkbox can hide rows
+                # whose ``work_dir`` differs from the client's
+                # currently-configured workspace.  Empty string when
+                # the task pre-dates the persistence change or is
+                # still running.
+                "work_dir": "",
                 # Agent start / end timestamps in ms since epoch.
                 # ``startTs`` comes from the row's own ``timestamp``
                 # column (set on INSERT in ``_add_task``), ``endTs``
@@ -638,6 +714,9 @@ class VSCodeServer(
                     session["is_favorite"] = bool(
                         extra_obj.get("is_favorite", False)
                     )
+                    wd_raw = extra_obj.get("work_dir", "")
+                    if isinstance(wd_raw, str):
+                        session["work_dir"] = wd_raw
                     try:
                         start_ts_raw = extra_obj.get("startTs", 0)
                         if start_ts_raw:
@@ -958,6 +1037,51 @@ class VSCodeServer(
         if not result:
             result = _load_latest_chat_events_by_chat_id(chat_id)
         if not result:
+            # The persisted ``task_history`` row may not exist yet —
+            # ``ChatSorcarAgent.run`` writes it inside the worker
+            # thread, and a tab that STARTED a task and is immediately
+            # closed+reopened (or VS Code reload) can race the writer.
+            # Without a row there are no events to replay, but a live
+            # ``_RunningAgentState`` may still exist for this
+            # ``chat_id`` / ``tab_id`` — re-subscribe the re-opened
+            # webview to its stream and broadcast ``status running:true``
+            # so the webview learns the task is running.  Otherwise the
+            # re-opened tab would silently keep ``isRunning=false``,
+            # the user's next message would be sent as a ``submit``
+            # (→ ``run``) that the daemon would have to inject (the
+            # tab is busy) — and after the task finishes the tab would
+            # appear idle, but any input would NEVER reach the
+            # appendUserMessage path because the webview never learned
+            # the task was running in the first place.  Worst case is
+            # silent: the user types and nothing happens.
+            cleanup_tab = getattr(self.printer, "cleanup_tab", None)
+            if cleanup_tab is not None:
+                cleanup_tab(tab_id)
+            rebound_running = self._reattach_running_chat(
+                chat_id,
+                tab_id,
+                task_id=task_id,
+                is_subagent=False,
+            )
+            if rebound_running:
+                start_ts = self._live_task_start_ms(task_id, chat_id)
+                self.printer.broadcast({
+                    "type": "status",
+                    "running": True,
+                    "tabId": tab_id,
+                    "startTs": start_ts,
+                })
+                # Empty task_events so the webview's replay loop
+                # transitions out of its "loading" state cleanly.
+                self.printer.broadcast({
+                    "type": "task_events",
+                    "events": [],
+                    "task": "",
+                    "task_id": task_id,
+                    "chat_id": chat_id,
+                    "extra": "",
+                    "tabId": tab_id,
+                })
             return
         # NOTE: do NOT early-return on empty ``events``.  When a
         # sub-agent has just been spawned by ``run_parallel`` and
@@ -1024,6 +1148,29 @@ class VSCodeServer(
             task_id=rebound_task_id,
             is_subagent=subagent_info is not None,
         )
+        # Tasks launched by the local ``sorcar`` CLI never have a
+        # :class:`_RunningAgentState` registry entry in this process
+        # (the CLI agent runs in a separate Python process and only
+        # talks to the daemon over UDS).  ``_reattach_running_chat``
+        # therefore returns ``False`` for them and a webview tab
+        # opened from the history sidebar would not be subscribed to
+        # the live event stream and not get the blinking-green-circle
+        # "running" indicator.  Consult the CLI-running-task hook the
+        # :class:`RemoteAccessServer` installed via
+        # :meth:`set_cli_running_lookup` and, when the click resolved
+        # to a still-running CLI task, subscribe this tab under the
+        # task id (so subsequent ``cliEvent`` relays fan out to it)
+        # AND broadcast a ``status:running=true`` event to start the
+        # indicator.  Mirrors the tail of the rebound-running branch
+        # below.
+        if (
+            not rebound_running
+            and rebound_task_id is not None
+            and self._cli_running_lookup is not None
+            and self._cli_running_lookup(rebound_task_id)
+        ):
+            self.printer.subscribe_tab(str(rebound_task_id), tab_id)
+            rebound_running = True
 
         # Loading a (completed or running-elsewhere) task into this
         # tab is a VIEW operation — no agent will run here, so we
