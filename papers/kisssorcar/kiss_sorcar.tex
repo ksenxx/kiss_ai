@@ -52,7 +52,7 @@ Koushik Sen \\ EECS Department, UC Berkeley\\ \texttt{ksen@berkeley.edu} \\ }
 \begin{abstract}
 Large language models can generate code and call tools fluently, yet deploying them as practical software engineering assistants still exposes persistent gaps: finite context windows, a single mistake that can derail entire sessions, agents that get stuck in dead ends, AI slop, and generated changes that are difficult to review or revert.
 
-We present \textbf{KISS Sorcar}, a general-purpose assistant and integrated development environment (IDE) built on top of the \textbf{KISS Agent Framework}, a stupidly-simple AI agent framework of roughly 2,400~lines of code for the core agents.  The framework addresses these gaps through a structured system prompt and a five-layer agent hierarchy in which each layer adds exactly one concern: budget-tracked ReAct execution, automatic continuation across sub-sessions via summarization, coding, and browser tools with parallel sub-agents, persistent multi-turn chat with history recall, and git worktree isolation so every task runs on its own branch.  Engineering principles are encoded in the agent's system prompt.
+We present \textbf{KISS Sorcar}, a general-purpose assistant and integrated development environment (IDE) built on top of the \textbf{KISS Agent Framework}, a stupidly-simple AI agent framework of roughly 2,600~lines of code for the core agents.  The framework addresses these gaps through a structured system prompt and a five-layer agent hierarchy in which each layer adds exactly one concern: budget-tracked ReAct execution, automatic continuation across sub-sessions via summarization, coding, and browser tools with parallel sub-agents, persistent multi-turn chat with history recall, and git worktree isolation so every task runs on its own branch.  Engineering principles are encoded in the agent's system prompt.
 
 We implemented KISS Sorcar as a free, open-source Visual Studio Code extension that runs locally, handles long-horizon tasks, and supports browser automation, multimodal input, and Docker containers.
 
@@ -66,7 +66,7 @@ In this research, we deliberately prioritize output quality over speed:  giving 
 
 Modern Large language models (LLMs), such as Anthropic's Claude Opus 4.7~\citep{anthropic2026opus47}, OpenAI's GPT 5.5~\citep{openai2026gpt55}, and Google's Gemini 3.1~\citep{google2026gemini31}, can generate code, reason about software architecture, and use developer tools~\citep{chen2021evaluating,roziere2023code}.  A growing body of work has explored how to harness these capabilities for autonomous software engineering, from single-session agents that resolve GitHub issues~\citep{yang2024sweagent,wang2024openhands} to industrial products marketed as AI software and general assistants ~\citep{copilot2021,cursor2024,devin2024,claudecode2025,codex2025,openclaw2025}. Yet using an LLM as a practical software engineering or general assistant still exposes several stubborn gaps: context windows are finite, a single mistake can derail an entire session, agents get stuck in dead ends, models generate AI slop, and generated changes are difficult to review or revert once applied to a live codebase.
 
-We propose the \emph{KISS Agent Framework}, a stupidly simple AI agent framework containing around 2,400 lines of code for the core agent implementation.  We try to address the above-mentioned gaps through a structured system prompt (Section~\ref{sec:system-prompt}) and a five-layer agent hierarchy in which each layer solves exactly one concern:
+We propose the \emph{KISS Agent Framework}, a stupidly simple AI agent framework containing around 2,600 lines of code for the core agent implementation.  We try to address the above-mentioned gaps through a structured system prompt (Section~\ref{sec:system-prompt}) and a five-layer agent hierarchy in which each layer solves exactly one concern:
 
 \begin{enumerate}[nosep]
   \item \textbf{KISS Agent} --- budget-tracked
@@ -92,7 +92,7 @@ The name ``KISS'' reflects the \emph{Keep It Simple, Stupid} design philosophy i
 
 We implement KISS Sorcar, a general-purpose assistant and an integrated development environment (IDE), on top of the KISS Agent Framework.  KISS Sorcar is a Visual Studio Code extension that runs locally. It has browser support (using open-source Chromium and Playwright), multimodal support, Docker container support, OpenClaw-like features (whose discussion is beyond the scope of the paper), and a mobile/web app. KISS Sorcar is free and open-source; all one needs is a model API key from a major LLM provider, such as Anthropic.  We implemented this framework in roughly 4 months, and the repository is available at \url{https://github.com/ksenxx/kiss_ai}. The name ``Sorcar'' pays homage to P.~C.~Sorcar, the Bengali magician.  The engineering principles described in Section~\ref{sec:system-prompt} are encoded in the agent's system prompt.
 
-KISS Sorcar has been built using itself.  The entire codebase---the KISS Agent framework, the Sorcar agent layers, the VS~Code extension, and the system prompt---was developed by KISS Sorcar operating on its own repository.  This self-hosting discipline provides a continuous-integration-style stress test: if the agent introduces a bug that impairs its ability to function, we ask the agent to fix it by analyzing the trajectory and code.  The simplicity of the layered architecture was both a prerequisite for and a consequence of this bootstrapping process. The simplicity of the framework reduced the number of bugs the agent introduced.  The five core agent classes are compact: the KISS Agent comprises 392~lines, the Relentless Agent 403~lines, the Sorcar Agent 673~lines, the Chat Sorcar Agent 315~lines, and the Worktree Sorcar Agent 638~lines---a total of roughly 2,421~lines of code (counting only significant lines, i.e.\ excluding empty lines, comment-only lines, and the docstrings of private methods).  Despite the Sorcar and Chat layers absorbing Docker-aware tool variants, parallel sub-agent orchestration, and persistent chat-session bookkeeping, the framework has remained within this compact footprint and within the layered, single-concern design.
+KISS Sorcar has been built using itself.  The entire codebase---the KISS Agent framework, the Sorcar agent layers, the VS~Code extension, and the system prompt---was developed by KISS Sorcar operating on its own repository.  This self-hosting discipline provides a continuous-integration-style stress test: if the agent introduces a bug that impairs its ability to function, we ask the agent to fix it by analyzing the trajectory and code.  The simplicity of the layered architecture was both a prerequisite for and a consequence of this bootstrapping process. The simplicity of the framework reduced the number of bugs the agent introduced.  The five core agent classes are compact: the KISS Agent comprises 423~lines, the Relentless Agent 421~lines, the Sorcar Agent 672~lines, the Chat Sorcar Agent 386~lines, and the Worktree Sorcar Agent 669~lines---a total of roughly 2,571~lines of code (counting only significant lines, i.e.\ excluding empty lines, comment-only lines, and the docstrings of private methods).  Despite the Sorcar and Chat layers absorbing Docker-aware tool variants, parallel sub-agent orchestration, and persistent chat-session bookkeeping, the framework has remained within this compact footprint and within the layered, single-concern design.
 
 In the project, we deliberately prioritize output quality over speed.  In our experience, using a weaker or cheaper model often forces the developer to discard the agent's work and retry, ultimately increasing the total cost of completing a task.  Conversely, giving a frontier model adequate time to validate its own output---running linters, type checkers, and tests before declaring success---reduces the ``slop'' (low-quality, subtly incorrect code) common in faster but less thorough agents.  We expect token costs and inference latencies to continue to fall~\citep {gao2025trae}, making this quality-first posture increasingly practical.  In the meantime, the code produced by our agent is well-organized, simple, and idiomatic.
 
@@ -328,7 +328,7 @@ The prompt opens with two XML-tagged sections that establish who the agent is an
 You are KISS Sorcar, an AI General Assistant and IDE
 developed by Koushik Sen (ksen@berkeley.edu).
 Repo: https://github.com/ksenxx/kiss_ai
-Version: 2026.6.8
+Version: 2026.6.24
 
 Your sole goal is completing the user's task accurately
 and thoroughly.  Be rigorous, check facts, and produce
@@ -471,9 +471,9 @@ existing architecture. If referenced files, commands, or
 config don't exist, stop and ask the user rather than
 guessing.
 
-When fixing bugs, issues, or race conditions: write an
-integration test that reproduces the problem first, then
-fix the code, then verify the test passes.
+**When fixing bugs, issues, or race conditions: write an
+end-to-end test that reproduces the problem first, then
+fix the code, then verify the test passes.**
 \end{prompt}
 
 \noindent The ``Mandatory First Actions'' section ensures that project-specific overrides are loaded before any work begins.  This section has undergone several rounds of empirical refinement.  In an earlier version that merely mentioned the read inside a separate ``Self-Improvement Loop'' section, the agent read \texttt{SORCAR.md} as its first tool call only 46\% of the time.  After promoting the read to a dedicated section with imperative language, compliance improved in integration tests but regressed in production: analysis of 91~real tasks showed that 92\% never read \texttt{SORCAR.md}.  Two evasion patterns emerged: (1)~the agent used \texttt{Bash("cat ...")} instead of the \texttt{Read()} tool, and (2)~the agent combined the file read with other commands in a single \texttt{Bash} call.  Explicit prohibitions and ordinal position mandates raised compliance to 100\% in integration tests.
@@ -488,7 +488,7 @@ Each pre-flight check targets a specific category of avoidable error:
 
 \textbf{``If referenced files, commands, or config don't exist, stop and ask the user rather than guessing.''}  LLMs have a strong tendency to confabulate: when asked to modify a file that does not exist, the model will often proceed as if it does, producing edits against phantom content.  This instruction converts a silent failure (incorrect edits applied to a nonexistent file, which silently creates it) into an explicit clarification request.
 
-\textbf{``Write an integration test that reproduces the problem first, then fix the code, then verify the test passes.''}  This instruction mandates a test-first discipline for bug fixes, specifying the three-step sequence explicitly.  The motivation is two-fold: first, a test that reproduces the bug provides concrete verification that the fix is correct (the test should pass after the fix and fail before it).  Second, writing the test forces the model to understand the bug precisely before attempting a fix, reducing the risk of an ad~hoc patch that addresses a symptom rather than the root cause.  Specifying ``integration test'' rather than just ``test'' reinforces the no-mocks testing discipline described in Section~\ref{sec:system-prompt}.
+\textbf{``Write an end-to-end test that reproduces the problem first, then fix the code, then verify the test passes.''}  This instruction mandates a test-first discipline for bug fixes, specifying the three-step sequence explicitly.  The motivation is two-fold: first, a test that reproduces the bug provides concrete verification that the fix is correct (the test should pass after the fix and fail before it).  Second, writing the test forces the model to understand the bug precisely before attempting a fix, reducing the risk of an ad~hoc patch that addresses a symptom rather than the root cause.  Specifying ``end-to-end test'' rather than just ``test'' reinforces the no-mocks testing discipline described in Section~\ref{sec:system-prompt}.
 
 %......................................................................
 \subsection{Code Style Guidelines}
@@ -610,11 +610,11 @@ The testing section is perhaps the most opinionated:
 - Run lint and typecheckers; fix all errors including
   pre-existing ones.
 - Aim for 100% branch coverage on new and modified code.
-- Write integration and end-to-end tests only. Do not
-  use mocks, patches, fakes, or test doubles. Each test
-  must be independent and verify actual behavior.
-- Do not write structural tests which assert on the
-  source code.
+- Write end-to-end tests only. Do not use mocks,
+  patches, fakes, or test doubles. Each test must be
+  independent and verify actual behavior.
+- **DO NOT** write structural tests which assert on
+  the source code.
 - After modifications, run only the impacted tests.
 - To confirm race conditions: add a random sleep (<0.1s)
   before the suspected racing statements.
@@ -631,7 +631,7 @@ The testing section is perhaps the most opinionated:
 
 \textbf{``Aim for 100\% branch coverage on new and modified code.''}  LLMs tend to write happy-path tests that cover the main code path but ignore error handling, edge cases, and early-return branches.  The 100\% target forces the model to write tests for every branch, including error paths and boundary conditions.  Moreover, such tests help with regression---developers can use AI coding agents with less risk that changes will break existing program behavior.  The wording ``aim for'' rather than ``achieve'' acknowledges that perfect coverage is not always feasible, while still setting an ambitious target.
 
-\textbf{``Write integration and end-to-end tests only.\ Do not use mocks, patches, fakes, or test doubles.''}  This is the most opinionated rule.  Mock tests that verify code calls certain methods in a certain order test the implementation, not the behavior.  A test suite built on mocks can pass with flying colors while the system is fundamentally broken, because the mocks hide the real dependencies.  Integration tests that exercise actual behavior are more expensive to run but provide stronger evidence that the system works.  Moreover, writing integration tests forces the model to reason about the system's actual dependencies, often enabling the agent to find additional bugs.  The distinction between unit and integration tests matters: a unit test in isolation may verify that a function produces the right output for a given input, but an integration or end-to-end test verifies that the function works correctly within the larger system---with real file I/O, real database connections, and real inter-module interactions.
+\textbf{``Write end-to-end tests only.\ Do not use mocks, patches, fakes, or test doubles.''}  This is the most opinionated rule.  Mock tests that verify code calls certain methods in a certain order test the implementation, not the behavior.  A test suite built on mocks can pass with flying colors while the system is fundamentally broken, because the mocks hide the real dependencies.  End-to-end tests that exercise actual behavior are more expensive to run but provide stronger evidence that the system works.  Moreover, writing end-to-end tests forces the model to reason about the system's actual dependencies, often enabling the agent to find additional bugs.  The distinction between unit and end-to-end tests matters: a unit test in isolation may verify that a function produces the right output for a given input, but an end-to-end test verifies that the function works correctly within the larger system---with real file I/O, real database connections, and real inter-module interactions.
 
 \textbf{``Each test independent, verifying actual behavior.''}  Test independence means that running tests in any order produces the same results.  Tests that depend on shared state or execution order are brittle and difficult to debug when they fail.  ``Verifying actual behavior'' reiterates that tests should assert on observable outcomes (return values, side effects, system state) rather than implementation details.
 
@@ -803,10 +803,10 @@ A final section provides project-specific instructions that are injected when th
 - Lint/typecheck/format: `uv run check --full`. Tests:
   `uv run pytest -v` (timeout 900s).
 - The injectable instructions are available at
-  ~/.vscode/extensions/ksenxx.kiss-sorcar-2026.6.8/
+  ~/.vscode/extensions/ksenxx.kiss-sorcar-2026.6.24/
     kiss_project/src/kiss/INJECTIONS.md
 - Your SYSTEM.md (the system prompt) is located at
-  ~/.vscode/extensions/ksenxx.kiss-sorcar-2026.6.8/
+  ~/.vscode/extensions/ksenxx.kiss-sorcar-2026.6.24/
     kiss_project/src/kiss/SYSTEM.md
 - KISS Sorcar paper:
   https://github.com/ksenxx/kiss_ai/blob/main/
@@ -814,12 +814,24 @@ A final section provides project-specific instructions that are injected when th
 - Third-party agents: kiss/agents/third_party_agents
 - Claude SKILLS: kiss/agents/claude_skills. You can
   use them as necessary.
+- **If you create any artifact that the user can use
+  after the task is over, you MUST create them in a
+  directory and add the directory contents to git.**
+- MAINTAIN a PROGRESS.md across agent sessions logging
+  details of all the steps you have done so far from
+  the start with explanation and relevant code snippets.
+  Clear the contents of PROGRESS.md when a new task
+  (not subtask) begins.
+- **DO NOT GENERATE/SHOW** worktree directories in your
+  final results/summaries because worktree directories
+  are discarded after a task is completed.  Rather show
+  the directories relative to the main repo.
 - Authenticate unauthenticated third-party agents; ask
   the user only when a page requires human
   authentication.
 \end{prompt}
 
-These overrides serve six purposes.  First, they specify the exact toolchain commands for the KISS project itself (\texttt{uv run check -{}-full}, \texttt{uv run pytest -v} with a 900-second timeout), eliminating guesswork about which linter, formatter, or test runner to use.  Second, the agent is told the on-disk location of an \emph{injectable instructions} file---\texttt{\textasciitilde/.vscode/extensions/ksenxx.kiss-sorcar-\$VERSION/kiss\_project/src/kiss/INJECTIONS.md}---which the framework may concatenate onto the system prompt at runtime to deliver tricks and workarounds discovered after the extension shipped without requiring a new release; pointing the agent at this file lets it inspect or update those injected directives directly.  Third, the agent is told the on-disk location of its own \texttt{SYSTEM.md} (under the same extension directory, ending in \texttt{/SYSTEM.md}) so that questions about its own prompt or behavior can be answered by reading the canonical file rather than from memory.  This pointer is paired with a URL to the paper's \LaTeX{} source, giving the agent two complementary self-references: the system prompt for operational rules and the paper for design rationale.  Fourth, the instructions expose a third-party agent integration layer: the agent is told where third-party agents live (\texttt{kiss/agents/third\_party\_agents}).  When a third-party agent requires authentication, the agent handles it autonomously and only prompts the user when a page genuinely requires human credentials---reducing unnecessary interruptions while maintaining security.  Fifth, Claude SKILLS~\citep{claudecode2025} are bundled in \texttt{kiss/agents/claude\_skills} with the note ``You can use them as necessary,'' giving the agent access to Anthropic's skill library for common software engineering patterns; the permissive framing (rather than a mandate) lets the agent select skills opportunistically when a task matches one.  Sixth, the \texttt{SORCAR.md} override mechanism---now enforced by the Mandatory First Actions section---allows per-repository instructions to further customize the agent's behavior, forming a hierarchy: general system prompt $\rightarrow$ Sorcar-specific instructions $\rightarrow$ repository-specific \texttt{SORCAR.md}.  This approach also enables us to not hardcode \texttt{SORCAR.md} in the KISS Sorcar code, removing one more dependency.  In the \texttt{SORCAR.md}, one can include more markdown files for further instructions.
+These overrides serve nine purposes.  First, they specify the exact toolchain commands for the KISS project itself (\texttt{uv run check -{}-full}, \texttt{uv run pytest -v} with a 900-second timeout), eliminating guesswork about which linter, formatter, or test runner to use.  Second, the agent is told the on-disk location of an \emph{injectable instructions} file---\texttt{\textasciitilde/.vscode/extensions/ksenxx.kiss-sorcar-\$VERSION/kiss\_project/src/kiss/INJECTIONS.md}---which the framework may concatenate onto the system prompt at runtime to deliver tricks and workarounds discovered after the extension shipped without requiring a new release; pointing the agent at this file lets it inspect or update those injected directives directly.  Third, the agent is told the on-disk location of its own \texttt{SYSTEM.md} (under the same extension directory, ending in \texttt{/SYSTEM.md}) so that questions about its own prompt or behavior can be answered by reading the canonical file rather than from memory.  This pointer is paired with a URL to the paper's \LaTeX{} source, giving the agent two complementary self-references: the system prompt for operational rules and the paper for design rationale.  Fourth, the instructions expose a third-party agent integration layer: the agent is told where third-party agents live (\texttt{kiss/agents/third\_party\_agents}).  When a third-party agent requires authentication, the agent handles it autonomously and only prompts the user when a page genuinely requires human credentials---reducing unnecessary interruptions while maintaining security.  Fifth, Claude SKILLS~\citep{claudecode2025} are bundled in \texttt{kiss/agents/claude\_skills} with the note ``You can use them as necessary,'' giving the agent access to Anthropic's skill library for common software engineering patterns; the permissive framing (rather than a mandate) lets the agent select skills opportunistically when a task matches one.  Sixth, the \texttt{SORCAR.md} override mechanism---now enforced by the Mandatory First Actions section---allows per-repository instructions to further customize the agent's behavior, forming a hierarchy: general system prompt $\rightarrow$ Sorcar-specific instructions $\rightarrow$ repository-specific \texttt{SORCAR.md}.  This approach also enables us to not hardcode \texttt{SORCAR.md} in the KISS Sorcar code, removing one more dependency.  In the \texttt{SORCAR.md}, one can include more markdown files for further instructions.  Seventh, a directory-with-git-commit rule requires that any artifact the user can use after the task ends be created inside a directory and added to git, ensuring that durable outputs are version-controlled and easy to locate rather than scattered as loose files.  Eighth, the agent is required to maintain a \texttt{PROGRESS.md} across sub-sessions logging every step taken so far with explanations and relevant code snippets---and to clear it when a new top-level task (not a subtask) begins; this acts as a persistent scratchpad that bridges Relentless Agent continuations and lets a fresh sub-session pick up exactly where the previous one left off without re-deriving prior decisions.  Ninth, the worktree-presentation rule (``DO NOT GENERATE/SHOW worktree directories in your final results/summaries... rather show the directories relative to the main repo'') prevents the agent from quoting transient worktree paths that are discarded after merge; user-visible references must point at paths in the main repository so that copy-pasted file names and shell commands remain valid after the task completes.
 
 %----------------------------------------------------------------------
 \section{VS Code Extension Features}
