@@ -470,24 +470,33 @@ def _request_cli_info(
         "requestId": request_id,
     }
     cmd.update(extra)
+    # Disconnect / timeout sentinels use disjoint fields for the
+    # bool flag (``error``) and the human-readable string
+    # (``errorMessage``) — review A5/B4 round 2.  The old code put a
+    # bool into the same ``error`` field the server uses for an error
+    # string, which made the custom-command branch literally print
+    # "True" on disconnect.
+    disc_msg = "Daemon connection lost — type /exit to quit"
     # Early-fail when the daemon is already gone so the caller does
     # not block on a queue that no producer can write to.
     if client._closed.is_set():
         return {"type": "cliInfo", "subtype": subtype,
-                "text": "✗ Daemon connection lost — type /exit to quit",
-                "error": True}
+                "text": f"✗ {disc_msg}",
+                "error": True, "errorMessage": disc_msg}
     client.send(cmd)
     deadline = time.monotonic() + timeout
     while True:
         if client._closed.is_set():
             return {"type": "cliInfo", "subtype": subtype,
-                    "text": "✗ Daemon connection lost — type /exit to quit",
-                    "error": True}
+                    "text": f"✗ {disc_msg}",
+                    "error": True, "errorMessage": disc_msg}
         remaining = deadline - time.monotonic()
         if remaining <= 0:
+            timeout_msg = f"Daemon timed out waiting for {subtype} reply"
             return {"type": "cliInfo", "subtype": subtype,
                     "text": f"(no reply for {subtype})",
-                    "error": True, "timedOut": True}
+                    "error": True, "errorMessage": timeout_msg,
+                    "timedOut": True}
         try:
             ev = client.dispatcher.cli_info_q.get(
                 timeout=min(0.25, remaining),
@@ -551,6 +560,17 @@ def _handle_client_slash(  # noqa: PLR0911,PLR0912 - branchy by design
     arg = parts[1].strip() if len(parts) > 1 else ""
 
     if cmd in ("/exit", "/quit"):
+        # If a task is in flight, send ``stop`` so the daemon does
+        # not keep running it after the CLI client disconnects — the
+        # old code only sent ``closeTab`` from the outer ``finally``,
+        # leaking a long-running task whenever the user typed
+        # ``/exit`` mid-task (review #20 round 1, still present in
+        # round 2).
+        if client.dispatcher.task_active.is_set():
+            try:
+                client.send({"type": "stop", "tabId": client.tab_id})
+            except Exception:
+                logger.debug("/exit stop send failed", exc_info=True)
         return True
     if cmd == "/help":
         reply = _request_cli_info(client, "help")
@@ -630,11 +650,31 @@ def _handle_client_slash(  # noqa: PLR0911,PLR0912 - branchy by design
         _drain_queue(client.dispatcher.commit_q)
         client.send({"type": "generateCommitMessage",
                      "workDir": client.work_dir})
-        try:
-            ev = client.dispatcher.commit_q.get(timeout=30)
-        except queue.Empty:
-            print("\n✗ Auto-commit timed out waiting for a commit message.\n")
-            return False
+        # Poll for the reply but honour ``client._closed`` so a
+        # daemon disconnect mid-commit does NOT freeze the REPL for
+        # the full 30 s budget (review A3 round 2).
+        ev: dict[str, Any] | None = None
+        deadline = time.monotonic() + 30.0
+        while True:
+            if client._closed.is_set():
+                print(
+                    "\n✗ Auto-commit aborted: daemon connection lost.\n",
+                )
+                return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                print(
+                    "\n✗ Auto-commit timed out waiting for a "
+                    "commit message.\n",
+                )
+                return False
+            try:
+                ev = client.dispatcher.commit_q.get(
+                    timeout=min(0.25, remaining),
+                )
+                break
+            except queue.Empty:
+                continue
         msg = ev.get("message", "")
         if not msg:
             print(f"\n✗ Auto-commit: {ev.get('error', 'no message')}\n")
@@ -659,7 +699,10 @@ def _handle_client_slash(  # noqa: PLR0911,PLR0912 - branchy by design
         print(f"⚡ Running custom command {cmd} ({src}:{path})")
         _submit_task(client, prompt)
         return False
-    err = reply.get("error", "") or (
+    # ``errorMessage`` (string) carries the human text; ``error``
+    # is a bool flag.  Old code conflated them and printed the
+    # literal "True" on disconnect (review A5/B4 round 2).
+    err = reply.get("errorMessage") or (
         f"Unknown command: {cmd}. Type /help for the list of commands."
     )
     print(f"{err}\n")
@@ -694,95 +737,96 @@ def _submit_task(
         timeout_seconds: Hard cap on the wait loop so a wedged daemon
             does not pin the REPL forever.
     """
+    # Mint a per-submission task id BEFORE clearing ``task_active``
+    # so any inbound status event observed mid-transition matches
+    # the new task id (review B1 round 2 ordering fix).
+    new_task_id = uuid.uuid4().hex
+    client.dispatcher.current_task_id = new_task_id
     # Drain any stale status / askUser queue entries left over from a
     # prior task; this closes issue #46 from the review (a stale
     # ``status:false`` between two tasks would otherwise clear
     # ``task_active`` immediately and silently drop the new task).
     client.dispatcher.task_active.clear()
-    # Mint a per-submission task id and arm the dispatcher to match
-    # ``status`` events on it.  Stale ``status:false`` events from a
-    # prior task are filtered out by the dispatcher because their
-    # ``taskId`` does not match the active one (review #3).  An
-    # explicit ``current_task_id`` also lets a slow daemon take
-    # arbitrarily long to emit the first ``status:true`` — replacing
-    # the brittle 2 s armed-deadline fail-open (review #4).
-    new_task_id = uuid.uuid4().hex
-    client.dispatcher.current_task_id = new_task_id
     _drain_queue(client.dispatcher.ask_user_q)
     start = time.time()
-    client.send({
-        "type": "run",
-        "prompt": prompt,
-        "model": client.dispatcher.current_model,
-        "workDir": client.work_dir,
-        "useWorktree": use_worktree,
-        "useParallel": use_parallel,
-        "autoCommit": auto_commit,
-        "taskId": new_task_id,
-    })
-    # Wait for the daemon's first ``status:running=true`` for this
-    # task id.  Use the full ``timeout_seconds`` budget so slow
-    # daemon startup (worktree creation, MCP probe, cold model) does
-    # not silently abandon the task — review #4.
-    armed_deadline = time.monotonic() + timeout_seconds
-    while (
-        not client.dispatcher.task_active.is_set()
-        and time.monotonic() < armed_deadline
-        and not client._closed.is_set()
-    ):
-        time.sleep(0.05)
-    if client._closed.is_set():
-        client.dispatcher.printer.print(
-            "[red]✗ Daemon connection lost — type /exit to quit[/red]",
-            type="text",
-        )
-        client.dispatcher.current_task_id = ""
-        _print_elapsed(client, start)
-        return
-    if not client.dispatcher.task_active.is_set():
-        # The daemon never acknowledged the task within the user's
-        # timeout budget; surface a clear error instead of pretending
-        # the task ran.
-        client.dispatcher.printer.print(
-            f"[yellow]⏹  Daemon did not acknowledge the task within "
-            f"{int(timeout_seconds)}s.[/yellow]",
-            type="text",
-        )
-        client.dispatcher.current_task_id = ""
-        _print_elapsed(client, start)
-        return
-    deadline = time.monotonic() + timeout_seconds
-    while client.dispatcher.task_active.is_set():
+    try:
+        client.send({
+            "type": "run",
+            "prompt": prompt,
+            "model": client.dispatcher.current_model,
+            "workDir": client.work_dir,
+            "useWorktree": use_worktree,
+            "useParallel": use_parallel,
+            "autoCommit": auto_commit,
+            "taskId": new_task_id,
+        })
+        # Wait for the daemon's first ``status:running=true`` for this
+        # task id.  Use the full ``timeout_seconds`` budget so slow
+        # daemon startup (worktree creation, MCP probe, cold model) does
+        # not silently abandon the task — review #4.
+        armed_deadline = time.monotonic() + timeout_seconds
+        while (
+            not client.dispatcher.task_active.is_set()
+            and time.monotonic() < armed_deadline
+            and not client._closed.is_set()
+        ):
+            time.sleep(0.05)
         if client._closed.is_set():
             client.dispatcher.printer.print(
                 "[red]✗ Daemon connection lost — type /exit to quit[/red]",
                 type="text",
             )
             return
-        if time.monotonic() > deadline:
+        if not client.dispatcher.task_active.is_set():
+            # The daemon never acknowledged the task within the user's
+            # timeout budget; surface a clear error instead of pretending
+            # the task ran.
             client.dispatcher.printer.print(
-                f"[yellow]⏹  Task wait timed out after "
+                f"[yellow]⏹  Daemon did not acknowledge the task within "
                 f"{int(timeout_seconds)}s.[/yellow]",
                 type="text",
             )
             return
-        # Drain pending askUser questions on the REPL thread so the
-        # user's input() blocks here, never on the asyncio loop.
-        try:
-            question = client.dispatcher.ask_user_q.get(timeout=0.1)
-        except queue.Empty:
-            continue
-        client.dispatcher.printer.print(
-            f"[bold yellow]Agent asks:[/bold yellow] {question}",
-            type="text",
-        )
-        try:
-            ans = input("> ")
-        except (EOFError, KeyboardInterrupt):
-            ans = "done"
-        client.send({"type": "userAnswer", "answer": ans})
-    client.dispatcher.current_task_id = ""
-    _print_elapsed(client, start)
+        deadline = time.monotonic() + timeout_seconds
+        while client.dispatcher.task_active.is_set():
+            if client._closed.is_set():
+                client.dispatcher.printer.print(
+                    "[red]✗ Daemon connection lost — type /exit to quit"
+                    "[/red]",
+                    type="text",
+                )
+                return
+            if time.monotonic() > deadline:
+                client.dispatcher.printer.print(
+                    f"[yellow]⏹  Task wait timed out after "
+                    f"{int(timeout_seconds)}s.[/yellow]",
+                    type="text",
+                )
+                return
+            # Drain pending askUser questions on the REPL thread so the
+            # user's input() blocks here, never on the asyncio loop.
+            try:
+                question = client.dispatcher.ask_user_q.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            client.dispatcher.printer.print(
+                f"[bold yellow]Agent asks:[/bold yellow] {question}",
+                type="text",
+            )
+            try:
+                ans = input("> ")
+            except (EOFError, KeyboardInterrupt):
+                ans = "done"
+            client.send({"type": "userAnswer", "answer": ans})
+    finally:
+        # Always reset the per-task dispatcher state, regardless of
+        # which exit path was taken (early returns, timeout, disconnect,
+        # exceptions) — review B1 round 2.  Without this, a stale
+        # ``current_task_id`` survives the call and the next task's
+        # status events get filtered out under the OLD id.
+        client.dispatcher.current_task_id = ""
+        client.dispatcher.task_active.clear()
+        _print_elapsed(client, start)
 
 
 def _print_elapsed(client: CliClient, start: float) -> None:

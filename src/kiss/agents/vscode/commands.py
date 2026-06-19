@@ -1023,15 +1023,21 @@ class _CommandsMixin:
                 if found is None:
                     # Tag missing-skill replies as errors so the CLI
                     # client can render them with the ✗ marker rather
-                    # than as a normal info line (review #27).
+                    # than as a normal info line (review #27).  Use
+                    # ``error`` (bool) for the flag and
+                    # ``errorMessage`` (string) for the human-readable
+                    # text — disambiguating the previously-overloaded
+                    # ``error`` field (review A5/B4 round 2).
                     text = f"Unknown skill: {name}. /skills lists them."
                     extra["error"] = True
+                    extra["errorMessage"] = text
                 else:
                     try:
                         text = load_skill_content(found)
                     except Exception as exc:  # pragma: no cover - read guard
                         text = f"Failed to load skill {name}: {exc}"
                         extra["error"] = True
+                        extra["errorMessage"] = text
             else:
                 text = format_skill_listing(skills)
         elif subtype == "mcp":
@@ -1060,11 +1066,14 @@ class _CommandsMixin:
             agent_obj = getattr(tab, "agent", None) if tab is not None else None
             budget = float(getattr(agent_obj, "budget_used", 0.0) or 0.0)
             tokens = int(getattr(agent_obj, "total_tokens_used", 0) or 0)
-            chat_id = (
-                getattr(agent_obj, "chat_id", "") or ""
-            ) if agent_obj is not None else ""
-            if not chat_id and tab is not None:
-                chat_id = tab.chat_id or ""
+            # ``tab.chat_id`` wins over ``agent.chat_id`` because the
+            # latter is bound at agent-construction time and goes stale
+            # the moment the user issues ``/clear`` (which resets
+            # ``tab.chat_id`` to ""); the agent reference may still
+            # carry the OLD id (review A1.a round 3).
+            chat_id = (tab.chat_id or "") if tab is not None else ""
+            if not chat_id and agent_obj is not None:
+                chat_id = getattr(agent_obj, "chat_id", "") or ""
             text = (
                 f"Chat ID: {chat_id or '(new)'}\n"
                 f"Cost: ${budget:.4f}\n"
@@ -1090,14 +1099,21 @@ class _CommandsMixin:
             if found_cmd is None:
                 text = ""
                 extra["found"] = False
-                extra["error"] = f"Unknown command: /{name}"
+                # Disambiguate ``error`` (bool flag) from
+                # ``errorMessage`` (human-readable string).  The
+                # round-2 commit overloaded ``error`` with both shapes
+                # which made the client print the literal "True" when
+                # a timeout / disconnect set ``error=True`` (no string).
+                extra["error"] = True
+                extra["errorMessage"] = f"Unknown command: /{name}"
             else:
                 try:
                     expanded = expand_command(found_cmd, args, work_dir)
                 except Exception as exc:  # pragma: no cover - expansion guard
                     text = ""
                     extra["found"] = False
-                    extra["error"] = f"Expansion failed: {exc}"
+                    extra["error"] = True
+                    extra["errorMessage"] = f"Expansion failed: {exc}"
                 else:
                     text = expanded
                     extra["found"] = True
@@ -1105,6 +1121,8 @@ class _CommandsMixin:
                     extra["path"] = str(found_cmd.path)
         else:
             text = f"Unknown cliInfo subtype: {subtype}"
+            extra["error"] = True
+            extra["errorMessage"] = text
 
         event: dict[str, Any] = {
             "type": "cliInfo",

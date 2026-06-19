@@ -143,15 +143,24 @@ class _TaskRunnerMixin:
         # opened from history while the agent was already running).
         start_ms = int(time.time() * 1000)
         cmd["_start_ms"] = start_ms
+        # The CLI client stamps every ``run`` with a per-submission
+        # ``taskId`` (a UUID it minted just before sending) so its
+        # dispatcher can filter stale ``status:running=false`` events
+        # from a prior task that finished after the new one was sent
+        # (review #3 / #4 round 2 — A2 critical).  Echo the id verbatim
+        # on every ``status`` broadcast for this run so the client's
+        # ``current_task_id`` filter actually works in production.
+        client_task_id = cmd.get("taskId", "") or ""
         try:
-            self.printer.broadcast(
-                {
-                    "type": "status",
-                    "running": True,
-                    "tabId": tab_id,
-                    "startTs": start_ms,
-                },
-            )
+            status_start: dict[str, Any] = {
+                "type": "status",
+                "running": True,
+                "tabId": tab_id,
+                "startTs": start_ms,
+            }
+            if client_task_id:
+                status_start["taskId"] = client_task_id
+            self.printer.broadcast(status_start)
             self._run_task_inner(cmd)
         except Exception as exc:
             # ``_run_task_inner`` handles failures of the agent run
@@ -229,16 +238,22 @@ class _TaskRunnerMixin:
                 task_id_for_end = (
                     tab.last_task_id if tab is not None else None
                 )
-                self.printer.broadcast(
-                    {"type": "status", "running": False, "tabId": tab_id},
-                )
-            self._broadcast_status_end_to_viewers(task_id_for_end, tab_id)
+                status_end: dict[str, Any] = {
+                    "type": "status", "running": False, "tabId": tab_id,
+                }
+                if client_task_id:
+                    status_end["taskId"] = client_task_id
+                self.printer.broadcast(status_end)
+            self._broadcast_status_end_to_viewers(
+                task_id_for_end, tab_id, client_task_id=client_task_id,
+            )
             # If the user clicked closeTab while this task was still
             # running, dispose the now-idle _RunningAgentState.  No-op otherwise.
             self._dispose_if_closed(tab_id)
 
     def _broadcast_status_end_to_viewers(
         self, task_id: int | None, launcher_tab_id: str,
+        *, client_task_id: str = "",
     ) -> None:
         """Broadcast ``status running=False`` to every viewer subscribed
         to *task_id*, excluding the launcher tab.
@@ -269,11 +284,14 @@ class _TaskRunnerMixin:
         for viewer_tab_id in self.printer._fanout_targets(task_id):
             if viewer_tab_id == launcher_tab_id:
                 continue
-            self.printer.broadcast({
+            payload: dict[str, Any] = {
                 "type": "status",
                 "running": False,
                 "tabId": viewer_tab_id,
-            })
+            }
+            if client_task_id:
+                payload["taskId"] = client_task_id
+            self.printer.broadcast(payload)
 
     @staticmethod
     def _capture_pre_snapshot(
