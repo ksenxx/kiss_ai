@@ -365,9 +365,19 @@ class CliClient:
             self._closed.set()
 
     async def _main(self) -> None:
+        # The daemon emits very large single-line JSON events at the
+        # start of every task — most notably ``system_prompt``, which
+        # carries the full ``SYSTEM.md`` plus injections and easily
+        # exceeds 64 KiB.  ``asyncio.open_unix_connection`` defaults
+        # ``StreamReader``'s buffer to 64 KiB, so an oversize line
+        # would raise :class:`asyncio.LimitOverrunError` from
+        # :meth:`StreamReader.readline` and tear down the connection,
+        # which the user sees as ``Daemon connection lost``.  Use a
+        # 16 MiB buffer to accommodate any realistic single event.
         try:
             self._reader, self._writer = await asyncio.open_unix_connection(
                 str(self.sock_path),
+                limit=16 * 1024 * 1024,
             )
         except OSError as exc:
             self._connect_error = exc
@@ -379,7 +389,22 @@ class CliClient:
         self._connected.set()
         try:
             while True:
-                line = await self._reader.readline()
+                try:
+                    line = await self._reader.readline()
+                except asyncio.LimitOverrunError:
+                    # Defence in depth: an event larger than even the
+                    # 16 MiB buffer would normally tear down the UDS
+                    # silently.  Log loudly and return so the caller's
+                    # ``finally`` marks the client as closed — the
+                    # symptom (``Daemon connection lost``) is now
+                    # accompanied by an actionable log line.
+                    logger.error(
+                        "daemon emitted oversize event "
+                        "(exceeds StreamReader buffer); UDS closed",
+                    )
+                    return
+                except asyncio.IncompleteReadError:
+                    return
                 if not line:
                     return
                 try:
