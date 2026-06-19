@@ -217,7 +217,9 @@ class TestVscodeOnlyCommandsDropped(_ServerTestBase):
         any (erroneous) broadcast caused by the VS Code-only commands
         would arrive before the unknown-command error sentinel.
         """
-        reader, writer = await asyncio.open_unix_connection(str(self.uds_path))
+        reader, writer = await asyncio.open_unix_connection(
+            str(self.uds_path), limit=16 * 1024 * 1024,
+        )
         try:
             for cmd in (
                 {"type": "pickFolder"},

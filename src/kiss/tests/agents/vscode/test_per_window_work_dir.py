@@ -115,6 +115,7 @@ class TestPerWindowWorkDir(IsolatedAsyncioTestCase):
         """Open one UDS connection (simulates one VS Code window)."""
         reader, writer = await asyncio.open_unix_connection(
             str(self.uds_path),
+            limit=16 * 1024 * 1024,
         )
         self._writers.append(writer)
         return reader, writer
