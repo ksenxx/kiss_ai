@@ -237,15 +237,15 @@ class TestOpenAIXhighDefault:
     def test_model_info_flag_drives_defaulting(self, capture_server: str) -> None:
         """The xhigh default must be driven solely by the MODEL_INFO flag.
 
-        Flipping ``supports_xhigh_reasoning_effort`` on a model that does NOT
-        normally default (here: ``gpt-4o``) must immediately cause the next
+        Flipping ``thinking`` on a model that does NOT normally default
+        (here: ``gpt-4o``) must immediately cause the next
         ``OpenAICompatibleModel`` instance built for that model to send
         ``reasoning_effort: xhigh``.  This is the contract that makes adding
         future xhigh-capable models a one-line change in ``model_info.py``.
         """
         from kiss.core.models.model_info import MODEL_INFO
-        original = MODEL_INFO["gpt-4o"].supports_xhigh_reasoning_effort
-        MODEL_INFO["gpt-4o"].supports_xhigh_reasoning_effort = True
+        original = MODEL_INFO["gpt-4o"].thinking
+        MODEL_INFO["gpt-4o"].thinking = "xhigh"
         try:
             m = OpenAICompatibleModel(
                 "gpt-4o",
@@ -257,4 +257,4 @@ class TestOpenAIXhighDefault:
             body = _CapturingHandler.captured_bodies[-1]
             assert body.get("reasoning_effort") == "xhigh"
         finally:
-            MODEL_INFO["gpt-4o"].supports_xhigh_reasoning_effort = original
+            MODEL_INFO["gpt-4o"].thinking = original

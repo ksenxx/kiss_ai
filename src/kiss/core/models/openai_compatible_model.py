@@ -26,14 +26,15 @@ from kiss.core.models.model import (
 
 logger = logging.getLogger(__name__)
 
-def _model_supports_xhigh(model_name: str) -> bool:
-    """Return True iff *model_name* is flagged as supporting ``xhigh`` effort.
+def _model_thinking_level(model_name: str) -> str | None:
+    """Return the default ``reasoning_effort`` level for *model_name*, if any.
 
-    The flag lives on ``MODEL_INFO[model_name].supports_xhigh_reasoning_effort``
-    and is set per-model in ``model_info.py`` via the ``xhigh=True`` argument
-    of the ``_mi(...)`` helper.  Models not in ``MODEL_INFO`` (e.g. custom
-    endpoints with arbitrary model names) return False so we never send an
-    unsupported ``reasoning_effort`` to such providers.
+    The level lives on ``MODEL_INFO[model_name].thinking`` and is set
+    per-model in ``model_info.py`` via the ``thinking="<level>"`` argument of
+    the ``_mi(...)`` helper (e.g. ``thinking="xhigh"`` for the gpt-5.5
+    family).  Models not in ``MODEL_INFO`` (e.g. custom endpoints with
+    arbitrary model names) return ``None`` so we never send an unsupported
+    ``reasoning_effort`` to such providers.
 
     Args:
         model_name: The full model name as passed to
@@ -41,15 +42,15 @@ def _model_supports_xhigh(model_name: str) -> bool:
             prefix.
 
     Returns:
-        True iff a matching ``MODEL_INFO`` entry exists and has
-        ``supports_xhigh_reasoning_effort=True``.
+        The thinking level string (e.g. ``"xhigh"``) if the matching
+        ``MODEL_INFO`` entry sets one, otherwise ``None``.
     """
     # Lazy import: avoid a circular import between this module and
     # ``model_info`` (which imports ``OpenAICompatibleModel`` from this
     # package via ``_openai_compatible``).
     from kiss.core.models.model_info import MODEL_INFO
     info = MODEL_INFO.get(model_name)
-    return bool(info and info.supports_xhigh_reasoning_effort)
+    return info.thinking if info is not None else None
 
 
 DEEPSEEK_REASONING_MODELS = {
@@ -161,15 +162,13 @@ class OpenAICompatibleModel(Model):
         self._api_model_name = (
             model_name[len("openrouter/") :] if model_name.startswith("openrouter/") else model_name
         )
-        # Default reasoning_effort to "xhigh" for any model flagged in
-        # MODEL_INFO as supporting it.  Copy first so we never mutate the
-        # caller's dict.  Caller-supplied values always win.
-        if (
-            _model_supports_xhigh(self.model_name)
-            and "reasoning_effort" not in self.model_config
-        ):
+        # Default ``reasoning_effort`` to the level declared on the model's
+        # MODEL_INFO entry (e.g. ``"xhigh"`` for gpt-5.5).  Copy first so we
+        # never mutate the caller's dict.  Caller-supplied values always win.
+        thinking_level = _model_thinking_level(self.model_name)
+        if thinking_level is not None and "reasoning_effort" not in self.model_config:
             self.model_config = dict(self.model_config)
-            self.model_config["reasoning_effort"] = "xhigh"
+            self.model_config["reasoning_effort"] = thinking_level
 
     def __str__(self) -> str:
         """Return a string representation of the model.
