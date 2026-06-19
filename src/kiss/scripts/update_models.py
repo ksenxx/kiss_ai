@@ -515,6 +515,34 @@ def find_deprecated_models(
     return deprecated
 
 
+_GPT_PRO_OR_CODEX_RE = re.compile(r"-(pro|codex)(-|$)")
+
+
+def _is_excluded_gpt_pro_or_codex(name: str) -> bool:
+    """Return True for GPT ``-pro`` / ``-codex`` variants we never auto-add.
+
+    GPT ``-pro`` slugs (``gpt-5-pro``, ``gpt-5.5-pro-2026-04-23``, ...) reject
+    the ``reasoning_effort`` parameter, are billed at premium tiers, and the
+    Codex CLI rejects them at runtime for ChatGPT-account users. GPT
+    ``-codex`` slugs (``gpt-5-codex``, ``gpt-5.1-codex-max``, ...) are
+    intended to be exercised through the Codex CLI backend rather than
+    direct Chat Completions. In both cases the discovery flow must silently
+    skip those names so they are never appended to ``model_info.py``.
+
+    The match is scoped to the GPT family by checking that the base name
+    (last ``/``-separated segment) starts with ``gpt-``; this keeps unrelated
+    vendor models (e.g. a hypothetical ``acme/super-pro``) eligible for
+    addition. Matches both undated forms (``gpt-5-pro``, ``gpt-5.3-codex``)
+    and dated snapshots (``gpt-5-pro-2025-10-06``), and applies equally to
+    OpenRouter passthroughs (``openrouter/openai/gpt-5-pro``) and Codex CLI
+    keys (``codex/gpt-5.3-codex``).
+    """
+    base = name.rsplit("/", 1)[-1]
+    if not base.startswith("gpt-"):
+        return False
+    return bool(_GPT_PRO_OR_CODEX_RE.search(base))
+
+
 def _strip_date_suffix(name: str) -> str:
     """Remove trailing date suffixes (YYYYMMDD or YYYY-MM-DD) for fuzzy lookup."""
     stripped = re.sub(r"-\d{8}$", "", name)
@@ -578,6 +606,8 @@ def _add_codex_candidates(
     for slug in codex_slugs:  # pragma: no branch
         codex_name = f"codex/{slug}"
         if codex_name in current:  # pragma: no branch
+            continue
+        if _is_excluded_gpt_pro_or_codex(codex_name):  # pragma: no branch
             continue
         or_info = _lookup_openrouter_pricing(slug, "openai", openrouter)
         ctx = or_info["context_length"] if or_info and or_info.get("context_length") else 400000
@@ -657,6 +687,8 @@ def compute_changes(
             if changed:  # pragma: no branch
                 updates.append({"name": name, "changes": changed, "source": "openrouter"})
         else:
+            if _is_excluded_gpt_pro_or_codex(name):
+                continue
             is_preview = "preview" in name.split("/")[-1]
             has_pricing = fetched["input_price_per_1M"] > 0
             if fetched["context_length"] and (has_pricing or is_preview):
@@ -754,6 +786,8 @@ def compute_changes(
 
     for name in openai:  # pragma: no branch
         if name not in current:  # pragma: no branch
+            if _is_excluded_gpt_pro_or_codex(name):  # pragma: no branch
+                continue
             or_info = _lookup_openrouter_pricing(name, "openai", openrouter)
             ctx = or_info["context_length"] if or_info and or_info.get("context_length") else 0
             inp = or_info["input_price_per_1M"] if or_info else 0.0
