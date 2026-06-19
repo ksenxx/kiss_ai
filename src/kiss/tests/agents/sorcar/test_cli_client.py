@@ -441,13 +441,16 @@ class TestEventDispatcherRouting(unittest.TestCase):
         self.disp.dispatch({"type": "clear", "chat_id": "abc123"})
         self.assertEqual(self.disp.chat_id, "abc123")
 
-    def test_ask_user_invokes_callback(self) -> None:
-        captured: queue.Queue[str] = queue.Queue()
-        self.disp.ask_user_cb = captured.put
+    def test_ask_user_enqueues_question(self) -> None:
         self.disp.dispatch(
             {"type": "askUser", "question": "Continue?"},
         )
-        self.assertEqual(captured.get(timeout=1), "Continue?")
+        # The dispatcher now hands askUser questions to the REPL
+        # thread via a queue (so ``input()`` does not block the
+        # asyncio loop thread); the test reads them off the queue.
+        self.assertEqual(
+            self.disp.ask_user_q.get(timeout=1), "Continue?",
+        )
 
     def test_streamed_events_do_not_crash(self) -> None:
         events: list[dict[str, Any]] = [
@@ -470,6 +473,121 @@ class TestEventDispatcherRouting(unittest.TestCase):
         ]
         for ev in events:
             self.disp.dispatch(ev)
+
+
+class TestSubmitTaskBehaviour(CliClientBase):
+    """:func:`_submit_task` must forward run flags and handle race cases."""
+
+    def test_run_flags_are_forwarded(self) -> None:
+        """``use_worktree`` / ``use_parallel`` / ``auto_commit`` reach daemon."""
+        from kiss.agents.sorcar.cli_client import _submit_task
+
+        # Intercept the next ``run`` broadcast by snapshotting captured
+        # length and triggering _submit_task with a tiny timeout so the
+        # call returns immediately when no daemon-side status:true
+        # event is observed.  Since the test daemon's task runner is
+        # the same code path as the webview's, _cmd_run will fire and
+        # broadcast ``setTaskText`` + ``status:true`` then start the
+        # background worker.  We immediately ``stop`` the task and let
+        # the dispatcher exit cleanly.
+        captured_runs: list[dict[str, Any]] = []
+        orig_send = self.client.send
+
+        def _capture_send(cmd: dict[str, Any]) -> None:
+            captured_runs.append(dict(cmd))
+            orig_send(cmd)
+
+        self.client.send = _capture_send  # type: ignore[method-assign]
+        try:
+            # Use a very tight timeout so the wait loop exits promptly.
+            _submit_task(
+                self.client, "noop",
+                use_worktree=False,
+                use_parallel=False,
+                auto_commit=True,
+                timeout_seconds=0.5,
+            )
+        finally:
+            self.client.send = orig_send  # type: ignore[method-assign]
+            # Stop any task the daemon started so it does not leak.
+            self.client.send({"type": "stop"})
+
+        run_msgs = [c for c in captured_runs if c.get("type") == "run"]
+        self.assertEqual(len(run_msgs), 1, captured_runs)
+        run_cmd = run_msgs[0]
+        self.assertFalse(run_cmd["useWorktree"])
+        self.assertFalse(run_cmd["useParallel"])
+        self.assertTrue(run_cmd["autoCommit"])
+
+    def test_submit_task_returns_when_daemon_disconnects(self) -> None:
+        """``_submit_task`` must not wedge when the daemon goes away."""
+        from kiss.agents.sorcar.cli_client import _submit_task
+
+        # Force the wait loop into "task active" so the disconnect
+        # path is the only way out, then mark the connection closed.
+        self.client.dispatcher.task_active.set()
+        self.client._closed.set()
+        start = time.monotonic()
+        _submit_task(self.client, "noop", timeout_seconds=10.0)
+        self.assertLess(time.monotonic() - start, 3.0)
+
+
+class TestResumeNoArg(CliClientBase):
+    """``/resume`` with no arg must list recent chats without the REPL stub."""
+
+    def test_resume_no_arg_does_not_print_chat_mode_error(self) -> None:
+        # Capture stdout so we can assert the chat-mode error from
+        # ``_handle_resume`` is NOT printed in client mode.
+        from io import StringIO
+
+        buf = StringIO()
+        with patch.object(sys, "stdout", buf):
+            self.assertFalse(_handle_client_slash(self.client, "/resume"))
+        text = buf.getvalue()
+        self.assertNotIn("Resume is only available in chat mode", text)
+        # The recent-chats listing must include the resume hint.
+        self.assertIn("Resume one with: /resume <chat-id>", text)
+
+
+class TestConnIdIsolation(unittest.TestCase):
+    """Two CLI clients on the same daemon must not see each other's replies."""
+
+    def setUp(self) -> None:
+        self.harness = _DaemonHarness()
+        # Two independent clients, each with its own tab id.
+        self.client_a = CliClient(
+            sock_path=Path(self.harness.sock_path),
+            work_dir=self.harness.work_dir,
+            tab_id=uuid.uuid4().hex,
+            printer=ConsolePrinter(file=open(os.devnull, "w")),
+        )
+        self.client_b = CliClient(
+            sock_path=Path(self.harness.sock_path),
+            work_dir=self.harness.work_dir,
+            tab_id=uuid.uuid4().hex,
+            printer=ConsolePrinter(file=open(os.devnull, "w")),
+        )
+        self.client_a.start(timeout=5.0)
+        self.client_b.start(timeout=5.0)
+
+    def tearDown(self) -> None:
+        try:
+            self.client_a.close()
+            self.client_b.close()
+        finally:
+            self.harness.shutdown()
+
+    def test_cli_info_reply_routed_to_requesting_client_only(self) -> None:
+        # Drain both queues so we can detect cross-talk.
+        from kiss.agents.sorcar.cli_client import _drain_queue
+
+        _drain_queue(self.client_a.dispatcher.cli_info_q)
+        _drain_queue(self.client_b.dispatcher.cli_info_q)
+        reply_a = _request_cli_info(self.client_a, "help")
+        self.assertIn("/help", reply_a.get("text", ""))
+        # Client B must NOT have received the reply.
+        with self.assertRaises(queue.Empty):
+            self.client_b.dispatcher.cli_info_q.get(timeout=0.5)
 
 
 if __name__ == "__main__":
