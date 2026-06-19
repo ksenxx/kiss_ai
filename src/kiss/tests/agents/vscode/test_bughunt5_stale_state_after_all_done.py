@@ -142,6 +142,7 @@ class TestStaleStateAfterClientAllDone(IsolatedAsyncioTestCase):
         """Open one UDS connection (the VS Code extension transport)."""
         reader, writer = await asyncio.open_unix_connection(
             str(self.uds_path),
+            limit=16 * 1024 * 1024,
         )
         self._conns.append((reader, writer))
         return reader, writer
