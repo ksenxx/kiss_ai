@@ -147,7 +147,9 @@ class TestCliDaemonLiveStream(unittest.TestCase):
         async def _open() -> tuple[
             asyncio.StreamReader, asyncio.StreamWriter,
         ]:
-            return await asyncio.open_unix_connection(self.sock_path)
+            return await asyncio.open_unix_connection(
+                self.sock_path, limit=16 * 1024 * 1024,
+            )
 
         reader, writer = asyncio.run_coroutine_threadsafe(
             _open(), self.loop,
