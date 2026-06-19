@@ -190,9 +190,9 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "gemini-2.5-flash-lite": _mi(1048576, 0.10, 0.40, fc=False),
     "gemini-2.5-pro": _mi(1048576, 1.25, 10.00),
     "gemini-3-flash-preview": _mi(1048576, 0.50, 3.00),
-    "gemini-3-pro-image": _mi(131072, 0.00, 0.00),  # NEW: needs pricing
+    "gemini-3-pro-image": _mi(131072, 2.00, 12.00),  # NEW: needs pricing
     "gemini-3-pro-preview": _mi(1048576, 2.00, 12.00),
-    "gemini-3.1-flash-image": _mi(65536, 0.00, 0.00),  # NEW: needs pricing
+    "gemini-3.1-flash-image": _mi(65536, 0.50, 3.00),  # NEW: needs pricing
     "gemini-3.1-flash-lite": _mi(1048576, 0.25, 1.50),  # NEW
     "gemini-3.1-flash-lite-preview": _mi(1048576, 0.25, 1.50),
     "gemini-3.1-flash-tts-preview": _mi(8192, 0.00, 0.00),
@@ -388,7 +388,9 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/google/gemini-2.5-pro-preview": _mi(1048576, 1.25, 10.00),
     "openrouter/google/gemini-2.5-pro-preview-05-06": _mi(1048576, 1.25, 10.00, fc=False),
     "openrouter/google/gemini-3-flash-preview": _mi(1048576, 0.50, 3.00),
+    "openrouter/google/gemini-3-pro-image": _mi(65536, 2.00, 12.00),  # NEW
     "openrouter/google/gemini-3-pro-image-preview": _mi(65536, 2.00, 12.00, fc=False, gen=False),
+    "openrouter/google/gemini-3.1-flash-image": _mi(131072, 0.50, 3.00, fc=False),  # NEW
     "openrouter/google/gemini-3.1-flash-image-preview": _mi(131072, 0.50, 3.00),
     "openrouter/google/gemini-3.1-flash-lite": _mi(1048576, 0.25, 1.50),  # NEW
     "openrouter/google/gemini-3.1-flash-lite-preview": _mi(1048576, 0.25, 1.50),
@@ -416,7 +418,6 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/kwaipilot/kat-coder-pro-v2": _mi(256000, 0.30, 1.20),
     "openrouter/liquid/lfm-2-24b-a2b": _mi(128000, 0.03, 0.12),
     "openrouter/mancer/weaver": _mi(8000, 0.75, 1.00, fc=False),
-    "openrouter/meta-llama/llama-3-70b-instruct": _mi(8192, 0.51, 0.74, fc=False),
     "openrouter/meta-llama/llama-3-8b-instruct": _mi(8192, 0.14, 0.14, fc=False),
     "openrouter/meta-llama/llama-3.1-70b-instruct": _mi(131072, 0.40, 0.40, fc=False),
     "openrouter/meta-llama/llama-3.1-8b-instruct": _mi(131072, 0.02, 0.03, fc=False),
@@ -461,7 +462,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/moonshotai/kimi-k2-0905": _mi(262144, 0.60, 2.50, fc=False),
     "openrouter/moonshotai/kimi-k2-thinking": _mi(262144, 0.60, 2.50, fc=False),
     "openrouter/moonshotai/kimi-k2.5": _mi(262144, 0.375, 2.025),
-    "openrouter/moonshotai/kimi-k2.6": _mi(262144, 0.684, 3.41),
+    "openrouter/moonshotai/kimi-k2.6": _mi(262144, 0.67, 3.50),
     "openrouter/moonshotai/kimi-k2.7-code": _mi(262144, 0.74, 3.50),  # NEW
     "openrouter/morph/morph-v3-fast": _mi(81920, 0.80, 1.20, fc=False),
     "openrouter/morph/morph-v3-large": _mi(262144, 0.90, 1.90, fc=False),
@@ -472,7 +473,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/nvidia/llama-3.3-nemotron-super-49b-v1.5": _mi(131072, 0.40, 0.40),
     "openrouter/nvidia/nemotron-3-nano-30b-a3b": _mi(262144, 0.05, 0.20, fc=False),
     "openrouter/nvidia/nemotron-3-super-120b-a12b": _mi(1000000, 0.09, 0.45),
-    "openrouter/nvidia/nemotron-3-ultra-550b-a55b": _mi(1000000, 0.50, 2.50),  # NEW
+    "openrouter/nvidia/nemotron-3-ultra-550b-a55b": _mi(1000000, 0.50, 2.20),  # NEW
     "openrouter/openai/gpt-3.5-turbo": _mi(16385, 0.50, 1.50),
     "openrouter/openai/gpt-3.5-turbo-0613": _mi(4095, 1.00, 2.00),
     "openrouter/openai/gpt-3.5-turbo-16k": _mi(16385, 3.00, 4.00),
@@ -540,6 +541,8 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/perplexity/sonar-pro": _mi(200000, 3.00, 15.00, fc=False),
     "openrouter/perplexity/sonar-pro-search": _mi(200000, 3.00, 15.00, fc=False),
     "openrouter/perplexity/sonar-reasoning-pro": _mi(128000, 2.00, 8.00, fc=False),
+    "openrouter/poolside/laguna-m.1": _mi(262144, 0.20, 0.40, fc=False),  # NEW
+    "openrouter/poolside/laguna-xs.2": _mi(262144, 0.10, 0.20),  # NEW
     "openrouter/prime-intellect/intellect-3": _mi(131072, 0.20, 1.10, fc=False),
     "openrouter/qwen/qwen-2.5-72b-instruct": _mi(131072, 0.36, 0.40),
     "openrouter/qwen/qwen-2.5-7b-instruct": _mi(131072, 0.04, 0.10, fc=False),
@@ -582,7 +585,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/qwen/qwen3.5-plus-02-15": _mi(1000000, 0.26, 1.56),
     "openrouter/qwen/qwen3.5-plus-20260420": _mi(1000000, 0.30, 1.80),
     "openrouter/qwen/qwen3.6-27b": _mi(262144, 0.29, 3.17),
-    "openrouter/qwen/qwen3.6-35b-a3b": _mi(262144, 0.15, 1.00, fc=False),
+    "openrouter/qwen/qwen3.6-35b-a3b": _mi(262144, 0.14, 1.00, fc=False),
     "openrouter/qwen/qwen3.6-flash": _mi(1000000, 0.188, 1.125),
     "openrouter/qwen/qwen3.6-max-preview": _mi(262144, 1.04, 6.24),
     "openrouter/qwen/qwen3.6-plus": _mi(1000000, 0.325, 1.95),
@@ -612,7 +615,6 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/x-ai/grok-4.20-multi-agent": _mi(2000000, 1.25, 2.50),
     "openrouter/x-ai/grok-4.3": _mi(1000000, 1.25, 2.50),
     "openrouter/x-ai/grok-build-0.1": _mi(256000, 1.00, 2.00),  # NEW
-    "openrouter/xiaomi/mimo-v2-flash": _mi(262144, 0.10, 0.30, fc=False),
     "openrouter/xiaomi/mimo-v2.5": _mi(1048576, 0.14, 0.28),
     "openrouter/xiaomi/mimo-v2.5-pro": _mi(1048576, 0.435, 0.87),
     "openrouter/z-ai/glm-4.5": _mi(131072, 0.60, 2.20),
@@ -625,14 +627,14 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/z-ai/glm-5": _mi(202752, 0.60, 1.92),
     "openrouter/z-ai/glm-5-turbo": _mi(262144, 1.20, 4.00),
     "openrouter/z-ai/glm-5.1": _mi(202752, 0.98, 3.08),
-    "openrouter/z-ai/glm-5.2": _mi(1048576, 1.40, 4.40),  # NEW
+    "openrouter/z-ai/glm-5.2": _mi(1048576, 1.20, 4.10),  # NEW
     "openrouter/~anthropic/claude-fable-latest": _mi(1000000, 10.00, 50.00),  # NEW
     "openrouter/~anthropic/claude-haiku-latest": _mi(200000, 1.00, 5.00),
     "openrouter/~anthropic/claude-opus-latest": _mi(1000000, 5.00, 25.00),
     "openrouter/~anthropic/claude-sonnet-latest": _mi(1000000, 3.00, 15.00),
     "openrouter/~google/gemini-flash-latest": _mi(1048576, 1.50, 9.00),
     "openrouter/~google/gemini-pro-latest": _mi(1048576, 2.00, 12.00),
-    "openrouter/~moonshotai/kimi-latest": _mi(262144, 0.684, 3.41),
+    "openrouter/~moonshotai/kimi-latest": _mi(262144, 0.67, 3.50),
     "openrouter/~openai/gpt-latest": _mi(1050000, 5.00, 30.00, thinking="xhigh"),
     "openrouter/~openai/gpt-mini-latest": _mi(400000, 0.75, 4.50),
     "Qwen/Qwen2-1.5B-Instruct": _mi(32768, 0.02, 0.02),
@@ -663,6 +665,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "zai-org/GLM-4.7": _mi(202752, 0.45, 2.00),
     "zai-org/GLM-5": _mi(202752, 1.00, 3.20),
     "zai-org/GLM-5.1": _mi(202752, 1.40, 4.40),
+    "zai-org/GLM-5.2": _mi(262144, 1.40, 4.40),  # NEW
 }
 
 _ANTHROPIC_CACHE_PREFIXES = (
