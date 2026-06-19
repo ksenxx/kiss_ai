@@ -890,6 +890,159 @@ class _CommandsMixin:
         if new_password and new_password != prev_password:
             _restart_kiss_web_daemon()
 
+    def _cmd_cli_info(self, cmd: dict[str, Any]) -> None:
+        """Reply to a ``cliInfo`` request from the sorcar CLI client.
+
+        Handles the slash-command surface that was previously rendered
+        only inside the standalone REPL (``/help``, ``/commands``,
+        ``/skills``, ``/skills <name>``, ``/mcp``, ``/cost``,
+        ``/model`` with no argument) by reusing the very same helpers
+        from :mod:`kiss.agents.sorcar.custom_commands`,
+        :mod:`kiss.agents.sorcar.skills` and
+        :mod:`kiss.agents.sorcar.mcp_servers`, plus custom-command
+        expansion.
+
+        The reply is emitted as a single ``cliInfo`` event stamped
+        with the originating ``connId`` so it is delivered ONLY to the
+        requesting CLI client (mirroring the per-connection routing of
+        ``models`` / ``files`` / ``configData`` replies).
+
+        Args:
+            cmd: The parsed ``cliInfo`` command from the CLI client,
+                carrying a ``subtype`` field selecting the reply, plus
+                any subtype-specific arguments (``arg`` / ``name`` /
+                ``args`` / ``tabId`` / ``workDir``).
+        """
+        from kiss.agents.sorcar.cli_repl import SLASH_COMMANDS
+        from kiss.agents.sorcar.custom_commands import (
+            discover_commands,
+            expand_command,
+            format_command_listing,
+        )
+
+        subtype = cmd.get("subtype", "")
+        work_dir = cmd.get("workDir", "") or self.work_dir or "."
+        conn_id = cmd.get("connId", "")
+        tab_id = cmd.get("tabId", "")
+        text = ""
+        extra: dict[str, Any] = {}
+
+        if subtype == "help":
+            lines = ["Commands:"]
+            for c, d in SLASH_COMMANDS.items():
+                lines.append(f"  {c:<10} {d}")
+            try:
+                custom = discover_commands(work_dir)
+            except Exception:  # pragma: no cover - discovery guard
+                logger.debug("custom command discovery failed", exc_info=True)
+                custom = {}
+            if custom:
+                lines.append("")
+                lines.append("Custom commands:")
+                lines.append(format_command_listing(custom))
+            lines.append("")
+            lines.append(
+                "Input fast-completes (Tab): @path mentions files, "
+                "/ completes commands, /model <partial> completes model "
+                "names, and typing a prefix of a previous task suggests "
+                "its completion.",
+            )
+            text = "\n".join(lines)
+        elif subtype == "commands":
+            try:
+                custom = discover_commands(work_dir)
+            except Exception:  # pragma: no cover - discovery guard
+                logger.debug("custom command discovery failed", exc_info=True)
+                custom = {}
+            text = format_command_listing(custom)
+        elif subtype == "skills":
+            from kiss.agents.sorcar.skills import (
+                discover_skills,
+                format_skill_listing,
+                load_skill_content,
+            )
+
+            try:
+                skills = discover_skills(work_dir)
+            except Exception:  # pragma: no cover - discovery guard
+                logger.debug("skill discovery failed", exc_info=True)
+                skills = {}
+            name = cmd.get("name", "") or cmd.get("arg", "")
+            if name:
+                found = skills.get(name)
+                if found is None:
+                    text = f"Unknown skill: {name}. /skills lists them."
+                else:
+                    try:
+                        text = load_skill_content(found)
+                    except Exception as exc:  # pragma: no cover - read guard
+                        text = f"Failed to load skill {name}: {exc}"
+            else:
+                text = format_skill_listing(skills)
+        elif subtype == "mcp":
+            from kiss.agents.sorcar.mcp_servers import format_mcp_listing
+
+            try:
+                text = format_mcp_listing(work_dir, connect=True)
+            except Exception as exc:  # pragma: no cover - listing guard
+                text = f"Failed to list MCP servers: {exc}"
+        elif subtype == "cost":
+            tab = _RunningAgentState.running_agent_states.get(tab_id)
+            chat_id = tab.chat_id if tab is not None else ""
+            budget = float(getattr(tab, "budget_used", 0.0) or 0.0) if tab else 0.0
+            tokens = int(getattr(tab, "total_tokens_used", 0) or 0) if tab else 0
+            text = (
+                f"Chat ID: {chat_id or '(new)'}\n"
+                f"Cost: ${budget:.4f}\n"
+                f"Total tokens: {tokens}"
+            )
+            extra["chatId"] = chat_id
+            extra["cost"] = budget
+            extra["tokens"] = tokens
+        elif subtype == "modelCurrent":
+            tab = _RunningAgentState.running_agent_states.get(tab_id)
+            current = tab.selected_model if tab is not None else self._default_model
+            text = f"Current model: {current}"
+            extra["model"] = current
+        elif subtype == "expandCommand":
+            name = cmd.get("name", "") or cmd.get("arg", "")
+            args = cmd.get("args", "")
+            try:
+                custom = discover_commands(work_dir)
+            except Exception:  # pragma: no cover - discovery guard
+                logger.debug("custom command discovery failed", exc_info=True)
+                custom = {}
+            found_cmd = custom.get(name)
+            if found_cmd is None:
+                text = ""
+                extra["found"] = False
+                extra["error"] = f"Unknown command: /{name}"
+            else:
+                try:
+                    expanded = expand_command(found_cmd, args, work_dir)
+                except Exception as exc:  # pragma: no cover - expansion guard
+                    text = ""
+                    extra["found"] = False
+                    extra["error"] = f"Expansion failed: {exc}"
+                else:
+                    text = expanded
+                    extra["found"] = True
+                    extra["source"] = found_cmd.source
+                    extra["path"] = str(found_cmd.path)
+        else:
+            text = f"Unknown cliInfo subtype: {subtype}"
+
+        event: dict[str, Any] = {
+            "type": "cliInfo",
+            "subtype": subtype,
+            "text": text,
+            "tabId": tab_id,
+        }
+        event.update(extra)
+        if conn_id:
+            event["connId"] = conn_id
+        self.printer.broadcast(event)
+
     def _cmd_set_work_dir(self, cmd: dict[str, Any]) -> None:
         """Update the server's *fallback* working directory.
 
@@ -971,4 +1124,5 @@ class _CommandsMixin:
         "setWorkDir": _cmd_set_work_dir,
         "getConfig": _cmd_get_config,
         "saveConfig": _cmd_save_config,
+        "cliInfo": _cmd_cli_info,
     }
