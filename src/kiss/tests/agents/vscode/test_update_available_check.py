@@ -151,7 +151,9 @@ class _UpdateCheckTestBase(IsolatedAsyncioTestCase):
     async def _connect_uds(
         self,
     ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        return await asyncio.open_unix_connection(str(self.uds_path))
+        return await asyncio.open_unix_connection(
+            str(self.uds_path), limit=16 * 1024 * 1024,
+        )
 
     async def _send_ready(
         self, writer: asyncio.StreamWriter, tab_id: str,
