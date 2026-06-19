@@ -90,6 +90,17 @@ class ConsolePrinter(Printer):
             self._file.flush()
             self._mid_line = False
 
+    def flush_newline(self) -> None:
+        """Public wrapper around :meth:`_flush_newline`.
+
+        External callers (e.g. the sorcar CLI client driving streamed
+        ``text_delta`` events from the daemon) need to terminate any
+        partially-written line before the next Rich panel renders.
+        Exposed as a stable name so they don't reach into ``_mid_line``
+        directly.
+        """
+        self._flush_newline()
+
     def _stream_delta(self, text: str, **kwargs: Any) -> None:
         self._console.print(text, end="", highlight=False, markup=False, **kwargs)
         if text:
