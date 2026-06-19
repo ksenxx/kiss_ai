@@ -892,6 +892,7 @@ class _CommandsMixin:
 
     def _dispatch_mcp_listing(
         self, *, work_dir: str, conn_id: str, tab_id: str,
+        request_id: str = "",
     ) -> None:
         """Compute ``/mcp`` listing on a worker thread and broadcast.
 
@@ -922,6 +923,12 @@ class _CommandsMixin:
                 "text": text,
                 "tabId": tab_id,
             }
+            # Echo the originating ``requestId`` so the CLI client can
+            # filter stale replies that race with newer requests
+            # (review #14).  Empty string means "no id supplied" which
+            # the client treats as a wildcard match for back-compat.
+            if request_id:
+                event["requestId"] = request_id
             if conn_id:
                 event["connId"] = conn_id
             self.printer.broadcast(event)
@@ -964,6 +971,9 @@ class _CommandsMixin:
         work_dir = cmd.get("workDir", "") or self.work_dir or "."
         conn_id = cmd.get("connId", "")
         tab_id = cmd.get("tabId", "")
+        # Per-request id so the CLI client can drop stale replies that
+        # race with newer requests (review #14).
+        request_id = str(cmd.get("requestId", "") or "")
         text = ""
         extra: dict[str, Any] = {}
 
@@ -1011,12 +1021,17 @@ class _CommandsMixin:
             if name:
                 found = skills.get(name)
                 if found is None:
+                    # Tag missing-skill replies as errors so the CLI
+                    # client can render them with the ✗ marker rather
+                    # than as a normal info line (review #27).
                     text = f"Unknown skill: {name}. /skills lists them."
+                    extra["error"] = True
                 else:
                     try:
                         text = load_skill_content(found)
                     except Exception as exc:  # pragma: no cover - read guard
                         text = f"Failed to load skill {name}: {exc}"
+                        extra["error"] = True
             else:
                 text = format_skill_listing(skills)
         elif subtype == "mcp":
@@ -1032,13 +1047,24 @@ class _CommandsMixin:
             # subtype, so this is fully transparent to the client.
             self._dispatch_mcp_listing(
                 work_dir=work_dir, conn_id=conn_id, tab_id=tab_id,
+                request_id=request_id,
             )
             return
         elif subtype == "cost":
+            # Budget / token counters live on the **agent**, not on the
+            # ``_RunningAgentState`` (whose ``__slots__`` carries
+            # ``agent`` but not ``budget_used`` / ``total_tokens_used``).
+            # The earlier port read directly off the tab and so always
+            # reported $0 / 0 tokens — review #1.
             tab = _RunningAgentState.running_agent_states.get(tab_id)
-            chat_id = tab.chat_id if tab is not None else ""
-            budget = float(getattr(tab, "budget_used", 0.0) or 0.0) if tab else 0.0
-            tokens = int(getattr(tab, "total_tokens_used", 0) or 0) if tab else 0
+            agent_obj = getattr(tab, "agent", None) if tab is not None else None
+            budget = float(getattr(agent_obj, "budget_used", 0.0) or 0.0)
+            tokens = int(getattr(agent_obj, "total_tokens_used", 0) or 0)
+            chat_id = (
+                getattr(agent_obj, "chat_id", "") or ""
+            ) if agent_obj is not None else ""
+            if not chat_id and tab is not None:
+                chat_id = tab.chat_id or ""
             text = (
                 f"Chat ID: {chat_id or '(new)'}\n"
                 f"Cost: ${budget:.4f}\n"
@@ -1087,6 +1113,8 @@ class _CommandsMixin:
             "tabId": tab_id,
         }
         event.update(extra)
+        if request_id:
+            event["requestId"] = request_id
         if conn_id:
             event["connId"] = conn_id
         self.printer.broadcast(event)
