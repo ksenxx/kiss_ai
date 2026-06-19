@@ -26,6 +26,44 @@ from kiss.core.models.model import (
 
 logger = logging.getLogger(__name__)
 
+# Models that accept (and benefit from) the ``xhigh`` reasoning tier on the
+# OpenAI Chat Completions API.  The gpt-5.5 family adds ``xhigh`` on top of
+# ``minimal | low | medium | high``.  ``-pro`` and ``-chat-latest`` variants
+# do NOT accept ``reasoning_effort`` and must be excluded.  ``gpt-latest`` is
+# an OpenRouter alias that currently points at gpt-5.5.
+_XHIGH_DEFAULT_MODEL_PREFIXES: tuple[str, ...] = ("gpt-5.5",)
+_XHIGH_DEFAULT_MODEL_NAMES: frozenset[str] = frozenset({"gpt-latest"})
+_REASONING_EFFORT_EXCLUSIONS: tuple[str, ...] = ("-pro", "chat-latest", "-image")
+
+
+def _supports_xhigh_default(api_model_name: str) -> bool:
+    """Return True iff *api_model_name* should default to ``xhigh`` effort.
+
+    Strips OpenRouter passthrough prefixes (``openai/``, ``~openai/``) so
+    both direct OpenAI routing and OpenRouter passthrough resolve to the
+    same bare name.  Excludes ``-pro``, ``-chat-latest``, and image
+    variants which do not accept ``reasoning_effort`` on the API.
+
+    Args:
+        api_model_name: The model name as sent to the API (i.e. with the
+            ``openrouter/`` prefix already stripped).
+
+    Returns:
+        True if the model is in the gpt-5.5 family (or an alias) and is
+        not one of the excluded variants.
+    """
+    bare = api_model_name
+    for prefix in ("openai/", "~openai/"):
+        if bare.startswith(prefix):
+            bare = bare[len(prefix):]
+            break
+    if any(marker in bare for marker in _REASONING_EFFORT_EXCLUSIONS):
+        return False
+    if bare in _XHIGH_DEFAULT_MODEL_NAMES:
+        return True
+    return bare.startswith(_XHIGH_DEFAULT_MODEL_PREFIXES)
+
+
 DEEPSEEK_REASONING_MODELS = {
     "deepseek/deepseek-r1",
     "deepseek/deepseek-r1-0528",
@@ -135,6 +173,15 @@ class OpenAICompatibleModel(Model):
         self._api_model_name = (
             model_name[len("openrouter/") :] if model_name.startswith("openrouter/") else model_name
         )
+        # Default reasoning_effort to "xhigh" for gpt-5.5+ models that accept
+        # it.  Copy first so we never mutate the caller's dict.  Caller-supplied
+        # values always win.
+        if (
+            _supports_xhigh_default(self._api_model_name)
+            and "reasoning_effort" not in self.model_config
+        ):
+            self.model_config = dict(self.model_config)
+            self.model_config["reasoning_effort"] = "xhigh"
 
     def __str__(self) -> str:
         """Return a string representation of the model.
