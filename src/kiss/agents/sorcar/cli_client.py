@@ -677,7 +677,11 @@ def _handle_client_slash(  # noqa: PLR0911,PLR0912 - branchy by design
                 continue
         msg = ev.get("message", "")
         if not msg:
-            print(f"\n✗ Auto-commit: {ev.get('error', 'no message')}\n")
+            # Prefer ``errorMessage`` (string) over the bool ``error``
+            # field so a daemon that sets ``error=True`` does not make
+            # the CLI print the literal "True" (review M1 round 3).
+            err = ev.get("errorMessage") or ev.get("error") or "no message"
+            print(f"\n✗ Auto-commit: {err}\n")
             return False
         client.send({
             "type": "autocommitAction",
