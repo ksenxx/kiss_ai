@@ -221,8 +221,7 @@ class _EventDispatcher:
             return
         if et == "text_end":
             # Force a newline so the next panel starts on its own row.
-            if getattr(self.printer, "_mid_line", False):
-                self.printer._flush_newline()  # type: ignore[attr-defined]
+            self.printer.flush_newline()
             return
         if et == "prompt":
             self.printer.print(event.get("text", ""), type="prompt")
@@ -632,6 +631,7 @@ def _submit_task(
     # ``task_active`` immediately and silently drop the new task).
     client.dispatcher.task_active.clear()
     _drain_queue(client.dispatcher.ask_user_q)
+    start = time.time()
     client.send({
         "type": "run",
         "prompt": prompt,
@@ -655,6 +655,7 @@ def _submit_task(
     if not client.dispatcher.task_active.is_set():
         # Daemon either never started the task or already finished
         # within the 2 s grace; nothing more to wait for.
+        _print_elapsed(client, start)
         return
     deadline = time.monotonic() + timeout_seconds
     while client.dispatcher.task_active.is_set():
@@ -686,6 +687,23 @@ def _submit_task(
         except (EOFError, KeyboardInterrupt):
             ans = "done"
         client.send({"type": "userAnswer", "answer": ans})
+    _print_elapsed(client, start)
+
+
+def _print_elapsed(client: CliClient, start: float) -> None:
+    """Print the wall-clock task duration after a task ends.
+
+    The standalone REPL printed this via ``print_outcome`` /
+    ``_print_run_stats`` in :mod:`cli_helpers` — only the in-process
+    agent's chat object knew when ``run()`` returned.  In client mode
+    the daemon's ``Result`` panel already shows tokens + cost + steps,
+    so we only emit the elapsed-time line here for parity with the
+    old REPL (review item #25).  Routed through ``ConsolePrinter`` so
+    a partially-written streamed line gets terminated first.
+    """
+    elapsed = time.time() - start
+    client.dispatcher.printer.flush_newline()
+    print(f"Time: {elapsed:.1f}s")
 
 
 def run_client(

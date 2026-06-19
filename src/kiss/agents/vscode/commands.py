@@ -890,6 +890,46 @@ class _CommandsMixin:
         if new_password and new_password != prev_password:
             _restart_kiss_web_daemon()
 
+    def _dispatch_mcp_listing(
+        self, *, work_dir: str, conn_id: str, tab_id: str,
+    ) -> None:
+        """Compute ``/mcp`` listing on a worker thread and broadcast.
+
+        Splits the synchronous MCP probe out of
+        :meth:`_cmd_cli_info` so the main command dispatcher does not
+        block while ``format_mcp_listing(connect=True)`` opens each
+        configured stdio MCP server and waits for ``initialize`` —
+        an operation that can take seconds per server and that
+        hangs entirely when a server is wedged.
+
+        Args:
+            work_dir: Project dir to discover ``.mcp.json`` under.
+            conn_id: Connection id stamped on the reply so the daemon
+                only routes it back to the originating CLI client.
+            tab_id: CLI tab id mirrored on the reply for parity with
+                the synchronous reply path.
+        """
+
+        def _worker() -> None:
+            from kiss.agents.sorcar.mcp_servers import format_mcp_listing
+            try:
+                text = format_mcp_listing(work_dir, connect=True)
+            except Exception as exc:  # pragma: no cover - listing guard
+                text = f"Failed to list MCP servers: {exc}"
+            event: dict[str, Any] = {
+                "type": "cliInfo",
+                "subtype": "mcp",
+                "text": text,
+                "tabId": tab_id,
+            }
+            if conn_id:
+                event["connId"] = conn_id
+            self.printer.broadcast(event)
+
+        threading.Thread(
+            target=_worker, daemon=True, name="sorcar-mcp-listing",
+        ).start()
+
     def _cmd_cli_info(self, cmd: dict[str, Any]) -> None:
         """Reply to a ``cliInfo`` request from the sorcar CLI client.
 
@@ -980,12 +1020,20 @@ class _CommandsMixin:
             else:
                 text = format_skill_listing(skills)
         elif subtype == "mcp":
-            from kiss.agents.sorcar.mcp_servers import format_mcp_listing
-
-            try:
-                text = format_mcp_listing(work_dir, connect=True)
-            except Exception as exc:  # pragma: no cover - listing guard
-                text = f"Failed to list MCP servers: {exc}"
+            # ``format_mcp_listing(connect=True)`` opens a stdio
+            # subprocess per configured MCP server and waits for
+            # ``initialize`` — each one can take seconds and a wedged
+            # server hangs the whole command-dispatcher thread.
+            # Spawn a worker thread that broadcasts the ``cliInfo``
+            # reply when ready so the dispatcher returns immediately
+            # and the CLI's other inbound events (streamed tokens,
+            # status, askUser) keep flowing.  The CLI client blocks
+            # on its own ``cli_info_q`` waiter just as for any other
+            # subtype, so this is fully transparent to the client.
+            self._dispatch_mcp_listing(
+                work_dir=work_dir, conn_id=conn_id, tab_id=tab_id,
+            )
+            return
         elif subtype == "cost":
             tab = _RunningAgentState.running_agent_states.get(tab_id)
             chat_id = tab.chat_id if tab is not None else ""
