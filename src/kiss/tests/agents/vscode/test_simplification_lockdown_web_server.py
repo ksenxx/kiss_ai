@@ -125,6 +125,7 @@ class _ServerTestBase(IsolatedAsyncioTestCase):
         """Send raw HTTPS bytes to the server and read until EOF."""
         reader, writer = await asyncio.open_connection(
             "127.0.0.1", self.port, ssl=_no_verify_ssl(),
+            limit=16 * 1024 * 1024,
         )
         try:
             writer.write(payload)
