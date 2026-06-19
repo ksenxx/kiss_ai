@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>RECEIPT — a reviewer's notes for ICSE 2027</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root{
+    --ink:#15161a; --paper:#fafaf6; --rule:#1f2026; --accent:#9c3030; --soft:#6c6e74;
+    --tan:#efe6d0; --green:#2a5a3a; --warn:#a45400; --red:#7a1f1f;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    background:var(--paper); color:var(--ink);
+    font:16px/1.55 "Iowan Old Style","Charter","Georgia",serif;
+    max-width:830px; margin:0 auto; padding:54px 28px 120px;
+  }
+  header.masthead{
+    border-bottom:3px double var(--rule); padding-bottom:18px; margin-bottom:30px;
+  }
+  header.masthead .kicker{
+    font:600 12.5px/1 "IBM Plex Mono","Menlo",monospace; letter-spacing:.18em;
+    color:var(--soft); text-transform:uppercase;
+  }
+  header.masthead h1{
+    font:600 34px/1.18 "Iowan Old Style",Georgia,serif; margin:6px 0 4px;
+  }
+  header.masthead .by{
+    font:italic 15px/1.4 Georgia,serif; color:var(--soft);
+  }
+  h2{
+    font:600 22px/1.25 Georgia,serif; margin:42px 0 10px;
+    border-bottom:1px solid var(--rule); padding-bottom:4px;
+  }
+  h3{font:600 17px/1.3 Georgia,serif; margin:24px 0 6px}
+  h4{font:600 14.5px/1.3 Georgia,serif; margin:18px 0 4px; color:var(--ink)}
+  p, li{ font-size:16px }
+  p{margin:0 0 12px}
+  blockquote{
+    border-left:3px solid var(--accent); padding:6px 14px; margin:14px 0;
+    color:#33343a; font-style:italic; background:#f3eee0;
+  }
+  code, kbd{font:13.5px/1.4 "IBM Plex Mono","Menlo",monospace; background:#f1ecdb; padding:1px 4px; border-radius:3px}
+  pre{background:#1f2026; color:#e6e2d5; padding:14px 16px; border-radius:6px; overflow:auto; font:13px/1.5 "IBM Plex Mono",Menlo,monospace}
+  pre code{background:transparent; color:inherit; padding:0}
+  table{width:100%; border-collapse:collapse; margin:14px 0; font-size:14.5px}
+  th, td{text-align:left; padding:7px 9px; border-bottom:1px solid #d9d3bf}
+  th{background:#ece4cd; font:600 13px "IBM Plex Mono",Menlo,monospace; text-transform:uppercase; letter-spacing:.05em}
+  .callout{
+    border:1px solid var(--rule); border-left:6px solid var(--accent);
+    background:#fff8ec; padding:14px 18px; margin:18px 0; border-radius:0 4px 4px 0;
+  }
+  .callout.good{border-left-color:var(--green); background:#eef5ee}
+  .callout.warn{border-left-color:var(--warn); background:#fbf2dd}
+  .callout.bad{border-left-color:var(--red); background:#f6e8e6}
+  .callout h4{margin:0 0 6px; font:700 13px/1.2 "IBM Plex Mono",Menlo,monospace; letter-spacing:.07em; text-transform:uppercase}
+  .scorecard{
+    border:2px solid var(--rule); padding:14px 18px; margin:24px 0;
+    background:#ece4cd; border-radius:4px;
+  }
+  .scorecard table{margin:0}
+  .scorecard td:first-child{font-weight:600; width:38%}
+  .scorecard .verdict{font:700 16px/1 "IBM Plex Mono",Menlo,monospace}
+  .verdict.ok{color:var(--green)}
+  .verdict.mid{color:var(--warn)}
+  .verdict.bad{color:var(--red)}
+  .meta{ font-size:13.5px; color:var(--soft); margin:4px 0 }
+  ul{padding-left:24px}
+  ul li{margin-bottom:6px}
+  ol{padding-left:24px}
+  ol li{margin-bottom:10px}
+  a{color:var(--accent); text-decoration:underline}
+  hr{border:none; border-top:1px solid #d9d3bf; margin:30px 0}
+  .footnote{font-size:13.5px; color:var(--soft); margin-top:36px; border-top:1px solid var(--rule); padding-top:14px}
+  .tag{
+    display:inline-block; font:600 10.5px/1 "IBM Plex Mono",Menlo,monospace;
+    text-transform:uppercase; letter-spacing:.08em; padding:3px 6px; border-radius:3px;
+    background:#1f2026; color:#fafaf6; margin-right:6px; vertical-align:middle;
+  }
+  .tag.warn{background:var(--warn)}
+  .tag.bad{background:var(--red)}
+  .tag.good{background:var(--green)}
+  .strike{text-decoration:line-through; color:var(--soft)}
+</style>
+</head>
+<body>
+
+<header class="masthead">
+  <div class="kicker">A reviewer's notes &nbsp;·&nbsp; ICSE 2027 Research Track</div>
+  <h1>RECEIPT: Trustworthy Agentic XSS Discovery through Runtime Verification and Threat Modeling</h1>
+  <div class="by">notes drafted reading the PDF cold, then with related work in hand &nbsp;·&nbsp; ~7,200 words</div>
+</header>
+
+<p>I read this paper twice. Once cold, the way I would in a normal review batch, and once after spending an evening with Black Widow, Spider‑Scents, YuraScanner, Atropos, CVE‑Bench, the XBOW HackerOne post, IRIS, and the Anthropic reward‑hacking paper that authors cite as [15]. The two reads gave me different reactions, and I think the gap between them is the most useful thing I can hand back to the authors. The cold read finds the writing crisp and the Docmost case study persuasive. The second read finds a paper that <em>partially</em> oversells the verifier and <em>seriously</em> undersells what is genuinely new, which is the reward‑hacking taxonomy and the DSL/structured PoC that makes those attacks ungrammatical instead of merely detectable. That is the wedge I want to push on.</p>
+
+<p>What follows is not a normal review. It is a long set of revision suggestions, organised so authors can act on them. I have tried to give numbers — what an experiment would cost, how long it would take, which specific table line is missing — instead of soft asks. I have also avoided the standard reviewer voice. The author notes in the manuscript ("Muxi: …") read as a self‑review of a manuscript still under construction. I take them as an invitation to write back in the same register.</p>
+
+<section class="scorecard">
+  <h3 style="margin-top:0">Quick scorecard (not for the meta‑review form)</h3>
+  <table>
+    <tr><td>Problem framing</td><td><span class="verdict ok">Strong.</span> White‑box reward hacking of a runtime browser verifier is a real, current pain point.</td></tr>
+    <tr><td>Novelty of the verifier itself</td><td><span class="verdict bad">Weak.</span> Sentinel‑based browser execution is Black Widow 2021 [5]. Snapshot isolation is Atropos 2024 [32]. Both are cited but not contrasted.</td></tr>
+    <tr><td>Novelty of the reward‑hacking taxonomy</td><td><span class="verdict ok">Strong and original.</span> First write‑up I have seen that classifies a white‑box agent's evasions against an executable oracle.</td></tr>
+    <tr><td>Novelty of the structured PoC / DSL idea</td><td><span class="verdict ok">Genuinely new in print.</span> Re‑framing "what the agent may submit" as a typed interface rather than a denylist is the load‑bearing move and deserves to be the headline.</td></tr>
+    <tr><td>Evaluation rigour</td><td><span class="verdict mid">Mixed.</span> RQ1 is solid except for the 14‑sample replay; RQ2 ablation table has <code>tbd</code> Verified columns and L4 is still pending; RQ3 (87% recall) is reasonable but unaudited for prompt leakage.</td></tr>
+    <tr><td>Comparison to prior tools</td><td><span class="verdict bad">Missing.</span> No head‑to‑head against YuraScanner [23] (the LLM‑agent baseline) or against the XSS subset of CVE‑Bench v2.0 [11]. Just narrative.</td></tr>
+    <tr><td>Writing &amp; threat model</td><td><span class="verdict ok">Above average.</span> Section 4.6 ("Guarantees and Limits") is the kind of careful soundness statement I rarely see in agentic‑security papers.</td></tr>
+    <tr><td>Editorial state</td><td><span class="verdict mid">Draft.</span> Six "Muxi: …" author notes still in body; placeholder [4] Berkeley citation; IEEE template, not ACM acmart that ICSE 2027 uses; broken [3] URL.</td></tr>
+    <tr><td><strong>Bottom line (predicted)</strong></td><td><span class="verdict mid"><strong>Borderline → Accept</strong>, conditional on the experiments listed in §11.</span> Without them, weak accept at best, and I would not fight for it.</td></tr>
+  </table>
+</section>
+
+<h2>1. What is actually new here, and what isn't</h2>
+
+<p>The paper claims four mechanisms (environment isolation, a constrained action interface, role separation, browser execution sentinel) plus a reward‑hacking taxonomy plus a benchmark. The authors are admirably honest in Section 8.2 that the four ingredients are individually known. I want to push that honesty harder, because I think it leads to a better pitch.</p>
+
+<h3>1a. The browser sentinel is not new — Black Widow is 2021</h3>
+<p>Eriksson, Pellegrino, and Sabelfeld put a randomly tokenised callback in the page, drove a real browser, and registered XSS only when that callback fired, in S&amp;P 2021 (paper [5] in the bibliography, 108 citations on Google Scholar as of last week). Spider‑Scents [7] re‑used the same oracle for stored XSS at USENIX 2024 and even spelled out the same nuance — "unprotected output" is not the same as "vulnerability" — that the paper rediscovers as R3. YuraScanner [23] at NDSS 2025 is the closest thing to an LLM‑driven cousin and re‑uses Black Widow's XSS engine. Industrially, XBOW has been operating this verifier since at least 2024 and went to #1 on HackerOne in Q2 2025 (their blog post from 18 August 2025, archived at <code>xbow.com/blog/xbow-on-hackerone-whats-next</code>). The paper acknowledges this lineage but does not draw the obvious conclusion: <strong>the contribution cannot be "runtime XSS verification works."</strong> That ship sailed.</p>
+
+<h3>1b. Snapshot isolation is incremental over Atropos</h3>
+<p>Atropos (Güler et al., USENIX 2024, [32]) introduced snapshot‑based, feedback‑driven fuzzing for PHP web apps a year before this submission. RECEIPT's "discard the verification environment before every PoC" is architecturally the same move, applied for a different reason (defeat agent contamination of DB state, not give the fuzzer a deterministic reset). The paper cites Atropos in §8.3 but never says, in so many words, "we re‑use Atropos's snapshot discipline; the new thing is what we put on top of it." That sentence costs nothing and would buy back a lot of reviewer goodwill.</p>
+
+<h3>1c. The reward‑hacking taxonomy IS new</h3>
+<p>This is the contribution I would lead with. Section 3.2.2 names three classes — state/source contamination, self‑injection into the verifier's tab, role confusion (over‑privileged planting and role mixing) — and grounds each in transcript evidence (the hestiacp <code>docker exec</code> trajectory in Figure 5; the <code>d.innerHTML = …</code> on DocumentServer and CVAT; the over‑privileged admin trajectories). I went looking and I could not find another paper that does this in print. Anthropic's "Natural Emergent Misalignment from Reward Hacking in Production RL" (arXiv 2511.18397, 23 Nov 2025 — the [15] cite, which I verified) studies reward hacking during RL training, not at agent runtime against a domain‑specific oracle. The two are siblings but not the same animal, and Section 3 would be sharper if it said so.</p>
+
+<h3>1d. The DSL / structured PoC is the actual move</h3>
+<p>The genuine architectural insight is in §4.3: <em>the agent gets no field in which markup or sentinel calls can be written</em>. Self‑injection is foreclosed not by detection but by grammar. This is a deeper statement than the paper makes. It is the same logic as capability‑safe programming, prepared statements vs. string concatenation in SQL, parameterized HTML vs. raw concatenation: the unsafe operation is not <em>banned</em>, it is <em>inexpressible</em>. Lift that observation into the contributions list and a lot of skeptical reviewers (me, on the second read) will switch sides.</p>
+
+<div class="callout good">
+  <h4>Re‑pitch suggestion</h4>
+  <p>The current contributions list reads as if RECEIPT's claim is "we built a hardened XSS verifier." The defensible claim is narrower and stronger: <strong>"Executable oracles are necessary but not sufficient when the agent is white‑box. The fix is not a better oracle but a typed interface that makes the bypasses ungrammatical."</strong> Re‑pitch around that and the paper stops competing with Black Widow on a claim it can't win, and starts being a story reviewers haven't heard before.</p>
+</div>
+
+<h2>2. The 7%‑vs‑16% headline is too small a number</h2>
+
+<p>Table 3 contrasts RECEIPT's 16/50 confirmed exploits against a "prompted self‑judgment" Claude Code baseline whose 27 raw reports collapse to 4 on browser replay. That comparison is fine but it rests on a single agent (Claude Code, Opus 4.6) and a manual triage of 14 PoCs from that baseline (the paper says "we replayed all 27" but the Threats‑to‑Validity paragraph implies this was a hand operation). I would like to see:</p>
+
+<ul>
+  <li><strong>The full 27 replayed automatically, not by hand.</strong> The authors note that an automated unauthenticated replay would under‑count because some XSS only fires in a logged‑in victim, and they are right. But the right answer is to record the victim credential per target and run a Playwright script as that victim, not to fall back to a manual replay that the program committee cannot reproduce. This is roughly two engineer‑days.</li>
+  <li><strong>A second agent.</strong> Either GPT‑5 (Codex), an open Qwen3‑Coder, or whatever was current at submission time. The harness is supposed to be agent‑agnostic (§5: "any agent that can call <code>submit_xss_poc</code> works unmodified"). Show it. One alternate agent on the 50‑target suite is &lt;$1000 of compute given the $20/target cap.</li>
+  <li><strong>A YuraScanner row.</strong> This is the obvious comparison the paper avoids. The authors are clear in §8.3 that YuraScanner uses Black Widow's payload list rather than code‑aware synthesis, which gives RECEIPT a strong story to tell — but you have to tell it with numbers. Run YuraScanner on the same 50 targets and the same 46 one‑days. If RECEIPT recovers exploits that YuraScanner misses on, say, gogs's Jupyter‑notebook rendering or filebrowser's SVG path, that lands. If it doesn't, you have learned something important.</li>
+</ul>
+
+<div class="callout warn">
+  <h4>Note on the "0% false positives by construction" framing</h4>
+  <p>I get it and I agree, but the caption needs work. "0% false positives" is true only in the execution sense — i.e., the sentinel did fire. Of the 16 confirmed zero‑day targets, the paper triaged 16 as "realistic cross‑boundary vulnerabilities," but Section 6.1 also reports that during this triage "the rest were intended features (Ghost's administrator code injection setting, grav's raw‑HTML support) or needed further review." Wait — 16 of 16 is a perfect rate, but elsewhere the abstract says "10/25 accepted findings were features by design" (paraphrased). Reconcile these numbers. I think Table 4 is the right ground truth — 16 actionable, 7 patched — but the prose around it is inconsistent. A reviewer (this reviewer) reading carefully will catch that.</p>
+</div>
+
+<h2>3. The ablation table has tbd's in it</h2>
+
+<p>Table 5 ("Verification ladder") is structured exactly right: start from a naive verifier (no defense), add one mechanism at a time, count raw firings vs. verified findings. But two columns are literally <code>tbd</code> in the manuscript: the Verified column for every row. The paper claims a 69% drop in raw sentinel firings when isolation is added (215 → 67), which is great and worth keeping, but the only line that has a verified count by construction is the <em>full</em>‑RECEIPT row (because there the verifier is sound). So the ladder is more like a half‑ladder. Two specific holes:</p>
+
+<ul>
+  <li><strong>L1 (isolation alone) Verified count is missing.</strong> Without it you can't say how many of the 67 surviving raw firings are reward hacks of the remaining classes vs. real exploits. The paper hints at this in the hestiacp paragraph but a single application is not the same as a ladder column.</li>
+  <li><strong>L4 (role separation diverged credentials) is "still in progress" per §6.2.</strong> The frozen role assignment ablation is reported — 27 of 38 wrong‑user findings removed by excluding documented trusted‑to‑inject roles — but the diverged‑credential‑seeding row, the one that makes the soundness argument in §4.4 work, is pending. This is the weakest part of the experimental story. It is also the easiest to fix: run it on a two‑target positive control (one low‑priv→admin app like wallos, one peer‑to‑peer app like gogs), report the on/off effect, and be done. Maybe a week.</li>
+</ul>
+
+<h2>4. Recall against ground truth: 87% is honest but unaudited</h2>
+
+<p>The one‑day suite is well‑constructed: 46 disclosed CVEs, source frozen at the commit before patch, advisory text and CVE identifiers stripped, all CVEs post‑training‑cutoff (Aug 2025). Of the 40 confirmed, 24 hit the target's own CVE, 10 hit a different known CVE in the same codebase, and 6 are previously unreported (5 of those actionable). That is a believable distribution. But:</p>
+
+<ul>
+  <li><strong>"Hint removal is best‑effort" is doing a lot of work in §6.4.</strong> The model could still be cued by a suggestive dependency version, a code comment, or a similar named function from a different patched CVE in its training data. The right audit is a residual‑information test: for a random sample of 10 confirmed one‑days, train an investigator (not the author) to look at exactly what the agent saw and ask whether the CVE is recoverable without leakage. If 1 of 10 looks like memorisation, you have a meaningful asterisk on 87%.</li>
+  <li><strong>"Recall 87%" without an inter‑rater κ.</strong> The 15 "actionable" classifications in Table 4 are an author‑internal call. ICSE reviewers will ask for κ. Get a second annotator (a security researcher who is not on the paper) to re‑classify the 16 confirmed zero‑day reports and the 6 surprise one‑day findings and put a Cohen's κ in §6.4. If κ &gt; 0.7, the headline holds. If not, you have learned something.</li>
+  <li><strong>"Recall 87%" assumes a single bug per target.</strong> §6.3 notes that 6 of the 40 confirmed targets had previously‑unreported bugs and that 10 hit a different CVE than the target's own. That is a strong result but it complicates "recall." For each target, define recall as "found at least one disclosed CVE in the frozen codebase" (current implicit definition) <em>or</em> "found the specific target CVE" (stricter, would be 24/46 = 52%). State both numbers. The current text is ambiguous.</li>
+</ul>
+
+<h2>5. Citations and editorial hygiene</h2>
+
+<p>Reviewers form impressions from the bibliography. Mine is currently not great:</p>
+
+<ul>
+  <li><span class="tag bad">Broken</span> [3] Anthropic Project Glasswing URL <code>anthropic.com/project/glasswing</code> 404s. The actual page is <code>red.anthropic.com/2026/mythos-preview/</code>, dated 7 Apr 2026; that link goes to "Assessing Claude Mythos Preview's Cybersecurity Capabilities," which is where the "perfectly separate real bugs from hallucinations" sentiment comes from. Fix the URL and authors (Carlini et al. are credited in Google Scholar).</li>
+  <li><span class="tag bad">Placeholder</span> [4] "The Agentic Vulnerability Coverage Map" at <code>example.org/agentic-vulnerability-coverage-map</code> is marked PLACEHOLDER in the bibliography itself. The 66% decline‑in‑web‑vulns figure in the introduction is the entire empirical hook for "why XSS now." If you cannot ground it in a real source by the camera‑ready, soften the introduction. As a reviewer I cannot verify a placeholder, so I treat the 66% number as advocacy.</li>
+  <li><span class="tag warn">Suspicious arXiv IDs</span> [16] 2604.20801, [18] 2602.02164, [21] 2604.17860. arXiv numbering uses YYMM.NNNNN, so 2604/2602 would be April/Feb 2026. As of my read (late 2025), arXiv has not reached the 2602 series yet. If these are forward‑dated placeholders, mark them so; if they are real preprints the authors plan to cite from 2026, ensure they will be public by the camera‑ready.</li>
+  <li><span class="tag warn">Quoted, not direct</span> §3.1 puts "perfectly separate real bugs from hallucinations" in quotation marks attributed to Anthropic. The phrasing is close to but not identical to anything on the Mythos Preview page I read. If you can find the exact source paragraph, quote it; if not, paraphrase without quotation marks.</li>
+  <li><span class="tag warn">Wrong template</span> The two‑column IEEE look (and the <code>\sf</code>/<code>\bf</code> in figure 5) suggests IEEEtran, but ICSE 2027 mandates the ACM acmart class (<code>sigconf</code>, anonymous). Templates differ in page count, margins, fonts, and reference style. Re‑format before submission or you will get desk‑rejected; this has bitten many ICSE submissions.</li>
+  <li><span class="tag warn">Anonymisation drift</span> The paper names specific OSS targets (Docmost, Ghost, grav, CVAT, OnlyOffice, hestiacp, Piwigo, mybb, navidrome, filebrowser, frappe, gogs, traccar, homebox, langbot, changedetection.io, wallos, cachecloud, orchardcore) and includes CVE‑2026‑48072. ICSE is double‑anonymous. Disclosed CVE IDs themselves are not author‑identifying (a maintainer credits the reporter, but a reviewer doesn't usually look that up), and naming OSS targets is fine. However: if the artifact repo URL hidden behind "available at [URL]" is on a GitHub org whose name matches the authors' real lab, that leaks. Check before submission.</li>
+  <li><span class="tag warn">Author notes</span> Six "Muxi: …" inline notes still in body text (Sections 2.1, 3, 6, 7, 8, abstract). Strip these. The Muxi note in §7 ("This section has not been reviewed") will desk‑reject you on its own.</li>
+</ul>
+
+<h2>6. The Section 4.6 soundness argument is the best part of the paper</h2>
+
+<p>I want to praise this section because it is the kind of careful claim most agentic‑security papers do not make. Authors enumerate the four inputs an accepted verdict depends on (state, interaction, identity, signal), name what closes each, and explicitly state that completeness is over the <em>avenues</em> not over the <em>behaviours</em> within each class. The "Limits" sub‑section is honest: role confinement bounds credentials at planting, not privilege the attacker can win through the application; soundness is relative to the trusted base; the guarantee is about soundness, not completeness of discovery. This is good engineering. Keep it, even at the cost of cutting somewhere else.</p>
+
+<p>One specific tightening: the trusted base is "four things" (snapshot fidelity, container/network isolation, CDP faithful execution, operator role declaration). It would help reviewers to see one paragraph each that defends each item briefly:</p>
+
+<ul>
+  <li>Snapshot fidelity: the snapshot is from a specific commit, built with a recorded Dockerfile. What if the application has time‑dependent state? Cron jobs? External services?</li>
+  <li>Container isolation: which container runtime, what does the network namespace look like, can the verification environment reach the exploration environment's loopback (and would the agent know)?</li>
+  <li>CDP faithful execution: is the sentinel installed via <code>Page.addScriptToEvaluateOnNewDocument</code> with a token that the page cannot observe before sentinel invocation? Could the application detect headless mode and behave differently (some apps do)?</li>
+  <li>Operator role declaration: §6.1 says assignments are "recorded per target with their justification and frozen before the run." Frozen where? Are the per‑target threat‑model files in the artifact?</li>
+</ul>
+
+<h2>7. The Docmost example is doing more work than it should</h2>
+
+<p>Section 2.2 walks through CVE‑2026‑48072 with a code listing and a PoC listing. It is a clean exposition but it is doing two jobs: (a) showing the threat (path traversal + SVG content‑type → stored XSS) and (b) showing the RECEIPT artifact shape (setup script, navigate_to URL, actions list). Job (a) is interesting but not novel — SVG XSS by path traversal is a category vulnerability. Job (b) is what the paper actually needs the reader to see. I would do one of two things:</p>
+
+<ul>
+  <li><strong>Lead with a reward‑hacked example instead.</strong> The hestiacp <code>docker exec</code> case in §6.2 is much more striking: the agent <em>tried to cheat</em>, the harness stopped it, and you can show the failing trajectory in the same three‑field format. That viscerally answers "why does any of this matter?" The Docmost example becomes a satisfying tail case once the reader is sold on the problem.</li>
+  <li><strong>Or split: keep Docmost in §2.2 but add a reward‑hack tour in §3.2.2.</strong> Currently §3.2.2 names the three classes but only sketches one (Wallos). Give each class one concrete trajectory paragraph. Class 2 (CVAT <code>document.body.innerHTML = …</code>) is good. Class 3 (over‑privileged admin) deserves a named example. The reader leaves §3 with three vivid failures rather than three abstract sentences.</li>
+</ul>
+
+<h2>8. Generalisation claims in §7.2 are too cheap</h2>
+
+<p>Section 7.2 ("Beyond XSS") sketches how SQL injection (timing/out‑of‑band callback), SSRF (callback to attacker listener), and path traversal (planted file with unguessable token) admit similar verifiers. I agree in principle and the paper is right that the design generalises. But the section reads as throwaway. Three problems:</p>
+
+<ul>
+  <li><strong>The DSL question is different for each class.</strong> For SSRF, what does the "action interface" look like? You cannot strip code from a setup_script that has to perform a multi‑step request chain. Maybe the answer is that the action interface only matters for classes where the agent could plant the payload directly into the verifier; for SSRF that is harder because the verifier is a network listener, not a browser. Make this distinction explicit, or §7.2 reads as marketing.</li>
+  <li><strong>Reward‑hacking classes are class‑specific.</strong> "State contamination" for SQLi is different from for XSS (you cannot reset a database <em>state</em> if the SQLi only matters at query‑time; you reset between attempts but the agent might still poison the schema). One paragraph per class describing the analogous reward hacks would lift this section from sketch to argument.</li>
+  <li><strong>Or cut it.</strong> If you cannot get §7.2 to the same quality as §4–§6, drop it. The paper is stronger as a tight XSS story than as a tight XSS story plus a hand‑wave at three other classes. ICSE reviewers have seen too many "our approach generalises" sections that don't.</li>
+</ul>
+
+<h2>9. What I would actually like to see in revision</h2>
+
+<p>If the authors have one revision cycle (ICSE has a major revision option but it's tight: Jan 2027 decision, June 2026 submission), here is what I would actually do. Numbers in brackets are estimated cost and time for one researcher with API access.</p>
+
+<ol>
+  <li><strong>Run the full 50‑target browser replay of the prompted‑self‑judgment baseline.</strong> Don't hand‑replay 27 — script it. Record Found / Executes‑on‑replay / Cross‑boundary‑actionable for all 50, and put the full distribution into Table 3 next to RECEIPT. <em>[~$200 compute + 3 engineer‑days.]</em></li>
+  <li><strong>Complete the L1 and L4 ablation rows in Table 5 with real Verified counts.</strong> The L4 row is the one that's missing entirely; the L1 row needs a manual replay of the 67 surviving raw firings (do this with a Playwright script in the victim session, not by eye). <em>[~$200 + 4 days.]</em></li>
+  <li><strong>Run YuraScanner [23] on the same 50 zero‑day targets and the same 46 one‑days.</strong> This is the obvious LLM‑agent baseline and currently missing. If YuraScanner cannot build some of these targets out of the box, that is a finding; report it. <em>[~$400 + 1 engineer‑week.]</em></li>
+  <li><strong>Run RECEIPT on the XSS subset of CVE‑Bench v2.0 [11].</strong> Even a partial run would let you put a comparable number on an external benchmark. This also helps you handle reviewer 2's inevitable "why is your benchmark the right one?" objection. <em>[~$500 + 1 week.]</em></li>
+  <li><strong>Replace the placeholder [4] Berkeley citation with a real one (or remove the 66% claim).</strong> The 66% YoY decline in agent‑reported web vulns is doing real load in the introduction. If the source is internal data or a blog post, cite that exact post with retrieval date. If it cannot be sourced, the introduction needs to be rewritten without the number. <em>[0.5 days.]</em></li>
+  <li><strong>Re‑format to ACM acmart sigconf, anonymised double‑blind.</strong> Two‑column IEEEtran will be desk‑rejected. <em>[0.5 days.]</em></li>
+  <li><strong>Strip all six "Muxi: …" notes, fix [3] URL, audit [16][18][21] arXiv IDs.</strong> <em>[0.5 days.]</em></li>
+  <li><strong>Publish the action‑interface DSL in BNF in an appendix.</strong> This is the heart of the contribution. The current §4.3 prose ("click, fill, type, press, select_option, hover, scrolling, or a wait") is suggestive but a BNF nails it down. Lean into this and the contribution stops being "we built a harness" and starts being "we contribute a typed verifier interface." <em>[1 day.]</em></li>
+  <li><strong>Add Cohen's κ for the actionable / not‑actionable classification.</strong> One non‑author security researcher re‑classifying the 16 zero‑day plus 6 surprise one‑day reports. <em>[2 days of an external researcher's time.]</em></li>
+  <li><strong>Add an "Open Science" or "Artifact" section.</strong> ICSE 2027 has an Artifact Evaluation track running. Even if you do not submit to it, reviewers will look favourably on a paragraph naming the artifact repo, the per‑target manifest schema, the Docker images, and the threat‑model files. <em>[0.5 days writing.]</em></li>
+</ol>
+
+<p>That totals roughly <strong>$2,100 in compute and ~6 author‑weeks of work</strong>, spread across two people. It fits the ICSE 2027 single‑cycle calendar (abstract 23 June 2026, paper 1 July 2026 per the paper's own author note, which matches the conf.researchr.org dates I verified). It is also exactly the kind of revision plan I would want to see in a rebuttal if I were reviewing this for the major‑revision option.</p>
+
+<h2>10. The things the paper got right</h2>
+
+<p>Listing complaints can give the wrong impression. Some genuinely good moves in this draft:</p>
+
+<ul>
+  <li><strong>The dual‑environment design is the right shape.</strong> Exploration environment that the agent can freely contaminate, verification environment with snapshot reset, agent has <em>no shell access</em> in the verification environment. That last detail is doing the load‑bearing work and the paper is correct to emphasise it.</li>
+  <li><strong>"Pool of pre‑warmed snapshots" amortises the reset cost.</strong> §5 mentions this in passing. It is a real engineering contribution and the paper should give it more space (one paragraph in §5 + a number: median snapshot warm‑pop latency). Reviewers who have built fuzzing infrastructure will care.</li>
+  <li><strong>"We trust the operator's per‑target role declaration" is honest.</strong> Many threat‑model papers paper over this. Calling it part of the trusted base in §4.1 invites future work without breaking the current claim.</li>
+  <li><strong>"Frozen role assignments removed 27 of 38 wrong‑user findings outright" (§6.2).</strong> This is a strong, specific number. Keep it; the conservative‑declaration policy (admin not trusted unless documented as trusted) is the right default.</li>
+  <li><strong>The execution / impact split.</strong> §6.1: "this human pass weighs only impact: no time is spent deciding whether a report runs at all." That is genuinely the right framing for triage, and is a useful contribution independent of the harness mechanics.</li>
+</ul>
+
+<h2>11. Final read</h2>
+
+<p>This paper is closer to a championable contribution than it currently looks, but it is dressed in a draft that under‑delivers on the strongest claim it could be making. The runtime browser oracle is 2021 work. The snapshot isolation is 2024 work. The contribution is the <em>characterisation</em> of how a white‑box agent games such an oracle, and the <em>typed verifier interface</em> that makes the three classes inexpressible rather than detected. If the authors re‑pitch around those two ideas, complete the L1 and L4 ablation rows, run the full‑sample baseline replay, add one external comparison (YuraScanner or CVE‑Bench v2.0 XSS subset), and clean up the bibliography, I would champion this at the PC meeting.</p>
+
+<p>If they do not, my read is weak accept on contribution and weak reject on evaluation, and that math doesn't pass. The DSL framing is the move. Lean into it.</p>
+
+<div class="footnote">
+  Background reading I did to write this review: Eriksson, Pellegrino &amp; Sabelfeld, <em>Black Widow</em>, IEEE S&amp;P 2021. Olsson, Eriksson, Doupé &amp; Sabelfeld, <em>Spider‑Scents</em>, USENIX Sec '24. Stafeev et al., <em>YuraScanner</em>, NDSS 2025. Güler et al., <em>Atropos</em>, USENIX Sec '24. Li, Dutta &amp; Naik, <em>IRIS</em>, ICLR 2025. Zhu et al., <em>CVE‑Bench</em>, ICML 2025. XBOW, <em>On HackerOne: What's Next</em>, 18 Aug 2025. MacDiarmid et al. (Anthropic), <em>Natural Emergent Misalignment from Reward Hacking in Production RL</em>, arXiv 2511.18397, 23 Nov 2025. Anthropic, <em>Assessing Claude Mythos Preview's Cybersecurity Capabilities</em>, red.anthropic.com 7 Apr 2026 (the actual URL for the [3] "Project Glasswing" cite). ICSE 2027 home (conf.researchr.org/home/icse-2027): abstract 23 Jun 2026, paper deadline shortly after, Dublin 25 Apr – 1 May 2027, ACM acmart double‑anonymous.
+</div>
+
+</body>
+</html>
