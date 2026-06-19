@@ -201,3 +201,60 @@ class TestOpenAIXhighDefault:
         m.generate()
         body = _CapturingHandler.captured_bodies[-1]
         assert body.get("reasoning_effort") == "xhigh"
+
+    def test_openrouter_gpt_latest_alias_defaults_to_xhigh(
+        self, capture_server: str
+    ) -> None:
+        """openrouter/~openai/gpt-latest (alias for current best GPT) defaults too."""
+        m = OpenAICompatibleModel(
+            "openrouter/~openai/gpt-latest",
+            base_url=capture_server,
+            api_key="test-key",
+        )
+        m.initialize("hi")
+        m.generate()
+        body = _CapturingHandler.captured_bodies[-1]
+        assert body.get("reasoning_effort") == "xhigh"
+
+    def test_unknown_model_does_not_default(self, capture_server: str) -> None:
+        """A model name not present in MODEL_INFO must NOT receive xhigh.
+
+        This guards custom local endpoints (Ollama, vLLM, LM Studio) and
+        any future model whose entry has not yet been added — defaulting
+        ``reasoning_effort`` for an unknown model would be wrong because
+        the upstream API may reject the parameter.
+        """
+        m = OpenAICompatibleModel(
+            "some-custom-local-model-not-in-model-info",
+            base_url=capture_server,
+            api_key="test-key",
+        )
+        m.initialize("hi")
+        m.generate()
+        body = _CapturingHandler.captured_bodies[-1]
+        assert "reasoning_effort" not in body
+
+    def test_model_info_flag_drives_defaulting(self, capture_server: str) -> None:
+        """The xhigh default must be driven solely by the MODEL_INFO flag.
+
+        Flipping ``supports_xhigh_reasoning_effort`` on a model that does NOT
+        normally default (here: ``gpt-4o``) must immediately cause the next
+        ``OpenAICompatibleModel`` instance built for that model to send
+        ``reasoning_effort: xhigh``.  This is the contract that makes adding
+        future xhigh-capable models a one-line change in ``model_info.py``.
+        """
+        from kiss.core.models.model_info import MODEL_INFO
+        original = MODEL_INFO["gpt-4o"].supports_xhigh_reasoning_effort
+        MODEL_INFO["gpt-4o"].supports_xhigh_reasoning_effort = True
+        try:
+            m = OpenAICompatibleModel(
+                "gpt-4o",
+                base_url=capture_server,
+                api_key="test-key",
+            )
+            m.initialize("hi")
+            m.generate()
+            body = _CapturingHandler.captured_bodies[-1]
+            assert body.get("reasoning_effort") == "xhigh"
+        finally:
+            MODEL_INFO["gpt-4o"].supports_xhigh_reasoning_effort = original
