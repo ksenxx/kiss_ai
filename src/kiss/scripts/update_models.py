@@ -297,7 +297,7 @@ def get_current_model_info() -> dict[str, dict]:
             "fc": info.is_function_calling_supported,
             "emb": info.is_embedding_supported,
             "gen": info.is_generation_supported,
-            "xhigh": info.supports_xhigh_reasoning_effort,
+            "thinking": info.thinking,
         }
         for name, info in MODEL_INFO.items()
     }
@@ -329,17 +329,21 @@ def test_embedding(model_name: str) -> bool:
         return False
 
 
-def test_xhigh_reasoning_effort(model_name: str) -> bool:
-    """Test whether the model accepts ``reasoning_effort="xhigh"``.
+_THINKING_LEVELS_TO_PROBE: tuple[str, ...] = ("xhigh",)
 
-    Issues a minimal generate call with
-    ``model_config={"reasoning_effort": "xhigh"}`` explicitly so that the
-    OpenAI Chat Completions API decides the verdict, regardless of whether
-    the model is already flagged in ``MODEL_INFO``.
 
-    Returns True iff the call succeeds with non-empty output. Returns False
-    on any error (including HTTP 400 from APIs that reject the value) or
-    for backends that don't accept ``reasoning_effort`` at all:
+def detect_thinking_level(model_name: str) -> str | None:
+    """Detect the highest ``reasoning_effort`` level the model accepts.
+
+    Probes each level in :data:`_THINKING_LEVELS_TO_PROBE` (currently just
+    ``"xhigh"``) by issuing a minimal generate call with
+    ``model_config={"reasoning_effort": <level>}`` explicitly so that the
+    OpenAI Chat Completions API itself decides the verdict, regardless of
+    whether the model is already flagged in ``MODEL_INFO``. Returns the
+    first level that succeeds, or ``None`` if none did.
+
+    Returns ``None`` (without making any API call) for backends that don't
+    accept ``reasoning_effort`` at all:
 
     * ``codex/*`` — routed through the Codex CLI, which controls reasoning
       via its own ``model_reasoning_effort`` config rather than per-call.
@@ -351,9 +355,9 @@ def test_xhigh_reasoning_effort(model_name: str) -> bool:
     from kiss.core.models.model_info import _OPENAI_PREFIXES
 
     if model_name.startswith(("codex/", "claude-", "gemini-")):
-        return False
+        return None
     if any(marker in model_name for marker in ("-pro", "chat-latest", "-image")):
-        return False
+        return None
     is_openai = model_name.startswith(_OPENAI_PREFIXES) and not model_name.startswith(
         "text-embedding"
     )
@@ -361,18 +365,21 @@ def test_xhigh_reasoning_effort(model_name: str) -> bool:
         ("openrouter/openai/", "openrouter/~openai/")
     )
     if not (is_openai or is_openrouter_openai):
-        return False
+        return None
 
     from kiss.core.models.model_info import model as create_model
 
-    try:
-        m = create_model(model_name, model_config={"reasoning_effort": "xhigh"})
-        m.initialize("Say hello in one word.")
-        text, _ = m.generate()
-        return bool(text and text.strip())
-    except Exception:
-        logger.debug("Exception caught", exc_info=True)
-        return False
+    for level in _THINKING_LEVELS_TO_PROBE:
+        try:
+            m = create_model(model_name, model_config={"reasoning_effort": level})
+            m.initialize("Say hello in one word.")
+            text, _ = m.generate()
+            if text and text.strip():
+                return level
+        except Exception:
+            logger.debug("Exception caught", exc_info=True)
+            continue
+    return None
 
 
 def test_function_calling(model_name: str) -> bool:
@@ -403,8 +410,8 @@ def test_function_calling(model_name: str) -> bool:
 def test_model_capabilities(
     model_name: str,
     verbose: bool = False,
-) -> dict[str, bool]:
-    results: dict[str, bool] = {}
+) -> dict[str, Any]:
+    results: dict[str, Any] = {}
     if verbose:  # pragma: no branch
         print(f"    Testing {model_name}...", end="", flush=True)
 
@@ -421,13 +428,16 @@ def test_model_capabilities(
         results["fc"] = False
 
     if results["gen"]:  # pragma: no branch
-        results["xhigh"] = test_xhigh_reasoning_effort(model_name)
+        results["thinking"] = detect_thinking_level(model_name)
         time.sleep(0.5)
     else:
-        results["xhigh"] = False
+        results["thinking"] = None
 
     if verbose:  # pragma: no branch
-        flags = " ".join(f"{k}={'Y' if v else 'N'}" for k, v in results.items())
+        flags = " ".join(
+            f"{k}={v if isinstance(v, str) else ('Y' if v else 'N')}"
+            for k, v in results.items()
+        )
         print(f" {flags}")
     return results
 
@@ -808,7 +818,7 @@ def _make_entry_line(
     fc: bool = True,
     emb: bool = False,
     gen: bool = True,
-    xhigh: bool = False,
+    thinking: str | None = None,
     comment: str = "",
 ) -> str:
     if emb and not gen:  # pragma: no branch
@@ -822,8 +832,8 @@ def _make_entry_line(
             extras.append("emb=True")
         if not gen:  # pragma: no branch
             extras.append("gen=False")
-        if xhigh:  # pragma: no branch
-            extras.append("xhigh=True")
+        if thinking:  # pragma: no branch
+            extras.append(f'thinking="{thinking}"')
         if extras:  # pragma: no branch
             args += ", " + ", ".join(extras)
         line = f'    "{name}": _mi({args}),'
@@ -880,7 +890,7 @@ def apply_updates_to_file(
         new_ctx = upd["changes"].get("context_length", cur["context_length"])
         new_inp = upd["changes"].get("input_price_per_1M", cur["input_price_per_1M"])
         new_out = upd["changes"].get("output_price_per_1M", cur["output_price_per_1M"])
-        new_xhigh = upd["changes"].get("xhigh", cur.get("xhigh", False))
+        new_thinking = upd["changes"].get("thinking", cur.get("thinking"))
         new_line = _make_entry_line(
             name,
             new_ctx,
@@ -889,7 +899,7 @@ def apply_updates_to_file(
             fc=cur["fc"],
             emb=cur["emb"],
             gen=cur["gen"],
-            xhigh=new_xhigh,
+            thinking=new_thinking,
         )
         start, end = _find_entry_span(lines, name)
         if start >= 0:  # pragma: no branch
@@ -927,7 +937,7 @@ def apply_updates_to_file(
             fc=nm.get("fc", True),
             emb=nm.get("emb", False),
             gen=nm.get("gen", True),
-            xhigh=nm.get("xhigh", False),
+            thinking=nm.get("thinking"),
             comment=comment,
         )
         new_lines_to_add.append(entry_line)
@@ -1084,7 +1094,7 @@ def main() -> None:
             nm["gen"] = caps["gen"]
             nm["emb"] = caps["emb"]
             nm["fc"] = caps["fc"]
-            nm["xhigh"] = caps["xhigh"]
+            nm["thinking"] = caps["thinking"]
             if not caps["gen"] and not caps["emb"]:  # pragma: no branch
                 nm["_skip"] = True
         new_models = [nm for nm in new_models if not nm.get("_skip")]
@@ -1095,7 +1105,7 @@ def main() -> None:
             nm["fc"] = True
             nm["gen"] = not nm.get("is_embedding", False)
             nm["emb"] = nm.get("is_embedding", False)
-            nm["xhigh"] = False
+            nm["thinking"] = None
     else:
         print("\n[5/6] No new models to test")
 
@@ -1105,8 +1115,8 @@ def main() -> None:
         for name, cur in current.items():  # pragma: no branch
             caps = test_model_capabilities(name, verbose=args.verbose)
             fc_changed = caps["fc"] != cur["fc"]
-            xhigh_changed = caps["xhigh"] != cur.get("xhigh", False)
-            if not (fc_changed or xhigh_changed):  # pragma: no branch
+            thinking_changed = caps["thinking"] != cur.get("thinking")
+            if not (fc_changed or thinking_changed):  # pragma: no branch
                 continue
             existing = update_by_name.get(name)
             if existing is None:  # pragma: no branch
@@ -1116,11 +1126,11 @@ def main() -> None:
             if fc_changed:  # pragma: no branch
                 existing["changes"]["fc"] = caps["fc"]
                 print(f"    {name}: fc changed {cur['fc']} -> {caps['fc']}")
-            if xhigh_changed:  # pragma: no branch
-                existing["changes"]["xhigh"] = caps["xhigh"]
+            if thinking_changed:  # pragma: no branch
+                existing["changes"]["thinking"] = caps["thinking"]
                 print(
-                    f"    {name}: xhigh changed "
-                    f"{cur.get('xhigh', False)} -> {caps['xhigh']}"
+                    f"    {name}: thinking changed "
+                    f"{cur.get('thinking')!r} -> {caps['thinking']!r}"
                 )
 
     print("\n[6/6] Applying changes...")
