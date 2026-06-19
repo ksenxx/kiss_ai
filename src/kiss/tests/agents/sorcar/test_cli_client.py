@@ -158,7 +158,12 @@ class CliClientBase(unittest.TestCase):
 
     def setUp(self) -> None:
         self.harness = _DaemonHarness()
-        self.printer = ConsolePrinter(file=open(os.devnull, "w"))
+        # Keep a handle on the devnull file so ``tearDown`` can close
+        # it — without that, every test leaks an FD and a long
+        # suite eventually trips ``OSError: Too many open files``
+        # (default ulimit on macOS is 256).
+        self._devnull = open(os.devnull, "w")
+        self.printer = ConsolePrinter(file=self._devnull)
         self.client = CliClient(
             sock_path=Path(self.harness.sock_path),
             work_dir=self.harness.work_dir,
@@ -171,7 +176,10 @@ class CliClientBase(unittest.TestCase):
         try:
             self.client.close()
         finally:
-            self.harness.shutdown()
+            try:
+                self.harness.shutdown()
+            finally:
+                self._devnull.close()
 
 
 class TestCliInfoSlashCommands(CliClientBase):
@@ -312,7 +320,10 @@ class TestExpandCommand(CliClientBase):
             self.client, "expandCommand", name="does-not-exist", args="",
         )
         self.assertFalse(reply.get("found"))
-        self.assertIn("Unknown command", reply.get("error", ""))
+        # ``error`` is a bool flag; ``errorMessage`` carries the
+        # human-readable text (review A5/B4 round 2 — disambiguated).
+        self.assertIs(reply.get("error"), True)
+        self.assertIn("Unknown command", reply.get("errorMessage", ""))
 
     def test_known_command_is_expanded(self) -> None:
         cmds_dir = Path(self.harness.work_dir) / ".kiss" / "commands"
