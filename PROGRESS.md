@@ -1,65 +1,109 @@
-# Progress — run all tests and report causes of failures
+# Task: Convert `xhigh=True` flag to `thinking="xhigh"` string field
 
-- Read `SORCAR.md` (empty) then `PROGRESS.md` (had a previous-session log).
-- Checked CPU cores: 10 → split tests into 8 parallel splits (cores − 2).
-- Collected all pytest node IDs with `uv run pytest --collect-only -q --no-cov -m ''` → 3749 tests (all markers enabled).
-- Split node IDs into 8 files `tmp/split_1..8.txt` via a small Python script.
-- Ran all 8 splits in parallel via `run_parallel`. Each agent ran:
-  `xargs -a tmp/split_N.txt uv run pytest --no-cov -m '' --tb=short -q -p no:randomly`
-  and wrote a concise `tmp/results_N.md` report. NO code was modified.
-- Read every `tmp/results_N.md` and synthesized the final failure report below.
+## Goal
 
-## Aggregate result
+Replace boolean `supports_xhigh_reasoning_effort` / `xhigh=True` with a more
+general `thinking: str | None` field on `ModelInfo` that stores the
+`reasoning_effort` level the model accepts. `OpenAICompatibleModel` then
+defaults `reasoning_effort` to that level.
 
-- Total: 3749 tests
-- Passed: 3692
-- Failed: 17
-- Skipped: 37 (29 in split 1 + 8 in split 8; all environment-/marker-gated)
-- Errors: 0
+## Done so far
 
-## Failures grouped by root cause
+### 1. `src/kiss/core/models/model_info.py` — DONE
 
-### A. `openSubagentTab` events not emitted/captured (6 failures)
+- `ModelInfo.__init__`: replaced `supports_xhigh_reasoning_effort: bool = False`
+  with `thinking: str | None = None`. Stored on `self.thinking`.
+- `_mi(...)` helper: replaced `xhigh: bool = False` with
+  `thinking: str | None = None`. Docstring updated.
+- All 4 `xhigh=True` call sites converted to `thinking="xhigh"`:
+  - `"gpt-5.5"`
+  - `"gpt-5.5-2026-04-23"`
+  - `"openrouter/openai/gpt-5.5"`
+  - `"openrouter/~openai/gpt-latest"`
 
-Tests asserting that running `run_parallel` emits `openSubagentTab` stream
-events see an empty event list. The producer side appears to emit
-`new_tab` / `subagentDone` instead (event-name / wiring drift between
-producer and consumer of the subagent-tab event stream).
+### 2. `src/kiss/core/models/openai_compatible_model.py` — DONE
 
-- `src/kiss/tests/agents/sorcar/test_run_parallel_integration.py::TestNestedParallelReal::test_nested_parallel_subagent_tab_events` — `assert 0 == 2` (expected 2 outer `openSubagentTab` events as direct children of root).
-- `src/kiss/tests/agents/sorcar/test_run_parallel_integration.py::TestSubagentTabEventsE2E::test_subagent_tab_events_broadcast` — `assert 0 == 2`.
-- `src/kiss/tests/agents/sorcar/test_run_parallel_integration.py::TestSubagentTabEventsE2E::test_subagent_streaming_events_have_tab_ids` — `assert 0 > 0` (no streaming events tagged with sub-agent `tab_id`).
-- `src/kiss/tests/agents/sorcar/test_run_parallel_integration.py::TestSubagentTabEventsE2E::test_description_field_in_open_event` — `assert 0 == 1` (no `openSubagentTab` event to inspect `description` on).
-- `src/kiss/tests/agents/sorcar/test_subagent_tabs.py::TestSubagentTabEvents::test_parallel_creates_subagent_tab_events` — `assert len(open_events) >= 2`, got 0.
-- `src/kiss/tests/agents/sorcar/test_subagent_tabs.py::TestSubagentTabEvents::test_parallel_subagent_events_have_correct_types` — `assert len(open_events) >= 1`, got 0.
+- `_model_supports_xhigh(name) -> bool` replaced with
+  `_model_thinking_level(name) -> str | None` returning
+  `MODEL_INFO[name].thinking`.
+- `__init__` now does:
+  ```python
+  thinking_level = _model_thinking_level(self.model_name)
+  if thinking_level is not None and "reasoning_effort" not in self.model_config:
+      self.model_config = dict(self.model_config)
+      self.model_config["reasoning_effort"] = thinking_level
+  ```
 
-### B. VSCode server stop test never observes status `running=true` (1 failure)
+### 3. `src/kiss/scripts/update_models.py` — PARTIALLY DONE
 
-- `src/kiss/tests/agents/sorcar/test_vscode_stop.py::TestVSCodeServerStop::test_stop_command_interrupts_running_task` — `AssertionError: Never saw status running=true. Events: []`. The status-streaming channel the test subscribes to is not being populated (server didn't start/emit status within the wait window or status feed is not wired in this environment).
+- `get_current_model_info`: emits `"thinking": info.thinking` (str|None)
+  instead of `"xhigh": bool`. DONE.
+- `test_xhigh_reasoning_effort(name) -> bool` replaced with
+  `detect_thinking_level(name) -> str | None` that probes each level in
+  `_THINKING_LEVELS_TO_PROBE = ("xhigh",)` and returns the first that
+  succeeds, else `None`. DONE.
 
-### C. Stderr-drain timing-too-tight (1 failure, looks like flake / host-speed-dependent)
+## Remaining work
 
-- `src/kiss/tests/agents/vscode/test_web_server_security.py::TestH6StderrReaderCleanup::test_reader_keeps_draining_stderr_after_url_found` — `subprocess.TimeoutExpired` after 10 s. The helper subprocess writes 2000 stderr lines with `time.sleep(0.001)` between each line and does not finish within `proc.wait(timeout=10)` on this host. The test's timing budget is too tight rather than an actual stderr-drain bug.
+### `src/kiss/scripts/update_models.py` still to update
 
-### D. Missing external CLI binary `/usr/bin/claude` (2 failures)
+Caller of test in `test_model_capabilities` (around line 423) currently does:
 
-Real-CLI integration tests that spawn `/usr/bin/claude`, which is not installed.
+```python
+results["xhigh"] = test_xhigh_reasoning_effort(model_name)
+...
+results["xhigh"] = False
+```
 
-- `src/kiss/tests/core/models/test_cc_opus_live_thinking.py::TestCCOpusLiveThinking::test_no_empty_thinking_bar` — `FileNotFoundError: '/usr/bin/claude'` → `KISSError: Failed to start Claude Code CLI`.
-- `src/kiss/tests/core/models/test_claude_code_model.py::TestGenerateIntegration::test_generate_token_counts` — same `FileNotFoundError: '/usr/bin/claude'`.
-- `src/kiss/tests/core/models/test_claude_code_model.py::TestGenerateIntegration::test_generate_streaming` — same `FileNotFoundError: '/usr/bin/claude'`.
+Need to change to:
 
-### E. Missing external CLI binary `/usr/bin/codex` (6 failures)
+```python
+results["thinking"] = detect_thinking_level(model_name)
+...
+results["thinking"] = None
+```
 
-Real-CLI integration tests that spawn `/usr/bin/codex`, which is not installed.
+Also the `flags` print line uses `'Y' if v else 'N'` — that needs to handle
+string|None values, e.g. `v or 'N'`.
 
-- `src/kiss/tests/core/models/test_codex_model.py::TestGenerateIntegration::test_generate_token_counts` — `FileNotFoundError: '/usr/bin/codex'`.
-- `src/kiss/tests/core/models/test_codex_model.py::TestGenerateIntegration::test_generate_streaming` — same.
-- `src/kiss/tests/core/models/test_codex_model.py::TestGenerateIntegration::test_generate_failure_raises` — expected regex `'Codex CLI failed'` but actual error is the same startup `FileNotFoundError: '/usr/bin/codex'`.
-- `src/kiss/tests/core/models/test_codex_model.py::TestGenerateIntegration::test_generate_can_modify_files` — same `FileNotFoundError`.
-- `src/kiss/tests/core/models/test_codex_model.py::TestGenerateIntegration::test_generate_streams_command_progress` — same.
-- `src/kiss/tests/core/models/test_codex_model.py::TestGenerateIntegration::test_generate_and_process_with_tools_runs` — same.
+`_make_entry_line` at line ~803-830: signature uses `xhigh: bool = False`.
+Replace with `thinking: str | None = None`. Body:
 
-(Recount: A = 6, B = 1, C = 1, D = 3, E = 6 → 17 failures.)
+```python
+if thinking:
+    extras.append(f'thinking="{thinking}"')
+```
 
-## No code was modified during this task.
+`apply_updates_to_file` at line ~877: `new_xhigh = upd["changes"].get("xhigh", cur.get("xhigh", False))`
+and `xhigh=new_xhigh,`. Replace with `thinking` key everywhere.
+
+Line ~930: `xhigh=nm.get("xhigh", False),` → `thinking=nm.get("thinking"),`.
+
+Line ~1087: `nm["xhigh"] = caps["xhigh"]` → `nm["thinking"] = caps["thinking"]`.
+Line ~1098: `nm["xhigh"] = False` → `nm["thinking"] = None`.
+Lines ~1106-1124: `--test-existing` block — rename `xhigh_changed` /
+`changes["xhigh"]` to `thinking_changed` / `changes["thinking"]`; comparison
+becomes `caps["thinking"] != cur.get("thinking")`.
+
+### `src/kiss/tests/core/models/test_openai_xhigh_default.py`
+
+- Last test uses `MODEL_INFO["gpt-4o"].supports_xhigh_reasoning_effort`.
+  Replace with `.thinking` and assign `"xhigh"` / `None` instead of
+  `True` / original-bool.
+
+### `src/kiss/tests/scripts/test_update_models_xhigh.py`
+
+- Import `detect_thinking_level as _probe` (rename).
+- `_make_entry_line(..., xhigh=True)` → `thinking="xhigh"`.
+- Assert generated line says `thinking="xhigh"` not `xhigh=True`.
+- `"fc=False, xhigh=True"` → `'fc=False, thinking="xhigh"'`.
+- Replace `_probe_xhigh(...) is False` with
+  `_probe(...) is None` for all the short-circuit tests.
+- `get_current_model_info` tests: assert `snapshot[name]["thinking"]`
+  matches `info.thinking` (str|None). For `gpt-5.5` assert `== "xhigh"`,
+  for `gpt-4o` assert `is None`.
+
+### Verification
+
+- `uv run pytest src/kiss/tests/core/models/test_openai_xhigh_default.py src/kiss/tests/scripts/test_update_models_xhigh.py -v`
+- `uv run check --full`
