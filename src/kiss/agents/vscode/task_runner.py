@@ -573,6 +573,7 @@ class _TaskRunnerMixin:
                 self._subscribe_chat_viewers,
                 source_tab_id=tab_id,
                 start_ms=start_ms,
+                client_task_id=cmd.get("taskId", "") or "",
             )
 
             for task_prompt in subtasks:
@@ -1050,6 +1051,7 @@ class _TaskRunnerMixin:
         *,
         source_tab_id: str,
         start_ms: int,
+        client_task_id: str = "",
     ) -> None:
         """Subscribe every tab that has *chat_id* open to a new task's stream.
 
@@ -1096,12 +1098,20 @@ class _TaskRunnerMixin:
                 "chat_id": chat_id,
                 "tabId": viewer_tab_id,
             })
-            self.printer.broadcast({
+            viewer_status: dict[str, Any] = {
                 "type": "status",
                 "running": True,
                 "tabId": viewer_tab_id,
                 "startTs": start_ms,
-            })
+            }
+            if client_task_id:
+                # Echo the launcher's client-supplied taskId so the
+                # CLI client's per-task status filter symmetrically
+                # accepts BOTH the viewer-start (here) and the
+                # viewer-end (``_broadcast_status_end_to_viewers``)
+                # broadcasts — review H1 round 3.
+                viewer_status["taskId"] = client_task_id
+            self.printer.broadcast(viewer_status)
 
     def _stop_task(self, tab_id: str = "") -> None:
         """Signal the agent to stop.

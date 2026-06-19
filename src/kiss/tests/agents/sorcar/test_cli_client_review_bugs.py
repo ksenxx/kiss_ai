@@ -454,10 +454,12 @@ class TestCustomCommandDisconnectDoesNotPrintTrue(CliClientBase):
                          f"Disconnect printed literal True: {output!r}")
         # The message should mention the daemon connection issue or
         # fall back to a generic "Unknown command".
-        self.assertTrue(
-            "Daemon" in output or "Unknown command" in output,
-            f"Bad output on disconnect: {output!r}",
-        )
+        # Tightened from a 4-way disjunction (round 2 D7) to a
+        # precise expectation — the disconnect-sentinel always
+        # populates ``errorMessage`` so the printed line must contain
+        # "Daemon" (review T15 round 3).
+        self.assertIn("Daemon", output,
+                      f"Bad output on disconnect: {output!r}")
 
     def test_unknown_command_when_connected_prints_unknown_message(self) -> None:
         buf = io.StringIO()
@@ -491,25 +493,46 @@ class TestAutocommitDisconnectFastFail(CliClientBase):
 
 
 class TestExitStopsRunningTask(CliClientBase):
-    """Review #20 round 1 — ``/exit`` mid-task must send ``stop`` to daemon."""
+    """Review #20 round 1 — ``/exit`` mid-task must send ``stop`` to daemon.
+
+    Round-3 (review T8): assert the daemon actually received a
+    ``stop`` command via the harness's ``received_cmds`` capture from
+    the :class:`_RecordingRemoteAccessServer` subclass.  The previous
+    round only asserted that ``_handle_client_slash`` returned True,
+    which would pass even if the round-2 ``stop`` send were reverted.
+    """
 
     def test_exit_during_active_task_emits_stop(self) -> None:
-        # Pretend a task is running.
         self.client.dispatcher.task_active.set()
-        before = len(self.harness.captured)
-        # ``/exit`` should send ``stop`` then return True so the REPL
-        # outer loop breaks.
+        before = len(self.harness.received_cmds)
         self.assertTrue(_handle_client_slash(self.client, "/exit"))
-        # Wait for the daemon to receive the stop; even if the daemon
-        # doesn't broadcast anything in response, the captured list
-        # may include side-effects of the stop.  The send is async,
-        # so just confirm that the client did emit the request — we
-        # check by sending a follow-up ``getModels`` to flush the
-        # write pipeline, then assert no exception.
-        # Real verification: the daemon's internal stop handler is
-        # idempotent so we just confirm the call did not crash.
-        # No explicit broadcast capture is needed.
-        del before
+
+        def _saw_stop() -> bool:
+            for c in self.harness.received_cmds[before:]:
+                if (c.get("type") == "stop"
+                        and c.get("tabId") == self.client.tab_id):
+                    return True
+            return False
+
+        self.assertTrue(
+            _wait_for(_saw_stop, timeout=3.0),
+            f"daemon never received stop after /exit; "
+            f"saw {self.harness.received_cmds[before:]!r}",
+        )
+
+    def test_exit_without_active_task_does_not_send_stop(self) -> None:
+        # When no task is running, /exit must not send a redundant
+        # stop — the existing closeTab from the outer finally is
+        # sufficient.
+        self.assertFalse(self.client.dispatcher.task_active.is_set())
+        before = len(self.harness.received_cmds)
+        self.assertTrue(_handle_client_slash(self.client, "/exit"))
+        time.sleep(0.2)
+        stops = [
+            c for c in self.harness.received_cmds[before:]
+            if c.get("type") == "stop"
+        ]
+        self.assertEqual(stops, [], f"unexpected stop: {stops!r}")
 
 
 class TestStatusFilterAcceptsWhenUnarmed(CliClientBase):
