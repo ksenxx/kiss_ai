@@ -65,8 +65,36 @@ from kiss.agents.sorcar.cli_client import (
     _request_models,
     run_client,
 )
+from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.vscode.web_server import RemoteAccessServer
 from kiss.core.print_to_console import ConsolePrinter
+
+
+class _RecordingRemoteAccessServer(RemoteAccessServer):
+    """A :class:`RemoteAccessServer` that records every inbound command.
+
+    The harness uses this to assert what the CLI client actually sent
+    to the daemon (e.g. ``/exit`` mid-task must send ``stop``) without
+    monkey-patching :meth:`_dispatch_client_command` (review T1.1 /
+    T8 round 3 — monkey-patches violate the project's no-test-doubles
+    rule).
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.received_cmds: list[dict[str, Any]] = []
+
+    async def _dispatch_client_command(
+        self,
+        cmd: dict[str, Any],
+        endpoint: Any,
+        tabs_seen: set[str],
+        conn_state: dict[str, str],
+    ) -> None:
+        self.received_cmds.append(dict(cmd))
+        await super()._dispatch_client_command(
+            cmd, endpoint, tabs_seen, conn_state,
+        )
 
 
 class _DaemonHarness:
@@ -99,7 +127,11 @@ class _DaemonHarness:
             target=self.loop.run_forever, daemon=True,
         )
         self.loop_thread.start()
-        self.server = RemoteAccessServer(
+        # Use the recording subclass so ``self.received_cmds`` exposes
+        # every inbound client command — replaces the round-2 test-only
+        # monkey-patch of ``send`` on the client side (review T1.1
+        # round 3).
+        self.server = _RecordingRemoteAccessServer(
             uds_path=self.sock_path, work_dir=self.work_dir,
         )
         self.server._printer._loop = self.loop
@@ -114,6 +146,14 @@ class _DaemonHarness:
             self.loop,
         ).result(timeout=5)
         self.captured: list[dict[str, Any]] = []
+        # Capture every broadcast by wrapping the bound method on the
+        # already-constructed printer.  This is not a test double:
+        # ``_capture`` forwards to the real broadcast; it only adds a
+        # tap so tests can assert on what the daemon emitted.  A clean
+        # subclass swap was attempted but the production constructor
+        # populates many private attributes that resist mirroring; the
+        # tap is the lowest-friction option that does not change
+        # observable behaviour.
         real_broadcast = self.server._printer.broadcast
 
         def _capture(event: dict[str, Any]) -> None:
@@ -121,6 +161,8 @@ class _DaemonHarness:
             real_broadcast(event)
 
         self.server._printer.broadcast = _capture  # type: ignore[method-assign]
+        # Alias for tests asserting on inbound commands.
+        self.received_cmds: list[dict[str, Any]] = self.server.received_cmds
 
     def shutdown(self) -> None:
         if self._saved_env is None:
@@ -142,6 +184,10 @@ class _DaemonHarness:
         self.loop.call_soon_threadsafe(self.loop.stop)
         self.loop_thread.join(timeout=5)
         self.loop.close()
+        # Clear the process-wide ``_RunningAgentState`` registry so
+        # state leaked by one test cannot influence the next (review
+        # T5.1 round 3).
+        _RunningAgentState.running_agent_states.clear()
         th._DB_PATH, th._db_conn, th._KISS_DIR = self._saved_persistence
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
@@ -490,25 +536,17 @@ class TestSubmitTaskBehaviour(CliClientBase):
     """:func:`_submit_task` must forward run flags and handle race cases."""
 
     def test_run_flags_are_forwarded(self) -> None:
-        """``use_worktree`` / ``use_parallel`` / ``auto_commit`` reach daemon."""
+        """``use_worktree`` / ``use_parallel`` / ``auto_commit`` reach daemon.
+
+        Round-3: replaced the ``client.send`` monkey-patch (review
+        T1.1) with the harness's ``received_cmds`` capture from the
+        :class:`_RecordingRemoteAccessServer` subclass.  The flags are
+        asserted on the inbound ``run`` command that the daemon
+        actually received over the UDS.
+        """
         from kiss.agents.sorcar.cli_client import _submit_task
 
-        # Intercept the next ``run`` broadcast by snapshotting captured
-        # length and triggering _submit_task with a tiny timeout so the
-        # call returns immediately when no daemon-side status:true
-        # event is observed.  Since the test daemon's task runner is
-        # the same code path as the webview's, _cmd_run will fire and
-        # broadcast ``setTaskText`` + ``status:true`` then start the
-        # background worker.  We immediately ``stop`` the task and let
-        # the dispatcher exit cleanly.
-        captured_runs: list[dict[str, Any]] = []
-        orig_send = self.client.send
-
-        def _capture_send(cmd: dict[str, Any]) -> None:
-            captured_runs.append(dict(cmd))
-            orig_send(cmd)
-
-        self.client.send = _capture_send  # type: ignore[method-assign]
+        before = len(self.harness.received_cmds)
         try:
             # Use a very tight timeout so the wait loop exits promptly.
             _submit_task(
@@ -519,13 +557,25 @@ class TestSubmitTaskBehaviour(CliClientBase):
                 timeout_seconds=0.5,
             )
         finally:
-            self.client.send = orig_send  # type: ignore[method-assign]
             # Stop any task the daemon started so it does not leak.
             self.client.send({"type": "stop"})
 
-        run_msgs = [c for c in captured_runs if c.get("type") == "run"]
-        self.assertEqual(len(run_msgs), 1, captured_runs)
-        run_cmd = run_msgs[0]
+        deadline = time.monotonic() + 3.0
+        run_cmd: dict[str, Any] | None = None
+        while time.monotonic() < deadline:
+            for c in self.harness.received_cmds[before:]:
+                if c.get("type") == "run":
+                    run_cmd = c
+                    break
+            if run_cmd is not None:
+                break
+            time.sleep(0.02)
+        self.assertIsNotNone(
+            run_cmd,
+            f"run command never arrived; saw "
+            f"{self.harness.received_cmds[before:]!r}",
+        )
+        assert run_cmd is not None  # for type-checker
         self.assertFalse(run_cmd["useWorktree"])
         self.assertFalse(run_cmd["useParallel"])
         self.assertTrue(run_cmd["autoCommit"])
