@@ -297,6 +297,7 @@ def get_current_model_info() -> dict[str, dict]:
             "fc": info.is_function_calling_supported,
             "emb": info.is_embedding_supported,
             "gen": info.is_generation_supported,
+            "xhigh": info.supports_xhigh_reasoning_effort,
         }
         for name, info in MODEL_INFO.items()
     }
@@ -323,6 +324,52 @@ def test_embedding(model_name: str) -> bool:
         m.initialize("")
         vec = m.get_embedding("Hello world")
         return isinstance(vec, list) and len(vec) > 0
+    except Exception:
+        logger.debug("Exception caught", exc_info=True)
+        return False
+
+
+def test_xhigh_reasoning_effort(model_name: str) -> bool:
+    """Test whether the model accepts ``reasoning_effort="xhigh"``.
+
+    Issues a minimal generate call with
+    ``model_config={"reasoning_effort": "xhigh"}`` explicitly so that the
+    OpenAI Chat Completions API decides the verdict, regardless of whether
+    the model is already flagged in ``MODEL_INFO``.
+
+    Returns True iff the call succeeds with non-empty output. Returns False
+    on any error (including HTTP 400 from APIs that reject the value) or
+    for backends that don't accept ``reasoning_effort`` at all:
+
+    * ``codex/*`` — routed through the Codex CLI, which controls reasoning
+      via its own ``model_reasoning_effort`` config rather than per-call.
+    * ``claude-*``, ``gemini-*`` — non-OpenAI providers that don't accept
+      ``reasoning_effort``.
+    * Variants known to reject ``reasoning_effort`` entirely (``-pro``,
+      ``-chat-latest``, ``-image``).
+    """
+    from kiss.core.models.model_info import _OPENAI_PREFIXES
+
+    if model_name.startswith(("codex/", "claude-", "gemini-")):
+        return False
+    if any(marker in model_name for marker in ("-pro", "chat-latest", "-image")):
+        return False
+    is_openai = model_name.startswith(_OPENAI_PREFIXES) and not model_name.startswith(
+        "text-embedding"
+    )
+    is_openrouter_openai = model_name.startswith(
+        ("openrouter/openai/", "openrouter/~openai/")
+    )
+    if not (is_openai or is_openrouter_openai):
+        return False
+
+    from kiss.core.models.model_info import model as create_model
+
+    try:
+        m = create_model(model_name, model_config={"reasoning_effort": "xhigh"})
+        m.initialize("Say hello in one word.")
+        text, _ = m.generate()
+        return bool(text and text.strip())
     except Exception:
         logger.debug("Exception caught", exc_info=True)
         return False
@@ -372,6 +419,12 @@ def test_model_capabilities(
         time.sleep(0.5)
     else:
         results["fc"] = False
+
+    if results["gen"]:  # pragma: no branch
+        results["xhigh"] = test_xhigh_reasoning_effort(model_name)
+        time.sleep(0.5)
+    else:
+        results["xhigh"] = False
 
     if verbose:  # pragma: no branch
         flags = " ".join(f"{k}={'Y' if v else 'N'}" for k, v in results.items())
@@ -755,6 +808,7 @@ def _make_entry_line(
     fc: bool = True,
     emb: bool = False,
     gen: bool = True,
+    xhigh: bool = False,
     comment: str = "",
 ) -> str:
     if emb and not gen:  # pragma: no branch
@@ -768,6 +822,8 @@ def _make_entry_line(
             extras.append("emb=True")
         if not gen:  # pragma: no branch
             extras.append("gen=False")
+        if xhigh:  # pragma: no branch
+            extras.append("xhigh=True")
         if extras:  # pragma: no branch
             args += ", " + ", ".join(extras)
         line = f'    "{name}": _mi({args}),'
@@ -824,6 +880,7 @@ def apply_updates_to_file(
         new_ctx = upd["changes"].get("context_length", cur["context_length"])
         new_inp = upd["changes"].get("input_price_per_1M", cur["input_price_per_1M"])
         new_out = upd["changes"].get("output_price_per_1M", cur["output_price_per_1M"])
+        new_xhigh = upd["changes"].get("xhigh", cur.get("xhigh", False))
         new_line = _make_entry_line(
             name,
             new_ctx,
@@ -832,6 +889,7 @@ def apply_updates_to_file(
             fc=cur["fc"],
             emb=cur["emb"],
             gen=cur["gen"],
+            xhigh=new_xhigh,
         )
         start, end = _find_entry_span(lines, name)
         if start >= 0:  # pragma: no branch
@@ -869,6 +927,7 @@ def apply_updates_to_file(
             fc=nm.get("fc", True),
             emb=nm.get("emb", False),
             gen=nm.get("gen", True),
+            xhigh=nm.get("xhigh", False),
             comment=comment,
         )
         new_lines_to_add.append(entry_line)
@@ -1025,6 +1084,7 @@ def main() -> None:
             nm["gen"] = caps["gen"]
             nm["emb"] = caps["emb"]
             nm["fc"] = caps["fc"]
+            nm["xhigh"] = caps["xhigh"]
             if not caps["gen"] and not caps["emb"]:  # pragma: no branch
                 nm["_skip"] = True
         new_models = [nm for nm in new_models if not nm.get("_skip")]
@@ -1035,18 +1095,33 @@ def main() -> None:
             nm["fc"] = True
             nm["gen"] = not nm.get("is_embedding", False)
             nm["emb"] = nm.get("is_embedding", False)
+            nm["xhigh"] = False
     else:
         print("\n[5/6] No new models to test")
 
     if args.test_existing:  # pragma: no branch
         print("\n  Re-testing existing models...")
-        for upd in updates:  # pragma: no branch
-            name = upd["name"]
+        update_by_name = {upd["name"]: upd for upd in updates}
+        for name, cur in current.items():  # pragma: no branch
             caps = test_model_capabilities(name, verbose=args.verbose)
-            cur = current[name]
-            if caps["fc"] != cur["fc"]:  # pragma: no branch
-                upd["changes"]["fc"] = caps["fc"]
+            fc_changed = caps["fc"] != cur["fc"]
+            xhigh_changed = caps["xhigh"] != cur.get("xhigh", False)
+            if not (fc_changed or xhigh_changed):  # pragma: no branch
+                continue
+            existing = update_by_name.get(name)
+            if existing is None:  # pragma: no branch
+                existing = {"name": name, "changes": {}, "source": "retest"}
+                updates.append(existing)
+                update_by_name[name] = existing
+            if fc_changed:  # pragma: no branch
+                existing["changes"]["fc"] = caps["fc"]
                 print(f"    {name}: fc changed {cur['fc']} -> {caps['fc']}")
+            if xhigh_changed:  # pragma: no branch
+                existing["changes"]["xhigh"] = caps["xhigh"]
+                print(
+                    f"    {name}: xhigh changed "
+                    f"{cur.get('xhigh', False)} -> {caps['xhigh']}"
+                )
 
     print("\n[6/6] Applying changes...")
     apply_updates_to_file(updates, new_models, deprecated, current, dry_run=args.dry_run)
