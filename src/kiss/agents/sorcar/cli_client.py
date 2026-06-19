@@ -154,6 +154,11 @@ class _EventDispatcher:
         self.chat_id: str = ""
         self.current_model: str = ""
         self.task_active = threading.Event()
+        # Per-submission task id used to filter ``status`` events.
+        # Stale ``status:false`` events from a prior task (or from a
+        # peer subscriber on the same tab) carry a different
+        # ``taskId`` and are ignored here — review #3 / #4.
+        self.current_task_id: str = ""
         # Queue of pending askUser questions forwarded from the loop
         # thread to the REPL thread.  Bouncing the prompt off the loop
         # thread is mandatory: ``input()`` on the asyncio loop thread
@@ -164,7 +169,11 @@ class _EventDispatcher:
     def dispatch(self, event: dict[str, Any]) -> None:
         """Route one event to the appropriate handler."""
         et = event.get("type", "")
-        # Strip server-side routing metadata that has no UI meaning.
+        # Capture ``taskId`` BEFORE we pop it so status filtering can
+        # match against the dispatcher's currently armed task id
+        # (review #3).  Routing metadata is then stripped so consumers
+        # downstream do not see server-internal fields.
+        task_id = event.get("taskId", "")
         event.pop("taskId", None)
         if et == "cliInfo":
             self.cli_info_q.put(event)
@@ -184,6 +193,16 @@ class _EventDispatcher:
                 self.current_model = cfg.get("model", "") or self.current_model
             return
         if et == "status":
+            # Filter on ``taskId``: stale ``status:false`` events from
+            # a prior task that finished after the new task was sent
+            # would otherwise clear ``task_active`` immediately and
+            # silently terminate the wait (review #3).  When the
+            # dispatcher is not armed (``current_task_id`` empty) we
+            # accept every status — preserves the existing behaviour
+            # for non-task-driven status broadcasts.
+            current = self.current_task_id
+            if current and task_id and task_id != current:
+                return
             running = bool(event.get("running", False))
             if running:
                 self.task_active.set()
@@ -206,12 +225,16 @@ class _EventDispatcher:
         self._render(event)
 
     def _render(self, event: dict[str, Any]) -> None:
+        # ``event.get(key, default)`` only falls back when the key is
+        # absent — ``text: null`` still returns ``None``.  Defensively
+        # coerce ``None`` to the empty string / empty dict so a daemon
+        # version drift cannot crash the loop thread (review #36).
         et = event.get("type", "")
         if et == "text_delta":
-            self.printer.token_callback(event.get("text", ""))
+            self.printer.token_callback(event.get("text") or "")
             return
         if et == "thinking_delta":
-            self.printer.token_callback(event.get("text", ""))
+            self.printer.token_callback(event.get("text") or "")
             return
         if et == "thinking_start":
             self.printer.thinking_callback(True)
@@ -224,32 +247,33 @@ class _EventDispatcher:
             self.printer.flush_newline()
             return
         if et == "prompt":
-            self.printer.print(event.get("text", ""), type="prompt")
+            self.printer.print(event.get("text") or "", type="prompt")
             return
         if et == "system_prompt":
-            self.printer.print(event.get("text", ""), type="system_prompt")
+            self.printer.print(event.get("text") or "", type="system_prompt")
             return
         if et == "tool_call":
+            ti = event.get("input")
             self.printer.print(
-                event.get("name", ""),
+                event.get("name") or "",
                 type="tool_call",
-                tool_input=event.get("input", {}) or {},
+                tool_input=ti if isinstance(ti, dict) else {},
             )
             return
         if et == "tool_result":
             self.printer.print(
-                event.get("content", ""),
+                event.get("content") or "",
                 type="tool_result",
                 is_error=bool(event.get("is_error", False)),
-                tool_name=event.get("tool_name", ""),
+                tool_name=event.get("tool_name") or "",
             )
             return
         if et == "system_output":
-            self.printer.print(event.get("text", ""), type="bash_stream")
+            self.printer.print(event.get("text") or "", type="bash_stream")
             return
         if et == "usage_info":
             self.printer.print(
-                event.get("text", ""),
+                event.get("text") or "",
                 type="usage_info",
                 total_tokens=event.get("total_tokens", 0),
                 cost=event.get("cost", "N/A"),
@@ -258,7 +282,7 @@ class _EventDispatcher:
             return
         if et == "result":
             self.printer.print(
-                event.get("text", "") or "(no result)",
+                event.get("text") or "(no result)",
                 type="result",
                 total_tokens=event.get("total_tokens", 0),
                 cost=event.get("cost", "N/A"),
@@ -425,23 +449,68 @@ def _drain_queue(q: queue.Queue[Any]) -> None:
 
 
 def _request_cli_info(
-    client: CliClient, subtype: str, **extra: Any,
+    client: CliClient, subtype: str, *, timeout: float = 10.0, **extra: Any,
 ) -> dict[str, Any]:
-    """Issue a ``cliInfo`` request and block for the matching reply."""
+    """Issue a ``cliInfo`` request and block for the matching reply.
+
+    Each request carries a unique ``requestId`` that the server echoes
+    back so the client can filter stale replies racing with newer
+    requests (review #14).  The waiter also bails early when the
+    daemon connection drops (``client._closed``) so a single
+    disconnect does not stall every subsequent slash command for the
+    full timeout (review #8 / #25).
+    """
     _drain_queue(client.dispatcher.cli_info_q)
+    request_id = uuid.uuid4().hex
     cmd: dict[str, Any] = {
         "type": "cliInfo",
         "subtype": subtype,
         "workDir": client.work_dir,
         "tabId": client.tab_id,
+        "requestId": request_id,
     }
     cmd.update(extra)
-    client.send(cmd)
-    try:
-        return client.dispatcher.cli_info_q.get(timeout=10)
-    except queue.Empty:
+    # Early-fail when the daemon is already gone so the caller does
+    # not block on a queue that no producer can write to.
+    if client._closed.is_set():
         return {"type": "cliInfo", "subtype": subtype,
-                "text": f"(no reply for {subtype})"}
+                "text": "✗ Daemon connection lost — type /exit to quit",
+                "error": True}
+    client.send(cmd)
+    deadline = time.monotonic() + timeout
+    while True:
+        if client._closed.is_set():
+            return {"type": "cliInfo", "subtype": subtype,
+                    "text": "✗ Daemon connection lost — type /exit to quit",
+                    "error": True}
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return {"type": "cliInfo", "subtype": subtype,
+                    "text": f"(no reply for {subtype})",
+                    "error": True, "timedOut": True}
+        try:
+            ev = client.dispatcher.cli_info_q.get(
+                timeout=min(0.25, remaining),
+            )
+        except queue.Empty:
+            continue
+        # Filter on requestId so stale replies from prior requests do
+        # not get routed to the current waiter.  Replies without an id
+        # are accepted as wildcard matches for backwards compat (the
+        # server may be older than the client during a rolling
+        # upgrade) — but if the subtype also mismatches we keep
+        # looking.
+        ev_rid = ev.get("requestId", "")
+        if ev_rid:
+            if ev_rid == request_id:
+                return ev
+            # Stale reply for a previous request — discard and keep
+            # waiting for our matching reply.
+            continue
+        # No id on the reply: accept only when the subtype matches so
+        # at least we cannot confuse a /mcp reply with a /help reply.
+        if ev.get("subtype") == subtype:
+            return ev
 
 
 def _request_models(client: CliClient) -> list[dict[str, Any]]:
@@ -630,6 +699,15 @@ def _submit_task(
     # ``status:false`` between two tasks would otherwise clear
     # ``task_active`` immediately and silently drop the new task).
     client.dispatcher.task_active.clear()
+    # Mint a per-submission task id and arm the dispatcher to match
+    # ``status`` events on it.  Stale ``status:false`` events from a
+    # prior task are filtered out by the dispatcher because their
+    # ``taskId`` does not match the active one (review #3).  An
+    # explicit ``current_task_id`` also lets a slow daemon take
+    # arbitrarily long to emit the first ``status:true`` — replacing
+    # the brittle 2 s armed-deadline fail-open (review #4).
+    new_task_id = uuid.uuid4().hex
+    client.dispatcher.current_task_id = new_task_id
     _drain_queue(client.dispatcher.ask_user_q)
     start = time.time()
     client.send({
@@ -640,21 +718,37 @@ def _submit_task(
         "useWorktree": use_worktree,
         "useParallel": use_parallel,
         "autoCommit": auto_commit,
+        "taskId": new_task_id,
     })
-    # Wait briefly for the daemon's first ``status:running=true`` so
-    # the wait loop below sees ``task_active`` set.  A daemon that
-    # never emits running:true (broken plumbing) returns to the
-    # prompt after a 2 s grace instead of wedging forever.
-    armed_deadline = time.monotonic() + 2.0
+    # Wait for the daemon's first ``status:running=true`` for this
+    # task id.  Use the full ``timeout_seconds`` budget so slow
+    # daemon startup (worktree creation, MCP probe, cold model) does
+    # not silently abandon the task — review #4.
+    armed_deadline = time.monotonic() + timeout_seconds
     while (
         not client.dispatcher.task_active.is_set()
         and time.monotonic() < armed_deadline
         and not client._closed.is_set()
     ):
         time.sleep(0.05)
+    if client._closed.is_set():
+        client.dispatcher.printer.print(
+            "[red]✗ Daemon connection lost — type /exit to quit[/red]",
+            type="text",
+        )
+        client.dispatcher.current_task_id = ""
+        _print_elapsed(client, start)
+        return
     if not client.dispatcher.task_active.is_set():
-        # Daemon either never started the task or already finished
-        # within the 2 s grace; nothing more to wait for.
+        # The daemon never acknowledged the task within the user's
+        # timeout budget; surface a clear error instead of pretending
+        # the task ran.
+        client.dispatcher.printer.print(
+            f"[yellow]⏹  Daemon did not acknowledge the task within "
+            f"{int(timeout_seconds)}s.[/yellow]",
+            type="text",
+        )
+        client.dispatcher.current_task_id = ""
         _print_elapsed(client, start)
         return
     deadline = time.monotonic() + timeout_seconds
@@ -687,6 +781,7 @@ def _submit_task(
         except (EOFError, KeyboardInterrupt):
             ans = "done"
         client.send({"type": "userAnswer", "answer": ans})
+    client.dispatcher.current_task_id = ""
     _print_elapsed(client, start)
 
 
@@ -703,7 +798,12 @@ def _print_elapsed(client: CliClient, start: float) -> None:
     """
     elapsed = time.time() - start
     client.dispatcher.printer.flush_newline()
-    print(f"Time: {elapsed:.1f}s")
+    # Route through the same ``ConsolePrinter`` the dispatcher uses so
+    # tests that capture the printer's configured ``file=`` see the
+    # elapsed line, and so downstream redirection (file logging,
+    # captured-output panels) does not split it from the streamed
+    # output (review #34).
+    client.dispatcher.printer.print(f"Time: {elapsed:.1f}s", type="text")
 
 
 def run_client(
