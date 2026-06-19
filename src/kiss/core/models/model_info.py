@@ -32,7 +32,7 @@ class ModelInfo:
         cache_read_price_per_million: float | None = None,
         cache_write_price_per_million: float | None = None,
         cache_write_1h_price_per_million: float | None = None,
-        supports_xhigh_reasoning_effort: bool = False,
+        thinking: str | None = None,
     ):
         self.context_length = context_length
         self.input_price_per_1M = input_price_per_million
@@ -43,7 +43,7 @@ class ModelInfo:
         self.cache_read_price_per_1M = cache_read_price_per_million
         self.cache_write_price_per_1M = cache_write_price_per_million
         self.cache_write_1h_price_per_1M = cache_write_1h_price_per_million
-        self.supports_xhigh_reasoning_effort = supports_xhigh_reasoning_effort
+        self.thinking = thinking
 
 
 def _mi(
@@ -56,7 +56,7 @@ def _mi(
     cr: float | None = None,
     cw: float | None = None,
     cw1h: float | None = None,
-    xhigh: bool = False,
+    thinking: str | None = None,
 ) -> ModelInfo:
     """Helper to create ModelInfo with shorter syntax.
 
@@ -70,14 +70,15 @@ def _mi(
         cr: cache_read_price_per_million (None = use input price)
         cw: cache_write_price_per_million (None = use input price)
         cw1h: one-hour cache write price per million tokens.
-        xhigh: True iff the model accepts ``reasoning_effort="xhigh"`` on the
-            OpenAI Chat Completions API. When True, ``OpenAICompatibleModel``
-            defaults ``reasoning_effort`` to ``"xhigh"`` for this model unless
-            the caller passes an explicit value. Variants that do NOT accept
-            ``reasoning_effort`` at all (``-pro``, ``-chat-latest``, image
-            models) must leave this False.
+        thinking: The highest ``reasoning_effort`` level the model accepts on
+            the OpenAI Chat Completions API (e.g. ``"xhigh"``). When set,
+            ``OpenAICompatibleModel`` defaults ``reasoning_effort`` to this
+            value for the model unless the caller passes an explicit value.
+            Variants that do NOT accept ``reasoning_effort`` at all
+            (``-pro``, ``-chat-latest``, image models) must leave this
+            ``None``.
     """
-    return ModelInfo(ctx, inp, out, fc, emb, gen, cr, cw, cw1h, xhigh)
+    return ModelInfo(ctx, inp, out, fc, emb, gen, cr, cw, cw1h, thinking)
 
 
 def _emb(ctx: int, inp: float) -> ModelInfo:
@@ -259,8 +260,8 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "gpt-5.4-nano-2026-03-17": _mi(400000, 0.20, 1.25),
     "gpt-5.4-pro": _mi(1050000, 30.00, 180.00),
     "gpt-5.4-pro-2026-03-05": _mi(1050000, 30.00, 180.00),
-    "gpt-5.5": _mi(1050000, 5.00, 30.00, xhigh=True),
-    "gpt-5.5-2026-04-23": _mi(1050000, 5.00, 30.00, xhigh=True),
+    "gpt-5.5": _mi(1050000, 5.00, 30.00, thinking="xhigh"),
+    "gpt-5.5-2026-04-23": _mi(1050000, 5.00, 30.00, thinking="xhigh"),
     "gpt-5.5-pro": _mi(1050000, 30.00, 180.00),
     "gpt-5.5-pro-2026-04-23": _mi(1050000, 30.00, 180.00),
     "gpt-image-1": _mi(32768, 5.00, 40.00, fc=False),
@@ -515,7 +516,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/openai/gpt-5.4-mini": _mi(400000, 0.75, 4.50),
     "openrouter/openai/gpt-5.4-nano": _mi(400000, 0.20, 1.25),
     "openrouter/openai/gpt-5.4-pro": _mi(1050000, 30.00, 180.00),
-    "openrouter/openai/gpt-5.5": _mi(1050000, 5.00, 30.00, xhigh=True),
+    "openrouter/openai/gpt-5.5": _mi(1050000, 5.00, 30.00, thinking="xhigh"),
     "openrouter/openai/gpt-5.5-pro": _mi(1050000, 30.00, 180.00),
     "openrouter/openai/gpt-audio": _mi(128000, 2.50, 10.00, fc=False),
     "openrouter/openai/gpt-audio-mini": _mi(128000, 0.60, 2.40, fc=False),
@@ -632,7 +633,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/~google/gemini-flash-latest": _mi(1048576, 1.50, 9.00),
     "openrouter/~google/gemini-pro-latest": _mi(1048576, 2.00, 12.00),
     "openrouter/~moonshotai/kimi-latest": _mi(262144, 0.684, 3.41),
-    "openrouter/~openai/gpt-latest": _mi(1050000, 5.00, 30.00, xhigh=True),
+    "openrouter/~openai/gpt-latest": _mi(1050000, 5.00, 30.00, thinking="xhigh"),
     "openrouter/~openai/gpt-mini-latest": _mi(400000, 0.75, 4.50),
     "Qwen/Qwen2-1.5B-Instruct": _mi(32768, 0.02, 0.02),
     "Qwen/Qwen2-VL-72B-Instruct": _mi(32768, 1.20, 1.20),
