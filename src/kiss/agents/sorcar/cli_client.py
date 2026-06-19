@@ -58,6 +58,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from kiss.agents.sorcar.cli_helpers import _print_recent_chats
 from kiss.agents.sorcar.cli_panel import (
     CYAN,
     PROMPT_MARKER,
@@ -66,7 +67,6 @@ from kiss.agents.sorcar.cli_panel import (
 from kiss.agents.sorcar.cli_repl import (
     _EXIT_WORDS,
     CliCompleter,
-    _handle_resume,
     _history_path,
     _make_ptk_reader,
     _print_help,
@@ -154,9 +154,12 @@ class _EventDispatcher:
         self.chat_id: str = ""
         self.current_model: str = ""
         self.task_active = threading.Event()
-        # Hook called when the server emits ``askUser`` so the main
-        # REPL thread can prompt and reply.
-        self.ask_user_cb: Any | None = None
+        # Queue of pending askUser questions forwarded from the loop
+        # thread to the REPL thread.  Bouncing the prompt off the loop
+        # thread is mandatory: ``input()`` on the asyncio loop thread
+        # would block every other event (streamed tokens, ``status``,
+        # ``result``) for the duration of the user's typing.
+        self.ask_user_q: queue.Queue[str] = queue.Queue()
 
     def dispatch(self, event: dict[str, Any]) -> None:
         """Route one event to the appropriate handler."""
@@ -188,10 +191,11 @@ class _EventDispatcher:
                 self.task_active.clear()
             return
         if et == "askUser":
-            cb = self.ask_user_cb
-            question = str(event.get("question", ""))
-            if cb is not None:
-                cb(question)
+            # Forward the question to the REPL thread; the loop
+            # thread MUST NOT call ``input()`` itself because that
+            # would block every other inbound event for the duration
+            # of the user's typing.
+            self.ask_user_q.put(str(event.get("question", "")))
             return
         if et == "error":
             self.printer.print(
@@ -511,25 +515,29 @@ def _handle_client_slash(  # noqa: PLR0911,PLR0912 - branchy by design
             client.dispatcher.chat_id = arg
             print(f"Resumed chat {arg}.\n")
         else:
-            # Listing recent chats reads the local kiss DB the daemon
-            # also writes to; reuse the local helper unchanged.  The
-            # stub deliberately fails the ``isinstance(..., Chat
-            # SorcarAgent)`` check inside :func:`_handle_resume` so
-            # only the "list recent chats" branch executes.
-            _handle_resume(
-                _StubAgent(client.dispatcher.chat_id),  # type: ignore[arg-type]
-                arg,
-            )
+            # List recent chats from the shared kiss DB the daemon
+            # also writes to.  Bypassing ``cli_repl._handle_resume``
+            # avoids its mandatory ``ChatSorcarAgent`` type check
+            # (there is no in-process agent in client mode); the
+            # original "list recent chats" behaviour is preserved
+            # via :func:`_print_recent_chats` directly.
+            _print_recent_chats()
+            print("\nResume one with: /resume <chat-id>\n")
         return False
     if cmd == "/model":
         if arg == "list":
-            models = _request_models(client)
-            if models:
-                _print_model_listing_from_server(
-                    models, client.dispatcher.current_model,
-                )
-            else:
-                _print_model_list(client.dispatcher.current_model)
+            # The original REPL's local listing reads
+            # ``get_generation_model_listing()`` which returns
+            # ``(name, provider, configured)`` triples — including the
+            # ``configured`` (API-key-present) flag the daemon does
+            # NOT emit on its ``models`` event (which only carries
+            # ``{name, vendor, inp, out, uses}``).  Falling through to
+            # the local helper preserves the green check / red cross
+            # column from the standalone REPL.  The daemon's models
+            # event is still requested (and consumed) so the side
+            # effect of refreshing ``current_model`` is preserved.
+            _request_models(client)
+            _print_model_list(client.dispatcher.current_model)
             return False
         if not arg:
             reply = _request_cli_info(client, "modelCurrent")
@@ -590,107 +598,94 @@ def _handle_client_slash(  # noqa: PLR0911,PLR0912 - branchy by design
     return False
 
 
-def _print_model_listing_from_server(
-    models: list[dict[str, Any]], current: str,
+def _submit_task(
+    client: CliClient,
+    prompt: str,
+    *,
+    use_worktree: bool = True,
+    use_parallel: bool = True,
+    auto_commit: bool = False,
+    timeout_seconds: float = 60 * 60,
 ) -> None:
-    """Render the ``models`` event in the same columnar layout as REPL.
-
-    The daemon emits one entry per generation model; each entry has
-    at least ``name`` and may carry ``provider`` / ``configured``
-    flags depending on the server version.  Missing fields degrade
-    gracefully to a single-column listing.
-    """
-    if not models:
-        print("No generation models are available.\n")
-        return
-    name_w = max(len(m.get("name", "")) for m in models)
-    prov_w = max(len(m.get("provider", "")) for m in models) or 1
-    configured = sum(1 for m in models if m.get("configured", True))
-    print(
-        f"\nGeneration models ({configured}/{len(models)} with credentials "
-        f"configured):"
-    )
-    for m in models:
-        name = m.get("name", "")
-        provider = m.get("provider", "")
-        ok = bool(m.get("configured", True))
-        mark = "✓" if ok else "✗"
-        status = "configured" if ok else "no API key"
-        here = "  ← current" if name == current else ""
-        print(
-            f"  {mark} {name:<{name_w}}  {provider:<{prov_w}}  "
-            f"{status}{here}"
-        )
-    print()
-
-
-class _StubAgent:
-    """Minimal agent stub passed to local-only helpers reused from REPL.
-
-    :func:`cli_repl._handle_resume` checks ``isinstance(agent,
-    ChatSorcarAgent)`` before letting the user resume; in client mode
-    no agent runs in this process, so the stub deliberately fails
-    that check and only the "list recent chats" branch executes —
-    which reads from the local kiss DB the daemon also writes to.
-    """
-
-    def __init__(self, chat_id: str = "") -> None:
-        self.chat_id = chat_id
-
-
-def _submit_task(client: CliClient, prompt: str) -> None:
     """Send a ``run`` command for *prompt* and block until task ends.
 
     Uses the dispatcher's ``task_active`` event (toggled by the
-    server's ``status`` broadcasts) as the completion signal, with a
-    last-event fallback so a missed final ``status:false`` does not
-    wedge the REPL forever.
-
-    During the wait an in-band ``askUser`` event triggers a
-    synchronous prompt on this thread and the reply is shipped back
-    as ``userAnswer`` — exactly the same protocol the webview uses.
+    server's ``status`` broadcasts) as the completion signal and
+    additionally polls :class:`queue.Queue` for ``askUser`` questions
+    on the REPL thread so the user's ``input()`` reply does NOT block
+    the loop thread (which would freeze every other inbound event).
 
     Args:
         client: The live :class:`CliClient`.
         prompt: The user's instruction for this turn.
+        use_worktree: Forward the ``useWorktree`` flag from the CLI's
+            argparsed ``run_kwargs`` so ``--no-worktree`` is honoured
+            in client mode.
+        use_parallel: Same as above for ``--no-parallel``.
+        auto_commit: Same as above for ``--auto-commit``.
+        timeout_seconds: Hard cap on the wait loop so a wedged daemon
+            does not pin the REPL forever.
     """
-    answer_pending = threading.Event()
-    answer_text: list[str] = []
-
-    def _on_ask(question: str) -> None:
-        print(f"\n[bold yellow]Agent asks:[/bold yellow] {question}")
-        try:
-            ans = input("> ")
-        except (EOFError, KeyboardInterrupt):
-            ans = "done"
-        answer_text.append(ans)
-        answer_pending.set()
-        client.send({"type": "userAnswer", "answer": ans})
-
-    client.dispatcher.ask_user_cb = _on_ask
-    client.dispatcher.task_active.set()
+    # Drain any stale status / askUser queue entries left over from a
+    # prior task; this closes issue #46 from the review (a stale
+    # ``status:false`` between two tasks would otherwise clear
+    # ``task_active`` immediately and silently drop the new task).
+    client.dispatcher.task_active.clear()
+    _drain_queue(client.dispatcher.ask_user_q)
     client.send({
         "type": "run",
         "prompt": prompt,
         "model": client.dispatcher.current_model,
         "workDir": client.work_dir,
-        "useWorktree": True,
-        "useParallel": True,
-        "autoCommit": False,
+        "useWorktree": use_worktree,
+        "useParallel": use_parallel,
+        "autoCommit": auto_commit,
     })
-    try:
-        # Wait for the server to emit the final ``status:false``.
-        # The dispatcher clears ``task_active`` on receipt.  An
-        # outer timeout caps total wait so a stuck server cannot
-        # wedge the REPL forever.
-        deadline = time.monotonic() + 60 * 60
-        while client.dispatcher.task_active.is_set():
-            if time.monotonic() > deadline:
-                print("\n⏹  Task wait timed out after 1h.\n")
-                break
-            time.sleep(0.1)
-    finally:
-        client.dispatcher.ask_user_cb = None
+    # Wait briefly for the daemon's first ``status:running=true`` so
+    # the wait loop below sees ``task_active`` set.  A daemon that
+    # never emits running:true (broken plumbing) returns to the
+    # prompt after a 2 s grace instead of wedging forever.
+    armed_deadline = time.monotonic() + 2.0
+    while (
+        not client.dispatcher.task_active.is_set()
+        and time.monotonic() < armed_deadline
+        and not client._closed.is_set()
+    ):
+        time.sleep(0.05)
+    if not client.dispatcher.task_active.is_set():
+        # Daemon either never started the task or already finished
+        # within the 2 s grace; nothing more to wait for.
+        return
+    deadline = time.monotonic() + timeout_seconds
+    while client.dispatcher.task_active.is_set():
+        if client._closed.is_set():
+            client.dispatcher.printer.print(
+                "[red]✗ Daemon connection lost — type /exit to quit[/red]",
+                type="text",
+            )
+            return
+        if time.monotonic() > deadline:
+            client.dispatcher.printer.print(
+                f"[yellow]⏹  Task wait timed out after "
+                f"{int(timeout_seconds)}s.[/yellow]",
+                type="text",
+            )
+            return
+        # Drain pending askUser questions on the REPL thread so the
+        # user's input() blocks here, never on the asyncio loop.
+        try:
+            question = client.dispatcher.ask_user_q.get(timeout=0.1)
+        except queue.Empty:
+            continue
+        client.dispatcher.printer.print(
+            f"[bold yellow]Agent asks:[/bold yellow] {question}",
+            type="text",
+        )
+        try:
+            ans = input("> ")
+        except (EOFError, KeyboardInterrupt):
+            ans = "done"
+        client.send({"type": "userAnswer", "answer": ans})
 
 
 def run_client(
@@ -698,6 +693,10 @@ def run_client(
     model_name: str = "",
     sock_path: Path | None = None,
     active_file: str = "",
+    *,
+    use_worktree: bool = True,
+    use_parallel: bool = True,
+    auto_commit: bool = False,
 ) -> int:
     """Run the interactive sorcar CLI as a client of ``sorcar web``.
 
@@ -789,7 +788,12 @@ def run_client(
                 continue
             _record_mentions(line)
             try:
-                _submit_task(client, line)
+                _submit_task(
+                    client, line,
+                    use_worktree=use_worktree,
+                    use_parallel=use_parallel,
+                    auto_commit=auto_commit,
+                )
             except KeyboardInterrupt:
                 client.send({"type": "stop"})
                 print("\n⏹  Task interrupted.\n")
