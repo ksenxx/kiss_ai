@@ -30,6 +30,6 @@ Why did this the last task got interrupted? Thoroughly and precisely analyze the
 
 Can you create an html report with diagrams and illustrations in PWD/reports and open it in the user's default browser?
 
-## Trick 
+## Trick
 
 Use gpt-5.5 model to get your work thoroughly reviewed and use the orginal model for all tasks including coding, bug fixing, and test creation.
