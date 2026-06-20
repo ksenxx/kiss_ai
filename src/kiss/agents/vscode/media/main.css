@@ -1533,6 +1533,23 @@ body.remote-chat #welcome-config { display: none !important; }
   text-overflow: ellipsis;
 }
 
+/* Meta row — task model name and the three persisted run flags
+   (wt/no-wt, parallel/sequential, auto-commit/manual-commit)
+   rendered as a single dot-separated line directly below the
+   workspace row (or immediately after the metrics row when no
+   workspace is present).  ``flex-basis: 100%`` drops it onto its
+   own line inside the .sidebar-item flex container, mirroring the
+   workspace and metrics rows above. */
+.running-item-meta {
+  flex-basis: 100%;
+  font-size: var(--fs-sm);
+  color: color-mix(in srgb, #000 55%, transparent);
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 @keyframes sidebar-running-pulse {
   0%, 100% { opacity: 1; box-shadow: 0 0 0 1px rgb(0 0 0 / 15%); }
   50% { opacity: 0.4; box-shadow: 0 0 6px 2px rgb(46 125 50 / 50%); }
