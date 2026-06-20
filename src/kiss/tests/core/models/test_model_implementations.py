@@ -17,8 +17,8 @@ from kiss.core.kiss_error import KISSError
 from kiss.core.models.anthropic_model import AnthropicModel
 from kiss.core.models.model_info import (
     MODEL_INFO,
+    ModelInfo,
     _apply_cache_pricing,
-    _mi,
     _openai_cache_read_multiplier,
     calculate_cost,
     get_flaky_reason,
@@ -31,6 +31,27 @@ from kiss.tests.conftest import (
     requires_gemini_api_key,
     requires_openai_api_key,
 )
+
+
+def _mi_for_test(
+    ctx: int,
+    inp: float,
+    out: float,
+    fc: bool = True,
+    emb: bool = False,
+    gen: bool = True,
+    cr: float | None = None,
+    cw: float | None = None,
+    cw1h: float | None = None,
+    thinking: str | None = None,
+) -> ModelInfo:
+    """Local replacement for the old private ``_mi`` helper.
+
+    The runtime model table now lives in MODEL_INFO.json so the
+    short-syntax ``_mi`` helper is gone, but these tests still want to
+    construct synthetic ``ModelInfo`` instances quickly.
+    """
+    return ModelInfo(ctx, inp, out, fc, emb, gen, cr, cw, cw1h, thinking)
 
 MODEL_CONFIGS = [
     pytest.param("claude-haiku-4-5", "AnthropicModel", "4", marks=requires_anthropic_api_key),
@@ -315,13 +336,13 @@ class TestCachePricing:
         assert calculate_cost("openai/gpt-5.5", 0, 0, 1_000_000, 0) == pytest.approx(1.00)
 
     def test_apply_cache_pricing_respects_existing_prices(self):
-        info = _mi(1000, 10.0, 20.0, cr=1.0, cw=2.0)
+        info = _mi_for_test(1000, 10.0, 20.0, cr=1.0, cw=2.0)
         _apply_cache_pricing("gpt-4o", info)
         assert info.cache_read_price_per_1M == 1.0
         assert info.cache_write_price_per_1M == 2.0
 
     def test_model_info_explicit_cache_prices_override_loop(self):
-        info = _mi(1000, 10.0, 20.0, cr=1.0, cw=2.0)
+        info = _mi_for_test(1000, 10.0, 20.0, cr=1.0, cw=2.0)
         assert info.cache_read_price_per_1M == 1.0
         assert info.cache_write_price_per_1M == 2.0
 
