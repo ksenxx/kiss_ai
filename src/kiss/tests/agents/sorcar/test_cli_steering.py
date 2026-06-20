@@ -17,10 +17,16 @@ import io
 import threading
 from typing import Any
 
-from kiss.agents.sorcar.cli_panel import body_cursor_col, panel_cols
+from kiss.agents.sorcar.cli_panel import (
+    _term_size,
+    body_cursor_col,
+    panel_cols,
+)
 from kiss.agents.sorcar.cli_steering import (
+    _BOX_H,
     AnchoredRepl,
     SteeringSession,
+    _box_top_row,
     _InputBox,
     _StdoutProxy,
     run_with_steering,
@@ -305,45 +311,335 @@ class TestInputBoxHistory:
         assert box.buf == "first"
 
 
-class TestInputBoxCompletion:
-    """Tab completion via the ``completer_fn`` callback."""
+class TestInputBoxCompletionMenu:
+    """In-place completion menu opened by Tab.
 
-    def test_tab_inserts_first_candidate(self) -> None:
+    With two or more candidates Tab opens a menu drawn above the input
+    box; ``buf`` stays at what the user typed until they select with
+    Enter.  With exactly one candidate Tab accepts it directly (no
+    menu).  Without a completer Tab is silently dropped.
+    """
+
+    def test_tab_opens_menu_with_first_selected(self) -> None:
         box = _make_box()
         box.completer_fn = lambda _buf: ["/help ", "/clear "]
         box.feed(b"/he", lambda _s: None, lambda: None)
         box.feed(b"\t", lambda _s: None, lambda: None)
-        assert box.buf == "/help "
+        assert box._menu_open is True
+        assert box._menu_items == ["/help ", "/clear "]
+        assert box._menu_sel == 0
+        # ``buf`` is left untouched until the user picks a candidate.
+        assert box.buf == "/he"
 
-    def test_tab_cycles_candidates(self) -> None:
+    def test_enter_on_open_menu_accepts_does_not_submit(self) -> None:
+        box = _make_box()
+        box.completer_fn = lambda _buf: ["/help ", "/clear "]
+        box.feed(b"/he\t", lambda _s: None, lambda: None)
+        submitted: list[str] = []
+        box.feed(b"\n", submitted.append, lambda: None)
+        # First Enter only accepts the highlighted candidate.
+        assert submitted == []
+        assert box.buf == "/help "
+        assert box._menu_open is False
+        # Next Enter submits the now-completed line.
+        box.feed(b"\n", submitted.append, lambda: None)
+        assert submitted == ["/help "]
+
+    def test_tab_advances_selection_when_menu_open(self) -> None:
         box = _make_box()
         box.completer_fn = lambda _buf: ["/help ", "/clear "]
         box.feed(b"/", lambda _s: None, lambda: None)
         box.feed(b"\t", lambda _s: None, lambda: None)
         box.feed(b"\t", lambda _s: None, lambda: None)
+        assert box._menu_open is True
+        assert box._menu_sel == 1
+        # ``buf`` only changes once Enter accepts the new selection.
+        assert box.buf == "/"
+        submitted: list[str] = []
+        box.feed(b"\n", submitted.append, lambda: None)
         assert box.buf == "/clear "
+        assert submitted == []
+
+    def test_down_arrow_navigates_menu(self) -> None:
+        box = _make_box()
+        box.completer_fn = lambda _buf: ["a", "b", "c"]
+        box.feed(b"\t", lambda _s: None, lambda: None)
+        assert box._menu_sel == 0
+        box.feed(b"\x1b[B", lambda _s: None, lambda: None)
+        assert box._menu_sel == 1
+        box.feed(b"\x1b[B", lambda _s: None, lambda: None)
+        assert box._menu_sel == 2
+        # Past the last item wraps back to the first.
+        box.feed(b"\x1b[B", lambda _s: None, lambda: None)
+        assert box._menu_sel == 0
+
+    def test_up_arrow_navigates_menu_backwards(self) -> None:
+        box = _make_box()
+        box.completer_fn = lambda _buf: ["a", "b", "c"]
+        box.feed(b"\t", lambda _s: None, lambda: None)
+        # Up from idx 0 wraps to the last candidate.
+        box.feed(b"\x1b[A", lambda _s: None, lambda: None)
+        assert box._menu_sel == 2
+
+    def test_shift_tab_moves_selection_up(self) -> None:
+        box = _make_box()
+        box.completer_fn = lambda _buf: ["a", "b", "c"]
+        box.feed(b"\t\t", lambda _s: None, lambda: None)
+        assert box._menu_sel == 1
+        # CSI Z (Shift+Tab) goes back.
+        box.feed(b"\x1b[Z", lambda _s: None, lambda: None)
+        assert box._menu_sel == 0
+
+    def test_typing_closes_menu_and_appends(self) -> None:
+        box = _make_box()
+        box.completer_fn = lambda _buf: ["alpha", "beta"]
+        box.feed(b"\t", lambda _s: None, lambda: None)
+        assert box._menu_open is True
+        box.feed(b"x", lambda _s: None, lambda: None)
+        assert box._menu_open is False
+        assert box.buf == "x"
+
+    def test_backspace_with_buffer_closes_menu(self) -> None:
+        box = _make_box()
+        box.completer_fn = lambda _buf: ["alpha", "beta"]
+        box.feed(b"ab\t", lambda _s: None, lambda: None)
+        assert box._menu_open is True
+        box.feed(b"\x7f", lambda _s: None, lambda: None)
+        assert box._menu_open is False
+        assert box.buf == "a"
+
+    def test_backspace_with_empty_buffer_dismisses_menu(self) -> None:
+        box = _make_box()
+        box.completer_fn = lambda _buf: ["alpha", "beta"]
+        box.feed(b"\t", lambda _s: None, lambda: None)
+        assert box._menu_open is True
+        box.feed(b"\x7f", lambda _s: None, lambda: None)
+        assert box._menu_open is False
+        assert box.buf == ""
+
+    def test_ctrl_g_cancels_menu(self) -> None:
+        box = _make_box()
+        box.completer_fn = lambda _buf: ["alpha", "beta"]
+        box.feed(b"\t", lambda _s: None, lambda: None)
+        box.feed(b"\x07", lambda _s: None, lambda: None)
+        assert box._menu_open is False
+        assert box.buf == ""
+
+    def test_ctrl_c_dismisses_menu_without_aborting(self) -> None:
+        box = _make_box()
+        box.completer_fn = lambda _buf: ["alpha", "beta"]
+        box.feed(b"\t", lambda _s: None, lambda: None)
+        aborted: list[bool] = []
+        box.feed(b"\x03", lambda _s: None, lambda: aborted.append(True))
+        assert box._menu_open is False
+        assert aborted == []
+        # A second Ctrl+C with the menu now closed propagates as abort.
+        box.feed(b"\x03", lambda _s: None, lambda: aborted.append(True))
+        assert aborted == [True]
+
+    def test_single_candidate_replaces_buf_no_menu(self) -> None:
+        box = _make_box()
+        box.completer_fn = lambda _buf: ["/help "]
+        box.feed(b"/h\t", lambda _s: None, lambda: None)
+        assert box.buf == "/help "
+        assert box._menu_open is False
 
     def test_no_completer_drops_tab(self) -> None:
         box = _make_box()
         box.feed(b"a\tb", lambda _s: None, lambda: None)
         # Tab without a completer is silently dropped — not typed.
         assert box.buf == "ab"
+        assert box._menu_open is False
 
-    def test_edit_resets_tab_cycle(self) -> None:
+    def test_empty_candidate_list_keeps_menu_closed(self) -> None:
         box = _make_box()
-        calls: list[str] = []
-
-        def completer(buf: str) -> list[str]:
-            calls.append(buf)
-            return [buf + "X", buf + "Y"]
-
-        box.completer_fn = completer
-        box.feed(b"a\t", lambda _s: None, lambda: None)
-        assert box.buf == "aX"
-        # Backspace edits → next Tab re-queries with the new buffer.
-        box.feed(b"\x7f", lambda _s: None, lambda: None)
+        box.completer_fn = lambda _buf: []
         box.feed(b"\t", lambda _s: None, lambda: None)
-        assert calls == ["a", "a"]
+        assert box._menu_open is False
+        assert box.buf == ""
+
+    def test_menu_renders_candidates_above_box(self) -> None:
+        """Integration test reproducing the original bug.
+
+        Before the fix, pressing Tab with multiple candidates silently
+        cycled ``buf`` through them — *no menu was painted* and the
+        input box stayed pinned to the bottom with the user unable to
+        see the alternatives.  After the fix, the candidates must
+        appear stacked above the input box (which has moved up to
+        make room for them), with the first one highlighted with the
+        ``❯`` marker.
+        """
+        out = io.StringIO()
+        box = _InputBox(threading.RLock(), out)
+        box.completer_fn = lambda _buf: ["/help ", "/history "]
+        box._active = True
+        box.feed(b"/", lambda _s: None, lambda: None)
+        # Snapshot the rendered output after the menu opens.
+        out.seek(0)
+        out.truncate(0)
+        box.feed(b"\t", lambda _s: None, lambda: None)
+        text = out.getvalue()
+        # Both candidates must appear in the painted output.
+        assert "/help" in text, "first candidate missing from menu render"
+        assert "/history" in text, "second candidate missing from menu render"
+        # The highlighted candidate carries the ❯ marker.
+        assert "❯" in text, "no selection marker drawn on highlighted row"
+        # The input box itself was moved up by the menu height (2 rows).
+        rows, _ = _term_size()
+        menu_top = _box_top_row(rows, _BOX_H + 2)
+        # Menu row 1, menu row 2, then the box's top border at menu_top+2.
+        assert f"\x1b[{menu_top};1H" in text
+        assert f"\x1b[{menu_top + 1};1H" in text
+        assert f"\x1b[{menu_top + 2};1H" in text
+        # Scroll region was shrunk to leave room for the menu.
+        assert f"\x1b[1;{max(rows - (_BOX_H + 2), 1)}r" in text
+        # buf stays as what the user typed until they accept.
+        assert box.buf == "/"
+        assert box._menu_open is True
+
+    def test_menu_close_clears_menu_rows_in_scroll_region(self) -> None:
+        """Closing the menu must clear rows that re-join the scroll region.
+
+        Otherwise leftover candidate glyphs would linger at the bottom
+        of the agent output area after the user dismisses the menu.
+        """
+        out = io.StringIO()
+        box = _InputBox(threading.RLock(), out)
+        box.completer_fn = lambda _buf: ["one", "two", "three"]
+        box._active = True
+        box.feed(b"\t", lambda _s: None, lambda: None)
+        # Drop the open-menu render; we only care about what is emitted
+        # by the close that follows.
+        out.seek(0)
+        out.truncate(0)
+        box.feed(b"\x07", lambda _s: None, lambda: None)
+        text = out.getvalue()
+        rows, _ = _term_size()
+        # The rows that *were* menu rows must have been cleared (each
+        # gets an ESC[<r>;1H followed by ESC[2K) before the scroll
+        # region is restored to the unreserved height.
+        old_top = _box_top_row(rows, _BOX_H + 3)
+        for r in range(old_top, old_top + 3):
+            assert f"\x1b[{r};1H\x1b[2K" in text, f"row {r} not cleared"
+        # And the DECSTBM region is widened back to the no-menu height.
+        assert f"\x1b[1;{max(rows - _BOX_H, 1)}r" in text
+
+
+class TestInputBoxCompletionMenuEdgeCases:
+    """Edge cases for the in-place completion menu (gpt-5.1 review)."""
+
+    def test_candidate_ansi_escapes_sanitised_in_render(self) -> None:
+        """A candidate containing an ANSI SGR sequence must not emit
+        its raw ESC bytes into the painted menu row.  Otherwise a
+        malicious / corrupted candidate could repaint the terminal.
+        """
+        out = io.StringIO()
+        box = _InputBox(threading.RLock(), out)
+        box.completer_fn = lambda _buf: [
+            "\x1b[31mred\x1b[0m candidate",
+            "plain candidate",
+        ]
+        box._active = True
+        box.feed(b"\t", lambda _s: None, lambda: None)
+        text = out.getvalue()
+        # The candidate payload contained an ESC byte; menu_row must
+        # have stripped it so the terminal cannot interpret the SGR
+        # change as a real colour escape.
+        assert "\x1b[31m" not in text, (
+            "raw candidate ANSI escape leaked into terminal output"
+        )
+        assert "\x1b[0m red" not in text, (
+            "raw candidate reset escape leaked into terminal output"
+        )
+        # The "second candidate" must still render normally.
+        assert "plain candidate" in text
+
+    def test_stop_while_menu_open_resets_menu_state(self) -> None:
+        """stop() must leave the box with no lingering menu state, so a
+        later start() does not paint phantom menu rows nor mistakenly
+        trip the "menu shrank" clear path in _draw_locked.
+        """
+        out = io.StringIO()
+        box = _InputBox(threading.RLock(), out)
+        box.completer_fn = lambda _buf: ["alpha", "beta"]
+        # Forge an active start state without a real tty.
+        box._active = True
+        box._rows, _ = _term_size()
+        box.feed(b"\t", lambda _s: None, lambda: None)
+        assert box._menu_open is True
+        # stop() needs termios for tcsetattr; short-circuit by faking
+        # the saved tty state to None (the call early-returns the
+        # tcsetattr block).
+        box._old_term = None
+        box.stop()
+        assert box._menu_open is False
+        assert box._menu_items == []
+        assert box._drawn_menu_h == 0
+
+    def test_bracketed_paste_dismisses_open_menu(self) -> None:
+        box = _make_box()
+        box.completer_fn = lambda _buf: ["one", "two"]
+        box.feed(b"\t", lambda _s: None, lambda: None)
+        assert box._menu_open is True
+        # Bracketed paste sequence with content.
+        box.feed(
+            b"\x1b[200~hello\x1b[201~",
+            lambda _s: None,
+            lambda: None,
+        )
+        assert box._menu_open is False
+        assert box.buf.endswith("hello")
+
+    def test_menu_h_auto_dismisses_when_no_room(
+        self, monkeypatch: Any,
+    ) -> None:
+        """On a terminal too small to fit even one menu row above the
+        box, ``_menu_h`` must auto-dismiss the menu so the next arrow
+        / Enter is not silently consumed by an invisible widget.
+        """
+        box = _make_box()
+        box.completer_fn = lambda _buf: ["a", "b"]
+        box.feed(b"\t", lambda _s: None, lambda: None)
+        assert box._menu_open is True
+        # Force a tiny terminal: rows - _BOX_H - 1 == 0 → no room.
+        monkeypatch.setattr(
+            "kiss.agents.sorcar.cli_steering._term_size",
+            lambda: (_BOX_H + 1, 80),
+        )
+        assert box._menu_h() == 0
+        assert box._menu_open is False
+        assert box._menu_items == []
+
+    def test_ask_user_question_dismisses_open_menu(self) -> None:
+        """Switching the box into ask-user-question mode must close
+        any open completion menu so the first Enter submits the
+        answer rather than picking a stale candidate.
+        """
+        agent = SorcarAgent("steer-test")
+        state = _RunningAgentState("chat-id", "", agent=None)
+        box = _make_box()
+        session = SteeringSession(
+            agent, state, "chat-id", box=box,
+        )
+        box.completer_fn = lambda _buf: ["one", "two"]
+        box.feed(b"\t", lambda _s: None, lambda: None)
+        assert box._menu_open is True
+
+        answers: list[str] = []
+
+        def ask() -> None:
+            answers.append(session.ask_user_question("pick?"))
+
+        worker = threading.Thread(target=ask, daemon=True)
+        worker.start()
+        # Wait until the worker has parked on the queue.
+        assert session._question_pending.wait(timeout=2.0)
+        # By the time the title is flipped, the menu must be closed.
+        assert box._menu_open is False
+        # Unblock the worker and finish.
+        session._answer_q.put("done")
+        worker.join(timeout=2.0)
+        assert answers == ["done"]
 
 
 class TestInputBoxEOF:
