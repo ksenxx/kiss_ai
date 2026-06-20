@@ -75,7 +75,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from kiss.agents.sorcar.cli_helpers import (
     _print_recent_chats,
@@ -87,24 +87,32 @@ from kiss.agents.sorcar.cli_panel import (
     IDLE_TITLE,
     PROMPT_MARKER,
     RESET,
+    _term_size,
     panel_bottom,
     panel_cols,
     panel_top,
 )
 from kiss.agents.sorcar.cli_prompt import _AT_RE, _MODEL_CMD_RE, PtkLineReader
-from kiss.agents.sorcar.cli_steering import run_with_steering
+from kiss.agents.sorcar.cli_steering import (
+    _MIN_ROWS,
+    AnchoredRepl,
+    run_with_steering,
+    supports_steering,
+)
 from kiss.agents.sorcar.custom_commands import (
     discover_commands,
     expand_command,
     format_command_listing,
 )
 from kiss.agents.sorcar.persistence import (
+    _allocate_chat_id,
     _default_kiss_dir,
     _ensure_kiss_dir,
     _load_file_usage,
     _prefix_match_tasks,
     _record_file_usage,
 )
+from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.vscode.helpers import (
     clip_autocomplete_suggestion,
     rank_file_suggestions,
@@ -902,6 +910,167 @@ def _read_line(prompt: str, reader: PtkLineReader | None = None) -> str | None:
     return line
 
 
+def _load_history_lines(path: Path) -> list[str]:
+    """Return the saved input lines for the anchored REPL, oldest first.
+
+    Args:
+        path: Persistence path; non-existent / unreadable files yield
+            an empty history (best effort).
+
+    Returns:
+        The history lines (without trailing newlines).
+    """
+    if not path.exists():
+        return []
+    try:
+        return [
+            ln for ln in path.read_text(encoding="utf-8").splitlines() if ln
+        ]
+    except OSError:
+        return []
+
+
+def _save_history_lines(path: Path, history: list[str]) -> None:
+    """Persist the anchored REPL's input history (last 1000 lines).
+
+    Args:
+        path: Destination file; parent directories are created as needed.
+        history: Lines to persist (oldest first).
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        text = "\n".join(history[-1000:])
+        if history:
+            text += "\n"
+        path.write_text(text, encoding="utf-8")
+    except OSError:  # pragma: no cover - disk/permission error
+        logger.debug("could not save anchored history", exc_info=True)
+
+
+def _run_anchored_repl(
+    agent: SorcarAgent, run_kwargs: dict[str, Any],
+) -> None:
+    """Run the interactive REPL with the input bar pinned to the bottom.
+
+    Used when the terminal supports the steering box (POSIX TTY with
+    termios) and is at least :data:`_MIN_ROWS` tall.  The same box
+    handles both idle reads (next instruction) and task execution
+    (queueing follow-ups), matching Claude Code's fullscreen TUI
+    behaviour where the input bar is visible at all times.
+
+    Args:
+        agent: The live agent to drive.
+        run_kwargs: Base keyword arguments for ``agent.run``.
+    """
+    work_dir = run_kwargs.get("work_dir") or str(Path(".").resolve())
+    model_name = (
+        run_kwargs.get("model_name", "")
+        or getattr(agent, "model_name", "")
+    )
+    active_file = run_kwargs.get("current_editor_file") or ""
+    completer = CliCompleter(work_dir, active_file)
+    history_path = _history_path(work_dir)
+    history = _load_history_lines(history_path)
+
+    def completer_fn(buf: str) -> list[str]:
+        try:
+            return completer._build_matches(buf)
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("anchored completion failed", exc_info=True)
+            return []
+
+    with AnchoredRepl(completer_fn=completer_fn, history=history) as repl:
+        _print_welcome(work_dir, model_name)
+        interrupt_armed = False
+        while True:
+            try:
+                line = repl.read_idle_line()
+            except KeyboardInterrupt:
+                if interrupt_armed:
+                    print("\nGoodbye.")
+                    break
+                interrupt_armed = True
+                print("\n(Press Ctrl+C again or type /exit to quit)")
+                continue
+            if line is None:  # EOF / Ctrl+D
+                print("\nGoodbye.")
+                break
+            interrupt_armed = False
+            text = line.strip()
+            if not text:
+                continue
+            if text in _EXIT_WORDS:
+                break
+            if text.startswith("/"):
+                try:
+                    if _handle_slash(agent, line, run_kwargs):
+                        break
+                except Exception as exc:
+                    logger.debug(
+                        "slash command failed", exc_info=True,
+                    )
+                    print(f"\n✗ Command failed: {exc}\n")
+                continue
+            _record_mentions(line)
+            _run_one_anchored(agent, line, run_kwargs, repl)
+        _save_history_lines(history_path, repl.box.history)
+
+
+def _run_one_anchored(
+    agent: SorcarAgent,
+    prompt: str,
+    run_kwargs: dict[str, Any],
+    repl: AnchoredRepl,
+) -> None:
+    """Run one task line through the shared anchored input box.
+
+    Mirrors :func:`_run_one` but reuses ``repl``'s already-drawn box
+    (via :meth:`AnchoredRepl.run_task`) so the bottom input bar stays
+    pinned across the idle → running → idle transition.
+
+    Args:
+        agent: The live agent to drive.
+        prompt: The user's instruction for this turn.
+        run_kwargs: Base run kwargs (copied; prompt is overlaid).
+        repl: The anchored REPL whose box runs the task.
+    """
+    kwargs = dict(run_kwargs)
+    kwargs["prompt_template"] = prompt
+    chat_id = getattr(agent, "_chat_id", "") or _allocate_chat_id()
+    agent._chat_id = chat_id  # type: ignore[attr-defined]
+    agent._tab_id = chat_id  # type: ignore[attr-defined]
+    state = _RunningAgentState(
+        chat_id,
+        getattr(agent, "model_name", "") or "",
+        agent=cast("Any", agent),
+    )
+    state.chat_id = chat_id
+    state.is_task_active = True
+    _RunningAgentState.register(chat_id, state)
+    start = time.time()
+    try:
+        result = repl.run_task(agent, state, chat_id, kwargs)
+    except KeyboardInterrupt:
+        print("\n⏹  Task interrupted.\n")
+        return
+    except Exception as exc:
+        logger.debug("task failed", exc_info=True)
+        print(f"\n✗ Task failed: {exc}\n")
+        return
+    finally:
+        with _RunningAgentState._registry_lock:
+            if (
+                _RunningAgentState.running_agent_states.get(chat_id) is state
+            ):
+                state.is_task_active = False
+                _RunningAgentState.unregister(chat_id)
+    elapsed = time.time() - start
+    verbose = bool(kwargs.get("verbose", True))
+    print_outcome(agent, result, elapsed, verbose)
+    if not verbose:
+        print()
+
+
 def run_repl(
     agent: SorcarAgent, run_kwargs: dict[str, Any],
 ) -> None:
@@ -918,6 +1087,16 @@ def run_repl(
             ``prompt_template`` is replaced for each submitted line and
             any default task placeholder is ignored.
     """
+    # When the terminal supports the steering box (POSIX TTY with
+    # termios) and is tall enough, run the REPL with the input bar
+    # pinned to the bottom of the screen for both idle reads and task
+    # execution — matching Claude Code's fullscreen TUI behaviour.
+    # Off-TTY (pytest, pipes), Windows, or tiny terminals fall back to
+    # the inline readline / prompt_toolkit path below.
+    rows, _ = _term_size()
+    if supports_steering() and rows >= _MIN_ROWS:
+        _run_anchored_repl(agent, run_kwargs)
+        return
     work_dir = run_kwargs.get("work_dir") or str(Path(".").resolve())
     model_name = run_kwargs.get("model_name", "") or getattr(agent, "model_name", "")
     active_file = run_kwargs.get("current_editor_file") or ""
