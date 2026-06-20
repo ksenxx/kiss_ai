@@ -100,6 +100,28 @@ def _sock_path() -> Path:
     return Path(env) if env else _DEFAULT_SOCK_PATH
 
 
+def _clear_terminal() -> None:
+    """Clear the terminal screen and scrollback when stdout is a TTY.
+
+    Emits the ANSI sequences ``ESC[H`` (cursor home), ``ESC[2J``
+    (erase visible screen) and ``ESC[3J`` (erase scrollback) so the
+    interactive CLI starts on a clean canvas — matching the behaviour
+    of ``clear`` / Cmd-K in modern terminals.  Skipped when stdout is
+    not a TTY (pytest capture, piped output) so test runs and log
+    redirection are not polluted with escape codes.
+    """
+    try:
+        if not sys.stdout.isatty():
+            return
+    except Exception:  # pragma: no cover - defensive isatty guard
+        return
+    try:
+        sys.stdout.write("\033[H\033[2J\033[3J")
+        sys.stdout.flush()
+    except Exception:  # pragma: no cover - defensive write guard
+        return
+
+
 def _wait_for_socket(path: Path, timeout: float = 5.0) -> bool:
     """Block up to *timeout* seconds for *path* to be a connectable UDS.
 
@@ -1177,6 +1199,12 @@ def run_client(
         return 1
 
     client.dispatcher.current_model = model_name
+
+    # Wipe the terminal so the interactive session starts on a clean
+    # canvas (no leftover shell prompt / prior command output above
+    # the welcome banner).  No-op when stdout is not a TTY so pytest
+    # capture and piped output stay clean.
+    _clear_terminal()
 
     # When the terminal supports the steering box (POSIX TTY with
     # termios) and is tall enough, run the REPL with the input bar
