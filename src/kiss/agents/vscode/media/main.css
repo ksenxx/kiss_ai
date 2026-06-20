@@ -1517,30 +1517,15 @@ body.remote-chat #welcome-config { display: none !important; }
   margin-top: 2px;
 }
 
-/* Workspace row — the task's work_dir rendered on the line right
-   below the metrics row.  ``flex-basis: 100%`` drops it onto its
-   own line inside the .sidebar-item flex container, mirroring the
-   metrics row above.  Long paths are clipped with an ellipsis;
-   the native ``title`` attribute (set in renderHistory) exposes
-   the full path on hover. */
+/* Workspace + meta row — the task's work_dir plus the per-task
+   metadata (model name, wt/no-wt, parallel/sequential,
+   auto-commit/manual-commit) rendered as a single dot-separated
+   line right below the metrics row.  ``flex-basis: 100%`` drops
+   it onto its own line inside the .sidebar-item flex container,
+   mirroring the metrics row above.  Long lines are clipped with
+   an ellipsis; the native ``title`` attribute (set in
+   renderHistory) exposes the full text on hover. */
 .running-item-workspace {
-  flex-basis: 100%;
-  font-size: var(--fs-sm);
-  color: color-mix(in srgb, #000 55%, transparent);
-  margin-top: 2px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* Meta row — task model name and the three persisted run flags
-   (wt/no-wt, parallel/sequential, auto-commit/manual-commit)
-   rendered as a single dot-separated line directly below the
-   workspace row (or immediately after the metrics row when no
-   workspace is present).  ``flex-basis: 100%`` drops it onto its
-   own line inside the .sidebar-item flex container, mirroring the
-   workspace and metrics rows above. */
-.running-item-meta {
   flex-basis: 100%;
   font-size: var(--fs-sm);
   color: color-mix(in srgb, #000 55%, transparent);
