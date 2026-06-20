@@ -321,20 +321,25 @@ class TestInputBoxCompletionMenu:
     """
 
     def test_tab_opens_menu_with_first_selected(self) -> None:
+        # With "complete while typing" the menu auto-opens as the user
+        # types so suggestions appear without an explicit Tab.  The
+        # first candidate is highlighted; ``buf`` is left untouched
+        # until the user picks one with Enter.
         box = _make_box()
         box.completer_fn = lambda _buf: ["/help ", "/clear "]
         box.feed(b"/he", lambda _s: None, lambda: None)
-        box.feed(b"\t", lambda _s: None, lambda: None)
         assert box._menu_open is True
         assert box._menu_items == ["/help ", "/clear "]
         assert box._menu_sel == 0
-        # ``buf`` is left untouched until the user picks a candidate.
         assert box.buf == "/he"
 
     def test_enter_on_open_menu_accepts_does_not_submit(self) -> None:
+        # Typing alone pops the menu (no Tab needed); first Enter
+        # accepts the highlighted candidate, next Enter submits.
         box = _make_box()
         box.completer_fn = lambda _buf: ["/help ", "/clear "]
-        box.feed(b"/he\t", lambda _s: None, lambda: None)
+        box.feed(b"/he", lambda _s: None, lambda: None)
+        assert box._menu_open is True
         submitted: list[str] = []
         box.feed(b"\n", submitted.append, lambda: None)
         # First Enter only accepts the highlighted candidate.
@@ -346,18 +351,24 @@ class TestInputBoxCompletionMenu:
         assert submitted == ["/help "]
 
     def test_tab_advances_selection_when_menu_open(self) -> None:
+        # Three candidates keeps Tab/Tab away from the wrap boundary
+        # so the menu reliably advances by two steps to sel=2.
         box = _make_box()
-        box.completer_fn = lambda _buf: ["/help ", "/clear "]
+        box.completer_fn = lambda _buf: ["/help ", "/clear ", "/quit "]
+        # Typing pops the menu at sel=0 via "complete while typing".
         box.feed(b"/", lambda _s: None, lambda: None)
-        box.feed(b"\t", lambda _s: None, lambda: None)
-        box.feed(b"\t", lambda _s: None, lambda: None)
         assert box._menu_open is True
+        assert box._menu_sel == 0
+        # Each Tab advances the highlighted candidate.
+        box.feed(b"\t", lambda _s: None, lambda: None)
         assert box._menu_sel == 1
+        box.feed(b"\t", lambda _s: None, lambda: None)
+        assert box._menu_sel == 2
         # ``buf`` only changes once Enter accepts the new selection.
         assert box.buf == "/"
         submitted: list[str] = []
         box.feed(b"\n", submitted.append, lambda: None)
-        assert box.buf == "/clear "
+        assert box.buf == "/quit "
         assert submitted == []
 
     def test_down_arrow_navigates_menu(self) -> None:
@@ -390,19 +401,27 @@ class TestInputBoxCompletionMenu:
         box.feed(b"\x1b[Z", lambda _s: None, lambda: None)
         assert box._menu_sel == 0
 
-    def test_typing_closes_menu_and_appends(self) -> None:
+    def test_typing_to_no_matches_closes_menu(self) -> None:
+        # When typing extends the buffer past anything the completer
+        # matches, the menu must close so a stale candidate list does
+        # not linger above the new buffer.
         box = _make_box()
-        box.completer_fn = lambda _buf: ["alpha", "beta"]
-        box.feed(b"\t", lambda _s: None, lambda: None)
+        # Completer matches only the literal buffer "a"; any other
+        # input returns nothing so the menu must dismiss.
+        box.completer_fn = lambda buf: ["alpha", "ant"] if buf == "a" else []
+        box.feed(b"a", lambda _s: None, lambda: None)
         assert box._menu_open is True
         box.feed(b"x", lambda _s: None, lambda: None)
         assert box._menu_open is False
-        assert box.buf == "x"
+        assert box.buf == "ax"
 
-    def test_backspace_with_buffer_closes_menu(self) -> None:
+    def test_backspace_shrinking_to_no_matches_closes_menu(self) -> None:
+        # A prefix-aware completer that only matches the full "ab"
+        # buffer; backspacing back to "a" yields no candidates, so the
+        # menu must close.
         box = _make_box()
-        box.completer_fn = lambda _buf: ["alpha", "beta"]
-        box.feed(b"ab\t", lambda _s: None, lambda: None)
+        box.completer_fn = lambda buf: ["abacus", "abalone"] if buf == "ab" else []
+        box.feed(b"ab", lambda _s: None, lambda: None)
         assert box._menu_open is True
         box.feed(b"\x7f", lambda _s: None, lambda: None)
         assert box._menu_open is False
@@ -459,41 +478,40 @@ class TestInputBoxCompletionMenu:
         assert box.buf == ""
 
     def test_menu_renders_candidates_above_box(self) -> None:
-        """Integration test reproducing the original bug.
+        """Integration test reproducing the original "fast complete" bug.
 
-        Before the fix, pressing Tab with multiple candidates silently
-        cycled ``buf`` through them — *no menu was painted* and the
-        input box stayed pinned to the bottom with the user unable to
-        see the alternatives.  After the fix, the candidates must
-        appear stacked above the input box (which has moved up to
-        make room for them), with the first one highlighted with the
-        ``❯`` marker.
+        Before the fix, typing into the box never produced any visible
+        completion menu — the user had to press Tab to even see
+        suggestions, and on the anchored-box code path no menu was
+        ever painted at all.  After the fix, the candidates must
+        appear stacked above the input box (which stays anchored at
+        the same screen row; the menu attaches above its top border by
+        shrinking the DECSTBM scroll region), with the first one
+        highlighted with the ``❯`` marker — and they must appear from
+        typing alone, with no Tab press.
         """
         out = io.StringIO()
         box = _InputBox(threading.RLock(), out)
         box.completer_fn = lambda _buf: ["/help ", "/history "]
         box._active = True
+        # Capture the rendered output produced purely from typing.
         box.feed(b"/", lambda _s: None, lambda: None)
-        # Snapshot the rendered output after the menu opens.
-        out.seek(0)
-        out.truncate(0)
-        box.feed(b"\t", lambda _s: None, lambda: None)
         text = out.getvalue()
         # Both candidates must appear in the painted output.
         assert "/help" in text, "first candidate missing from menu render"
         assert "/history" in text, "second candidate missing from menu render"
         # The highlighted candidate carries the ❯ marker.
         assert "❯" in text, "no selection marker drawn on highlighted row"
-        # The input box itself was moved up by the menu height (2 rows).
+        # Menu attaches above the input box; the box's top border is
+        # painted at menu_top + 2 (two menu rows above it).
         rows, _ = _term_size()
         menu_top = _box_top_row(rows, _BOX_H + 2)
-        # Menu row 1, menu row 2, then the box's top border at menu_top+2.
         assert f"\x1b[{menu_top};1H" in text
         assert f"\x1b[{menu_top + 1};1H" in text
         assert f"\x1b[{menu_top + 2};1H" in text
-        # Scroll region was shrunk to leave room for the menu.
+        # DECSTBM scroll region is shrunk to leave room for the menu.
         assert f"\x1b[1;{max(rows - (_BOX_H + 2), 1)}r" in text
-        # buf stays as what the user typed until they accept.
+        # buf stays as what the user typed — typing only previews.
         assert box.buf == "/"
         assert box._menu_open is True
 
@@ -576,12 +594,14 @@ class TestInputBoxCompletionMenuEdgeCases:
         assert box._menu_items == []
         assert box._drawn_menu_h == 0
 
-    def test_bracketed_paste_dismisses_open_menu(self) -> None:
+    def test_bracketed_paste_refreshes_menu_or_dismisses(self) -> None:
+        # Paste with a prefix-aware completer that no longer matches
+        # the buffer after paste must dismiss the menu (C3 + C2:
+        # pasted content is treated like typing and re-queries).
         box = _make_box()
-        box.completer_fn = lambda _buf: ["one", "two"]
+        box.completer_fn = lambda buf: ["alpha", "ant"] if buf == "" else []
         box.feed(b"\t", lambda _s: None, lambda: None)
         assert box._menu_open is True
-        # Bracketed paste sequence with content.
         box.feed(
             b"\x1b[200~hello\x1b[201~",
             lambda _s: None,
@@ -589,6 +609,22 @@ class TestInputBoxCompletionMenuEdgeCases:
         )
         assert box._menu_open is False
         assert box.buf.endswith("hello")
+
+    def test_bracketed_paste_refreshes_menu_with_matches(self) -> None:
+        # When the pasted prefix still has candidates, the menu must
+        # refresh (not close) so the user immediately sees them.
+        box = _make_box()
+        box.completer_fn = lambda buf: (
+            ["/help ", "/clear "] if buf.startswith("/") else []
+        )
+        box.feed(
+            b"\x1b[200~/\x1b[201~",
+            lambda _s: None,
+            lambda: None,
+        )
+        assert box._menu_open is True
+        assert box._menu_items == ["/help ", "/clear "]
+        assert box.buf == "/"
 
     def test_menu_h_auto_dismisses_when_no_room(
         self, monkeypatch: Any,
@@ -640,6 +676,126 @@ class TestInputBoxCompletionMenuEdgeCases:
         session._answer_q.put("done")
         worker.join(timeout=2.0)
         assert answers == ["done"]
+
+
+class TestCompleteWhileTyping:
+    """Integration tests for the "fast complete" auto-pop menu.
+
+    These reproduce the user-reported bug from the previous task: the
+    in-place completion menu only appeared on Tab, so users never saw
+    suggestions as they typed and the "fast complete" experience felt
+    broken.  After the fix every printable keystroke (and every
+    buffer-shrinking backspace) re-queries the completer and pops the
+    in-place menu automatically — mirroring the old prompt_toolkit
+    ``complete_while_typing=True`` dropdown.
+    """
+
+    def test_typing_auto_opens_menu_with_matches(self) -> None:
+        """A single keystroke is enough to pop the menu — no Tab."""
+        box = _make_box()
+        box.completer_fn = lambda buf: (
+            ["/help ", "/history "] if buf.startswith("/") else []
+        )
+        box.feed(b"/h", lambda _s: None, lambda: None)
+        assert box._menu_open is True
+        assert box._menu_sel == 0
+        assert box._menu_items == ["/help ", "/history "]
+        # Typing only previews; buf stays at exactly what was typed.
+        assert box.buf == "/h"
+
+    def test_typing_refreshes_menu_items(self) -> None:
+        """Each keystroke re-queries the completer and resets sel."""
+        calls: list[str] = []
+
+        def completer(buf: str) -> list[str]:
+            calls.append(buf)
+            if buf == "a":
+                return ["alpha", "ant"]
+            if buf == "ab":
+                return ["abacus"]
+            return []
+
+        box = _make_box()
+        box.completer_fn = completer
+        box.feed(b"a", lambda _s: None, lambda: None)
+        assert box._menu_items == ["alpha", "ant"]
+        assert box._menu_sel == 0
+        box.feed(b"b", lambda _s: None, lambda: None)
+        # New keystroke re-queried the completer with the new buffer.
+        assert calls[-1] == "ab"
+        assert box._menu_items == ["abacus"]
+        assert box._menu_sel == 0
+
+    def test_typing_with_no_matches_closes_menu(self) -> None:
+        """After auto-pop, the next no-match keystroke closes the menu."""
+        box = _make_box()
+        box.completer_fn = lambda buf: ["alpha", "ant"] if buf == "a" else []
+        box.feed(b"a", lambda _s: None, lambda: None)
+        assert box._menu_open is True
+        box.feed(b"z", lambda _s: None, lambda: None)
+        assert box._menu_open is False
+        assert box.buf == "az"
+
+    def test_backspace_refreshes_menu_keeps_open(self) -> None:
+        """Backspace re-queries; menu stays open if matches still exist."""
+        box = _make_box()
+        box.completer_fn = lambda buf: ["alpha", "ant"] if buf == "a" else (
+            ["abacus"] if buf == "ab" else []
+        )
+        box.feed(b"ab", lambda _s: None, lambda: None)
+        assert box._menu_items == ["abacus"]
+        box.feed(b"\x7f", lambda _s: None, lambda: None)
+        assert box.buf == "a"
+        assert box._menu_open is True
+        assert box._menu_items == ["alpha", "ant"]
+
+    def test_empty_buf_after_backspace_closes_menu(self) -> None:
+        """Backspacing the buffer to empty must drop the open menu."""
+        box = _make_box()
+        box.completer_fn = lambda _buf: ["alpha", "ant"]
+        box.feed(b"a", lambda _s: None, lambda: None)
+        assert box._menu_open is True
+        box.feed(b"\x7f", lambda _s: None, lambda: None)
+        assert box.buf == ""
+        assert box._menu_open is False
+
+    def test_single_candidate_typing_previews_no_replace(self) -> None:
+        """Typing never auto-replaces buf — only Tab does."""
+        box = _make_box()
+        box.completer_fn = lambda _buf: ["/help "]
+        box.feed(b"/h", lambda _s: None, lambda: None)
+        # buf stays at the typed prefix; the single candidate is just
+        # previewed in the menu.
+        assert box.buf == "/h"
+        assert box._menu_open is True
+        assert box._menu_items == ["/help "]
+        # Tab on a single-candidate preview accepts directly.
+        box.feed(b"\t", lambda _s: None, lambda: None)
+        assert box.buf == "/help "
+        assert box._menu_open is False
+
+    def test_painted_menu_appears_from_typing_alone(self) -> None:
+        """Bug reproducer: a single typed char paints the candidate menu.
+
+        Asserts ``❯``, both candidates, the shrunk DECSTBM region and
+        the box's top border all appear in the rendered byte stream —
+        without any Tab keypress.
+        """
+        out = io.StringIO()
+        box = _InputBox(threading.RLock(), out)
+        box.completer_fn = lambda _buf: ["/help ", "/history "]
+        box._active = True
+        box.feed(b"/", lambda _s: None, lambda: None)
+        text = out.getvalue()
+        assert "/help" in text
+        assert "/history" in text
+        assert "❯" in text
+        rows, _ = _term_size()
+        # DECSTBM region shrunk by the menu height (2 rows).
+        assert f"\x1b[1;{max(rows - (_BOX_H + 2), 1)}r" in text
+        # Box top border row.
+        menu_top = _box_top_row(rows, _BOX_H + 2)
+        assert f"\x1b[{menu_top + 2};1H" in text
 
 
 class TestInputBoxEOF:
