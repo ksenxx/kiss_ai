@@ -425,6 +425,126 @@ class TestAnchoredReplWiring:
         assert repl.box.completer_fn is None
 
 
+class TestRunSteeringLoop:
+    """Wiring tests for :meth:`AnchoredRepl.run_steering_loop`.
+
+    A full TTY-driven test would require a PTY pair + termios; here
+    we only exercise the title/status flip + restore around the loop
+    using ``is_done`` that returns True immediately so the select
+    loop never blocks on stdin.  ``sys.stdin`` is replaced with the
+    read end of a real OS pipe so :func:`sys.stdin.fileno` works
+    under pytest's stdin capture.
+    """
+
+    def _build_repl(self) -> AnchoredRepl:
+        repl = AnchoredRepl()
+        # Replace the real stdout-bound box with one writing to a
+        # StringIO so redraw() does not touch the terminal.
+        repl.box = _InputBox(repl.lock, io.StringIO())
+        return repl
+
+    def _swap_stdin_pipe(self) -> tuple[int, int, Any]:
+        """Replace ``sys.stdin`` with a real-pipe-backed file object.
+
+        Returns ``(read_fd, write_fd, saved_stdin)`` so the caller can
+        restore stdin and close both ends in ``finally``.
+        """
+        import os as _os
+        import sys as _sys
+
+        r, w = _os.pipe()
+        saved = _sys.stdin
+        _sys.stdin = _os.fdopen(r, "r", closefd=False)
+        return r, w, saved
+
+    def _restore_stdin(self, r: int, w: int, saved: Any) -> None:
+        import os as _os
+        import sys as _sys
+
+        try:
+            _sys.stdin.close()
+        except Exception:  # noqa: BLE001
+            pass
+        _sys.stdin = saved
+        for fd in (r, w):
+            try:
+                _os.close(fd)
+            except OSError:
+                pass
+
+    def test_loop_flips_title_to_steer_and_restores(self) -> None:
+        from kiss.agents.sorcar.cli_panel import IDLE_TITLE, STEER_TITLE
+
+        repl = self._build_repl()
+        repl.box.title = IDLE_TITLE
+        repl.box.status = "prev-status"
+        seen_title: list[str] = []
+
+        def is_done() -> bool:
+            if not seen_title:
+                seen_title.append(repl.box.title)
+            return True
+
+        r, w, saved = self._swap_stdin_pipe()
+        try:
+            repl.run_steering_loop(
+                on_submit=lambda _s: None,
+                on_abort=lambda: None,
+                is_done=is_done,
+            )
+        finally:
+            self._restore_stdin(r, w, saved)
+        assert seen_title == [STEER_TITLE]
+        assert repl.box.title == IDLE_TITLE
+        assert repl.box.status == "prev-status"
+
+    def test_on_idle_fired_when_no_stdin_activity(self) -> None:
+        repl = self._build_repl()
+        idle_calls: list[int] = []
+        steps: list[int] = [0]
+
+        def is_done() -> bool:
+            steps[0] += 1
+            return steps[0] > 2
+
+        def on_idle() -> None:
+            idle_calls.append(1)
+
+        r, w, saved = self._swap_stdin_pipe()
+        try:
+            repl.run_steering_loop(
+                on_submit=lambda _s: None,
+                on_abort=lambda: None,
+                is_done=is_done,
+                on_idle=on_idle,
+            )
+        finally:
+            self._restore_stdin(r, w, saved)
+        assert idle_calls, "on_idle was never invoked"
+
+    def test_on_idle_exception_does_not_crash_loop(self) -> None:
+        repl = self._build_repl()
+        steps: list[int] = [0]
+
+        def is_done() -> bool:
+            steps[0] += 1
+            return steps[0] > 2
+
+        def on_idle() -> None:
+            raise RuntimeError("boom")
+
+        r, w, saved = self._swap_stdin_pipe()
+        try:
+            repl.run_steering_loop(
+                on_submit=lambda _s: None,
+                on_abort=lambda: None,
+                is_done=is_done,
+                on_idle=on_idle,
+            )
+        finally:
+            self._restore_stdin(r, w, saved)
+
+
 if __name__ == "__main__":
     import pytest
 
