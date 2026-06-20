@@ -1341,6 +1341,20 @@ body.remote-chat #welcome-config { display: none !important; }
   color: color-mix(in srgb, var(--fg) 80%, transparent);
 }
 
+/* Atomic wrapper around a date filter trio (label + <input
+   type=date> + calendar-picker button) inside .history-filter-bar.
+   .history-filter-bar is a ``flex-wrap: wrap`` container, so
+   without this wrapper the three pieces would each be their own
+   flex item and could land on three separate rows when the
+   sidebar gets narrow.  ``display: inline-flex`` makes the
+   wrapper itself a single flex item of the bar, and
+   ``flex-wrap: nowrap`` + ``white-space: nowrap`` keep the
+   label, input, and button glued on the same visual line. */
+.history-filter-date-group {
+  display: inline-flex; align-items: center; gap: 4px;
+  flex-wrap: nowrap; white-space: nowrap;
+}
+
 .history-filter-date {
   flex: 0 1 auto; min-width: 0; width: 7.5em;
   background: color-mix(in srgb, var(--fg) 5%, transparent);
