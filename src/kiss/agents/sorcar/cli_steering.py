@@ -58,6 +58,7 @@ from kiss.agents.sorcar.cli_panel import (
     STEER_TITLE,
     _term_size,
     body_cursor_col,
+    menu_row,
     panel_body,
     panel_bottom,
     panel_cols,
@@ -92,7 +93,7 @@ _PASTE_END = f"{_ESC}[201~"
 _PASTE_SEQ_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b.")
 
 
-def _box_top_row(rows: int) -> int:
+def _box_top_row(rows: int, box_h: int = _BOX_H) -> int:
     """Return the box's first screen row (1-based) for *rows* total rows.
 
     Clamped so a terminal shrunk below the box height never produces
@@ -101,11 +102,21 @@ def _box_top_row(rows: int) -> int:
 
     Args:
         rows: Total terminal rows.
+        box_h: Effective height of the box (including any menu rows
+            stacked above it when the in-place completion menu is
+            open).  Defaults to :data:`_BOX_H` (no menu).
 
     Returns:
         The 1-based row of the box's top border, always ``>= 1``.
     """
-    return max(rows - _BOX_H, 1) + 1
+    return max(rows - box_h, 1) + 1
+
+
+# Maximum number of in-place completion menu rows rendered above the
+# box.  When the candidate list exceeds this height the menu scrolls so
+# the selected candidate stays visible.  Capped further at runtime so
+# the menu + box never consume the whole terminal.
+_MENU_MAX_H = 8
 
 
 def _partial_suffix_len(text: str, seq: str) -> int:
@@ -254,15 +265,27 @@ class _InputBox:
         self._hist_idx: int | None = None
         self._hist_saved: str = ""
         # Tab-completion callback returning ranked replacement candidates
-        # for the current buffer.  When set, Tab cycles through the
-        # candidates (re-querying when the buffer changes mid-cycle).
+        # for the current buffer.  Tab opens an in-place menu using
+        # the returned candidates; the menu state below tracks it.
         self.completer_fn: Callable[[str], list[str]] | None = None
-        self._tab_candidates: list[str] = []
-        self._tab_idx: int = 0
-        # The buffer the user typed when the Tab cycle began; any edit
-        # mid-cycle resets the candidate list so the next Tab starts a
-        # new query against the new buffer.
-        self._tab_origin: str = ""
+        # In-place completion menu: when open, candidate rows are drawn
+        # above the box's top border, the scroll region shrinks by the
+        # menu's height so agent output cannot scroll over the menu,
+        # and Tab/arrows navigate the candidates instead of editing.
+        # ``_menu_items`` is the full ranked candidate list,
+        # ``_menu_sel`` is the highlighted index, and ``_menu_scroll``
+        # is the first visible item (so a long candidate list scrolls
+        # within the menu height cap).
+        self._menu_open = False
+        self._menu_items: list[str] = []
+        self._menu_sel = 0
+        self._menu_scroll = 0
+        # Effective menu height as last rendered.  A mismatch on the
+        # next draw means the scroll region must be re-anchored and
+        # the rows that newly became scroll-region rows must be
+        # cleared (otherwise stale menu glyphs linger inside the
+        # scroll region).
+        self._drawn_menu_h = 0
 
     def start(self) -> None:
         """Enter raw mode, reserve the scroll region and draw the box."""
@@ -292,7 +315,8 @@ class _InputBox:
             out = self._out
             # Push existing content up so the box does not overwrite it.
             out.write("\n" * _BOX_H)
-            # Scroll region = everything above the box.
+            # Scroll region = everything above the box (no menu open at
+            # start, so the effective box height is simply ``_BOX_H``).
             out.write(f"{_ESC}[1;{max(rows - _BOX_H, 1)}r")
             # Park the output cursor on the last region row and save that
             # position; agent output is later written by restoring to it
@@ -317,7 +341,12 @@ class _InputBox:
             return
         assert termios is not None
         rows, _ = _term_size()
-        top_row = _box_top_row(rows)
+        # Clear *all* rows the box (possibly including the in-place
+        # completion menu stacked above its top border) currently
+        # occupies, not just the three input-panel rows; otherwise a
+        # menu open at the moment ``stop`` is called would leak its
+        # rows under the returning idle prompt.
+        top_row = _box_top_row(rows, _BOX_H + self._menu_h())
         if self._prev_sigcont is not None:
             try:
                 signal.signal(signal.SIGCONT, self._prev_sigcont)
@@ -343,6 +372,12 @@ class _InputBox:
         if self._old_term is not None:
             termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old_term)
             self._old_term = None
+        # Drop completion-menu state so a later ``start()`` does not
+        # paint phantom menu rows or wrongly trip the "menu shrank"
+        # clear path in :meth:`_draw_locked` (which compares the next
+        # ``_menu_h()`` against ``_drawn_menu_h`` from this run).
+        self._reset_completion_state()
+        self._drawn_menu_h = 0
 
     def _on_sigcont(self, signum: int, frame: Any) -> None:
         """Restore the box after the process is resumed (``fg``).
@@ -377,22 +412,82 @@ class _InputBox:
             if self._active:
                 self._draw_locked()
 
+    def _menu_h(self) -> int:
+        """Return the current rendered height of the completion menu.
+
+        ``0`` when the menu is closed; otherwise the lesser of the
+        candidate count, :data:`_MENU_MAX_H`, and however many rows
+        can fit above the box without consuming the whole scroll
+        region (so at least one row of agent output is always
+        visible).
+
+        If the terminal is too small to fit even one menu row above
+        the box the menu is auto-dismissed (state reset to closed) —
+        otherwise the user would be interacting with an invisible
+        widget where arrows silently navigate and Enter silently
+        overwrites the edit buffer.
+        """
+        if not self._menu_open or not self._menu_items:
+            return 0
+        rows, _ = _term_size()
+        # Leave at least one scroll-region row above the menu so the
+        # last line of agent output stays visible.
+        room = max(rows - _BOX_H - 1, 0)
+        h = min(len(self._menu_items), _MENU_MAX_H, room)
+        if h == 0:
+            # No room to render the menu — collapse to closed so the
+            # next keypress (arrows / Enter) is not consumed by an
+            # invisible menu.
+            self._menu_open = False
+            self._menu_items = []
+            self._menu_sel = 0
+            self._menu_scroll = 0
+        return h
+
     def _draw_locked(self) -> None:
         rows, _ = _term_size()
         cols = panel_cols()
-        top_row = _box_top_row(rows)
+        menu_h = self._menu_h()
+        eff_box_h = _BOX_H + menu_h
+        top_row = _box_top_row(rows, eff_box_h)
         out = self._out
-        if rows != self._rows:
-            # The terminal was resized: re-anchor the scroll region and
-            # re-save the output cursor inside the new region so agent
-            # output cannot scroll over the relocated box.  Row values
-            # are clamped to >= 1 so a terminal shrunk below the box
-            # height never receives invalid control sequences.
-            out.write(f"{_ESC}[1;{max(rows - _BOX_H, 1)}r")
-            out.write(f"{_ESC}[{max(rows - _BOX_H, 1)};1H")
+        # Either the terminal was resized OR the menu opened/closed/
+        # changed height: in both cases the DECSTBM scroll region must
+        # be re-anchored to ``rows - eff_box_h`` so agent output cannot
+        # scroll over the menu or the box, and the saved output cursor
+        # must be re-parked inside the new region.  Row values are
+        # clamped to >= 1 so a terminal shrunk below the box height
+        # never receives invalid control sequences.
+        if rows != self._rows or menu_h != self._drawn_menu_h:
+            region_bottom = max(rows - eff_box_h, 1)
+            # When the menu shrinks (e.g. on close) the rows that were
+            # menu rows are now back in the scroll region; clear them
+            # so leftover candidate glyphs don't linger as ghost text
+            # at the bottom of the agent output area.
+            if self._drawn_menu_h:
+                # Use the previous terminal row count so that a resize
+                # which also shrinks the menu clears the menu rows at
+                # their OLD on-screen positions, not the post-resize
+                # positions (which would leave ghost glyphs behind).
+                prev_rows = self._rows or rows
+                prev_top = _box_top_row(
+                    prev_rows, _BOX_H + self._drawn_menu_h,
+                )
+                for r in range(prev_top, prev_top + self._drawn_menu_h):
+                    out.write(f"{_ESC}[{r};1H{_ESC}[2K")
+            out.write(f"{_ESC}[1;{region_bottom}r")
+            out.write(f"{_ESC}[{region_bottom};1H")
             out.write(f"{_ESC}7")
             self._rows = rows
+            self._drawn_menu_h = menu_h
 
+        # Draw the in-place completion menu rows (if open) right above
+        # the box's top border, sharing the same column layout so the
+        # menu visually extends the box upward.
+        if menu_h:
+            self._draw_menu_locked(top_row, cols, menu_h)
+
+        box_top = top_row + menu_h
         top = panel_top(self.title, cols)
         bottom = panel_bottom(self.status, cols)
         body, is_placeholder = panel_body(self.buf, cols)
@@ -408,11 +503,49 @@ class _InputBox:
         # saved *output* position (held by the ``ESC 7`` register and
         # restored by :class:`_StdoutProxy`).  After painting, the visible
         # caret is parked in the body so it blinks after the chevron.
-        out.write(f"{_ESC}[{top_row};1H{_ESC}[2K{CYAN}{top}{RESET}")
-        out.write(f"{_ESC}[{top_row + 1};1H{_ESC}[2K{CYAN}│{RESET}{mid_inner}{CYAN}│{RESET}")
-        out.write(f"{_ESC}[{top_row + 2};1H{_ESC}[2K{CYAN}{bottom}{RESET}")
+        out.write(f"{_ESC}[{box_top};1H{_ESC}[2K{CYAN}{top}{RESET}")
+        out.write(f"{_ESC}[{box_top + 1};1H{_ESC}[2K{CYAN}│{RESET}{mid_inner}{CYAN}│{RESET}")
+        out.write(f"{_ESC}[{box_top + 2};1H{_ESC}[2K{CYAN}{bottom}{RESET}")
         self._park_cursor_locked(rows, cols)
         out.flush()
+
+    def _draw_menu_locked(self, top_row: int, cols: int, menu_h: int) -> None:
+        """Render the in-place completion menu rows above the box.
+
+        Scrolls :attr:`_menu_items` so the highlighted :attr:`_menu_sel`
+        row stays inside the visible window of *menu_h* rows.  Each row
+        is written with an absolute cursor positioning sequence + a full
+        line-clear so a previously open longer menu cannot leak glyphs
+        onto the right edge.
+
+        Args:
+            top_row: 1-based screen row of the first menu line (which
+                doubles as the menu's top border row in the absolute
+                layout).
+            cols: Total panel width in columns.
+            menu_h: Number of menu rows to render (already capped by
+                :meth:`_menu_h`).
+        """
+        n = len(self._menu_items)
+        if self._menu_sel < self._menu_scroll:
+            self._menu_scroll = self._menu_sel
+        elif self._menu_sel >= self._menu_scroll + menu_h:
+            self._menu_scroll = self._menu_sel - menu_h + 1
+        if self._menu_scroll < 0:
+            self._menu_scroll = 0
+        if self._menu_scroll > max(n - menu_h, 0):
+            self._menu_scroll = max(n - menu_h, 0)
+        out = self._out
+        for vi in range(menu_h):
+            idx = self._menu_scroll + vi
+            row = top_row + vi
+            if idx >= n:
+                out.write(f"{_ESC}[{row};1H{_ESC}[2K")
+                continue
+            line = menu_row(
+                self._menu_items[idx], idx == self._menu_sel, cols,
+            )
+            out.write(f"{_ESC}[{row};1H{_ESC}[2K{line}")
 
     def _park_cursor_locked(
         self, rows: int | None = None, cols: int | None = None
@@ -432,9 +565,13 @@ class _InputBox:
             rows, _ = _term_size()
         if cols is None:
             cols = panel_cols()
-        top_row = _box_top_row(rows)
+        top_row = _box_top_row(rows, _BOX_H + self._menu_h())
+        # The body row sits one row below the panel's top border, which
+        # in turn sits ``_menu_h()`` rows below the menu's first row.
         col = body_cursor_col(self.buf, cols)
-        self._out.write(f"{_ESC}[{top_row + 1};{col}H")
+        self._out.write(
+            f"{_ESC}[{top_row + self._menu_h() + 1};{col}H"
+        )
 
     def _append_paste(self, chunk: str) -> bool:
         """Append bracketed-paste content to the edit buffer.
@@ -486,10 +623,70 @@ class _InputBox:
             self.buf = self._hist_saved
 
     def _reset_completion_state(self) -> None:
-        """Drop the in-progress Tab-completion cycle."""
-        self._tab_candidates = []
-        self._tab_idx = 0
-        self._tab_origin = ""
+        """Close the in-place completion menu and drop its state."""
+        with self.lock:
+            self._menu_open = False
+            self._menu_items = []
+            self._menu_sel = 0
+            self._menu_scroll = 0
+
+    def _open_completion_menu(self) -> bool:
+        """Pop the in-place completion menu using :attr:`completer_fn`.
+
+        Queries the completer with the current edit buffer.  When the
+        completer returns zero candidates the menu stays closed and
+        the call is a no-op.  With exactly one candidate the menu is
+        not opened — instead :attr:`buf` is replaced with the single
+        candidate (so trivial single-match completions behave like a
+        normal Tab).  With two or more candidates the menu is opened
+        with the first candidate highlighted; :attr:`buf` is *not*
+        modified until the user actually picks one with Enter.
+
+        Returns:
+            ``True`` when the menu changed visible state (opened, or
+            the buffer was replaced by a single-candidate completion),
+            so the caller knows a redraw is needed.
+        """
+        if self.completer_fn is None:
+            return False
+        cands = [c.rstrip("\n") for c in self.completer_fn(self.buf)]
+        if not cands:
+            return False
+        with self.lock:
+            if len(cands) == 1:
+                self.buf = cands[0]
+                self._hist_idx = None
+                return True
+            self._menu_items = cands
+            self._menu_sel = 0
+            self._menu_scroll = 0
+            self._menu_open = True
+        return True
+
+    def _menu_move(self, delta: int) -> None:
+        """Advance the highlighted menu candidate by *delta* (wraps).
+
+        Args:
+            delta: ``+1`` for next item, ``-1`` for previous item.  The
+                index wraps modulo :attr:`_menu_items` so a single
+                key press past either end returns to the opposite end.
+        """
+        with self.lock:
+            n = len(self._menu_items)
+            if n == 0:
+                return
+            self._menu_sel = (self._menu_sel + delta) % n
+
+    def _menu_accept(self) -> None:
+        """Replace :attr:`buf` with the highlighted candidate and close the menu."""
+        with self.lock:
+            if self._menu_open and self._menu_items:
+                self.buf = self._menu_items[self._menu_sel]
+                self._hist_idx = None
+        # ``_reset_completion_state`` is the single source of truth for
+        # tearing down menu state; reuse it instead of duplicating the
+        # field resets here.
+        self._reset_completion_state()
 
     def feed(
         self,
@@ -523,11 +720,16 @@ class _InputBox:
                         _partial_suffix_len(text, _PASTE_END), len(text) - i
                     )
                     if self._append_paste(text[i : len(text) - keep]):
+                        # Bracketed paste is a buffer edit; the open
+                        # completion menu (Tab-cycle preview) no longer
+                        # matches the new buffer, so dismiss it.
+                        self._reset_completion_state()
                         changed = True
                     self._pending_esc = text[len(text) - keep :] if keep else ""
                     i = len(text)
                     break
                 if self._append_paste(text[i:end]):
+                    self._reset_completion_state()
                     changed = True
                 self._pasting = False
                 i = end + len(_PASTE_END)
@@ -559,10 +761,11 @@ class _InputBox:
                 if i + 1 >= len(text):
                     self._pending_esc = text[i:]
                     break
-                # Parse other CSI escape sequences: Up/Down arrows browse
-                # the input history; the rest (Left/Right/F-keys, etc.)
-                # are swallowed so their printable bytes do not type into
-                # the buffer.
+                # Parse other CSI escape sequences: Up/Down arrows
+                # navigate the in-place completion menu when it's
+                # open, or browse the input history otherwise; the
+                # rest (Left/Right/F-keys, etc.) are swallowed so
+                # their printable bytes do not type into the buffer.
                 if text[i + 1] == "[":
                     j = i + 2
                     while j < len(text) and not ("@" <= text[j] <= "~"):
@@ -573,13 +776,21 @@ class _InputBox:
                     final = text[j]
                     seq = text[i + 2 : j]
                     if final == "A" and seq == "":  # Up arrow
-                        self._history_back()
-                        self._reset_completion_state()
+                        if self._menu_open:
+                            self._menu_move(-1)
+                        else:
+                            self._history_back()
                         changed = True
                     elif final == "B" and seq == "":  # Down arrow
-                        self._history_forward()
-                        self._reset_completion_state()
+                        if self._menu_open:
+                            self._menu_move(1)
+                        else:
+                            self._history_forward()
                         changed = True
+                    elif final == "Z" and seq == "":  # Shift+Tab
+                        if self._menu_open:
+                            self._menu_move(-1)
+                            changed = True
                     i = j + 1
                     continue
                 # Swallow SS3 sequences (``ESC O <final>``): arrow keys
@@ -594,17 +805,34 @@ class _InputBox:
                 i += 1
                 continue
             if ch in ("\r", "\n"):
-                line = self.buf
-                self.buf = ""
-                self._hist_idx = None
-                self._hist_saved = ""
-                self._reset_completion_state()
-                changed = True
-                on_submit(line)
+                if self._menu_open:
+                    # Enter on an open completion menu accepts the
+                    # highlighted candidate (replacing the buffer) and
+                    # closes the menu *without* submitting the line —
+                    # the next Enter actually submits.  This matches
+                    # the prompt_toolkit dropdown behavior and the
+                    # ``_accept_completion_enter`` binding in
+                    # ``cli_prompt.py``.
+                    self._menu_accept()
+                    changed = True
+                else:
+                    line = self.buf
+                    self.buf = ""
+                    self._hist_idx = None
+                    self._hist_saved = ""
+                    self._reset_completion_state()
+                    changed = True
+                    on_submit(line)
             elif ch in ("\x7f", "\x08"):
                 if self.buf:
                     self.buf = self.buf[:-1]
                     self._hist_idx = None
+                    self._reset_completion_state()
+                    changed = True
+                elif self._menu_open:
+                    # Backspace on an empty buffer with the menu open
+                    # is a natural "dismiss" gesture — closes the menu
+                    # without editing the buffer further.
                     self._reset_completion_state()
                     changed = True
             elif ch == "\x15":  # Ctrl+U clears the line
@@ -613,7 +841,22 @@ class _InputBox:
                     self._hist_idx = None
                     self._reset_completion_state()
                     changed = True
+                elif self._menu_open:
+                    self._reset_completion_state()
+                    changed = True
+            elif ch == "\x07":  # Ctrl+G cancels the completion menu
+                if self._menu_open:
+                    self._reset_completion_state()
+                    changed = True
             elif ch == "\x03":  # Ctrl+C
+                if self._menu_open:
+                    # Ctrl+C while the menu is open just dismisses it;
+                    # only a bare Ctrl+C with no menu propagates as an
+                    # abort to the caller.
+                    self._reset_completion_state()
+                    changed = True
+                    i += 1
+                    continue
                 on_abort()
                 return
             elif ch == "\x04":  # Ctrl+D on empty buffer = EOF
@@ -621,26 +864,19 @@ class _InputBox:
                     on_eof()
                     return
             elif ch == "\t":
-                # Tab cycles through completion candidates supplied by
-                # ``completer_fn``.  The first Tab after an edit queries
-                # the completer with the current buffer; subsequent Tabs
-                # advance through the same candidate list until the user
-                # edits the buffer again.
-                if self.completer_fn is not None:
-                    if not self._tab_candidates:
-                        self._tab_origin = self.buf
-                        cands = self.completer_fn(self.buf)
-                        self._tab_candidates = [
-                            c.rstrip("\n") for c in cands
-                        ]
-                        self._tab_idx = 0
-                    else:
-                        self._tab_idx = (
-                            self._tab_idx + 1
-                        ) % len(self._tab_candidates)
-                    if self._tab_candidates:
-                        self.buf = self._tab_candidates[self._tab_idx]
-                        self._hist_idx = None
+                # Tab pops the in-place completion menu using
+                # ``completer_fn``.  With exactly one candidate the
+                # buffer is replaced directly (no menu); with multiple
+                # candidates the menu opens with the first highlighted
+                # and the buffer is left untouched until the user picks
+                # one with Enter.  Tab while the menu is already open
+                # advances the highlighted candidate so the user can
+                # navigate the list from the home row too.
+                if self._menu_open:
+                    self._menu_move(1)
+                    changed = True
+                elif self.completer_fn is not None:
+                    if self._open_completion_menu():
                         changed = True
             elif ch >= " " and not ("\x80" <= ch <= "\x9f"):
                 # The C1 control range (U+0080–U+009F) must never reach
@@ -726,6 +962,10 @@ class SteeringSession:
             sys.stdout.write(f"\n\x1b[33m? {question}\x1b[0m\n")
             sys.stdout.flush()
         prev_title = self.box.title
+        # Dismiss any open in-place completion menu so the next Enter
+        # in the question loop submits the user's answer instead of
+        # silently picking a stale candidate from the previous edit.
+        self.box._reset_completion_state()
         self.box.title = " answer the question above, then Enter "
         self.box.redraw()
         self._question_pending.set()
