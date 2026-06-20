@@ -625,6 +625,22 @@ class OpenAICompatibleModel(Model):
         )
         self._apply_cache_control_for_openrouter_anthropic(kwargs)
 
+        # OpenAI's /v1/chat/completions endpoint rejects the combination of
+        # ``tools`` + ``reasoning_effort`` for GPT-5.x / o-series reasoning
+        # models with: "Function tools with reasoning_effort are not supported
+        # ... in /v1/chat/completions. Please use /v1/responses instead."
+        # Migrating the whole transport to the Responses API is a major
+        # rewrite, so as a pragmatic fix we strip ``reasoning_effort`` from
+        # tool-bearing requests; the no-tools ``generate()`` path still keeps
+        # the high-reasoning default.
+        if tools and "reasoning_effort" in kwargs:
+            dropped = kwargs.pop("reasoning_effort")
+            logger.debug(
+                "Dropping reasoning_effort=%r because tools are attached "
+                "(chat.completions rejects this combo for reasoning models).",
+                dropped,
+            )
+
         if self.token_callback is not None:  # pragma: no cover – API streaming
             kwargs["stream"] = True
             kwargs["stream_options"] = {"include_usage": True}
