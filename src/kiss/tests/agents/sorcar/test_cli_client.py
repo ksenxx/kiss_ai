@@ -651,5 +651,288 @@ class TestConnIdIsolation(unittest.TestCase):
             self.client_b.dispatcher.cli_info_q.get(timeout=0.5)
 
 
+class _TestRepl:
+    """Test stand-in for :class:`AnchoredRepl` that drives the callbacks.
+
+    This is test *infrastructure* (analogous to
+    :class:`_RecordingRemoteAccessServer` above), not a mock of the
+    code under test: it owns a real :class:`_InputBox` and a real
+    lock, and its :meth:`run_steering_loop` synchronously plays a
+    pre-recorded script of actions (``"submit"`` / ``"abort"`` /
+    ``"idle"``) so the behaviour of
+    :func:`_submit_task_anchored` — wiring callbacks to the daemon —
+    can be exercised end-to-end without a real TTY or termios.
+    """
+
+    def __init__(self, script: list[tuple[str, Any]] | None = None) -> None:
+        import io as _io
+        import threading as _t
+
+        from kiss.agents.sorcar.cli_steering import _InputBox
+
+        self.lock = _t.RLock()
+        self.box = _InputBox(self.lock, _io.StringIO())
+        self.script = list(script or [])
+        self.captured_titles: list[str] = []
+        self.captured_statuses: list[str] = []
+
+    def run_steering_loop(
+        self,
+        on_submit: Any,
+        on_abort: Any,
+        is_done: Any,
+        on_idle: Any = None,
+    ) -> None:
+        # Capture the title the caller flipped to before running.
+        self.captured_titles.append(self.box.title)
+        self.captured_statuses.append(self.box.status)
+        for kind, arg in self.script:
+            if kind == "submit":
+                on_submit(str(arg))
+            elif kind == "abort":
+                on_abort()
+            elif kind == "idle" and on_idle is not None:
+                on_idle()
+            elif kind == "sleep":
+                time.sleep(float(arg))
+        # Wait until the caller signals completion (or a hard cap).
+        deadline = time.monotonic() + 5.0
+        while not is_done() and time.monotonic() < deadline:
+            time.sleep(0.02)
+
+
+class TestSubmitTaskAnchored(CliClientBase):
+    """:func:`_submit_task_anchored` wires the box to the daemon."""
+
+    def _pre_arm_task_active(self) -> threading.Thread:
+        """Spawn a watcher that sets ``task_active`` once daemon got run.
+
+        :func:`_submit_task_anchored` clears ``task_active`` at the top
+        and then waits for the daemon's ``status: running`` broadcast to
+        re-set it.  In the test loop we do not want to depend on the
+        daemon actually starting a real LLM task, so a watcher sets the
+        flag synthetically as soon as the ``run`` command lands on the
+        recording server.
+        """
+        stop = threading.Event()
+
+        def watch() -> None:
+            deadline = time.monotonic() + 5.0
+            while not stop.is_set() and time.monotonic() < deadline:
+                for c in self.harness.received_cmds:
+                    if c.get("type") == "run":
+                        self.client.dispatcher.task_active.set()
+                        return
+                time.sleep(0.02)
+
+        t = threading.Thread(target=watch, daemon=True)
+        t.start()
+        # Caller is responsible for stopping the watcher (stop._set?).
+        # Stash it on the thread for tear-down.
+        t._stop_event = stop  # type: ignore[attr-defined]
+        return t
+
+    def test_run_command_carries_flags(self) -> None:
+        from kiss.agents.sorcar.cli_client import _submit_task_anchored
+
+        repl = _TestRepl(script=[])
+        before = len(self.harness.received_cmds)
+        watcher = self._pre_arm_task_active()
+        try:
+            _submit_task_anchored(
+                self.client, "initial prompt", repl,  # type: ignore[arg-type]
+                use_worktree=False,
+                use_parallel=False,
+                auto_commit=True,
+                timeout_seconds=5.0,
+            )
+        finally:
+            watcher._stop_event.set()  # type: ignore[attr-defined]
+            self.client.send({"type": "stop"})
+            watcher.join(timeout=2)
+
+        run_cmd: dict[str, Any] | None = None
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and run_cmd is None:
+            for c in self.harness.received_cmds[before:]:
+                if c.get("type") == "run":
+                    run_cmd = c
+                    break
+            time.sleep(0.02)
+        self.assertIsNotNone(run_cmd)
+        assert run_cmd is not None
+        self.assertEqual(run_cmd["prompt"], "initial prompt")
+        self.assertFalse(run_cmd["useWorktree"])
+        self.assertFalse(run_cmd["useParallel"])
+        self.assertTrue(run_cmd["autoCommit"])
+
+    def test_submitted_lines_become_append_user_message(self) -> None:
+        from kiss.agents.sorcar.cli_client import _submit_task_anchored
+
+        repl = _TestRepl(script=[
+            ("submit", "follow up A"),
+            ("submit", "follow up B"),
+        ])
+        before = len(self.harness.received_cmds)
+        watcher = self._pre_arm_task_active()
+        try:
+            _submit_task_anchored(
+                self.client, "go", repl,  # type: ignore[arg-type]
+                timeout_seconds=3.0,
+            )
+        finally:
+            watcher._stop_event.set()  # type: ignore[attr-defined]
+            self.client.send({"type": "stop"})
+            watcher.join(timeout=2)
+
+        deadline = time.monotonic() + 3.0
+        prompts: list[str] = []
+        while time.monotonic() < deadline:
+            prompts = [
+                c.get("prompt", "")
+                for c in self.harness.received_cmds[before:]
+                if c.get("type") == "appendUserMessage"
+            ]
+            if "follow up A" in prompts and "follow up B" in prompts:
+                break
+            time.sleep(0.02)
+        self.assertIn("follow up A", prompts)
+        self.assertIn("follow up B", prompts)
+
+    def test_abort_sends_stop_to_daemon(self) -> None:
+        from kiss.agents.sorcar.cli_client import _submit_task_anchored
+
+        repl = _TestRepl(script=[("abort", None)])
+        before = len(self.harness.received_cmds)
+        watcher = self._pre_arm_task_active()
+        try:
+            _submit_task_anchored(
+                self.client, "go", repl,  # type: ignore[arg-type]
+                timeout_seconds=3.0,
+            )
+        finally:
+            watcher._stop_event.set()  # type: ignore[attr-defined]
+            watcher.join(timeout=2)
+
+        deadline = time.monotonic() + 3.0
+        saw_stop = False
+        while time.monotonic() < deadline:
+            saw_stop = any(
+                c.get("type") == "stop"
+                for c in self.harness.received_cmds[before:]
+            )
+            if saw_stop:
+                break
+            time.sleep(0.02)
+        self.assertTrue(
+            saw_stop,
+            f"Expected stop in {self.harness.received_cmds[before:]!r}",
+        )
+
+    def test_ask_user_question_flips_title_and_routes_answer(self) -> None:
+        """``askUser`` arrival flips the box, next submit goes as userAnswer."""
+        from kiss.agents.sorcar.cli_client import _submit_task_anchored
+
+        # ``_submit_task_anchored`` drains ``ask_user_q`` at the top,
+        # so the question must be enqueued AFTER the drain.  The
+        # ``sleep`` step in the script gives the function a beat to
+        # drain, then the test enqueues the question via a side
+        # thread, then ``idle`` is replayed so ``on_idle`` picks it up.
+        question_dispatched = threading.Event()
+
+        def enqueue_question() -> None:
+            # Wait for run to be sent, then enqueue.
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                if any(
+                    c.get("type") == "run"
+                    for c in self.harness.received_cmds
+                ):
+                    self.client.dispatcher.ask_user_q.put("Which file?")
+                    question_dispatched.set()
+                    return
+                time.sleep(0.02)
+
+        threading.Thread(target=enqueue_question, daemon=True).start()
+
+        # Repl script: wait for the question to land, then idle to
+        # pick it up, then submit the answer.
+        class _AskRepl(_TestRepl):
+            def run_steering_loop(  # type: ignore[override]
+                self,
+                on_submit: Any,
+                on_abort: Any,
+                is_done: Any,
+                on_idle: Any = None,
+            ) -> None:
+                self.captured_titles.append(self.box.title)
+                assert question_dispatched.wait(timeout=5)
+                # Drive on_idle so the dispatcher question is picked up.
+                if on_idle is not None:
+                    on_idle()
+                on_submit("src/main.py")
+                deadline = time.monotonic() + 5.0
+                while not is_done() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+
+        repl = _AskRepl()
+        before = len(self.harness.received_cmds)
+        watcher = self._pre_arm_task_active()
+        try:
+            _submit_task_anchored(
+                self.client, "go", repl,  # type: ignore[arg-type]
+                timeout_seconds=3.0,
+            )
+        finally:
+            watcher._stop_event.set()  # type: ignore[attr-defined]
+            self.client.send({"type": "stop"})
+            watcher.join(timeout=2)
+
+        deadline = time.monotonic() + 3.0
+        answers: list[str] = []
+        appended: list[str] = []
+        while time.monotonic() < deadline:
+            answers = [
+                c.get("answer", "")
+                for c in self.harness.received_cmds[before:]
+                if c.get("type") == "userAnswer"
+            ]
+            appended = [
+                c.get("prompt", "")
+                for c in self.harness.received_cmds[before:]
+                if c.get("type") == "appendUserMessage"
+            ]
+            if "src/main.py" in answers:
+                break
+            time.sleep(0.02)
+        self.assertIn("src/main.py", answers)
+        # The answer line MUST NOT also be sent as appendUserMessage.
+        self.assertNotIn("src/main.py", appended)
+
+    def test_daemon_disconnect_returns_promptly(self) -> None:
+        """When the connection closes mid-task, the loop exits without wedge."""
+        from kiss.agents.sorcar.cli_client import _submit_task_anchored
+
+        # Repl that just waits for is_done to flip.
+        repl = _TestRepl(script=[])
+        watcher = self._pre_arm_task_active()
+        try:
+            # Fire and forget — after a short delay, close the client.
+            def closer() -> None:
+                time.sleep(0.2)
+                self.client._closed.set()
+
+            threading.Thread(target=closer, daemon=True).start()
+            start = time.monotonic()
+            _submit_task_anchored(
+                self.client, "go", repl,  # type: ignore[arg-type]
+                timeout_seconds=10.0,
+            )
+        finally:
+            watcher._stop_event.set()  # type: ignore[attr-defined]
+            watcher.join(timeout=2)
+        self.assertLess(time.monotonic() - start, 5.0)
+
+
 if __name__ == "__main__":
     unittest.main()

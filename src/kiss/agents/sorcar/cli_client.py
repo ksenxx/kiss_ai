@@ -63,11 +63,14 @@ from kiss.agents.sorcar.cli_panel import (
     CYAN,
     PROMPT_MARKER,
     RESET,
+    STEER_TITLE,
+    _term_size,
 )
 from kiss.agents.sorcar.cli_repl import (
     _EXIT_WORDS,
     CliCompleter,
     _history_path,
+    _load_history_lines,
     _make_ptk_reader,
     _print_help,
     _print_model_list,
@@ -75,7 +78,13 @@ from kiss.agents.sorcar.cli_repl import (
     _read_line,
     _record_mentions,
     _save_history,
+    _save_history_lines,
     _setup_readline,
+)
+from kiss.agents.sorcar.cli_steering import (
+    _MIN_ROWS,
+    AnchoredRepl,
+    supports_steering,
 )
 from kiss.core.print_to_console import ConsolePrinter
 
@@ -858,6 +867,241 @@ def _submit_task(
         _print_elapsed(client, start)
 
 
+def _submit_task_anchored(
+    client: CliClient,
+    prompt: str,
+    repl: AnchoredRepl,
+    *,
+    use_worktree: bool = True,
+    use_parallel: bool = True,
+    auto_commit: bool = False,
+    timeout_seconds: float = 60 * 60,
+) -> None:
+    """Run a daemon task while keeping the anchored input box pinned.
+
+    Mirrors :func:`_submit_task` but uses the already-drawn bottom
+    box (owned by ``repl``) for the duration of the task: the box's
+    title flips to :data:`STEER_TITLE`, every line the user submits
+    while the task is running is sent to the daemon as an
+    ``appendUserMessage`` command (exactly the way the VS Code
+    frontend / remote browser webapp queue follow-ups), and the
+    box's status shows a running ``queued: N`` count.  Ctrl+C
+    forwards a ``stop`` command to the daemon.  ``askUser`` events
+    coming back from the daemon flip the box title to "answer the
+    question above" so the next submitted line is sent as a
+    ``userAnswer`` reply.
+
+    Args:
+        client: The live :class:`CliClient`.
+        prompt: The user's instruction for this turn.
+        repl: The anchored REPL whose box drives the steering loop.
+        use_worktree: Forwarded as ``useWorktree`` to the daemon.
+        use_parallel: Forwarded as ``useParallel`` to the daemon.
+        auto_commit: Forwarded as ``autoCommit`` to the daemon.
+        timeout_seconds: Hard wall-clock cap on the wait so a wedged
+            daemon never pins the REPL forever.
+    """
+    new_task_id = uuid.uuid4().hex
+    client.dispatcher.current_task_id = new_task_id
+    client.dispatcher.task_active.clear()
+    _drain_queue(client.dispatcher.ask_user_q)
+    queued = [0]
+    pending_question = [False]
+    start = time.time()
+    try:
+        client.send({
+            "type": "run",
+            "prompt": prompt,
+            "model": client.dispatcher.current_model,
+            "workDir": client.work_dir,
+            "useWorktree": use_worktree,
+            "useParallel": use_parallel,
+            "autoCommit": auto_commit,
+            "taskId": new_task_id,
+        })
+        armed_deadline = time.monotonic() + timeout_seconds
+        while (
+            not client.dispatcher.task_active.is_set()
+            and time.monotonic() < armed_deadline
+            and not client._closed.is_set()
+        ):
+            time.sleep(0.05)
+        if client._closed.is_set():
+            client.dispatcher.printer.print(
+                "[red]✗ Daemon connection lost — type /exit to quit[/red]",
+                type="text",
+            )
+            return
+        if not client.dispatcher.task_active.is_set():
+            client.dispatcher.printer.print(
+                f"[yellow]⏹  Daemon did not acknowledge the task within "
+                f"{int(timeout_seconds)}s.[/yellow]",
+                type="text",
+            )
+            return
+
+        def on_submit(line: str) -> None:
+            text = line.strip()
+            if not text:
+                return
+            if pending_question[0]:
+                client.send({"type": "userAnswer", "answer": line})
+                pending_question[0] = False
+                with repl.lock:
+                    repl.box.title = STEER_TITLE
+                    repl.box.status = (
+                        f" queued: {queued[0]} " if queued[0] else ""
+                    )
+                    repl.box.redraw()
+                return
+            client.send({
+                "type": "appendUserMessage",
+                "prompt": text,
+                "tabId": client.tab_id,
+            })
+            queued[0] += 1
+            with repl.lock:
+                repl.box.status = f" queued: {queued[0]} "
+                repl.box.redraw()
+                sys.stdout.write(f"\x1b[2m▸ queued: {text}\x1b[0m\n")
+                sys.stdout.flush()
+
+        def on_abort() -> None:
+            try:
+                client.send({"type": "stop"})
+            except Exception:  # noqa: BLE001 - defensive
+                logger.debug("stop send failed", exc_info=True)
+            client.dispatcher.printer.print(
+                "[yellow]⏹  Sent stop to daemon.[/yellow]",
+                type="text",
+            )
+
+        def on_idle() -> None:
+            try:
+                question = client.dispatcher.ask_user_q.get_nowait()
+            except queue.Empty:
+                return
+            with repl.lock:
+                sys.stdout.write(f"\n\x1b[33m? {question}\x1b[0m\n")
+                sys.stdout.flush()
+                repl.box.title = " answer the question above, then Enter "
+                repl.box.redraw()
+            pending_question[0] = True
+
+        def is_done() -> bool:
+            return (
+                not client.dispatcher.task_active.is_set()
+                or client._closed.is_set()
+                or time.monotonic() - start > timeout_seconds
+            )
+
+        repl.run_steering_loop(on_submit, on_abort, is_done, on_idle)
+        if client._closed.is_set():
+            client.dispatcher.printer.print(
+                "[red]✗ Daemon connection lost — type /exit to quit[/red]",
+                type="text",
+            )
+    finally:
+        client.dispatcher.current_task_id = ""
+        client.dispatcher.task_active.clear()
+        _print_elapsed(client, start)
+
+
+def _run_anchored_client(
+    client: CliClient,
+    work_dir: str,
+    model_name: str,
+    active_file: str,
+    *,
+    use_worktree: bool,
+    use_parallel: bool,
+    auto_commit: bool,
+) -> int:
+    """Run the daemon-client REPL with the input bar pinned to the bottom.
+
+    Used when the terminal supports the steering box (POSIX TTY with
+    termios) and is at least :data:`_MIN_ROWS` tall.  The bottom box
+    is owned by :class:`AnchoredRepl` for the entire session: idle
+    reads (next instruction) flow through :meth:`read_idle_line`
+    under the :data:`IDLE_TITLE` preset, and task execution
+    (``run`` → ``status:false``) flows through :func:`_submit_task_anchored`
+    under the :data:`STEER_TITLE` preset, with submitted lines sent
+    to the daemon as ``appendUserMessage`` exactly as the VS Code
+    frontend / remote browser webapp queue follow-ups.
+
+    Args:
+        client: The connected :class:`CliClient`.
+        work_dir: Project directory (only used for completion / history).
+        model_name: Initial model name for the welcome banner.
+        active_file: Active editor file used by the completer for
+            identifier-suffix predictive completion.
+        use_worktree: Forwarded to every ``run`` command.
+        use_parallel: Forwarded to every ``run`` command.
+        auto_commit: Forwarded to every ``run`` command.
+
+    Returns:
+        ``0`` on a clean exit.
+    """
+    completer = CliCompleter(work_dir, active_file)
+    history_path = _history_path(work_dir)
+    history = _load_history_lines(history_path)
+
+    def completer_fn(buf: str) -> list[str]:
+        try:
+            return completer._build_matches(buf)
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("anchored completion failed", exc_info=True)
+            return []
+
+    with AnchoredRepl(completer_fn=completer_fn, history=history) as repl:
+        _print_welcome(work_dir, model_name or "(daemon)")
+        interrupt_armed = False
+        while True:
+            try:
+                line = repl.read_idle_line()
+            except KeyboardInterrupt:
+                if interrupt_armed:
+                    print("\nGoodbye.")
+                    break
+                interrupt_armed = True
+                if client.dispatcher.task_active.is_set():
+                    client.send({"type": "stop"})
+                    print("\n⏹  Sent stop to daemon.")
+                else:
+                    print("\n(Press Ctrl+C again or type /exit to quit)")
+                continue
+            if line is None:  # EOF / Ctrl+D
+                print("\nGoodbye.")
+                break
+            interrupt_armed = False
+            text = line.strip()
+            if not text:
+                continue
+            if text in _EXIT_WORDS:
+                break
+            if text.startswith("/"):
+                try:
+                    if _handle_client_slash(client, line):
+                        break
+                except Exception as exc:  # noqa: BLE001 - resilient REPL
+                    logger.debug("slash command failed", exc_info=True)
+                    print(f"\n✗ Command failed: {exc}\n")
+                continue
+            _record_mentions(line)
+            try:
+                _submit_task_anchored(
+                    client, line, repl,
+                    use_worktree=use_worktree,
+                    use_parallel=use_parallel,
+                    auto_commit=auto_commit,
+                )
+            except KeyboardInterrupt:
+                client.send({"type": "stop"})
+                print("\n⏹  Task interrupted.\n")
+        _save_history_lines(history_path, repl.box.history)
+    return 0
+
+
 def _print_elapsed(client: CliClient, start: float) -> None:
     """Print the wall-clock task duration after a task ends.
 
@@ -932,6 +1176,34 @@ def run_client(
         print(f"✗ {exc}", file=sys.stderr)
         return 1
 
+    client.dispatcher.current_model = model_name
+
+    # When the terminal supports the steering box (POSIX TTY with
+    # termios) and is tall enough, run the REPL with the input bar
+    # pinned to the bottom of the screen for both idle reads and
+    # task execution — matching Claude Code's fullscreen TUI
+    # behaviour where the rectangular input box stays visible while
+    # the agent works.  Lines submitted into the box during a task
+    # are sent to the daemon as ``appendUserMessage`` (the same
+    # command the VS Code extension and the remote browser webapp
+    # use to queue follow-ups).  Off-TTY (pytest, pipes), Windows,
+    # or tiny terminals fall back to the inline readline /
+    # prompt_toolkit path below.
+    rows, _ = _term_size()
+    if supports_steering() and rows >= _MIN_ROWS:
+        try:
+            return _run_anchored_client(
+                client,
+                work_dir,
+                model_name,
+                active_file,
+                use_worktree=use_worktree,
+                use_parallel=use_parallel,
+                auto_commit=auto_commit,
+            )
+        finally:
+            client.close()
+
     completer = CliCompleter(work_dir, active_file)
     history_path = _history_path(work_dir)
     reader = _make_ptk_reader(completer, history_path)
@@ -939,7 +1211,6 @@ def run_client(
     if using_readline:
         _setup_readline(completer, history_path)
 
-    client.dispatcher.current_model = model_name
     _print_welcome(work_dir, model_name or "(daemon)")
 
     interrupt_armed = False
@@ -999,8 +1270,10 @@ __all__ = [
     "CliClient",
     "_EventDispatcher",
     "_handle_client_slash",
+    "_run_anchored_client",
     "_sock_path",
     "_submit_task",
+    "_submit_task_anchored",
     "_wait_for_socket",
     "run_client",
 ]
