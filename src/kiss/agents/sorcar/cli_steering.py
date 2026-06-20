@@ -1022,6 +1022,81 @@ class AnchoredRepl:
             sys.stdout.flush()
         return line
 
+    def run_steering_loop(
+        self,
+        on_submit: Callable[[str], None],
+        on_abort: Callable[[], None],
+        is_done: Callable[[], bool],
+        on_idle: Callable[[], None] | None = None,
+    ) -> None:
+        """Process stdin through the box, flipped to steering mode.
+
+        Used by the daemon-client REPL while a task runs on the
+        ``sorcar web`` daemon: lines submitted into the bottom box
+        are routed through ``on_submit`` (which the caller forwards
+        as an ``appendUserMessage`` command over the UDS), Ctrl+C
+        triggers ``on_abort`` (which the caller forwards as ``stop``),
+        and the loop exits once ``is_done`` returns ``True`` —
+        typically when the daemon's ``status:false`` event clears
+        ``client.dispatcher.task_active``.
+
+        Args:
+            on_submit: Callable invoked with each completed line
+                (string).  Empty lines are NOT pre-filtered — the
+                caller is responsible for any input policy.
+            on_abort: Callable invoked when Ctrl+C is pressed.  The
+                loop continues running afterwards (so the user can
+                queue more input or wait for the daemon's task to
+                wind down); use ``is_done`` to actually terminate.
+            is_done: Predicate polled in the select timeout window.
+                The loop exits once this returns ``True``.
+            on_idle: Optional callable invoked once per select
+                timeout while waiting.  Callers use it to drain
+                ``askUser`` questions from the dispatcher queue
+                without blocking the loop.
+        """
+        with self.lock:
+            prev_title = self.box.title
+            prev_status = self.box.status
+            self.box.title = STEER_TITLE
+            self.box.status = ""
+            self.box.redraw()
+        fd = sys.stdin.fileno()
+        last_size = _term_size()
+        try:
+            while not is_done():
+                try:
+                    ready, _, _ = select.select([fd], [], [], 0.1)
+                except (InterruptedError, OSError):
+                    continue
+                except KeyboardInterrupt:
+                    on_abort()
+                    continue
+                if not ready:
+                    if on_idle is not None:
+                        try:
+                            on_idle()
+                        except Exception:  # noqa: BLE001 - defensive
+                            logger.debug("on_idle raised", exc_info=True)
+                    size = _term_size()
+                    if size != last_size:
+                        last_size = size
+                        self.box.redraw()
+                    continue
+                try:
+                    data = os.read(fd, 4096)
+                except (InterruptedError, OSError):
+                    continue
+                if not data:
+                    continue
+                self.box.feed(data, on_submit, on_abort)
+        finally:
+            with self.lock:
+                self.box.title = prev_title
+                self.box.status = prev_status
+                if self.box._active:
+                    self.box.redraw()
+
     def run_task(
         self,
         agent: SorcarAgent,
