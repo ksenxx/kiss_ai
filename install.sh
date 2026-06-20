@@ -825,6 +825,21 @@ update_repo() {
     # client that is mid-flight during the launchd/systemd respawn window.
     rm -f "$HOME/.kiss/sorcar.sock"
 
+    # Copy the bundled MODEL_INFO.json into ~/.kiss/ so the freshly installed
+    # extension serves the latest model pricing/context table on startup
+    # without waiting for ``model_info.py``'s lazy auto-copy.  The Python
+    # loader in ``kiss.core.models.model_info`` also auto-refreshes when the
+    # package copy is newer, but doing it here makes the data the user sees
+    # match the just-installed source immediately.
+    MODEL_INFO_SRC="$PROJECT_DIR/src/kiss/core/models/MODEL_INFO.json"
+    MODEL_INFO_DST="$HOME/.kiss/MODEL_INFO.json"
+    if [ -f "$MODEL_INFO_SRC" ]; then
+        cp "$MODEL_INFO_SRC" "$MODEL_INFO_DST"
+        echo "   Installed MODEL_INFO.json at $MODEL_INFO_DST"
+    else
+        echo "   WARNING: $MODEL_INFO_SRC missing — model table not refreshed."
+    fi
+
     date -u +%Y-%m-%dT%H:%M:%SZ > "$HOME/.kiss/.extension-updated"
     # Remove any stale source-install marker from older versions of this
     # installer.  The extension now always runs against the kiss_project
