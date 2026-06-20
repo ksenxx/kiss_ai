@@ -2,46 +2,91 @@
 
 ## Task
 
-> Check why the last task failed. Fix the issue. Use internet search
-> extensively.
+> In a task panel of the task history panel, show the time spent on the task in
+> hh:mm:ss format after showing the cost at the bottom of the panel. Reproduce
+> the issue by writing an integration test. Then fix the issue.
 
 ## Status: DONE
 
-## Root cause
+## Work completed
 
-The previous task failed with:
+1. Read the project instructions in `SORCAR.md`.
 
-```
-Error code: 400 - {'error': {'message': 'Function tools with
-reasoning_effort are not supported for gpt-5.5 in
-/v1/chat/completions. Please use /v1/responses instead.', ...}}
-```
+1. Located the History sidebar rendering in
+   `src/kiss/agents/vscode/media/main.js`, specifically `renderHistory()` and
+   the `.running-item-metrics` row that previously rendered:
 
-`src/kiss/core/models/openai_compatible_model.py::__init__` defaults
-`reasoning_effort="xhigh"` for the gpt-5.5 family (via
-`MODEL_INFO[...].thinking`). Sorcar's agentic loop always sends a tools
-list, and OpenAI's `/v1/chat/completions` rejects `tools` +
-`reasoning_effort` for GPT-5.x / o-series reasoning models — it requires
-the new `/v1/responses` API instead.
+   ```text
+   <steps> steps • <tokens> tok • $<cost> [ • <date>]
+   ```
 
-## Fix
+1. Confirmed the backend history payload already includes `startTs` and `endTs`
+   in milliseconds, so no backend change was needed.
 
-Minimal, non-invasive: in
-`generate_and_process_with_tools()`, drop `reasoning_effort` from
-`kwargs` when `tools` are attached. The no-tools `generate()` path keeps
-the xhigh default. Migrating the whole transport to `/v1/responses`
-would be a major rewrite (different request/streaming/tool schemas)
-and is out of scope.
+1. Added the JSDOM integration test
+   `src/kiss/agents/vscode/test/historyTaskDuration.test.js`. The test drives
+   the real `chat.html`, `panelCopy.js`, and `main.js`, sends a `history` event,
+   and asserts that history rows render duration immediately after cost:
+
+   ```text
+   <steps> steps • <tokens> tok • $<cost> • hh:mm:ss [ • <date>]
+   ```
+
+   The fixture covers 10 seconds (`00:00:10`), 65 seconds (`00:01:05`), 3725
+   seconds (`01:02:05`), a running task using a frozen `Date.now()`, and a
+   legacy row with no usable timestamps that must omit the duration token.
+
+1. Reproduced the issue by running the new node integration test before the fix;
+   it failed because the metrics row did not include the duration token.
+
+1. Fixed `src/kiss/agents/vscode/media/main.js` by adding
+   `formatDurationHms(ms)` and computing duration inside `renderHistory()` from
+   `endTs - startTs` for finished rows or `Date.now() - startTs` for running
+   rows. Non-positive or legacy durations are omitted, so `00:00:00` is not
+   shown for missing timestamp data.
+
+1. Wired the JS integration test into
+   `src/kiss/agents/vscode/package.json` so `npm test` and the VS Code extension
+   check path run it.
+
+1. Added `src/kiss/tests/agents/vscode/test_history_task_duration.py`, a pytest
+   wrapper that spawns the node integration test so the regression is also
+   collected by pytest.
+
+1. Used `gpt-5.5` (non-codex) only for the requested thorough review of the diff
+   and tests, then switched back to the original coding model. Review conclusion:
+   no code changes were needed.
 
 ## Verification
 
-- `uv run pytest src/kiss/tests/core/models/test_openai_xhigh_default.py -v` → 15 passed (12 existing + 3 new).
-- `uv run check --full` → all checks pass.
+1. Direct integration test:
 
-## New tests added
+   ```bash
+   cd src/kiss/agents/vscode && node test/historyTaskDuration.test.js
+   ```
 
-`src/kiss/tests/core/models/test_openai_xhigh_default.py`:
+   Result: passed.
 
-- `test_reasoning_effort_dropped_when_tools_attached`
-- `test_reasoning_effort_kept_when_no_tools`
-- `test_openrouter_gpt_5_5_tools_strips_reasoning_effort`
+1. Counted the targeted pytest set before running it: 9 tests, below the
+   100-test parallelization threshold.
+
+1. Targeted pytest run:
+
+   ```bash
+   uv run pytest -v \
+     src/kiss/tests/agents/vscode/test_history_task_duration.py \
+     src/kiss/tests/agents/vscode/test_history_filter_panel.py \
+     src/kiss/tests/agents/vscode/test_history_title_full_text.py \
+     src/kiss/tests/agents/vscode/test_history_failed_flag.py
+   ```
+
+   Result: 9 passed.
+
+1. Full check:
+
+   ```bash
+   uv run check --full
+   ```
+
+   Result: all code/type/lint/extension checks passed, including the new
+   history duration integration test.
