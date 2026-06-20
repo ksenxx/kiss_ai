@@ -194,6 +194,42 @@ def panel_body(buf: str, cols: int) -> tuple[str, bool]:
     return _clip_pad(PROMPT_MARKER + PLACEHOLDER, inner_w), True
 
 
+def menu_row(text: str, selected: bool, cols: int) -> str:
+    """Return one fully-styled in-place completion menu row.
+
+    Drawn above the input panel's top border as ``│ ❯ candidate    │``
+    (cyan when selected) or ``│   candidate    │`` (dim otherwise),
+    using the same rounded-border column layout as :func:`panel_body`
+    so the menu visually extends the input box upward.
+
+    Args:
+        text: Candidate text shown in the row.
+        selected: ``True`` when this row is the currently highlighted
+            candidate (rendered with an ``❯`` marker and no dimming).
+        cols: Total panel width in columns.
+
+    Returns:
+        The full row string with ANSI styling and the leading/trailing
+        ``│`` border glyphs, ready to be written after an absolute
+        cursor positioning escape.
+    """
+    inner_w = cols - 4  # room between "│ " and " │"
+    # Sanitise the candidate text: newlines/tabs render as ⏎/space, all
+    # other control characters (C0 \\x00-\\x1f including ESC, DEL \\x7f
+    # and C1 \\x80-\\x9f — notably U+009B which is the one-character
+    # CSI introducer) are stripped.  Without this an attacker- or
+    # bug-generated candidate could inject ANSI styling that leaks past
+    # the right border and corrupts the rest of the screen.
+    raw = text.replace("\n", "⏎").replace("\t", " ")
+    shown = "".join(
+        ch for ch in raw if ch >= " " and not ("\x7f" <= ch <= "\x9f")
+    )
+    marker = "❯ " if selected else "  "
+    body = _clip_pad(marker + shown, inner_w)
+    inner = body if selected else f"{DIM}{body}{RESET}"
+    return f"{CYAN}│{RESET} {inner} {CYAN}│{RESET}"
+
+
 def body_cursor_col(buf: str, cols: int) -> int:
     """Return the 1-based terminal column for the body row's blinking caret.
 

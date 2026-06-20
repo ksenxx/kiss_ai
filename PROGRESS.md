@@ -1,71 +1,42 @@
-# Sorcar daemon-client CLI: input box always visible (complete)
+# PROGRESS
 
-## Goal
+## Task
 
-Show the rectangular bottom-anchored input box during task execution in `sorcar`'s daemon-client
-interactive mode, the same way it's shown when sorcar CLI starts. Lines submitted into the box
-while a task runs must be queued onto the daemon via `appendUserMessage` — the same wire
-command used by the VS Code extension and the remote browser webapp.
+Make Tab fast-complete work in sorcar CLI as an in-place menu above the input box.
 
-## Root cause
+## Status
 
-Previously `AnchoredRepl` was only integrated into the standalone `cli_repl.run_repl()` path,
-but the actual interactive entry point is `cli_client.run_client()` (the daemon client). It
-read input via inline `_read_line` and during task execution only rendered streamed events —
-no bottom-anchored box.
+Implementation + tests complete. All gpt-5.1 review fixes (C2, C3, C4, B1, B2, B3, B7, B8, B9) APPLIED. Edge-case tests still TODO.
 
-## Implementation
+## Files modified
 
-### `src/kiss/agents/sorcar/cli_steering.py` (+75 lines)
+- `src/kiss/agents/sorcar/cli_panel.py` — `menu_row()` helper with C0/C1 ANSI sanitisation (C2).
+- `src/kiss/agents/sorcar/cli_steering.py` — menu state, draw, feed, ask_user_question changes.
+- `src/kiss/tests/agents/sorcar/test_cli_steering.py` — TestInputBoxCompletionMenu (16 tests).
 
-Added `AnchoredRepl.run_steering_loop(on_submit, on_abort, is_done, on_idle=None)`:
+## Continuation 3 fixes applied this session
 
-- Flips the box title to `STEER_TITLE`, restores on exit.
-- `select`-based stdin read loop dispatching keystrokes through `_InputBox.feed`.
-- Exits once `is_done()` becomes `True`.
-- `on_idle` invoked once per select timeout for callers to drain `askUser` from the dispatcher
-  without blocking the loop.
-- Catches `InterruptedError`/`OSError`/`KeyboardInterrupt` on `select` and `os.read`; re-draws
-  on terminal resize.
+- `_reset_completion_state`: removed dead `_tab_candidates/_idx/_origin` assignments (B9).
+- `_draw_locked` shrink branch: use `self._rows or rows` for `prev_top`, clear ALL previous menu rows when `_drawn_menu_h > 0` (C4).
+- `_append_paste` call sites (both branches in `feed`): call `_reset_completion_state()` to dismiss menu on paste (B2).
+- `SteeringSession.ask_user_question`: calls `self.box._reset_completion_state()` before flipping title (B3).
+- `_reset_completion_state`, `_open_completion_menu`, `_menu_move`, `_menu_accept`: wrapped state mutations in `self.lock` (B7).
+- `_menu_accept`: now delegates close to `_reset_completion_state` (B8).
 
-### `src/kiss/agents/sorcar/cli_client.py` (+275 lines)
+## Verification this session
 
-- `_submit_task_anchored(client, prompt, repl, *, use_worktree, use_parallel, auto_commit, timeout_seconds)`: sends `{"type": "run", ...}`, waits for `dispatcher.task_active`, then
-  drives `repl.run_steering_loop(...)` with closures that:
-  - `on_submit` → sends `{"type": "appendUserMessage", "prompt": text, "tabId": ...}`,
-    increments the `queued: N` status, echoes a dim `▸ queued: <text>` line.
-  - `on_abort` → sends `{"type": "stop"}`.
-  - `on_idle` → drains `dispatcher.ask_user_q`; flips the box title to "answer the question
-    above"; the next submitted line is sent as `{"type": "userAnswer", "answer": line}`.
-  - `is_done` returns true when `task_active` clears, the client closes, or the wall-clock cap
-    is hit.
-- `_run_anchored_client(client, work_dir, model_name, active_file, *, use_worktree, use_parallel, auto_commit)`: full REPL loop with anchored box for both idle reads and task
-  execution. Persists history via `_load_history_lines`/`_save_history_lines`. Routes slash
-  commands through the existing `_handle_client_slash`.
-- `run_client()` dispatches to `_run_anchored_client` when `supports_steering() and rows >= _MIN_ROWS`; falls back to the inline path otherwise.
+- `uv run pytest src/kiss/tests/agents/sorcar/test_cli_steering.py` → 51/51 pass.
 
-### Tests
+## Remaining for NEXT session (in order)
 
-- `src/kiss/tests/agents/sorcar/test_cli_client.py` (+283 lines):
-  - `_TestRepl`: test stand-in for `AnchoredRepl` with a real `_InputBox` and lock,
-    `run_steering_loop` synchronously playing a scripted sequence.
-  - `TestSubmitTaskAnchored`:
-    - `test_run_command_carries_flags` — `useWorktree`/`useParallel`/`autoCommit` flags
-      reach the daemon on the `run` command.
-    - `test_submitted_lines_become_append_user_message` — typed lines send
-      `appendUserMessage`.
-    - `test_abort_sends_stop_to_daemon` — Ctrl+C sends `stop`.
-    - `test_ask_user_question_flips_title_and_routes_answer` — `askUser` arrival flips the
-      box, next submit is sent as `userAnswer` (NOT `appendUserMessage`).
-    - `test_daemon_disconnect_returns_promptly` — closed connection unblocks the loop.
-  - All tests use the real `_RecordingRemoteAccessServer` + `_DaemonHarness` to assert on
-    inbound commands.
-- `src/kiss/tests/agents/sorcar/test_cli_steering.py` (+120 lines):
-  - `TestRunSteeringLoop`: title flip to `STEER_TITLE` + restore; `on_idle` is fired;
-    `on_idle` exceptions do not crash the loop. `sys.stdin` is replaced with the read end of a
-    real OS pipe so `sys.stdin.fileno()` works under pytest's stdin capture.
-
-## Verification
-
-- `uv run check --full` → all green (ruff, mypy, pyright, mdformat, syntax check, API docs).
-- `uv run pytest src/kiss/tests/agents/sorcar/test_cli_client.py src/kiss/tests/agents/sorcar/test_cli_steering.py` → **75/75 passed**.
+1. Add `TestInputBoxCompletionMenuEdgeCases` class in test_cli_steering.py covering:
+   - candidate with `\x1b[31m...` produces NO ESC bytes in painted output (E4, C2 verification).
+   - `stop()` while menu open clears menu rows AND resets `_menu_open=False`, `_drawn_menu_h=0` (E11, C3).
+   - paste while menu open dismisses the menu (E8, B2).
+   - `_menu_h` auto-dismisses when room=0 (monkeypatch `_term_size` to return (4, 80)) (E2, B1).
+   - `SteeringSession.ask_user_question` dismisses an open menu before title flip (E10, B3).
+1. `uv run check --full` — must pass.
+1. `uv run pytest src/kiss/tests/agents/sorcar/test_cli_steering.py src/kiss/tests/agents/sorcar/test_cli_client.py` — must pass.
+1. Quick run of related sorcar tests (bughunt3/4/5/6, panel, shift_enter).
+1. Delete `tmp/tmp_diff_for_review.patch` and `tmp/review.md`.
+1. Call `finish(success=True)`.
