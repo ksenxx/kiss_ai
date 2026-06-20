@@ -286,6 +286,13 @@ class _InputBox:
         # cleared (otherwise stale menu glyphs linger inside the
         # scroll region).
         self._drawn_menu_h = 0
+        # Tiny ``(buf, candidates)`` cache used by
+        # :meth:`_refresh_typing_menu` to short-circuit repeat
+        # completer calls (auto-repeat, idempotent edits, etc.) so a
+        # slow ``completer_fn`` does not stall keystroke processing
+        # or block agent stdout writes contending for ``self.lock``.
+        self._last_completed_buf: str | None = None
+        self._last_completed_cands: list[str] = []
 
     def start(self) -> None:
         """Enter raw mode, reserve the scroll region and draw the box."""
@@ -663,6 +670,97 @@ class _InputBox:
             self._menu_open = True
         return True
 
+    def _refresh_typing_menu(self) -> bool:
+        """Refresh the in-place menu as the user edits the buffer.
+
+        Implements "complete while typing": every buffer edit
+        (printable keystroke, backspace, Shift+Enter newline, paste,
+        history recall) re-queries :attr:`completer_fn` and pops the
+        menu with the returned candidates, *without* ever
+        auto-replacing :attr:`buf` — unlike Tab on a single candidate,
+        typing only previews (see Tab handler in :meth:`feed` for the
+        single-item shortcut).  When the completer returns zero
+        candidates any open menu is closed so a stale candidate list
+        never lingers under the new buffer.
+
+        Implementation notes:
+
+        * Buffer + completer are snapshotted under :attr:`lock` and
+          the (possibly slow) completer call runs *outside* the lock
+          so concurrent agent stdout writes are not stalled by it.
+        * A small ``(buf, candidates)`` cache short-circuits repeats
+          (e.g. auto-repeat or backspace through a shared prefix) so
+          the completer is not re-invoked when nothing has changed.
+        * If the user typed more characters while the completer was
+          running, the snapshot's results are dropped (stale-buf
+          guard) so a slow late result cannot overwrite the new
+          menu — the next refresh will reflect the current buffer.
+        * Selection is preserved across refreshes whenever the
+          previously-highlighted candidate is still present in the
+          new list (matches the prompt_toolkit behaviour).
+
+        Returns:
+            ``True`` when the menu changed visible state (opened,
+            refreshed with new items, or closed), so the caller
+            knows a redraw is needed.
+        """
+        with self.lock:
+            if self.completer_fn is None:
+                if self._menu_open:
+                    self._reset_completion_state()
+                    return True
+                return False
+            buf = self.buf
+            completer = self.completer_fn
+            prev_sel_text = (
+                self._menu_items[self._menu_sel]
+                if (
+                    self._menu_open
+                    and self._menu_items
+                    and 0 <= self._menu_sel < len(self._menu_items)
+                )
+                else None
+            )
+        if not buf:
+            with self.lock:
+                if self._menu_open:
+                    self._reset_completion_state()
+                    return True
+                return False
+        if buf == self._last_completed_buf:
+            cands = self._last_completed_cands
+        else:
+            try:
+                cands = [c.rstrip("\n") for c in completer(buf)]
+            except Exception:  # noqa: BLE001 - completer must not break editing
+                logger.debug(
+                    "completer raised during typing refresh", exc_info=True,
+                )
+                cands = []
+            self._last_completed_buf = buf
+            self._last_completed_cands = cands
+        with self.lock:
+            if buf != self.buf:
+                # User kept typing while the completer ran; drop these
+                # stale results — the next refresh will reflect the
+                # now-current buffer.
+                return False
+            if not cands:
+                if not self._menu_open:
+                    return False
+                self._reset_completion_state()
+                return True
+            self._menu_items = cands
+            # Preserve the highlighted candidate across the refresh if
+            # it is still in the list; otherwise fall back to the top.
+            if prev_sel_text is not None and prev_sel_text in cands:
+                self._menu_sel = cands.index(prev_sel_text)
+            else:
+                self._menu_sel = 0
+                self._menu_scroll = 0
+            self._menu_open = True
+        return True
+
     def _menu_move(self, delta: int) -> None:
         """Advance the highlighted menu candidate by *delta* (wraps).
 
@@ -720,16 +818,19 @@ class _InputBox:
                         _partial_suffix_len(text, _PASTE_END), len(text) - i
                     )
                     if self._append_paste(text[i : len(text) - keep]):
-                        # Bracketed paste is a buffer edit; the open
-                        # completion menu (Tab-cycle preview) no longer
-                        # matches the new buffer, so dismiss it.
-                        self._reset_completion_state()
+                        # Bracketed paste is a buffer edit; refresh the
+                        # in-place completion menu against the new
+                        # buffer ("complete while typing" applies to
+                        # paste too — a pasted prefix should immediately
+                        # show its completions).  The helper closes the
+                        # menu when no candidates match.
+                        self._refresh_typing_menu()
                         changed = True
                     self._pending_esc = text[len(text) - keep :] if keep else ""
                     i = len(text)
                     break
                 if self._append_paste(text[i:end]):
-                    self._reset_completion_state()
+                    self._refresh_typing_menu()
                     changed = True
                 self._pasting = False
                 i = end + len(_PASTE_END)
@@ -749,6 +850,10 @@ class _InputBox:
                 for seq in ("[13;2u", "[27;2;13~"):
                     if text.startswith(seq, i + 1):
                         self.buf += "\n"
+                        # Shift+Enter is a buffer edit; refresh the
+                        # menu so suggestions track multi-line input
+                        # ("complete while typing").
+                        self._refresh_typing_menu()
                         changed = True
                         i += 1 + len(seq)
                         shift_enter = True
@@ -780,12 +885,17 @@ class _InputBox:
                             self._menu_move(-1)
                         else:
                             self._history_back()
+                            # Refresh the menu against the recalled
+                            # buffer so "fast complete" tracks history
+                            # navigation too.
+                            self._refresh_typing_menu()
                         changed = True
                     elif final == "B" and seq == "":  # Down arrow
                         if self._menu_open:
                             self._menu_move(1)
                         else:
                             self._history_forward()
+                            self._refresh_typing_menu()
                         changed = True
                     elif final == "Z" and seq == "":  # Shift+Tab
                         if self._menu_open:
@@ -827,7 +937,12 @@ class _InputBox:
                 if self.buf:
                     self.buf = self.buf[:-1]
                     self._hist_idx = None
-                    self._reset_completion_state()
+                    # Backspace is an edit; refresh the in-place menu
+                    # so suggestions track the shrinking buffer ("fast
+                    # complete" while typing).  When the buffer becomes
+                    # empty or no candidates match, the helper closes
+                    # the menu instead.
+                    self._refresh_typing_menu()
                     changed = True
                 elif self._menu_open:
                     # Backspace on an empty buffer with the menu open
@@ -871,10 +986,28 @@ class _InputBox:
                 # and the buffer is left untouched until the user picks
                 # one with Enter.  Tab while the menu is already open
                 # advances the highlighted candidate so the user can
-                # navigate the list from the home row too.
+                # navigate the list from the home row too — except
+                # when only one candidate is showing (which can happen
+                # when "complete while typing" pre-opened the menu with
+                # a single-match preview), in which case Tab accepts
+                # it directly, matching the closed-menu single-match
+                # shortcut.
                 if self._menu_open:
-                    self._menu_move(1)
-                    changed = True
+                    if len(self._menu_items) == 1:
+                        # Re-query before accepting so a stale
+                        # single-item preview cannot overwrite the
+                        # buffer with an out-of-date candidate.
+                        self._reset_completion_state()
+                        if not self._open_completion_menu():
+                            changed = True
+                        elif len(self._menu_items) == 1:
+                            self._menu_accept()
+                            changed = True
+                        else:
+                            changed = True
+                    else:
+                        self._menu_move(1)
+                        changed = True
                 elif self.completer_fn is not None:
                     if self._open_completion_menu():
                         changed = True
@@ -885,7 +1018,12 @@ class _InputBox:
                 # (\x7f) is already consumed by the backspace branch.
                 self.buf += ch
                 self._hist_idx = None
-                self._reset_completion_state()
+                # "Fast complete" while typing: every printable
+                # keystroke refreshes the in-place menu with current
+                # candidates, mirroring the old prompt_toolkit
+                # ``complete_while_typing=True`` dropdown.  Unlike Tab,
+                # this never auto-replaces ``buf`` — it only previews.
+                self._refresh_typing_menu()
                 changed = True
             i += 1
         if len(self._pending_esc) > 64:
