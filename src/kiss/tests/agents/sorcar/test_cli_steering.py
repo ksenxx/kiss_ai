@@ -19,6 +19,7 @@ from typing import Any
 
 from kiss.agents.sorcar.cli_panel import body_cursor_col, panel_cols
 from kiss.agents.sorcar.cli_steering import (
+    AnchoredRepl,
     SteeringSession,
     _InputBox,
     _StdoutProxy,
@@ -265,6 +266,163 @@ class TestRunWithSteeringFallback:
         result = run_with_steering(agent, {"prompt_template": "hi"})  # type: ignore[arg-type]
         assert result == "summary: done\n"
         assert agent.called_with == {"prompt_template": "hi"}
+
+
+class TestInputBoxHistory:
+    """Up/Down arrow recall through ``_InputBox.history``."""
+
+    def test_up_arrow_recalls_last(self) -> None:
+        box = _make_box()
+        box.history = ["first", "second"]
+        box.feed(b"\x1b[A", lambda _s: None, lambda: None)
+        assert box.buf == "second"
+
+    def test_up_twice_goes_further_back(self) -> None:
+        box = _make_box()
+        box.history = ["first", "second"]
+        box.feed(b"\x1b[A\x1b[A", lambda _s: None, lambda: None)
+        assert box.buf == "first"
+
+    def test_down_returns_to_draft(self) -> None:
+        box = _make_box()
+        box.history = ["first", "second"]
+        box.feed(b"draft", lambda _s: None, lambda: None)
+        box.feed(b"\x1b[A", lambda _s: None, lambda: None)
+        assert box.buf == "second"
+        box.feed(b"\x1b[B", lambda _s: None, lambda: None)
+        assert box.buf == "draft"
+
+    def test_typing_resets_history_pointer(self) -> None:
+        box = _make_box()
+        box.history = ["first"]
+        box.feed(b"\x1b[A", lambda _s: None, lambda: None)
+        assert box.buf == "first"
+        box.feed(b"x", lambda _s: None, lambda: None)
+        # After editing, Up should restart at the latest history entry,
+        # not advance further back from the old pointer.
+        assert box.buf == "firstx"
+        box.feed(b"\x1b[A", lambda _s: None, lambda: None)
+        assert box.buf == "first"
+
+
+class TestInputBoxCompletion:
+    """Tab completion via the ``completer_fn`` callback."""
+
+    def test_tab_inserts_first_candidate(self) -> None:
+        box = _make_box()
+        box.completer_fn = lambda _buf: ["/help ", "/clear "]
+        box.feed(b"/he", lambda _s: None, lambda: None)
+        box.feed(b"\t", lambda _s: None, lambda: None)
+        assert box.buf == "/help "
+
+    def test_tab_cycles_candidates(self) -> None:
+        box = _make_box()
+        box.completer_fn = lambda _buf: ["/help ", "/clear "]
+        box.feed(b"/", lambda _s: None, lambda: None)
+        box.feed(b"\t", lambda _s: None, lambda: None)
+        box.feed(b"\t", lambda _s: None, lambda: None)
+        assert box.buf == "/clear "
+
+    def test_no_completer_drops_tab(self) -> None:
+        box = _make_box()
+        box.feed(b"a\tb", lambda _s: None, lambda: None)
+        # Tab without a completer is silently dropped — not typed.
+        assert box.buf == "ab"
+
+    def test_edit_resets_tab_cycle(self) -> None:
+        box = _make_box()
+        calls: list[str] = []
+
+        def completer(buf: str) -> list[str]:
+            calls.append(buf)
+            return [buf + "X", buf + "Y"]
+
+        box.completer_fn = completer
+        box.feed(b"a\t", lambda _s: None, lambda: None)
+        assert box.buf == "aX"
+        # Backspace edits → next Tab re-queries with the new buffer.
+        box.feed(b"\x7f", lambda _s: None, lambda: None)
+        box.feed(b"\t", lambda _s: None, lambda: None)
+        assert calls == ["a", "a"]
+
+
+class TestInputBoxEOF:
+    """Ctrl+D semantics: empty buffer → on_eof; non-empty → no-op."""
+
+    def test_ctrl_d_empty_invokes_eof(self) -> None:
+        box = _make_box()
+        eofs: list[bool] = []
+        box.feed(
+            b"\x04",
+            lambda _s: None,
+            lambda: None,
+            lambda: eofs.append(True),
+        )
+        assert eofs == [True]
+
+    def test_ctrl_d_with_buffer_does_nothing(self) -> None:
+        box = _make_box()
+        eofs: list[bool] = []
+        box.feed(
+            b"abc\x04",
+            lambda _s: None,
+            lambda: None,
+            lambda: eofs.append(True),
+        )
+        assert box.buf == "abc"
+        assert eofs == []
+
+
+class TestSteeringSessionSharedBox:
+    """When a box is passed in, the session must not own its lifecycle."""
+
+    def test_shared_box_marks_session_as_non_owner(self) -> None:
+        box = _make_box()
+        agent = SorcarAgent("steer-test")
+        state = _RunningAgentState("c", "", agent=None)
+        state.chat_id = "c"
+        state.is_task_active = True
+        session = SteeringSession(
+            agent, state, "c",
+            box=box,
+            lock=threading.RLock(),
+            real_stdout=io.StringIO(),
+            real_stderr=io.StringIO(),
+        )
+        assert session._owns_box is False
+        assert session.box is box
+
+    def test_default_session_owns_box(self) -> None:
+        agent = SorcarAgent("steer-test")
+        state = _RunningAgentState("c", "", agent=None)
+        state.chat_id = "c"
+        state.is_task_active = True
+        session = SteeringSession(agent, state, "c")
+        assert session._owns_box is True
+
+
+class TestAnchoredReplWiring:
+    """Bare wiring tests for :class:`AnchoredRepl` without a real TTY.
+
+    A full end-to-end test would require driving termios and a fake
+    PTY; here we only exercise the wiring (completer/history plumbing)
+    that does not need an active box.
+    """
+
+    def test_constructor_seeds_history_and_completer(self) -> None:
+        def completer(_buf: str) -> list[str]:
+            return []
+
+        repl = AnchoredRepl(
+            completer_fn=completer, history=["one", "two"],
+        )
+        assert repl.box.history == ["one", "two"]
+        assert repl.box.completer_fn is completer
+
+    def test_constructor_handles_no_history(self) -> None:
+        repl = AnchoredRepl()
+        assert repl.box.history == []
+        assert repl.box.completer_fn is None
 
 
 if __name__ == "__main__":
