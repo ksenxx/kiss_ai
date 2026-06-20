@@ -2,125 +2,58 @@
 
 ## Task
 
-> Make sure that the From label, the date textbox, and the date picker
-> MUST not get split between new lines. Reproduce the issue by writing
-> an integration test. Then fix the issue.
+> why codex and claude are not in my PATH?
 
 ## Status: DONE
 
 ## Work completed
 
-1. Located the offending markup in
-   `src/kiss/agents/vscode/media/chat.html` (the History sidebar's
-   `.history-filter-bar`). The "From" trio (`<label for="hf-from">`,
-   `<input type="date" id="hf-from">`, `<button id="hf-from-btn">`)
-   and the matching "To" trio were six direct children of
-   `.history-filter-bar`, which is declared as
-   `display: flex; flex-wrap: wrap;`. Because each child was its own
-   flex item, a narrow sidebar could wrap the label, the textbox, and
-   the calendar-picker button onto three different rows.
+1. Read `SORCAR.md` first as required; it is empty.
+2. Checked the current Sorcar process environment. In this shell, `PATH` is:
 
-1. Reproduced the bug by writing a JSDOM integration test
-   `src/kiss/agents/vscode/test/historyFilterDateGroup.test.js` that
-   loads `media/chat.html` + `media/main.js` and asserts:
-
-   - `label[for="hf-from"]`, `#hf-from`, and `#hf-from-btn` share a
-     single direct parent element (i.e. the trio is wrapped in one
-     grouping span);
-   - that parent is **not** `.history-filter-bar` itself;
-   - that parent carries the class `.history-filter-date-group`;
-   - the same three invariants hold for the "To" trio;
-   - the order inside each group is label → input → button;
-   - the group has exactly 3 children (no stray nodes);
-   - `media/main.css` declares a `.history-filter-date-group` rule
-     that uses `display: inline-flex` (or `inline-block`) AND uses
-     `flex-wrap: nowrap` or `white-space: nowrap`, guaranteeing the
-     three pieces stay glued on a single line even when the sidebar
-     wraps.
-
-   Running the test against the unfixed code failed at step 1, exactly
-   as expected (TDD).
-
-1. Fixed `src/kiss/agents/vscode/media/chat.html` by wrapping each
-   trio in a `<span class="history-filter-date-group">…</span>`:
-
-   ```html
-   <span class="history-filter-date-group">
-     <label for="hf-from" class="history-filter-date-lbl">From:</label>
-     <input type="date" id="hf-from" class="history-filter-date" …>
-     <button type="button" id="hf-from-btn" class="history-filter-date-btn" …>📅</button>
-   </span>
-   <span class="history-filter-date-group">
-     <label for="hf-to" class="history-filter-date-lbl">To:</label>
-     <input type="date" id="hf-to" class="history-filter-date" …>
-     <button type="button" id="hf-to-btn" class="history-filter-date-btn" …>📅</button>
-   </span>
+   ```text
+   /opt/homebrew/bin:/Users/ksen/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
    ```
 
-   With the wrapper in place the bar sees just one flex item per
-   date filter, so the bar's `flex-wrap: wrap` can still break
-   between groups when the sidebar is very narrow, but it can never
-   tear a label/input/button trio apart.
+   and both commands resolve:
 
-1. Added the matching CSS rule to
-   `src/kiss/agents/vscode/media/main.css` (next to the existing
-   `.history-filter-date-lbl` rule):
-
-   ```css
-   .history-filter-date-group {
-     display: inline-flex; align-items: center; gap: 4px;
-     flex-wrap: nowrap; white-space: nowrap;
-   }
+   ```text
+   /opt/homebrew/bin/codex
+   /Users/ksen/.local/bin/claude
    ```
 
-   `inline-flex` makes the wrapper one flex item of
-   `.history-filter-bar`; `flex-wrap: nowrap` + `white-space: nowrap`
-   keep the children on a single line.
+3. Checked common shells. `zsh -lc`, `zsh -ic`, `bash -lc`, and `sh -lc` all resolve both `codex` and `claude` here. Bash/sh do print a separate warning because `~/.profile` and `~/.bash_profile` source missing `/Users/ksen/.local/bin/env`, but their PATH still includes both required directories.
+4. Inspected the KISS daemon LaunchAgent. `~/Library/LaunchAgents/com.kiss.web-server.plist` explicitly sets:
 
-1. Added a pytest wrapper
-   `src/kiss/tests/agents/vscode/test_history_filter_date_group.py`
-   that spawns `node` on the JSDOM test so `uv run pytest` and CI
-   pick it up alongside the rest of the VS Code-extension tests.
-
-## Verification
-
-1. Direct JSDOM integration test (the source of truth):
-
-   ```bash
-   cd src/kiss/agents/vscode && node test/historyFilterDateGroup.test.js
+   ```text
+   PATH=/opt/homebrew/bin:/Users/ksen/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
    ```
 
-   Result:
+   `launchctl print gui/$(id -u)/com.kiss.web-server` reports the daemon is running as PID 66936 with the same PATH. This explains why the current backend can resolve both commands.
+5. Found the relevant code paths:
+   - `src/kiss/core/models/codex_model.py` locates `codex` with `shutil.which("codex")`, falling back to known desktop-app paths.
+   - `src/kiss/core/models/claude_code_model.py` locates `claude` with `shutil.which("claude")` only.
+   - `src/kiss/agents/vscode/src/DependencyInstaller.ts` writes the LaunchAgent PATH as `/opt/homebrew/bin:${HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin` on macOS.
 
-   ```
-   ok - From and To label/input/button trios share a single
-        .history-filter-date-group parent inside .history-filter-bar
-   ok - .history-filter-date-group CSS keeps label/input/button on
-        the same line
-   historyFilterDateGroup.test.js: all assertions passed.
-   ```
+## Conclusion
 
-1. Regression sweep of all related History-sidebar JSDOM tests
-   (`historyTaskMeta`, `historyTaskWorkspace`, `historyTaskDuration`,
-   `historyWorkspaceFilter`, `historyFilterDateGroup`) — all green.
+On this machine/session, `codex` and `claude` are in PATH for Sorcar and for normal shell probes. If the UI previously reported they were missing, the likely causes are:
 
-1. Targeted pytest (impacted tests only, well under the 100-test
-   threshold):
+1. the daemon was started before the current LaunchAgent PATH fix and needs a safe restart/reload;
+2. a different process/session is being checked than PID 66936;
+3. VS Code or an already-open terminal has an older inherited PATH;
+4. `claude` depends on `/Users/ksen/.local/bin`, and that directory is added in `.zshrc` rather than `.zprofile`, so login/non-interactive contexts that do not use the KISS LaunchAgent PATH could miss it.
 
-   ```bash
-   uv run pytest -v \
-     src/kiss/tests/agents/vscode/test_history_filter_date_group.py \
-     src/kiss/tests/agents/vscode/test_history_task_meta.py \
-     src/kiss/tests/agents/vscode/test_history_task_workspace.py
-   ```
+## Useful facts
 
-   Result: 3 passed.
+```text
+codex  -> /opt/homebrew/bin/codex
+claude -> /Users/ksen/.local/bin/claude
+```
 
-1. Full check:
+The installed symlinks are:
 
-   ```bash
-   uv run check --full
-   ```
-
-   Result: all code / type / lint / extension / markdown checks
-   passed.
+```text
+/opt/homebrew/bin/codex -> /opt/homebrew/Caskroom/codex/0.128.0/codex-aarch64-apple-darwin
+/Users/ksen/.local/bin/claude -> /Users/ksen/.local/share/claude/versions/2.1.114
+```
