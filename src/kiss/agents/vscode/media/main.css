@@ -1279,6 +1279,19 @@ body.remote-chat #welcome-config { display: none !important; }
   margin-top: 2px;
 }
 
+/* The settings panel uses its OWN ``overflow-y: auto`` (see #settings-panel
+   above) to scroll its long form when it doesn't fit the viewport.  The
+   shared .sidebar-section rule above (designed for the History / Frequent
+   sidebar tabs that nest an inner scrolling list) would otherwise clip the
+   form to the panel height — ``flex: 1`` stretches it to exactly the
+   parent's content area and ``overflow: hidden`` chops everything past
+   the bottom, leaving #settings-panel with no overflow to scroll.  Restore
+   natural sizing + visible overflow inside the settings panel only. */
+#settings-panel > .sidebar-section {
+  flex: 0 0 auto;
+  overflow: visible;
+}
+
 #history-list {
   overflow-y: auto;
   flex: 1;
