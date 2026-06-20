@@ -5502,6 +5502,26 @@
         when;
       div.appendChild(metrics);
 
+      // Workspace row — the task's ``work_dir`` rendered on its own
+      // line IMMEDIATELY after the metrics line.  Like
+      // ``.running-item-metrics``, ``flex-basis: 100%`` on
+      // ``.running-item-workspace`` drops this span onto its own
+      // line below the metrics row inside the ``.sidebar-item``
+      // flex container.  Rows whose backend ``work_dir`` is empty
+      // or missing render NO workspace line (no placeholder, no
+      // blank line) — we never display "(no workspace)".
+      const workDir = typeof s.work_dir === 'string' ? s.work_dir : '';
+      if (workDir) {
+        const workspace = document.createElement('span');
+        workspace.className = 'running-item-workspace';
+        workspace.textContent = workDir;
+        // Native HTML tooltip — useful when the workspace path is
+        // long enough to be clipped by overflow:hidden in the
+        // sidebar.
+        workspace.title = workDir;
+        div.appendChild(workspace);
+      }
+
       div.addEventListener('click', () => {
         if (demoMode && typeof window._startDemoReplay === 'function') {
           closeSidebar();
