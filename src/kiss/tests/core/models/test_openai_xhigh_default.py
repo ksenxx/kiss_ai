@@ -45,6 +45,27 @@ def _ok_chunk(content: str = "ok") -> str:
     )
 
 
+_ECHO_TOOL_SCHEMA: list[dict[str, object]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "echo",
+            "description": "Echo back the given text.",
+            "parameters": {
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+            },
+        },
+    }
+]
+
+
+def _echo(text: str) -> str:
+    """Echo back the given text (test stub used as a tool implementation)."""
+    return text
+
+
 # Each handler instance is per-request; persist captured bodies on the
 # class itself so the test can read them after .generate() returns.
 class _CapturingHandler(BaseHTTPRequestHandler):
@@ -232,6 +253,77 @@ class TestOpenAIXhighDefault:
         m.initialize("hi")
         m.generate()
         body = _CapturingHandler.captured_bodies[-1]
+        assert "reasoning_effort" not in body
+
+    def test_reasoning_effort_dropped_when_tools_attached(
+        self, capture_server: str
+    ) -> None:
+        """gpt-5.5 + tools must NOT send reasoning_effort.
+
+        OpenAI's /v1/chat/completions rejects ``tools`` + ``reasoning_effort``
+        for GPT-5.x / o-series models with HTTP 400, demanding the
+        /v1/responses API instead.  KISS Sorcar's agentic loop always passes
+        tools, so we strip ``reasoning_effort`` from such requests to keep
+        chat.completions working.
+        """
+        m = OpenAICompatibleModel(
+            "gpt-5.5",
+            base_url=capture_server,
+            api_key="test-key",
+        )
+        m.initialize("hi")
+        m.generate_and_process_with_tools(
+            function_map={"echo": _echo},
+            tools_schema=_ECHO_TOOL_SCHEMA,
+        )
+        body = _CapturingHandler.captured_bodies[-1]
+        assert body.get("tools"), "tools must be sent on the wire"
+        assert "reasoning_effort" not in body, (
+            "reasoning_effort must be stripped from tool-bearing requests"
+        )
+
+    def test_reasoning_effort_kept_when_no_tools(
+        self, capture_server: str
+    ) -> None:
+        """The plain ``generate()`` (no tools) path must still send xhigh.
+
+        Sanity check that the strip-when-tools fix above is scoped strictly
+        to the tool-bearing code path and does not regress the existing
+        xhigh default for the no-tools ``generate()`` flow.
+        """
+        m = OpenAICompatibleModel(
+            "gpt-5.5",
+            base_url=capture_server,
+            api_key="test-key",
+        )
+        m.initialize("hi")
+        m.generate()
+        body = _CapturingHandler.captured_bodies[-1]
+        assert body.get("reasoning_effort") == "xhigh"
+        assert not body.get("tools"), "no tools should be sent on plain generate()"
+
+    def test_openrouter_gpt_5_5_tools_strips_reasoning_effort(
+        self, capture_server: str
+    ) -> None:
+        """openrouter/openai/gpt-5.5 with tools must also strip reasoning_effort.
+
+        OpenRouter forwards parameters to the OpenAI backend unchanged, so
+        the same /v1/chat/completions tools + reasoning_effort rejection
+        applies.  Confirm the strip kicks in for the OpenRouter-prefixed
+        model name too.
+        """
+        m = OpenAICompatibleModel(
+            "openrouter/openai/gpt-5.5",
+            base_url=capture_server,
+            api_key="test-key",
+        )
+        m.initialize("hi")
+        m.generate_and_process_with_tools(
+            function_map={"echo": _echo},
+            tools_schema=_ECHO_TOOL_SCHEMA,
+        )
+        body = _CapturingHandler.captured_bodies[-1]
+        assert body.get("tools"), "tools must be sent on the wire"
         assert "reasoning_effort" not in body
 
     def test_model_info_flag_drives_defaulting(self, capture_server: str) -> None:
