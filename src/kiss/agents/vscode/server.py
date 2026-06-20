@@ -594,6 +594,34 @@ class VSCodeServer(
                 if cur is not None:
                     steps += int(getattr(cur, "step_count", 0) or 0)
                 session["steps"] = steps
+                # Overlay run-mode metadata for the meta line.
+                # The persisted ``extra`` is only written at task
+                # END (see ``_TaskRunnerMixin._run_task_inner``),
+                # so a still-running task has no model / flag
+                # values in its row.  Read them straight off the
+                # live agent / tab so the history sidebar's meta
+                # line renders the same model + flags the running
+                # tab actually uses.  ``agent.model_name`` is the
+                # model the in-flight task was launched with
+                # (``_TaskRunnerMixin._cmd_run`` plumbs this from
+                # the ``run`` command's ``model`` field through to
+                # the agent); we prefer it over the tab-level
+                # ``selected_model`` because the user can change
+                # ``selected_model`` mid-task via the model picker.
+                mdl_live = getattr(agent, "model_name", "") or getattr(
+                    tab, "selected_model", ""
+                )
+                if isinstance(mdl_live, str) and mdl_live:
+                    session["model"] = mdl_live
+                session["is_worktree"] = bool(
+                    getattr(tab, "use_worktree", False)
+                )
+                session["is_parallel"] = bool(
+                    getattr(tab, "use_parallel", False)
+                )
+                session["auto_commit_mode"] = bool(
+                    getattr(tab, "auto_commit_mode", False)
+                )
                 break
 
     def _get_history(
@@ -652,6 +680,22 @@ class VSCodeServer(
                 # the task pre-dates the persistence change or is
                 # still running.
                 "work_dir": "",
+                # Per-task run-mode metadata persisted by
+                # ``_TaskRunnerMixin._run_task_inner`` into the row's
+                # ``extra`` JSON.  Surfaced so the history sidebar can
+                # render its dot-separated meta line under the
+                # workspace row::
+                #
+                #     <model> • <wt|no-wt> • <parallel|sequential>
+                #         • <auto-commit|manual-commit>
+                #
+                # Legacy rows that pre-date the persistence change
+                # (no ``model`` field) get an empty ``model``, which
+                # the frontend interprets as "render no meta line".
+                "model": "",
+                "is_worktree": False,
+                "is_parallel": False,
+                "auto_commit_mode": False,
                 # Agent start / end timestamps in ms since epoch.
                 # ``startTs`` comes from the row's own ``timestamp``
                 # column (set on INSERT in ``_add_task``), ``endTs``
@@ -717,6 +761,24 @@ class VSCodeServer(
                     wd_raw = extra_obj.get("work_dir", "")
                     if isinstance(wd_raw, str):
                         session["work_dir"] = wd_raw
+                    # Run-mode metadata for the meta line.
+                    # ``model`` round-trips verbatim when present;
+                    # the three booleans are coerced via ``bool()``
+                    # so missing / non-boolean garbage falls back
+                    # to ``False`` (rendered as "no-wt" /
+                    # "sequential" / "manual-commit").
+                    mdl_raw = extra_obj.get("model", "")
+                    if isinstance(mdl_raw, str):
+                        session["model"] = mdl_raw
+                    session["is_worktree"] = bool(
+                        extra_obj.get("is_worktree", False)
+                    )
+                    session["is_parallel"] = bool(
+                        extra_obj.get("is_parallel", False)
+                    )
+                    session["auto_commit_mode"] = bool(
+                        extra_obj.get("auto_commit_mode", False)
+                    )
                     try:
                         start_ts_raw = extra_obj.get("startTs", 0)
                         if start_ts_raw:
