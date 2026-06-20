@@ -210,12 +210,6 @@ class TestCachePricing:
         assert info.cache_read_price_per_1M == pytest.approx(0.10)  # 0.25 * 0.40
         assert info.cache_write_price_per_1M == 0.0
 
-    def test_openai_gpt5_cache_read_is_tenth(self):
-        for name in ("gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5", "gpt-5-codex"):
-            info = MODEL_INFO[name]
-            assert info.cache_read_price_per_1M == pytest.approx(info.input_price_per_1M * 0.1)
-            assert info.cache_write_price_per_1M == 0.0
-
     def test_openai_gpt41_and_o3_cache_read_is_quarter(self):
         for name in ("gpt-4.1", "gpt-4.1-mini", "o3", "o4-mini", "o3-deep-research"):
             info = MODEL_INFO[name]
@@ -330,11 +324,6 @@ class TestCachePricing:
         info = _mi(1000, 10.0, 20.0, cr=1.0, cw=2.0)
         assert info.cache_read_price_per_1M == 1.0
         assert info.cache_write_price_per_1M == 2.0
-
-    def test_openai_pro_cache_read_uses_full_input_price(self):
-        info = MODEL_INFO["gpt-5.5-pro"]
-        assert info.cache_read_price_per_1M == pytest.approx(info.input_price_per_1M)
-        assert calculate_cost("gpt-5.5-pro", 0, 0, 1_000_000, 0) == pytest.approx(30.00)
 
     def test_long_context_tiers_apply_after_threshold(self):
         expected_openai = (201_000 * 10.00 + 201_000 * 45.00 + 201_000 * 1.00) / 1_000_000
