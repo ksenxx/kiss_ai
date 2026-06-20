@@ -12,18 +12,18 @@ spawns ``node`` on that file so the integration test is also picked
 up by ``uv run pytest`` and shows up in CI alongside the rest of the
 VS Code-extension Python tests.
 
-The test exercises the per-task "meta" line in the History
-sidebar: every row whose persisted ``extra`` carries a ``model``
-must render a ``.running-item-meta`` span on its own visual line
-directly below the workspace row (or, when no workspace is
-present, immediately after the metrics row).  The line is a single
-dot-separated string::
+The test exercises the per-task workspace+metadata line in the
+History sidebar: every row whose persisted ``extra`` carries a
+``model`` must append the model name and the three run flags to
+the workspace span, separated by ``•``, so everything renders on
+the SAME visual line as the workspace path::
 
-    <model> • <wt|no-wt> • <parallel|sequential>
-        • <auto-commit|manual-commit>
+    <work_dir> • <model> • <wt|no-wt>
+        • <parallel|sequential> • <auto-commit|manual-commit>
 
-Rows whose persisted ``model`` is missing must render NO meta
-line at all.
+Rows whose persisted ``model`` is missing render the workspace
+alone (legacy behaviour); rows with neither workspace nor model
+render no ``.running-item-workspace`` span at all.
 """
 
 from __future__ import annotations

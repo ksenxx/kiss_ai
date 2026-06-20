@@ -5502,55 +5502,50 @@
         when;
       div.appendChild(metrics);
 
-      // Workspace row — the task's ``work_dir`` rendered on its own
-      // line IMMEDIATELY after the metrics line.  Like
-      // ``.running-item-metrics``, ``flex-basis: 100%`` on
-      // ``.running-item-workspace`` drops this span onto its own
-      // line below the metrics row inside the ``.sidebar-item``
-      // flex container.  Rows whose backend ``work_dir`` is empty
-      // or missing render NO workspace line (no placeholder, no
-      // blank line) — we never display "(no workspace)".
-      const workDir = typeof s.work_dir === 'string' ? s.work_dir : '';
-      if (workDir) {
-        const workspace = document.createElement('span');
-        workspace.className = 'running-item-workspace';
-        workspace.textContent = workDir;
-        // Native HTML tooltip — useful when the workspace path is
-        // long enough to be clipped by overflow:hidden in the
-        // sidebar.
-        workspace.title = workDir;
-        div.appendChild(workspace);
-      }
-
-      // Meta row — task model name and the three persisted run
-      // flags rendered as a single dot-separated line directly
-      // below the workspace row (or immediately after the metrics
-      // row when no workspace is present).  Format:
+      // Workspace + meta row — the task's ``work_dir`` and the
+      // persisted run metadata (model name, wt/no-wt,
+      // parallel/sequential, auto-commit/manual-commit) rendered
+      // as a single dot-separated line IMMEDIATELY after the
+      // metrics line.  ``flex-basis: 100%`` on
+      // ``.running-item-workspace`` drops it onto its own line
+      // below the metrics row inside the ``.sidebar-item`` flex
+      // container.  Format:
       //
-      //   <model> • <wt|no-wt> • <parallel|sequential>
-      //     • <auto-commit|manual-commit>
+      //   <work_dir> • <model> • <wt|no-wt>
+      //     • <parallel|sequential> • <auto-commit|manual-commit>
       //
-      // Source fields come from the per-task ``extra`` JSON
+      // The metadata fields come from the per-task ``extra`` JSON
       // (``model``, ``is_worktree``, ``is_parallel``,
       // ``auto_commit_mode``) persisted by
-      // ``_TaskRunnerMixin._run_task_inner``.  Legacy rows that
-      // pre-date the persistence change (no ``model`` field) get
-      // NO meta line at all — we never render a placeholder.
+      // ``_TaskRunnerMixin._run_task_inner``.  Missing pieces are
+      // simply skipped:
+      //   * no ``work_dir``      → line starts with the model;
+      //   * no ``model``         → line shows only the workspace;
+      //   * neither present      → no line at all (no placeholder).
+      // Booleans default to ``false`` when missing → no-wt /
+      // sequential / manual-commit.
+      const workDir = typeof s.work_dir === 'string' ? s.work_dir : '';
       const modelName = typeof s.model === 'string' ? s.model : '';
+      const parts = [];
+      if (workDir) {
+        parts.push(workDir);
+      }
       if (modelName) {
-        const meta = document.createElement('span');
-        meta.className = 'running-item-meta';
         const wtLabel = s.is_worktree ? 'wt' : 'no-wt';
         const parLabel = s.is_parallel ? 'parallel' : 'sequential';
         const acLabel = s.auto_commit_mode ? 'auto-commit' : 'manual-commit';
-        const metaText =
-          modelName + ' • ' + wtLabel + ' • ' + parLabel + ' • ' + acLabel;
-        meta.textContent = metaText;
-        // Native HTML tooltip — long model names can be clipped
-        // by overflow:hidden in the sidebar; ``title`` exposes the
-        // full text on hover.
-        meta.title = metaText;
-        div.appendChild(meta);
+        parts.push(modelName, wtLabel, parLabel, acLabel);
+      }
+      if (parts.length > 0) {
+        const workspace = document.createElement('span');
+        workspace.className = 'running-item-workspace';
+        const text = parts.join(' • ');
+        workspace.textContent = text;
+        // Native HTML tooltip — useful when the combined line is
+        // long enough to be clipped by overflow:hidden in the
+        // sidebar.
+        workspace.title = text;
+        div.appendChild(workspace);
       }
 
       div.addEventListener('click', () => {
