@@ -2455,6 +2455,21 @@
     const dm = Math.floor(ds / 60);
     return 'Done (' + (dm > 0 ? dm + 'm ' : '') + (ds % 60) + 's)';
   }
+  /**
+   * Format a millisecond duration as ``hh:mm:ss`` (zero-padded).
+   * Hours have no upper bound (e.g. ``101:02:03`` is valid for a
+   * 101-hour task).  Negative or non-finite inputs clamp to 0.
+   * Used by the History sidebar's per-task panel to show the time
+   * spent on the task after the cost figure.
+   */
+  function formatDurationHms(ms) {
+    const total = Math.max(0, Math.floor(Number(ms) / 1000));
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = total % 60;
+    const pad = n => (n < 10 ? '0' + n : String(n));
+    return pad(h) + ':' + pad(m) + ':' + pad(s);
+  }
   function _renderTimerTick() {
     // If the agent's persisted end timestamp has already passed,
     // surface "Done (Xm Ys)" computed from agent wall-clock
@@ -5434,10 +5449,10 @@
         div.appendChild(actions);
       }
 
-      // Metrics row (steps • tokens • cost) — matches the Running
-      // tab.  ``flex-basis: 100%`` on .running-item-metrics drops
-      // this onto its own line below the running/failed dot, the
-      // task text, and the delete button.
+      // Metrics row (steps • tokens • cost • duration) — matches the
+      // Running tab.  ``flex-basis: 100%`` on .running-item-metrics
+      // drops this onto its own line below the running/failed dot,
+      // the task text, and the delete button.
       const metrics = document.createElement('span');
       metrics.className = 'running-item-metrics';
       const tokens = Number(s.tokens || 0);
@@ -5459,12 +5474,31 @@
             });
         }
       }
+      // Time spent on the task in hh:mm:ss format, rendered AFTER the
+      // cost and BEFORE the date suffix.  For finished rows the
+      // backend surfaces ``endTs - startTs``; for running rows
+      // (``is_running=true`` or ``endTs==0``) we use ``Date.now() -
+      // startTs`` so the user sees a live estimate at history-load
+      // time.  Rows with no usable startTs or a non-positive duration
+      // omit the token entirely — we never display 00:00:00.
+      const startTsMs = Number(s.startTs || 0);
+      const endTsMs = Number(s.endTs || 0);
+      let durMs = 0;
+      if (startTsMs > 0) {
+        if (endTsMs > startTsMs) {
+          durMs = endTsMs - startTsMs;
+        } else if (s.is_running || endTsMs === 0) {
+          durMs = Date.now() - startTsMs;
+        }
+      }
+      const dur = durMs > 0 ? ' • ' + formatDurationHms(durMs) : '';
       metrics.textContent =
         steps +
         ' steps • ' +
         tokens.toLocaleString() +
         ' tok • $' +
         cost.toFixed(4) +
+        dur +
         when;
       div.appendChild(metrics);
 
