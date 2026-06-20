@@ -2,126 +2,119 @@
 
 ## Task
 
-> I wanted them in the same line as the workspace and a dot between them.
-
-(Follow-up to the previous "model name, wt/no-wt, sequential/parallel,
-auto-commit/manual-commit" task — instead of rendering on their own
-row, the four metadata items must share the workspace line with a `•`
-separator.)
+> Make sure that the From label, the date textbox, and the date picker
+> MUST not get split between new lines. Reproduce the issue by writing
+> an integration test. Then fix the issue.
 
 ## Status: DONE
 
 ## Work completed
 
-1. Reviewed the previous implementation in
-   `src/kiss/agents/vscode/media/main.js` (`renderHistory`) where two
-   separate spans were rendered under each history row's metrics line:
+1. Located the offending markup in
+   `src/kiss/agents/vscode/media/chat.html` (the History sidebar's
+   `.history-filter-bar`). The "From" trio (`<label for="hf-from">`,
+   `<input type="date" id="hf-from">`, `<button id="hf-from-btn">`)
+   and the matching "To" trio were six direct children of
+   `.history-filter-bar`, which is declared as
+   `display: flex; flex-wrap: wrap;`. Because each child was its own
+   flex item, a narrow sidebar could wrap the label, the textbox, and
+   the calendar-picker button onto three different rows.
 
-   - `.running-item-workspace` carrying just the `work_dir`;
-   - `.running-item-meta` carrying
-     `<model> • <wt|no-wt> • <par|seq> • <auto|manual>`.
+1. Reproduced the bug by writing a JSDOM integration test
+   `src/kiss/agents/vscode/test/historyFilterDateGroup.test.js` that
+   loads `media/chat.html` + `media/main.js` and asserts:
 
-   Each span used `flex-basis: 100%` so they took their own visual rows
-   inside the `.sidebar-item` flex container.
+   - `label[for="hf-from"]`, `#hf-from`, and `#hf-from-btn` share a
+     single direct parent element (i.e. the trio is wrapped in one
+     grouping span);
+   - that parent is **not** `.history-filter-bar` itself;
+   - that parent carries the class `.history-filter-date-group`;
+   - the same three invariants hold for the "To" trio;
+   - the order inside each group is label → input → button;
+   - the group has exactly 3 children (no stray nodes);
+   - `media/main.css` declares a `.history-filter-date-group` rule
+     that uses `display: inline-flex` (or `inline-block`) AND uses
+     `flex-wrap: nowrap` or `white-space: nowrap`, guaranteeing the
+     three pieces stay glued on a single line even when the sidebar
+     wraps.
 
-1. Replaced both spans with a SINGLE merged `.running-item-workspace`
-   span whose text is built as `parts.join(' • ')`:
+   Running the test against the unfixed code failed at step 1, exactly
+   as expected (TDD).
 
-   ```js
-   const parts = [];
-   if (workDir) parts.push(workDir);
-   if (modelName) {
-     const wtLabel = s.is_worktree ? 'wt' : 'no-wt';
-     const parLabel = s.is_parallel ? 'parallel' : 'sequential';
-     const acLabel = s.auto_commit_mode ? 'auto-commit' : 'manual-commit';
-     parts.push(modelName, wtLabel, parLabel, acLabel);
-   }
-   if (parts.length > 0) {
-     const workspace = document.createElement('span');
-     workspace.className = 'running-item-workspace';
-     const text = parts.join(' • ');
-     workspace.textContent = text;
-     workspace.title = text;
-     div.appendChild(workspace);
+1. Fixed `src/kiss/agents/vscode/media/chat.html` by wrapping each
+   trio in a `<span class="history-filter-date-group">…</span>`:
+
+   ```html
+   <span class="history-filter-date-group">
+     <label for="hf-from" class="history-filter-date-lbl">From:</label>
+     <input type="date" id="hf-from" class="history-filter-date" …>
+     <button type="button" id="hf-from-btn" class="history-filter-date-btn" …>📅</button>
+   </span>
+   <span class="history-filter-date-group">
+     <label for="hf-to" class="history-filter-date-lbl">To:</label>
+     <input type="date" id="hf-to" class="history-filter-date" …>
+     <button type="button" id="hf-to-btn" class="history-filter-date-btn" …>📅</button>
+   </span>
+   ```
+
+   With the wrapper in place the bar sees just one flex item per
+   date filter, so the bar's `flex-wrap: wrap` can still break
+   between groups when the sidebar is very narrow, but it can never
+   tear a label/input/button trio apart.
+
+1. Added the matching CSS rule to
+   `src/kiss/agents/vscode/media/main.css` (next to the existing
+   `.history-filter-date-lbl` rule):
+
+   ```css
+   .history-filter-date-group {
+     display: inline-flex; align-items: center; gap: 4px;
+     flex-wrap: nowrap; white-space: nowrap;
    }
    ```
 
-   This puts the workspace path and the four metadata items on the SAME
-   visual line separated by ` • `, exactly as requested. Edge cases:
+   `inline-flex` makes the wrapper one flex item of
+   `.history-filter-bar`; `flex-wrap: nowrap` + `white-space: nowrap`
+   keep the children on a single line.
 
-   - workspace + model present → `<wd> • <model> • wt • parallel • auto-commit`;
-   - workspace only (legacy rows, no `model` field) → just `<wd>`;
-   - model only (no workspace) → `<model> • <wt|no-wt> • ...` alone (no
-     leading bullet);
-   - neither → no span at all (no blank line, no placeholder);
-   - missing booleans default to `false` → `no-wt`/`sequential`/`manual-commit`.
-
-1. Removed the now-unused `.running-item-meta` CSS rule from
-   `src/kiss/agents/vscode/media/main.css` and rewrote the comment above
-   `.running-item-workspace` to describe the merged "workspace + meta"
-   line. The single `flex-basis: 100%` rule still drops the line onto
-   its own row below the metrics row.
-
-1. Rewrote the JSDOM integration test
-   `src/kiss/agents/vscode/test/historyTaskMeta.test.js` to assert the
-   merged behaviour. Added a sixth fixture row (F: neither workspace nor
-   model) and updated the existing rows so the test now verifies:
-
-   - row A (workspace + all flags on) →
-     `${WS_A} • gpt-5 • wt • parallel • auto-commit`;
-   - row B (workspace + all flags off) →
-     `${WS_B} • claude-3.7-sonnet • no-wt • sequential • manual-commit`;
-   - row C (no workspace, model + flags) →
-     `gpt-5-mini • wt • sequential • auto-commit` (no leading bullet);
-   - row D (workspace, no model) → workspace alone (legacy);
-   - row E (model only, every boolean missing) →
-     `legacy-model • no-wt • sequential • manual-commit` (defaults);
-   - row F (no workspace, no model) → NO `.running-item-workspace` span;
-   - every row asserts that no stray `.running-item-meta` span survives;
-   - the workspace+meta span is the metrics span's immediate next
-     sibling (so the line lands directly below metrics);
-   - the production `main.css` declares `flex-basis: 100%` on
-     `.running-item-workspace` so the line drops onto its own visual
-     row in the flex container.
-
-1. Updated the pytest wrapper docstring in
-   `src/kiss/tests/agents/vscode/test_history_task_meta.py` to reflect
-   the new combined-line contract. No backend change was needed — the
-   server still emits `model` / `is_worktree` / `is_parallel` /
-   `auto_commit_mode` on each session row exactly as before, so the
-   server-side pytest module
-   `test_history_task_meta_server.py` continued to pass unchanged.
-
-1. `npm install` inside `src/kiss/agents/vscode` (needed because the
-   worktree did not yet have `node_modules/`), then verification.
+1. Added a pytest wrapper
+   `src/kiss/tests/agents/vscode/test_history_filter_date_group.py`
+   that spawns `node` on the JSDOM test so `uv run pytest` and CI
+   pick it up alongside the rest of the VS Code-extension tests.
 
 ## Verification
 
-1. Direct integration test (single source of truth):
+1. Direct JSDOM integration test (the source of truth):
 
    ```bash
-   cd src/kiss/agents/vscode && node test/historyTaskMeta.test.js
+   cd src/kiss/agents/vscode && node test/historyFilterDateGroup.test.js
    ```
 
    Result:
+
    ```
-   ok - workspace + metadata render on the same line, separated by " • "
-   ok - workspace+meta span has flex-basis: 100%
-   historyTaskMeta.test.js: all assertions passed.
+   ok - From and To label/input/button trios share a single
+        .history-filter-date-group parent inside .history-filter-bar
+   ok - .history-filter-date-group CSS keeps label/input/button on
+        the same line
+   historyFilterDateGroup.test.js: all assertions passed.
    ```
+
+1. Regression sweep of all related History-sidebar JSDOM tests
+   (`historyTaskMeta`, `historyTaskWorkspace`, `historyTaskDuration`,
+   `historyWorkspaceFilter`, `historyFilterDateGroup`) — all green.
 
 1. Targeted pytest (impacted tests only, well under the 100-test
    threshold):
 
    ```bash
    uv run pytest -v \
+     src/kiss/tests/agents/vscode/test_history_filter_date_group.py \
      src/kiss/tests/agents/vscode/test_history_task_meta.py \
-     src/kiss/tests/agents/vscode/test_history_task_meta_server.py \
-     src/kiss/tests/agents/vscode/test_history_task_workspace.py \
-     src/kiss/tests/agents/vscode/test_history_task_duration.py
+     src/kiss/tests/agents/vscode/test_history_task_workspace.py
    ```
 
-   Result: 10 passed.
+   Result: 3 passed.
 
 1. Full check:
 
@@ -129,4 +122,5 @@ separator.)
    uv run check --full
    ```
 
-   Result: all code / type / lint / extension checks passed.
+   Result: all code / type / lint / extension / markdown checks
+   passed.
