@@ -4,7 +4,12 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 """Fetch latest model pricing/context from vendor APIs, test new models,
-and update model_info.py.
+and update MODEL_INFO.json.
+
+The script writes the source-of-truth ``src/kiss/core/models/MODEL_INFO.json``
+in the repo. When the user-local copy at ``~/.kiss/MODEL_INFO.json`` exists,
+it is also refreshed so a running KISS install picks up the changes on its
+next ``model_info`` reload without waiting for a reinstall.
 
 Usage:
     uv run python scripts/update_models.py [OPTIONS]
@@ -33,11 +38,11 @@ from urllib.request import Request, urlopen
 
 logger = logging.getLogger(__name__)
 
-_EXPECTED_SUBPATH = Path("src") / "kiss" / "core" / "models" / "model_info.py"
+_EXPECTED_SUBPATH = Path("src") / "kiss" / "core" / "models" / "MODEL_INFO.json"
 
 
 def _find_project_root() -> Path:
-    """Find the project root directory for writing model_info.py.
+    """Find the project root directory for writing MODEL_INFO.json.
 
     Checks in order:
     1. KISS_WORKDIR environment variable (set by the KISS agent runtime)
@@ -68,7 +73,8 @@ def _find_project_root() -> Path:
 PROJECT_ROOT = _find_project_root()
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-MODEL_INFO_PATH = PROJECT_ROOT / "src" / "kiss" / "core" / "models" / "model_info.py"
+MODEL_INFO_PATH = PROJECT_ROOT / "src" / "kiss" / "core" / "models" / "MODEL_INFO.json"
+USER_MODEL_INFO_PATH = Path.home() / ".kiss" / "MODEL_INFO.json"
 
 _SSL_CTX = ssl.create_default_context()
 
@@ -85,17 +91,6 @@ def api_get(url: str, headers: dict[str, str] | None = None) -> Any:
                 raise
             time.sleep(2**attempt)
     raise RuntimeError("unreachable")
-
-
-def fmt_price(p: float) -> str:
-    if p == 0:  # pragma: no branch
-        return "0.00"
-    if p == int(p):  # pragma: no branch
-        return f"{int(p):.2f}"
-    s = f"{p:.3f}"
-    if s[-1] == "0" and len(s.split(".")[1]) > 2:  # pragma: no branch
-        s = s[:-1]
-    return s
 
 
 def fetch_openrouter(verbose: bool = False) -> dict[str, dict]:
@@ -844,8 +839,7 @@ def compute_changes(
     return updates, new_models
 
 
-def _make_entry_line(
-    name: str,
+def _build_entry(
     ctx: int,
     inp: float,
     out: float,
@@ -854,26 +848,58 @@ def _make_entry_line(
     gen: bool = True,
     thinking: str | None = None,
     comment: str = "",
-) -> str:
-    if emb and not gen:  # pragma: no branch
-        line = f'    "{name}": _emb({ctx}, {fmt_price(inp)}),'
-    else:
-        args = f"{ctx}, {fmt_price(inp)}, {fmt_price(out)}"
-        extras = []
-        if not fc:  # pragma: no branch
-            extras.append("fc=False")
-        if emb:  # pragma: no branch
-            extras.append("emb=True")
-        if not gen:  # pragma: no branch
-            extras.append("gen=False")
-        if thinking:  # pragma: no branch
-            extras.append(f'thinking="{thinking}"')
-        if extras:  # pragma: no branch
-            args += ", " + ", ".join(extras)
-        line = f'    "{name}": _mi({args}),'
-    if comment and len(line) + len(comment) + 4 <= 100:  # pragma: no branch
-        line += f"  # {comment}"
-    return line
+) -> dict[str, Any]:
+    """Build a MODEL_INFO.json entry dict for one model.
+
+    Optional fields (``thinking``, ``comment``) are only included when set
+    so the on-disk JSON stays compact and reviewable; required fields
+    (``context_length``, prices, ``fc``/``emb``/``gen``) are always present.
+
+    Args:
+        ctx: Maximum context length in tokens.
+        inp: Input price per 1M tokens (USD).
+        out: Output price per 1M tokens (USD).
+        fc: Whether the model supports function calling.
+        emb: Whether the model is an embedding model.
+        gen: Whether the model supports text generation.
+        thinking: Highest ``reasoning_effort`` level the model accepts.
+        comment: Free-form annotation (e.g. ``"NEW"`` /
+            ``"NEW: needs pricing"``). Omitted when empty.
+
+    Returns:
+        A dict suitable for serialization to MODEL_INFO.json.
+    """
+    entry: dict[str, Any] = {
+        "context_length": ctx,
+        "input_price_per_1M": inp,
+        "output_price_per_1M": out,
+        "fc": fc,
+        "emb": emb,
+        "gen": gen,
+    }
+    if thinking:  # pragma: no branch
+        entry["thinking"] = thinking
+    if comment:  # pragma: no branch
+        entry["comment"] = comment
+    return entry
+
+
+def _read_model_info_json(path: Path) -> dict[str, dict]:
+    """Read MODEL_INFO.json into a name → entry-dict mapping.
+
+    Returns an empty dict when the file doesn't exist yet (lets the script
+    bootstrap a brand new JSON file from scratch).
+    """
+    if not path.exists():  # pragma: no branch
+        return {}
+    return json.loads(path.read_text())  # type: ignore[no-any-return]
+
+
+def _write_model_info_json(path: Path, data: dict[str, dict]) -> None:
+    """Write ``data`` to ``path`` as sorted, pretty-printed JSON."""
+    sorted_data = dict(sorted(data.items()))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(sorted_data, indent=2) + "\n")
 
 
 def apply_updates_to_file(
@@ -883,160 +909,83 @@ def apply_updates_to_file(
     current: dict[str, dict],
     dry_run: bool = False,
 ) -> None:
-    content = MODEL_INFO_PATH.read_text()
-    lines = content.split("\n")
+    """Apply MODEL_INFO updates/additions/removals to the JSON source of truth.
 
-    _key_pat = re.compile(r'^\s+"[^"]+"\s*:')
+    Mutates ``MODEL_INFO_PATH`` (the in-repo ``MODEL_INFO.json``) and, when
+    it already exists, also syncs the user-local copy at
+    ``~/.kiss/MODEL_INFO.json`` so that a running KISS install picks up the
+    changes on next ``model_info`` reload without waiting for a reinstall.
 
-    def _find_entry_span(lines: list[str], name: str) -> tuple[int, int]:
-        """Return (start, end) indices of a model entry, handling multi-line spans."""
-        pat = re.compile(rf'^\s+"{re.escape(name)}"\s*:')
-        for i, line in enumerate(lines):  # pragma: no branch
-            if pat.match(line):  # pragma: no branch
-                if line.rstrip().endswith(","):  # pragma: no branch
-                    return i, i + 1
-                for j in range(i + 1, len(lines)):  # pragma: no branch
-                    if (  # pragma: no branch
-                        lines[j].rstrip().endswith(",") or _key_pat.match(lines[j])
-                    ):
-                        if _key_pat.match(lines[j]):  # pragma: no branch
-                            return i, j
-                        return i, j + 1
-                return i, i + 1
-        return -1, -1
+    Args:
+        updates: ``[{"name": str, "changes": {field: value, ...}}]``.
+            ``changes`` may target ``context_length``, ``input_price_per_1M``,
+            ``output_price_per_1M``, ``fc``, ``emb``, ``gen``, ``thinking``.
+            A ``thinking`` value of ``None`` removes the field.
+        new_models: Each entry must carry at minimum ``name``,
+            ``context_length``, ``input_price_per_1M``, ``output_price_per_1M``.
+            Optional flags: ``fc`` (default True), ``emb`` (False),
+            ``gen`` (True), ``thinking``, ``needs_pricing``.
+        deprecated: ``[{"name": str, "reason": str}]``; removed by name.
+        current: Snapshot of the pre-update ``MODEL_INFO`` (used to
+            preserve unchanged fields when applying updates to models that
+            don't yet have a JSON entry).
+        dry_run: When True, print what would change and return without
+            touching disk.
+    """
+    data = _read_model_info_json(MODEL_INFO_PATH)
 
     deprecated_names = {d["name"] for d in deprecated}
-    removed = 0
-    if deprecated_names:  # pragma: no branch
-        spans: list[tuple[int, int]] = []
-        for name in deprecated_names:  # pragma: no branch
-            start, end = _find_entry_span(lines, name)
-            if start >= 0:  # pragma: no branch
-                spans.append((start, end))
-        for start, end in sorted(spans, reverse=True):  # pragma: no branch
-            del lines[start:end]
-            removed += 1
+    removed = sum(1 for name in deprecated_names if data.pop(name, None) is not None)
 
-    applied_updates = 0
+    applied = 0
     for upd in updates:  # pragma: no branch
         name = upd["name"]
-        cur = current[name]
-        new_ctx = upd["changes"].get("context_length", cur["context_length"])
-        new_inp = upd["changes"].get("input_price_per_1M", cur["input_price_per_1M"])
-        new_out = upd["changes"].get("output_price_per_1M", cur["output_price_per_1M"])
-        new_thinking = upd["changes"].get("thinking", cur.get("thinking"))
-        new_line = _make_entry_line(
-            name,
-            new_ctx,
-            new_inp,
-            new_out,
-            fc=cur["fc"],
-            emb=cur["emb"],
-            gen=cur["gen"],
-            thinking=new_thinking,
+        cur = current.get(name, {})
+        entry = data.get(name) or _build_entry(
+            ctx=cur.get("context_length", 0),
+            inp=cur.get("input_price_per_1M", 0.0),
+            out=cur.get("output_price_per_1M", 0.0),
+            fc=cur.get("fc", True),
+            emb=cur.get("emb", False),
+            gen=cur.get("gen", True),
+            thinking=cur.get("thinking"),
         )
-        start, end = _find_entry_span(lines, name)
-        if start >= 0:  # pragma: no branch
-            old_first = lines[start]
-            old_comment = ""
-            if "#" in old_first:
-                old_comment = old_first[old_first.index("#") + 1 :].strip()
-            if old_comment and len(new_line) + len(old_comment) + 4 <= 100:  # pragma: no branch
-                new_line += f"  # {old_comment}"
-            lines[start:end] = [new_line]
-            applied_updates += 1
+        for field, value in upd["changes"].items():  # pragma: no branch
+            if field == "thinking" and value is None:  # pragma: no branch
+                entry.pop("thinking", None)
+            else:
+                entry[field] = value
+        data[name] = entry
+        applied += 1
 
     added = 0
-    insert_before_closing = -1
-    in_model_info = False
-    for i, line in enumerate(lines):  # pragma: no branch
-        if "MODEL_INFO" in line and "{" in line:  # pragma: no branch
-            in_model_info = True
-        if in_model_info and line.strip() == "}":  # pragma: no branch
-            insert_before_closing = i
-            break
-
-    new_lines_to_add: list[str] = []
     for nm in new_models:  # pragma: no branch
-        name = nm["name"]
-        if nm.get("needs_pricing"):  # pragma: no branch
-            comment = "NEW: needs pricing"
-        else:
-            comment = "NEW"
-        entry_line = _make_entry_line(
-            name,
-            nm["context_length"],
-            nm["input_price_per_1M"],
-            nm["output_price_per_1M"],
+        comment = "NEW: needs pricing" if nm.get("needs_pricing") else "NEW"
+        data[nm["name"]] = _build_entry(
+            ctx=nm["context_length"],
+            inp=nm["input_price_per_1M"],
+            out=nm["output_price_per_1M"],
             fc=nm.get("fc", True),
             emb=nm.get("emb", False),
             gen=nm.get("gen", True),
             thinking=nm.get("thinking"),
             comment=comment,
         )
-        new_lines_to_add.append(entry_line)
         added += 1
 
-    if new_lines_to_add and insert_before_closing >= 0:  # pragma: no branch
-        for line in reversed(new_lines_to_add):  # pragma: no branch
-            lines.insert(insert_before_closing, line)
-
-    dict_start = -1
-    dict_end = -1
-    in_mi = False
-    for i, line in enumerate(lines):  # pragma: no branch
-        if "MODEL_INFO" in line and "{" in line:  # pragma: no branch
-            dict_start = i + 1
-            in_mi = True
-        if in_mi and line.strip() == "}":  # pragma: no branch
-            dict_end = i
-            break
-
-    if dict_start >= 0 and dict_end > dict_start:  # pragma: no branch
-        standalone_comments: list[str] = []
-        entry_blocks: list[list[str]] = []
-        current_block: list[str] = []
-
-        for line in lines[dict_start:dict_end]:  # pragma: no branch
-            stripped = line.strip()
-            if not stripped:  # pragma: no branch
-                continue
-            if stripped.startswith("#"):
-                if current_block:  # pragma: no branch
-                    current_block.append(line)
-                elif not stripped.startswith("# ==="):
-                    standalone_comments.append(line)
-                continue
-            if re.match(r'\s+"[^"]+"\s*:', line):  # pragma: no branch
-                if current_block:  # pragma: no branch
-                    entry_blocks.append(current_block)
-                current_block = [line]
-            else:
-                current_block.append(line)
-
-        if current_block:  # pragma: no branch
-            entry_blocks.append(current_block)
-
-        def _sort_key(block: list[str]) -> str:
-            m = re.search(r'"([^"]+)"', block[0])
-            return m.group(1).lower() if m else block[0]
-
-        entry_blocks.sort(key=_sort_key)
-        sorted_lines: list[str] = standalone_comments[:]
-        for block in entry_blocks:  # pragma: no branch
-            sorted_lines.extend(block)
-        lines[dict_start:dict_end] = sorted_lines
-
-    print(f"\n  Removed {removed} deprecated, applied {applied_updates} updates, added {added} new")
-    if not dry_run:  # pragma: no branch
-        MODEL_INFO_PATH.write_text("\n".join(lines))
-        print(f"  Written to {MODEL_INFO_PATH}")
-    else:
+    print(f"\n  Removed {removed} deprecated, applied {applied} updates, added {added} new")
+    if dry_run:
         print("  (dry-run, no files modified)")
+        return
+    _write_model_info_json(MODEL_INFO_PATH, data)
+    print(f"  Written to {MODEL_INFO_PATH}")
+    if USER_MODEL_INFO_PATH.exists():  # pragma: no branch
+        _write_model_info_json(USER_MODEL_INFO_PATH, data)
+        print(f"  Also synced to {USER_MODEL_INFO_PATH}")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Update model_info.py from vendor APIs")
+    parser = argparse.ArgumentParser(description="Update MODEL_INFO.json from vendor APIs")
     parser.add_argument(
         "--dry-run",
         action="store_true",

@@ -7,8 +7,8 @@
 These verify that the data-driven ``thinking`` field on ``ModelInfo`` is
 populated end-to-end by update_models.py:
 
-1. ``_make_entry_line`` emits ``thinking="xhigh"`` in the generated
-   ``_mi(...)`` line when the level is set, and omits it otherwise.
+1. ``_build_entry`` emits a ``thinking`` key in the JSON entry when the
+   level is set, and omits it otherwise.
 2. ``detect_thinking_level`` short-circuits to ``None`` for backends that
    don't accept ``reasoning_effort`` (codex/*, claude-*, gemini-*) and for
    variants known to reject it (``-pro``, ``-chat-latest``, ``-image``) and
@@ -19,47 +19,51 @@ populated end-to-end by update_models.py:
 """
 
 from kiss.core.models.model_info import MODEL_INFO
-from kiss.scripts.update_models import _make_entry_line, get_current_model_info
+from kiss.scripts.update_models import _build_entry, get_current_model_info
 from kiss.scripts.update_models import detect_thinking_level as _probe
 
 
-def test_make_entry_line_emits_thinking_xhigh():
+def test_build_entry_emits_thinking_xhigh():
     """A new gpt-5.5-style entry with thinking='xhigh' must include it."""
-    line = _make_entry_line(
-        "gpt-99",
+    entry = _build_entry(
         ctx=1050000,
         inp=5.00,
         out=30.00,
         thinking="xhigh",
         comment="NEW",
     )
-    assert '"gpt-99": _mi(1050000, 5.00, 30.00, thinking="xhigh"),' in line
-    assert "# NEW" in line
+    assert entry["thinking"] == "xhigh"
+    assert entry["context_length"] == 1050000
+    assert entry["input_price_per_1M"] == 5.00
+    assert entry["output_price_per_1M"] == 30.00
+    assert entry["comment"] == "NEW"
 
 
-def test_make_entry_line_omits_thinking_when_none():
-    """Without a thinking level the line must not mention thinking at all."""
-    line = _make_entry_line(
-        "gpt-foo",
-        ctx=200000,
-        inp=1.00,
-        out=2.00,
-    )
-    assert "thinking" not in line
-    assert '"gpt-foo": _mi(200000, 1.00, 2.00),' in line
+def test_build_entry_omits_thinking_when_none():
+    """Without a thinking level the entry must not carry the ``thinking`` key."""
+    entry = _build_entry(ctx=200000, inp=1.00, out=2.00)
+    assert "thinking" not in entry
+    assert entry == {
+        "context_length": 200000,
+        "input_price_per_1M": 1.00,
+        "output_price_per_1M": 2.00,
+        "fc": True,
+        "emb": False,
+        "gen": True,
+    }
 
 
-def test_make_entry_line_combines_thinking_with_other_flags():
-    """thinking='xhigh' must compose with fc=False in the right order."""
-    line = _make_entry_line(
-        "gpt-bar",
+def test_build_entry_combines_thinking_with_other_flags():
+    """thinking='xhigh' must compose with fc=False without dropping flags."""
+    entry = _build_entry(
         ctx=128000,
         inp=1.00,
         out=2.00,
         fc=False,
         thinking="xhigh",
     )
-    assert 'fc=False, thinking="xhigh"' in line
+    assert entry["fc"] is False
+    assert entry["thinking"] == "xhigh"
 
 
 def test_thinking_probe_skipped_for_codex_models():

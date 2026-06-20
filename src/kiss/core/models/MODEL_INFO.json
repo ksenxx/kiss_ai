@@ -1,0 +1,3998 @@
+{
+  "BAAI/bge-base-en-v1.5": {
+    "context_length": 512,
+    "input_price_per_1M": 0.01,
+    "output_price_per_1M": 0.0,
+    "fc": false,
+    "emb": true,
+    "gen": false
+  },
+  "MiniMaxAI/MiniMax-M2.5": {
+    "context_length": 196608,
+    "input_price_per_1M": 0.3,
+    "output_price_per_1M": 1.2,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "MiniMaxAI/MiniMax-M2.7": {
+    "context_length": 196608,
+    "input_price_per_1M": 0.3,
+    "output_price_per_1M": 1.2,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "MiniMaxAI/MiniMax-M3": {
+    "context_length": 524288,
+    "input_price_per_1M": 0.3,
+    "output_price_per_1M": 1.2,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "Qwen/QwQ-32B": {
+    "context_length": 131072,
+    "input_price_per_1M": 1.2,
+    "output_price_per_1M": 1.2,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "Qwen/Qwen2-1.5B-Instruct": {
+    "context_length": 32768,
+    "input_price_per_1M": 0.02,
+    "output_price_per_1M": 0.02,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "Qwen/Qwen2-VL-72B-Instruct": {
+    "context_length": 32768,
+    "input_price_per_1M": 1.2,
+    "output_price_per_1M": 1.2,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "Qwen/Qwen2.5-14B-Instruct": {
+    "context_length": 32768,
+    "input_price_per_1M": 0.8,
+    "output_price_per_1M": 0.8,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "Qwen/Qwen2.5-72B-Instruct": {
+    "context_length": 32768,
+    "input_price_per_1M": 1.2,
+    "output_price_per_1M": 1.2,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "Qwen/Qwen2.5-72B-Instruct-Turbo": {
+    "context_length": 131072,
+    "input_price_per_1M": 1.2,
+    "output_price_per_1M": 1.2,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "Qwen/Qwen2.5-7B-Instruct-Turbo": {
+    "context_length": 32768,
+    "input_price_per_1M": 0.3,
+    "output_price_per_1M": 0.3,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "Qwen/Qwen2.5-Coder-32B-Instruct": {
+    "context_length": 16384,
+    "input_price_per_1M": 0.8,
+    "output_price_per_1M": 0.8,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "Qwen/Qwen2.5-VL-72B-Instruct": {
+    "context_length": 32768,
+    "input_price_per_1M": 1.95,
+    "output_price_per_1M": 8.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "Qwen/Qwen3-235B-A22B-Instruct-2507-tput": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.2,
+    "output_price_per_1M": 0.6,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "Qwen/Qwen3-235B-A22B-Thinking-2507": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.65,
+    "output_price_per_1M": 3.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8": {
+    "context_length": 262144,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 2.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "Qwen/Qwen3-Coder-Next-FP8": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.5,
+    "output_price_per_1M": 1.2,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "Qwen/Qwen3-Next-80B-A3B-Instruct": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.15,
+    "output_price_per_1M": 1.5,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "Qwen/Qwen3-Next-80B-A3B-Thinking": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.15,
+    "output_price_per_1M": 1.5,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "Qwen/Qwen3-VL-32B-Instruct": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.5,
+    "output_price_per_1M": 1.5,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "Qwen/Qwen3-VL-8B-Instruct": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.18,
+    "output_price_per_1M": 0.68,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "Qwen/Qwen3.5-397B-A17B": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.6,
+    "output_price_per_1M": 3.6,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "Qwen/Qwen3.5-9B": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.17,
+    "output_price_per_1M": 0.25,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "Qwen/Qwen3.6-Plus": {
+    "context_length": 1000000,
+    "input_price_per_1M": 0.5,
+    "output_price_per_1M": 3.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "arcee-ai/trinity-mini": {
+    "context_length": 128000,
+    "input_price_per_1M": 0.04,
+    "output_price_per_1M": 0.15,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "cc/haiku": {
+    "context_length": 200000,
+    "input_price_per_1M": 0.0,
+    "output_price_per_1M": 0.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "cc/opus": {
+    "context_length": 200000,
+    "input_price_per_1M": 0.0,
+    "output_price_per_1M": 0.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "cc/sonnet": {
+    "context_length": 200000,
+    "input_price_per_1M": 0.0,
+    "output_price_per_1M": 0.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "claude-fable-5": {
+    "context_length": 200000,
+    "input_price_per_1M": 10.0,
+    "output_price_per_1M": 50.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "claude-haiku-4-5": {
+    "context_length": 200000,
+    "input_price_per_1M": 1.0,
+    "output_price_per_1M": 5.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "claude-haiku-4-5-20251001": {
+    "context_length": 200000,
+    "input_price_per_1M": 1.0,
+    "output_price_per_1M": 5.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "claude-opus-4-1": {
+    "context_length": 200000,
+    "input_price_per_1M": 15.0,
+    "output_price_per_1M": 75.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "claude-opus-4-1-20250805": {
+    "context_length": 200000,
+    "input_price_per_1M": 15.0,
+    "output_price_per_1M": 75.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "claude-opus-4-5": {
+    "context_length": 200000,
+    "input_price_per_1M": 5.0,
+    "output_price_per_1M": 25.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "claude-opus-4-5-20251101": {
+    "context_length": 200000,
+    "input_price_per_1M": 5.0,
+    "output_price_per_1M": 25.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "claude-opus-4-6": {
+    "context_length": 200000,
+    "input_price_per_1M": 5.0,
+    "output_price_per_1M": 25.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "claude-opus-4-7": {
+    "context_length": 500000,
+    "input_price_per_1M": 5.0,
+    "output_price_per_1M": 25.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "claude-opus-4-8": {
+    "context_length": 200000,
+    "input_price_per_1M": 5.0,
+    "output_price_per_1M": 25.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "claude-sonnet-4-5": {
+    "context_length": 200000,
+    "input_price_per_1M": 3.0,
+    "output_price_per_1M": 15.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "claude-sonnet-4-5-20250929": {
+    "context_length": 200000,
+    "input_price_per_1M": 3.0,
+    "output_price_per_1M": 15.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "claude-sonnet-4-6": {
+    "context_length": 200000,
+    "input_price_per_1M": 3.0,
+    "output_price_per_1M": 15.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "codex/codex-auto-review": {
+    "context_length": 400000,
+    "input_price_per_1M": 0.0,
+    "output_price_per_1M": 0.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "codex/default": {
+    "context_length": 400000,
+    "input_price_per_1M": 0.0,
+    "output_price_per_1M": 0.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "codex/gpt-5.2": {
+    "context_length": 400000,
+    "input_price_per_1M": 0.0,
+    "output_price_per_1M": 0.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "codex/gpt-5.3-codex": {
+    "context_length": 400000,
+    "input_price_per_1M": 0.0,
+    "output_price_per_1M": 0.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "codex/gpt-5.4": {
+    "context_length": 1050000,
+    "input_price_per_1M": 0.0,
+    "output_price_per_1M": 0.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "codex/gpt-5.4-mini": {
+    "context_length": 400000,
+    "input_price_per_1M": 0.0,
+    "output_price_per_1M": 0.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "codex/gpt-5.5": {
+    "context_length": 1050000,
+    "input_price_per_1M": 0.0,
+    "output_price_per_1M": 0.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "computer-use-preview": {
+    "context_length": 128000,
+    "input_price_per_1M": 3.0,
+    "output_price_per_1M": 12.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "computer-use-preview-2025-03-11": {
+    "context_length": 128000,
+    "input_price_per_1M": 3.0,
+    "output_price_per_1M": 12.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "deepcogito/cogito-v1-preview-llama-70B": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.0,
+    "output_price_per_1M": 0.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "deepcogito/cogito-v1-preview-llama-70B-Turbo": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.0,
+    "output_price_per_1M": 0.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "deepcogito/cogito-v1-preview-llama-8B": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.0,
+    "output_price_per_1M": 0.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "deepcogito/cogito-v1-preview-qwen-14B": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.0,
+    "output_price_per_1M": 0.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "deepcogito/cogito-v1-preview-qwen-32B": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.0,
+    "output_price_per_1M": 0.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "deepcogito/cogito-v2-1-671b": {
+    "context_length": 163840,
+    "input_price_per_1M": 1.25,
+    "output_price_per_1M": 1.25,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "deepseek-ai/DeepSeek-R1": {
+    "context_length": 163840,
+    "input_price_per_1M": 3.0,
+    "output_price_per_1M": 7.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "deepseek-ai/DeepSeek-R1-0528": {
+    "context_length": 163840,
+    "input_price_per_1M": 3.0,
+    "output_price_per_1M": 7.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "deepseek-ai/DeepSeek-R1-0528-tput": {
+    "context_length": 163840,
+    "input_price_per_1M": 3.0,
+    "output_price_per_1M": 7.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "deepseek-ai/DeepSeek-R1-Distill-Llama-70B": {
+    "context_length": 131072,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 2.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.18,
+    "output_price_per_1M": 0.18,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B": {
+    "context_length": 131072,
+    "input_price_per_1M": 1.6,
+    "output_price_per_1M": 1.6,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "deepseek-ai/DeepSeek-V3-0324": {
+    "context_length": 163840,
+    "input_price_per_1M": 1.25,
+    "output_price_per_1M": 1.25,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "deepseek-ai/DeepSeek-V3.1": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.6,
+    "output_price_per_1M": 1.7,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "deepseek-ai/DeepSeek-V4-Pro": {
+    "context_length": 512000,
+    "input_price_per_1M": 1.74,
+    "output_price_per_1M": 3.48,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "deepseek-ai/deepseek-coder-33b-instruct": {
+    "context_length": 16384,
+    "input_price_per_1M": 0.8,
+    "output_price_per_1M": 0.8,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "essentialai/rnj-1-instruct": {
+    "context_length": 32768,
+    "input_price_per_1M": 0.15,
+    "output_price_per_1M": 0.15,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "gemini-2.0-flash": {
+    "context_length": 1048576,
+    "input_price_per_1M": 0.1,
+    "output_price_per_1M": 0.4,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gemini-2.0-flash-001": {
+    "context_length": 1048576,
+    "input_price_per_1M": 0.1,
+    "output_price_per_1M": 0.4,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gemini-2.0-flash-lite": {
+    "context_length": 1048576,
+    "input_price_per_1M": 0.075,
+    "output_price_per_1M": 0.3,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gemini-2.0-flash-lite-001": {
+    "context_length": 1048576,
+    "input_price_per_1M": 0.075,
+    "output_price_per_1M": 0.3,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gemini-2.5-flash": {
+    "context_length": 1048576,
+    "input_price_per_1M": 0.3,
+    "output_price_per_1M": 2.5,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gemini-2.5-flash-image": {
+    "context_length": 32768,
+    "input_price_per_1M": 0.3,
+    "output_price_per_1M": 2.5,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gemini-2.5-flash-lite": {
+    "context_length": 1048576,
+    "input_price_per_1M": 0.1,
+    "output_price_per_1M": 0.4,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "gemini-2.5-pro": {
+    "context_length": 1048576,
+    "input_price_per_1M": 1.25,
+    "output_price_per_1M": 10.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gemini-3-flash-preview": {
+    "context_length": 1048576,
+    "input_price_per_1M": 0.5,
+    "output_price_per_1M": 3.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gemini-3-pro-image": {
+    "context_length": 131072,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 12.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gemini-3-pro-preview": {
+    "context_length": 1048576,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 12.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gemini-3.1-flash-image": {
+    "context_length": 65536,
+    "input_price_per_1M": 0.5,
+    "output_price_per_1M": 3.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gemini-3.1-flash-lite": {
+    "context_length": 1048576,
+    "input_price_per_1M": 0.25,
+    "output_price_per_1M": 1.5,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gemini-3.1-flash-lite-preview": {
+    "context_length": 1048576,
+    "input_price_per_1M": 0.25,
+    "output_price_per_1M": 1.5,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gemini-3.1-flash-tts-preview": {
+    "context_length": 8192,
+    "input_price_per_1M": 0.0,
+    "output_price_per_1M": 0.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gemini-3.1-pro-preview": {
+    "context_length": 1048576,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 12.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gemini-3.5-flash": {
+    "context_length": 1048576,
+    "input_price_per_1M": 1.5,
+    "output_price_per_1M": 9.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gemini-embedding-001": {
+    "context_length": 2048,
+    "input_price_per_1M": 0.15,
+    "output_price_per_1M": 0.0,
+    "fc": false,
+    "emb": true,
+    "gen": false
+  },
+  "gemini-embedding-2": {
+    "context_length": 8192,
+    "input_price_per_1M": 0.0,
+    "output_price_per_1M": 0.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gemini-embedding-2-preview": {
+    "context_length": 8192,
+    "input_price_per_1M": 0.0,
+    "output_price_per_1M": 0.0,
+    "fc": false,
+    "emb": true,
+    "gen": false
+  },
+  "google/gemma-2-27b-it": {
+    "context_length": 8192,
+    "input_price_per_1M": 0.8,
+    "output_price_per_1M": 0.8,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "google/gemma-3n-E4B-it": {
+    "context_length": 32768,
+    "input_price_per_1M": 0.06,
+    "output_price_per_1M": 0.12,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "google/gemma-4-31B-it": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.39,
+    "output_price_per_1M": 0.97,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-3.5-turbo": {
+    "context_length": 16385,
+    "input_price_per_1M": 0.5,
+    "output_price_per_1M": 1.5,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-3.5-turbo-0125": {
+    "context_length": 16385,
+    "input_price_per_1M": 0.5,
+    "output_price_per_1M": 1.5,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-3.5-turbo-1106": {
+    "context_length": 16385,
+    "input_price_per_1M": 1.0,
+    "output_price_per_1M": 2.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-3.5-turbo-16k": {
+    "context_length": 16385,
+    "input_price_per_1M": 3.0,
+    "output_price_per_1M": 4.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-4": {
+    "context_length": 8192,
+    "input_price_per_1M": 30.0,
+    "output_price_per_1M": 60.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-4-0613": {
+    "context_length": 8192,
+    "input_price_per_1M": 30.0,
+    "output_price_per_1M": 60.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-4-turbo": {
+    "context_length": 128000,
+    "input_price_per_1M": 10.0,
+    "output_price_per_1M": 30.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-4-turbo-2024-04-09": {
+    "context_length": 128000,
+    "input_price_per_1M": 10.0,
+    "output_price_per_1M": 30.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-4.1": {
+    "context_length": 128000,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 8.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-4.1-2025-04-14": {
+    "context_length": 1047576,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 8.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-4.1-mini": {
+    "context_length": 128000,
+    "input_price_per_1M": 0.4,
+    "output_price_per_1M": 1.6,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-4.1-mini-2025-04-14": {
+    "context_length": 1047576,
+    "input_price_per_1M": 0.4,
+    "output_price_per_1M": 1.6,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-4.1-nano": {
+    "context_length": 128000,
+    "input_price_per_1M": 0.1,
+    "output_price_per_1M": 0.4,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-4.1-nano-2025-04-14": {
+    "context_length": 1047576,
+    "input_price_per_1M": 0.1,
+    "output_price_per_1M": 0.4,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-4o": {
+    "context_length": 128000,
+    "input_price_per_1M": 2.5,
+    "output_price_per_1M": 10.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-4o-2024-05-13": {
+    "context_length": 128000,
+    "input_price_per_1M": 5.0,
+    "output_price_per_1M": 15.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-4o-2024-08-06": {
+    "context_length": 128000,
+    "input_price_per_1M": 2.5,
+    "output_price_per_1M": 10.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-4o-2024-11-20": {
+    "context_length": 128000,
+    "input_price_per_1M": 2.5,
+    "output_price_per_1M": 10.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-4o-mini": {
+    "context_length": 128000,
+    "input_price_per_1M": 0.15,
+    "output_price_per_1M": 0.6,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-4o-mini-2024-07-18": {
+    "context_length": 128000,
+    "input_price_per_1M": 0.15,
+    "output_price_per_1M": 0.6,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-4o-mini-search-preview": {
+    "context_length": 128000,
+    "input_price_per_1M": 0.15,
+    "output_price_per_1M": 0.6,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-4o-mini-search-preview-2025-03-11": {
+    "context_length": 128000,
+    "input_price_per_1M": 0.15,
+    "output_price_per_1M": 0.6,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-4o-search-preview": {
+    "context_length": 128000,
+    "input_price_per_1M": 2.5,
+    "output_price_per_1M": 10.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-4o-search-preview-2025-03-11": {
+    "context_length": 128000,
+    "input_price_per_1M": 2.5,
+    "output_price_per_1M": 10.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-5": {
+    "context_length": 400000,
+    "input_price_per_1M": 1.25,
+    "output_price_per_1M": 10.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-5-2025-08-07": {
+    "context_length": 400000,
+    "input_price_per_1M": 1.25,
+    "output_price_per_1M": 10.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-5-chat-latest": {
+    "context_length": 400000,
+    "input_price_per_1M": 1.25,
+    "output_price_per_1M": 10.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-5-mini": {
+    "context_length": 400000,
+    "input_price_per_1M": 0.25,
+    "output_price_per_1M": 2.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-5-mini-2025-08-07": {
+    "context_length": 400000,
+    "input_price_per_1M": 0.25,
+    "output_price_per_1M": 2.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-5-nano": {
+    "context_length": 400000,
+    "input_price_per_1M": 0.05,
+    "output_price_per_1M": 0.4,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-5-nano-2025-08-07": {
+    "context_length": 400000,
+    "input_price_per_1M": 0.05,
+    "output_price_per_1M": 0.4,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-5.1": {
+    "context_length": 400000,
+    "input_price_per_1M": 1.25,
+    "output_price_per_1M": 10.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-5.1-2025-11-13": {
+    "context_length": 400000,
+    "input_price_per_1M": 1.25,
+    "output_price_per_1M": 10.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-5.1-chat-latest": {
+    "context_length": 400000,
+    "input_price_per_1M": 1.25,
+    "output_price_per_1M": 10.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-5.2": {
+    "context_length": 400000,
+    "input_price_per_1M": 1.75,
+    "output_price_per_1M": 14.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-5.2-2025-12-11": {
+    "context_length": 400000,
+    "input_price_per_1M": 1.75,
+    "output_price_per_1M": 14.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-5.2-chat-latest": {
+    "context_length": 400000,
+    "input_price_per_1M": 1.75,
+    "output_price_per_1M": 14.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-5.3-chat-latest": {
+    "context_length": 400000,
+    "input_price_per_1M": 1.75,
+    "output_price_per_1M": 14.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-5.4": {
+    "context_length": 1050000,
+    "input_price_per_1M": 2.5,
+    "output_price_per_1M": 15.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-5.4-2026-03-05": {
+    "context_length": 1050000,
+    "input_price_per_1M": 2.5,
+    "output_price_per_1M": 15.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-5.4-mini": {
+    "context_length": 400000,
+    "input_price_per_1M": 0.75,
+    "output_price_per_1M": 4.5,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-5.4-mini-2026-03-17": {
+    "context_length": 400000,
+    "input_price_per_1M": 0.75,
+    "output_price_per_1M": 4.5,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-5.4-nano": {
+    "context_length": 400000,
+    "input_price_per_1M": 0.2,
+    "output_price_per_1M": 1.25,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-5.4-nano-2026-03-17": {
+    "context_length": 400000,
+    "input_price_per_1M": 0.2,
+    "output_price_per_1M": 1.25,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-5.5": {
+    "context_length": 1050000,
+    "input_price_per_1M": 5.0,
+    "output_price_per_1M": 30.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "thinking": "xhigh"
+  },
+  "gpt-5.5-2026-04-23": {
+    "context_length": 1050000,
+    "input_price_per_1M": 5.0,
+    "output_price_per_1M": 30.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "thinking": "xhigh"
+  },
+  "gpt-image-1": {
+    "context_length": 32768,
+    "input_price_per_1M": 5.0,
+    "output_price_per_1M": 40.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-image-1-mini": {
+    "context_length": 32768,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 8.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-image-1.5": {
+    "context_length": 32768,
+    "input_price_per_1M": 5.0,
+    "output_price_per_1M": 32.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-image-2": {
+    "context_length": 32768,
+    "input_price_per_1M": 5.0,
+    "output_price_per_1M": 30.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "gpt-image-2-2026-04-21": {
+    "context_length": 32768,
+    "input_price_per_1M": 5.0,
+    "output_price_per_1M": 30.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "intfloat/multilingual-e5-large-instruct": {
+    "context_length": 514,
+    "input_price_per_1M": 0.02,
+    "output_price_per_1M": 0.0,
+    "fc": false,
+    "emb": true,
+    "gen": false
+  },
+  "meta-llama/Llama-3-70b-chat-hf": {
+    "context_length": 8192,
+    "input_price_per_1M": 0.88,
+    "output_price_per_1M": 0.88,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "meta-llama/Llama-3-8b-chat-hf": {
+    "context_length": 8192,
+    "input_price_per_1M": 0.2,
+    "output_price_per_1M": 0.2,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "meta-llama/Llama-3.1-405B-Instruct": {
+    "context_length": 4096,
+    "input_price_per_1M": 3.5,
+    "output_price_per_1M": 3.5,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "meta-llama/Llama-3.2-1B-Instruct": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.06,
+    "output_price_per_1M": 0.06,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "meta-llama/Llama-3.2-3B-Instruct-Turbo": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.06,
+    "output_price_per_1M": 0.06,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "meta-llama/Llama-3.3-70B-Instruct-Turbo": {
+    "context_length": 131072,
+    "input_price_per_1M": 1.04,
+    "output_price_per_1M": 1.04,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "meta-llama/Llama-3.3-70B-Instruct-Turbo-test": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.88,
+    "output_price_per_1M": 0.88,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8": {
+    "context_length": 1048576,
+    "input_price_per_1M": 0.27,
+    "output_price_per_1M": 0.85,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "meta-llama/Llama-4-Scout-17B-16E-Instruct": {
+    "context_length": 1048576,
+    "input_price_per_1M": 0.18,
+    "output_price_per_1M": 0.59,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "meta-llama/Meta-Llama-3-70B-Instruct-Turbo": {
+    "context_length": 8192,
+    "input_price_per_1M": 0.88,
+    "output_price_per_1M": 0.88,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "meta-llama/Meta-Llama-3-8B-Instruct": {
+    "context_length": 8192,
+    "input_price_per_1M": 0.2,
+    "output_price_per_1M": 0.2,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "meta-llama/Meta-Llama-3-8B-Instruct-Lite": {
+    "context_length": 8192,
+    "input_price_per_1M": 0.14,
+    "output_price_per_1M": 0.14,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "meta-llama/Meta-Llama-3.1-70B-Instruct-Reference": {
+    "context_length": 8192,
+    "input_price_per_1M": 0.9,
+    "output_price_per_1M": 0.9,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.88,
+    "output_price_per_1M": 0.88,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "meta-llama/Meta-Llama-3.1-8B-Instruct-Reference": {
+    "context_length": 16384,
+    "input_price_per_1M": 0.2,
+    "output_price_per_1M": 0.2,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.18,
+    "output_price_per_1M": 0.18,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "minimax-m2.5": {
+    "context_length": 1000000,
+    "input_price_per_1M": 0.15,
+    "output_price_per_1M": 1.2,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "minimax-m2.5-lightning": {
+    "context_length": 1000000,
+    "input_price_per_1M": 0.3,
+    "output_price_per_1M": 2.4,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "mistralai/Ministral-3-14B-Instruct-2512": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.2,
+    "output_price_per_1M": 0.2,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "mistralai/Mistral-7B-Instruct-v0.1": {
+    "context_length": 32768,
+    "input_price_per_1M": 0.2,
+    "output_price_per_1M": 0.2,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "mistralai/Mistral-7B-Instruct-v0.2": {
+    "context_length": 32768,
+    "input_price_per_1M": 0.2,
+    "output_price_per_1M": 0.2,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "mistralai/Mistral-7B-Instruct-v0.3": {
+    "context_length": 32768,
+    "input_price_per_1M": 0.2,
+    "output_price_per_1M": 0.2,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "mistralai/Mistral-Small-24B-Instruct-2501": {
+    "context_length": 32768,
+    "input_price_per_1M": 0.1,
+    "output_price_per_1M": 0.3,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "mistralai/Mixtral-8x7B-Instruct-v0.1": {
+    "context_length": 32768,
+    "input_price_per_1M": 0.6,
+    "output_price_per_1M": 0.6,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "moonshotai/Kimi-K2-Instruct": {
+    "context_length": 128000,
+    "input_price_per_1M": 1.0,
+    "output_price_per_1M": 3.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "moonshotai/Kimi-K2-Instruct-0905": {
+    "context_length": 262144,
+    "input_price_per_1M": 1.0,
+    "output_price_per_1M": 3.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "moonshotai/Kimi-K2-Thinking": {
+    "context_length": 262144,
+    "input_price_per_1M": 1.2,
+    "output_price_per_1M": 4.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "moonshotai/Kimi-K2.5": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.5,
+    "output_price_per_1M": 2.8,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "moonshotai/Kimi-K2.6": {
+    "context_length": 262144,
+    "input_price_per_1M": 1.2,
+    "output_price_per_1M": 4.5,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "moonshotai/Kimi-K2.7-Code": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.95,
+    "output_price_per_1M": 4.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "nvidia/Llama-3.1-Nemotron-70B-Instruct-HF": {
+    "context_length": 32768,
+    "input_price_per_1M": 0.88,
+    "output_price_per_1M": 0.88,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "nvidia/NVIDIA-Nemotron-Nano-9B-v2": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.06,
+    "output_price_per_1M": 0.25,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "nvidia/nemotron-3-ultra-550b-a55b": {
+    "context_length": 512288,
+    "input_price_per_1M": 0.6,
+    "output_price_per_1M": 3.6,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "o1": {
+    "context_length": 200000,
+    "input_price_per_1M": 15.0,
+    "output_price_per_1M": 60.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "o1-2024-12-17": {
+    "context_length": 200000,
+    "input_price_per_1M": 15.0,
+    "output_price_per_1M": 60.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "o3": {
+    "context_length": 200000,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 8.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "o3-2025-04-16": {
+    "context_length": 200000,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 8.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "o3-deep-research": {
+    "context_length": 200000,
+    "input_price_per_1M": 10.0,
+    "output_price_per_1M": 40.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "o3-deep-research-2025-06-26": {
+    "context_length": 200000,
+    "input_price_per_1M": 10.0,
+    "output_price_per_1M": 40.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "o3-mini": {
+    "context_length": 200000,
+    "input_price_per_1M": 1.1,
+    "output_price_per_1M": 4.4,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "o3-mini-2025-01-31": {
+    "context_length": 200000,
+    "input_price_per_1M": 1.1,
+    "output_price_per_1M": 4.4,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "o4-mini": {
+    "context_length": 200000,
+    "input_price_per_1M": 1.1,
+    "output_price_per_1M": 4.4,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "o4-mini-2025-04-16": {
+    "context_length": 200000,
+    "input_price_per_1M": 1.1,
+    "output_price_per_1M": 4.4,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "o4-mini-deep-research": {
+    "context_length": 200000,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 8.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "o4-mini-deep-research-2025-06-26": {
+    "context_length": 200000,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 8.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openai/gpt-oss-120b": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.15,
+    "output_price_per_1M": 0.6,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openai/gpt-oss-20b": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.05,
+    "output_price_per_1M": 0.2,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/ai21/jamba-large-1.7": {
+    "context_length": 256000,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 8.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/aion-labs/aion-1.0": {
+    "context_length": 131072,
+    "input_price_per_1M": 4.0,
+    "output_price_per_1M": 8.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/aion-labs/aion-1.0-mini": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.7,
+    "output_price_per_1M": 1.4,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/aion-labs/aion-2.0": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.8,
+    "output_price_per_1M": 1.6,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/aion-labs/aion-rp-llama-3.1-8b": {
+    "context_length": 32768,
+    "input_price_per_1M": 0.8,
+    "output_price_per_1M": 1.6,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/allenai/olmo-3-32b-think": {
+    "context_length": 65536,
+    "input_price_per_1M": 0.15,
+    "output_price_per_1M": 0.5,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/amazon/nova-2-lite-v1": {
+    "context_length": 1000000,
+    "input_price_per_1M": 0.3,
+    "output_price_per_1M": 2.5,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/amazon/nova-lite-v1": {
+    "context_length": 300000,
+    "input_price_per_1M": 0.06,
+    "output_price_per_1M": 0.24,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/amazon/nova-micro-v1": {
+    "context_length": 128000,
+    "input_price_per_1M": 0.04,
+    "output_price_per_1M": 0.14,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/amazon/nova-premier-v1": {
+    "context_length": 1000000,
+    "input_price_per_1M": 2.5,
+    "output_price_per_1M": 12.5,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/amazon/nova-pro-v1": {
+    "context_length": 300000,
+    "input_price_per_1M": 0.8,
+    "output_price_per_1M": 3.2,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/anthracite-org/magnum-v4-72b": {
+    "context_length": 32768,
+    "input_price_per_1M": 3.0,
+    "output_price_per_1M": 5.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/anthropic/claude-3-haiku": {
+    "context_length": 200000,
+    "input_price_per_1M": 0.25,
+    "output_price_per_1M": 1.25,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/anthropic/claude-3.5-haiku": {
+    "context_length": 200000,
+    "input_price_per_1M": 0.8,
+    "output_price_per_1M": 4.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/anthropic/claude-3.7-sonnet:thinking": {
+    "context_length": 200000,
+    "input_price_per_1M": 3.0,
+    "output_price_per_1M": 15.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/anthropic/claude-fable-5": {
+    "context_length": 1000000,
+    "input_price_per_1M": 10.0,
+    "output_price_per_1M": 50.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/anthropic/claude-haiku-4.5": {
+    "context_length": 200000,
+    "input_price_per_1M": 1.0,
+    "output_price_per_1M": 5.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/anthropic/claude-opus-4": {
+    "context_length": 200000,
+    "input_price_per_1M": 15.0,
+    "output_price_per_1M": 75.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/anthropic/claude-opus-4.1": {
+    "context_length": 200000,
+    "input_price_per_1M": 15.0,
+    "output_price_per_1M": 75.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/anthropic/claude-opus-4.5": {
+    "context_length": 200000,
+    "input_price_per_1M": 5.0,
+    "output_price_per_1M": 25.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/anthropic/claude-opus-4.6": {
+    "context_length": 1000000,
+    "input_price_per_1M": 5.0,
+    "output_price_per_1M": 25.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/anthropic/claude-opus-4.6-fast": {
+    "context_length": 1000000,
+    "input_price_per_1M": 30.0,
+    "output_price_per_1M": 150.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/anthropic/claude-opus-4.7": {
+    "context_length": 1000000,
+    "input_price_per_1M": 5.0,
+    "output_price_per_1M": 25.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/anthropic/claude-opus-4.7-fast": {
+    "context_length": 1000000,
+    "input_price_per_1M": 30.0,
+    "output_price_per_1M": 150.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/anthropic/claude-opus-4.8": {
+    "context_length": 1000000,
+    "input_price_per_1M": 5.0,
+    "output_price_per_1M": 25.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/anthropic/claude-opus-4.8-fast": {
+    "context_length": 1000000,
+    "input_price_per_1M": 10.0,
+    "output_price_per_1M": 50.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/anthropic/claude-sonnet-4": {
+    "context_length": 1000000,
+    "input_price_per_1M": 3.0,
+    "output_price_per_1M": 15.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/anthropic/claude-sonnet-4.5": {
+    "context_length": 1000000,
+    "input_price_per_1M": 3.0,
+    "output_price_per_1M": 15.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/anthropic/claude-sonnet-4.6": {
+    "context_length": 1000000,
+    "input_price_per_1M": 3.0,
+    "output_price_per_1M": 15.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/arcee-ai/coder-large": {
+    "context_length": 32768,
+    "input_price_per_1M": 0.5,
+    "output_price_per_1M": 0.8,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/arcee-ai/trinity-large-thinking": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.22,
+    "output_price_per_1M": 0.85,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/arcee-ai/trinity-mini": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.045,
+    "output_price_per_1M": 0.15,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/arcee-ai/virtuoso-large": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.75,
+    "output_price_per_1M": 1.2,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/baidu/ernie-4.5-vl-424b-a47b": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.42,
+    "output_price_per_1M": 1.25,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/bytedance-seed/seed-1.6": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.25,
+    "output_price_per_1M": 2.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/bytedance-seed/seed-1.6-flash": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.075,
+    "output_price_per_1M": 0.3,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/bytedance-seed/seed-2.0-lite": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.25,
+    "output_price_per_1M": 2.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/bytedance-seed/seed-2.0-mini": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.1,
+    "output_price_per_1M": 0.4,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/bytedance/ui-tars-1.5-7b": {
+    "context_length": 128000,
+    "input_price_per_1M": 0.1,
+    "output_price_per_1M": 0.2,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/cohere/command-a": {
+    "context_length": 256000,
+    "input_price_per_1M": 2.5,
+    "output_price_per_1M": 10.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/cohere/command-r-08-2024": {
+    "context_length": 128000,
+    "input_price_per_1M": 0.15,
+    "output_price_per_1M": 0.6,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/cohere/command-r-plus-08-2024": {
+    "context_length": 128000,
+    "input_price_per_1M": 2.5,
+    "output_price_per_1M": 10.0,
+    "fc": false,
+    "emb": false,
+    "gen": false
+  },
+  "openrouter/cohere/command-r7b-12-2024": {
+    "context_length": 128000,
+    "input_price_per_1M": 0.04,
+    "output_price_per_1M": 0.15,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/deepcogito/cogito-v2.1-671b": {
+    "context_length": 128000,
+    "input_price_per_1M": 1.25,
+    "output_price_per_1M": 1.25,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/deepseek/deepseek-chat": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.2,
+    "output_price_per_1M": 0.8,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/deepseek/deepseek-chat-v3-0324": {
+    "context_length": 163840,
+    "input_price_per_1M": 0.2,
+    "output_price_per_1M": 0.77,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/deepseek/deepseek-chat-v3.1": {
+    "context_length": 163840,
+    "input_price_per_1M": 0.21,
+    "output_price_per_1M": 0.79,
+    "fc": false,
+    "emb": false,
+    "gen": false
+  },
+  "openrouter/deepseek/deepseek-r1": {
+    "context_length": 163840,
+    "input_price_per_1M": 0.7,
+    "output_price_per_1M": 2.5,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/deepseek/deepseek-r1-0528": {
+    "context_length": 163840,
+    "input_price_per_1M": 0.5,
+    "output_price_per_1M": 2.15,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/deepseek/deepseek-r1-distill-llama-70b": {
+    "context_length": 128000,
+    "input_price_per_1M": 0.8,
+    "output_price_per_1M": 0.8,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/deepseek/deepseek-v3.1-terminus": {
+    "context_length": 163840,
+    "input_price_per_1M": 0.27,
+    "output_price_per_1M": 0.95,
+    "fc": false,
+    "emb": false,
+    "gen": false
+  },
+  "openrouter/deepseek/deepseek-v3.2": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.229,
+    "output_price_per_1M": 0.343,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/deepseek/deepseek-v3.2-exp": {
+    "context_length": 163840,
+    "input_price_per_1M": 0.27,
+    "output_price_per_1M": 0.41,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/deepseek/deepseek-v4-flash": {
+    "context_length": 1048576,
+    "input_price_per_1M": 0.09,
+    "output_price_per_1M": 0.18,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/deepseek/deepseek-v4-pro": {
+    "context_length": 1048576,
+    "input_price_per_1M": 0.435,
+    "output_price_per_1M": 0.87,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/essentialai/rnj-1-instruct": {
+    "context_length": 32768,
+    "input_price_per_1M": 0.15,
+    "output_price_per_1M": 0.15,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/google/gemini-2.5-flash": {
+    "context_length": 1048576,
+    "input_price_per_1M": 0.3,
+    "output_price_per_1M": 2.5,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/google/gemini-2.5-flash-image": {
+    "context_length": 32768,
+    "input_price_per_1M": 0.3,
+    "output_price_per_1M": 2.5,
+    "fc": false,
+    "emb": false,
+    "gen": false
+  },
+  "openrouter/google/gemini-2.5-flash-lite": {
+    "context_length": 1048576,
+    "input_price_per_1M": 0.1,
+    "output_price_per_1M": 0.4,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/google/gemini-2.5-flash-lite-preview-09-2025": {
+    "context_length": 1048576,
+    "input_price_per_1M": 0.1,
+    "output_price_per_1M": 0.4,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/google/gemini-2.5-pro": {
+    "context_length": 1048576,
+    "input_price_per_1M": 1.25,
+    "output_price_per_1M": 10.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/google/gemini-2.5-pro-preview": {
+    "context_length": 1048576,
+    "input_price_per_1M": 1.25,
+    "output_price_per_1M": 10.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/google/gemini-2.5-pro-preview-05-06": {
+    "context_length": 1048576,
+    "input_price_per_1M": 1.25,
+    "output_price_per_1M": 10.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/google/gemini-3-flash-preview": {
+    "context_length": 1048576,
+    "input_price_per_1M": 0.5,
+    "output_price_per_1M": 3.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/google/gemini-3-pro-image": {
+    "context_length": 65536,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 12.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/google/gemini-3-pro-image-preview": {
+    "context_length": 65536,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 12.0,
+    "fc": false,
+    "emb": false,
+    "gen": false
+  },
+  "openrouter/google/gemini-3.1-flash-image": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.5,
+    "output_price_per_1M": 3.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/google/gemini-3.1-flash-image-preview": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.5,
+    "output_price_per_1M": 3.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/google/gemini-3.1-flash-lite": {
+    "context_length": 1048576,
+    "input_price_per_1M": 0.25,
+    "output_price_per_1M": 1.5,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/google/gemini-3.1-flash-lite-preview": {
+    "context_length": 1048576,
+    "input_price_per_1M": 0.25,
+    "output_price_per_1M": 1.5,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/google/gemini-3.1-pro-preview": {
+    "context_length": 1048576,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 12.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/google/gemini-3.1-pro-preview-customtools": {
+    "context_length": 1048756,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 12.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/google/gemini-3.5-flash": {
+    "context_length": 1048576,
+    "input_price_per_1M": 1.5,
+    "output_price_per_1M": 9.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/google/gemma-2-27b-it": {
+    "context_length": 8192,
+    "input_price_per_1M": 0.65,
+    "output_price_per_1M": 0.65,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/google/gemma-3-12b-it": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.05,
+    "output_price_per_1M": 0.15,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/google/gemma-3-27b-it": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.08,
+    "output_price_per_1M": 0.16,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/google/gemma-3-4b-it": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.05,
+    "output_price_per_1M": 0.1,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/google/gemma-3n-e4b-it": {
+    "context_length": 32768,
+    "input_price_per_1M": 0.06,
+    "output_price_per_1M": 0.12,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/google/gemma-4-26b-a4b-it": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.06,
+    "output_price_per_1M": 0.33,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/google/gemma-4-31b-it": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.12,
+    "output_price_per_1M": 0.35,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/google/lyria-3-clip-preview": {
+    "context_length": 1048576,
+    "input_price_per_1M": 0.0,
+    "output_price_per_1M": 0.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/google/lyria-3-pro-preview": {
+    "context_length": 1048576,
+    "input_price_per_1M": 0.0,
+    "output_price_per_1M": 0.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/gryphe/mythomax-l2-13b": {
+    "context_length": 4096,
+    "input_price_per_1M": 0.06,
+    "output_price_per_1M": 0.06,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/ibm-granite/granite-4.0-h-micro": {
+    "context_length": 131000,
+    "input_price_per_1M": 0.02,
+    "output_price_per_1M": 0.11,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/ibm-granite/granite-4.1-8b": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.05,
+    "output_price_per_1M": 0.1,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/inception/mercury-2": {
+    "context_length": 128000,
+    "input_price_per_1M": 0.25,
+    "output_price_per_1M": 0.75,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/inclusionai/ling-2.6-1t": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.075,
+    "output_price_per_1M": 0.625,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/inclusionai/ling-2.6-flash": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.01,
+    "output_price_per_1M": 0.03,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/inclusionai/ring-2.6-1t": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.075,
+    "output_price_per_1M": 0.625,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/inflection/inflection-3-pi": {
+    "context_length": 8000,
+    "input_price_per_1M": 2.5,
+    "output_price_per_1M": 10.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/inflection/inflection-3-productivity": {
+    "context_length": 8000,
+    "input_price_per_1M": 2.5,
+    "output_price_per_1M": 10.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/kwaipilot/kat-coder-pro-v2": {
+    "context_length": 256000,
+    "input_price_per_1M": 0.3,
+    "output_price_per_1M": 1.2,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/liquid/lfm-2-24b-a2b": {
+    "context_length": 128000,
+    "input_price_per_1M": 0.03,
+    "output_price_per_1M": 0.12,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/mancer/weaver": {
+    "context_length": 8000,
+    "input_price_per_1M": 0.75,
+    "output_price_per_1M": 1.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/meta-llama/llama-3-8b-instruct": {
+    "context_length": 8192,
+    "input_price_per_1M": 0.14,
+    "output_price_per_1M": 0.14,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/meta-llama/llama-3.1-70b-instruct": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.4,
+    "output_price_per_1M": 0.4,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/meta-llama/llama-3.1-8b-instruct": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.02,
+    "output_price_per_1M": 0.03,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/meta-llama/llama-3.2-11b-vision-instruct": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.345,
+    "output_price_per_1M": 0.345,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/meta-llama/llama-3.2-1b-instruct": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.03,
+    "output_price_per_1M": 0.2,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/meta-llama/llama-3.2-3b-instruct": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.051,
+    "output_price_per_1M": 0.335,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/meta-llama/llama-3.3-70b-instruct": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.1,
+    "output_price_per_1M": 0.32,
+    "fc": false,
+    "emb": false,
+    "gen": false
+  },
+  "openrouter/meta-llama/llama-4-maverick": {
+    "context_length": 1048576,
+    "input_price_per_1M": 0.15,
+    "output_price_per_1M": 0.6,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/meta-llama/llama-4-scout": {
+    "context_length": 10000000,
+    "input_price_per_1M": 0.1,
+    "output_price_per_1M": 0.3,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/meta-llama/llama-guard-4-12b": {
+    "context_length": 163840,
+    "input_price_per_1M": 0.18,
+    "output_price_per_1M": 0.18,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/microsoft/phi-4": {
+    "context_length": 16384,
+    "input_price_per_1M": 0.065,
+    "output_price_per_1M": 0.14,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/microsoft/phi-4-mini-instruct": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.08,
+    "output_price_per_1M": 0.35,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/microsoft/wizardlm-2-8x22b": {
+    "context_length": 65536,
+    "input_price_per_1M": 0.62,
+    "output_price_per_1M": 0.62,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/minimax/minimax-01": {
+    "context_length": 1000192,
+    "input_price_per_1M": 0.2,
+    "output_price_per_1M": 1.1,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/minimax/minimax-m1": {
+    "context_length": 1000000,
+    "input_price_per_1M": 0.4,
+    "output_price_per_1M": 2.2,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/minimax/minimax-m2": {
+    "context_length": 204800,
+    "input_price_per_1M": 0.255,
+    "output_price_per_1M": 1.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/minimax/minimax-m2-her": {
+    "context_length": 65536,
+    "input_price_per_1M": 0.3,
+    "output_price_per_1M": 1.2,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/minimax/minimax-m2.1": {
+    "context_length": 204800,
+    "input_price_per_1M": 0.29,
+    "output_price_per_1M": 0.95,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/minimax/minimax-m2.5": {
+    "context_length": 204800,
+    "input_price_per_1M": 0.15,
+    "output_price_per_1M": 0.9,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/minimax/minimax-m2.7": {
+    "context_length": 204800,
+    "input_price_per_1M": 0.25,
+    "output_price_per_1M": 1.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/minimax/minimax-m3": {
+    "context_length": 1048576,
+    "input_price_per_1M": 0.3,
+    "output_price_per_1M": 1.2,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/mistralai/codestral-2508": {
+    "context_length": 256000,
+    "input_price_per_1M": 0.3,
+    "output_price_per_1M": 0.9,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/mistralai/devstral-2512": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.4,
+    "output_price_per_1M": 2.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/mistralai/ministral-14b-2512": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.2,
+    "output_price_per_1M": 0.2,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/mistralai/ministral-3b-2512": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.1,
+    "output_price_per_1M": 0.1,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/mistralai/ministral-8b-2512": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.15,
+    "output_price_per_1M": 0.15,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/mistralai/mistral-large": {
+    "context_length": 128000,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 6.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/mistralai/mistral-large-2407": {
+    "context_length": 131072,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 6.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/mistralai/mistral-large-2512": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.5,
+    "output_price_per_1M": 1.5,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/mistralai/mistral-medium-3": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.4,
+    "output_price_per_1M": 2.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/mistralai/mistral-medium-3-5": {
+    "context_length": 262144,
+    "input_price_per_1M": 1.5,
+    "output_price_per_1M": 7.5,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/mistralai/mistral-medium-3.1": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.4,
+    "output_price_per_1M": 2.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/mistralai/mistral-nemo": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.02,
+    "output_price_per_1M": 0.03,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/mistralai/mistral-saba": {
+    "context_length": 32768,
+    "input_price_per_1M": 0.2,
+    "output_price_per_1M": 0.6,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/mistralai/mistral-small-24b-instruct-2501": {
+    "context_length": 32768,
+    "input_price_per_1M": 0.05,
+    "output_price_per_1M": 0.08,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/mistralai/mistral-small-2603": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.15,
+    "output_price_per_1M": 0.6,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/mistralai/mistral-small-3.1-24b-instruct": {
+    "context_length": 128000,
+    "input_price_per_1M": 0.35,
+    "output_price_per_1M": 0.555,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/mistralai/mistral-small-3.2-24b-instruct": {
+    "context_length": 128000,
+    "input_price_per_1M": 0.075,
+    "output_price_per_1M": 0.2,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/mistralai/mixtral-8x22b-instruct": {
+    "context_length": 65536,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 6.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/mistralai/voxtral-small-24b-2507": {
+    "context_length": 32000,
+    "input_price_per_1M": 0.1,
+    "output_price_per_1M": 0.3,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/moonshotai/kimi-k2": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.57,
+    "output_price_per_1M": 2.3,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/moonshotai/kimi-k2-0905": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.6,
+    "output_price_per_1M": 2.5,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/moonshotai/kimi-k2-thinking": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.6,
+    "output_price_per_1M": 2.5,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/moonshotai/kimi-k2.5": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.375,
+    "output_price_per_1M": 2.025,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/moonshotai/kimi-k2.6": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.67,
+    "output_price_per_1M": 3.5,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/moonshotai/kimi-k2.7-code": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.74,
+    "output_price_per_1M": 3.5,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/morph/morph-v3-fast": {
+    "context_length": 81920,
+    "input_price_per_1M": 0.8,
+    "output_price_per_1M": 1.2,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/morph/morph-v3-large": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.9,
+    "output_price_per_1M": 1.9,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/nousresearch/hermes-3-llama-3.1-405b": {
+    "context_length": 131072,
+    "input_price_per_1M": 1.0,
+    "output_price_per_1M": 1.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/nousresearch/hermes-3-llama-3.1-70b": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.7,
+    "output_price_per_1M": 0.7,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/nousresearch/hermes-4-405b": {
+    "context_length": 131072,
+    "input_price_per_1M": 1.0,
+    "output_price_per_1M": 3.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/nousresearch/hermes-4-70b": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.13,
+    "output_price_per_1M": 0.4,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/nvidia/llama-3.3-nemotron-super-49b-v1.5": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.4,
+    "output_price_per_1M": 0.4,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/nvidia/nemotron-3-nano-30b-a3b": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.05,
+    "output_price_per_1M": 0.2,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/nvidia/nemotron-3-super-120b-a12b": {
+    "context_length": 1000000,
+    "input_price_per_1M": 0.09,
+    "output_price_per_1M": 0.45,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/nvidia/nemotron-3-ultra-550b-a55b": {
+    "context_length": 1000000,
+    "input_price_per_1M": 0.5,
+    "output_price_per_1M": 2.2,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/openai/gpt-3.5-turbo": {
+    "context_length": 16385,
+    "input_price_per_1M": 0.5,
+    "output_price_per_1M": 1.5,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/openai/gpt-3.5-turbo-0613": {
+    "context_length": 4095,
+    "input_price_per_1M": 1.0,
+    "output_price_per_1M": 2.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/openai/gpt-3.5-turbo-16k": {
+    "context_length": 16385,
+    "input_price_per_1M": 3.0,
+    "output_price_per_1M": 4.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/openai/gpt-3.5-turbo-instruct": {
+    "context_length": 4095,
+    "input_price_per_1M": 1.5,
+    "output_price_per_1M": 2.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/openai/gpt-4": {
+    "context_length": 8191,
+    "input_price_per_1M": 30.0,
+    "output_price_per_1M": 60.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/openai/gpt-4-turbo": {
+    "context_length": 128000,
+    "input_price_per_1M": 10.0,
+    "output_price_per_1M": 30.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/openai/gpt-4-turbo-preview": {
+    "context_length": 128000,
+    "input_price_per_1M": 10.0,
+    "output_price_per_1M": 30.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/openai/gpt-4.1": {
+    "context_length": 1047576,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 8.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/openai/gpt-4.1-mini": {
+    "context_length": 1047576,
+    "input_price_per_1M": 0.4,
+    "output_price_per_1M": 1.6,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/openai/gpt-4.1-nano": {
+    "context_length": 1047576,
+    "input_price_per_1M": 0.1,
+    "output_price_per_1M": 0.4,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/openai/gpt-4o": {
+    "context_length": 128000,
+    "input_price_per_1M": 2.5,
+    "output_price_per_1M": 10.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/openai/gpt-4o-2024-05-13": {
+    "context_length": 128000,
+    "input_price_per_1M": 5.0,
+    "output_price_per_1M": 15.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/openai/gpt-4o-2024-08-06": {
+    "context_length": 128000,
+    "input_price_per_1M": 2.5,
+    "output_price_per_1M": 10.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/openai/gpt-4o-2024-11-20": {
+    "context_length": 128000,
+    "input_price_per_1M": 2.5,
+    "output_price_per_1M": 10.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/openai/gpt-4o-mini": {
+    "context_length": 128000,
+    "input_price_per_1M": 0.15,
+    "output_price_per_1M": 0.6,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/openai/gpt-4o-mini-2024-07-18": {
+    "context_length": 128000,
+    "input_price_per_1M": 0.15,
+    "output_price_per_1M": 0.6,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/openai/gpt-4o-mini-search-preview": {
+    "context_length": 128000,
+    "input_price_per_1M": 0.15,
+    "output_price_per_1M": 0.6,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/openai/gpt-4o-search-preview": {
+    "context_length": 128000,
+    "input_price_per_1M": 2.5,
+    "output_price_per_1M": 10.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/openai/gpt-4o:extended": {
+    "context_length": 128000,
+    "input_price_per_1M": 6.0,
+    "output_price_per_1M": 18.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/openai/gpt-5": {
+    "context_length": 400000,
+    "input_price_per_1M": 1.25,
+    "output_price_per_1M": 10.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/openai/gpt-5-chat": {
+    "context_length": 128000,
+    "input_price_per_1M": 1.25,
+    "output_price_per_1M": 10.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/openai/gpt-5-image": {
+    "context_length": 400000,
+    "input_price_per_1M": 10.0,
+    "output_price_per_1M": 10.0,
+    "fc": false,
+    "emb": false,
+    "gen": false
+  },
+  "openrouter/openai/gpt-5-image-mini": {
+    "context_length": 400000,
+    "input_price_per_1M": 2.5,
+    "output_price_per_1M": 2.0,
+    "fc": false,
+    "emb": false,
+    "gen": false
+  },
+  "openrouter/openai/gpt-5-mini": {
+    "context_length": 400000,
+    "input_price_per_1M": 0.25,
+    "output_price_per_1M": 2.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/openai/gpt-5-nano": {
+    "context_length": 400000,
+    "input_price_per_1M": 0.05,
+    "output_price_per_1M": 0.4,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/openai/gpt-5.1": {
+    "context_length": 400000,
+    "input_price_per_1M": 1.25,
+    "output_price_per_1M": 10.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/openai/gpt-5.1-chat": {
+    "context_length": 128000,
+    "input_price_per_1M": 1.25,
+    "output_price_per_1M": 10.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/openai/gpt-5.2": {
+    "context_length": 400000,
+    "input_price_per_1M": 1.75,
+    "output_price_per_1M": 14.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/openai/gpt-5.2-chat": {
+    "context_length": 128000,
+    "input_price_per_1M": 1.75,
+    "output_price_per_1M": 14.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/openai/gpt-5.3-chat": {
+    "context_length": 128000,
+    "input_price_per_1M": 1.75,
+    "output_price_per_1M": 14.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/openai/gpt-5.4": {
+    "context_length": 1050000,
+    "input_price_per_1M": 2.5,
+    "output_price_per_1M": 15.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/openai/gpt-5.4-image-2": {
+    "context_length": 272000,
+    "input_price_per_1M": 8.0,
+    "output_price_per_1M": 15.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/openai/gpt-5.4-mini": {
+    "context_length": 400000,
+    "input_price_per_1M": 0.75,
+    "output_price_per_1M": 4.5,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/openai/gpt-5.4-nano": {
+    "context_length": 400000,
+    "input_price_per_1M": 0.2,
+    "output_price_per_1M": 1.25,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/openai/gpt-5.5": {
+    "context_length": 1050000,
+    "input_price_per_1M": 5.0,
+    "output_price_per_1M": 30.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "thinking": "xhigh"
+  },
+  "openrouter/openai/gpt-audio": {
+    "context_length": 128000,
+    "input_price_per_1M": 2.5,
+    "output_price_per_1M": 10.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/openai/gpt-audio-mini": {
+    "context_length": 128000,
+    "input_price_per_1M": 0.6,
+    "output_price_per_1M": 2.4,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/openai/gpt-chat-latest": {
+    "context_length": 400000,
+    "input_price_per_1M": 5.0,
+    "output_price_per_1M": 30.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/openai/gpt-oss-120b": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.039,
+    "output_price_per_1M": 0.18,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/openai/gpt-oss-20b": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.03,
+    "output_price_per_1M": 0.14,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/openai/gpt-oss-safeguard-20b": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.075,
+    "output_price_per_1M": 0.3,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/openai/o1": {
+    "context_length": 200000,
+    "input_price_per_1M": 15.0,
+    "output_price_per_1M": 60.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/openai/o3": {
+    "context_length": 200000,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 8.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/openai/o3-deep-research": {
+    "context_length": 200000,
+    "input_price_per_1M": 10.0,
+    "output_price_per_1M": 40.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/openai/o3-mini": {
+    "context_length": 200000,
+    "input_price_per_1M": 1.1,
+    "output_price_per_1M": 4.4,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/openai/o3-mini-high": {
+    "context_length": 200000,
+    "input_price_per_1M": 1.1,
+    "output_price_per_1M": 4.4,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/openai/o4-mini": {
+    "context_length": 200000,
+    "input_price_per_1M": 1.1,
+    "output_price_per_1M": 4.4,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/openai/o4-mini-deep-research": {
+    "context_length": 200000,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 8.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/openai/o4-mini-high": {
+    "context_length": 200000,
+    "input_price_per_1M": 1.1,
+    "output_price_per_1M": 4.4,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/perceptron/perceptron-mk1": {
+    "context_length": 32768,
+    "input_price_per_1M": 0.15,
+    "output_price_per_1M": 1.5,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/perplexity/sonar": {
+    "context_length": 127072,
+    "input_price_per_1M": 1.0,
+    "output_price_per_1M": 1.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/perplexity/sonar-deep-research": {
+    "context_length": 128000,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 8.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/perplexity/sonar-pro": {
+    "context_length": 200000,
+    "input_price_per_1M": 3.0,
+    "output_price_per_1M": 15.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/perplexity/sonar-pro-search": {
+    "context_length": 200000,
+    "input_price_per_1M": 3.0,
+    "output_price_per_1M": 15.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/perplexity/sonar-reasoning-pro": {
+    "context_length": 128000,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 8.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/poolside/laguna-m.1": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.2,
+    "output_price_per_1M": 0.4,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/poolside/laguna-xs.2": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.1,
+    "output_price_per_1M": 0.2,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/prime-intellect/intellect-3": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.2,
+    "output_price_per_1M": 1.1,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/qwen/qwen-2.5-72b-instruct": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.36,
+    "output_price_per_1M": 0.4,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/qwen/qwen-2.5-7b-instruct": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.04,
+    "output_price_per_1M": 0.1,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/qwen/qwen-2.5-coder-32b-instruct": {
+    "context_length": 128000,
+    "input_price_per_1M": 0.66,
+    "output_price_per_1M": 1.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/qwen/qwen-plus": {
+    "context_length": 1000000,
+    "input_price_per_1M": 0.26,
+    "output_price_per_1M": 0.78,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/qwen/qwen-plus-2025-07-28": {
+    "context_length": 1000000,
+    "input_price_per_1M": 0.26,
+    "output_price_per_1M": 0.78,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/qwen/qwen-plus-2025-07-28:thinking": {
+    "context_length": 1000000,
+    "input_price_per_1M": 0.4,
+    "output_price_per_1M": 4.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/qwen/qwen2.5-vl-72b-instruct": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.8,
+    "output_price_per_1M": 1.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/qwen/qwen3-14b": {
+    "context_length": 131702,
+    "input_price_per_1M": 0.1,
+    "output_price_per_1M": 0.24,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/qwen/qwen3-235b-a22b": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.455,
+    "output_price_per_1M": 1.82,
+    "fc": false,
+    "emb": false,
+    "gen": false
+  },
+  "openrouter/qwen/qwen3-235b-a22b-2507": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.09,
+    "output_price_per_1M": 0.1,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/qwen/qwen3-235b-a22b-thinking-2507": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.1,
+    "output_price_per_1M": 0.1,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/qwen/qwen3-30b-a3b": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.12,
+    "output_price_per_1M": 0.5,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/qwen/qwen3-30b-a3b-instruct-2507": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.048,
+    "output_price_per_1M": 0.193,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/qwen/qwen3-30b-a3b-thinking-2507": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.08,
+    "output_price_per_1M": 0.4,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/qwen/qwen3-32b": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.08,
+    "output_price_per_1M": 0.28,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/qwen/qwen3-8b": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.05,
+    "output_price_per_1M": 0.4,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/qwen/qwen3-coder": {
+    "context_length": 1048576,
+    "input_price_per_1M": 0.22,
+    "output_price_per_1M": 1.8,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/qwen/qwen3-coder-30b-a3b-instruct": {
+    "context_length": 160000,
+    "input_price_per_1M": 0.07,
+    "output_price_per_1M": 0.27,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/qwen/qwen3-coder-flash": {
+    "context_length": 1000000,
+    "input_price_per_1M": 0.195,
+    "output_price_per_1M": 0.975,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/qwen/qwen3-coder-next": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.11,
+    "output_price_per_1M": 0.8,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/qwen/qwen3-coder-plus": {
+    "context_length": 1000000,
+    "input_price_per_1M": 0.65,
+    "output_price_per_1M": 3.25,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/qwen/qwen3-max": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.78,
+    "output_price_per_1M": 3.9,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/qwen/qwen3-max-thinking": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.78,
+    "output_price_per_1M": 3.9,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/qwen/qwen3-next-80b-a3b-instruct": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.09,
+    "output_price_per_1M": 1.1,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/qwen/qwen3-next-80b-a3b-thinking": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.098,
+    "output_price_per_1M": 0.78,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/qwen/qwen3-vl-235b-a22b-instruct": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.2,
+    "output_price_per_1M": 0.88,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/qwen/qwen3-vl-235b-a22b-thinking": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.26,
+    "output_price_per_1M": 2.6,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/qwen/qwen3-vl-30b-a3b-instruct": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.13,
+    "output_price_per_1M": 0.52,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/qwen/qwen3-vl-30b-a3b-thinking": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.13,
+    "output_price_per_1M": 1.56,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/qwen/qwen3-vl-32b-instruct": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.104,
+    "output_price_per_1M": 0.416,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/qwen/qwen3-vl-8b-instruct": {
+    "context_length": 256000,
+    "input_price_per_1M": 0.08,
+    "output_price_per_1M": 0.5,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/qwen/qwen3-vl-8b-thinking": {
+    "context_length": 256000,
+    "input_price_per_1M": 0.117,
+    "output_price_per_1M": 1.365,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/qwen/qwen3.5-122b-a10b": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.26,
+    "output_price_per_1M": 2.08,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/qwen/qwen3.5-27b": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.195,
+    "output_price_per_1M": 1.56,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/qwen/qwen3.5-35b-a3b": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.14,
+    "output_price_per_1M": 1.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/qwen/qwen3.5-397b-a17b": {
+    "context_length": 256000,
+    "input_price_per_1M": 0.385,
+    "output_price_per_1M": 2.45,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/qwen/qwen3.5-9b": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.1,
+    "output_price_per_1M": 0.15,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/qwen/qwen3.5-flash-02-23": {
+    "context_length": 1000000,
+    "input_price_per_1M": 0.065,
+    "output_price_per_1M": 0.26,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/qwen/qwen3.5-plus-02-15": {
+    "context_length": 1000000,
+    "input_price_per_1M": 0.26,
+    "output_price_per_1M": 1.56,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/qwen/qwen3.5-plus-20260420": {
+    "context_length": 1000000,
+    "input_price_per_1M": 0.3,
+    "output_price_per_1M": 1.8,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/qwen/qwen3.6-27b": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.29,
+    "output_price_per_1M": 3.17,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/qwen/qwen3.6-35b-a3b": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.14,
+    "output_price_per_1M": 1.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/qwen/qwen3.6-flash": {
+    "context_length": 1000000,
+    "input_price_per_1M": 0.188,
+    "output_price_per_1M": 1.125,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/qwen/qwen3.6-max-preview": {
+    "context_length": 262144,
+    "input_price_per_1M": 1.04,
+    "output_price_per_1M": 6.24,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/qwen/qwen3.6-plus": {
+    "context_length": 1000000,
+    "input_price_per_1M": 0.325,
+    "output_price_per_1M": 1.95,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/qwen/qwen3.7-max": {
+    "context_length": 1000000,
+    "input_price_per_1M": 1.25,
+    "output_price_per_1M": 3.75,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/qwen/qwen3.7-plus": {
+    "context_length": 1000000,
+    "input_price_per_1M": 0.32,
+    "output_price_per_1M": 1.28,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/rekaai/reka-edge": {
+    "context_length": 16384,
+    "input_price_per_1M": 0.1,
+    "output_price_per_1M": 0.1,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/rekaai/reka-flash-3": {
+    "context_length": 65536,
+    "input_price_per_1M": 0.1,
+    "output_price_per_1M": 0.2,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/relace/relace-apply-3": {
+    "context_length": 256000,
+    "input_price_per_1M": 0.85,
+    "output_price_per_1M": 1.25,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/relace/relace-search": {
+    "context_length": 256000,
+    "input_price_per_1M": 1.0,
+    "output_price_per_1M": 3.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/sao10k/l3-lunaris-8b": {
+    "context_length": 8192,
+    "input_price_per_1M": 0.04,
+    "output_price_per_1M": 0.05,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/sao10k/l3.1-70b-hanami-x1": {
+    "context_length": 16000,
+    "input_price_per_1M": 3.0,
+    "output_price_per_1M": 3.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/sao10k/l3.1-euryale-70b": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.85,
+    "output_price_per_1M": 0.85,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/sao10k/l3.3-euryale-70b": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.65,
+    "output_price_per_1M": 0.75,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/stepfun/step-3.5-flash": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.09,
+    "output_price_per_1M": 0.3,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/stepfun/step-3.7-flash": {
+    "context_length": 256000,
+    "input_price_per_1M": 0.2,
+    "output_price_per_1M": 1.15,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/switchpoint/router": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.85,
+    "output_price_per_1M": 3.4,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/tencent/hunyuan-a13b-instruct": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.14,
+    "output_price_per_1M": 0.57,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/tencent/hy3-preview": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.066,
+    "output_price_per_1M": 0.26,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/thedrummer/cydonia-24b-v4.1": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.3,
+    "output_price_per_1M": 0.5,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/thedrummer/rocinante-12b": {
+    "context_length": 32768,
+    "input_price_per_1M": 0.17,
+    "output_price_per_1M": 0.43,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/thedrummer/skyfall-36b-v2": {
+    "context_length": 32768,
+    "input_price_per_1M": 0.55,
+    "output_price_per_1M": 0.8,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/thedrummer/unslopnemo-12b": {
+    "context_length": 32768,
+    "input_price_per_1M": 0.4,
+    "output_price_per_1M": 0.4,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/undi95/remm-slerp-l2-13b": {
+    "context_length": 6144,
+    "input_price_per_1M": 0.45,
+    "output_price_per_1M": 0.65,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/upstage/solar-pro-3": {
+    "context_length": 128000,
+    "input_price_per_1M": 0.15,
+    "output_price_per_1M": 0.6,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/writer/palmyra-x5": {
+    "context_length": 1040000,
+    "input_price_per_1M": 0.6,
+    "output_price_per_1M": 6.0,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/x-ai/grok-4.20": {
+    "context_length": 2000000,
+    "input_price_per_1M": 1.25,
+    "output_price_per_1M": 2.5,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/x-ai/grok-4.20-multi-agent": {
+    "context_length": 2000000,
+    "input_price_per_1M": 1.25,
+    "output_price_per_1M": 2.5,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/x-ai/grok-4.3": {
+    "context_length": 1000000,
+    "input_price_per_1M": 1.25,
+    "output_price_per_1M": 2.5,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/x-ai/grok-build-0.1": {
+    "context_length": 256000,
+    "input_price_per_1M": 1.0,
+    "output_price_per_1M": 2.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/xiaomi/mimo-v2.5": {
+    "context_length": 1048576,
+    "input_price_per_1M": 0.14,
+    "output_price_per_1M": 0.28,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/xiaomi/mimo-v2.5-pro": {
+    "context_length": 1048576,
+    "input_price_per_1M": 0.435,
+    "output_price_per_1M": 0.87,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/z-ai/glm-4.5": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.6,
+    "output_price_per_1M": 2.2,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/z-ai/glm-4.5-air": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.13,
+    "output_price_per_1M": 0.85,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/z-ai/glm-4.5v": {
+    "context_length": 65536,
+    "input_price_per_1M": 0.6,
+    "output_price_per_1M": 1.8,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/z-ai/glm-4.6": {
+    "context_length": 202752,
+    "input_price_per_1M": 0.43,
+    "output_price_per_1M": 1.74,
+    "fc": false,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/z-ai/glm-4.6v": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.3,
+    "output_price_per_1M": 0.9,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/z-ai/glm-4.7": {
+    "context_length": 202752,
+    "input_price_per_1M": 0.4,
+    "output_price_per_1M": 1.75,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/z-ai/glm-4.7-flash": {
+    "context_length": 202752,
+    "input_price_per_1M": 0.06,
+    "output_price_per_1M": 0.4,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/z-ai/glm-5": {
+    "context_length": 202752,
+    "input_price_per_1M": 0.6,
+    "output_price_per_1M": 1.92,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/z-ai/glm-5-turbo": {
+    "context_length": 262144,
+    "input_price_per_1M": 1.2,
+    "output_price_per_1M": 4.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/z-ai/glm-5.1": {
+    "context_length": 202752,
+    "input_price_per_1M": 0.98,
+    "output_price_per_1M": 3.08,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/z-ai/glm-5.2": {
+    "context_length": 1048576,
+    "input_price_per_1M": 1.2,
+    "output_price_per_1M": 4.1,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/~anthropic/claude-fable-latest": {
+    "context_length": 1000000,
+    "input_price_per_1M": 10.0,
+    "output_price_per_1M": 50.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/~anthropic/claude-haiku-latest": {
+    "context_length": 200000,
+    "input_price_per_1M": 1.0,
+    "output_price_per_1M": 5.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/~anthropic/claude-opus-latest": {
+    "context_length": 1000000,
+    "input_price_per_1M": 5.0,
+    "output_price_per_1M": 25.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/~anthropic/claude-sonnet-latest": {
+    "context_length": 1000000,
+    "input_price_per_1M": 3.0,
+    "output_price_per_1M": 15.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/~google/gemini-flash-latest": {
+    "context_length": 1048576,
+    "input_price_per_1M": 1.5,
+    "output_price_per_1M": 9.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/~google/gemini-pro-latest": {
+    "context_length": 1048576,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 12.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/~moonshotai/kimi-latest": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.67,
+    "output_price_per_1M": 3.5,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "openrouter/~openai/gpt-latest": {
+    "context_length": 1050000,
+    "input_price_per_1M": 5.0,
+    "output_price_per_1M": 30.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "thinking": "xhigh"
+  },
+  "openrouter/~openai/gpt-mini-latest": {
+    "context_length": 400000,
+    "input_price_per_1M": 0.75,
+    "output_price_per_1M": 4.5,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "text-embedding-3-large": {
+    "context_length": 8191,
+    "input_price_per_1M": 0.13,
+    "output_price_per_1M": 0.0,
+    "fc": false,
+    "emb": true,
+    "gen": false
+  },
+  "text-embedding-3-small": {
+    "context_length": 8191,
+    "input_price_per_1M": 0.02,
+    "output_price_per_1M": 0.0,
+    "fc": false,
+    "emb": true,
+    "gen": false
+  },
+  "text-embedding-ada-002": {
+    "context_length": 8191,
+    "input_price_per_1M": 0.1,
+    "output_price_per_1M": 0.0,
+    "fc": false,
+    "emb": true,
+    "gen": false
+  },
+  "zai-org/GLM-4.5-Air-FP8": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.2,
+    "output_price_per_1M": 1.1,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "zai-org/GLM-4.6": {
+    "context_length": 202752,
+    "input_price_per_1M": 0.6,
+    "output_price_per_1M": 2.2,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "zai-org/GLM-4.7": {
+    "context_length": 202752,
+    "input_price_per_1M": 0.45,
+    "output_price_per_1M": 2.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "zai-org/GLM-5": {
+    "context_length": 202752,
+    "input_price_per_1M": 1.0,
+    "output_price_per_1M": 3.2,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "zai-org/GLM-5.1": {
+    "context_length": 202752,
+    "input_price_per_1M": 1.4,
+    "output_price_per_1M": 4.4,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "zai-org/GLM-5.2": {
+    "context_length": 262144,
+    "input_price_per_1M": 1.4,
+    "output_price_per_1M": 4.4,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  }
+}
