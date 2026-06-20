@@ -5522,6 +5522,37 @@
         div.appendChild(workspace);
       }
 
+      // Meta row — task model name and the three persisted run
+      // flags rendered as a single dot-separated line directly
+      // below the workspace row (or immediately after the metrics
+      // row when no workspace is present).  Format:
+      //
+      //   <model> • <wt|no-wt> • <parallel|sequential>
+      //     • <auto-commit|manual-commit>
+      //
+      // Source fields come from the per-task ``extra`` JSON
+      // (``model``, ``is_worktree``, ``is_parallel``,
+      // ``auto_commit_mode``) persisted by
+      // ``_TaskRunnerMixin._run_task_inner``.  Legacy rows that
+      // pre-date the persistence change (no ``model`` field) get
+      // NO meta line at all — we never render a placeholder.
+      const modelName = typeof s.model === 'string' ? s.model : '';
+      if (modelName) {
+        const meta = document.createElement('span');
+        meta.className = 'running-item-meta';
+        const wtLabel = s.is_worktree ? 'wt' : 'no-wt';
+        const parLabel = s.is_parallel ? 'parallel' : 'sequential';
+        const acLabel = s.auto_commit_mode ? 'auto-commit' : 'manual-commit';
+        const metaText =
+          modelName + ' • ' + wtLabel + ' • ' + parLabel + ' • ' + acLabel;
+        meta.textContent = metaText;
+        // Native HTML tooltip — long model names can be clipped
+        // by overflow:hidden in the sidebar; ``title`` exposes the
+        // full text on hover.
+        meta.title = metaText;
+        div.appendChild(meta);
+      }
+
       div.addEventListener('click', () => {
         if (demoMode && typeof window._startDemoReplay === 'function') {
           closeSidebar();
