@@ -895,6 +895,62 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         return GitWorktreeOps.cleanup_orphans(Path(repo_root))
 
 
+# Flags that only make sense in interactive (daemon-client) mode:
+# they configure features the bare ``SorcarAgent`` used by the
+# non-interactive path does not implement.  Listed as the literal CLI
+# tokens (matched against ``sys.argv`` so the user's exact spelling
+# is reflected in the error).  ``main()`` consults this set after
+# parsing to fail fast when one of these flags is combined with
+# ``-t`` / ``-f``.  Argparse prefix abbreviations cannot evade this
+# table because :func:`_build_arg_parser` sets ``allow_abbrev=False``.
+_INTERACTIVE_ONLY_FLAGS: frozenset[str] = frozenset({
+    "--worktree", "--no-worktree",
+    "--auto-commit", "--no-auto-commit",
+    "-n", "--new",
+})
+
+
+def _reject_interactive_only_flags(argv: list[str]) -> None:
+    """Fail fast when a non-interactive run carries interactive-only flags.
+
+    The non-interactive (``-t`` / ``-f``) path now constructs a bare
+    :class:`SorcarAgent` and therefore cannot honour
+    ``--worktree`` / ``--no-worktree`` / ``--auto-commit`` /
+    ``--no-auto-commit`` / ``-n`` / ``--new``.  Silently accepting
+    them would, in the case of ``--worktree`` (the previous default),
+    let edits land in the user's working tree instead of the isolated
+    worktree branch the flag advertised — a destructive surprise.
+    This helper inspects the user's literal ``argv`` (so ``-n`` is
+    flagged just like ``--new``) and exits via ``sys.exit(2)`` (the
+    argparse convention) with a message naming every offending flag.
+
+    Argparse prefix abbreviations (e.g. ``--auto`` for
+    ``--auto-commit``) cannot bypass this guard because
+    :func:`_build_arg_parser` disables ``allow_abbrev``; the user
+    must spell the full flag, and the full spelling is in this set.
+
+    Args:
+        argv: The process argument list (typically ``sys.argv``).
+    """
+    bad: list[str] = []
+    seen: set[str] = set()
+    for token in argv[1:]:
+        if token in _INTERACTIVE_ONLY_FLAGS and token not in seen:
+            bad.append(token)
+            seen.add(token)
+    if not bad:
+        return
+    flag_list = ", ".join(bad)
+    msg = (
+        f"sorcar: error: {flag_list} cannot be combined with -t/--task "
+        "or -f/--file (non-interactive mode runs a bare SorcarAgent; "
+        "drop the flag, or run sorcar without -t/-f for the "
+        "interactive daemon-client mode which honours it)"
+    )
+    print(msg, file=sys.stderr)
+    sys.exit(2)
+
+
 def main() -> None:
     """Run the ``sorcar`` CLI.
 
@@ -904,15 +960,24 @@ def main() -> None:
       terminal client of the local ``sorcar web`` daemon — see
       :mod:`kiss.agents.sorcar.cli_client`.  The ``--worktree`` /
       ``--no-worktree`` / ``--parallel`` / ``--no-parallel`` /
-      ``--auto-commit`` / ``--no-auto-commit`` flags are forwarded
-      to the daemon so each task can still run on an isolated git
-      worktree, with parallel sub-agents and auto-commit.
+      ``--auto-commit`` / ``--no-auto-commit`` / ``-n/--new`` flags
+      are forwarded to the daemon so each task can still run on an
+      isolated git worktree, with parallel sub-agents, auto-commit
+      and chat-session control.
     * **Non-interactive** (``-t`` or ``-f`` supplied): runs a plain
       :class:`~kiss.agents.sorcar.sorcar_agent.SorcarAgent` once on
-      the supplied task and exits.  No chat persistence, no git
-      worktree isolation — those features were always tied to the
+      the supplied task and exits.  No git worktree isolation, no
+      chat-session control — those features were always tied to the
       removed ``-c/--chat-id`` / ``-l/--list-chat-id`` /
       ``--cleanup`` / ``--use-chat`` / ``--use-worktree`` flag set.
+      ``--worktree`` / ``--no-worktree`` / ``--auto-commit`` /
+      ``--no-auto-commit`` / ``-n/--new`` are interactive-only and
+      are rejected when combined with ``-t`` / ``-f``
+      (see :func:`_reject_interactive_only_flags`).  Display events
+      from the run are still streamed into the local chat DB via
+      :class:`RecordingConsolePrinter` so the run is replayable in
+      the chat webview; only the *chat session* surface (resume by
+      id, ``-n/--new``) is unavailable.
 
     ``sorcar mcp ...`` is dispatched to the MCP management subcommand
     (:mod:`kiss.agents.sorcar.mcp_cli`) before normal argument parsing.
@@ -927,6 +992,12 @@ def main() -> None:
     work_dir = args.work_dir or _launch_work_dir()
 
     interactive = args.task is None and args.file is None
+    if not interactive:
+        # Validate AFTER argparse (so ``-t``/``-f`` are decoded
+        # correctly) but BEFORE the agent is built / the LLM is
+        # contacted (so the user sees the error immediately and no
+        # budget is spent).
+        _reject_interactive_only_flags(sys.argv)
     run_kwargs = _build_run_kwargs(args)
 
     if interactive:
