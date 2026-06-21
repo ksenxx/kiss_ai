@@ -117,6 +117,7 @@ class TestWelcomeSuggestionsNotBroadcast(IsolatedAsyncioTestCase):
         # 1) Extension-side connection: registers with the broadcaster.
         ext_reader, ext_writer = await asyncio.open_unix_connection(
             str(self.uds_path),
+            limit=16 * 1024 * 1024,
         )
         try:
             ext_writer.write(
@@ -144,6 +145,7 @@ class TestWelcomeSuggestionsNotBroadcast(IsolatedAsyncioTestCase):
             #    a getWelcomeSuggestions command.
             web_reader, web_writer = await asyncio.open_unix_connection(
                 str(self.uds_path),
+                limit=16 * 1024 * 1024,
             )
             try:
                 web_writer.write(

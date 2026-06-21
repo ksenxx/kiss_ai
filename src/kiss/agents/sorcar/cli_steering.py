@@ -45,17 +45,20 @@ import select
 import signal
 import sys
 import threading
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
 from kiss.agents.sorcar.cli_panel import (
     _ESC,
     CYAN,
     DIM,
+    IDLE_TITLE,
     PROMPT_MARKER,
     RESET,
     STEER_TITLE,
     _term_size,
     body_cursor_col,
+    menu_row,
     panel_body,
     panel_bottom,
     panel_cols,
@@ -90,7 +93,7 @@ _PASTE_END = f"{_ESC}[201~"
 _PASTE_SEQ_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b.")
 
 
-def _box_top_row(rows: int) -> int:
+def _box_top_row(rows: int, box_h: int = _BOX_H) -> int:
     """Return the box's first screen row (1-based) for *rows* total rows.
 
     Clamped so a terminal shrunk below the box height never produces
@@ -99,11 +102,21 @@ def _box_top_row(rows: int) -> int:
 
     Args:
         rows: Total terminal rows.
+        box_h: Effective height of the box (including any menu rows
+            stacked above it when the in-place completion menu is
+            open).  Defaults to :data:`_BOX_H` (no menu).
 
     Returns:
         The 1-based row of the box's top border, always ``>= 1``.
     """
-    return max(rows - _BOX_H, 1) + 1
+    return max(rows - box_h, 1) + 1
+
+
+# Maximum number of in-place completion menu rows rendered above the
+# box.  When the candidate list exceeds this height the menu scrolls so
+# the selected candidate stays visible.  Capped further at runtime so
+# the menu + box never consume the whole terminal.
+_MENU_MAX_H = 8
 
 
 def _partial_suffix_len(text: str, seq: str) -> int:
@@ -245,6 +258,41 @@ class _InputBox:
         # by the SIGCONT handler after a suspend/resume cycle.
         self._raw_term: Any = None
         self._prev_sigcont: Any = None
+        # Persistent input history (oldest -> newest); Up/Down browse it.
+        # ``_hist_idx`` is ``None`` when not browsing; otherwise an index
+        # into ``history`` (or ``len(history)`` when at the saved draft).
+        self.history: list[str] = []
+        self._hist_idx: int | None = None
+        self._hist_saved: str = ""
+        # Tab-completion callback returning ranked replacement candidates
+        # for the current buffer.  Tab opens an in-place menu using
+        # the returned candidates; the menu state below tracks it.
+        self.completer_fn: Callable[[str], list[str]] | None = None
+        # In-place completion menu: when open, candidate rows are drawn
+        # above the box's top border, the scroll region shrinks by the
+        # menu's height so agent output cannot scroll over the menu,
+        # and Tab/arrows navigate the candidates instead of editing.
+        # ``_menu_items`` is the full ranked candidate list,
+        # ``_menu_sel`` is the highlighted index, and ``_menu_scroll``
+        # is the first visible item (so a long candidate list scrolls
+        # within the menu height cap).
+        self._menu_open = False
+        self._menu_items: list[str] = []
+        self._menu_sel = 0
+        self._menu_scroll = 0
+        # Effective menu height as last rendered.  A mismatch on the
+        # next draw means the scroll region must be re-anchored and
+        # the rows that newly became scroll-region rows must be
+        # cleared (otherwise stale menu glyphs linger inside the
+        # scroll region).
+        self._drawn_menu_h = 0
+        # Tiny ``(buf, candidates)`` cache used by
+        # :meth:`_refresh_typing_menu` to short-circuit repeat
+        # completer calls (auto-repeat, idempotent edits, etc.) so a
+        # slow ``completer_fn`` does not stall keystroke processing
+        # or block agent stdout writes contending for ``self.lock``.
+        self._last_completed_buf: str | None = None
+        self._last_completed_cands: list[str] = []
 
     def start(self) -> None:
         """Enter raw mode, reserve the scroll region and draw the box."""
@@ -274,7 +322,8 @@ class _InputBox:
             out = self._out
             # Push existing content up so the box does not overwrite it.
             out.write("\n" * _BOX_H)
-            # Scroll region = everything above the box.
+            # Scroll region = everything above the box (no menu open at
+            # start, so the effective box height is simply ``_BOX_H``).
             out.write(f"{_ESC}[1;{max(rows - _BOX_H, 1)}r")
             # Park the output cursor on the last region row and save that
             # position; agent output is later written by restoring to it
@@ -299,7 +348,12 @@ class _InputBox:
             return
         assert termios is not None
         rows, _ = _term_size()
-        top_row = _box_top_row(rows)
+        # Clear *all* rows the box (possibly including the in-place
+        # completion menu stacked above its top border) currently
+        # occupies, not just the three input-panel rows; otherwise a
+        # menu open at the moment ``stop`` is called would leak its
+        # rows under the returning idle prompt.
+        top_row = _box_top_row(rows, _BOX_H + self._menu_h())
         if self._prev_sigcont is not None:
             try:
                 signal.signal(signal.SIGCONT, self._prev_sigcont)
@@ -325,6 +379,12 @@ class _InputBox:
         if self._old_term is not None:
             termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old_term)
             self._old_term = None
+        # Drop completion-menu state so a later ``start()`` does not
+        # paint phantom menu rows or wrongly trip the "menu shrank"
+        # clear path in :meth:`_draw_locked` (which compares the next
+        # ``_menu_h()`` against ``_drawn_menu_h`` from this run).
+        self._reset_completion_state()
+        self._drawn_menu_h = 0
 
     def _on_sigcont(self, signum: int, frame: Any) -> None:
         """Restore the box after the process is resumed (``fg``).
@@ -359,22 +419,82 @@ class _InputBox:
             if self._active:
                 self._draw_locked()
 
+    def _menu_h(self) -> int:
+        """Return the current rendered height of the completion menu.
+
+        ``0`` when the menu is closed; otherwise the lesser of the
+        candidate count, :data:`_MENU_MAX_H`, and however many rows
+        can fit above the box without consuming the whole scroll
+        region (so at least one row of agent output is always
+        visible).
+
+        If the terminal is too small to fit even one menu row above
+        the box the menu is auto-dismissed (state reset to closed) —
+        otherwise the user would be interacting with an invisible
+        widget where arrows silently navigate and Enter silently
+        overwrites the edit buffer.
+        """
+        if not self._menu_open or not self._menu_items:
+            return 0
+        rows, _ = _term_size()
+        # Leave at least one scroll-region row above the menu so the
+        # last line of agent output stays visible.
+        room = max(rows - _BOX_H - 1, 0)
+        h = min(len(self._menu_items), _MENU_MAX_H, room)
+        if h == 0:
+            # No room to render the menu — collapse to closed so the
+            # next keypress (arrows / Enter) is not consumed by an
+            # invisible menu.
+            self._menu_open = False
+            self._menu_items = []
+            self._menu_sel = 0
+            self._menu_scroll = 0
+        return h
+
     def _draw_locked(self) -> None:
         rows, _ = _term_size()
         cols = panel_cols()
-        top_row = _box_top_row(rows)
+        menu_h = self._menu_h()
+        eff_box_h = _BOX_H + menu_h
+        top_row = _box_top_row(rows, eff_box_h)
         out = self._out
-        if rows != self._rows:
-            # The terminal was resized: re-anchor the scroll region and
-            # re-save the output cursor inside the new region so agent
-            # output cannot scroll over the relocated box.  Row values
-            # are clamped to >= 1 so a terminal shrunk below the box
-            # height never receives invalid control sequences.
-            out.write(f"{_ESC}[1;{max(rows - _BOX_H, 1)}r")
-            out.write(f"{_ESC}[{max(rows - _BOX_H, 1)};1H")
+        # Either the terminal was resized OR the menu opened/closed/
+        # changed height: in both cases the DECSTBM scroll region must
+        # be re-anchored to ``rows - eff_box_h`` so agent output cannot
+        # scroll over the menu or the box, and the saved output cursor
+        # must be re-parked inside the new region.  Row values are
+        # clamped to >= 1 so a terminal shrunk below the box height
+        # never receives invalid control sequences.
+        if rows != self._rows or menu_h != self._drawn_menu_h:
+            region_bottom = max(rows - eff_box_h, 1)
+            # When the menu shrinks (e.g. on close) the rows that were
+            # menu rows are now back in the scroll region; clear them
+            # so leftover candidate glyphs don't linger as ghost text
+            # at the bottom of the agent output area.
+            if self._drawn_menu_h:
+                # Use the previous terminal row count so that a resize
+                # which also shrinks the menu clears the menu rows at
+                # their OLD on-screen positions, not the post-resize
+                # positions (which would leave ghost glyphs behind).
+                prev_rows = self._rows or rows
+                prev_top = _box_top_row(
+                    prev_rows, _BOX_H + self._drawn_menu_h,
+                )
+                for r in range(prev_top, prev_top + self._drawn_menu_h):
+                    out.write(f"{_ESC}[{r};1H{_ESC}[2K")
+            out.write(f"{_ESC}[1;{region_bottom}r")
+            out.write(f"{_ESC}[{region_bottom};1H")
             out.write(f"{_ESC}7")
             self._rows = rows
+            self._drawn_menu_h = menu_h
 
+        # Draw the in-place completion menu rows (if open) right above
+        # the box's top border, sharing the same column layout so the
+        # menu visually extends the box upward.
+        if menu_h:
+            self._draw_menu_locked(top_row, cols, menu_h)
+
+        box_top = top_row + menu_h
         top = panel_top(self.title, cols)
         bottom = panel_bottom(self.status, cols)
         body, is_placeholder = panel_body(self.buf, cols)
@@ -390,11 +510,49 @@ class _InputBox:
         # saved *output* position (held by the ``ESC 7`` register and
         # restored by :class:`_StdoutProxy`).  After painting, the visible
         # caret is parked in the body so it blinks after the chevron.
-        out.write(f"{_ESC}[{top_row};1H{_ESC}[2K{CYAN}{top}{RESET}")
-        out.write(f"{_ESC}[{top_row + 1};1H{_ESC}[2K{CYAN}│{RESET}{mid_inner}{CYAN}│{RESET}")
-        out.write(f"{_ESC}[{top_row + 2};1H{_ESC}[2K{CYAN}{bottom}{RESET}")
+        out.write(f"{_ESC}[{box_top};1H{_ESC}[2K{CYAN}{top}{RESET}")
+        out.write(f"{_ESC}[{box_top + 1};1H{_ESC}[2K{CYAN}│{RESET}{mid_inner}{CYAN}│{RESET}")
+        out.write(f"{_ESC}[{box_top + 2};1H{_ESC}[2K{CYAN}{bottom}{RESET}")
         self._park_cursor_locked(rows, cols)
         out.flush()
+
+    def _draw_menu_locked(self, top_row: int, cols: int, menu_h: int) -> None:
+        """Render the in-place completion menu rows above the box.
+
+        Scrolls :attr:`_menu_items` so the highlighted :attr:`_menu_sel`
+        row stays inside the visible window of *menu_h* rows.  Each row
+        is written with an absolute cursor positioning sequence + a full
+        line-clear so a previously open longer menu cannot leak glyphs
+        onto the right edge.
+
+        Args:
+            top_row: 1-based screen row of the first menu line (which
+                doubles as the menu's top border row in the absolute
+                layout).
+            cols: Total panel width in columns.
+            menu_h: Number of menu rows to render (already capped by
+                :meth:`_menu_h`).
+        """
+        n = len(self._menu_items)
+        if self._menu_sel < self._menu_scroll:
+            self._menu_scroll = self._menu_sel
+        elif self._menu_sel >= self._menu_scroll + menu_h:
+            self._menu_scroll = self._menu_sel - menu_h + 1
+        if self._menu_scroll < 0:
+            self._menu_scroll = 0
+        if self._menu_scroll > max(n - menu_h, 0):
+            self._menu_scroll = max(n - menu_h, 0)
+        out = self._out
+        for vi in range(menu_h):
+            idx = self._menu_scroll + vi
+            row = top_row + vi
+            if idx >= n:
+                out.write(f"{_ESC}[{row};1H{_ESC}[2K")
+                continue
+            line = menu_row(
+                self._menu_items[idx], idx == self._menu_sel, cols,
+            )
+            out.write(f"{_ESC}[{row};1H{_ESC}[2K{line}")
 
     def _park_cursor_locked(
         self, rows: int | None = None, cols: int | None = None
@@ -414,9 +572,13 @@ class _InputBox:
             rows, _ = _term_size()
         if cols is None:
             cols = panel_cols()
-        top_row = _box_top_row(rows)
+        top_row = _box_top_row(rows, _BOX_H + self._menu_h())
+        # The body row sits one row below the panel's top border, which
+        # in turn sits ``_menu_h()`` rows below the menu's first row.
         col = body_cursor_col(self.buf, cols)
-        self._out.write(f"{_ESC}[{top_row + 1};{col}H")
+        self._out.write(
+            f"{_ESC}[{top_row + self._menu_h() + 1};{col}H"
+        )
 
     def _append_paste(self, chunk: str) -> bool:
         """Append bracketed-paste content to the edit buffer.
@@ -445,13 +607,201 @@ class _InputBox:
         self.buf += cleaned
         return True
 
-    def feed(self, data: bytes, on_submit: Any, on_abort: Any) -> None:
+    def _history_back(self) -> None:
+        """Step one entry backwards through :attr:`history`."""
+        if not self.history:
+            return
+        if self._hist_idx is None:
+            self._hist_saved = self.buf
+            self._hist_idx = len(self.history)
+        if self._hist_idx > 0:
+            self._hist_idx -= 1
+            self.buf = self.history[self._hist_idx]
+
+    def _history_forward(self) -> None:
+        """Step one entry forwards through :attr:`history` (or back to draft)."""
+        if self._hist_idx is None:
+            return
+        if self._hist_idx < len(self.history) - 1:
+            self._hist_idx += 1
+            self.buf = self.history[self._hist_idx]
+        else:
+            self._hist_idx = None
+            self.buf = self._hist_saved
+
+    def _reset_completion_state(self) -> None:
+        """Close the in-place completion menu and drop its state."""
+        with self.lock:
+            self._menu_open = False
+            self._menu_items = []
+            self._menu_sel = 0
+            self._menu_scroll = 0
+
+    def _open_completion_menu(self) -> bool:
+        """Pop the in-place completion menu using :attr:`completer_fn`.
+
+        Queries the completer with the current edit buffer.  When the
+        completer returns zero candidates the menu stays closed and
+        the call is a no-op.  With exactly one candidate the menu is
+        not opened — instead :attr:`buf` is replaced with the single
+        candidate (so trivial single-match completions behave like a
+        normal Tab).  With two or more candidates the menu is opened
+        with the first candidate highlighted; :attr:`buf` is *not*
+        modified until the user actually picks one with Enter.
+
+        Returns:
+            ``True`` when the menu changed visible state (opened, or
+            the buffer was replaced by a single-candidate completion),
+            so the caller knows a redraw is needed.
+        """
+        if self.completer_fn is None:
+            return False
+        cands = [c.rstrip("\n") for c in self.completer_fn(self.buf)]
+        if not cands:
+            return False
+        with self.lock:
+            if len(cands) == 1:
+                self.buf = cands[0]
+                self._hist_idx = None
+                return True
+            self._menu_items = cands
+            self._menu_sel = 0
+            self._menu_scroll = 0
+            self._menu_open = True
+        return True
+
+    def _refresh_typing_menu(self) -> bool:
+        """Refresh the in-place menu as the user edits the buffer.
+
+        Implements "complete while typing": every buffer edit
+        (printable keystroke, backspace, Shift+Enter newline, paste,
+        history recall) re-queries :attr:`completer_fn` and pops the
+        menu with the returned candidates, *without* ever
+        auto-replacing :attr:`buf` — unlike Tab on a single candidate,
+        typing only previews (see Tab handler in :meth:`feed` for the
+        single-item shortcut).  When the completer returns zero
+        candidates any open menu is closed so a stale candidate list
+        never lingers under the new buffer.
+
+        Implementation notes:
+
+        * Buffer + completer are snapshotted under :attr:`lock` and
+          the (possibly slow) completer call runs *outside* the lock
+          so concurrent agent stdout writes are not stalled by it.
+        * A small ``(buf, candidates)`` cache short-circuits repeats
+          (e.g. auto-repeat or backspace through a shared prefix) so
+          the completer is not re-invoked when nothing has changed.
+        * If the user typed more characters while the completer was
+          running, the snapshot's results are dropped (stale-buf
+          guard) so a slow late result cannot overwrite the new
+          menu — the next refresh will reflect the current buffer.
+        * Selection is preserved across refreshes whenever the
+          previously-highlighted candidate is still present in the
+          new list (matches the prompt_toolkit behaviour).
+
+        Returns:
+            ``True`` when the menu changed visible state (opened,
+            refreshed with new items, or closed), so the caller
+            knows a redraw is needed.
+        """
+        with self.lock:
+            if self.completer_fn is None:
+                if self._menu_open:
+                    self._reset_completion_state()
+                    return True
+                return False
+            buf = self.buf
+            completer = self.completer_fn
+            prev_sel_text = (
+                self._menu_items[self._menu_sel]
+                if (
+                    self._menu_open
+                    and self._menu_items
+                    and 0 <= self._menu_sel < len(self._menu_items)
+                )
+                else None
+            )
+        if not buf:
+            with self.lock:
+                if self._menu_open:
+                    self._reset_completion_state()
+                    return True
+                return False
+        if buf == self._last_completed_buf:
+            cands = self._last_completed_cands
+        else:
+            try:
+                cands = [c.rstrip("\n") for c in completer(buf)]
+            except Exception:  # noqa: BLE001 - completer must not break editing
+                logger.debug(
+                    "completer raised during typing refresh", exc_info=True,
+                )
+                cands = []
+            self._last_completed_buf = buf
+            self._last_completed_cands = cands
+        with self.lock:
+            if buf != self.buf:
+                # User kept typing while the completer ran; drop these
+                # stale results — the next refresh will reflect the
+                # now-current buffer.
+                return False
+            if not cands:
+                if not self._menu_open:
+                    return False
+                self._reset_completion_state()
+                return True
+            self._menu_items = cands
+            # Preserve the highlighted candidate across the refresh if
+            # it is still in the list; otherwise fall back to the top.
+            if prev_sel_text is not None and prev_sel_text in cands:
+                self._menu_sel = cands.index(prev_sel_text)
+            else:
+                self._menu_sel = 0
+                self._menu_scroll = 0
+            self._menu_open = True
+        return True
+
+    def _menu_move(self, delta: int) -> None:
+        """Advance the highlighted menu candidate by *delta* (wraps).
+
+        Args:
+            delta: ``+1`` for next item, ``-1`` for previous item.  The
+                index wraps modulo :attr:`_menu_items` so a single
+                key press past either end returns to the opposite end.
+        """
+        with self.lock:
+            n = len(self._menu_items)
+            if n == 0:
+                return
+            self._menu_sel = (self._menu_sel + delta) % n
+
+    def _menu_accept(self) -> None:
+        """Replace :attr:`buf` with the highlighted candidate and close the menu."""
+        with self.lock:
+            if self._menu_open and self._menu_items:
+                self.buf = self._menu_items[self._menu_sel]
+                self._hist_idx = None
+        # ``_reset_completion_state`` is the single source of truth for
+        # tearing down menu state; reuse it instead of duplicating the
+        # field resets here.
+        self._reset_completion_state()
+
+    def feed(
+        self,
+        data: bytes,
+        on_submit: Any,
+        on_abort: Any,
+        on_eof: Any = None,
+    ) -> None:
         """Process a chunk of raw keyboard input.
 
         Args:
             data: Raw bytes read from stdin.
             on_submit: Callable invoked with each completed line (string).
             on_abort: Callable invoked when Ctrl+C is pressed.
+            on_eof: Optional callable invoked when Ctrl+D is pressed on an
+                empty buffer (signalling EOF / exit).  When ``None`` the
+                key is ignored.
         """
         text = self._pending_esc + self._decoder.decode(data)
         self._pending_esc = ""
@@ -468,11 +818,19 @@ class _InputBox:
                         _partial_suffix_len(text, _PASTE_END), len(text) - i
                     )
                     if self._append_paste(text[i : len(text) - keep]):
+                        # Bracketed paste is a buffer edit; refresh the
+                        # in-place completion menu against the new
+                        # buffer ("complete while typing" applies to
+                        # paste too — a pasted prefix should immediately
+                        # show its completions).  The helper closes the
+                        # menu when no candidates match.
+                        self._refresh_typing_menu()
                         changed = True
                     self._pending_esc = text[len(text) - keep :] if keep else ""
                     i = len(text)
                     break
                 if self._append_paste(text[i:end]):
+                    self._refresh_typing_menu()
                     changed = True
                 self._pasting = False
                 i = end + len(_PASTE_END)
@@ -492,6 +850,10 @@ class _InputBox:
                 for seq in ("[13;2u", "[27;2;13~"):
                     if text.startswith(seq, i + 1):
                         self.buf += "\n"
+                        # Shift+Enter is a buffer edit; refresh the
+                        # menu so suggestions track multi-line input
+                        # ("complete while typing").
+                        self._refresh_typing_menu()
                         changed = True
                         i += 1 + len(seq)
                         shift_enter = True
@@ -504,7 +866,11 @@ class _InputBox:
                 if i + 1 >= len(text):
                     self._pending_esc = text[i:]
                     break
-                # Swallow other CSI escape sequences (arrow keys, etc.).
+                # Parse other CSI escape sequences: Up/Down arrows
+                # navigate the in-place completion menu when it's
+                # open, or browse the input history otherwise; the
+                # rest (Left/Right/F-keys, etc.) are swallowed so
+                # their printable bytes do not type into the buffer.
                 if text[i + 1] == "[":
                     j = i + 2
                     while j < len(text) and not ("@" <= text[j] <= "~"):
@@ -512,6 +878,29 @@ class _InputBox:
                     if j >= len(text):  # split mid-sequence
                         self._pending_esc = text[i:]
                         break
+                    final = text[j]
+                    seq = text[i + 2 : j]
+                    if final == "A" and seq == "":  # Up arrow
+                        if self._menu_open:
+                            self._menu_move(-1)
+                        else:
+                            self._history_back()
+                            # Refresh the menu against the recalled
+                            # buffer so "fast complete" tracks history
+                            # navigation too.
+                            self._refresh_typing_menu()
+                        changed = True
+                    elif final == "B" and seq == "":  # Down arrow
+                        if self._menu_open:
+                            self._menu_move(1)
+                        else:
+                            self._history_forward()
+                            self._refresh_typing_menu()
+                        changed = True
+                    elif final == "Z" and seq == "":  # Shift+Tab
+                        if self._menu_open:
+                            self._menu_move(-1)
+                            changed = True
                     i = j + 1
                     continue
                 # Swallow SS3 sequences (``ESC O <final>``): arrow keys
@@ -526,27 +915,115 @@ class _InputBox:
                 i += 1
                 continue
             if ch in ("\r", "\n"):
-                line = self.buf
-                self.buf = ""
-                changed = True
-                on_submit(line)
+                if self._menu_open:
+                    # Enter on an open completion menu accepts the
+                    # highlighted candidate (replacing the buffer) and
+                    # closes the menu *without* submitting the line —
+                    # the next Enter actually submits.  This matches
+                    # the prompt_toolkit dropdown behavior and the
+                    # ``_accept_completion_enter`` binding in
+                    # ``cli_prompt.py``.
+                    self._menu_accept()
+                    changed = True
+                else:
+                    line = self.buf
+                    self.buf = ""
+                    self._hist_idx = None
+                    self._hist_saved = ""
+                    self._reset_completion_state()
+                    changed = True
+                    on_submit(line)
             elif ch in ("\x7f", "\x08"):
                 if self.buf:
                     self.buf = self.buf[:-1]
+                    self._hist_idx = None
+                    # Backspace is an edit; refresh the in-place menu
+                    # so suggestions track the shrinking buffer ("fast
+                    # complete" while typing).  When the buffer becomes
+                    # empty or no candidates match, the helper closes
+                    # the menu instead.
+                    self._refresh_typing_menu()
+                    changed = True
+                elif self._menu_open:
+                    # Backspace on an empty buffer with the menu open
+                    # is a natural "dismiss" gesture — closes the menu
+                    # without editing the buffer further.
+                    self._reset_completion_state()
                     changed = True
             elif ch == "\x15":  # Ctrl+U clears the line
                 if self.buf:
                     self.buf = ""
+                    self._hist_idx = None
+                    self._reset_completion_state()
+                    changed = True
+                elif self._menu_open:
+                    self._reset_completion_state()
+                    changed = True
+            elif ch == "\x07":  # Ctrl+G cancels the completion menu
+                if self._menu_open:
+                    self._reset_completion_state()
                     changed = True
             elif ch == "\x03":  # Ctrl+C
+                if self._menu_open:
+                    # Ctrl+C while the menu is open just dismisses it;
+                    # only a bare Ctrl+C with no menu propagates as an
+                    # abort to the caller.
+                    self._reset_completion_state()
+                    changed = True
+                    i += 1
+                    continue
                 on_abort()
                 return
+            elif ch == "\x04":  # Ctrl+D on empty buffer = EOF
+                if not self.buf and on_eof is not None:
+                    on_eof()
+                    return
+            elif ch == "\t":
+                # Tab pops the in-place completion menu using
+                # ``completer_fn``.  With exactly one candidate the
+                # buffer is replaced directly (no menu); with multiple
+                # candidates the menu opens with the first highlighted
+                # and the buffer is left untouched until the user picks
+                # one with Enter.  Tab while the menu is already open
+                # advances the highlighted candidate so the user can
+                # navigate the list from the home row too — except
+                # when only one candidate is showing (which can happen
+                # when "complete while typing" pre-opened the menu with
+                # a single-match preview), in which case Tab accepts
+                # it directly, matching the closed-menu single-match
+                # shortcut.
+                if self._menu_open:
+                    if len(self._menu_items) == 1:
+                        # Re-query before accepting so a stale
+                        # single-item preview cannot overwrite the
+                        # buffer with an out-of-date candidate.
+                        self._reset_completion_state()
+                        if not self._open_completion_menu():
+                            changed = True
+                        elif len(self._menu_items) == 1:
+                            self._menu_accept()
+                            changed = True
+                        else:
+                            changed = True
+                    else:
+                        self._menu_move(1)
+                        changed = True
+                elif self.completer_fn is not None:
+                    if self._open_completion_menu():
+                        changed = True
             elif ch >= " " and not ("\x80" <= ch <= "\x9f"):
                 # The C1 control range (U+0080–U+009F) must never reach
                 # the buffer: U+009B is a one-character CSI introducer
                 # and would corrupt the terminal when redrawn.  DEL
                 # (\x7f) is already consumed by the backspace branch.
                 self.buf += ch
+                self._hist_idx = None
+                # "Fast complete" while typing: every printable
+                # keystroke refreshes the in-place menu with current
+                # candidates, mirroring the old prompt_toolkit
+                # ``complete_while_typing=True`` dropdown.  Unlike Tab,
+                # this never auto-replaces ``buf`` — it only previews.
+                self._refresh_typing_menu()
                 changed = True
             i += 1
         if len(self._pending_esc) > 64:
@@ -571,22 +1048,34 @@ class SteeringSession:
         agent: SorcarAgent,
         state: _RunningAgentState,
         chat_id: str,
+        *,
+        box: _InputBox | None = None,
+        lock: threading.RLock | None = None,
+        real_stdout: Any = None,
+        real_stderr: Any = None,
     ) -> None:
         # ``chat_id`` is accepted for call-site symmetry with the
         # registry entry but the session itself never needs it.
         del chat_id
         self.agent = agent
         self.state = state
-        self.lock = threading.RLock()
-        # Capture the real stdout now (before :meth:`run` swaps in the
-        # proxy) so box rendering writes straight to the terminal.
-        self._real_stdout = sys.stdout
-        # stderr is swapped too: logging handlers, ``warnings`` and
-        # library noise write there, and an unproxied write would land
-        # at the visible cursor parked inside the box body row,
-        # overprinting the input panel instead of scrolling above it.
-        self._real_stderr = sys.stderr
-        self.box = _InputBox(self.lock, self._real_stdout)
+        # When ``box`` is provided the caller (typically
+        # :class:`AnchoredRepl`) already owns the terminal scroll region
+        # and stdout/stderr proxies; the session shares them instead of
+        # tearing them down between tasks so the input bar stays pinned
+        # to the bottom of the screen during idle reads too.
+        self.lock = lock if lock is not None else threading.RLock()
+        self._real_stdout = (
+            real_stdout if real_stdout is not None else sys.stdout
+        )
+        self._real_stderr = (
+            real_stderr if real_stderr is not None else sys.stderr
+        )
+        self._owns_box = box is None
+        self.box = (
+            box if box is not None
+            else _InputBox(self.lock, self._real_stdout)
+        )
         self._done = threading.Event()
         self._aborted = threading.Event()
         self._result = ""
@@ -611,6 +1100,10 @@ class SteeringSession:
             sys.stdout.write(f"\n\x1b[33m? {question}\x1b[0m\n")
             sys.stdout.flush()
         prev_title = self.box.title
+        # Dismiss any open in-place completion menu so the next Enter
+        # in the question loop submits the user's answer instead of
+        # silently picking a stale candidate from the previous edit.
+        self.box._reset_completion_state()
         self.box.title = " answer the question above, then Enter "
         self.box.redraw()
         self._question_pending.set()
@@ -692,14 +1185,26 @@ class SteeringSession:
         Raises:
             KeyboardInterrupt: If the user aborts with Ctrl+C.
         """
-        real_stdout = self._real_stdout
-        real_stderr = self._real_stderr
-        proxy = _StdoutProxy(real_stdout, self.lock, self.box)
-        sys.stdout = cast(Any, proxy)
-        sys.stderr = cast(
-            Any, _StdoutProxy(real_stderr, self.lock, self.box)
-        )
-        self.box.start()
+        prev_stdout = sys.stdout
+        prev_stderr = sys.stderr
+        prev_title = self.box.title
+        prev_status = self.box.status
+        if self._owns_box:
+            proxy = _StdoutProxy(self._real_stdout, self.lock, self.box)
+            sys.stdout = cast(Any, proxy)
+            sys.stderr = cast(
+                Any,
+                _StdoutProxy(self._real_stderr, self.lock, self.box),
+            )
+            self.box.start()
+        # Whether the box is owned or shared, the in-task title/status
+        # come from the steering preset so the user sees the "queue
+        # follow-ups" hint while the agent works.
+        with self.lock:
+            self.box.title = STEER_TITLE
+            self.box.status = ""
+            if self.box._active:
+                self.box.redraw()
         worker = threading.Thread(
             target=self._worker, args=(run_kwargs,), daemon=True
         )
@@ -715,9 +1220,19 @@ class SteeringSession:
             # interrupted below instead of leaking in the background.
             self._on_abort()
         finally:
-            self.box.stop()
-            sys.stdout = real_stdout
-            sys.stderr = real_stderr
+            if self._owns_box:
+                self.box.stop()
+                sys.stdout = prev_stdout
+                sys.stderr = prev_stderr
+            else:
+                # Shared box stays drawn for the next idle read; just
+                # restore the title/status so the next idle read shows
+                # the idle preset instead of the steering one.
+                with self.lock:
+                    self.box.title = prev_title
+                    self.box.status = prev_status
+                    if self.box._active:
+                        self.box.redraw()
         if self._aborted.is_set():
             self._interrupt_worker(worker)
             raise KeyboardInterrupt
@@ -751,6 +1266,248 @@ class SteeringSession:
             if not data:
                 continue
             self.box.feed(data, self._on_submit, self._on_abort)
+
+
+class AnchoredRepl:
+    """Owns the bottom-anchored input box for the whole sorcar REPL.
+
+    The box stays pinned at the bottom of the screen for both idle
+    reads (the next instruction the user wants to dispatch) and task
+    execution (queueing follow-up instructions into
+    ``state.pending_user_messages`` exactly the way the VS Code
+    extension's ``appendUserMessage`` command queues them).  The
+    scroll region above the box scrolls agent output as usual, so the
+    input bar behaves like Claude Code's fullscreen TUI mode — visible
+    all the time, regardless of whether a task is running.
+
+    Used as a context manager so the box is torn down on exit even
+    when the REPL raises::
+
+        with AnchoredRepl(completer_fn=fn, history=h) as repl:
+            line = repl.read_idle_line()
+            repl.run_task(agent, state, chat_id, run_kwargs)
+
+    Attributes:
+        lock: Shared terminal lock guarding stdout/box writes.
+        box: The persistent :class:`_InputBox` rendered at the bottom.
+    """
+
+    def __init__(
+        self,
+        completer_fn: Callable[[str], list[str]] | None = None,
+        history: list[str] | None = None,
+    ) -> None:
+        self.lock = threading.RLock()
+        # Capture the real stdout/stderr now (before ``__enter__`` swaps
+        # in the proxies) so box rendering writes straight to the
+        # terminal regardless of how often ``sys.stdout`` is reassigned
+        # later.
+        self._real_stdout = sys.stdout
+        self._real_stderr = sys.stderr
+        self.box = _InputBox(self.lock, self._real_stdout)
+        self.box.completer_fn = completer_fn
+        self.box.history = list(history or [])
+        self._prev_stdout: Any = None
+        self._prev_stderr: Any = None
+
+    def __enter__(self) -> AnchoredRepl:
+        """Install stdout/stderr proxies and start the bottom box."""
+        self._prev_stdout = sys.stdout
+        self._prev_stderr = sys.stderr
+        sys.stdout = cast(
+            Any, _StdoutProxy(self._real_stdout, self.lock, self.box),
+        )
+        sys.stderr = cast(
+            Any, _StdoutProxy(self._real_stderr, self.lock, self.box),
+        )
+        self.box.start()
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        """Tear down the bottom box and restore the original streams."""
+        del exc_type, exc, tb
+        self.box.stop()
+        sys.stdout = self._prev_stdout
+        sys.stderr = self._prev_stderr
+
+    def read_idle_line(self) -> str | None:
+        """Read one line in idle mode through the anchored box.
+
+        Up/Down arrows browse :attr:`_InputBox.history`, Tab cycles
+        through the registered ``completer_fn`` candidates, and the
+        line is echoed above the box (in the scroll region) after
+        Enter so the user can see what they typed.
+
+        Returns:
+            The typed line (possibly empty), or ``None`` on Ctrl+D
+            with an empty buffer.
+
+        Raises:
+            KeyboardInterrupt: When the user presses Ctrl+C.
+        """
+        with self.lock:
+            self.box.title = IDLE_TITLE
+            self.box.status = ""
+            self.box.redraw()
+        result: list[str] = []
+        eof_flag: list[bool] = []
+        abort_flag: list[bool] = []
+
+        def on_submit(line: str) -> None:
+            result.append(line)
+
+        def on_abort() -> None:
+            abort_flag.append(True)
+
+        def on_eof() -> None:
+            eof_flag.append(True)
+
+        fd = sys.stdin.fileno()
+        last_size = _term_size()
+        while not result and not eof_flag and not abort_flag:
+            try:
+                ready, _, _ = select.select([fd], [], [], 0.1)
+            except (InterruptedError, OSError):
+                continue
+            except KeyboardInterrupt:
+                abort_flag.append(True)
+                break
+            if not ready:
+                size = _term_size()
+                if size != last_size:
+                    last_size = size
+                    self.box.redraw()
+                continue
+            try:
+                data = os.read(fd, 4096)
+            except (InterruptedError, OSError):
+                continue
+            if not data:
+                eof_flag.append(True)
+                break
+            self.box.feed(data, on_submit, on_abort, on_eof)
+        if abort_flag:
+            raise KeyboardInterrupt
+        if eof_flag:
+            return None
+        line = result[0]
+        if line.strip() and (
+            not self.box.history or self.box.history[-1] != line
+        ):
+            self.box.history.append(line)
+        with self.lock:
+            sys.stdout.write(f"\x1b[36m> {line}\x1b[0m\n")
+            sys.stdout.flush()
+        return line
+
+    def run_steering_loop(
+        self,
+        on_submit: Callable[[str], None],
+        on_abort: Callable[[], None],
+        is_done: Callable[[], bool],
+        on_idle: Callable[[], None] | None = None,
+    ) -> None:
+        """Process stdin through the box, flipped to steering mode.
+
+        Used by the daemon-client REPL while a task runs on the
+        ``sorcar web`` daemon: lines submitted into the bottom box
+        are routed through ``on_submit`` (which the caller forwards
+        as an ``appendUserMessage`` command over the UDS), Ctrl+C
+        triggers ``on_abort`` (which the caller forwards as ``stop``),
+        and the loop exits once ``is_done`` returns ``True`` —
+        typically when the daemon's ``status:false`` event clears
+        ``client.dispatcher.task_active``.
+
+        Args:
+            on_submit: Callable invoked with each completed line
+                (string).  Empty lines are NOT pre-filtered — the
+                caller is responsible for any input policy.
+            on_abort: Callable invoked when Ctrl+C is pressed.  The
+                loop continues running afterwards (so the user can
+                queue more input or wait for the daemon's task to
+                wind down); use ``is_done`` to actually terminate.
+            is_done: Predicate polled in the select timeout window.
+                The loop exits once this returns ``True``.
+            on_idle: Optional callable invoked once per select
+                timeout while waiting.  Callers use it to drain
+                ``askUser`` questions from the dispatcher queue
+                without blocking the loop.
+        """
+        with self.lock:
+            prev_title = self.box.title
+            prev_status = self.box.status
+            self.box.title = STEER_TITLE
+            self.box.status = ""
+            self.box.redraw()
+        fd = sys.stdin.fileno()
+        last_size = _term_size()
+        try:
+            while not is_done():
+                try:
+                    ready, _, _ = select.select([fd], [], [], 0.1)
+                except (InterruptedError, OSError):
+                    continue
+                except KeyboardInterrupt:
+                    on_abort()
+                    continue
+                if not ready:
+                    if on_idle is not None:
+                        try:
+                            on_idle()
+                        except Exception:  # noqa: BLE001 - defensive
+                            logger.debug("on_idle raised", exc_info=True)
+                    size = _term_size()
+                    if size != last_size:
+                        last_size = size
+                        self.box.redraw()
+                    continue
+                try:
+                    data = os.read(fd, 4096)
+                except (InterruptedError, OSError):
+                    continue
+                if not data:
+                    continue
+                self.box.feed(data, on_submit, on_abort)
+        finally:
+            with self.lock:
+                self.box.title = prev_title
+                self.box.status = prev_status
+                if self.box._active:
+                    self.box.redraw()
+
+    def run_task(
+        self,
+        agent: SorcarAgent,
+        state: _RunningAgentState,
+        chat_id: str,
+        run_kwargs: dict[str, Any],
+    ) -> str:
+        """Run an agent task while keeping the anchored box pinned.
+
+        Mirrors :func:`run_with_steering` but threads the shared box,
+        lock and proxied streams into :class:`SteeringSession` so the
+        box is not torn down between tasks — instead the title and
+        status flip from idle to "queue follow-ups" for the duration
+        of the task, then back to idle once it ends.
+
+        Args:
+            agent: The live agent to run.
+            state: The registry entry whose ``pending_user_messages``
+                receives lines queued during the task.
+            chat_id: The chat identifier (forwarded for symmetry).
+            run_kwargs: Keyword arguments forwarded to ``agent.run``.
+
+        Returns:
+            The agent's YAML result string.
+        """
+        session = SteeringSession(
+            agent, state, chat_id,
+            box=self.box, lock=self.lock,
+            real_stdout=self._real_stdout, real_stderr=self._real_stderr,
+        )
+        kwargs = dict(run_kwargs)
+        kwargs["ask_user_question_callback"] = session.ask_user_question
+        return session.run(kwargs)
 
 
 def run_with_steering(

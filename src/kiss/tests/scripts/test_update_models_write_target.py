@@ -4,29 +4,30 @@
 # add your name here
 """Integration tests for update_models.py write-target resolution.
 
-The script must write to the *source repository* model_info.py, not to a
-bundled copy (e.g. the VS Code extension's kiss_project directory).  The
-root cause of the bug was that PROJECT_ROOT was computed from __file__,
-which resolves to the extension copy when Sorcar runs the script from the
-extension's working directory.
+The script must write to the *source repository* ``MODEL_INFO.json``, not
+to a bundled copy (e.g. the VS Code extension's kiss_project directory).
+The root cause of the original bug was that ``PROJECT_ROOT`` was computed
+from ``__file__``, which resolves to the extension copy when Sorcar runs
+the script from the extension's working directory.
 
-These tests verify that _find_project_root() correctly resolves to the
-source repo via KISS_WORKDIR, .git detection, or __file__ fallback.
+These tests verify that ``_find_project_root()`` correctly resolves to the
+source repo via ``KISS_WORKDIR``, ``.git`` detection, or ``__file__`` fallback,
+and that ``apply_updates_to_file`` writes through the resolved path.
 """
 
 from __future__ import annotations
 
-import textwrap
+import json
 from pathlib import Path
 
 import pytest
 
 
 def _make_fake_project(root: Path) -> None:
-    """Create a minimal project structure with a dummy model_info.py."""
-    model_info = root / "src" / "kiss" / "core" / "models" / "model_info.py"
+    """Create a minimal project structure with a dummy MODEL_INFO.json."""
+    model_info = root / "src" / "kiss" / "core" / "models" / "MODEL_INFO.json"
     model_info.parent.mkdir(parents=True, exist_ok=True)
-    model_info.write_text("# placeholder\n")
+    model_info.write_text("{}\n")
 
 
 def test_find_project_root_prefers_kiss_workdir_over_file(
@@ -86,9 +87,9 @@ def test_find_project_root_falls_back_to_file(
 
     result = mod._find_project_root()
     # Should still return a valid path (the real source repo via __file__)
-    expected_marker = result / "src" / "kiss" / "core" / "models" / "model_info.py"
+    expected_marker = result / "src" / "kiss" / "core" / "models" / "MODEL_INFO.json"
     assert expected_marker.exists(), (
-        f"Fallback PROJECT_ROOT {result} does not contain model_info.py"
+        f"Fallback PROJECT_ROOT {result} does not contain MODEL_INFO.json"
     )
 
 
@@ -98,59 +99,15 @@ def test_apply_updates_writes_to_workdir_not_extension(
 ) -> None:
     """End-to-end: apply_updates_to_file must write to the KISS_WORKDIR target.
 
-    Simulates the bug scenario: script __file__ is in an extension copy,
-    but KISS_WORKDIR points to the source repo. The write must go to the
+    Simulates the bug scenario: script ``__file__`` is in an extension copy,
+    but ``KISS_WORKDIR`` points to the source repo. The write must go to the
     source repo, not the extension copy.
     """
     source_repo = tmp_path / "source_repo"
     _make_fake_project(source_repo)
     (source_repo / ".git").mkdir()
 
-    # Write a minimal but valid model_info.py content
-    model_info_content = textwrap.dedent('''\
-        from dataclasses import dataclass
-
-        @dataclass
-        class ModelInfo:
-            context_length: int = 0
-            input_price_per_1M: float = 0.0
-            output_price_per_1M: float = 0.0
-            is_function_calling_supported: bool = True
-            is_embedding_supported: bool = False
-            is_generation_supported: bool = True
-
-        def _mi(ctx, inp, out, fc=True, emb=False, gen=True):
-            return ModelInfo(ctx, inp, out, fc, emb, gen)
-
-        def _emb(ctx, inp):
-            return ModelInfo(ctx, inp, 0.0, False, True, False)
-
-        MODEL_INFO: dict[str, ModelInfo] = {
-            "test-model-a": _mi(100000, 1.00, 2.00),
-            "test-model-b": _mi(200000, 3.00, 4.00),
-        }
-    ''')
-
-    source_model_info = source_repo / "src" / "kiss" / "core" / "models" / "model_info.py"
-    source_model_info.write_text(model_info_content)
-
-    extension_copy = tmp_path / "extension_copy"
-    _make_fake_project(extension_copy)
-    ext_model_info = extension_copy / "src" / "kiss" / "core" / "models" / "model_info.py"
-    ext_model_info.write_text(model_info_content)
-
-    monkeypatch.setenv("KISS_WORKDIR", str(source_repo))
-
-    import kiss.scripts.update_models as mod
-
-    # Redirect MODULE_INFO_PATH to the source repo
-    resolved_root = mod._find_project_root()
-    resolved_path = resolved_root / "src" / "kiss" / "core" / "models" / "model_info.py"
-
-    # Monkeypatch the module-level constant to use the resolved path
-    monkeypatch.setattr(mod, "MODEL_INFO_PATH", resolved_path)
-
-    current = {
+    initial = {
         "test-model-a": {
             "context_length": 100000,
             "input_price_per_1M": 1.00,
@@ -168,6 +125,28 @@ def test_apply_updates_writes_to_workdir_not_extension(
             "gen": True,
         },
     }
+    source_model_info = source_repo / "src" / "kiss" / "core" / "models" / "MODEL_INFO.json"
+    source_model_info.write_text(json.dumps(initial, indent=2) + "\n")
+
+    extension_copy = tmp_path / "extension_copy"
+    _make_fake_project(extension_copy)
+    ext_model_info = extension_copy / "src" / "kiss" / "core" / "models" / "MODEL_INFO.json"
+    ext_model_info.write_text(json.dumps(initial, indent=2) + "\n")
+
+    monkeypatch.setenv("KISS_WORKDIR", str(source_repo))
+
+    import kiss.scripts.update_models as mod
+
+    # Redirect MODEL_INFO_PATH to the resolved source repo (mirrors the
+    # behavior when the script is invoked fresh under that KISS_WORKDIR).
+    resolved_root = mod._find_project_root()
+    resolved_path = resolved_root / "src" / "kiss" / "core" / "models" / "MODEL_INFO.json"
+    monkeypatch.setattr(mod, "MODEL_INFO_PATH", resolved_path)
+
+    # Also redirect the user-local sync target so the test does not touch
+    # ``~/.kiss/MODEL_INFO.json`` on the developer's machine.
+    monkeypatch.setattr(mod, "USER_MODEL_INFO_PATH", tmp_path / "user-kiss" / "MODEL_INFO.json")
+
     updates = [
         {
             "name": "test-model-a",
@@ -176,15 +155,19 @@ def test_apply_updates_writes_to_workdir_not_extension(
         }
     ]
 
-    mod.apply_updates_to_file(updates, [], [], current, dry_run=False)
+    mod.apply_updates_to_file(updates, [], [], initial, dry_run=False)
 
     # Source repo file should be updated
-    source_content = source_model_info.read_text()
-    assert "1.50" in source_content, "Source repo model_info.py was not updated"
+    source_content = json.loads(source_model_info.read_text())
+    assert source_content["test-model-a"]["input_price_per_1M"] == 1.50, (
+        "Source repo MODEL_INFO.json was not updated"
+    )
 
     # Extension copy should NOT be modified
-    ext_content = ext_model_info.read_text()
-    assert "1.50" not in ext_content, "Extension copy was incorrectly modified"
+    ext_content = json.loads(ext_model_info.read_text())
+    assert ext_content["test-model-a"]["input_price_per_1M"] == 1.00, (
+        "Extension copy was incorrectly modified"
+    )
 
 
 def test_find_project_root_exists_and_returns_valid_path() -> None:
@@ -193,4 +176,4 @@ def test_find_project_root_exists_and_returns_valid_path() -> None:
 
     assert callable(mod._find_project_root)
     result = mod._find_project_root()
-    assert (result / "src" / "kiss" / "core" / "models" / "model_info.py").exists()
+    assert (result / "src" / "kiss" / "core" / "models" / "MODEL_INFO.json").exists()

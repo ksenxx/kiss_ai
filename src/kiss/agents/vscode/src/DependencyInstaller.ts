@@ -453,6 +453,9 @@ async function runFinalization(
     installCliScript(kissProjectPath, uvPath);
   }
 
+  if (progress) progress.report({message: 'Refreshing model info...'});
+  installModelInfoJson(kissProjectPath);
+
   if (progress) progress.report({message: 'Checking cloudflared...'});
   await installCloudflaredIfNeeded();
 
@@ -1305,6 +1308,40 @@ function computeKissWebFingerprint(
       `computeKissWebFingerprint failed: ${err instanceof Error ? err.message : err}`,
     );
     return '';
+  }
+}
+
+/**
+ * Copy the kiss_project's bundled ``MODEL_INFO.json`` to
+ * ``~/.kiss/MODEL_INFO.json``.  The Python loader in
+ * ``kiss.core.models.model_info`` reads the user-local copy at runtime
+ * (with an mtime-based auto-refresh from the package copy), so seeding
+ * it here on every install means the freshly installed extension serves
+ * the up-to-date pricing/context table immediately.  Failures are logged
+ * and swallowed: model_info.py's loader falls back to the package copy
+ * if ~/.kiss/MODEL_INFO.json is missing or unreadable.
+ */
+function installModelInfoJson(kissProjectPath: string): void {
+  if (!HOME_DIR) return;
+  const src = path.join(
+    kissProjectPath,
+    'src',
+    'kiss',
+    'core',
+    'models',
+    'MODEL_INFO.json',
+  );
+  const dst = path.join(LOG_DIR, 'MODEL_INFO.json');
+  try {
+    if (!fs.existsSync(src)) {
+      log(`MODEL_INFO.json not found at ${src}; skipping copy`);
+      return;
+    }
+    fs.mkdirSync(LOG_DIR, {recursive: true});
+    fs.copyFileSync(src, dst);
+    log(`Installed MODEL_INFO.json at ${dst}`);
+  } catch (e: unknown) {
+    log(`Failed to install MODEL_INFO.json: ${(e as Error).message}`);
   }
 }
 

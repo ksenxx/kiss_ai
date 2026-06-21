@@ -95,7 +95,9 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
     async def _connect(
         self,
     ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        return await asyncio.open_unix_connection(str(self.uds_path))
+        return await asyncio.open_unix_connection(
+            str(self.uds_path), limit=16 * 1024 * 1024,
+        )
 
     async def _send(
         self, writer: asyncio.StreamWriter, cmd: dict[str, Any],

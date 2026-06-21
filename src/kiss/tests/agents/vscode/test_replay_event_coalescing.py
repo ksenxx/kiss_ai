@@ -259,7 +259,9 @@ class TestFanoutSingleSerialization:
             ).result(timeout=5)
 
             async def _connect() -> asyncio.StreamWriter:
-                _reader, w = await asyncio.open_unix_connection(sock_path)
+                _reader, w = await asyncio.open_unix_connection(
+                    sock_path, limit=16 * 1024 * 1024,
+                )
                 return w
 
             writer = asyncio.run_coroutine_threadsafe(

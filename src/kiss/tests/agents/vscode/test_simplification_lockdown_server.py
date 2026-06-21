@@ -292,10 +292,22 @@ class TestLiveTaskIdFallback(_DbTestBase):
         agent.total_tokens_used = 555
         agent.budget_used = 1.25
         agent.total_steps = 9
+        agent.model_name = "test-model"
+        tab.use_worktree = True
+        tab.use_parallel = False
+        tab.auto_commit_mode = False
 
         matched: dict = {"tokens": 0, "cost": 0.0, "steps": 0}
         server._overlay_live_metrics(matched, 7)
-        assert matched == {"tokens": 555, "cost": 1.25, "steps": 9}
+        assert matched == {
+            "tokens": 555,
+            "cost": 1.25,
+            "steps": 9,
+            "model": "test-model",
+            "is_worktree": True,
+            "is_parallel": False,
+            "auto_commit_mode": False,
+        }
 
         # The fallback id must NOT match while the agent id is set.
         unmatched: dict = {"tokens": 0, "cost": 0.0, "steps": 0}
@@ -312,11 +324,23 @@ class TestLiveTaskIdFallback(_DbTestBase):
         agent.total_tokens_used = 100
         agent.budget_used = 0.5
         agent.total_steps = 4
+        agent.model_name = "fallback-model"
+        tab.use_worktree = False
+        tab.use_parallel = True
+        tab.auto_commit_mode = False
 
         session: dict = {"tokens": 0, "cost": 0.0, "steps": 0}
         server._overlay_live_metrics(session, 42)
 
-        assert session == {"tokens": 100, "cost": 0.5, "steps": 4}
+        assert session == {
+            "tokens": 100,
+            "cost": 0.5,
+            "steps": 4,
+            "model": "fallback-model",
+            "is_worktree": False,
+            "is_parallel": True,
+            "auto_commit_mode": False,
+        }
 
 
 class TestDeferredTabDisposal(_DbTestBase):
