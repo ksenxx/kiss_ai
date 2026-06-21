@@ -66,6 +66,69 @@ def _stale_worktree_fallback(resolved: Path) -> Path | None:
     return None
 
 
+def _active_worktree_remap(resolved: Path, work_dir: str | None) -> Path | None:
+    """If *work_dir* lives inside a live ``.kiss-worktrees/kiss_wt-*`` worktree
+    and *resolved* points to a file in the parent repo (outside any
+    worktree), return the equivalent path *inside* the active worktree.
+    Otherwise return ``None``.
+
+    This is the symmetric inverse of :func:`_stale_worktree_fallback`:
+    while a worktree is *live*, the agent's tool calls must operate on
+    the worktree's working tree even when the model emits an absolute
+    path that points at the parent repo.  Without this remap, an LLM
+    that ignores the ``Work dir:`` hint and edits e.g.
+    ``/abs/repo/README.md`` would mutate the user's main checkout,
+    leave the worktree clean (so the framework's auto-commit finds
+    nothing), and skip the squash-merge entirely — i.e. the
+    "why didn't you run the last task in worktree and why didn't you
+    commit the changes?" failure mode.
+
+    The remap is purely structural — it only inspects path strings
+    (``.kiss-worktrees/kiss_wt-*`` segments), so it works regardless
+    of whether the worktree is currently registered with git.
+
+    Args:
+        resolved: An already-resolved absolute path the caller is about
+            to read/write/edit.
+        work_dir: The agent's working directory (usually inside the
+            worktree).  May be ``None`` (no worktree → no remap).
+
+    Returns:
+        The remapped worktree-internal path, or ``None`` when no remap
+        applies (no active worktree in *work_dir*, *resolved* is not
+        under the parent repo, or *resolved* is already inside a
+        worktree).
+    """
+    if not work_dir:
+        return None
+    work_parts = Path(work_dir).resolve().parts
+    for i in range(len(work_parts) - 1):
+        if (
+            work_parts[i] == ".kiss-worktrees"
+            and work_parts[i + 1].startswith("kiss_wt-")
+        ):
+            main_repo_parts = work_parts[:i]
+            wt_root_parts = work_parts[: i + 2]
+            res_parts = resolved.parts
+            # *resolved* must be STRICTLY under the parent repo
+            # (equal-length is no-op, shorter or different prefix is
+            # outside the repo entirely).
+            if (
+                len(res_parts) <= len(main_repo_parts)
+                or res_parts[: len(main_repo_parts)] != main_repo_parts
+            ):
+                return None
+            tail = res_parts[len(main_repo_parts):]
+            # Leave any path that is already inside ANY worktree
+            # untouched: don't redirect a sibling-worktree path
+            # (a different concurrent tab's working tree) into the
+            # active worktree.
+            if tail and tail[0] == ".kiss-worktrees":
+                return None
+            return Path(*wt_root_parts, *tail)
+    return None
+
+
 def _suggest_close_path(resolved: Path) -> str:
     """Return a ``Did you mean: …`` suffix for a missing file, or ``""``.
 
@@ -334,6 +397,17 @@ class UsefulTools:
             expanded = _expand_pwd_prefix(file_path, self.work_dir)
             resolved = Path(expanded).resolve()
 
+            # Active-worktree remap: if work_dir is inside a live
+            # ``.kiss-worktrees/kiss_wt-*`` worktree and the caller
+            # passed a parent-repo path (LLM ignored the work_dir
+            # hint), reroute to the equivalent worktree-internal
+            # path so the read sees the worktree's content (which
+            # may have already diverged from main via earlier
+            # remapped edits).
+            remapped = _active_worktree_remap(resolved, self.work_dir)
+            if remapped is not None and remapped.exists():
+                resolved = remapped.resolve()
+
             # Stale-worktree fallback: if the caller passed a path inside
             # a .kiss-worktrees/kiss_wt-* directory that has since been
             # torn down (autocommit / task finish), try the equivalent
@@ -435,6 +509,12 @@ class UsefulTools:
         try:
             expanded = _expand_pwd_prefix(file_path, self.work_dir)
             resolved = Path(expanded).resolve()
+            # Active-worktree remap: redirect parent-repo absolute paths
+            # into the active worktree so writes never leak out of the
+            # task's isolated working tree (see ``_active_worktree_remap``).
+            remapped = _active_worktree_remap(resolved, self.work_dir)
+            if remapped is not None:
+                resolved = remapped
             # Refuse existing non-regular targets: opening a FIFO for
             # writing blocks forever when it has no reader, hanging the
             # agent with no timeout (directories/devices are also wrong).
@@ -471,6 +551,12 @@ class UsefulTools:
         try:
             expanded = _expand_pwd_prefix(file_path, self.work_dir)
             resolved = Path(expanded).resolve()
+            # Active-worktree remap: redirect parent-repo absolute paths
+            # into the active worktree so edits never leak out of the
+            # task's isolated working tree (see ``_active_worktree_remap``).
+            remapped = _active_worktree_remap(resolved, self.work_dir)
+            if remapped is not None and remapped.is_file():
+                resolved = remapped
             if not resolved.is_file():
                 return f"Error: File not found: {file_path}"
             if old_string == new_string:

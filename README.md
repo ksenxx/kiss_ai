@@ -28,6 +28,7 @@ ______________________________________________________________________
 <summary><strong>Table of Contents</strong></summary>
 
 - [Introduction to KISS Sorcar](#introduction-to-kiss-sorcar)
+- [KISS Sorcar vs Claude Code vs Cursor](#-kiss-sorcar-vs-claude-code-vs-cursor)
 - [See It in Action](#-see-it-in-action)
 - [Full Installation](#full-installation)
 - [KISS Sorcar Extension Installation](#kiss-sorcar-extension-installation)
@@ -63,6 +64,19 @@ KISS Sorcar is named after [P. C. Sorcar, the Bengali magician](https://en.wikip
 An old video on KISS Sorcar can be found at [https://www.youtube.com/watch?v=xnYxWvRqACE](https://www.youtube.com/watch?v=xnYxWvRqACE). We **no longer** recommend explicitly creating a plan in KISS Sorcar. See the paper for details.
 
 <scriptsize>Note that **Sorcar** also means government in Bengali.</scriptsize>
+
+## 🆚 KISS Sorcar vs Claude Code vs Cursor
+
+| Capability | **KISS Sorcar** | **Claude Code** | **Cursor** |
+|---|---|---|---|
+| **Interfaces** | CLI + VS Code extension + web/mobile app | CLI + mobile app | VS Code extension |
+| **Multiple models from multiple vendors in the *same* task** | ✅ Yes — mix OpenAI, Anthropic, Gemini, Together, OpenRouter, MiniMax, Claude Code CLI, Codex CLI freely within one task | ❌ No (Anthropic Claude models only) | ❌ No (one model per task) |
+| **Number of models supported** | 499 across 8 provider categories | Claude family only | Subset chosen by Cursor |
+| **Bring your own API key / fully local** | ✅ Yes — keys stay on your machine, no proxy through vendor servers | ✅ Yes (Anthropic key only) | ⚠️ Routed through Cursor's backend |
+| **Open source** | ✅ Apache-2.0 | ❌ Proprietary | ❌ Proprietary |
+| **Price** | Free (pay only your LLM provider) | Subscription / API usage | Subscription |
+| **Run on top of Claude Code / Codex CLI** | ✅ `cc/*` and `codex/*` model namespaces | N/A | ❌ |
+| **Terminal Bench 2.0 score** | **62.2%** | 58% | 61.7% (Cursor agent) |
 
 ## 🎬 See It in Action
 
