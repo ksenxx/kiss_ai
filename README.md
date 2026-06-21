@@ -2,10 +2,6 @@
 
 ![KISS Framework](assets/KISS-Sorcar.png)
 
-# KISS Sorcar
-
-**KISS Sorcar is an open-source general-purpose AI agentic framework with high-quality software engineering expertise**. KISS Sorcar really shines for AI discovery and for long horizon tasks with goals.  It can use multiple models for solving a task.  You bring your own model API key (Anthropic highly recommended) or LLM endpoint or Claude Code or OpenAI Codex; nothing about your code or prompts is sent through our servers.
-
 [![Version](https://img.shields.io/badge/version-2026.6.25-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.13-blue?style=flat-square)](https://www.python.org/)
@@ -14,21 +10,31 @@
 
 *"Everything should be made as simple as possible, but not simpler." — Albert Einstein*
 
-**Website:** [https://kisssorcar.github.io/](https://kisssorcar.github.io/) · **Paper:** [arXiv:2604.23822](https://arxiv.org/abs/2604.23822)
-
 </div>
+
+# KISS Sorcar
+
+### Open-source general-purpose AI agent for long-horizon tasks and AI discovery
+
+**KISS Sorcar is free, simple, local-first, bring-your-own-key AI agent frmework.** It runs as a VS Code extension, a Claude-Code-style CLI, and a browser/mobile web app. Your prompts and code are sent directly to the model provider or local endpoint you configure — not through our servers.  It supports multi-model workflow just via prompt.  All agents run as daemon.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install.sh | bash
+```
 
 ______________________________________________________________________
 
 <details>
 <summary><strong>Table of Contents</strong></summary>
 
-- [Introduction to KISS Sorcar](#introduction-to-kiss-sorcar)
+- [What is KISS Sorcar?](#what-is-kiss-sorcar)
+- [Why KISS Sorcar?](#why-kiss-sorcar)
 - [KISS Sorcar vs Claude Code vs Cursor](#-kiss-sorcar-vs-claude-code-vs-cursor)
 - [See It in Action](#-see-it-in-action)
-- [Full Installation](#full-installation)
-- [KISS Sorcar Extension Installation](#kiss-sorcar-extension-installation)
+- [Installation](#installation)
+- [VS Code Extension](#vs-code-extension)
 - [CLI Interface](#cli-interface)
+- [Web and Mobile App](#web-and-mobile-app)
 - [Messaging & Third-Party Agents](#-messaging--third-party-agents)
 - [Models Supported](#-models-supported)
 - [Contributing](#-contributing)
@@ -37,46 +43,26 @@ ______________________________________________________________________
 
 </details>
 
-# Introduction to KISS Sorcar
-
-<div align="center">
-  <img src="assets/sorcar-main.gif" alt="KISS Sorcar demo" width="100%">
-</div>
-
-
-## Full Installation
-
-```
-curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install.sh | bash
-```
-
 ## 🆚 KISS Sorcar vs Claude Code vs Cursor
 
 | Capability | **KISS Sorcar** | **Claude Code** | **Cursor** |
 |---|---|---|---|
 | **Interfaces** | CLI + VS Code extension + web/mobile app | CLI + mobile app | Custom VS Code |
-| **Multiple models from multiple vendors in the *same* task** | ✅ Yes — mix OpenAI, Anthropic, Gemini, Together, OpenRouter, MiniMax, Claude Code CLI, Codex CLI freely within one task | ❌ No (Anthropic Claude models only) | ❌ No (one model per task) |
-| **Number of models supported** | 499 across 8 provider categories | Claude family only | Subset chosen by Cursor |
-| **Bring your own API key / fully local** | ✅ Yes — keys stay on your machine, no proxy through vendor servers | ✅ Yes (Anthropic key only) | ⚠️ Routed through Cursor's backend |
+| **Multiple models from multiple vendors in the same task** | ✅ Mix OpenAI, Anthropic, Gemini, Together, MiniMax, OpenRouter, Claude Code CLI, and Codex CLI | ❌ Anthropic Claude models only | ❌ One model per task |
+| **Models in bundled catalog** | 499 across 8 provider categories | Claude family only | Subset chosen by Cursor |
+| **Bring your own API key / endpoint** | ✅ Yes — keys stay on your machine | ✅ Anthropic key | ⚠️ Routed through Cursor backend |
 | **Open source** | ✅ Apache-2.0 | ❌ Proprietary | ❌ Proprietary |
-| **Price** | Free (pay only your LLM provider) | Subscription / API usage | Subscription |
-| **Run on top of Claude Code / Codex CLI** | ✅ `cc/*` and `codex/*` model namespaces | N/A | ❌ |
+| **Price** | Free framework; pay only your chosen model provider | Subscription / API usage | Subscription |
+| **Run on top of Claude Code / Codex CLI** | ✅ `cc/*` and `codex/*` namespaces | N/A | ❌ |
 | **Terminal Bench 2.0 score** | **62.2%** | 58% | 61.7% (Cursor agent) |
 
-KISS Sorcar runs as a **CLI (like Claude Code), Visual Studio Code extension**, and as a **web/mobile app**, and is built on the **KISS Agent Framework** — a deliberately simple agent runtime that follows the [KISS principle](https://en.wikipedia.org/wiki/KISS_principle) ("Keep it Simple, Stupid"). All agents run as daemon thread in the KISS Sorcar web server daemon process. If you have Claude Code or OpenAI Codex in your PATH, you can also use `cc/*` or `codex/*` models for chat.
+## What is in the Name
 
-KISS Sorcar is named after [P. C. Sorcar, the Bengali magician](https://en.wikipedia.org/wiki/P._C._Sorcar). The paper is at [papers/kisssorcar/kiss_sorcar.pdf](papers/kisssorcar/kiss_sorcar.pdf).
-
-> Engineering principles are encoded in the agent's system prompt. See Section 5 of the [paper](papers/kisssorcar/kiss_sorcar.pdf) for details.
-
-An old video on KISS Sorcar can be found at [https://www.youtube.com/watch?v=xnYxWvRqACE](https://www.youtube.com/watch?v=xnYxWvRqACE). We **no longer** recommend explicitly creating a plan in KISS Sorcar. See the paper for details.
-
-<scriptsize>Note that **Sorcar** also means government in Bengali.</scriptsize>
-
+**KISS Agent Framework** is a deliberately small agent runtime organized around the [KISS principle](https://en.wikipedia.org/wiki/KISS_principle) ("Keep it Simple, Stupid"). 
+KISS Sorcar is named after [P. C. Sorcar, the Bengali magician](https://en.wikipedia.org/wiki/P._C._Sorcar). 
+<sub>Note: **Sorcar** also means government in Bengali.</sub>
 
 ## 🎬 See It in Action
-
-From writing production-grade code to planning your next vacation, KISS Sorcar handles a range of tasks end-to-end. Here are a few examples:
 
 <div align="center">
 
@@ -87,7 +73,7 @@ From writing production-grade code to planning your next vacation, KISS Sorcar h
       <br />
       <strong>💻 Coding & Software Engineering</strong>
       <br />
-      <sub>Writes, debugs, and refactors code.</sub>
+      <sub>Writes, debugs, tests, and refactors code.</sub>
     </td>
     <td align="center" width="50%">
       <img src="assets/sorcar-trip.gif" alt="KISS Sorcar planning a trip" width="100%" />
@@ -110,62 +96,124 @@ From writing production-grade code to planning your next vacation, KISS Sorcar h
       <br />
       <strong>📱 Mobile/Web App</strong>
       <br />
-      <sub>You can use KISS Sorcar as a mobile/web app.</sub>
+      <sub>Use KISS Sorcar from a browser or mobile device.</sub>
     </td>
   </tr>
 </table>
 
 </div>
 
-## KISS Sorcar Extension Installation
+An older KISS Sorcar video is available at [https://www.youtube.com/watch?v=xnYxWvRqACE](https://www.youtube.com/watch?v=xnYxWvRqACE). We **no longer** recommend explicitly creating a plan in KISS Sorcar; see the paper for the current workflow guidance.
 
-To install the KISS Sorcar extension only, open Visual Studio Code, search for "KISS Sorcar" in the extension marketplace, install, and relaunch VS Code. Press ESC if you don't have a specific API key, but you must provide at least one API key.
+## Installation
 
-You can also manually download the extension from [src/kiss/agents/vscode/kiss-sorcar.vsix](src/kiss/agents/vscode/kiss-sorcar.vsix).
+### Full install from source
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install.sh | bash
+```
+
+The installer targets macOS and Linux on `x86_64`, `aarch64`, and `arm64`. It installs or checks the tools needed to run KISS Sorcar and build/install the VS Code extension.
+
+### Python package / CLI install
+
+If you only want the Python package and CLI entry points:
+
+```bash
+pipx install kiss-agent-framework
+# or
+uv tool install kiss-agent-framework
+```
+
+KISS Sorcar requires **Python 3.13+**.
+
+### Configure model access
+
+Provide at least one model backend. You can use environment variables such as:
+
+```bash
+export ANTHROPIC_API_KEY=...
+export OPENAI_API_KEY=...
+export GEMINI_API_KEY=...
+export TOGETHER_API_KEY=...
+export OPENROUTER_API_KEY=...
+export MINIMAX_API_KEY=...
+```
+
+You can also configure a custom endpoint with `--endpoint` / `-e` and optional repeated `--header Key:Value` CLI flags.
+
+## VS Code Extension
+
+To install only the KISS Sorcar extension, open Visual Studio Code, search for **KISS Sorcar** in the extension marketplace, install it, and relaunch VS Code. Press ESC if you do not have a specific API key ready, but configure at least one model backend before running tasks.
+
+You can also manually install the bundled VSIX from [src/kiss/agents/vscode/kiss-sorcar.vsix](src/kiss/agents/vscode/kiss-sorcar.vsix).
 
 ## CLI Interface
 
-If you do not want to use the KISS Sorcar IDE, you can open a terminal and use `sorcar` as a shell command or a CLI (similar to Claude Code). Some examples:
+Use `sorcar` as either an interactive CLI or a one-shot command.
 
-```
-sorcar # to launch Sorcar CLI similar to Claude Code
+```bash
+# Launch the interactive Sorcar CLI, similar to Claude Code.
+sorcar
 
-sorcar -t "What is 2435*234"
+# Run a one-shot task.
+sorcar -t "What is 2435*234?"
 
-sorcar -n --no-worktree -t "What is 2435*234?" # start a new chat session
+# Start a new chat session and run directly in the working tree.
+sorcar -n --no-worktree -t "What is 2435*234?"
 
-sorcar -m "claude-sonnet-4-6" -t "What is 2435*234?" # use a specific model
+# Use a specific model.
+sorcar -m "claude-sonnet-4-6" -t "What is 2435*234?"
 
+# Use the contents of a file as the task.
 echo "Can you find the cheapest non-stop flight from SFO to JFK on June 15?" > prompt
-sorcar -f prompt # use contents of a file as the task
+sorcar -f prompt
 
-sorcar -t 'Can you send the message "Hello from Sorcar!" to ksen via the desktop slack app?'
+# Ask Sorcar to use desktop/browser/messaging tools.
+sorcar -t 'Can you send the message "Hello from Sorcar!" to ksen via the desktop Slack app?'
 
+# Ask Sorcar to explain code.
 sorcar -t 'Can you show me the detailed step-by-step workflow of gepa.py?'
 ```
 
-### CLI Options
+### CLI options
 
 | Flag | Description |
 |------|-------------|
 | `-t`, `--task` | Task description |
 | `-f`, `--file` | Path to a file whose contents to use as the task |
-| `-m`, `--model_name` | LLM model name (auto-picked from configured API keys: Anthropic→`claude-opus-4-7`, OpenAI→`gpt-5.5`, Gemini→`gemini-3.1-pro-preview`, OpenRouter→`openrouter/anthropic/claude-opus-4.7`, Together→`Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8`, Claude Code CLI→`cc/opus`, Codex CLI→`codex/default`) |
-| `-e`, `--endpoint` | Custom endpoint for a local model |
+| `-m`, `--model_name` | LLM model name; defaults to the best available model for configured keys |
+| `-e`, `--endpoint` | Custom endpoint for a local or self-hosted model |
 | `--header` | Custom HTTP header in `Key:Value` form; may be repeated |
 | `-b`, `--max_budget` | Maximum budget in USD |
-| `-w`, `--work_dir` | Working directory |
-| `-v`, `--verbose` | Print output to console (default: true) |
+| `-w`, `--work_dir` | Working directory; defaults to the directory where `sorcar` is launched |
+| `-v`, `--verbose` | Print output to console (`true` by default) |
 | `-n`, `--new` | Start a new chat session |
 | `-c`, `--chat-id` | Resume a chat session by ID |
 | `-l`, `--list-chat-id` | List the last 10 chat sessions with tasks and results |
-| `-p`, `--parallel` / `--no-parallel` | Enable/disable parallel subagents (default: enabled) |
-| `--worktree` / `--no-worktree` | Isolate each task in a git worktree branch (default: enabled) |
-| `--auto-commit` / `--no-auto-commit` | Auto-commit worktree changes when a task finishes (default: enabled) |
-| `--no-web` | Disable browser/web tools (terminal-only mode) |
-| `--use-chat` | Legacy alias for `--no-worktree` (chat mode) |
-| `--use-worktree` | Legacy alias for `--worktree` (git worktree isolation) |
+| `-p`, `--parallel` / `--no-parallel` | Enable/disable parallel subagents (`--parallel` by default) |
+| `--worktree` / `--no-worktree` | Isolate each task in a git worktree branch (`--worktree` by default) |
+| `--auto-commit` / `--no-auto-commit` | Auto-commit worktree changes when a task finishes (`--auto-commit` by default) |
+| `--no-web` | Disable browser/web tools for terminal-only mode |
+| `--use-chat` | Legacy alias for `--no-worktree` |
+| `--use-worktree` | Legacy alias for `--worktree` |
 | `--cleanup` | Scan for and clean up orphaned worktree branches |
+
+### Interactive CLI features
+
+The interactive CLI includes:
+
+- `@` file/folder mentions with ranked project-file completion.
+- `/help`, `/clear`, `/resume`, `/model`, `/model list`, `/cost`, `/context`, `/commands`, `/skills`, `/mcp`, `/autocommit`, and `/exit` slash commands.
+- Custom Markdown slash commands from `~/.kiss/commands`, `<project>/.kiss/commands`, `~/.claude/commands`, and `<project>/.claude/commands`.
+- Agent Skills from `~/.kiss/skills`, `<project>/.kiss/skills`, Claude skill directories, `.agents/skills`, and bundled Sorcar skills.
+- MCP server discovery from `~/.kiss/mcp.json`, `<project>/.kiss/mcp.json`, and `<project>/.mcp.json`.
+
+## Web and Mobile App
+
+The `kiss-web` entry point starts the browser/mobile web server used for remote KISS Sorcar access. It serves the chat UI over HTTPS/WSS, auto-generates a self-signed certificate under `~/.kiss/tls/` when needed, and authenticates with the `remote_password` setting in `~/.kiss/config.json`.
+
+For access outside your LAN, KISS Sorcar can use a Cloudflare tunnel. Without a named tunnel token, quick tunnels use a random `*.trycloudflare.com` URL that changes on restart; set `CLOUDFLARE_TUNNEL_TOKEN` or `tunnel_token` in `~/.kiss/config.json` for a fixed named tunnel.
 
 ## 💬 Messaging & Third-Party Agents
 
@@ -173,56 +221,40 @@ KISS Sorcar includes 23 third-party messaging agents that can send and receive m
 
 BlueBubbles · Discord · Feishu · Gmail · Google Chat · iMessage · IRC · LINE · Matrix · Mattermost · Microsoft Teams · Nextcloud Talk · Nostr · Phone Control · Signal · Slack · SMS · Synology Chat · Telegram · Tlon · Twitch · WhatsApp · Zalo
 
-It also ships a **Govee smart-home CLI** for controlling IoT lights (on/off, brightness, color, color temperature) via the Govee Developer API.
+It also ships a **Govee smart-home CLI** for controlling IoT lights (on/off, brightness, color, and color temperature) via the Govee Developer API.
 
-These agents are in `src/kiss/agents/third_party_agents/`.
+These agents live in `src/kiss/agents/third_party_agents/`.
 
 ## 🤖 Models Supported
 
-**499 models** across 8 provider categories (OpenAI, Anthropic, Gemini, Together AI, MiniMax, OpenRouter, Claude Code CLI, Codex CLI) with built-in pricing, context lengths, and capability flags (`fc` function-calling, `gen` generation, `emb` embedding). The full catalog lives in `src/kiss/core/models/MODEL_INFO.json`.
+KISS Sorcar ships a catalog of **499 models** across **8 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json).
 
-**Generation Models** (text generation, most with function-calling support):
+| Provider category | Catalog entries |
+|---|---:|
+| OpenAI | 70 |
+| Anthropic | 13 |
+| Gemini / Google | 23 |
+| Together AI | 77 |
+| MiniMax | 5 |
+| OpenRouter | 301 |
+| Claude Code CLI (`cc/*`) | 3 |
+| Codex CLI (`codex/*`) | 7 |
 
-- **OpenAI**: gpt-3.5-turbo, gpt-4, gpt-4-turbo, gpt-4.1, gpt-4.1-mini, gpt-4.1-nano, gpt-4o, gpt-4o-mini, gpt-5, gpt-5-mini, gpt-5-nano, gpt-5-chat-latest, gpt-5.1, gpt-5.1-chat-latest, gpt-5.2, gpt-5.2-chat-latest, gpt-5.3-chat-latest, gpt-5.4, gpt-5.4-mini, gpt-5.4-nano, gpt-5.5 (+ dated variants)
-- **OpenAI (Reasoning)**: o1, o3, o3-mini, o3-deep-research, o4-mini, o4-mini-deep-research (+ dated variants)
-- **OpenAI (Image)**: gpt-image-1, gpt-image-1-mini, gpt-image-1.5, gpt-image-2
-- **OpenAI (Search)**: gpt-4o-search-preview, gpt-4o-mini-search-preview (+ dated variants)
-- **OpenAI (Other)**: computer-use-preview, openai/gpt-oss-20b, openai/gpt-oss-120b
-- **Anthropic**: claude-opus-4-8, claude-opus-4-7, claude-opus-4-6, claude-opus-4-5, claude-opus-4-1, claude-sonnet-4-6, claude-sonnet-4-5, claude-haiku-4-5, claude-fable-5 (+ dated variants)
-- **Claude Code CLI**: cc/haiku, cc/opus, cc/sonnet
-- **Codex CLI**: codex/default, codex/codex-auto-review, codex/gpt-5.2, codex/gpt-5.3-codex, codex/gpt-5.4, codex/gpt-5.4-mini, codex/gpt-5.5
-- **Gemini**: gemini-2.5-pro, gemini-2.5-flash, gemini-2.5-flash-image, gemini-2.5-flash-lite, gemini-2.0-flash, gemini-2.0-flash-lite, gemini-3.5-flash, gemini-3.1-flash-lite
-- **Gemini (Preview)**: gemini-3-pro-preview, gemini-3-flash-preview, gemini-3.1-pro-preview, gemini-3.1-flash-lite-preview, gemini-3.1-flash-tts-preview
-- **Gemini (Image)**: gemini-3-pro-image, gemini-3.1-flash-image
-- **Gemini (Open Models)**: google/gemma-4-31B-it, google/gemma-3n-E4B-it, google/gemma-2-27b-it
-- **Together AI (Llama)**: Llama-4-Scout, Llama-4-Maverick (with function calling), Llama-3.x series (generation only)
-- **Together AI (Qwen)**: Qwen2-1.5B-Instruct, Qwen2-VL-72B-Instruct, Qwen2.5-72B/14B/7B-Instruct, Qwen2.5-VL-72B, Qwen2.5-Coder-32B, Qwen3-235B series, Qwen3-Coder-480B, Qwen3-Coder-Next, Qwen3-Next-80B, Qwen3-VL-32B/8B, Qwen3.5-397B/9B, Qwen3.6-Plus, QwQ-32B
-- **Together AI (DeepSeek)**: DeepSeek-R1, DeepSeek-R1-0528, DeepSeek-R1-0528-tput, DeepSeek-R1-Distill-Llama-70B, DeepSeek-R1-Distill-Qwen-1.5B/14B, DeepSeek-V3-0324, DeepSeek-V3.1, DeepSeek-V4-Pro, deepseek-coder-33b-instruct
-- **Together AI (Kimi/Moonshot)**: Kimi-K2-Instruct, Kimi-K2-Instruct-0905, Kimi-K2-Thinking, Kimi-K2.5, Kimi-K2.6, Kimi-K2.7-Code
-- **Together AI (Mistral)**: Ministral-3-14B, Mistral-7B-v0.1/v0.2/v0.3, Mistral-Small-24B, Mixtral-8x7B
-- **Together AI (Z.AI)**: GLM-4.5-Air-FP8, GLM-4.6, GLM-4.7, GLM-5, GLM-5.1, GLM-5.2
-- **Together AI (MiniMax)**: MiniMax-M2.5, MiniMax-M2.7, MiniMax-M3
-- **MiniMax (direct API)**: minimax-m2.5, minimax-m2.5-lightning
-- **Together AI (DeepCogito)**: cogito-v1-preview (llama-70B/8B/70B-Turbo, qwen-14B/32B), cogito-v2-1-671b
-- **Together AI (NVIDIA)**: Llama-3.1-Nemotron-70B, NVIDIA-Nemotron-Nano-9B-v2, nemotron-3-ultra-550b-a55b
-- **Together AI (Other)**: arcee-ai/trinity-mini, essentialai/rnj-1-instruct
-- **OpenRouter**: Access to 301 models from 50 providers via a unified API, including OpenAI, Anthropic, Google, Meta Llama, DeepSeek, Qwen, Amazon Nova, Cohere, X.AI Grok, MiniMax, ByteDance / ByteDance Seed, MoonshotAI, Mistral, NVIDIA, Z.AI / GLM, AllenAI, Perplexity, NousResearch, Baidu ERNIE, Xiaomi, Reka AI, Arcee AI, Perceptron, StepFun, Tencent, Inception, InclusionAI, KwaiPilot, Liquid, Morph, Relace, IBM Granite, Prime Intellect, Poolside, AI21, Aion Labs, Anthracite, DeepCogito, Essential AI, Gryphe, Inflection, Mancer, Microsoft, Sao10K, Switchpoint, TheDrummer, Undi95, Upstage, Writer, and others
+Current catalog capability totals:
 
-**Embedding Models** (for RAG and semantic search):
+- **483** generation-capable models
+- **320** function-calling-capable models
+- **7** embedding models
 
-- **OpenAI**: text-embedding-3-small, text-embedding-3-large, text-embedding-ada-002
-- **Google**: gemini-embedding-001, gemini-embedding-2-preview
-- **Together AI**: BAAI/bge-base-en-v1.5, intfloat/multilingual-e5-large-instruct
-
-Each model entry includes capability flags: `fc` (function calling), `gen` (text generation), `emb` (embedding), plus `context_length`, `input_price_per_1M`, and `output_price_per_1M`.
+Examples include OpenAI GPT/o-series/image/search/embedding models, Anthropic Claude Opus/Sonnet/Haiku/Fable models, Gemini and Gemma models, Together-hosted Llama/Qwen/DeepSeek/Kimi/Mistral/Z.AI/MiniMax/DeepCogito/NVIDIA models, direct MiniMax models, Claude Code CLI models, Codex CLI models, and OpenRouter routes to 301 models from 54 provider namespaces.
 
 ## 🤗 Contributing
 
-Contributions in the form of issues are welcome! KISS Sorcar should be able to take care of them.
+Contributions in the form of issues are welcome. KISS Sorcar should be able to help implement and review them.
 
 ## 📄 License
 
-Apache-2.0
+Apache-2.0. See [LICENSE](LICENSE).
 
 ## 📚 Citation
 
