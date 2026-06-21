@@ -890,6 +890,253 @@ class _CommandsMixin:
         if new_password and new_password != prev_password:
             _restart_kiss_web_daemon()
 
+    def _dispatch_mcp_listing(
+        self, *, work_dir: str, conn_id: str, tab_id: str,
+        request_id: str = "",
+    ) -> None:
+        """Compute ``/mcp`` listing on a worker thread and broadcast.
+
+        Splits the synchronous MCP probe out of
+        :meth:`_cmd_cli_info` so the main command dispatcher does not
+        block while ``format_mcp_listing(connect=True)`` opens each
+        configured stdio MCP server and waits for ``initialize`` —
+        an operation that can take seconds per server and that
+        hangs entirely when a server is wedged.
+
+        Args:
+            work_dir: Project dir to discover ``.mcp.json`` under.
+            conn_id: Connection id stamped on the reply so the daemon
+                only routes it back to the originating CLI client.
+            tab_id: CLI tab id mirrored on the reply for parity with
+                the synchronous reply path.
+        """
+
+        def _worker() -> None:
+            from kiss.agents.sorcar.mcp_servers import format_mcp_listing
+            try:
+                text = format_mcp_listing(work_dir, connect=True)
+            except Exception as exc:  # pragma: no cover - listing guard
+                text = f"Failed to list MCP servers: {exc}"
+            event: dict[str, Any] = {
+                "type": "cliInfo",
+                "subtype": "mcp",
+                "text": text,
+                "tabId": tab_id,
+            }
+            # Echo the originating ``requestId`` so the CLI client can
+            # filter stale replies that race with newer requests
+            # (review #14).  Empty string means "no id supplied" which
+            # the client treats as a wildcard match for back-compat.
+            if request_id:
+                event["requestId"] = request_id
+            if conn_id:
+                event["connId"] = conn_id
+            self.printer.broadcast(event)
+
+        threading.Thread(
+            target=_worker, daemon=True, name="sorcar-mcp-listing",
+        ).start()
+
+    def _cmd_cli_info(self, cmd: dict[str, Any]) -> None:
+        """Reply to a ``cliInfo`` request from the sorcar CLI client.
+
+        Handles the slash-command surface that was previously rendered
+        only inside the standalone REPL (``/help``, ``/commands``,
+        ``/skills``, ``/skills <name>``, ``/mcp``, ``/cost``,
+        ``/model`` with no argument) by reusing the very same helpers
+        from :mod:`kiss.agents.sorcar.custom_commands`,
+        :mod:`kiss.agents.sorcar.skills` and
+        :mod:`kiss.agents.sorcar.mcp_servers`, plus custom-command
+        expansion.
+
+        The reply is emitted as a single ``cliInfo`` event stamped
+        with the originating ``connId`` so it is delivered ONLY to the
+        requesting CLI client (mirroring the per-connection routing of
+        ``models`` / ``files`` / ``configData`` replies).
+
+        Args:
+            cmd: The parsed ``cliInfo`` command from the CLI client,
+                carrying a ``subtype`` field selecting the reply, plus
+                any subtype-specific arguments (``arg`` / ``name`` /
+                ``args`` / ``tabId`` / ``workDir``).
+        """
+        from kiss.agents.sorcar.cli_repl import SLASH_COMMANDS
+        from kiss.agents.sorcar.custom_commands import (
+            discover_commands,
+            expand_command,
+            format_command_listing,
+        )
+
+        subtype = cmd.get("subtype", "")
+        work_dir = cmd.get("workDir", "") or self.work_dir or "."
+        conn_id = cmd.get("connId", "")
+        tab_id = cmd.get("tabId", "")
+        # Per-request id so the CLI client can drop stale replies that
+        # race with newer requests (review #14).
+        request_id = str(cmd.get("requestId", "") or "")
+        text = ""
+        extra: dict[str, Any] = {}
+
+        if subtype == "help":
+            lines = ["Commands:"]
+            for c, d in SLASH_COMMANDS.items():
+                lines.append(f"  {c:<10} {d}")
+            try:
+                custom = discover_commands(work_dir)
+            except Exception:  # pragma: no cover - discovery guard
+                logger.debug("custom command discovery failed", exc_info=True)
+                custom = {}
+            if custom:
+                lines.append("")
+                lines.append("Custom commands:")
+                lines.append(format_command_listing(custom))
+            lines.append("")
+            lines.append(
+                "Input fast-completes (Tab): @path mentions files, "
+                "/ completes commands, /model <partial> completes model "
+                "names, and typing a prefix of a previous task suggests "
+                "its completion.",
+            )
+            text = "\n".join(lines)
+        elif subtype == "commands":
+            try:
+                custom = discover_commands(work_dir)
+            except Exception:  # pragma: no cover - discovery guard
+                logger.debug("custom command discovery failed", exc_info=True)
+                custom = {}
+            text = format_command_listing(custom)
+        elif subtype == "skills":
+            from kiss.agents.sorcar.skills import (
+                discover_skills,
+                format_skill_listing,
+                load_skill_content,
+            )
+
+            try:
+                skills = discover_skills(work_dir)
+            except Exception:  # pragma: no cover - discovery guard
+                logger.debug("skill discovery failed", exc_info=True)
+                skills = {}
+            name = cmd.get("name", "") or cmd.get("arg", "")
+            if name:
+                found = skills.get(name)
+                if found is None:
+                    # Tag missing-skill replies as errors so the CLI
+                    # client can render them with the ✗ marker rather
+                    # than as a normal info line (review #27).  Use
+                    # ``error`` (bool) for the flag and
+                    # ``errorMessage`` (string) for the human-readable
+                    # text — disambiguating the previously-overloaded
+                    # ``error`` field (review A5/B4 round 2).
+                    text = f"Unknown skill: {name}. /skills lists them."
+                    extra["error"] = True
+                    extra["errorMessage"] = text
+                else:
+                    try:
+                        text = load_skill_content(found)
+                    except Exception as exc:  # pragma: no cover - read guard
+                        text = f"Failed to load skill {name}: {exc}"
+                        extra["error"] = True
+                        extra["errorMessage"] = text
+            else:
+                text = format_skill_listing(skills)
+        elif subtype == "mcp":
+            # ``format_mcp_listing(connect=True)`` opens a stdio
+            # subprocess per configured MCP server and waits for
+            # ``initialize`` — each one can take seconds and a wedged
+            # server hangs the whole command-dispatcher thread.
+            # Spawn a worker thread that broadcasts the ``cliInfo``
+            # reply when ready so the dispatcher returns immediately
+            # and the CLI's other inbound events (streamed tokens,
+            # status, askUser) keep flowing.  The CLI client blocks
+            # on its own ``cli_info_q`` waiter just as for any other
+            # subtype, so this is fully transparent to the client.
+            self._dispatch_mcp_listing(
+                work_dir=work_dir, conn_id=conn_id, tab_id=tab_id,
+                request_id=request_id,
+            )
+            return
+        elif subtype == "cost":
+            # Budget / token counters live on the **agent**, not on the
+            # ``_RunningAgentState`` (whose ``__slots__`` carries
+            # ``agent`` but not ``budget_used`` / ``total_tokens_used``).
+            # The earlier port read directly off the tab and so always
+            # reported $0 / 0 tokens — review #1.
+            tab = _RunningAgentState.running_agent_states.get(tab_id)
+            agent_obj = getattr(tab, "agent", None) if tab is not None else None
+            budget = float(getattr(agent_obj, "budget_used", 0.0) or 0.0)
+            tokens = int(getattr(agent_obj, "total_tokens_used", 0) or 0)
+            # ``tab.chat_id`` wins over ``agent.chat_id`` because the
+            # latter is bound at agent-construction time and goes stale
+            # the moment the user issues ``/clear`` (which resets
+            # ``tab.chat_id`` to ""); the agent reference may still
+            # carry the OLD id (review A1.a round 3).
+            chat_id = (tab.chat_id or "") if tab is not None else ""
+            if not chat_id and agent_obj is not None:
+                chat_id = getattr(agent_obj, "chat_id", "") or ""
+            text = (
+                f"Chat ID: {chat_id or '(new)'}\n"
+                f"Cost: ${budget:.4f}\n"
+                f"Total tokens: {tokens}"
+            )
+            extra["chatId"] = chat_id
+            extra["cost"] = budget
+            extra["tokens"] = tokens
+        elif subtype == "modelCurrent":
+            tab = _RunningAgentState.running_agent_states.get(tab_id)
+            current = tab.selected_model if tab is not None else self._default_model
+            text = f"Current model: {current}"
+            extra["model"] = current
+        elif subtype == "expandCommand":
+            name = cmd.get("name", "") or cmd.get("arg", "")
+            args = cmd.get("args", "")
+            try:
+                custom = discover_commands(work_dir)
+            except Exception:  # pragma: no cover - discovery guard
+                logger.debug("custom command discovery failed", exc_info=True)
+                custom = {}
+            found_cmd = custom.get(name)
+            if found_cmd is None:
+                text = ""
+                extra["found"] = False
+                # Disambiguate ``error`` (bool flag) from
+                # ``errorMessage`` (human-readable string).  The
+                # round-2 commit overloaded ``error`` with both shapes
+                # which made the client print the literal "True" when
+                # a timeout / disconnect set ``error=True`` (no string).
+                extra["error"] = True
+                extra["errorMessage"] = f"Unknown command: /{name}"
+            else:
+                try:
+                    expanded = expand_command(found_cmd, args, work_dir)
+                except Exception as exc:  # pragma: no cover - expansion guard
+                    text = ""
+                    extra["found"] = False
+                    extra["error"] = True
+                    extra["errorMessage"] = f"Expansion failed: {exc}"
+                else:
+                    text = expanded
+                    extra["found"] = True
+                    extra["source"] = found_cmd.source
+                    extra["path"] = str(found_cmd.path)
+        else:
+            text = f"Unknown cliInfo subtype: {subtype}"
+            extra["error"] = True
+            extra["errorMessage"] = text
+
+        event: dict[str, Any] = {
+            "type": "cliInfo",
+            "subtype": subtype,
+            "text": text,
+            "tabId": tab_id,
+        }
+        event.update(extra)
+        if request_id:
+            event["requestId"] = request_id
+        if conn_id:
+            event["connId"] = conn_id
+        self.printer.broadcast(event)
+
     def _cmd_set_work_dir(self, cmd: dict[str, Any]) -> None:
         """Update the server's *fallback* working directory.
 
@@ -971,4 +1218,5 @@ class _CommandsMixin:
         "setWorkDir": _cmd_set_work_dir,
         "getConfig": _cmd_get_config,
         "saveConfig": _cmd_save_config,
+        "cliInfo": _cmd_cli_info,
     }

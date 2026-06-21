@@ -4317,7 +4317,7 @@ class TestHeadPartialBuffer(IsolatedAsyncioTestCase):
         """Sending partial HEAD data is buffered until \\r\\n is seen."""
         ctx = _no_verify_ssl()
         reader, writer = await asyncio.open_connection(
-            "127.0.0.1", self.port, ssl=ctx,
+            "127.0.0.1", self.port, ssl=ctx, limit=16 * 1024 * 1024,
         )
         writer.write(b"HEA")
         await writer.drain()
@@ -5502,7 +5502,7 @@ class TestHeadTransportNone(IsolatedAsyncioTestCase):
         """HEAD request when transport already closed doesn't crash."""
         ctx = _no_verify_ssl()
         reader, writer = await asyncio.open_connection(
-            "127.0.0.1", self.port, ssl=ctx,
+            "127.0.0.1", self.port, ssl=ctx, limit=16 * 1024 * 1024,
         )
         writer.write(b"HEAD / HTTP/1.1\r\nHost: localhost\r\n\r\n")
         await writer.drain()

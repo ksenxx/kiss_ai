@@ -108,7 +108,9 @@ class TestServerReset(IsolatedAsyncioTestCase):
     async def _connect(
         self,
     ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        reader, writer = await asyncio.open_unix_connection(str(self.uds_path))
+        reader, writer = await asyncio.open_unix_connection(
+            str(self.uds_path), limit=16 * 1024 * 1024,
+        )
         self._writers.append(writer)
         return reader, writer
 

@@ -990,9 +990,28 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
         _apply_chat_args(agent, args, task=chat_task)
 
     if interactive:
-        from kiss.agents.sorcar.cli_repl import run_repl
+        # Client mode: the standalone REPL has been replaced by a
+        # thin terminal client of the local ``sorcar web`` daemon
+        # (see :mod:`kiss.agents.sorcar.cli_client`).  The same agent
+        # surface is preserved — slash commands, fast-completes,
+        # streamed rendering — but every task now runs inside the
+        # daemon process, so the in-process ``agent`` built above is
+        # not used by the interactive path.  The argparsed run flags
+        # (``--no-worktree`` / ``--no-parallel`` / ``--auto-commit``)
+        # are forwarded so the user's CLI options survive the port.
+        from kiss.agents.sorcar.cli_client import run_client
 
-        run_repl(agent, run_kwargs)
+        sys.exit(
+            run_client(
+                work_dir=run_kwargs.get("work_dir") or work_dir,
+                model_name=run_kwargs.get("model_name", "")
+                or getattr(agent, "model_name", ""),
+                active_file=run_kwargs.get("current_editor_file") or "",
+                use_worktree=bool(getattr(args, "worktree", True)),
+                use_parallel=bool(getattr(args, "parallel", True)),
+                auto_commit=bool(getattr(args, "auto_commit", False)),
+            ),
+        )
     else:
         from kiss.agents.sorcar.cli_steering import run_with_steering
 

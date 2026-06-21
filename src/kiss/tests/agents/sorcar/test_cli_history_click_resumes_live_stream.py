@@ -137,7 +137,9 @@ class TestCliHistoryClickResumesLiveStream(unittest.TestCase):
         async def _open() -> tuple[
             asyncio.StreamReader, asyncio.StreamWriter,
         ]:
-            return await asyncio.open_unix_connection(self.sock_path)
+            return await asyncio.open_unix_connection(
+                self.sock_path, limit=16 * 1024 * 1024,
+            )
 
         reader, writer = asyncio.run_coroutine_threadsafe(
             _open(), self.loop,
@@ -355,6 +357,7 @@ class TestCliHistoryClickResumesLiveStream(unittest.TestCase):
         async def _open_and_send() -> asyncio.StreamWriter:
             reader, writer = await asyncio.open_unix_connection(
                 self.sock_path,
+                limit=16 * 1024 * 1024,
             )
             envelope = json.dumps({
                 "type": "cliTaskStart", "taskId": task_id,

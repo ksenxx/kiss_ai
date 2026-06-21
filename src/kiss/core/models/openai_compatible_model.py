@@ -26,6 +26,33 @@ from kiss.core.models.model import (
 
 logger = logging.getLogger(__name__)
 
+def _model_thinking_level(model_name: str) -> str | None:
+    """Return the default ``reasoning_effort`` level for *model_name*, if any.
+
+    The level lives on ``MODEL_INFO[model_name].thinking`` and is set
+    per-model in ``model_info.py`` via the ``thinking="<level>"`` argument of
+    the ``_mi(...)`` helper (e.g. ``thinking="xhigh"`` for the gpt-5.5
+    family).  Models not in ``MODEL_INFO`` (e.g. custom endpoints with
+    arbitrary model names) return ``None`` so we never send an unsupported
+    ``reasoning_effort`` to such providers.
+
+    Args:
+        model_name: The full model name as passed to
+            :class:`OpenAICompatibleModel`, including any ``openrouter/``
+            prefix.
+
+    Returns:
+        The thinking level string (e.g. ``"xhigh"``) if the matching
+        ``MODEL_INFO`` entry sets one, otherwise ``None``.
+    """
+    # Lazy import: avoid a circular import between this module and
+    # ``model_info`` (which imports ``OpenAICompatibleModel`` from this
+    # package via ``_openai_compatible``).
+    from kiss.core.models.model_info import MODEL_INFO
+    info = MODEL_INFO.get(model_name)
+    return info.thinking if info is not None else None
+
+
 DEEPSEEK_REASONING_MODELS = {
     "deepseek/deepseek-r1",
     "deepseek/deepseek-r1-0528",
@@ -135,6 +162,13 @@ class OpenAICompatibleModel(Model):
         self._api_model_name = (
             model_name[len("openrouter/") :] if model_name.startswith("openrouter/") else model_name
         )
+        # Default ``reasoning_effort`` to the level declared on the model's
+        # MODEL_INFO entry (e.g. ``"xhigh"`` for gpt-5.5).  Copy first so we
+        # never mutate the caller's dict.  Caller-supplied values always win.
+        thinking_level = _model_thinking_level(self.model_name)
+        if thinking_level is not None and "reasoning_effort" not in self.model_config:
+            self.model_config = dict(self.model_config)
+            self.model_config["reasoning_effort"] = thinking_level
 
     def __str__(self) -> str:
         """Return a string representation of the model.
@@ -590,6 +624,22 @@ class OpenAICompatibleModel(Model):
             }
         )
         self._apply_cache_control_for_openrouter_anthropic(kwargs)
+
+        # OpenAI's /v1/chat/completions endpoint rejects the combination of
+        # ``tools`` + ``reasoning_effort`` for GPT-5.x / o-series reasoning
+        # models with: "Function tools with reasoning_effort are not supported
+        # ... in /v1/chat/completions. Please use /v1/responses instead."
+        # Migrating the whole transport to the Responses API is a major
+        # rewrite, so as a pragmatic fix we strip ``reasoning_effort`` from
+        # tool-bearing requests; the no-tools ``generate()`` path still keeps
+        # the high-reasoning default.
+        if tools and "reasoning_effort" in kwargs:
+            dropped = kwargs.pop("reasoning_effort")
+            logger.debug(
+                "Dropping reasoning_effort=%r because tools are attached "
+                "(chat.completions rejects this combo for reasoning models).",
+                dropped,
+            )
 
         if self.token_callback is not None:  # pragma: no cover – API streaming
             kwargs["stream"] = True
