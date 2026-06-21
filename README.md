@@ -122,7 +122,7 @@ sorcar # to launch Sorcar CLI similar to Claude Code
 
 sorcar -t "What is 2435*234"
 
-sorcar -n -t --use-chat "What is 2435*234?" # start a new chat session
+sorcar -n --no-worktree -t "What is 2435*234?" # start a new chat session
 
 sorcar -m "claude-sonnet-4-6" -t "What is 2435*234?" # use a specific model
 
@@ -140,7 +140,7 @@ sorcar -t 'Can you show me the detailed step-by-step workflow of gepa.py?'
 |------|-------------|
 | `-t`, `--task` | Task description |
 | `-f`, `--file` | Path to a file whose contents to use as the task |
-| `-m`, `--model_name` | LLM model name (default: `claude-opus-4-6`) |
+| `-m`, `--model_name` | LLM model name (auto-picked from configured API keys: Anthropic→`claude-opus-4-7`, OpenAI→`gpt-5.5`, Gemini→`gemini-3.1-pro-preview`, OpenRouter→`openrouter/anthropic/claude-opus-4.7`, Together→`Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8`, Claude Code CLI→`cc/opus`, Codex CLI→`codex/default`) |
 | `-e`, `--endpoint` | Custom endpoint for a local model |
 | `--header` | Custom HTTP header in `Key:Value` form; may be repeated |
 | `-b`, `--max_budget` | Maximum budget in USD |
@@ -149,10 +149,12 @@ sorcar -t 'Can you show me the detailed step-by-step workflow of gepa.py?'
 | `-n`, `--new` | Start a new chat session |
 | `-c`, `--chat-id` | Resume a chat session by ID |
 | `-l`, `--list-chat-id` | List the last 10 chat sessions with tasks and results |
-| `-p`, `--parallel` | Enable parallel subagents |
+| `-p`, `--parallel` / `--no-parallel` | Enable/disable parallel subagents (default: enabled) |
+| `--worktree` / `--no-worktree` | Isolate each task in a git worktree branch (default: enabled) |
+| `--auto-commit` / `--no-auto-commit` | Auto-commit worktree changes when a task finishes (default: enabled) |
 | `--no-web` | Disable browser/web tools (terminal-only mode) |
-| `--use-chat` | Use chat mode |
-| `--use-worktree` | Use chat mode with git worktree isolation (advanced) |
+| `--use-chat` | Legacy alias for `--no-worktree` (chat mode) |
+| `--use-worktree` | Legacy alias for `--worktree` (git worktree isolation) |
 | `--cleanup` | Scan for and clean up orphaned worktree branches |
 
 ## 💬 Messaging & Third-Party Agents
@@ -167,17 +169,16 @@ These agents are in `src/kiss/agents/third_party_agents/`.
 
 ## 🤖 Models Supported
 
-**529 models** across 8 provider categories (OpenAI, Anthropic, Gemini, Together AI, MiniMax, OpenRouter, Claude Code CLI, Codex CLI) with built-in pricing, context lengths, and capability flags.
+**499 models** across 8 provider categories (OpenAI, Anthropic, Gemini, Together AI, MiniMax, OpenRouter, Claude Code CLI, Codex CLI) with built-in pricing, context lengths, and capability flags (`fc` function-calling, `gen` generation, `emb` embedding). The full catalog lives in `src/kiss/core/models/MODEL_INFO.json`.
 
-**Generation Models** (text generation with function calling support):
+**Generation Models** (text generation, most with function-calling support):
 
-- **OpenAI**: gpt-3.5-turbo, gpt-4, gpt-4-turbo, gpt-4.1, gpt-4.1-mini, gpt-4.1-nano, gpt-4o, gpt-4o-mini, gpt-5, gpt-5-mini, gpt-5-nano, gpt-5-pro, gpt-5.1, gpt-5.2, gpt-5.2-pro, gpt-5.3-chat-latest, gpt-5.4, gpt-5.4-mini, gpt-5.4-nano, gpt-5.4-pro, gpt-5.5, gpt-5.5-pro (+ dated variants)
-- **OpenAI (Codex)**: gpt-5-codex, gpt-5.1-codex, gpt-5.1-codex-max, gpt-5.1-codex-mini, gpt-5.2-codex, gpt-5.3-codex
-- **OpenAI (Reasoning)**: o1, o1-pro, o3, o3-mini, o3-pro, o3-deep-research, o4-mini, o4-mini-deep-research (+ dated variants)
+- **OpenAI**: gpt-3.5-turbo, gpt-4, gpt-4-turbo, gpt-4.1, gpt-4.1-mini, gpt-4.1-nano, gpt-4o, gpt-4o-mini, gpt-5, gpt-5-mini, gpt-5-nano, gpt-5-chat-latest, gpt-5.1, gpt-5.1-chat-latest, gpt-5.2, gpt-5.2-chat-latest, gpt-5.3-chat-latest, gpt-5.4, gpt-5.4-mini, gpt-5.4-nano, gpt-5.5 (+ dated variants)
+- **OpenAI (Reasoning)**: o1, o3, o3-mini, o3-deep-research, o4-mini, o4-mini-deep-research (+ dated variants)
 - **OpenAI (Image)**: gpt-image-1, gpt-image-1-mini, gpt-image-1.5, gpt-image-2
-- **OpenAI (Search)**: gpt-4o-search-preview, gpt-4o-mini-search-preview
+- **OpenAI (Search)**: gpt-4o-search-preview, gpt-4o-mini-search-preview (+ dated variants)
 - **OpenAI (Other)**: computer-use-preview, openai/gpt-oss-20b, openai/gpt-oss-120b
-- **Anthropic**: claude-opus-4-8, claude-opus-4-7, claude-opus-4-6, claude-opus-4-5, claude-opus-4-1, claude-opus-4, claude-sonnet-4-6, claude-sonnet-4-5, claude-sonnet-4, claude-haiku-4-5 (+ dated variants)
+- **Anthropic**: claude-opus-4-8, claude-opus-4-7, claude-opus-4-6, claude-opus-4-5, claude-opus-4-1, claude-sonnet-4-6, claude-sonnet-4-5, claude-haiku-4-5, claude-fable-5 (+ dated variants)
 - **Claude Code CLI**: cc/haiku, cc/opus, cc/sonnet
 - **Codex CLI**: codex/default, codex/codex-auto-review, codex/gpt-5.2, codex/gpt-5.3-codex, codex/gpt-5.4, codex/gpt-5.4-mini, codex/gpt-5.5
 - **Gemini**: gemini-2.5-pro, gemini-2.5-flash, gemini-2.5-flash-image, gemini-2.5-flash-lite, gemini-2.0-flash, gemini-2.0-flash-lite, gemini-3.5-flash, gemini-3.1-flash-lite
@@ -187,23 +188,23 @@ These agents are in `src/kiss/agents/third_party_agents/`.
 - **Together AI (Llama)**: Llama-4-Scout, Llama-4-Maverick (with function calling), Llama-3.x series (generation only)
 - **Together AI (Qwen)**: Qwen2-1.5B-Instruct, Qwen2-VL-72B-Instruct, Qwen2.5-72B/14B/7B-Instruct, Qwen2.5-VL-72B, Qwen2.5-Coder-32B, Qwen3-235B series, Qwen3-Coder-480B, Qwen3-Coder-Next, Qwen3-Next-80B, Qwen3-VL-32B/8B, Qwen3.5-397B/9B, Qwen3.6-Plus, QwQ-32B
 - **Together AI (DeepSeek)**: DeepSeek-R1, DeepSeek-R1-0528, DeepSeek-R1-0528-tput, DeepSeek-R1-Distill-Llama-70B, DeepSeek-R1-Distill-Qwen-1.5B/14B, DeepSeek-V3-0324, DeepSeek-V3.1, DeepSeek-V4-Pro, deepseek-coder-33b-instruct
-- **Together AI (Kimi/Moonshot)**: Kimi-K2-Instruct, Kimi-K2-Instruct-0905, Kimi-K2-Thinking, Kimi-K2.5, Kimi-K2.6
+- **Together AI (Kimi/Moonshot)**: Kimi-K2-Instruct, Kimi-K2-Instruct-0905, Kimi-K2-Thinking, Kimi-K2.5, Kimi-K2.6, Kimi-K2.7-Code
 - **Together AI (Mistral)**: Ministral-3-14B, Mistral-7B-v0.1/v0.2/v0.3, Mistral-Small-24B, Mixtral-8x7B
-- **Together AI (Z.AI)**: GLM-5, GLM-5.1, GLM-4.5-Air-FP8, GLM-4.6, GLM-4.7
-- **Together AI (MiniMax)**: MiniMax-M2.5, MiniMax-M2.7
-- **MiniMax**: minimax-m2.5, minimax-m2.5-lightning (via MiniMax direct API)
+- **Together AI (Z.AI)**: GLM-4.5-Air-FP8, GLM-4.6, GLM-4.7, GLM-5, GLM-5.1, GLM-5.2
+- **Together AI (MiniMax)**: MiniMax-M2.5, MiniMax-M2.7, MiniMax-M3
+- **MiniMax (direct API)**: minimax-m2.5, minimax-m2.5-lightning
 - **Together AI (DeepCogito)**: cogito-v1-preview (llama-70B/8B/70B-Turbo, qwen-14B/32B), cogito-v2-1-671b
-- **Together AI (NVIDIA)**: Llama-3.1-Nemotron-70B, Nemotron-Nano-9B-v2
+- **Together AI (NVIDIA)**: Llama-3.1-Nemotron-70B, NVIDIA-Nemotron-Nano-9B-v2, nemotron-3-ultra-550b-a55b
 - **Together AI (Other)**: arcee-ai/trinity-mini, essentialai/rnj-1-instruct
-- **OpenRouter**: Access to 313 models from 53 providers via unified API, including OpenAI, Anthropic, Google, Meta Llama, DeepSeek, Qwen, Amazon Nova, Cohere, X.AI Grok, MiniMax, ByteDance/ByteDance Seed, MoonshotAI, Mistral, NVIDIA, Z.AI/GLM, AllenAI, Perplexity, NousResearch, Baidu ERNIE, Xiaomi, Reka AI, Arcee AI, Perceptron, StepFun, Tencent, Inception, InclusionAI, KwaiPilot, Liquid, Morph, Relace, IBM Granite, Prime Intellect, AI21, Aion Labs, Anthracite, DeepCogito, Essential AI, Gryphe, Inflection, Mancer, Microsoft, Sao10K, Switchpoint, TheDrummer, Undi95, Upstage, Writer, and others
+- **OpenRouter**: Access to 301 models from 50 providers via a unified API, including OpenAI, Anthropic, Google, Meta Llama, DeepSeek, Qwen, Amazon Nova, Cohere, X.AI Grok, MiniMax, ByteDance / ByteDance Seed, MoonshotAI, Mistral, NVIDIA, Z.AI / GLM, AllenAI, Perplexity, NousResearch, Baidu ERNIE, Xiaomi, Reka AI, Arcee AI, Perceptron, StepFun, Tencent, Inception, InclusionAI, KwaiPilot, Liquid, Morph, Relace, IBM Granite, Prime Intellect, Poolside, AI21, Aion Labs, Anthracite, DeepCogito, Essential AI, Gryphe, Inflection, Mancer, Microsoft, Sao10K, Switchpoint, TheDrummer, Undi95, Upstage, Writer, and others
 
 **Embedding Models** (for RAG and semantic search):
 
 - **OpenAI**: text-embedding-3-small, text-embedding-3-large, text-embedding-ada-002
-- **Google**: gemini-embedding-001, gemini-embedding-2, gemini-embedding-2-preview
+- **Google**: gemini-embedding-001, gemini-embedding-2-preview
 - **Together AI**: BAAI/bge-base-en-v1.5, intfloat/multilingual-e5-large-instruct
 
-Each model entry includes capability flags: `is_function_calling_supported`, `is_generation_supported`, `is_embedding_supported`.
+Each model entry includes capability flags: `fc` (function calling), `gen` (text generation), `emb` (embedding), plus `context_length`, `input_price_per_1M`, and `output_price_per_1M`.
 
 ## 🤗 Contributing
 
