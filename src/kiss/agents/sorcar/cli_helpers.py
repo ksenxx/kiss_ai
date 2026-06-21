@@ -189,9 +189,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "-f", "--file", type=str, default=None,
         help="Path to a file whose contents to use as the task",
     )
-    parser.add_argument(
-        "-n", "--new", action="store_true", help="Start a new chat session",
-    )
     return parser
 
 
@@ -202,11 +199,15 @@ def _apply_chat_args(
 ) -> None:
     """Apply ``-n`` / ``--chat-id`` args to *agent*, or resume by *task*.
 
-    Only the sorcar CLI's ``-n/--new`` flag is now in ``argparse``;
-    third-party background agents (Slack, Discord, …) still bolt
-    ``--chat-id`` / ``--list-chat-id`` onto their own parsers and
-    call this helper.  ``getattr`` keeps the helper backwards
-    compatible with both shapes.
+    Used exclusively by third-party background agents (Slack,
+    Discord, …) which extend the shared parser with
+    ``-n/--new`` / ``--chat-id`` / ``--list-chat-id`` in
+    ``channel_main`` and then call this helper.  The sorcar CLI
+    itself no longer exposes any of those flags (its non-interactive
+    path runs a bare ``SorcarAgent`` with no chat-session surface,
+    and its interactive path forwards session control to the
+    daemon via slash commands).  ``getattr`` keeps the helper
+    tolerant of parsers that omit the optional attributes.
     """
     if getattr(args, "new", False):
         agent.new_chat()
