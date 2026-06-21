@@ -82,6 +82,68 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 
+# Keys in the persisted ``extra`` JSON that capture the per-task
+# snapshot of GLOBAL settings (the model picker and the worktree /
+# parallel / auto-commit toggles) at the moment the task ran.  When a
+# chat tab is LOADED FROM HISTORY into a tab, the live toggles in the
+# webview already reflect the user's CURRENT global preferences (synced
+# from ``~/.kiss/config.json`` via ``updateSetting`` / ``configData``);
+# replaying these stale per-task values would stamp the toggles back
+# onto the loaded task's old settings and silently make the NEXT task
+# run with those old settings instead of whatever the user just picked
+# globally.  ``_extra_for_replay`` strips them so the frontend's
+# ``task_events`` handler cannot clobber the live toggle state.
+#
+# Keys deliberately preserved: ``startTs`` / ``endTs`` drive the
+# "Running …" / "Done (Xm Ys)" header in the chat webview; ``work_dir``
+# is per-tab routing state; ``tokens`` / ``cost`` / ``steps`` /
+# ``version`` are informational read-outs of the historical run.
+_REPLAY_STRIPPED_EXTRA_KEYS = (
+    "model",
+    "is_worktree",
+    "is_parallel",
+    "auto_commit_mode",
+)
+
+
+def _extra_for_replay(extra: object) -> str:
+    """Return *extra* with global-setting keys stripped for replay.
+
+    See :data:`_REPLAY_STRIPPED_EXTRA_KEYS` for the rationale.  Non-
+    string and non-dict-JSON payloads are passed through unchanged so
+    this helper is safe to apply unconditionally to whatever the
+    persistence layer returned.
+
+    Args:
+        extra: The persisted ``extra`` value from
+            ``_load_chat_events_by_task_id`` /
+            ``_load_latest_chat_events_by_chat_id``.
+
+    Returns:
+        A JSON string with the stripped keys removed, the original
+        string when it is not parseable as a JSON object, or ``""``
+        when *extra* is missing / not a string.
+    """
+    if not isinstance(extra, str):
+        return ""
+    if not extra:
+        return ""
+    try:
+        parsed = json.loads(extra)
+    except (json.JSONDecodeError, TypeError):
+        return extra
+    if not isinstance(parsed, dict):
+        return extra
+    mutated = False
+    for key in _REPLAY_STRIPPED_EXTRA_KEYS:
+        if key in parsed:
+            parsed.pop(key, None)
+            mutated = True
+    if not mutated:
+        return extra
+    return json.dumps(parsed)
+
+
 def _coalesced_replay_events(events: object) -> list[dict[str, Any]]:
     """Coalesce a persisted event list for a replay broadcast.
 
@@ -1255,26 +1317,18 @@ class VSCodeServer(
             tab = _RunningAgentState.running_agent_states.get(tab_id)
             if tab is not None:
                 tab.chat_id = chat_id
-                # Do NOT clobber ``use_worktree`` while a task is in
-                # flight on this tab or while a finished worktree run
-                # is awaiting the user's merge/discard decision
-                # (``agent._wt_pending``): the end-of-task cleanup in
-                # ``_TaskRunnerMixin._run_task`` keeps the agent alive
-                # only when ``tab.use_worktree and tab.agent._wt_pending``,
-                # and the merge-busy guard scans ``t.is_merging and
-                # t.use_worktree`` — flipping the flag mid-flight would
-                # dispose the agent that still holds the pending
-                # worktree state (breaking merge/discard and leaking
-                # the worktree branch).
-                wt_pending = bool(
-                    tab.agent is not None
-                    and getattr(tab.agent, "_wt_pending", False),
-                )
-                if not tab.is_task_active and not wt_pending:
-                    tab.use_worktree = bool(
-                        extra_raw.get("is_worktree")
-                        if isinstance(extra_raw, dict) else False,
-                    )
+                # Do NOT seed ``tab.use_worktree`` from the loaded
+                # task's ``extra.is_worktree``: that historical value
+                # is a snapshot of the toggle at the time the task
+                # ran, NOT the user's current global setting.  Loading
+                # a chat is a VIEW operation — the NEXT task started
+                # in this tab will overwrite ``tab.use_worktree`` from
+                # the frontend's live ``useWorktree`` flag (which
+                # mirrors the user's CURRENT global toggle), so any
+                # value seeded here would be either stale (last-task
+                # snapshot) or immediately clobbered (correct global).
+                # Leaving the field untouched lets a follow-up run
+                # honor the user's current toggle state.
                 tab.frontend_closed = False
             # Record which chat this tab now displays so a task later
             # started on the same chat (from any tab in any window)
@@ -1383,7 +1437,16 @@ class VSCodeServer(
             "task": result["task"],
             "task_id": result.get("task_id"),
             "chat_id": chat_id,
-            "extra": result.get("extra", ""),
+            # ``_extra_for_replay`` strips ``model`` / ``is_worktree``
+            # / ``is_parallel`` / ``auto_commit_mode`` so loading a
+            # chat into this tab cannot clobber the live toggle / model
+            # state that mirrors the user's CURRENT global settings.
+            # A follow-up task started in this tab must use whatever
+            # the toggles currently say (= the global settings the
+            # user just picked), not the stale per-task snapshot of
+            # the historical row being loaded.  See the comment on
+            # :data:`_REPLAY_STRIPPED_EXTRA_KEYS`.
+            "extra": _extra_for_replay(result.get("extra", "")),
             "tabId": tab_id,
         })
         self._emit_pending_worktree(tab_id)
@@ -1533,7 +1596,20 @@ class VSCodeServer(
                 "task": description,
                 "task_id": sub_task_id,
                 "chat_id": row.get("chat_id", ""),
-                "extra": row.get("extra", ""),
+                # Sub-agent tabs reopened on a parent-task history
+                # load must follow the same strip rule as the parent
+                # ``_replay_session`` broadcast above: a persisted
+                # sub-agent ``extra`` snapshot of
+                # ``model`` / ``is_worktree`` / ``is_parallel`` /
+                # ``auto_commit_mode`` is just as historical as the
+                # parent's, and the frontend's background-tab
+                # ``task_events`` branch still reads ``extra.model``
+                # into ``teTab.selectedModel`` (see ``media/main.js``
+                # near the ``bgExtra.model`` block).  Stripping here
+                # prevents a stale per-sub-agent model from being
+                # inherited by the live model picker when the user
+                # later switches to that sub-tab.
+                "extra": _extra_for_replay(row.get("extra", "")),
                 "tabId": sub_tab_id,
             })
 

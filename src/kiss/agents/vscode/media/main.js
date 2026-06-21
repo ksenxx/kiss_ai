@@ -2883,7 +2883,19 @@
           if (ev.extra) {
             try {
               const bgExtra = JSON.parse(ev.extra);
-              if (bgExtra.model) teTab.selectedModel = bgExtra.model;
+              // Do NOT stamp ``teTab.selectedModel`` from
+              // ``bgExtra.model``: a background tab whose chat is
+              // being LOADED from history would otherwise capture
+              // the loaded task's historical model snapshot into
+              // its per-tab state — and ``restoreTab`` would then
+              // promote it to the live ``selectedModel`` when the
+              // user later switches to that tab, silently making
+              // the next submit run with the loaded task's old
+              // model instead of the user's current global one.
+              // The backend (``_extra_for_replay`` in server.py)
+              // already strips ``model`` from history replays; this
+              // guard mirrors the active-tab path so the rule holds
+              // even if a future replay path forgets to strip.
               if (bgExtra.work_dir) teTab.workDir = bgExtra.work_dir;
               // Capture the agent's persisted start / end timestamps
               // so switching to this background tab renders
@@ -2952,25 +2964,26 @@
             if (typeof extra.endTs === 'number' && extra.endTs > 0) {
               endTs = extra.endTs;
             }
-            if (extra.model) {
-              selectedModel = extra.model;
-              if (modelName) modelName.textContent = selectedModel;
-              const curTab = getTab(activeTabId);
-              if (curTab) curTab.selectedModel = selectedModel;
-            }
             if (extra.work_dir) {
               const wdTab = getTab(activeTabId);
               if (wdTab) wdTab.workDir = extra.work_dir;
             }
-            if (worktreeToggleBtn) {
-              worktreeToggleBtn.checked = !!extra.is_worktree;
-            }
-            if (parallelToggleBtn) {
-              parallelToggleBtn.checked = !!extra.is_parallel;
-            }
-            if (autocommitToggleBtn) {
-              autocommitToggleBtn.checked = !!extra.auto_commit_mode;
-            }
+            // Do NOT clobber the live toggle / model state from this
+            // task's historical ``extra.is_worktree`` /
+            // ``extra.is_parallel`` / ``extra.auto_commit_mode`` /
+            // ``extra.model``: those values are a SNAPSHOT of what
+            // the toggles read AT THE TIME this task ran, not the
+            // user's CURRENT global settings.  The live toggles in
+            // this webview already mirror ``~/.kiss/config.json``
+            // (kept in sync via ``updateSetting`` / ``configData``);
+            // overwriting them with the loaded task's stale snapshot
+            // would silently make the NEXT task submitted in this
+            // tab run with the loaded task's old settings instead of
+            // whatever the user just picked globally.  The backend's
+            // ``_extra_for_replay`` (server.py) defensively strips
+            // these keys from the broadcast ``extra`` for the same
+            // reason — this guard keeps the bug from creeping back
+            // in if an older/local backend still ships them.
           } catch (_e) {
             /* ignore malformed extra */
           }
