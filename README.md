@@ -4,11 +4,7 @@
 
 # KISS Sorcar
 
-### The open-source AI coding agent that beats Cursor and Claude Code on Terminal Bench.
-
-**Terminal Bench 2.0:  KISS Sorcar 62.2%  •  Cursor agent 61.7%  •  Claude Code 58%**
-
-*Free. Local. Bring your own API key. Runs as a VS Code extension and as a web/mobile app.*
+**KISS Sorcar is an open-source general-purpose AI agentic framework with high-quality software engineering expertise**. KISS Sorcar really shines for AI discovery and for long horizon tasks with goals.  It can use multiple models for solving a task.  You bring your own model API key (Anthropic highly recommended) or LLM endpoint or Claude Code or OpenAI Codex; nothing about your code or prompts is sent through our servers.
 
 [![Version](https://img.shields.io/badge/version-2026.6.25-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
@@ -47,13 +43,25 @@ ______________________________________________________________________
   <img src="assets/sorcar-main.gif" alt="KISS Sorcar demo" width="100%">
 </div>
 
-**KISS Sorcar is an open-source general-purpose AI agent with high-quality software engineering expertise**. KISS Sorcar really shines for AI discovery and for long horizon tasks with goals.  You bring your own model API key (Anthropic highly recommended) or LLM endpoint or Claude Code or OpenAI Codex; nothing about your code or prompts is sent through our servers.
 
 ## Full Installation
 
 ```
 curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install.sh | bash
 ```
+
+## 🆚 KISS Sorcar vs Claude Code vs Cursor
+
+| Capability | **KISS Sorcar** | **Claude Code** | **Cursor** |
+|---|---|---|---|
+| **Interfaces** | CLI + VS Code extension + web/mobile app | CLI + mobile app | Custom VS Code |
+| **Multiple models from multiple vendors in the *same* task** | ✅ Yes — mix OpenAI, Anthropic, Gemini, Together, OpenRouter, MiniMax, Claude Code CLI, Codex CLI freely within one task | ❌ No (Anthropic Claude models only) | ❌ No (one model per task) |
+| **Number of models supported** | 499 across 8 provider categories | Claude family only | Subset chosen by Cursor |
+| **Bring your own API key / fully local** | ✅ Yes — keys stay on your machine, no proxy through vendor servers | ✅ Yes (Anthropic key only) | ⚠️ Routed through Cursor's backend |
+| **Open source** | ✅ Apache-2.0 | ❌ Proprietary | ❌ Proprietary |
+| **Price** | Free (pay only your LLM provider) | Subscription / API usage | Subscription |
+| **Run on top of Claude Code / Codex CLI** | ✅ `cc/*` and `codex/*` model namespaces | N/A | ❌ |
+| **Terminal Bench 2.0 score** | **62.2%** | 58% | 61.7% (Cursor agent) |
 
 KISS Sorcar runs as a **CLI (like Claude Code), Visual Studio Code extension**, and as a **web/mobile app**, and is built on the **KISS Agent Framework** — a deliberately simple agent runtime that follows the [KISS principle](https://en.wikipedia.org/wiki/KISS_principle) ("Keep it Simple, Stupid"). All agents run as daemon thread in the KISS Sorcar web server daemon process. If you have Claude Code or OpenAI Codex in your PATH, you can also use `cc/*` or `codex/*` models for chat.
 
@@ -65,18 +73,6 @@ An old video on KISS Sorcar can be found at [https://www.youtube.com/watch?v=xnY
 
 <scriptsize>Note that **Sorcar** also means government in Bengali.</scriptsize>
 
-## 🆚 KISS Sorcar vs Claude Code vs Cursor
-
-| Capability | **KISS Sorcar** | **Claude Code** | **Cursor** |
-|---|---|---|---|
-| **Interfaces** | CLI + VS Code extension + web/mobile app | CLI + mobile app | VS Code extension |
-| **Multiple models from multiple vendors in the *same* task** | ✅ Yes — mix OpenAI, Anthropic, Gemini, Together, OpenRouter, MiniMax, Claude Code CLI, Codex CLI freely within one task | ❌ No (Anthropic Claude models only) | ❌ No (one model per task) |
-| **Number of models supported** | 499 across 8 provider categories | Claude family only | Subset chosen by Cursor |
-| **Bring your own API key / fully local** | ✅ Yes — keys stay on your machine, no proxy through vendor servers | ✅ Yes (Anthropic key only) | ⚠️ Routed through Cursor's backend |
-| **Open source** | ✅ Apache-2.0 | ❌ Proprietary | ❌ Proprietary |
-| **Price** | Free (pay only your LLM provider) | Subscription / API usage | Subscription |
-| **Run on top of Claude Code / Codex CLI** | ✅ `cc/*` and `codex/*` model namespaces | N/A | ❌ |
-| **Terminal Bench 2.0 score** | **62.2%** | 58% | 61.7% (Cursor agent) |
 
 ## 🎬 See It in Action
 
