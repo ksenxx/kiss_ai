@@ -906,7 +906,6 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
 _INTERACTIVE_ONLY_FLAGS: frozenset[str] = frozenset({
     "--worktree", "--no-worktree",
     "--auto-commit", "--no-auto-commit",
-    "-n", "--new",
 })
 
 
@@ -916,13 +915,13 @@ def _reject_interactive_only_flags(argv: list[str]) -> None:
     The non-interactive (``-t`` / ``-f``) path now constructs a bare
     :class:`SorcarAgent` and therefore cannot honour
     ``--worktree`` / ``--no-worktree`` / ``--auto-commit`` /
-    ``--no-auto-commit`` / ``-n`` / ``--new``.  Silently accepting
-    them would, in the case of ``--worktree`` (the previous default),
-    let edits land in the user's working tree instead of the isolated
-    worktree branch the flag advertised — a destructive surprise.
-    This helper inspects the user's literal ``argv`` (so ``-n`` is
-    flagged just like ``--new``) and exits via ``sys.exit(2)`` (the
-    argparse convention) with a message naming every offending flag.
+    ``--no-auto-commit``.  Silently accepting them would, in the
+    case of ``--worktree`` (the previous default), let edits land
+    in the user's working tree instead of the isolated worktree
+    branch the flag advertised — a destructive surprise.  This
+    helper inspects the user's literal ``argv`` and exits via
+    ``sys.exit(2)`` (the argparse convention) with a message
+    naming every offending flag.
 
     Argparse prefix abbreviations (e.g. ``--auto`` for
     ``--auto-commit``) cannot bypass this guard because
@@ -960,10 +959,11 @@ def main() -> None:
       terminal client of the local ``sorcar web`` daemon — see
       :mod:`kiss.agents.sorcar.cli_client`.  The ``--worktree`` /
       ``--no-worktree`` / ``--parallel`` / ``--no-parallel`` /
-      ``--auto-commit`` / ``--no-auto-commit`` / ``-n/--new`` flags
-      are forwarded to the daemon so each task can still run on an
-      isolated git worktree, with parallel sub-agents, auto-commit
-      and chat-session control.
+      ``--auto-commit`` / ``--no-auto-commit`` flags are forwarded
+      to the daemon so each task can still run on an isolated git
+      worktree, with parallel sub-agents and auto-commit.
+      Chat-session control (new chat, resume) is driven from the
+      interactive client's slash commands rather than CLI flags.
     * **Non-interactive** (``-t`` or ``-f`` supplied): runs a plain
       :class:`~kiss.agents.sorcar.sorcar_agent.SorcarAgent` once on
       the supplied task and exits.  No git worktree isolation, no
@@ -971,13 +971,13 @@ def main() -> None:
       removed ``-c/--chat-id`` / ``-l/--list-chat-id`` /
       ``--cleanup`` / ``--use-chat`` / ``--use-worktree`` flag set.
       ``--worktree`` / ``--no-worktree`` / ``--auto-commit`` /
-      ``--no-auto-commit`` / ``-n/--new`` are interactive-only and
-      are rejected when combined with ``-t`` / ``-f``
-      (see :func:`_reject_interactive_only_flags`).  Display events
-      from the run are still streamed into the local chat DB via
+      ``--no-auto-commit`` are interactive-only and are rejected
+      when combined with ``-t`` / ``-f`` (see
+      :func:`_reject_interactive_only_flags`).  Display events from
+      the run are still streamed into the local chat DB via
       :class:`RecordingConsolePrinter` so the run is replayable in
       the chat webview; only the *chat session* surface (resume by
-      id, ``-n/--new``) is unavailable.
+      id) is unavailable.
 
     ``sorcar mcp ...`` is dispatched to the MCP management subcommand
     (:mod:`kiss.agents.sorcar.mcp_cli`) before normal argument parsing.

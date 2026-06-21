@@ -7,13 +7,15 @@
 After restricting the non-interactive (``-t TASK`` / ``-f FILE``) path
 to a plain :class:`SorcarAgent`, the parser still exposed
 ``--worktree`` / ``--no-worktree`` / ``--auto-commit`` /
-``--no-auto-commit`` / ``-n`` / ``--new`` — and silently swallowed
-every one of them in non-interactive mode.  In particular a user
-running ``sorcar -t 'fix bug' --worktree`` (or just relying on the
-documented default ``--worktree=True``) silently lost worktree
-isolation: edits landed directly in the working tree instead of an
-isolated worktree branch.  Likewise ``--auto-commit`` / ``-n`` were
-silent no-ops with no warning, no error, and no help text.
+``--no-auto-commit`` — and silently swallowed every one of them in
+non-interactive mode.  In particular a user running
+``sorcar -t 'fix bug' --worktree`` (or just relying on the documented
+default ``--worktree=True``) silently lost worktree isolation: edits
+landed directly in the working tree instead of an isolated worktree
+branch.  Likewise ``--auto-commit`` was a silent no-op with no
+warning, no error, and no help text.  (``-n/--new`` was a third
+silent-no-op flag in the same set; it has since been dropped from
+the sorcar parser entirely — see :mod:`test_cli_only_sorcar_agent`.)
 
 These tests reproduce that bug by driving the real CLI plumbing
 (``worktree_sorcar_agent.main``) with the listed flags and asserting
@@ -39,8 +41,6 @@ _NON_INTERACTIVE_INVALID_FLAGS: list[tuple[list[str], str]] = [
     (["--no-worktree"], "--no-worktree"),
     (["--auto-commit"], "--auto-commit"),
     (["--no-auto-commit"], "--no-auto-commit"),
-    (["-n"], "-n"),
-    (["--new"], "--new"),
 ]
 
 # Argparse's default ``allow_abbrev=True`` would accept these prefix
@@ -53,7 +53,6 @@ _NON_INTERACTIVE_INVALID_ABBREVIATIONS: list[list[str]] = [
     ["--no-auto"],
     ["--worktr"],
     ["--no-worktr"],
-    ["--ne"],
 ]
 
 
@@ -230,7 +229,7 @@ class TestInteractiveStillAcceptsAllFlags:
     @pytest.mark.parametrize(
         "flag_argv",
         [["--worktree"], ["--no-worktree"], ["--auto-commit"],
-         ["--no-auto-commit"], ["-n"], ["--new"]],
+         ["--no-auto-commit"]],
     )
     def test_flag_is_accepted_in_interactive_mode(
         self,
