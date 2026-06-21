@@ -47,7 +47,7 @@ ______________________________________________________________________
   <img src="assets/sorcar-main.gif" alt="KISS Sorcar demo" width="100%">
 </div>
 
-**KISS Sorcar is an open-source AI software engineering and general-purpose assistant**, which is **free**, **open-source**, and **fully local**. You bring your own model API key (Anthropic highly recommended) or LLM endpoint or Claude Code or OpenAI Codex; nothing about your code or prompts is sent through our servers.
+**KISS Sorcar is an open-source general-purpose AI agent with high-quality software engineering expertise**. KISS Sorcar really shines for AI discovery and for long horizon tasks with goals.  You bring your own model API key (Anthropic highly recommended) or LLM endpoint or Claude Code or OpenAI Codex; nothing about your code or prompts is sent through our servers.
 
 ## Full Installation
 
@@ -55,7 +55,7 @@ ______________________________________________________________________
 curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install.sh | bash
 ```
 
-KISS Sorcar runs as a **Visual Studio Code extension**, as a **CLI tool** and as a **web/mobile app**, and is built on the **KISS Agent Framework** — a deliberately simple agent runtime that follows the [KISS principle](https://en.wikipedia.org/wiki/KISS_principle) ("Keep it Simple, Stupid"). All agents run as daemon thread in the KISS Sorcar web server daemon process. The agent has **browser** support (Chromium + Playwright), **multimodal** support, **Docker container** support, can **research topics on the web**, and can **run for hours** across multiple sessions. If you have Claude Code or OpenAI Codex in your PATH, you can also use `cc/*` or `codex/*` models for chat.
+KISS Sorcar runs as a **CLI (like Claude Code), Visual Studio Code extension**, and as a **web/mobile app**, and is built on the **KISS Agent Framework** — a deliberately simple agent runtime that follows the [KISS principle](https://en.wikipedia.org/wiki/KISS_principle) ("Keep it Simple, Stupid"). All agents run as daemon thread in the KISS Sorcar web server daemon process. If you have Claude Code or OpenAI Codex in your PATH, you can also use `cc/*` or `codex/*` models for chat.
 
 KISS Sorcar is named after [P. C. Sorcar, the Bengali magician](https://en.wikipedia.org/wiki/P._C._Sorcar). The paper is at [papers/kisssorcar/kiss_sorcar.pdf](papers/kisssorcar/kiss_sorcar.pdf).
 
