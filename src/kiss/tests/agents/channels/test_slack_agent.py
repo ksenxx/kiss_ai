@@ -5,8 +5,7 @@
 """Integration tests for slack_agent — no mocks or test doubles.
 
 Tests token persistence, tool creation, SlackAgent construction,
-authentication workflows, tool function signatures, and chat session
-persistence (new_chat, resume_chat, -n flag).
+authentication workflows, and tool function signatures.
 """
 
 from __future__ import annotations
@@ -16,12 +15,9 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, cast
 
 import pytest
 
-import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.third_party_agents.slack_agent import (
     _SLACK_DIR,
     SlackAgent,
@@ -347,111 +343,4 @@ class TestSlackAgent:
         assert _load_token() is None
 
 
-def _redirect_db(tmpdir: str) -> tuple:
-    """Redirect persistence DB to a temp dir and reset singleton connection."""
-    old = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-    kiss_dir = Path(tmpdir) / ".kiss"
-    kiss_dir.mkdir(parents=True, exist_ok=True)
-    th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "sorcar.db"
-    th._db_conn = None
-    return old
 
-
-def _restore_db(saved: tuple) -> None:
-    (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
-
-
-def _intercept_run(agent: SlackAgent, captured: dict[str, Any]) -> Any:
-    """Replace RelentlessAgent.run to capture the prompt without calling LLM.
-
-    Returns the original method so it can be restored.
-    """
-    parent_class = cast(Any, SorcarAgent.__mro__[1])
-    original = parent_class.run
-
-    def intercepted_run(self_agent: object, **kwargs: object) -> str:
-        captured["prompt_template"] = kwargs.get("prompt_template", "")
-        return "success: true\nsummary: done\n"
-
-    parent_class.run = intercepted_run
-    return original
-
-
-class TestSlackAgentChatPersistence:
-    """Integration tests for SlackAgent chat session persistence.
-
-    Verifies new_chat(), resume_chat(), build_chat_prompt(), and the
-    -n CLI flag work correctly with the real SQLite persistence layer.
-    """
-
-    def setup_method(self) -> None:
-        self._backup = _backup_and_clear()
-        self._tmpdir = tempfile.mkdtemp()
-        self._db_saved = _redirect_db(self._tmpdir)
-
-    def teardown_method(self) -> None:
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
-        _restore_db(self._db_saved)
-        _restore(self._backup)
-        shutil.rmtree(self._tmpdir, ignore_errors=True)
-
-    def test_resume_chat_nonexistent_keeps_id(self) -> None:
-        """resume_chat() with unknown task keeps the current chat_id."""
-        agent = SlackAgent()
-        old_id = agent.chat_id
-        agent.resume_chat("task that does not exist in db")
-        assert agent.chat_id == old_id
-
-    def test_main_with_new_flag_creates_new_session(self) -> None:
-        """main() with -n flag calls new_chat(), giving a fresh session."""
-        agent = SlackAgent()
-        agent.web_use_tool = None
-        captured: dict[str, Any] = {}
-        parent_class = cast(Any, SorcarAgent.__mro__[1])
-        original = _intercept_run(agent, captured)
-        try:
-            agent.run(prompt_template="pre-existing task")
-        finally:
-            parent_class.run = original
-        captured2: dict[str, Any] = {}
-        original2 = _intercept_run(agent, captured2)
-        original_argv = sys.argv
-        try:
-            sys.argv = ["slack_agent", "-n", "-t", "new task"]
-            main()
-        finally:
-            parent_class.run = original2
-            sys.argv = original_argv
-
-        prompt = str(captured2.get("prompt_template", ""))
-        assert "# Task\nnew task" in prompt
-        assert "pre-existing task" not in prompt
-
-    def test_main_without_new_flag_resumes_session(self) -> None:
-        """main() without -n flag calls resume_chat(), continuing the session."""
-        agent = SlackAgent()
-        agent.web_use_tool = None
-        captured: dict[str, Any] = {}
-        parent_class = cast(Any, SorcarAgent.__mro__[1])
-        original = _intercept_run(agent, captured)
-        try:
-            agent.run(prompt_template="resumable task")
-        finally:
-            parent_class.run = original
-
-        captured2: dict[str, Any] = {}
-        original2 = _intercept_run(agent, captured2)
-        original_argv = sys.argv
-        try:
-            sys.argv = ["slack_agent", "-t", "resumable task"]
-            main()
-        finally:
-            parent_class.run = original2
-            sys.argv = original_argv
-
-        prompt = str(captured2.get("prompt_template", ""))
-        assert "## Previous tasks and results" in prompt
-        assert "### Task 1\nresumable task" in prompt

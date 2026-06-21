@@ -164,12 +164,14 @@ class TestParserDefaultsStillSane:
             parser.parse_args(["--new"])
 
 
-class TestApplyChatArgsStillExported:
-    """Third-party agents (Slack, Discord, …) still use
-    :func:`cli_helpers._apply_chat_args` to wire chat resumption into
-    their own parser; the helper must remain importable even though
-    the sorcar CLI no longer calls it.
+class TestApplyChatArgsRemoved:
+    """``_apply_chat_args`` was the only helper that tied the CLI
+    surface to chat-session persistence.  Now that channel agents
+    inherit a plain :class:`SorcarAgent` and the sorcar CLI no
+    longer exposes any chat-session flags, the helper has been
+    removed from :mod:`cli_helpers` so the chat-session surface
+    really is gone from the project.
     """
 
-    def test_apply_chat_args_importable(self) -> None:
-        assert callable(cli_helpers._apply_chat_args)
+    def test_apply_chat_args_no_longer_exists(self) -> None:
+        assert not hasattr(cli_helpers, "_apply_chat_args")
