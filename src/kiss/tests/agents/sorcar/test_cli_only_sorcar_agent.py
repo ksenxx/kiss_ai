@@ -43,6 +43,14 @@ _REMOVED_FLAGS: list[list[str]] = [
     ["--use-chat"],
     ["--cleanup"],
     ["--use-worktree"],
+    # ``-n/--new`` was a silent no-op in the sorcar CLI (the
+    # interactive client has no ``new`` parameter and the
+    # non-interactive path rejected the flag), so it has been
+    # removed entirely.  Channel agents (Slack, Discord, …) still
+    # support it via the local parser extension in
+    # :func:`channel_main`.
+    ["-n"],
+    ["--new"],
 ]
 
 
@@ -132,8 +140,8 @@ class TestResolveCliModesHelperIsGone:
 
 class TestParserDefaultsStillSane:
     """The trimmed parser must still expose ``--worktree`` /
-    ``--no-worktree`` (defaulting to True) and ``-n/--new`` so the
-    interactive daemon-client path keeps its existing flag surface.
+    ``--no-worktree`` (defaulting to True) so the interactive
+    daemon-client path keeps its existing flag surface.
     """
 
     def test_worktree_default_on(self) -> None:
@@ -144,9 +152,16 @@ class TestParserDefaultsStillSane:
         args = _build_arg_parser().parse_args(["--no-worktree"])
         assert args.worktree is False
 
-    def test_new_flag_still_present(self) -> None:
-        args = _build_arg_parser().parse_args(["-n"])
-        assert args.new is True
+    def test_new_flag_no_longer_exposed(self) -> None:
+        """``-n/--new`` was a silent no-op (no consumer in either
+        the interactive or the non-interactive path); the parser
+        must now reject it like any other unknown flag.
+        """
+        parser = _build_arg_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args(["-n"])
+        with pytest.raises(SystemExit):
+            parser.parse_args(["--new"])
 
 
 class TestApplyChatArgsStillExported:
