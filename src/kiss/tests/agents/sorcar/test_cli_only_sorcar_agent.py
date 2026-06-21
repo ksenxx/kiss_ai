@@ -108,13 +108,12 @@ class TestNonInteractiveUsesPlainSorcarAgent:
         assert not isinstance(agent, ChatSorcarAgent)
         assert not isinstance(agent, WorktreeSorcarAgent)
 
-    def test_no_worktree_still_uses_plain_sorcar_agent(
-        self, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        agent = self._run_main_with_task(monkeypatch, ["--no-worktree"])
-        assert type(agent) is SorcarAgent
-        assert not isinstance(agent, ChatSorcarAgent)
-        assert not isinstance(agent, WorktreeSorcarAgent)
+    # Note: ``--no-worktree`` (and ``--worktree`` / ``--auto-commit``
+    # / ``--no-auto-commit`` / ``-n``) are now rejected when combined
+    # with ``-t`` / ``-f`` — see
+    # :mod:`test_cli_non_interactive_flag_validation` for the
+    # fail-fast contract.  This file pins the "which agent runs"
+    # contract; the flag-rejection contract lives next door.
 
 
 class TestResolveCliModesHelperIsGone:
