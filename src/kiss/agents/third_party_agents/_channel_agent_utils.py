@@ -482,11 +482,13 @@ def channel_main(
         sys.exit(1)
 
     parser = _build_arg_parser()
-    # The sorcar CLI dropped these chat-resume flags when it was
-    # restricted to a bare ``SorcarAgent`` in non-interactive mode,
-    # but the third-party channel agents are still long-running
-    # ``ChatSorcarAgent`` subclasses that need to list/resume chats.
-    # Add the flags back onto the local parser so the channel-agent
+    # The sorcar CLI dropped these chat-session flags when it was
+    # restricted to a bare ``SorcarAgent`` in non-interactive mode
+    # (and the interactive client surfaces session control through
+    # slash commands), but the third-party channel agents are still
+    # long-running ``ChatSorcarAgent`` subclasses that need to
+    # start a fresh chat or list/resume chats from the CLI.  Add
+    # the flags back onto the local parser so the channel-agent
     # CLI surface stays unchanged.
     parser.add_argument(
         "-c", "--chat-id", type=str, default=None,
@@ -495,6 +497,10 @@ def channel_main(
     parser.add_argument(
         "-l", "--list-chat-id", action="store_true",
         help="List the last 10 chat sessions with tasks and results",
+    )
+    parser.add_argument(
+        "-n", "--new", action="store_true",
+        help="Start a new chat session",
     )
     parser.add_argument(
         "--workspace",
