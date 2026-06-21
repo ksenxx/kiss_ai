@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Discord Agent — ChatSorcarAgent extension with Discord REST API tools.
+"""Discord Agent — SorcarAgent extension with Discord REST API tools.
 
 Provides authenticated access to Discord via a bot token. Uses the Discord
 REST API v10 directly via requests (no discord.py needed). Stores the token
@@ -24,7 +24,7 @@ from typing import Any
 
 import requests
 
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.third_party_agents._backend_utils import wait_for_matching_message
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
@@ -470,8 +470,8 @@ class DiscordChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-class DiscordAgent(BaseChannelAgent, ChatSorcarAgent):
-    """ChatSorcarAgent extended with Discord REST API tools.
+class DiscordAgent(BaseChannelAgent, SorcarAgent):
+    """SorcarAgent extended with Discord REST API tools.
 
     Example::
 

@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Zalo Agent — ChatSorcarAgent extension with Zalo Official Account API tools.
+"""Zalo Agent — SorcarAgent extension with Zalo Official Account API tools.
 
 Provides authenticated access to Zalo OA via access token. Covers both
 extensions/zalo/ (OA API) and extensions/zalouser/ (personal). Stores
@@ -27,7 +27,7 @@ from typing import Any
 
 import requests
 
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     stop_http_server,
@@ -365,8 +365,8 @@ class ZaloChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-class ZaloAgent(BaseChannelAgent, ChatSorcarAgent):
-    """ChatSorcarAgent extended with Zalo OA API tools."""
+class ZaloAgent(BaseChannelAgent, SorcarAgent):
+    """SorcarAgent extended with Zalo OA API tools."""
 
     def __init__(self) -> None:
         super().__init__("Zalo Agent")

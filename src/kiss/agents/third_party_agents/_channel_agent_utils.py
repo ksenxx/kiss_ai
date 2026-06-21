@@ -221,9 +221,9 @@ class BaseChannelAgent:
     Subclasses must set ``self._backend`` (a ``ToolMethodBackend`` instance)
     and override :meth:`_is_authenticated` and :meth:`_get_auth_tools`.
 
-    Use this mixin **before** ``ChatSorcarAgent`` in the MRO::
+    Use this mixin **before** ``SorcarAgent`` in the MRO::
 
-        class SlackAgent(BaseChannelAgent, ChatSorcarAgent): ...
+        class SlackAgent(BaseChannelAgent, SorcarAgent): ...
     """
 
     _backend: Any
@@ -260,7 +260,7 @@ class ChannelRunner:
 
     Connects to a backend, retrieves recent messages, filters to
     allowed users, skips messages the bot has already replied to, and
-    runs a ChatSorcarAgent for each pending message.
+    runs a SorcarAgent for each pending message.
     """
 
     def __init__(
@@ -289,7 +289,7 @@ class ChannelRunner:
 
         Connects to the backend, joins the configured channel, retrieves
         recent messages, filters to allowed users, skips messages the bot
-        has already replied to, and runs a ChatSorcarAgent for each
+        has already replied to, and runs a SorcarAgent for each
         pending message.  Each message is processed synchronously.
 
         Returns:
@@ -358,14 +358,13 @@ class ChannelRunner:
 
     def _handle_message(self, channel_id: str, msg: dict[str, Any]) -> None:
         """Run one agent task for an inbound message."""
-        from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+        from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 
         text = self._backend.strip_bot_mention(msg.get("text", ""))
         thread_ts = msg.get("thread_ts", msg.get("ts", ""))
         session_key = f"{channel_id}:{msg.get('ts', '')}"
 
-        agent = ChatSorcarAgent(self._agent_name)
-        agent.new_chat()
+        agent = SorcarAgent(self._agent_name)
 
         tools = list(self._extra_tools)
         replied = threading.Event()
@@ -463,16 +462,14 @@ def channel_main(
     import inspect
 
     from kiss.agents.sorcar.cli_helpers import (
-        _apply_chat_args,
         _build_arg_parser,
         _build_run_kwargs,
-        _print_recent_chats,
         _print_run_stats,
     )
 
     if len(sys.argv) <= 1:  # pragma: no branch
         parts = [f"Usage: {cli_name} [-m MODEL] [-e ENDPOINT] [-b BUDGET]"]
-        parts.append("[-w PWD] [-t TASK] [-f FILE] [-n] [--chat-id ID] [-l]")
+        parts.append("[-w PWD] [-t TASK] [-f FILE]")
         parts.append("[--workspace WS]")
         if make_backend is not None:
             parts.append("[--channel CH]")
@@ -482,26 +479,6 @@ def channel_main(
         sys.exit(1)
 
     parser = _build_arg_parser()
-    # The sorcar CLI dropped these chat-session flags when it was
-    # restricted to a bare ``SorcarAgent`` in non-interactive mode
-    # (and the interactive client surfaces session control through
-    # slash commands), but the third-party channel agents are still
-    # long-running ``ChatSorcarAgent`` subclasses that need to
-    # start a fresh chat or list/resume chats from the CLI.  Add
-    # the flags back onto the local parser so the channel-agent
-    # CLI surface stays unchanged.
-    parser.add_argument(
-        "-c", "--chat-id", type=str, default=None,
-        help="Resume a chat session by ID",
-    )
-    parser.add_argument(
-        "-l", "--list-chat-id", action="store_true",
-        help="List the last 10 chat sessions with tasks and results",
-    )
-    parser.add_argument(
-        "-n", "--new", action="store_true",
-        help="Start a new chat session",
-    )
     parser.add_argument(
         "--workspace",
         default="default",
@@ -515,10 +492,6 @@ def channel_main(
             help="Comma-separated usernames or user IDs to allow",
         )
     args = parser.parse_args()
-
-    if args.list_chat_id:
-        _print_recent_chats()
-        sys.exit(0)
 
     workspace: str = args.workspace
 
@@ -563,7 +536,6 @@ def channel_main(
     else:
         agent = agent_cls()
     run_kwargs = _build_run_kwargs(args)
-    _apply_chat_args(agent, args, task=run_kwargs.get("prompt_template", ""))
 
     start_time = _time.time()
     agent.run(**run_kwargs)
