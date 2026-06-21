@@ -23,7 +23,6 @@ from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.models.model_info import get_default_model
 
 if TYPE_CHECKING:
-    from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
     from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 
 _DEFAULT_TASK = """
@@ -192,31 +191,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _apply_chat_args(
-    agent: ChatSorcarAgent,
-    args: argparse.Namespace,
-    task: str = "",
-) -> None:
-    """Apply ``-n`` / ``--chat-id`` args to *agent*, or resume by *task*.
-
-    Used exclusively by third-party background agents (Slack,
-    Discord, …) which extend the shared parser with
-    ``-n/--new`` / ``--chat-id`` / ``--list-chat-id`` in
-    ``channel_main`` and then call this helper.  The sorcar CLI
-    itself no longer exposes any of those flags (its non-interactive
-    path runs a bare ``SorcarAgent`` with no chat-session surface,
-    and its interactive path forwards session control to the
-    daemon via slash commands).  ``getattr`` keeps the helper
-    tolerant of parsers that omit the optional attributes.
-    """
-    if getattr(args, "new", False):
-        agent.new_chat()
-    elif getattr(args, "chat_id", None):
-        agent.resume_chat_by_id(args.chat_id)
-    elif task:
-        agent.resume_chat(task)
-
-
 def _build_run_kwargs(args: argparse.Namespace) -> dict[str, Any]:
     """Build ``agent.run()`` keyword arguments from parsed CLI args."""
     task_description = _resolve_task(args)
@@ -282,10 +256,9 @@ def _print_result(result: str) -> None:
         print(result)
 
 
-def _print_run_stats(agent: ChatSorcarAgent, elapsed: float) -> None:
-    """Print post-run statistics (chat ID, time, cost, tokens)."""
-    print(f"\nChat ID: {agent.chat_id}")
-    print(f"Time: {elapsed:.1f}s")
+def _print_run_stats(agent: SorcarAgent, elapsed: float) -> None:
+    """Print post-run statistics (time, cost, tokens)."""
+    print(f"\nTime: {elapsed:.1f}s")
     print(f"Cost: ${agent.budget_used:.4f}")
     print(f"Total tokens: {agent.total_tokens_used}")
 
@@ -309,12 +282,5 @@ def print_outcome(
     """
     if verbose:
         return
-    from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-
     _print_result(result)
-    if isinstance(agent, ChatSorcarAgent):
-        _print_run_stats(agent, elapsed)
-    else:
-        print(f"\nTime: {elapsed:.1f}s")
-        print(f"Cost: ${getattr(agent, 'budget_used', 0.0):.4f}")
-        print(f"Total tokens: {getattr(agent, 'total_tokens_used', 0)}")
+    _print_run_stats(agent, elapsed)

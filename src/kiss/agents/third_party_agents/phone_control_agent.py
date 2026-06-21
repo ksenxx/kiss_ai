@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Phone Control Agent — ChatSorcarAgent extension with Android phone control tools.
+"""Phone Control Agent — SorcarAgent extension with Android phone control tools.
 
 Provides access to Android SMS, calls, and notifications via a companion
 REST app. Stores config in ``~/.kiss/third_party_agents/phone/config.json``.
@@ -23,7 +23,7 @@ from typing import Any
 
 import requests
 
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.third_party_agents._backend_utils import wait_for_matching_message
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
@@ -320,8 +320,8 @@ class PhoneControlChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-class PhoneControlAgent(BaseChannelAgent, ChatSorcarAgent):
-    """ChatSorcarAgent extended with Android phone control tools."""
+class PhoneControlAgent(BaseChannelAgent, SorcarAgent):
+    """SorcarAgent extended with Android phone control tools."""
 
     def __init__(self) -> None:
         super().__init__("Phone Control Agent")

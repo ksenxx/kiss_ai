@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""LINE Agent — ChatSorcarAgent extension with LINE Messaging API tools.
+"""LINE Agent — SorcarAgent extension with LINE Messaging API tools.
 
 Provides authenticated access to LINE via channel access token. Uses webhook
 queue pattern for receiving messages. Stores config in
@@ -25,7 +25,7 @@ from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     stop_http_server,
@@ -301,8 +301,8 @@ class LineChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-class LineAgent(BaseChannelAgent, ChatSorcarAgent):
-    """ChatSorcarAgent extended with LINE Messaging API tools."""
+class LineAgent(BaseChannelAgent, SorcarAgent):
+    """SorcarAgent extended with LINE Messaging API tools."""
 
     def __init__(self) -> None:
         super().__init__("LINE Agent")
