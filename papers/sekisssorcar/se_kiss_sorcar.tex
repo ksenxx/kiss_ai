@@ -64,10 +64,11 @@ integrated development environment---using \kisssys{} itself.
 Over 44~days (April~22 to June~5, 2026), the developer issued
 3,099~tasks through the system's own interface.
 We analyzed every task in the system's SQLite usage log
-and identified seven recurring patterns: test-first bug fixing,
+and identified nine recurring patterns: test-first bug fixing,
 iterative feature construction, periodic code hygiene, paper--code
 co-evolution, defensive revert, architecture investigation before
-change, and multi-channel general assistance.
+change, multi-channel general assistance, invariant specification
+and repair, and cross-model iterative review.
 The developer used \kisssys{} not only to write code across
 Python, TypeScript, JavaScript, CSS, and \LaTeX{}, but also to
 control smart-home lights via the Govee API, plan trips,
@@ -125,7 +126,7 @@ function, and must be fixed immediately.
 To understand how this process works in practice, we analyzed all
 3,099~tasks recorded in the system's SQLite usage log
 (\texttt{\textasciitilde/.kiss/sorcar.db}) over 44~days of active development.
-The tasks fall into seven recurring patterns
+The tasks fall into nine recurring patterns
 (Section~\ref{sec:patterns}), each grounded in a software engineering
 principle (Section~\ref{sec:principles}).
 Table~\ref{tab:categories} summarizes the task distribution.
@@ -160,7 +161,7 @@ Other (security audits, installation,
 
 The rest of the paper is organized as follows.
 Section~\ref{sec:background} surveys related work.
-Section~\ref{sec:patterns} presents the seven usage patterns with
+Section~\ref{sec:patterns} presents the nine usage patterns with
 concrete examples from the log.
 Section~\ref{sec:iterative-case} zooms in on a single, complete
 development episode---redesigning the git-worktree merge workflow---to
@@ -265,7 +266,7 @@ every defect it introduces is a defect it must then live with.
 \label{sec:patterns}
 %----------------------------------------------------------------------
 
-We examined all 3,099~tasks in the usage log and identified seven
+We examined all 3,099~tasks in the usage log and identified nine
 recurring patterns.
 Each pattern is a workflow that the developer repeated dozens or
 hundreds of times.
@@ -752,6 +753,167 @@ many things, but that the \emph{same} engineering safeguards---verify
 sources, isolate changes, refuse unsafe requests, never fabricate---apply
 uniformly whether the task is a code fix or a dinner reservation.
 
+%......................................................................
+\subsection{Pattern 8: Invariant Specification and Repair}
+\label{sec:p-invariant}
+%......................................................................
+
+A distinctive workflow that recurs throughout the log is one in which
+the developer states a global \emph{invariant}---a property that
+\emph{every} part of the codebase must satisfy---and then asks the
+agent to find and fix every place that violates it.
+The invariant is expressed in a single English sentence; the search
+and repair span the entire repository.
+The canonical phrasing has the form ``\textit{X must be Y everywhere;
+find and fix all violations.}''
+
+\noindent Representative invariants drawn verbatim from the log
+include:
+\begin{itemize}[nosep]
+  \item \emph{File-system invariants:} ``All temporary files MUST live
+        under \texttt{PWD/tmp/}; find and fix every place that writes
+        a temporary file directly to \texttt{PWD/} or to the project
+        root.''
+  \item \emph{Module-boundary invariants:} ``All third-party
+        integrations MUST live in
+        \texttt{kiss/agents/third\_party\_agents}; relocate any that
+        do not, and update all imports.''
+  \item \emph{Tool-discipline invariants:} ``All file reads in the
+        codebase and in tests MUST go through the \texttt{Read()}
+        tool wrapper, never raw \texttt{open()} for source inspection;
+        flag every violation.''
+  \item \emph{Test-discipline invariants:} ``No test in the suite may
+        use mocks, patches, fakes, or test doubles; identify every
+        offending test and rewrite it as a real end-to-end test.''
+  \item \emph{Concurrency invariants:} ``Every SQLite write to
+        \texttt{sorcar.db} MUST be guarded by the persistence
+        module's read-write lock; locate and fix any direct
+        connection that bypasses it.''
+  \item \emph{Lifecycle invariants:} ``Every background subprocess
+        spawned by an agent MUST be terminated when its parent task
+        finishes; find any code path that can leak a process and fix
+        it.''
+\end{itemize}
+
+\noindent The verbatim audit prompt that most often opens this pattern
+is ``can you thoroughly find all bugs, redundancies, and
+inconsistencies'' (Pattern~3), but the invariant variant differs in
+intent: Pattern~3 asks for an open-ended quality sweep, whereas
+Pattern~8 specifies a single, precise property and demands closure.
+
+\paragraph{Why this works.}
+The invariant pattern leverages a strength specific to LLM agents
+that is hard to exploit in a manual workflow.
+A human enforcing a repository-wide invariant typically reaches for
+\texttt{grep} or a custom lint rule, both of which require the
+invariant to be expressible as a syntactic pattern.
+The agent, by contrast, can apply a \emph{semantic} filter: it reads
+each candidate site, decides whether the site actually violates the
+invariant in context, and edits only the genuine violations.
+The system prompt's File-Browsing protocol governs the search phase
+verbatim: the agent collects every candidate site into a
+\texttt{PWD/tmp/file-information-\{id\}.md} inventory, reviews the
+collected material as a single artifact, and only then proposes
+fixes.
+This collect-then-act discipline is what prevents the well-known
+failure mode in which a global search-and-replace silently breaks an
+unrelated call site that happens to share a syntactic shape.
+
+\paragraph{Example.}
+Task~1416 in the log states an invariant about temporary files:
+\emph{every} temporary file created by the agent must reside under
+\texttt{PWD/tmp/}, never in the project root.
+The agent ran the inventory phase, found multiple call sites in tests
+and in the research protocol that wrote scratch files into
+\texttt{PWD/}, fixed them, and---closing the invariant loop---added a
+clause to \texttt{SYSTEM.md} requiring the property to hold for
+\emph{future} edits as well.
+The pattern thereby produces two artifacts: a one-time repair sweep
+and a permanent specification clause that prevents the next agent
+session from regressing.
+Pattern~8 is therefore the natural complement to Pattern~6 (system
+prompt engineering): the developer first observes a class of
+violations in the log, then states the invariant that excludes them,
+then asks the agent to repair the past and amend the prompt against
+the future.
+
+%......................................................................
+\subsection{Pattern 9: Cross-Model Iterative Review}
+\label{sec:p-cross-model}
+%......................................................................
+
+A second distinctive workflow exploits a feature of the
+\texttt{update\_settings} tool exposed by the KISS Agent: the running
+agent can switch its own underlying LLM mid-session via the
+\texttt{model\_name} setting.
+The developer uses this to perform \emph{cross-model code review}.
+A task is first executed under the primary model (typically
+\texttt{claude-sonnet}); the developer then issues a follow-up task
+that switches to a different model---most often \texttt{gpt-5.5}---and
+asks the new model to review the prior change, find bugs, and propose
+fixes.
+The loop iterates until the reviewing model reports a clean pass.
+
+\noindent The canonical phrasing recurs in the log as variants of:
+\begin{quote}\small
+``Switch to \texttt{gpt-5.5} and review the changes from the last
+task.  Find any bugs, regressions, or violations of \texttt{SYSTEM.md}.
+Write integration tests for any defect you find, then fix it.
+Iterate until the suite is clean and you have nothing more to
+report.''
+\end{quote}
+
+\noindent The mechanism is a single agent that swaps its weights
+between tasks, not two agents in a debate: the Chat Sorcar Agent
+preserves the conversation, the Worktree Sorcar Agent keeps the
+review on the same branch as the original change, and the KISS Agent
+tracks the cumulative cost across models in the sidebar so the
+developer sees the price of the second opinion in real time.
+
+\paragraph{Why two models help.}
+Cross-model review is not redundant when the two models share a
+common training distribution: it is a practical form of \emph{ensemble
+disagreement}.
+A bug that one model introduces---an off-by-one in a slice, an unhandled
+error path, a stale import left behind after a refactor---is by
+construction one the model failed to detect; a model with a different
+training mixture and different inductive biases is statistically more
+likely to catch it.
+The pattern repurposes a model-evaluation insight for development:
+disagreement between models is a noisy but useful signal of latent
+defects, and the explain-then-revise loop of
+Section~\ref{sec:iterative-case} gives the developer a low-cost way to
+act on that signal without leaving the chat.
+The discipline also doubles as a guard against the well-known failure
+mode in which an LLM blesses its own output: when the same model both
+writes and reviews a change, it is biased to confirm rather than
+falsify.
+Forcing the reviewer to be a different model breaks that loop.
+
+\paragraph{Example.}
+Tasks of the form ``switch to \texttt{gpt-5.5} and audit the worktree
+merge changes from the previous task'' appear repeatedly after major
+refactors of safety-critical code (\eg{} the merge-workflow redesign
+in Section~\ref{sec:iterative-case}).
+A representative session proceeds as follows:
+(i)~the primary model lands a multi-file edit and reports all tests
+green;
+(ii)~the developer issues ``\texttt{set\_model gpt-5.5}; now re-read
+the diff and write a failing test for any bug you can find'';
+(iii)~the reviewer finds, say, an unhandled \texttt{None} return on a
+rarely-taken code path and reproduces it in a new test;
+(iv)~the developer asks the reviewer to fix it, runs the now-larger
+suite, and either accepts the fix or rolls the round back via the
+defensive-revert variant of Pattern~1.
+The loop is typically iterated two or three times before the
+reviewing model stops finding defects.
+The cost of a review round is bounded by the budget tracker, so the
+developer can cap a cross-model audit at a fixed dollar amount, just
+as one caps a CI run at a fixed wall-clock budget.
+Pattern~9 thereby brings to a single-developer workflow the
+adversarial-review discipline that distributed teams obtain through
+pull-request review---without requiring a second human reviewer.
+
 %----------------------------------------------------------------------
 \section{Iterative Development: A Detailed Case Study}
 \label{sec:iterative-case}
@@ -1129,6 +1291,10 @@ The system prompt encodes three levels: read before editing,
 plan before executing, verify before finishing.
 Pattern~3's periodic ``\texttt{uv run check --full and fix}''
 is the automated form of the pre-finish verification.
+Pattern~8 (invariant specification and repair) is the
+repository-scale variant: the developer states a global property,
+the agent reads every candidate site before editing any of them,
+and the fix is applied only after the inventory is complete.
 
 %......................................................................
 \subsection{Self-Hosting as Continuous Integration}
@@ -1147,6 +1313,10 @@ The diff/merge UI bug for \LaTeX{} files (Task~109) was discovered
 because the agent was editing its own paper.
 The auto-commit bug (Task~104) was discovered because the developer
 was reviewing the agent's own output.
+Pattern~9 (cross-model iterative review) extends the same idea to
+the agent itself: a second model audits the first model's changes,
+giving the single-developer workflow the adversarial-review property
+that a team obtains from pull-request review.
 
 %----------------------------------------------------------------------
 \section{The Software Ecosystem}
@@ -1255,7 +1425,7 @@ polluted the project root; the ``visit at least 10~websites'' rule
 
 \subsection{What the Patterns Reveal}
 
-The seven patterns tell a consistent story.
+The nine patterns tell a consistent story.
 The developer did not write specifications or design documents.
 Instead, the developer \emph{conversed} with the agent, issuing
 short natural-language commands and observing results.
@@ -1332,10 +1502,11 @@ optimized for the kinds of tasks the agent can already do well.
 
 We analyzed 3,099~tasks from 44~days of building \kisssys{} with
 \kisssys{}.
-Seven patterns emerged: test-first bug fixing, iterative feature
+Nine patterns emerged: test-first bug fixing, iterative feature
 construction, periodic code hygiene, paper--code co-evolution,
 architecture investigation before change, system prompt engineering,
-and multi-channel general assistance.
+multi-channel general assistance, invariant specification and
+repair, and cross-model iterative review.
 
 Each pattern maps to an established software engineering principle:
 test-driven development, separation of concerns, defensive
