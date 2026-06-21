@@ -1279,6 +1279,19 @@ body.remote-chat #welcome-config { display: none !important; }
   margin-top: 2px;
 }
 
+/* The settings panel uses its OWN ``overflow-y: auto`` (see #settings-panel
+   above) to scroll its long form when it doesn't fit the viewport.  The
+   shared .sidebar-section rule above (designed for the History / Frequent
+   sidebar tabs that nest an inner scrolling list) would otherwise clip the
+   form to the panel height — ``flex: 1`` stretches it to exactly the
+   parent's content area and ``overflow: hidden`` chops everything past
+   the bottom, leaving #settings-panel with no overflow to scroll.  Restore
+   natural sizing + visible overflow inside the settings panel only. */
+#settings-panel > .sidebar-section {
+  flex: 0 0 auto;
+  overflow: visible;
+}
+
 #history-list {
   overflow-y: auto;
   flex: 1;
@@ -1326,6 +1339,20 @@ body.remote-chat #welcome-config { display: none !important; }
 .history-filter-date-lbl {
   user-select: none; cursor: pointer;
   color: color-mix(in srgb, var(--fg) 80%, transparent);
+}
+
+/* Atomic wrapper around a date filter trio (label + <input
+   type=date> + calendar-picker button) inside .history-filter-bar.
+   .history-filter-bar is a ``flex-wrap: wrap`` container, so
+   without this wrapper the three pieces would each be their own
+   flex item and could land on three separate rows when the
+   sidebar gets narrow.  ``display: inline-flex`` makes the
+   wrapper itself a single flex item of the bar, and
+   ``flex-wrap: nowrap`` + ``white-space: nowrap`` keep the
+   label, input, and button glued on the same visual line. */
+.history-filter-date-group {
+  display: inline-flex; align-items: center; gap: 4px;
+  flex-wrap: nowrap; white-space: nowrap;
 }
 
 .history-filter-date {
@@ -1502,6 +1529,24 @@ body.remote-chat #welcome-config { display: none !important; }
   font-variant-numeric: tabular-nums;
   color: color-mix(in srgb, #000 65%, transparent);
   margin-top: 2px;
+}
+
+/* Workspace + meta row — the task's work_dir plus the per-task
+   metadata (model name, wt/no-wt, parallel/sequential,
+   auto-commit/manual-commit) rendered as a single dot-separated
+   line right below the metrics row.  ``flex-basis: 100%`` drops
+   it onto its own line inside the .sidebar-item flex container,
+   mirroring the metrics row above.  Long lines are clipped with
+   an ellipsis; the native ``title`` attribute (set in
+   renderHistory) exposes the full text on hover. */
+.running-item-workspace {
+  flex-basis: 100%;
+  font-size: var(--fs-sm);
+  color: color-mix(in srgb, #000 55%, transparent);
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 @keyframes sidebar-running-pulse {

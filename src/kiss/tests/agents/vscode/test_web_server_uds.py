@@ -117,6 +117,7 @@ class TestUdsListener(IsolatedAsyncioTestCase):
         """A ``ready`` command over UDS produces a ``focusInput`` reply."""
         reader, writer = await asyncio.open_unix_connection(
             str(self.uds_path),
+            limit=16 * 1024 * 1024,
         )
         try:
             writer.write(
@@ -139,6 +140,7 @@ class TestUdsListener(IsolatedAsyncioTestCase):
         """Dropping the UDS arms a deferred ``closeTab`` for every tab seen."""
         reader, writer = await asyncio.open_unix_connection(
             str(self.uds_path),
+            limit=16 * 1024 * 1024,
         )
         writer.write(
             json.dumps(
@@ -168,6 +170,7 @@ class TestUdsListener(IsolatedAsyncioTestCase):
         """Backend broadcasts reach UDS clients via the WebPrinter fan-out."""
         reader, writer = await asyncio.open_unix_connection(
             str(self.uds_path),
+            limit=16 * 1024 * 1024,
         )
         try:
             # Register the writer with the printer by sending ready;
@@ -208,6 +211,7 @@ class TestUdsListener(IsolatedAsyncioTestCase):
         """
         reader, writer = await asyncio.open_unix_connection(
             str(self.uds_path),
+            limit=16 * 1024 * 1024,
         )
         try:
             writer.write(
@@ -271,6 +275,7 @@ class TestUdsListener(IsolatedAsyncioTestCase):
         """
         reader, writer = await asyncio.open_unix_connection(
             str(self.uds_path),
+            limit=16 * 1024 * 1024,
         )
         try:
             query = json.dumps({"type": "activeTasksQuery"}).encode("utf-8")
@@ -320,6 +325,7 @@ class TestUdsListener(IsolatedAsyncioTestCase):
         try:
             reader, writer = await asyncio.open_unix_connection(
                 str(self.uds_path),
+                limit=16 * 1024 * 1024,
             )
             try:
                 writer.write(
