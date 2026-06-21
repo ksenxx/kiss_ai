@@ -1,88 +1,79 @@
-# PROGRESS
+# Progress
 
-## Task
+## Task: Re-review previous task's worktree-remap fix with gpt-5.5
 
-> Move `MODEL_INFO` from `src/kiss/core/models/model_info.py` into a JSON file
-> `src/kiss/core/models/MODEL_INFO.json`. `src/kiss/scripts/update_models.py`
-> MUST update `MODEL_INFO.json`. During installation, copy `MODEL_INFO.json`
-> to `~/.kiss/` and make `model_info.py` load the table from that copied file.
+### Final state — DONE
 
-## Status: CODE COMPLETE — awaiting GPT‑5.5 review
+Commit `339c7e99` (already on the worktree branch, ready for squash-merge to main):
 
-## Work completed (chronological)
+```
+fix(sorcar): prevent parent-repo mutations in worktree-isolated tasks
 
-1. Inspected the existing `model_info.py` (≈900 lines: 499 entries + helpers
-   `_mi`/`_emb`, cache-pricing logic, `model()` dispatch).
+* Add _absolutize() helper to anchor relative paths under work_dir,
+  ensuring they resolve to the worktree regardless of host process cwd
+  (bug 1: relative paths bypass remap)
+* Make Read/Write/Edit path remap unconditional to prevent fallthrough
+  when worktree branch deletes files (bugs 2–3)
+* Add _bash_parent_repo_guard() to refuse shell commands targeting
+  parent-repo absolute paths, blocking sed -i / echo / rm leaks (bug 4)
+* Separate Read's stale-worktree fallback into elif for mutual exclusion
+  with active remap
+* Add 11 regression tests covering all identified bugs and end-to-end
+  auto-commit/squash-merge verification
+```
 
-1. Inspected `update_models.py` — confirmed it was a Python-source rewriter
-   that called `_make_entry_line` to emit `_mi(...)` lines.
+### Round 1 — gpt-5.5 review of commit 43a1b70f
 
-1. Inspected `install.sh` and `DependencyInstaller.ts` to find the right
-   places to seed `~/.kiss/MODEL_INFO.json`.
+Bugs identified:
 
-1. **Extracted MODEL_INFO to JSON.** Wrote a one-shot AST-walk script in
-   `tmp/dump_to_json.py` that visits each `_mi(...)`/`_emb(...)` call and
-   writes the explicit fields (`context_length`, prices, `fc`/`emb`/`gen`,
-   `thinking`) into `src/kiss/core/models/MODEL_INFO.json`. 499 entries.
-   Cache prices are NOT persisted (they are computed at load time).
+1. HIGH — Relative paths bypass remap (Path.resolve() uses host cwd).
+1. HIGH — Edit silently mutates main when worktree branch deleted file.
+1. HIGH — Read returns stale main content when worktree branch deleted file.
+1. HIGH — Bash was not touched; sed -i / echo > / rm still leak.
+1. LOW — Misleading success messages (deprioritised).
+1. MEDIUM — Existing test only checked dirty-state, not main advancement.
 
-1. **Refactored `model_info.py` to load from JSON:**
+### Round 2 — claude-opus-4-7 fix in `src/kiss/agents/sorcar/useful_tools.py`
 
-   - Added `PACKAGE_MODEL_INFO_PATH` and `USER_MODEL_INFO_PATH` constants.
-   - Added `_ensure_user_model_info_path()` that copies the package copy
-     to `~/.kiss/MODEL_INFO.json` when missing OR when the package copy
-     is newer (mtime-based refresh); falls back to the package path on
-     `OSError` so import never fails on read-only filesystems.
-   - Added `_build_model_info_entry()` and `_load_model_info()`.
-   - Removed the `_mi` / `_emb` helper functions and the literal
-     `MODEL_INFO: dict[str, ModelInfo] = {…}` (replaced by a single
-     `MODEL_INFO: dict[str, ModelInfo] = _load_model_info()`).
+1. Added `import re`.
+1. New helper `_absolutize(file_path, work_dir)`.
+1. New helper `_bash_parent_repo_guard(command, work_dir)`.
+1. Wired `_absolutize` into `Read`, `Write`, `Edit`.
+1. `Read`: unconditional remap; stale-fallback now `elif` (mutex with active remap); removed second `.resolve()` on remap (Bug 5 sub-issue).
+1. `Edit`: unconditional remap (dropped `is_file()` gate).
+1. `Bash`: wired `_bash_parent_repo_guard` at top of both sync and streaming code paths.
 
-1. **Refactored `update_models.py` to update the JSON file:**
+### Round 2 — claude-opus-4-7 tests
 
-   - Changed `_EXPECTED_SUBPATH` and `MODEL_INFO_PATH` to point at
-     `src/kiss/core/models/MODEL_INFO.json`.
-   - Added `USER_MODEL_INFO_PATH = Path.home() / ".kiss" / "MODEL_INFO.json"`.
-   - Replaced `_make_entry_line` / `apply_updates_to_file` (Python source
-     rewriter + line-span parser) with:
-     - `_build_entry(...)` — builds one JSON entry dict.
-     - `_read_model_info_json` / `_write_model_info_json` helpers.
-     - `apply_updates_to_file(...)` — reads JSON, removes deprecated names,
-       applies updates (including `thinking=None` → key-removal), inserts
-       new models with a `comment` field ("NEW" / "NEW: needs pricing"),
-       sorts keys, writes back, and ALSO refreshes
-       `~/.kiss/MODEL_INFO.json` when it already exists.
-   - Removed the now-unused `fmt_price` helper.
+`src/kiss/tests/agents/sorcar/test_active_worktree_path_remap_review_bugs.py` (11 tests):
 
-1. **Updated installation:**
+- 3 × Bug 1: relative-path Edit / Write / Read with unrelated host cwd
+- 1 × Bug 2: Edit with file deleted from worktree branch must not mutate main
+- 1 × Bug 3: Read with file deleted from worktree branch must not return main content
+- 3 × Bug 4: Bash `> /main`, `sed -i /main`, `rm /main` all refused
+- 2 × Bug 4 positive controls: Bash inside worktree works, Bash outside repo works
+- 1 × Bug 6: end-to-end auto-commit + squash-merge actually advances main
 
-   - `install.sh`: added a `cp` step right before writing
-     `~/.kiss/.extension-updated` to seed the user-local copy.
-   - `DependencyInstaller.ts`: added `installModelInfoJson(kissProjectPath)`,
-     called from `runFinalization`, mirroring the bash behaviour.
+### Verification
 
-1. **Updated/added tests:**
+- 11/11 new tests pass after fix (0.96s).
+- 449/449 related tests pass across 8 parallel splits (worktree, useful_tools, pwd_prefix, read_tool, edit_crlf, empty_oldstring, read_binary).
+- `uv run check --full` passes (lint, mypy, pyright, mdformat, syntax, VS Code extension check).
 
-   - Rewrote `test_update_models_xhigh.py` to exercise the new
-     `_build_entry` helper (replacing the removed `_make_entry_line`).
-   - Rewrote `test_update_models_write_target.py` to operate on JSON
-     fixtures and to redirect `USER_MODEL_INFO_PATH` so the test does
-     not touch a developer's real `~/.kiss/`.
-   - Added `test_model_info_json_loader.py` with 9 new end-to-end tests
-     covering: package JSON validity, fresh-copy creation, stale-copy
-     mtime refresh, fresh-copy preservation, OSError fallback to
-     package path, `_build_model_info_entry` with full + minimal
-     payloads, `_load_model_info` return type, and the documented
-     `~/.kiss/MODEL_INFO.json` location invariant.
-   - Updated `test_model_implementations.py` to drop its `_mi` import
-     (the helper is gone) and use a local `_mi_for_test` wrapper that
-     calls `ModelInfo(...)` directly.
+### Round 3 — gpt-5.5 re-review of commit `339c7e99`
 
-1. **Verified:**
+Examined diff carefully:
 
-   - `uv run check --full` → all checks pass.
-   - `uv run pytest src/kiss/tests/core/models/test_model_info_completion.py src/kiss/tests/core/models/test_model_info_json_loader.py src/kiss/tests/core/models/test_model_implementations.py src/kiss/tests/scripts/ src/kiss/tests/core/test_coverage_integration.py`
-     → 142 passed, 1 skipped.
-   - Smoke test: 499 models loaded, cache pricing correctly applied
-     (`gpt-5.5` cache_read = 0.5 = 0.10 × input, Claude 1h cache_write =
-     2× input, etc.), `calculate_cost` returns expected values.
+- `_absolutize`: sound; only triggers with `work_dir` + relative path.
+- Bash guard regex: anchors at path boundary; allows worktree-prefixed paths; refuses sibling worktrees (correctly prevents cross-tab leak); refuses parent-repo paths.
+- Edge cases noted but NOT actionable: Windows separator (Unix-first project), symlinked parent paths (pre-existing limitation), heredoc false positives (acceptable trade-off).
+- Read/Write/Edit unconditional remap: correct; subsequent `is_file()` / `exists()` produce honest errors against the worktree path rather than leaking main content.
+- Stale-fallback `elif`: correct mutual exclusion with active remap.
+- Bash guard placement: covers both `_bash_streaming` and `_spawn`.
+
+Verdict: **no new actionable bugs found**. Loop terminates.
+
+### Model usage
+
+- gpt-5.5 (non-codex): Round 1 review, Round 3 re-review.
+- claude-opus-4-7: Round 2 tests + fix implementation + parallel test execution.
