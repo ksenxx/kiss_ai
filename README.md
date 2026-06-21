@@ -99,7 +99,7 @@ export MINIMAX_API_KEY=...
 
 You can also configure a custom endpoint with `--endpoint` / `-e` and optional repeated `--header Key:Value` CLI flags.
 
-## VS Code Extension
+### VS Code Extension Installation
 
 To install only the KISS Sorcar extension, open Visual Studio Code, search for **KISS Sorcar** in the extension marketplace, install it, and relaunch VS Code. Press ESC if you do not have a specific API key ready, but configure at least one model backend before running tasks.
 
