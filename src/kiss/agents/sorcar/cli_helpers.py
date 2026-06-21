@@ -181,26 +181,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-n", "--new", action="store_true", help="Start a new chat session",
     )
-    parser.add_argument(
-        "-c", "--chat-id", type=str, default=None, help="Resume a chat session by ID",
-    )
-    parser.add_argument(
-        "-l", "--list-chat-id", action="store_true",
-        help="List the last 10 chat sessions with tasks and results",
-    )
-    parser.add_argument(
-        "--cleanup", action="store_true",
-        help="Scan for and clean up orphaned worktree branches",
-    )
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument(
-        "--use-chat", action="store_true",
-        help="Legacy alias for --no-worktree (chat mode).",
-    )
-    group.add_argument(
-        "--use-worktree", action="store_true",
-        help="Legacy alias for --worktree (git worktree isolation).",
-    )
     return parser
 
 
@@ -209,10 +189,17 @@ def _apply_chat_args(
     args: argparse.Namespace,
     task: str = "",
 ) -> None:
-    """Apply ``-n`` / ``--chat-id`` args to *agent*, or resume by *task*."""
-    if args.new:
+    """Apply ``-n`` / ``--chat-id`` args to *agent*, or resume by *task*.
+
+    Only the sorcar CLI's ``-n/--new`` flag is now in ``argparse``;
+    third-party background agents (Slack, Discord, …) still bolt
+    ``--chat-id`` / ``--list-chat-id`` onto their own parsers and
+    call this helper.  ``getattr`` keeps the helper backwards
+    compatible with both shapes.
+    """
+    if getattr(args, "new", False):
         agent.new_chat()
-    elif args.chat_id:
+    elif getattr(args, "chat_id", None):
         agent.resume_chat_by_id(args.chat_id)
     elif task:
         agent.resume_chat(task)
