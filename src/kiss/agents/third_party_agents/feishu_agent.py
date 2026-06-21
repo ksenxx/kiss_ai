@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Feishu/Lark Agent — ChatSorcarAgent extension with Feishu Open Platform tools.
+"""Feishu/Lark Agent — SorcarAgent extension with Feishu Open Platform tools.
 
 Provides authenticated access to Feishu/Lark via app_id and app_secret.
 Stores config in ``~/.kiss/third_party_agents/feishu/config.json``.
@@ -21,7 +21,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.third_party_agents._backend_utils import wait_for_matching_message
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
@@ -380,8 +380,8 @@ class FeishuChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-class FeishuAgent(BaseChannelAgent, ChatSorcarAgent):
-    """ChatSorcarAgent extended with Feishu/Lark Open Platform tools."""
+class FeishuAgent(BaseChannelAgent, SorcarAgent):
+    """SorcarAgent extended with Feishu/Lark Open Platform tools."""
 
     def __init__(self) -> None:
         super().__init__("Feishu Agent")
