@@ -113,8 +113,19 @@ def _launch_work_dir() -> str:
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
-    """Build the CLI argument parser for all Sorcar agent entry points."""
-    parser = argparse.ArgumentParser(description="Run SorcarAgent demo")
+    """Build the CLI argument parser for all Sorcar agent entry points.
+
+    ``allow_abbrev`` is set to ``False`` so users must spell long
+    options out fully.  Otherwise argparse would expand abbreviations
+    like ``--auto`` into ``--auto-commit`` BEFORE the non-interactive
+    guard (:func:`_reject_interactive_only_flags`) gets to inspect
+    the raw argv — silently bypassing the guard for every flag in
+    the interactive-only set.
+    """
+    parser = argparse.ArgumentParser(
+        description="Run SorcarAgent demo",
+        allow_abbrev=False,
+    )
     parser.add_argument(
         "-m", "--model_name", type=str, default=get_default_model(),
         help="LLM model name (defaults to the best model for the configured API keys)",
