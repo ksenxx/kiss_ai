@@ -93,7 +93,7 @@ TRAJECTORY_TEMPLATE = (
     / "index.html"
 )
 
-TUNNEL_CHECK_INTERVAL = 30
+TUNNEL_CHECK_INTERVAL = 15
 
 # Number of consecutive watchdog ticks that must observe the *same*
 # new non-empty set of local IPs before the watchdog will treat it as
@@ -101,8 +101,8 @@ TUNNEL_CHECK_INTERVAL = 30
 # debounce a single transient flake from :func:`_get_local_ips`
 # (briefly empty result, DHCP renewal, VPN flap, post-sleep DNS hiccup)
 # would force a spurious daemon restart on LAN-only deployments.  Four
-# ticks at :data:`TUNNEL_CHECK_INTERVAL` = 120 s of sustained change.
-# Earlier code used 2 ticks (60 s) which still let a real-but-brief
+# ticks at :data:`TUNNEL_CHECK_INTERVAL` = 60 s of sustained change.
+# Earlier code used 2 ticks (30 s) which still let a real-but-brief
 # VPN-connect / Ethernet↔WiFi handover that holds a new consistent
 # IP set for ≥60 s trigger a daemon restart even if the address
 # reverted seconds later.  Tests override both knobs to drive the
