@@ -11,7 +11,6 @@ is never modified.  After the task the user chooses **merge** or
 
 from __future__ import annotations
 
-import argparse
 import logging
 import sys
 import time
@@ -23,11 +22,9 @@ import yaml
 
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.cli_helpers import (
-    _apply_chat_args,
     _build_arg_parser,
     _build_run_kwargs,
     _launch_work_dir,
-    _print_recent_chats,
     print_outcome,
 )
 from kiss.agents.sorcar.git_worktree import (
@@ -898,56 +895,24 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         return GitWorktreeOps.cleanup_orphans(Path(repo_root))
 
 
-def _resolve_cli_modes(args: argparse.Namespace) -> None:
-    """Apply legacy ``--use-chat`` / ``--use-worktree`` aliases.
+def main() -> None:
+    """Run the ``sorcar`` CLI.
 
-    The CLI now exposes ``--worktree`` / ``--no-worktree`` as the
-    primary toggle (defaulting to True).  The older ``--use-chat`` and
-    ``--use-worktree`` flags are kept for backward compatibility and
-    here override ``args.worktree`` when the user passes them
-    explicitly.
+    Two modes:
 
-    Args:
-        args: The parsed argparse namespace; mutated in place so that
-            ``args.worktree`` reflects the effective mode.
-    """
-    if getattr(args, "use_chat", False):
-        args.worktree = False
-    if getattr(args, "use_worktree", False):
-        args.worktree = True
-
-
-def _build_cli_agent(args: argparse.Namespace) -> SorcarAgent:
-    """Construct the agent the sorcar CLI should run.
-
-    With worktree mode on (the default) returns a
-    :class:`WorktreeSorcarAgent`, whose ``auto_commit_enabled`` flag is
-    set from ``args.auto_commit`` (also defaulting to True).  Otherwise
-    returns a plain :class:`ChatSorcarAgent` for direct (no-worktree)
-    chat mode.
-
-    Args:
-        args: The parsed argparse namespace, already passed through
-            :func:`_resolve_cli_modes`.
-
-    Returns:
-        The agent instance to run.
-    """
-    if args.worktree:
-        wt_agent = WorktreeSorcarAgent("Worktree Sorcar Agent")
-        wt_agent.auto_commit_enabled = bool(args.auto_commit)
-        return wt_agent
-    return ChatSorcarAgent("Stateful Sorcar Agent")
-
-
-def main() -> None:  # pragma: no cover – CLI entry point requires API
-    """Run a ChatSorcarAgent or WorktreeSorcarAgent from the CLI.
-
-    Defaults: worktree mode ON, parallel sub-agents ON, auto-commit
-    ON.  Use ``--no-worktree`` (or the legacy ``--use-chat`` alias)
-    to run in chat mode (no git isolation), ``--no-parallel`` to
-    disable parallel sub-agents, and ``--no-auto-commit`` to skip
-    the automatic worktree commit at task end.
+    * **Interactive** (no ``-t/--task`` / ``-f/--file``): a thin
+      terminal client of the local ``sorcar web`` daemon — see
+      :mod:`kiss.agents.sorcar.cli_client`.  The ``--worktree`` /
+      ``--no-worktree`` / ``--parallel`` / ``--no-parallel`` /
+      ``--auto-commit`` / ``--no-auto-commit`` flags are forwarded
+      to the daemon so each task can still run on an isolated git
+      worktree, with parallel sub-agents and auto-commit.
+    * **Non-interactive** (``-t`` or ``-f`` supplied): runs a plain
+      :class:`~kiss.agents.sorcar.sorcar_agent.SorcarAgent` once on
+      the supplied task and exits.  No chat persistence, no git
+      worktree isolation — those features were always tied to the
+      removed ``-c/--chat-id`` / ``-l/--list-chat-id`` /
+      ``--cleanup`` / ``--use-chat`` / ``--use-worktree`` flag set.
 
     ``sorcar mcp ...`` is dispatched to the MCP management subcommand
     (:mod:`kiss.agents.sorcar.mcp_cli`) before normal argument parsing.
@@ -959,83 +924,33 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
 
     parser = _build_arg_parser()
     args = parser.parse_args()
-
-    if args.list_chat_id:
-        _print_recent_chats()
-        sys.exit(0)
-
     work_dir = args.work_dir or _launch_work_dir()
 
-    if args.cleanup:
-        repo = GitWorktreeOps.discover_repo(Path(work_dir))
-        if repo is None:
-            print("Not a git repo.")
-            sys.exit(1)
-        print(WorktreeSorcarAgent.cleanup(repo))
-        sys.exit(0)
-
-    # Claude-Code parity: with no -t/--task and no -f/--file the user
-    # wants an interactive session.  Worktree mode is the default for
-    # both interactive and one-shot runs (see ``_resolve_cli_modes``);
-    # ``interactive`` is still tracked so we know to drive the REPL.
     interactive = args.task is None and args.file is None
-    _resolve_cli_modes(args)
-    agent: SorcarAgent = _build_cli_agent(args)
-
     run_kwargs = _build_run_kwargs(args)
-    # In interactive mode the prompt is read from the REPL, so do not
-    # treat the default-task placeholder as a chat to resume.
-    chat_task = "" if interactive else run_kwargs.get("prompt_template", "")
-    if isinstance(agent, ChatSorcarAgent):
-        _apply_chat_args(agent, args, task=chat_task)
 
     if interactive:
-        # Client mode: the standalone REPL has been replaced by a
-        # thin terminal client of the local ``sorcar web`` daemon
-        # (see :mod:`kiss.agents.sorcar.cli_client`).  The same agent
-        # surface is preserved — slash commands, fast-completes,
-        # streamed rendering — but every task now runs inside the
-        # daemon process, so the in-process ``agent`` built above is
-        # not used by the interactive path.  The argparsed run flags
-        # (``--no-worktree`` / ``--no-parallel`` / ``--auto-commit``)
-        # are forwarded so the user's CLI options survive the port.
         from kiss.agents.sorcar.cli_client import run_client
 
         sys.exit(
             run_client(
                 work_dir=run_kwargs.get("work_dir") or work_dir,
-                model_name=run_kwargs.get("model_name", "")
-                or getattr(agent, "model_name", ""),
+                model_name=run_kwargs.get("model_name", ""),
                 active_file=run_kwargs.get("current_editor_file") or "",
                 use_worktree=bool(getattr(args, "worktree", True)),
                 use_parallel=bool(getattr(args, "parallel", True)),
                 auto_commit=bool(getattr(args, "auto_commit", False)),
             ),
         )
-    else:
-        from kiss.agents.sorcar.cli_steering import run_with_steering
 
-        start_time = time.time()
-        result = run_with_steering(agent, run_kwargs)
-        elapsed = time.time() - start_time
-        print_outcome(agent, result, elapsed, run_kwargs.get("verbose", True))
+    # Non-interactive: plain SorcarAgent, no chat / no worktree.
+    from kiss.agents.sorcar.cli_steering import run_with_steering
 
-    if isinstance(agent, WorktreeSorcarAgent) and agent._wt_pending:
-        while True:
-            try:
-                choice = input("\n[c]ommit and merge / [d]iscard? ").strip().lower()
-            except EOFError:
-                # Interactive session ended (Ctrl+D); leave the branch
-                # in place for the user to merge or discard manually.
-                print(f"\nWorktree branch kept: {agent._wt_branch}")
-                break
-            if choice == "c":
-                print(agent.merge())
-                break
-            if choice == "d":
-                print(agent.discard())
-                break
-            print("Invalid choice.")
+    agent: SorcarAgent = SorcarAgent("Sorcar Agent")
+    start_time = time.time()
+    result = run_with_steering(agent, run_kwargs)
+    elapsed = time.time() - start_time
+    print_outcome(agent, result, elapsed, run_kwargs.get("verbose", True))
 
 
 if __name__ == "__main__":
