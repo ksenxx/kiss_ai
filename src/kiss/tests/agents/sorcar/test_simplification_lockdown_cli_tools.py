@@ -49,6 +49,7 @@ from kiss.agents.sorcar.cli_panel import (
     panel_top,
 )
 from kiss.agents.sorcar.cli_repl import _history_path, _print_usage
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.useful_tools import UsefulTools, _expand_pwd_prefix
 from kiss.agents.sorcar.web_use_tool import WebUseTool
 
@@ -238,13 +239,12 @@ def test_history_path_location_and_in_process_determinism(tmp_path):
 
 
 def test_print_run_stats_exact_lines(capsys):
-    agent = ChatSorcarAgent("lockdown-stats")
-    agent._chat_id = "abc123"
+    agent = SorcarAgent("lockdown-stats")
     agent.budget_used = 1.23456
     agent.total_tokens_used = 42
     _print_run_stats(agent, 2.5)
     out = capsys.readouterr().out
-    assert out == "\nChat ID: abc123\nTime: 2.5s\nCost: $1.2346\nTotal tokens: 42\n"
+    assert out == "\nTime: 2.5s\nCost: $1.2346\nTotal tokens: 42\n"
 
 
 def test_print_usage_exact_lines_fresh_chat_agent(capsys):
