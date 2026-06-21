@@ -49,7 +49,7 @@ ______________________________________________________________________
 |---|---|---|---|
 | **Interfaces** | CLI + VS Code extension + web/mobile app | CLI + mobile app | Custom VS Code |
 | **Multiple models from multiple vendors in the same task** | ✅ Mix OpenAI, Anthropic, Gemini, Together, MiniMax, OpenRouter, Claude Code CLI, and Codex CLI | ❌ Anthropic Claude models only | ❌ One model per task |
-| **Models in bundled catalog** | 499 across 8 provider categories | Claude family only | Subset chosen by Cursor |
+| **Models in bundled catalog** | 501 across 8 provider categories | Claude family only | Subset chosen by Cursor |
 | **Bring your own API key / endpoint** | ✅ Yes — keys stay on your machine | ✅ Anthropic key | ⚠️ Routed through Cursor backend |
 | **Open source** | ✅ Apache-2.0 | ❌ Proprietary | ❌ Proprietary |
 | **Price** | Free framework; pay only your chosen model provider | Subscription / API usage | Subscription |
@@ -176,7 +176,7 @@ These agents live in `src/kiss/agents/third_party_agents/`.
 
 ## 🤖 Models Supported
 
-KISS Sorcar ships a catalog of **499 models** across **8 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json).
+KISS Sorcar ships a catalog of **501 models** across **8 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json).
 
 | Provider category | Catalog entries |
 |---|---:|
@@ -185,14 +185,14 @@ KISS Sorcar ships a catalog of **499 models** across **8 provider categories**, 
 | Gemini / Google | 23 |
 | Together AI | 77 |
 | MiniMax | 5 |
-| OpenRouter | 301 |
+| OpenRouter | 303 |
 | Claude Code CLI (`cc/*`) | 3 |
 | Codex CLI (`codex/*`) | 7 |
 
 Current catalog capability totals:
 
-- **483** generation-capable models
-- **320** function-calling-capable models
+- **485** generation-capable models
+- **321** function-calling-capable models
 - **7** embedding models
 
 Full model list:
@@ -416,7 +416,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>OpenRouter (301)</strong></summary>
+<summary><strong>OpenRouter (303)</strong></summary>
 
 - `openrouter/ai21/jamba-large-1.7`
 - `openrouter/aion-labs/aion-1.0`
@@ -610,10 +610,12 @@ Full model list:
 - `openrouter/openai/gpt-oss-20b`
 - `openrouter/openai/gpt-oss-safeguard-20b`
 - `openrouter/openai/o1`
+- `openrouter/openai/o1-pro`
 - `openrouter/openai/o3`
 - `openrouter/openai/o3-deep-research`
 - `openrouter/openai/o3-mini`
 - `openrouter/openai/o3-mini-high`
+- `openrouter/openai/o3-pro`
 - `openrouter/openai/o4-mini`
 - `openrouter/openai/o4-mini-deep-research`
 - `openrouter/openai/o4-mini-high`
