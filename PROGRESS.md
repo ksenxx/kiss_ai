@@ -13,8 +13,10 @@
 
 1. Inspected the existing `model_info.py` (≈900 lines: 499 entries + helpers
    `_mi`/`_emb`, cache-pricing logic, `model()` dispatch).
+
 1. Inspected `update_models.py` — confirmed it was a Python-source rewriter
    that called `_make_entry_line` to emit `_mi(...)` lines.
+
 1. Inspected `install.sh` and `DependencyInstaller.ts` to find the right
    places to seed `~/.kiss/MODEL_INFO.json`.
 
@@ -79,10 +81,7 @@
 1. **Verified:**
 
    - `uv run check --full` → all checks pass.
-   - `uv run pytest src/kiss/tests/core/models/test_model_info_completion.py
-     src/kiss/tests/core/models/test_model_info_json_loader.py
-     src/kiss/tests/core/models/test_model_implementations.py
-     src/kiss/tests/scripts/ src/kiss/tests/core/test_coverage_integration.py`
+   - `uv run pytest src/kiss/tests/core/models/test_model_info_completion.py src/kiss/tests/core/models/test_model_info_json_loader.py src/kiss/tests/core/models/test_model_implementations.py src/kiss/tests/scripts/ src/kiss/tests/core/test_coverage_integration.py`
      → 142 passed, 1 skipped.
    - Smoke test: 499 models loaded, cache pricing correctly applied
      (`gpt-5.5` cache_read = 0.5 = 0.10 × input, Claude 1h cache_write =
