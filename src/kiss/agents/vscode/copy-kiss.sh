@@ -66,12 +66,12 @@ git ls-files src/kiss/ | while IFS= read -r f; do
         src/kiss/agents/vscode/*.py) ;;  # keep Python files
         # Runtime assets used by web_server.py (kiss-web daemon):
         #   /media/* is served as static HTTPS assets
-        #   SAMPLE_TASKS.json populates welcome-screen suggestions
+        #   SAMPLE_TASKS.md populates welcome-screen suggestions
         # Both are loaded relative to web_server.py via
         # ``Path(__file__).parent``, so they must live alongside it
         # inside kiss_project/ as well.
         src/kiss/agents/vscode/media/*) ;;
-        src/kiss/agents/vscode/SAMPLE_TASKS.json) ;;
+        src/kiss/agents/vscode/SAMPLE_TASKS.md) ;;
         src/kiss/agents/vscode/*)  continue ;;  # skip everything else
     esac
     mkdir -p "$DEST/$(dirname "$f")"
