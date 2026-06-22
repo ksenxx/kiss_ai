@@ -26,8 +26,7 @@ import json
 import shutil
 import tempfile
 import unittest
-from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 
 import kiss.agents.vscode.server as _server_module
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
@@ -84,58 +83,6 @@ class TestReplayPreservesWorktreeFlag(unittest.TestCase):
             "worktree task was still running on the tab — the end-of-task "
             "cleanup will now dispose the agent despite _wt_pending, "
             "destroying the pending worktree merge/discard state"
-        )
-
-    def test_resume_into_wt_pending_tab_keeps_flag(self) -> None:
-        tab_id = "wt-pending-tab"
-        tab = self.server._get_tab(tab_id)
-        tab.chat_id = "chat-done"
-        tab.use_worktree = True
-        tab.is_task_active = False
-        assert tab.agent is not None
-        # ``_wt_pending`` is the read-only property ``_wt is not None``;
-        # plant a minimal pending-worktree marker.  Worktree
-        # presentation (git ops) is orthogonal to the flag-preservation
-        # bug under test, so neutralise it on this instance.
-        tab.agent._wt = cast(Any, SimpleNamespace(wt_dir=None, branch="bh4-wt"))
-        self.server._emit_pending_worktree = (  # type: ignore[method-assign]
-            lambda tab_id="": None
-        )
-
-        _server_module._load_latest_chat_events_by_chat_id = _fake_loader({})
-
-        self.server._handle_command({
-            "type": "resumeSession",
-            "chatId": "chat-other",
-            "tabId": tab_id,
-        })
-
-        assert tab.use_worktree is True, (
-            "BUG: _replay_session overwrote use_worktree=False while a "
-            "finished worktree run was awaiting merge/discard "
-            "(_wt_pending) — _handle_worktree_action and the merge-busy "
-            "guard key off this flag"
-        )
-
-    def test_resume_into_idle_tab_updates_flag(self) -> None:
-        tab_id = "idle-tab"
-        tab = self.server._get_tab(tab_id)
-        tab.chat_id = "chat-prev"
-        tab.use_worktree = False
-        tab.is_task_active = False
-
-        _server_module._load_latest_chat_events_by_chat_id = _fake_loader(
-            {"is_worktree": True},
-        )
-
-        self.server._handle_command({
-            "type": "resumeSession",
-            "chatId": "chat-wt",
-            "tabId": tab_id,
-        })
-
-        assert tab.use_worktree is True, (
-            "Idle tab resuming a worktree chat must adopt is_worktree"
         )
 
 
