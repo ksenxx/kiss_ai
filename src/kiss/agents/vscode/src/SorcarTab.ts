@@ -12,6 +12,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import {findKissProject} from './kissPaths';
+import {ensureUserAsset} from './userAssets';
 
 /** Read the KISS project version from ``_version.py`` on disk. */
 export function getVersion(): string {
@@ -30,31 +31,95 @@ export function getVersion(): string {
 }
 
 /**
- * Read ``src/kiss/INJECTIONS.md`` and return one entry per ``## Trick``
- * section.  Returns an empty list if the file is missing — the Tricks
- * button still renders, just with an empty list.
+ * Strip CommonMark backslash escapes so a chip/dropdown entry displays
+ * the text the author typed.  ``mdformat`` automatically inserts ``\``
+ * before any character that could otherwise be parsed as Markdown
+ * syntax (e.g. ``<<x>>`` becomes ``\<<x>>``).  Both INJECTIONS.md and
+ * SAMPLE_TASKS.md are passed through mdformat by ``uv run check``, so
+ * the loaders must reverse those escapes before the strings reach the
+ * webview (which only HTML-escapes them).  Only the ASCII-punctuation
+ * set that CommonMark §2.4 explicitly allows to be escaped is
+ * unescaped; any other ``\X`` sequence is preserved.
  */
-export function getTricks(): string[] {
+function unescapeMarkdown(s: string): string {
+  return s.replace(/\\([\\`*_{}[\]()#+\-.!<>|~"'$%&,/:;=?@^])/g, '$1');
+}
+
+/**
+ * Read ``markdownFile`` and return the body of every ``## <heading>``
+ * section whose heading is ``heading``.  Bodies are trimmed and
+ * backslash-unescaped (so mdformat-produced ``\<<x>>`` reverts to
+ * ``<<x>>``).  Empty bodies are skipped.  Returns ``[]`` if the file
+ * is missing or unreadable.
+ */
+function readMarkdownSections(markdownFile: string, heading: string): string[] {
+  let text: string;
   try {
-    const kissRoot = findKissProject();
-    if (!kissRoot) return [];
-    const tricksFile = path.join(kissRoot, 'src', 'kiss', 'INJECTIONS.md');
-    const text = fs.readFileSync(tricksFile, 'utf-8');
-    const tricks: string[] = [];
-    const sections = text.split(/^##\s+/m);
-    for (let i = 1; i < sections.length; i++) {
-      const section = sections[i];
-      const newline = section.indexOf('\n');
-      if (newline < 0) continue;
-      const title = section.slice(0, newline).trim();
-      if (title !== 'Trick') continue;
-      const body = section.slice(newline + 1).trim();
-      if (body) tricks.push(body);
-    }
-    return tricks;
+    text = fs.readFileSync(markdownFile, 'utf-8');
   } catch {
     return [];
   }
+  const items: string[] = [];
+  const sections = text.split(/^##\s+/m);
+  for (let i = 1; i < sections.length; i++) {
+    const section = sections[i];
+    const newline = section.indexOf('\n');
+    if (newline < 0) continue;
+    const title = section.slice(0, newline).trim();
+    if (title !== heading) continue;
+    const body = unescapeMarkdown(section.slice(newline + 1).trim());
+    if (body) items.push(body);
+  }
+  return items;
+}
+
+/**
+ * Read ``~/.kiss/INJECTIONS.md`` and return one entry per ``## Trick``
+ * section.  The user-local copy is the runtime source of truth (so
+ * authors can edit it without rebuilding the extension); it is
+ * seeded from ``kissRoot/src/kiss/INJECTIONS.md`` by
+ * :func:`ensureUserAsset` only when the user copy is missing, so
+ * user edits survive every read.  Returns an empty list if the file
+ * is missing — the Tricks button still renders, just with an empty
+ * list.
+ */
+export function getTricks(): string[] {
+  const kissRoot = findKissProject();
+  if (!kissRoot) return [];
+  return readMarkdownSections(
+    ensureUserAsset(
+      'INJECTIONS.md',
+      path.join(kissRoot, 'src', 'kiss', 'INJECTIONS.md'),
+    ),
+    'Trick',
+  );
+}
+
+/**
+ * Read ``~/.kiss/SAMPLE_TASKS.md`` and return one ``{text}`` entry
+ * per ``## Task`` section.  Mirrors the ``INJECTIONS.md`` handling:
+ * the user-local copy at ``~/.kiss/SAMPLE_TASKS.md`` is the runtime
+ * source of truth so authors can edit welcome-screen suggestions in
+ * plain Markdown; it is seeded from the bundled
+ * ``src/kiss/SAMPLE_TASKS.md`` copy by :func:`ensureUserAsset` only
+ * when the user copy is missing, so user edits survive every read.
+ * Returns ``[]`` when the file is missing or unparseable so the
+ * welcome screen still renders without chips.
+ */
+export function readSampleTasks(extensionRoot: string): Array<{text: string}> {
+  const packagePath = path.join(
+    extensionRoot,
+    'kiss_project',
+    'src',
+    'kiss',
+    'SAMPLE_TASKS.md',
+  );
+  const sourcePath = path.join(extensionRoot, '..', '..', 'SAMPLE_TASKS.md');
+  const seedPath = fs.existsSync(packagePath) ? packagePath : sourcePath;
+  return readMarkdownSections(
+    ensureUserAsset('SAMPLE_TASKS.md', seedPath),
+    'Task',
+  ).map(text => ({text}));
 }
 
 /**

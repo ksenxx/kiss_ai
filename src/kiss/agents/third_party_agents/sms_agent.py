@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""SMS Agent — ChatSorcarAgent extension with Twilio SMS tools.
+"""SMS Agent — SorcarAgent extension with Twilio SMS tools.
 
 Provides SMS sending/receiving via Twilio. Stores config in
 ``~/.kiss/third_party_agents/sms/config.json``.
@@ -21,7 +21,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.third_party_agents._backend_utils import wait_for_matching_message
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
@@ -394,8 +394,8 @@ class SMSChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-class SMSAgent(BaseChannelAgent, ChatSorcarAgent):
-    """ChatSorcarAgent extended with Twilio SMS tools."""
+class SMSAgent(BaseChannelAgent, SorcarAgent):
+    """SorcarAgent extended with Twilio SMS tools."""
 
     def __init__(self) -> None:
         super().__init__("SMS Agent")

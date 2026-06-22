@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Gmail Agent — ChatSorcarAgent extension with Gmail API tools.
+"""Gmail Agent — SorcarAgent extension with Gmail API tools.
 
 Provides authenticated access to a Gmail account via OAuth2.
 Handles authentication (reading token from disk or prompting the user
@@ -31,7 +31,7 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.third_party_agents._backend_utils import (
     is_headless_environment,
     wait_for_matching_message,
@@ -943,8 +943,8 @@ class GmailChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-class GmailAgent(BaseChannelAgent, ChatSorcarAgent):
-    """ChatSorcarAgent extended with Gmail API tools.
+class GmailAgent(BaseChannelAgent, SorcarAgent):
+    """SorcarAgent extended with Gmail API tools.
 
     Inherits all standard SorcarAgent capabilities (bash, file editing,
     browser automation) and adds authenticated Gmail API tools for
