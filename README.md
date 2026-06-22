@@ -54,7 +54,7 @@ ______________________________________________________________________
 | **Open source** | ✅ Apache-2.0 | ❌ Proprietary | ❌ Proprietary |
 | **Price** | Free framework; pay only your chosen model provider | Subscription / API usage | Subscription |
 | **Run on top of Claude Code / Codex CLI** | ✅ `cc/*` and `codex/*` namespaces | N/A | ❌ |
-| **Primary focus** | ✅ **Quality** — rigorous multi-model review, end-to-end tests, lint/typecheck gates, and read-before-modify discipline baked into every task | Speed and developer ergonomics | IDE iteration speed |
+| **Primary focus** | ✅ **Quality** — rigorous review, end-to-end tests | Speed and developer ergonomics | IDE iteration speed |
 | **Terminal Bench 2.0 score** | **62.2%** | 58% | 61.7% (Cursor agent) |
 
 ## What is in the Name
