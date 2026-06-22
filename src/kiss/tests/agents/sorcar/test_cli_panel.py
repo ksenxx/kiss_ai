@@ -15,10 +15,16 @@ import io
 import threading
 
 from kiss.agents.sorcar.cli_panel import (
+    BOLD,
+    CYAN,
+    DIM,
     IDLE_TITLE,
+    ORANGE,
     PLACEHOLDER,
     PROMPT_MARKER,
+    RESET,
     STEER_TITLE,
+    menu_row,
     panel_body,
     panel_bottom,
     panel_top,
@@ -102,6 +108,59 @@ class TestSharedPanelAcrossDialogs:
         assert idle_top[0] == steer_top[0] == "╭"
         assert idle_top[-1] == steer_top[-1] == "╮"
         assert len(idle_top) == len(steer_top) == 80
+
+
+class TestMenuRowContrastingOrange:
+    """The completion menu mirrors Claude Code's high-contrast palette.
+
+    The highlighted candidate is drawn in bold coral-orange (xterm-256
+    index 208) while the other rows stay dim, so the selected entry
+    pops the way Claude Code's ``/color orange`` prompt bar does.
+    """
+
+    def test_selected_row_uses_bold_orange_with_arrow(self) -> None:
+        row = menu_row("install pkg", True, 40)
+        assert ORANGE in row
+        assert BOLD in row
+        assert "❯ install pkg" in row
+        # Border glyphs stay cyan; row terminates with a RESET.
+        assert f"{CYAN}│{RESET}" in row
+        assert row.endswith(f"{CYAN}│{RESET}")
+
+    def test_unselected_row_is_dim_and_not_orange(self) -> None:
+        row = menu_row("uninstall pkg", False, 40)
+        assert DIM in row
+        # No orange / bold leakage onto unselected rows — that is what
+        # makes the selected row visually contrast.
+        assert ORANGE not in row
+        assert BOLD not in row
+        # No chevron on unselected rows (two-space indent in its place).
+        assert "❯" not in row
+        assert f"{CYAN}│{RESET}" in row
+
+    def test_selected_and_unselected_rows_share_panel_width(self) -> None:
+        # Both rows must take the same number of *display* columns as
+        # the input panel below them so the menu stacks cleanly.
+        sel = menu_row("foo", True, 40)
+        unsel = menu_row("foo", False, 40)
+        # Strip ANSI escapes to count display width only.
+        import re
+
+        ansi = re.compile(r"\x1b\[[0-9;]*m")
+        assert len(ansi.sub("", sel)) == 40
+        assert len(ansi.sub("", unsel)) == 40
+
+    def test_menu_row_strips_injected_ansi(self) -> None:
+        # A candidate carrying a raw ESC must not be able to escape the
+        # row's own orange/dim styling and leak into the next line.
+        evil = "ok\x1b[31mRED"
+        row = menu_row(evil, True, 40)
+        # The ESC byte is stripped, so no foreign SGR can fire; only the
+        # row's own orange/bold/reset escapes remain.
+        assert "\x1b[31m" not in row
+        # The printable "[31m" residue still appears but is now harmless
+        # text inside the row's orange-bold span.
+        assert "ok[31mRED" in row
 
 
 if __name__ == "__main__":
