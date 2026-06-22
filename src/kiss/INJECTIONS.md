@@ -41,5 +41,3 @@ can you build the paper at
 ## Trick
 
 Why did this the last task got interrupted? Thoroughly and precisely analyze the logs and the events or the task. Reproduce the issue by writing an integration test. Then fix the issue.
-
-
