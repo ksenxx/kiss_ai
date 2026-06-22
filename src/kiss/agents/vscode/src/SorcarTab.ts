@@ -30,31 +30,75 @@ export function getVersion(): string {
 }
 
 /**
+ * Strip CommonMark backslash escapes so a chip/dropdown entry displays
+ * the text the author typed.  ``mdformat`` automatically inserts ``\``
+ * before any character that could otherwise be parsed as Markdown
+ * syntax (e.g. ``<<x>>`` becomes ``\<<x>>``).  Both INJECTIONS.md and
+ * SAMPLE_TASKS.md are passed through mdformat by ``uv run check``, so
+ * the loaders must reverse those escapes before the strings reach the
+ * webview (which only HTML-escapes them).  Only the ASCII-punctuation
+ * set that CommonMark §2.4 explicitly allows to be escaped is
+ * unescaped; any other ``\X`` sequence is preserved.
+ */
+function unescapeMarkdown(s: string): string {
+  return s.replace(/\\([\\`*_{}[\]()#+\-.!<>|~"'$%&,/:;=?@^])/g, '$1');
+}
+
+/**
+ * Read ``markdownFile`` and return the body of every ``## <heading>``
+ * section whose heading is ``heading``.  Bodies are trimmed and
+ * backslash-unescaped (so mdformat-produced ``\<<x>>`` reverts to
+ * ``<<x>>``).  Empty bodies are skipped.  Returns ``[]`` if the file
+ * is missing or unreadable.
+ */
+function readMarkdownSections(markdownFile: string, heading: string): string[] {
+  let text: string;
+  try {
+    text = fs.readFileSync(markdownFile, 'utf-8');
+  } catch {
+    return [];
+  }
+  const items: string[] = [];
+  const sections = text.split(/^##\s+/m);
+  for (let i = 1; i < sections.length; i++) {
+    const section = sections[i];
+    const newline = section.indexOf('\n');
+    if (newline < 0) continue;
+    const title = section.slice(0, newline).trim();
+    if (title !== heading) continue;
+    const body = unescapeMarkdown(section.slice(newline + 1).trim());
+    if (body) items.push(body);
+  }
+  return items;
+}
+
+/**
  * Read ``src/kiss/INJECTIONS.md`` and return one entry per ``## Trick``
  * section.  Returns an empty list if the file is missing — the Tricks
  * button still renders, just with an empty list.
  */
 export function getTricks(): string[] {
-  try {
-    const kissRoot = findKissProject();
-    if (!kissRoot) return [];
-    const tricksFile = path.join(kissRoot, 'src', 'kiss', 'INJECTIONS.md');
-    const text = fs.readFileSync(tricksFile, 'utf-8');
-    const tricks: string[] = [];
-    const sections = text.split(/^##\s+/m);
-    for (let i = 1; i < sections.length; i++) {
-      const section = sections[i];
-      const newline = section.indexOf('\n');
-      if (newline < 0) continue;
-      const title = section.slice(0, newline).trim();
-      if (title !== 'Trick') continue;
-      const body = section.slice(newline + 1).trim();
-      if (body) tricks.push(body);
-    }
-    return tricks;
-  } catch {
-    return [];
-  }
+  const kissRoot = findKissProject();
+  if (!kissRoot) return [];
+  return readMarkdownSections(
+    path.join(kissRoot, 'src', 'kiss', 'INJECTIONS.md'),
+    'Trick',
+  );
+}
+
+/**
+ * Read ``SAMPLE_TASKS.md`` from the extension root and return one
+ * ``{text}`` entry per ``## Task`` section.  Mirrors the format of
+ * ``src/kiss/INJECTIONS.md`` so authors can edit the welcome-screen
+ * suggestions in plain Markdown rather than escaping JSON.  Returns
+ * ``[]`` when the file is missing or unparseable so the welcome
+ * screen still renders without chips.
+ */
+export function readSampleTasks(extensionRoot: string): Array<{text: string}> {
+  return readMarkdownSections(
+    path.join(extensionRoot, 'SAMPLE_TASKS.md'),
+    'Task',
+  ).map(text => ({text}));
 }
 
 /**

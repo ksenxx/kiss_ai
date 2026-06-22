@@ -2,7 +2,7 @@
 
 can you authenticate me with the learningsystems workspace on slack using the slack agent?
 
-Can you create a cron job with name prefixed with "kiss-" which will check every 3 seconds if there are latest unresponsed messages from ksen in the channel sorcar using the slack agent, then it will run the messages as tasks one-by-one in the order of arrival and respond with the result suitably formatted for slack. 
+Can you create a cron job with name prefixed with "kiss-" which will check every 3 seconds if there are latest unresponsed messages from ksen in the channel sorcar using the slack agent, then it will run the messages as tasks one-by-one in the order of arrival and respond with the result suitably formatted for slack.
 
 can you authenticate me with the imessages agent?
 
