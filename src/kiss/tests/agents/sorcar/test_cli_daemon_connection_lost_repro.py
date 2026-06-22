@@ -128,8 +128,28 @@ class TestDaemonConnectionLostRepro(unittest.TestCase):
         cli_daemon_bridge.reset_for_tests()
 
         async def _shutdown() -> None:
+            # Close registered UDS writers + wait for pending tasks
+            # so every transport FD is released before
+            # ``loop.close()``.  Without this the per-process FD
+            # soft-limit (256 on macOS) is hit when the surrounding
+            # test chunk runs hundreds of tests in one process.
+            with self.server._printer._ws_lock:
+                writers = list(self.server._printer._uds_writers)
+            for writer in writers:
+                try:
+                    writer.close()
+                except Exception:
+                    pass
             self.uds_server.close()
             await self.uds_server.wait_closed()
+            pending = [
+                t for t in asyncio.all_tasks()
+                if t is not asyncio.current_task()
+            ]
+            for t in pending:
+                t.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
 
         try:
             asyncio.run_coroutine_threadsafe(
