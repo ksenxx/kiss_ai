@@ -16,7 +16,7 @@
 
 ### Open-source general-purpose AI agent for long-horizon tasks and AI discovery
 
-**KISS Sorcar is free, simple, local-first, bring-your-own-key AI agent frmework.** It runs as a VS Code extension, a Claude-Code-style CLI, and a browser/mobile web app. Your prompts and code are sent directly to the model provider or local endpoint you configure — not through our servers. It supports multi-model workflow just via prompt. All agents run as daemon.
+**KISS Sorcar is free, simple, local-first, bring-your-own-key AI agent framework.** It runs as a VS Code extension, a Claude-Code-style CLI, and a browser/mobile web app. Your prompts and code are sent directly to the model provider or local endpoint you configure — not through our servers. It supports multi-model workflow just via prompt. All agents run as daemon.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install.sh | bash
@@ -57,7 +57,7 @@ ______________________________________________________________________
 | **Open source** | ✅ Apache-2.0 | ❌ Proprietary | ❌ Proprietary |
 | **Price** | Free framework; pay only your chosen model provider | Subscription / API usage | Subscription |
 | **Run on top of Claude Code / Codex CLI** | ✅ `cc/*` and `codex/*` namespaces | N/A | ❌ |
-| **Primary focus** | ✅ **Quality** — rigorous review, end-to-end tests | Speed and developer ergonomics | IDE iteration speed |
+| **Primary focus** | ✅ **Quality** — rigorous review, end-to-end tests | Speed and developer ergonomics | Speed |
 | **Terminal Bench 2.0 score** | **62.2%** | 58% | 61.7% (Cursor agent) |
 
 ## What is in the Name
