@@ -887,7 +887,7 @@ update_repo() {
     else
         echo "   WARNING: $INJECTIONS_SRC missing — tricks not seeded."
     fi
-    SAMPLE_TASKS_SRC="$PROJECT_DIR/src/kiss/agents/vscode/SAMPLE_TASKS.md"
+    SAMPLE_TASKS_SRC="$PROJECT_DIR/src/kiss/SAMPLE_TASKS.md"
     SAMPLE_TASKS_DST="$KISS_HOME_DIR/SAMPLE_TASKS.md"
     if [ -f "$SAMPLE_TASKS_SRC" ]; then
         if [ -f "$SAMPLE_TASKS_DST" ]; then
