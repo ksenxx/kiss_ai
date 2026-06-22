@@ -8,7 +8,7 @@ Can you change the step \<<specify step>> as follows: \<<whatever way you want t
 
 ## Task
 
-can you authenticate me with the /<<workspace name>> workspace on slack using the slack agent?
+can you authenticate me with the /\<<workspace name>> workspace on slack using the slack agent?
 
 ## Task
 
@@ -66,4 +66,3 @@ In eah step, keep track of the best prompt which has the maximum number of succe
 ## Task
 
 Can you run gepa.py on hotpotqa using gpt-4o-mini as both models
-
