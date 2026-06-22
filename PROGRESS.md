@@ -1,59 +1,63 @@
-# Progress
+# Task
 
-## Task
+Make `INJECTIONS.md` and `SAMPLE_TASKS.md` follow the same `~/.kiss/`
+copy+read pattern as `MODEL_INFO.json` — but **without** the
+clobber-on-update semantics, since these two files are user-editable.
 
-Review the commit `cc6b47b5` ("prevent historical task settings from
-clobbering global config") using gpt-5.5 (non-codex); reproduce any
-reported bugs with end-to-end tests under claude-opus-4-7; fix and
-iterate until gpt-5.5 reports no defects.
+## Final design
 
-## Result — `Defects found: none.` after round 4.
+- `~/.kiss/INJECTIONS.md` and `~/.kiss/SAMPLE_TASKS.md` are the runtime
+  source of truth; bundled package copies under `src/kiss/` are the
+  seed.
+- Seed-only-if-missing: once a user copy exists, **user edits win
+  unconditionally** — no mtime-based refresh, no install-time clobber.
+  Regenerating from defaults is an explicit user action: remove the
+  file under `~/.kiss/` and re-launch.
+- `KISS_HOME` overrides `~/.kiss` in both the install script and the
+  runtime helpers, matching the rest of the kiss codebase.
 
-## Loop history
+## Files changed
 
-- **Round 1 (review):** original fix correct; flagged 3 residual
-  defects: Medium (`tab.use_parallel`/`auto_commit_mode` not reset
-  on history load — symmetric to `use_worktree`); Low
-  (`_extra_for_replay` non-dict pass-through); Low
-  (`tab.selected_model` not reset).
-- **Round 1 (fix):** in `src/kiss/agents/vscode/server.py`,
-  `_extra_for_replay` returns `""` for non-dict JSON;
-  `_replay_session` adds an explicit per-tab reset gated on a
-  `tab_alive` predicate.
-- **Round 2 (review):** flagged Medium that `tab_alive` omitted
-  `tab.is_merging`, and Low that the docstring was inconsistent.
-- **Round 2 (fix):** replaced ad-hoc `tab_alive` disjunction with the
-  shared `_tab_busy(tab)` predicate (covers `is_task_active`,
-  `is_merging`, `task_thread.is_alive()`); updated
-  `_extra_for_replay` docstring; added two tests:
-  `test_history_load_preserves_state_during_merge_review` and
-  `test_history_load_preserves_state_when_thread_alive`.
-- **Round 3 (review):** confirmed round-2 fixes; flagged Low that
-  `_tab_busy` docstring was now stale (didn't mention
-  `_replay_session` as a caller).
-- **Round 3 (fix):** updated `_tab_busy` docstring with the third
-  caller + lock-safety contract.
-- **Round 4 (review):** **Defects found: none.**
+1. **NEW** `src/kiss/agents/vscode/user_assets.py` — Python helper
+   exporting `kiss_home_dir()` and `ensure_user_asset(name, package_path)`.
+1. **NEW** `src/kiss/agents/vscode/src/userAssets.ts` — TypeScript
+   counterpart `kissHomeDir()` / `ensureUserAsset(name, packagePath)`.
+1. **MODIFY** `src/kiss/agents/vscode/web_server.py` — `_read_tricks`
+   now routes through `ensure_user_asset` so the kiss-web daemon
+   reads `~/.kiss/INJECTIONS.md`.
+1. **MODIFY** `src/kiss/agents/vscode/src/SorcarTab.ts` — `getTricks`
+   and `readSampleTasks` go through `ensureUserAsset`.
+1. **MODIFY** `install.sh` — eagerly seeds both files under
+   `${KISS_HOME:-$HOME/.kiss}` only when absent (idempotent, no
+   clobber).
+1. **MODIFY** `src/kiss/agents/vscode/test/sampleTasks.test.js` —
+   rewritten with a `withTempKissHome` helper; covers missing-file,
+   lazy seed, user-override-preferred, no-clobber-on-newer-package,
+   ordering, multi-line bodies, non-`Task` heading skip, empty-body
+   skip, mdformat unescape, shipped-file sanity.
+1. **NEW** `src/kiss/tests/agents/vscode/test_user_assets.py` —
+   Python tests for the helper + `_read_tricks` integration.
+1. **MODIFY** `README.md` — adds two bullets under the Customization
+   section so users discover they can edit
+   `~/.kiss/INJECTIONS.md` / `~/.kiss/SAMPLE_TASKS.md`.
 
-## Files touched
+## Review (gpt-5 non-codex subagent)
 
-- `src/kiss/agents/vscode/server.py`
-  - `_extra_for_replay`: non-dict JSON → `""`; docstring updated.
-  - `_replay_session`: state-reset block gated by `_tab_busy(tab)`.
-  - `_tab_busy`: docstring updated for the third caller and the
-    lock-safety contract.
-- `src/kiss/tests/agents/sorcar/test_replay_uses_global_settings.py`
-  - +4 tests in `TestReplayUsesGlobalSettings`:
-    `test_history_load_resets_use_parallel_and_auto_commit`,
-    `test_history_load_resets_selected_model`,
-    `test_history_load_preserves_state_during_merge_review`,
-    `test_history_load_preserves_state_when_thread_alive`,
-    `test_history_load_preserves_state_during_live_run`.
-  - +new `TestExtraForReplayUnit` class with 5 edge-case tests.
+Initial verdict: **NEEDS WORK**. Addressed:
+
+- MED-1 — added Customization bullets to README.
+- MED-2 — removed `os.utime` mutation of the shipped
+  `src/kiss/INJECTIONS.md` from the Python integration test.
+- MED-3 + MED-4 — dropped the mtime-based refresh entirely (both
+  helpers) and switched `install.sh` to no-clobber so user edits
+  survive every install/`git pull`. Updated docstrings and added
+  the no-clobber test on both sides.
+- LOW-1 — `install.sh` now honours `KISS_HOME`.
 
 ## Verification
 
-- `uv run pytest src/kiss/tests/agents/sorcar/test_replay_uses_global_settings.py`
-  — 13 passed.
-- 11 impacted neighbor suites — 104 passed total.
-- `uv run check --full` — all green.
+- `uv run check --full` → ✅ all checks pass (ruff, mypy, pyright,
+  mdformat, VS Code extension typecheck + eslint + stylelint +
+  htmlhint, 17 node tests).
+- `uv run pytest -x test_user_assets.py test_welcome_suggestions_not_broadcast.py` → 10 passed.
+- `bash -n install.sh` → syntax OK.
