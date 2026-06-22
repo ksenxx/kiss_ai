@@ -4,15 +4,16 @@
 # add your name here
 """End-to-end tests for ``kiss.agents.vscode.user_assets``.
 
-Locks in the contract that powers the user-local copies of
+Locks in the **runtime** contract of :func:`ensure_user_asset` for
 ``INJECTIONS.md`` and ``SAMPLE_TASKS.md``:
 
 * ``KISS_HOME`` overrides ``~/.kiss``.
 * A missing user copy is seeded from the package copy on first read.
-* An existing user copy is **never** silently refreshed from the
-  package copy — user edits survive every read, ``git pull``, and
-  ``install.sh`` re-run.  Regenerating from defaults is an explicit
-  user action: remove ``~/.kiss/<name>`` and read again.
+* An existing user copy is returned unchanged between daemon restarts
+  so user edits made *between* installs survive every runtime re-read.
+  Note: at *install time*, ``install.sh`` and ``installMarkdownAssets``
+  in ``DependencyInstaller.ts`` always overwrite both files with the
+  latest bundled copy — matching the ``MODEL_INFO.json`` pattern.
 * When ``~/.kiss/`` is not writable, the package copy is returned so
   the caller still sees a valid file.
 * When neither file exists the package path is returned (callers are
@@ -84,13 +85,17 @@ def test_returns_user_copy_when_present(
 def test_user_edits_survive_newer_package_copy(
     kiss_home: Path, tmp_path: Path,
 ) -> None:
-    """User edits must never be clobbered by a newer package copy.
+    """Runtime ``ensure_user_asset`` preserves user edits between daemon restarts.
 
-    Unlike :func:`MODEL_INFO.json`, ``INJECTIONS.md`` and
-    ``SAMPLE_TASKS.md`` are user-editable Markdown.  Silently
-    overwriting them on every ``git pull`` that bumps the package
-    copy's mtime would be a hostile surprise.  Locks that in so
-    nobody re-introduces the ``MODEL_INFO.json``-style mtime refresh.
+    At *install time* ``install.sh`` and ``installMarkdownAssets`` in
+    ``DependencyInstaller.ts`` always overwrite ``~/.kiss/INJECTIONS.md``
+    and ``~/.kiss/SAMPLE_TASKS.md`` with the latest bundled copy — matching
+    the ``MODEL_INFO.json`` pattern.
+
+    At *runtime* (this function), however, the file is read-only: if the
+    user copy already exists it is returned as-is so edits made *between*
+    installs survive daemon restarts and ``uv run`` invocations.  This test
+    locks in that runtime contract.
     """
     pkg = tmp_path / "INJECTIONS.md"
     pkg.write_text("## Trick\n\nFresh package content\n")
