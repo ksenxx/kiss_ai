@@ -21,7 +21,6 @@ No mocks, patches, fakes, or test doubles.
 
 from __future__ import annotations
 
-import argparse
 import shutil
 import sqlite3
 import subprocess
@@ -31,9 +30,7 @@ from pathlib import Path
 import pytest
 
 from kiss.agents.sorcar import persistence as th
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.cli_helpers import (
-    _apply_chat_args,
     _build_arg_parser,
     _build_run_kwargs,
     _print_recent_chats,
@@ -82,27 +79,6 @@ class TestCliHelpers:
             _print_recent_chats()
             out = capsys.readouterr().out
             assert "Chat ID:" in out
-        finally:
-            _restore_db(saved)
-
-    def test_apply_chat_args_chat_id(self, tmp_path: Path) -> None:
-        """_apply_chat_args with --chat-id resumes that session."""
-        saved = _redirect_db(str(tmp_path))
-        try:
-            agent = ChatSorcarAgent("test")
-            args = argparse.Namespace(new=False, chat_id=1000)
-            _apply_chat_args(agent, args)
-            assert agent.chat_id == 1000
-        finally:
-            _restore_db(saved)
-
-    def test_apply_chat_args_no_options(self, tmp_path: Path) -> None:
-        """_apply_chat_args with neither new nor chat_id and no task is a no-op."""
-        saved = _redirect_db(str(tmp_path))
-        try:
-            agent = ChatSorcarAgent("test")
-            args = argparse.Namespace(new=False, chat_id=None)
-            _apply_chat_args(agent, args, task="")
         finally:
             _restore_db(saved)
 

@@ -997,6 +997,79 @@ class TestRunSteeringLoop:
             self._restore_stdin(r, w, saved)
 
 
+class TestConsolePrinterStdoutBypass:
+    """Regression: agent output must not land inside the bottom input box.
+
+    Reproduces the bug where ``ConsolePrinter`` captures ``sys.stdout``
+    in ``__init__`` (as :func:`kiss.agents.sorcar.cli_client.run_client`
+    does at line ``printer = ConsolePrinter()`` BEFORE entering the
+    :class:`AnchoredRepl` context that swaps ``sys.stdout`` to a
+    :class:`_StdoutProxy`).  After the swap, direct ``self._file.write``
+    calls in the printer (``bash_stream``, ``_flush_newline``,
+    ``_print_tool_result``, ``_handle_message``) bypass the proxy and
+    land at the terminal's current cursor position — which is the input
+    box body — so streamed agent output is written *inside* the bottom
+    input area.
+
+    The proxy frames every write it sees with ``ESC 8`` (restore output
+    cursor saved at the bottom of the scroll region) and re-parks the
+    blinking caret in the body.  Output that bypasses the proxy appears
+    as a bare string with no ``ESC 8`` prefix — exactly what the test
+    asserts.
+    """
+
+    def _setup(self) -> tuple[Any, _InputBox, Any, io.StringIO]:
+        from kiss.core.print_to_console import ConsolePrinter
+
+        real_stdout = io.StringIO()
+        box = _InputBox(threading.RLock(), real_stdout)
+        box._active = True
+        # Match cli_client.run_client: the printer is constructed BEFORE
+        # the proxy is installed.
+        printer = ConsolePrinter()
+        proxy = _StdoutProxy(real_stdout, box.lock, box)
+        return printer, box, proxy, real_stdout
+
+    def test_bash_stream_output_routes_through_proxy(self) -> None:
+        printer, _box, proxy, real_stdout = self._setup()
+        import sys as _sys
+
+        prev = _sys.stdout
+        _sys.stdout = proxy
+        try:
+            printer.print("bash output line\n", type="bash_stream")
+        finally:
+            _sys.stdout = prev
+        text = real_stdout.getvalue()
+        assert "bash output line" in text
+        # Bug signature: bare "bash output line\n" with no ESC8 prefix
+        # means the write bypassed the proxy and landed in the box body.
+        assert "\x1b8bash output line\n" in text, (
+            "bash_stream output bypassed the proxy and landed in the "
+            "input box body (no ESC 8 restore-output-cursor framing)"
+        )
+
+    def test_flush_newline_routes_through_proxy(self) -> None:
+        printer, _box, proxy, real_stdout = self._setup()
+        printer._mid_line = True
+        import sys as _sys
+
+        prev = _sys.stdout
+        _sys.stdout = proxy
+        try:
+            printer._flush_newline()
+        finally:
+            _sys.stdout = prev
+        text = real_stdout.getvalue()
+        # The proxy frames its writes with ESC 8 (restore) ... ESC 7
+        # (re-save).  A direct write of "\n" to the original stdout has
+        # neither and lands in the input box body.
+        assert "\x1b8\n" in text, (
+            "_flush_newline bypassed the proxy and wrote a newline "
+            "directly into the input box body"
+        )
+
+
 if __name__ == "__main__":
     import pytest
 

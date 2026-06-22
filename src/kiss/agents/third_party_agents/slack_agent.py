@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Slack Agent — ChatSorcarAgent extension with Slack API tools.
+"""Slack Agent — SorcarAgent extension with Slack API tools.
 
 Provides authenticated access to a Slack workspace via a bot token
 with multi-turn chat-session persistence.  Handles authentication
@@ -30,7 +30,7 @@ from typing import Any, cast
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.third_party_agents._backend_utils import wait_for_matching_message
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
@@ -844,8 +844,8 @@ class SlackChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-class SlackAgent(BaseChannelAgent, ChatSorcarAgent):
-    """ChatSorcarAgent extended with Slack workspace tools.
+class SlackAgent(BaseChannelAgent, SorcarAgent):
+    """SorcarAgent extended with Slack workspace tools.
 
     Inherits all standard SorcarAgent capabilities (bash, file editing,
     browser automation) and adds authenticated Slack API tools for

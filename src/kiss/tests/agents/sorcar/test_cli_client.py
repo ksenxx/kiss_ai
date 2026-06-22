@@ -172,8 +172,35 @@ class _DaemonHarness:
         cli_daemon_bridge.reset_for_tests()
 
         async def _shutdown() -> None:
+            # Close all remaining UDS writers the server registered so
+            # the corresponding ``_uds_handler`` coroutines exit their
+            # ``readline()`` await with EOF and finalise.  Without this
+            # the handler tasks are still pending when ``loop.close()``
+            # runs below; their pipe / socket FDs are then released
+            # only when the Python GC eventually reaps the destroyed
+            # tasks — which is far too late under the 256-FD soft
+            # limit and triggers ``OSError [Errno 24]`` cascades in
+            # later tests.
+            with self.server._printer._ws_lock:
+                writers = list(self.server._printer._uds_writers)
+            for writer in writers:
+                try:
+                    writer.close()
+                except Exception:
+                    pass
             self.uds_server.close()
             await self.uds_server.wait_closed()
+            # Wait for the handler tasks to finish (or cancel them if
+            # they are stuck) so all transport FDs are released
+            # before the loop is closed.
+            pending = [
+                t for t in asyncio.all_tasks()
+                if t is not asyncio.current_task()
+            ]
+            for t in pending:
+                t.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
 
         try:
             asyncio.run_coroutine_threadsafe(

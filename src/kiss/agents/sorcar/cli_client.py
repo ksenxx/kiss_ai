@@ -480,19 +480,58 @@ class CliClient:
             logger.debug("send failed", exc_info=True)
 
     def close(self) -> None:
-        """Tell the daemon the tab is done and stop the loop thread."""
+        """Tell the daemon the tab is done and stop the loop thread.
+
+        Cleanly closes the UDS writer (so ``_main``'s ``readline``
+        unblocks via EOF and ``run_until_complete`` returns), joins
+        the loop thread, then closes the asyncio event loop itself.
+
+        Closing the loop is essential for test hygiene: every
+        :class:`asyncio.AbstractEventLoop` owns a self-pipe + selector
+        kqueue/epoll FD, so leaking them across hundreds of unit
+        tests trips the per-process FD soft-limit (256 on macOS) and
+        every subsequent ``asyncio.new_event_loop()`` /
+        ``socket.socket(AF_UNIX, ...)`` / ``os.pipe()`` call fails
+        with :class:`OSError` ``[Errno 24] Too many open files``.
+        """
         try:
             self.send({"type": "closeTab", "tabId": self.tab_id})
         except Exception:
             logger.debug("closeTab on shutdown failed", exc_info=True)
         loop = self._loop
-        if loop is not None:
+        if loop is not None and loop.is_running():
+            # Close the writer from the loop thread; this unblocks
+            # ``readline()`` in ``_main`` with EOF and causes
+            # ``run_until_complete`` to return cleanly.
+            async def _close_writer() -> None:
+                writer = self._writer
+                if writer is None:
+                    return
+                try:
+                    writer.close()
+                    await writer.wait_closed()
+                except Exception:
+                    logger.debug("writer close failed", exc_info=True)
+
+            try:
+                fut = asyncio.run_coroutine_threadsafe(_close_writer(), loop)
+                fut.result(timeout=2)
+            except Exception:
+                logger.debug("writer-close future failed", exc_info=True)
+            # Fall-back kick in case ``_main`` is still parked.
             try:
                 loop.call_soon_threadsafe(loop.stop)
             except Exception:
                 logger.debug("loop stop failed", exc_info=True)
         if self._thread is not None:
             self._thread.join(timeout=2)
+        if loop is not None and not loop.is_closed():
+            try:
+                loop.close()
+            except Exception:
+                logger.debug("loop close failed", exc_info=True)
+        self._writer = None
+        self._reader = None
 
 
 def _drain_queue(q: queue.Queue[Any]) -> None:

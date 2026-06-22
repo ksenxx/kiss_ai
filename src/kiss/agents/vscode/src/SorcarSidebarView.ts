@@ -31,7 +31,7 @@ import {AgentClient} from './AgentClient';
 import {getGitApi} from './gitApi';
 import {MergeManager} from './MergeManager';
 import {getDefaultModel} from './DependencyInstaller';
-import {buildChatHtml} from './SorcarTab';
+import {buildChatHtml, readSampleTasks} from './SorcarTab';
 import {findInstallScript, kissAiRoot} from './installerPath';
 import {
   FromWebviewMessage,
@@ -635,19 +635,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   }
 
   private _sendWelcomeSuggestions(): void {
-    const jsonPath = path.join(this._extensionUri.fsPath, 'SAMPLE_TASKS.json');
-    try {
-      const data = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
-      this._sendToWebview({
-        type: 'welcome_suggestions',
-        suggestions: data,
-      } as ToWebviewMessage);
-    } catch {
-      this._sendToWebview({
-        type: 'welcome_suggestions',
-        suggestions: [],
-      } as ToWebviewMessage);
-    }
+    this._sendToWebview({
+      type: 'welcome_suggestions',
+      suggestions: readSampleTasks(this._extensionUri.fsPath),
+    } as ToWebviewMessage);
   }
 
   /**
