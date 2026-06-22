@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Google Chat Agent — ChatSorcarAgent extension with Google Chat API tools.
+"""Google Chat Agent — SorcarAgent extension with Google Chat API tools.
 
 Provides authenticated access to Google Chat via Service Account or OAuth2.
 Stores credentials in ``~/.kiss/third_party_agents/googlechat/``.
@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.third_party_agents._backend_utils import (
     is_headless_environment,
     wait_for_matching_message,
@@ -466,8 +466,8 @@ class GoogleChatChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-class GoogleChatAgent(BaseChannelAgent, ChatSorcarAgent):
-    """ChatSorcarAgent extended with Google Chat API tools.
+class GoogleChatAgent(BaseChannelAgent, SorcarAgent):
+    """SorcarAgent extended with Google Chat API tools.
 
     Example::
 

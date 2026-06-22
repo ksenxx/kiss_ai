@@ -14,11 +14,10 @@ Verifies that:
 from __future__ import annotations
 
 import importlib
-import sys
 
 import pytest
 
-from kiss.agents.third_party_agents._channel_agent_utils import BaseChannelAgent, channel_main
+from kiss.agents.third_party_agents._channel_agent_utils import BaseChannelAgent
 
 ALL_AGENTS = [
     ("BlueBubblesAgent", "kiss.agents.third_party_agents.bluebubbles_agent"),
@@ -93,27 +92,6 @@ def test_no_inline_get_tools(class_name: str, module_path: str) -> None:
     """No agent defines its own _get_tools() — inherited from BaseChannelAgent."""
     cls = _get_agent_class(module_path, class_name)
     assert "_get_tools" not in cls.__dict__
-
-
-def test_channel_main_list_chats_exits(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """channel_main() with -l prints recent chats and exits."""
-    from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-
-    class FakeAgent(BaseChannelAgent, ChatSorcarAgent):
-        pass
-
-    original_argv = sys.argv[:]
-    try:
-        sys.argv = ["test-cli", "-l"]
-        with pytest.raises(SystemExit) as exc_info:
-            channel_main(FakeAgent, "kiss-test")
-        assert exc_info.value.code == 0
-        captured = capsys.readouterr()
-        assert captured.out
-    finally:
-        sys.argv = original_argv
 
 
 _POLL_MODULES = [

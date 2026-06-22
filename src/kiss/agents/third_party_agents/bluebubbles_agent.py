@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""BlueBubbles Agent — ChatSorcarAgent extension with BlueBubbles REST API tools.
+"""BlueBubbles Agent — SorcarAgent extension with BlueBubbles REST API tools.
 
 Provides access to iMessage via the BlueBubbles server running on a local Mac.
 macOS only. Stores config in ``~/.kiss/third_party_agents/bluebubbles/config.json``.
@@ -23,7 +23,7 @@ from typing import Any
 
 import requests
 
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.third_party_agents._backend_utils import wait_for_matching_message
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
@@ -288,8 +288,8 @@ class BlueBubblesChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-class BlueBubblesAgent(BaseChannelAgent, ChatSorcarAgent):
-    """ChatSorcarAgent extended with BlueBubbles REST API tools (macOS only)."""
+class BlueBubblesAgent(BaseChannelAgent, SorcarAgent):
+    """SorcarAgent extended with BlueBubbles REST API tools (macOS only)."""
 
     def __init__(self) -> None:
         super().__init__("BlueBubbles Agent")

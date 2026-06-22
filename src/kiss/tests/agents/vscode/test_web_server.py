@@ -4660,7 +4660,7 @@ class TestRemoteWelcomeSuggestionsEmpty(IsolatedAsyncioTestCase):
     async def test_remote_welcome_suggestions_not_broadcast(self) -> None:
         """Remote-chat ready handshake does NOT broadcast welcome_suggestions.
 
-        The remote chat webview suppresses the SAMPLE_TASKS.json
+        The remote chat webview suppresses the SAMPLE_TASKS.md
         suggestions via CSS and centers the input textbox on the
         welcome page instead, so the backend never needs to broadcast
         a ``welcome_suggestions`` event.  Broadcasting one (even an

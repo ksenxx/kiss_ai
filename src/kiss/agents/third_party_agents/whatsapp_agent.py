@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""WhatsApp Agent — ChatSorcarAgent extension with WhatsApp Business Cloud API tools.
+"""WhatsApp Agent — SorcarAgent extension with WhatsApp Business Cloud API tools.
 
 Provides authenticated access to WhatsApp via the Meta Graph API.
 Handles authentication (reading config from disk or prompting the user
@@ -29,7 +29,7 @@ from typing import Any
 
 import requests
 
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     stop_http_server,
@@ -790,8 +790,8 @@ class WhatsAppChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-class WhatsAppAgent(BaseChannelAgent, ChatSorcarAgent):
-    """ChatSorcarAgent extended with WhatsApp Business Cloud API tools.
+class WhatsAppAgent(BaseChannelAgent, SorcarAgent):
+    """SorcarAgent extended with WhatsApp Business Cloud API tools.
 
     Inherits all standard SorcarAgent capabilities (bash, file editing,
     browser automation) and adds authenticated WhatsApp API tools for

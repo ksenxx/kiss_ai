@@ -6,7 +6,7 @@
 
 The ``sorcar`` CLI must default to:
 
-* **worktree mode ON** — every task runs on an isolated
+* **worktree mode ON** — every interactive task runs on an isolated
   ``git worktree`` branch (the user's main working tree is never
   touched).
 * **parallel mode ON** — sub-agents are dispatched concurrently.
@@ -15,22 +15,21 @@ The ``sorcar`` CLI must default to:
   cleaned up / merged.
 
 Each toggle has a ``--no-...`` opt-out via
-:class:`argparse.BooleanOptionalAction`.  The legacy ``--use-chat`` /
-``--use-worktree`` flags are still honoured as aliases.
+:class:`argparse.BooleanOptionalAction`.
 
 These tests drive the real CLI plumbing:
 
 * :func:`~kiss.agents.sorcar.cli_helpers._build_arg_parser` for the
-  default flag values, ``--no-...`` opt-outs, and legacy aliases.
+  default flag values and ``--no-...`` opt-outs.
 * :func:`~kiss.agents.sorcar.cli_helpers._build_run_kwargs` for the
   ``is_parallel`` propagation into ``agent.run`` kwargs.
-* :func:`~kiss.agents.sorcar.worktree_sorcar_agent._resolve_cli_modes`
-  for legacy-alias resolution.
-* :func:`~kiss.agents.sorcar.worktree_sorcar_agent._build_cli_agent`
-  for the agent-class selection and ``auto_commit_enabled`` wiring.
 * :meth:`~kiss.agents.sorcar.worktree_sorcar_agent.WorktreeSorcarAgent._auto_commit_worktree`
   end-to-end against a real git worktree to confirm the
   ``--no-auto-commit`` opt-out actually suppresses the commit.
+
+The non-interactive (``-t``/``-f``) CLI path always uses a bare
+:class:`SorcarAgent` and never touches worktrees / chats; that
+contract is verified separately in ``test_cli_only_sorcar_agent.py``.
 """
 
 from __future__ import annotations
@@ -39,14 +38,9 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.cli_helpers import _build_arg_parser, _build_run_kwargs
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
-from kiss.agents.sorcar.worktree_sorcar_agent import (
-    WorktreeSorcarAgent,
-    _build_cli_agent,
-    _resolve_cli_modes,
-)
+from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
 
 def _make_repo(path: Path) -> Path:
@@ -119,29 +113,6 @@ class TestArgParserOptOuts:
         assert args.auto_commit is False
 
 
-class TestLegacyAliases:
-    """``--use-chat`` and ``--use-worktree`` must still drive
-    ``_resolve_cli_modes`` to flip ``args.worktree`` so existing user
-    scripts keep working.
-    """
-
-    def test_use_chat_alias_disables_worktree(self) -> None:
-        args = _build_arg_parser().parse_args(["--use-chat"])
-        # The new default is True; the legacy alias must override it.
-        assert args.worktree is True
-        _resolve_cli_modes(args)
-        assert args.worktree is False
-
-    def test_use_worktree_alias_enables_worktree(self) -> None:
-        # ``--no-worktree`` first, then the legacy alias re-enables it.
-        args = _build_arg_parser().parse_args(
-            ["--no-worktree", "--use-worktree"],
-        )
-        assert args.worktree is False
-        _resolve_cli_modes(args)
-        assert args.worktree is True
-
-
 class TestRunKwargsPropagation:
     """``_build_run_kwargs`` must carry the parser's ``parallel``
     default through to ``agent.run`` as ``is_parallel``.
@@ -156,41 +127,6 @@ class TestRunKwargsPropagation:
         args = _build_arg_parser().parse_args(["--no-parallel"])
         run_kwargs = _build_run_kwargs(args)
         assert run_kwargs["is_parallel"] is False
-
-
-class TestBuildCliAgent:
-    """``_build_cli_agent`` selects the agent class from
-    ``args.worktree`` and wires ``args.auto_commit`` into
-    :attr:`WorktreeSorcarAgent.auto_commit_enabled`.
-    """
-
-    def test_default_builds_worktree_agent_with_auto_commit_on(self) -> None:
-        args = _build_arg_parser().parse_args([])
-        _resolve_cli_modes(args)
-        agent = _build_cli_agent(args)
-        assert isinstance(agent, WorktreeSorcarAgent)
-        assert agent.auto_commit_enabled is True
-
-    def test_no_worktree_builds_chat_agent(self) -> None:
-        args = _build_arg_parser().parse_args(["--no-worktree"])
-        _resolve_cli_modes(args)
-        agent = _build_cli_agent(args)
-        assert isinstance(agent, ChatSorcarAgent)
-        assert not isinstance(agent, WorktreeSorcarAgent)
-
-    def test_no_auto_commit_propagates_to_agent(self) -> None:
-        args = _build_arg_parser().parse_args(["--no-auto-commit"])
-        _resolve_cli_modes(args)
-        agent = _build_cli_agent(args)
-        assert isinstance(agent, WorktreeSorcarAgent)
-        assert agent.auto_commit_enabled is False
-
-    def test_use_chat_alias_builds_chat_agent(self) -> None:
-        args = _build_arg_parser().parse_args(["--use-chat"])
-        _resolve_cli_modes(args)
-        agent = _build_cli_agent(args)
-        assert isinstance(agent, ChatSorcarAgent)
-        assert not isinstance(agent, WorktreeSorcarAgent)
 
 
 class TestAutoCommitEnabledGate:

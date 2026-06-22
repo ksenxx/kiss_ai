@@ -766,9 +766,23 @@ update_repo() {
         exit 1
     fi
     echo "   Extension installed into VS Code"
-    # NOTE: do NOT delete the VSIX.  ``kiss-sorcar.vsix`` is a git-tracked
-    # file in this checkout, so removing it would leave the working tree
-    # dirty (a pending deletion) after every install.
+    # ``kiss-sorcar.vsix`` is a build artifact and MUST NOT be committed
+    # to git — it is ~2 MB of binary that bloats the history and is
+    # rebuilt deterministically by the ``npm run package`` step above.
+    # The file is matched by ``*.vsix`` in the repo's ``.gitignore`` so
+    # ``git status`` never lists it and the auto-commit / ``git add .``
+    # flows cannot pick it up.  We deliberately do NOT delete the VSIX
+    # here so that subsequent ``code --install-extension`` invocations
+    # (e.g. a manual retry) can reuse the freshly built artifact without
+    # rebuilding it.  As a defence-in-depth check, refuse to continue if
+    # the VSIX has somehow become tracked again (e.g. a ``git add -f``
+    # by mistake) — that would cause the worktree flow to commit it.
+    if git -C "$PROJECT_DIR" ls-files --error-unmatch "$VSIX" &>/dev/null; then
+        echo "   ERROR: $VSIX is tracked by git but must remain ignored." >&2
+        echo "   Run: git -C \"$PROJECT_DIR\" rm --cached \"$VSIX\"" >&2
+        echo "   and ensure ``*.vsix`` stays in .gitignore." >&2
+        exit 1
+    fi
 
     # Stop the old kiss-web daemon BEFORE the extension auto-reloads.  The
     # ``--install-extension --force`` above replaced the extension directory
@@ -838,6 +852,36 @@ update_repo() {
         echo "   Installed MODEL_INFO.json at $MODEL_INFO_DST"
     else
         echo "   WARNING: $MODEL_INFO_SRC missing — model table not refreshed."
+    fi
+
+    # Always overwrite the bundled INJECTIONS.md and SAMPLE_TASKS.md into
+    # the user's kiss home directory on every install/update.  This ensures
+    # the kiss-web daemon's Tricks button and the VS Code extension's
+    # welcome-screen sample-task chips always reflect the latest bundled
+    # Markdown when the extension is updated — matching the MODEL_INFO.json
+    # pattern directly above.
+    #
+    # ``${KISS_HOME:-$HOME/.kiss}`` matches the runtime resolution in
+    # ``user_assets.kiss_home_dir`` so a developer with a custom
+    # ``KISS_HOME`` exported lands the files where the runtime will
+    # read them.
+    KISS_HOME_DIR="${KISS_HOME:-$HOME/.kiss}"
+    mkdir -p "$KISS_HOME_DIR"
+    INJECTIONS_SRC="$PROJECT_DIR/src/kiss/INJECTIONS.md"
+    INJECTIONS_DST="$KISS_HOME_DIR/INJECTIONS.md"
+    if [ -f "$INJECTIONS_SRC" ]; then
+        cp "$INJECTIONS_SRC" "$INJECTIONS_DST"
+        echo "   Installed INJECTIONS.md at $INJECTIONS_DST"
+    else
+        echo "   WARNING: $INJECTIONS_SRC missing — tricks not refreshed."
+    fi
+    SAMPLE_TASKS_SRC="$PROJECT_DIR/src/kiss/SAMPLE_TASKS.md"
+    SAMPLE_TASKS_DST="$KISS_HOME_DIR/SAMPLE_TASKS.md"
+    if [ -f "$SAMPLE_TASKS_SRC" ]; then
+        cp "$SAMPLE_TASKS_SRC" "$SAMPLE_TASKS_DST"
+        echo "   Installed SAMPLE_TASKS.md at $SAMPLE_TASKS_DST"
+    else
+        echo "   WARNING: $SAMPLE_TASKS_SRC missing — welcome chips not refreshed."
     fi
 
     date -u +%Y-%m-%dT%H:%M:%SZ > "$HOME/.kiss/.extension-updated"

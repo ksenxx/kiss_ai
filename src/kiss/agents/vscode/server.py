@@ -82,6 +82,80 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 
+# Keys in the persisted ``extra`` JSON that capture the per-task
+# snapshot of GLOBAL settings (the model picker and the worktree /
+# parallel / auto-commit toggles) at the moment the task ran.  When a
+# chat tab is LOADED FROM HISTORY into a tab, the live toggles in the
+# webview already reflect the user's CURRENT global preferences (synced
+# from ``~/.kiss/config.json`` via ``updateSetting`` / ``configData``);
+# replaying these stale per-task values would stamp the toggles back
+# onto the loaded task's old settings and silently make the NEXT task
+# run with those old settings instead of whatever the user just picked
+# globally.  ``_extra_for_replay`` strips them so the frontend's
+# ``task_events`` handler cannot clobber the live toggle state.
+#
+# Keys deliberately preserved: ``startTs`` / ``endTs`` drive the
+# "Running …" / "Done (Xm Ys)" header in the chat webview; ``work_dir``
+# is per-tab routing state; ``tokens`` / ``cost`` / ``steps`` /
+# ``version`` are informational read-outs of the historical run.
+_REPLAY_STRIPPED_EXTRA_KEYS = (
+    "model",
+    "is_worktree",
+    "is_parallel",
+    "auto_commit_mode",
+)
+
+
+def _extra_for_replay(extra: object) -> str:
+    """Return *extra* with global-setting keys stripped for replay.
+
+    See :data:`_REPLAY_STRIPPED_EXTRA_KEYS` for the rationale.  Non-
+    string inputs and non-dict-JSON payloads are converted to ``""``
+    (the persistence layer always writes a JSON object; any other
+    shape is defensive coverage against a future spread / Object.assign
+    reader smuggling arbitrary keys through).  An unparseable string
+    is returned as-is — the frontend's ``JSON.parse`` is wrapped in
+    ``try/catch`` and ignores the payload safely.
+
+    Args:
+        extra: The persisted ``extra`` value from
+            ``_load_chat_events_by_task_id`` /
+            ``_load_latest_chat_events_by_chat_id``.
+
+    Returns:
+        A JSON string with the stripped keys removed (or the original
+        string if no stripped key was present and it parses as a
+        dict), the original string when it does not parse as JSON,
+        or ``""`` when *extra* is missing, not a string, or parses
+        to a non-dict value.
+    """
+    if not isinstance(extra, str):
+        return ""
+    if not extra:
+        return ""
+    try:
+        parsed = json.loads(extra)
+    except (json.JSONDecodeError, TypeError):
+        return extra
+    if not isinstance(parsed, dict):
+        # Defensive: any non-dict JSON (list / scalar) is malformed
+        # for a task's ``extra`` payload — the persistence layer
+        # always writes a JSON object.  Returning ``""`` here means a
+        # future frontend reader that uses spread / Object.assign
+        # cannot smuggle arbitrary fields through a corrupt or
+        # tampered row.  The frontend's ``if (ev.extra)`` guard
+        # handles the empty case cleanly.
+        return ""
+    mutated = False
+    for key in _REPLAY_STRIPPED_EXTRA_KEYS:
+        if key in parsed:
+            parsed.pop(key, None)
+            mutated = True
+    if not mutated:
+        return extra
+    return json.dumps(parsed)
+
+
 def _coalesced_replay_events(events: object) -> list[dict[str, Any]]:
     """Coalesce a persisted event list for a replay broadcast.
 
@@ -125,12 +199,18 @@ def _live_task_id(tab: _RunningAgentState) -> int | None:
 
 
 def _tab_busy(tab: _RunningAgentState) -> bool:
-    """True when *tab* must not be disposed yet.
+    """True when *tab* must not be disposed yet OR have its per-tab
+    state reset.
 
     A tab is busy while a task is active, a merge review is in
     progress, or its worker thread is still alive.  Shared by the
     immediate (``_close_tab``) and deferred (``_dispose_if_closed``)
-    disposal paths.
+    disposal paths, AND by :meth:`_replay_session` as the
+    ``not _tab_busy`` gate on resetting ``tab.use_worktree`` /
+    ``tab.use_parallel`` / ``tab.auto_commit_mode`` /
+    ``tab.selected_model`` on a history load.  Callers must hold
+    ``_state_lock`` while reading the result — the function itself
+    only does plain attribute reads and is not internally locked.
 
     Args:
         tab: The per-tab state to inspect.
@@ -1255,26 +1335,60 @@ class VSCodeServer(
             tab = _RunningAgentState.running_agent_states.get(tab_id)
             if tab is not None:
                 tab.chat_id = chat_id
-                # Do NOT clobber ``use_worktree`` while a task is in
-                # flight on this tab or while a finished worktree run
-                # is awaiting the user's merge/discard decision
-                # (``agent._wt_pending``): the end-of-task cleanup in
-                # ``_TaskRunnerMixin._run_task`` keeps the agent alive
-                # only when ``tab.use_worktree and tab.agent._wt_pending``,
-                # and the merge-busy guard scans ``t.is_merging and
-                # t.use_worktree`` — flipping the flag mid-flight would
-                # dispose the agent that still holds the pending
-                # worktree state (breaking merge/discard and leaking
-                # the worktree branch).
-                wt_pending = bool(
-                    tab.agent is not None
-                    and getattr(tab.agent, "_wt_pending", False),
-                )
-                if not tab.is_task_active and not wt_pending:
-                    tab.use_worktree = bool(
-                        extra_raw.get("is_worktree")
-                        if isinstance(extra_raw, dict) else False,
-                    )
+                # Do NOT seed ``tab.use_worktree`` /
+                # ``tab.use_parallel`` / ``tab.auto_commit_mode`` /
+                # ``tab.selected_model`` from the loaded task's
+                # ``extra``: those historical values are a snapshot
+                # of the toggles / model at the time the task ran,
+                # NOT the user's current global setting.  Loading a
+                # chat is a VIEW operation — the NEXT task started in
+                # this tab will overwrite ``tab.use_worktree`` /
+                # ``tab.use_parallel`` / ``tab.auto_commit_mode`` from
+                # the frontend's live ``useWorktree`` / ``useParallel``
+                # / ``autoCommit`` flags (which mirror the user's
+                # CURRENT global toggles), so any value seeded here
+                # would be either stale (last-task snapshot) or
+                # immediately clobbered (correct global).
+                #
+                # Additionally, RESET these per-tab fields to baseline
+                # (= ``self._default_model`` for the model, ``False``
+                # for the toggle flags).  Without this reset a tab
+                # that previously ran a task — and therefore had
+                # ``tab.use_worktree`` / ``tab.use_parallel`` /
+                # ``tab.auto_commit_mode`` / ``tab.selected_model``
+                # written by ``_run_task`` — would keep those values
+                # after loading a different chat into the same tab,
+                # which ``_get_history`` then reads as the running-
+                # session sidebar metadata for any LIVE task in the
+                # loaded chat (see ``_get_history`` running-session
+                # loop earlier in this file).  Resetting here mirrors
+                # ``_new_chat``'s baseline (``tab.selected_model =
+                # self._default_model`` at the start of a fresh
+                # chat) and keeps a history-load idempotent w.r.t.
+                # the tab's prior task-runner state.
+                #
+                # Skip the reset when a task is actively running in
+                # this tab — that scenario means the user is re-
+                # rendering the live chat into the SAME tab that owns
+                # the run, so the in-flight per-tab fields are the
+                # source of truth for ``_get_history``'s sidebar
+                # metadata and must not be clobbered.
+                # Use the shared ``_tab_busy`` predicate so the guard
+                # ALSO covers an in-flight worktree-merge review
+                # (``tab.is_merging``).  Without that bit, a
+                # ``_replay_session`` re-entry on a tab whose
+                # post-task merge prompt is still open (e.g. user
+                # reloads the VS Code window mid-merge) would
+                # clobber ``tab.use_worktree=False`` and break
+                # ``_finish_merge`` / ``_present_pending_worktree``
+                # in ``merge_flow.py`` (which dispatch on
+                # ``tab.use_worktree``), leaking the worktree
+                # directory.
+                if not _tab_busy(tab):
+                    tab.use_worktree = False
+                    tab.use_parallel = False
+                    tab.auto_commit_mode = False
+                    tab.selected_model = self._default_model
                 tab.frontend_closed = False
             # Record which chat this tab now displays so a task later
             # started on the same chat (from any tab in any window)
@@ -1383,7 +1497,16 @@ class VSCodeServer(
             "task": result["task"],
             "task_id": result.get("task_id"),
             "chat_id": chat_id,
-            "extra": result.get("extra", ""),
+            # ``_extra_for_replay`` strips ``model`` / ``is_worktree``
+            # / ``is_parallel`` / ``auto_commit_mode`` so loading a
+            # chat into this tab cannot clobber the live toggle / model
+            # state that mirrors the user's CURRENT global settings.
+            # A follow-up task started in this tab must use whatever
+            # the toggles currently say (= the global settings the
+            # user just picked), not the stale per-task snapshot of
+            # the historical row being loaded.  See the comment on
+            # :data:`_REPLAY_STRIPPED_EXTRA_KEYS`.
+            "extra": _extra_for_replay(result.get("extra", "")),
             "tabId": tab_id,
         })
         self._emit_pending_worktree(tab_id)
@@ -1533,7 +1656,20 @@ class VSCodeServer(
                 "task": description,
                 "task_id": sub_task_id,
                 "chat_id": row.get("chat_id", ""),
-                "extra": row.get("extra", ""),
+                # Sub-agent tabs reopened on a parent-task history
+                # load must follow the same strip rule as the parent
+                # ``_replay_session`` broadcast above: a persisted
+                # sub-agent ``extra`` snapshot of
+                # ``model`` / ``is_worktree`` / ``is_parallel`` /
+                # ``auto_commit_mode`` is just as historical as the
+                # parent's, and the frontend's background-tab
+                # ``task_events`` branch still reads ``extra.model``
+                # into ``teTab.selectedModel`` (see ``media/main.js``
+                # near the ``bgExtra.model`` block).  Stripping here
+                # prevents a stale per-sub-agent model from being
+                # inherited by the live model picker when the user
+                # later switches to that sub-tab.
+                "extra": _extra_for_replay(row.get("extra", "")),
                 "tabId": sub_tab_id,
             })
 

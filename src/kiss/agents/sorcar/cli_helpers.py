@@ -23,7 +23,6 @@ from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.models.model_info import get_default_model
 
 if TYPE_CHECKING:
-    from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
     from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 
 _DEFAULT_TASK = """
@@ -113,8 +112,19 @@ def _launch_work_dir() -> str:
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
-    """Build the CLI argument parser for all Sorcar agent entry points."""
-    parser = argparse.ArgumentParser(description="Run SorcarAgent demo")
+    """Build the CLI argument parser for all Sorcar agent entry points.
+
+    ``allow_abbrev`` is set to ``False`` so users must spell long
+    options out fully.  Otherwise argparse would expand abbreviations
+    like ``--auto`` into ``--auto-commit`` BEFORE the non-interactive
+    guard (:func:`_reject_interactive_only_flags`) gets to inspect
+    the raw argv — silently bypassing the guard for every flag in
+    the interactive-only set.
+    """
+    parser = argparse.ArgumentParser(
+        description="Run SorcarAgent demo",
+        allow_abbrev=False,
+    )
     parser.add_argument(
         "-m", "--model_name", type=str, default=get_default_model(),
         help="LLM model name (defaults to the best model for the configured API keys)",
@@ -178,44 +188,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "-f", "--file", type=str, default=None,
         help="Path to a file whose contents to use as the task",
     )
-    parser.add_argument(
-        "-n", "--new", action="store_true", help="Start a new chat session",
-    )
-    parser.add_argument(
-        "-c", "--chat-id", type=str, default=None, help="Resume a chat session by ID",
-    )
-    parser.add_argument(
-        "-l", "--list-chat-id", action="store_true",
-        help="List the last 10 chat sessions with tasks and results",
-    )
-    parser.add_argument(
-        "--cleanup", action="store_true",
-        help="Scan for and clean up orphaned worktree branches",
-    )
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument(
-        "--use-chat", action="store_true",
-        help="Legacy alias for --no-worktree (chat mode).",
-    )
-    group.add_argument(
-        "--use-worktree", action="store_true",
-        help="Legacy alias for --worktree (git worktree isolation).",
-    )
     return parser
-
-
-def _apply_chat_args(
-    agent: ChatSorcarAgent,
-    args: argparse.Namespace,
-    task: str = "",
-) -> None:
-    """Apply ``-n`` / ``--chat-id`` args to *agent*, or resume by *task*."""
-    if args.new:
-        agent.new_chat()
-    elif args.chat_id:
-        agent.resume_chat_by_id(args.chat_id)
-    elif task:
-        agent.resume_chat(task)
 
 
 def _build_run_kwargs(args: argparse.Namespace) -> dict[str, Any]:
@@ -283,10 +256,9 @@ def _print_result(result: str) -> None:
         print(result)
 
 
-def _print_run_stats(agent: ChatSorcarAgent, elapsed: float) -> None:
-    """Print post-run statistics (chat ID, time, cost, tokens)."""
-    print(f"\nChat ID: {agent.chat_id}")
-    print(f"Time: {elapsed:.1f}s")
+def _print_run_stats(agent: SorcarAgent, elapsed: float) -> None:
+    """Print post-run statistics (time, cost, tokens)."""
+    print(f"\nTime: {elapsed:.1f}s")
     print(f"Cost: ${agent.budget_used:.4f}")
     print(f"Total tokens: {agent.total_tokens_used}")
 
@@ -310,12 +282,5 @@ def print_outcome(
     """
     if verbose:
         return
-    from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-
     _print_result(result)
-    if isinstance(agent, ChatSorcarAgent):
-        _print_run_stats(agent, elapsed)
-    else:
-        print(f"\nTime: {elapsed:.1f}s")
-        print(f"Cost: ${getattr(agent, 'budget_used', 0.0):.4f}")
-        print(f"Total tokens: {getattr(agent, 'total_tokens_used', 0)}")
+    _print_run_stats(agent, elapsed)
