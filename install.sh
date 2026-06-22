@@ -766,9 +766,23 @@ update_repo() {
         exit 1
     fi
     echo "   Extension installed into VS Code"
-    # NOTE: do NOT delete the VSIX.  ``kiss-sorcar.vsix`` is a git-tracked
-    # file in this checkout, so removing it would leave the working tree
-    # dirty (a pending deletion) after every install.
+    # ``kiss-sorcar.vsix`` is a build artifact and MUST NOT be committed
+    # to git — it is ~2 MB of binary that bloats the history and is
+    # rebuilt deterministically by the ``npm run package`` step above.
+    # The file is matched by ``*.vsix`` in the repo's ``.gitignore`` so
+    # ``git status`` never lists it and the auto-commit / ``git add .``
+    # flows cannot pick it up.  We deliberately do NOT delete the VSIX
+    # here so that subsequent ``code --install-extension`` invocations
+    # (e.g. a manual retry) can reuse the freshly built artifact without
+    # rebuilding it.  As a defence-in-depth check, refuse to continue if
+    # the VSIX has somehow become tracked again (e.g. a ``git add -f``
+    # by mistake) — that would cause the worktree flow to commit it.
+    if git -C "$PROJECT_DIR" ls-files --error-unmatch "$VSIX" &>/dev/null; then
+        echo "   ERROR: $VSIX is tracked by git but must remain ignored." >&2
+        echo "   Run: git -C \"$PROJECT_DIR\" rm --cached \"$VSIX\"" >&2
+        echo "   and ensure ``*.vsix`` stays in .gitignore." >&2
+        exit 1
+    fi
 
     # Stop the old kiss-web daemon BEFORE the extension auto-reloads.  The
     # ``--install-extension --force`` above replaced the extension directory
