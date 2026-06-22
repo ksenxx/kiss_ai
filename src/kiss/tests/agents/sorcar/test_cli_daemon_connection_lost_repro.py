@@ -45,6 +45,7 @@ What this test asserts
 from __future__ import annotations
 
 import asyncio
+import gc
 import os
 import shutil
 import tempfile
@@ -66,7 +67,21 @@ class TestDaemonConnectionLostRepro(unittest.TestCase):
     """End-to-end reproducer for the daemon-connection-lost bug."""
 
     def setUp(self) -> None:
+        # Every resource is registered with ``addCleanup`` the moment
+        # it is acquired.  ``addCleanup`` runs in LIFO order regardless
+        # of whether ``setUp`` completes — so a failure half-way
+        # through still releases the loop thread, the UDS listener,
+        # the asyncio event loop FDs, the devnull FD, and the tmpdir.
+        # Pre-tightening, a partial setUp left every one of those
+        # leaked, which compounded into ``OSError [Errno 24] Too many
+        # open files`` once a few hundred CLI tests had run in the
+        # same process.
         self.tmpdir = tempfile.mkdtemp(prefix="sorcar_cli_repro_")
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
+        # Final ``gc.collect()`` reclaims any selector / transport FDs
+        # whose only references were on now-closed asyncio tasks.
+        self.addCleanup(gc.collect)
+
         self.sock_path = str(Path(self.tmpdir) / "sorcar.sock")
         self.work_dir = str(Path(self.tmpdir) / "wd")
         os.makedirs(self.work_dir, exist_ok=True)
@@ -78,16 +93,26 @@ class TestDaemonConnectionLostRepro(unittest.TestCase):
         th._KISS_DIR = kiss_dir
         th._DB_PATH = kiss_dir / "sorcar.db"
         th._db_conn = None
+        self.addCleanup(self._restore_persistence)
+        # Drop any tabs the test may have inserted into the shared
+        # process-wide registry so they cannot bleed into later tests.
+        self.addCleanup(_RunningAgentState.running_agent_states.clear)
 
         self._saved_env = os.environ.get("KISS_SORCAR_SOCK")
         os.environ["KISS_SORCAR_SOCK"] = self.sock_path
         cli_daemon_bridge.reset_for_tests()
+        self.addCleanup(cli_daemon_bridge.reset_for_tests)
+        self.addCleanup(self._restore_sock_env)
 
         self.loop = asyncio.new_event_loop()
         self.loop_thread = threading.Thread(
             target=self.loop.run_forever, daemon=True,
         )
         self.loop_thread.start()
+        # Stop / close the loop LAST (after every coroutine-based
+        # cleanup has already run on it).  LIFO ordering means we
+        # register this BEFORE we register the asyncio shutdown.
+        self.addCleanup(self._stop_and_close_loop)
 
         self.server = RemoteAccessServer(
             uds_path=self.sock_path, work_dir=self.work_dir,
@@ -100,8 +125,12 @@ class TestDaemonConnectionLostRepro(unittest.TestCase):
             ),
             self.loop,
         ).result(timeout=5)
+        # Aggressive async shutdown runs before ``_stop_and_close_loop``
+        # because addCleanup is LIFO.
+        self.addCleanup(self._run_async_shutdown)
 
         self._devnull = open(os.devnull, "w")
+        self.addCleanup(self._safe_close_file, self._devnull)
         self.printer = ConsolePrinter(file=self._devnull)
         self.tab_id = uuid.uuid4().hex
         self.client = CliClient(
@@ -110,38 +139,79 @@ class TestDaemonConnectionLostRepro(unittest.TestCase):
             tab_id=self.tab_id,
             printer=self.printer,
         )
+        # Send a courtesy ``stop`` + ``close`` to the daemon before
+        # ripping the loop down — the client's UDS writer must be
+        # closed FIRST so the server-side ``_uds_handler`` exits its
+        # ``readline`` await with EOF and stops referencing the
+        # transport.
+        self.addCleanup(self._close_client)
         self.client.start(timeout=5.0)
 
-    def tearDown(self) -> None:
-        try:
-            self.client.send({"type": "stop", "tabId": self.tab_id})
-        except Exception:
-            pass
-        try:
-            self.client.close()
-        except Exception:
-            pass
+    def _restore_persistence(self) -> None:
+        th._DB_PATH, th._db_conn, th._KISS_DIR = self._saved_persistence
+
+    def _restore_sock_env(self) -> None:
         if self._saved_env is None:
             os.environ.pop("KISS_SORCAR_SOCK", None)
         else:
             os.environ["KISS_SORCAR_SOCK"] = self._saved_env
-        cli_daemon_bridge.reset_for_tests()
 
+    @staticmethod
+    def _safe_close_file(fh: object) -> None:
+        try:
+            fh.close()  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _close_client(self) -> None:
+        """Tell the daemon to stop the task and tear down the client UDS.
+
+        We send ``stop`` defensively (it is a no-op if no task is
+        running) and then call :meth:`CliClient.close` which closes
+        the client-side StreamWriter, joins the loop thread, and
+        closes the client's own asyncio loop.  Errors at any step are
+        swallowed: this is best-effort teardown.
+        """
+        try:
+            self.client.send({"type": "stop", "tabId": self.tab_id})
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self.client.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _run_async_shutdown(self) -> None:
+        """Drive the server-side async shutdown on the harness loop.
+
+        Closes every registered UDS writer with ``await wait_closed()``
+        so the underlying socket FDs are released before the loop
+        closes — a plain ``writer.close()`` only schedules the close;
+        the transport's FD is not freed until the next loop tick, which
+        never runs if we stop the loop too eagerly.
+        """
         async def _shutdown() -> None:
-            # Close registered UDS writers + wait for pending tasks
-            # so every transport FD is released before
-            # ``loop.close()``.  Without this the per-process FD
-            # soft-limit (256 on macOS) is hit when the surrounding
-            # test chunk runs hundreds of tests in one process.
             with self.server._printer._ws_lock:
                 writers = list(self.server._printer._uds_writers)
+                # Drop the references now — any subsequent broadcast
+                # will be a no-op rather than writing into a dying
+                # transport.
+                self.server._printer._uds_writers.clear()
             for writer in writers:
                 try:
                     writer.close()
-                except Exception:
+                except Exception:  # noqa: BLE001
                     pass
-            self.uds_server.close()
-            await self.uds_server.wait_closed()
+            for writer in writers:
+                try:
+                    await writer.wait_closed()
+                except Exception:  # noqa: BLE001
+                    pass
+            try:
+                self.uds_server.close()
+                await self.uds_server.wait_closed()
+            except Exception:  # noqa: BLE001
+                pass
             pending = [
                 t for t in asyncio.all_tasks()
                 if t is not asyncio.current_task()
@@ -151,22 +221,25 @@ class TestDaemonConnectionLostRepro(unittest.TestCase):
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
 
+        if not self.loop.is_closed() and self.loop.is_running():
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    _shutdown(), self.loop,
+                ).result(timeout=5)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _stop_and_close_loop(self) -> None:
         try:
-            asyncio.run_coroutine_threadsafe(
-                _shutdown(), self.loop,
-            ).result(timeout=5)
-        except Exception:
+            self.loop.call_soon_threadsafe(self.loop.stop)
+        except Exception:  # noqa: BLE001
             pass
-        self.loop.call_soon_threadsafe(self.loop.stop)
         self.loop_thread.join(timeout=5)
-        self.loop.close()
-        _RunningAgentState.running_agent_states.clear()
-        th._DB_PATH, th._db_conn, th._KISS_DIR = self._saved_persistence
         try:
-            self._devnull.close()
-        except Exception:
+            if not self.loop.is_closed():
+                self.loop.close()
+        except Exception:  # noqa: BLE001
             pass
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _wait_for_uds_writers(self, timeout: float = 5.0) -> None:
         """Block until the daemon has registered the CLI's UDS writer.
