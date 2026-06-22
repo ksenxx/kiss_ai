@@ -44,5 +44,25 @@ Sorcar for optimization: Can you run the command \<<command>> in the background 
 
 ## Task
 
-Sorcar GEPA Prompt Optimizer: Can you optimize a prompt for a ChatSorcarAgent of kiss-agent-framework Python library using the GEPA algorithm on the data at \<<url_or_db_file_of_data>> using claude-opus-4-8? You can find the trajectory events of an agent execution in ~/.kiss/sorcar.db after the agent has finished its execution. In the prompt always add the sentence "Use internet search extensively at every step." MAKE SURE THAT YOU DO NOT DO REWARD HACKING OR CHEATING IN THE AGENT YOU ARE IMPLEMENTING TO FIT DATA. YOUR SOLUTION MUST GENERALIZE BEYOND THE DATA PROVIDED. Use internet search extensively at every step. Do not worry about budget. Create an html report with diagrams and illustrations in PWD/reports and open it in the user's default browser. Do NOT STOP until you could not improve the accuracy and recall after three consecutive rollouts.
+Sorcar GEPA Prompt Optimizer: Can you optimize a prompt for a ChatSorcarAgent of kiss-agent-framework Python library using the following GEPA algorithm on the data at \<<url_or_db_file_of_data>> using claude-opus-4-8? You can find the trajectory events of an agent execution in ~/.kiss/sorcar.db after the agent has finished its execution.  Split the dataset into 50% dev set and 50% val set.  
+
+RUN_GEPA: Sample 100 data points from the val set and call it sval set.  Maintain a pareto frontier in the folder PWD/pareto where we have a sub-folder for each node in the frontier.  A node contains a prompt file (prompt.md) and a json file, say score.json, containing the list of sessions (ids) from the val set that were correctly predicted with the prompt.  When you add a node to the pareto frontier make sure that the list of correctly predicted sessions is not a subset or equal to an existing list of sessions in some node in the frontier.  If such a node exists, do not add the new node.  After adding a node, remove all nodes whose list of sessions is a subset or equal to the list of sessions in the added node. Then run the following algorithm.
+
+1. pick a node from the pareto frontier with probability 0.5
+  a. sample a minibatch of 5 sessions from the dev set
+  b. run the agent with the prompt from the node on the minibatch
+  c. if the agent incorrectly predicts for some sessions, analyze and reflect of the trajectory events of the agent on those sessions available at ~/.kiss/sorcar.db and propose a new prompt which will fix the mistakes made by the agent on sessions incorrectly predicted.
+  d. if the agent predicts correctly on the minibatch, then evaluate it on the val set and create the list of sessions on which the agent with the new prompt predicts correctly. 
+  e. Add the new prompt and the list of sessions to the pareto frontier
+2. pick two nodes from the pareto frontier randomly with the remaining probability.  
+  a. sample a minibatch of 5 sessions from the dev set
+  b. merge the prompts from two nodes into a new prompt.
+  c. if the agent predicts correctly on the minibatch with the new prompt, then evaluate it on the val set and create the list of sessions on which the agent with the new prompt predicts correctly. 
+  e. Add the new prompt and the list of sessions to the pareto frontier
+
+3. Repeat steps 1 and 2 until there is no change in the prompt after 3 iterations.
+END_RUN_GEPA
+Repeat RUN_GEPA until there is no change in the prompt after 3 iterations.
+
+In eah step, keep track of the best prompt which has the maximum number of successfully predicted sessions in PWD/pareto/optimal.md. In the prompt always add the sentence "Use internet search extensively at every step." MAKE SURE THAT YOU DO NOT DO REWARD HACKING OR CHEATING IN THE AGENT YOU ARE IMPLEMENTING TO FIT DATA. YOUR SOLUTION MUST GENERALIZE BEYOND THE DATA PROVIDED. Use internet search extensively at every step. Do not worry about budget. Create an html report with diagrams and illustrations in PWD/reports and open it in the user's default browser. Do NOT STOP until you could not improve the accuracy and recall after three consecutive rollouts.
 
