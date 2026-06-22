@@ -8,11 +8,7 @@ Can you change the step \<<specify step>> as follows: \<<whatever way you want t
 
 ## Task
 
-Can you run gepa.py on hotpotqa using gpt-4o-mini as both models
-
-## Task
-
-can you authenticate me with the learningsystems workspace on slack using the slack agent?
+can you authenticate me with the /<<workspace name>> workspace on slack using the slack agent?
 
 ## Task
 
@@ -66,3 +62,8 @@ RUN_GEPA: Sample 100 data points from the val set and call it sval set. Maintain
    Repeat RUN_GEPA until there is no change in the prompt after 3 iterations.
 
 In eah step, keep track of the best prompt which has the maximum number of successfully predicted sessions in PWD/pareto/optimal.md. In the prompt always add the sentence "Use internet search extensively at every step." MAKE SURE THAT YOU DO NOT DO REWARD HACKING OR CHEATING IN THE AGENT YOU ARE IMPLEMENTING TO FIT DATA. YOUR SOLUTION MUST GENERALIZE BEYOND THE DATA PROVIDED. Use internet search extensively at every step. Do not worry about budget. Create an html report with diagrams and illustrations in PWD/reports and open it in the user's default browser. Do NOT STOP until you could not improve the accuracy and recall after three consecutive rollouts.
+
+## Task
+
+Can you run gepa.py on hotpotqa using gpt-4o-mini as both models
+
