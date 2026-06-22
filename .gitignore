@@ -16,6 +16,7 @@ dist/
 .cursorrules
 .coverage_per_test
 *.log
+*.vsix
 .coverage*
 .kiss.artifacts
 env.sh
