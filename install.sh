@@ -854,6 +854,52 @@ update_repo() {
         echo "   WARNING: $MODEL_INFO_SRC missing — model table not refreshed."
     fi
 
+    # Seed the bundled INJECTIONS.md and SAMPLE_TASKS.md into the user's
+    # kiss home directory so the kiss-web daemon's Tricks button and the
+    # VS Code extension's welcome-screen sample-task chips serve the
+    # bundled Markdown out of the box, without waiting for the lazy seed
+    # in ``kiss.agents.vscode.user_assets.ensure_user_asset``.
+    #
+    # ``cp -n`` (no-clobber) — unlike MODEL_INFO.json above, these two
+    # files are *user-editable* by design (the user can hand-edit
+    # ``~/.kiss/INJECTIONS.md`` to customise Tricks and
+    # ``~/.kiss/SAMPLE_TASKS.md`` to customise the welcome-screen
+    # chips).  Re-running ``install.sh`` (e.g. via the Update button)
+    # must therefore NOT wipe those edits.  To pull in the latest
+    # bundled defaults, the user removes the file under ``~/.kiss/``
+    # and re-launches.
+    #
+    # ``${KISS_HOME:-$HOME/.kiss}`` matches the runtime resolution in
+    # ``user_assets.kiss_home_dir`` so a developer with a custom
+    # ``KISS_HOME`` exported lands the seeds where the runtime will
+    # read them.
+    KISS_HOME_DIR="${KISS_HOME:-$HOME/.kiss}"
+    mkdir -p "$KISS_HOME_DIR"
+    INJECTIONS_SRC="$PROJECT_DIR/src/kiss/INJECTIONS.md"
+    INJECTIONS_DST="$KISS_HOME_DIR/INJECTIONS.md"
+    if [ -f "$INJECTIONS_SRC" ]; then
+        if [ -f "$INJECTIONS_DST" ]; then
+            echo "   Kept existing $INJECTIONS_DST (user-editable)"
+        else
+            cp "$INJECTIONS_SRC" "$INJECTIONS_DST"
+            echo "   Installed INJECTIONS.md at $INJECTIONS_DST"
+        fi
+    else
+        echo "   WARNING: $INJECTIONS_SRC missing — tricks not seeded."
+    fi
+    SAMPLE_TASKS_SRC="$PROJECT_DIR/src/kiss/agents/vscode/SAMPLE_TASKS.md"
+    SAMPLE_TASKS_DST="$KISS_HOME_DIR/SAMPLE_TASKS.md"
+    if [ -f "$SAMPLE_TASKS_SRC" ]; then
+        if [ -f "$SAMPLE_TASKS_DST" ]; then
+            echo "   Kept existing $SAMPLE_TASKS_DST (user-editable)"
+        else
+            cp "$SAMPLE_TASKS_SRC" "$SAMPLE_TASKS_DST"
+            echo "   Installed SAMPLE_TASKS.md at $SAMPLE_TASKS_DST"
+        fi
+    else
+        echo "   WARNING: $SAMPLE_TASKS_SRC missing — welcome chips not seeded."
+    fi
+
     date -u +%Y-%m-%dT%H:%M:%SZ > "$HOME/.kiss/.extension-updated"
     # Remove any stale source-install marker from older versions of this
     # installer.  The extension now always runs against the kiss_project
