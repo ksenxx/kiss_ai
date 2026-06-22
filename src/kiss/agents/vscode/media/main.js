@@ -3834,6 +3834,7 @@
       const chip = document.createElement('div');
       chip.className = 'suggestion-chip';
       chip.dataset.prompt = s.text;
+      chip.dataset.tooltip = s.text;
       chip.innerHTML =
         '<span class="chip-label">Suggested</span>' +
         '<span class="chip-text">' +
