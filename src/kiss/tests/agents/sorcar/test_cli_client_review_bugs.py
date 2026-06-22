@@ -29,6 +29,7 @@ Round-3 fixes:
 from __future__ import annotations
 
 import contextlib
+import gc
 import io
 import os
 import time
@@ -101,32 +102,61 @@ class TestModelCurrentPerClient(unittest.TestCase):
     """Review #6 — ``/model`` no-arg must reflect *this* client's selection."""
 
     def setUp(self) -> None:
+        # Register every cleanup the moment its resource is acquired so
+        # a partial setUp (e.g. one ``start()`` raising) still releases
+        # everything constructed up to that point.  ``addCleanup`` runs
+        # in LIFO order — the harness shuts down last, after both
+        # clients have closed and their devnull FDs have been
+        # released.  Without this, an exception in ``client_b.start``
+        # would leak ``client_a``'s loop FDs and the harness's UDS
+        # listener, fanning out into ``OSError [Errno 24] Too many
+        # open files`` for the rest of the suite.
         self.harness = _DaemonHarness()
+        self.addCleanup(self.harness.shutdown)
+        # Force a final ``gc.collect()`` so any sockets / loops still
+        # held only by lingering references (e.g. closed dispatcher
+        # task wrappers) are reclaimed before the next test runs.
+        self.addCleanup(gc.collect)
+
         self._devnull_a = open(os.devnull, "w")
+        self.addCleanup(self._devnull_a.close)
         self._devnull_b = open(os.devnull, "w")
+        self.addCleanup(self._devnull_b.close)
+
         self.client_a = CliClient(
             sock_path=Path(self.harness.sock_path),
             work_dir=self.harness.work_dir,
             tab_id=uuid.uuid4().hex,
             printer=ConsolePrinter(file=self._devnull_a),
         )
+        # Register cleanup BEFORE ``start`` so a failure mid-start
+        # still releases whatever sockets / threads the client did
+        # manage to acquire.
+        self.addCleanup(self._safe_close, self.client_a)
+        self.client_a.start(timeout=5.0)
+
         self.client_b = CliClient(
             sock_path=Path(self.harness.sock_path),
             work_dir=self.harness.work_dir,
             tab_id=uuid.uuid4().hex,
             printer=ConsolePrinter(file=self._devnull_b),
         )
-        self.client_a.start(timeout=5.0)
+        self.addCleanup(self._safe_close, self.client_b)
         self.client_b.start(timeout=5.0)
 
-    def tearDown(self) -> None:
+    @staticmethod
+    def _safe_close(client: CliClient) -> None:
+        """Best-effort ``client.close`` that never re-raises.
+
+        ``CliClient.close()`` already swallows its own exceptions, but
+        we wrap once more so a hypothetical bubble-up from one
+        cleanup can never short-circuit later ones in the
+        ``addCleanup`` chain.
+        """
         try:
-            self.client_a.close()
-            self.client_b.close()
-        finally:
-            self._devnull_a.close()
-            self._devnull_b.close()
-            self.harness.shutdown()
+            client.close()
+        except Exception:  # noqa: BLE001 - last-ditch cleanup
+            pass
 
     def test_model_no_arg_per_client_isolation(self) -> None:
         models = _request_models(self.client_a)
