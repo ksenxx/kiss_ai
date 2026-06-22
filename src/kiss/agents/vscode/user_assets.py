@@ -4,38 +4,28 @@
 # add your name here
 """Resolve and lazily seed ``~/.kiss/<asset>`` markdown assets.
 
-At runtime ``~/.kiss/<asset>`` is the source of truth for user-editable
-assets (currently ``INJECTIONS.md`` and ``SAMPLE_TASKS.md``); the
-package copy bundled alongside the source tree is treated as a seed.
+At runtime ``~/.kiss/<asset>`` is the source of truth for
+``INJECTIONS.md`` and ``SAMPLE_TASKS.md``; the package copy bundled
+alongside the source tree is the seed / fallback.
 
-``install.sh`` eagerly copies the package copy into ``~/.kiss/`` on a
-fresh install (``cp -n``, no-clobber) so a brand-new user immediately
-sees the bundled content.  This module provides the matching lazy
-seed path so callers that run before/around the installer (tests,
-development checkouts, sandboxed environments) still observe a valid
-file without paying the cost of an extra launch step.
+**Install-time behaviour** (``install.sh`` and
+``DependencyInstaller.ts``): on every install or version upgrade both
+files are *always* copied from the package into ``~/.kiss/``,
+overwriting any prior copy.  This ensures the latest bundled Markdown
+is served immediately after an update — matching the ``MODEL_INFO.json``
+pattern.
 
-Behaviour:
-
-* If the user copy at ``~/.kiss/<asset>`` exists, **always** return
-  it — user edits survive every read.  This is a deliberate departure
-  from :func:`kiss.core.models.model_info._ensure_user_model_info_path`,
-  which refreshes ``MODEL_INFO.json`` when the package copy is newer:
-  ``MODEL_INFO.json`` is auto-generated data, whereas
-  ``INJECTIONS.md`` / ``SAMPLE_TASKS.md`` are user-editable Markdown,
-  and silently clobbering user edits on every ``git pull`` would be a
-  hostile surprise.
-* If the user copy is missing, seed it from the package copy.
-* When ``~/.kiss/`` is not writable (read-only FS, sandboxed test envs,
-  missing ``HOME``) return the package copy directly so the caller
-  still sees a valid file.
+**Runtime behaviour** (this module): if ``~/.kiss/<asset>`` exists
+return it as-is; user edits made *between* installs survive every
+daemon restart and ``uv run`` invocation.  If the user copy is missing
+(e.g. first run in a sandboxed test environment that skipped the
+installer), seed it from the package copy and return the new path.
+When ``~/.kiss/`` is not writable (read-only FS, missing ``HOME``)
+return the package copy directly so the caller still sees a valid file.
 
 ``KISS_HOME`` overrides the default ``~/.kiss`` location, matching the
 rest of the kiss codebase (``persistence.py``, ``web_server.py``,
 ``vscode_config.py``).
-
-To regenerate from the bundled defaults, the user simply removes the
-file under ``~/.kiss/`` — the next read seeds it again.
 """
 
 from __future__ import annotations

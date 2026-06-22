@@ -455,6 +455,7 @@ async function runFinalization(
 
   if (progress) progress.report({message: 'Refreshing model info...'});
   installModelInfoJson(kissProjectPath);
+  installMarkdownAssets(kissProjectPath);
 
   if (progress) progress.report({message: 'Checking cloudflared...'});
   await installCloudflaredIfNeeded();
@@ -1308,6 +1309,46 @@ function computeKissWebFingerprint(
       `computeKissWebFingerprint failed: ${err instanceof Error ? err.message : err}`,
     );
     return '';
+  }
+}
+
+/**
+ * Always overwrite ``~/.kiss/INJECTIONS.md`` and ``~/.kiss/SAMPLE_TASKS.md``
+ * with the copies bundled inside the installed kiss_project.  Called on
+ * every install/update (both fast and slow paths in ``runFinalization``) so
+ * that the kiss-web daemon's Tricks button and the VS Code extension's
+ * welcome-screen sample-task chips always reflect the latest bundled
+ * Markdown after a version upgrade — matching the ``installModelInfoJson``
+ * pattern.  Failures are logged and swallowed so a read-only ``~/.kiss/``
+ * cannot break the overall install flow.
+ */
+function installMarkdownAssets(kissProjectPath: string): void {
+  if (!HOME_DIR) return;
+  const kissHomeDir = LOG_DIR; // ~/.kiss
+  const assets: Array<[string, string]> = [
+    [
+      path.join(kissProjectPath, 'src', 'kiss', 'INJECTIONS.md'),
+      path.join(kissHomeDir, 'INJECTIONS.md'),
+    ],
+    [
+      path.join(kissProjectPath, 'src', 'kiss', 'SAMPLE_TASKS.md'),
+      path.join(kissHomeDir, 'SAMPLE_TASKS.md'),
+    ],
+  ];
+  for (const [src, dst] of assets) {
+    try {
+      if (!fs.existsSync(src)) {
+        log(`${path.basename(src)} not found at ${src}; skipping copy`);
+        continue;
+      }
+      fs.mkdirSync(kissHomeDir, {recursive: true});
+      fs.copyFileSync(src, dst);
+      log(`Installed ${path.basename(src)} at ${dst}`);
+    } catch (e: unknown) {
+      log(
+        `Failed to install ${path.basename(src)}: ${(e as Error).message}`,
+      );
+    }
   }
 }
 
