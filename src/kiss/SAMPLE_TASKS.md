@@ -40,7 +40,7 @@ Sorcar for optimization: Can you run the command \<<command>> in the background 
 
 ## Task
 
-Sorcar GEPA Prompt Optimizer: Can you optimize a prompt for a ChatSorcarAgent of kiss-agent-framework Python library using the following GEPA algorithm on the data at \<<url_or_db_file_of_data>> using claude-opus-4-8? You can find the trajectory events of an agent execution in ~/.kiss/sorcar.db after the agent has finished its execution. Split the dataset into 50% dev set and 50% val set.
+Sorcar GEPA Prompt Optimizer: Can you optimize a prompt for a ChatSorcarAgent of kiss-agent-framework Python library using the following GEPA algorithm on the data at \<<url_or_db_file_of_data>> using claude-opus-4-7? You can find the trajectory events of an agent execution in ~/.kiss/sorcar.db after the agent has finished its execution. Split the dataset into 50% dev set and 50% val set.
 
 RUN_GEPA: Sample 100 data points from the val set and call it sval set. Maintain a pareto frontier in the folder PWD/pareto where we have a sub-folder for each node in the frontier. A node contains a prompt file (prompt.md) and a json file, say score.json, containing the list of sessions (ids) from the val set that were correctly predicted with the prompt. When you add a node to the pareto frontier make sure that the list of correctly predicted sessions is not a subset or equal to an existing list of sessions in some node in the frontier. If such a node exists, do not add the new node. After adding a node, remove all nodes whose list of sessions is a subset or equal to the list of sessions in the added node. Then run the following algorithm.
 
