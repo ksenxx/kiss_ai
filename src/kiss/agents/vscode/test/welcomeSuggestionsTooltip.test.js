@@ -76,6 +76,13 @@ async function testWelcomeSuggestionHoverShowsFullSuggestedText() {
 
   const chip = win.document.querySelector('.suggestion-chip');
   assert.ok(chip, 'welcome suggestion chip should be rendered');
+  const label = chip.querySelector('.chip-label');
+  assert.ok(label, 'welcome suggestion chip should include a label');
+  assert.strictEqual(
+    label.textContent,
+    'Suggested prompt',
+    'welcome suggestion chip label should be renamed to Suggested prompt',
+  );
   assert.strictEqual(
     chip.dataset.tooltip,
     fullText,

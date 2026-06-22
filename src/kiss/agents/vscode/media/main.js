@@ -3836,7 +3836,7 @@
       chip.dataset.prompt = s.text;
       chip.dataset.tooltip = s.text;
       chip.innerHTML =
-        '<span class="chip-label">Suggested</span>' +
+        '<span class="chip-label">Suggested prompt</span>' +
         '<span class="chip-text">' +
         esc(s.text) +
         '</span>';

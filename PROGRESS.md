@@ -1,16 +1,15 @@
 # Task
 
-Add tooltips showing the entire suggested text for each suggestion.
+Rename the welcome page suggestion chip label from "Suggested" to "Suggested prompt".
 
 # Progress
 
-- Started by reading SORCAR.md as required.
-- Cleared prior task progress and began investigating the VS Code suggestion UI.
-- Located welcome suggestion rendering in `src/kiss/agents/vscode/media/main.js` (`renderWelcomeSuggestions`) and the existing custom tooltip system based on `[data-tooltip]`.
-- Added an end-to-end jsdom test `src/kiss/agents/vscode/test/welcomeSuggestionsTooltip.test.js` that sends a production `welcome_suggestions` event, hovers the rendered chip, and expects the custom tooltip to show the full suggestion text.
-- Ran the new test directly before installing Node dependencies in the worktree; it failed because `jsdom` was unavailable in this isolated worktree, but the test documents the missing tooltip behavior.
-- Implemented the fix by adding `chip.dataset.tooltip = s.text` in `renderWelcomeSuggestions`, reusing the existing custom tooltip code that watches `[data-tooltip]`.
-- Added `welcomeSuggestionsTooltip.test.js` to the VS Code extension `npm test` script so it runs with the normal extension test suite.
-- Ran `npm ci` in the VS Code extension directory to install test dependencies in this isolated worktree, then verified the impacted test with `node test/welcomeSuggestionsTooltip.test.js`.
-- Ran `uv run check --full`; it passed code checks and the VS Code extension test suite but failed markdown formatting on pre-existing `src/kiss/INJECTIONS.md` and `src/kiss/agents/vscode/SAMPLE_TASKS.md`.
-- Formatted those markdown files with `uv run mdformat ...` and reran `uv run check --full`, which passed all checks.
+- Started by reading `SORCAR.md` as required.
+- Searched the VS Code webview files for user-visible "Suggested" labels and identified the welcome-page chip label in `src/kiss/agents/vscode/media/main.js` inside `renderWelcomeSuggestions`.
+- Changed the welcome chip label markup in `renderWelcomeSuggestions` from `Suggested` to `Suggested prompt`.
+- Updated the existing jsdom welcome suggestion regression test to assert that `.chip-label` now renders `Suggested prompt`, in addition to preserving the full-text tooltip check.
+- Counted the impacted test file before running the focused test; the rough count was below 100, so no parallel splitting was needed.
+- The first focused test run failed because `jsdom` was unavailable in this isolated worktree, so I installed the VS Code extension dependencies with `npm ci`.
+- Re-ran `node test/welcomeSuggestionsTooltip.test.js`; it passed.
+- Ran `uv run check --full`; code checks and tests passed, but markdown formatting failed on this `PROGRESS.md` file, so I rewrote it in mdformat-friendly form.
+- Re-ran `uv run check --full`; all checks passed.
