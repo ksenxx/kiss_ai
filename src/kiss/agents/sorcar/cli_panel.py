@@ -22,6 +22,11 @@ _ESC = "\x1b"
 # ANSI styling shared by every panel render.
 CYAN = f"{_ESC}[36m"
 DIM = f"{_ESC}[2m"
+BOLD = f"{_ESC}[1m"
+# 256-color "DarkOrange" (xterm-256 index 208 ≈ #FF8700) — the closest
+# universal-terminal match to Claude Code's "coral" brand orange used
+# for its completion / prompt-bar highlight.
+ORANGE = f"{_ESC}[38;5;208m"
 RESET = f"{_ESC}[0m"
 # Cursor marker shown before the editable text inside the panel body.
 PROMPT_MARKER = "› "
@@ -197,15 +202,18 @@ def panel_body(buf: str, cols: int) -> tuple[str, bool]:
 def menu_row(text: str, selected: bool, cols: int) -> str:
     """Return one fully-styled in-place completion menu row.
 
-    Drawn above the input panel's top border as ``│ ❯ candidate    │``
-    (cyan when selected) or ``│   candidate    │`` (dim otherwise),
-    using the same rounded-border column layout as :func:`panel_body`
-    so the menu visually extends the input box upward.
+    Drawn above the input panel's top border as
+    ``│ ❯ candidate    │`` (bold orange — the same coral-orange Claude
+    Code uses for its highlighted prompt entry) or
+    ``│   candidate    │`` (dim grey otherwise) so the highlighted row
+    pops against the surrounding dim entries. Border glyphs stay cyan
+    to keep the menu visually anchored to the input box below, using
+    the same rounded-border column layout as :func:`panel_body`.
 
     Args:
         text: Candidate text shown in the row.
         selected: ``True`` when this row is the currently highlighted
-            candidate (rendered with an ``❯`` marker and no dimming).
+            candidate (rendered bold-orange with an ``❯`` marker).
         cols: Total panel width in columns.
 
     Returns:
@@ -226,7 +234,10 @@ def menu_row(text: str, selected: bool, cols: int) -> str:
     )
     marker = "❯ " if selected else "  "
     body = _clip_pad(marker + shown, inner_w)
-    inner = body if selected else f"{DIM}{body}{RESET}"
+    if selected:
+        inner = f"{ORANGE}{BOLD}{body}{RESET}"
+    else:
+        inner = f"{DIM}{body}{RESET}"
     return f"{CYAN}│{RESET} {inner} {CYAN}│{RESET}"
 
 

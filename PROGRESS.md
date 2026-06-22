@@ -1,78 +1,75 @@
 # Progress
 
-## Task: Sorcar CLI interactive mode — agent output landing in input area
+## Task: Sorcar CLI interactive — show completions in contrasting colors with orange (Claude Code style)
 
-### Bug
+### Step 1 — Research (done)
 
-In `sorcar` interactive mode, while the anchored bottom input box is
-active, agent display output (`bash_stream`, `_flush_newline`,
-`_print_tool_result`, `_handle_message`) was appearing **inside the
-input area** instead of in the scroll region above it.
+Searched 2 sites (Google AI overview + amanhimself.dev). Findings:
 
-### Root cause
+- Claude Code supports `/color orange` (and red/blue/green/yellow/purple/pink/cyan) to color the prompt bar (since v2.1.75).
+  Refs: https://code.claude.com/docs/en/commands and https://amanhimself.dev/blog/color-coding-claude-code-sessions/
+- Claude brand "Coral" orange is approximately `#D97757`; another common orange used in Claude Code screenshots is around `#FF8800`.
+- The completion menu in Claude Code uses ARROW marker (`❯`) for the selected entry, orange highlight on the selected row, and dim for unselected — matching the user's "contrasting colors with orange" request.
 
-`kiss.agents.sorcar.cli_client.run_client()` constructs the
-`ConsolePrinter` at line 1232 **before** entering the `AnchoredRepl`
-context (which installs a `_StdoutProxy` over `sys.stdout` at line
-1264). `ConsolePrinter.__init__` captured a *reference* to the
-original `sys.stdout` into `self._file`:
+### Step 2 — Code map (done)
 
-```python
-self._file = file or sys.stdout
-```
+- Completion menu is rendered by `menu_row()` in
+  `src/kiss/agents/sorcar/cli_panel.py` (line 197).
+  Currently uses `CYAN` for borders, no special highlight for the
+  selected row, and `DIM` for unselected rows.
+- Used by `_InputBox._draw_menu_locked()` in
+  `src/kiss/agents/sorcar/cli_steering.py` (line 552, with `menu_row(item, idx == self._menu_sel, cols)`).
+- Tests for menu rendering live in
+  `src/kiss/tests/agents/sorcar/test_cli_steering.py`
+  (search hits for `❯` at lines 504, 792). They assert presence of `❯`
+  on the selected row but do not pin a specific color, so adding orange
+  ANSI is non-breaking.
+- `test_cli_panel.py` does not test colors of menu rows.
 
-Rich's `Console(file=None)` resolves `sys.stdout` lazily at write
-time, so panels rendered through `self._console.print(...)` correctly
-went through the proxy. But every **direct** `self._file.write(...)`
-call (in `print(..., type="bash_stream")`, `_flush_newline`,
-`_print_tool_result`, `_handle_message`) bypassed the proxy and
-landed at the terminal's current cursor position — which the proxy
-parks inside the input box body — so streamed output was written
-into the input area at the bottom.
+### Step 3 — Planned change
 
-### Test reproducing the issue
+In `cli_panel.py`:
 
-Added `TestConsolePrinterStdoutBypass` in
-`src/kiss/tests/agents/sorcar/test_cli_steering.py` with two
-end-to-end cases:
+1. Add `ORANGE = f"{_ESC}[38;5;208m"` (256-color DarkOrange — closest
+   universal-terminal match to Claude Code's prompt-bar orange and
+   contrasts strongly with the surrounding dim/gray rows).
+1. Update `menu_row(text, selected, cols)` so the selected row prints
+   the marker `❯ <text>` in `ORANGE` + bold (`\x1b[1m`), and the
+   unselected row stays `DIM` for clear contrast. Border glyphs remain
+   `CYAN` to keep the menu visually anchored to the input panel.
 
-1. `test_bash_stream_output_routes_through_proxy` — asserts
-   `bash_stream` output is wrapped in the proxy's
-   `ESC 8 … ESC 7` framing (restore output cursor / re-save), proving
-   it landed in the scroll region rather than the box body.
-1. `test_flush_newline_routes_through_proxy` — asserts the same for
-   the `\n` written by `_flush_newline` when `_mid_line` is set.
+Add an end-to-end test in `test_cli_panel.py` asserting:
 
-Both tests fail on the pre-fix code and pass after the fix.
+- Selected row contains the ANSI sequence `\x1b[38;5;208m` and `❯`.
+- Unselected row contains the `DIM` sequence `\x1b[2m` and **not** the
+  orange sequence.
+- Both rows still carry the `CYAN` `│` border glyph.
 
-### Fix
+### Next session
 
-`src/kiss/core/print_to_console.py` — replace the eagerly-captured
-`self._file` attribute with a lazy property:
+Implement the change, run `uv run check --full`, then targeted tests:
 
-```python
-def __init__(self, file: Any = None) -> None:
-    self._console = Console(highlight=False, file=file)
-    self._explicit_file: Any = file
-    ...
+- `uv run pytest -v src/kiss/tests/agents/sorcar/test_cli_panel.py src/kiss/tests/agents/sorcar/test_cli_steering.py`.
 
-@property
-def _file(self) -> Any:
-    return self._explicit_file if self._explicit_file is not None else sys.stdout
-```
+### Step 4 — Implementation (done)
 
-When an explicit `file=` was passed (test paths use `io.StringIO()`),
-behaviour is unchanged. When `file=None` (the production code path),
-`sys.stdout` is resolved at each access — matching the lazy
-resolution Rich's `Console` already does — so a later swap of
-`sys.stdout` (the CLI's `_StdoutProxy`) is honoured.
+- Added `BOLD = "\x1b[1m"` and `ORANGE = "\x1b[38;5;208m"` (xterm-256
+  DarkOrange ≈ #FF8700, the closest universal-terminal match to
+  Claude Code's coral-orange `/color orange` palette) to
+  `src/kiss/agents/sorcar/cli_panel.py`.
+- Updated `menu_row()` so the highlighted candidate is rendered as
+  bold-orange `❯ <text>` and unselected candidates stay dim — the
+  same contrast pattern Claude Code uses for its slash-command menu.
+  Border glyphs remain cyan to keep the menu visually anchored to the
+  input panel below.
+- Added `TestMenuRowContrastingOrange` to
+  `src/kiss/tests/agents/sorcar/test_cli_panel.py` with 4 tests
+  verifying selected vs unselected styling, equal display width, and
+  that ESC-injection attempts still get sanitised.
 
-### Verification
+### Step 5 — Verification (done)
 
-- `uv run check --full` — all checks pass (lint, mypy, pyright,
-  mdformat, syntax, dependency sync, generate-api-docs).
-- Printer-related test suites all pass (159 tests):
-  `test_cli_steering`, `test_cli_repl`, `test_cli_client`,
-  `test_cli_chat_webview_events`, `test_cli_running_task_history_dot`,
-  `test_print_to_console`, `test_printer_parity`,
-  `test_tool_result_visible_for_all_tools`.
+- `uv run check --full` → all checks pass.
+- `uv run pytest -v src/kiss/tests/agents/sorcar/test_cli_panel.py src/kiss/tests/agents/sorcar/test_cli_steering.py` → 79/79 pass.
+- Live render of `menu_row('install pkg', True, 40)` confirms the
+  ANSI sequence `\x1b[38;5;208m\x1b[1m` wraps the `❯` row.
