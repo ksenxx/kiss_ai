@@ -15,8 +15,8 @@
 //   Markdown file with ``## Task`` sections (mirroring
 //   ``src/kiss/INJECTIONS.md``'s ``## Trick`` sections).  The loader
 //   must:
-//     * read ``~/.kiss/SAMPLE_TASKS.md`` (seeded from
-//       ``extensionRoot/SAMPLE_TASKS.md`` by ``ensureUserAsset``),
+//     * read ``~/.kiss/SAMPLE_TASKS.md`` (seeded from the bundled
+//       ``src/kiss/SAMPLE_TASKS.md`` by ``ensureUserAsset``),
 //     * return one ``{text}`` per ``## Task`` section, with body
 //       whitespace trimmed,
 //     * skip non-``Task`` sections,
@@ -86,14 +86,30 @@ function mkExt() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-sample-tasks-'));
 }
 
+function packageSampleTasksPath(ext) {
+  return path.join(
+    ext,
+    'kiss_project',
+    'src',
+    'kiss',
+    'SAMPLE_TASKS.md',
+  );
+}
+
+function writePackageSampleTasks(ext, content) {
+  const file = packageSampleTasksPath(ext);
+  fs.mkdirSync(path.dirname(file), {recursive: true});
+  fs.writeFileSync(file, content);
+}
+
 /**
  * Run ``fn`` with ``KISS_HOME`` redirected to a fresh temp directory
  * so the lazy ``~/.kiss/`` seed in ``ensureUserAsset`` operates on
  * disposable state.  ``readSampleTasks`` resolves the user copy at
- * ``KISS_HOME/SAMPLE_TASKS.md`` and seeds it from the package copy at
- * ``extensionRoot/SAMPLE_TASKS.md`` only when the user copy is
- * missing — so each test pre-populates the extension root and
- * asserts on what the user-copy parser returns.
+ * ``KISS_HOME/SAMPLE_TASKS.md`` and seeds it from the bundled package
+ * copy at ``extensionRoot/kiss_project/src/kiss/SAMPLE_TASKS.md``
+ * when that exists, falling back to the source-checkout layout
+ * ``extensionRoot/../../SAMPLE_TASKS.md`` for local tests and dev.
  */
 function withTempKissHome(fn) {
   const ext = mkExt();
@@ -118,18 +134,15 @@ test('returns [] when SAMPLE_TASKS.md is missing in both locations', () => {
 
 test('parses one ## Task section into [{text}]', () => {
   withTempKissHome(ext => {
-    fs.writeFileSync(
-      path.join(ext, 'SAMPLE_TASKS.md'),
-      '## Task\n\nDo the thing\n',
-    );
+    writePackageSampleTasks(ext, '## Task\n\nDo the thing\n');
     assert.deepStrictEqual(readSampleTasks(ext), [{text: 'Do the thing'}]);
   });
 });
 
 test('seeds ~/.kiss/SAMPLE_TASKS.md from the package copy on first read', () => {
   withTempKissHome((ext, kissHome) => {
-    const pkg = path.join(ext, 'SAMPLE_TASKS.md');
-    fs.writeFileSync(pkg, '## Task\n\nSeeded body\n');
+    const pkg = packageSampleTasksPath(ext);
+    writePackageSampleTasks(ext, '## Task\n\nSeeded body\n');
     const userCopy = path.join(kissHome, 'SAMPLE_TASKS.md');
     assert.ok(!fs.existsSync(userCopy), 'user copy must start absent');
     assert.deepStrictEqual(readSampleTasks(ext), [{text: 'Seeded body'}]);
@@ -146,10 +159,7 @@ test('seeds ~/.kiss/SAMPLE_TASKS.md from the package copy on first read', () => 
 
 test('reads user-edited ~/.kiss/SAMPLE_TASKS.md in preference to the package copy', () => {
   withTempKissHome((ext, kissHome) => {
-    fs.writeFileSync(
-      path.join(ext, 'SAMPLE_TASKS.md'),
-      '## Task\n\nPackage default\n',
-    );
+    writePackageSampleTasks(ext, '## Task\n\nPackage default\n');
     fs.writeFileSync(
       path.join(kissHome, 'SAMPLE_TASKS.md'),
       '## Task\n\nUser override\n',
@@ -172,10 +182,7 @@ test('preserves user edits even when the package copy is newer', () => {
     );
     const past = Date.now() / 1000 - 7200;
     fs.utimesSync(path.join(kissHome, 'SAMPLE_TASKS.md'), past, past);
-    fs.writeFileSync(
-      path.join(ext, 'SAMPLE_TASKS.md'),
-      '## Task\n\nFresh package copy\n',
-    );
+    writePackageSampleTasks(ext, '## Task\n\nFresh package copy\n');
     assert.deepStrictEqual(readSampleTasks(ext), [
       {text: 'User-curated chip'},
     ]);
@@ -184,8 +191,8 @@ test('preserves user edits even when the package copy is newer', () => {
 
 test('parses multiple ## Task sections in source order', () => {
   withTempKissHome(ext => {
-    fs.writeFileSync(
-      path.join(ext, 'SAMPLE_TASKS.md'),
+    writePackageSampleTasks(
+      ext,
       '## Task\n\nFirst task\n\n## Task\n\nSecond task\n\n## Task\n\nThird\n',
     );
     assert.deepStrictEqual(readSampleTasks(ext), [
@@ -201,18 +208,15 @@ test('preserves multi-line bodies and inline punctuation', () => {
     const body =
       'Line one with **bold**, "quotes", and a <<placeholder>>.\n' +
       'Line two continues the same task.';
-    fs.writeFileSync(
-      path.join(ext, 'SAMPLE_TASKS.md'),
-      `## Task\n\n${body}\n`,
-    );
+    writePackageSampleTasks(ext, `## Task\n\n${body}\n`);
     assert.deepStrictEqual(readSampleTasks(ext), [{text: body}]);
   });
 });
 
 test('skips sections whose heading is not Task', () => {
   withTempKissHome(ext => {
-    fs.writeFileSync(
-      path.join(ext, 'SAMPLE_TASKS.md'),
+    writePackageSampleTasks(
+      ext,
       '## Intro\n\nignored\n\n## Task\n\nkept\n\n## Notes\n\nalso ignored\n',
     );
     assert.deepStrictEqual(readSampleTasks(ext), [{text: 'kept'}]);
@@ -221,10 +225,7 @@ test('skips sections whose heading is not Task', () => {
 
 test('skips empty-bodied ## Task sections', () => {
   withTempKissHome(ext => {
-    fs.writeFileSync(
-      path.join(ext, 'SAMPLE_TASKS.md'),
-      '## Task\n\n\n## Task\n\nreal body\n',
-    );
+    writePackageSampleTasks(ext, '## Task\n\n\n## Task\n\nreal body\n');
     assert.deepStrictEqual(readSampleTasks(ext), [{text: 'real body'}]);
   });
 });
@@ -235,8 +236,8 @@ test('unescapes mdformat backslash escapes (\\<< -> <<)', () => {
     // renders ``s.text`` literally (only HTML-escaped) so the parser
     // MUST strip CommonMark backslash escapes — otherwise the user
     // sees a literal backslash on the welcome screen.
-    fs.writeFileSync(
-      path.join(ext, 'SAMPLE_TASKS.md'),
+    writePackageSampleTasks(
+      ext,
       '## Task\n\nRun on \\<<your dataset>> with **bold** \\*literal\\*\n',
     );
     assert.deepStrictEqual(readSampleTasks(ext), [
@@ -260,10 +261,11 @@ test('shipped SAMPLE_TASKS.md tasks never contain a leading backslash before <<'
 
 test('parses the shipped SAMPLE_TASKS.md (sanity)', () => {
   withTempKissHome(() => {
-    // The real file lives next to the extension's package.json.  This
-    // also guards against accidentally checking in a malformed file.
+    // The real source-checkout file lives at src/kiss/SAMPLE_TASKS.md,
+    // two levels above the extension root.  This also guards against
+    // accidentally checking in a malformed file.
     const ext = path.join(__dirname, '..');
-    const shipped = path.join(ext, 'SAMPLE_TASKS.md');
+    const shipped = path.join(ext, '..', '..', 'SAMPLE_TASKS.md');
     assert.ok(
       fs.existsSync(shipped),
       `shipped SAMPLE_TASKS.md missing at ${shipped}`,

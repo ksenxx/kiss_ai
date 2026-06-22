@@ -100,18 +100,24 @@ export function getTricks(): string[] {
  * per ``## Task`` section.  Mirrors the ``INJECTIONS.md`` handling:
  * the user-local copy at ``~/.kiss/SAMPLE_TASKS.md`` is the runtime
  * source of truth so authors can edit welcome-screen suggestions in
- * plain Markdown; it is seeded from
- * ``extensionRoot/SAMPLE_TASKS.md`` by :func:`ensureUserAsset` only
+ * plain Markdown; it is seeded from the bundled
+ * ``src/kiss/SAMPLE_TASKS.md`` copy by :func:`ensureUserAsset` only
  * when the user copy is missing, so user edits survive every read.
  * Returns ``[]`` when the file is missing or unparseable so the
  * welcome screen still renders without chips.
  */
 export function readSampleTasks(extensionRoot: string): Array<{text: string}> {
+  const packagePath = path.join(
+    extensionRoot,
+    'kiss_project',
+    'src',
+    'kiss',
+    'SAMPLE_TASKS.md',
+  );
+  const sourcePath = path.join(extensionRoot, '..', '..', 'SAMPLE_TASKS.md');
+  const seedPath = fs.existsSync(packagePath) ? packagePath : sourcePath;
   return readMarkdownSections(
-    ensureUserAsset(
-      'SAMPLE_TASKS.md',
-      path.join(extensionRoot, 'SAMPLE_TASKS.md'),
-    ),
+    ensureUserAsset('SAMPLE_TASKS.md', seedPath),
     'Task',
   ).map(text => ({text}));
 }
