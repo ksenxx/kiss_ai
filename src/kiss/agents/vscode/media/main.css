@@ -518,6 +518,17 @@ body.remote-chat #welcome-config { display: none !important; }
   letter-spacing: 0.04em; color: var(--accent); margin-bottom: 2px; opacity: 0.8;
 }
 
+/* Clamp each suggested task to at most 3 lines, with an ellipsis when the
+   text overflows, so long suggestions don't blow up the welcome layout. */
+.chip-text {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* ── Event items (from OUTPUT_CSS) ──────────────────── */
 .ev { margin-bottom: 6px; animation: fadeIn .15s ease; }
 
