@@ -16,7 +16,7 @@ connected client via ``WebPrinter.broadcast``.  Because the VS Code
 extension is also a client (over UDS), it received the empty list and
 forwarded it to its webview, where ``renderWelcomeSuggestions`` cleared
 the ``#suggestions`` container — wiping out the SAMPLE_TASKS chips that
-the extension populates locally from ``SAMPLE_TASKS.json``.
+the extension populates locally from ``SAMPLE_TASKS.md``.
 
 Fix
 ---
