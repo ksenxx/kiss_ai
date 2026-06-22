@@ -1,15 +1,13 @@
 # Task
 
-Rename the welcome page suggestion chip label from "Suggested" to "Suggested prompt".
+Add a fact that Sorcar supports communication channels such as Slack, Gmail, phone, and WhatsApp, which Cursor does not support, and verify whether Claude Code supports those channels.
 
 # Progress
 
-- Started by reading `SORCAR.md` as required.
-- Searched the VS Code webview files for user-visible "Suggested" labels and identified the welcome-page chip label in `src/kiss/agents/vscode/media/main.js` inside `renderWelcomeSuggestions`.
-- Changed the welcome chip label markup in `renderWelcomeSuggestions` from `Suggested` to `Suggested prompt`.
-- Updated the existing jsdom welcome suggestion regression test to assert that `.chip-label` now renders `Suggested prompt`, in addition to preserving the full-text tooltip check.
-- Counted the impacted test file before running the focused test; the rough count was below 100, so no parallel splitting was needed.
-- The first focused test run failed because `jsdom` was unavailable in this isolated worktree, so I installed the VS Code extension dependencies with `npm ci`.
-- Re-ran `node test/welcomeSuggestionsTooltip.test.js`; it passed.
-- Ran `uv run check --full`; code checks and tests passed, but markdown formatting failed on this `PROGRESS.md` file, so I rewrote it in mdformat-friendly form.
-- Re-ran `uv run check --full`; all checks passed.
+- Read `SORCAR.md` first as required; it is empty.
+- Read the currently open file `src/kiss/agents/vscode/SAMPLE_TASKS.md` to understand the existing sample task wording.
+- Created `tmp/` for temporary research notes.
+- Conducted required web research across 10 websites/pages and recorded findings in `tmp/information-channels-1782110694.md`.
+- Found that Claude Code currently documents Slack support, mobile Remote Control, and research-preview channels for Telegram, Discord, iMessage, and fakechat, plus custom channel development. It does not document built-in Gmail, WhatsApp, phone-call, or SMS channels.
+- Found that current Cursor docs do document Slack and Microsoft Teams Cloud Agent integrations, so the exact claim that Cursor does not support Slack would be inaccurate. Cursor docs do not document built-in Gmail, WhatsApp, phone-call, or SMS channels.
+- Updated the README comparison table with a new `Messaging and communication channels` row that states Sorcar has 23 third-party agents, including Slack, Gmail, Phone Control, SMS, and WhatsApp. The row also records the researched Claude Code and Cursor channel support limitations.
