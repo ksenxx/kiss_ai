@@ -105,64 +105,90 @@ To install only the KISS Sorcar extension, open Visual Studio Code, search for *
 
 ## CLI Interface
 
-Use `sorcar` as either an interactive CLI or a one-shot command.
+`sorcar` runs in two modes:
+
+- **Interactive** (no `-t/--task` or `-f/--file`) — a Claude-Code-style REPL that connects as a thin terminal client to the local `sorcar web` daemon. Chat-session control (new chat, resume by id, list history) and worktree merge/discard prompts are driven from slash commands. Each task is isolated in a git worktree by default.
+- **Non-interactive** (`-t` or `-f` supplied) — runs a plain `SorcarAgent` once on the supplied task and exits. Worktree isolation and chat-session control are unavailable in this mode; display events are still streamed into the chat DB so the run is replayable in the chat webview.
 
 ```bash
 # Launch the interactive Sorcar CLI, similar to Claude Code.
 sorcar
 
-# Run a one-shot task.
+# Run a one-shot task (non-interactive).
 sorcar -t "What is 2435*234?"
-
-# Start a new chat session and run directly in the working tree.
-sorcar -n --no-worktree -t "What is 2435*234?"
 
 # Use a specific model.
 sorcar -m "claude-sonnet-4-6" -t "What is 2435*234?"
 
+# Custom endpoint and headers for a local or self-hosted model.
+sorcar -e "http://localhost:8000/v1" --header "Authorization:Bearer xxx" \
+       -t "Summarise this codebase."
+
+# Cap spend at $2 and pin the working directory.
+sorcar -b 2.0 -w "$HOME/projects/my-repo" -t "Refactor utils.py for clarity."
+
 # Use the contents of a file as the task.
 echo "Can you find the cheapest non-stop flight from SFO to JFK on June 15?" > prompt
 sorcar -f prompt
+
+# Disable browser/web tools (terminal-only mode).
+sorcar --no-web -t "Lint and fix every Python file under src/."
+
+# Disable parallel sub-agents for a deterministic single-thread run.
+sorcar --no-parallel -t 'Run pytest and report which tests fail and why.'
 
 # Ask Sorcar to use desktop/browser/messaging tools.
 sorcar -t 'Can you send the message "Hello from Sorcar!" to ksen via the desktop Slack app?'
 
 # Ask Sorcar to explain code.
 sorcar -t 'Can you show me the detailed step-by-step workflow of gepa.py?'
+
+# Manage MCP servers (see "sorcar mcp" subcommand below).
+sorcar mcp list --ping
 ```
 
 ### CLI options
 
 | Flag | Description |
 |------|-------------|
-| `-t`, `--task` | Task description |
-| `-f`, `--file` | Path to a file whose contents to use as the task |
-| `-m`, `--model_name` | LLM model name; defaults to the best available model for configured keys |
-| `-e`, `--endpoint` | Custom endpoint for a local or self-hosted model |
+| `-t`, `--task` | Task description; switches to non-interactive mode |
+| `-f`, `--file` | Path to a file whose contents are used as the task; switches to non-interactive mode |
+| `-m`, `--model_name` | LLM model name; defaults to the best available model for the configured API keys |
+| `-e`, `--endpoint` | Custom base URL for a local or self-hosted model |
 | `--header` | Custom HTTP header in `Key:Value` form; may be repeated |
-| `-b`, `--max_budget` | Maximum budget in USD |
+| `-b`, `--max_budget` | Maximum spend in USD for the run |
 | `-w`, `--work_dir` | Working directory; defaults to the directory where `sorcar` is launched |
-| `-v`, `--verbose` | Print output to console (`true` by default) |
-| `-n`, `--new` | Start a new chat session |
-| `-c`, `--chat-id` | Resume a chat session by ID |
-| `-l`, `--list-chat-id` | List the last 10 chat sessions with tasks and results |
-| `-p`, `--parallel` / `--no-parallel` | Enable/disable parallel subagents (`--parallel` by default) |
-| `--worktree` / `--no-worktree` | Isolate each task in a git worktree branch (`--worktree` by default) |
-| `--auto-commit` / `--no-auto-commit` | Auto-commit worktree changes when a task finishes (`--auto-commit` by default) |
-| `--no-web` | Disable browser/web tools for terminal-only mode |
-| `--use-chat` | Legacy alias for `--no-worktree` |
-| `--use-worktree` | Legacy alias for `--worktree` |
-| `--cleanup` | Scan for and clean up orphaned worktree branches |
+| `-v`, `--verbose` | Print Rich panels to the console (`true` by default; pass `false` for quiet mode) |
+| `-p`, `--parallel` / `--no-parallel` | Enable/disable parallel sub-agents (enabled by default) |
+| `--worktree` / `--no-worktree` | **Interactive only.** Isolate each task in a git worktree branch (enabled by default); use `--no-worktree` to run directly in the working tree |
+| `--auto-commit` / `--no-auto-commit` | **Interactive only.** Auto-commit worktree changes when a task finishes (enabled by default); use `--no-auto-commit` to preserve the worktree for manual review |
+| `--no-web` | Disable browser/web tools (terminal-only mode) |
+
+`--worktree` / `--no-worktree` / `--auto-commit` / `--no-auto-commit` are rejected with `exit 2` when combined with `-t`/`-f`, since the non-interactive path runs a bare `SorcarAgent` that does not implement them. Argparse prefix abbreviations are disabled, so each flag must be spelled out in full.
 
 ### Interactive CLI features
 
 The interactive CLI includes:
 
 - `@` file/folder mentions with ranked project-file completion.
-- `/help`, `/clear`, `/resume`, `/model`, `/model list`, `/cost`, `/context`, `/commands`, `/skills`, `/mcp`, `/autocommit`, and `/exit` slash commands.
-- Custom Markdown slash commands from `~/.kiss/commands`, `<project>/.kiss/commands`, `~/.claude/commands`, and `<project>/.claude/commands`.
-- Agent Skills from `~/.kiss/skills`, `<project>/.kiss/skills`, Claude skill directories, `.agents/skills`, and bundled Sorcar skills.
+- Slash commands: `/help`, `/clear` (alias `/new`), `/resume`, `/model`, `/model list`, `/cost` (aliases `/usage`, `/context`), `/commands`, `/skills`, `/mcp`, `/autocommit`, and `/exit` (alias `/quit`).
+- Custom Markdown slash commands loaded from `~/.kiss/commands`, `<project>/.kiss/commands`, `~/.claude/commands`, and `<project>/.claude/commands`.
+- Agent Skills loaded from `~/.kiss/skills`, `<project>/.kiss/skills`, Claude skill directories, `.agents/skills`, and bundled Sorcar skills.
 - MCP server discovery from `~/.kiss/mcp.json`, `<project>/.kiss/mcp.json`, and `<project>/.mcp.json`.
+
+### `sorcar mcp` subcommand
+
+Manage Model-Context-Protocol servers used by Sorcar:
+
+| Subcommand | Purpose |
+|---|---|
+| `sorcar mcp add <name> <cmd…>` | Register a stdio (default) or `--transport http`/`sse` server in `--scope user` (`~/.kiss/mcp.json`) or `--scope project` (`<work_dir>/.kiss/mcp.json`); supports `--env KEY=VALUE` and `--header 'Key: Value'` (repeatable). |
+| `sorcar mcp list [--ping]` | List configured servers; `--ping` also connects and reports live status and tool counts. |
+| `sorcar mcp get <name>` | Print one server's configuration as JSON. |
+| `sorcar mcp remove <name>` | Delete a server from every writable config file. |
+| `sorcar mcp auth <name> [--no-browser]` | Run the OAuth 2.1 browser flow (dynamic client registration + PKCE) and persist tokens under `~/.kiss/mcp_auth/`. |
+| `sorcar mcp logout <name>` | Delete a server's stored OAuth tokens. |
+| `sorcar mcp debug <name>` | Connect and dump capabilities, tools (with input schemas and permission status), resources, and prompts. |
 
 ## 💬 Messaging & Third-Party Agents
 
