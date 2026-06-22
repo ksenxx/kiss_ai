@@ -9,20 +9,20 @@
  * Both keep ``INJECTIONS.md`` and ``SAMPLE_TASKS.md`` consistent
  * across the kiss-web daemon (Python) and the VS Code extension
  * webview (TypeScript): ``~/.kiss/<name>`` is the runtime source of
- * truth, and the bundled package copy is the seed used the very
- * first time a user opens the welcome screen / Tricks button on a
- * fresh machine.
+ * truth, and the bundled package copy is the seed / fallback.
  *
- * Once the user copy exists, **user edits win unconditionally** —
- * ``ensureUserAsset`` never refreshes a present user copy from the
- * package copy, even after the package copy is bumped by ``git pull``
- * or ``Update``.  To pull in a new bundled default, the user removes
- * ``~/.kiss/<name>`` and reads again.  Matches the Python helper.
+ * **Install-time behaviour** (``install.sh`` + ``installMarkdownAssets``
+ * in ``DependencyInstaller.ts``): on every install or version upgrade
+ * both files are *always* overwritten from the package copy so the
+ * latest bundled Markdown is served immediately after an update —
+ * matching the ``MODEL_INFO.json`` pattern.
  *
- * ``install.sh`` performs an eager ``cp -n`` seed so a fresh install
- * is immediately reflected without waiting for the first read; this
- * helper covers the cases ``install.sh`` does not (tests, dev
- * checkouts, sandboxed envs).
+ * **Runtime behaviour** (this helper): if ``~/.kiss/<name>`` already
+ * exists return it unchanged — user edits made *between* installs
+ * survive daemon restarts.  If the user copy is missing (sandboxed
+ * test envs, dev checkouts that skipped the installer), seed it from
+ * the package copy.  Falls back to ``packagePath`` when ``~/.kiss/``
+ * is not writable.
  *
  * Honours the ``KISS_HOME`` env var, matching ``persistence.py``,
  * ``web_server.py``, and ``vscode_config.py``.
