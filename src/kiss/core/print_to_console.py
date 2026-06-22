@@ -25,7 +25,15 @@ from kiss.core.printer import (
 class ConsolePrinter(Printer):
     def __init__(self, file: Any = None) -> None:
         self._console = Console(highlight=False, file=file)
-        self._file = file or sys.stdout
+        # Store only the explicit file (if any).  ``_file`` is resolved
+        # lazily via the property below so that a later swap of
+        # ``sys.stdout`` (e.g. the sorcar CLI's :class:`_StdoutProxy`,
+        # which is installed AFTER this printer is constructed) is
+        # honoured for direct ``self._file.write`` calls.  Without
+        # lazy resolution, ``bash_stream`` / ``_flush_newline`` /
+        # ``_print_tool_result`` writes bypass the proxy and land at
+        # the current cursor position — inside the bottom input box.
+        self._explicit_file: Any = file
         self._mid_line = False
         self._bash_streamed = False
         self._current_block_type = ""
@@ -37,6 +45,17 @@ class ConsolePrinter(Printer):
         self.tokens_offset = 0
         self.budget_offset = 0.0
         self.steps_offset = 0
+
+    @property
+    def _file(self) -> Any:
+        """Output stream — resolved lazily so a later ``sys.stdout`` swap is honoured.
+
+        Returns the explicit *file* passed to ``__init__`` when one
+        was provided, otherwise the current ``sys.stdout`` at access
+        time (matching the lazy resolution Rich's :class:`Console`
+        does for its own writes).
+        """
+        return self._explicit_file if self._explicit_file is not None else sys.stdout
 
     def reset(self) -> None:
         """Reset internal streaming state for a new turn."""
