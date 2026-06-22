@@ -181,7 +181,7 @@ The interactive CLI includes:
 - Agent Skills loaded from `~/.kiss/skills`, `<project>/.kiss/skills`, Claude skill directories, `.agents/skills`, and bundled Sorcar skills.
 - MCP server discovery from `~/.kiss/mcp.json`, `<project>/.kiss/mcp.json`, and `<project>/.mcp.json`.
 - VS Code "Tricks" button entries read from `~/.kiss/INJECTIONS.md` (one per `## Trick` section), seeded on install from the bundled `src/kiss/INJECTIONS.md`. Edit the file to customise the dropdown; remove it to regenerate from the bundled defaults.
-- VS Code welcome-screen sample-task chips read from `~/.kiss/SAMPLE_TASKS.md` (one per `## Task` section), seeded on install from the bundled `src/kiss/agents/vscode/SAMPLE_TASKS.md`. Edit the file to customise the chips; remove it to regenerate from the bundled defaults.
+- VS Code welcome-screen sample-task chips read from `~/.kiss/SAMPLE_TASKS.md` (one per `## Task` section), seeded on install from the bundled `src/kiss/SAMPLE_TASKS.md`. Edit the file to customise the chips; remove it to regenerate from the bundled defaults.
 
 ### `sorcar mcp` subcommand
 
