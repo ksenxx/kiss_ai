@@ -52,13 +52,13 @@ ______________________________________________________________________
 |---|---|---|---|
 | **Interfaces** | CLI + VS Code extension + web/mobile app | CLI + mobile app | Custom VS Code |
 | **Multiple models from multiple vendors in the same task** | ✅ Mix OpenAI, Anthropic, Gemini, Together, MiniMax, OpenRouter, Claude Code CLI, and Codex CLI | ❌ Anthropic Claude models only | ❌ One model per task |
+| **Primary focus** | ✅ **Quality** — rigorous review, end-to-end tests | Speed and developer ergonomics | Speed |
 | **Models in bundled catalog** | 501 across 8 provider categories | Claude family only | Subset chosen by Cursor |
 | **Bring your own API key / endpoint** | ✅ Yes — keys stay on your machine | ✅ Anthropic key | ⚠️ Routed through Cursor backend |
 | **Open source** | ✅ Apache-2.0 | ❌ Proprietary | ❌ Proprietary |
 | **Price** | Free framework; pay only your chosen model provider | Subscription / API usage | Subscription |
 | **Run on top of Claude Code / Codex CLI** | ✅ `cc/*` and `codex/*` namespaces | N/A | ❌ |
 | **Messaging and communication channels** | ✅ 23 third-party agents, including Slack, Gmail, Phone Control, SMS, and WhatsApp | ⚠️ Slack, mobile Remote Control, and research-preview channels for Telegram, Discord, and iMessage; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel | ⚠️ Slack and Microsoft Teams Cloud Agent integrations; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel |
-| **Primary focus** | ✅ **Quality** — rigorous review, end-to-end tests | Speed and developer ergonomics | Speed |
 | **Terminal Bench 2.0 score** | **62.2%** | 58% | 61.7% (Cursor agent) |
 
 ## What is in the Name
@@ -181,7 +181,7 @@ The interactive CLI includes:
 - Agent Skills loaded from `~/.kiss/skills`, `<project>/.kiss/skills`, Claude skill directories, `.agents/skills`, and bundled Sorcar skills.
 - MCP server discovery from `~/.kiss/mcp.json`, `<project>/.kiss/mcp.json`, and `<project>/.mcp.json`.
 - VS Code "Tricks" button entries read from `~/.kiss/INJECTIONS.md` (one per `## Trick` section), seeded on install from the bundled `src/kiss/INJECTIONS.md`. Edit the file to customise the dropdown; remove it to regenerate from the bundled defaults.
-- VS Code welcome-screen sample-task chips read from `~/.kiss/SAMPLE_TASKS.md` (one per `## Task` section), seeded on install from the bundled `src/kiss/SAMPLE_TASKS.md`. Edit the file to customise the chips; remove it to regenerate from the bundled defaults.
+- VS Code welcome-screen sample-task chips read from `~/.kiss/SAMPLE_TASKS.md` (one per `## Task` section), seeded on install from the bundled `src/kiss/agents/vscode/SAMPLE_TASKS.md`. Edit the file to customise the chips; remove it to regenerate from the bundled defaults.
 
 ### `sorcar mcp` subcommand
 
