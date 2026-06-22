@@ -64,7 +64,7 @@ ______________________________________________________________________
 
 **KISS Agent Framework** is a deliberately small agent runtime organized around the [KISS principle](https://en.wikipedia.org/wiki/KISS_principle) ("Keep it Simple, Stupid").
 KISS Sorcar is named after [P. C. Sorcar, the Bengali magician](https://en.wikipedia.org/wiki/P._C._Sorcar).
-<sub>Note: **Sorcar** also means government in Bengali.</sub>
+Note: **Sorcar** also means government in Bengali.
 
 ## Installation
 
