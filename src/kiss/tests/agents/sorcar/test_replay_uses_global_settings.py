@@ -346,6 +346,284 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
         assert second_extra.get("model") == "claude-sonnet-4-5", second_extra
 
 
+    def test_history_load_resets_use_parallel_and_auto_commit(self) -> None:
+        """Symmetric to ``test_followup_task_uses_new_global_settings``
+        for the parallel / auto-commit toggles.  A history load must
+        leave ``tab.use_parallel`` and ``tab.auto_commit_mode`` at the
+        baseline (``False``), so a follow-up run that forgets to pass
+        ``useParallel`` / ``autoCommit`` cannot silently inherit the
+        loaded task's stale ``True``."""
+        first_tab = "tab-first-pa"
+        _run_and_wait(
+            self.server,
+            tab_id=first_tab,
+            prompt="task with parallel + auto-commit enabled",
+            work_dir=self.tmpdir,
+            model="claude-opus-4-6",
+            use_worktree=True,
+            use_parallel=True,
+            auto_commit=True,
+        )
+        first_row = th._load_history(limit=10)[0]
+        chat_id = str(first_row["chat_id"])
+        first_task_id = cast(int, first_row["id"])
+
+        history_tab = "tab-history-pa"
+        self.server._handle_command(
+            {"type": "newChat", "tabId": history_tab},
+        )
+        self.server._handle_command({
+            "type": "resumeSession",
+            "id": chat_id,
+            "taskId": first_task_id,
+            "tabId": history_tab,
+        })
+
+        loaded_tab = self.server._get_tab(history_tab)
+        assert not loaded_tab.use_worktree, loaded_tab.use_worktree
+        assert not loaded_tab.use_parallel, loaded_tab.use_parallel
+        assert not loaded_tab.auto_commit_mode, loaded_tab.auto_commit_mode
+
+    def test_history_load_resets_selected_model(self) -> None:
+        """A history load must reset ``tab.selected_model`` to the
+        server's default (the persisted last-picked global model),
+        not leave it at whatever the previous chat in the same tab
+        was using.  Without the reset, ``_get_history``'s
+        running-session sidebar would read the stale per-tab model
+        for any LIVE task in the newly-loaded chat."""
+        first_tab = "tab-first-model"
+        _run_and_wait(
+            self.server,
+            tab_id=first_tab,
+            prompt="task to create a chat",
+            work_dir=self.tmpdir,
+            model=self.server._default_model,
+            use_worktree=False,
+            use_parallel=False,
+            auto_commit=False,
+        )
+        first_row = th._load_history(limit=10)[0]
+        chat_id = str(first_row["chat_id"])
+        first_task_id = cast(int, first_row["id"])
+
+        # Now load that chat into a brand-new tab.  We seed
+        # ``selected_model`` on the tab to a non-default value
+        # AFTER ``newChat`` (which itself resets it), to simulate
+        # a tab that had run a task with a non-default model in
+        # the past.  ``_replay_session`` (with the fix) must reset
+        # it back to the server default.
+        history_tab = "tab-history-model"
+        self.server._handle_command(
+            {"type": "newChat", "tabId": history_tab},
+        )
+        stale_model = "stale-test-model"
+        self.server._get_tab(history_tab).selected_model = stale_model
+        self.server._handle_command({
+            "type": "resumeSession",
+            "id": chat_id,
+            "taskId": first_task_id,
+            "tabId": history_tab,
+        })
+
+        loaded_tab = self.server._get_tab(history_tab)
+        assert (
+            loaded_tab.selected_model == self.server._default_model
+        ), loaded_tab.selected_model
+        # Defensive: must not be the stale value we seeded.
+        assert loaded_tab.selected_model != stale_model
+
+    def test_history_load_preserves_state_during_merge_review(self) -> None:
+        """Regression for the round-2 gpt-5.5 review finding: the
+        ``tab_alive`` guard must cover the ``tab.is_merging`` flag
+        too.  Without it, a ``_replay_session`` re-entry on a tab
+        whose post-task worktree-merge prompt is still open (e.g.
+        VS Code window reload mid-merge) would clobber
+        ``tab.use_worktree=False``, causing ``_finish_merge`` /
+        ``_present_pending_worktree`` to short-circuit and leak
+        the worktree directory."""
+        tab_id = "tab-merging"
+        _run_and_wait(
+            self.server,
+            tab_id=tab_id,
+            prompt="seed task for merge guard",
+            work_dir=self.tmpdir,
+            model=self.server._default_model,
+            use_worktree=True,
+            use_parallel=True,
+            auto_commit=True,
+        )
+        row = th._load_history(limit=10)[0]
+        chat_id = str(row["chat_id"])
+        task_id = cast(int, row["id"])
+
+        tab = self.server._get_tab(tab_id)
+        # Simulate mid-merge: task finished, merge review still open.
+        tab.is_task_active = False
+        tab.is_merging = True
+        tab.use_worktree = True
+        tab.use_parallel = True
+        tab.auto_commit_mode = True
+        tab.selected_model = "stale-merge-model"
+
+        try:
+            self.server._replay_session(
+                chat_id=chat_id, tab_id=tab_id, task_id=task_id,
+            )
+            assert tab.use_worktree is True, tab.use_worktree
+            assert tab.use_parallel is True, tab.use_parallel
+            assert tab.auto_commit_mode is True, tab.auto_commit_mode
+            assert (
+                tab.selected_model == "stale-merge-model"
+            ), tab.selected_model
+        finally:
+            tab.is_merging = False
+
+    def test_history_load_preserves_state_when_thread_alive(self) -> None:
+        """Cover the ``task_thread.is_alive()`` arm of the
+        ``_tab_busy`` predicate inside ``_replay_session``."""
+        tab_id = "tab-thread"
+        _run_and_wait(
+            self.server,
+            tab_id=tab_id,
+            prompt="seed task for thread guard",
+            work_dir=self.tmpdir,
+            model=self.server._default_model,
+            use_worktree=True,
+            use_parallel=False,
+            auto_commit=False,
+        )
+        row = th._load_history(limit=10)[0]
+        chat_id = str(row["chat_id"])
+        task_id = cast(int, row["id"])
+
+        tab = self.server._get_tab(tab_id)
+        stop_evt = threading.Event()
+        alive_thread = threading.Thread(target=stop_evt.wait, daemon=True)
+        alive_thread.start()
+        tab.is_task_active = False
+        tab.is_merging = False
+        tab.task_thread = alive_thread
+        tab.use_worktree = True
+        tab.use_parallel = True
+        tab.auto_commit_mode = True
+        tab.selected_model = "stale-thread-model"
+
+        try:
+            self.server._replay_session(
+                chat_id=chat_id, tab_id=tab_id, task_id=task_id,
+            )
+            assert tab.use_worktree is True
+            assert tab.use_parallel is True
+            assert tab.auto_commit_mode is True
+            assert tab.selected_model == "stale-thread-model"
+        finally:
+            stop_evt.set()
+            alive_thread.join(timeout=2)
+
+    def test_history_load_preserves_state_during_live_run(self) -> None:
+        """The reset added to ``_replay_session`` is gated by a
+        ``tab_alive`` guard: when the loaded chat is being re-rendered
+        into the SAME tab that owns the live run, the in-flight
+        per-tab fields are the source of truth for
+        ``_get_history``'s sidebar metadata and must not be
+        clobbered.  Reproduce by simulating an active task (set
+        ``is_task_active = True``) on the tab BEFORE calling
+        ``_replay_session``, then assert the fields are unchanged."""
+        tab_id = "tab-live"
+        # Spin up a chat by running a task to completion so a
+        # task_history row exists for the replay.
+        _run_and_wait(
+            self.server,
+            tab_id=tab_id,
+            prompt="seed task to create chat",
+            work_dir=self.tmpdir,
+            model="claude-opus-4-6",
+            use_worktree=True,
+            use_parallel=True,
+            auto_commit=True,
+        )
+        row = th._load_history(limit=10)[0]
+        chat_id = str(row["chat_id"])
+        task_id = cast(int, row["id"])
+
+        tab = self.server._get_tab(tab_id)
+        # Simulate an in-flight run by flipping the "alive" flag.
+        # ``_replay_session``'s ``tab_alive`` guard reads both
+        # ``is_task_active`` and ``task_thread.is_alive``; setting
+        # the flag is the minimum repro.
+        tab.is_task_active = True
+        tab.use_worktree = True
+        tab.use_parallel = True
+        tab.auto_commit_mode = True
+        tab.selected_model = "claude-opus-4-6"
+
+        try:
+            self.server._replay_session(
+                chat_id=chat_id, tab_id=tab_id, task_id=task_id,
+            )
+            # The guard prevents the reset, so the live values
+            # survive.
+            assert tab.use_worktree is True, tab.use_worktree
+            assert tab.use_parallel is True, tab.use_parallel
+            assert tab.auto_commit_mode is True, tab.auto_commit_mode
+            assert (
+                tab.selected_model == "claude-opus-4-6"
+            ), tab.selected_model
+        finally:
+            tab.is_task_active = False
+
+
+class TestExtraForReplayUnit(unittest.TestCase):
+    """Unit-level edge cases for ``_extra_for_replay``.  Mirrors the
+    docstring contract; the round-1 gpt-5.5 review flagged the
+    non-dict pass-through as a defensive hole that has now been
+    fixed to return ``""``."""
+
+    def test_non_dict_json_returns_empty(self) -> None:
+        from kiss.agents.vscode.server import _extra_for_replay
+        for malformed in ('[1,2,3]', '"x"', '42', 'null', 'true'):
+            assert _extra_for_replay(malformed) == "", malformed
+
+    def test_dict_with_stripped_keys_removes_them(self) -> None:
+        from kiss.agents.vscode.server import _extra_for_replay
+        payload = json.dumps({
+            "model": "claude-opus-4-6",
+            "is_worktree": True,
+            "is_parallel": True,
+            "auto_commit_mode": True,
+            "work_dir": "/tmp/x",
+            "startTs": 1, "endTs": 2,
+        })
+        out = _extra_for_replay(payload)
+        parsed = json.loads(out)
+        assert "model" not in parsed
+        assert "is_worktree" not in parsed
+        assert "is_parallel" not in parsed
+        assert "auto_commit_mode" not in parsed
+        assert parsed["work_dir"] == "/tmp/x"
+        assert parsed["startTs"] == 1
+        assert parsed["endTs"] == 2
+
+    def test_dict_without_stripped_keys_passes_through(self) -> None:
+        from kiss.agents.vscode.server import _extra_for_replay
+        payload = json.dumps({"work_dir": "/tmp/x", "startTs": 1})
+        # The implementation returns the ORIGINAL string when no
+        # stripped key was present (skips re-serialization).
+        out = _extra_for_replay(payload)
+        assert json.loads(out) == json.loads(payload)
+
+    def test_empty_or_non_string_returns_empty(self) -> None:
+        from kiss.agents.vscode.server import _extra_for_replay
+        assert _extra_for_replay("") == ""
+        assert _extra_for_replay(None) == ""
+        assert _extra_for_replay(123) == ""
+        assert _extra_for_replay({"k": "v"}) == ""
+
+    def test_invalid_json_returns_original(self) -> None:
+        from kiss.agents.vscode.server import _extra_for_replay
+        assert _extra_for_replay("not-json") == "not-json"
+
+
 class TestSubagentReplayStripsGlobalSettings(unittest.TestCase):
     """Loading a parent task that fans out to sub-agents reopens every
     persisted sub-agent tab with its own ``task_events`` broadcast.
