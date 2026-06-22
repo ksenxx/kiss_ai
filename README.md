@@ -27,14 +27,17 @@ ______________________________________________________________________
 <details>
 <summary><strong>Table of Contents</strong></summary>
 
-- [What is KISS Sorcar?](#what-is-kiss-sorcar)
-- [Why KISS Sorcar?](#why-kiss-sorcar)
 - [KISS Sorcar vs Claude Code vs Cursor](#-kiss-sorcar-vs-claude-code-vs-cursor)
-- [See It in Action](#-see-it-in-action)
+- [What is in the Name](#what-is-in-the-name)
 - [Installation](#installation)
-- [VS Code Extension](#vs-code-extension)
+  - [Full install from source](#full-install-from-source)
+  - [Python package / CLI install](#python-package--cli-install)
+  - [Configure model access](#configure-model-access)
+  - [VS Code Extension Installation](#vs-code-extension-installation)
 - [CLI Interface](#cli-interface)
-- [Web and Mobile App](#web-and-mobile-app)
+  - [CLI options](#cli-options)
+  - [Interactive CLI features](#interactive-cli-features)
+  - [`sorcar mcp` subcommand](#sorcar-mcp-subcommand)
 - [Messaging & Third-Party Agents](#-messaging--third-party-agents)
 - [Models Supported](#-models-supported)
 - [Contributing](#-contributing)
