@@ -3835,7 +3835,10 @@
       chip.className = 'suggestion-chip';
       chip.dataset.prompt = s.text;
       chip.innerHTML =
-        '<span class="chip-label">Suggested</span>' + esc(s.text);
+        '<span class="chip-label">Suggested</span>' +
+        '<span class="chip-text">' +
+        esc(s.text) +
+        '</span>';
       chip.addEventListener('click', () => {
         inp.value = s.text;
         syncClearBtn();
