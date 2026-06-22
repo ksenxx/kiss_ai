@@ -12,6 +12,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import {findKissProject} from './kissPaths';
+import {ensureUserAsset} from './userAssets';
 
 /** Read the KISS project version from ``_version.py`` on disk. */
 export function getVersion(): string {
@@ -73,30 +74,44 @@ function readMarkdownSections(markdownFile: string, heading: string): string[] {
 }
 
 /**
- * Read ``src/kiss/INJECTIONS.md`` and return one entry per ``## Trick``
- * section.  Returns an empty list if the file is missing — the Tricks
- * button still renders, just with an empty list.
+ * Read ``~/.kiss/INJECTIONS.md`` and return one entry per ``## Trick``
+ * section.  The user-local copy is the runtime source of truth (so
+ * authors can edit it without rebuilding the extension); it is
+ * seeded from ``kissRoot/src/kiss/INJECTIONS.md`` by
+ * :func:`ensureUserAsset` only when the user copy is missing, so
+ * user edits survive every read.  Returns an empty list if the file
+ * is missing — the Tricks button still renders, just with an empty
+ * list.
  */
 export function getTricks(): string[] {
   const kissRoot = findKissProject();
   if (!kissRoot) return [];
   return readMarkdownSections(
-    path.join(kissRoot, 'src', 'kiss', 'INJECTIONS.md'),
+    ensureUserAsset(
+      'INJECTIONS.md',
+      path.join(kissRoot, 'src', 'kiss', 'INJECTIONS.md'),
+    ),
     'Trick',
   );
 }
 
 /**
- * Read ``SAMPLE_TASKS.md`` from the extension root and return one
- * ``{text}`` entry per ``## Task`` section.  Mirrors the format of
- * ``src/kiss/INJECTIONS.md`` so authors can edit the welcome-screen
- * suggestions in plain Markdown rather than escaping JSON.  Returns
- * ``[]`` when the file is missing or unparseable so the welcome
- * screen still renders without chips.
+ * Read ``~/.kiss/SAMPLE_TASKS.md`` and return one ``{text}`` entry
+ * per ``## Task`` section.  Mirrors the ``INJECTIONS.md`` handling:
+ * the user-local copy at ``~/.kiss/SAMPLE_TASKS.md`` is the runtime
+ * source of truth so authors can edit welcome-screen suggestions in
+ * plain Markdown; it is seeded from
+ * ``extensionRoot/SAMPLE_TASKS.md`` by :func:`ensureUserAsset` only
+ * when the user copy is missing, so user edits survive every read.
+ * Returns ``[]`` when the file is missing or unparseable so the
+ * welcome screen still renders without chips.
  */
 export function readSampleTasks(extensionRoot: string): Array<{text: string}> {
   return readMarkdownSections(
-    path.join(extensionRoot, 'SAMPLE_TASKS.md'),
+    ensureUserAsset(
+      'SAMPLE_TASKS.md',
+      path.join(extensionRoot, 'SAMPLE_TASKS.md'),
+    ),
     'Task',
   ).map(text => ({text}));
 }

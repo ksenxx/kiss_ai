@@ -75,6 +75,7 @@ from websockets.http11 import Request, Response
 from kiss.agents.vscode.diff_merge import _read_lines_preserved
 from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.agents.vscode.server import VSCodeServer
+from kiss.agents.vscode.user_assets import ensure_user_asset
 from kiss.agents.vscode.vscode_config import load_config, source_shell_env
 from kiss.core.config import get_jobs_root
 from kiss.viz_trajectory.server import find_job_dir, list_jobs, load_job_trajectories
@@ -2251,7 +2252,14 @@ def _fetch_latest_version() -> str | None:
 
 
 def _read_tricks() -> list[str]:
-    """Parse ``src/kiss/INJECTIONS.md`` and return the trick texts.
+    """Parse ``~/.kiss/INJECTIONS.md`` and return the trick texts.
+
+    The user-local copy at ``~/.kiss/INJECTIONS.md`` is the runtime
+    source of truth — ``install.sh`` seeds it from the package copy
+    bundled at ``src/kiss/INJECTIONS.md`` on first install, and
+    :func:`ensure_user_asset` seeds it again the first time it is
+    read after a user wipes it; once present, user edits survive
+    every read.  This mirrors the ``SAMPLE_TASKS.md`` handling.
 
     The file contains a series of ``## Trick`` sections, each followed
     by a blank line and a one-line trick.  Returns an empty list if the
@@ -2259,7 +2267,8 @@ def _read_tricks() -> list[str]:
     INJECTIONS.md still renders the button (with an empty list).
     """
     try:
-        tfile = Path(__file__).parent.parent.parent / "INJECTIONS.md"
+        package_path = Path(__file__).parent.parent.parent / "INJECTIONS.md"
+        tfile = ensure_user_asset("INJECTIONS.md", package_path)
         text = tfile.read_text()
     except Exception:
         return []
@@ -3768,7 +3777,7 @@ class RemoteAccessServer:
         actively harmful for the VS Code extension: the extension is
         a *second* client of the same broadcaster (over its UDS
         connection), and it populates its own ``#suggestions``
-        container locally from ``SAMPLE_TASKS.md``.  The empty-list
+        container locally from ``~/.kiss/SAMPLE_TASKS.md``.  The empty-list
         broadcast was forwarded to the extension's webview and
         cleared every chip on the welcome page whenever any webapp
         client opened a new chat tab — see
