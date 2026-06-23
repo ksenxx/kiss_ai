@@ -20,7 +20,7 @@ can you review the updates made in the last task using gpt-5.5 (non codex) and c
 
 ## Trick
 
-Use openrouter/z-ai/glm-5.2 model for all tasks including coding, bug fixing, and test creation.  ALWAYS use gpt-5.5 model (not codex) and claude-opus-4-7 to carefully and thoroughly review the work done by openrouter/z-ai/glm-5.2.
+Use openrouter/z-ai/glm-5.2 model for all tasks including coding, bug fixing, and test creation. ALWAYS use gpt-5.5 model (not codex) and claude-opus-4-7 to carefully and thoroughly review the work done by openrouter/z-ai/glm-5.2.
 
 ## Trick
 
