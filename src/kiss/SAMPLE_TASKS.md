@@ -8,7 +8,7 @@ Can you change the step \<<specify step>> as follows: \<<whatever way you want t
 
 ## Task
 
-can you authenticate me with the /\<<workspace name>> workspace on Slack using the Slack agent?
+can you authenticate me with the \<<workspace name>> workspace on Slack using the Slack agent?
 
 ## Task
 
@@ -51,7 +51,7 @@ RUN_GEPA: Sample 100 data points from the val set and call it sval set. Maintain
    d. if the agent predicts correctly on the minibatch, then evaluate it on the val set and create the list of sessions on which the agent with the new prompt predicts correctly.
    e. Add the new prompt and the list of sessions to the pareto frontier
 
-1. pick two nodes from the pareto frontier randomly with the remaining probability.\
+1. pick two nodes from the pareto frontier randomly with the remaining probability.
    a. sample a minibatch of 5 sessions from the dev set
    b. merge the prompts from the two nodes into a new prompt.
    c. if the agent predicts correctly on the minibatch with the new prompt, then evaluate it on the val set and create the list of sessions on which the agent with the new prompt predicts correctly.
