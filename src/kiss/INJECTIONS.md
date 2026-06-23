@@ -12,7 +12,7 @@ Use gpt-5.5 model (not codex) for thorough review and use claude-opus-4-7 model 
 
 ## Trick
 
-can you review the updates made in the last task using gpt-5.5 (non codex) and claude-opus-4-7 thoroughly and then write end-to-end tests reproducing the bugs reported by the review, fix them, and test them using claude-opus-4-7? Run all the tests in parallel and fix bugs after revieweing the fixes with gpt-5.5 (non codex) and claude-opus-4-7. Repeat the process until you fail to reproduce the bugs reported by the review done by gpt-5.5 (non codex) and claude-opus-4-7.
+can you review the updates made in the last task using gpt-5.5 (non codex) and claude-opus-4-7 thoroughly and then write end-to-end tests reproducing the bugs reported by the review, fix them, and test them using claude-opus-4-7? Run all the tests in parallel and fix bugs after reviewing the fixes with gpt-5.5 (non codex) and claude-opus-4-7. Repeat the process until you fail to reproduce the bugs reported by the review done by gpt-5.5 (non codex) and claude-opus-4-7.
 
 ## Trick
 
@@ -40,4 +40,4 @@ can you build the paper at
 
 ## Trick
 
-Why did this the last task got interrupted? Thoroughly and precisely analyze the logs and the events or the task. Reproduce the issue by writing an integration test. Then fix the issue.
+Why did the last task get interrupted? Thoroughly and precisely analyze the logs and the events of the task. Reproduce the issue by writing an integration test. Then fix the issue.
