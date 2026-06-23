@@ -4,4 +4,4 @@ Can you read the paper at ~/Downloads/paper.pdf and review it deeply and thoroug
 
 ## Sorcar Fugu Ultra
 
-Use the best model from ~/.kiss/MODEL_INFO.json for various sub tasks.  Search the internet extensively once to figure out which model is good for which sub-task.  I find claude-opus-4-7 best for SWE work, gpt-5.5 for reviewing, and openrouter/z-ai/glm-5.2 for SWE tasks when budget is low.
+Use the best model from ~/.kiss/MODEL_INFO.json for various sub tasks. Search the internet extensively once to figure out which model is good for which sub-task. I find claude-opus-4-7 best for SWE work, gpt-5.5 for reviewing, and openrouter/z-ai/glm-5.2 for SWE tasks when budget is low.

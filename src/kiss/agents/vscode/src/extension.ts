@@ -371,7 +371,11 @@ export function activate(context: vscode.ExtensionContext): void {
   // ``screen.availWidth`` (close proxy for window width when maximized).
   // ``widenToOneThird`` runs an iterative measure→increase/decrease loop
   // until the sidebar is within ~6 % of the target.
-  if (!context.globalState.get<boolean>('sidebarWidened')) {
+  // The gate is per-WORKSPACE (not per-machine) so that every new
+  // workspace gets its secondary sidebar widened to ~1/3 of the
+  // window on the first open, while preserving any width the user
+  // manually tweaks on subsequent reopens of the same workspace.
+  if (!context.workspaceState.get<boolean>('sidebarWidened')) {
     sidebarView!.onFirstResolve(() => {
       setTimeout(async () => {
         await vscode.commands.executeCommand(
@@ -381,33 +385,36 @@ export function activate(context: vscode.ExtensionContext): void {
         await vscode.commands.executeCommand(
           'workbench.action.focusFirstEditorGroup',
         );
-        await context.globalState.update('sidebarWidened', true);
+        await context.workspaceState.update('sidebarWidened', true);
       }, 500);
     });
   }
 
   // Decide whether to auto-open the secondary sidebar.
-  // True on first-ever launch (firstLaunchDone is undefined) or after a
-  // rebuild/reinstall (marker written by build-extension.sh).  We use a
-  // local boolean because globalState.update() is async and the get()
-  // below would still see the stale value.
+  // True on first launch in THIS workspace (firstLaunchDone is
+  // undefined) or after a rebuild/reinstall (marker written by
+  // build-extension.sh).  We use a local boolean because
+  // workspaceState.update() is async and the get() below would still
+  // see the stale value.  The gate is per-WORKSPACE so every new
+  // workspace auto-selects the KISS Sorcar tab in the secondary
+  // panel on its first open.
   const extensionUpdatedMarker = path.join(
     os.homedir(),
     '.kiss',
     '.extension-updated',
   );
-  let shouldAutoOpen = !context.globalState.get<boolean>('firstLaunchDone');
+  let shouldAutoOpen = !context.workspaceState.get<boolean>('firstLaunchDone');
   if (fs.existsSync(extensionUpdatedMarker)) {
     shouldAutoOpen = true;
-    void context.globalState.update('firstLaunchDone', undefined);
+    void context.workspaceState.update('firstLaunchDone', undefined);
   }
 
-  // On first launch after install, auto-open the secondary sidebar chat
-  // and focus the input so the user can start typing immediately.
+  // On first launch in this workspace, auto-open the secondary sidebar
+  // chat and focus the input so the user can start typing immediately.
   if (shouldAutoOpen) {
     setTimeout(async () => {
       await sidebarView!.focusChatInput();
-      await context.globalState.update('firstLaunchDone', true);
+      await context.workspaceState.update('firstLaunchDone', true);
     }, 1000);
   }
 

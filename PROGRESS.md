@@ -1,141 +1,88 @@
-# Task Progress — kisssorcar.github.io README-aligned redesign
+# PROGRESS — Per-workspace secondary-sidebar bootstrap fix
 
 ## Task
-Make `~/work/kisssorcar.github.io/index.html` have the same sections as
-`PWD/README.md`. Use a card for each section with eye-catching animation that
-does NOT look like generic Claude/GPT output.
 
-## Repos
-- README source: `/Users/ksen/work/kiss/.kiss-worktrees/kiss_wt-1782164548-e4e973a6/README.md`
-- Site repo: `/Users/ksen/work/kisssorcar.github.io/` (branch `main`, clean tree)
-- Backup of original site: `/tmp/index.bak.html`
-- Site assets dir contents: `KISS-Sorcar-UI.png`, `KISS-Sorcar.png`,
-  `kiss_sorcar.pdf`, `og-card.png`, `se_kiss_sorcar.pdf`, `sorcar-main.mp4`,
-  `writing_paper.pdf`.
+When a NEW VS Code workspace is opened, the secondary sidebar should
+(a) widen to approximately one-third of the VS Code window and
+(b) auto-select the KISS Sorcar tab. Before this fix, both behaviours
+only fired on the very first activation per machine because the
+gates lived in `context.globalState`.
 
-## README section ordering (target for site)
-1. Hero / one-line install (already in site hero — keep)
-2. KISS Sorcar vs Claude Code vs Cursor  → `#compare`
-3. What is in the Name                   → `#name`   (NEW)
-4. Installation                          → `#install` (expand: full source, pip/uv, model keys, VS Code)
-5. CLI Interface                         → `#cli`    (NEW — CLI options table, interactive features, `sorcar mcp`)
-6. Messaging & Third-Party Agents        → `#agents`
-7. Models Supported                      → `#models`
-8. Contributing                          → `#contributing` (NEW)
-9. License                               → `#license`     (NEW)
-10. Citation                             → `#citation`
+## Root cause
 
-Drop the current `#features`, `#architecture`, `#papers`, `#demo` sections
-since they are not present as headings in README.md. (Keep the demo video as
-the hero screenshot since it already lives above the first section.)
+`src/kiss/agents/vscode/src/extension.ts` gated the widen + auto-open
+logic on `context.globalState.get('sidebarWidened')` and
+`context.globalState.get('firstLaunchDone')`. `globalState` is
+per-install (shared across every workspace on the machine), so the
+second and later workspaces on the same machine inherited the
+flags from the first workspace and the activate handler skipped both
+the `widenToOneThird()` call AND the `focusChatInput()` call.
 
-## Design system — eye-catching, non-template-y animations
-- Each top-level section wrapped in a `.section-card` whose `::before` paints
-  an animated rotating conic-gradient border via `@property --angle` →
-  `@keyframes spin { to { --angle: 360deg; } }`. Slow, ~9 s rotation.
-- Scroll-triggered reveal: IntersectionObserver toggles a class that runs a
-  "tilt-rise" keyframe: `from { opacity: 0; transform: translateY(36px) rotateX(-10deg); transform-origin: bottom; } to { opacity: 1; transform: none; }`.
-  Each child card inside the section gets a stagger delay via `--i` custom
-  property (set in JS or via nth-child).
-- Inner cards: cursor spotlight. `onmousemove` updates CSS vars `--mx`/`--my`
-  → a `radial-gradient(circle 240px at var(--mx) var(--my), ...)` overlay.
-- Hero: subtle "magic dust" canvas — 60 floating particles rising slowly,
-  thematic for Sorcar (the magician). Pauses when offscreen.
-- Keep existing palette (Material blue/teal). Add a second accent for the
-  rotating border: gold `#f7c948` blending with `--primary` and `--accent`.
-- Respect `prefers-reduced-motion: reduce` — disable spin, particles, tilt
-  reveal in that mode.
+VS Code stores sidebar widths per workspace, so without the
+bootstrap call each new workspace landed at VS Code's default
+narrow secondary-sidebar width and at whichever view happened to be
+selected — not necessarily the KISS Sorcar tab.
 
-## CLI Interface section content (from README)
-Three sub-cards laid out in a vertical stack inside the section:
+## Fix
 
-### CLI Options sub-card — table with these rows
-| Flag | Description |
-| `-t`, `--task` | Task description; non-interactive mode |
-| `-f`, `--file` | Task from a file; non-interactive mode |
-| `-m`, `--model_name` | LLM model name; defaults to best available |
-| `-e`, `--endpoint` | Custom base URL for local/self-hosted model |
-| `--header` | Custom HTTP header `Key:Value`; may repeat |
-| `-b`, `--max_budget` | Max spend in USD |
-| `-w`, `--work_dir` | Working directory |
-| `-v`, `--verbose` | Print Rich panels (default true) |
-| `-p`/`--parallel` / `--no-parallel` | Toggle parallel sub-agents |
-| `--worktree` / `--no-worktree` | Interactive only — git worktree isolation |
-| `--auto-commit` / `--no-auto-commit` | Interactive only — auto-commit worktree |
-| `--no-web` | Disable browser/web tools |
+`src/kiss/agents/vscode/src/extension.ts`: switched both flags from
+`context.globalState` to `context.workspaceState`. The gate is now
+per-workspace (the natural granularity), so the bootstrap fires
+exactly once per workspace and never overwrites the user's manual
+width adjustments on later reopens.
 
-### Interactive features sub-card — bulleted list
-- `@` file mentions with ranked completion
-- Slash commands: `/help`, `/clear` (`/new`), `/resume`, `/model`,
-  `/model list`, `/cost` (`/usage`, `/context`), `/commands`, `/skills`,
-  `/mcp`, `/autocommit`, `/exit` (`/quit`)
-- Custom Markdown slash commands from `~/.kiss/commands`,
-  `<project>/.kiss/commands`, `~/.claude/commands`,
-  `<project>/.claude/commands`
-- Agent Skills from `~/.kiss/skills`, `<project>/.kiss/skills`, Claude skill
-  dirs, `.agents/skills`, bundled Sorcar skills
-- MCP server discovery from `~/.kiss/mcp.json`, `<project>/.kiss/mcp.json`,
-  `<project>/.mcp.json`
-- VS Code "Tricks" button entries from `~/.kiss/INJECTIONS.md`
-- VS Code welcome-screen sample-task chips from `~/.kiss/SAMPLE_TASKS.md`
+Diff (logical):
 
-### `sorcar mcp` sub-card — table with these rows
-- `sorcar mcp add <name> <cmd…>` — Register stdio/`--transport http`/`sse`
-  server in `--scope user` or `--scope project`; `--env KEY=VALUE`,
-  `--header 'Key: Value'` (repeatable).
-- `sorcar mcp list [--ping]` — List configured servers; `--ping` reports
-  live status and tool counts.
-- `sorcar mcp get <name>` — Print one server's config as JSON.
-- `sorcar mcp remove <name>` — Delete a server from every writable config.
-- `sorcar mcp auth <name> [--no-browser]` — OAuth 2.1 browser flow (DCR +
-  PKCE); tokens under `~/.kiss/mcp_auth/`.
-- `sorcar mcp logout <name>` — Delete stored OAuth tokens.
-- `sorcar mcp debug <name>` — Dump capabilities, tools, resources, prompts.
+```ts
+// before
+if (!context.globalState.get<boolean>('sidebarWidened')) { ... }
+let shouldAutoOpen = !context.globalState.get<boolean>('firstLaunchDone');
+void context.globalState.update('firstLaunchDone', undefined);
+await context.globalState.update('sidebarWidened', true);
+await context.globalState.update('firstLaunchDone', true);
 
-## Models section content (from README)
-- OpenAI 70, Anthropic 13, Gemini/Google 23, Together AI 77, MiniMax 5,
-  OpenRouter 303, Claude Code CLI (`cc/*`) 3, Codex CLI (`codex/*`) 7.
-- Totals: 485 gen, 321 fc, 7 emb.
+// after
+if (!context.workspaceState.get<boolean>('sidebarWidened')) { ... }
+let shouldAutoOpen = !context.workspaceState.get<boolean>('firstLaunchDone');
+void context.workspaceState.update('firstLaunchDone', undefined);
+await context.workspaceState.update('sidebarWidened', true);
+await context.workspaceState.update('firstLaunchDone', true);
+```
 
-## Messaging section content (from README)
-BlueBubbles · Discord · Feishu · Gmail · Google Chat · iMessage · IRC · LINE ·
-Matrix · Mattermost · Microsoft Teams · Nextcloud Talk · Nostr · Phone
-Control · Signal · Slack · SMS · Synology Chat · Telegram · Tlon · Twitch ·
-WhatsApp · Zalo. Plus Govee smart-home CLI. Lives in
-`src/kiss/agents/third_party_agents/`.
+## Reproduction / regression test
 
-## What is in the Name content (from README)
-KISS Agent Framework — small agent runtime around the KISS principle.
-KISS Sorcar named after P. C. Sorcar, Bengali magician. "Sorcar" also means
-government in Bengali.
+`src/kiss/agents/vscode/test/secondarySidebarPerWorkspace.test.js`
+loads the real compiled `out/extension.js`, stubs only the modules
+that would pull in VS Code/jsdom/the daemon socket (`vscode`,
+`SorcarSidebarView`, `DependencyInstaller`, `gitApi`, `reloadGuard`),
+and runs `activate()` three times:
 
-## Contributing / License (from README)
-- Contributing: issues welcome; KISS Sorcar can help implement/review.
-- License: Apache-2.0, link to `LICENSE`.
+1. Workspace 1 — fresh `workspaceState` and fresh `globalState`.
+   Asserts `widenToOneThird` fires once and `focusChatInput` fires.
+1. Workspace 2 — fresh `workspaceState`, SAME `globalState` memento
+   as workspace 1. Asserts both fire again. This is the case that
+   reproduces the original bug; before the fix the `globalState`
+   flags from workspace 1 suppressed both calls.
+1. Workspace 2 reopened — same `workspaceState` memento as #2.
+   Asserts neither fires (idempotency — the user's manual width
+   tweaks must survive reopens).
 
-## Steps already completed
-1. Read `README.md` end-to-end and inventoried its sections.
-2. Read current `index.html` (1162 lines) — captured every existing section
-   (`#install`, `#compare`, `#features`, `#architecture`, `#models`,
-   `#agents`, `#papers`, `#demo`, `#citation`), the nav, the hero, the
-   benchmark band, the demo video, and the footer.
-3. Saved backup of original site at `/tmp/index.bak.html`.
+Verified by temporarily reverting the compiled bundle to use
+`globalState` and confirming the test fails with
+`workspace 2: widenToOneThird must fire exactly once on a NEW workspace (got 0)`, then restoring the fix and confirming the test
+passes.
 
-## Steps remaining (next session)
-1. Rewrite `/Users/ksen/work/kisssorcar.github.io/index.html` from scratch:
-   - Preserve `<head>` SEO/meta/og tags exactly.
-   - Preserve hero block (logo, Einstein quote, h1, lead, benchmark band,
-     screenshot video) — they are great as-is.
-   - Update nav links: Compare · Name · Install · CLI · Agents · Models ·
-     Contributing · License · Citation.
-   - Insert sections in the README order documented above.
-   - Add `@property --angle` rotating conic-gradient border on
-     `.section-card`, `prefers-reduced-motion` guard, IntersectionObserver
-     scroll-reveal with stagger, cursor-spotlight on inner cards, magic-dust
-     canvas in hero.
-2. Open the file in a local file:// URL to sanity-check rendering, fix
-   any visual issues.
-3. Commit and push? — not asked; only modify the file. Leave staging to the
-   user.
-4. Clean up `PWD/tmp/` and `PROGRESS.md` is the project-level tracker so it
-   stays.
+## Verification
+
+- `npm run compile` clean.
+- `node test/secondarySidebarPerWorkspace.test.js` — 3/3 OK.
+- `npm run check` (typecheck + lint + all 27 vscode tests) green.
+- `uv run check --full` green at the repo root (ruff, mypy, pyright,
+  vscode-check, mdformat).
+
+## Incidental clean-ups
+
+- `src/kiss/agents/vscode/src/DependencyInstaller.ts` — auto-fixed a
+  pre-existing prettier violation flagged by `npm run check`.
+- `RECIPES.md` — auto-fixed a pre-existing `mdformat` violation
+  flagged by `uv run check --full`.
