@@ -4,11 +4,15 @@ Use internet search extensively.
 
 ## Trick
 
-Reproduce the issue by writing an integration test. Then fix the issue.
+Reproduce the issue by writing integration tests. Then fix the issue.
 
 ## Trick
 
-Use gpt-5.5 model (not codex) for thorough review and use claude-opus-4-7 model for all tasks including coding, bug fixing, and test creation.
+Reproduce the issue by writing end-to-end test. Then fix the issue.
+
+## Trick
+
+Use claude-opus-4-7 model for all tasks including coding, bug fixing, and test creation. Use gpt-5.5 model (not codex) for thorough review of the work done by the other model.
 
 ## Trick
 
@@ -16,7 +20,7 @@ can you review the updates made in the last task using gpt-5.5 (non codex) and c
 
 ## Trick
 
-Use gpt-5.5 model (not codex) and claude-opus-4-7 for thorough review and use openrouter/z-ai/glm-5.2 model for all tasks including coding, bug fixing, and test creation.
+Use openrouter/z-ai/glm-5.2 model for all tasks including coding, bug fixing, and test creation.  ALWAYS use gpt-5.5 model (not codex) and claude-opus-4-7 to carefully and thoroughly review the work done by openrouter/z-ai/glm-5.2.
 
 ## Trick
 
