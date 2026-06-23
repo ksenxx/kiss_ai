@@ -1345,9 +1345,7 @@ function installMarkdownAssets(kissProjectPath: string): void {
       fs.copyFileSync(src, dst);
       log(`Installed ${path.basename(src)} at ${dst}`);
     } catch (e: unknown) {
-      log(
-        `Failed to install ${path.basename(src)}: ${(e as Error).message}`,
-      );
+      log(`Failed to install ${path.basename(src)}: ${(e as Error).message}`);
     }
   }
 }
