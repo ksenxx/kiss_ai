@@ -10,7 +10,13 @@
   {{HEAD_STYLE}}
 </head>
 <body{{BODY_CLASS_ATTR}}>
-  <div id="app">
+  <div id="kiss-server-loading" role="status" aria-live="polite">
+    <div class="kiss-server-loading-inner">
+      <div class="kiss-server-loading-spinner" aria-hidden="true"></div>
+      <div class="kiss-server-loading-msg">KISS Sorcar Server is starting ...</div>
+    </div>
+  </div>
+  <div id="app" style="display:none;">
     <div id="tab-bar"><div id="tab-list"></div></div>
 
     <div id="tab-status-bar">
