@@ -2071,3 +2071,49 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--dim); }
+
+/* ── KISS Sorcar server-starting overlay ────────────
+   Shown above #app while the kiss-web daemon UDS socket is not yet
+   connected (initial bootstrap or transient reconnect).  Hides the
+   tabs / welcome page so the user does not see a half-functional UI
+   that cannot reach the backend.  Toggled by setServerLoading() in
+   main.js in response to the ``daemonStatus`` message from the
+   extension host (SorcarSidebarView). */
+#kiss-server-loading {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg);
+  color: var(--fg);
+  z-index: 9999;
+}
+
+.kiss-server-loading-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  text-align: center;
+  padding: 16px;
+}
+
+.kiss-server-loading-spinner {
+  width: 28px;
+  height: 28px;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: kiss-server-loading-spin 1s linear infinite;
+}
+
+.kiss-server-loading-msg {
+  font-size: var(--fs-lg);
+  color: var(--fg);
+}
+
+@keyframes kiss-server-loading-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}

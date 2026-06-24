@@ -237,6 +237,7 @@ type ToWebviewMessageBody =
       chatHasMoreTasks: boolean;
     }
   | {type: 'measureSize'}
+  | {type: 'daemonStatus'; connected: boolean}
   | {type: 'updateSetting'; key: string; value: unknown}
   | {
       type: 'openSubagentTab';
