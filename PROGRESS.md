@@ -1,88 +1,132 @@
-# PROGRESS — Per-workspace secondary-sidebar bootstrap fix
+# PROGRESS — Hide KISS Sorcar tabs until kiss-web is started
 
 ## Task
 
-When a NEW VS Code workspace is opened, the secondary sidebar should
-(a) widen to approximately one-third of the VS Code window and
-(b) auto-select the KISS Sorcar tab. Before this fix, both behaviours
-only fired on the very first activation per machine because the
-gates lived in `context.globalState`.
+Until the kiss-web daemon has connected, the VS Code KISS Sorcar
+secondary-sidebar webview must NOT show its tab bar or welcome page.
+Instead it must show "KISS Sorcar Server is starting ..." with a
+spinner. Once the daemon socket is connected the regular UI must
+appear. A daemon disconnect (server reset) must re-show the overlay
+until auto-reconnect succeeds.
 
 ## Root cause
 
-`src/kiss/agents/vscode/src/extension.ts` gated the widen + auto-open
-logic on `context.globalState.get('sidebarWidened')` and
-`context.globalState.get('firstLaunchDone')`. `globalState` is
-per-install (shared across every workspace on the machine), so the
-second and later workspaces on the same machine inherited the
-flags from the first workspace and the activate handler skipped both
-the `widenToOneThird()` call AND the `focusChatInput()` call.
-
-VS Code stores sidebar widths per workspace, so without the
-bootstrap call each new workspace landed at VS Code's default
-narrow secondary-sidebar width and at whichever view happened to be
-selected — not necessarily the KISS Sorcar tab.
+`media/chat.html` rendered `#app` (tabs, welcome, input area, …)
+immediately on first paint, and `SorcarSidebarView.ts` never told the
+webview about the daemon's UDS connection state. Result: while
+`AgentClient` was still trying to reach `~/.kiss/sorcar.sock` on
+launch the user saw a fully-rendered (but non-functional) sidebar.
 
 ## Fix
 
-`src/kiss/agents/vscode/src/extension.ts`: switched both flags from
-`context.globalState` to `context.workspaceState`. The gate is now
-per-workspace (the natural granularity), so the bootstrap fires
-exactly once per workspace and never overwrites the user's manual
-width adjustments on later reopens.
+1. **`src/kiss/agents/vscode/src/types.ts`** — added a new
+   `ToWebviewMessageBody` variant
+   `{type: 'daemonStatus'; connected: boolean}` so the typecheck
+   covers the new control message.
 
-Diff (logical):
+1. **`src/kiss/agents/vscode/src/AgentClient.ts`** — emit a new
+   `'disconnect'` event on socket close so the sidebar can re-show
+   the loading overlay during reconnects:
 
-```ts
-// before
-if (!context.globalState.get<boolean>('sidebarWidened')) { ... }
-let shouldAutoOpen = !context.globalState.get<boolean>('firstLaunchDone');
-void context.globalState.update('firstLaunchDone', undefined);
-await context.globalState.update('sidebarWidened', true);
-await context.globalState.update('firstLaunchDone', true);
+   ```ts
+   sock.on('close', () => {
+     this._connecting = false;
+     this._socket = null;
+     this.emit('disconnect');
+     if (this._disposed) return;
+     this._scheduleReconnect();
+   });
+   ```
 
-// after
-if (!context.workspaceState.get<boolean>('sidebarWidened')) { ... }
-let shouldAutoOpen = !context.workspaceState.get<boolean>('firstLaunchDone');
-void context.workspaceState.update('firstLaunchDone', undefined);
-await context.workspaceState.update('sidebarWidened', true);
-await context.workspaceState.update('firstLaunchDone', true);
-```
+1. **`src/kiss/agents/vscode/src/SorcarSidebarView.ts`** —
+   added `private _daemonConnected = false` and three hooks:
+
+   ```ts
+   client.on('connect', () => {
+     // (existing setWorkDir send …)
+     this._daemonConnected = true;
+     this._sendToWebview({type: 'daemonStatus', connected: true});
+   });
+   client.on('disconnect', () => {
+     this._daemonConnected = false;
+     this._sendToWebview({type: 'daemonStatus', connected: false});
+   });
+   // in case 'ready' (webview just attached its message listener):
+   this._sendToWebview({
+     type: 'daemonStatus',
+     connected: this._daemonConnected,
+   });
+   ```
+
+   The `ready` push covers webview reloads (e.g. after a VS Code
+   reload window) where the webview's DOM was reset but the daemon is
+   already connected — the overlay would otherwise stay up forever.
+
+1. **`src/kiss/agents/vscode/media/chat.html`** — added a fixed
+   `#kiss-server-loading` overlay element above `#app` and started
+   `#app` with `style="display:none;"`:
+
+   ```html
+   <div id="kiss-server-loading" role="status" aria-live="polite">
+     <div class="kiss-server-loading-inner">
+       <div class="kiss-server-loading-spinner" aria-hidden="true"></div>
+       <div class="kiss-server-loading-msg">KISS Sorcar Server is starting ...</div>
+     </div>
+   </div>
+   <div id="app" style="display:none;">…</div>
+   ```
+
+1. **`src/kiss/agents/vscode/media/main.css`** — themed full-viewport
+   overlay with a CSS-keyframe spinner, using the VS Code theme
+   variables already exposed at `:root` (`--bg`, `--fg`, `--accent`,
+   `--border`).
+
+1. **`src/kiss/agents/vscode/media/main.js`** — added
+   `setServerLoading(loading)` and a `case 'daemonStatus'` early in
+   `handleEvent` that toggles `#kiss-server-loading` /
+   `#app` `display` based on `ev.connected`.
 
 ## Reproduction / regression test
 
-`src/kiss/agents/vscode/test/secondarySidebarPerWorkspace.test.js`
-loads the real compiled `out/extension.js`, stubs only the modules
-that would pull in VS Code/jsdom/the daemon socket (`vscode`,
-`SorcarSidebarView`, `DependencyInstaller`, `gitApi`, `reloadGuard`),
-and runs `activate()` three times:
+`src/kiss/agents/vscode/test/serverLoadingOverlay.test.js` (registered
+in `package.json` `test` script) is a real end-to-end test against
+the compiled `out/SorcarSidebarView.js` and `out/AgentClient.js`:
 
-1. Workspace 1 — fresh `workspaceState` and fresh `globalState`.
-   Asserts `widenToOneThird` fires once and `focusChatInput` fires.
-1. Workspace 2 — fresh `workspaceState`, SAME `globalState` memento
-   as workspace 1. Asserts both fire again. This is the case that
-   reproduces the original bug; before the fix the `globalState`
-   flags from workspace 1 suppressed both calls.
-1. Workspace 2 reopened — same `workspaceState` memento as #2.
-   Asserts neither fires (idempotency — the user's manual width
-   tweaks must survive reopens).
+1. Spawns a real UDS server at `~/.kiss/sorcar.sock` (with `$HOME`
+   redirected to a tempdir).
+1. Stubs only the `vscode` module via the same `_vscode-stub.js`
+   pattern used by `syncWorkDir.test.js`, and provides a fake
+   `WebviewView` that captures `webview.postMessage(...)` and lets
+   the test fire `onDidReceiveMessage` callbacks.
+1. Asserts five things, each one matching a real bug surface:
+   - the initial HTML from `buildChatHtml(…)` contains the
+     `id="kiss-server-loading"` overlay AND `<div id="app" style="display:none">`,
+   - a `ready` message posted to the view while the daemon socket is
+     down triggers a `daemonStatus connected:false` reply (so a
+     reloaded webview re-locks the overlay),
+   - starting the UDS server causes the auto-reconnect to fire
+     `connect`, which posts `daemonStatus connected:true`,
+   - destroying the accepted server socket triggers
+     `daemonStatus connected:false` (re-showing the overlay),
+   - the next auto-reconnect again posts `connected:true`.
 
-Verified by temporarily reverting the compiled bundle to use
-`globalState` and confirming the test fails with
-`workspace 2: widenToOneThird must fire exactly once on a NEW workspace (got 0)`, then restoring the fix and confirming the test
-passes.
+Reproduction verified by manually stripping the new `daemonStatus`
+posts from the compiled JS — the test failed on tests 3, 4, 5 with
+`no daemonStatus(connected:…)` waitFor timeouts. Restoring the fix
+turned all five back green.
 
 ## Verification
 
-- `npm run compile` clean.
-- `node test/secondarySidebarPerWorkspace.test.js` — 3/3 OK.
-- `npm run check` (typecheck + lint + all 27 vscode tests) green.
-- `uv run check --full` green at the repo root (ruff, mypy, pyright,
-  vscode-check, mdformat).
+- `npm run compile` — clean.
+- `node test/serverLoadingOverlay.test.js` — 5/5 OK.
+- `npm run check` — typecheck + lint + all 28 webview tests green
+  (including the new one).
+- `uv run check --full` — ruff, mypy, pyright, vscode-check,
+  mdformat all green.
 
 ## Incidental clean-ups
 
-- `src/kiss/agents/vscode/src/DependencyInstaller.ts` — auto-fixed a
-  pre-existing prettier violation flagged by `npm run check`.
-- `RECIPES.md` — auto-fixed a pre-existing `mdformat` violation
-  flagged by `uv run check --full`.
+- `media/main.css` had four pre-existing `stylelint`
+  `rule-empty-line-before` / `at-rule-empty-line-before` violations
+  in the new overlay block; auto-fixed via
+  `npx stylelint media/**/*.css --fix`.

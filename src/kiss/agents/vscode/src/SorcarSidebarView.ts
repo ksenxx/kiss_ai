@@ -97,6 +97,16 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
    * activation can reconnect and re-subscribe.
    */
   private _client: AgentClient | null = null;
+  /**
+   * Whether the kiss-web daemon UDS socket is currently connected.
+   *
+   * Drives the "KISS Sorcar Server is starting ..." overlay in the
+   * webview: while ``false`` the webview hides ``#app`` and renders the
+   * loading overlay; while ``true`` the regular chat UI is shown.
+   * Flipped by the ``connect``/``disconnect`` events on
+   * :class:`AgentClient`.
+   */
+  private _daemonConnected: boolean = false;
   /** The currently active tab ID (updated on every message with tabId). */
   private _activeTabId: string = '';
   private _extensionUri: vscode.Uri;
@@ -298,6 +308,17 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     // per-connection state starts empty for each new socket.
     client.on('connect', () => {
       client.sendCommand({type: 'setWorkDir', workDir: this._getWorkDir()});
+      this._daemonConnected = true;
+      // Hide the "KISS Sorcar Server is starting ..." overlay and
+      // reveal the regular chat UI now that the daemon is reachable.
+      this._sendToWebview({type: 'daemonStatus', connected: true});
+    });
+    client.on('disconnect', () => {
+      this._daemonConnected = false;
+      // The daemon socket dropped (e.g. ``serverReset`` / installer
+      // restart) — re-show the loading overlay until AgentClient's
+      // auto-reconnect succeeds.
+      this._sendToWebview({type: 'daemonStatus', connected: false});
     });
     client.connect();
     // Keep the daemon in sync whenever the workspace folder set
@@ -870,6 +891,16 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         const readyTabId = message.tabId;
         if (readyTabId) this._activeTabId = readyTabId;
         const client = this._getClient();
+        // Reflect the current daemon connection state to a freshly
+        // (re)loaded webview so it knows whether to keep the
+        // "KISS Sorcar Server is starting ..." overlay up or hide it
+        // and show the regular tabs.  The HTML defaults to showing the
+        // overlay; this message decides which state to settle on once
+        // the webview script is ready.
+        this._sendToWebview({
+          type: 'daemonStatus',
+          connected: this._daemonConnected,
+        });
         client.sendCommand({type: 'getModels'});
         this._sendWelcomeSuggestions();
         this._sendRemoteUrl();
