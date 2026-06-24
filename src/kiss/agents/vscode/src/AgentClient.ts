@@ -97,6 +97,10 @@ export class AgentClient extends EventEmitter {
     sock.on('close', () => {
       this._connecting = false;
       this._socket = null;
+      // Tell listeners (SorcarSidebarView) the daemon is gone so the
+      // webview can re-show the "KISS Sorcar Server is starting ..."
+      // overlay until the auto-reconnect succeeds.
+      this.emit('disconnect');
       if (this._disposed) return;
       this._scheduleReconnect();
     });
