@@ -26,26 +26,6 @@ from kiss.core.models.model import (
 logger = logging.getLogger(__name__)
 
 
-def _expand_pwd_prefix(file_path: str, work_dir: str | None) -> str:
-    """Expand a literal ``PWD/`` prefix to the agent's working directory.
-
-    The system prompt instructs the model to interpret ``PWD`` as the
-    current working directory, but models routinely pass it through as a
-    literal path component (e.g. ``PWD/SORCAR.md``).  This helper
-    rewrites such paths so the subsequent Read still works.
-    """
-    if file_path == "PWD":
-        return work_dir or os.getcwd()
-    if file_path.startswith("PWD/"):
-        base = work_dir or os.getcwd()
-        # Strip extra leading slashes (e.g. "PWD//etc/passwd"):
-        # os.path.join discards *base* when the second component is
-        # absolute, which would silently escape the working directory.
-        suffix = file_path[len("PWD/") :].lstrip("/")
-        return os.path.join(base, suffix) if suffix else base
-    return file_path
-
-
 def _stale_worktree_fallback(resolved: Path) -> Path | None:
     """If *resolved* lives under a now-deleted ``.kiss-worktrees/kiss_wt-*``
     directory, return the equivalent path with that worktree segment
@@ -489,8 +469,7 @@ class UsefulTools:
             max_lines: Maximum number of lines to return.
         """
         try:
-            expanded = _expand_pwd_prefix(file_path, self.work_dir)
-            expanded = _absolutize(expanded, self.work_dir)
+            expanded = _absolutize(file_path, self.work_dir)
             resolved = Path(expanded).resolve()
 
             # Active-worktree remap: if work_dir is inside a live
@@ -607,8 +586,7 @@ class UsefulTools:
             content: The full content to write to the file.
         """
         try:
-            expanded = _expand_pwd_prefix(file_path, self.work_dir)
-            expanded = _absolutize(expanded, self.work_dir)
+            expanded = _absolutize(file_path, self.work_dir)
             resolved = Path(expanded).resolve()
             # Active-worktree remap: redirect parent-repo absolute paths
             # into the active worktree so writes never leak out of the
@@ -650,8 +628,7 @@ class UsefulTools:
             The output of the edit operation.
         """
         try:
-            expanded = _expand_pwd_prefix(file_path, self.work_dir)
-            expanded = _absolutize(expanded, self.work_dir)
+            expanded = _absolutize(file_path, self.work_dir)
             resolved = Path(expanded).resolve()
             # Active-worktree remap: redirect parent-repo absolute paths
             # into the active worktree so edits never leak out of the
