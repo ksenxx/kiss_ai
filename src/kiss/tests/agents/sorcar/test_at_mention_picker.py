@@ -7,7 +7,7 @@
 Covers the prompt_toolkit dropdown added in
 :mod:`kiss.agents.sorcar.cli_prompt`: pressing ``@`` must immediately
 offer the project's files and folders, Up/Down must navigate the menu,
-and Tab/Enter must insert the highlighted ``PWD/<path>`` mention
+and Tab/Enter must insert the highlighted ``./<path>`` mention
 without submitting the line.
 """
 
@@ -76,7 +76,7 @@ def test_at_press_immediately_lists_files_and_folders(tmp_path: Path) -> None:
     assert "subdir/" in shown  # folders are offered too
     assert "subdir/gamma.txt" in shown
     for c in completions:
-        assert c.text.startswith("PWD/")
+        assert c.text.startswith("./")
         assert c.text.endswith(" ")
         assert c.start_position == -1  # replaces just the "@"
 
@@ -92,7 +92,7 @@ def test_at_query_filters_and_replaces_whole_token(tmp_path: Path) -> None:
     for c in completions:
         assert "alp" in str(c.display_text)
         assert c.start_position == -len("@alp")
-    assert any(c.text == "PWD/alpha.py " for c in completions)
+    assert any(c.text == "./alpha.py " for c in completions)
 
 
 def test_folder_completion_meta_marks_folders(tmp_path: Path) -> None:
@@ -105,7 +105,7 @@ def test_folder_completion_meta_marks_folders(tmp_path: Path) -> None:
     by_display = {str(c.display_text): c for c in completions}
     folder = by_display["subdir/"]
     assert "folder" in str(folder.display_meta_text)
-    assert folder.text == "PWD/subdir/ "
+    assert folder.text == "./subdir/ "
 
 
 def test_slash_menu_lists_commands_with_help(tmp_path: Path) -> None:
@@ -254,7 +254,7 @@ def test_arrow_down_then_enter_selects_mention(tmp_path: Path) -> None:
 
     Drives a real PromptSession through a pipe: the first Enter lands
     while a completion is highlighted, so it must *insert* the
-    ``PWD/<path>`` mention (not submit); the second Enter submits the
+    ``./<path>`` mention (not submit); the second Enter submits the
     line.
     """
     project = _make_project(tmp_path)
@@ -276,9 +276,9 @@ def test_arrow_down_then_enter_selects_mention(tmp_path: Path) -> None:
                 line = reader.read("> ")
         finally:
             timer.cancel()
-    assert line.startswith("look at PWD/")
+    assert line.startswith("look at ./")
     assert line.endswith(" please")
-    mentioned = line[len("look at PWD/"):-len(" please")].strip()
+    mentioned = line[len("look at ./"):-len(" please")].strip()
     assert (project / mentioned).exists()
 
 
@@ -302,7 +302,7 @@ def test_tab_confirms_highlighted_completion(tmp_path: Path) -> None:
                 line = reader.read("> ")
         finally:
             timer.cancel()
-    assert line == "PWD/alpha.py now"
+    assert line == "./alpha.py now"
 
 
 def test_readline_history_is_migrated_once(tmp_path: Path) -> None:

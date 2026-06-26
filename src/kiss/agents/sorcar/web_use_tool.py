@@ -169,8 +169,7 @@ class WebUseTool:
         self.viewport = viewport
         self.user_data_dir = user_data_dir
         self._headless = headless
-        # Agent working directory: relative screenshot paths (and the
-        # literal ``PWD/`` prefix the system prompt mandates) are
+        # Agent working directory: relative screenshot paths are
         # anchored here, consistent with the Read/Write/Edit/Bash tools.
         self.work_dir = work_dir
         self._playwright: Any = None
@@ -564,13 +563,11 @@ class WebUseTool:
             "Error taking screenshot: <message>" on error."""
         self._ensure_browser()
         try:
-            from kiss.agents.sorcar.useful_tools import _expand_pwd_prefix
-
-            # Anchor the path the same way the file tools do: expand a
-            # literal ``PWD/`` prefix and resolve relative paths against
-            # the agent work_dir (NOT the daemon process cwd — in
-            # worktree mode that would silently escape the worktree).
-            path = Path(_expand_pwd_prefix(file_path, self.work_dir))
+            # Anchor the path the same way the file tools do: resolve
+            # relative paths against the agent work_dir (NOT the
+            # daemon process cwd — in worktree mode that would
+            # silently escape the worktree).
+            path = Path(file_path)
             if not path.is_absolute() and self.work_dir:
                 path = Path(self.work_dir) / path
             path = path.resolve()
