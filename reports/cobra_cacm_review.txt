@@ -1,0 +1,155 @@
+Review of "Move Fast and Fix Things: The Cobra Analyzer"
+Submitted to Communications of the ACM
+Recommendation: major revision before further consideration.
+========================================================================
+
+WHAT THE PAPER DOES
+
+The manuscript is a tutorial walk-through of Cobra -- a token-based
+static analyzer that the author has maintained since the JPL release in
+2016 -- and of tgrep, a ~165-line shell front end shipped with Cobra
+5.3. The engine treats source as a stream of lexical tokens, lets the
+user write Thompson-style regular expressions over them with bound
+metavariables and positional constraints, collects matches into named
+"pattern sets" combinable with Boolean and Allen-interval operators,
+and exposes a small inline scripting language for further analyses.
+Demonstrations use Linux 5.0.9 (~18M LoC) and cover missing NULL
+checks after fopen, negative array indices, an AUTOSAR rule, CVE-2018-
+19475 (snprintf return value), and a divide-by-zero hunt.
+
+The exposition is clean and the examples are pleasant to read. The
+problem is that, as written, this is a polished chapter from the 2025
+Cobra book, not yet a CACM article. Below I lay out, concretely, what
+would have to change to fix that.
+
+1. NOVELTY -- THE CENTRAL ISSUE
+
+(a) Versus the author's own prior work. The 2017 ISSE paper ("Cobra:
+a light-weight tool for static and dynamic program analysis," ISSE
+13(1):35-49) already states the core contributions: token-expression
+matching as an alternative to text-based grep, the language-neutral
+lexer architecture, interactive use on million-LoC inputs, and the
+dual static/runtime story. Everything genuinely new here -- tgrep,
+bound variables (x:@ident), named pattern sets, Allen-interval set
+operators, the inline scripting language, multi-core parallelism, the
+CEV checker library, the HBM forward-looking remark -- is engineering
+on top of that 2017 paper. The manuscript never makes the delta to
+ISSE 2017 explicit. CACM readers will want "here is what is new since
+the last paper, and here is the evidence that it matters."
+
+(b) Versus the field. The reference list has 12 entries; nine are by
+the author or are dependencies (Thompson, Allen, Graphviz, AUTOSAR, an
+NVD URL). There is no citation of, or comparison with, any of the
+modern tools that occupy exactly this niche:
+  - Semgrep (~10k stars on GitHub; AST patterns with $X metavariables,
+    ellipsis, taint mode, 35+ languages);
+  - Coccinelle (SmPL, CTL matching, mass-merged into the Linux kernel
+    as scripts/coccinelle/, the prior art for x:@ident-style binding);
+  - CodeQL/QL (relational DB + Datalog-style queries, the engine
+    behind GitHub Code Scanning);
+  - comby (lightweight structural matching, :[hole] templates, ~40
+    languages);
+  - ast-grep (tree-sitter based, Rust, code-shaped patterns, ripgrep-
+    class throughput);
+  - srcML (lossless XML AST + srcQL since v1.1.0, Aug 2025) and the
+    Engler/Metal/xgcc lineage that became Coverity (OSDI'00 Best Paper).
+Without these, the implicit claim that "there is a capability gap...
+that puts grep at a disadvantage" is historically wrong: Coccinelle
+has filled it for C since 2008, Semgrep since 2019, comby since 2019,
+ast-grep since 2021. The right framing is not "we fill a gap" but
+"here is the distinctive design point in a now-crowded space, and here
+is why token-level matching beats AST-level matching for these uses."
+The 2017 design predates most competitors -- a legitimate priority
+claim -- but the manuscript must make and defend it.
+
+(c) Token-level vs. AST-level matching is the most interesting
+technical question and is never confronted. Coccinelle is whitespace-,
+naming-, and CFG-insensitive by construction; Semgrep absorbs constant
+propagation and AC-matching of && / ||; both handle import aliasing.
+Cobra cannot. Conversely, token matching is preprocessor-robust,
+build-free, retargets in hours, and -- the author's strongest argument
+-- scans Linux 5.0.9 in <4 s after a 14.5 s tokenize. That is a real
+advantage if it is quantified head-to-head. As written, the reader
+must guess.
+
+2. EVALUATION -- WHAT IS MISSING
+
+The fopen/fprintf case finds "a single match in a driver file. That
+match disappeared in later releases." No commit hash, no statement of
+whether it was a real bug, a CVE, or a maintainer-deemed false
+positive. The CVE-2018-19475 example finds 987 matches in Linux 5.0.9
+but never reports how many are true positives -- and, more pointedly,
+never tries the check on the project that actually had the CVE
+(sk1project/UniConvertor, Ghostscript). The divide-by-zero analysis
+finds 26 sites, 24 of which collapse to a single false-positive
+cluster, and 2 of which "can indeed return zero values" -- but were
+they exploitable, were they fixed? The AUTOSAR M5-2-1 check finds 4
+matches with no breakdown. The fopen example even ends with "Bad =
+Check - Good" empty -- i.e. all four matches were false positives,
+which is honest but cries out for a real-bug evaluation.
+
+This "the tool found N matches, end of paragraph" pattern is the
+single biggest weakness. Concrete suggestions:
+  - Run on a recognized benchmark (OWASP Benchmark Java, Juliet C/C++,
+    or the historical kernel-CVE set used by Doyensec 2022 and Konvu
+    2026) and report precision/recall against Semgrep OSS and
+    Coccinelle.
+  - Re-run the fopen, snprintf, and divide-by-zero checks on a corpus
+    where the true positives are known (the kernel commits that fixed
+    CVE-2018-19475-class bugs).
+  - Replace the lone "14.5 s + 3.4 s on 8 cores" datapoint with a
+    scaling curve from 1 to 32 cores, and compare against rg,
+    ast-grep, and Semgrep on the same hardware and corpus.
+  - Add a small developer-time study: same bug pattern in Cobra vs.
+    Semgrep vs. Coccinelle, time to a passing rule.
+
+3. WRITING AND PRESENTATION -- SPECIFIC FIXES
+
+- The title "Move Fast and Fix Things" is catchy but says nothing
+  about the topic. Try "Token-level pattern matching for interactive
+  bug discovery in million-line code bases."
+- Section 1 opens by treating grep as the alternative; in 2025 it is
+  not. Rewrite around Semgrep and ast-grep.
+- "Can be applied to... HTML, French poetry, or Latin texts" reads as
+  a flourish. Either show a non-code use that matters, or drop it.
+- The inline programming language (Sections 3.8-3.9) is presented by
+  example only. Give it a one-page BNF, state termination and typing,
+  and justify why a new language was needed instead of an embedded
+  Lua/Python.
+- The HBM remark in the abstract is speculative and out of place. Move
+  it to a Future Work paragraph or remove it.
+- Figure 1's bound-variable annotation is correct, but the figure is
+  screenshot-grey and hard to read in print.
+- Section 3.7's `pe ZU` example admits the pattern is broken, then
+  fixes it. Lead with the working formulation; discuss the wrong one
+  as a brief lesson.
+- The Tcl/Tk GUI (icobra), the multi-language rule libraries, and the
+  runtime-verification mode are mentioned but never shown. In a
+  retrospective CACM piece each deserves a proper section.
+- Reference [10] is a bare URL; [7] is the author's own book without
+  an evaluation hook. Tighten the bibliography to ~30 entries and put
+  the field on the map.
+
+4. POSITIONING FOR CACM
+
+CACM articles work when they tell the broad ACM membership why they
+should care. The story that would land: "After ten years of use at JPL
+and in safety-critical projects, here is what we learned about the
+trade-off between token-level and AST-level pattern matching, and why
+a 25k-LoC C tool with no dependencies still outperforms heavier
+analyzers for interactive developer use." Lead with that lesson, back
+it with the comparative numbers above, and the engineering catalogue
+becomes supporting evidence rather than the main course.
+
+SUMMARY JUDGMENT
+
+The Cobra design is real, the engine is fast, the open-source release
+and the new book are credible artifacts, and the author has the
+authority to write the definitive CACM piece on this style of
+analysis. The submitted draft is not yet that piece. With (i) an
+explicit delta to ISSE 2017, (ii) a serious related-work section
+grounded in Semgrep, Coccinelle, CodeQL, comby, and ast-grep,
+(iii) precision/recall and head-to-head timing on a recognized
+benchmark, and (iv) a sharper CACM-style framing of the lesson, this
+could be a strong and durable contribution. Without those changes I
+would not recommend acceptance.
