@@ -469,8 +469,7 @@ class UsefulTools:
             max_lines: Maximum number of lines to return.
         """
         try:
-            expanded = _expand_pwd_prefix(file_path, self.work_dir)
-            expanded = _absolutize(expanded, self.work_dir)
+            expanded = _absolutize(file_path, self.work_dir)
             resolved = Path(expanded).resolve()
 
             # Active-worktree remap: if work_dir is inside a live
@@ -587,8 +586,7 @@ class UsefulTools:
             content: The full content to write to the file.
         """
         try:
-            expanded = _expand_pwd_prefix(file_path, self.work_dir)
-            expanded = _absolutize(expanded, self.work_dir)
+            expanded = _absolutize(file_path, self.work_dir)
             resolved = Path(expanded).resolve()
             # Active-worktree remap: redirect parent-repo absolute paths
             # into the active worktree so writes never leak out of the
@@ -630,8 +628,7 @@ class UsefulTools:
             The output of the edit operation.
         """
         try:
-            expanded = _expand_pwd_prefix(file_path, self.work_dir)
-            expanded = _absolutize(expanded, self.work_dir)
+            expanded = _absolutize(file_path, self.work_dir)
             resolved = Path(expanded).resolve()
             # Active-worktree remap: redirect parent-repo absolute paths
             # into the active worktree so edits never leak out of the
