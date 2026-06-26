@@ -528,24 +528,6 @@ class VSCodeServer(
             self.printer.broadcast(event)
 
 
-    def broadcast_new_tab(self, task_id: int) -> None:
-        """Ask the frontend to open a fresh chat tab and resume ``task_id``.
-
-        The webview's ``new_tab`` handler allocates a new tab id
-        (frontend-only concept) via ``createNewTab`` and then posts a
-        ``resumeSession`` command back with the same ``task_id`` —
-        ``_cmd_resume_session`` accepts a task-id-only resume payload.
-
-        ``taskId=""`` keeps this a global system event so it reaches
-        every connected client; otherwise ``WebPrinter.broadcast``
-        would fan it out only to subscribers of the freshly-minted
-        task (of which there are none until the frontend has
-        received this broadcast and allocated the tab).
-        """
-        self.printer.broadcast(
-            {"type": "new_tab", "task_id": int(task_id), "taskId": ""},
-        )
-
     def _get_models(self, conn_id: str = "") -> None:
         """Send available models list with usage counts and pricing.
 
