@@ -16,7 +16,7 @@ Each test class targets one confirmed bug (see ``tmp/findings-1.md``):
 * **A3** — ``_save_task_extra`` blind-overwrote the ``extra`` JSON
   column, destroying the ``is_favorite`` flag that
   ``_set_task_favorite`` merge-updates.
-* **A4** — ``_get_history_entry`` and ``_prefix_match_task`` lacked the
+* **A4** — ``_prefix_match_task`` lacked the
   sub-agent exclusion filter used by ``_load_history`` /
   ``_search_history``, so their row indexing disagreed with the UI list
   and sub-agent internal task text leaked into autocomplete.
@@ -39,7 +39,6 @@ from kiss.agents.sorcar.persistence import (
     _add_task,
     _delete_task,
     _flush_chat_events,
-    _get_history_entry,
     _load_chat_context_text,
     _load_chat_events_by_task_id,
     _load_history,
@@ -190,21 +189,6 @@ class TestA3SaveTaskExtraPreservesFavorite(_TempDbTestBase):
 
 class TestA4SubagentFilterConsistency(_TempDbTestBase):
     """[A4] history-entry indexing and prefix matching must skip sub-agents."""
-
-    def test_get_history_entry_index_matches_load_history(self) -> None:
-        _add_task("parent task")
-        time.sleep(0.01)
-        _add_task(
-            "subagent internal task",
-            extra={"subagent": {"parent_task_id": 1}},
-        )
-
-        entry = _get_history_entry(0)
-        assert entry is not None
-        assert entry["task"] == "parent task"
-        # Index space must agree with the filtered UI list.
-        assert entry["task"] == _load_history()[0]["task"]
-        assert _get_history_entry(1) is None
 
     def test_prefix_match_skips_subagent_rows(self) -> None:
         _add_task("visible parent task")

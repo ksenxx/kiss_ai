@@ -42,18 +42,6 @@ class TestTaskHistory:
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_get_history_entry(self):
-        th._add_task("first")
-        time.sleep(0.01)
-        th._add_task("second")
-        entry = th._get_history_entry(0)
-        assert entry is not None
-        assert entry["task"] == "second"
-        entry1 = th._get_history_entry(1)
-        assert entry1 is not None
-        assert entry1["task"] == "first"
-        assert th._get_history_entry(99999) is None
-
     def test_prefix_match_task_empty_query(self):
         th._add_task("anything")
         assert th._prefix_match_task("") == ""
@@ -250,15 +238,6 @@ class TestSaveTaskExtra:
         assert len(results) == 1
         stored = json.loads(str(results[0]["extra"]))
         assert stored["model"] == "test-model"
-
-    def test_extra_in_get_history_entry(self):
-        task_id, _ = th._add_task("entry extra", chat_id="1001")
-        th._save_task_extra({"tokens": 999}, task_id=task_id)
-        entry = th._get_history_entry(0)
-        assert entry is not None
-        stored = json.loads(str(entry["extra"]))
-        assert stored["tokens"] == 999
-
 
 class TestFileUsage:
     def setup_method(self):

@@ -874,20 +874,6 @@ class GitWorktreeOps:
         )
 
     @staticmethod
-    def load_baseline_commit(repo: Path, branch: str) -> str | None:
-        """Load the baseline commit SHA from git config.
-
-        Args:
-            repo: Git repo root path.
-            branch: The worktree branch name.
-
-        Returns:
-            The baseline commit SHA, or ``None`` if not stored (clean
-            worktree or legacy worktree without baseline support).
-        """
-        return GitWorktreeOps._load_branch_config(repo, branch, "kiss-baseline")
-
-    @staticmethod
     def _remove_path(path: Path) -> None:
         """Remove *path* whatever it is (symlink, dir, file, or absent).
 

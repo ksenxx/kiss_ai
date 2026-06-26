@@ -22,7 +22,6 @@ from kiss.agents.sorcar.persistence import (
     _add_task,
     _append_chat_event,
     _load_chat_context,
-    _load_task_chat_id,
     _record_frequent_task,
     _save_task_extra,
     _save_task_result,
@@ -68,19 +67,6 @@ class ChatSorcarAgent(SorcarAgent):
     def new_chat(self) -> None:
         """Reset to a new chat session (equivalent to VS Code 'Clear')."""
         self._chat_id = ""
-
-    def resume_chat(self, task: str) -> None:
-        """Resume a previous chat session by looking up the task's chat_id.
-
-        If the task has an associated ``chat_id`` in history, subsequent
-        ``run()`` calls will continue that session.
-
-        Args:
-            task: The task description string to look up.
-        """
-        chat_id = _load_task_chat_id(task)
-        if chat_id:
-            self.resume_chat_by_id(chat_id)
 
     def resume_chat_by_id(self, chat_id: str) -> None:
         """Resume a chat session using a stable chat identifier.
