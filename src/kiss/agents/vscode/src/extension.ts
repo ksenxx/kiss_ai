@@ -92,7 +92,7 @@ export function activate(context: vscode.ExtensionContext): void {
       const startCol = sel.start.character + 1;
       const endLine = sel.end.line + 1;
       const endCol = sel.end.character + 1;
-      const hunkRef = `text from (line, col)=(${startLine},${startCol}) to (line, col)=(${endLine},${endCol}) in PWD/${filePath}`;
+      const hunkRef = `text from (line, col)=(${startLine},${startCol}) to (line, col)=(${endLine},${endCol}) in ./${filePath}`;
       void sidebarView!.appendToInput(hunkRef);
     }),
   );

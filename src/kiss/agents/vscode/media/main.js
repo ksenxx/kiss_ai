@@ -3254,7 +3254,7 @@
           const after = inp.value.substring(pos);
           const insert = ev.paths
             .map(p => {
-              return 'PWD/' + p;
+              return './' + p;
             })
             .join(' ');
           const needSpace = before.length > 0 && !/\s$/.test(before);
