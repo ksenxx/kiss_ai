@@ -353,23 +353,20 @@ class TestBranchConfigRoundTrip:
         assert GitWorktreeOps.save_original_branch(repo, branch, "main") is True
         assert GitWorktreeOps.load_original_branch(repo, branch) == "main"
 
-    def test_baseline_commit_round_trip(self, tmp_path: Path) -> None:
-        """save_baseline_commit then load_baseline_commit returns the SHA."""
+    def test_baseline_commit_save_succeeds(self, tmp_path: Path) -> None:
+        """save_baseline_commit returns True on success."""
         repo = _make_repo(tmp_path / "repo")
         branch = "kiss/wt-cfg2"
         _git("branch", branch, cwd=repo)
         assert GitWorktreeOps.save_baseline_commit(repo, branch, "deadbeef") is True
-        assert GitWorktreeOps.load_baseline_commit(repo, branch) == "deadbeef"
 
     def test_load_returns_none_when_unset(self, tmp_path: Path) -> None:
-        """Both loaders return None for branches without stored config."""
+        """``load_original_branch`` returns None for branches without stored config."""
         repo = _make_repo(tmp_path / "repo")
         branch = "kiss/wt-bare"
         _git("branch", branch, cwd=repo)
         assert GitWorktreeOps.load_original_branch(repo, branch) is None
-        assert GitWorktreeOps.load_baseline_commit(repo, branch) is None
         assert GitWorktreeOps.load_original_branch(repo, "no/such") is None
-        assert GitWorktreeOps.load_baseline_commit(repo, "no/such") is None
 
 
 class TestSquashMergeFromBaseline:

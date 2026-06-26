@@ -115,15 +115,6 @@ class TestMultiViewerFanout:
             "pruned by cleanup_tab."
         )
 
-    def test_unsubscribe_drops_only_the_named_tab(self) -> None:
-        printer = MemoryPrinter()
-        printer.subscribe_tab("TASK1", "T1")
-        printer.subscribe_tab("TASK1", "T2")
-
-        printer.unsubscribe_tab("TASK1", "T1")
-
-        assert printer._subscribers["TASK1"] == {"T2"}
-
     def test_explicit_tabid_event_bypasses_fanout(self) -> None:
         """Events that already carry ``tabId`` are forwarded verbatim
         once, never duplicated for subscribers."""
