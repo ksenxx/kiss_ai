@@ -1,6 +1,6 @@
 ## Sorcar for paper review
 
-Can you read the paper at ~/Downloads/paper.pdf and review it deeply and thoroughly for ICSE 2027 conference. Look at related work. Do not write a typical review, but suggest how to improve the paper and results. Make sure that the review doesn't read like AI generated. Use internet search extensively. Judge the novelty of the work. Create an html report in PWD/reports and open it in the user's default browser?
+Can you read the paper at ~/Downloads/paper.pdf and review it deeply and thoroughly for ICSE 2027 conference. Look at related work. Do not write a typical review, but suggest how to improve the paper and results. Make sure that the review doesn't read like AI generated. Use internet search extensively. Judge the novelty of the work. Create an html report in ./reports and open it in the user's default browser?
 
 ## Sorcar Fugu Ultra
 
