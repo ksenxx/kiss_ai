@@ -7,8 +7,8 @@
 These tests were added in response to a recurring class of model
 failures observed in ~/.kiss/sorcar.db where the ``Read`` tool returned
 bare or cryptic error messages (empty body, ``Errno 21``, ``FileNotFoundError``,
-stale ``.kiss-worktrees/kiss_wt-*`` paths, literal ``PWD/`` prefix) and
-the model interpreted the response as a failure.
+stale ``.kiss-worktrees/kiss_wt-*`` paths) and the model interpreted the
+response as a failure.
 
 Each test exercises a real filesystem fixture (no mocks).
 """
@@ -109,37 +109,6 @@ def test_file_not_found_walks_up_to_existing_parent(temp_dir: Path) -> None:
     assert "File not found" in out
     # The suggestion walks up to ``temp_dir`` and finds SORCAR.md.
     assert "SORCAR.md" in out
-
-
-def test_pwd_prefix_expands_to_work_dir(temp_dir: Path) -> None:
-    """``PWD/foo`` is rewritten to ``<work_dir>/foo``."""
-    (temp_dir / "CONFIG.md").write_text("config body\n")
-    tools = UsefulTools(work_dir=str(temp_dir))
-
-    out = tools.Read("PWD/CONFIG.md")
-
-    assert out == "config body\n"
-
-
-def test_pwd_alone_expands_to_directory_listing(temp_dir: Path) -> None:
-    """``PWD`` alone resolves to ``work_dir`` and yields a directory listing."""
-    (temp_dir / "hello.txt").write_text("hi\n")
-    tools = UsefulTools(work_dir=str(temp_dir))
-
-    out = tools.Read("PWD")
-
-    assert "is a directory" in out
-    assert "hello.txt" in out
-
-
-def test_pwd_prefix_uses_cwd_when_no_work_dir(temp_dir: Path) -> None:
-    """When no ``work_dir`` is set, ``PWD/`` falls back to ``os.getcwd()``.
-
-    The ``temp_dir`` fixture chdirs into the temp directory.
-    """
-    (temp_dir / "hi.md").write_text("hi\n")
-    out = UsefulTools().Read("PWD/hi.md")
-    assert out == "hi\n"
 
 
 def test_stale_worktree_falls_back_to_repo(temp_dir: Path) -> None:

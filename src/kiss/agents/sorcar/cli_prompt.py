@@ -7,7 +7,7 @@
 Provides the interactive dropdown that :mod:`readline` cannot render:
 as soon as ``@`` is typed the file/folder picker pops up under the
 input line, Up/Down (and Tab) move through the candidates, and Tab or
-Enter inserts the highlighted ``PWD/<path>`` mention without submitting
+Enter inserts the highlighted ``./<path>`` mention without submitting
 the line.  The same live menu serves ``/`` slash commands,
 ``/model <partial>`` model names, and whole-line predictive
 completion: whenever the typed prefix matches one or more prior tasks
@@ -78,7 +78,7 @@ class PtkCompleter(Completer):
 
     Yields :class:`Completion` objects for the live dropdown:
     ``@``-mention files/folders (shown as the bare path, inserted as
-    ``PWD/<path> ``), slash commands with their help text, and
+    ``./<path> ``), slash commands with their help text, and
     ``/model`` model names.  Whole-line predictive matches are offered
     only when completion is explicitly requested with Tab.
 
@@ -123,7 +123,7 @@ class PtkCompleter(Completer):
         """Build the ``@``-mention picker entries for *query*.
 
         Each entry displays the bare relative path (folders end in
-        ``/``) and inserts ``PWD/<path> `` in place of the
+        ``/``) and inserts ``./<path> `` in place of the
         ``@<query>`` token, exactly like the readline completer and the
         VS Code extension.
         """

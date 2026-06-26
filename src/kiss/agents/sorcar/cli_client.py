@@ -76,7 +76,6 @@ from kiss.agents.sorcar.cli_repl import (
     _print_model_list,
     _print_welcome,
     _read_line,
-    _record_mentions,
     _save_history,
     _save_history_lines,
     _setup_readline,
@@ -1148,7 +1147,6 @@ def _run_anchored_client(
                     logger.debug("slash command failed", exc_info=True)
                     print(f"\n✗ Command failed: {exc}\n")
                 continue
-            _record_mentions(line)
             try:
                 _submit_task_anchored(
                     client, line, repl,
@@ -1315,7 +1313,6 @@ def run_client(
                     logger.debug("slash command failed", exc_info=True)
                     print(f"\n✗ Command failed: {exc}\n")
                 continue
-            _record_mentions(line)
             try:
                 _submit_task(
                     client, line,
