@@ -18,9 +18,8 @@ break it.  Locked-down contracts:
 3. ``_save_task_result`` overwrites the ``"Agent Failed Abruptly"`` sentinel;
    ``_save_task_extra`` round-trips JSON; both honor the flush-before-write
    contract with respect to queued events.
-4. ``_load_task_chat_id(task_text)`` returns the chat_id of the most recent
-   task with that text; ``_get_task_chat_id(task_id)`` returns the row's
-   chat_id; both return ``""`` for missing rows.
+4. ``_get_task_chat_id(task_id)`` returns the row's chat_id and ``""``
+   for missing rows.
 5. ``has_events`` is set to 1 via BOTH the synchronous ``_append_chat_event``
    path and the queued ``_queue_chat_event`` + ``_flush_chat_events`` path.
 6. ``_load_chat_context_text`` cache freshness: writes after a cached read
@@ -220,21 +219,19 @@ class TestSaveResultAndExtra(_PersistenceTestBase):
 
 
 class TestChatIdLookups(_PersistenceTestBase):
-    """(4) ``_load_task_chat_id`` / ``_get_task_chat_id`` contracts."""
+    """(4) ``_get_task_chat_id`` contract."""
 
-    def test_load_task_chat_id_returns_most_recent_run(self) -> None:
+    def test_get_task_chat_id_returns_row_chat(self) -> None:
         old_id, old_chat = th._add_task("repeated task")
         time.sleep(0.02)  # distinct timestamps for ORDER BY timestamp DESC
         new_id, new_chat = th._add_task("repeated task")
         assert old_chat != new_chat
 
-        assert th._load_task_chat_id("repeated task") == new_chat
         assert th._get_task_chat_id(old_id) == old_chat
         assert th._get_task_chat_id(new_id) == new_chat
 
     def test_lookups_return_empty_for_missing(self) -> None:
         th._add_task("present task")
-        assert th._load_task_chat_id("no such task text") == ""
         assert th._get_task_chat_id(999_999) == ""
 
 

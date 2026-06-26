@@ -14,8 +14,8 @@ while Python's ``json.loads`` (used by ``_is_subagent_row``) accepts
 them.  The two sub-agent detectors therefore DISAGREE for any sub-agent
 row whose metrics contain a non-finite float (e.g. a NaN ``cost``):
 
-* ``_load_history`` / ``_search_history`` / ``_get_history_entry`` /
-  ``_prefix_match_task`` (SQL side) treat the row as a REGULAR task and
+* ``_load_history`` / ``_search_history`` / ``_prefix_match_task``
+  (SQL side) treat the row as a REGULAR task and
   surface it in the history sidebar;
 * ``_list_recent_chats``'s chat-selection query counts the row's chat
   against ``limit`` but the Python-side ``_is_subagent_row`` filter then

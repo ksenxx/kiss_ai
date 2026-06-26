@@ -4,8 +4,8 @@
 # add your name here
 """Bug-hunt 3: ``_HISTORY_NOT_SUBAGENT`` LIKE filter false positives.
 
-``_load_history``, ``_search_history``, ``_get_history_entry`` and
-``_prefix_match_task`` filter sub-agent rows with the raw SQL
+``_load_history``, ``_search_history`` and ``_prefix_match_task``
+filter sub-agent rows with the raw SQL
 substring predicate ``extra NOT LIKE '%"subagent"%'`` — with NO JSON
 re-validation.  A regular (parent) task whose ``extra`` JSON merely
 *contains* the substring ``"subagent"`` — e.g. a NESTED key
@@ -33,7 +33,6 @@ from pathlib import Path
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.persistence import (
     _add_task,
-    _get_history_entry,
     _load_chat_context,
     _load_history,
     _prefix_match_task,
@@ -90,10 +89,6 @@ class TestSubagentLikeFalsePositive(_TempDbTestBase):
         found = _search_history("review")
         assert [h["id"] for h in found] == [task_id]
 
-        entry = _get_history_entry(0)
-        assert entry is not None
-        assert entry["id"] == task_id
-
         assert _prefix_match_task("review sub") == task_text
 
     def test_true_subagent_rows_remain_filtered(self) -> None:
@@ -107,9 +102,6 @@ class TestSubagentLikeFalsePositive(_TempDbTestBase):
         hist = _load_history()
         assert [h["id"] for h in hist] == [parent_id]
         assert _search_history("child") == []
-        entry = _get_history_entry(0)
-        assert entry is not None
-        assert entry["id"] == parent_id
         assert _prefix_match_task("child") == ""
         # Chat context also filters genuine sub-agent rows.
         ctx = _load_chat_context(chat_id)

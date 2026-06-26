@@ -143,10 +143,6 @@ ______________________________________________________________________
 
 - **new_chat** — Reset to a new chat session (equivalent to VS Code 'Clear').<br/>`new_chat() -> None`
 
-- **resume_chat** — Resume a previous chat session by looking up the task's chat_id. If the task has an associated `chat_id` in history, subsequent `run()` calls will continue that session.<br/>`resume_chat(task: str) -> None`
-
-  - `task`: The task description string to look up.
-
 - **resume_chat_by_id** — Resume a chat session using a stable chat identifier.<br/>`resume_chat_by_id(chat_id: str) -> None`
 
   - `chat_id`: String chat session identifier to resume.
@@ -302,12 +298,6 @@ ______________________________________________________________________
   - `sha`: The baseline commit SHA to store.
   - **Returns:** True if config was saved successfully, False otherwise.
 
-- **load_baseline_commit** — Load the baseline commit SHA from git config.<br/>`load_baseline_commit(repo: Path, branch: str) -> str | None`
-
-  - `repo`: Git repo root path.
-  - `branch`: The worktree branch name.
-  - **Returns:** The baseline commit SHA, or `None` if not stored (clean worktree or legacy worktree without baseline support).
-
 - **copy_dirty_state** — Copy uncommitted/staged/untracked files from main worktree. Reads `git status --porcelain` in *repo* and mirrors every dirty file into *wt_dir*. Files that exist in the main worktree are copied; files that were deleted are removed from *wt_dir*. The caller is expected to stage and commit the result as a baseline commit.<br/>`copy_dirty_state(repo: Path, wt_dir: Path) -> bool`
 
   - `repo`: Git repo root (main worktree).
@@ -365,14 +355,5 @@ ______________________________________________________________________
 - **discard** — Throw away the task branch and worktree, checkout original. Every step is idempotent — safe to call multiple times. Acquires `repo_lock` to serialize against concurrent merge/release operations on the same repository.<br/>`discard() -> str`
 
   - **Returns:** Confirmation message (includes a warning if checkout to the original branch failed).
-
-- **merge_instructions** — Return human-readable merge/discard instructions.<br/>`merge_instructions() -> str`
-
-  - **Returns:** Multi-line string with merge and discard instructions.
-
-- **cleanup** — Scan for orphaned `kiss/wt-*` branches and worktrees.<br/>`cleanup(repo_root: Path | str) -> str`
-
-  - `repo_root`: Root of the git repository to scan.
-  - **Returns:** Summary of findings and any cleanup actions taken.
 
 ______________________________________________________________________

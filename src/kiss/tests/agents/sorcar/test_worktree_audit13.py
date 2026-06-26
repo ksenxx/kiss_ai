@@ -248,7 +248,6 @@ class TestRed7DeadCodeRemoved:
             "branch_exists",
             "load_original_branch",
             "save_original_branch",
-            "load_baseline_commit",
             "save_baseline_commit",
             "copy_dirty_state",
             "head_sha",
