@@ -51,6 +51,8 @@ ______________________________________________________________________
 | Capability | **KISS Sorcar** | **Claude Code** | **Cursor** |
 |---|---|---|---|
 | **Interfaces** | CLI + VS Code extension + web/mobile app | CLI + mobile app | Custom VS Code |
+| **AI Discovery** | ✅ simply via prompt | ❌  | ❌  |
+| **GEPA Prompt Optimization** | ✅ simply via prompt | ❌  | ❌  |
 | **Multiple models from multiple vendors in the same task** | ✅ Mix OpenAI, Anthropic, Gemini, Together, MiniMax, OpenRouter, Claude Code CLI, and Codex CLI | ❌ Anthropic Claude models only | ❌ One model per task |
 | **Primary focus** | ✅ **Quality** — rigorous review, end-to-end tests | Speed and developer ergonomics | Speed |
 | **Models in bundled catalog** | 501 across 8 provider categories | Claude family only | Subset chosen by Cursor |
