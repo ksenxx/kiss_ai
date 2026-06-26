@@ -894,45 +894,6 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         return f"Discarded branch '{wt.branch}'.{checkout_warning}"
 
 
-    def merge_instructions(self) -> str:
-        """Return human-readable merge/discard instructions.
-
-        Returns:
-            Multi-line string with merge and discard instructions.
-        """
-        if self._wt is None:
-            return "No pending worktree task."
-        wt = self._wt
-        orig = wt.original_branch or "<branch>"
-        merge_cmd = _manual_merge_cmd(wt)
-        return (
-            f"Task completed on branch: {wt.branch}\n"
-            "\nTo commit and merge:\n"
-            "    agent.merge()\n"
-            "\nTo discard:\n"
-            "    agent.discard()\n"
-            "\nOr manually:\n"
-            f"    cd {wt.repo_root}\n"
-            f"    git checkout {orig}\n"
-            f"    {merge_cmd}\n"
-            "    git commit\n"
-            f"    git branch -d {wt.branch}"
-        )
-
-
-    @staticmethod
-    def cleanup(repo_root: Path | str) -> str:
-        """Scan for orphaned ``kiss/wt-*`` branches and worktrees.
-
-        Args:
-            repo_root: Root of the git repository to scan.
-
-        Returns:
-            Summary of findings and any cleanup actions taken.
-        """
-        return GitWorktreeOps.cleanup_orphans(Path(repo_root))
-
-
 # Flags that only make sense in interactive (daemon-client) mode:
 # they configure features the bare ``SorcarAgent`` used by the
 # non-interactive path does not implement.  Listed as the literal CLI
