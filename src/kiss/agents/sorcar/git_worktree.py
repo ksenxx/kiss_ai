@@ -428,6 +428,25 @@ class GitWorktreeOps:
         return bool(status.stdout.strip())
 
     @staticmethod
+    def status_porcelain(wt_dir: Path) -> str:
+        """Return the raw ``git status --porcelain`` output.
+
+        Used by failure-path warnings (e.g.
+        :meth:`~kiss.agents.sorcar.worktree_sorcar_agent.WorktreeSorcarAgent._finalize_worktree`)
+        to embed the exact leftover files in the log so an operator
+        can tell a real pre-commit-hook rejection apart from a race
+        leftover or a corrupt index without having to ssh in and
+        run git themselves.
+
+        Args:
+            wt_dir: Git working directory to inspect.
+
+        Returns:
+            The stripped porcelain output (possibly empty).
+        """
+        return _git("status", "--porcelain", cwd=wt_dir).stdout.strip()
+
+    @staticmethod
     def staged_diff(wt_dir: Path) -> str:
         """Return the staged diff text for the worktree.
 

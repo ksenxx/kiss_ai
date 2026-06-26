@@ -115,7 +115,7 @@ ______________________________________________________________________
   - `ask_user_question_callback`: Optional callback used by the ask_user_question tool to collect a text response from the user.
   - **Returns:** YAML string with 'success' and 'summary' keys.
 
-**`auto_commit_changes`** — Stage all changes, generate a commit message, and commit. Stages all changes once, generates a commit message from the staged diff via *message_fn*, then commits the already-staged changes (without re-staging). Falls back to a generic commit message when *message_fn* raises (e.g. the LLM-based generator is unavailable).<br/>`def auto_commit_changes(commit_dir: Path, user_prompt: str | None, message_fn: Callable[[Path, str | None], str]) -> bool`
+**`auto_commit_changes`** — Stage all changes, generate a commit message, and commit. Stages once so *message_fn* can compute the diff, runs *message_fn* (typically a slow LLM call) to generate the commit subject/body, then re-stages immediately before the commit so any file that appeared in the worktree during the LLM call (e.g. `PROGRESS.md` rewrites, macOS `.DS_Store` materializing after an `open` of the report, an editor side-channel saving swap files) is included in the same commit. Without the second `stage_all` those late-arriving files would be left uncommitted, `_finalize_worktree` would see them via `has_uncommitted_changes` and abort the auto-merge with the misleading "pre-commit hook may have rejected" warning (observed in production on 2026-06-26 07:23:14 for worktree `kiss_wt-1782483430-cb03445c` even though the repo had no custom pre-commit hooks installed). Falls back to a generic commit message when *message_fn* raises (e.g. the LLM-based generator is unavailable).<br/>`def auto_commit_changes(commit_dir: Path, user_prompt: str | None, message_fn: Callable[[Path, str | None], str]) -> bool`
 
 - `commit_dir`: Directory whose changes are staged and committed.
 - `user_prompt`: The user's task prompt, woven into the commit message (or its fallback), or `None` when unavailable.
@@ -219,6 +219,11 @@ ______________________________________________________________________
 
   - `wt_dir`: Git working directory to check.
   - **Returns:** True if there are staged, unstaged, or untracked changes.
+
+- **status_porcelain** — Return the raw `git status --porcelain` output. Used by failure-path warnings (e.g. :meth:`~kiss.agents.sorcar.worktree_sorcar_agent.WorktreeSorcarAgent._finalize_worktree`) to embed the exact leftover files in the log so an operator can tell a real pre-commit-hook rejection apart from a race leftover or a corrupt index without having to ssh in and run git themselves.<br/>`status_porcelain(wt_dir: Path) -> str`
+
+  - `wt_dir`: Git working directory to inspect.
+  - **Returns:** The stripped porcelain output (possibly empty).
 
 - **staged_diff** — Return the staged diff text for the worktree.<br/>`staged_diff(wt_dir: Path) -> str`
 
