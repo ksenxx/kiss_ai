@@ -14,9 +14,8 @@ completes" using the very same backend helpers, so behaviour matches the
 extension precisely:
 
 * ``@``-mention file picker — :func:`rank_file_suggestions` over
-  :func:`_scan_files`, inserting ``PWD/<path>`` and recording file usage
-  through :func:`_record_file_usage` (mirrors the webview's
-  ``insertAtMention`` + ``recordFileUsage``).
+  :func:`_scan_files`, inserting ``./<path>`` (mirrors the webview's
+  ``insertAtMention``).
 * predictive whole-line completion — :func:`_prefix_match_tasks` lists
   every recent task starting with the typed prefix, falling back to an
   active-file identifier clipped with
@@ -57,7 +56,7 @@ extension precisely:
 On an interactive TTY the input line is read through
 :mod:`prompt_toolkit` (see :mod:`kiss.agents.sorcar.cli_prompt`): typing
 ``@`` immediately pops the file/folder picker under the line, Up/Down
-navigate it, and Tab/Enter insert the highlighted ``PWD/<path>``
+navigate it, and Tab/Enter insert the highlighted ``./<path>``
 mention; the same live menu serves ``/`` commands and ``/model`` names,
 with history (Up/Down), reverse search (Ctrl+R), and emacs-style line
 editing built in.  Off-TTY (or if prompt_toolkit fails to initialise)
@@ -110,7 +109,6 @@ from kiss.agents.sorcar.persistence import (
     _ensure_kiss_dir,
     _load_file_usage,
     _prefix_match_tasks,
-    _record_file_usage,
 )
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.vscode.helpers import (
@@ -232,7 +230,7 @@ class CliCompleter:
         return self._file_cache
 
     def _at_mention_matches(self, line: str, at_start: int, query: str) -> list[str]:
-        """Build ``PWD/<path>`` completions for an ``@``-mention token.
+        """Build ``./<path>`` completions for an ``@``-mention token.
 
         Args:
             line: The full input line being completed.
@@ -997,7 +995,6 @@ def _run_anchored_repl(
                     )
                     print(f"\n✗ Command failed: {exc}\n")
                 continue
-            _record_mentions(line)
             _run_one_anchored(agent, line, run_kwargs, repl)
         _save_history_lines(history_path, repl.box.history)
 
@@ -1129,7 +1126,6 @@ def run_repl(
                     logger.debug("slash command failed", exc_info=True)
                     print(f"\n✗ Command failed: {exc}\n")
                 continue
-            _record_mentions(line)
             _run_one(agent, line, run_kwargs)
     finally:
         # prompt_toolkit's FileHistory persists as it goes; writing the

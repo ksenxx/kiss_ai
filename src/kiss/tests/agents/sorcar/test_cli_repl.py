@@ -29,7 +29,6 @@ from kiss.agents.sorcar.cli_repl import (
     SLASH_COMMANDS,
     CliCompleter,
     _handle_slash,
-    _record_mentions,
 )
 
 
@@ -56,14 +55,14 @@ def _write_project(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def test_at_mention_completion_inserts_pwd_path(tmp_path: Path, kiss_db) -> None:
-    """``@`` mentions complete to ``PWD/<path>`` like the extension."""
+def test_at_mention_completion_inserts_relative_path(tmp_path: Path, kiss_db) -> None:
+    """``@`` mentions complete to ``./<path>`` like the extension."""
     project = _write_project(tmp_path)
     completer = CliCompleter(str(project))
     matches = completer._build_matches("look at @alpha")
     assert matches, "expected at least one file suggestion"
-    assert matches[0] == "look at PWD/alpha.py "
-    assert all(m.startswith("look at PWD/") for m in matches)
+    assert matches[0] == "look at ./alpha.py "
+    assert all(m.startswith("look at ./") for m in matches)
 
 
 def test_at_mention_completion_matches_nested_files(tmp_path: Path, kiss_db) -> None:
@@ -71,7 +70,7 @@ def test_at_mention_completion_matches_nested_files(tmp_path: Path, kiss_db) -> 
     project = _write_project(tmp_path)
     completer = CliCompleter(str(project))
     matches = completer._build_matches("edit @beta")
-    assert any(m == "edit PWD/src/beta_module.py " for m in matches)
+    assert any(m == "edit ./src/beta_module.py " for m in matches)
 
 
 def test_slash_command_completion(tmp_path: Path) -> None:
@@ -163,23 +162,6 @@ def test_predictive_completion_from_active_file(tmp_path: Path, kiss_db) -> None
     completer = CliCompleter(str(tmp_path), active_file=str(active))
     matches = completer._build_matches("call calculate_t")
     assert matches == ["call calculate_total"]
-
-
-def test_record_mentions_persists_file_usage(tmp_path: Path, kiss_db) -> None:
-    """Submitting a ``PWD/<path>`` line records file usage for ranking."""
-    _record_mentions("please update PWD/src/app.py and PWD/main.py now")
-    usage = th._load_file_usage()
-    assert usage.get("src/app.py", 0) >= 1
-    assert usage.get("main.py", 0) >= 1
-
-
-def test_record_mentions_then_ranks_used_file_first(tmp_path: Path, kiss_db) -> None:
-    """A recorded file is promoted to the 'frequent' group in suggestions."""
-    project = _write_project(tmp_path)
-    _record_mentions("touch PWD/src/beta_module.py")
-    completer = CliCompleter(str(project))
-    matches = completer._build_matches("see @beta")
-    assert matches[0] == "see PWD/src/beta_module.py "
 
 
 def test_handle_slash_clear_starts_new_chat(tmp_path: Path, kiss_db) -> None:
