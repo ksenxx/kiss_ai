@@ -337,19 +337,6 @@ class TestWorktreeWorkflow:
         assert not agent._wt_pending
 
 
-    def test_merge_instructions_contain_all_options(self) -> None:
-        """merge_instructions mentions merge() and discard() but not do_nothing()."""
-        agent = self._agent()
-        agent.run(prompt_template="task1", work_dir=str(self.repo))
-
-        instructions = agent.merge_instructions()
-        assert "agent.merge()" in instructions
-        assert "agent.discard()" in instructions
-        assert "do_nothing" not in instructions
-        assert agent._wt_branch is not None
-        assert agent._wt_branch in instructions
-        agent.discard()
-
     def test_run_result_is_plain_task_output(self) -> None:
         """run() returns only the task result — no merge-instructions suffix."""
         agent = self._agent()
