@@ -196,21 +196,56 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
     def _finalize_worktree(self) -> bool:
         """Auto-commit, remove worktree, prune.
 
+        After the LLM-driven auto-commit, a single-shot retry runs
+        :meth:`GitWorktreeOps.commit_all` with a generic message to
+        catch the very narrow remaining race where a file appears
+        between :func:`~kiss.agents.sorcar.sorcar_agent.auto_commit_changes`'s
+        second ``stage_all`` and its ``commit_staged`` call (e.g.
+        ``PROGRESS.md`` being rewritten, ``.DS_Store`` materializing
+        after an ``open`` of the report, an editor swap file
+        appearing).  Only if that retry STILL leaves uncommitted
+        state do we preserve the worktree and log a warning — and
+        that warning now includes the raw ``git status --porcelain``
+        leftover so an operator can distinguish a real pre-commit
+        rejection from a race leftover from a corrupt index without
+        sshing in.
+
         Returns:
             True if the worktree was cleaned up successfully.  False if
-            uncommitted changes remain after the auto-commit attempt
-            (e.g. a pre-commit hook rejected the commit) — the worktree
+            uncommitted changes remain after BOTH the auto-commit and
+            the late-arriver retry (e.g. a pre-commit hook rejected
+            the commit, or a third write landed in the microsecond
+            after the retry's own ``stage_all``) — the worktree
             directory is preserved so no work is lost.
         """
         assert self._wt is not None
         wt = self._wt
         if wt.wt_dir.exists():
             self._auto_commit_worktree()
+            # Single-shot retry: closes the residual race window
+            # between ``auto_commit_changes``'s second ``stage_all``
+            # and its ``commit_staged`` call.  ``commit_all`` is a
+            # no-op when nothing is uncommitted (its inner
+            # ``commit_staged`` short-circuits on an empty
+            # ``git diff --cached``), so it is safe to always invoke
+            # here — but skipping the call keeps the happy-path log
+            # quiet.
             if GitWorktreeOps.has_uncommitted_changes(wt.wt_dir):
+                GitWorktreeOps.commit_all(
+                    wt.wt_dir,
+                    "kiss: auto-commit late-arriving changes",
+                )
+            if GitWorktreeOps.has_uncommitted_changes(wt.wt_dir):
+                leftover = GitWorktreeOps.status_porcelain(wt.wt_dir)
                 logger.warning(
                     "Worktree has uncommitted changes after auto-commit "
-                    "(pre-commit hook may have rejected); preserving: %s",
+                    "and late-arriver retry (possible causes: a "
+                    "pre-commit hook rejected the commit, a real "
+                    "commit failure, or a concurrent write that "
+                    "outraced both staging passes); preserving %s\n"
+                    "git status --porcelain:\n%s",
                     wt.wt_dir,
+                    leftover,
                 )
                 return False
             GitWorktreeOps.remove(wt.repo_root, wt.wt_dir)
@@ -357,7 +392,10 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             self._merge_conflict_warning = (
                 f"Could not auto-commit worktree changes for "
                 f"'{wt.branch}' (a pre-commit hook may have rejected "
-                f"the commit). The worktree is preserved at: {wt.wt_dir}"
+                "the commit, the commit itself failed, or a "
+                "concurrent write outraced both staging passes — "
+                "see the kiss-web log for the exact leftover "
+                f"files). The worktree is preserved at: {wt.wt_dir}"
             )
             self._wt = None
             return None
