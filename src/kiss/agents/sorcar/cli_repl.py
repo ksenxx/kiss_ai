@@ -173,7 +173,6 @@ SLASH_COMMANDS: dict[str, str] = {
 _EXIT_WORDS = {"exit", "quit"}
 
 _PROMPT = f"{CYAN}{PROMPT_MARKER}{RESET}"
-_MENTION_RE = re.compile(r"PWD/(\S+)")
 # ANSI SGR (colour) sequences embedded in the input prompt.
 _ANSI_SGR_RE = re.compile(r"(\x1b\[[0-9;]*m)")
 
@@ -246,7 +245,7 @@ class CliCompleter:
         usage = _load_file_usage()
         ranked = rank_file_suggestions(self._files(), query, usage)
         prefix = line[:at_start]
-        return [f"{prefix}PWD/{item['text']} " for item in ranked]
+        return [f"{prefix}./{item['text']} " for item in ranked]
 
     def _model_matches(self, query: str) -> list[str]:
         """Return ``/model <name>`` completions for the ``/model`` command.
@@ -466,19 +465,6 @@ def _print_help(work_dir: str = "") -> None:
         "/ completes commands, /model <partial> completes model names, "
         "and typing a prefix of a previous task suggests its completion.\n"
     )
-
-
-def _record_mentions(line: str) -> None:
-    """Record file usage for every ``PWD/<path>`` mention in *line*.
-
-    Mirrors the extension's ``recordFileUsage`` so that the most-used
-    files float to the top of future ``@``-mention suggestions.
-    """
-    for match in _MENTION_RE.finditer(line):
-        try:
-            _record_file_usage(match.group(1))
-        except Exception:  # pragma: no cover - persistence guard
-            logger.debug("record_file_usage failed", exc_info=True)
 
 
 def _handle_slash(
