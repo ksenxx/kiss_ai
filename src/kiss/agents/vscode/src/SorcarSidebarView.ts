@@ -961,8 +961,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
         const trimmed = message.prompt.trim();
         if (trimmed && !trimmed.includes('\n')) {
-          const bare = trimmed.replace(/^PWD[/\\]/, '');
-          const resolved = path.resolve(effectiveWorkDir, bare);
+          const resolved = path.resolve(effectiveWorkDir, trimmed);
           // H4 — only treat as a file shortcut when the resolved path is
           // strictly inside the work dir; otherwise fall through and let
           // the prompt run as a normal task.
