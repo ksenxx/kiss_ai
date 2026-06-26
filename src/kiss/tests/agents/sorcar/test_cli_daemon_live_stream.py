@@ -63,6 +63,20 @@ from kiss.agents.sorcar.cli_printer import RecordingConsolePrinter
 from kiss.agents.vscode.web_server import RemoteAccessServer
 
 
+def _reset_cli_daemon_writer() -> None:
+    """Drop the cached UDS writer between tests so a fresh daemon (on
+    a new temp socket path) is contacted instead of a stale connection
+    from a previous test."""
+    with cli_daemon_bridge._LOCK:
+        writer = cli_daemon_bridge._WRITER
+        if writer is not None:
+            try:
+                writer.close()
+            except OSError:
+                pass
+            cli_daemon_bridge._WRITER = None
+
+
 class TestCliDaemonLiveStream(unittest.TestCase):
     """CLI events reach an open chat webview without a page reload."""
 
@@ -99,7 +113,7 @@ class TestCliDaemonLiveStream(unittest.TestCase):
         # bridge connects to OUR temp daemon, not the user's real one.
         self._saved_env = os.environ.get("KISS_SORCAR_SOCK")
         os.environ["KISS_SORCAR_SOCK"] = self.sock_path
-        cli_daemon_bridge.reset_for_tests()
+        _reset_cli_daemon_writer()
 
         self._viewer_writer: asyncio.StreamWriter | None = None
         self._reader_task: concurrent.futures.Future[None] | None = None
@@ -112,7 +126,7 @@ class TestCliDaemonLiveStream(unittest.TestCase):
             os.environ.pop("KISS_SORCAR_SOCK", None)
         else:
             os.environ["KISS_SORCAR_SOCK"] = self._saved_env
-        cli_daemon_bridge.reset_for_tests()
+        _reset_cli_daemon_writer()
 
         async def _shutdown() -> None:
             try:

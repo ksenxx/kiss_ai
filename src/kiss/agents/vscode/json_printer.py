@@ -110,7 +110,7 @@ class JsonPrinter(Printer):
     looked up from ``_subscribers[task_id]``.  A tab subscribes via
     :meth:`subscribe_tab` (e.g. when the user opens the task in a new
     browser tab) and unsubscribes via :meth:`cleanup_tab` (when the tab
-    closes) or :meth:`unsubscribe_tab`.
+    closes).
     """
 
     @property
@@ -204,25 +204,6 @@ class JsonPrinter(Printer):
                 viewers = set()
                 self._subscribers[key] = viewers
             viewers.add(tab_id)
-
-    def unsubscribe_tab(self, task_id: Any, tab_id: str) -> None:
-        """Remove *tab_id* from the subscriber set for *task_id*.
-
-        Args:
-            task_id: The task identifier (``task_history.id`` int or
-                its string form).
-            tab_id: The frontend tab id to unsubscribe.
-        """
-        key = self._coerce_task_id(task_id)
-        if not key or not tab_id:
-            return
-        with self._lock:
-            viewers = self._subscribers.get(key)
-            if viewers is None:
-                return
-            viewers.discard(tab_id)
-            if not viewers:
-                self._subscribers.pop(key, None)
 
     def _fanout_targets(self, task_id: Any) -> list[str]:
         """Return a snapshot of subscriber tab ids for *task_id*.

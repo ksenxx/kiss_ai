@@ -4,17 +4,16 @@
 # add your name here
 """Bug-hunt 3: task-text lookups pick the WRONG row on timestamp ties.
 
-``_most_recent_task_id(db, task)`` and ``_load_task_chat_id(task)``
-order by bare ``timestamp DESC`` with no ``id`` tiebreak.  Their SQL
-runs through the ``idx_th_task`` index plus a temp B-tree sort, which
-(empirically, and per SQLite docs, "unspecified") returns the LOWEST
-rowid first among equal timestamps — i.e. the OLDEST run of the task.
+``_most_recent_task_id(db, task)`` orders by bare ``timestamp DESC``
+with no ``id`` tiebreak.  Its SQL runs through the ``idx_th_task``
+index plus a temp B-tree sort, which (empirically, and per SQLite
+docs, "unspecified") returns the LOWEST rowid first among equal
+timestamps — i.e. the OLDEST run of the task.
 
 Consequences when two runs of the same task text share a timestamp
 value (coarse clock ticks, concurrent inserts, imported/restored
 databases):
 
-* ``_load_task_chat_id(task)`` resumes the WRONG (older) chat session.
 * ``_save_task_result(result, task=...)`` / ``_save_task_extra(...,
   task=...)`` (legacy task-text fallback through ``_resolve_task_id``
   → ``_most_recent_task_id``) UPDATE the older row, clobbering a
@@ -40,7 +39,6 @@ from pathlib import Path
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.persistence import (
     _add_task,
-    _load_task_chat_id,
     _most_recent_task_id,
     _save_task_result,
 )
@@ -76,13 +74,12 @@ class _TempDbTestBase:
 class TestTaskTextLookupTimestampTie(_TempDbTestBase):
     """(timestamp, id) total order for task-text-keyed lookups."""
 
-    def test_load_task_chat_id_returns_latest_run(self) -> None:
+    def test_most_recent_task_id_returns_latest_run(self) -> None:
         _t1, chat1 = _add_task("deploy app")
         t2, chat2 = _add_task("deploy app")  # new, separate session
         assert chat1 != chat2
         self._force_all_timestamps(1000.0)
 
-        assert _load_task_chat_id("deploy app") == chat2
         db = th._get_db()
         with th._rw_lock.read_lock():
             assert _most_recent_task_id(db, "deploy app") == t2
@@ -110,7 +107,7 @@ class TestTaskTextLookupTimestampTie(_TempDbTestBase):
     def test_distinct_timestamps_still_ordered_by_time(self) -> None:
         # Sanity: the id tiebreak must not override genuine timestamp
         # ordering (older row with a larger id).
-        t1, chat1 = _add_task("run tests")
+        t1, _chat1 = _add_task("run tests")
         _t2, _chat2 = _add_task("run tests")
         db = th._get_db()
         with th._rw_lock.write_lock():
@@ -125,6 +122,5 @@ class TestTaskTextLookupTimestampTie(_TempDbTestBase):
             db.commit()
         th._invalidate_chat_context_cache("")
 
-        assert _load_task_chat_id("run tests") == chat1
         with th._rw_lock.read_lock():
             assert _most_recent_task_id(db, "run tests") == t1

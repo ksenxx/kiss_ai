@@ -41,65 +41,6 @@ from kiss.core.relentless_agent import RelentlessAgent
 logger = logging.getLogger(__name__)
 
 
-def _save_setting_to_config(key: str, value: Any) -> None:
-    """Persist a single setting to ~/.kiss/config.json.
-
-    Loads the existing config, updates the specified key, and saves
-    atomically. Also applies the change to the running environment.
-
-    Args:
-        key: The config key (e.g. "max_budget", "work_dir").
-        value: The new value for the key.
-    """
-    try:
-        from kiss.agents.vscode.vscode_config import (
-            apply_config_to_env,
-            load_config,
-            save_config,
-        )
-
-        cfg = load_config()
-        cfg[key] = value
-        save_config(cfg)
-        apply_config_to_env(cfg)
-    except Exception:
-        pass
-
-
-def _apply_setting(
-    updated: list[str],
-    broadcast: Callable[[dict[str, Any]], None] | None,
-    key: str,
-    value: Any,
-    label: str | None = None,
-    broadcast_value: Any = None,
-) -> None:
-    """Record, persist, and broadcast a single settings update.
-
-    Appends a human-readable entry to *updated*, persists *value* under
-    *key* via :func:`_save_setting_to_config`, and broadcasts an
-    ``updateSetting`` event to the frontend when *broadcast* is set.
-
-    Args:
-        updated: Accumulator of "key=value" summary strings.
-        broadcast: Frontend broadcast callable, or ``None``.
-        key: The config / broadcast key.
-        value: The new value to persist.
-        label: Override for the summary entry (default ``"{key}={value}"``);
-            used to mask secrets (e.g. ``"remote_password=<updated>"``).
-        broadcast_value: Override for the broadcast payload value
-            (default *value*); used to avoid leaking secrets to the UI.
-    """
-    updated.append(label if label is not None else f"{key}={value}")
-    _save_setting_to_config(key, value)
-    if broadcast:
-        broadcast({
-            "type": "updateSetting",
-            "key": key,
-            "value": value if broadcast_value is None else broadcast_value,
-        })
-
-
 def _generate_commit_message(
     commit_dir: Path, user_prompt: str | None = None,
 ) -> str:
