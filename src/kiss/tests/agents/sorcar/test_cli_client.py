@@ -70,6 +70,20 @@ from kiss.agents.vscode.web_server import RemoteAccessServer
 from kiss.core.print_to_console import ConsolePrinter
 
 
+def _reset_cli_daemon_writer() -> None:
+    """Drop the cached UDS writer between tests so a fresh daemon (on
+    a new temp socket path) is contacted instead of a stale connection
+    from a previous test."""
+    with cli_daemon_bridge._LOCK:
+        writer = cli_daemon_bridge._WRITER
+        if writer is not None:
+            try:
+                writer.close()
+            except OSError:
+                pass
+            cli_daemon_bridge._WRITER = None
+
+
 class _RecordingRemoteAccessServer(RemoteAccessServer):
     """A :class:`RemoteAccessServer` that records every inbound command.
 
@@ -120,7 +134,7 @@ class _DaemonHarness:
         th._db_conn = None
         self._saved_env = os.environ.get("KISS_SORCAR_SOCK")
         os.environ["KISS_SORCAR_SOCK"] = self.sock_path
-        cli_daemon_bridge.reset_for_tests()
+        _reset_cli_daemon_writer()
 
         self.loop = asyncio.new_event_loop()
         self.loop_thread = threading.Thread(
@@ -169,7 +183,7 @@ class _DaemonHarness:
             os.environ.pop("KISS_SORCAR_SOCK", None)
         else:
             os.environ["KISS_SORCAR_SOCK"] = self._saved_env
-        cli_daemon_bridge.reset_for_tests()
+        _reset_cli_daemon_writer()
 
         async def _shutdown() -> None:
             # Close all remaining UDS writers the server registered so

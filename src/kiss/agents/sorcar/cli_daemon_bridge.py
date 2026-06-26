@@ -40,9 +40,7 @@ _WRITER: socket.socket | None = None
 def _sock_path() -> Path:
     """Return the UDS path the bridge should connect to.
 
-    Reads the ``KISS_SORCAR_SOCK`` environment variable on every call
-    (so tests can repoint the bridge by setting an env var and calling
-    :func:`reset_for_tests`).
+    Reads the ``KISS_SORCAR_SOCK`` environment variable on every call.
     """
     env = os.environ.get("KISS_SORCAR_SOCK")
     return Path(env) if env else _DEFAULT_SOCK_PATH
@@ -123,18 +121,3 @@ def send_cli_task_end(task_id: int) -> None:
     _send_envelope({"type": "cliTaskEnd", "taskId": int(task_id)})
 
 
-def reset_for_tests() -> None:
-    """Drop the cached UDS connection.
-
-    Called by tests between scenarios so a new daemon (bound to a
-    fresh temp UDS path) is contacted instead of a stale cached
-    socket from a previous test.
-    """
-    global _WRITER
-    with _LOCK:
-        if _WRITER is not None:
-            try:
-                _WRITER.close()
-            except OSError:
-                pass
-            _WRITER = None

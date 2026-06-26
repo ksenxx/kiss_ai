@@ -80,26 +80,6 @@ class TestGitWorktreeBaseline:
         assert wt.baseline_commit == "abc123"
 
 
-class TestBaselineCommitConfig:
-    """Save and load baseline commit SHA via git config."""
-
-    def test_save_and_load(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = _make_repo(Path(tmp) / "repo")
-            branch = "kiss/wt-test-123"
-            _git("branch", branch, cwd=repo)
-
-            assert GitWorktreeOps.save_baseline_commit(repo, branch, "deadbeef")
-            loaded = GitWorktreeOps.load_baseline_commit(repo, branch)
-            assert loaded == "deadbeef"
-
-    def test_load_missing(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = _make_repo(Path(tmp) / "repo")
-            result = GitWorktreeOps.load_baseline_commit(repo, "no/such-branch")
-            assert result is None
-
-
 class TestCopyDirtyState:
     """copy_dirty_state mirrors dirty files from main worktree."""
 

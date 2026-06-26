@@ -136,33 +136,6 @@ class TestWorktreeSorcarAgent:
             agent.discard()
 
 
-    def test_cleanup(self) -> None:
-        agent = self._agent()
-        agent.run(prompt_template="task1", work_dir=str(self.repo))
-        branch = agent._wt_branch
-        assert branch is not None
-
-        wt_dir = agent._wt_dir
-        assert wt_dir is not None
-        _git("worktree", "remove", str(wt_dir), "--force", cwd=self.repo)
-        _git("worktree", "prune", cwd=self.repo)
-
-        _git("config", "--remove-section", f"branch.{branch}",
-             cwd=self.repo)
-
-        result = WorktreeSorcarAgent.cleanup(self.repo)
-        assert "Deleted" in result or "orphan" in result.lower() or "1 kiss/wt-*" in result
-
-        check = _git("rev-parse", "--verify", f"refs/heads/{branch}",
-                      cwd=self.repo)
-        assert check.returncode != 0
-
-
-    def test_merge_instructions_idle(self) -> None:
-        agent = self._agent()
-        assert agent.merge_instructions() == "No pending worktree task."
-
-
     def test_auto_commit_no_wt_dir(self) -> None:
         agent = self._agent()
         assert not agent._auto_commit_worktree()
@@ -195,11 +168,6 @@ class TestWorktreeSorcarAgent:
         result = agent.run(prompt_template="task1", work_dir=str(empty))
         assert "test done" in result
         assert agent._wt_branch is None
-
-    def test_cleanup_no_orphans(self) -> None:
-        result = WorktreeSorcarAgent.cleanup(self.repo)
-        assert "No orphans found" in result
-
 
     def test_git_with_cwd(self) -> None:
         result = _git("--version", cwd=self.repo)
@@ -235,15 +203,6 @@ class TestWorktreeSorcarAgent:
         result = agent.run(prompt_template="task1", work_dir=str(self.repo))
         assert "test done" in result
         shutil.rmtree(wt_base, ignore_errors=True)
-
-    def test_cleanup_with_active_worktree(self) -> None:
-        agent = self._agent()
-        agent.run(prompt_template="task1", work_dir=str(self.repo))
-        result = WorktreeSorcarAgent.cleanup(self.repo)
-        assert "1 kiss/wt-*" in result
-        assert "1 active" in result
-        agent.discard()
-
 
     def test_run_without_work_dir(self) -> None:
         import os

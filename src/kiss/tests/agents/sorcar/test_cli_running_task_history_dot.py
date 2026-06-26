@@ -67,6 +67,20 @@ from kiss.agents.sorcar.persistence import _add_task, _append_chat_event
 from kiss.agents.vscode.web_server import RemoteAccessServer
 
 
+def _reset_cli_daemon_writer() -> None:
+    """Drop the cached UDS writer between tests so a fresh daemon (on
+    a new temp socket path) is contacted instead of a stale connection
+    from a previous test."""
+    with cli_daemon_bridge._LOCK:
+        writer = cli_daemon_bridge._WRITER
+        if writer is not None:
+            try:
+                writer.close()
+            except OSError:
+                pass
+            cli_daemon_bridge._WRITER = None
+
+
 class TestCliRunningTaskHistoryDot(unittest.TestCase):
     """``_get_history`` MUST flag CLI-running tasks as ``is_running=True``."""
 
@@ -106,7 +120,7 @@ class TestCliRunningTaskHistoryDot(unittest.TestCase):
 
         self._saved_env = os.environ.get("KISS_SORCAR_SOCK")
         os.environ["KISS_SORCAR_SOCK"] = self.sock_path
-        cli_daemon_bridge.reset_for_tests()
+        _reset_cli_daemon_writer()
 
         # Capture every event broadcast by ``_get_history`` so we can
         # inspect the assembled session list.  ``WebPrinter.broadcast``
@@ -128,7 +142,7 @@ class TestCliRunningTaskHistoryDot(unittest.TestCase):
             os.environ.pop("KISS_SORCAR_SOCK", None)
         else:
             os.environ["KISS_SORCAR_SOCK"] = self._saved_env
-        cli_daemon_bridge.reset_for_tests()
+        _reset_cli_daemon_writer()
 
         async def _shutdown() -> None:
             self.uds_server.close()

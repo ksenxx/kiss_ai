@@ -812,23 +812,6 @@ def _search_history(
         return [dict(r) for r in rows]
 
 
-def _get_history_entry(idx: int) -> _HistoryEntry | None:
-    """Get a single history entry by its index (0 = most recent). Thread-safe.
-
-    Returns:
-        The entry dict, or ``None`` if the index is out of range.
-    """
-    with _rw_lock.read_lock():
-        db = _get_db()
-        row = db.execute(
-            _HISTORY_SELECT
-            + f"WHERE {_HISTORY_NOT_SUBAGENT} "
-            + "ORDER BY timestamp DESC, id DESC LIMIT 1 OFFSET ?",
-            (idx,),
-        ).fetchone()
-        return dict(row) if row else None
-
-
 def _resolve_task_id(
     db: sqlite3.Connection,
     task_id: int | None,
@@ -1557,40 +1540,6 @@ def _task_has_events(task_id: int) -> bool:
             (task_id,),
         ).fetchone()
         return row is not None
-
-
-def _load_task_chat_id(task: str) -> str:
-    """Return the chat_id for the most recent run of *task*, or ``""``.
-
-    Args:
-        task: The task description string.
-
-    Returns:
-        The string chat_id, or ``""`` if not found.
-    """
-    with _rw_lock.read_lock():
-        db = _get_db()
-        row = db.execute(
-            "SELECT chat_id FROM task_history WHERE task = ? "
-            "ORDER BY timestamp DESC, id DESC LIMIT 1",
-            (task,),
-        ).fetchone()
-        return str(row["chat_id"]) if row and row["chat_id"] else ""
-
-
-def _load_last_chat_id() -> str:
-    """Return the chat_id of the most recently added task, or ``""``.
-
-    Useful for resuming the last CLI session without manually tracking
-    the chat_id.
-    """
-    with _rw_lock.read_lock():
-        db = _get_db()
-        row = db.execute(
-            "SELECT chat_id FROM task_history "
-            "ORDER BY timestamp DESC, id DESC LIMIT 1"
-        ).fetchone()
-        return str(row["chat_id"]) if row and row["chat_id"] else ""
 
 
 def _list_recent_chats(limit: int = 10) -> list[dict[str, object]]:
