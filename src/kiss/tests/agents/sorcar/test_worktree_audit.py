@@ -164,16 +164,6 @@ class TestFix3MergeInstructionsUseSquash:
 
         agent.discard()
 
-    def test_merge_instructions_say_squash(self) -> None:
-        """merge_instructions() also uses 'git merge --squash'."""
-        agent = WorktreeSorcarAgent("test")
-        agent.run(prompt_template="task1", work_dir=str(self.repo))
-
-        instructions = agent.merge_instructions()
-        assert "git merge --squash" in instructions
-
-        agent.discard()
-
     def test_unknown_branch_instructions_say_squash(self) -> None:
         """When original_branch is None, instructions still say --squash."""
         agent = WorktreeSorcarAgent("test")

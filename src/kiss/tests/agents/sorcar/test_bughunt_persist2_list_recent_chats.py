@@ -5,7 +5,7 @@
 """Bug-hunt: ``_list_recent_chats`` must not surface sub-agent rows.
 
 Every other chat/history reader in ``persistence.py`` —
-``_load_history``, ``_search_history``, ``_get_history_entry``,
+``_load_history``, ``_search_history``,
 ``_prefix_match_task``, ``_load_chat_context``,
 ``_load_latest_chat_events_by_chat_id`` and
 ``_get_adjacent_task_by_chat_id`` — explicitly filters out sub-agent
