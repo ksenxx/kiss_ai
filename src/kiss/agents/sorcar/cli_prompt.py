@@ -138,7 +138,7 @@ class PtkCompleter(Completer):
             else:
                 meta = "file"
             yield Completion(
-                f"PWD/{path} ",
+                f"./{path} ",
                 start_position=-(len(query) + 1),
                 display=path,
                 display_meta=meta,
