@@ -6467,7 +6467,7 @@
       const before = inp.value.substring(0, atCtx.start);
       const after = inp.value.substring(inp.selectionStart || inp.value.length);
       const sep = /^\s/.test(after) ? '' : ' ';
-      const mention = 'PWD/' + file;
+      const mention = './' + file;
       inp.value = before + mention + sep + after;
       syncClearBtn();
       const np = before.length + mention.length + sep.length;
