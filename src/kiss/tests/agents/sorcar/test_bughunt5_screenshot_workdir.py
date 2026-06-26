@@ -4,16 +4,11 @@
 # add your name here
 """Bug-hunt iteration 5: screenshot() must anchor paths to the agent work_dir.
 
-Every file tool (Read/Write/Edit via ``_expand_pwd_prefix``, Bash via
-``cwd=work_dir``) anchors relative paths and the literal ``PWD/`` prefix
-(which the system prompt mandates for artifacts) to the agent's working
-directory.  Pre-fix, ``WebUseTool.screenshot`` resolved paths against the
-DAEMON PROCESS's cwd instead:
-
-- in worktree mode, ``screenshot("shot.png")`` escaped the worktree (the
-  file was never merged back / visible to the task);
-- ``screenshot("PWD/tmp/shot.png")`` created a junk literal ``PWD/``
-  directory tree in the process cwd.
+Every file tool (Read/Write/Edit, Bash via ``cwd=work_dir``) anchors
+relative paths to the agent's working directory.  Pre-fix,
+``WebUseTool.screenshot`` resolved paths against the DAEMON PROCESS's
+cwd instead: in worktree mode, ``screenshot("shot.png")`` escaped the
+worktree (the file was never merged back / visible to the task).
 
 Uses a real headless Chromium (same pattern as test_web_use_tool.py).
 """
@@ -43,29 +38,6 @@ def test_screenshot_relative_path_lands_in_work_dir(tmp_path: Path) -> None:
             f"cwd contents: {list(cwd.rglob('*'))}"
         )
         assert not (cwd / "shots").exists()
-    finally:
-        os.chdir(old_cwd)
-        tool.close()
-
-
-def test_screenshot_pwd_prefix_expands_to_work_dir(tmp_path: Path) -> None:
-    """The literal PWD/ prefix must expand to work_dir (as in Read/Write)."""
-    cwd = tmp_path / "process_cwd"
-    work = tmp_path / "agent_workdir"
-    cwd.mkdir()
-    work.mkdir()
-    old_cwd = os.getcwd()
-    tool = WebUseTool(user_data_dir=None, headless=True, work_dir=str(work))
-    os.chdir(cwd)
-    try:
-        nav = tool.go_to_url("data:text/html,<h1>hello</h1>")
-        assert not nav.startswith("Error"), nav
-        msg = tool.screenshot("PWD/tmp/shot.png")
-        assert msg.startswith("Screenshot saved to"), msg
-        assert (work / "tmp" / "shot.png").is_file(), msg
-        assert not (cwd / "PWD").exists(), (
-            "literal PWD/ directory created in process cwd"
-        )
     finally:
         os.chdir(old_cwd)
         tool.close()

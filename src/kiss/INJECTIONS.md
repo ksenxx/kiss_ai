@@ -24,7 +24,7 @@ Use openrouter/z-ai/glm-5.2 model for all tasks including coding, bug fixing, an
 
 ## Trick
 
-Can you create an html report with diagrams and illustrations in PWD/reports and open it in the user's default browser?
+Can you create an html report with diagrams and illustrations in ./reports and open it in the user's default browser?
 
 ## Trick
 

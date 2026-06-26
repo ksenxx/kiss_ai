@@ -132,11 +132,23 @@ def auto_commit_changes(
 ) -> bool:
     """Stage all changes, generate a commit message, and commit.
 
-    Stages all changes once, generates a commit message from the
-    staged diff via *message_fn*, then commits the already-staged
-    changes (without re-staging).  Falls back to a generic commit
-    message when *message_fn* raises (e.g. the LLM-based generator
-    is unavailable).
+    Stages once so *message_fn* can compute the diff, runs
+    *message_fn* (typically a slow LLM call) to generate the commit
+    subject/body, then re-stages immediately before the commit so
+    any file that appeared in the worktree during the LLM call
+    (e.g. ``PROGRESS.md`` rewrites, macOS ``.DS_Store`` materializing
+    after an ``open`` of the report, an editor side-channel saving
+    swap files) is included in the same commit.  Without the second
+    ``stage_all`` those late-arriving files would be left
+    uncommitted, ``_finalize_worktree`` would see them via
+    ``has_uncommitted_changes`` and abort the auto-merge with the
+    misleading "pre-commit hook may have rejected" warning
+    (observed in production on 2026-06-26 07:23:14 for worktree
+    ``kiss_wt-1782483430-cb03445c`` even though the repo had no
+    custom pre-commit hooks installed).
+
+    Falls back to a generic commit message when *message_fn* raises
+    (e.g. the LLM-based generator is unavailable).
 
     Args:
         commit_dir: Directory whose changes are staged and committed.
@@ -162,6 +174,12 @@ def auto_commit_changes(
             from kiss.agents.vscode.helpers import _append_user_prompt
 
             msg = _append_user_prompt(msg, user_prompt)
+    # Re-stage immediately before committing to capture any files
+    # that materialized during the (typically slow) *message_fn*
+    # call — see the docstring above for the production race this
+    # closes.  Cheap when nothing changed (``git add -A`` is a no-op
+    # against an unchanged tree).
+    GitWorktreeOps.stage_all(commit_dir)
     return GitWorktreeOps.commit_staged(commit_dir, msg)
 
 

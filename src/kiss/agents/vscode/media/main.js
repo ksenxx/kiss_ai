@@ -2556,10 +2556,35 @@
     }
   }
 
+  /**
+   * Toggle the "KISS Sorcar Server is starting ..." overlay.
+   *
+   * When the kiss-web daemon socket is NOT yet connected the overlay
+   * covers the whole webview and #app is hidden so the user does not
+   * see a non-functional tab bar / welcome page.  When connected the
+   * overlay is removed and #app becomes visible.
+   *
+   * Driven by the ``daemonStatus`` message posted from the extension
+   * host (see SorcarSidebarView.ts ``connect``/``disconnect`` handlers
+   * and the ``ready`` handler).
+   */
+  function setServerLoading(loading) {
+    const overlay = document.getElementById('kiss-server-loading');
+    const app = document.getElementById('app');
+    if (overlay) overlay.style.display = loading ? '' : 'none';
+    if (app) app.style.display = loading ? 'none' : '';
+  }
+
   // --- Main event handler ---
   function handleEvent(ev) {
     const t = ev.type;
     switch (t) {
+      case 'daemonStatus':
+        // The extension host has told us whether the kiss-web daemon
+        // socket is connected.  Hide #app and show the loading overlay
+        // until ``connected === true``, then reveal the regular tabs.
+        setServerLoading(!ev.connected);
+        return;
       case 'status': {
         const evTab = findTabByEvt(ev);
         if (evTab) {
