@@ -224,7 +224,7 @@ class TestApiKeyShell:
 
         monkeypatch.setenv("SHELL", "/bin/zsh")
         old_cfg = config_module.DEFAULT_CONFIG
-        save_api_key_to_shell("MINIMAX_API_KEY", "mm-key")
+        save_api_key_to_shell("ZAI_API_KEY", "z-key")
         assert config_module.DEFAULT_CONFIG is not old_cfg
 
     def test_multiple_keys_sequential(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -754,7 +754,8 @@ class TestApiKeyEnvVarsConstant:
             "ANTHROPIC_API_KEY",
             "TOGETHER_API_KEY",
             "OPENROUTER_API_KEY",
-            "MINIMAX_API_KEY",
+            "ZAI_API_KEY",
+            "MOONSHOT_API_KEY",
         }
         assert API_KEY_ENV_VARS == expected
 

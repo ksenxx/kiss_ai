@@ -7,30 +7,6 @@
     "emb": true,
     "gen": false
   },
-  "MiniMaxAI/MiniMax-M2.5": {
-    "context_length": 196608,
-    "input_price_per_1M": 0.3,
-    "output_price_per_1M": 1.2,
-    "fc": true,
-    "emb": false,
-    "gen": true
-  },
-  "MiniMaxAI/MiniMax-M2.7": {
-    "context_length": 196608,
-    "input_price_per_1M": 0.3,
-    "output_price_per_1M": 1.2,
-    "fc": true,
-    "emb": false,
-    "gen": true
-  },
-  "MiniMaxAI/MiniMax-M3": {
-    "context_length": 524288,
-    "input_price_per_1M": 0.3,
-    "output_price_per_1M": 1.2,
-    "fc": true,
-    "emb": false,
-    "gen": true
-  },
   "Qwen/QwQ-32B": {
     "context_length": 131072,
     "input_price_per_1M": 1.2,
@@ -1265,18 +1241,115 @@
     "emb": false,
     "gen": true
   },
-  "minimax-m2.5": {
-    "context_length": 1000000,
-    "input_price_per_1M": 0.15,
-    "output_price_per_1M": 1.2,
+  "glm-4-32b-0414-128k": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.1,
+    "output_price_per_1M": 0.1,
     "fc": true,
     "emb": false,
     "gen": true
   },
-  "minimax-m2.5-lightning": {
-    "context_length": 1000000,
-    "input_price_per_1M": 0.3,
-    "output_price_per_1M": 2.4,
+  "glm-4.5": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.6,
+    "output_price_per_1M": 2.2,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "glm-4.5-air": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.2,
+    "output_price_per_1M": 1.1,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "glm-4.5-airx": {
+    "context_length": 131072,
+    "input_price_per_1M": 1.1,
+    "output_price_per_1M": 4.5,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "glm-4.5-flash": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.0,
+    "output_price_per_1M": 0.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "glm-4.5-x": {
+    "context_length": 131072,
+    "input_price_per_1M": 2.2,
+    "output_price_per_1M": 8.9,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "glm-4.6": {
+    "context_length": 204800,
+    "input_price_per_1M": 0.6,
+    "output_price_per_1M": 2.2,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "glm-4.7": {
+    "context_length": 204800,
+    "input_price_per_1M": 0.6,
+    "output_price_per_1M": 2.2,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "cache_read_price_per_1M": 0.11
+  },
+  "kimi-k2.5": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.6,
+    "output_price_per_1M": 2.5,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "kimi-k2.6": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.6,
+    "output_price_per_1M": 2.5,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "kimi-k2.7-code": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.6,
+    "output_price_per_1M": 2.5,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "moonshot-v1-128k": {
+    "context_length": 131072,
+    "input_price_per_1M": 2.0,
+    "output_price_per_1M": 2.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "moonshot-v1-32k": {
+    "context_length": 32768,
+    "input_price_per_1M": 1.0,
+    "output_price_per_1M": 1.0,
+    "fc": true,
+    "emb": false,
+    "gen": true
+  },
+  "moonshot-v1-8k": {
+    "context_length": 8192,
+    "input_price_per_1M": 0.4,
+    "output_price_per_1M": 0.4,
     "fc": true,
     "emb": false,
     "gen": true
@@ -2366,70 +2439,6 @@
     "input_price_per_1M": 0.62,
     "output_price_per_1M": 0.62,
     "fc": false,
-    "emb": false,
-    "gen": true
-  },
-  "openrouter/minimax/minimax-01": {
-    "context_length": 1000192,
-    "input_price_per_1M": 0.2,
-    "output_price_per_1M": 1.1,
-    "fc": false,
-    "emb": false,
-    "gen": true
-  },
-  "openrouter/minimax/minimax-m1": {
-    "context_length": 1000000,
-    "input_price_per_1M": 0.4,
-    "output_price_per_1M": 2.2,
-    "fc": false,
-    "emb": false,
-    "gen": true
-  },
-  "openrouter/minimax/minimax-m2": {
-    "context_length": 204800,
-    "input_price_per_1M": 0.255,
-    "output_price_per_1M": 1.0,
-    "fc": false,
-    "emb": false,
-    "gen": true
-  },
-  "openrouter/minimax/minimax-m2-her": {
-    "context_length": 65536,
-    "input_price_per_1M": 0.3,
-    "output_price_per_1M": 1.2,
-    "fc": false,
-    "emb": false,
-    "gen": true
-  },
-  "openrouter/minimax/minimax-m2.1": {
-    "context_length": 204800,
-    "input_price_per_1M": 0.29,
-    "output_price_per_1M": 0.95,
-    "fc": true,
-    "emb": false,
-    "gen": true
-  },
-  "openrouter/minimax/minimax-m2.5": {
-    "context_length": 204800,
-    "input_price_per_1M": 0.15,
-    "output_price_per_1M": 0.9,
-    "fc": true,
-    "emb": false,
-    "gen": true
-  },
-  "openrouter/minimax/minimax-m2.7": {
-    "context_length": 204800,
-    "input_price_per_1M": 0.25,
-    "output_price_per_1M": 1.0,
-    "fc": true,
-    "emb": false,
-    "gen": true
-  },
-  "openrouter/minimax/minimax-m3": {
-    "context_length": 1048576,
-    "input_price_per_1M": 0.3,
-    "output_price_per_1M": 1.2,
-    "fc": true,
     "emb": false,
     "gen": true
   },

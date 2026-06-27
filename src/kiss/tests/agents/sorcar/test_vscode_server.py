@@ -54,7 +54,7 @@ class TestModelVendorOrder(unittest.TestCase):
             "claude-opus-4-6",
             "gpt-4o",
             "openrouter/x",
-            "minimax-large",
+            "glm-4.6",
             "cc/opus",
         ]
         sorted_names = sorted(names, key=_model_vendor_order)

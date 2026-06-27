@@ -23,7 +23,8 @@ class TestFastModelFor:
             "TOGETHER_API_KEY",
             "GEMINI_API_KEY",
             "OPENAI_API_KEY",
-            "MINIMAX_API_KEY",
+            "ZAI_API_KEY",
+            "MOONSHOT_API_KEY",
         ):
             monkeypatch.delenv(key, raising=False)
         from kiss.core import config as _cfg

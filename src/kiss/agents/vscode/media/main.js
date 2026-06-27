@@ -3557,7 +3557,8 @@
             anthropic_api_key: 'ANTHROPIC_API_KEY',
             together_api_key: 'TOGETHER_API_KEY',
             openrouter_api_key: 'OPENROUTER_API_KEY',
-            minimax_api_key: 'MINIMAX_API_KEY',
+            zai_api_key: 'ZAI_API_KEY',
+            moonshot_api_key: 'MOONSHOT_API_KEY',
           };
           const envVar = envMap[sKey];
           if (envVar) {
@@ -5076,7 +5077,8 @@
       'cfg-key-ANTHROPIC_API_KEY',
       'cfg-key-TOGETHER_API_KEY',
       'cfg-key-OPENROUTER_API_KEY',
-      'cfg-key-MINIMAX_API_KEY',
+      'cfg-key-ZAI_API_KEY',
+      'cfg-key-MOONSHOT_API_KEY',
       'cfg-custom-api-key',
     ].forEach(setupSecretInput);
     // The welcome-page remote-password input and the settings-panel
@@ -6868,7 +6870,8 @@
       'ANTHROPIC_API_KEY',
       'TOGETHER_API_KEY',
       'OPENROUTER_API_KEY',
-      'MINIMAX_API_KEY',
+      'ZAI_API_KEY',
+      'MOONSHOT_API_KEY',
     ];
     keyIds.forEach(k => {
       el('cfg-key-' + k).value = (apiKeys && apiKeys[k]) || '';
@@ -6900,7 +6903,8 @@
       'ANTHROPIC_API_KEY',
       'TOGETHER_API_KEY',
       'OPENROUTER_API_KEY',
-      'MINIMAX_API_KEY',
+      'ZAI_API_KEY',
+      'MOONSHOT_API_KEY',
     ];
     keyIds.forEach(k => {
       const v = el('cfg-key-' + k).value.trim();

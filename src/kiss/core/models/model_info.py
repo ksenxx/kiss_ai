@@ -127,7 +127,6 @@ _OPENAI_PREFIXES = ("gpt", "text-embedding", "o1", "o3", "o4", "codex", "compute
 _TOGETHER_PREFIXES = (
     "meta-llama/",
     "Qwen/",
-    "MiniMaxAI/",
     "mistralai/",
     "deepseek-ai/",
     "deepcogito/",
@@ -482,11 +481,20 @@ def model(
             token_callback=token_callback,
             thinking_callback=thinking_callback,
         )
-    if model_name.startswith("minimax-"):
+    if model_name.startswith("glm-"):
         return _openai_compatible(
             model_name,
-            "https://api.minimax.chat/v1",
-            keys.MINIMAX_API_KEY,
+            "https://api.z.ai/api/paas/v4",
+            keys.ZAI_API_KEY,
+            model_config,
+            token_callback,
+            thinking_callback,
+        )
+    if model_name.startswith("kimi-") or model_name.startswith("moonshot-"):
+        return _openai_compatible(
+            model_name,
+            "https://api.moonshot.ai/v1",
+            keys.MOONSHOT_API_KEY,
             model_config,
             token_callback,
             thinking_callback,
@@ -517,7 +525,9 @@ def get_available_models() -> list[str]:
         "openrouter/": keys.OPENROUTER_API_KEY,
         "claude-": keys.ANTHROPIC_API_KEY,
         "gemini-": keys.GEMINI_API_KEY,
-        "minimax-": keys.MINIMAX_API_KEY,
+        "glm-": keys.ZAI_API_KEY,
+        "kimi-": keys.MOONSHOT_API_KEY,
+        "moonshot-": keys.MOONSHOT_API_KEY,
     }
     import shutil
 
@@ -560,7 +570,8 @@ def get_model_provider(model_name: str) -> str:
     The mapping mirrors the dispatch order in :func:`model`: subscription
     CLIs first (``cc/`` → Claude Code, ``codex/`` → Codex), then the
     prefix-routed HTTP providers (``openrouter/``, ``claude-``,
-    ``gemini-``, ``minimax-``), then the OpenAI and Together prefix sets.
+    ``gemini-``, ``glm-`` for Z.AI, ``kimi-``/``moonshot-`` for Moonshot),
+    then the OpenAI and Together prefix sets.
 
     Args:
         model_name: A ``MODEL_INFO`` key.
@@ -579,8 +590,10 @@ def get_model_provider(model_name: str) -> str:
         return "Anthropic"
     if model_name.startswith("gemini-") or model_name == "text-embedding-004":
         return "Gemini"
-    if model_name.startswith("minimax-"):
-        return "MiniMax"
+    if model_name.startswith("glm-"):
+        return "Z.AI"
+    if model_name.startswith("kimi-") or model_name.startswith("moonshot-"):
+        return "Moonshot"
     if model_name.startswith(_OPENAI_PREFIXES) and not model_name.startswith("openai/gpt-oss"):
         return "OpenAI"
     if model_name.startswith(_TOGETHER_PREFIXES):
@@ -612,7 +625,8 @@ def get_generation_model_listing() -> list[tuple[str, str, bool]]:
         "Gemini": bool(keys.GEMINI_API_KEY),
         "OpenRouter": bool(keys.OPENROUTER_API_KEY),
         "Together": bool(keys.TOGETHER_API_KEY),
-        "MiniMax": bool(keys.MINIMAX_API_KEY),
+        "Z.AI": bool(keys.ZAI_API_KEY),
+        "Moonshot": bool(keys.MOONSHOT_API_KEY),
         "Claude Code CLI": shutil.which("claude") is not None,
         "Codex CLI": find_codex_executable() is not None,
         "Unknown": False,
