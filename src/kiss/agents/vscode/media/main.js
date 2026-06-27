@@ -5143,40 +5143,13 @@
         e.stopPropagation();
         // Server reset SIGTERMs the kiss-web daemon, killing every
         // in-flight agent.  When any tab still has a running agent,
-        // first ask the user whether they really want to forcefully
-        // restart the server — otherwise their unfinished task is
-        // silently aborted.  When nothing is running, fall through to
-        // the existing fast path so the button stays one click for the
-        // common case.
+        // the extension must surface a native VS Code modal dialog
+        // (OK/Cancel) before forwarding the reset — otherwise the
+        // user's unfinished task is silently aborted.  Tell the
+        // extension whether any tab is currently running so it can
+        // decide whether to raise the dialog or fast-path the reset.
         const agentRunning = tabs.some(tab => tab && tab.isRunning);
-        if (!agentRunning) {
-          vscode.postMessage({type: 'serverReset'});
-          return;
-        }
-        showNotification({
-          id: 'kiss-server-reset-confirm',
-          severity: 'warning',
-          message:
-            'An agent is still running. Forcefully restart the server ' +
-            'and abort the in-flight task?',
-          sticky: true,
-          actions: [
-            {
-              label: 'Forcefully restart',
-              ariaLabel: 'Forcefully restart the server',
-              onClick: () => {
-                vscode.postMessage({type: 'serverReset'});
-              },
-            },
-            {
-              label: 'Cancel',
-              ariaLabel: 'Cancel server reset',
-              onClick: () => {
-                // Dismiss only — leave the running agent untouched.
-              },
-            },
-          ],
-        });
+        vscode.postMessage({type: 'serverReset', agentRunning});
       });
     }
 
