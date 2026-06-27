@@ -137,18 +137,18 @@ async function testStickyStateRefreshesAfterReusingNotificationId() {
       'reused notification id must expose sticky=false after refresh',
     );
     assert.ok(
-      timerDelays(wv).includes(10000),
-      'transient info notification must schedule a 10s auto-dismiss timer',
+      timerDelays(wv).includes(5000),
+      'transient info notification must schedule a 5s auto-dismiss timer',
     );
 
     toast.dispatchEvent(new wv.win.MouseEvent('mouseenter', {bubbles: true}));
     assert.ok(
-      !timerDelays(wv).includes(10000),
+      !timerDelays(wv).includes(5000),
       'hovering the toast must clear the transient auto-dismiss timer',
     );
 
     toast.dispatchEvent(new wv.win.MouseEvent('mouseleave', {bubbles: true}));
-    const dismissTimer = latestTimer(wv, 10000);
+    const dismissTimer = latestTimer(wv, 5000);
     assert.ok(
       dismissTimer,
       'leaving a reused now-transient toast must reschedule auto-dismiss using current sticky state',
