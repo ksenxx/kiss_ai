@@ -1,112 +1,33 @@
-# Progress — Diagnose and fix spurious merge-conflict message
+# Progress — Broadcast ask-user prompts across clients
 
 ## Task
 
-Investigate why the previous task generated a manual merge-conflict message,
-reproduce it with an end-to-end test, fix it, test it using `claude-opus-4-7`,
-and then review the work with `gpt-5.5` (non-codex).
+When the agent asks the user a question, show the prompt on all tabs on all
+clients with the same chat id. When the user responds on one tab, close/remove
+that prompt window from all tabs on all clients with the same chat id. Reproduce
+with an end-to-end test, fix the issue using `claude-opus-4-7`, and review the
+full work with `gpt-5.5` (not codex).
 
 ## Steps so far
 
 - Read `SORCAR.md` first as required; it is empty.
-
-- Switched to `claude-opus-4-7` for implementation/test work as requested.
-
-- Inspected current branch/status and confirmed this task starts on
-  `kiss/wt-1782544196-1298b638` at commit
-  `d64fd6fe feat: add start_line parameter to Read tools`.
-
-- Located the manual-conflict message in `WorktreeSorcarAgent.merge()` and
-  inspected the previous failed branch `kiss/wt-1782543318-283af1fe`.
-
-- Replayed the previous task's manual cherry-pick in an isolated temporary git
-  worktree under `./tmp/repro-prev-conflict`:
-
-  ```text
-  git cherry-pick --no-commit a3582790521293a064c1687de0f0e7b671ed77ce..kiss/wt-1782543318-283af1fe
-  CONFLICT (content): Merge conflict in src/kiss/INJECTIONS.md
-  ```
-
-  The conflict markers showed a whitespace/wording drift between the
-  dirty-state baseline and the branch edit in `src/kiss/INJECTIONS.md`; the
-  temp worktree was then removed.
-
-- Wrote an end-to-end regression test in
-  `src/kiss/tests/agents/sorcar/test_progress_md_merge_conflict.py`:
-
-  ```python
-  def test_injections_md_prompt_drift_is_scratch_and_auto_resolves(self) -> None:
-      injections = self.repo / "src" / "kiss" / "INJECTIONS.md"
-      injections.parent.mkdir(parents=True)
-      injections.write_text(INJECTIONS_HEAD)
-      _commit_all(self.repo, "add injection scratch prompt")
-
-      injections.write_text(INJECTIONS_BASELINE)
-      wt_dir = _create_worktree(self.repo, "kiss/wt-test-injections")
-      assert GitWorktreeOps.copy_dirty_state(self.repo, wt_dir)
-      GitWorktreeOps.stage_all(wt_dir)
-      assert GitWorktreeOps.commit_staged(
-          wt_dir, "kiss: baseline from dirty state", no_verify=True
-      )
-      baseline = GitWorktreeOps.head_sha(wt_dir)
-      assert baseline is not None
-      _git("checkout", "--", "src/kiss/INJECTIONS.md", cwd=self.repo)
-
-      (wt_dir / "src" / "kiss" / "INJECTIONS.md").write_text(INJECTIONS_BRANCH)
-      (wt_dir / "agent_work.py").write_text("y = 2\n")
-      _commit_all(wt_dir, "agent task work")
-      GitWorktreeOps.ensure_scratch_merge_driver(self.repo)
-
-      result = GitWorktreeOps.squash_merge_from_baseline(
-          self.repo, "kiss/wt-test-injections", baseline
-      )
-
-      assert result == MergeResult.SUCCESS
-  ```
-
-- Confirmed the new test failed before the fix with `MergeResult.CONFLICT` and
-  git reporting `could not apply ... agent task work`.
-
-- Fixed `GitWorktreeOps.ensure_scratch_merge_driver()` to register both scratch files:
-
-  ```python
-  for scratch_path in ("PROGRESS.md", "src/kiss/INJECTIONS.md"):
-      GitWorktreeOps._append_info_line(
-          repo, "attributes", f"{scratch_path} merge=kiss-scratch"
-      )
-  ```
-
-- Updated the merge-driver docstring to describe both `PROGRESS.md` and
-  `src/kiss/INJECTIONS.md` scratch semantics.
-
-- Extended the idempotency test to assert exactly one
-  `src/kiss/INJECTIONS.md merge=kiss-scratch` attributes line.
-
-- Verified the new test passes after the fix.
-
-- Ran impacted scratch/worktree tests in parallel across 8 splits
-  (10 cores → 8 workers): all 92 selected tests passed.
-
-- Switched to `gpt-5.5` for review. Review findings:
-
-  - The root-cause identification is concrete and reproducible: the previous
-    branch still exists, its baseline commit is `a3582790`, and a clean replay
-    of `git cherry-pick --no-commit a3582790..kiss/wt-1782543318-283af1fe`
-    conflicts specifically in `src/kiss/INJECTIONS.md`.
-  - The new test is end-to-end enough for this subsystem: it uses a real
-    temporary git repo, real worktree branch, real dirty-state baseline commit,
-    real cherry-pick merge path through
-    `GitWorktreeOps.squash_merge_from_baseline()`, and no mocks/fakes.
-  - The failure mode is correctly pinned: before the fix,
-    `GitWorktreeOps.ensure_scratch_merge_driver()` only added
-    `PROGRESS.md merge=kiss-scratch`, so `src/kiss/INJECTIONS.md` used Git's
-    default text merge and conflicted.
-  - The fix is minimal and general for the observed bug: it extends the
-    existing repo-local scratch merge-driver registration to the second scratch
-    file rather than changing merge control flow or suppressing all conflicts.
-  - Real source conflicts remain guarded by the existing
-    `test_real_source_conflict_still_reported`; adding `INJECTIONS.md` does not
-    make arbitrary project files auto-resolve.
-  - Idempotency remains covered for both attributes entries.
-  - One documentation nit was found: the test module docstring still described
-    only `PROGRESS.md`; updated it to describe both scratch files.
+- Switched to `claude-opus-4-7` for all implementation/test work as requested.
+- Started exploring the VS Code/webview and Sorcar ask-user code paths.
+- Found that ask prompts are emitted as task events (`type: "askUser"`) and fanned out by `WebPrinter` to task subscribers (tabs viewing the task/chat), but submitting a `userAnswer` only puts the answer into the owner queue and the frontend only clears the modal in the submitting tab. Other subscribed tabs keep a stale modal open.
+- Planned changes:
+  1. Add an end-to-end backend test proving `askUser` is fanned out to all task/chat subscribers and that answering from one subscriber broadcasts a clear event to all subscribers.
+  1. Add a frontend handler for that clear event so every tab with the same chat/task removes the ask-user modal.
+  1. Keep existing direct owner-tab answer routing and viewer-tab fallback behavior intact.
+- Added `src/kiss/tests/agents/sorcar/test_ask_user_broadcast.py`, an end-to-end backend test that starts `_ask_user_question()` on an agent-like thread, subscribes `owner-tab` and `viewer-tab` to the same task, verifies both receive `askUser`, submits `userAnswer` from the viewer, and expects both tabs to receive `askUserDone`.
+- Confirmed the new test fails before the fix: both tabs got `askUser`, the answer reached the waiting agent, but there were no `askUserDone` events for either tab.
+- Implemented the backend fix in `commands.py`: after a valid `userAnswer` is enqueued, compute all subscriber tabs sharing the answering tab's task and broadcast `{"type": "askUserDone", "tabId": tab_id}` to each of them.
+- Implemented the frontend fix in `media/main.js`: handle `askUserDone` by clearing that tab's pending question/input and hiding the shared modal if that tab is active.
+- Updated `types.ts` so `askUser` may carry `tabId` and added the `askUserDone` message type.
+- Re-ran impacted tests after the fix: `uv run pytest -q src/kiss/tests/agents/sorcar/test_ask_user_broadcast.py src/kiss/tests/agents/sorcar/test_ask_user_immediate_response.py src/kiss/tests/agents/sorcar/test_vscode_tabs.py` passed with 45 tests.
+- Switched to `gpt-5.5` for a full-work review. Review findings:
+  - The regression test exercises the actual backend lifecycle: task-local thread state, `_ask_user_question()`, production-equivalent fanout via `MemoryPrinter`, command dispatch through `_handle_command(userAnswer)`, and queue wake-up to the waiting agent. It reproduces the stale-modal problem because pre-fix no `askUserDone` event is emitted.
+  - The fix preserves the existing answer-routing behavior: direct owner queue lookup remains first, viewer-tab fallback still resolves through the subscriber graph, and unknown/unrelated tabs still drop safely because no queue is found.
+  - Broadcasting `askUserDone` after the queue update is the right protocol-level fix: all clients sharing the task subscription receive an explicit close event, so VS Code webviews and remote browser clients converge even when only one frontend submitted the answer.
+  - The frontend change is minimal and stateful: it clears the addressed tab's pending question and input, and only hides the currently mounted modal when the addressed tab is active, so background-tab state is corrected without disrupting the foreground if the event is for a different tab.
+  - The message type update in `types.ts` is necessary because VS Code extension code inspects `msg.type === 'askUser'` and forwards the new daemon event through the same typed channel.
+  - One concurrency improvement was made during review: compute and broadcast `askUserDone` outside `_state_lock` so transport fanout never runs while holding the registry lock.
