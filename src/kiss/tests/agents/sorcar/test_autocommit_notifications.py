@@ -217,7 +217,12 @@ class TestAutoCommitChangesNotifyFn:
             assert calls[1][2] == head_after
             assert head_after != head_before
 
-    def test_no_commit_means_only_generating_fires(self) -> None:
+    def test_no_commit_skips_message_fn_and_notifications(self) -> None:
+        """Bug 1 (gpt-5.5 review): when nothing is staged, do NOT fire
+        the misleading "Generating commit message" toast and do NOT
+        invoke the (slow, token-costing) ``message_fn``.  The whole
+        auto-commit short-circuits silently.
+        """
         with tempfile.TemporaryDirectory() as tmp_str:
             tmp = Path(tmp_str)
             repo = _make_repo(tmp / "repo")
@@ -228,17 +233,26 @@ class TestAutoCommitChangesNotifyFn:
             def notify(stage: str, subject: str) -> None:
                 calls.append((stage, subject))
 
+            msg_fn_called = []
+
+            def message_fn(_d: Path, _p: str | None) -> str:
+                msg_fn_called.append(True)
+                return "feat: noop"
+
             with _LLMUnavailable():
                 created = auto_commit_changes(
                     repo,
                     user_prompt=None,
-                    message_fn=lambda d, p: "feat: noop",
+                    message_fn=message_fn,
                     notify_fn=notify,
                 )
 
             assert created is False
-            # No changes ⇒ no commit ⇒ only the "generating" toast.
-            assert calls == [("generating", "")]
+            # No changes ⇒ no "generating" toast (it would be misleading
+            # because nothing is going to be committed).
+            assert calls == []
+            # No changes ⇒ no LLM call (saves tokens and latency).
+            assert msg_fn_called == []
             assert _head_sha(repo) == head_before
 
     def test_notify_fn_none_does_not_break_flow(self) -> None:
@@ -306,6 +320,32 @@ class TestAutoCommitChangesNotifyFn:
             committed = [s for stage, s in calls if stage == "committed"]
             assert committed == ["feat: real subject"]
 
+    def test_empty_tree_does_not_invoke_message_fn(self) -> None:
+        """Bug 1 (gpt-5.5 review): an empty tree must short-circuit
+        BEFORE the (slow, token-costing) ``message_fn`` call.  Otherwise
+        we burn LLM tokens on a commit that will never happen and the
+        user sees a misleading "Generating commit message" toast.
+        """
+        with tempfile.TemporaryDirectory() as tmp_str:
+            tmp = Path(tmp_str)
+            repo = _make_repo(tmp / "repo")
+
+            invocations: list[str] = []
+
+            def message_fn(_d: Path, _p: str | None) -> str:
+                invocations.append("called")
+                return "feat: should not happen"
+
+            with _LLMUnavailable():
+                created = auto_commit_changes(
+                    repo,
+                    user_prompt=None,
+                    message_fn=message_fn,
+                )
+
+            assert created is False
+            assert invocations == []  # message_fn was NOT called.
+
 
 class TestWorktreeAutoCommitBroadcasts:
     """``WorktreeSorcarAgent._auto_commit_worktree`` routes the two
@@ -342,8 +382,12 @@ class TestWorktreeAutoCommitBroadcasts:
                 assert ev["severity"] == "info"
                 assert ev["tabId"] == "tab-xyz"
                 assert isinstance(ev["id"], str) and ev["id"]
-            # Distinct ids so the webview can dismiss them independently.
-            assert gen_ev["id"] != committed_ev["id"]
+            # Bug 2 (gpt-5.5 review): the two events MUST share the
+            # same notification id so the webview updates the toast in
+            # place (Generating → Committed) instead of stacking two
+            # toasts and leaving the misleading "Generating commit
+            # message" lingering until its own auto-dismiss timer fires.
+            assert gen_ev["id"] == committed_ev["id"]
 
             # Content + ordering.
             assert gen_ev["message"] == "Generating commit message"
@@ -356,7 +400,12 @@ class TestWorktreeAutoCommitBroadcasts:
             subject = _head_message(wt_dir).splitlines()[0].strip()
             assert committed_ev["message"] == f"Committed {subject}"
 
-    def test_worktree_no_commit_emits_only_generating(self) -> None:
+    def test_worktree_no_commit_emits_no_notifications(self) -> None:
+        """Bug 1 (gpt-5.5 review): worktree path must NOT emit the
+        misleading "Generating commit message" toast when there are no
+        staged changes to commit.  Otherwise the webview shows a toast
+        that never resolves to a "Committed" message.
+        """
         with tempfile.TemporaryDirectory() as tmp_str:
             tmp = Path(tmp_str)
             agent, _repo, wt_dir = _setup_worktree_agent(tmp, "notif-empty")
@@ -369,9 +418,8 @@ class TestWorktreeAutoCommitBroadcasts:
             with _LLMUnavailable():
                 assert agent._auto_commit_worktree() is False
 
-            notifs = _notification_events(printer)
-            assert len(notifs) == 1
-            assert notifs[0][0]["message"] == "Generating commit message"
+            # No notifications at all — the empty path is silent.
+            assert _notification_events(printer) == []
             assert _head_sha(wt_dir) == head_before
 
     def test_worktree_no_printer_does_not_crash(self) -> None:
@@ -425,4 +473,64 @@ class TestWorktreeAutoCommitBroadcasts:
             agent.printer = printer  # type: ignore[assignment]
 
             assert agent._auto_commit_worktree() is False
+            assert _notification_events(printer) == []
+
+    def test_worktree_generating_and_committed_share_id(self) -> None:
+        """Bug 2 (gpt-5.5 review): the "generating" and "committed"
+        toast events must share the same notification id so
+        ``media/main.js`` updates the existing toast in place instead of
+        stacking two notifications.  Otherwise the misleading
+        "Generating commit message" lingers next to the new
+        "Committed <subject>" toast until its own auto-dismiss timer.
+        """
+        with tempfile.TemporaryDirectory() as tmp_str:
+            tmp = Path(tmp_str)
+            agent, _repo, wt_dir = _setup_worktree_agent(tmp, "notif-sameid")
+            (wt_dir / "new.txt").write_text("hi\n")
+
+            printer = _RecordingPrinter(wt_dir)
+            agent.printer = printer  # type: ignore[assignment]
+
+            with _LLMUnavailable():
+                assert agent._auto_commit_worktree() is True
+
+            notifs = _notification_events(printer)
+            assert len(notifs) == 2
+            assert notifs[0][0]["id"] == notifs[1][0]["id"]
+            assert notifs[0][0]["message"] == "Generating commit message"
+            assert notifs[1][0]["message"].startswith("Committed ")
+
+    def test_worktree_no_commit_does_not_call_llm(self) -> None:
+        """Bug 1 (gpt-5.5 review) — worktree integration check: when
+        nothing is staged the worktree path must NOT invoke the
+        LLM-backed commit-message generator (it costs tokens for
+        nothing) and must NOT broadcast the "Generating commit
+        message" toast.
+        """
+        # Spy on ``_generate_commit_message`` to confirm it is never
+        # called when the worktree has no changes.
+        import kiss.agents.sorcar.sorcar_agent as sa
+
+        original = sa._generate_commit_message
+        calls: list[tuple[Path, str | None]] = []
+
+        def spy(commit_dir: Path, user_prompt: str | None) -> str:
+            calls.append((commit_dir, user_prompt))
+            return original(commit_dir, user_prompt)
+
+        with tempfile.TemporaryDirectory() as tmp_str:
+            tmp = Path(tmp_str)
+            agent, _repo, wt_dir = _setup_worktree_agent(tmp, "notif-llmskip")
+
+            printer = _RecordingPrinter(wt_dir)
+            agent.printer = printer  # type: ignore[assignment]
+
+            sa._generate_commit_message = spy  # type: ignore[assignment]
+            try:
+                with _LLMUnavailable():
+                    assert agent._auto_commit_worktree() is False
+            finally:
+                sa._generate_commit_message = original  # type: ignore[assignment]
+
+            assert calls == []
             assert _notification_events(printer) == []
