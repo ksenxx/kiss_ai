@@ -117,7 +117,7 @@ from kiss.agents.vscode.helpers import (
 )
 from kiss.agents.vscode.tricks import (
     current_sentence_partial,
-    prefix_match_trick,
+    prefix_match_tricks,
 )
 
 if TYPE_CHECKING:
@@ -304,14 +304,17 @@ class CliCompleter:
         # INJECTIONS.md "Inject instruction" tricks are also surfaced
         # as fast-complete suggestions, but ONLY at the beginning of a
         # sentence (start of *line* or after ``[.!?]`` + whitespace).
-        # ``prefix_match_trick`` returns the full trick body when the
-        # current sentence's leading partial prefixes a trick; we
-        # reconstruct the whole-line completion by replacing that
-        # partial with the trick text.
-        trick = prefix_match_trick(line)
-        if trick:
+        # ``prefix_match_tricks`` returns EVERY trick whose body
+        # begins with the current sentence's leading partial — so when
+        # multiple tricks share a prefix (e.g. the bundled
+        # INJECTIONS.md ships two ``Reproduce the issue by writing …``
+        # tricks) the dropdown menu shows them all, mirroring
+        # ``_prefix_match_tasks``' multi-alternative contract.
+        tricks = prefix_match_tricks(line)
+        if tricks:
             partial = current_sentence_partial(line)
-            return [line + trick[len(partial):]]
+            head = line[: len(line) - len(partial)]
+            return [head + trick for trick in tricks]
         suffix = self._active_file_suffix(line)
         if suffix:
             return [line + suffix]
