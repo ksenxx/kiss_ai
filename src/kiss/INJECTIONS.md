@@ -1,6 +1,6 @@
 ## Trick
 
-Use internet search extensively.
+Search internet extensively.
 
 ## Trick
 
