@@ -461,13 +461,25 @@ class UsefulTools:
         self,
         file_path: str,
         max_lines: int = 2000,
+        start_line: int = 1,
     ) -> str:
         """Read file contents.
 
         Args:
             file_path: Absolute path to file.
             max_lines: Maximum number of lines to return.
+            start_line: 1-indexed line at which to begin the returned
+                window.  ``start_line=1`` (the default) reads from the
+                top of the file and is backward-compatible.  Values
+                less than 1 are rejected; values beyond EOF return an
+                explicit sentinel rather than empty content so the
+                model is not misled into thinking the file is empty.
         """
+        if start_line < 1:
+            return (
+                f"Error: start_line must be >= 1 (got {start_line}); the "
+                f"parameter is 1-indexed."
+            )
         try:
             expanded = _absolutize(file_path, self.work_dir)
             resolved = Path(expanded).resolve()
@@ -524,12 +536,17 @@ class UsefulTools:
                 return "(file is empty)"
 
             lines = text.splitlines(keepends=True)
-            if len(lines) > max_lines:
+            total = len(lines)
+            if start_line > total:
                 return (
-                    "".join(lines[:max_lines])
-                    + f"\n[truncated: {len(lines) - max_lines} more lines]"
+                    f"Error: start_line={start_line} is past EOF "
+                    f"(file has {total} line{'s' if total != 1 else ''})."
                 )
-            return text
+            window = lines[start_line - 1 : start_line - 1 + max_lines]
+            remaining = total - (start_line - 1) - len(window)
+            if remaining > 0:
+                return "".join(window) + f"\n[truncated: {remaining} more lines]"
+            return "".join(window)
         except Exception as e:
             logger.debug("Exception caught", exc_info=True)
             return f"Error: {e}"

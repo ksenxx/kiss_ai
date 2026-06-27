@@ -39,6 +39,13 @@ import {
   Attachment,
   AgentCommand,
 } from './types';
+import {
+  resolveWebviewNotificationAction,
+  setWebviewNotificationPoster,
+  showErrorNotification,
+  showInformationNotification,
+  withWebviewNotificationProgress,
+} from './WebviewNotifications';
 
 /**
  * Webview messages forwarded verbatim to the daemon — message type →
@@ -182,7 +189,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     resolveMap: Map<string, () => void>,
     timeoutMs: number = 120_000,
   ): void {
-    vscode.window.withProgress(
+    withWebviewNotificationProgress(
       {
         location: vscode.ProgressLocation.Notification,
         title,
@@ -427,13 +434,11 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           this._resolveAllWorktreeActions();
         }
         if (msg.success) {
-          vscode.window.showInformationMessage(
+          showInformationNotification(
             msg.message || 'Worktree action completed.',
           );
         } else {
-          vscode.window.showErrorMessage(
-            msg.message || 'Worktree action failed.',
-          );
+          showErrorNotification(msg.message || 'Worktree action failed.');
         }
         if (msg.success && wrTabId !== undefined) {
           const wtDir = this._worktreeDirs.get(wrTabId);
@@ -464,11 +469,9 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           this._autocommitProgresses.delete(adTabId);
         }
         if (msg.success) {
-          vscode.window.showInformationMessage(
-            msg.message || 'Auto-commit completed.',
-          );
+          showInformationNotification(msg.message || 'Auto-commit completed.');
         } else {
-          vscode.window.showErrorMessage(msg.message || 'Auto-commit failed.');
+          showErrorNotification(msg.message || 'Auto-commit failed.');
         }
       }
 
@@ -521,6 +524,9 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     _token: vscode.CancellationToken,
   ): void {
     this._view = webviewView;
+    setWebviewNotificationPoster(message =>
+      this._sendToWebview(message as ToWebviewMessage),
+    );
     // A fresh webview is being (re)resolved — clear the disposed flag so
     // _sendToWebview resumes forwarding daemon events.  Closing the tab
     // fires the per-webview onDidDispose below (which sets _disposed),
@@ -576,6 +582,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       if (this._view === webviewView) {
         this._view = undefined;
         this._disposed = true;
+        setWebviewNotificationPoster(undefined);
       }
       this._resolveAllWorktreeActions();
     });
@@ -1224,6 +1231,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         this._getClient().sendCommand({type: 'serverReset'});
         break;
 
+      case 'notificationAction':
+        resolveWebviewNotificationAction(message.id, message.action);
+        break;
+
       case 'closeTab': {
         const closeTabId = message.tabId;
         if (closeTabId) {
@@ -1253,12 +1264,12 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   private _runUpdate(): void {
     const scriptPath = findInstallScript();
     if (!scriptPath) {
-      vscode.window.showErrorMessage(
+      showErrorNotification(
         `Cannot update KISS Sorcar: install.sh not found in ${kissAiRoot()}.`,
       );
       return;
     }
-    vscode.window.showInformationMessage(
+    showInformationNotification(
       'An update of KISS Sorcar is getting installed…',
     );
     const terminal = vscode.window.createTerminal({
@@ -1469,6 +1480,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
    */
   public dispose(): void {
     this._disposed = true;
+    setWebviewNotificationPoster(undefined);
     if (this._urlFileWatchTimer) {
       clearInterval(this._urlFileWatchTimer);
       this._urlFileWatchTimer = undefined;

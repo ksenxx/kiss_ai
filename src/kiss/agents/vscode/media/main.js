@@ -17,6 +17,139 @@
   }
 
   /**
+   * Format an elapsed duration in milliseconds for the per-panel time
+   * footer: ``"850ms"`` below one second, ``"3.4s"`` below one minute,
+   * ``"1m 12.0s"`` otherwise.
+   */
+  function fmtElapsedMs(ms) {
+    const n = Math.max(0, Math.round(Number(ms) || 0));
+    if (n < 1000) return n + 'ms';
+    const s = n / 1000;
+    if (s < 60) return s.toFixed(1) + 's';
+    const m = Math.floor(s / 60);
+    const sec = (s - m * 60).toFixed(1);
+    return m + 'm ' + sec + 's';
+  }
+
+  // Set of in-progress panel elements currently being stamped with a
+  // live ``.panel-time`` footer.  Populated by ``stampPanelStart`` and
+  // drained by ``finalizePanelTime``.  A single 1-second interval
+  // (``_activePanelTickIv``) walks this set and re-renders each
+  // panel's footer so the user sees the elapsed time update every
+  // second while the panel is still active.  Without this loop the
+  // footer would only appear/refresh when the panel closes — which is
+  // the bug we are fixing.
+  const _activePanels = new Set();
+  let _activePanelTickIv = null;
+
+  /**
+   * Stamp a panel element with its creation time (``data-start-ms``).
+   *
+   * No-op if the panel already carries a start stamp or if we are
+   * currently replaying persisted events (``_deferHighlight`` is set
+   * only during ``replayEventsInto``).  Replayed events arrive
+   * back-to-back so per-panel wall-clock measurements would be
+   * meaningless; we deliberately skip stamping then.
+   *
+   * In addition to stamping, the panel is registered with the live
+   * 1-second ticker so its ``.panel-time`` footer starts rendering
+   * immediately and refreshes every second while the panel is active.
+   */
+  function stampPanelStart(el) {
+    if (!el || _deferHighlight) return;
+    if (el.dataset.startMs) return;
+    el.dataset.startMs = String(Date.now());
+    _activePanels.add(el);
+    _renderPanelTime(el);
+    _startActivePanelTick();
+  }
+
+  /**
+   * Render (create or refresh) the ``.panel-time`` footer for ``el``
+   * using its ``data-start-ms`` stamp.  Shared by the live 1-second
+   * ticker and by ``finalizePanelTime`` so the in-progress footer and
+   * the final footer use identical anchoring/formatting logic.
+   *
+   * No-op if the panel was never stamped (e.g. replayed events) so the
+   * historical view stays clean.
+   */
+  function _renderPanelTime(el) {
+    if (!el) return;
+    const startMs = Number(el.dataset.startMs || 0);
+    if (!startMs) return;
+    const ms = Date.now() - startMs;
+    let footer = null;
+    // Find an existing direct-child footer (avoid matching footers
+    // inside nested panels).
+    for (let i = el.children.length - 1; i >= 0; i--) {
+      const c = el.children[i];
+      if (c.classList && c.classList.contains('panel-time')) {
+        footer = c;
+        break;
+      }
+    }
+    if (!footer) {
+      footer = document.createElement('div');
+      footer.className = 'panel-time';
+      el.appendChild(footer);
+    } else if (footer !== el.lastElementChild) {
+      // Keep the footer anchored as the LAST child so it always
+      // renders visually at the bottom of the panel, even when later
+      // content (e.g. a tool_result bash-panel) is appended after the
+      // initial finalisation.
+      el.appendChild(footer);
+    }
+    footer.textContent = fmtElapsedMs(ms);
+  }
+
+  /**
+   * Start the shared 1-second interval that re-renders the
+   * ``.panel-time`` footer of every panel still in ``_activePanels``.
+   * Idempotent: a no-op if the interval is already running or if no
+   * panels are active.  Each tick prunes panels that are no longer
+   * connected to the DOM so detached panels don't keep the loop alive
+   * forever, and stops the interval once the active set is empty.
+   */
+  function _startActivePanelTick() {
+    if (_activePanelTickIv) return;
+    if (_activePanels.size === 0) return;
+    _activePanelTickIv = setInterval(() => {
+      for (const el of Array.from(_activePanels)) {
+        if (!el || !el.isConnected) {
+          _activePanels.delete(el);
+          continue;
+        }
+        _renderPanelTime(el);
+      }
+      if (_activePanels.size === 0) {
+        clearInterval(_activePanelTickIv);
+        _activePanelTickIv = null;
+      }
+    }, 1000);
+  }
+
+  /**
+   * Append (or refresh) the final "time spent" footer as the LAST
+   * child of the given panel, then deregister the panel from the live
+   * ticker so its footer freezes at the closing time.  Reads
+   * ``data-start-ms`` set by ``stampPanelStart``.
+   *
+   * No-op if the panel was never stamped (e.g. replayed events), so
+   * the historical view stays clean.
+   */
+  function finalizePanelTime(el) {
+    if (!el) return;
+    const startMs = Number(el.dataset.startMs || 0);
+    if (!startMs) return;
+    _renderPanelTime(el);
+    _activePanels.delete(el);
+    if (_activePanels.size === 0 && _activePanelTickIv) {
+      clearInterval(_activePanelTickIv);
+      _activePanelTickIv = null;
+    }
+  }
+
+  /**
    * Sanitize an HTML string before assigning to innerHTML.
    *
    * Strips dangerous tags (script/iframe/object/embed/form/meta/link/style/
@@ -73,6 +206,258 @@
     };
     walk(t.content);
     return t.innerHTML;
+  }
+
+  const notificationTimers = new Map();
+
+  function ensureNotificationContainer() {
+    let container = document.getElementById('kiss-notification-container');
+    if (!container) {
+      container = document.createElement('section');
+      container.id = 'kiss-notification-container';
+      container.className = 'kiss-notification-container';
+      container.setAttribute('aria-label', 'KISS Sorcar notifications');
+      document.body.appendChild(container);
+    }
+    let liveRegion = document.getElementById('kiss-notification-live-region');
+    if (!liveRegion) {
+      liveRegion = document.createElement('div');
+      liveRegion.id = 'kiss-notification-live-region';
+      liveRegion.className = 'kiss-sr-only';
+      liveRegion.setAttribute('role', 'status');
+      liveRegion.setAttribute('aria-live', 'polite');
+      liveRegion.setAttribute('aria-atomic', 'true');
+      document.body.appendChild(liveRegion);
+    }
+    return container;
+  }
+
+  function notificationIcon(severity) {
+    if (severity === 'error') return '\u2715';
+    if (severity === 'warning') return '\u26A0';
+    return '\u2139';
+  }
+
+  function notificationTitle(severity) {
+    if (severity === 'error') return 'Error';
+    if (severity === 'warning') return 'Warning';
+    return 'Information';
+  }
+
+  function clearNotificationTimer(id) {
+    const timer = notificationTimers.get(id);
+    if (timer) clearTimeout(timer);
+    notificationTimers.delete(id);
+  }
+
+  function notificationSelector(id) {
+    return (
+      '.kiss-notification[data-notification-id="' +
+      String(id).replace(/\\/g, '\\\\').replace(/"/g, '\\"') +
+      '"]'
+    );
+  }
+
+  function removeNotification(id, action, notifyExtension) {
+    clearNotificationTimer(id);
+    const toast = document.querySelector(notificationSelector(id));
+    if (toast && toast.parentNode) toast.parentNode.removeChild(toast);
+    if (notifyExtension) {
+      vscode.postMessage({type: 'notificationAction', id: id, action: action});
+    }
+  }
+
+  function scheduleNotificationDismiss(id, severity, sticky) {
+    clearNotificationTimer(id);
+    if (sticky) return;
+    const delay =
+      severity === 'error' ? 15000 : severity === 'warning' ? 12000 : 10000;
+    notificationTimers.set(
+      id,
+      setTimeout(() => removeNotification(id, undefined, false), delay),
+    );
+  }
+
+  function showNotification(ev) {
+    const container = ensureNotificationContainer();
+    const id = ev.id || String(Date.now());
+    let toast = container.querySelector(notificationSelector(id));
+    const severity = ev.severity || 'info';
+    const actions = Array.isArray(ev.actions) ? ev.actions : [];
+    const hasLocalActions = actions.some(
+      action =>
+        action &&
+        typeof action === 'object' &&
+        !Array.isArray(action) &&
+        typeof action.onClick === 'function',
+    );
+    const notifyOnClose = actions.length > 0 && !hasLocalActions;
+    const sticky = !!ev.sticky || actions.length > 0 || !!ev.progress;
+    if (!toast) {
+      toast = document.createElement('article');
+      toast.className = 'kiss-notification';
+      toast.dataset.notificationId = String(id);
+      toast.tabIndex = -1;
+      container.insertBefore(toast, container.firstChild);
+      toast.addEventListener('mouseenter', () => clearNotificationTimer(id));
+      toast.addEventListener('focusin', () => clearNotificationTimer(id));
+      toast.addEventListener('mouseleave', () => {
+        const state = toast.kissNotificationState || {
+          id: id,
+          severity: 'info',
+          sticky: false,
+        };
+        scheduleNotificationDismiss(state.id, state.severity, state.sticky);
+      });
+      toast.addEventListener('focusout', () => {
+        const state = toast.kissNotificationState || {
+          id: id,
+          severity: 'info',
+          sticky: false,
+        };
+        scheduleNotificationDismiss(state.id, state.severity, state.sticky);
+      });
+    }
+    toast.kissNotificationState = {id: id, severity: severity, sticky: sticky};
+    toast.className = 'kiss-notification kiss-notification-' + severity;
+    // Expose `sticky` on the DOM so downstream tests (and any future
+    // a11y tooling) can verify that a notification will not auto-
+    // dismiss — the existing `scheduleNotificationDismiss` already
+    // honours it for the timer, but the flag was otherwise invisible
+    // from the rendered DOM.
+    toast.dataset.notificationSticky = sticky ? 'true' : 'false';
+    toast.setAttribute('role', severity === 'error' ? 'alert' : 'status');
+    toast.setAttribute(
+      'aria-label',
+      notificationTitle(severity) + ': ' + (ev.message || ''),
+    );
+
+    const body = document.createElement('div');
+    body.className = 'kiss-notification-body';
+    const icon = document.createElement('div');
+    icon.className = 'kiss-notification-icon';
+    icon.setAttribute('aria-hidden', 'true');
+    icon.textContent = notificationIcon(severity);
+    const content = document.createElement('div');
+    content.className = 'kiss-notification-content';
+    const title = document.createElement('div');
+    title.className = 'kiss-notification-title';
+    title.textContent = notificationTitle(severity);
+    const message = document.createElement('div');
+    message.className = 'kiss-notification-message';
+    message.textContent = ev.message || '';
+    content.appendChild(title);
+    content.appendChild(message);
+    if (ev.progress && ev.progressMessage) {
+      const progress = document.createElement('div');
+      progress.className = 'kiss-notification-progress-message';
+      progress.textContent = ev.progressMessage;
+      content.appendChild(progress);
+    }
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.className = 'kiss-notification-close';
+    closeBtn.setAttribute('aria-label', 'Dismiss notification');
+    closeBtn.textContent = '\u00d7';
+    closeBtn.addEventListener('click', () =>
+      removeNotification(id, undefined, notifyOnClose),
+    );
+    body.appendChild(icon);
+    body.appendChild(content);
+    body.appendChild(closeBtn);
+    toast.replaceChildren(body);
+    if (ev.progress) {
+      const progressBar = document.createElement('div');
+      progressBar.className = 'kiss-notification-progress';
+      progressBar.setAttribute('aria-hidden', 'true');
+      toast.appendChild(progressBar);
+    }
+    if (actions.length > 0) {
+      const actionRow = document.createElement('div');
+      actionRow.className = 'kiss-notification-actions';
+      actions.forEach(action => {
+        // Each action is either a plain string label OR an object of
+        // shape ``{label, svg?, ariaLabel?, onClick?}``.  The object
+        // form is used by in-webview callers (e.g. the permanent
+        // "update available" notification) that want to render an
+        // inline ``<svg>`` icon inside the button and/or run a local
+        // click handler instead of round-tripping through the
+        // extension via ``notificationAction``.
+        const isObj =
+          action && typeof action === 'object' && !Array.isArray(action);
+        const label = isObj ? String(action.label || '') : String(action);
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'kiss-notification-action';
+        if (isObj && action.svg) {
+          // Parse + sanitise the SVG XML in an off-DOM template, then
+          // adopt the resulting SVG element.  This guarantees the
+          // browser parses it as SVG (correct namespace) and that
+          // ``kissSanitize`` strips any ``<script>``/``on*``/javascript:
+          // payload that may have slipped in.
+          const cleaned = kissSanitize(String(action.svg));
+          const parser = new window.DOMParser();
+          const doc = parser.parseFromString(cleaned, 'image/svg+xml');
+          const svgEl = doc.documentElement;
+          // DOMParser returns a ``<parsererror>`` element on invalid
+          // input — only adopt real SVG roots so we never inject
+          // arbitrary error HTML into the button.
+          if (
+            svgEl &&
+            svgEl.namespaceURI === 'http://www.w3.org/2000/svg' &&
+            svgEl.localName === 'svg'
+          ) {
+            svgEl.setAttribute('class', 'kiss-notification-action-icon');
+            svgEl.setAttribute('aria-hidden', 'true');
+            button.appendChild(document.importNode(svgEl, true));
+          }
+        }
+        if (label) {
+          const labelEl = document.createElement('span');
+          labelEl.className = 'kiss-notification-action-label';
+          labelEl.textContent = label;
+          button.appendChild(labelEl);
+        }
+        if (isObj && action.ariaLabel) {
+          button.setAttribute('aria-label', String(action.ariaLabel));
+        } else if (label) {
+          button.setAttribute('aria-label', label);
+        }
+        button.addEventListener('click', () => {
+          if (isObj && typeof action.onClick === 'function') {
+            try {
+              action.onClick();
+            } catch (_err) {
+              // Swallow handler errors so the notification still
+              // closes — the click already dismissed it from the
+              // user's point of view.
+            }
+            removeNotification(id, undefined, false);
+            return;
+          }
+          removeNotification(id, isObj ? label : action, true);
+        });
+        actionRow.appendChild(button);
+      });
+      toast.appendChild(actionRow);
+    }
+    const liveRegion = document.getElementById('kiss-notification-live-region');
+    if (liveRegion) {
+      liveRegion.textContent = '';
+      setTimeout(() => {
+        liveRegion.textContent =
+          notificationTitle(severity) + ': ' + (ev.message || '');
+      }, 0);
+    }
+    scheduleNotificationDismiss(id, severity, sticky);
+  }
+
+  function updateNotification(ev) {
+    if (ev.close) {
+      removeNotification(ev.id, undefined, false);
+      return;
+    }
+    showNotification(ev);
   }
 
   // State — isRunning mirrors the active tab's tab.isRunning for UI controls
@@ -254,6 +639,7 @@
     hdr.textContent = 'Thoughts';
     addCollapse(panel, hdr);
     panel.appendChild(hdr);
+    stampPanelStart(panel);
     return panel;
   }
 
@@ -1863,6 +2249,7 @@
         addCollapse(c, hdr);
         target.appendChild(c);
         tState.lastToolCallEl = c;
+        stampPanelStart(c);
         if (ev.command) {
           const bp = mkEl('div', 'bash-panel');
           const bpContent = mkEl('div', 'bash-panel-content');
@@ -1882,6 +2269,10 @@
         const hadBash = !!tState.bashPanel;
         tState.bashPanel = null;
         tState.bashRaf = 0;
+        // Close out the tool-call panel's time footer here — BEFORE the
+        // ``hadBash && !is_error`` early exit — so every tool_result
+        // path (bash, plain output, error) stamps the elapsed time.
+        if (tState.lastToolCallEl) finalizePanelTime(tState.lastToolCallEl);
         if (hadBash && !ev.is_error) break;
         const resultTarget = tState.lastToolCallEl || target;
         if (ev.is_error) {
@@ -2058,6 +2449,10 @@
     const t = ev.type;
     if (t === 'tool_call') {
       lastToolName = ev.name || '';
+      // Close out the previous Thoughts panel — the next streaming
+      // step will create a new one — so the time-spent footer covers
+      // the period between this panel and the tool call that ends it.
+      if (llmPanel) finalizePanelTime(llmPanel);
       llmPanel = null;
       llmPanelState = mkS();
       // Set true (not false) so that non-core tools (screenshot,
@@ -2103,6 +2498,9 @@
       currentTaskMetrics.steps = statusSteps ? statusSteps.textContent : '';
     }
     if (t === 'result') {
+      // Close out the last live Thoughts panel so its bottom-anchored
+      // time footer reflects the duration up to the result event.
+      if (llmPanel) finalizePanelTime(llmPanel);
       collapseAllExceptResult(O);
       if (ev.success === false && !ev.is_continue) {
         const rTab = getTab(activeTabId);
@@ -2151,6 +2549,9 @@
     // Advance the streaming state machine
     if (t === 'tool_call') {
       bgLastToolName = ev.name || '';
+      // Mirror processOutputEvent: close out the previous Thoughts
+      // panel so its time-spent footer covers up to this tool call.
+      if (bgLlmPanel) finalizePanelTime(bgLlmPanel);
       bgLlmPanel = null;
       bgLlmPanelState = mkS();
       bgPendingPanel = true;
@@ -2211,6 +2612,9 @@
       if (statusSteps) statusSteps.textContent = prevStepsText;
 
       if (t === 'result') {
+        // Close out the last bg-tab Thoughts panel so its footer
+        // reflects the duration up to this result event.
+        if (bgLlmPanel) finalizePanelTime(bgLlmPanel);
         if (ev.step_count) {
           bgStepCount = ev.step_count;
           tab.statusStepsText = 'Steps: ' + ev.step_count;
@@ -2585,6 +2989,9 @@
         // until ``connected === true``, then reveal the regular tabs.
         setServerLoading(!ev.connected);
         return;
+      case 'notification':
+        updateNotification(ev);
+        break;
       case 'status': {
         const evTab = findTabByEvt(ev);
         if (evTab) {
@@ -2691,6 +3098,15 @@
         if (!askTab) break;
         askTab.askPendingQuestion = ev.question || '';
         showAskForTab(askTab);
+        break;
+      }
+      case 'askUserDone': {
+        const askTabId = ev.tabId !== undefined ? ev.tabId : activeTabId;
+        const askTab = getTab(askTabId);
+        if (!askTab) break;
+        askTab.askPendingQuestion = null;
+        if (askTab.askInputEl) askTab.askInputEl.value = '';
+        if (askTab.id === activeTabId) clearAskSlot();
         break;
       }
       case 'error':
@@ -3801,7 +4217,31 @@
    * @param {string} latest - The latest version reported by PyPI.
    * @param {string} current - The version installed locally.
    */
+  // Stable id for the permanent "update available" notification.  Using
+  // a fixed string (instead of the auto-generated ``Date.now()``)
+  // ensures the hourly PyPI re-broadcast re-uses the existing toast
+  // rather than stacking duplicate notifications on top of each other.
+  const UPDATE_NOTIFICATION_ID = 'kiss-update-available';
+
+  // Inline SVG markup for the Feather "download" arrow used by both the
+  // small settings-button badge and the action-button icon inside the
+  // permanent update notification.  Kept as a single source of truth so
+  // the two surfaces always look identical.
+  const UPDATE_DOWNLOAD_SVG =
+    '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" ' +
+    'viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+    '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>' +
+    '<polyline points="7 10 12 15 17 10"/>' +
+    '<line x1="12" y1="15" x2="12" y2="3"/>' +
+    '</svg>';
+
   function renderUpdateAvailable(available, latest, current) {
+    renderUpdateAvailableBadge(available, latest, current);
+    renderUpdateAvailableNotification(available, latest, current);
+  }
+
+  function renderUpdateAvailableBadge(available, latest, current) {
     const btn = document.getElementById('cfg-update-btn');
     if (!btn) return;
     // Strip any previously-injected icon so repeated broadcasts do
@@ -3847,6 +4287,48 @@
       icon.appendChild(el);
     }
     btn.insertBefore(icon, btn.firstChild);
+  }
+
+  /**
+   * Show (or dismiss) the permanent "KISS Sorcar update available"
+   * notification.
+   *
+   * The settings-panel "Update" button is only visible while the
+   * settings panel is expanded, which left users who never opened
+   * the panel unaware that a new release was waiting.  This helper
+   * surfaces the same event in the always-visible chat-webview
+   * notification stack with an SVG-iconed action button.  The
+   * notification is sticky (never auto-dismisses) so it stays put
+   * until the user clicks the update button or the next PyPI poll
+   * reports the user is current.
+   */
+  function renderUpdateAvailableNotification(available, latest, current) {
+    if (!available) {
+      removeNotification(UPDATE_NOTIFICATION_ID, undefined, false);
+      return;
+    }
+    const message =
+      latest && current
+        ? `KISS Sorcar ${latest} is available (you have ${current}).`
+        : 'A new KISS Sorcar release is available.';
+    showNotification({
+      id: UPDATE_NOTIFICATION_ID,
+      severity: 'info',
+      message,
+      sticky: true,
+      actions: [
+        {
+          label: 'Update',
+          ariaLabel: latest
+            ? `Update KISS Sorcar to ${latest}`
+            : 'Update KISS Sorcar',
+          svg: UPDATE_DOWNLOAD_SVG,
+          onClick: () => {
+            vscode.postMessage({type: 'runUpdate'});
+          },
+        },
+      ],
+    });
   }
 
   // --- Welcome suggestions (dynamic) ---

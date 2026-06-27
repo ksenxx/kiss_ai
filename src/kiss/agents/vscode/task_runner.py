@@ -91,6 +91,7 @@ class _TaskRunnerMixin:
         work_dir: str
         _state_lock: threading.RLock
         _tab_chat_views: dict[str, str]
+        _pending_user_answer_tasks: dict[int, str]
 
         def _get_tab(self, tab_id: str) -> _RunningAgentState: ...
         def _any_non_wt_running(self) -> bool: ...
@@ -1323,6 +1324,9 @@ class _TaskRunnerMixin:
         # THIS question instantly and the user would never see it.
         # Held under ``_state_lock`` so the drain cannot interleave
         # with ``_cmd_user_answer``'s drain-then-put sequence.
+        task_key = self.printer._coerce_task_id(
+            getattr(self.printer._thread_local, "task_id", None),
+        )
         q = self._resolve_task_answer_queue()
         if q is not None:
             with self._state_lock:
@@ -1331,8 +1335,15 @@ class _TaskRunnerMixin:
                         q.get_nowait()
                     except queue.Empty:  # pragma: no cover — race guard
                         break
-        self.printer.broadcast({
-            "type": "askUser",
-            "question": question,
-        })
-        return self._await_user_response()
+                if task_key:
+                    self._pending_user_answer_tasks[id(q)] = task_key
+        try:
+            self.printer.broadcast({
+                "type": "askUser",
+                "question": question,
+            })
+            return self._await_user_response()
+        finally:
+            if q is not None:
+                with self._state_lock:
+                    self._pending_user_answer_tasks.pop(id(q), None)
