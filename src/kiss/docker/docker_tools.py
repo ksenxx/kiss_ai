@@ -29,21 +29,39 @@ class DockerTools:
         self,
         file_path: str,
         max_lines: int = 2000,
+        start_line: int = 1,
     ) -> str:
         """Read file contents.
 
         Args:
             file_path: Absolute path to file.
             max_lines: Maximum number of lines to return.
+            start_line: 1-indexed line at which to begin the returned
+                window.  ``start_line=1`` (the default) reads from the
+                top of the file and is backward-compatible.  Values
+                less than 1 are rejected; values beyond EOF return an
+                explicit sentinel rather than empty content.
         """
+        if start_line < 1:
+            return (
+                f"Error: start_line must be >= 1 (got {start_line}); the "
+                f"parameter is 1-indexed."
+            )
         path = shlex.quote(file_path)
         cmd = (
             f'FILE={path}\n'
             f'if [ ! -f "$FILE" ]; then echo "Error: File not found: $FILE"; exit 1; fi\n'
             f'TOTAL=$(wc -l < "$FILE")\n'
-            f'head -n {max_lines} "$FILE"\n'
-            f'if [ "$TOTAL" -gt {max_lines} ]; then\n'
-            f'  echo "[truncated: $((TOTAL - {max_lines})) more lines]"\n'
+            f'START={start_line}\n'
+            f'MAX={max_lines}\n'
+            f'if [ "$START" -gt "$TOTAL" ] && [ "$TOTAL" -gt 0 ]; then\n'
+            f'  echo "Error: start_line=$START is past EOF (file has $TOTAL lines)."\n'
+            f'  exit 0\n'
+            f'fi\n'
+            f'tail -n +"$START" "$FILE" | head -n "$MAX"\n'
+            f'REMAINING=$((TOTAL - START + 1 - MAX))\n'
+            f'if [ "$REMAINING" -gt 0 ]; then\n'
+            f'  echo "[truncated: $REMAINING more lines]"\n'
             f'fi'
         )
         return self.bash(cmd, f"Read {file_path}")
