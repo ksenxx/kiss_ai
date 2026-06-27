@@ -125,9 +125,10 @@ def _build_test_page() -> str:
     // None of these are exercised by the history-rendering pipeline,
     // they only need to exist so the IIFE runs to completion and
     // registers the ``message`` listener.
+    window.__postedMessages = [];
     window.acquireVsCodeApi = function () {{
       return {{
-        postMessage: function () {{}},
+        postMessage: function (msg) {{ window.__postedMessages.push(msg); }},
         setState: function () {{}},
         getState: function () {{ return null; }},
       }};
@@ -169,14 +170,15 @@ def _browser():
             browser.close()
 
 
-def _open_history_page(_browser):
+def _open_history_page(_browser, width: int = 480, height: int = 900):
     """Open the test harness and return ``(context, page)``.
 
-    The viewport is tall enough that all sample rows fit without
-    overflow, so per-row visibility checks reflect the feature under
-    test and not viewport clipping.
+    The viewport defaults to a tall layout where all sample rows fit
+    without overflow, so per-row visibility checks reflect the feature
+    under test and not viewport clipping.  Individual tests may pass a
+    narrower viewport to exercise responsive/wrapping behaviour.
     """
-    context = _browser.new_context(viewport={"width": 480, "height": 900})
+    context = _browser.new_context(viewport={"width": width, "height": height})
     page = context.new_page()
     page.set_content(_build_test_page(), wait_until="load")
     page.wait_for_function(
@@ -261,18 +263,34 @@ def _sample_sessions() -> list[dict]:
     ]
 
 
-def _post_history(page, sessions: list[dict]) -> None:
+def _post_history(
+    page,
+    sessions: list[dict],
+    offset: int = 0,
+    generation: int = 0,
+    expected_total: int | None = None,
+) -> None:
     """Dispatch a ``message`` event with a ``history`` payload and wait
     for ``renderHistory`` to materialise the rows in the DOM."""
     ev = {
         "type": "history",
         "sessions": sessions,
-        "offset": 0,
-        "generation": 0,
+        "offset": offset,
+        "generation": generation,
     }
+    if expected_total is None:
+        expected_total = len(sessions) if offset == 0 else None
+    if expected_total is None:
+        before = page.evaluate(
+            "() => document.querySelectorAll('#history-list .sidebar-item').length"
+        )
+        expected_total = int(before) + len(sessions)
     page.evaluate("ev => window.__post(ev)", ev)
     page.wait_for_function(
-        f"document.querySelectorAll('#history-list .sidebar-item').length === {len(sessions)}",
+        "expected => document.querySelectorAll("
+        "'#history-list .sidebar-item'"
+        ").length === expected",
+        arg=expected_total,
         timeout=5000,
     )
 
@@ -433,6 +451,216 @@ def test_errored_filter_toggle_hides_and_shows_failed_row(_browser) -> None:
             ").offsetParent !== null"
         )
         assert visible1, "failed row should reappear when Errored filter is re-checked"
+    finally:
+        context.close()
+
+
+def test_errored_filter_is_checked_by_default(_browser) -> None:
+    """The default History filter must include errored tasks.
+
+    A failed row can only show its red circle on first open if the
+    production ``#hf-errors`` checkbox starts checked.  This reproduces
+    the review concern that a default-unchecked Errored filter would
+    make the feature appear broken even though the dot DOM exists.
+    """
+    context, page = _open_history_page(_browser)
+    try:
+        defaults = page.evaluate(
+            """
+            () => ({
+              running: document.getElementById('hf-running').checked,
+              errors: document.getElementById('hf-errors').checked,
+              completed: document.getElementById('hf-completed').checked,
+            })
+            """
+        )
+        assert defaults == {"running": True, "errors": True, "completed": True}
+
+        _post_history(page, _sample_sessions())
+        visible_failed_dot = page.evaluate(
+            """
+            () => {
+              const row = document.querySelector(
+                '#history-list .sidebar-item[data-category="errors"]',
+              );
+              const dot = row && row.querySelector('.sidebar-item-failed');
+              return !!row && row.offsetParent !== null &&
+                !!dot && dot.offsetParent !== null;
+            }
+            """
+        )
+        assert visible_failed_dot, (
+            "failed task red circle should be visible with the default filters"
+        )
+    finally:
+        context.close()
+
+
+def test_filter_that_hides_all_failed_rows_shows_empty_placeholder(_browser) -> None:
+    """If filters hide every failed row, the list must show a useful
+    empty-state placeholder rather than a blank History panel."""
+    context, page = _open_history_page(_browser)
+    try:
+        _post_history(page, [_sample_sessions()[0]])
+        page.evaluate(
+            "() => { const c = document.getElementById('hf-errors');"
+            " c.checked = false; c.dispatchEvent(new Event('change')); }"
+        )
+        state = page.evaluate(
+            """
+            () => {
+              const row = document.querySelector('#history-list .sidebar-item');
+              const empty = document.querySelector(
+                '#history-list .sidebar-empty-filter',
+              );
+              return {
+                rowHidden: row && row.offsetParent === null,
+                emptyVisible: empty && empty.offsetParent !== null,
+                emptyText: empty ? empty.textContent : null,
+              };
+            }
+            """
+        )
+        assert state == {
+            "rowHidden": True,
+            "emptyVisible": True,
+            "emptyText": "No tasks match the filter",
+        }
+    finally:
+        context.close()
+
+
+def test_search_results_can_render_failed_red_circle(_browser) -> None:
+    """Search-triggered history results must use the same failed-dot
+    rendering path as normal history loads.
+
+    The test enters a query in the real search box, verifies the
+    frontend asks the host for ``getHistory`` with that query, then
+    delivers the host's filtered ``history`` response and checks that
+    the failed search result is visible with its red circle.
+    """
+    context, page = _open_history_page(_browser)
+    try:
+        page.fill('#history-search', 'failing')
+        page.wait_for_function(
+            "() => window.__postedMessages.some("
+            "m => m && m.type === 'getHistory' && m.query === 'failing'"
+            ")",
+            timeout=5000,
+        )
+        # Typing into the search box calls ``resetHistoryPagination``
+        # which bumps ``historyGeneration``; ``renderHistory`` drops
+        # any incoming ``history`` event whose ``generation`` does not
+        # match the current value, so reuse the generation the
+        # frontend just asked for instead of the default ``0``.
+        search_generation = page.evaluate(
+            "() => {"
+            " const m = window.__postedMessages.slice().reverse().find("
+            " x => x && x.type === 'getHistory' && x.query === 'failing'"
+            " );"
+            " return m ? m.generation : 0;"
+            " }"
+        )
+        _post_history(
+            page, [_sample_sessions()[0]], generation=int(search_generation)
+        )
+        dot_visible = page.evaluate(
+            """
+            () => {
+              const row = document.querySelector('#history-list .sidebar-item');
+              const dot = row && row.querySelector('.sidebar-item-failed');
+              return !!row && row.offsetParent !== null &&
+                row.querySelector('.sidebar-item-text').textContent ===
+                  'failing task' &&
+                !!dot && dot.offsetParent !== null &&
+                getComputedStyle(dot).backgroundColor === 'rgb(211, 47, 47)';
+            }
+            """
+        )
+        assert dot_visible, "failed search result did not show a visible red dot"
+    finally:
+        context.close()
+
+
+def test_paginated_history_batch_can_append_failed_red_circle(_browser) -> None:
+    """A failed task arriving in an ``offset > 0`` pagination batch must
+    still get a visible red circle when appended to existing rows."""
+    context, page = _open_history_page(_browser)
+    try:
+        completed = _sample_sessions()[2]
+        failed = _sample_sessions()[0]
+        _post_history(page, [completed], offset=0, expected_total=1)
+        _post_history(page, [failed], offset=1, expected_total=2)
+        state = page.evaluate(
+            """
+            () => Array.from(
+              document.querySelectorAll('#history-list .sidebar-item'),
+            ).map(row => ({
+              text: row.querySelector('.sidebar-item-text').textContent,
+              category: row.dataset.category,
+              hasFailedDot: !!row.querySelector('.sidebar-item-failed'),
+              visible: row.offsetParent !== null,
+            }))
+            """
+        )
+        assert state == [
+            {
+                "text": "successful task",
+                "category": "completed",
+                "hasFailedDot": False,
+                "visible": True,
+            },
+            {
+                "text": "failing task",
+                "category": "errors",
+                "hasFailedDot": True,
+                "visible": True,
+            },
+        ]
+    finally:
+        context.close()
+
+
+def test_failed_dot_stays_on_first_text_line_in_narrow_history_sidebar(
+    _browser,
+) -> None:
+    """At a narrow viewport the failed marker must not wrap onto its
+    own line above the task text.
+
+    The review flagged ``.running-item { flex-wrap: wrap }`` as a risk:
+    if the dot consumes a whole flex line, colour/status information is
+    visually detached from the task title.  Use the real CSS at a narrow
+    webview width and assert the dot and text start on the same row.
+    """
+    context, page = _open_history_page(_browser, width=180, height=900)
+    try:
+        session = dict(_sample_sessions()[0])
+        session["title"] = "a deliberately long failing history task title"
+        session["preview"] = session["title"]
+        _post_history(page, [session])
+        geometry = page.evaluate(
+            """
+            () => {
+              const row = document.querySelector('#history-list .sidebar-item');
+              const dot = row.querySelector('.sidebar-item-failed');
+              const text = row.querySelector('.sidebar-item-text');
+              const rowRect = row.getBoundingClientRect();
+              const dotRect = dot.getBoundingClientRect();
+              const textRect = text.getBoundingClientRect();
+              return {
+                rowWidth: rowRect.width,
+                dotTop: dotRect.top,
+                dotBottom: dotRect.bottom,
+                textTop: textRect.top,
+                textLeft: textRect.left,
+                dotLeft: dotRect.left,
+              };
+            }
+            """
+        )
+        assert geometry["rowWidth"] < 170, geometry
+        assert abs(geometry["dotTop"] - geometry["textTop"]) <= 2, geometry
+        assert geometry["dotLeft"] < geometry["textLeft"], geometry
     finally:
         context.close()
 
