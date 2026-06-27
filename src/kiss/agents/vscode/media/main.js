@@ -2008,14 +2008,11 @@
     return {previous: previous, final: final};
   }
 
-  function removeLastResultPanel(container) {
+  function removeResultPanels(container) {
     if (!container || !container.children) return;
     for (let i = container.children.length - 1; i >= 0; i--) {
       const child = container.children[i];
-      if (child.classList && child.classList.contains('rc')) {
-        child.remove();
-        return;
-      }
+      if (child.classList && child.classList.contains('rc')) child.remove();
     }
   }
 
@@ -2420,7 +2417,7 @@
       case 'result': {
         const multiSummary = splitMultiSessionSummary(ev.summary);
         if (multiSummary) {
-          removeLastResultPanel(target);
+          removeResultPanels(target);
           target.appendChild(
             createResultPanel(
               ev,
