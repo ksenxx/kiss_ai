@@ -182,32 +182,39 @@ class TestModelInfo:
             if info.is_embedding_supported:
                 assert info.output_price_per_1M == 0.0, f"{name}: embedding should have 0 output"
 
-    def test_minimax_m2_5_in_model_info(self):
-        assert "minimax-m2.5" in MODEL_INFO
-        info = MODEL_INFO["minimax-m2.5"]
-        assert info.context_length == 1000000
-        assert info.input_price_per_1M == 0.15
-        assert info.output_price_per_1M == 1.20
+    def test_glm_4_6_in_model_info(self):
+        assert "glm-4.6" in MODEL_INFO
+        info = MODEL_INFO["glm-4.6"]
+        assert info.context_length == 204800
+        assert info.input_price_per_1M == 0.60
+        assert info.output_price_per_1M == 2.20
         assert info.is_function_calling_supported is True
         assert info.is_generation_supported is True
         assert info.is_embedding_supported is False
 
-    def test_minimax_m2_5_lightning_in_model_info(self):
-        assert "minimax-m2.5-lightning" in MODEL_INFO
-        info = MODEL_INFO["minimax-m2.5-lightning"]
-        assert info.context_length == 1000000
-        assert info.input_price_per_1M == 0.30
-        assert info.output_price_per_1M == 2.40
+    def test_glm_4_5_flash_in_model_info(self):
+        assert "glm-4.5-flash" in MODEL_INFO
+        info = MODEL_INFO["glm-4.5-flash"]
+        assert info.input_price_per_1M == 0.0
+        assert info.output_price_per_1M == 0.0
         assert info.is_function_calling_supported is True
 
-    def test_minimax_m2_5_openrouter_in_model_info(self):
-        assert "openrouter/minimax/minimax-m2.5" in MODEL_INFO
+    def test_moonshot_v1_32k_in_model_info(self):
+        assert "moonshot-v1-32k" in MODEL_INFO
+        info = MODEL_INFO["moonshot-v1-32k"]
+        assert info.context_length == 32768
+        assert info.is_function_calling_supported is True
 
-    def test_minimax_api_key_routing(self):
+    def test_kimi_in_model_info(self):
+        assert "kimi-k2.6" in MODEL_INFO
+
+    def test_zai_and_moonshot_api_key_routing(self):
         from kiss.tests.conftest import get_required_api_key_for_model
 
-        assert get_required_api_key_for_model("minimax-m2.5") == "MINIMAX_API_KEY"
-        assert get_required_api_key_for_model("minimax-m2.5-lightning") == "MINIMAX_API_KEY"
+        assert get_required_api_key_for_model("glm-4.6") == "ZAI_API_KEY"
+        assert get_required_api_key_for_model("glm-4.5-flash") == "ZAI_API_KEY"
+        assert get_required_api_key_for_model("kimi-k2.6") == "MOONSHOT_API_KEY"
+        assert get_required_api_key_for_model("moonshot-v1-32k") == "MOONSHOT_API_KEY"
 
 
 class TestCachePricing:
@@ -301,7 +308,7 @@ class TestCachePricing:
 
     def test_undocumented_providers_have_no_cache_pricing(self):
         # Providers without a documented cache discount fall back to full input price.
-        for name in ("minimax-m2.5", "deepseek-ai/DeepSeek-V3-0324", "Qwen/Qwen3.6-Plus"):
+        for name in ("glm-4.6", "deepseek-ai/DeepSeek-V3-0324", "Qwen/Qwen3.6-Plus"):
             info = MODEL_INFO[name]
             assert info.cache_read_price_per_1M is None, f"{name} should not have cache pricing"
             assert info.cache_write_price_per_1M is None
