@@ -53,10 +53,10 @@ ______________________________________________________________________
 | **Interfaces** | CLI + VS Code extension + web/mobile app | CLI + mobile app | Custom VS Code |
 | **AI Discovery** | ✅ simply via prompt | ❌ | ❌ |
 | **GEPA Prompt Optimization** | ✅ simply via prompt | ❌ | ❌ |
-| **Multiple models from multiple vendors in the same task** | ✅ Mix OpenAI, Anthropic, Gemini, Together, MiniMax, OpenRouter, Claude Code CLI, and Codex CLI | ❌ Anthropic Claude models only | ❌ One model per task |
+| **Multiple models from multiple vendors in the same task** | ✅ Mix OpenAI, Anthropic, Gemini, Together, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, and Codex CLI | ❌ Anthropic Claude models only | ❌ One model per task |
 | **Primary focus** | ✅ **Quality** — rigorous review, end-to-end tests | Speed and developer ergonomics | Speed |
 | **Core Agents # LoC** | **~2500** | Unknown | Unknown |
-| **Models in bundled catalog** | 501 across 8 provider categories | Claude family only | Subset chosen by Cursor |
+| **Models in bundled catalog** | 502 across 9 provider categories | Claude family only | Subset chosen by Cursor |
 | **Bring your own API key / endpoint** | ✅ Yes — keys stay on your machine | ✅ Anthropic key | ⚠️ Routed through Cursor backend |
 | **Open source** | ✅ Apache-2.0 | ❌ Proprietary | ❌ Proprietary |
 | **Price** | Free framework; pay only your chosen model provider | Subscription / API usage | Subscription |
@@ -101,8 +101,9 @@ export ANTHROPIC_API_KEY=...
 export OPENAI_API_KEY=...
 export GEMINI_API_KEY=...
 export TOGETHER_API_KEY=...
+export ZAI_API_KEY=...
+export MOONSHOT_API_KEY=...
 export OPENROUTER_API_KEY=...
-export MINIMAX_API_KEY=...
 ```
 
 You can also configure a custom endpoint with `--endpoint` / `-e` and optional repeated `--header Key:Value` CLI flags.
@@ -212,7 +213,7 @@ These agents live in `src/kiss/agents/third_party_agents/`.
 
 ## 🤖 Models Supported
 
-KISS Sorcar ships a catalog of **501 models** across **8 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json).
+KISS Sorcar ships a catalog of **502 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json).
 
 | Provider category | Catalog entries |
 |---|---:|
@@ -220,15 +221,16 @@ KISS Sorcar ships a catalog of **501 models** across **8 provider categories**, 
 | Anthropic | 13 |
 | Gemini / Google | 23 |
 | Together AI | 77 |
-| MiniMax | 5 |
-| OpenRouter | 303 |
+| Z.AI | 8 |
+| Moonshot AI | 6 |
+| OpenRouter | 295 |
 | Claude Code CLI (`cc/*`) | 3 |
 | Codex CLI (`codex/*`) | 7 |
 
 Current catalog capability totals:
 
-- **485** generation-capable models
-- **321** function-calling-capable models
+- **486** generation-capable models
+- **326** function-calling-capable models
 - **7** embedding models
 
 Full model list:
@@ -441,18 +443,33 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>MiniMax (5)</strong></summary>
+<summary><strong>Z.AI (8)</strong></summary>
 
-- `minimax-m2.5`
-- `minimax-m2.5-lightning`
-- `MiniMaxAI/MiniMax-M2.5`
-- `MiniMaxAI/MiniMax-M2.7`
-- `MiniMaxAI/MiniMax-M3`
+- `glm-4-32b-0414-128k`
+- `glm-4.5`
+- `glm-4.5-air`
+- `glm-4.5-airx`
+- `glm-4.5-flash`
+- `glm-4.5-x`
+- `glm-4.6`
+- `glm-4.7`
 
 </details>
 
 <details>
-<summary><strong>OpenRouter (303)</strong></summary>
+<summary><strong>Moonshot AI (6)</strong></summary>
+
+- `kimi-k2.5`
+- `kimi-k2.6`
+- `kimi-k2.7-code`
+- `moonshot-v1-128k`
+- `moonshot-v1-32k`
+- `moonshot-v1-8k`
+
+</details>
+
+<details>
+<summary><strong>OpenRouter (295)</strong></summary>
 
 - `openrouter/ai21/jamba-large-1.7`
 - `openrouter/aion-labs/aion-1.0`
@@ -561,14 +578,6 @@ Full model list:
 - `openrouter/microsoft/phi-4`
 - `openrouter/microsoft/phi-4-mini-instruct`
 - `openrouter/microsoft/wizardlm-2-8x22b`
-- `openrouter/minimax/minimax-01`
-- `openrouter/minimax/minimax-m1`
-- `openrouter/minimax/minimax-m2`
-- `openrouter/minimax/minimax-m2-her`
-- `openrouter/minimax/minimax-m2.1`
-- `openrouter/minimax/minimax-m2.5`
-- `openrouter/minimax/minimax-m2.7`
-- `openrouter/minimax/minimax-m3`
 - `openrouter/mistralai/codestral-2508`
 - `openrouter/mistralai/devstral-2512`
 - `openrouter/mistralai/ministral-14b-2512`
