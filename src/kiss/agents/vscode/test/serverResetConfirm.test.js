@@ -6,28 +6,26 @@
 // Webview-side contract test for the settings-panel "Server reset"
 // button.
 //
-// Background
-// ----------
+// New contract (in-settings-panel floating dialog)
+// -------------------------------------------------
 // The "Server reset" button (``#cfg-server-reset-btn``) in the
 // settings panel asks the kiss-web daemon to SIGTERM itself so the
 // supervising LaunchAgent/systemd unit respawns a fresh daemon
-// process.  When a server-reset click happens while ANY tab still
-// has a running agent, the webview MUST tell the extension about it
-// so the extension can surface a native VS Code modal dialog asking
-// the user to confirm — running agents would otherwise be killed
-// mid-task without any prompt.
+// process.  When the click happens while ANY tab still has a running
+// agent, the webview MUST surface an in-settings-panel floating
+// confirmation box (``#server-reset-confirm-modal``) with OK and
+// Cancel buttons.  The webview must NOT post ``serverReset`` to the
+// extension until the user clicks OK.  Cancel closes the dialog and
+// posts nothing.
 //
-// The webview's responsibility is therefore narrow but exact:
-//   * On every click, post ``{type: 'serverReset', agentRunning}``.
-//   * ``agentRunning`` must be ``true`` iff any persisted tab has
-//     ``isRunning === true``.
-//   * The webview must NOT render any in-webview confirmation toast;
-//     the dialog is the extension's job (a real VS Code modal, not
-//     a webview toast).
+// When no tab is running, the webview fast-paths
+// ``{type:'serverReset'}`` directly to the extension and does NOT
+// open the floating box.
 //
-// The integration test in ``serverResetDialog.test.js`` covers the
-// dialog half — this test pins the webview half so a future refactor
-// of ``main.js`` cannot silently drop the ``agentRunning`` flag.
+// The integration test in ``serverResetFloatingDialog.test.js``
+// covers the full extension+daemon end-to-end loop — this test pins
+// the webview half so a future refactor of ``main.js`` cannot
+// silently revert the in-panel dialog to a system modal.
 
 'use strict';
 
@@ -108,10 +106,48 @@ async function waitFor(predicate, message) {
   throw new Error(message || 'waitFor timed out');
 }
 
+function isFloatingModalOpen(win) {
+  const modal = win.document.getElementById('server-reset-confirm-modal');
+  return !!(modal && modal.classList.contains('open'));
+}
+
 async function runTests() {
-  // ---------- Case A: no agent running.
-  // The webview must report agentRunning=false so the extension can
-  // fast-path the reset, and must NOT render any in-webview toast.
+  // ---------- Static structure: the floating box must exist inside
+  //            #settings-panel with OK/Cancel buttons.
+  {
+    const wv = makeDomWebview();
+    try {
+      const settingsPanel =
+        wv.win.document.getElementById('settings-panel');
+      const modal = wv.win.document.getElementById(
+        'server-reset-confirm-modal',
+      );
+      assert.ok(modal, '#server-reset-confirm-modal must exist');
+      assert.ok(
+        settingsPanel && settingsPanel.contains(modal),
+        'the floating confirmation box must live INSIDE #settings-panel',
+      );
+      assert.ok(
+        wv.win.document.getElementById('server-reset-confirm-ok'),
+        'modal must expose #server-reset-confirm-ok',
+      );
+      assert.ok(
+        wv.win.document.getElementById('server-reset-confirm-cancel'),
+        'modal must expose #server-reset-confirm-cancel',
+      );
+      assert.strictEqual(
+        isFloatingModalOpen(wv.win),
+        false,
+        'floating modal must start closed',
+      );
+    } finally {
+      wv.close();
+    }
+  }
+
+  // ---------- Case A: no agent running → fast path.
+  // The webview must immediately post {type:'serverReset'} and must
+  // NOT open the floating box.
   {
     const wv = makeDomWebview();
     try {
@@ -121,12 +157,13 @@ async function runTests() {
       click(btn);
       const msg = await waitFor(
         () => wv.posted.find(m => m.type === 'serverReset'),
-        'click must post {type: "serverReset"} to the extension',
+        'no-agent click must post {type: "serverReset"} to the extension',
       );
+      assert.strictEqual(msg.type, 'serverReset');
       assert.strictEqual(
-        msg.agentRunning,
+        isFloatingModalOpen(wv.win),
         false,
-        'with no running agent the webview must post agentRunning=false',
+        'no-agent click must NOT open the floating confirmation box',
       );
       assert.strictEqual(
         wv.win.document.querySelectorAll('.kiss-notification').length,
@@ -138,10 +175,7 @@ async function runTests() {
     }
   }
 
-  // ---------- Case B: agent running.
-  // The webview must still post {type:'serverReset', agentRunning:true}
-  // — the dialog is the extension's job.  It must NOT render any
-  // in-webview confirmation toast and must NOT swallow the post.
+  // ---------- Case B: agent running → floating box, NO post yet.
   {
     const wv = makeDomWebview();
     try {
@@ -154,28 +188,57 @@ async function runTests() {
       });
 
       click(btn);
+      await waitFor(
+        () => isFloatingModalOpen(wv.win),
+        'agent-running click must open the floating confirmation box',
+      );
+      assert.strictEqual(
+        wv.posted.filter(m => m.type === 'serverReset').length,
+        0,
+        'no serverReset post must be made until the user clicks OK',
+      );
+
+      // Cancel closes the box and posts nothing.
+      click(wv.win.document.getElementById('server-reset-confirm-cancel'));
+      await waitFor(
+        () => !isFloatingModalOpen(wv.win),
+        'Cancel must close the floating confirmation box',
+      );
+      assert.strictEqual(
+        wv.posted.filter(m => m.type === 'serverReset').length,
+        0,
+        'Cancel must NOT post serverReset',
+      );
+
+      // Re-open and OK → exactly one serverReset post.
+      click(btn);
+      await waitFor(
+        () => isFloatingModalOpen(wv.win),
+        'a fresh click after Cancel must re-open the dialog',
+      );
+      click(wv.win.document.getElementById('server-reset-confirm-ok'));
       const msg = await waitFor(
         () => wv.posted.find(m => m.type === 'serverReset'),
-        'click with a running agent must still post serverReset (with agentRunning=true)',
+        'OK must post serverReset',
+      );
+      assert.strictEqual(msg.type, 'serverReset');
+      assert.strictEqual(
+        isFloatingModalOpen(wv.win),
+        false,
+        'OK must close the floating confirmation box',
       );
       assert.strictEqual(
-        msg.agentRunning,
-        true,
-        'with a running agent the webview must post agentRunning=true so the extension can raise the dialog',
-      );
-      assert.strictEqual(
-        wv.win.document.querySelectorAll('.kiss-notification').length,
-        0,
-        'the webview must NOT render any in-webview confirmation toast — the dialog is a real VS Code modal',
+        wv.posted.filter(m => m.type === 'serverReset').length,
+        1,
+        'OK must produce exactly ONE serverReset post',
       );
     } finally {
       wv.close();
     }
   }
 
-  // ---------- Case C: agent finished.
-  // After ``running:false`` arrives the agentRunning flag must reset
-  // — no stale "still running" reports on subsequent clicks.
+  // ---------- Case C: agent finished → fast path resumes.
+  // After ``running:false`` arrives the click must fast-path again.
   {
     const wv = makeDomWebview();
     try {
@@ -195,12 +258,85 @@ async function runTests() {
       click(btn);
       const msg = await waitFor(
         () => wv.posted.find(m => m.type === 'serverReset'),
-        'click after the agent stops must post serverReset',
+        'click after the agent stops must fast-path serverReset',
+      );
+      assert.strictEqual(msg.type, 'serverReset');
+      assert.strictEqual(
+        isFloatingModalOpen(wv.win),
+        false,
+        'fast path must NOT open the floating dialog',
+      );
+    } finally {
+      wv.close();
+    }
+  }
+
+  // ---------- Case D: double-click while floating box is open.
+  // The second click must be ignored — no extra posts, no stacking.
+  {
+    const wv = makeDomWebview();
+    try {
+      const btn = wv.win.document.getElementById('cfg-server-reset-btn');
+      send(wv.win, {
+        type: 'status',
+        tabId: PRELOADED_TAB_ID,
+        running: true,
+        startTs: Date.now(),
+      });
+
+      click(btn);
+      await waitFor(
+        () => isFloatingModalOpen(wv.win),
+        'first click must open the floating dialog',
+      );
+      click(btn);
+      assert.strictEqual(
+        isFloatingModalOpen(wv.win),
+        true,
+        'second click while the dialog is open must be a no-op',
+      );
+      click(wv.win.document.getElementById('server-reset-confirm-ok'));
+      await waitFor(
+        () => !isFloatingModalOpen(wv.win),
+        'OK must close the dialog',
       );
       assert.strictEqual(
-        msg.agentRunning,
-        false,
-        'after the agent stops, agentRunning must be false on subsequent clicks',
+        wv.posted.filter(m => m.type === 'serverReset').length,
+        1,
+        'double-click + OK must produce exactly ONE serverReset post',
+      );
+    } finally {
+      wv.close();
+    }
+  }
+
+  // ---------- Case E: Escape closes the floating dialog.
+  {
+    const wv = makeDomWebview();
+    try {
+      const btn = wv.win.document.getElementById('cfg-server-reset-btn');
+      send(wv.win, {
+        type: 'status',
+        tabId: PRELOADED_TAB_ID,
+        running: true,
+        startTs: Date.now(),
+      });
+      click(btn);
+      await waitFor(
+        () => isFloatingModalOpen(wv.win),
+        'click must open the floating dialog',
+      );
+      wv.win.document.dispatchEvent(
+        new wv.win.KeyboardEvent('keydown', {key: 'Escape', bubbles: true}),
+      );
+      await waitFor(
+        () => !isFloatingModalOpen(wv.win),
+        'Escape must close the floating dialog',
+      );
+      assert.strictEqual(
+        wv.posted.filter(m => m.type === 'serverReset').length,
+        0,
+        'Escape must NOT post serverReset',
       );
     } finally {
       wv.close();
