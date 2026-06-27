@@ -25,6 +25,10 @@ from kiss.agents.vscode.helpers import (
     clip_autocomplete_suggestion,
     rank_file_suggestions,
 )
+from kiss.agents.vscode.tricks import (
+    current_sentence_partial,
+    prefix_match_trick,
+)
 
 if TYPE_CHECKING:
     from kiss.agents.vscode.json_printer import JsonPrinter
@@ -186,9 +190,19 @@ class _AutocompleteMixin:
         if match:
             fast = match[len(query):]
         else:
-            fast = self._complete_from_active_file(
-                query, snapshot_file, snapshot_content, chat_id,
-            )
+            trick = prefix_match_trick(query)
+            if trick:
+                # The trick's prefix matched the *partial* of the
+                # current sentence, not the whole query.  The ghost
+                # suffix is therefore the remainder of the trick past
+                # that partial, so appending it to ``query`` cleanly
+                # completes the in-progress sentence with the trick.
+                partial = current_sentence_partial(query)
+                fast = trick[len(partial):]
+            else:
+                fast = self._complete_from_active_file(
+                    query, snapshot_file, snapshot_content, chat_id,
+                )
         fast = clip_autocomplete_suggestion(query, fast)
         self._emit_ghost(fast, query, conn_id)
 
