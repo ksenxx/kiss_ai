@@ -238,7 +238,7 @@ _MAX_RESTORED_TABS = 32
 _MAX_ATTACHMENTS = 32
 
 # Seconds to wait after acknowledging a "Server reset" request before
-# SIGTERMing this daemon, so the ``notice`` event flushes to the
+# SIGTERMing this daemon, so the ``notification`` event flushes to the
 # clicking window before its socket drops on shutdown.
 _SERVER_RESET_DELAY = 0.4
 
@@ -3534,10 +3534,10 @@ class RemoteAccessServer:
         """Restart the ``kiss-web`` daemon at the user's request.
 
         Server-side handler for the settings-panel "Server reset"
-        button.  Broadcasts an acknowledgement ``notice`` to the
+        button.  Broadcasts an acknowledgement ``notification`` to the
         requesting window (stamped with its ``connId`` so siblings do
         not pop a banner), then schedules a ``SIGTERM`` to this very
-        process after a short delay so the notice flushes to the client
+        process after a short delay so the notification flushes to the client
         before its socket drops.  The ``SIGTERM`` is caught by
         :meth:`_handle_shutdown_signal`, which raises
         :class:`KeyboardInterrupt` to unwind the ``asyncio.run`` loop in
@@ -3553,13 +3553,15 @@ class RemoteAccessServer:
         """
         loop = self._loop
         assert loop is not None
-        notice: dict[str, Any] = {
-            "type": "notice",
-            "text": "Restarting the KISS Sorcar web server…",
+        notification: dict[str, Any] = {
+            "type": "notification",
+            "id": "server-reset-restarting",
+            "severity": "info",
+            "message": "Restarting the KISS Sorcar web server…",
         }
         if conn_id:
-            notice["connId"] = conn_id
-        self._printer.broadcast(notice)
+            notification["connId"] = conn_id
+        self._printer.broadcast(notification)
         loop.call_later(_SERVER_RESET_DELAY, self._trigger_server_reset)
 
     def _trigger_server_reset(self) -> None:
