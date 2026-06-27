@@ -392,6 +392,15 @@ class TestWorktreeAutoCommitBroadcasts:
             # Content + ordering.
             assert gen_ev["message"] == "Generating commit message"
             assert gen_head == head_before  # fired BEFORE the commit
+            # The "Generating commit message" toast MUST be sticky:
+            # the webview's transient auto-dismiss timer (~5 s for
+            # info severity) would otherwise hide it mid-LLM-call and
+            # mislead the user into thinking the commit had stalled.
+            # The follow-up "Committed <subject>" event reuses the
+            # same id but omits sticky, so the toast reverts to a
+            # normal transient that fades on its own.
+            assert gen_ev.get("sticky") is True
+            assert "sticky" not in committed_ev or not committed_ev["sticky"]
             assert committed_ev["message"].startswith("Committed ")
             head_after = _head_sha(wt_dir)
             assert committed_head == head_after  # fired AFTER the commit
