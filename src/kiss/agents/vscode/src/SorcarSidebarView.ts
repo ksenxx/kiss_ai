@@ -152,6 +152,18 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     string,
     vscode.Progress<{message?: string}>
   > = new Map();
+  /**
+   * Safety-timeout (ms) for the "Auto-committing…" progress toast.
+   *
+   * ``undefined`` (the production default) disables the auto-dismiss
+   * timer entirely — the toast stays visible until ``autocommit_done``
+   * arrives or the view is disposed.  A finite value re-enables the
+   * timer at that interval; this is used by the E2E regression test
+   * (``autocommitProgressSticky.test.js``) to reproduce the bug where
+   * a fixed timeout dismissed the toast in the middle of a slow
+   * "Generating commit message…" LLM call.
+   */
+  public _autocommitProgressTimeoutMs: number | undefined = undefined;
   private _disposed: boolean = false;
   /** Last remote URL sent to the webview — avoids redundant messages. */
   private _lastSentUrl: string = '';
@@ -175,19 +187,31 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   private _workspaceFoldersSub: vscode.Disposable | undefined;
 
   /**
-   * Show a notification-progress dialog with a timeout-based auto-resolve.
+   * Show a notification-progress dialog backed by the chat webview.
    *
    * Stores the progress reporter and resolve callback in the given maps
    * so that incoming backend events can update the message or complete
-   * the dialog.  If no completion event arrives within *timeoutMs* the
-   * dialog is automatically dismissed.
+   * the dialog.
+   *
+   * When *timeoutMs* is a finite positive number, the dialog is
+   * automatically dismissed after that many milliseconds even if no
+   * completion event has arrived.  When *timeoutMs* is ``undefined``
+   * (or non-finite, or ``<= 0``) no auto-dismiss timer is started; the
+   * dialog stays visible until either (a) the matching completion event
+   * arrives and removes the resolver from *resolveMap*, or (b)
+   * ``_resolveAllWorktreeActions`` drains the maps on dispose /
+   * disconnect.  This sticky mode is used for autocommit, where the
+   * underlying LLM call ("Generating commit message…") can legitimately
+   * take much longer than any reasonable safety timeout — dismissing
+   * the progress toast early would mislead the user into thinking the
+   * commit failed or is no longer in progress.
    */
   private _showActionProgress(
     title: string,
     tabId: string | undefined,
     progressMap: Map<string, vscode.Progress<{message?: string}>>,
     resolveMap: Map<string, () => void>,
-    timeoutMs: number = 120_000,
+    timeoutMs: number | undefined = 120_000,
   ): void {
     withWebviewNotificationProgress(
       {
@@ -202,12 +226,18 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           if (tabId !== undefined) {
             resolveMap.set(tabId, resolve);
           }
-          setTimeout(() => {
-            if (tabId !== undefined && resolveMap.get(tabId) === resolve) {
-              resolveMap.delete(tabId);
-              resolve();
-            }
-          }, timeoutMs);
+          if (
+            timeoutMs !== undefined &&
+            Number.isFinite(timeoutMs) &&
+            timeoutMs > 0
+          ) {
+            setTimeout(() => {
+              if (tabId !== undefined && resolveMap.get(tabId) === resolve) {
+                resolveMap.delete(tabId);
+                resolve();
+              }
+            }, timeoutMs);
+          }
         });
       },
     );
@@ -326,6 +356,16 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       // restart) — re-show the loading overlay until AgentClient's
       // auto-reconnect succeeds.
       this._sendToWebview({type: 'daemonStatus', connected: false});
+      // Any in-flight worktree / autocommit progress toast is
+      // orphaned now: the daemon's per-connection per-tab state was
+      // dropped with the socket, so ``autocommit_done`` /
+      // ``worktree_result`` can never arrive for the operation that
+      // was running pre-disconnect.  Drain the resolver maps so the
+      // sticky "Auto-committing… / Generating commit message…" toast
+      // does not linger forever — the inner promise resolves, then
+      // ``withWebviewNotificationProgress``'s ``.finally`` posts
+      // ``{close: true}`` to the still-active webview poster.
+      this._resolveAllWorktreeActions();
     });
     client.connect();
     // Keep the daemon in sync whenever the workspace folder set
@@ -1170,11 +1210,23 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         const acAction = message.action;
         const acTabId = message.tabId;
         if (acAction === 'commit') {
+          // No auto-dismiss timeout in production
+          // (``_autocommitProgressTimeoutMs`` is ``undefined`` by
+          // default).  The "Generating commit message…" phase is
+          // driven by an LLM call that can easily exceed any fixed
+          // timeout we might pick, so the progress toast must stay
+          // visible until ``autocommit_done`` arrives (or the view is
+          // disposed / the daemon disconnects, both of which drain
+          // the resolver map via ``_resolveAllWorktreeActions``).
+          // Tests can opt into a finite safety timer by setting
+          // ``_autocommitProgressTimeoutMs`` to reproduce the original
+          // bug.
           this._showActionProgress(
             'Auto-committing…',
             acTabId,
             this._autocommitProgresses,
             this._autocommitActionResolves,
+            this._autocommitProgressTimeoutMs,
           );
         }
         this._getClient().sendCommand({
