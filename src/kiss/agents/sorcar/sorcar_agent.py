@@ -70,6 +70,7 @@ def auto_commit_changes(
     commit_dir: Path,
     user_prompt: str | None,
     message_fn: Callable[[Path, str | None], str],
+    notify_fn: Callable[[str, str], None] | None = None,
 ) -> bool:
     """Stage all changes, generate a commit message, and commit.
 
@@ -97,6 +98,21 @@ def auto_commit_changes(
             message (or its fallback), or ``None`` when unavailable.
         message_fn: Callable producing a commit message from
             ``(commit_dir, user_prompt)``.
+        notify_fn: Optional UI callback invoked at two life-cycle
+            points so the chat webview can render toasts:
+
+            - ``notify_fn("generating", "")`` immediately before
+              *message_fn* runs (typically a slow LLM call) so the
+              user sees "Generating commit message" while the LLM
+              works.
+            - ``notify_fn("committed", subject)`` immediately after
+              a successful commit, where *subject* is the first
+              non-empty line of the committed message.  Not invoked
+              when there was nothing to commit (``commit_staged``
+              returned ``False``).
+
+            All ``notify_fn`` exceptions are swallowed so a broken
+            UI hook can never block the commit itself.
 
     Returns:
         True if a commit was created, False if nothing to commit.
@@ -104,6 +120,7 @@ def auto_commit_changes(
     from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 
     GitWorktreeOps.stage_all(commit_dir)
+    _safe_notify(notify_fn, "generating", "")
     try:
         msg = message_fn(commit_dir, user_prompt)
     except Exception:
@@ -121,7 +138,44 @@ def auto_commit_changes(
     # closes.  Cheap when nothing changed (``git add -A`` is a no-op
     # against an unchanged tree).
     GitWorktreeOps.stage_all(commit_dir)
-    return GitWorktreeOps.commit_staged(commit_dir, msg)
+    committed = GitWorktreeOps.commit_staged(commit_dir, msg)
+    if committed:
+        _safe_notify(notify_fn, "committed", _commit_subject(msg))
+    return committed
+
+
+def _commit_subject(message: str) -> str:
+    """Return the first non-empty line of a commit *message*.
+
+    Used as the subject the chat webview renders inside the
+    "Committed <subject>" toast.  Falls back to an empty string when
+    the message has no printable line (defensive: in practice the
+    fallback message always starts with ``kiss:``).
+    """
+    for raw in message.splitlines():
+        line = raw.strip()
+        if line:
+            return line
+    return ""
+
+
+def _safe_notify(
+    notify_fn: Callable[[str, str], None] | None,
+    stage: str,
+    subject: str,
+) -> None:
+    """Invoke *notify_fn* swallowing any exception.
+
+    Errors in the optional UI hook must never prevent the commit
+    itself (and must never poison the surrounding ``except`` block
+    that the LLM-failure fallback relies on).
+    """
+    if notify_fn is None:
+        return
+    try:
+        notify_fn(stage, subject)
+    except Exception:
+        logger.debug("auto_commit_changes notify_fn raised", exc_info=True)
 
 
 def _yaml_failure(exc: BaseException) -> str:
