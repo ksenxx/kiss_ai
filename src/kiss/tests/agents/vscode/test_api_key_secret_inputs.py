@@ -29,7 +29,8 @@ API_KEY_INPUT_IDS = [
     "cfg-key-ANTHROPIC_API_KEY",
     "cfg-key-TOGETHER_API_KEY",
     "cfg-key-OPENROUTER_API_KEY",
-    "cfg-key-MINIMAX_API_KEY",
+    "cfg-key-ZAI_API_KEY",
+    "cfg-key-MOONSHOT_API_KEY",
     "cfg-custom-api-key",
 ]
 
