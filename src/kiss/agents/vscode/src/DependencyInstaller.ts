@@ -21,6 +21,12 @@ import {
   daemonHasActiveTasks,
   decideRestart,
 } from './daemonHealth';
+import {
+  showErrorNotification,
+  showInformationNotification,
+  showWarningNotification,
+  withWebviewNotificationProgress,
+} from './WebviewNotifications';
 
 const HOME_DIR = process.env.HOME || process.env.USERPROFILE || '';
 const LOG_DIR = path.join(HOME_DIR, '.kiss');
@@ -521,7 +527,7 @@ async function ensureDependenciesImpl(): Promise<void> {
   const kissProjectPath = findKissProject();
   if (!kissProjectPath) {
     log('KISS project not found — skipping dependency setup');
-    vscode.window.showErrorMessage(
+    showErrorNotification(
       'KISS Sorcar: Could not find the KISS project directory. ' +
         'Please set "kissSorcar.kissProjectPath" in VS Code settings. ' +
         'See ~/.kiss/install.log for details.',
@@ -618,7 +624,7 @@ async function ensureDependenciesImpl(): Promise<void> {
         // browsers are cached system-wide (outside .venv), so a transient
         // background update failure is benign when chromium is already cached.
         if (!isChromiumInstalled()) {
-          vscode.window.showWarningMessage(
+          showWarningNotification(
             'KISS Sorcar: Chromium browser update failed in background. See ~/.kiss/install.log for details.',
           );
         }
@@ -627,7 +633,7 @@ async function ensureDependenciesImpl(): Promise<void> {
     if (!gitWorks()) {
       void installGit().then(installed => {
         if (!installed) {
-          vscode.window.showWarningMessage(
+          showWarningNotification(
             `KISS Sorcar: git is not available. ${gitInstallHint()}`,
           );
         }
@@ -636,7 +642,7 @@ async function ensureDependenciesImpl(): Promise<void> {
     if (!commandExists('node')) {
       void installNode().then(installed => {
         if (!installed) {
-          vscode.window.showWarningMessage(
+          showWarningNotification(
             'KISS Sorcar: Node.js could not be installed automatically. Some agent tools may be unavailable.',
           );
         }
@@ -655,7 +661,7 @@ async function ensureDependenciesImpl(): Promise<void> {
     apiKeysReady = await runFinalization(null, kissProjectPath, uvPath);
   } else {
     // Slow path: show progress bar and install missing deps
-    const result = await vscode.window.withProgress(
+    const result = await withWebviewNotificationProgress(
       {
         location: vscode.ProgressLocation.Notification,
         title: 'KISS Sorcar: Setting up',
@@ -668,7 +674,7 @@ async function ensureDependenciesImpl(): Promise<void> {
           if (process.platform !== 'win32') {
             for (const bin of ['curl', 'tar']) {
               if (!commandExists(bin)) {
-                vscode.window.showErrorMessage(
+                showErrorNotification(
                   `KISS Sorcar: '${bin}' is required to install uv but was not found. Please install '${bin}' and restart VS Code.`,
                 );
                 return {success: false, apiKeysReady: false};
@@ -681,7 +687,7 @@ async function ensureDependenciesImpl(): Promise<void> {
           });
           uvPath = await installUv();
           if (!uvPath) {
-            vscode.window.showErrorMessage(
+            showErrorNotification(
               'KISS Sorcar: Failed to install uv. Install manually: curl -LsSf https://astral.sh/uv/install.sh | sh',
             );
             return {success: false, apiKeysReady: false};
@@ -694,7 +700,7 @@ async function ensureDependenciesImpl(): Promise<void> {
           progress.report({message: 'Installing git...'});
           const gitInstalled = await installGit();
           if (!gitInstalled) {
-            vscode.window.showWarningMessage(
+            showWarningNotification(
               `KISS Sorcar: git could not be installed automatically. ${gitInstallHint()}`,
             );
           }
@@ -706,7 +712,7 @@ async function ensureDependenciesImpl(): Promise<void> {
           const nodeInstalled = await installNode();
           if (!nodeInstalled) {
             log('Node.js could not be installed automatically');
-            vscode.window.showWarningMessage(
+            showWarningNotification(
               'KISS Sorcar: Node.js could not be installed automatically. ' +
                 'Some agent tools may be unavailable. Install from https://nodejs.org',
             );
@@ -734,7 +740,7 @@ async function ensureDependenciesImpl(): Promise<void> {
 
         // 6. Verify Python version meets minimum requirement
         if (checkPythonVersion(uvPath, kissProjectPath) !== 'ok') {
-          vscode.window.showErrorMessage(
+          showErrorNotification(
             `KISS Sorcar requires Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR}+. ` +
               `Please install Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR} or later and restart VS Code.`,
           );
@@ -808,12 +814,12 @@ async function ensureDependenciesImpl(): Promise<void> {
   // non-prompting info message instead of forcing a reload.
   if (showRestartNotification) {
     if (apiKeysReady) {
-      vscode.window.showInformationMessage(
+      showInformationNotification(
         'KISS Sorcar: Installation complete! You are ready to go. ' +
           'Already-open terminals will not see the updated PATH until you open a new one.',
       );
     } else {
-      vscode.window.showWarningMessage(
+      showWarningNotification(
         'KISS Sorcar: Installation complete, but at least one of Claude Code, ANTHROPIC_API_KEY, or OPENAI_API_KEY is required. ' +
           'Set an API key in your environment, then reload the window (Developer: Reload Window) to be prompted again.',
       );
@@ -2260,7 +2266,7 @@ async function promptForApiKey(
 
     if (key === undefined) {
       if (!optional) {
-        const choice = await vscode.window.showWarningMessage(
+        const choice = await showWarningNotification(
           `${displayName} is required for KISS Sorcar to function.`,
           'Enter Key',
           'Skip',
@@ -2278,7 +2284,7 @@ async function promptForApiKey(
     }
 
     if (validate) {
-      const valid = await vscode.window.withProgress(
+      const valid = await withWebviewNotificationProgress(
         {
           location: vscode.ProgressLocation.Notification,
           title: `Validating ${displayName}...`,
@@ -2287,7 +2293,7 @@ async function promptForApiKey(
       );
 
       if (!valid) {
-        const choice = await vscode.window.showWarningMessage(
+        const choice = await showWarningNotification(
           `The ${displayName} is not valid. Please try again.`,
           'Try Again',
           'Cancel',
@@ -2407,7 +2413,7 @@ async function ensureApiKeys(): Promise<boolean> {
     if (hasAnyKey()) break;
 
     // No key provided — warn and offer retry
-    const choice = await vscode.window.showWarningMessage(
+    const choice = await showWarningNotification(
       'KISS Sorcar requires Claude Code, ANTHROPIC_API_KEY, or OPENAI_API_KEY to work.',
       'Enter Key',
       'Skip',
@@ -2590,7 +2596,7 @@ async function ensureRemotePassword(): Promise<void> {
   });
 
   if (password === undefined || password.trim() === '') {
-    vscode.window.showInformationMessage(
+    showInformationNotification(
       'KISS Sorcar: You can set the remote access password later in the ' +
         'KISS Sorcar settings panel (Remote password field).',
     );
