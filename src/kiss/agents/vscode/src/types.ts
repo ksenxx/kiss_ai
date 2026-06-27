@@ -86,7 +86,7 @@ export type FromWebviewMessage =
     }
   | {type: 'sizeReport'; innerWidth: number; screenWidth: number}
   | {type: 'runUpdate'}
-  | {type: 'serverReset'; agentRunning?: boolean}
+  | {type: 'serverReset'}
   | {type: 'notificationAction'; id: string; action?: string};
 
 /** Messages from extension to webview (matches browser event protocol) */
