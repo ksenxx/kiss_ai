@@ -1,13 +1,25 @@
 # Progress
 
-- Started task: reproduce and fix stale merge/diff UI on remote webapp tab refresh with an end-to-end test.
+- Started new task: use `gpt-5.5` to thoroughly review the previous ask-user broadcast fix, then use `claude-opus-4-7` for any end-to-end repro tests and fixes, run tests in parallel, review fixes with `gpt-5.5`, and repeat until no reported bugs remain.
 - Read `SORCAR.md` first as required; it was empty.
-- Switched primary work model to `claude-opus-4-7` as requested for coding, bug fixing, and test creation.
-- Inspected relevant remote-web merge review code in `src/kiss/agents/vscode/web_server.py` and webview rendering code in `src/kiss/agents/vscode/media/main.js`.
-- Added a Python end-to-end regression in `src/kiss/tests/agents/vscode/test_bughunt4_merge_replay_on_reconnect.py` reproducing the bug: on remote webapp refresh, the active `tabId` also appears in `ready.restoredTabs`, causing `_handle_ready` to replay `merge_data`/`merge_started`/`merge_nav` twice. The first diff panel becomes stale because later `merge_nav` updates only the newest merge panel.
-- Verified the new Python test failed before the fix with duplicate merge events: `['merge_data', 'merge_started', 'merge_nav', 'merge_data', 'merge_started', 'merge_nav']`.
-- Fixed `RemoteAccessServer._handle_ready` to track merge-review tabs replayed during a single `ready` command and skip duplicate replay for restored tabs already replayed as the active tab.
-- Ran the new impacted Python test after the fix; it passed. Ran the full impacted Python file `src/kiss/tests/agents/vscode/test_bughunt4_merge_replay_on_reconnect.py`; all 3 tests passed.
-- Ran `uv run check --full`; first run exposed a pre-existing Prettier issue in `src/kiss/agents/vscode/src/DependencyInstaller.ts` (missing trailing comma in `showInformationNotification(...)`). Fixed that formatting issue and reran `uv run check --full`; all checks passed.
-- Switched to `gpt-5.5` for review. Review finding: a redundant JS jsdom test had been added but did not reproduce the actual server duplicate replay bug and was not included in npm test scripts; removed that redundant file and kept the Python end-to-end WSS test as the authoritative regression.
-- Review also noted the restored-tab replay guard should retain the previous non-empty tab-id condition; updated the condition to require `rt_id` to be non-empty before consulting the duplicate-replay set.
+- Switched to `gpt-5.5` for the initial review.
+- Read the prior ask-user changes and adjacent code: `src/kiss/agents/vscode/commands.py`, `src/kiss/agents/vscode/media/main.js`, `src/kiss/agents/vscode/src/types.ts`, and `src/kiss/tests/agents/sorcar/test_ask_user_broadcast.py`.
+- Initial `gpt-5.5` review finding: `_user_answer_clear_tabs(ans_tab)` closes every subscriber set containing the answering tab. Since completed task subscriber sets are intentionally preserved, a tab that appears in an old completed task and a new running task can answer the new task and incorrectly emit `askUserDone` to old unrelated subscribers, closing their unrelated ask modal.
+- Switched to `claude-opus-4-7` for test creation and bug fixing.
+- Added an end-to-end backend regression to `src/kiss/tests/agents/sorcar/test_ask_user_broadcast.py`: it keeps an old completed-task subscriber set containing `viewer-tab` and `unrelated-tab`, then runs a new ask-user lifecycle on a different task with `owner-tab` and `viewer-tab`. The pre-fix code failed because `askUserDone` was emitted to `unrelated-tab`.
+- Fixed the backend by tracking the task id for the currently pending ask-user queue in `VSCodeServer._pending_user_answer_tasks`. `_ask_user_question` records `id(queue) -> task_id` before broadcasting the question and removes it when the question completes. `_cmd_user_answer` pops that task id when the answer is accepted and `_user_answer_clear_tabs` now closes only that task's subscriber set, falling back to just the answering tab when no pending task can be associated.
+- Ran impacted tests: `uv run pytest -q src/kiss/tests/agents/sorcar/test_ask_user_broadcast.py src/kiss/tests/agents/sorcar/test_ask_user_immediate_response.py src/kiss/tests/agents/sorcar/test_vscode_tabs.py src/kiss/tests/agents/vscode/test_bughunt5_stale_user_answer.py` passed with 47 tests. Pytest reported one existing unhandled-thread warning from `test_vscode_tabs.py` where a deliberately interrupted sleeping daemon thread receives `KeyboardInterrupt`.
+- Switched back to `gpt-5.5` for a thorough review of the fix. Review found the over-broad stale-subscriber close bug was addressed and did not identify another reproducible ask-user close bug in this cycle.
+- Counted collected pytest tests before running the full suite: 3,807 node IDs. The machine has 10 cores, so split the suite into 8 files and used `run_parallel` with 8 workers. All splits passed:
+  - Split 0: 473 passed, 3 skipped, 4 warnings.
+  - Split 1: 472 passed, 4 skipped, 182 warnings.
+  - Split 2: 471 passed, 5 skipped, 6 warnings.
+  - Split 3: 470 passed, 6 skipped, 200 subtests passed, 1 warning.
+  - Split 4: 470 passed, 6 skipped, 24 subtests passed, 18 warnings.
+  - Split 5: 473 passed, 3 skipped, 209 subtests passed, 34 warnings.
+  - Split 6: 472 passed, 4 skipped, 8 subtests passed, 4 warnings.
+  - Split 7: 472 passed, 3 skipped, 4 subtests passed, 14 warnings.
+- Continued after the abrupt failure by reading `SORCAR.md`, switching to `claude-opus-4-7`, reading the requested split file `./tmp/pytest-split-ask-user-review-3.txt`, and counting 476 listed tests before running them.
+- Ran the exact requested command: `uv run pytest -q $(cat ./tmp/pytest-split-ask-user-review-3.txt)`. Result: 470 passed, 6 skipped, 1 warning, and 200 subtests passed in 94.29 seconds. The warning summary showed a `google.genai.types` deprecation warning; the output also included resource warnings about unclosed sqlite connections, but pytest exited successfully.
+- Ran requested split command: `uv run pytest -q $(cat ./tmp/pytest-split-ask-user-review-1.txt)`. Result: 472 passed, 4 skipped, 182 warnings in 95.55 seconds. The only visible warnings in the captured output were resource/unclosed-database warnings and other existing pytest warnings; the split completed successfully.
+- Ran the requested split: `uv run pytest -q $(cat ./tmp/pytest-split-ask-user-review-7.txt)`. Result: 472 passed, 3 skipped, 14 warnings, 4 subtests passed in 75.60 seconds.
