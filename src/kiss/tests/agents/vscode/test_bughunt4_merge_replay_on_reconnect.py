@@ -49,6 +49,7 @@ from websockets.asyncio.client import ClientConnection, connect
 
 import kiss.agents.sorcar.persistence as th
 import kiss.agents.vscode.vscode_config as vc
+from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.vscode.web_server import (
     RemoteAccessServer,
     _generate_self_signed_cert,
@@ -120,6 +121,10 @@ class TestMergeReplayOnReconnect(IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-bughunt4-mrgreplay-")
         self.saved = _redirect_persistence(self.tmpdir)
+        with _RunningAgentState._registry_lock:
+            self._saved_running_agent_states = dict(
+                _RunningAgentState.running_agent_states,
+            )
         self._orig_cfg_dir = vc.CONFIG_DIR
         self._orig_cfg_path = vc.CONFIG_PATH
         vc.CONFIG_DIR = Path(self.tmpdir) / "config"
@@ -153,6 +158,11 @@ class TestMergeReplayOnReconnect(IsolatedAsyncioTestCase):
         if th._db_conn is not None:
             th._db_conn.close()
         _restore_persistence(self.saved)
+        with _RunningAgentState._registry_lock:
+            _RunningAgentState.running_agent_states.clear()
+            _RunningAgentState.running_agent_states.update(
+                self._saved_running_agent_states,
+            )
         vc.CONFIG_DIR = self._orig_cfg_dir
         vc.CONFIG_PATH = self._orig_cfg_path
         shutil.rmtree(self.tmpdir, ignore_errors=True)
@@ -191,6 +201,24 @@ class TestMergeReplayOnReconnect(IsolatedAsyncioTestCase):
         got: list[str] = []
         deadline = time.monotonic() + timeout
         wanted = {"merge_data", "merge_started", "merge_nav"}
+        while time.monotonic() < deadline:
+            remaining = max(0.05, deadline - time.monotonic())
+            try:
+                raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
+            except TimeoutError:
+                break
+            ev = json.loads(raw)
+            etype = ev.get("type", "")
+            if etype in wanted:
+                got.append(etype)
+        return got
+
+    async def _collect_event_types(
+        self, ws: ClientConnection, wanted: set[str], timeout: float = 3.0,
+    ) -> list[str]:
+        """Collect wanted event types in arrival order within *timeout*."""
+        got: list[str] = []
+        deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             remaining = max(0.05, deadline - time.monotonic())
             try:
@@ -314,6 +342,48 @@ class TestMergeReplayOnReconnect(IsolatedAsyncioTestCase):
         self.assertEqual(
             got, {},
             f"unexpected merge replay for tabs with no review: {got}",
+        )
+
+    async def test_refresh_restored_active_tab_replays_history_before_merge(
+        self,
+    ) -> None:
+        """History replay must not erase the just-replayed merge panel."""
+        tab_id = "tab-active-history-refresh"
+        Path(self.tmpdir, "work-history").mkdir(exist_ok=True)
+        merge_data = _build_merge_data(Path(self.tmpdir) / "work-history")
+        task_id, chat_id = th._add_task("historical prompt")
+        th._append_chat_event({"type": "text_delta", "text": "old output"}, task_id)
+        self.server._printer.broadcast({
+            "type": "merge_data",
+            "tabId": tab_id,
+            "data": merge_data,
+            "hunk_count": 3,
+        })
+        self.server._vscode_server._get_tab(tab_id)
+        with self.server._vscode_server._state_lock:
+            tab = _RunningAgentState.running_agent_states[tab_id]
+            tab.chat_id = chat_id
+            tab.is_merging = True
+            tab.use_worktree = True
+        with self.server._merge_states_lock:
+            self.assertIn(tab_id, self.server._merge_states)
+
+        ws = await self._connect_ok()
+        await ws.send(json.dumps({
+            "type": "ready",
+            "tabId": tab_id,
+            "restoredTabs": [{"tabId": tab_id, "chatId": chat_id}],
+        }))
+        got = await self._collect_event_types(
+            ws, {"task_events", "merge_data", "merge_started", "merge_nav"},
+        )
+        self.assertIn("task_events", got, got)
+        self.assertIn("merge_data", got, got)
+        self.assertLess(
+            got.index("task_events"), got.index("merge_data"),
+            "BUG: ready replayed merge_data before resumeSession/task_events; "
+            "the frontend's task_events replay clears #output afterwards, "
+            "erasing the recovered merge/diff UI on refresh",
         )
 
 
