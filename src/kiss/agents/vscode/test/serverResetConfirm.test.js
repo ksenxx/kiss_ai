@@ -3,33 +3,31 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 //
-// End-to-end regression test for the settings-panel "Server reset"
+// Webview-side contract test for the settings-panel "Server reset"
 // button.
 //
-// Bug reproduced
-// --------------
+// Background
+// ----------
 // The "Server reset" button (``#cfg-server-reset-btn``) in the
 // settings panel asks the kiss-web daemon to SIGTERM itself so the
 // supervising LaunchAgent/systemd unit respawns a fresh daemon
-// process.  Before this fix the click handler unconditionally posted
-// ``{type: 'serverReset'}`` to the extension — even when the user's
-// currently active (or any) tab still owned a running agent.  Running
-// agents would therefore be killed mid-task without any prompt or
-// chance for the user to cancel the destructive action.
+// process.  When a server-reset click happens while ANY tab still
+// has a running agent, the webview MUST tell the extension about it
+// so the extension can surface a native VS Code modal dialog asking
+// the user to confirm — running agents would otherwise be killed
+// mid-task without any prompt.
 //
-// The fix: when a server-reset click happens while ANY tab has
-// ``isRunning === true``, the webview must NOT post the reset
-// immediately.  Instead it must surface a sticky confirmation
-// notification asking the user whether to forcefully restart the
-// server.  Only after the user activates the "Forcefully restart"
-// affordance does ``{type: 'serverReset'}`` get posted.  Clicking
-// "Cancel" must dismiss the prompt without posting anything.
+// The webview's responsibility is therefore narrow but exact:
+//   * On every click, post ``{type: 'serverReset', agentRunning}``.
+//   * ``agentRunning`` must be ``true`` iff any persisted tab has
+//     ``isRunning === true``.
+//   * The webview must NOT render any in-webview confirmation toast;
+//     the dialog is the extension's job (a real VS Code modal, not
+//     a webview toast).
 //
-// When no agent is running the click must still post the reset
-// immediately (preserving the existing fast path).
-//
-// This test drives the real ``media/main.js`` against a JSDOM-rendered
-// ``media/chat.html`` and asserts the contract above.
+// The integration test in ``serverResetDialog.test.js`` covers the
+// dialog half — this test pins the webview half so a future refactor
+// of ``main.js`` cannot silently drop the ``agentRunning`` flag.
 
 'use strict';
 
@@ -46,10 +44,6 @@ function makeDomWebview() {
   let html = fs.readFileSync(path.join(mediaDir, 'chat.html'), 'utf8');
   html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
   html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  // Strip any inline <script>…</script> blocks the template carries —
-  // panelCopy.js + main.js are evaluated by hand below so the JSDOM
-  // sandbox starts from a known, identical baseline to the other
-  // webview tests in this folder.
   html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
 
   const dom = new JSDOM(html, {
@@ -63,9 +57,6 @@ function makeDomWebview() {
   win.HTMLElement.prototype.scrollTo = function () {};
 
   const posted = [];
-  // Preload a single-tab persisted state with a deterministic chatId
-  // so the test can target the active tab by id when broadcasting
-  // status updates.
   let state = {
     tabs: [
       {
@@ -117,26 +108,10 @@ async function waitFor(predicate, message) {
   throw new Error(message || 'waitFor timed out');
 }
 
-async function waitForFalsy(predicate, message) {
-  for (let i = 0; i < 100; i++) {
-    if (!predicate()) return;
-    await new Promise(r => setTimeout(r, 20));
-  }
-  throw new Error(message || 'waitForFalsy timed out');
-}
-
-function findActionButton(toast, labelMatcher) {
-  const buttons = toast.querySelectorAll('.kiss-notification-action');
-  for (const btn of buttons) {
-    const label = (btn.textContent || '').trim().toLowerCase();
-    const aria = (btn.getAttribute('aria-label') || '').toLowerCase();
-    if (labelMatcher(label, aria)) return btn;
-  }
-  return null;
-}
-
 async function runTests() {
-  // ---------- Case A: no agent running → reset goes through immediately.
+  // ---------- Case A: no agent running.
+  // The webview must report agentRunning=false so the extension can
+  // fast-path the reset, and must NOT render any in-webview toast.
   {
     const wv = makeDomWebview();
     try {
@@ -144,34 +119,33 @@ async function runTests() {
       assert.ok(btn, 'settings panel must expose #cfg-server-reset-btn');
 
       click(btn);
-
-      // The fast path is unchanged: the click posts the reset right
-      // away with NO confirmation notification interposed.
-      await waitFor(
-        () => wv.posted.some(m => m.type === 'serverReset'),
-        'click without a running agent must post {type: "serverReset"} immediately',
+      const msg = await waitFor(
+        () => wv.posted.find(m => m.type === 'serverReset'),
+        'click must post {type: "serverReset"} to the extension',
+      );
+      assert.strictEqual(
+        msg.agentRunning,
+        false,
+        'with no running agent the webview must post agentRunning=false',
       );
       assert.strictEqual(
         wv.win.document.querySelectorAll('.kiss-notification').length,
         0,
-        'fast path must not surface a confirmation notification',
+        'the webview must NOT render any in-webview confirmation toast',
       );
     } finally {
       wv.close();
     }
   }
 
-  // ---------- Case B: agent running → click shows confirmation prompt;
-  // ``Cancel`` dismisses it without posting; a second click + ``Forcefully
-  // restart`` posts the reset.
+  // ---------- Case B: agent running.
+  // The webview must still post {type:'serverReset', agentRunning:true}
+  // — the dialog is the extension's job.  It must NOT render any
+  // in-webview confirmation toast and must NOT swallow the post.
   {
     const wv = makeDomWebview();
     try {
       const btn = wv.win.document.getElementById('cfg-server-reset-btn');
-      assert.ok(btn);
-
-      // Mark the (single, preloaded) active tab as running, exactly as
-      // a real backend ``status`` event would.
       send(wv.win, {
         type: 'status',
         tabId: PRELOADED_TAB_ID,
@@ -179,109 +153,33 @@ async function runTests() {
         startTs: Date.now(),
       });
 
-      // First click — must NOT immediately post serverReset.  Must
-      // raise a sticky confirmation toast with two action buttons.
       click(btn);
-
-      const toast = await waitFor(
-        () => wv.win.document.querySelector('.kiss-notification'),
-        'click with a running agent must raise a confirmation notification',
+      const msg = await waitFor(
+        () => wv.posted.find(m => m.type === 'serverReset'),
+        'click with a running agent must still post serverReset (with agentRunning=true)',
       );
-
-      // The toast must be sticky: the click is asking the user to
-      // confirm a destructive action; a self-dismissing toast would
-      // make the prompt fire-and-forget.
       assert.strictEqual(
-        toast.getAttribute('data-notification-sticky'),
-        'true',
-        'confirmation toast must be sticky',
+        msg.agentRunning,
+        true,
+        'with a running agent the webview must post agentRunning=true so the extension can raise the dialog',
       );
-
-      // Body text must mention that an agent is still running so the
-      // user understands WHY they are being asked.
-      const body = (toast.textContent || '').toLowerCase();
-      assert.ok(
-        body.includes('agent') && body.includes('running'),
-        'confirmation must explain that an agent is still running, got: ' +
-          JSON.stringify(toast.textContent),
-      );
-
-      // No serverReset must have been posted yet — that is the bug
-      // this test guards against.
-      assert.ok(
-        !wv.posted.some(m => m.type === 'serverReset'),
-        'serverReset must NOT be posted before the user confirms',
-      );
-
-      // The toast must expose at least a Cancel and a Forcefully-
-      // restart affordance.
-      const cancelBtn = findActionButton(
-        toast,
-        label => label.includes('cancel'),
-      );
-      assert.ok(
-        cancelBtn,
-        'confirmation must expose a Cancel button',
-      );
-      const forceBtn = findActionButton(
-        toast,
-        (label, aria) =>
-          label.includes('forcefully') ||
-          label.includes('force') ||
-          aria.includes('forcefully'),
-      );
-      assert.ok(
-        forceBtn,
-        'confirmation must expose a "Forcefully restart" button',
-      );
-
-      // Clicking Cancel must close the toast and NOT post serverReset.
-      click(cancelBtn);
-      await waitForFalsy(
-        () => wv.win.document.querySelector('.kiss-notification'),
-        'Cancel must dismiss the confirmation notification',
-      );
-      assert.ok(
-        !wv.posted.some(m => m.type === 'serverReset'),
-        'Cancel must not post {type: "serverReset"}',
-      );
-
-      // Click again → confirmation reappears.  Click "Forcefully
-      // restart" — this time the reset must be posted.
-      click(btn);
-      const toast2 = await waitFor(
-        () => wv.win.document.querySelector('.kiss-notification'),
-        'second click while running must re-raise the confirmation',
-      );
-      const forceBtn2 = findActionButton(
-        toast2,
-        (label, aria) =>
-          label.includes('forcefully') ||
-          label.includes('force') ||
-          aria.includes('forcefully'),
-      );
-      assert.ok(forceBtn2);
-      click(forceBtn2);
-      await waitFor(
-        () => wv.posted.some(m => m.type === 'serverReset'),
-        '"Forcefully restart" must post {type: "serverReset"}',
-      );
-      await waitForFalsy(
-        () => wv.win.document.querySelector('.kiss-notification'),
-        '"Forcefully restart" must dismiss the confirmation notification',
+      assert.strictEqual(
+        wv.win.document.querySelectorAll('.kiss-notification').length,
+        0,
+        'the webview must NOT render any in-webview confirmation toast — the dialog is a real VS Code modal',
       );
     } finally {
       wv.close();
     }
   }
 
-  // ---------- Case C: agent stops running → subsequent reset bypasses
-  // the prompt again (no stale "still running" state).
+  // ---------- Case C: agent finished.
+  // After ``running:false`` arrives the agentRunning flag must reset
+  // — no stale "still running" reports on subsequent clicks.
   {
     const wv = makeDomWebview();
     try {
       const btn = wv.win.document.getElementById('cfg-server-reset-btn');
-
       send(wv.win, {
         type: 'status',
         tabId: PRELOADED_TAB_ID,
@@ -295,14 +193,14 @@ async function runTests() {
       });
 
       click(btn);
-      await waitFor(
-        () => wv.posted.some(m => m.type === 'serverReset'),
-        'after the agent stops, click must post the reset immediately',
+      const msg = await waitFor(
+        () => wv.posted.find(m => m.type === 'serverReset'),
+        'click after the agent stops must post serverReset',
       );
       assert.strictEqual(
-        wv.win.document.querySelectorAll('.kiss-notification').length,
-        0,
-        'no prompt should appear once no agent is running',
+        msg.agentRunning,
+        false,
+        'after the agent stops, agentRunning must be false on subsequent clicks',
       );
     } finally {
       wv.close();
