@@ -570,6 +570,17 @@ class VSCodeServer(
         if custom:
             models_list.insert(0, custom)
 
+        # ``kiss-web`` can outlive VS Code windows.  A fresh VS Code
+        # activation asks this long-lived daemon for ``getModels``;
+        # if the user selected a different model in a previous window
+        # session, that choice is persisted in ``config.json`` and must
+        # take precedence over this process's stale in-memory default.
+        # Honor the persisted last model whenever it is still runnable.
+        available_names = {m["name"] for m in models_list}
+        persisted = _load_last_model()
+        if persisted in available_names:
+            self._default_model = persisted
+
         # On a fresh installation the server is constructed before any
         # API key is configured, so ``self._default_model`` is the
         # ``"No model"`` sentinel.  Once a key becomes available (env var
@@ -577,7 +588,6 @@ class VSCodeServer(
         # models, but the cached sentinel would keep the picker stuck on
         # "No model".  Re-resolve the default whenever the cached
         # selection is no longer a valid choice so the picker recovers.
-        available_names = {m["name"] for m in models_list}
         if self._default_model not in available_names:
             refreshed = get_default_model()
             if refreshed in available_names:
