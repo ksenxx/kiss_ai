@@ -7,8 +7,8 @@
 The chat webview's "Server reset" button (next to "Update") posts a
 ``serverReset`` command.  ``RemoteAccessServer._dispatch_client_command``
 routes it to :meth:`RemoteAccessServer._handle_server_reset`, which
-broadcasts a ``notice`` acknowledgement to the requesting window and
-then schedules a ``SIGTERM`` to its own process so the supervising
+broadcasts a ``notification`` acknowledgement to the requesting window
+and then schedules a ``SIGTERM`` to its own process so the supervising
 LaunchAgent / systemd unit respawns a fresh daemon.
 
 These tests bind a temporary UDS socket (not the production
@@ -137,52 +137,60 @@ class TestServerReset(IsolatedAsyncioTestCase):
         raise AssertionError("predicate never matched within budget")
 
     async def test_server_reset_acks_and_triggers_restart(self) -> None:
-        """``serverReset`` broadcasts a notice then fires the restart."""
+        """``serverReset`` broadcasts a notification then fires the restart."""
         reader, writer = await self._connect()
 
         await self._send(writer, {"type": "serverReset"})
 
-        notice = await self._drain_until(
+        notification = await self._drain_until(
             reader,
-            lambda m: m.get("type") == "notice"
-            and "web server" in str(m.get("text", "")).lower(),
+            lambda m: m.get("type") == "notification"
+            and "web server" in str(m.get("message", "")).lower(),
         )
-        self.assertIn("restart", str(notice["text"]).lower())
+        self.assertEqual(notification.get("id"), "server-reset-restarting")
+        self.assertEqual(notification.get("severity"), "info")
+        self.assertIn("restart", str(notification["message"]).lower())
+        # The user requested a top-right notification, not a chat-output
+        # ``notice`` note — guard against accidental regressions.
+        self.assertNotEqual(notification.get("type"), "notice")
 
         # The restart trigger is scheduled via ``call_later`` and must
         # fire shortly after the acknowledgement.
         await asyncio.wait_for(self._reset_fired.wait(), timeout=5.0)
         self.assertTrue(self._reset_fired.is_set())
 
-    async def test_server_reset_notice_only_to_requesting_window(self) -> None:
+    async def test_server_reset_notification_only_to_requesting_window(
+        self,
+    ) -> None:
         """The reset acknowledgement reaches only the clicking window."""
         reader_a, writer_a = await self._connect()
         reader_b, writer_b = await self._connect()
 
         await self._send(writer_a, {"type": "serverReset"})
 
-        # Window A receives the notice.
+        # Window A receives the notification.
         await self._drain_until(
             reader_a,
-            lambda m: m.get("type") == "notice"
-            and "web server" in str(m.get("text", "")).lower(),
+            lambda m: m.get("type") == "notification"
+            and "web server" in str(m.get("message", "")).lower(),
         )
 
-        # Window B must NOT receive the notice.  Probe B with an
+        # Window B must NOT receive the notification.  Probe B with an
         # ``activeTasksQuery`` (answered directly, bypassing broadcast)
-        # and assert no reset notice arrived ahead of the response.
+        # and assert no reset notification arrived ahead of the response.
         await self._send(writer_b, {"type": "activeTasksQuery"})
-        seen_notice = False
+        seen_notification = False
 
         def _is_probe_response(msg: dict[str, Any]) -> bool:
-            nonlocal seen_notice
-            if msg.get("type") == "notice" and "web server" in str(
-                msg.get("text", ""),
+            nonlocal seen_notification
+            if msg.get("type") == "notification" and "web server" in str(
+                msg.get("message", ""),
             ).lower():
-                seen_notice = True
+                seen_notification = True
             return msg.get("type") == "activeTasksResponse"
 
         await self._drain_until(reader_b, _is_probe_response)
         self.assertFalse(
-            seen_notice, "reset notice leaked to a sibling window",
+            seen_notification,
+            "reset notification leaked to a sibling window",
         )
