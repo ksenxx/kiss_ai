@@ -97,6 +97,12 @@ function assertSummaryOrdering(summary, expectedFinalText) {
   const panels = Array.from(win.document.querySelectorAll('#output > .rc'));
   assert.ok(panels.length >= 2, 'expected at least Previous Sessions + Result panels');
   const headings = panels.map(panel => text(panel.querySelector('.rc-h h3')));
+  assert.deepStrictEqual(
+    headings,
+    ['Previous Sessions', 'Result'],
+    'BUG: stale per-session Result panels must be removed when the merged multi-session Result arrives; got ' +
+      headings.join(' -> '),
+  );
   const previousIdx = headings.lastIndexOf('Previous Sessions');
   const resultIdx = headings.lastIndexOf('Result');
   assert.ok(previousIdx >= 0, 'BUG: Previous Sessions panel did not render');
