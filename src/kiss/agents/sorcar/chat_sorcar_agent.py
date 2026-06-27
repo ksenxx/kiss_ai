@@ -535,6 +535,27 @@ class ChatSorcarAgent(SorcarAgent):
             start_rec = getattr(printer, "start_recording", None)
             if start_rec is not None:
                 start_rec()
+            # Notify the frontend that ``task_history`` has gained a
+            # new row so the History sidebar refreshes IMMEDIATELY
+            # at task start — not only when the task ends.  Without
+            # this, the only refresh trigger sent at start is
+            # ``status running=True`` (in ``web_server._run_task_inner``)
+            # which fires BEFORE ``_add_task`` has inserted the row;
+            # ``refreshHistory`` then fetches a history list that
+            # does not yet include the running task and the new
+            # task panel never appears in the History sidebar until
+            # the task finishes (where ``task_runner`` emits
+            # ``tasks_updated`` in its post-task block).  Broadcasting
+            # here, immediately after ``_add_task`` has committed
+            # the row, makes the running task appear in History
+            # right away across all launch paths (VS Code UI, CLI,
+            # remote browser, sub-agents).
+            broadcast = getattr(printer, "broadcast", None)
+            if broadcast is not None:
+                try:
+                    broadcast({"type": "tasks_updated", "taskId": ""})
+                except Exception:
+                    pass
         if on_task_id_allocated is not None:
             # Tell the caller (the VS Code task runner) which
             # ``task_history`` row id this run owns, BEFORE any agent
