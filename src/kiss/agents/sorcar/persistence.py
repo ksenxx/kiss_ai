@@ -337,14 +337,19 @@ def _is_failed_result(result: str) -> bool:
     * ``Task terminated unexpectedly (process killed)`` — the rewrite
       that ``_recover_orphaned_tasks`` applies to surviving sentinel
       rows on fresh-server boot.
-
-    User-stopped runs (``Task stopped by user``) are intentionally
-    NOT marked failed here: the user explicitly halted them.
+    * ``Task stopped by user`` — an explicit user cancellation.  It is
+      not a successful completion, so the history sidebar should mark
+      it with the same red status dot used for failed runs.
+    * ``Task interrupted by server restart/shutdown`` — a graceful
+      daemon/server shutdown cancellation.  It is likewise an
+      incomplete task outcome rather than a success.
     """
     return (
         result.startswith("Task failed")
         or result == "Agent Failed Abruptly"
         or result == "Task terminated unexpectedly (process killed)"
+        or result == "Task stopped by user"
+        or result == "Task interrupted by server restart/shutdown"
     )
 
 
