@@ -222,7 +222,8 @@ async function runTests() {
   workspaceFolders = [{uri: makeUri(ws)}];
 
   // extensionUri points at the real extension dir so buildChatHtml can
-  // read media/chat.html + SAMPLE_TASKS.md.
+  // read media/chat.html, ~/.kiss/MY_TASK_TEMPLATES.md (auto-seeded), and
+  // the bundled SAMPLE_TASKS.md.
   const extUri = makeUri(path.join(__dirname, '..'));
   const view = new SorcarSidebarView(extUri);
 

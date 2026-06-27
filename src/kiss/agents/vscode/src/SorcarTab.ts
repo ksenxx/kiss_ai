@@ -12,7 +12,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import {findKissProject} from './kissPaths';
-import {ensureUserAsset} from './userAssets';
+import {ensureUserAsset, ensureUserAssetFromDefault} from './userAssets';
 
 /** Read the KISS project version from ``_version.py`` on disk. */
 export function getVersion(): string {
@@ -96,17 +96,47 @@ export function getTricks(): string[] {
 }
 
 /**
- * Read ``~/.kiss/SAMPLE_TASKS.md`` and return one ``{text}`` entry
- * per ``## Task`` section.  Mirrors the ``INJECTIONS.md`` handling:
- * the user-local copy at ``~/.kiss/SAMPLE_TASKS.md`` is the runtime
- * source of truth so authors can edit welcome-screen suggestions in
- * plain Markdown; it is seeded from the bundled
- * ``src/kiss/SAMPLE_TASKS.md`` copy by :func:`ensureUserAsset` only
- * when the user copy is missing, so user edits survive every read.
- * Returns ``[]`` when the file is missing or unparseable so the
- * welcome screen still renders without chips.
+ * Build the welcome-screen chip list from two Markdown files.
+ *
+ * Order matters — user-curated chips come first, bundled chips
+ * second:
+ *
+ *   1. ``~/.kiss/MY_TASK_TEMPLATES.md`` — purely user-curated tasks.
+ *      Auto-created on first read with the seed content
+ *      ``## Task\n\nHi!\n`` so the file is always present and
+ *      editable.  Never overwritten once it exists; user edits
+ *      survive across upgrades and daemon restarts.
+ *
+ *   2. ``<extensionRoot>/kiss_project/src/kiss/SAMPLE_TASKS.md`` (or,
+ *      in dev checkouts, ``<extensionRoot>/../../SAMPLE_TASKS.md``)
+ *      — the bundled sample tasks shipped with the extension.  Read
+ *      **directly from the package copy**; never copied into
+ *      ``~/.kiss/``.  This way every extension upgrade automatically
+ *      delivers the latest bundled chips without clobbering the
+ *      user's curated list.
+ *
+ * Each ``## Task`` section yields one ``{text}`` entry, with the body
+ * trimmed and mdformat backslash escapes reverted.  Returns ``[]``
+ * when neither file contributes any sections so the welcome screen
+ * still renders without chips.
  */
 export function readSampleTasks(extensionRoot: string): Array<{text: string}> {
+  const items: Array<{text: string}> = [];
+
+  // (1) User-curated chips from ~/.kiss/MY_TASK_TEMPLATES.md.
+  const myTasksPath = ensureUserAssetFromDefault(
+    'MY_TASK_TEMPLATES.md',
+    '## Task\n\nHi!\n',
+  );
+  if (myTasksPath !== null) {
+    for (const text of readMarkdownSections(myTasksPath, 'Task')) {
+      items.push({text});
+    }
+  }
+
+  // (2) Bundled chips read directly from the package copy.  No
+  //     ``~/.kiss/SAMPLE_TASKS.md`` is ever created here — the
+  //     bundled file is the only source of these chips.
   const packagePath = path.join(
     extensionRoot,
     'kiss_project',
@@ -115,11 +145,12 @@ export function readSampleTasks(extensionRoot: string): Array<{text: string}> {
     'SAMPLE_TASKS.md',
   );
   const sourcePath = path.join(extensionRoot, '..', '..', 'SAMPLE_TASKS.md');
-  const seedPath = fs.existsSync(packagePath) ? packagePath : sourcePath;
-  return readMarkdownSections(
-    ensureUserAsset('SAMPLE_TASKS.md', seedPath),
-    'Task',
-  ).map(text => ({text}));
+  const bundledPath = fs.existsSync(packagePath) ? packagePath : sourcePath;
+  for (const text of readMarkdownSections(bundledPath, 'Task')) {
+    items.push({text});
+  }
+
+  return items;
 }
 
 /**
