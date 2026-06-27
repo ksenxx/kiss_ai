@@ -1990,6 +1990,88 @@
     }
   }
 
+  function splitMultiSessionSummary(summary) {
+    const text = typeof summary === 'string' ? summary : '';
+    const finalMarker = '\n\n---\n\n### Final Session\n';
+    let markerIdx = text.indexOf(finalMarker);
+    let markerLen = finalMarker.length;
+    if (markerIdx <= 0) {
+      const separator = '\n\n---\n\n';
+      markerIdx = text.lastIndexOf(separator);
+      markerLen = separator.length;
+    }
+    if (markerIdx <= 0) return null;
+    const previous = text.substring(0, markerIdx).trim();
+    const final = text.substring(markerIdx + markerLen).trim();
+    if (!previous || !final) return null;
+    if (!previous.includes('### Previous Session')) return null;
+    return {previous: previous, final: final};
+  }
+
+  function removeLastResultPanel(container) {
+    if (!container || !container.children) return;
+    for (let i = container.children.length - 1; i >= 0; i--) {
+      const child = container.children[i];
+      if (child.classList && child.classList.contains('rc')) {
+        child.remove();
+        return;
+      }
+    }
+  }
+
+  function createResultPanel(ev, summaryOverride, titleOverride, showStatus) {
+    const rc = mkEl('div', 'ev rc');
+    let rb = '';
+    let rawBody = '';
+    if (showStatus && ev.is_continue) {
+      rb +=
+        '<div style="color:var(--yellow);font-weight:700;font-size:var(--fs-xl);margin-bottom:10px">Status: Continue</div>';
+      rawBody += 'Status: Continue\n\n';
+    } else if (showStatus && ev.success === false) {
+      rb +=
+        '<div style="color:var(--red);font-weight:700;font-size:var(--fs-xl);margin-bottom:10px">Status: FAILED</div>';
+      rawBody += 'Status: FAILED\n\n';
+    }
+    let usePre = true;
+    const summaryText =
+      summaryOverride !== undefined ? summaryOverride : ev.summary;
+    if (summaryText) {
+      const sum = String(summaryText)
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+      if (typeof marked !== 'undefined') {
+        rb += kissSanitize(marked.parse(sum));
+        usePre = false;
+      } else {
+        rb += esc(sum);
+      }
+      rawBody += sum;
+    } else {
+      const txt = (ev.text || '(no result)').replace(/\n{3,}/g, '\n\n').trim();
+      rb += esc(txt);
+      rawBody += txt;
+    }
+    rc.dataset.rawText = rawBody;
+    rc.innerHTML =
+      '<div class="rc-h"><h3>' +
+      esc(titleOverride || 'Result') +
+      '</h3><div class="rs">' +
+      '<span>Tokens <b>' +
+      fmtN(ev.total_tokens || 0) +
+      '</b></span>' +
+      '<span>Cost <b>' +
+      esc(ev.cost || 'N/A') +
+      '</b></span>' +
+      '</div></div><div class="rc-body md-body' +
+      (usePre ? ' pre' : '') +
+      '">' +
+      rb +
+      '</div>';
+    hlBlock(rc);
+    addCopyButton(rc);
+    return rc;
+  }
+
   window.toggleThink = toggleThink;
 
   function lineDiff(a, b) {
@@ -2336,55 +2418,23 @@
         break;
       }
       case 'result': {
-        const rc = mkEl('div', 'ev rc');
-        let rb = '';
-        let rawBody = '';
-        if (ev.is_continue) {
-          rb +=
-            '<div style="color:var(--yellow);font-weight:700;font-size:var(--fs-xl);margin-bottom:10px">Status: Continue</div>';
-          rawBody += 'Status: Continue\n\n';
-        } else if (ev.success === false) {
-          rb +=
-            '<div style="color:var(--red);font-weight:700;font-size:var(--fs-xl);margin-bottom:10px">Status: FAILED</div>';
-          rawBody += 'Status: FAILED\n\n';
-        }
-        let usePre = true;
-        if (ev.summary) {
-          const sum = (ev.summary || '').replace(/\n{3,}/g, '\n\n').trim();
-          if (typeof marked !== 'undefined') {
-            rb += kissSanitize(marked.parse(sum));
-            usePre = false;
-          } else {
-            rb += esc(sum);
-          }
-          rawBody += sum;
+        const multiSummary = splitMultiSessionSummary(ev.summary);
+        if (multiSummary) {
+          removeLastResultPanel(target);
+          target.appendChild(
+            createResultPanel(
+              ev,
+              multiSummary.previous,
+              'Previous Sessions',
+              false,
+            ),
+          );
+          target.appendChild(
+            createResultPanel(ev, multiSummary.final, 'Result', true),
+          );
         } else {
-          const txt = (ev.text || '(no result)')
-            .replace(/\n{3,}/g, '\n\n')
-            .trim();
-          rb += esc(txt);
-          rawBody += txt;
+          target.appendChild(createResultPanel(ev, undefined, 'Result', true));
         }
-        // Preserve raw markdown/text result so the panel Copy button
-        // reproduces the agent-supplied markdown rather than the rendered
-        // HTML's textContent (which strips #/`*/` markers).
-        rc.dataset.rawText = rawBody;
-        rc.innerHTML =
-          '<div class="rc-h"><h3>Result</h3><div class="rs">' +
-          '<span>Tokens <b>' +
-          fmtN(ev.total_tokens || 0) +
-          '</b></span>' +
-          '<span>Cost <b>' +
-          esc(ev.cost || 'N/A') +
-          '</b></span>' +
-          '</div></div><div class="rc-body md-body' +
-          (usePre ? ' pre' : '') +
-          '">' +
-          rb +
-          '</div>';
-        hlBlock(rc);
-        addCopyButton(rc);
-        target.appendChild(rc);
         if (statusTokens && ev.total_tokens)
           statusTokens.textContent = 'Tokens: ' + fmtN(ev.total_tokens);
         if (statusBudget && ev.cost && ev.cost !== 'N/A')
