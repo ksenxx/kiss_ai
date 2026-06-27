@@ -133,6 +133,13 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         # the owning :class:`_RunningAgentState` and pull queued
         # follow-up prompts before each model call.
         self._tab_id: str = ""
+        # Notification id for the in-flight auto-commit toast.
+        # Set at the start of every ``_auto_commit_worktree`` call so
+        # the "generating" and "committed" stages share a single id —
+        # ``media/main.js`` ``showNotification`` then updates the
+        # existing toast in place instead of stacking two notifications
+        # (see Bug 2 in tmp/review-round-1.md).
+        self._commit_run_id: str = ""
         # Wall-clock start of the current task in epoch milliseconds,
         # stamped by the VS Code ``task_runner`` just before the run
         # starts; read (via ``getattr`` with a 0 default) by
@@ -195,6 +202,14 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             return False
         if not self.auto_commit_enabled:
             return False
+        # Stash a single notification id for the whole
+        # ``auto_commit_changes`` lifecycle so both the "generating"
+        # and "committed" toasts share it (Bug 2 from gpt-5.5
+        # review).  Includes ``time.time_ns()`` so concurrent agents
+        # on the same tab (e.g. sub-agent sessions) don't collide.
+        self._commit_run_id = (
+            f"autocommit-{self._tab_id}-{time.time_ns()}"
+        )
         return auto_commit_changes(
             self._wt.wt_dir,
             self._last_user_prompt or None,
@@ -233,9 +248,18 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             message = f"Committed {subject}" if subject else "Committed"
         else:
             return
+        # Share a single id across both lifecycle stages so the
+        # webview updates the existing toast in place ("Generating
+        # commit message" → "Committed <subject>") instead of stacking
+        # two toasts and leaving the "Generating" toast lingering
+        # until its own auto-dismiss timer fires (Bug 2, gpt-5.5
+        # round-1 review).
+        notification_id = self._commit_run_id or (
+            f"autocommit-{self._tab_id}-{time.time_ns()}"
+        )
         event = {
             "type": "notification",
-            "id": f"autocommit-{stage}-{time.time_ns()}",
+            "id": notification_id,
             "severity": "info",
             "message": message,
             "tabId": self._tab_id,
