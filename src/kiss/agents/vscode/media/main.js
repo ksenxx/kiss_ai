@@ -3021,6 +3021,15 @@
         showAskForTab(askTab);
         break;
       }
+      case 'askUserDone': {
+        const askTabId = ev.tabId !== undefined ? ev.tabId : activeTabId;
+        const askTab = getTab(askTabId);
+        if (!askTab) break;
+        askTab.askPendingQuestion = null;
+        if (askTab.askInputEl) askTab.askInputEl.value = '';
+        if (askTab.id === activeTabId) clearAskSlot();
+        break;
+      }
       case 'error':
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) break;
         addError(ev.text);
