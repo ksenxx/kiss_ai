@@ -1,21 +1,78 @@
 # Progress
 
-- Started a new task to diagnose why reopening VS Code shows the model picker as `gpt-5.5` instead of the model selected in the last session (`claude-opus-4-8`).
-- Read `SORCAR.md` first as required; it was empty.
-- Cleared the previous task log from `PROGRESS.md` for this new task.
-- Read model-picker related code in `SorcarSidebarView.ts`, `SorcarTab.ts`, `server.py`, `commands.py`, `vscode_config.py`, `persistence.py`, `model_info.py`, and `media/main.js`.
-- Confirmed the likely root cause: `VSCodeServer.__init__` reads persisted `last_model` once into `self._default_model`, but a long-lived `kiss-web` daemon can survive VS Code window restarts. A new VS Code activation sends `getModels`, and `_get_models()` broadcasts stale `self._default_model` unless that model is invalid. Therefore an old `gpt-5.5` default can overwrite the webview picker even if `config.json` was later changed to `claude-opus-4-8`.
-- Read the user's actual `~/.kiss/config.json` and observed `"last_model": "gpt-5.5"`, which explains the currently visible picker state.
-- Added regression test `src/kiss/tests/agents/vscode/test_model_picker_last_model_persistence.py` that starts a server with persisted `gpt-5.5`, changes persisted `last_model` to `claude-opus-4-8` while the server remains alive, calls `_get_models()`, and expects the `models` broadcast to select `claude-opus-4-8`.
-- Ran the new regression before the fix; it failed as expected with `selected='gpt-5.5'` instead of `claude-opus-4-8`.
-- Fixed `VSCodeServer._get_models()` to call `_load_last_model()` on each model-list refresh and update `self._default_model` to the persisted last model whenever it is present in the currently available/runnable model list. Kept the existing invalid-selection recovery afterward.
-- Ran impacted model-picker tests after the fix:
-  ```bash
-  uv run pytest -q \
-    src/kiss/tests/agents/vscode/test_model_picker_last_model_persistence.py \
-    src/kiss/tests/agents/vscode/test_model_picker_refresh.py \
-    src/kiss/tests/agents/vscode/test_new_chat_model_picker.py
-  ```
-  They passed: `6 passed in 0.85s`.
-- Ran `uv run check --full`; ruff reported one long line in the new regression test.
-- Wrapped the long `monkeypatch.setattr(vc, "CONFIG_PATH", ...)` line in `test_model_picker_last_model_persistence.py`.
+## Task: review previous model-picker fix via gpt-5.5, write tests for reported bugs, fix using claude-opus-4-7, repeat until no more bugs
+
+### Pass 1 (gpt-5.5 review of original fix)
+
+Found:
+- `_get_models` could broadcast `selected` value that is not present in the available model list when only a custom endpoint is configured (because `get_default_model()` cannot name a custom model).
+- `_get_models` mutated daemon-global `self._default_model` without synchronization and emitted it directly to the broadcast event.
+
+Fix (`src/kiss/agents/vscode/server.py::_get_models`):
+- Wrapped mutation in `_state_lock` and emitted a local `selected` snapshot captured under the lock.
+- When the cached/persisted/refreshed model is unavailable but `models_list` is non-empty (custom-only case), pick `models_list[0]` so the picker never emits an unavailable selection.
+
+Test added (`src/kiss/tests/agents/vscode/test_model_picker_last_model_persistence.py::test_get_models_selects_custom_model_when_cached_default_is_invalid`).
+
+### Pass 2 (gpt-5.5 review of pass-1 fix)
+
+Found: race between `_cmd_select_model` and `_get_models`.
+- `_cmd_select_model` set `self._default_model = newmodel` inside `_state_lock` but called `_record_model_usage` (which persists via `_save_last_model`) AFTER releasing the lock.
+- `_get_models` read `_load_last_model()` OUTSIDE the lock, then inside the lock did `self._default_model = persisted`. A concurrent select left a stale on-disk value that clobbered the just-picked in-memory selection.
+
+Test added (`test_concurrent_get_models_does_not_revert_just_picked_model`) using a `_save_last_model` mock that blocks until signalled, plus thread synchronization.
+
+Fix:
+- `src/kiss/agents/vscode/commands.py::_cmd_select_model`: moved `_record_model_usage(model)` INSIDE the `with self._state_lock:` block so disk is written before lock release.
+- `src/kiss/agents/vscode/server.py::_get_models`: moved `persisted = _load_last_model()` INSIDE `_state_lock` so it observes the new on-disk value.
+
+### Pass 3 (gpt-5.5 review of pass-2 fix)
+
+Found: same race exists in `_new_chat`.
+- `_new_chat` read `_load_last_model()` outside `_state_lock` and assigned `self._default_model = persisted` outside the lock. A concurrent `_cmd_select_model` could be clobbered, with the bug appearing on both the daemon-wide default AND the new tab's `selected_model`.
+
+Test added (`test_concurrent_new_chat_does_not_revert_just_picked_model`).
+
+Fix (`src/kiss/agents/vscode/server.py::_new_chat`):
+- Moved `persisted = _load_last_model()` and `self._default_model = persisted` INSIDE the existing `with self._state_lock:` block.
+- Snapshotted `welcome_model = self._default_model` under the lock and used the snapshot in the `showWelcome` broadcast (mirrors the `selected` snapshot pattern from `_get_models`).
+
+### Pass 4 (gpt-5.5 review of pass-3 fix)
+
+No new reproducible bugs reported. Lock ordering is consistent (`_state_lock` outer → DB `_rw_lock` / config `_config_lock` inner) matching the established convention elsewhere in the codebase.
+
+### Verification
+
+Final model-picker regression tests:
+
+```text
+uv run pytest -q --no-cov src/kiss/tests/agents/vscode/test_model_picker_last_model_persistence.py
+4 passed
+```
+
+Broader impacted tests:
+
+```text
+uv run pytest -q --no-cov src/kiss/tests/agents/vscode/ src/kiss/tests/agents/sorcar/test_change_model.py
+1083 passed, 4 skipped, 27 deselected, 436 subtests passed
+```
+
+Full test suite, run in 8 parallel splits (vscode-A/B, sorcar-A/B, core, channels, bench/scripts/docker/viz, root tests):
+
+```text
+338 + 732 + 711 + 918 + 433 + 474 + 75 + 97 passed
+= 3778 passed total
+```
+
+Full project checks:
+
+```text
+uv run check --full
+✅ All checks passed!
+```
+
+### Files changed
+
+- `src/kiss/agents/vscode/commands.py` — `_cmd_select_model` now persists under `_state_lock`.
+- `src/kiss/agents/vscode/server.py` — `_get_models` reads persisted under lock; `_new_chat` reads persisted under lock and snapshots welcome_model; custom-only fallback for `selected`.
+- `src/kiss/tests/agents/vscode/test_model_picker_last_model_persistence.py` — 3 new regression tests (custom-only, concurrent-get-models, concurrent-new-chat).
