@@ -1,16 +1,21 @@
 # Progress
 
-- Started a new task to review the previous merge replay fix with `gpt-5.5`, reproduce any review-reported bugs with end-to-end tests, fix them using `claude-opus-4-7`, and iterate until the review reports no reproducible bugs.
+- Started a new task to diagnose why reopening VS Code shows the model picker as `gpt-5.5` instead of the model selected in the last session (`claude-opus-4-8`).
 - Read `SORCAR.md` first as required; it was empty.
-- Switched to `gpt-5.5` for the requested thorough review phase.
-- Review finding: the previous fix replays the active tab's merge UI before processing `restoredTabs`. On real refreshes with a backend `chatId`, `_handle_ready` then calls `resumeSession`, which emits `task_events`; the frontend's `task_events` handler calls `replayTaskEvents()`, which clears `#output`, erasing the replayed merge/diff panel. This makes a refreshed tab lose the merge UI despite receiving `merge_data`.
-- Switched to `claude-opus-4-7` for test creation and bug fixing as requested.
-- Added an end-to-end WSS regression `test_refresh_restored_active_tab_replays_history_before_merge` that persists a real chat history row, opens a real in-flight merge review, reconnects with the active tab also listed in `restoredTabs` with a `chatId`, and asserts `task_events` arrives before `merge_data` so the frontend history replay cannot erase the merge panel.
-- Verified the new regression failed before the fix with event order `['merge_data', 'merge_started', 'merge_nav', 'task_events']`.
-- Fixed `RemoteAccessServer._handle_ready` to collect unique active/restored merge tabs during ready handling, process all restored-tab `resumeSession` calls first, then replay each merge review once after session history replay.
-- Reviewed the fix with `gpt-5.5`; the main follow-up concern was that the new regression creates a `_RunningAgentState` in the process-global registry, so the test fixture should restore the registry after each test to avoid cross-test leakage.
-- Switched back to `claude-opus-4-7` and updated the WSS regression fixture to snapshot `_RunningAgentState.running_agent_states` under `_registry_lock` in `asyncSetUp` and restore that snapshot in `asyncTearDown`.
-- Counted 4 impacted tests in `test_bughunt4_merge_replay_on_reconnect.py`; no split was needed under the >100-test rule. Ran the targeted new regression and the full impacted file in parallel; both passed (`1 passed`, `4 passed`).
-- Switched back to `gpt-5.5` for a second review. Reviewed `_handle_ready`, `_run_cmd`, resume-session replay ordering, `_replay_merge_review`, and the updated fixture cleanup. No further reproducible product bug was found: merge replays are now deduplicated and occur after all synchronous `resumeSession` history broadcasts, so the frontend's `task_events` replay cannot clear the recovered merge panel afterward.
-- Ran mandatory `uv run check --full`; all checks passed.
-- For the user's request to run all tests in parallel, collected 3807 pytest test items and split them into 8 groups (`number_of_cores - 2`, with 10 cores available). Ran the 8 groups concurrently. Six groups passed immediately; two unrelated tests failed/errorred in the concurrent full-suite environment (`test_replay_strips_global_setting_keys_from_extra` and `test_send_message_with_thread`). Reran both failing tests in isolation and both passed, indicating the parallel full-suite failures were order/concurrency/environment issues unrelated to the merge replay fix.
+- Cleared the previous task log from `PROGRESS.md` for this new task.
+- Read model-picker related code in `SorcarSidebarView.ts`, `SorcarTab.ts`, `server.py`, `commands.py`, `vscode_config.py`, `persistence.py`, `model_info.py`, and `media/main.js`.
+- Confirmed the likely root cause: `VSCodeServer.__init__` reads persisted `last_model` once into `self._default_model`, but a long-lived `kiss-web` daemon can survive VS Code window restarts. A new VS Code activation sends `getModels`, and `_get_models()` broadcasts stale `self._default_model` unless that model is invalid. Therefore an old `gpt-5.5` default can overwrite the webview picker even if `config.json` was later changed to `claude-opus-4-8`.
+- Read the user's actual `~/.kiss/config.json` and observed `"last_model": "gpt-5.5"`, which explains the currently visible picker state.
+- Added regression test `src/kiss/tests/agents/vscode/test_model_picker_last_model_persistence.py` that starts a server with persisted `gpt-5.5`, changes persisted `last_model` to `claude-opus-4-8` while the server remains alive, calls `_get_models()`, and expects the `models` broadcast to select `claude-opus-4-8`.
+- Ran the new regression before the fix; it failed as expected with `selected='gpt-5.5'` instead of `claude-opus-4-8`.
+- Fixed `VSCodeServer._get_models()` to call `_load_last_model()` on each model-list refresh and update `self._default_model` to the persisted last model whenever it is present in the currently available/runnable model list. Kept the existing invalid-selection recovery afterward.
+- Ran impacted model-picker tests after the fix:
+  ```bash
+  uv run pytest -q \
+    src/kiss/tests/agents/vscode/test_model_picker_last_model_persistence.py \
+    src/kiss/tests/agents/vscode/test_model_picker_refresh.py \
+    src/kiss/tests/agents/vscode/test_new_chat_model_picker.py
+  ```
+  They passed: `6 passed in 0.85s`.
+- Ran `uv run check --full`; ruff reported one long line in the new regression test.
+- Wrapped the long `monkeypatch.setattr(vc, "CONFIG_PATH", ...)` line in `test_model_picker_last_model_persistence.py`.
