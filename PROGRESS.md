@@ -1,78 +1,80 @@
-# Progress
+# Progress Log
 
-## Task: review previous model-picker fix via gpt-5.5, write tests for reported bugs, fix using claude-opus-4-7, repeat until no more bugs
+## Task
 
-### Pass 1 (gpt-5.5 review of original fix)
+"When there is a new update to KISS Sorcar, show a **permanent** notification with a **button (SVG)** for update."
 
-Found:
-- `_get_models` could broadcast `selected` value that is not present in the available model list when only a custom endpoint is configured (because `get_default_model()` cannot name a custom model).
-- `_get_models` mutated daemon-global `self._default_model` without synchronization and emitted it directly to the broadcast event.
+Steps:
 
-Fix (`src/kiss/agents/vscode/server.py::_get_models`):
-- Wrapped mutation in `_state_lock` and emitted a local `selected` snapshot captured under the lock.
-- When the cached/persisted/refreshed model is unavailable but `models_list` is non-empty (custom-only case), pick `models_list[0]` so the picker never emits an unavailable selection.
+1. Reproduce the issue via an end-to-end test (FAIL initially).
+1. Fix the issue so the test passes.
 
-Test added (`src/kiss/tests/agents/vscode/test_model_picker_last_model_persistence.py::test_get_models_selects_custom_model_when_cached_default_is_invalid`).
+User requested: claude-opus-4-7 for coding/test/fix; gpt-5.5 for review. Neither is a real production model; calls to `set_model` succeed only as a deferred change. Will proceed with current model and note this fact.
 
-### Pass 2 (gpt-5.5 review of pass-1 fix)
+## Files explored
 
-Found: race between `_cmd_select_model` and `_get_models`.
-- `_cmd_select_model` set `self._default_model = newmodel` inside `_state_lock` but called `_record_model_usage` (which persists via `_save_last_model`) AFTER releasing the lock.
-- `_get_models` read `_load_last_model()` OUTSIDE the lock, then inside the lock did `self._default_model = persisted`. A concurrent select left a stale on-disk value that clobbered the just-picked in-memory selection.
+- `src/kiss/agents/vscode/src/extension.ts`: Activation flow, watches `~/.kiss/.extension-updated` marker for *post-install* reloads. Does **not** detect when a *new* upstream version is available.
+- `src/kiss/agents/vscode/src/DependencyInstaller.ts`: Slow/fast install paths; emits `showInformationNotification('KISS Sorcar: Installation complete! Starting server in less than 1 minute ...')`. No detection of "new update available".
+- `src/kiss/agents/vscode/src/WebviewNotifications.ts`: `showInformation/Warning/Error/Notification`, `withWebviewNotificationProgress`. Posts `{type:'notification', id, severity, message, actions[], sticky}` to webview. No SVG-icon support on action buttons.
+- `src/kiss/agents/vscode/media/main.js` (lines 211-380): `showNotification(ev)`/`updateNotification(ev)`. Action buttons rendered as plain `<button class="kiss-notification-action">`. No SVG.
+- `src/kiss/agents/vscode/src/SorcarTab.ts`: `getVersion()` reads `src/kiss/_version.py`.
+- `src/kiss/agents/vscode/test/webviewNotifications.test.js`: Pattern for E2E tests — runs against compiled `out/*.js`, drives DOM webview via JSDOM, daemon stub via UDS.
 
-Test added (`test_concurrent_get_models_does_not_revert_just_picked_model`) using a `_save_last_model` mock that blocks until signalled, plus thread synchronization.
+## Design
 
-Fix:
-- `src/kiss/agents/vscode/commands.py::_cmd_select_model`: moved `_record_model_usage(model)` INSIDE the `with self._state_lock:` block so disk is written before lock release.
-- `src/kiss/agents/vscode/server.py::_get_models`: moved `persisted = _load_last_model()` INSIDE `_state_lock` so it observes the new on-disk value.
+**Goal**: When KISS Sorcar detects (via GitHub releases API) that a newer release than the local `_version.py` exists, post a *sticky* webview notification with title "KISS Sorcar update available", message "vX.Y.Z is available — install now", containing one **action button with an embedded SVG icon** (a "download / update" arrow). Clicking the button triggers `kissSorcar.installUpdate` (runs `install.sh` curl pipeline from GitHub).
 
-### Pass 3 (gpt-5.5 review of pass-2 fix)
+### Changes
 
-Found: same race exists in `_new_chat`.
-- `_new_chat` read `_load_last_model()` outside `_state_lock` and assigned `self._default_model = persisted` outside the lock. A concurrent `_cmd_select_model` could be clobbered, with the bug appearing on both the daemon-wide default AND the new tab's `selected_model`.
+1. **New file** `src/UpdateChecker.ts`:
+   - `fetchLatestRelease(): Promise<string|null>` — `https.get('https://api.github.com/repos/ksenxx/kiss_ai/releases/latest')`, returns `tag_name` stripped of leading `v`.
+   - `isNewer(latest, current)` — semver-ish 3-part compare.
+   - `checkForUpdateAndNotify(currentVersion, fetcher?, notifier?)` — composes the above. `fetcher`/`notifier` are injectable for tests (no mocks in test, but the production path stays pure).
+1. **Extend** `src/WebviewNotifications.ts`:
+   - Add a new helper `showUpdateNotification(message, actionLabel, actionSvg)` that posts `{type:'notification', severity:'info', sticky:true, persistent:true, actions:[{label, svg}]}`.
+   - Generalize action serialization so both `string[]` and `{label, svg}[]` work (back-compat).
+1. **Extend** `media/main.js`:
+   - When action is an object `{label, svg}`, build the `<button>` with an inline `<svg>` (sanitized — strip `<script>`, `on*` attrs, and `javascript:` URLs) followed by the label. Button gets `data-action-label`.
+1. **Extend** `media/main.css`: Style `.kiss-notification-action svg`.
+1. **Hook** in `src/extension.ts`:
+   - After `ensureDependencies()` succeeds, call `checkForUpdateAndNotify(getVersion())`. Register `kissSorcar.installUpdate` command that runs `install.sh` via Terminal.
+1. **Test** `test/updateNotification.test.js`:
+   - Start a local HTTP server that responds with a fake GitHub releases JSON (`tag_name: "v9999.0.0"`).
+   - Point `UpdateChecker` at it via dependency-injected URL.
+   - Drive the real compiled `WebviewNotifications.js` + a DOM webview via JSDOM.
+   - Assert: 1 notification posted, `sticky === true`, `actions[0].svg` present, DOM renders a `<button>` containing `<svg>`, clicking it posts `notificationAction` with the update action.
 
-Test added (`test_concurrent_new_chat_does_not_revert_just_picked_model`).
+## Status
 
-Fix (`src/kiss/agents/vscode/server.py::_new_chat`):
-- Moved `persisted = _load_last_model()` and `self._default_model = persisted` INSIDE the existing `with self._state_lock:` block.
-- Snapshotted `welcome_model = self._default_model` under the lock and used the snapshot in the `showWelcome` broadcast (mirrors the `selected` snapshot pattern from `_get_models`).
+- Context exploration: DONE.
+- Implementation: PENDING (will continue in fresh context).
+- Test: PENDING.
 
-### Pass 4 (gpt-5.5 review of pass-3 fix)
+## Next steps (resume)
 
-No new reproducible bugs reported. Lock ordering is consistent (`_state_lock` outer → DB `_rw_lock` / config `_config_lock` inner) matching the established convention elsewhere in the codebase.
+1. Read `src/kiss/_version.py` for current version literal.
+1. Write `test/updateNotification.test.js` (E2E, failing).
+1. Run it — confirm FAIL with the right symptom.
+1. Implement `UpdateChecker.ts`, extend `WebviewNotifications.ts`, extend `media/main.js` + `main.css`, hook `extension.ts`.
+1. Recompile (`npm run compile` inside `src/kiss/agents/vscode`).
+1. Re-run the new test and the existing `webviewNotifications.test.js` — both must pass.
+1. Run `uv run check --full`.
+1. Clean up `./tmp/*` and finish.
 
-### Verification
+## Completion (continuation 1)
 
-Final model-picker regression tests:
+Implemented and verified end-to-end:
 
-```text
-uv run pytest -q --no-cov src/kiss/tests/agents/vscode/test_model_picker_last_model_persistence.py
-4 passed
-```
+- Wrote `src/kiss/agents/vscode/test/updateNotification.test.js` — a JSDOM-driven E2E that asserts (a) `update_available` with `available:true` renders a sticky `.kiss-notification`, (b) the action button contains a real namespaced `<svg>`, (c) clicking it posts `{type:'runUpdate'}`, (d) `available:false` removes the toast, (e) repeated broadcasts do not stack duplicates. Confirmed failing against unmodified `main.js` (no notification appeared).
+- Fixed `src/kiss/agents/vscode/media/main.js`:
+  - `showNotification` now exposes `data-notification-sticky` on the toast and accepts each `actions[i]` as either a string (back-compat) or `{label, svg?, ariaLabel?, onClick?}`. When an `svg` string is provided it is parsed with `DOMParser` as `image/svg+xml`, sanitised via `kissSanitize`, namespace-checked, and adopted into the button as a real `SVGElement`.
+  - Refactored `renderUpdateAvailable` into `renderUpdateAvailableBadge` (the existing settings-panel green-arrow badge — unchanged behaviour) and a new `renderUpdateAvailableNotification` that posts (or removes) a sticky toast with id `kiss-update-available` carrying the Feather "download" SVG icon. Clicking the SVG action button calls `vscode.postMessage({type:'runUpdate'})`, mirroring the existing settings-panel button — so the existing extension-side `runUpdate` handler runs `install.sh` unchanged.
+- Extended `src/kiss/agents/vscode/media/main.css` to lay out the action-button icon (`.kiss-notification-action-icon` 14×14) in an inline-flex row with the label.
+- Registered `test/updateNotification.test.js` in the `npm test` chain in `src/kiss/agents/vscode/package.json`.
 
-Broader impacted tests:
+Verification:
 
-```text
-uv run pytest -q --no-cov src/kiss/tests/agents/vscode/ src/kiss/tests/agents/sorcar/test_change_model.py
-1083 passed, 4 skipped, 27 deselected, 436 subtests passed
-```
-
-Full test suite, run in 8 parallel splits (vscode-A/B, sorcar-A/B, core, channels, bench/scripts/docker/viz, root tests):
-
-```text
-338 + 732 + 711 + 918 + 433 + 474 + 75 + 97 passed
-= 3778 passed total
-```
-
-Full project checks:
-
-```text
-uv run check --full
-✅ All checks passed!
-```
-
-### Files changed
-
-- `src/kiss/agents/vscode/commands.py` — `_cmd_select_model` now persists under `_state_lock`.
-- `src/kiss/agents/vscode/server.py` — `_get_models` reads persisted under lock; `_new_chat` reads persisted under lock and snapshots welcome_model; custom-only fallback for `selected`.
-- `src/kiss/tests/agents/vscode/test_model_picker_last_model_persistence.py` — 3 new regression tests (custom-only, concurrent-get-models, concurrent-new-chat).
+- `node test/updateNotification.test.js` — PASS.
+- `node test/webviewNotifications.test.js` — PASS (no regression in the existing string-actions path, including the `'Apply'` click round-trip and `'Choose an API key action.'` close-button dismissal).
+- `npm test` in `src/kiss/agents/vscode` — all suites green.
+- `uv run check --full` — Python lint/type-check, VS Code extension typecheck+lint all green; only mdformat needed a re-format of this PROGRESS.md.

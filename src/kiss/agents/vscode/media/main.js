@@ -301,6 +301,12 @@
       );
     }
     toast.className = 'kiss-notification kiss-notification-' + severity;
+    // Expose `sticky` on the DOM so downstream tests (and any future
+    // a11y tooling) can verify that a notification will not auto-
+    // dismiss — the existing `scheduleNotificationDismiss` already
+    // honours it for the timer, but the flag was otherwise invisible
+    // from the rendered DOM.
+    toast.dataset.notificationSticky = sticky ? 'true' : 'false';
     toast.setAttribute('role', severity === 'error' ? 'alert' : 'status');
     toast.setAttribute(
       'aria-label',
@@ -351,13 +357,67 @@
       const actionRow = document.createElement('div');
       actionRow.className = 'kiss-notification-actions';
       actions.forEach(action => {
+        // Each action is either a plain string label OR an object of
+        // shape ``{label, svg?, ariaLabel?, onClick?}``.  The object
+        // form is used by in-webview callers (e.g. the permanent
+        // "update available" notification) that want to render an
+        // inline ``<svg>`` icon inside the button and/or run a local
+        // click handler instead of round-tripping through the
+        // extension via ``notificationAction``.
+        const isObj =
+          action && typeof action === 'object' && !Array.isArray(action);
+        const label = isObj ? String(action.label || '') : String(action);
         const button = document.createElement('button');
         button.type = 'button';
         button.className = 'kiss-notification-action';
-        button.textContent = String(action);
-        button.addEventListener('click', () =>
-          removeNotification(id, action, true),
-        );
+        if (isObj && action.svg) {
+          // Parse + sanitise the SVG XML in an off-DOM template, then
+          // adopt the resulting SVG element.  This guarantees the
+          // browser parses it as SVG (correct namespace) and that
+          // ``kissSanitize`` strips any ``<script>``/``on*``/javascript:
+          // payload that may have slipped in.
+          const cleaned = kissSanitize(String(action.svg));
+          const parser = new window.DOMParser();
+          const doc = parser.parseFromString(cleaned, 'image/svg+xml');
+          const svgEl = doc.documentElement;
+          // DOMParser returns a ``<parsererror>`` element on invalid
+          // input — only adopt real SVG roots so we never inject
+          // arbitrary error HTML into the button.
+          if (
+            svgEl &&
+            svgEl.namespaceURI === 'http://www.w3.org/2000/svg' &&
+            svgEl.localName === 'svg'
+          ) {
+            svgEl.setAttribute('class', 'kiss-notification-action-icon');
+            svgEl.setAttribute('aria-hidden', 'true');
+            button.appendChild(document.importNode(svgEl, true));
+          }
+        }
+        if (label) {
+          const labelEl = document.createElement('span');
+          labelEl.className = 'kiss-notification-action-label';
+          labelEl.textContent = label;
+          button.appendChild(labelEl);
+        }
+        if (isObj && action.ariaLabel) {
+          button.setAttribute('aria-label', String(action.ariaLabel));
+        } else if (label) {
+          button.setAttribute('aria-label', label);
+        }
+        button.addEventListener('click', () => {
+          if (isObj && typeof action.onClick === 'function') {
+            try {
+              action.onClick();
+            } catch (_err) {
+              // Swallow handler errors so the notification still
+              // closes — the click already dismissed it from the
+              // user's point of view.
+            }
+            removeNotification(id, undefined, false);
+            return;
+          }
+          removeNotification(id, isObj ? label : action, true);
+        });
         actionRow.appendChild(button);
       });
       toast.appendChild(actionRow);
@@ -4138,7 +4198,31 @@
    * @param {string} latest - The latest version reported by PyPI.
    * @param {string} current - The version installed locally.
    */
+  // Stable id for the permanent "update available" notification.  Using
+  // a fixed string (instead of the auto-generated ``Date.now()``)
+  // ensures the hourly PyPI re-broadcast re-uses the existing toast
+  // rather than stacking duplicate notifications on top of each other.
+  const UPDATE_NOTIFICATION_ID = 'kiss-update-available';
+
+  // Inline SVG markup for the Feather "download" arrow used by both the
+  // small settings-button badge and the action-button icon inside the
+  // permanent update notification.  Kept as a single source of truth so
+  // the two surfaces always look identical.
+  const UPDATE_DOWNLOAD_SVG =
+    '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" ' +
+    'viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+    '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>' +
+    '<polyline points="7 10 12 15 17 10"/>' +
+    '<line x1="12" y1="15" x2="12" y2="3"/>' +
+    '</svg>';
+
   function renderUpdateAvailable(available, latest, current) {
+    renderUpdateAvailableBadge(available, latest, current);
+    renderUpdateAvailableNotification(available, latest, current);
+  }
+
+  function renderUpdateAvailableBadge(available, latest, current) {
     const btn = document.getElementById('cfg-update-btn');
     if (!btn) return;
     // Strip any previously-injected icon so repeated broadcasts do
@@ -4184,6 +4268,48 @@
       icon.appendChild(el);
     }
     btn.insertBefore(icon, btn.firstChild);
+  }
+
+  /**
+   * Show (or dismiss) the permanent "KISS Sorcar update available"
+   * notification.
+   *
+   * The settings-panel "Update" button is only visible while the
+   * settings panel is expanded, which left users who never opened
+   * the panel unaware that a new release was waiting.  This helper
+   * surfaces the same event in the always-visible chat-webview
+   * notification stack with an SVG-iconed action button.  The
+   * notification is sticky (never auto-dismisses) so it stays put
+   * until the user clicks the update button or the next PyPI poll
+   * reports the user is current.
+   */
+  function renderUpdateAvailableNotification(available, latest, current) {
+    if (!available) {
+      removeNotification(UPDATE_NOTIFICATION_ID, undefined, false);
+      return;
+    }
+    const message =
+      latest && current
+        ? `KISS Sorcar ${latest} is available (you have ${current}).`
+        : 'A new KISS Sorcar release is available.';
+    showNotification({
+      id: UPDATE_NOTIFICATION_ID,
+      severity: 'info',
+      message,
+      sticky: true,
+      actions: [
+        {
+          label: 'Update',
+          ariaLabel: latest
+            ? `Update KISS Sorcar to ${latest}`
+            : 'Update KISS Sorcar',
+          svg: UPDATE_DOWNLOAD_SVG,
+          onClick: () => {
+            vscode.postMessage({type: 'runUpdate'});
+          },
+        },
+      ],
+    });
   }
 
   // --- Welcome suggestions (dynamic) ---
