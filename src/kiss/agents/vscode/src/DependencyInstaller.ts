@@ -815,7 +815,7 @@ async function ensureDependenciesImpl(): Promise<void> {
   if (showRestartNotification) {
     if (apiKeysReady) {
       showInformationNotification(
-        'KISS Sorcar: Installation complete! Starting server in less than 1 minute ... '
+        'KISS Sorcar: Installation complete! Starting server in less than 1 minute ... ',
       );
     } else {
       showWarningNotification(

@@ -184,6 +184,25 @@ class TestMergeReplayOnReconnect(IsolatedAsyncioTestCase):
                 got[etype] = ev
         return got
 
+    async def _collect_merge_event_types(
+        self, ws: ClientConnection, timeout: float = 2.0,
+    ) -> list[str]:
+        """Collect all merge replay event types received within *timeout*."""
+        got: list[str] = []
+        deadline = time.monotonic() + timeout
+        wanted = {"merge_data", "merge_started", "merge_nav"}
+        while time.monotonic() < deadline:
+            remaining = max(0.05, deadline - time.monotonic())
+            try:
+                raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
+            except TimeoutError:
+                break
+            ev = json.loads(raw)
+            etype = ev.get("type", "")
+            if etype in wanted:
+                got.append(etype)
+        return got
+
     async def test_reconnect_replays_in_flight_merge_review(self) -> None:
         """``ready`` with a restored mid-review tab must replay the review."""
         tab_id = "tab-m"
@@ -240,6 +259,46 @@ class TestMergeReplayOnReconnect(IsolatedAsyncioTestCase):
             nav.get("resolved"),
             [{"fi": 0, "hi": 0, "status": "accepted"}],
         )
+
+    async def test_refresh_active_tab_replays_merge_review_once(self) -> None:
+        """Refreshing the active restored tab must not duplicate merge UI."""
+        tab_id = "tab-active-refresh"
+        Path(self.tmpdir, "work-active").mkdir(exist_ok=True)
+        merge_data = _build_merge_data(Path(self.tmpdir) / "work-active")
+        self.server._printer.broadcast({
+            "type": "merge_data",
+            "tabId": tab_id,
+            "data": merge_data,
+            "hunk_count": 3,
+        })
+        with self.server._merge_states_lock:
+            self.assertIn(tab_id, self.server._merge_states)
+
+        await self.server._handle_web_merge_action({
+            "type": "mergeAction", "action": "accept", "tabId": tab_id,
+        })
+
+        ws = await self._connect_ok()
+        # This is the shape sent by the real remote webapp on refresh:
+        # ``tabId`` is the active restored tab, and persisted tabs with
+        # backend chat ids are also listed in ``restoredTabs``.  The old
+        # server replayed the same in-flight merge review once for the
+        # active ``tabId`` and then again for the restored entry.  The
+        # frontend appended two diff panels; merge_nav only updated the
+        # most recent one, leaving the first panel as stale merge/diff UI.
+        await ws.send(json.dumps({
+            "type": "ready",
+            "tabId": tab_id,
+            "restoredTabs": [{"tabId": tab_id, "chatId": "chat-active"}],
+        }))
+        got = await self._collect_merge_event_types(ws, timeout=2.0)
+        self.assertEqual(
+            got.count("merge_data"), 1,
+            f"BUG: active-tab refresh replayed duplicate merge_data events, "
+            f"leaving a stale diff panel in the remote webapp: {got}",
+        )
+        self.assertEqual(got.count("merge_started"), 1, got)
+        self.assertEqual(got.count("merge_nav"), 1, got)
 
     async def test_ready_without_merge_state_sends_no_merge_events(self) -> None:
         """A plain reconnect with no in-flight review must not emit merge events."""
