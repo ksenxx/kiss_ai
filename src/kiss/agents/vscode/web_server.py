@@ -3896,12 +3896,20 @@ class RemoteAccessServer:
         except Exception:
             pass
         # Replay an in-flight merge review for the tab this connection
-        # claims directly (restored tabs are replayed in the loop
-        # below).  ``merge_data`` events are tab-stamped and never
-        # persisted, so without this a page reload mid-review loses
-        # the merge UI forever while the server-side ``_WebMergeState``
-        # (and the backend tab's ``is_merging`` flag) stay stuck.
-        await self._replay_merge_review(tab_id, websocket)
+        # claims directly.  ``merge_data`` events are tab-stamped and
+        # never persisted, so without this a page reload mid-review
+        # loses the merge UI forever while the server-side
+        # ``_WebMergeState`` (and the backend tab's ``is_merging``
+        # flag) stay stuck.  Track tabs replayed during this ``ready``
+        # so a refreshed active tab that also appears in
+        # ``restoredTabs`` is not replayed twice; duplicate
+        # ``merge_data`` panels leave the first diff panel stale in
+        # the remote webapp because later ``merge_nav`` updates only
+        # the most recent panel.
+        replayed_merge_tabs: set[str] = set()
+        if isinstance(tab_id, str) and tab_id:
+            await self._replay_merge_review(tab_id, websocket)
+            replayed_merge_tabs.add(tab_id)
         # M7: cap the number of restored tabs a single client can ask
         # the server to resume so an authenticated-but-malicious or
         # buggy client cannot flood the executor with thousands of
@@ -3933,8 +3941,13 @@ class RemoteAccessServer:
                     {"type": "resumeSession", "chatId": chat_id,
                      "tabId": rt_id},
                 )
-            if isinstance(rt_id, str) and rt_id:
+            if (
+                isinstance(rt_id, str)
+                and rt_id
+                and rt_id not in replayed_merge_tabs
+            ):
                 await self._replay_merge_review(rt_id, websocket)
+                replayed_merge_tabs.add(rt_id)
 
     async def _replay_merge_review(self, tab_id: str, websocket: Any) -> None:
         """Re-send an in-flight merge review to a reconnecting client.
