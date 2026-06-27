@@ -1318,14 +1318,19 @@ function computeKissWebFingerprint(
 }
 
 /**
- * Always overwrite ``~/.kiss/INJECTIONS.md`` and ``~/.kiss/SAMPLE_TASKS.md``
- * with the copies bundled inside the installed kiss_project.  Called on
- * every install/update (both fast and slow paths in ``runFinalization``) so
- * that the kiss-web daemon's Tricks button and the VS Code extension's
- * welcome-screen sample-task chips always reflect the latest bundled
- * Markdown after a version upgrade — matching the ``installModelInfoJson``
- * pattern.  Failures are logged and swallowed so a read-only ``~/.kiss/``
- * cannot break the overall install flow.
+ * Always overwrite ``~/.kiss/INJECTIONS.md`` with the copy bundled
+ * inside the installed kiss_project.  Called on every install/update
+ * (both fast and slow paths in ``runFinalization``) so that the
+ * kiss-web daemon's Tricks button always reflects the latest bundled
+ * Markdown after a version upgrade — matching the
+ * ``installModelInfoJson`` pattern.  Failures are logged and swallowed
+ * so a read-only ``~/.kiss/`` cannot break the overall install flow.
+ *
+ * ``SAMPLE_TASKS.md`` is intentionally NOT copied: the welcome-screen
+ * chip loader (``readSampleTasks`` in ``SorcarTab.ts``) reads the
+ * bundled package copy directly, while user-curated chips live in
+ * ``~/.kiss/MY_TASK_TEMPLATES.md`` (auto-seeded on first read with
+ * the starter task ``## Task\n\nHi!\n``).
  */
 function installMarkdownAssets(kissProjectPath: string): void {
   if (!HOME_DIR) return;
@@ -1334,10 +1339,6 @@ function installMarkdownAssets(kissProjectPath: string): void {
     [
       path.join(kissProjectPath, 'src', 'kiss', 'INJECTIONS.md'),
       path.join(kissHomeDir, 'INJECTIONS.md'),
-    ],
-    [
-      path.join(kissProjectPath, 'src', 'kiss', 'SAMPLE_TASKS.md'),
-      path.join(kissHomeDir, 'SAMPLE_TASKS.md'),
     ],
   ];
   for (const [src, dst] of assets) {
