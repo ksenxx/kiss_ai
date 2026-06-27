@@ -2027,6 +2027,22 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 .llm-panel-hdr:hover { color: var(--fg); }
 .llm-panel.collapsed > :not(.llm-panel-hdr, .panel-copy-btn) { display: none; }
 
+/* Per-panel "time spent" footer — appended as the LAST child of every
+   .llm-panel and .tc tool-call panel by finalizePanelTime().  Sits
+   right-aligned and dim at the bottom of each panel.  Collapsing a
+   panel hides this footer via the existing
+   ``.llm-panel.collapsed > :not(.llm-panel-hdr, .panel-copy-btn)`` and
+   ``.tc.collapsed > :not(.tc-h, .panel-copy-btn)`` rules. */
+.panel-time {
+  font-size: var(--fs-sm);
+  color: var(--dim);
+  text-align: right;
+  margin-top: 6px;
+  padding: 2px 4px 0;
+  font-family: var(--vscode-editor-font-family, monospace);
+  opacity: 0.75;
+}
+
 /* Panel copy button — anchored top-right of any .copyable panel. */
 .copyable { position: relative; }
 

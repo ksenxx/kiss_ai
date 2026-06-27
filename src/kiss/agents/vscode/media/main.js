@@ -17,6 +17,72 @@
   }
 
   /**
+   * Format an elapsed duration in milliseconds for the per-panel time
+   * footer: ``"850ms"`` below one second, ``"3.4s"`` below one minute,
+   * ``"1m 12.0s"`` otherwise.
+   */
+  function fmtElapsedMs(ms) {
+    const n = Math.max(0, Math.round(Number(ms) || 0));
+    if (n < 1000) return n + 'ms';
+    const s = n / 1000;
+    if (s < 60) return s.toFixed(1) + 's';
+    const m = Math.floor(s / 60);
+    const sec = (s - m * 60).toFixed(1);
+    return m + 'm ' + sec + 's';
+  }
+
+  /**
+   * Stamp a panel element with its creation time (``data-start-ms``).
+   *
+   * No-op if the panel already carries a start stamp or if we are
+   * currently replaying persisted events (``_deferHighlight`` is set
+   * only during ``replayEventsInto``).  Replayed events arrive
+   * back-to-back so per-panel wall-clock measurements would be
+   * meaningless; we deliberately skip stamping then.
+   */
+  function stampPanelStart(el) {
+    if (!el || _deferHighlight) return;
+    if (el.dataset.startMs) return;
+    el.dataset.startMs = String(Date.now());
+  }
+
+  /**
+   * Append (or refresh) a "time spent" footer as the LAST child of the
+   * given panel.  Reads ``data-start-ms`` set by ``stampPanelStart``.
+   *
+   * No-op if the panel was never stamped (e.g. replayed events), so
+   * the historical view stays clean.
+   */
+  function finalizePanelTime(el) {
+    if (!el) return;
+    const startMs = Number(el.dataset.startMs || 0);
+    if (!startMs) return;
+    const ms = Date.now() - startMs;
+    let footer = null;
+    // Find an existing direct-child footer (avoid matching footers
+    // inside nested panels).
+    for (let i = el.children.length - 1; i >= 0; i--) {
+      const c = el.children[i];
+      if (c.classList && c.classList.contains('panel-time')) {
+        footer = c;
+        break;
+      }
+    }
+    if (!footer) {
+      footer = document.createElement('div');
+      footer.className = 'panel-time';
+      el.appendChild(footer);
+    } else if (footer !== el.lastElementChild) {
+      // Keep the footer anchored as the LAST child so it always
+      // renders visually at the bottom of the panel, even when later
+      // content (e.g. a tool_result bash-panel) is appended after the
+      // initial finalisation.
+      el.appendChild(footer);
+    }
+    footer.textContent = fmtElapsedMs(ms);
+  }
+
+  /**
    * Sanitize an HTML string before assigning to innerHTML.
    *
    * Strips dangerous tags (script/iframe/object/embed/form/meta/link/style/
@@ -254,6 +320,7 @@
     hdr.textContent = 'Thoughts';
     addCollapse(panel, hdr);
     panel.appendChild(hdr);
+    stampPanelStart(panel);
     return panel;
   }
 
@@ -1863,6 +1930,7 @@
         addCollapse(c, hdr);
         target.appendChild(c);
         tState.lastToolCallEl = c;
+        stampPanelStart(c);
         if (ev.command) {
           const bp = mkEl('div', 'bash-panel');
           const bpContent = mkEl('div', 'bash-panel-content');
@@ -1882,6 +1950,10 @@
         const hadBash = !!tState.bashPanel;
         tState.bashPanel = null;
         tState.bashRaf = 0;
+        // Close out the tool-call panel's time footer here — BEFORE the
+        // ``hadBash && !is_error`` early exit — so every tool_result
+        // path (bash, plain output, error) stamps the elapsed time.
+        if (tState.lastToolCallEl) finalizePanelTime(tState.lastToolCallEl);
         if (hadBash && !ev.is_error) break;
         const resultTarget = tState.lastToolCallEl || target;
         if (ev.is_error) {
@@ -2058,6 +2130,10 @@
     const t = ev.type;
     if (t === 'tool_call') {
       lastToolName = ev.name || '';
+      // Close out the previous Thoughts panel — the next streaming
+      // step will create a new one — so the time-spent footer covers
+      // the period between this panel and the tool call that ends it.
+      if (llmPanel) finalizePanelTime(llmPanel);
       llmPanel = null;
       llmPanelState = mkS();
       // Set true (not false) so that non-core tools (screenshot,
@@ -2103,6 +2179,9 @@
       currentTaskMetrics.steps = statusSteps ? statusSteps.textContent : '';
     }
     if (t === 'result') {
+      // Close out the last live Thoughts panel so its bottom-anchored
+      // time footer reflects the duration up to the result event.
+      if (llmPanel) finalizePanelTime(llmPanel);
       collapseAllExceptResult(O);
       if (ev.success === false && !ev.is_continue) {
         const rTab = getTab(activeTabId);
@@ -2151,6 +2230,9 @@
     // Advance the streaming state machine
     if (t === 'tool_call') {
       bgLastToolName = ev.name || '';
+      // Mirror processOutputEvent: close out the previous Thoughts
+      // panel so its time-spent footer covers up to this tool call.
+      if (bgLlmPanel) finalizePanelTime(bgLlmPanel);
       bgLlmPanel = null;
       bgLlmPanelState = mkS();
       bgPendingPanel = true;
@@ -2211,6 +2293,9 @@
       if (statusSteps) statusSteps.textContent = prevStepsText;
 
       if (t === 'result') {
+        // Close out the last bg-tab Thoughts panel so its footer
+        // reflects the duration up to this result event.
+        if (bgLlmPanel) finalizePanelTime(bgLlmPanel);
         if (ev.step_count) {
           bgStepCount = ev.step_count;
           tab.statusStepsText = 'Steps: ' + ev.step_count;
