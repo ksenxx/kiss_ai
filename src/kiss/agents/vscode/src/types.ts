@@ -180,7 +180,8 @@ type ToWebviewMessageBody =
       prefix?: string;
       loading?: boolean;
     }
-  | {type: 'askUser'; question: string}
+  | {type: 'askUser'; question: string; tabId?: string}
+  | {type: 'askUserDone'; tabId?: string}
   | {type: 'error'; text: string}
   | {type: 'followup_suggestion'; text: string}
   | {type: 'tasks_updated'}
