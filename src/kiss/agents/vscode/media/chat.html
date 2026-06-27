@@ -237,6 +237,31 @@
           </label>
         </div>
       </div>
+
+      <!--
+        Floating confirmation box for the "Server reset" button.  Lives
+        inside #settings-panel (so it floats above the settings content
+        without leaving the panel) and replaces the native VS Code
+        modal warning dialog.  Default hidden — main.js toggles
+        ``.open`` to show it.  Both buttons close the dialog; only OK
+        forwards the reset to the extension.
+      -->
+      <div id="server-reset-confirm-modal"
+           role="dialog"
+           aria-modal="true"
+           aria-labelledby="server-reset-confirm-title"
+           aria-describedby="server-reset-confirm-message">
+        <div class="server-reset-confirm-content">
+          <div id="server-reset-confirm-title" class="server-reset-confirm-title">Restart the server?</div>
+          <div id="server-reset-confirm-message" class="server-reset-confirm-message">
+            An agent is still running. Restart the server anyway? This will abort the in-flight task.
+          </div>
+          <div class="server-reset-confirm-actions">
+            <button type="button" id="server-reset-confirm-cancel" class="server-reset-confirm-btn server-reset-confirm-cancel">Cancel</button>
+            <button type="button" id="server-reset-confirm-ok" class="server-reset-confirm-btn server-reset-confirm-ok">OK</button>
+          </div>
+        </div>
+      </div>
     </div>
     <div id="settings-overlay"></div>
 
