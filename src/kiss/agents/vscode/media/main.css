@@ -163,6 +163,9 @@ body {
   font-family: inherit;
   font-size: var(--fs-sm);
   padding: 4px 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .kiss-notification-action:hover,
@@ -170,6 +173,12 @@ body {
   background: color-mix(in srgb, var(--accent) 16%, transparent);
   border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
   outline: none;
+}
+
+.kiss-notification-action-icon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
 }
 
 .kiss-notification-progress {
