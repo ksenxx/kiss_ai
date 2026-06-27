@@ -3761,7 +3761,8 @@ class RemoteAccessServer:
         actively harmful for the VS Code extension: the extension is
         a *second* client of the same broadcaster (over its UDS
         connection), and it populates its own ``#suggestions``
-        container locally from ``~/.kiss/SAMPLE_TASKS.md``.  The empty-list
+        container locally from ``~/.kiss/MY_TASK_TEMPLATES.md`` plus
+        the bundled ``src/kiss/SAMPLE_TASKS.md``.  The empty-list
         broadcast was forwarded to the extension's webview and
         cleared every chip on the welcome page whenever any webapp
         client opened a new chat tab — see
