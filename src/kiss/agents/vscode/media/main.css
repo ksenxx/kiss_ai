@@ -1689,8 +1689,21 @@ body.remote-chat #welcome-config { display: none !important; }
   animation: sidebar-running-pulse 1.5s ease-in-out infinite;
 }
 
+/* Solid green circle for cleanly-finished History rows.  Same #2e7d32
+   hue as the pulsing running dot, but with NO animation — so the user
+   instantly distinguishes finished tasks (static green) from running
+   ones (pulsing green) and failed ones (solid red).  Sits at the
+   middle-left of the row as the first child, matching the layout of
+   the running and failed dots. */
+.sidebar-item-completed {
+  flex-shrink: 0; width: 8px; height: 8px; border-radius: 50%;
+  background: #2e7d32; margin-right: 8px;
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 15%);
+}
+
 .running-item > .sidebar-item-failed,
-.running-item > .sidebar-item-running {
+.running-item > .sidebar-item-running,
+.running-item > .sidebar-item-completed {
   align-self: flex-start;
 }
 
