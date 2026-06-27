@@ -1,25 +1,16 @@
 # Progress
 
-- Started new task: use `gpt-5.5` to thoroughly review the previous ask-user broadcast fix, then use `claude-opus-4-7` for any end-to-end repro tests and fixes, run tests in parallel, review fixes with `gpt-5.5`, and repeat until no reported bugs remain.
+- Started a new task to review the previous merge replay fix with `gpt-5.5`, reproduce any review-reported bugs with end-to-end tests, fix them using `claude-opus-4-7`, and iterate until the review reports no reproducible bugs.
 - Read `SORCAR.md` first as required; it was empty.
-- Switched to `gpt-5.5` for the initial review.
-- Read the prior ask-user changes and adjacent code: `src/kiss/agents/vscode/commands.py`, `src/kiss/agents/vscode/media/main.js`, `src/kiss/agents/vscode/src/types.ts`, and `src/kiss/tests/agents/sorcar/test_ask_user_broadcast.py`.
-- Initial `gpt-5.5` review finding: `_user_answer_clear_tabs(ans_tab)` closes every subscriber set containing the answering tab. Since completed task subscriber sets are intentionally preserved, a tab that appears in an old completed task and a new running task can answer the new task and incorrectly emit `askUserDone` to old unrelated subscribers, closing their unrelated ask modal.
-- Switched to `claude-opus-4-7` for test creation and bug fixing.
-- Added an end-to-end backend regression to `src/kiss/tests/agents/sorcar/test_ask_user_broadcast.py`: it keeps an old completed-task subscriber set containing `viewer-tab` and `unrelated-tab`, then runs a new ask-user lifecycle on a different task with `owner-tab` and `viewer-tab`. The pre-fix code failed because `askUserDone` was emitted to `unrelated-tab`.
-- Fixed the backend by tracking the task id for the currently pending ask-user queue in `VSCodeServer._pending_user_answer_tasks`. `_ask_user_question` records `id(queue) -> task_id` before broadcasting the question and removes it when the question completes. `_cmd_user_answer` pops that task id when the answer is accepted and `_user_answer_clear_tabs` now closes only that task's subscriber set, falling back to just the answering tab when no pending task can be associated.
-- Ran impacted tests: `uv run pytest -q src/kiss/tests/agents/sorcar/test_ask_user_broadcast.py src/kiss/tests/agents/sorcar/test_ask_user_immediate_response.py src/kiss/tests/agents/sorcar/test_vscode_tabs.py src/kiss/tests/agents/vscode/test_bughunt5_stale_user_answer.py` passed with 47 tests. Pytest reported one existing unhandled-thread warning from `test_vscode_tabs.py` where a deliberately interrupted sleeping daemon thread receives `KeyboardInterrupt`.
-- Switched back to `gpt-5.5` for a thorough review of the fix. Review found the over-broad stale-subscriber close bug was addressed and did not identify another reproducible ask-user close bug in this cycle.
-- Counted collected pytest tests before running the full suite: 3,807 node IDs. The machine has 10 cores, so split the suite into 8 files and used `run_parallel` with 8 workers. All splits passed:
-  - Split 0: 473 passed, 3 skipped, 4 warnings.
-  - Split 1: 472 passed, 4 skipped, 182 warnings.
-  - Split 2: 471 passed, 5 skipped, 6 warnings.
-  - Split 3: 470 passed, 6 skipped, 200 subtests passed, 1 warning.
-  - Split 4: 470 passed, 6 skipped, 24 subtests passed, 18 warnings.
-  - Split 5: 473 passed, 3 skipped, 209 subtests passed, 34 warnings.
-  - Split 6: 472 passed, 4 skipped, 8 subtests passed, 4 warnings.
-  - Split 7: 472 passed, 3 skipped, 4 subtests passed, 14 warnings.
-- Continued after the abrupt failure by reading `SORCAR.md`, switching to `claude-opus-4-7`, reading the requested split file `./tmp/pytest-split-ask-user-review-3.txt`, and counting 476 listed tests before running them.
-- Ran the exact requested command: `uv run pytest -q $(cat ./tmp/pytest-split-ask-user-review-3.txt)`. Result: 470 passed, 6 skipped, 1 warning, and 200 subtests passed in 94.29 seconds. The warning summary showed a `google.genai.types` deprecation warning; the output also included resource warnings about unclosed sqlite connections, but pytest exited successfully.
-- Ran requested split command: `uv run pytest -q $(cat ./tmp/pytest-split-ask-user-review-1.txt)`. Result: 472 passed, 4 skipped, 182 warnings in 95.55 seconds. The only visible warnings in the captured output were resource/unclosed-database warnings and other existing pytest warnings; the split completed successfully.
-- Ran the requested split: `uv run pytest -q $(cat ./tmp/pytest-split-ask-user-review-7.txt)`. Result: 472 passed, 3 skipped, 14 warnings, 4 subtests passed in 75.60 seconds.
+- Switched to `gpt-5.5` for the requested thorough review phase.
+- Review finding: the previous fix replays the active tab's merge UI before processing `restoredTabs`. On real refreshes with a backend `chatId`, `_handle_ready` then calls `resumeSession`, which emits `task_events`; the frontend's `task_events` handler calls `replayTaskEvents()`, which clears `#output`, erasing the replayed merge/diff panel. This makes a refreshed tab lose the merge UI despite receiving `merge_data`.
+- Switched to `claude-opus-4-7` for test creation and bug fixing as requested.
+- Added an end-to-end WSS regression `test_refresh_restored_active_tab_replays_history_before_merge` that persists a real chat history row, opens a real in-flight merge review, reconnects with the active tab also listed in `restoredTabs` with a `chatId`, and asserts `task_events` arrives before `merge_data` so the frontend history replay cannot erase the merge panel.
+- Verified the new regression failed before the fix with event order `['merge_data', 'merge_started', 'merge_nav', 'task_events']`.
+- Fixed `RemoteAccessServer._handle_ready` to collect unique active/restored merge tabs during ready handling, process all restored-tab `resumeSession` calls first, then replay each merge review once after session history replay.
+- Reviewed the fix with `gpt-5.5`; the main follow-up concern was that the new regression creates a `_RunningAgentState` in the process-global registry, so the test fixture should restore the registry after each test to avoid cross-test leakage.
+- Switched back to `claude-opus-4-7` and updated the WSS regression fixture to snapshot `_RunningAgentState.running_agent_states` under `_registry_lock` in `asyncSetUp` and restore that snapshot in `asyncTearDown`.
+- Counted 4 impacted tests in `test_bughunt4_merge_replay_on_reconnect.py`; no split was needed under the >100-test rule. Ran the targeted new regression and the full impacted file in parallel; both passed (`1 passed`, `4 passed`).
+- Switched back to `gpt-5.5` for a second review. Reviewed `_handle_ready`, `_run_cmd`, resume-session replay ordering, `_replay_merge_review`, and the updated fixture cleanup. No further reproducible product bug was found: merge replays are now deduplicated and occur after all synchronous `resumeSession` history broadcasts, so the frontend's `task_events` replay cannot clear the recovered merge panel afterward.
+- Ran mandatory `uv run check --full`; all checks passed.
+- For the user's request to run all tests in parallel, collected 3807 pytest test items and split them into 8 groups (`number_of_cores - 2`, with 10 cores available). Ran the 8 groups concurrently. Six groups passed immediately; two unrelated tests failed/errorred in the concurrent full-suite environment (`test_replay_strips_global_setting_keys_from_extra` and `test_send_message_with_thread`). Reran both failing tests in isolation and both passed, indicating the parallel full-suite failures were order/concurrency/environment issues unrelated to the merge replay fix.
