@@ -358,7 +358,18 @@ class _CommandsMixin:
             if not model:
                 return
             self._default_model = model
-        _record_model_usage(model)
+            # Persist the user's pick under the SAME critical section
+            # that updates ``self._default_model``.  A concurrent
+            # ``_get_models`` reads ``_load_last_model()`` (the
+            # persisted ``last_model`` from ``config.json``) inside
+            # ``_state_lock`` and applies it to ``self._default_model``
+            # — if the disk write happens AFTER releasing the lock,
+            # the racing refresh would observe the OLD on-disk value
+            # and clobber the just-picked in-memory selection.
+            # Persisting inside the lock guarantees that any
+            # ``_get_models`` that subsequently acquires the lock sees
+            # the new value on disk.
+            _record_model_usage(model)
 
     def _cmd_get_history(self, cmd: dict[str, Any]) -> None:
         """Send conversation history to the requesting connection only."""
