@@ -1,102 +1,86 @@
 # Progress
 
-## Task: Fix "time does not update every second when the panel is active"
+## Task: Review last notification-system updates, reproduce/fix review bugs, and verify
 
-Goal: while the model is thinking but has not produced any thought tokens yet,
-the Thoughts (`.llm-panel`) panel must still be shown with a live `.panel-time`
-footer. More generally, while a Thoughts (`.llm-panel`) or Tool-call (`.tc`)
-panel is still open, the `.panel-time` footer must tick every second. Before
-the fix, the footer was only rendered when the panel closed.
+Started a new task, so cleared the previous task progress log.
 
-### Reproduction (end-to-end test)
+### GPT-5.5 review of last notification-system updates
 
-Wrote `src/kiss/agents/vscode/test/panelTimeActiveTick.test.js` (jsdom-based,
-loads the production `chat.html` + `panelCopy.js` + `media/main.js`):
+Reviewed the full notification implementation and call sites, not just the diff. The review found two concrete bugs in `src/kiss/agents/vscode/src/WebviewNotifications.ts`:
 
-1. `clear` + `status running` + `thinking_start` only — deliberately no
-   `thinking_delta`, so the panel is open while the model has produced zero
-   thought tokens.
-1. Immediately asserts the `.llm-panel` exists, its `.ev.think .cnt` is empty,
-   and exactly one direct-child `:scope > .panel-time` footer is already shown.
-1. `await sleep(2200)` → asserts exactly one `:scope > .panel-time` footer
-   remains on the tokenless `.llm-panel` and its parsed-ms value is `>= 1000`
-   (proves the live ticker ran).
-1. `await sleep(1200)` → asserts the footer's parsed-ms grew by `>= 800`
-   (proves the tick keeps firing).
-1. Asserts `.panel-time` stays the LAST child while ticking and `.ev.think .cnt`
-   is still empty, proving the test remains in the no-thought-token state.
-1. Sends `thinking_end` + `result` + `status running:false`,
-   `await sleep(1300)` → asserts the footer is frozen (Δ < 200 ms).
+1. **Pending action promises can hang forever when the webview/poster is cleared.**
 
-Wired the new test into `npm test` in
-`src/kiss/agents/vscode/package.json`.
+   - `showWarningNotification(..., 'Action')` stores a resolver in `pendingActions`.
+   - If the chat webview is disposed or `setWebviewNotificationPoster(undefined)` is called before the user clicks/dismisses the toast, no `notificationAction` message can ever arrive.
+   - The promise remains pending, which can hang flows such as API-key prompts.
 
-### Fix
+1. **Progress notifications are not closed if the progress task throws synchronously.**
 
-Edited `src/kiss/agents/vscode/media/main.js`:
+   - `withWebviewNotificationProgress` currently evaluates `task(progress, source.token)` before `Promise.resolve(...)` is constructed:
+     ```ts
+     return Promise.resolve(task(progress, source.token)).finally(() => {
+       poster?.({type: 'notification', id, close: true});
+       source.dispose();
+     });
+     ```
+   - A synchronous throw skips the `.finally(...)`, leaving the progress notification stuck and the cancellation source undisposed.
 
-- Added module-private `_activePanels = new Set()` and
-  `_activePanelTickIv = null` after `fmtElapsedMs`.
-- Refactored the original `finalizePanelTime` body into a shared
-  `_renderPanelTime(el)` that creates/refreshes the `.panel-time` footer
-  as the LAST direct child using `fmtElapsedMs(Date.now() - startMs)`.
-- `stampPanelStart(el)` now: stamps `data-start-ms`, adds `el` to
-  `_activePanels`, calls `_renderPanelTime(el)` so the footer appears
-  immediately, then `_startActivePanelTick()`.
-- `_startActivePanelTick()` lazily starts a single
-  `setInterval(..., 1000)` that iterates `_activePanels`, prunes
-  disconnected elements, re-renders each via `_renderPanelTime`, and
-  stops the interval when the set empties.
-- `finalizePanelTime(el)` now calls `_renderPanelTime(el)` once for the
-  final value, then removes `el` from `_activePanels` and clears the
-  interval if it was the last active panel — so the footer freezes when
-  the panel closes.
-- `_deferHighlight` exclusion preserved: replayed events still never
-  stamp/tick.
+Planned changes:
 
-Relevant snippet:
+- Extend `src/kiss/agents/vscode/test/webviewNotifications.test.js` with E2E regression coverage for both bugs using the real compiled `WebviewNotifications.js` module and the existing real notification/webview test harness.
+- Fix `WebviewNotifications.ts` by resolving pending action promises with `undefined` when the poster is cleared, and by wrapping progress task invocation in a promise chain that also catches synchronous throws while preserving rejection semantics.
+- Compile, run the impacted tests, then run all VS Code extension tests in parallel after counting them.
+- Review fixes again with `gpt-5.5` and repeat if new reproducible bugs are found.
+
+### Reproduction tests added before fixing
+
+Extended `src/kiss/agents/vscode/test/webviewNotifications.test.js` with two E2E-style regressions against the real compiled `WebviewNotifications.js` module:
 
 ```js
-function stampPanelStart(el) {
-  if (!el || _deferHighlight) return;
-  if (el.dataset.startMs) return;
-  el.dataset.startMs = String(Date.now());
-  _activePanels.add(el);
-  _renderPanelTime(el);
-  _startActivePanelTick();
-}
-
-function _startActivePanelTick() {
-  if (_activePanelTickIv) return;
-  if (_activePanels.size === 0) return;
-  _activePanelTickIv = setInterval(() => {
-    for (const el of Array.from(_activePanels)) {
-      if (!el || !el.isConnected) {
-        _activePanels.delete(el);
-        continue;
-      }
-      _renderPanelTime(el);
-    }
-    if (_activePanels.size === 0) {
-      clearInterval(_activePanelTickIv);
-      _activePanelTickIv = null;
-    }
-  }, 1000);
-}
+const pendingActionPromise = notificationsApi.showWarningNotification(
+  'Choose a pending action.',
+  'Continue',
+);
+const pendingBeforeDispose = await Promise.race([
+  pendingActionPromise.then(value => ({settled: true, value})),
+  new Promise(resolve => setTimeout(() => resolve({settled: false}), 80)),
+]);
+assert.deepStrictEqual(pendingBeforeDispose, {settled: false});
+view.dispose();
+const pendingAfterDispose = await Promise.race([
+  pendingActionPromise.then(value => ({settled: true, value})),
+  new Promise(resolve => setTimeout(() => resolve({settled: false}), 200)),
+]);
+assert.deepStrictEqual(pendingAfterDispose, {settled: true, value: undefined});
 ```
 
-### Verification
+and:
 
-- `node test/panelTimeActiveTick.test.js` → `All tests passed`.
-- `npm test` (full suite) → all suites pass; no regression in
-  `panelTimeSpent.test.js`.
-- `uv run check --full` → all checks pass (compileall, ruff, mypy,
-  pyright, VS Code typecheck+lint, mdformat).
+```js
+await notificationsApi.withWebviewNotificationProgress(
+  {
+    location: vscodeStub.ProgressLocation.Notification,
+    title: 'Sync failing progress',
+  },
+  () => {
+    throw thrown;
+  },
+);
+```
 
-### Models used
+The assertions require the original error to be rejected, the cancellation source to be disposed, and a `{type:'notification', close:true}` message to be posted.
 
-- Coding / bug-fix / tests: `claude-opus-4-7`.
-- Thorough review of the diff and test: `gpt-5.5` (NOT codex). Review
-  found no issues to fix — single shared ticker, correct
-  pruning/auto-stop, no race in single-threaded JS event loop,
-  last-child anchoring preserved, replay exclusion preserved.
+Ran `cd src/kiss/agents/vscode && npm run compile && node test/webviewNotifications.test.js` after installing npm deps. The new pending-action test reproduced the first review bug exactly:
+
+```text
+AssertionError [ERR_ASSERTION]: disposing the active webview must resolve pending action notifications undefined
++ actual - expected
+
+  {
++   settled: false
+-   settled: true,
+-   value: undefined
+  }
+```
+
+The first assertion also verified the action promise was genuinely pending before dispose.

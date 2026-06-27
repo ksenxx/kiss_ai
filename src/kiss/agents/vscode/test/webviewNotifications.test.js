@@ -48,11 +48,14 @@ class StubEventEmitter {
   }
 }
 
+let cancellationDisposeCount = 0;
 class StubCancellationTokenSource {
   constructor() {
     this.token = {onCancellationRequested: () => ({dispose: () => {}})};
   }
-  dispose() {}
+  dispose() {
+    cancellationDisposeCount++;
+  }
 }
 
 function makeUri(fsPath) {
@@ -236,8 +239,20 @@ async function runTests() {
 
   const sourcePath = path.join(__dirname, '..', 'out', 'SorcarSidebarView.js');
   assert.ok(fs.existsSync(sourcePath), `compiled extension missing: ${sourcePath}`);
+  const notificationPath = path.join(
+    __dirname,
+    '..',
+    'out',
+    'WebviewNotifications.js',
+  );
+  assert.ok(
+    fs.existsSync(notificationPath),
+    `compiled notification helper missing: ${notificationPath}`,
+  );
+  delete require.cache[require.resolve(notificationPath)];
   delete require.cache[require.resolve(sourcePath)];
   const {SorcarSidebarView} = require(sourcePath);
+  const notificationsApi = require(notificationPath);
 
   const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-webview-ntf-ws-'));
   tmpDirs.push(ws);
@@ -332,7 +347,104 @@ async function runTests() {
     domWebview.close();
   }
 
-  if (typeof view.dispose === 'function') view.dispose();
+  const pendingActionPromise = notificationsApi.showWarningNotification(
+    'Choose a pending action.',
+    'Continue',
+  );
+  const pendingBeforeDispose = await Promise.race([
+    pendingActionPromise.then(value => ({settled: true, value})),
+    new Promise(resolve => setTimeout(() => resolve({settled: false}), 80)),
+  ]);
+  assert.deepStrictEqual(
+    pendingBeforeDispose,
+    {settled: false},
+    'action notification promise should remain pending before webview disposal',
+  );
+  view.dispose();
+  const pendingAfterDispose = await Promise.race([
+    pendingActionPromise.then(value => ({settled: true, value})),
+    new Promise(resolve => setTimeout(() => resolve({settled: false}), 200)),
+  ]);
+  assert.deepStrictEqual(
+    pendingAfterDispose,
+    {settled: true, value: undefined},
+    'disposing the active webview must resolve pending action notifications undefined',
+  );
+
+  const progressPosts = [];
+  notificationsApi.setWebviewNotificationPoster(message => {
+    progressPosts.push(message);
+  });
+  cancellationDisposeCount = 0;
+  const thrown = new Error('synchronous progress failure');
+  let rejected;
+  try {
+    await notificationsApi.withWebviewNotificationProgress(
+      {
+        location: vscodeStub.ProgressLocation.Notification,
+        title: 'Sync failing progress',
+      },
+      () => {
+        throw thrown;
+      },
+    );
+  } catch (err) {
+    rejected = err;
+  }
+  assert.strictEqual(
+    rejected,
+    thrown,
+    'sync progress task errors must still reject with the original error',
+  );
+  assert.strictEqual(
+    cancellationDisposeCount,
+    1,
+    'sync progress task errors must dispose the cancellation source',
+  );
+  assert.ok(
+    progressPosts.some(m => m.type === 'notification' && m.progress === true),
+    'sync progress test must post the progress notification before the failure',
+  );
+  assert.ok(
+    progressPosts.some(m => m.type === 'notification' && m.close === true),
+    'sync progress task errors must close the webview progress notification',
+  );
+  notificationsApi.setWebviewNotificationPoster(undefined);
+
+  // Bug C: replacing the poster (e.g. webview re-resolved while the old
+  // webview's onDidDispose has not yet fired) must resolve pending action
+  // promises tied to the OLD poster — otherwise their notifications can
+  // never be acknowledged (the new webview does not know those IDs).
+  const postedA = [];
+  notificationsApi.setWebviewNotificationPoster(message => postedA.push(message));
+  const oldPosterPending = notificationsApi.showWarningNotification(
+    'Pending from old webview poster.',
+    'Continue',
+  );
+  const oldPosterBeforeSwap = await Promise.race([
+    oldPosterPending.then(value => ({settled: true, value})),
+    new Promise(resolve => setTimeout(() => resolve({settled: false}), 80)),
+  ]);
+  assert.deepStrictEqual(
+    oldPosterBeforeSwap,
+    {settled: false},
+    'pending action should remain pending while old poster is active',
+  );
+  // Now swap to a NEW poster WITHOUT clearing first.  This mirrors the
+  // VS Code ordering where a fresh webview is resolved BEFORE the stale
+  // old webview's onDidDispose fires.
+  const postedB = [];
+  notificationsApi.setWebviewNotificationPoster(message => postedB.push(message));
+  const oldPosterAfterSwap = await Promise.race([
+    oldPosterPending.then(value => ({settled: true, value})),
+    new Promise(resolve => setTimeout(() => resolve({settled: false}), 200)),
+  ]);
+  assert.deepStrictEqual(
+    oldPosterAfterSwap,
+    {settled: true, value: undefined},
+    'replacing the poster must resolve pending action promises from the old poster as undefined',
+  );
+  notificationsApi.setWebviewNotificationPoster(undefined);
 }
 
 function cleanup() {

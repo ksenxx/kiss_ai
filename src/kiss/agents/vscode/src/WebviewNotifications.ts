@@ -15,6 +15,12 @@ let poster: NotificationPost | undefined;
 let nextId = 1;
 const pendingActions = new Map<string, (value: string | undefined) => void>();
 
+function resolveAllPendingActions(): void {
+  const resolvers = Array.from(pendingActions.values());
+  pendingActions.clear();
+  for (const resolve of resolvers) resolve(undefined);
+}
+
 /**
  * Register the active chat webview poster used by notification helpers.
  *
@@ -24,6 +30,15 @@ const pendingActions = new Map<string, (value: string | undefined) => void>();
 export function setWebviewNotificationPoster(
   notificationPoster: NotificationPost | undefined,
 ): void {
+  // Any poster change (clear OR replace) must resolve pending action
+  // promises that were registered against the previous poster.  The
+  // previous webview is no longer reachable so its toasts can never
+  // produce a notificationAction reply, and the new webview (if any)
+  // does not know about the old IDs.  Leaving them pending would hang
+  // flows like API-key prompts forever.
+  if (notificationPoster !== poster) {
+    resolveAllPendingActions();
+  }
   poster = notificationPoster;
 }
 
@@ -158,8 +173,10 @@ export function withWebviewNotificationProgress<R>(
     },
   };
   const source = new vscode.CancellationTokenSource();
-  return Promise.resolve(task(progress, source.token)).finally(() => {
-    poster?.({type: 'notification', id, close: true});
-    source.dispose();
-  });
+  return Promise.resolve()
+    .then(() => task(progress, source.token))
+    .finally(() => {
+      poster?.({type: 'notification', id, close: true});
+      source.dispose();
+    });
 }
