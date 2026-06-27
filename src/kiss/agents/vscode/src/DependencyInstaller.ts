@@ -815,8 +815,7 @@ async function ensureDependenciesImpl(): Promise<void> {
   if (showRestartNotification) {
     if (apiKeysReady) {
       showInformationNotification(
-        'KISS Sorcar: Installation complete! You are ready to go. ' +
-          'Already-open terminals will not see the updated PATH until you open a new one.',
+        'KISS Sorcar: Installation complete! Starting server in less than 1 minute ... '
       );
     } else {
       showWarningNotification(
