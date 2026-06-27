@@ -1887,6 +1887,58 @@ body.remote-chat #welcome-config { display: none !important; }
   color: var(--vscode-button-foreground);
 }
 
+/* ── Server-Reset Confirmation Floating Box ──────────────
+   Replaces the native VS Code modal warning dialog for the settings-
+   panel "Server reset" button.  The floating box is scoped to the
+   settings panel (it's a child of #settings-panel in chat.html) and
+   uses ``position: absolute; inset: 0`` so its backdrop covers the
+   whole settings panel — not the entire VS Code window.  Hidden by
+   default; main.js toggles ``.open`` to show it. */
+#server-reset-confirm-modal {
+  display: none;
+  position: absolute; inset: 0;
+  background: rgb(0 0 0 / 60%);
+  align-items: center; justify-content: center;
+  z-index: 500; padding: 16px; box-sizing: border-box;
+}
+#server-reset-confirm-modal.open { display: flex; }
+
+.server-reset-confirm-content {
+  background: var(--bg2); border: 1px solid var(--border);
+  border-radius: 12px; padding: 20px; width: 90%; max-width: 360px;
+  box-sizing: border-box; box-shadow: 0 8px 24px rgb(0 0 0 / 40%);
+}
+
+.server-reset-confirm-title {
+  font-size: var(--fs-xl); font-weight: 600; color: var(--fg);
+  margin-bottom: 12px;
+}
+
+.server-reset-confirm-message {
+  font-size: var(--fs-lg); color: color-mix(in srgb, var(--fg) 83%, transparent);
+  margin-bottom: 16px; line-height: 1.5;
+  overflow-wrap: anywhere; word-break: break-word;
+}
+
+.server-reset-confirm-actions {
+  display: flex; justify-content: flex-end; gap: 8px;
+}
+
+.server-reset-confirm-btn {
+  border-radius: 6px; font-size: var(--fs-base); font-weight: 500;
+  padding: 6px 14px; cursor: pointer; transition: opacity 0.15s, background 0.15s;
+}
+.server-reset-confirm-btn:hover { opacity: 0.9; }
+
+.server-reset-confirm-cancel {
+  background: transparent; border: 1px solid var(--border); color: var(--fg);
+}
+
+.server-reset-confirm-ok {
+  background: var(--accent); border: 1px solid var(--accent);
+  color: var(--vscode-button-foreground);
+}
+
 /* ── Markdown content rendering (shared via .md-body on system-prompt-body, prompt-body, rc-body) ── */
 .md-body p { margin: 4px 0; }
 .md-body :is(h1,h2,h3,h4,h5,h6) { margin: 8px 0 4px; font-weight: 600; color: var(--fg); }
