@@ -1,96 +1,29 @@
 # Progress
 
-## Task: Fix "time does not update every second when the panel is active"
-
-Goal: while a Thoughts (`.llm-panel`) or Tool-call (`.tc`) panel is still open,
-the `.panel-time` footer must tick every second. Before the fix, the footer
-was only rendered when the panel closed.
-
-### Reproduction (end-to-end test)
-
-Wrote `src/kiss/agents/vscode/test/panelTimeActiveTick.test.js` (jsdom-based,
-loads the production `chat.html` + `panelCopy.js` + `media/main.js`):
-
-1. `clear` + `status running` + `thinking_start` + `thinking_delta` (panel
-   stays open — no `thinking_end`).
-1. `await sleep(2200)` → asserts exactly one `:scope > .panel-time` footer
-   on the `.llm-panel` and its parsed-ms value is `>= 1000` (proves the
-   live ticker ran).
-1. `await sleep(1200)` → asserts the footer's parsed-ms grew by `>= 800`
-   (proves the tick keeps firing).
-1. Asserts `.panel-time` stays the LAST child while ticking.
-1. Sends `thinking_end` + `result` + `status running:false`,
-   `await sleep(1300)` → asserts the footer is frozen (Δ < 200 ms).
-
-Wired the new test into `npm test` in
-`src/kiss/agents/vscode/package.json`.
-
-### Fix
-
-Edited `src/kiss/agents/vscode/media/main.js`:
-
-- Added module-private `_activePanels = new Set()` and
-  `_activePanelTickIv = null` after `fmtElapsedMs`.
-- Refactored the original `finalizePanelTime` body into a shared
-  `_renderPanelTime(el)` that creates/refreshes the `.panel-time` footer
-  as the LAST direct child using `fmtElapsedMs(Date.now() - startMs)`.
-- `stampPanelStart(el)` now: stamps `data-start-ms`, adds `el` to
-  `_activePanels`, calls `_renderPanelTime(el)` so the footer appears
-  immediately, then `_startActivePanelTick()`.
-- `_startActivePanelTick()` lazily starts a single
-  `setInterval(..., 1000)` that iterates `_activePanels`, prunes
-  disconnected elements, re-renders each via `_renderPanelTime`, and
-  stops the interval when the set empties.
-- `finalizePanelTime(el)` now calls `_renderPanelTime(el)` once for the
-  final value, then removes `el` from `_activePanels` and clears the
-  interval if it was the last active panel — so the footer freezes when
-  the panel closes.
-- `_deferHighlight` exclusion preserved: replayed events still never
-  stamp/tick.
-
-Relevant snippet:
-
-```js
-function stampPanelStart(el) {
-  if (!el || _deferHighlight) return;
-  if (el.dataset.startMs) return;
-  el.dataset.startMs = String(Date.now());
-  _activePanels.add(el);
-  _renderPanelTime(el);
-  _startActivePanelTick();
-}
-
-function _startActivePanelTick() {
-  if (_activePanelTickIv) return;
-  if (_activePanels.size === 0) return;
-  _activePanelTickIv = setInterval(() => {
-    for (const el of Array.from(_activePanels)) {
-      if (!el || !el.isConnected) {
-        _activePanels.delete(el);
-        continue;
-      }
-      _renderPanelTime(el);
-    }
-    if (_activePanels.size === 0) {
-      clearInterval(_activePanelTickIv);
-      _activePanelTickIv = null;
-    }
-  }, 1000);
-}
-```
-
-### Verification
-
-- `node test/panelTimeActiveTick.test.js` → `All tests passed`.
-- `npm test` (full suite) → all suites pass; no regression in
-  `panelTimeSpent.test.js`.
-- `uv run check --full` → all checks pass (compileall, ruff, mypy,
-  pyright, VS Code typecheck+lint, mdformat).
-
-### Models used
-
-- Coding / bug-fix / tests: `claude-opus-4-7`.
-- Thorough review of the diff and test: `gpt-5.5` (NOT codex). Review
-  found no issues to fix — single shared ticker, correct
-  pruning/auto-stop, no race in single-threaded JS event loop,
-  last-child anchoring preserved, replay exclusion preserved.
+- Started new task: implement a VS Code-like notification system in the chat webview for KISS Sorcar notification usages under `src/kiss/agents/vscode/`.
+- Read `SORCAR.md` first as required; it was empty.
+- Switched requested coding model to `claude-opus-4-7`.
+- Performed 10-site web research on VS Code notifications/toasts and accessibility; findings were tracked in `tmp/information-notifications.md`.
+- Identified VS Code notification usages under `src/kiss/agents/vscode/`: `SorcarSidebarView.ts`, `MergeManager.ts`, `extension.ts`, and `DependencyInstaller.ts`.
+- Implemented webview notification UI in `media/main.js` with top-right stacked toasts, severity icons, close buttons, optional action buttons, progress updates, auto-dismiss timers, and a live region.
+- Added notification styling to `media/main.css`, fixed at the top-right of the chat webview.
+- Added `src/WebviewNotifications.ts` helper to route information/warning/error/progress notifications to the webview when active, with fallback to native VS Code notifications before the webview exists.
+- Replaced KISS VS Code notification usages in `SorcarSidebarView.ts`, `MergeManager.ts`, `extension.ts`, and `DependencyInstaller.ts` with the webview notification helper.
+- Added `notificationAction` to the webview-to-extension message union in `types.ts`.
+- Added an end-to-end regression test `test/webviewNotifications.test.js` that drives the compiled extension against a real UDS daemon stub and asserts a `worktree_result` produces a webview `notification` message without calling native VS Code notification APIs.
+- Added the new test to the VS Code extension npm test script.
+- Attempted `npm run compile`; it failed because `tsc` was not installed, so installed npm dependencies in `src/kiss/agents/vscode`.
+- Re-ran `npm run compile`; it passed.
+- Ran `node test/webviewNotifications.test.js`; it passed.
+- Ran `npm run test` for the VS Code extension; all 22 extension tests passed.
+- Ran `uv run check --full`; it initially reported lint/style issues in the new JS/CSS, then after formatting fixes it passed.
+- Switched to `gpt-5.5` for a thorough review of the work as requested.
+- Review found one semantic gap: action notifications resolved only when an action button was clicked; dismissing the toast close button did not resolve the extension-side promise with `undefined` like VS Code native notifications do.
+- Switched back to `claude-opus-4-7` to implement the review finding.
+- Patched `media/main.js` so dismissing an action notification posts `notificationAction` with `action: undefined`, while auto-dismiss/extension-driven close do not notify the extension.
+- Relaxed `WebviewNotifications.resolveWebviewNotificationAction` and `FromWebviewMessage` typing to allow `action?: string` / `string | undefined`.
+- Extended `test/webviewNotifications.test.js` with a real jsdom run of production `media/main.js` that verifies both close-button dismissal and action-button selection post the correct `notificationAction` messages.
+- Re-ran `cd src/kiss/agents/vscode && npm run compile && node test/webviewNotifications.test.js`; it passed.
+- Counted VS Code extension tests before running the suite: 22 tests, under the 100-test split threshold.
+- Re-ran `cd src/kiss/agents/vscode && npm run test`; all tests passed.
+- Re-ran mandatory `uv run check --full`; all checks passed.
