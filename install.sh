@@ -859,12 +859,18 @@ update_repo() {
         echo "   WARNING: $MODEL_INFO_SRC missing — model table not refreshed."
     fi
 
-    # Always overwrite the bundled INJECTIONS.md and SAMPLE_TASKS.md into
-    # the user's kiss home directory on every install/update.  This ensures
-    # the kiss-web daemon's Tricks button and the VS Code extension's
-    # welcome-screen sample-task chips always reflect the latest bundled
-    # Markdown when the extension is updated — matching the MODEL_INFO.json
-    # pattern directly above.
+    # Always overwrite the bundled INJECTIONS.md into the user's kiss
+    # home directory on every install/update.  This ensures the
+    # kiss-web daemon's Tricks button always reflects the latest
+    # bundled Markdown when the extension is updated — matching the
+    # MODEL_INFO.json pattern directly above.
+    #
+    # SAMPLE_TASKS.md is intentionally NOT copied: the welcome-screen
+    # chip loader (``readSampleTasks`` in SorcarTab.ts) reads the
+    # bundled package copy directly so every extension upgrade
+    # automatically delivers the latest chips, while user-curated
+    # chips live in ``~/.kiss/MY_TASK_TEMPLATES.md`` (auto-seeded on
+    # first read with the starter task ``## Task\n\nHi!\n``).
     #
     # ``${KISS_HOME:-$HOME/.kiss}`` matches the runtime resolution in
     # ``user_assets.kiss_home_dir`` so a developer with a custom
@@ -879,14 +885,6 @@ update_repo() {
         echo "   Installed INJECTIONS.md at $INJECTIONS_DST"
     else
         echo "   WARNING: $INJECTIONS_SRC missing — tricks not refreshed."
-    fi
-    SAMPLE_TASKS_SRC="$PROJECT_DIR/src/kiss/SAMPLE_TASKS.md"
-    SAMPLE_TASKS_DST="$KISS_HOME_DIR/SAMPLE_TASKS.md"
-    if [ -f "$SAMPLE_TASKS_SRC" ]; then
-        cp "$SAMPLE_TASKS_SRC" "$SAMPLE_TASKS_DST"
-        echo "   Installed SAMPLE_TASKS.md at $SAMPLE_TASKS_DST"
-    else
-        echo "   WARNING: $SAMPLE_TASKS_SRC missing — welcome chips not refreshed."
     fi
 
     date -u +%Y-%m-%dT%H:%M:%SZ > "$HOME/.kiss/.extension-updated"
