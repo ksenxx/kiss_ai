@@ -115,6 +115,10 @@ from kiss.agents.vscode.helpers import (
     clip_autocomplete_suggestion,
     rank_file_suggestions,
 )
+from kiss.agents.vscode.tricks import (
+    current_sentence_partial,
+    prefix_match_trick,
+)
 
 if TYPE_CHECKING:
     from kiss.agents.sorcar.sorcar_agent import SorcarAgent
@@ -297,6 +301,17 @@ class CliCompleter:
         tasks = _prefix_match_tasks(line)
         if tasks:
             return tasks
+        # INJECTIONS.md "Inject instruction" tricks are also surfaced
+        # as fast-complete suggestions, but ONLY at the beginning of a
+        # sentence (start of *line* or after ``[.!?]`` + whitespace).
+        # ``prefix_match_trick`` returns the full trick body when the
+        # current sentence's leading partial prefixes a trick; we
+        # reconstruct the whole-line completion by replacing that
+        # partial with the trick text.
+        trick = prefix_match_trick(line)
+        if trick:
+            partial = current_sentence_partial(line)
+            return [line + trick[len(partial):]]
         suffix = self._active_file_suffix(line)
         if suffix:
             return [line + suffix]
