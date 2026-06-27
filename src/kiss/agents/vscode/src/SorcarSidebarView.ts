@@ -166,6 +166,16 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   private _preMergeOpenFiles: Map<string, Set<string>> = new Map();
   private _restoreChain: Promise<void> = Promise.resolve();
   private _onFirstResolve: (() => void) | undefined;
+  /**
+   * In-flight guard for the "Server reset" confirmation modal.  Set
+   * to ``true`` while ``vscode.window.showWarningMessage`` is awaiting
+   * an answer; any concurrent ``serverReset`` messages that arrive
+   * before the user picks OK/Cancel are dropped so a rapid double
+   * click cannot stack two modal dialogs or send a duplicate reset to
+   * the daemon.  Cleared in the ``finally`` block once the dialog
+   * resolves, so the next click works fresh.
+   */
+  private _serverResetDialogOpen: boolean = false;
   /** Pending resolver for the next ``sizeReport`` from the webview.
    *  Set by ``_measureSidebar`` and cleared by the ``sizeReport`` handler. */
   private _sizeReportResolver:
@@ -1236,13 +1246,32 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         // shows "OK" and "Cancel" buttons (VS Code adds Cancel
         // automatically for ``{modal: true}`` warning messages); the
         // reset is only forwarded when the user picks OK.
+        // Drop EVERY concurrent serverReset arriving for this
+        // sidebar while a confirmation modal is open — regardless of
+        // its ``agentRunning`` flag.  Otherwise:
+        //
+        //   * a rapid double-click while agentRunning=true stacks two
+        //     dialogs, and OK on both sends a duplicate reset;
+        //   * a click while the modal is open + the agent finishes
+        //     would let the second click (now agentRunning=false)
+        //     bypass the guard via the fast path and fire its own
+        //     reset, racing the eventual OK from the dialog.
+        //
+        // One in-flight click per sidebar instance, period.
+        if (this._serverResetDialogOpen) break;
         if (message.agentRunning) {
-          const choice = await vscode.window.showWarningMessage(
-            'An agent is still running. Restart the server anyway? ' +
-              'This will abort the in-flight task.',
-            {modal: true},
-            'OK',
-          );
+          this._serverResetDialogOpen = true;
+          let choice: string | undefined;
+          try {
+            choice = await vscode.window.showWarningMessage(
+              'An agent is still running. Restart the server anyway? ' +
+                'This will abort the in-flight task.',
+              {modal: true},
+              'OK',
+            );
+          } finally {
+            this._serverResetDialogOpen = false;
+          }
           if (choice !== 'OK') break;
         }
         this._getClient().sendCommand({type: 'serverReset'});
