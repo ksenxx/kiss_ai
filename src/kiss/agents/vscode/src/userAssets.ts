@@ -6,23 +6,22 @@
  * Resolve and lazily seed ``~/.kiss/<asset>`` markdown assets.
  *
  * TypeScript counterpart to ``kiss/agents/vscode/user_assets.py``.
- * Both keep ``INJECTIONS.md`` and ``SAMPLE_TASKS.md`` consistent
- * across the kiss-web daemon (Python) and the VS Code extension
- * webview (TypeScript): ``~/.kiss/<name>`` is the runtime source of
- * truth, and the bundled package copy is the seed / fallback.
  *
- * **Install-time behaviour** (``install.sh`` + ``installMarkdownAssets``
- * in ``DependencyInstaller.ts``): on every install or version upgrade
- * both files are *always* overwritten from the package copy so the
- * latest bundled Markdown is served immediately after an update —
- * matching the ``MODEL_INFO.json`` pattern.
+ * Two helpers:
  *
- * **Runtime behaviour** (this helper): if ``~/.kiss/<name>`` already
- * exists return it unchanged — user edits made *between* installs
- * survive daemon restarts.  If the user copy is missing (sandboxed
- * test envs, dev checkouts that skipped the installer), seed it from
- * the package copy.  Falls back to ``packagePath`` when ``~/.kiss/``
- * is not writable.
+ * * ``ensureUserAsset(name, packagePath)`` — seeds a user copy from a
+ *   bundled package file.  Used for ``INJECTIONS.md``: the file in
+ *   ``src/kiss/INJECTIONS.md`` is the seed/fallback and is also
+ *   overwritten into ``~/.kiss/INJECTIONS.md`` at install time by
+ *   ``install.sh`` and ``installMarkdownAssets`` so version upgrades
+ *   propagate.  At runtime user edits survive every read.
+ *
+ * * ``ensureUserAssetFromDefault(name, defaultContent)`` — seeds a user
+ *   copy from an inline string default, with no package file
+ *   involved.  Used for ``MY_TASK_TEMPLATES.md``: the file is purely
+ *   user-curated and the only "bundled" content is a tiny starter task
+ *   (``## Task\n\nHi!\n``).  Returns ``null`` when ``~/.kiss/`` is not
+ *   writable so the caller can skip silently.
  *
  * Honours the ``KISS_HOME`` env var, matching ``persistence.py``,
  * ``web_server.py``, and ``vscode_config.py``.
@@ -68,4 +67,33 @@ export function ensureUserAsset(name: string, packagePath: string): string {
     /* fall through to package path */
   }
   return packagePath;
+}
+
+/**
+ * Return ``~/.kiss/<name>``, seeding it with ``defaultContent`` when
+ * absent.  Used for assets like ``MY_TASK_TEMPLATES.md`` whose source
+ * of truth is the user's local copy — there is no bundled package
+ * file, only a tiny inline default written on first read.  Returns
+ * ``null`` when ``~/.kiss/`` is not writable (read-only FS, missing
+ * HOME) so the caller can skip silently.
+ *
+ * @param name Asset filename (e.g. ``"MY_TASK_TEMPLATES.md"``).
+ * @param defaultContent UTF-8 string written to the user copy on
+ *   first read.  Never overwrites an existing file.
+ * @returns Path to the user copy, or ``null`` when ``~/.kiss/`` cannot
+ *   be written.
+ */
+export function ensureUserAssetFromDefault(
+  name: string,
+  defaultContent: string,
+): string | null {
+  const userPath = path.join(kissHomeDir(), name);
+  try {
+    if (fs.existsSync(userPath)) return userPath;
+    fs.mkdirSync(path.dirname(userPath), {recursive: true});
+    fs.writeFileSync(userPath, defaultContent);
+    return userPath;
+  } catch {
+    return null;
+  }
 }
