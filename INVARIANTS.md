@@ -72,6 +72,10 @@ ______________________________________________________________________
   - the user MUST be able to stream the agent's events into a chat-webview tab by
     clicking the task in the task history panel, and that tab's title MUST show
     the blinking green circle while the agent is running. (3740)
+- Every row in the History panel MUST carry a middle-left status circle: a
+  pulsing green circle while running, a solid green circle once finished
+  cleanly, and a solid red circle when the task failed. A freshly-started task
+  MUST appear at the top of the History list when the burger menu is opened.
 
 ## Tabs & chat webview
 
