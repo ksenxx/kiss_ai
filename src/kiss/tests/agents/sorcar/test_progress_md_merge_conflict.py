@@ -2,19 +2,19 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""PROGRESS.md must never cause worktree merge conflicts.
+"""Agent scratch files must never cause worktree merge conflicts.
 
-Reproduces the incident where merging a task branch back into main
-failed with "Merge conflict detected" purely because of PROGRESS.md:
-the file is a tracked per-task agent log that every task wholesale
-rewrites ("clear PROGRESS.md when a new task begins"), so whenever
-main's copy diverged from the worktree's fork point, the whole-file
-rewrite on both sides made every three-way merge conflict.
+Reproduces incidents where merging a task branch back into main failed
+with "Merge conflict detected" purely because tracked agent scratch
+files drifted: ``PROGRESS.md`` is a per-task agent log that every task
+wholesale rewrites, and ``src/kiss/INJECTIONS.md`` can be captured in a
+dirty-state baseline and later receive formatting-only task-branch
+changes.
 
 The fix installs a repo-local git merge driver (via the untracked
 ``<git_common_dir>/info/attributes`` + local config, never touching
-tracked files) that auto-resolves PROGRESS.md content conflicts by
-taking the incoming task branch's version — the newest task's log
+tracked files) that auto-resolves scratch-file content conflicts by
+taking the incoming task branch's version — the newest scratch state
 wins.  Because the driver lives in repo plumbing it also fixes the
 manual ``git cherry-pick`` / ``git merge`` resolution commands.
 """
@@ -38,6 +38,22 @@ from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
 MAIN_LOG = "# Task: bug hunt iteration 7\n" + "- found bug\n" * 50
 BRANCH_LOG = "# Task: forensic analysis\n- daemon was killed by SIGTERM\n"
+INJECTIONS_HEAD = (
+    "## Trick\n\n"
+    "Use openrouter/z-ai/glm-5.2 model for all tasks including coding, "
+    "bug fixing, and test creation. ALWAYS use gpt-5.5 model (not codex) "
+    "and claude-opus-4-7 to carefully and thoroughly review the work done "
+    "by openrouter/z-ai/glm-5.2.\n"
+)
+INJECTIONS_BASELINE = INJECTIONS_HEAD.replace(
+    "and claude-opus-4-7 to carefully and thoroughly review",
+    "to carefully and thoroughly review",
+).replace(
+    "by openrouter/z-ai/glm-5.2.\n",
+    "by openrouter/z-ai/glm-5.2.  Then use claude-opus-4-7 to carefully "
+    "and thoroughly review the work done by openrouter/z-ai/glm-5.2.\n",
+)
+INJECTIONS_BRANCH = INJECTIONS_BASELINE.replace(".  Then use", ". Then use")
 
 
 def _make_repo(path: Path) -> Path:
@@ -157,6 +173,7 @@ class TestScratchMergeDriverOps:
         attrs = self.repo / ".git" / "info" / "attributes"
         lines = attrs.read_text().splitlines()
         assert lines.count("PROGRESS.md merge=kiss-scratch") == 1
+        assert lines.count("src/kiss/INJECTIONS.md merge=kiss-scratch") == 1
         driver = _git(
             "config", "merge.kiss-scratch.driver", cwd=self.repo
         ).stdout.strip()
@@ -180,6 +197,50 @@ class TestScratchMergeDriverOps:
         )
         assert result.returncode == 0, result.stderr
         assert (self.repo / "PROGRESS.md").read_text() == BRANCH_LOG
+
+    def test_injections_md_prompt_drift_is_scratch_and_auto_resolves(self) -> None:
+        """Prompt-injection scratch edits must not block task-branch merge.
+
+        Replays the previous-task incident precisely: the user's dirty
+        ``src/kiss/INJECTIONS.md`` was captured as the baseline commit,
+        while the agent later made only a whitespace adjustment in the
+        same scratch prompt file.  Main meanwhile had the original
+        pre-baseline text, so ``git cherry-pick --no-commit
+        baseline..branch`` produced a conflict in ``INJECTIONS.md``.
+
+        ``INJECTIONS.md`` has the same per-task scratch semantics as
+        ``PROGRESS.md`` and must use the same incoming-branch merge
+        driver so a formatting-only prompt-log drift cannot surface as
+        a user-visible worktree merge conflict.
+        """
+        injections = self.repo / "src" / "kiss" / "INJECTIONS.md"
+        injections.parent.mkdir(parents=True)
+        injections.write_text(INJECTIONS_HEAD)
+        _commit_all(self.repo, "add injection scratch prompt")
+
+        injections.write_text(INJECTIONS_BASELINE)
+        wt_dir = _create_worktree(self.repo, "kiss/wt-test-injections")
+        assert GitWorktreeOps.copy_dirty_state(self.repo, wt_dir)
+        GitWorktreeOps.stage_all(wt_dir)
+        assert GitWorktreeOps.commit_staged(
+            wt_dir, "kiss: baseline from dirty state", no_verify=True
+        )
+        baseline = GitWorktreeOps.head_sha(wt_dir)
+        assert baseline is not None
+        _git("checkout", "--", "src/kiss/INJECTIONS.md", cwd=self.repo)
+
+        (wt_dir / "src" / "kiss" / "INJECTIONS.md").write_text(INJECTIONS_BRANCH)
+        (wt_dir / "agent_work.py").write_text("y = 2\n")
+        _commit_all(wt_dir, "agent task work")
+        GitWorktreeOps.ensure_scratch_merge_driver(self.repo)
+
+        result = GitWorktreeOps.squash_merge_from_baseline(
+            self.repo, "kiss/wt-test-injections", baseline
+        )
+
+        assert result == MergeResult.SUCCESS
+        assert injections.read_text() == INJECTIONS_BRANCH
+        assert (self.repo / "agent_work.py").read_text() == "y = 2\n"
 
 
 def _redirect_db(tmpdir: str) -> tuple[Any, Any, Any]:
