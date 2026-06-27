@@ -1320,6 +1320,15 @@
   const demoToggleBtn = document.getElementById('cfg-demo-mode');
   const updateBtn = document.getElementById('cfg-update-btn');
   const serverResetBtn = document.getElementById('cfg-server-reset-btn');
+  const serverResetConfirmModal = document.getElementById(
+    'server-reset-confirm-modal',
+  );
+  const serverResetConfirmOkBtn = document.getElementById(
+    'server-reset-confirm-ok',
+  );
+  const serverResetConfirmCancelBtn = document.getElementById(
+    'server-reset-confirm-cancel',
+  );
   const autocommitToggleBtn = document.getElementById('cfg-auto-commit');
   const taskPanel = document.getElementById('task-panel');
   const taskPanelText = document.getElementById('task-panel-text');
@@ -5137,19 +5146,89 @@
       });
     }
 
+    // Open/close helpers for the in-settings-panel floating confirmation
+    // box.  The dialog replaces the native VS Code modal warning so the
+    // confirmation lives WITHIN the settings panel itself.  Only OK
+    // forwards ``{type:'serverReset'}`` to the extension; Cancel, the
+    // backdrop, and Escape all simply close the box.
+    function openServerResetConfirm() {
+      if (!serverResetConfirmModal) return;
+      serverResetConfirmModal.classList.add('open');
+      // Focus the OK button so keyboard users can confirm with Enter
+      // (or dismiss with Escape) without reaching for the mouse.
+      if (serverResetConfirmOkBtn) {
+        try {
+          serverResetConfirmOkBtn.focus();
+        } catch (_err) {
+          // ``focus()`` can throw if the element is detached or in a
+          // hidden subtree (some JSDOM versions); the dialog still
+          // works without focus, so swallow.
+        }
+      }
+    }
+    function closeServerResetConfirm() {
+      if (!serverResetConfirmModal) return;
+      serverResetConfirmModal.classList.remove('open');
+    }
+    function isServerResetConfirmOpen() {
+      return !!(
+        serverResetConfirmModal &&
+        serverResetConfirmModal.classList.contains('open')
+      );
+    }
+
     if (serverResetBtn) {
       serverResetBtn.addEventListener('click', e => {
         e.preventDefault();
         e.stopPropagation();
         // Server reset SIGTERMs the kiss-web daemon, killing every
-        // in-flight agent.  When any tab still has a running agent,
-        // the extension must surface a native VS Code modal dialog
-        // (OK/Cancel) before forwarding the reset — otherwise the
-        // user's unfinished task is silently aborted.  Tell the
-        // extension whether any tab is currently running so it can
-        // decide whether to raise the dialog or fast-path the reset.
+        // in-flight agent.  When any tab still has a running agent we
+        // surface an in-webview floating confirmation box anchored to
+        // the settings panel; only OK forwards the reset.  When no
+        // agent is running we fast-path the reset.
+        //
+        // Guard: if the confirmation box is already open, ignore the
+        // click — otherwise rapid double-clicks would re-open / stack
+        // the dialog.
+        if (isServerResetConfirmOpen()) return;
         const agentRunning = tabs.some(tab => tab && tab.isRunning);
-        vscode.postMessage({type: 'serverReset', agentRunning});
+        if (!agentRunning) {
+          vscode.postMessage({type: 'serverReset'});
+          return;
+        }
+        openServerResetConfirm();
+      });
+    }
+
+    if (serverResetConfirmOkBtn) {
+      serverResetConfirmOkBtn.addEventListener('click', e => {
+        e.preventDefault();
+        e.stopPropagation();
+        closeServerResetConfirm();
+        vscode.postMessage({type: 'serverReset'});
+      });
+    }
+    if (serverResetConfirmCancelBtn) {
+      serverResetConfirmCancelBtn.addEventListener('click', e => {
+        e.preventDefault();
+        e.stopPropagation();
+        closeServerResetConfirm();
+      });
+    }
+    if (serverResetConfirmModal) {
+      // Clicking the dimmed backdrop (the modal element itself, not its
+      // inner content box) dismisses the dialog without confirming.
+      serverResetConfirmModal.addEventListener('click', e => {
+        if (e.target === serverResetConfirmModal) closeServerResetConfirm();
+      });
+      // Escape closes the dialog — only when it's open, so we don't
+      // swallow Escape for the rest of the webview.
+      document.addEventListener('keydown', e => {
+        if (e.key === 'Escape' && isServerResetConfirmOpen()) {
+          e.preventDefault();
+          e.stopPropagation();
+          closeServerResetConfirm();
+        }
       });
     }
 
