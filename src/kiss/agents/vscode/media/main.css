@@ -752,6 +752,15 @@ body.remote-chat #welcome-config { display: none !important; }
   background: color-mix(in srgb, var(--orange) 8%, transparent); color: var(--orange);
 }
 .tc-h:hover { color: var(--fg); }
+
+/* Bash tool-call panels paint their title header in cyan to mirror
+   how file paths render (see ``.tp``).  The compound selector beats
+   the generic ``.tc-h`` rule above without raising specificity for
+   other tools. */
+.tc-h.tc-h-bash {
+  background: color-mix(in srgb, var(--cyan) 8%, transparent); color: var(--cyan);
+}
+.tc-h.tc-h-bash:hover { color: var(--fg); }
 .tc.collapsed > :not(.tc-h, .panel-copy-btn) { display: none; }
 
 .tp {
