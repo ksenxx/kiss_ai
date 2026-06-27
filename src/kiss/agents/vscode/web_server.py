@@ -75,7 +75,6 @@ from websockets.http11 import Request, Response
 from kiss.agents.vscode.diff_merge import _read_lines_preserved
 from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.agents.vscode.server import VSCodeServer
-from kiss.agents.vscode.user_assets import ensure_user_asset
 from kiss.agents.vscode.vscode_config import load_config, source_shell_env
 from kiss.core.config import get_jobs_root
 from kiss.viz_trajectory.server import find_job_dir, list_jobs, load_job_trajectories
@@ -2254,37 +2253,20 @@ def _fetch_latest_version() -> str | None:
 def _read_tricks() -> list[str]:
     """Parse ``~/.kiss/INJECTIONS.md`` and return the trick texts.
 
-    The user-local copy at ``~/.kiss/INJECTIONS.md`` is the runtime
-    source of truth — ``install.sh`` seeds it from the package copy
-    bundled at ``src/kiss/INJECTIONS.md`` on first install, and
-    :func:`ensure_user_asset` seeds it again the first time it is
-    read after a user wipes it; once present, user edits survive
-    every read.  This mirrors the ``SAMPLE_TASKS.md`` handling.
+    Thin wrapper around :func:`kiss.agents.vscode.tricks.read_tricks`
+    kept for backward compatibility with existing call sites in
+    :mod:`web_server`.  The user-local copy at
+    ``~/.kiss/INJECTIONS.md`` is the runtime source of truth — the
+    sidebar "Inject" panel and the ghost-text fast-complete pipeline
+    share that same file via the helper module.
 
-    The file contains a series of ``## Trick`` sections, each followed
-    by a blank line and a one-line trick.  Returns an empty list if the
-    file is missing or unparseable, so a deployment without
-    INJECTIONS.md still renders the button (with an empty list).
+    Returns:
+        Ordered list of trick text strings (one per ``## Trick``
+        section), or an empty list when INJECTIONS.md is missing or
+        unparseable so the button still renders.
     """
-    try:
-        package_path = Path(__file__).parent.parent.parent / "INJECTIONS.md"
-        tfile = ensure_user_asset("INJECTIONS.md", package_path)
-        text = tfile.read_text()
-    except Exception:
-        return []
-    tricks: list[str] = []
-    # Split on H2 headings, then keep only sections whose title is
-    # "Trick".  ``re.split`` with a capturing group preserves the
-    # heading so we can identify each section.
-    sections = re.split(r"^##\s+", text, flags=re.MULTILINE)
-    for section in sections[1:]:
-        lines = section.splitlines()
-        if not lines or lines[0].strip() != "Trick":
-            continue
-        body = "\n".join(lines[1:]).strip()
-        if body:
-            tricks.append(body)
-    return tricks
+    from kiss.agents.vscode.tricks import read_tricks
+    return read_tricks()
 
 
 _WS_SHIM_JS = r"""
