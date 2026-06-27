@@ -6006,6 +6006,18 @@
         failedDot.dataset.tooltip = 'Task failed';
         failedDot.setAttribute('aria-label', 'Task failed');
         div.appendChild(failedDot);
+      } else {
+        // Cleanly-finished task: render a SOLID green circle as the
+        // first child of the row so every History row carries some
+        // middle-left status indicator.  The shared #2e7d32 green is
+        // the same hue the running dot pulses to; the static
+        // ``.sidebar-item-completed`` rule omits the pulse animation
+        // so the user can tell at a glance "this one finished".
+        const completedDot = document.createElement('span');
+        completedDot.className = 'sidebar-item-completed';
+        completedDot.dataset.tooltip = 'Task completed';
+        completedDot.setAttribute('aria-label', 'Task completed');
+        div.appendChild(completedDot);
       }
 
       const textSpan = document.createElement('span');

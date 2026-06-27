@@ -1,0 +1,391 @@
+// Author: Koushik Sen (ksen@berkeley.edu)
+// Contributors:
+// Koushik Sen (ksen@berkeley.edu)
+// add your name here
+//
+// End-to-end test pinning two intertwined History-sidebar invariants
+// that regressed together:
+//
+//   (a) When the user starts a task and then opens the burger menu,
+//       the freshly-started running task MUST appear at the TOP of
+//       the History list (no other row may come before it).
+//
+//   (b) Each row's MIDDLE-LEFT MUST carry a green circle status
+//       indicator:
+//         * ``is_running:true``  → ``.sidebar-item-running``
+//           (pulsing green via @keyframes sidebar-running-pulse).
+//         * Finished cleanly     → ``.sidebar-item-completed``
+//           (SOLID green, no animation).
+//         * ``failed:true``      → ``.sidebar-item-failed``
+//           (solid red).
+//       The indicator MUST be the FIRST child of the row so it sits
+//       to the left of the task title.  No row may render WITHOUT
+//       one of these indicators.
+//
+// Run directly with ``node``:
+//
+//     node src/kiss/agents/vscode/test/historyTaskRowIndicators.test.js
+
+'use strict';
+
+const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
+const {JSDOM} = require('jsdom');
+
+const MEDIA = path.join(__dirname, '..', 'media');
+const FROZEN_NOW_MS = 1_700_500_000_000;
+
+function makeWebview() {
+  let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
+  html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
+  html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
+  html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
+
+  const dom = new JSDOM(html, {
+    runScripts: 'dangerously',
+    pretendToBeVisual: true,
+    url: 'https://localhost/',
+  });
+  const win = dom.window;
+
+  win.Element.prototype.scrollIntoView = function () {};
+  win.Element.prototype.scrollTo = function () {};
+  win.HTMLElement.prototype.scrollTo = function () {};
+
+  const RealDate = win.Date;
+  const FakeDate = function (...args) {
+    if (args.length === 0) return new RealDate(FROZEN_NOW_MS);
+    return new RealDate(...args);
+  };
+  FakeDate.prototype = RealDate.prototype;
+  FakeDate.now = () => FROZEN_NOW_MS;
+  FakeDate.parse = RealDate.parse;
+  FakeDate.UTC = RealDate.UTC;
+  win.Date = FakeDate;
+
+  const posted = [];
+  win.acquireVsCodeApi = function () {
+    let state;
+    return {
+      postMessage: msg => posted.push(msg),
+      getState: () => state,
+      setState: s => {
+        state = s;
+      },
+    };
+  };
+
+  // Inline main.css so getComputedStyle reflects the real
+  // .sidebar-item-* indicator rules in jsdom.
+  const cssText = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
+  const styleEl = win.document.createElement('style');
+  styleEl.textContent = cssText;
+  win.document.head.appendChild(styleEl);
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
+  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+
+  return {win, posted};
+}
+
+function send(win, data) {
+  win.dispatchEvent(new win.MessageEvent('message', {data}));
+}
+
+function makeRow(overrides) {
+  return Object.assign(
+    {
+      id: 'chat-' + (overrides.task_id || 0),
+      task_id: overrides.task_id || 0,
+      title: overrides.title || 'untitled',
+      timestamp: overrides.timestamp || 1_700_000_000,
+      preview: overrides.title || 'untitled',
+      has_events: false,
+      failed: false,
+      is_running: false,
+      tokens: 1,
+      cost: 0,
+      steps: 1,
+      is_favorite: false,
+      work_dir: '',
+      startTs: (overrides.timestamp || 1_700_000_000) * 1000,
+      endTs: 1_700_000_010_000,
+    },
+    overrides,
+  );
+}
+
+function uncheckWorkspaceFilter(win) {
+  // Workspace filter is on by default; switch it off so empty
+  // work_dir rows (fresh running tasks) and finished rows alike
+  // pass the filter and become visible.  Without this, the
+  // workspace filter would hide rows whose ``work_dir`` does not
+  // match the client's configured workspace.
+  send(win, {
+    type: 'configData',
+    config: {work_dir: ''},
+    apiKeys: {},
+  });
+  const ws = win.document.getElementById('hf-workspace');
+  if (ws && ws.checked) {
+    ws.checked = false;
+    ws.dispatchEvent(new win.Event('change', {bubbles: true}));
+  }
+}
+
+function openBurgerMenu(win) {
+  // ``menu-btn`` is the burger button under the input box; clicking
+  // it opens the History sidebar (#sidebar) and posts ``getHistory``
+  // to the backend.
+  const btn = win.document.getElementById('menu-btn');
+  assert.ok(btn, 'burger menu button (#menu-btn) must exist');
+  btn.click();
+}
+
+function rows(win) {
+  const list = win.document.getElementById('history-list');
+  return list.querySelectorAll('.sidebar-item');
+}
+
+function indicatorOf(row) {
+  return (
+    row.querySelector('.sidebar-item-running') ||
+    row.querySelector('.sidebar-item-completed') ||
+    row.querySelector('.sidebar-item-failed')
+  );
+}
+
+function testRunningTaskShowsAtTopAfterBurgerOpen() {
+  // Scenario: an older finished task is already in history; the
+  // user kicks off a new task whose row is persisted at the top
+  // of ``task_history`` (most-recent timestamp).  When the user
+  // clicks the burger menu, the backend's ``getHistory`` reply
+  // delivers sessions in ``ORDER BY timestamp DESC`` — the
+  // running task therefore arrives FIRST.  The frontend MUST
+  // preserve that ordering: the running row MUST be rendered as
+  // the FIRST ``.sidebar-item`` in the History list.
+  const {win, posted} = makeWebview();
+
+  // Simulate: user clicks the burger menu while a task is running.
+  // This must open the sidebar AND post ``getHistory``.
+  openBurgerMenu(win);
+  uncheckWorkspaceFilter(win);
+  const getHist = posted.find(m => m && m.type === 'getHistory');
+  assert.ok(
+    getHist,
+    'opening the burger menu must post getHistory; got: ' +
+      JSON.stringify(posted),
+  );
+
+  // Backend reply (timestamp-DESC order): the newly-started
+  // running task comes first, the older finished task second.
+  const sessions = [
+    makeRow({
+      task_id: 101,
+      title: 'NEW running task',
+      is_running: true,
+      timestamp: 1_700_100_000,
+      endTs: 0,
+    }),
+    makeRow({
+      task_id: 100,
+      title: 'OLD finished task',
+      is_running: false,
+      timestamp: 1_700_000_000,
+    }),
+  ];
+  send(win, {
+    type: 'history',
+    sessions,
+    offset: 0,
+    generation: getHist.generation,
+  });
+
+  const r = rows(win);
+  assert.strictEqual(r.length, 2, 'both rows must render');
+  const firstText = r[0].querySelector('.sidebar-item-text');
+  assert.ok(firstText, 'first row must have a text span');
+  assert.strictEqual(
+    firstText.textContent,
+    'NEW running task',
+    'the freshly-started running task MUST be the FIRST row in ' +
+      'the History list when the burger menu is opened',
+  );
+
+  // And the running row must carry the pulsing green dot as its
+  // first child (middle-left of the row).
+  const dot = r[0].querySelector('.sidebar-item-running');
+  assert.ok(
+    dot,
+    'first (running) row must carry .sidebar-item-running dot',
+  );
+  assert.strictEqual(
+    r[0].firstElementChild,
+    dot,
+    'pulsing dot must be the first child of the row',
+  );
+
+  win.close();
+  console.log(
+    '  ok - running task is FIRST in History list when burger menu opens',
+  );
+}
+
+function testFinishedTaskShowsSolidGreenCircle() {
+  // Scenario: a task that has completed successfully (not running,
+  // not failed) must render a SOLID green circle (no pulsing) at
+  // the middle-left of its row, so the user can tell at a glance
+  // that the task finished cleanly.  Before this fix, finished
+  // rows rendered NO indicator at all — only running and failed
+  // rows had one — which is exactly the regression the user hit.
+  const {win, posted} = makeWebview();
+  openBurgerMenu(win);
+  uncheckWorkspaceFilter(win);
+  const getHist = posted.find(m => m && m.type === 'getHistory');
+  assert.ok(getHist, 'burger menu open must post getHistory');
+
+  const sessions = [
+    makeRow({task_id: 1, title: 'completed task', is_running: false}),
+    makeRow({
+      task_id: 2,
+      title: 'running task',
+      is_running: true,
+      endTs: 0,
+    }),
+    makeRow({
+      task_id: 3,
+      title: 'failed task',
+      is_running: false,
+      failed: true,
+    }),
+  ];
+  send(win, {
+    type: 'history',
+    sessions,
+    offset: 0,
+    generation: getHist.generation,
+  });
+
+  const byTitle = {};
+  rows(win).forEach(r => {
+    const t = r.querySelector('.sidebar-item-text');
+    if (t) byTitle[t.textContent] = r;
+  });
+
+  // The completed row MUST render the solid green circle.
+  const completedRow = byTitle['completed task'];
+  assert.ok(completedRow, 'completed row must render');
+  const completedDot = completedRow.querySelector('.sidebar-item-completed');
+  assert.ok(
+    completedDot,
+    'finished task row MUST carry a .sidebar-item-completed dot ' +
+      'so the user sees a SOLID green circle at the middle-left',
+  );
+  assert.strictEqual(
+    completedRow.firstElementChild,
+    completedDot,
+    'solid green circle must be the FIRST child (middle-left) of the row',
+  );
+
+  // Computed style: solid green (#2e7d32 == rgb(46, 125, 50)),
+  // no animation.
+  const cs = win.getComputedStyle(completedDot);
+  assert.strictEqual(
+    cs.backgroundColor,
+    'rgb(46, 125, 50)',
+    `solid circle background must be #2e7d32 ` +
+      `(rgb(46, 125, 50)); got: ${cs.backgroundColor}`,
+  );
+  const animName = cs.getPropertyValue('animation-name') || '';
+  const animShort = cs.getPropertyValue('animation') || '';
+  // ``animation-name: none`` or empty / no ``sidebar-running-pulse``
+  // mention is fine; the key requirement is that the completed dot
+  // does NOT inherit the pulsing animation.
+  assert.ok(
+    animName.indexOf('sidebar-running-pulse') < 0 &&
+      animShort.indexOf('sidebar-running-pulse') < 0,
+    'solid (completed) circle MUST NOT animate via ' +
+      `sidebar-running-pulse; got animation-name="${animName}" ` +
+      `animation="${animShort}"`,
+  );
+
+  // Running row still gets the pulsing dot, not the completed dot.
+  const runningRow = byTitle['running task'];
+  assert.ok(
+    runningRow.querySelector('.sidebar-item-running'),
+    'running row must still carry .sidebar-item-running',
+  );
+  assert.strictEqual(
+    runningRow.querySelector('.sidebar-item-completed'),
+    null,
+    'running row must NOT carry the completed dot',
+  );
+
+  // Failed row keeps the red dot, not the completed dot.
+  const failedRow = byTitle['failed task'];
+  assert.ok(
+    failedRow.querySelector('.sidebar-item-failed'),
+    'failed row must still carry .sidebar-item-failed',
+  );
+  assert.strictEqual(
+    failedRow.querySelector('.sidebar-item-completed'),
+    null,
+    'failed row must NOT carry the completed dot',
+  );
+
+  // Every row must have SOME middle-left indicator dot.
+  rows(win).forEach(r => {
+    assert.ok(
+      indicatorOf(r),
+      'every history row MUST carry exactly one middle-left ' +
+        'status indicator (running / completed / failed); row ' +
+        `"${r.querySelector('.sidebar-item-text').textContent}" has none`,
+    );
+  });
+
+  win.close();
+  console.log(
+    '  ok - finished task row shows SOLID green circle (middle-left)',
+  );
+}
+
+function testCompletedDotKeyframesNotShared() {
+  // Regression guard: the @keyframes ``sidebar-running-pulse`` rule
+  // belongs to the running dot ONLY.  The completed dot is a
+  // separate class; main.css MUST define it as solid green and MUST
+  // NOT attach the pulsing animation to it.
+  const cssText = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
+  assert.ok(
+    /\.sidebar-item-completed\s*\{/.test(cssText),
+    'main.css must define .sidebar-item-completed for the solid ' +
+      'green finished-task circle',
+  );
+
+  // Pull out the .sidebar-item-completed block and assert it does
+  // NOT contain ``animation:`` or ``animation-name:`` referencing
+  // the pulse keyframe.
+  const m = cssText.match(/\.sidebar-item-completed\s*\{([^}]*)\}/);
+  assert.ok(m, 'expected a single-rule .sidebar-item-completed block');
+  const body = m[1];
+  assert.ok(
+    body.indexOf('sidebar-running-pulse') < 0,
+    '.sidebar-item-completed MUST NOT use sidebar-running-pulse; ' +
+      'the solid circle is static',
+  );
+  assert.ok(
+    /background\s*:\s*#2e7d32/i.test(body),
+    '.sidebar-item-completed MUST use the #2e7d32 green background',
+  );
+
+  console.log('  ok - .sidebar-item-completed is defined as solid green');
+}
+
+function main() {
+  testRunningTaskShowsAtTopAfterBurgerOpen();
+  testFinishedTaskShowsSolidGreenCircle();
+  testCompletedDotKeyframesNotShared();
+  console.log('historyTaskRowIndicators.test.js: all assertions passed.');
+}
+
+main();
