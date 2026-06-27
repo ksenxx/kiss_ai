@@ -77,8 +77,12 @@ def has_openrouter_api_key() -> bool:
     return bool(os.environ.get("OPENROUTER_API_KEY"))
 
 
-def has_minimax_api_key() -> bool:
-    return bool(os.environ.get("MINIMAX_API_KEY"))
+def has_zai_api_key() -> bool:
+    return bool(os.environ.get("ZAI_API_KEY"))
+
+
+def has_moonshot_api_key() -> bool:
+    return bool(os.environ.get("MOONSHOT_API_KEY"))
 
 def get_required_api_key_for_model(model_name: str) -> str | None:
     if model_name.startswith("openrouter/"):
@@ -116,8 +120,10 @@ def get_required_api_key_for_model(model_name: str) -> str | None:
         return "ANTHROPIC_API_KEY"
     elif model_name.startswith("gemini-"):
         return "GEMINI_API_KEY"
-    elif model_name.startswith("minimax-"):
-        return "MINIMAX_API_KEY"
+    elif model_name.startswith("glm-"):
+        return "ZAI_API_KEY"
+    elif model_name.startswith("kimi-") or model_name.startswith("moonshot-"):
+        return "MOONSHOT_API_KEY"
     return None
 
 
@@ -149,8 +155,12 @@ requires_together_api_key = pytest.mark.skipif(
 requires_openrouter_api_key = pytest.mark.skipif(
     not has_openrouter_api_key(), reason="OPENROUTER_API_KEY environment variable not set"
 )
-requires_minimax_api_key = pytest.mark.skipif(
-    not has_minimax_api_key(), reason="MINIMAX_API_KEY environment variable not set"
+requires_zai_api_key = pytest.mark.skipif(
+    not has_zai_api_key(), reason="ZAI_API_KEY environment variable not set"
+)
+requires_moonshot_api_key = pytest.mark.skipif(
+    not has_moonshot_api_key(),
+    reason="MOONSHOT_API_KEY environment variable not set",
 )
 @pytest.fixture
 def temp_dir(tmp_path):
