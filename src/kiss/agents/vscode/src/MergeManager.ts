@@ -13,6 +13,10 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import {EventEmitter} from 'events';
+import {
+  showInformationNotification,
+  showWarningNotification,
+} from './WebviewNotifications';
 
 interface ProcessedHunk {
   /** Old-lines start (0-based, in the merged document) */
@@ -279,9 +283,7 @@ export class MergeManager extends EventEmitter {
       const ed = await this._getOrOpenEditor(fp);
       const ok = await this._delLinesWithRetry(ed, h[startProp], h[countProp]);
       if (!ok) {
-        vscode.window.showWarningMessage(
-          'Failed to apply change. Please try again.',
-        );
+        showWarningNotification('Failed to apply change. Please try again.');
         return;
       }
       const rm = h[countProp];
@@ -514,7 +516,7 @@ export class MergeManager extends EventEmitter {
         this._restoreBinaryBase(fp, basePath);
       }
       await vscode.workspace.saveAll(false);
-      vscode.window.showInformationMessage(label);
+      showInformationNotification(label);
       this.emit('allDone');
     }
   }
@@ -575,11 +577,11 @@ export class MergeManager extends EventEmitter {
     this._curHunk = null;
     vscode.workspace.saveAll(false).then(
       () => {
-        vscode.window.showInformationMessage('All changes reviewed.');
+        showInformationNotification('All changes reviewed.');
         this.emit('allDone');
       },
       () => {
-        vscode.window.showInformationMessage('All changes reviewed.');
+        showInformationNotification('All changes reviewed.');
         this.emit('allDone');
       },
     );
@@ -781,7 +783,7 @@ export class MergeManager extends EventEmitter {
     }
 
     const fileCount = (data.files || []).length;
-    vscode.window.showInformationMessage(
+    showInformationNotification(
       `Reviewing ${fileCount} file(s). Red = old, Green = new. Use Accept / Reject.`,
     );
   }

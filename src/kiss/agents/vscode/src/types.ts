@@ -86,7 +86,8 @@ export type FromWebviewMessage =
     }
   | {type: 'sizeReport'; innerWidth: number; screenWidth: number}
   | {type: 'runUpdate'}
-  | {type: 'serverReset'};
+  | {type: 'serverReset'}
+  | {type: 'notificationAction'; id: string; action?: string};
 
 /** Messages from extension to webview (matches browser event protocol) */
 export type ToWebviewMessage = ToWebviewMessageBody & {tabId?: string};
@@ -179,7 +180,8 @@ type ToWebviewMessageBody =
       prefix?: string;
       loading?: boolean;
     }
-  | {type: 'askUser'; question: string}
+  | {type: 'askUser'; question: string; tabId?: string}
+  | {type: 'askUserDone'; tabId?: string}
   | {type: 'error'; text: string}
   | {type: 'followup_suggestion'; text: string}
   | {type: 'tasks_updated'}
