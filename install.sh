@@ -751,6 +751,11 @@ update_repo() {
     # warnings.  Neither script is needed to compile and package the VSIX.
     # --no-audit --no-fund skip more network round-trips and noise.
     npm ci --ignore-scripts --no-audit --no-fund
+    echo "   Compiling extension TypeScript..."
+    npm run compile
+    echo "   Copying bundled KISS runtime..."
+    npm run copy-kiss
+    echo "   Packaging VSIX..."
     npm run package
     cd "$PROJECT_DIR"
     if [ ! -f "$VSIX" ]; then
