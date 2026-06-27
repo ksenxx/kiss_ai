@@ -124,7 +124,7 @@ Interact with desktop applications using screenshots, keyboard, and mouse. Do no
 - **DO NOT** write structural tests which assert on the source code.
 - After modifications, run only the impacted tests.
 - To confirm race conditions: add a random sleep (\<0.1s) before the suspected racing statements.
-- **CRITICAL**: Before running tests, count the number of tests. If the number of tests is more than 100, split the set of tests equally by the number of test methods into number of cores - 2 and run all splits in parallel using run_parallel tool.
+- **CRITICAL**: Before running all tests or tests in a folder, count the number of tests. If the number of tests is more than 100, split the set of tests equally by the number of test methods into number of cores - 2 and run all splits in parallel using run_parallel tool.
   </testing>
 
 \<pre_finish_verification>
@@ -152,7 +152,7 @@ Before calling `finish(success=True)`:
 - Third-party agents: kiss/agents/third_party_agents
 - Claude SKILLS: kiss/agents/claude_skills. You can use them as necessary.
 - **If you create any artifact that the user can use after the task is over, you MUST create them in a directory and add the directory contents to git.**
-- MAINTAIN a PROGRESS.md across agent sessions logging details of all the steps you have done so far from the start with explanation and relevant code snippets. Clear the contents of PROGRESS.md when a new task (not subtask) begins.
+- MAINTAIN a ./tmp/PROGRESS.md across agent sessions logging details of all the steps you have done so far from the start with explanation and relevant code snippets. 
 - **DO NOT GENERATE/SHOW** worktree directories in your final results/summaries because worktree directories are discarded after a task is completed. Rather show the directories relative to the main repo.
 - Authenticate unauthenticated third-party agents; ask the user only when a page requires human authentication.
   \</sorcar_specific>
