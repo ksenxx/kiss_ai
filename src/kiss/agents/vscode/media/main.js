@@ -271,7 +271,7 @@
     clearNotificationTimer(id);
     if (sticky) return;
     const delay =
-      severity === 'error' ? 15000 : severity === 'warning' ? 12000 : 10000;
+      severity === 'error' ? 7500 : severity === 'warning' ? 6000 : 5000;
     notificationTimers.set(
       id,
       setTimeout(() => removeNotification(id, undefined, false), delay),
