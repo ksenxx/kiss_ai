@@ -40,10 +40,17 @@ Two visibility regressions are also covered:
 from __future__ import annotations
 
 import json
+import shutil
+import tempfile
+import threading
 from pathlib import Path
+from typing import Any
 
 import pytest
 from playwright.sync_api import sync_playwright
+
+from kiss.agents.sorcar import persistence as th
+from kiss.agents.vscode.server import VSCodeServer
 
 _MEDIA_DIR = (
     Path(__file__).resolve().parents[4]
@@ -278,6 +285,17 @@ def _post_history(
         "offset": offset,
         "generation": generation,
     }
+    _post_history_event(page, ev, offset=offset, expected_total=expected_total)
+
+
+def _post_history_event(
+    page,
+    ev: dict[str, Any],
+    offset: int = 0,
+    expected_total: int | None = None,
+) -> None:
+    """Dispatch a real host ``history`` event and wait for rendered rows."""
+    sessions = ev.get("sessions", [])
     if expected_total is None:
         expected_total = len(sessions) if offset == 0 else None
     if expected_total is None:
@@ -285,7 +303,7 @@ def _post_history(
             "() => document.querySelectorAll('#history-list .sidebar-item').length"
         )
         expected_total = int(before) + len(sessions)
-    page.evaluate("ev => window.__post(ev)", ev)
+    page.evaluate("event => window.__post(event)", ev)
     page.wait_for_function(
         "expected => document.querySelectorAll("
         "'#history-list .sidebar-item'"
@@ -293,6 +311,99 @@ def _post_history(
         arg=expected_total,
         timeout=5000,
     )
+
+
+def _history_event_for_persisted_result(result: str) -> dict[str, Any]:
+    """Persist one task result and return the real ``getHistory`` event.
+
+    This exercises the backend half of the end-to-end pipeline instead
+    of fabricating ``session.failed`` in the browser test.  A cancelled
+    task previously persisted as ``"Task stopped by user"`` but the
+    server emitted ``failed: false``, so the real frontend had no red
+    circle to render.
+    """
+    tmp = tempfile.mkdtemp(prefix="kiss-history-cancel-test-")
+    orig_db_path = th._DB_PATH  # type: ignore[attr-defined]
+    th._close_db()
+    th._DB_PATH = Path(tmp) / "sorcar.db"  # type: ignore[attr-defined]
+    try:
+        server = VSCodeServer()
+        server.work_dir = tmp
+        events: list[dict[str, Any]] = []
+        lock = threading.Lock()
+        orig_broadcast = server.printer.broadcast
+
+        def capture(event: dict[str, Any]) -> None:
+            with lock:
+                events.append(dict(event))
+            orig_broadcast(event)
+
+        server.printer.broadcast = capture  # type: ignore[assignment]
+
+        task_id, _ = th._add_task("cancelled task from real backend")
+        th._save_task_result(result=result, task_id=task_id)
+        server._handle_command({"type": "getHistory"})
+
+        with lock:
+            for event in reversed(events):
+                if event.get("type") == "history":
+                    return dict(event)
+        raise AssertionError("getHistory did not broadcast a history event")
+    finally:
+        th._close_db()
+        th._DB_PATH = orig_db_path  # type: ignore[attr-defined]
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_user_cancelled_task_from_backend_history_renders_red_circle(
+    _browser,
+) -> None:
+    """A user-cancelled task must get a red circle in real history.
+
+    This is the regression the user reported: clicking Stop persists
+    ``"Task stopped by user"``.  Before the fix, ``getHistory`` emitted
+    that row with ``failed: false`` and the task history panel rendered
+    it as a completed row with no red circle.
+    """
+    event = _history_event_for_persisted_result("Task stopped by user")
+    session = event["sessions"][0]
+    assert session["preview"] == "cancelled task from real backend"
+    assert session["failed"] is True
+
+    context, page = _open_history_page(_browser)
+    try:
+        _post_history_event(page, event, expected_total=1)
+        state = page.evaluate(
+            """
+            () => {
+              const row = document.querySelector('#history-list .sidebar-item');
+              const dot = row && row.querySelector('.sidebar-item-failed');
+              const dotStyle = dot ? getComputedStyle(dot) : null;
+              return {
+                text: row && row.querySelector('.sidebar-item-text').textContent,
+                category: row && row.dataset.category,
+                rowVisible: !!row && row.offsetParent !== null,
+                hasFailedDot: !!dot,
+                dotVisible: !!dot && dot.offsetParent !== null,
+                dotBackground: dotStyle && dotStyle.backgroundColor,
+                dotWidth: dotStyle && dotStyle.width,
+                dotHeight: dotStyle && dotStyle.height,
+              };
+            }
+            """
+        )
+        assert state == {
+            "text": "cancelled task from real backend",
+            "category": "errors",
+            "rowVisible": True,
+            "hasFailedDot": True,
+            "dotVisible": True,
+            "dotBackground": "rgb(211, 47, 47)",
+            "dotWidth": "8px",
+            "dotHeight": "8px",
+        }
+    finally:
+        context.close()
 
 
 def test_failed_session_renders_red_circle(_browser) -> None:
