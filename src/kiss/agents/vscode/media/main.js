@@ -208,6 +208,179 @@
     return t.innerHTML;
   }
 
+  const notificationTimers = new Map();
+
+  function ensureNotificationContainer() {
+    let container = document.getElementById('kiss-notification-container');
+    if (!container) {
+      container = document.createElement('section');
+      container.id = 'kiss-notification-container';
+      container.className = 'kiss-notification-container';
+      container.setAttribute('aria-label', 'KISS Sorcar notifications');
+      document.body.appendChild(container);
+    }
+    let liveRegion = document.getElementById('kiss-notification-live-region');
+    if (!liveRegion) {
+      liveRegion = document.createElement('div');
+      liveRegion.id = 'kiss-notification-live-region';
+      liveRegion.className = 'kiss-sr-only';
+      liveRegion.setAttribute('role', 'status');
+      liveRegion.setAttribute('aria-live', 'polite');
+      liveRegion.setAttribute('aria-atomic', 'true');
+      document.body.appendChild(liveRegion);
+    }
+    return container;
+  }
+
+  function notificationIcon(severity) {
+    if (severity === 'error') return '\u2715';
+    if (severity === 'warning') return '\u26A0';
+    return '\u2139';
+  }
+
+  function notificationTitle(severity) {
+    if (severity === 'error') return 'Error';
+    if (severity === 'warning') return 'Warning';
+    return 'Information';
+  }
+
+  function clearNotificationTimer(id) {
+    const timer = notificationTimers.get(id);
+    if (timer) clearTimeout(timer);
+    notificationTimers.delete(id);
+  }
+
+  function notificationSelector(id) {
+    return (
+      '.kiss-notification[data-notification-id="' +
+      String(id).replace(/\\/g, '\\\\').replace(/"/g, '\\"') +
+      '"]'
+    );
+  }
+
+  function removeNotification(id, action, notifyExtension) {
+    clearNotificationTimer(id);
+    const toast = document.querySelector(notificationSelector(id));
+    if (toast && toast.parentNode) toast.parentNode.removeChild(toast);
+    if (notifyExtension) {
+      vscode.postMessage({type: 'notificationAction', id: id, action: action});
+    }
+  }
+
+  function scheduleNotificationDismiss(id, severity, sticky) {
+    clearNotificationTimer(id);
+    if (sticky) return;
+    const delay =
+      severity === 'error' ? 15000 : severity === 'warning' ? 12000 : 10000;
+    notificationTimers.set(
+      id,
+      setTimeout(() => removeNotification(id, undefined, false), delay),
+    );
+  }
+
+  function showNotification(ev) {
+    const container = ensureNotificationContainer();
+    const id = ev.id || String(Date.now());
+    let toast = container.querySelector(notificationSelector(id));
+    const severity = ev.severity || 'info';
+    const actions = Array.isArray(ev.actions) ? ev.actions : [];
+    const sticky = !!ev.sticky || actions.length > 0 || !!ev.progress;
+    if (!toast) {
+      toast = document.createElement('article');
+      toast.className = 'kiss-notification';
+      toast.dataset.notificationId = String(id);
+      toast.tabIndex = -1;
+      container.insertBefore(toast, container.firstChild);
+      toast.addEventListener('mouseenter', () => clearNotificationTimer(id));
+      toast.addEventListener('focusin', () => clearNotificationTimer(id));
+      toast.addEventListener('mouseleave', () =>
+        scheduleNotificationDismiss(id, severity, sticky),
+      );
+      toast.addEventListener('focusout', () =>
+        scheduleNotificationDismiss(id, severity, sticky),
+      );
+    }
+    toast.className = 'kiss-notification kiss-notification-' + severity;
+    toast.setAttribute('role', severity === 'error' ? 'alert' : 'status');
+    toast.setAttribute(
+      'aria-label',
+      notificationTitle(severity) + ': ' + (ev.message || ''),
+    );
+
+    const body = document.createElement('div');
+    body.className = 'kiss-notification-body';
+    const icon = document.createElement('div');
+    icon.className = 'kiss-notification-icon';
+    icon.setAttribute('aria-hidden', 'true');
+    icon.textContent = notificationIcon(severity);
+    const content = document.createElement('div');
+    content.className = 'kiss-notification-content';
+    const title = document.createElement('div');
+    title.className = 'kiss-notification-title';
+    title.textContent = notificationTitle(severity);
+    const message = document.createElement('div');
+    message.className = 'kiss-notification-message';
+    message.textContent = ev.message || '';
+    content.appendChild(title);
+    content.appendChild(message);
+    if (ev.progress && ev.progressMessage) {
+      const progress = document.createElement('div');
+      progress.className = 'kiss-notification-progress-message';
+      progress.textContent = ev.progressMessage;
+      content.appendChild(progress);
+    }
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.className = 'kiss-notification-close';
+    closeBtn.setAttribute('aria-label', 'Dismiss notification');
+    closeBtn.textContent = '\u00d7';
+    closeBtn.addEventListener('click', () =>
+      removeNotification(id, undefined, actions.length > 0),
+    );
+    body.appendChild(icon);
+    body.appendChild(content);
+    body.appendChild(closeBtn);
+    toast.replaceChildren(body);
+    if (ev.progress) {
+      const progressBar = document.createElement('div');
+      progressBar.className = 'kiss-notification-progress';
+      progressBar.setAttribute('aria-hidden', 'true');
+      toast.appendChild(progressBar);
+    }
+    if (actions.length > 0) {
+      const actionRow = document.createElement('div');
+      actionRow.className = 'kiss-notification-actions';
+      actions.forEach(action => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'kiss-notification-action';
+        button.textContent = String(action);
+        button.addEventListener('click', () =>
+          removeNotification(id, action, true),
+        );
+        actionRow.appendChild(button);
+      });
+      toast.appendChild(actionRow);
+    }
+    const liveRegion = document.getElementById('kiss-notification-live-region');
+    if (liveRegion) {
+      liveRegion.textContent = '';
+      setTimeout(() => {
+        liveRegion.textContent =
+          notificationTitle(severity) + ': ' + (ev.message || '');
+      }, 0);
+    }
+    scheduleNotificationDismiss(id, severity, sticky);
+  }
+
+  function updateNotification(ev) {
+    if (ev.close) {
+      removeNotification(ev.id, undefined, false);
+      return;
+    }
+    showNotification(ev);
+  }
+
   // State — isRunning mirrors the active tab's tab.isRunning for UI controls
   let isRunning = false;
   let selectedModel = '';
@@ -2737,6 +2910,9 @@
         // until ``connected === true``, then reveal the regular tabs.
         setServerLoading(!ev.connected);
         return;
+      case 'notification':
+        updateNotification(ev);
+        break;
       case 'status': {
         const evTab = findTabByEvt(ev);
         if (evTab) {
