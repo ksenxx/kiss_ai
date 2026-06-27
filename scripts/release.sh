@@ -249,6 +249,8 @@ build_vscode_extension() {
     # network/toolchain issues and neither script is needed to package the VSIX
     # (mirrors install.sh).
     npm ci --ignore-scripts --no-audit --no-fund
+    npm run compile
+    npm run copy-kiss
     npm run package
 
     if [[ ! -f "kiss-sorcar.vsix" ]]; then
