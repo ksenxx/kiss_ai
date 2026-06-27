@@ -1,80 +1,143 @@
-# Progress Log
+# Progress Log — Review-driven follow-up task
 
-## Task
+## Current task
 
-"When there is a new update to KISS Sorcar, show a **permanent** notification with a **button (SVG)** for update."
+Review the update-notification work from the previous task, reproduce bugs
+reported by the review with end-to-end tests, fix those bugs, run the tests in
+parallel, review the fixes, and repeat until no reported bugs remain.
 
-Steps:
+Model note: `set_model("gpt-5.5")` and `set_model("claude-opus-4-7")` both
+reported deferred model changes only; neither model is live in this environment.
+The review and fix passes were therefore performed by the active model.
 
-1. Reproduce the issue via an end-to-end test (FAIL initially).
-1. Fix the issue so the test passes.
+## Reviewed change set from previous task
 
-User requested: claude-opus-4-7 for coding/test/fix; gpt-5.5 for review. Neither is a real production model; calls to `set_model` succeed only as a deferred change. Will proceed with current model and note this fact.
+- `src/kiss/agents/vscode/media/main.js`: added visible sticky state for
+  notifications, SVG object actions, and the permanent
+  `kiss-update-available` toast for `update_available` daemon broadcasts.
+- `src/kiss/agents/vscode/media/main.css`: added icon/action alignment CSS.
+- `src/kiss/agents/vscode/test/updateNotification.test.js`: added the original
+  end-to-end update-toast regression test.
+- `src/kiss/agents/vscode/package.json`: added that test to the extension test
+  chain.
 
-## Files explored
+## Review findings
 
-- `src/kiss/agents/vscode/src/extension.ts`: Activation flow, watches `~/.kiss/.extension-updated` marker for *post-install* reloads. Does **not** detect when a *new* upstream version is available.
-- `src/kiss/agents/vscode/src/DependencyInstaller.ts`: Slow/fast install paths; emits `showInformationNotification('KISS Sorcar: Installation complete! Starting server in less than 1 minute ...')`. No detection of "new update available".
-- `src/kiss/agents/vscode/src/WebviewNotifications.ts`: `showInformation/Warning/Error/Notification`, `withWebviewNotificationProgress`. Posts `{type:'notification', id, severity, message, actions[], sticky}` to webview. No SVG-icon support on action buttons.
-- `src/kiss/agents/vscode/media/main.js` (lines 211-380): `showNotification(ev)`/`updateNotification(ev)`. Action buttons rendered as plain `<button class="kiss-notification-action">`. No SVG.
-- `src/kiss/agents/vscode/src/SorcarTab.ts`: `getVersion()` reads `src/kiss/_version.py`.
-- `src/kiss/agents/vscode/test/webviewNotifications.test.js`: Pattern for E2E tests — runs against compiled `out/*.js`, drives DOM webview via JSDOM, daemon stub via UDS.
+The thorough follow-up review identified these actionable bugs/regression risks:
 
-## Design
+1. `showNotification` registered `mouseleave`/`focusout` listeners only on first
+   toast creation, and those listeners closed over the first render's
+   `severity` and `sticky` values. Reusing a notification id with different
+   sticky semantics could leave a now-transient toast alive forever or dismiss a
+   now-sticky toast.
+1. The new in-webview-only update notification used an object action with a
+   local `onClick`, but the X close button still called
+   `removeNotification(id, undefined, actions.length > 0)`. Closing the update
+   toast therefore posted an extension `notificationAction` message that has no
+   useful consumer.
+1. Re-broadcasting `update_available` with a newer `latest` version should keep
+   one stable toast while refreshing both the visible message and the action
+   `aria-label`. Review suggested this was likely correct but needed a guard.
 
-**Goal**: When KISS Sorcar detects (via GitHub releases API) that a newer release than the local `_version.py` exists, post a *sticky* webview notification with title "KISS Sorcar update available", message "vX.Y.Z is available — install now", containing one **action button with an embedded SVG icon** (a "download / update" arrow). Clicking the button triggers `kissSorcar.installUpdate` (runs `install.sh` curl pipeline from GitHub).
+Lower-severity notes were reviewed and not converted into fixes in this pass:
+error swallowing in local action handlers, `status`/`polite` ARIA semantics, and
+CSS layout changes for existing string action buttons. Existing tests cover the
+legacy string-action path.
 
-### Changes
+## Tests added
 
-1. **New file** `src/UpdateChecker.ts`:
-   - `fetchLatestRelease(): Promise<string|null>` — `https.get('https://api.github.com/repos/ksenxx/kiss_ai/releases/latest')`, returns `tag_name` stripped of leading `v`.
-   - `isNewer(latest, current)` — semver-ish 3-part compare.
-   - `checkForUpdateAndNotify(currentVersion, fetcher?, notifier?)` — composes the above. `fetcher`/`notifier` are injectable for tests (no mocks in test, but the production path stays pure).
-1. **Extend** `src/WebviewNotifications.ts`:
-   - Add a new helper `showUpdateNotification(message, actionLabel, actionSvg)` that posts `{type:'notification', severity:'info', sticky:true, persistent:true, actions:[{label, svg}]}`.
-   - Generalize action serialization so both `string[]` and `{label, svg}[]` work (back-compat).
-1. **Extend** `media/main.js`:
-   - When action is an object `{label, svg}`, build the `<button>` with an inline `<svg>` (sanitized — strip `<script>`, `on*` attrs, and `javascript:` URLs) followed by the label. Button gets `data-action-label`.
-1. **Extend** `media/main.css`: Style `.kiss-notification-action svg`.
-1. **Hook** in `src/extension.ts`:
-   - After `ensureDependencies()` succeeds, call `checkForUpdateAndNotify(getVersion())`. Register `kissSorcar.installUpdate` command that runs `install.sh` via Terminal.
-1. **Test** `test/updateNotification.test.js`:
-   - Start a local HTTP server that responds with a fake GitHub releases JSON (`tag_name: "v9999.0.0"`).
-   - Point `UpdateChecker` at it via dependency-injected URL.
-   - Drive the real compiled `WebviewNotifications.js` + a DOM webview via JSDOM.
-   - Assert: 1 notification posted, `sticky === true`, `actions[0].svg` present, DOM renders a `<button>` containing `<svg>`, clicking it posts `notificationAction` with the update action.
+Added `src/kiss/agents/vscode/test/updateNotification_review.test.js`, a real
+JSDOM webview end-to-end test that evaluates `media/panelCopy.js` and
+`media/main.js` and sends real `message` events. It covers:
 
-## Status
+- sticky-state refresh for a reused notification id:
+  `sticky:true` → `sticky:false` → hover clears the timer → mouseleave must
+  schedule a new 10-second auto-dismiss timer using the current state;
+- X-close on the update toast dismisses locally and does not post
+  `{type: "notificationAction"}`;
+- repeated `update_available` broadcasts with `latest: "9999.1.0"` reuse the
+  single toast and refresh the visible text plus `aria-label`.
 
-- Context exploration: DONE.
-- Implementation: PENDING (will continue in fresh context).
-- Test: PENDING.
+Before the fix, the new test failed with:
 
-## Next steps (resume)
+```text
+AssertionError [ERR_ASSERTION]: leaving a reused now-transient toast must reschedule auto-dismiss using current sticky state
+```
 
-1. Read `src/kiss/_version.py` for current version literal.
-1. Write `test/updateNotification.test.js` (E2E, failing).
-1. Run it — confirm FAIL with the right symptom.
-1. Implement `UpdateChecker.ts`, extend `WebviewNotifications.ts`, extend `media/main.js` + `main.css`, hook `extension.ts`.
-1. Recompile (`npm run compile` inside `src/kiss/agents/vscode`).
-1. Re-run the new test and the existing `webviewNotifications.test.js` — both must pass.
-1. Run `uv run check --full`.
-1. Clean up `./tmp/*` and finish.
+This reproduced the stale-closure bug.
 
-## Completion (continuation 1)
+## Fixes implemented
 
-Implemented and verified end-to-end:
+### `src/kiss/agents/vscode/media/main.js`
 
-- Wrote `src/kiss/agents/vscode/test/updateNotification.test.js` — a JSDOM-driven E2E that asserts (a) `update_available` with `available:true` renders a sticky `.kiss-notification`, (b) the action button contains a real namespaced `<svg>`, (c) clicking it posts `{type:'runUpdate'}`, (d) `available:false` removes the toast, (e) repeated broadcasts do not stack duplicates. Confirmed failing against unmodified `main.js` (no notification appeared).
-- Fixed `src/kiss/agents/vscode/media/main.js`:
-  - `showNotification` now exposes `data-notification-sticky` on the toast and accepts each `actions[i]` as either a string (back-compat) or `{label, svg?, ariaLabel?, onClick?}`. When an `svg` string is provided it is parsed with `DOMParser` as `image/svg+xml`, sanitised via `kissSanitize`, namespace-checked, and adopted into the button as a real `SVGElement`.
-  - Refactored `renderUpdateAvailable` into `renderUpdateAvailableBadge` (the existing settings-panel green-arrow badge — unchanged behaviour) and a new `renderUpdateAvailableNotification` that posts (or removes) a sticky toast with id `kiss-update-available` carrying the Feather "download" SVG icon. Clicking the SVG action button calls `vscode.postMessage({type:'runUpdate'})`, mirroring the existing settings-panel button — so the existing extension-side `runUpdate` handler runs `install.sh` unchanged.
-- Extended `src/kiss/agents/vscode/media/main.css` to lay out the action-button icon (`.kiss-notification-action-icon` 14×14) in an inline-flex row with the label.
-- Registered `test/updateNotification.test.js` in the `npm test` chain in `src/kiss/agents/vscode/package.json`.
+- Added local-action detection:
 
-Verification:
+```js
+const hasLocalActions = actions.some(
+  action =>
+    action &&
+    typeof action === 'object' &&
+    !Array.isArray(action) &&
+    typeof action.onClick === 'function',
+);
+const notifyOnClose = actions.length > 0 && !hasLocalActions;
+```
 
-- `node test/updateNotification.test.js` — PASS.
-- `node test/webviewNotifications.test.js` — PASS (no regression in the existing string-actions path, including the `'Apply'` click round-trip and `'Choose an API key action.'` close-button dismissal).
-- `npm test` in `src/kiss/agents/vscode` — all suites green.
-- `uv run check --full` — Python lint/type-check, VS Code extension typecheck+lint all green; only mdformat needed a re-format of this PROGRESS.md.
+- Changed hover/focus lifecycle listeners to read current toast state instead of
+  stale first-render closure values:
+
+```js
+toast.addEventListener('mouseleave', () => {
+  const state = toast.kissNotificationState || {
+    id: id,
+    severity: 'info',
+    sticky: false,
+  };
+  scheduleNotificationDismiss(state.id, state.severity, state.sticky);
+});
+toast.addEventListener('focusout', () => {
+  const state = toast.kissNotificationState || {
+    id: id,
+    severity: 'info',
+    sticky: false,
+  };
+  scheduleNotificationDismiss(state.id, state.severity, state.sticky);
+});
+```
+
+- Refreshed `toast.kissNotificationState` on every render:
+
+```js
+toast.kissNotificationState = {id: id, severity: severity, sticky: sticky};
+```
+
+- Changed the close button to use the current render's notification-close
+  policy:
+
+```js
+closeBtn.addEventListener('click', () =>
+  removeNotification(id, undefined, notifyOnClose),
+);
+```
+
+### `src/kiss/agents/vscode/package.json`
+
+Added `node test/updateNotification_review.test.js` to the `npm test` chain.
+
+## Verification performed
+
+- `cd src/kiss/agents/vscode && node test/updateNotification_review.test.js`:
+  failed before the fix, then passed after the fix.
+- `cd src/kiss/agents/vscode && npm run compile && find test -name '*.test.js' -print0 | xargs -0 -n 1 -P 8 node`: all 32 VS Code extension
+  tests passed in parallel after compiling.
+- `uv run check --full`: all code, type, VS Code extension, tests, and
+  markdown formatting passed. The first run exposed an unformatted
+  `PROGRESS.md`; after formatting this file, the full check was re-run and
+  passed.
+
+## Final review loop status
+
+After the fixes, the review no longer found an actionable reproduced bug in the
+update-notification changes. The local-action close semantics remain compatible
+with existing string actions, and the stable update-toast id refreshes message
+and `aria-label` without stacking duplicates.

@@ -284,6 +284,14 @@
     let toast = container.querySelector(notificationSelector(id));
     const severity = ev.severity || 'info';
     const actions = Array.isArray(ev.actions) ? ev.actions : [];
+    const hasLocalActions = actions.some(
+      action =>
+        action &&
+        typeof action === 'object' &&
+        !Array.isArray(action) &&
+        typeof action.onClick === 'function',
+    );
+    const notifyOnClose = actions.length > 0 && !hasLocalActions;
     const sticky = !!ev.sticky || actions.length > 0 || !!ev.progress;
     if (!toast) {
       toast = document.createElement('article');
@@ -293,13 +301,24 @@
       container.insertBefore(toast, container.firstChild);
       toast.addEventListener('mouseenter', () => clearNotificationTimer(id));
       toast.addEventListener('focusin', () => clearNotificationTimer(id));
-      toast.addEventListener('mouseleave', () =>
-        scheduleNotificationDismiss(id, severity, sticky),
-      );
-      toast.addEventListener('focusout', () =>
-        scheduleNotificationDismiss(id, severity, sticky),
-      );
+      toast.addEventListener('mouseleave', () => {
+        const state = toast.kissNotificationState || {
+          id: id,
+          severity: 'info',
+          sticky: false,
+        };
+        scheduleNotificationDismiss(state.id, state.severity, state.sticky);
+      });
+      toast.addEventListener('focusout', () => {
+        const state = toast.kissNotificationState || {
+          id: id,
+          severity: 'info',
+          sticky: false,
+        };
+        scheduleNotificationDismiss(state.id, state.severity, state.sticky);
+      });
     }
+    toast.kissNotificationState = {id: id, severity: severity, sticky: sticky};
     toast.className = 'kiss-notification kiss-notification-' + severity;
     // Expose `sticky` on the DOM so downstream tests (and any future
     // a11y tooling) can verify that a notification will not auto-
@@ -341,7 +360,7 @@
     closeBtn.setAttribute('aria-label', 'Dismiss notification');
     closeBtn.textContent = '\u00d7';
     closeBtn.addEventListener('click', () =>
-      removeNotification(id, undefined, actions.length > 0),
+      removeNotification(id, undefined, notifyOnClose),
     );
     body.appendChild(icon);
     body.appendChild(content);
