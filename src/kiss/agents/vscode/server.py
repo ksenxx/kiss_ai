@@ -577,26 +577,40 @@ class VSCodeServer(
         # take precedence over this process's stale in-memory default.
         # Honor the persisted last model whenever it is still runnable.
         available_names = {m["name"] for m in models_list}
-        persisted = _load_last_model()
-        if persisted in available_names:
-            self._default_model = persisted
+        with self._state_lock:
+            # Read the persisted last model INSIDE the lock so a
+            # concurrent ``_cmd_select_model`` (which now persists
+            # under the same lock) cannot leave us with a stale
+            # on-disk value that would clobber the user's just-picked
+            # in-memory selection.
+            persisted = _load_last_model()
+            if persisted in available_names:
+                self._default_model = persisted
 
-        # On a fresh installation the server is constructed before any
-        # API key is configured, so ``self._default_model`` is the
-        # ``"No model"`` sentinel.  Once a key becomes available (env var
-        # or settings panel), ``get_available_models()`` returns real
-        # models, but the cached sentinel would keep the picker stuck on
-        # "No model".  Re-resolve the default whenever the cached
-        # selection is no longer a valid choice so the picker recovers.
-        if self._default_model not in available_names:
-            refreshed = get_default_model()
-            if refreshed in available_names:
-                self._default_model = refreshed
+            # On a fresh installation the server is constructed before any
+            # API key is configured, so ``self._default_model`` is the
+            # ``"No model"`` sentinel.  Once a key becomes available (env var
+            # or settings panel), ``get_available_models()`` returns real
+            # models, but the cached sentinel would keep the picker stuck on
+            # "No model".  Re-resolve the default whenever the cached
+            # selection is no longer a valid choice so the picker recovers.
+            # If the only available option is a custom endpoint, the core
+            # default resolver cannot name it; choose the first available
+            # entry so the picker never emits a stale unavailable selection.
+            if self._default_model not in available_names:
+                refreshed = get_default_model()
+                if refreshed in available_names:
+                    self._default_model = refreshed
+                elif models_list:
+                    self._default_model = str(models_list[0]["name"])
+                else:
+                    self._default_model = refreshed
+            selected = self._default_model
 
         event: dict[str, Any] = {
             "type": "models",
             "models": models_list,
-            "selected": self._default_model,
+            "selected": selected,
         }
         if conn_id:
             event["connId"] = conn_id
@@ -1111,11 +1125,21 @@ class VSCodeServer(
             # disposed.  Mirror ``_replay_session``'s empty-id no-op.
             logger.debug("newChat ignored: empty tabId")
             return
-        persisted = _load_last_model()
-        if persisted:
-            self._default_model = persisted
         tab = self._get_tab(tab_id)
         with self._state_lock:
+            # Read the persisted last model INSIDE ``_state_lock`` so a
+            # concurrent ``_cmd_select_model`` (which now persists
+            # under the same lock) cannot leave us with a stale
+            # on-disk value that would clobber the user's just-picked
+            # in-memory selection.  Without this guard,
+            # ``_load_last_model()`` could read the OLD on-disk value
+            # mid-flight of ``_cmd_select_model``'s disk write, then
+            # ``self._default_model = persisted`` would revert the
+            # just-picked model both on the daemon-wide default AND
+            # on this new tab's ``selected_model``.
+            persisted = _load_last_model()
+            if persisted:
+                self._default_model = persisted
             tab.selected_model = self._default_model
             # Clear the long-lived chat identity for this tab; the
             # next ``_cmd_run`` will mint a fresh chat id when it
@@ -1128,6 +1152,13 @@ class VSCodeServer(
             # chat until ``_cmd_run`` mints one or ``_replay_session``
             # associates a resumed one.
             self._tab_chat_views.pop(tab_id, None)
+            # Snapshot the model under the lock so the ``showWelcome``
+            # broadcast below cannot disagree with the in-memory state
+            # captured for ``tab.selected_model`` above (a concurrent
+            # ``_cmd_select_model`` could otherwise mutate
+            # ``self._default_model`` between the lock release and the
+            # broadcast read).
+            welcome_model = self._default_model
         # Drop any live-task subscriptions this tab carried from the
         # chat it previously displayed (e.g. a still-running task it
         # was viewing via ``_reattach_running_chat``).  The webview now
@@ -1141,7 +1172,7 @@ class VSCodeServer(
         self.printer.broadcast({
             "type": "showWelcome",
             "tabId": tab_id,
-            "model": self._default_model,
+            "model": welcome_model,
         })
 
     def _replay_session(
