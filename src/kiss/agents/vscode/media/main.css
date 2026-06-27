@@ -1680,6 +1680,11 @@ body.remote-chat #welcome-config { display: none !important; }
   animation: sidebar-running-pulse 1.5s ease-in-out infinite;
 }
 
+.running-item > .sidebar-item-failed,
+.running-item > .sidebar-item-running {
+  align-self: flex-start;
+}
+
 .running-item {
   flex-wrap: wrap;
   white-space: normal;
