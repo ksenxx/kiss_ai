@@ -350,6 +350,70 @@ function testFinishedTaskShowsSolidGreenCircle() {
   );
 }
 
+function testIndicatorsAreVerticallyCenteredInTaskPanels() {
+  // Reproduces the visual regression reported by the user: History
+  // rows use the same multi-line ``running-item`` task-panel layout
+  // for running, completed, and failed tasks.  The status indicator
+  // is the row's first child at the left edge; it must be vertically
+  // centered in the panel, not pinned to the top-left.  This drives
+  // the real chat.html + main.css + main.js inside jsdom and checks
+  // the rendered task panels for all three status variants.
+  const {win, posted} = makeWebview();
+  openBurgerMenu(win);
+  uncheckWorkspaceFilter(win);
+  const getHist = posted.find(m => m && m.type === 'getHistory');
+  assert.ok(getHist, 'burger menu open must post getHistory');
+
+  send(win, {
+    type: 'history',
+    sessions: [
+      makeRow({task_id: 11, title: 'completed centered task'}),
+      makeRow({
+        task_id: 12,
+        title: 'running centered task',
+        is_running: true,
+        endTs: 0,
+      }),
+      makeRow({
+        task_id: 13,
+        title: 'failed centered task',
+        failed: true,
+      }),
+    ],
+    offset: 0,
+    generation: getHist.generation,
+  });
+
+  rows(win).forEach(row => {
+    const title = row.querySelector('.sidebar-item-text').textContent;
+    const indicator = indicatorOf(row);
+    assert.ok(indicator, `row ${title} must render a status indicator`);
+    assert.strictEqual(
+      row.firstElementChild,
+      indicator,
+      `row ${title} indicator must stay at the left edge as first child`,
+    );
+    const style = win.getComputedStyle(indicator);
+    assert.strictEqual(
+      style.top,
+      '50%',
+      `row ${title} indicator must be vertically centered in the task ` +
+        `panel, not top-aligned; got top=${style.top}`,
+    );
+    assert.strictEqual(
+      style.transform,
+      'translateY(-50%)',
+      `row ${title} indicator must translate by half its own height ` +
+        `to sit at panel middle-left; got transform=${style.transform}`,
+    );
+  });
+
+  win.close();
+  console.log(
+    '  ok - history task-panel indicators are centered at middle-left',
+  );
+}
+
 function testCompletedDotKeyframesNotShared() {
   // Regression guard: the @keyframes ``sidebar-running-pulse`` rule
   // belongs to the running dot ONLY.  The completed dot is a
@@ -384,6 +448,7 @@ function testCompletedDotKeyframesNotShared() {
 function main() {
   testRunningTaskShowsAtTopAfterBurgerOpen();
   testFinishedTaskShowsSolidGreenCircle();
+  testIndicatorsAreVerticallyCenteredInTaskPanels();
   testCompletedDotKeyframesNotShared();
   console.log('historyTaskRowIndicators.test.js: all assertions passed.');
 }

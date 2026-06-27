@@ -781,16 +781,16 @@ def test_status_running_true_event_triggers_history_refresh(_browser) -> None:
         context.close()
 
 
-def test_running_dot_stays_on_first_text_line_in_narrow_history_sidebar(
+def test_running_dot_is_centered_middle_left_in_history_task_panel(
     _browser,
 ) -> None:
-    """At a narrow viewport the running marker must not wrap onto its
-    own line above the task text.
+    """At a narrow viewport the running marker must remain at the
+    middle-left of the whole task panel.
 
-    Mirrors the failed-dot positioning test added by commit 60f44dfe
-    so the same regression cannot return for the green running dot
-    (which inherits ``align-self: flex-start`` from the shared rule
-    in ``main.css``).
+    The History sidebar renders each task as a multi-line panel with
+    title, metrics, and workspace metadata.  The green running marker
+    should stay on the left edge while being vertically centered in the
+    panel, not pinned to the first text line at the top-left.
     """
     context, page = _open_history_page(_browser, width=180, height=900)
     try:
@@ -809,9 +809,8 @@ def test_running_dot_stays_on_first_text_line_in_narrow_history_sidebar(
               const textRect = text.getBoundingClientRect();
               return {
                 rowWidth: rowRect.width,
-                dotTop: dotRect.top,
-                dotBottom: dotRect.bottom,
-                textTop: textRect.top,
+                rowMiddle: rowRect.top + rowRect.height / 2,
+                dotMiddle: dotRect.top + dotRect.height / 2,
                 textLeft: textRect.left,
                 dotLeft: dotRect.left,
               };
@@ -819,7 +818,7 @@ def test_running_dot_stays_on_first_text_line_in_narrow_history_sidebar(
             """
         )
         assert geometry["rowWidth"] < 170, geometry
-        assert abs(geometry["dotTop"] - geometry["textTop"]) <= 2, geometry
+        assert abs(geometry["dotMiddle"] - geometry["rowMiddle"]) <= 2, geometry
         assert geometry["dotLeft"] < geometry["textLeft"], geometry
     finally:
         context.close()
