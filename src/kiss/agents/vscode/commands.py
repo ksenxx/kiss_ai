@@ -145,6 +145,7 @@ class _CommandsMixin:
         _last_active_content: dict[str, str]
         _file_cache: dict[str, list[str]]
         _tab_chat_views: dict[str, str]
+        _pending_user_answer_tasks: dict[int, str]
 
         def _get_tab(self, tab_id: str) -> _RunningAgentState: ...
         def _run_task(self, cmd: dict[str, Any]) -> None: ...
@@ -463,6 +464,7 @@ class _CommandsMixin:
             if q is None:
                 logger.debug("userAnswer dropped: no queue for tabId=%s", ans_tab)
                 return
+            answered_task_id = self._pending_user_answer_tasks.pop(id(q), "")
             while not q.empty():
                 try:
                     q.get_nowait()
@@ -478,39 +480,45 @@ class _CommandsMixin:
                 q.put_nowait(answer)
             except queue.Full:  # pragma: no cover — drained immediately above
                 pass
-        clear_tabs = self._user_answer_clear_tabs(ans_tab)
+        clear_tabs = self._user_answer_clear_tabs(ans_tab, answered_task_id)
         for tab_id in clear_tabs:
             self.printer.broadcast({"type": "askUserDone", "tabId": tab_id})
 
-    def _user_answer_clear_tabs(self, ans_tab: str) -> list[str]:
+    def _user_answer_clear_tabs(
+        self, ans_tab: str, answered_task_id: str,
+    ) -> list[str]:
         """Return every tab whose ask-user modal should close.
 
-        A submitted answer resolves one pending question for the shared
-        task/chat, regardless of which subscribed tab supplied it.  The
-        frontend clears the modal locally on click, but every sibling
-        frontend also needs an explicit event or it will keep showing a
-        stale answer window for the already-answered question.  The
-        source set is the printer subscriber graph: all tabs subscribed
-        to any task containing ``ans_tab`` should close.
+        A submitted answer resolves one pending question for exactly one
+        running task/chat, regardless of which subscribed tab supplied it.
+        Completed-task subscriber sets are intentionally retained for
+        post-task broadcasts, so closing every historic subscriber set
+        that contains ``ans_tab`` can dismiss an unrelated tab's current
+        question.  The pending-question registry records the task id that
+        owns the queue which consumed this answer; only that task's
+        subscribers receive ``askUserDone``.
 
         Args:
             ans_tab: Frontend tab id carried by the ``userAnswer``
                 command.
+            answered_task_id: Task id associated with the live
+                ``ask_user_question`` that consumed the answer.
 
         Returns:
             Stable list of tab ids to receive ``askUserDone``.
         """
         if not ans_tab:
             return []
+        if not answered_task_id:
+            return [ans_tab]
         printer_lock = getattr(self.printer, "_lock", None)
         subs_map = getattr(self.printer, "_subscribers", {})
         if printer_lock is None:
             return [ans_tab]
+        task_key = self.printer._coerce_task_id(answered_task_id)
         with printer_lock:
-            tabs: set[str] = set()
-            for viewers in subs_map.values():
-                if ans_tab in viewers:
-                    tabs.update(str(v) for v in viewers if v)
+            viewers = list(subs_map.get(task_key, ()))
+        tabs = {str(v) for v in viewers if v}
         if not tabs:
             tabs.add(ans_tab)
         return sorted(tabs)
