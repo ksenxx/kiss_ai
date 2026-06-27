@@ -1223,13 +1223,31 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         this._runUpdate();
         break;
 
-      case 'serverReset':
+      case 'serverReset': {
         // Forward to the kiss-web daemon, which SIGTERMs itself so the
         // supervising LaunchAgent/systemd unit respawns a fresh
         // process.  The AgentClient transparently reconnects over the
         // UDS once the new daemon is listening.
+        //
+        // When the webview reports that an agent is still running on
+        // some tab, raise a native VS Code modal dialog asking the
+        // user to confirm — the reset SIGTERMs every in-flight agent
+        // and silently aborting their task is destructive.  The modal
+        // shows "OK" and "Cancel" buttons (VS Code adds Cancel
+        // automatically for ``{modal: true}`` warning messages); the
+        // reset is only forwarded when the user picks OK.
+        if (message.agentRunning) {
+          const choice = await vscode.window.showWarningMessage(
+            'An agent is still running. Restart the server anyway? ' +
+              'This will abort the in-flight task.',
+            {modal: true},
+            'OK',
+          );
+          if (choice !== 'OK') break;
+        }
         this._getClient().sendCommand({type: 'serverReset'});
         break;
+      }
 
       case 'notificationAction':
         resolveWebviewNotificationAction(message.id, message.action);
