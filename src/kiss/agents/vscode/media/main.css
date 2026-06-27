@@ -77,11 +77,19 @@ body {
   pointer-events: auto;
   color: var(--fg);
   background: var(--bg2);
-  border: 1px solid var(--border);
+  border: 2px solid color-mix(in srgb, var(--accent) 70%, var(--fg));
   border-radius: 6px;
   box-shadow: 0 8px 24px rgb(0 0 0 / 45%);
   overflow: hidden;
   animation: kiss-notification-in 0.18s ease-out;
+}
+
+.kiss-notification-warning {
+  border-color: color-mix(in srgb, var(--yellow) 75%, var(--fg));
+}
+
+.kiss-notification-error {
+  border-color: color-mix(in srgb, var(--red) 75%, var(--fg));
 }
 
 .kiss-notification-body {
