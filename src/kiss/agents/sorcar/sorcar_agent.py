@@ -107,9 +107,15 @@ def auto_commit_changes(
               works.
             - ``notify_fn("committed", subject)`` immediately after
               a successful commit, where *subject* is the first
-              non-empty line of the committed message.  Not invoked
-              when there was nothing to commit (``commit_staged``
-              returned ``False``).
+              non-empty line of the committed message.
+
+            Both hooks are SKIPPED when there is nothing to commit
+            (no staged diff after the initial ``stage_all``), so the
+            webview never sees a misleading "Generating commit
+            message" toast without a follow-up.  The "committed"
+            hook is also not invoked when ``commit_staged`` returns
+            ``False`` after *message_fn* (e.g. pre-commit hook
+            rejected the commit).
 
             All ``notify_fn`` exceptions are swallowed so a broken
             UI hook can never block the commit itself.
@@ -120,6 +126,13 @@ def auto_commit_changes(
     from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 
     GitWorktreeOps.stage_all(commit_dir)
+    # Short-circuit cleanly when there is nothing to commit: no
+    # "generating" toast (it would be misleading because no commit
+    # will happen), no LLM call (saves tokens), no follow-up
+    # "committed" toast.  Late-arriving files don't matter here
+    # because there's no slow message_fn window to race against.
+    if not GitWorktreeOps.staged_diff(commit_dir):
+        return False
     _safe_notify(notify_fn, "generating", "")
     try:
         msg = message_fn(commit_dir, user_prompt)
