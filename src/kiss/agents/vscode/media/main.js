@@ -2204,6 +2204,16 @@
         const c = mkEl('div', 'ev tc');
         const hdr = mkEl('div', 'tc-h');
         hdr.textContent = ev.name || 'Tool';
+        // The Bash tool-call panel header is painted in the cyan
+        // theme colour to visually distinguish shell invocations from
+        // every other tool (which use the orange accent).  Tag the
+        // header (and outer container) with a Bash-specific CSS hook
+        // so ``main.css`` can target it without touching the generic
+        // ``.tc-h`` rule that every other tool depends on.
+        if (ev.name === 'Bash') {
+          hdr.classList.add('tc-h-bash');
+          c.classList.add('tc-bash');
+        }
         let b = '';
         if (ev.path) {
           const ep = esc(ev.path).replace(/"/g, '&quot;');
