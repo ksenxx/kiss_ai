@@ -5,18 +5,19 @@
 //
 // End-to-end test for the "live panel time" feature.
 //
-// REQUIREMENT: While a panel (a Thoughts ``.llm-panel`` or a Tool-call
-// ``.tc`` panel) is still active — i.e. it has been opened but not yet
-// closed by ``thinking_end`` / ``tool_result`` / ``result`` — the
-// webview must update its ``.panel-time`` footer every second so the
-// user sees the elapsed time tick up live.
+// REQUIREMENT: While the model is thinking but has not produced any
+// thought tokens yet, the webview must already show the Thoughts
+// ``.llm-panel`` with a live ``.panel-time`` footer.  The footer must
+// keep updating every second while the panel is active — i.e. after
+// ``thinking_start`` and before ``thinking_end`` / ``result``.
 //
-// Before the fix, ``.panel-time`` is only rendered when the panel
-// closes, so an active panel shows no footer (and a freshly opened
-// panel has no visible elapsed time at all).  This test reproduces
-// that bug by opening a Thoughts panel and never closing it, waiting
-// real wall-clock time, and asserting that the footer exists and that
-// its value grows by ~1 second between ticks.
+// Before the fix, ``.panel-time`` was only rendered when the panel
+// closed, so an active tokenless Thoughts panel showed no visible
+// elapsed time at all.  This test reproduces that bug by opening a
+// Thoughts panel with ``thinking_start`` and intentionally sending no
+// ``thinking_delta`` events, waiting real wall-clock time, and
+// asserting that the tokenless panel exists, has a footer, and that
+// the footer value grows by ~1 second between ticks.
 //
 // Run directly with ``node``:
 //
@@ -109,12 +110,38 @@ async function runTests() {
     startTs: Date.now(),
   });
 
-  // Open a Thoughts panel but DO NOT close it — the panel must remain
-  // active so we can observe the live-tick footer growing in real time.
+  // Open a Thoughts panel but DO NOT send any thought tokens and DO
+  // NOT close it — this reproduces the user-visible bug where the
+  // model is thinking but has not produced any thought tokens yet.
+  // The tokenless panel must still be visible with live elapsed time.
   send(win, {type: 'thinking_start', tabId: TAB});
-  send(win, {type: 'thinking_delta', text: 'Planning…', tabId: TAB});
 
   const output = win.document.getElementById('output');
+  const immediatePanel = output.querySelector('.llm-panel');
+  assert.ok(
+    immediatePanel,
+    'BUG: thinking_start with no thought tokens must immediately show ' +
+      'the Thoughts panel so the user can see that the model is thinking.',
+  );
+  const thinkingContent = immediatePanel.querySelector('.ev.think .cnt');
+  assert.ok(
+    thinkingContent,
+    'expected the tokenless Thoughts panel to contain an empty ' +
+      'thinking content element',
+  );
+  assert.strictEqual(
+    thinkingContent.textContent,
+    '',
+    'test setup must reproduce the tokenless-thinking state before ' +
+      'checking the live time footer',
+  );
+  let immediateFooters = immediatePanel.querySelectorAll(':scope > .panel-time');
+  assert.strictEqual(
+    immediateFooters.length,
+    1,
+    'BUG: a tokenless active .llm-panel must show a .panel-time ' +
+      'footer immediately when thinking_start arrives.',
+  );
 
   // After ~2.2s the live ticker should have rendered at least once.
   await sleep(2200);
@@ -130,9 +157,10 @@ async function runTests() {
   assert.strictEqual(
     footers.length,
     1,
-    'BUG: an active .llm-panel must have a .panel-time footer that ' +
-      'updates live (got ' + footers.length + ' footers).  The webview ' +
-      'is only rendering the footer when the panel closes.',
+    'BUG: a tokenless active .llm-panel must have a .panel-time ' +
+      'footer that updates live (got ' + footers.length +
+      ' footers).  The webview is only rendering the footer when ' +
+      'the panel closes.',
   );
 
   const firstMs = parsePanelTimeMs(footers[0].textContent);
@@ -143,8 +171,8 @@ async function runTests() {
   );
   assert.ok(
     firstMs >= 1000,
-    'BUG: after waiting ~2.2s with an active panel, the live footer ' +
-      'must have ticked at least once and show >= 1000ms (got ' +
+    'BUG: after waiting ~2.2s with a tokenless active panel, the ' +
+      'live footer must have ticked at least once and show >= 1000ms (got ' +
       firstMs + 'ms).  The webview is not ticking the active footer.',
   );
 
@@ -178,6 +206,13 @@ async function runTests() {
     last && last.classList.contains('panel-time'),
     'BUG: live .panel-time must be the LAST child of its panel; last ' +
       'child is <' + (last ? last.tagName.toLowerCase() : 'null') + '>',
+  );
+
+  assert.strictEqual(
+    thinkingContent.textContent,
+    '',
+    'the Thoughts panel must still have zero thought tokens while its ' +
+      'live time footer is ticking',
   );
 
   // Closing the panel (via ``result``) must freeze the footer at the
