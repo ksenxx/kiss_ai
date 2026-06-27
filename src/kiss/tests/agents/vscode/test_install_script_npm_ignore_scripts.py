@@ -83,10 +83,14 @@ def test_install_sh_npm_ci_ignores_lifecycle_scripts() -> None:
         "'[5/6] Building VS Code extension...'"
     )
     src = INSTALL_SCRIPT.read_text(encoding="utf-8")
-    # "npm run package" also appears in install.sh's header comment — match
-    # the actual (indented) command statement.
-    assert src.index(line) < src.index("\n    npm run package"), (
-        "npm ci --ignore-scripts must run before npm run package"
+    assert src.index(line) < src.index("\n    npm run compile"), (
+        "npm ci --ignore-scripts must run before compiling the extension"
+    )
+    assert src.index("\n    npm run compile") < src.index("\n    npm run copy-kiss"), (
+        "install.sh must compile before copying the bundled runtime"
+    )
+    assert src.index("\n    npm run copy-kiss") < src.index("\n    npm run package"), (
+        "install.sh must copy the bundled runtime before packaging the VSIX"
     )
 
 
@@ -98,6 +102,10 @@ def test_release_scripts_npm_ci_ignore_lifecycle_scripts() -> None:
             f"{script.name} must pass --ignore-scripts to npm ci "
             "(parity with install.sh)"
         )
+        src = script.read_text(encoding="utf-8")
+        assert src.index(line) < src.index("\n    npm run compile")
+        assert src.index("\n    npm run compile") < src.index("\n    npm run copy-kiss")
+        assert src.index("\n    npm run copy-kiss") < src.index("\n    npm run package")
 
 
 def _write_dep_tarball(dest: Path) -> None:
