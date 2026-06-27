@@ -257,13 +257,24 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         notification_id = self._commit_run_id or (
             f"autocommit-{self._tab_id}-{time.time_ns()}"
         )
-        event = {
+        # The ``"generating"`` toast must remain visible for the
+        # entire (potentially long) LLM-driven commit-message call —
+        # the webview's transient auto-dismiss timer (~5 s) would
+        # otherwise hide it mid-flight and mislead the user into
+        # thinking the commit had stalled.  Mark it ``sticky`` so
+        # ``scheduleNotificationDismiss`` short-circuits, and rely on
+        # the subsequent ``"committed"`` event (which reuses the same
+        # ``id`` but omits ``sticky``) to replace it with a regular
+        # transient toast that fades out normally.
+        event: dict[str, object] = {
             "type": "notification",
             "id": notification_id,
             "severity": "info",
             "message": message,
             "tabId": self._tab_id,
         }
+        if stage == "generating":
+            event["sticky"] = True
         try:
             printer.broadcast(event)
         except Exception:  # pragma: no cover — best-effort UI hook
