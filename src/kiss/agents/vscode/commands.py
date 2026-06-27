@@ -478,6 +478,42 @@ class _CommandsMixin:
                 q.put_nowait(answer)
             except queue.Full:  # pragma: no cover — drained immediately above
                 pass
+        clear_tabs = self._user_answer_clear_tabs(ans_tab)
+        for tab_id in clear_tabs:
+            self.printer.broadcast({"type": "askUserDone", "tabId": tab_id})
+
+    def _user_answer_clear_tabs(self, ans_tab: str) -> list[str]:
+        """Return every tab whose ask-user modal should close.
+
+        A submitted answer resolves one pending question for the shared
+        task/chat, regardless of which subscribed tab supplied it.  The
+        frontend clears the modal locally on click, but every sibling
+        frontend also needs an explicit event or it will keep showing a
+        stale answer window for the already-answered question.  The
+        source set is the printer subscriber graph: all tabs subscribed
+        to any task containing ``ans_tab`` should close.
+
+        Args:
+            ans_tab: Frontend tab id carried by the ``userAnswer``
+                command.
+
+        Returns:
+            Stable list of tab ids to receive ``askUserDone``.
+        """
+        if not ans_tab:
+            return []
+        printer_lock = getattr(self.printer, "_lock", None)
+        subs_map = getattr(self.printer, "_subscribers", {})
+        if printer_lock is None:
+            return [ans_tab]
+        with printer_lock:
+            tabs: set[str] = set()
+            for viewers in subs_map.values():
+                if ans_tab in viewers:
+                    tabs.update(str(v) for v in viewers if v)
+        if not tabs:
+            tabs.add(ans_tab)
+        return sorted(tabs)
 
     def _resolve_user_answer_queue(
         self, ans_tab: str,
