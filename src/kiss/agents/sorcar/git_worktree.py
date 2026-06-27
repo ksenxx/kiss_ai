@@ -757,16 +757,19 @@ class GitWorktreeOps:
         """Install a merge driver that auto-resolves agent scratch files.
 
         ``PROGRESS.md`` is a tracked per-task agent log that every task
-        wholesale rewrites ("clear PROGRESS.md when a new task begins").
-        Whenever main's copy diverged from the worktree's fork point,
-        the whole-file rewrite on both sides made every three-way merge
-        (``git merge --squash`` and ``git cherry-pick`` alike) conflict
-        — blocking the entire worktree merge over a scratch file.
+        wholesale rewrites ("clear PROGRESS.md when a new task begins"),
+        and ``src/kiss/INJECTIONS.md`` is an agent-maintained scratch
+        prompt file that can drift between task baselines.  Whenever
+        main's copy diverged from the worktree's fork point, these
+        scratch-file rewrites made three-way merges (``git merge
+        --squash`` and ``git cherry-pick`` alike) conflict — blocking
+        the entire worktree merge over non-user source state.
 
         This registers a repo-local ``kiss-scratch`` merge driver that
         resolves content conflicts in such files by keeping the
-        incoming branch's version (``%B``): the newest task's log wins,
-        matching the clear-on-new-task convention.  Installation uses
+        incoming branch's version (``%B``): the newest task's scratch
+        state wins, matching the clear-on-new-task convention.
+        Installation uses
         only untracked plumbing — ``<git_common_dir>/info/attributes``
         plus repo-local config — so no tracked file is ever modified,
         and the driver equally fixes the *manual* merge/cherry-pick
@@ -775,9 +778,10 @@ class GitWorktreeOps:
         Args:
             repo: Git repo root path.
         """
-        GitWorktreeOps._append_info_line(
-            repo, "attributes", "PROGRESS.md merge=kiss-scratch"
-        )
+        for scratch_path in ("PROGRESS.md", "src/kiss/INJECTIONS.md"):
+            GitWorktreeOps._append_info_line(
+                repo, "attributes", f"{scratch_path} merge=kiss-scratch"
+            )
         _git(
             "config",
             "merge.kiss-scratch.name",

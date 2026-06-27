@@ -1,68 +1,112 @@
-# Progress — Add `start_line` parameter to Read tools
+# Progress — Diagnose and fix spurious merge-conflict message
 
-## Plan
+## Task
 
-1. Write failing integration tests that exercise reading a window starting at
-   `start_line` on:
-   - `kiss.agents.sorcar.useful_tools.UsefulTools.Read`
-   - `kiss.docker.docker_tools.DockerTools.Read`
-1. Add `start_line: int = 1` parameter (1-indexed) to both `Read` implementations.
-1. Confirm tests pass with `uv run pytest` and the project is clean under
-   `uv run check --full`.
-1. Hand the diff to `gpt-5.5` for a thorough review.
+Investigate why the previous task generated a manual merge-conflict message,
+reproduce it with an end-to-end test, fix it, test it using `claude-opus-4-7`,
+and then review the work with `gpt-5.5` (non-codex).
 
-## Decisions
+## Steps so far
 
-- `start_line` is 1-indexed (matches `head`/`tail`/IDE jump-to-line UX).
-- `start_line=1` is the default → fully backward compatible.
-- Out-of-range (`start_line > total_lines`) returns a clear sentinel string
-  rather than silently returning empty content.
-- `start_line < 1` is rejected with an error string (avoid surprising the model
-  with 0/negative indexing semantics).
-- The truncation footer continues to count the lines that were skipped at the
-  *end* of the window so the model knows how many remain.
-- Empty-file behaviour (`(file is empty)`) is preserved regardless of
-  `start_line`.
+- Read `SORCAR.md` first as required; it is empty.
 
-## Status
+- Switched to `claude-opus-4-7` for implementation/test work as requested.
 
-- [x] Reproduce bug with failing integration tests (claude-opus-4-7).
-- [x] Implement `start_line` on `UsefulTools.Read` (claude-opus-4-7).
-- [x] Implement `start_line` on `DockerTools.Read` shell snippet (claude-opus-4-7).
-- [x] `uv run pytest` for new + existing Read tests: 39+16 passing.
-- [x] `uv run check --full`: passing.
-- [x] Thorough review by gpt-5.5 — passes.
+- Inspected current branch/status and confirmed this task starts on
+  `kiss/wt-1782544196-1298b638` at commit
+  `d64fd6fe feat: add start_line parameter to Read tools`.
 
-## gpt-5.5 review notes
+- Located the manual-conflict message in `WorktreeSorcarAgent.merge()` and
+  inspected the previous failed branch `kiss/wt-1782543318-283af1fe`.
 
-- **Backward compatibility (Python)**: default `start_line=1` reproduces prior
-  behavior. The new path uses `text.splitlines(keepends=True)` + `"".join(window)`
-  which is a lossless round-trip for the universal-newline-translated string
-  returned by `Path.read_text()`.
-- **Empty / single-newline files**: `(file is empty)` sentinel preserved;
-  `"\n"`-only files still return `"\n"` (covered by existing
-  `test_text_file_with_only_newlines_is_not_empty`).
-- **Truncation footer**: now `total - (start_line - 1) - len(window)` — counts
-  only the tail beyond the returned window, never double-counting the prefix.
-- **Docker shell snippet**: `tail -n +"$START" | head -n "$MAX"` is POSIX-portable;
-  `wc -l` whitespace is tolerated by `[ -gt ]` and `$(())`. Out-of-range guard
-  prints the error and `exit 0` so the bash wrapper surfaces it as stdout
-  (same convention as "File not found" already used).
-- **Tool schema**: `model.py` derives JSON Schema from `inspect.signature` +
-  docstring; no hardcoded schema mentions `Read` or `max_lines` anywhere — the
-  new `start_line` parameter is automatically exposed to the LLM.
-- **Validation**: `start_line < 1` is rejected with an explicit message; past-EOF
-  returns a sentinel rather than silently leaking either nothing or earlier
-  content. Both contracts are pinned by the new tests.
-- **Regressions**: ran 1,636 tests across sorcar+docker suites. Five sporadic
-  failures live in `test_cli_client*` (CLI/REPL contention, pre-existing); each
-  passes in isolation and none touch the Read code path.
-- **Lint/typecheck**: `uv run check --full` passes (ruff + mypy + pyright +
-  mdformat).
+- Replayed the previous task's manual cherry-pick in an isolated temporary git
+  worktree under `./tmp/repro-prev-conflict`:
 
-## Files to change
+  ```text
+  git cherry-pick --no-commit a3582790521293a064c1687de0f0e7b671ed77ce..kiss/wt-1782543318-283af1fe
+  CONFLICT (content): Merge conflict in src/kiss/INJECTIONS.md
+  ```
 
-- `src/kiss/agents/sorcar/useful_tools.py` — `UsefulTools.Read`
-- `src/kiss/docker/docker_tools.py` — `DockerTools.Read`
-- `src/kiss/tests/agents/sorcar/test_read_start_line.py` — new test file
-- `src/kiss/tests/docker/test_docker_tools_start_line.py` — new test file
+  The conflict markers showed a whitespace/wording drift between the
+  dirty-state baseline and the branch edit in `src/kiss/INJECTIONS.md`; the
+  temp worktree was then removed.
+
+- Wrote an end-to-end regression test in
+  `src/kiss/tests/agents/sorcar/test_progress_md_merge_conflict.py`:
+
+  ```python
+  def test_injections_md_prompt_drift_is_scratch_and_auto_resolves(self) -> None:
+      injections = self.repo / "src" / "kiss" / "INJECTIONS.md"
+      injections.parent.mkdir(parents=True)
+      injections.write_text(INJECTIONS_HEAD)
+      _commit_all(self.repo, "add injection scratch prompt")
+
+      injections.write_text(INJECTIONS_BASELINE)
+      wt_dir = _create_worktree(self.repo, "kiss/wt-test-injections")
+      assert GitWorktreeOps.copy_dirty_state(self.repo, wt_dir)
+      GitWorktreeOps.stage_all(wt_dir)
+      assert GitWorktreeOps.commit_staged(
+          wt_dir, "kiss: baseline from dirty state", no_verify=True
+      )
+      baseline = GitWorktreeOps.head_sha(wt_dir)
+      assert baseline is not None
+      _git("checkout", "--", "src/kiss/INJECTIONS.md", cwd=self.repo)
+
+      (wt_dir / "src" / "kiss" / "INJECTIONS.md").write_text(INJECTIONS_BRANCH)
+      (wt_dir / "agent_work.py").write_text("y = 2\n")
+      _commit_all(wt_dir, "agent task work")
+      GitWorktreeOps.ensure_scratch_merge_driver(self.repo)
+
+      result = GitWorktreeOps.squash_merge_from_baseline(
+          self.repo, "kiss/wt-test-injections", baseline
+      )
+
+      assert result == MergeResult.SUCCESS
+  ```
+
+- Confirmed the new test failed before the fix with `MergeResult.CONFLICT` and
+  git reporting `could not apply ... agent task work`.
+
+- Fixed `GitWorktreeOps.ensure_scratch_merge_driver()` to register both scratch files:
+
+  ```python
+  for scratch_path in ("PROGRESS.md", "src/kiss/INJECTIONS.md"):
+      GitWorktreeOps._append_info_line(
+          repo, "attributes", f"{scratch_path} merge=kiss-scratch"
+      )
+  ```
+
+- Updated the merge-driver docstring to describe both `PROGRESS.md` and
+  `src/kiss/INJECTIONS.md` scratch semantics.
+
+- Extended the idempotency test to assert exactly one
+  `src/kiss/INJECTIONS.md merge=kiss-scratch` attributes line.
+
+- Verified the new test passes after the fix.
+
+- Ran impacted scratch/worktree tests in parallel across 8 splits
+  (10 cores → 8 workers): all 92 selected tests passed.
+
+- Switched to `gpt-5.5` for review. Review findings:
+
+  - The root-cause identification is concrete and reproducible: the previous
+    branch still exists, its baseline commit is `a3582790`, and a clean replay
+    of `git cherry-pick --no-commit a3582790..kiss/wt-1782543318-283af1fe`
+    conflicts specifically in `src/kiss/INJECTIONS.md`.
+  - The new test is end-to-end enough for this subsystem: it uses a real
+    temporary git repo, real worktree branch, real dirty-state baseline commit,
+    real cherry-pick merge path through
+    `GitWorktreeOps.squash_merge_from_baseline()`, and no mocks/fakes.
+  - The failure mode is correctly pinned: before the fix,
+    `GitWorktreeOps.ensure_scratch_merge_driver()` only added
+    `PROGRESS.md merge=kiss-scratch`, so `src/kiss/INJECTIONS.md` used Git's
+    default text merge and conflicted.
+  - The fix is minimal and general for the observed bug: it extends the
+    existing repo-local scratch merge-driver registration to the second scratch
+    file rather than changing merge control flow or suppressing all conflicts.
+  - Real source conflicts remain guarded by the existing
+    `test_real_source_conflict_still_reported`; adding `INJECTIONS.md` does not
+    make arbitrary project files auto-resolve.
+  - Idempotency remains covered for both attributes entries.
+  - One documentation nit was found: the test module docstring still described
+    only `PROGRESS.md`; updated it to describe both scratch files.
