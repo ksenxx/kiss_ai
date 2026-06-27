@@ -31,6 +31,17 @@
     return m + 'm ' + sec + 's';
   }
 
+  // Set of in-progress panel elements currently being stamped with a
+  // live ``.panel-time`` footer.  Populated by ``stampPanelStart`` and
+  // drained by ``finalizePanelTime``.  A single 1-second interval
+  // (``_activePanelTickIv``) walks this set and re-renders each
+  // panel's footer so the user sees the elapsed time update every
+  // second while the panel is still active.  Without this loop the
+  // footer would only appear/refresh when the panel closes — which is
+  // the bug we are fixing.
+  const _activePanels = new Set();
+  let _activePanelTickIv = null;
+
   /**
    * Stamp a panel element with its creation time (``data-start-ms``).
    *
@@ -39,21 +50,30 @@
    * only during ``replayEventsInto``).  Replayed events arrive
    * back-to-back so per-panel wall-clock measurements would be
    * meaningless; we deliberately skip stamping then.
+   *
+   * In addition to stamping, the panel is registered with the live
+   * 1-second ticker so its ``.panel-time`` footer starts rendering
+   * immediately and refreshes every second while the panel is active.
    */
   function stampPanelStart(el) {
     if (!el || _deferHighlight) return;
     if (el.dataset.startMs) return;
     el.dataset.startMs = String(Date.now());
+    _activePanels.add(el);
+    _renderPanelTime(el);
+    _startActivePanelTick();
   }
 
   /**
-   * Append (or refresh) a "time spent" footer as the LAST child of the
-   * given panel.  Reads ``data-start-ms`` set by ``stampPanelStart``.
+   * Render (create or refresh) the ``.panel-time`` footer for ``el``
+   * using its ``data-start-ms`` stamp.  Shared by the live 1-second
+   * ticker and by ``finalizePanelTime`` so the in-progress footer and
+   * the final footer use identical anchoring/formatting logic.
    *
-   * No-op if the panel was never stamped (e.g. replayed events), so
-   * the historical view stays clean.
+   * No-op if the panel was never stamped (e.g. replayed events) so the
+   * historical view stays clean.
    */
-  function finalizePanelTime(el) {
+  function _renderPanelTime(el) {
     if (!el) return;
     const startMs = Number(el.dataset.startMs || 0);
     if (!startMs) return;
@@ -80,6 +100,53 @@
       el.appendChild(footer);
     }
     footer.textContent = fmtElapsedMs(ms);
+  }
+
+  /**
+   * Start the shared 1-second interval that re-renders the
+   * ``.panel-time`` footer of every panel still in ``_activePanels``.
+   * Idempotent: a no-op if the interval is already running or if no
+   * panels are active.  Each tick prunes panels that are no longer
+   * connected to the DOM so detached panels don't keep the loop alive
+   * forever, and stops the interval once the active set is empty.
+   */
+  function _startActivePanelTick() {
+    if (_activePanelTickIv) return;
+    if (_activePanels.size === 0) return;
+    _activePanelTickIv = setInterval(() => {
+      for (const el of Array.from(_activePanels)) {
+        if (!el || !el.isConnected) {
+          _activePanels.delete(el);
+          continue;
+        }
+        _renderPanelTime(el);
+      }
+      if (_activePanels.size === 0) {
+        clearInterval(_activePanelTickIv);
+        _activePanelTickIv = null;
+      }
+    }, 1000);
+  }
+
+  /**
+   * Append (or refresh) the final "time spent" footer as the LAST
+   * child of the given panel, then deregister the panel from the live
+   * ticker so its footer freezes at the closing time.  Reads
+   * ``data-start-ms`` set by ``stampPanelStart``.
+   *
+   * No-op if the panel was never stamped (e.g. replayed events), so
+   * the historical view stays clean.
+   */
+  function finalizePanelTime(el) {
+    if (!el) return;
+    const startMs = Number(el.dataset.startMs || 0);
+    if (!startMs) return;
+    _renderPanelTime(el);
+    _activePanels.delete(el);
+    if (_activePanels.size === 0 && _activePanelTickIv) {
+      clearInterval(_activePanelTickIv);
+      _activePanelTickIv = null;
+    }
   }
 
   /**
