@@ -303,6 +303,12 @@ class VSCodeServer(
         # (see the C2/C3 note in ``_replay_session``).  Guarded by
         # ``_state_lock``.
         self._tab_chat_views: dict[str, str] = {}
+        # Maps ``id(user_answer_queue)`` to the task id of the currently
+        # pending ``ask_user_question`` that owns that queue.  ``userAnswer``
+        # uses this to close exactly the subscriber set for the task that
+        # consumed the answer; old completed-task subscriber sets are
+        # intentionally retained and must not receive unrelated close events.
+        self._pending_user_answer_tasks: dict[int, str] = {}
         persisted = _load_last_model()
         self._default_model = (
             persisted
