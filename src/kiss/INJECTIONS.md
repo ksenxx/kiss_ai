@@ -12,15 +12,15 @@ Reproduce the issue by writing end-to-end test. Then fix the issue.
 
 ## Trick
 
-Use claude-opus-4-7 model for all tasks including coding, bug fixing, and test creation. Use gpt-5.5 model (not codex) for thorough review of the work done by the other model.
+Use claude-opus-4-7 model for all tasks including coding, bug fixing, and test creation. Use gpt-5.5 model (not codex) for thorough review of the work done by the other model.  Check if the other model has missed some code.
 
 ## Trick
 
-can you review the updates made in the last task using gpt-5.5 (non codex) and claude-opus-4-7 thoroughly and then write end-to-end tests reproducing the bugs reported by the review, fix them, and test them using claude-opus-4-7? Run all the tests in parallel and fix bugs after reviewing the fixes with gpt-5.5 (non codex) and claude-opus-4-7. Repeat the process until you fail to reproduce the bugs reported by the review done by gpt-5.5 (non codex) and claude-opus-4-7.
+can you review the updates made in the last task using gpt-5.5 (non codex) and then write end-to-end tests reproducing the bugs reported by the review, fix them, and test them using claude-opus-4-7? Run all the tests in parallel and fix bugs after reviewing the fixes with gpt-5.5 (non codex). Repeat the process until you fail to reproduce the bugs reported by the review done by gpt-5.5 (non codex).
 
 ## Trick
 
-Use openrouter/z-ai/glm-5.2 model for all tasks including coding, bug fixing, and test creation. ALWAYS use gpt-5.5 model (not codex) and claude-opus-4-7 to carefully and thoroughly review the work done by openrouter/z-ai/glm-5.2.
+Use openrouter/z-ai/glm-5.2 model for all tasks including coding, bug fixing, and test creation. ALWAYS use gpt-5.5 model (not codex) to carefully and thoroughly review the work done by openrouter/z-ai/glm-5.2.  Then use claude-opus-4-7 to carefully and thoroughly review the work done by openrouter/z-ai/glm-5.2.
 
 ## Trick
 
