@@ -521,15 +521,42 @@ def source_shell_env() -> None:
             cmd = f"source {rc_q} 2>/dev/null; env"
         else:
             cmd = f"source {rc_q} 2>/dev/null && env"
-        result = subprocess.run(
+        # Use ``Popen`` as a context manager (rather than the higher
+        # level ``subprocess.run``) so the stdout/stderr pipe fds are
+        # *always* closed via ``__exit__`` — even on the rare paths
+        # where ``run`` would have re-raised before tearing the pipes
+        # down (e.g. ``communicate`` raising ``OSError`` after the
+        # ``TimeoutExpired`` kill path).  ``stdin=DEVNULL`` avoids
+        # leaking the parent's stdin fd into the child and prevents
+        # any RC line that reads from stdin (e.g. an interactive
+        # ``read`` in ``.bashrc``) from blocking until the timeout.
+        # Reading ``stderr`` into a sink (rather than discarding via
+        # ``2>/dev/null`` inside the cmd alone) is fine — the pipe is
+        # closed on exit.  Tests across the suite call
+        # ``source_shell_env`` many times via the CLI client / VSCode
+        # config code paths; leaking even two fds per invocation
+        # eventually exhausts ``RLIMIT_NOFILE`` and surfaces as
+        # ``OSError: [Errno 24] Too many open files`` in unrelated
+        # later tests.
+        with subprocess.Popen(
             [shell_path, "-c", cmd],
-            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
-            timeout=5,
             env=sub_env,
-        )
-        for line in result.stdout.splitlines():
+        ) as proc:
+            try:
+                stdout, _stderr = proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                # Drain the pipes so ``__exit__``'s ``wait()`` does
+                # not deadlock on a full PIPE buffer, then re-raise so
+                # the surrounding ``except`` logs the timeout.
+                proc.communicate()
+                raise
+        for line in stdout.splitlines():
             if "=" in line:
                 k, _, v = line.partition("=")
                 if k in API_KEY_ENV_VARS:
