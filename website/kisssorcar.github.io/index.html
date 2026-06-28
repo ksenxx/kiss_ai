@@ -621,6 +621,36 @@
       color: var(--primary-dark);
     }
 
+    /* Preferred / recommended inner-card variant — highlights the "best" choice. */
+    .inner-card--preferred {
+      border-color: var(--primary);
+      box-shadow:
+        0 0 0 1px var(--primary),
+        0 8px 28px -10px rgba(25,118,210,0.45);
+      background:
+        linear-gradient(180deg, rgba(25,118,210,0.06), rgba(0,137,123,0.03)) ,
+        var(--bg);
+    }
+    .inner-card--preferred:hover {
+      box-shadow:
+        0 0 0 1px var(--primary),
+        0 14px 36px -10px rgba(25,118,210,0.55);
+      border-color: var(--primary);
+    }
+    .inner-card--preferred .preferred-badge {
+      display: inline-flex; align-items: center; gap: 0.3rem;
+      font-family: 'Roboto Mono', monospace;
+      font-size: 0.66rem; font-weight: 700; letter-spacing: 0.08em;
+      text-transform: uppercase;
+      padding: 0.18rem 0.5rem; border-radius: 999px;
+      background: linear-gradient(135deg, var(--primary), var(--accent));
+      color: #fff;
+      box-shadow: 0 2px 8px rgba(25,118,210,0.35);
+      white-space: nowrap;
+      margin-left: auto;
+    }
+    .inner-card--preferred h3 { flex-wrap: wrap; }
+
     /* Stagger reveal of inner cards inside a section. */
     .section-card.in-view .inner-card {
       animation: rise 0.7s cubic-bezier(.2,.7,.2,1) both;
@@ -2375,12 +2405,12 @@ In each step, keep track of the best prompt which has the maximum number of succ
   <section id="install" class="section-card">
     <span class="num">§ 04 — Installation</span>
     <h2>Install in one line.<a href="#install" class="anchor">¶</a></h2>
-    <p class="sub">Pick the install path that fits you &mdash; full source, Python package, or the VS Code extension. All you need is at least one API key from a major LLM provider.</p>
+    <p class="sub">Pick the install path that fits you &mdash; full source, Python package, or the VS Code extension. All you need is at least one API key from a major LLM provider. <strong>The one-line install script below is the recommended way to install the full KISS Sorcar stack.</strong></p>
     <div class="section-body">
       <div class="grid-2">
-        <div class="inner-card" style="--i:0">
-          <h3>Full install from source</h3>
-          <p style="margin-bottom:0.7rem;">macOS and Linux on <code>x86_64</code>, <code>aarch64</code>, and <code>arm64</code>. Installs or checks every tool needed to run KISS Sorcar and build/install the VS Code extension.</p>
+        <div class="inner-card inner-card--preferred" style="--i:0">
+          <h3>Full install from source <span class="preferred-badge" aria-label="Recommended install method">★ Recommended</span></h3>
+          <p style="margin-bottom:0.7rem;"><strong>Preferred way to install the full KISS Sorcar stack.</strong> Works on macOS and Linux (<code>x86_64</code>, <code>aarch64</code>, <code>arm64</code>). Installs or checks every tool needed to run KISS Sorcar and build/install the VS Code extension &mdash; one command, no extra steps.</p>
           <div class="code-panel">
             <div class="code-line"><span class="prompt">$</span> <span class="green">curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install.sh | bash</span></div>
           </div>
