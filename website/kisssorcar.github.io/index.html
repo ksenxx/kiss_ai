@@ -22,6 +22,20 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script>
+    /* Theme bootstrap — runs synchronously before <style> parses to avoid FOUC.
+       Reads saved preference from localStorage; falls back to "dark" so the
+       site keeps its current first-load look for anyone without a preference. */
+    (function () {
+      try {
+        var saved = localStorage.getItem('kiss-theme');
+        var theme = (saved === 'light' || saved === 'dark') ? saved : 'dark';
+        document.documentElement.setAttribute('data-theme', theme);
+      } catch (e) {
+        document.documentElement.setAttribute('data-theme', 'dark');
+      }
+    })();
+  </script>
   <style>
     *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -1072,9 +1086,11 @@
     /* ============================================================
        VISUAL OVERHAUL — modern dark theme, ambient gradients,
        glassmorphism, gradient sweeps, scroll-reveal, animated stats.
-       Applied via :root override; existing markup is unchanged.
+       Applied via :root[data-theme="dark"] override so the same
+       file can be flipped back to the original light palette by
+       setting <html data-theme="light">.
        ============================================================ */
-    :root {
+    :root[data-theme="dark"] {
       --bg: #07090f;
       --surface: rgba(255,255,255,0.035);
       --surface-2: rgba(255,255,255,0.07);
@@ -1095,7 +1111,13 @@
       --shadow-3: 0 22px 60px -18px rgba(45,212,191,0.42), 0 14px 36px -16px rgba(167,139,250,0.40);
     }
 
-    html, body { background: var(--bg); color: var(--text); }
+    /* Everything below is scoped to dark theme via CSS native nesting.
+       Type selectors inside a nested block are matched as descendants
+       of the parent selector — modern browsers (Chrome 120+, Safari 17.2+,
+       Firefox 117+) support this out of the box. */
+    html[data-theme="dark"] {
+
+    &, body { background: var(--bg); color: var(--text); }
 
     /* Ambient animated gradient orbs behind everything. */
     body {
@@ -1129,11 +1151,13 @@
       -webkit-mask-image: radial-gradient(ellipse 80% 70% at 50% 35%, #000 30%, transparent 75%);
       opacity: 0.7;
     }
+    } /* end html[data-theme="dark"] (extract @keyframes to top level) */
     @keyframes orb-float {
       0%   { transform: translate3d(0, 0, 0)   scale(1);    }
       50%  { transform: translate3d(2%, -3%, 0) scale(1.06); }
       100% { transform: translate3d(-3%, 2%, 0) scale(0.96); }
     }
+    html[data-theme="dark"] {
 
     /* Navigation — glass dark bar with gradient bottom edge. */
     nav {
@@ -1184,10 +1208,12 @@
       -webkit-text-fill-color: transparent; color: transparent;
       animation: shimmer 9s ease-in-out infinite;
     }
+    } /* end html[data-theme="dark"] (extract @keyframes to top level) */
     @keyframes shimmer {
       0%, 100% { background-position: 0% center; }
       50%      { background-position: 100% center; }
     }
+    html[data-theme="dark"] {
     .hero-logo { filter: drop-shadow(0 10px 36px rgba(45,212,191,0.35)) drop-shadow(0 6px 18px rgba(167,139,250,0.25)); }
     .hero-quote blockquote { color: var(--text-dim); }
     .hero-quote figcaption { color: var(--text-soft); }
@@ -1446,6 +1472,240 @@
       .cta-btn::after { transition: none; }
       .reveal { opacity: 1; transform: none; transition: none; }
     }
+    } /* end html[data-theme="dark"] wrapper */
+
+    /* ============================================================
+       LIGHT-THEME POLISH — when html[data-theme="light"], the dark
+       wrapper above is skipped entirely, falling back to the original
+       light palette from the first :root block.  These small tweaks
+       give the light theme its own polish: subtle pastel ambient
+       background, gradient bottom edge on nav, gradient h1 sweep,
+       gradient CTAs, and animated counters/scroll-reveal that re-use
+       the same JS classes as dark mode.
+       ============================================================ */
+    @keyframes orb-float-light {
+      0%   { transform: translate3d(0, 0, 0)   scale(1);    }
+      50%  { transform: translate3d(2%, -3%, 0) scale(1.05); }
+      100% { transform: translate3d(-3%, 2%, 0) scale(0.97); }
+    }
+    @keyframes shimmer-light {
+      0%, 100% { background-position: 0% center; }
+      50%      { background-position: 100% center; }
+    }
+
+    html[data-theme="light"] {
+      color-scheme: light;
+    }
+    html[data-theme="light"] body {
+      position: relative;
+      background:
+        radial-gradient(ellipse 80% 60% at 20% 0%, rgba(25,118,210,0.06), transparent 60%),
+        radial-gradient(ellipse 70% 60% at 85% 15%, rgba(0,137,123,0.05), transparent 60%),
+        radial-gradient(ellipse 90% 60% at 50% 100%, rgba(247,201,72,0.05), transparent 65%),
+        var(--bg);
+      background-attachment: fixed;
+    }
+    html[data-theme="light"] body::before {
+      content: "";
+      position: fixed; inset: -10%;
+      z-index: -2; pointer-events: none;
+      background:
+        radial-gradient(circle 380px at 12% 18%, rgba(25,118,210,0.10), transparent 60%),
+        radial-gradient(circle 460px at 88% 28%, rgba(0,137,123,0.10), transparent 60%),
+        radial-gradient(circle 520px at 22% 78%, rgba(247,201,72,0.08), transparent 60%);
+      filter: blur(40px) saturate(140%);
+      animation: orb-float-light 22s ease-in-out infinite alternate;
+    }
+    html[data-theme="light"] body::after {
+      content: "";
+      position: fixed; inset: 0;
+      z-index: -1; pointer-events: none;
+      background-image: radial-gradient(circle, rgba(25,118,210,0.06) 1px, transparent 1px);
+      background-size: 26px 26px;
+      mask-image: radial-gradient(ellipse 80% 70% at 50% 35%, #000 30%, transparent 75%);
+      -webkit-mask-image: radial-gradient(ellipse 80% 70% at 50% 35%, #000 30%, transparent 75%);
+      opacity: 0.55;
+    }
+    html[data-theme="light"] nav {
+      background: rgba(255,255,255,0.78);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+      box-shadow: 0 1px 0 rgba(25,118,210,0.05), 0 18px 40px -30px rgba(0,0,0,0.12);
+    }
+    html[data-theme="light"] nav::after {
+      content: "";
+      position: absolute; left: 0; right: 0; bottom: -1px; height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(25,118,210,0.45), rgba(0,137,123,0.45), transparent);
+      pointer-events: none;
+    }
+    html[data-theme="light"] nav .links a {
+      position: relative; border-bottom-color: transparent;
+    }
+    html[data-theme="light"] nav .links a::after {
+      content: ""; position: absolute; left: 50%; bottom: -2px;
+      width: 0; height: 2px; transform: translateX(-50%);
+      background: linear-gradient(90deg, var(--primary), var(--accent));
+      border-radius: 2px;
+      transition: width 0.25s ease;
+    }
+    html[data-theme="light"] nav .links a:hover { border-bottom-color: transparent; }
+    html[data-theme="light"] nav .links a:hover::after { width: 100%; }
+    html[data-theme="light"] .hero h1 {
+      background: linear-gradient(110deg,
+        #212121 0%, #212121 30%,
+        #1976d2 45%, #00897b 60%,
+        #212121 75%, #212121 100%);
+      background-size: 250% auto;
+      -webkit-background-clip: text; background-clip: text;
+      -webkit-text-fill-color: transparent; color: transparent;
+      animation: shimmer-light 9s ease-in-out infinite;
+    }
+    html[data-theme="light"] .hero-trust strong {
+      background: linear-gradient(90deg, var(--primary), var(--accent));
+      -webkit-background-clip: text; background-clip: text;
+      -webkit-text-fill-color: transparent; color: transparent;
+    }
+    html[data-theme="light"] .star-count {
+      background: linear-gradient(90deg, var(--primary), var(--accent));
+      -webkit-background-clip: text; background-clip: text;
+      -webkit-text-fill-color: transparent; color: transparent;
+      font-weight: 700;
+    }
+    html[data-theme="light"] .cta-btn { position: relative; overflow: hidden; isolation: isolate; }
+    html[data-theme="light"] .cta-btn::after {
+      content: ""; position: absolute; inset: 0;
+      background: linear-gradient(120deg, transparent 30%, rgba(255,255,255,0.45) 50%, transparent 70%);
+      transform: translateX(-110%);
+      transition: transform 0.7s ease;
+      pointer-events: none;
+      z-index: 0;
+    }
+    html[data-theme="light"] .cta-btn:hover::after { transform: translateX(110%); }
+    html[data-theme="light"] .cta-btn > * { position: relative; z-index: 1; }
+    html[data-theme="light"] .cta-vscode {
+      background: linear-gradient(135deg, #1976d2, #00897b 70%, #1976d2);
+      border-color: transparent;
+      color: #fff;
+      box-shadow: 0 10px 24px -10px rgba(25,118,210,0.45);
+    }
+    html[data-theme="light"] .cta-vscode:hover {
+      background: linear-gradient(135deg, #2186e8, #00a392 70%, #2186e8);
+      color: #fff;
+      transform: translateY(-2px);
+      box-shadow: 0 16px 36px -10px rgba(25,118,210,0.55);
+    }
+    html[data-theme="light"] .inner-card,
+    html[data-theme="light"] .section-card,
+    html[data-theme="light"] .quickstart {
+      transition: transform 0.3s ease, box-shadow 0.3s ease, border-color 0.3s ease;
+    }
+    html[data-theme="light"] .inner-card:hover {
+      transform: translateY(-3px);
+      border-color: rgba(25,118,210,0.40);
+      box-shadow: 0 18px 36px -18px rgba(25,118,210,0.30), 0 10px 24px -14px rgba(0,137,123,0.25);
+    }
+    /* Custom scrollbars + selection in light theme. */
+    html[data-theme="light"] *,
+    html[data-theme="light"] { scrollbar-color: rgba(25,118,210,0.45) transparent; scrollbar-width: thin; }
+    html[data-theme="light"] *::-webkit-scrollbar { width: 10px; height: 10px; }
+    html[data-theme="light"] *::-webkit-scrollbar-track { background: transparent; }
+    html[data-theme="light"] *::-webkit-scrollbar-thumb {
+      background: linear-gradient(180deg, rgba(25,118,210,0.55), rgba(0,137,123,0.65));
+      border-radius: 999px; border: 2px solid transparent; background-clip: padding-box;
+    }
+    html[data-theme="light"] *::-webkit-scrollbar-thumb:hover {
+      background: linear-gradient(180deg, rgba(25,118,210,0.8), rgba(0,137,123,0.9));
+      background-clip: padding-box;
+    }
+    html[data-theme="light"] ::selection { background: rgba(25,118,210,0.25); color: #0d1117; }
+    html[data-theme="light"] .reveal { opacity: 0; transform: translateY(22px); transition: opacity 0.85s ease, transform 0.85s ease; }
+    html[data-theme="light"] .reveal.in-view { opacity: 1; transform: none; }
+    @media (prefers-reduced-motion: reduce) {
+      html[data-theme="light"] body::before { animation: none; }
+      html[data-theme="light"] .hero h1 { animation: none; background-position: 0 center; }
+      html[data-theme="light"] .cta-btn::after { transition: none; }
+      html[data-theme="light"] .reveal { opacity: 1; transform: none; transition: none; }
+    }
+
+    /* ============================================================
+       THEME TOGGLE BUTTON — sits in the nav, swaps sun/moon icon.
+       Works in both light and dark via :root[data-theme="..."].
+       ============================================================ */
+    .theme-toggle {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 38px; height: 38px;
+      padding: 0; margin-left: 0.4rem;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--text);
+      cursor: pointer;
+      transition: transform 0.25s ease, background 0.25s ease, border-color 0.25s ease, box-shadow 0.25s ease, color 0.25s ease;
+      position: relative;
+      overflow: hidden;
+    }
+    .theme-toggle:hover {
+      transform: translateY(-1px) rotate(-10deg);
+      border-color: var(--primary);
+      color: var(--primary);
+    }
+    .theme-toggle:focus-visible {
+      outline: 2px solid var(--primary);
+      outline-offset: 2px;
+    }
+    .theme-toggle svg {
+      width: 18px; height: 18px;
+      transition: transform 0.45s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.25s ease;
+    }
+    .theme-toggle .icon-sun,
+    .theme-toggle .icon-moon {
+      position: absolute;
+      top: 50%; left: 50%;
+      transform: translate(-50%, -50%) scale(1) rotate(0);
+    }
+    /* Dark theme: show the SUN (click to switch to light). Moon hidden. */
+    html[data-theme="dark"] .theme-toggle .icon-moon {
+      opacity: 0; transform: translate(-50%, -50%) scale(0.4) rotate(-90deg);
+    }
+    html[data-theme="dark"] .theme-toggle .icon-sun {
+      opacity: 1; transform: translate(-50%, -50%) scale(1) rotate(0);
+    }
+    html[data-theme="dark"] .theme-toggle {
+      background: linear-gradient(140deg, rgba(45,212,191,0.16), rgba(167,139,250,0.18));
+      border-color: rgba(167,139,250,0.35);
+      color: var(--gold);
+      box-shadow: 0 6px 18px -10px rgba(45,212,191,0.4);
+    }
+    html[data-theme="dark"] .theme-toggle:hover {
+      background: linear-gradient(140deg, rgba(45,212,191,0.28), rgba(167,139,250,0.30));
+      border-color: var(--primary);
+      color: var(--gold);
+      box-shadow: 0 10px 24px -10px rgba(45,212,191,0.55);
+    }
+    /* Light theme: show the MOON (click to switch to dark). Sun hidden. */
+    html[data-theme="light"] .theme-toggle .icon-sun,
+    :root:not([data-theme="dark"]) .theme-toggle .icon-sun {
+      opacity: 0; transform: translate(-50%, -50%) scale(0.4) rotate(90deg);
+    }
+    html[data-theme="light"] .theme-toggle .icon-moon,
+    :root:not([data-theme="dark"]) .theme-toggle .icon-moon {
+      opacity: 1; transform: translate(-50%, -50%) scale(1) rotate(0);
+    }
+    html[data-theme="light"] .theme-toggle {
+      background: var(--surface);
+      border-color: var(--border);
+      color: var(--primary);
+    }
+    html[data-theme="light"] .theme-toggle:hover {
+      background: var(--primary-soft);
+      border-color: var(--primary);
+      color: var(--primary-dark);
+      box-shadow: 0 8px 20px -12px rgba(25,118,210,0.45);
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .theme-toggle, .theme-toggle svg { transition: none !important; }
+    }
   </style>
 </head>
 <body>
@@ -1466,6 +1726,15 @@
         <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.36-3.88-1.36-.52-1.33-1.27-1.69-1.27-1.69-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.18 1.76 1.18 1.02 1.75 2.69 1.24 3.34.95.1-.74.4-1.24.72-1.53-2.55-.29-5.24-1.27-5.24-5.66 0-1.25.45-2.27 1.18-3.07-.12-.29-.51-1.46.11-3.05 0 0 .96-.31 3.16 1.17.92-.26 1.91-.39 2.88-.39s1.96.13 2.88.39c2.2-1.48 3.16-1.17 3.16-1.17.62 1.59.23 2.76.11 3.05.74.8 1.18 1.82 1.18 3.07 0 4.4-2.69 5.37-5.25 5.65.41.36.78 1.05.78 2.12v3.14c0 .31.21.66.79.55C20.21 21.39 23.5 17.08 23.5 12 23.5 5.65 18.35.5 12 .5z"/></svg>
         GitHub
       </a>
+      <button type="button" id="theme-toggle" class="theme-toggle" aria-label="Switch to light theme" title="Switch theme">
+        <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="4"></circle>
+          <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"></path>
+        </svg>
+        <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+        </svg>
+      </button>
     </div>
   </nav>
 
@@ -2353,6 +2622,33 @@ In each step, keep track of the best prompt which has the maximum number of succ
   </footer>
 
   <script>
+    // ---------------------------------------------------------------
+    // Theme toggle — swaps <html data-theme="dark"|"light">, persists
+    // the choice to localStorage, and updates the button's aria-label
+    // so screen readers describe the action correctly.  The icon flip
+    // (sun <-> moon) is handled entirely in CSS via the data-theme
+    // attribute; this script just changes the attribute.
+    // ---------------------------------------------------------------
+    (function () {
+      var btn = document.getElementById('theme-toggle');
+      if (!btn) return;
+      var root = document.documentElement;
+      function applyAria(theme) {
+        // Show the action the click will perform, not the current state.
+        var nextLabel = theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme';
+        btn.setAttribute('aria-label', nextLabel);
+        btn.setAttribute('title', nextLabel);
+      }
+      applyAria(root.getAttribute('data-theme') || 'dark');
+      btn.addEventListener('click', function () {
+        var current = root.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+        var next = current === 'dark' ? 'light' : 'dark';
+        root.setAttribute('data-theme', next);
+        try { localStorage.setItem('kiss-theme', next); } catch (e) { /* localStorage may be blocked */ }
+        applyAria(next);
+      });
+    })();
+
     // ---------------------------------------------------------------
     // Hero CTAs:
     //  (a) click-to-copy on the "pipx install kiss-agent-framework" pill.
