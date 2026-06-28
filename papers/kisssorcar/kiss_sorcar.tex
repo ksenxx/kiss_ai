@@ -44,11 +44,12 @@
     linecolor=black,
     innerleftmargin=5pt,
     innerrightmargin=5pt,
-    innertopmargin=4pt,
-    innerbottommargin=4pt,
+    innertopmargin=5pt,
+    innerbottommargin=5pt,
     skipabove=2pt,
     skipbelow=5pt]
-  \ttfamily\scriptsize\raggedright\frenchspacing\obeylines
+  \setlength{\parskip}{0pt}\setlength{\parindent}{0pt}%
+  \ttfamily\scriptsize\raggedright\frenchspacing\obeylines\leavevmode\strut\ignorespaces
 }{%
   \end{mdframed}
 }
@@ -272,16 +273,16 @@ This single tool is what enables \emph{multi-model, multi-vendor workflows insid
 The following three prompts, reproduced from \texttt{src/kiss/INJECTIONS.md}, illustrate what this tool layer empowers.  They are not API calls or special modes: each is a single natural-language instruction that can be pasted into the IDE or CLI.  Their power comes from the combination of dynamic model switching, coding tools, test execution, parallel sub-agents, and later layers' persistence and worktree isolation.
 
 \noindent\textbf{Primary model plus independent review.}\par\vspace{1pt}
-\begin{promptbox}
+\begin{promptbox}%
 Use claude-opus-4-7 model for all tasks including coding, bug
 fixing, and test creation. Use gpt-5.5 model (not codex) for
 thorough review and debugging of the work done by the other
 model. Check if the other model has missed some code or has
-introduced bugs. No need to check if the models exist.
+introduced bugs. No need to check if the models exist.%
 \end{promptbox}
 
 \noindent\textbf{Self-review, reproduce, fix, and repeat.}\par\vspace{1pt}
-\begin{promptbox}
+\begin{promptbox}%
 Can you review the updates made in the last task using gpt-5.5
 (non codex) and find bugs or missing code. Then write end-to-end
 tests reproducing the bugs reported by the review, fix them, and
@@ -289,16 +290,16 @@ test them using claude-opus-4-7? Run all the tests in parallel
 and fix bugs after thoroughly reviewing the fixes with gpt-5.5
 (non codex). Repeat the process until you fail to reproduce the
 bugs reported by the review done by gpt-5.5 (non codex). No need
-to check if the models exist.
+to check if the models exist.%
 \end{promptbox}
 
 \noindent\textbf{Three-model generation and review.}\par\vspace{1pt}
-\begin{promptbox}
+\begin{promptbox}%
 Use openrouter/z-ai/glm-5.2 model for all tasks including coding,
 bug fixing, and test creation. ALWAYS use gpt-5.5 model (not
 codex) to carefully and thoroughly review and debug the work done
 by openrouter/z-ai/glm-5.2 for bugs and missing code. Then use
-claude-opus-4-7 to do the same thing.
+claude-opus-4-7 to do the same thing.%
 \end{promptbox}
 
 These prompts show that \texttt{set\_model} turns model choice from a session-level setting into a programmable task-level resource.  A user can ask one model to implement and test, another model to review the result, and a third model to audit both the implementation and the review without leaving the same conversation.  Combined with the Sorcar Agent's real coding tools and parallel test execution, this enables inexpensive models to do routine work while stronger or independent models are reserved for the high-value verification steps where missed code, subtle bugs, and inadequate tests are most likely to matter.
