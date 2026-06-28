@@ -160,6 +160,61 @@ class MergeResult(enum.Enum):
     STASH_FAILED = "stash_failed"
 
 
+# Sentinel directory under which the framework creates per-task worktrees.
+# Layout: ``<repo>/.kiss-worktrees/kiss_wt-<slug>/...``.  Kept in sync with
+# ``GitWorktreeOps.cleanup_orphans`` and the wt-dir creation paths.
+_WORKTREE_SUBDIR = ".kiss-worktrees"
+_WORKTREE_SLUG_PREFIX = "kiss_wt-"
+
+
+def strip_worktree_suffix(path: str) -> str:
+    """Return *path* with the ``.kiss-worktrees/kiss_wt-<slug>[/...]``
+    suffix removed, leaving the parent repository path.
+
+    Worktree directories are ephemeral — they are deleted when the
+    worktree is merged or discarded.  Persisting a worktree path in
+    long-lived storage (e.g. ``task_history.extra.work_dir``) would
+    leave dangling references the user-visible UI cannot resolve.  Use
+    this helper at every persistence boundary that records a
+    ``work_dir`` for later display or filtering.
+
+    Paths that do not contain a ``<repo>/.kiss-worktrees/kiss_wt-*``
+    segment are returned unchanged, including the empty string.
+
+    Args:
+        path: An absolute or relative filesystem path string.
+
+    Returns:
+        The parent-repo path string, or the unchanged input when the
+        path is not inside a KISS worktree.
+    """
+    if not path:
+        return path
+    # Split on os-agnostic separators so the helper works on POSIX paths
+    # carried across platforms (tests, payloads from remote daemons).
+    # ``str.replace`` first folds Windows separators to ``/`` so the
+    # logic is uniform.
+    norm = path.replace("\\", "/")
+    parts = norm.split("/")
+    for i, segment in enumerate(parts):
+        if (
+            segment == _WORKTREE_SUBDIR
+            and i + 1 < len(parts)
+            and parts[i + 1].startswith(_WORKTREE_SLUG_PREFIX)
+        ):
+            parent = "/".join(parts[:i])
+            if parent:
+                # Normal case: ``/Users/x/proj/.kiss-worktrees/kiss_wt-…``
+                # → ``/Users/x/proj``.
+                return parent
+            # No parent segments before ``.kiss-worktrees``.  For an
+            # absolute path (``/.kiss-worktrees/kiss_wt-…``) the parent
+            # is the filesystem root; for a relative path
+            # (``.kiss-worktrees/kiss_wt-…``) it is the current dir.
+            return "/" if norm.startswith("/") else "."
+    return path
+
+
 def _unquote_git_path(path: str) -> str:
     """Unquote a C-style quoted filename from ``git status --porcelain``.
 
