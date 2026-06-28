@@ -81,7 +81,9 @@ class TestSubagentOnlyChatsDoNotConsumeLimit(_TempDbTestBase):
         # the listing but previously still consuming a limit slot.
         x_id, _chat_x = _add_task(
             "orphaned subagent task",
-            extra={"subagent": {"parent_task_id": 999_999}},
+            extra={"subagent": {
+                "parent_task_id": "ffffffffffffffffffffffffffffffff"
+            }},
         )
         self._set_timestamp(x_id, base - 10)
 

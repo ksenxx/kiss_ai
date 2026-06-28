@@ -131,6 +131,10 @@ class _RunningAgentState:
         default_model: str,
         *,
         agent: WorktreeSorcarAgent | None = None,
+        chat_id: str = "",
+        is_subagent: bool = False,
+        parent_task_id: str | None = None,
+        is_task_active: bool = False,
     ) -> None:
         # ``agent`` is transient — the VS Code server flow leaves it
         # ``None`` until :meth:`_TaskRunnerMixin._run_task_inner`
@@ -150,12 +154,12 @@ class _RunningAgentState:
         # :meth:`VSCodeServer._replay_session` (resumed history row).
         # Orthogonal to :attr:`tab_id` (frontend routing key): the
         # same chat may be live-viewed from multiple tabs.
-        self.chat_id: str = ""
+        self.chat_id: str = chat_id
         # Primary-key id of the most recently *completed* task in this
         # tab's chat session — used by post-task hooks
         # (:meth:`_MergeFlowMixin._handle_autocommit_action`) that may
         # run after the agent has already been disposed.
-        self.last_task_id: int | None = None
+        self.last_task_id: str | None = None
         # Most recent user task prompt submitted on this tab.
         # Populated by :meth:`_TaskRunnerMixin._run_task_inner` before
         # each agent run and read by post-task auto-commit hooks
@@ -168,7 +172,7 @@ class _RunningAgentState:
         # ``task_done`` / ``task_stopped`` / ``task_error`` event,
         # the result row, and the extra-payload row.  Reset to
         # ``None`` once the post-task finally block has cleaned up.
-        self.task_history_id: int | None = None
+        self.task_history_id: str | None = None
         self.use_worktree: bool = False
         self.use_parallel: bool = True
         # ``auto_commit_mode`` mirrors the "Auto commit" menu toggle
@@ -196,7 +200,7 @@ class _RunningAgentState:
         self.pending_user_messages: list[str] = []
         self.is_merging: bool = False
         self.is_running_non_wt: bool = False
-        self.is_task_active: bool = False
+        self.is_task_active: bool = is_task_active
         # ``True`` when this tab's in-flight task is being cancelled by
         # the server's graceful-shutdown path
         # (:meth:`RemoteAccessServer._stop_active_agent_tasks`, reached
@@ -227,5 +231,5 @@ class _RunningAgentState:
         # :meth:`VSCodeServer._reattach_running_chat` disambiguate
         # which live state to subscribe a freshly-opened history-tab
         # to when several states share the same ``chat_id``.
-        self.is_subagent: bool = False
-        self.parent_task_id: int | None = None
+        self.is_subagent: bool = is_subagent
+        self.parent_task_id: str | None = parent_task_id

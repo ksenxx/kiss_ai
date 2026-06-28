@@ -2,28 +2,18 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Bug-hunt 6: starring a legacy corrupt-extra row makes it vanish.
+"""Bug-hunt 6 (new flat-column schema): starring a row must never flip
+its sub-agent classification.
 
-A legacy row written by the pre-iteration-5 code path can carry a bare
-``NaN`` token in ``task_history.extra`` — invalid RFC 8259 JSON.  Since
-iteration 5, BOTH sub-agent detectors (SQLite ``json_valid`` in
-``_HISTORY_NOT_SUBAGENT`` and strict ``_parse_extra_dict`` in
-``_is_subagent_row``) reject such extras, so the row is uniformly
-classified as a REGULAR task and is visible in the history sidebar —
-even when the corrupt extra textually contains a ``"subagent"`` key.
-
-``_set_task_favorite`` however parsed the stored extra with the lenient
-default ``json.loads`` (which ACCEPTS NaN), merged ``is_favorite`` into
-the recovered dict — including the never-effective ``subagent`` key —
-and re-encoded it through ``_dumps_extra`` as VALID JSON.  The rewrite
-therefore flipped the row's classification to "sub-agent": clicking the
-favourite star made the task permanently disappear from
-``_load_history`` / ``_search_history`` / ``_list_recent_chats``.
-
-Fix: when the stored extra is strict-invalid, ``_set_task_favorite``
-still preserves the leniently-recovered metadata (the sidebar displays
-it) but drops the top-level ``subagent`` key so the merge-rewrite can
-never change the row's sub-agent classification.
+The pre-iteration-5 attack surface was a JSON ``extra`` column whose
+corrupt contents could trick the favourite-rewrite into adding /
+dropping a top-level ``"subagent"`` key.  In the current flat-column
+schema sub-agent identification is driven exclusively by the dedicated
+``parent_task_id`` column, which ``_set_task_favorite`` never touches.
+These tests therefore lock down the *post-refactor* invariant: toggling
+``is_favorite`` is purely a flag write that preserves the row's
+sub-agent classification and keeps the row's chat reachable from the
+recent-chats list.
 
 Runs against a real SQLite database redirected to a temp dir.
 No mocks, patches, fakes, or test doubles.
@@ -31,10 +21,8 @@ No mocks, patches, fakes, or test doubles.
 
 from __future__ import annotations
 
-import json
 import shutil
 import tempfile
-import time
 from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
@@ -67,103 +55,90 @@ class _TempDbTestBase:
         th._DB_PATH, th._db_conn, th._KISS_DIR = self.saved
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def _insert_raw_extra(self, task: str, chat_id: str, extra_raw: str) -> int:
-        """Insert a row with a verbatim ``extra`` string (legacy-row shim)."""
-        db = th._get_db()
-        with th._rw_lock.write_lock():
-            cursor = db.execute(
-                "INSERT INTO task_history "
-                "(timestamp, task, chat_id, result, extra) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (time.time(), task, chat_id, "done", extra_raw),
-            )
-            db.commit()
-        row_id = cursor.lastrowid
-        assert row_id is not None
-        return int(row_id)
-
-    def _raw_extra(self, task_id: int) -> str:
+    def _parent_task_id(self, task_id: str) -> str:
         db = th._get_db()
         with th._rw_lock.read_lock():
             row = db.execute(
-                "SELECT extra FROM task_history WHERE id = ?", (task_id,),
+                "SELECT parent_task_id FROM task_history WHERE id = ?",
+                (task_id,),
             ).fetchone()
-        return str(row["extra"] or "")
+        return str(row["parent_task_id"] or "")
 
+    def _row(self, task_id: str):
+        db = th._get_db()
+        with th._rw_lock.read_lock():
+            return db.execute(
+                "SELECT * FROM task_history WHERE id = ?",
+                (task_id,),
+            ).fetchone()
 
-_LEGACY_NAN_SUBAGENT_EXTRA = (
-    '{"subagent": {"parent_task_id": 1}, "cost": NaN, "model": "m"}'
-)
+    def _is_favorite(self, task_id: str) -> bool:
+        db = th._get_db()
+        with th._rw_lock.read_lock():
+            row = db.execute(
+                "SELECT is_favorite FROM task_history WHERE id = ?",
+                (task_id,),
+            ).fetchone()
+        return bool(row["is_favorite"])
 
 
 class TestFavoriteDoesNotFlipClassification(_TempDbTestBase):
-    """Starring a row must never change its sub-agent classification."""
+    """Starring/unstarring a row must never change its sub-agent classification."""
 
-    def test_star_legacy_nan_subagent_row_stays_visible(self) -> None:
-        row_id = self._insert_raw_extra(
-            "legacy nan row", "legacychat", _LEGACY_NAN_SUBAGENT_EXTRA,
-        )
-        # Pre-condition: the corrupt row is uniformly classified as a
-        # regular task and shows up in the history sidebar.
-        assert "legacy nan row" in [e["task"] for e in _load_history()]
-        assert not _is_subagent_row(_LEGACY_NAN_SUBAGENT_EXTRA)
+    def test_star_regular_row_stays_visible(self) -> None:
+        task_id, chat_id = _add_task("plain row", extra={"model": "m"})
+        # Pre-condition: classified as regular task.
+        assert "plain row" in [e["task"] for e in _load_history()]
+        assert not _is_subagent_row(self._row(task_id))
 
-        assert _set_task_favorite(row_id, True)
+        assert _set_task_favorite(task_id, True)
 
-        # The starred row must remain visible everywhere.
-        assert "legacy nan row" in [e["task"] for e in _load_history()]
-        assert "legacy nan row" in [
-            e["task"] for e in _search_history("legacy nan")
+        # The starred row must remain visible and stay classified
+        # as a regular (non-sub-agent) task.
+        assert "plain row" in [e["task"] for e in _load_history()]
+        assert "plain row" in [
+            e["task"] for e in _search_history("plain")
         ]
-        # And SQL/Python classification must still agree post-rewrite.
-        assert not _is_subagent_row(self._raw_extra(row_id))
+        assert not _is_subagent_row(self._row(task_id))
+        assert self._is_favorite(task_id)
 
-    def test_star_legacy_nan_subagent_row_keeps_chat_in_recent_chats(
-        self,
-    ) -> None:
-        row_id = self._insert_raw_extra(
-            "legacy nan row", "legacychat", _LEGACY_NAN_SUBAGENT_EXTRA,
-        )
-        assert _set_task_favorite(row_id, True)
+    def test_star_row_keeps_chat_in_recent_chats(self) -> None:
+        task_id, chat_id = _add_task("plain row")
+        assert _set_task_favorite(task_id, True)
         chats = _list_recent_chats(limit=10)
-        assert "legacychat" in [c["chat_id"] for c in chats]
+        assert chat_id in [c["chat_id"] for c in chats]
 
-    def test_unstar_legacy_nan_subagent_row_stays_visible(self) -> None:
-        row_id = self._insert_raw_extra(
-            "legacy nan row", "legacychat", _LEGACY_NAN_SUBAGENT_EXTRA,
-        )
-        assert _set_task_favorite(row_id, False)
-        entries = [e for e in _load_history() if e["task"] == "legacy nan row"]
+    def test_unstar_row_stays_visible_and_clears_flag(self) -> None:
+        task_id, chat_id = _add_task("plain row")
+        assert _set_task_favorite(task_id, True)
+        assert _set_task_favorite(task_id, False)
+        entries = [e for e in _load_history() if e["task"] == "plain row"]
         assert len(entries) == 1
-        parsed = json.loads(self._raw_extra(row_id))
-        assert parsed["is_favorite"] is False
+        assert not self._is_favorite(task_id)
 
-    def test_star_legacy_nan_row_preserves_displayed_metadata(self) -> None:
-        # The sidebar displays extra metadata via lenient json.loads, so
-        # the favourite rewrite must keep the recovered fields (with the
-        # non-finite values sanitised) — only the classification-flipping
-        # "subagent" key may be dropped.
-        row_id = self._insert_raw_extra(
-            "legacy nan row", "legacychat", _LEGACY_NAN_SUBAGENT_EXTRA,
+    def test_star_preserves_displayed_metadata(self) -> None:
+        # Toggling favourite must not corrupt the flat metadata columns
+        # used by the history sidebar.
+        task_id, chat_id = _add_task(
+            "row with meta",
+            extra={"model": "m", "work_dir": "/tmp/x", "cost": 1.5},
         )
-        assert _set_task_favorite(row_id, True)
-        raw = self._raw_extra(row_id)
-        parsed = json.loads(raw)
-        assert parsed["is_favorite"] is True
-        assert parsed["model"] == "m"
-        assert parsed["cost"] is None
-        # The rewritten column must be strict-valid JSON.
+        assert _set_task_favorite(task_id, True)
         db = th._get_db()
         with th._rw_lock.read_lock():
             row = db.execute(
-                "SELECT json_valid(extra) AS ok FROM task_history WHERE id = ?",
-                (row_id,),
+                "SELECT model, work_dir, cost, is_favorite "
+                "FROM task_history WHERE id = ?",
+                (task_id,),
             ).fetchone()
-        assert row["ok"] == 1
+        assert row["model"] == "m"
+        assert row["work_dir"] == "/tmp/x"
+        assert row["cost"] == 1.5
+        assert row["is_favorite"] == 1
 
     def test_star_valid_subagent_row_stays_hidden(self) -> None:
-        # Control: a REAL (valid-JSON) sub-agent row keeps its subagent
-        # marker through a favourite toggle and stays hidden.
+        # A REAL sub-agent row (parent_task_id set) keeps its sub-agent
+        # classification through a favourite toggle and stays hidden.
         parent_id, chat = _add_task("parent task")
         sub_id, _ = _add_task(
             "fanned-out subtask",
@@ -171,5 +146,7 @@ class TestFavoriteDoesNotFlipClassification(_TempDbTestBase):
             extra={"subagent": {"parent_task_id": parent_id}},
         )
         assert _set_task_favorite(sub_id, True)
-        assert "fanned-out subtask" not in [e["task"] for e in _load_history()]
-        assert _is_subagent_row(self._raw_extra(sub_id))
+        assert "fanned-out subtask" not in [
+            e["task"] for e in _load_history()
+        ]
+        assert _is_subagent_row(self._row(sub_id))
