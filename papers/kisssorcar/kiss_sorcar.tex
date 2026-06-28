@@ -252,7 +252,41 @@ The Sorcar Agent adds the tools that make the system useful for software develop
 
 \textbf{Dynamic model switching with \texttt{set\_model}.}  A \texttt{set\_model} tool, registered automatically on every Sorcar Agent, lets the agent hand the live conversation off to a different LLM at any point during a task without restarting it.  The tool accepts a model name (for example \texttt{"gpt-5.5"}, \texttt{"claude-opus-4-7"}, or \texttt{"gemini-3.5-flash"}), constructs the new backend through the same factory that built the original model, copies the conversation history and the cumulative usage counters into the new backend, rebuilds the cached tools schema in the new provider's dialect (Anthropic and OpenAI schemas differ in subtle ways), persists the choice to disk so that the next task in the same chat session reuses it, and returns a confirmation string back to the agent loop.  If no model has been instantiated yet (deferred-startup case), it simply updates the agent's default \texttt{model\_name} for the next run; if the requested model is already active, it is a no-op.
 
-This single tool is what enables \emph{multi-model, multi-vendor workflows inside a single task}.  Three idiomatic patterns recur in our usage: (i)~a \emph{scout-then-edit} pattern where a cheap fast model (e.g.\ \texttt{gemini-2.5-flash}) reads the repository, grep-searches for relevant call sites, and gathers context, then \texttt{set\_model("claude-opus-4-7")} hands off to a stronger reasoner for the actual edit; (ii)~a \emph{generate-then-review} pattern where a primary model produces a change and the agent calls \texttt{set\_model("gpt-5.5")} to switch to a second-opinion model that re-reads the diff, runs the tests, and verifies the change against the original request---this exact pattern is requested by the GEPA prompt-optimization task template in \texttt{src/kiss/SAMPLE\_TASKS.md} (``Use gpt-5.5 model (not codex) for thorough review of the work done at every step by the other model''); and (iii)~a \emph{cost-aware long-loop} pattern where an open-ended optimization or discovery task (Section~\ref{sec:long-running}) spends a cheap model on bookkeeping and journal-keeping but pays for a frontier model only at the decision points.  Because the conversation transcript and usage counters are carried across the switch, all subsequent budget accounting and continuation summaries remain coherent regardless of how many times the model is changed.
+This single tool is what enables \emph{multi-model, multi-vendor workflows inside a single task}.  Three idiomatic patterns recur in our usage: (i)~a \emph{scout-then-edit} pattern where a cheap fast model (e.g.\ \texttt{gemini-2.5-flash}) reads the repository, grep-searches for relevant call sites, and gathers context, then \texttt{set\_model("claude-opus-4-7")} hands off to a stronger reasoner for the actual edit; (ii)~a \emph{generate-then-review} pattern where a primary model produces a change and the agent calls \texttt{set\_model("gpt-5.5")} to switch to a second-opinion model that re-reads the diff, runs the tests, and verifies the change against the original request; and (iii)~a \emph{cost-aware long-loop} pattern where an open-ended optimization or discovery task (Section~\ref{sec:long-running}) spends a cheap model on bookkeeping and journal-keeping but pays for a frontier model only at the decision points.  Because the conversation transcript and usage counters are carried across the switch, all subsequent budget accounting and continuation summaries remain coherent regardless of how many times the model is changed.
+
+The following three prompts, reproduced from \texttt{src/kiss/INJECTIONS.md}, illustrate what this tool layer empowers.  They are not API calls or special modes: each is a single natural-language instruction that can be pasted into the IDE or CLI.  Their power comes from the combination of dynamic model switching, coding tools, test execution, parallel sub-agents, and later layers' persistence and worktree isolation.
+
+\paragraph{Primary model plus independent review.}
+\begin{prompt}
+Use claude-opus-4-7 model for all tasks including coding, bug
+fixing, and test creation. Use gpt-5.5 model (not codex) for
+thorough review and debugging of the work done by the other
+model. Check if the other model has missed some code or has
+introduced bugs. No need to check if the models exist.
+\end{prompt}
+
+\paragraph{Self-review, reproduce, fix, and repeat.}
+\begin{prompt}
+Can you review the updates made in the last task using gpt-5.5
+(non codex) and find bugs or missing code. Then write end-to-end
+tests reproducing the bugs reported by the review, fix them, and
+test them using claude-opus-4-7? Run all the tests in parallel
+and fix bugs after thoroughly reviewing the fixes with gpt-5.5
+(non codex). Repeat the process until you fail to reproduce the
+bugs reported by the review done by gpt-5.5 (non codex). No need
+to check if the models exist.
+\end{prompt}
+
+\paragraph{Three-model generation and review.}
+\begin{prompt}
+Use openrouter/z-ai/glm-5.2 model for all tasks including coding,
+bug fixing, and test creation. ALWAYS use gpt-5.5 model (not
+codex) to carefully and thoroughly review and debug the work done
+by openrouter/z-ai/glm-5.2 for bugs and missing code. Then use
+claude-opus-4-7 to do the same thing.
+\end{prompt}
+
+These prompts show that \texttt{set\_model} turns model choice from a session-level setting into a programmable task-level resource.  A user can ask one model to implement and test, another model to review the result, and a third model to audit both the implementation and the review without leaving the same conversation.  Combined with the Sorcar Agent's real coding tools and parallel test execution, this enables inexpensive models to do routine work while stronger or independent models are reserved for the high-value verification steps where missed code, subtle bugs, and inadequate tests are most likely to matter.
 
 %......................................................................
 \subsection{Chat Sorcar Agent}
