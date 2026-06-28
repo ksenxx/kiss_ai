@@ -844,20 +844,22 @@ update_repo() {
     # client that is mid-flight during the launchd/systemd respawn window.
     rm -f "$HOME/.kiss/sorcar.sock"
 
-    # Copy the bundled MODEL_INFO.json into ~/.kiss/ so the freshly installed
-    # extension serves the latest model pricing/context table on startup
-    # without waiting for ``model_info.py``'s lazy auto-copy.  The Python
-    # loader in ``kiss.core.models.model_info`` also auto-refreshes when the
-    # package copy is newer, but doing it here makes the data the user sees
-    # match the just-installed source immediately.
-    MODEL_INFO_SRC="$PROJECT_DIR/src/kiss/core/models/MODEL_INFO.json"
-    MODEL_INFO_DST="$HOME/.kiss/MODEL_INFO.json"
-    if [ -f "$MODEL_INFO_SRC" ]; then
-        cp "$MODEL_INFO_SRC" "$MODEL_INFO_DST"
-        echo "   Installed MODEL_INFO.json at $MODEL_INFO_DST"
-    else
-        echo "   WARNING: $MODEL_INFO_SRC missing — model table not refreshed."
-    fi
+    # MODEL_INFO.json is intentionally NOT copied into the user's kiss
+    # home directory.  The bundled
+    # ``src/kiss/core/models/MODEL_INFO.json`` is read directly from
+    # the installed package at runtime by ``kiss.core.models.model_info``,
+    # so every extension upgrade automatically delivers the latest model
+    # pricing/context table without leaving a stale user-side copy
+    # shadowing the freshly installed bundled file.
+    #
+    # User-curated model overrides / extensions live in
+    # ``~/.kiss/MY_MODELS.json`` — auto-seeded on first import with a
+    # short documentation block and one commented-out example entry —
+    # matching the ``MY_INJECTION.md`` / ``MY_TASK_TEMPLATES.md`` pattern.
+    #
+    # Re-introducing the copy here would mean a stale user-side
+    # ``~/.kiss/MODEL_INFO.json`` shadowing the freshly installed
+    # bundled file forever after the first install.
 
     # INJECTIONS.md is intentionally NOT copied into the user's kiss
     # home directory.  The bundled ``src/kiss/INJECTIONS.md`` is read
