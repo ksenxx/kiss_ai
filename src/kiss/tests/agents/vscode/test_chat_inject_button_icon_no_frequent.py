@@ -10,7 +10,7 @@ The chat webview toolbar (the row of small icon buttons under the
 chat text input) used to expose two toggle buttons next to each
 other: ``#frequent-tasks-btn`` (a tiny bar-chart icon, tooltip
 "Frequent tasks") and ``#tricks-btn`` (a lightbulb-shaped icon,
-tooltip "Inject instruction").
+tooltip "Inject promptlet").
 
 This change removes the Frequent-tasks toggle entirely and replaces
 the lightbulb icon inside the Inject-instruction button with a
@@ -25,7 +25,7 @@ substituted), and assert directly against the rendered DOM:
   visible button.  The previous tooltip text "Frequent tasks" is
   also gone from the toolbar area.
 * ``#tricks-btn`` is still present, still carries its ``Inject
-  instruction`` tooltip, and the SVG inside it contains the
+  promptlet`` tooltip, and the SVG inside it contains the
   signature path data of a syringe (the diagonal needle/barrel
   paths from the Lucide ``syringe`` glyph) instead of the previous
   lightbulb path.
@@ -181,8 +181,8 @@ def test_no_button_advertises_frequent_tasks_tooltip(_page) -> None:
 def test_inject_instruction_button_uses_syringe_icon(_page) -> None:
     """``#tricks-btn`` must render a syringe glyph, not a lightbulb.
 
-    Asserts (a) the button is still present, (b) it still carries
-    the ``Inject instruction`` tooltip, and (c) the inline SVG
+    Asserts (a) the button is still present, (b) it carries
+    the ``Inject promptlet`` tooltip, and (c) the inline SVG
     inside it contains the signature path data of the Lucide
     ``syringe`` icon and none of the previous lightbulb path data.
     """
@@ -199,9 +199,9 @@ def test_inject_instruction_button_uses_syringe_icon(_page) -> None:
         """,
     )
     assert info is not None, "#tricks-btn must still exist in chat.html"
-    assert info["tooltip"] == "Inject instruction", (
+    assert info["tooltip"] == "Inject promptlet", (
         f"#tricks-btn tooltip changed unexpectedly: "
-        f"got {info['tooltip']!r}, want 'Inject instruction'."
+        f"got {info['tooltip']!r}, want 'Inject promptlet'."
     )
     svg = info["svg"]
     assert "<svg" in svg, "#tricks-btn must contain an inline <svg> icon"
