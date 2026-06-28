@@ -20,7 +20,7 @@ class TestPersistence(unittest.TestCase):
 
     def test_append_chat_event_no_task(self):
         # This test should not raise an exception
-        persistence._append_chat_event(event={}, task_id=999)
+        persistence._append_chat_event(event={}, task_id="999")
 
 if __name__ == "__main__":
     unittest.main()

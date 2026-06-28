@@ -668,7 +668,7 @@ class TestSubagentReplayStripsGlobalSettings(unittest.TestCase):
         )
         # Seed two sub-agent rows whose extras also carry stripped
         # keys + the subagent metadata.
-        sub_ids: list[int] = []
+        sub_ids: list[str] = []
         for i in range(2):
             sub_id, _ = th._add_task(f"sub {i}", chat_id=chat_id)
             th._append_chat_event(

@@ -77,10 +77,10 @@ def _make_server() -> tuple[VSCodeServer, list[dict]]:
 
 def _seed_subagent_row(
     *,
-    parent_task_id: int,
+    parent_task_id: str,
     chat_id: str,
     description: str,
-) -> int:
+) -> str:
     task_id, _ = th._add_task(description, chat_id=chat_id)
     th._append_chat_event(
         {"type": "text_delta", "text": "x"}, task_id=task_id,

@@ -134,7 +134,7 @@ class TestResumeRunningStartTs(_BugHuntBase):
         })
         try:
             # Wait until the run has allocated its task_history row.
-            task_id: int | None = None
+            task_id: str | None = None
             deadline = time.time() + 30
             while time.time() < deadline:
                 tab = _RunningAgentState.running_agent_states.get(src_tab)
@@ -189,7 +189,7 @@ class TestResumeRunningStartTs(_BugHuntBase):
 class TestAutocommitDonePersistedToCurrentTask(_BugHuntBase):
     """BUG-2: in-task auto-commit must persist under the CURRENT task id."""
 
-    def _events_for_task(self, task_id: int) -> list[dict[str, Any]]:
+    def _events_for_task(self, task_id: str) -> list[dict[str, Any]]:
         _persistence._flush_chat_events()
         db = _persistence._get_db()
         rows = db.execute(
