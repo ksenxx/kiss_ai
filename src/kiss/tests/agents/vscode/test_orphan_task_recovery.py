@@ -47,7 +47,7 @@ def _make_server() -> Any:
     return VSCodeServer()
 
 
-def _insert_sentinel_row(task: str, chat_id: str = "orphan-chat") -> int:
+def _insert_sentinel_row(task: str, chat_id: str = "orphan-chat") -> str:
     """Insert a task_history row with the abrupt-failure sentinel.
 
     Mirrors the production ``early_extra`` shape (5 keys) so the
@@ -68,7 +68,7 @@ def _insert_sentinel_row(task: str, chat_id: str = "orphan-chat") -> int:
     return task_id
 
 
-def _row_result(task_id: int) -> str:
+def _row_result(task_id: str) -> str:
     db = _persistence._get_db()
     row = db.execute(
         "SELECT result FROM task_history WHERE id = ?", (task_id,),

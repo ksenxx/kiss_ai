@@ -11,8 +11,9 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
+from collections.abc import Generator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -24,7 +25,9 @@ from kiss.agents.sorcar import persistence
 
 
 @pytest.fixture
-def temp_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def temp_db(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> Generator[Path]:
     """Point persistence at a temp DB and reset per-thread connection cache."""
     db_path = tmp_path / "sorcar.db"
     monkeypatch.setattr(persistence, "_DB_PATH", db_path)
@@ -258,7 +261,7 @@ def test_persist_bug14_history_dict_exposes_typed_columns(
     assert e["tokens"] == 4242
     # Legacy ``extra`` JSON synthesis must still be present.
     assert "extra" in e
-    extra_parsed = json.loads(e["extra"])
+    extra_parsed = json.loads(cast(str, e["extra"]))
     assert extra_parsed["model"] == "gpt-5"
 
 

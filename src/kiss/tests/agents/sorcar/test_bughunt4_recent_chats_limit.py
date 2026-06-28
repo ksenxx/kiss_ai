@@ -55,7 +55,7 @@ class _TempDbTestBase:
         th._DB_PATH, th._db_conn, th._KISS_DIR = self.saved
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def _set_timestamp(self, task_id: int, ts: float) -> None:
+    def _set_timestamp(self, task_id: str, ts: float) -> None:
         db = th._get_db()
         with th._rw_lock.write_lock():
             db.execute(

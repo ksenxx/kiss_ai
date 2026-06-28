@@ -32,7 +32,7 @@ def _register(
     *,
     is_subagent: bool = False,
     chat_id: str = "",
-    task_history_id: int | None = None,
+    task_history_id: str | None = None,
 ) -> _RunningAgentState:
     st = _RunningAgentState(tab_id, "test-model")
     st.is_subagent = is_subagent
@@ -54,9 +54,9 @@ class TestResolveParentTabIdForSub:
     def test_task_id_match_via_task_history_id(self) -> None:
         """Tier 1: parent's ``task_history_id`` equals lookup id."""
         server = VSCodeServer()
-        _register("parent-tab", task_history_id=42, chat_id="c1")
+        _register("parent-tab", task_history_id="42", chat_id="c1")
         out = server._resolve_parent_tab_id_for_sub(
-            parent_task_id=42, chat_id="c1", sub_tab_id="task-42__sub_0",
+            parent_task_id="42", chat_id="c1", sub_tab_id="task-42__sub_0",
         )
         assert out == "parent-tab"
 
@@ -64,11 +64,11 @@ class TestResolveParentTabIdForSub:
         """Sub-agent states must never be returned as the parent."""
         server = VSCodeServer()
         _register(
-            "sub-tab", is_subagent=True, task_history_id=42, chat_id="c1",
+            "sub-tab", is_subagent=True, task_history_id="42", chat_id="c1",
         )
-        _register("parent-tab", task_history_id=42, chat_id="c1")
+        _register("parent-tab", task_history_id="42", chat_id="c1")
         out = server._resolve_parent_tab_id_for_sub(
-            parent_task_id=42, chat_id="c1", sub_tab_id="task-42__sub_0",
+            parent_task_id="42", chat_id="c1", sub_tab_id="task-42__sub_0",
         )
         assert out == "parent-tab"
 
@@ -83,7 +83,7 @@ class TestResolveParentTabIdForSub:
             chat_id="c2",
         )
         out = server._resolve_parent_tab_id_for_sub(
-            parent_task_id=999, chat_id="c2", sub_tab_id="x__sub_0",
+            parent_task_id="999", chat_id="c2", sub_tab_id="x__sub_0",
         )
         assert out == "parent-tab"
 
@@ -145,7 +145,7 @@ class TestResolveParentTabIdForSub:
             logging.WARNING, logger="kiss.agents.vscode.server",
         ):
             out = server._resolve_parent_tab_id_for_sub(
-                parent_task_id=12345, chat_id="missing-chat",
+                parent_task_id="12345", chat_id="missing-chat",
                 sub_tab_id="no-suffix",
             )
         assert out == ""
@@ -157,13 +157,13 @@ class TestResolveParentTabIdForSub:
         state."""
         server = VSCodeServer()
         _register(
-            "correct-parent", task_history_id=7, chat_id="other-chat",
+            "correct-parent", task_history_id="7", chat_id="other-chat",
         )
         _register(
             "wrong-parent", task_history_id=None, chat_id="lookup-chat",
         )
         out = server._resolve_parent_tab_id_for_sub(
-            parent_task_id=7, chat_id="lookup-chat",
+            parent_task_id="7", chat_id="lookup-chat",
             sub_tab_id="x__sub_0",
         )
         assert out == "correct-parent"
@@ -173,18 +173,18 @@ class TestResolveParentTabIdForSub:
         ``task_history_id`` is populated) must also be honored."""
 
         class _StubAgent:
-            _last_task_id: int | None = None
+            _last_task_id: str | None = None
 
         server = VSCodeServer()
         st = _register(
             "running-parent", task_history_id=None, chat_id="c4",
         )
         stub = _StubAgent()
-        stub._last_task_id = 88
+        stub._last_task_id = "88"
         st.agent = stub  # type: ignore[assignment]
 
         out = server._resolve_parent_tab_id_for_sub(
-            parent_task_id=88, chat_id="c4",
+            parent_task_id="88", chat_id="c4",
             sub_tab_id="task-88__sub_0",
         )
         assert out == "running-parent"

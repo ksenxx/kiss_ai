@@ -556,7 +556,7 @@ class TestPerTabAgentIsolation(unittest.TestCase):
         server, _ = _make_server()
         tab1 = server._get_tab("1")
         tab2 = server._get_tab("2")
-        tab1.task_history_id = 42
+        tab1.task_history_id = "42"
         assert tab2.task_history_id is None
 
     def test_get_tab_creates_on_demand(self) -> None:

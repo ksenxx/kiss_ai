@@ -207,16 +207,16 @@ class TestReattachRunningChatTaskIdDisambiguation:
         # different task_history_id.
         parent_state = _RunningAgentState("tab-parent", "test-model")
         parent_state.chat_id = "shared-chat"
-        parent_state.task_history_id = 100
+        parent_state.task_history_id = "100"
         parent_state.is_task_active = True
         _RunningAgentState.running_agent_states["tab-parent"] = parent_state
 
         # Sub-agent state — same chat_id, different task_history_id.
         sub_state = _RunningAgentState("tab-parent__sub_0", "test-model")
         sub_state.chat_id = "shared-chat"
-        sub_state.task_history_id = 200
+        sub_state.task_history_id = "200"
         sub_state.is_subagent = True
-        sub_state.parent_task_id = 100
+        sub_state.parent_task_id = "100"
         sub_state.is_task_active = True
         _RunningAgentState.running_agent_states["tab-parent__sub_0"] = (
             sub_state
@@ -229,10 +229,10 @@ class TestReattachRunningChatTaskIdDisambiguation:
         # so passing 200 — not the source's ``tab_id`` — proves the
         # disambiguation worked.
         ok = server._reattach_running_chat(
-            "shared-chat", "tab-history-click", task_id=200,
+            "shared-chat", "tab-history-click", task_id="200",
         )
         assert ok is True
-        assert subs == [(200, "tab-history-click")]
+        assert subs == [("200", "tab-history-click")]
 
         # Click a fresh tab with no task_id → falls back to chat_id
         # matching; the first eligible state wins.  The exact match
@@ -262,14 +262,14 @@ class TestReattachRunningChatTaskIdDisambiguation:
         # fallback if it weren't suppressed.
         parent_state = _RunningAgentState("tab-parent", "test-model")
         parent_state.chat_id = "chat-A"
-        parent_state.task_history_id = 100
+        parent_state.task_history_id = "100"
         parent_state.is_task_active = True
         _RunningAgentState.running_agent_states["tab-parent"] = parent_state
 
         ok = server._reattach_running_chat(
             "chat-A",
             "tab-history-click",
-            task_id=999,
+            task_id="999",
             is_subagent=True,
         )
         assert ok is False
@@ -289,17 +289,17 @@ class TestReattachRunningChatTaskIdDisambiguation:
 
         parent_state = _RunningAgentState("tab-parent", "test-model")
         parent_state.chat_id = "chat-A"
-        parent_state.task_history_id = 100
+        parent_state.task_history_id = "100"
         parent_state.is_task_active = True
         _RunningAgentState.running_agent_states["tab-parent"] = parent_state
 
         ok = server._reattach_running_chat(
-            "chat-A", "tab-history-click", task_id=999,
+            "chat-A", "tab-history-click", task_id="999",
         )
         assert ok is True
         # Fallback found the parent (chat-id match); the printer is
         # subscribed per ``task_history_id``, so the call key is 100.
-        assert subs == [(100, "tab-history-click")]
+        assert subs == [("100", "tab-history-click")]
 
 
 class TestReplaySessionSubscribesRunningSubagent:
