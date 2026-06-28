@@ -242,6 +242,71 @@
       box-shadow: var(--shadow-2); background: #000;
     }
 
+    /* ========================================================== */
+    /* HERO INSTALL — preferred full-stack install, sits directly */
+    /* below the demo video and above the CTA strip.              */
+    /* ========================================================== */
+    .hero-install {
+      max-width: 960px;
+      margin: 0 auto 1.4rem;
+      padding: 0 1.5rem;
+    }
+    .hero-install-card {
+      position: relative;
+      border: 1px solid var(--primary);
+      border-radius: 12px;
+      padding: 1rem 1.15rem 1.05rem;
+      background:
+        linear-gradient(180deg, rgba(25,118,210,0.08), rgba(0,137,123,0.04)),
+        var(--bg);
+      box-shadow:
+        0 0 0 1px var(--primary),
+        0 10px 30px -12px rgba(25,118,210,0.45);
+      display: flex;
+      flex-direction: column;
+      gap: 0.65rem;
+    }
+    .hero-install-head {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.45rem 0.8rem;
+    }
+    .hero-install-title {
+      margin: 0;
+      font-size: 1rem;
+      font-weight: 600;
+      color: var(--text);
+    }
+    .hero-install-badge {
+      display: inline-flex; align-items: center; gap: 0.3rem;
+      font-family: 'Roboto Mono', monospace;
+      font-size: 0.66rem; font-weight: 700; letter-spacing: 0.08em;
+      text-transform: uppercase;
+      padding: 0.18rem 0.55rem; border-radius: 999px;
+      background: linear-gradient(135deg, var(--primary), var(--accent));
+      color: #fff;
+      box-shadow: 0 2px 8px rgba(25,118,210,0.35);
+      white-space: nowrap;
+    }
+    .hero-install-note {
+      margin: 0 0 0 auto;
+      color: var(--text-dim);
+      font-size: 0.85rem;
+      line-height: 1.45;
+    }
+    .hero-install-copy {
+      /* Inherits .quickstart-copy base styling; tweak for a wider, hero-prominent panel. */
+      font-size: 0.85rem;
+      padding: 0.8rem 1rem;
+      overflow-x: auto;
+      white-space: nowrap;
+    }
+    @media (max-width: 640px) {
+      .hero-install-note { margin-left: 0; flex-basis: 100%; }
+      .hero-install-copy { font-size: 0.74rem; padding: 0.7rem 0.85rem; }
+    }
+
     /* Hero CTA strip — three buttons directly under the demo video. */
     .hero-ctas {
       max-width: 960px;
@@ -1794,6 +1859,20 @@
            aria-label="KISS Sorcar demo video">
       <a href="assets/sorcar-main.mp4">Watch the KISS Sorcar demo video</a>
     </video>
+  </div>
+
+  <!-- Preferred way to install KISS Sorcar (full stack) — directly below the demo video. -->
+  <div class="hero-install" aria-label="Full installation script for KISS Sorcar">
+    <div class="hero-install-card">
+      <div class="hero-install-head">
+        <h3 class="hero-install-title">Full installation script</h3>
+        <span class="hero-install-badge" aria-label="Recommended install method">★ Recommended</span>
+        <p class="hero-install-note">Preferred way to install KISS Sorcar &mdash; macOS &amp; Linux, one command, no extra steps.</p>
+      </div>
+      <button class="quickstart-copy hero-install-copy" type="button"
+              data-copy="curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install.sh | bash"
+              aria-label="Copy full installation script to clipboard">$ curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install.sh | bash</button>
+    </div>
   </div>
 
   <!-- Hero CTAs: Install (VS Code) · pipx install (click to copy) · Star on GitHub -->
