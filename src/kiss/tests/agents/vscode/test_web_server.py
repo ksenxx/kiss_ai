@@ -155,11 +155,24 @@ class TestWebappServerLoadingOverlay(unittest.TestCase):
         of the shim's ``onmessage`` handler.
         """
         html = _build_html()
-        # Isolate the auth_ok branch ("auth_ok" … "return;").
+        # Isolate the NORMAL auth_ok path.  The handler begins with an
+        # early-return reload short-circuit for the
+        # "reconnect-after-prior-auth" recovery case (see
+        # ``_hadAuthThenClosed`` in the shim — when the WS dropped
+        # post-auth and the new socket re-authenticates we reload the
+        # whole page rather than continue in place).  That early
+        # return ends with its own ``return;``, so naively splitting on
+        # the first ``return;`` after the auth_ok marker would only
+        # examine the reload short-circuit and miss the normal-path
+        # ``daemonStatus`` dispatch.  Anchor on ``_authenticated =
+        # true`` instead, which marks the start of the normal path.
         marker = "msg.type === 'auth_ok'"
         self.assertIn(marker, html)
         after_auth_ok = html.split(marker, 1)[1]
-        auth_ok_branch, _rest = after_auth_ok.split("return;", 1)
+        normal_path_marker = "_authenticated = true"
+        self.assertIn(normal_path_marker, after_auth_ok)
+        normal_path_onward = after_auth_ok.split(normal_path_marker, 1)[1]
+        auth_ok_branch, _rest = normal_path_onward.split("return;", 1)
         self.assertIn("daemonStatus", auth_ok_branch)
         self.assertIn("connected: true", auth_ok_branch)
         self.assertIn(

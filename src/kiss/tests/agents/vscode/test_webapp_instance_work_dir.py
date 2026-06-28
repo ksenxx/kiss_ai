@@ -147,10 +147,24 @@ out.sent = ws0.sent.map(s => JSON.parse(s));
             [m["type"] for m in sent].index("getFiles"),
         )
 
-    def test_reconnect_replays_pinned_work_dir(self) -> None:
-        """After a dropped WebSocket the shim reconnects and re-sends
-        ``setWorkDir`` from the sessionStorage pin on ``auth_ok``."""
+    def test_reconnect_after_prior_auth_reloads_page(self) -> None:
+        """After a dropped WebSocket post-auth the shim reloads the page
+        on the next ``auth_ok`` (recovering from a server restart).
+        The reload preserves ``sessionStorage`` so the post-reload
+        shim's first ``auth_ok`` replays ``setWorkDir`` from the pin
+        (covered by
+        ``test_fresh_shim_with_pinned_work_dir_replays_on_auth_ok``).
+
+        Together these two tests preserve the per-tab work_dir
+        invariant across reconnects under the auto-reload design
+        introduced to recover from server restarts: the in-place
+        replay is replaced by a reload-then-replay round-trip whose
+        net observable effect on the server is the same
+        ``setWorkDir`` frame on the new connection."""
         out = _run_shim_harness("""
+globalThis.location.reload = () => {
+  out.reloaded = (out.reloaded || 0) + 1;
+};
 const api = window.acquireVsCodeApi();
 const ws0 = FakeWS.instances[0];
 ws0.onopen();
@@ -163,10 +177,37 @@ ws1.onopen();
 ws1.onmessage({data: JSON.stringify({type: 'auth_ok'})});
 out.sent1 = ws1.sent.map(s => JSON.parse(s));
 """)
+        # Reload must have been triggered exactly once: this is what
+        # refreshes the page so the new server's restored state is
+        # visible to the user.
+        self.assertEqual(out.get("reloaded"), 1, out)
+        # The second connection sent ONLY ``auth`` — no in-place
+        # setWorkDir replay, because the shim short-circuits to a
+        # reload on the post-disconnect ``auth_ok``.  The replay
+        # happens on the fresh post-reload shim from sessionStorage.
         sent1 = out["sent1"]
-        self.assertEqual(sent1[0]["type"], "auth")
-        self.assertEqual(sent1[1]["type"], "setWorkDir")
-        self.assertEqual(sent1[1]["workDir"], "/inst/a")
+        self.assertEqual([m["type"] for m in sent1], ["auth"])
+        # And the sessionStorage pin survives the simulated reload
+        # (real ``location.reload()`` preserves sessionStorage).
+        self.assertEqual(out["sessionWorkDir"], "/inst/a")
+
+    def test_fresh_shim_with_pinned_work_dir_replays_on_auth_ok(self) -> None:
+        """A fresh shim whose sessionStorage already holds a pinned
+        work_dir (e.g. because the prior shim instance reloaded the
+        page on reconnect) MUST replay ``setWorkDir`` on its first
+        ``auth_ok``.  This is the post-reload half of the
+        reconnect-replay round-trip."""
+        out = _run_shim_harness("""
+_ss['sorcar-work-dir'] = '/inst/a';  // pin from a prior page instance
+const ws0 = FakeWS.instances[0];
+ws0.onopen();
+ws0.onmessage({data: JSON.stringify({type: 'auth_ok'})});
+out.sent = ws0.sent.map(s => JSON.parse(s));
+""")
+        sent = out["sent"]
+        self.assertEqual(sent[0]["type"], "auth")
+        self.assertEqual(sent[1]["type"], "setWorkDir")
+        self.assertEqual(sent[1]["workDir"], "/inst/a")
 
     def test_no_pin_means_no_replay(self) -> None:
         """A fresh instance with no pinned work_dir sends nothing but
