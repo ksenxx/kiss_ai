@@ -230,7 +230,7 @@ KISS Sorcar ships a catalog of **502 models** across **9 provider categories**, 
 Current catalog capability totals:
 
 - **486** generation-capable models
-- **326** function-calling-capable models
+- **327** function-calling-capable models
 - **7** embedding models
 
 Full model list:

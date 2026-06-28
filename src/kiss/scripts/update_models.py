@@ -74,8 +74,31 @@ PROJECT_ROOT = _find_project_root()
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 MODEL_INFO_PATH = PROJECT_ROOT / "src" / "kiss" / "core" / "models" / "MODEL_INFO.json"
+README_PATH = PROJECT_ROOT / "README.md"
+
+# Provider prefixes we intentionally exclude from the bundled catalog.
+# These are removed on every run regardless of whether they still appear
+# in upstream APIs.  Currently used to keep MiniMax models out: we replaced
+# MiniMax API-key support with Z.AI and Moonshot AI, and several tests
+# (``test_zai_moonshot_keys.test_model_info_json_has_no_minimax_entries``)
+# assert that no minimax entries leak back into ``MODEL_INFO.json``.
+_EXCLUDED_PREFIXES: tuple[str, ...] = (
+    "minimax-",
+    "MiniMaxAI/",
+    "openrouter/minimax/",
+)
 
 _SSL_CTX = ssl.create_default_context()
+
+
+def _is_excluded_provider(name: str) -> bool:
+    """Return True if ``name`` belongs to a permanently excluded provider.
+
+    Used to drop entries from upstream fetches and to mark any leftover
+    catalog entries as deprecated so they are removed from
+    ``MODEL_INFO.json`` on the next run.
+    """
+    return name.startswith(_EXCLUDED_PREFIXES)
 
 
 def api_get(url: str, headers: dict[str, str] | None = None) -> Any:
@@ -116,6 +139,8 @@ def fetch_openrouter(verbose: bool = False) -> dict[str, dict]:
         completion_per_tok = float(pricing.get("completion") or "0")
         ctx = m.get("context_length", 0)
         name = f"openrouter/{model_id}"
+        if _is_excluded_provider(name):  # pragma: no branch
+            continue
         models[name] = {
             "context_length": ctx,
             "input_price_per_1M": round(prompt_per_tok * 1_000_000, 3),
@@ -462,6 +487,9 @@ def find_deprecated_models(
     deprecated: list[dict] = []
 
     for name in current:  # pragma: no branch
+        if _is_excluded_provider(name):  # pragma: no branch
+            deprecated.append({"name": name, "reason": "excluded provider"})
+            continue
         if name.startswith("codex/"):  # pragma: no branch
             if codex_slugs and name != "codex/default":
                 slug = name.removeprefix("codex/")
@@ -984,6 +1012,140 @@ def apply_updates_to_file(
     # overrides live in ``~/.kiss/MY_MODELS.json`` instead.
 
 
+def _readme_provider_category(model_name: str) -> str:
+    """Return the README provider-category label for ``model_name``.
+
+    Mirrors ``tests/test_readme_zai_moonshot._provider_category`` so that
+    counts emitted into ``README.md`` are guaranteed to agree with the
+    test's expectations after :func:`sync_readme_catalog` rewrites the
+    "Models Supported" section. The ``cc/*`` and ``codex/*`` labels keep
+    the backticks (and matching parentheses) so they can be matched
+    verbatim by the test's ``| Provider | count |`` regex.
+    """
+    if model_name.startswith("openrouter/"):
+        return "OpenRouter"
+    if model_name.startswith("cc/"):
+        return "Claude Code CLI (`cc/*`)"
+    if model_name.startswith("codex/"):
+        return "Codex CLI (`codex/*`)"
+    if model_name.startswith("claude-"):
+        return "Anthropic"
+    if model_name.startswith("glm-"):
+        return "Z.AI"
+    if model_name.startswith(("kimi-", "moonshot-")):
+        return "Moonshot AI"
+    if model_name.startswith(("gemini-", "google/")):
+        return "Gemini / Google"
+    if model_name.startswith(("gpt-", "o", "computer-use-preview", "text-embedding-")):
+        return "OpenAI"
+    return "Together AI"
+
+
+def _summary_label(category: str) -> str:
+    """Map a README category label to its ``<summary>`` form (no backticks).
+
+    The table rows keep the backticks (``| Claude Code CLI (`cc/*`) | 3 |``)
+    but the collapsible-section headers strip them
+    (``<summary><strong>Claude Code CLI (cc/*) (3)</strong></summary>``),
+    so the rewriter must produce both spellings.
+    """
+    return category.replace("`", "")
+
+
+def sync_readme_catalog(readme_path: Path, model_info_path: Path) -> bool:
+    """Rewrite the catalog totals in ``README.md`` to match MODEL_INFO.json.
+
+    Updates the catalog totals, capability counts, per-provider table
+    counts, and ``<summary>`` headers in place using targeted regex
+    substitutions, leaving the rest of the file untouched. Returns
+    ``True`` when the file was modified.
+    """
+    data: dict[str, dict[str, Any]] = json.loads(model_info_path.read_text())
+    counts: dict[str, int] = {}
+    for name in data:
+        category = _readme_provider_category(name)
+        counts[category] = counts.get(category, 0) + 1
+    total = sum(counts.values())
+    cat_count = len(counts)
+    generation = sum(1 for entry in data.values() if entry.get("gen"))
+    function_calling = sum(1 for entry in data.values() if entry.get("fc"))
+    embedding = sum(1 for entry in data.values() if entry.get("emb"))
+
+    text = readme_path.read_text()
+    original = text
+
+    text = re.sub(
+        r"(\| \*\*Models in bundled catalog\*\* \| )\d+ across \d+ provider categories",
+        rf"\g<1>{total} across {cat_count} provider categories",
+        text,
+    )
+    text = re.sub(
+        r"(ships a catalog of \*\*)\d+( models\*\* across \*\*)\d+( provider categories\*\*)",
+        rf"\g<1>{total}\g<2>{cat_count}\g<3>",
+        text,
+    )
+    text = re.sub(
+        r"- \*\*\d+\*\* generation-capable models",
+        f"- **{generation}** generation-capable models",
+        text,
+    )
+    text = re.sub(
+        r"- \*\*\d+\*\* function-calling-capable models",
+        f"- **{function_calling}** function-calling-capable models",
+        text,
+    )
+    text = re.sub(
+        r"- \*\*\d+\*\* embedding models",
+        f"- **{embedding}** embedding models",
+        text,
+    )
+
+    for category, count in counts.items():
+        table_pat = rf"(\| {re.escape(category)} \| )\d+( \|)"
+        text = re.sub(table_pat, rf"\g<1>{count}\g<2>", text)
+        summary = _summary_label(category)
+        details_pat = (
+            rf"(<summary><strong>{re.escape(summary)} \()\d+(\)</strong></summary>)"
+        )
+        text = re.sub(details_pat, rf"\g<1>{count}\g<2>", text)
+
+    if text == original:
+        return False
+    readme_path.write_text(text)
+    return True
+
+
+def _run_scrub_only(dry_run: bool = False) -> None:
+    """Offline path: drop excluded-provider entries and resync README.
+
+    Reads ``MODEL_INFO.json`` directly (rather than going through
+    ``get_current_model_info``) so the script can run without importing
+    any provider backends, then writes the trimmed JSON and refreshes the
+    README's catalog totals. Used to apply provider-removal fixes (e.g.
+    purging MiniMax) without requiring any vendor API keys.
+    """
+    print("=" * 60)
+    print("Model Info Updater (scrub-only mode)")
+    print("=" * 60)
+    data = _read_model_info_json(MODEL_INFO_PATH)
+    print(f"\n[1/3] Loaded {len(data)} entries from {MODEL_INFO_PATH}")
+    removed = [name for name in list(data) if _is_excluded_provider(name)]
+    print(f"\n[2/3] {len(removed)} excluded-provider entries to remove:")
+    for name in removed:
+        print(f"    {name}")
+    if dry_run:
+        print("  (dry-run, no files modified)")
+        return
+    for name in removed:
+        data.pop(name, None)
+    _write_model_info_json(MODEL_INFO_PATH, data)
+    print(f"  Written to {MODEL_INFO_PATH}")
+    print("\n[3/3] Syncing README catalog totals...")
+    changed = sync_readme_catalog(README_PATH, MODEL_INFO_PATH)
+    print(f"  README updated: {changed} ({README_PATH})")
+    print("\nDone!")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Update MODEL_INFO.json from vendor APIs")
     parser.add_argument(
@@ -993,8 +1155,21 @@ def main() -> None:
     )
     parser.add_argument("--skip-test", action="store_true", help="Skip capability testing")
     parser.add_argument("--test-existing", action="store_true", help="Re-test existing models")
+    parser.add_argument(
+        "--scrub-only",
+        action="store_true",
+        help=(
+            "Offline mode: skip vendor API fetches, drop catalog entries "
+            "belonging to permanently excluded providers, and resync "
+            "README.md catalog totals. Requires no API keys."
+        ),
+    )
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
+
+    if args.scrub_only:
+        _run_scrub_only(dry_run=args.dry_run)
+        return
 
     print("=" * 60)
     print("Model Info Updater")
@@ -1118,6 +1293,11 @@ def main() -> None:
 
     print("\n[6/6] Applying changes...")
     apply_updates_to_file(updates, new_models, deprecated, current, dry_run=args.dry_run)
+
+    if not args.dry_run and README_PATH.exists():
+        print("\n  Syncing README catalog totals...")
+        changed = sync_readme_catalog(README_PATH, MODEL_INFO_PATH)
+        print(f"  README updated: {changed} ({README_PATH})")
 
     print("\nDone!")
 
