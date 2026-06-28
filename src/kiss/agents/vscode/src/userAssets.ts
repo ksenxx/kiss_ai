@@ -10,17 +10,20 @@
  * Two helpers:
  *
  * * ``ensureUserAsset(name, packagePath)`` — seeds a user copy from a
- *   bundled package file.  Used for ``INJECTIONS.md``: the file in
- *   ``src/kiss/INJECTIONS.md`` is the seed/fallback and is also
- *   overwritten into ``~/.kiss/INJECTIONS.md`` at install time by
- *   ``install.sh`` and ``installMarkdownAssets`` so version upgrades
- *   propagate.  At runtime user edits survive every read.
+ *   bundled package file.  Generic helper retained in the public API
+ *   for future package-seeded assets; no production caller currently
+ *   uses it (``INJECTIONS.md`` is now read directly from the bundled
+ *   package, never copied into ``~/.kiss/`` — see ``getTricks`` in
+ *   ``SorcarTab.ts`` and ``kiss.agents.vscode.tricks.read_tricks``).
+ *   At runtime user edits survive every read.
  *
  * * ``ensureUserAssetFromDefault(name, defaultContent)`` — seeds a user
  *   copy from an inline string default, with no package file
- *   involved.  Used for ``MY_TASK_TEMPLATES.md``: the file is purely
- *   user-curated and the only "bundled" content is a tiny starter task
- *   (``## Task\n\nHi!\n``).  Returns ``null`` when ``~/.kiss/`` is not
+ *   involved.  Used for ``MY_TASK_TEMPLATES.md`` (welcome-screen chips)
+ *   and ``MY_INJECTION.md`` (Inject instruction panel), both purely
+ *   user-curated files whose only "bundled" content is a tiny inline
+ *   starter (``## Task\n\nHi!\n`` and a ``## Trick`` test-first
+ *   starter, respectively).  Returns ``null`` when ``~/.kiss/`` is not
  *   writable so the caller can skip silently.
  *
  * Honours the ``KISS_HOME`` env var, matching ``persistence.py``,

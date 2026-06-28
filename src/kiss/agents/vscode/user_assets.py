@@ -7,27 +7,26 @@
 This module exposes two helpers:
 
 * :func:`ensure_user_asset` — seeds a user copy from a **bundled
-  package file**.  Used for ``INJECTIONS.md``, where the source of
-  truth is the file shipped in ``src/kiss/INJECTIONS.md`` and the user
-  copy at ``~/.kiss/INJECTIONS.md`` is a writable mirror.
+  package file**.  Generic helper retained in the public API for
+  future package-seeded assets; no production caller currently uses
+  it (``INJECTIONS.md`` is now read directly from the bundled
+  package, never copied into ``~/.kiss/`` — see
+  :mod:`kiss.agents.vscode.tricks`).
 
-  **Install-time** (``install.sh`` and ``DependencyInstaller.ts``): on
-  every install or version upgrade ``INJECTIONS.md`` is *always*
-  copied from the package into ``~/.kiss/``, overwriting any prior
-  copy — matching the ``MODEL_INFO.json`` pattern.
-
-  **Runtime** (this helper): if ``~/.kiss/<asset>`` exists return it
-  as-is; user edits made *between* installs survive every daemon
-  restart.  If the user copy is missing seed it from the package copy
-  and return the new path.  When ``~/.kiss/`` is not writable, return
-  the package copy directly so the caller still sees a valid file.
+  If ``~/.kiss/<asset>`` exists return it as-is; user edits survive
+  every daemon restart.  If the user copy is missing seed it from
+  the package copy and return the new path.  When ``~/.kiss/`` is
+  not writable, return the package copy directly so the caller still
+  sees a valid file.
 
 * :func:`ensure_user_asset_from_default` — seeds a user copy from an
   **inline string default**, with no package file involved.  Used for
-  ``MY_TASK_TEMPLATES.md``, where the file is purely user-curated and
-  the only "bundled" content is a tiny starter task (``## Task\\n\\nHi!\\n``).
-  Returns ``None`` when ``~/.kiss/`` is not writable so the caller can
-  skip silently.
+  ``MY_TASK_TEMPLATES.md`` (welcome-screen chips) and
+  ``MY_INJECTION.md`` (Inject instruction panel), both purely
+  user-curated files whose only "bundled" content is a tiny inline
+  starter (``## Task\\n\\nHi!\\n`` and a ``## Trick`` test-first
+  starter, respectively).  Returns ``None`` when ``~/.kiss/`` is not
+  writable so the caller can skip silently.
 
 ``KISS_HOME`` overrides the default ``~/.kiss`` location, matching the
 rest of the kiss codebase (``persistence.py``, ``web_server.py``,
