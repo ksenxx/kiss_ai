@@ -58,7 +58,10 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar.cli_helpers import _print_recent_chats
+from kiss.agents.sorcar.cli_helpers import (
+    _parse_resume_arg,
+    _print_recent_chats,
+)
 from kiss.agents.sorcar.cli_panel import (
     CYAN,
     PROMPT_MARKER,
@@ -692,10 +695,15 @@ def _handle_client_slash(  # noqa: PLR0911,PLR0912 - branchy by design
         print("Started a new chat — context cleared.\n")
         return False
     if cmd == "/resume":
-        if arg:
-            client.send({"type": "resumeSession", "chatId": arg})
-            client.dispatcher.chat_id = arg
-            print(f"Resumed chat {arg}.\n")
+        try:
+            chat_id, limit = _parse_resume_arg(arg)
+        except ValueError as exc:
+            print(f"Invalid /resume argument: {exc}\n")
+            return False
+        if chat_id:
+            client.send({"type": "resumeSession", "chatId": chat_id})
+            client.dispatcher.chat_id = chat_id
+            print(f"Resumed chat {chat_id}.\n")
         else:
             # List recent chats from the shared kiss DB the daemon
             # also writes to.  Bypassing ``cli_repl._handle_resume``
@@ -703,7 +711,7 @@ def _handle_client_slash(  # noqa: PLR0911,PLR0912 - branchy by design
             # (there is no in-process agent in client mode); the
             # original "list recent chats" behaviour is preserved
             # via :func:`_print_recent_chats` directly.
-            _print_recent_chats()
+            _print_recent_chats(limit=limit)
             print("\nResume one with: /resume <chat-id>\n")
         return False
     if cmd == "/model":
