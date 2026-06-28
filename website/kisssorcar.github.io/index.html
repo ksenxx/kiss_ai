@@ -1068,6 +1068,384 @@
       #magic-dust { display: none; }
       html { scroll-behavior: auto; }
     }
+
+    /* ============================================================
+       VISUAL OVERHAUL — modern dark theme, ambient gradients,
+       glassmorphism, gradient sweeps, scroll-reveal, animated stats.
+       Applied via :root override; existing markup is unchanged.
+       ============================================================ */
+    :root {
+      --bg: #07090f;
+      --surface: rgba(255,255,255,0.035);
+      --surface-2: rgba(255,255,255,0.07);
+      --border: rgba(167,139,250,0.18);
+      --text: #ecedf3;
+      --text-dim: #a8b0c2;
+      --text-soft: #7c869a;
+      --primary: #2dd4bf;
+      --primary-dark: #14b8a6;
+      --primary-soft: rgba(45,212,191,0.12);
+      --accent: #a78bfa;
+      --gold: #fbbf24;
+      --magenta: #ec4899;
+      --code-bg: #0b1020;
+      --code-text: #e8eaed;
+      --shadow-1: 0 2px 8px rgba(0,0,0,0.45), 0 1px 2px rgba(0,0,0,0.5);
+      --shadow-2: 0 8px 26px rgba(0,0,0,0.55), 0 2px 6px rgba(0,0,0,0.4);
+      --shadow-3: 0 22px 60px -18px rgba(45,212,191,0.42), 0 14px 36px -16px rgba(167,139,250,0.40);
+    }
+
+    html, body { background: var(--bg); color: var(--text); }
+
+    /* Ambient animated gradient orbs behind everything. */
+    body {
+      position: relative;
+      background:
+        radial-gradient(ellipse 80% 60% at 20% 0%, rgba(45,212,191,0.10), transparent 60%),
+        radial-gradient(ellipse 70% 60% at 85% 15%, rgba(167,139,250,0.12), transparent 60%),
+        radial-gradient(ellipse 90% 60% at 50% 100%, rgba(236,72,153,0.07), transparent 65%),
+        var(--bg);
+      background-attachment: fixed;
+    }
+    body::before {
+      content: "";
+      position: fixed; inset: -10%;
+      z-index: -2; pointer-events: none;
+      background:
+        radial-gradient(circle 380px at 12% 18%, rgba(45,212,191,0.18), transparent 60%),
+        radial-gradient(circle 460px at 88% 28%, rgba(167,139,250,0.22), transparent 60%),
+        radial-gradient(circle 520px at 22% 78%, rgba(236,72,153,0.14), transparent 60%),
+        radial-gradient(circle 420px at 78% 92%, rgba(251,191,36,0.10), transparent 60%);
+      filter: blur(40px) saturate(140%);
+      animation: orb-float 22s ease-in-out infinite alternate;
+    }
+    body::after {
+      content: "";
+      position: fixed; inset: 0;
+      z-index: -1; pointer-events: none;
+      background-image: radial-gradient(circle, rgba(255,255,255,0.045) 1px, transparent 1px);
+      background-size: 26px 26px;
+      mask-image: radial-gradient(ellipse 80% 70% at 50% 35%, #000 30%, transparent 75%);
+      -webkit-mask-image: radial-gradient(ellipse 80% 70% at 50% 35%, #000 30%, transparent 75%);
+      opacity: 0.7;
+    }
+    @keyframes orb-float {
+      0%   { transform: translate3d(0, 0, 0)   scale(1);    }
+      50%  { transform: translate3d(2%, -3%, 0) scale(1.06); }
+      100% { transform: translate3d(-3%, 2%, 0) scale(0.96); }
+    }
+
+    /* Navigation — glass dark bar with gradient bottom edge. */
+    nav {
+      background: rgba(9,12,22,0.72);
+      border-bottom: 1px solid rgba(167,139,250,0.18);
+      box-shadow: 0 1px 0 rgba(45,212,191,0.08), 0 18px 40px -28px rgba(0,0,0,0.7);
+    }
+    nav::after {
+      content: "";
+      position: absolute; left: 0; right: 0; bottom: -1px; height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(45,212,191,0.55), rgba(167,139,250,0.55), transparent);
+      pointer-events: none;
+    }
+    nav .brand { color: var(--text); }
+    nav .links a {
+      position: relative; color: var(--text-dim); border-bottom-color: transparent;
+    }
+    nav .links a::after {
+      content: ""; position: absolute; left: 50%; bottom: -2px;
+      width: 0; height: 2px; transform: translateX(-50%);
+      background: linear-gradient(90deg, var(--primary), var(--accent));
+      border-radius: 2px;
+      transition: width 0.25s ease;
+    }
+    nav .links a:hover { color: var(--text); border-bottom-color: transparent; }
+    nav .links a:hover::after { width: 100%; }
+    nav .gh-badge {
+      background: linear-gradient(140deg, rgba(45,212,191,0.16), rgba(167,139,250,0.18));
+      border-color: rgba(167,139,250,0.30);
+      color: var(--text);
+      backdrop-filter: blur(8px);
+      box-shadow: 0 6px 18px -10px rgba(45,212,191,0.4);
+    }
+    nav .gh-badge:hover {
+      background: linear-gradient(140deg, rgba(45,212,191,0.30), rgba(167,139,250,0.32));
+      border-color: rgba(45,212,191,0.5);
+      transform: translateY(-1px);
+    }
+
+    /* Hero h1 — gradient sweep with subtle shimmer. */
+    .hero h1 {
+      background: linear-gradient(110deg,
+        #ecedf3 0%, #ecedf3 30%,
+        #2dd4bf 45%, #a78bfa 60%,
+        #ecedf3 75%, #ecedf3 100%);
+      background-size: 250% auto;
+      -webkit-background-clip: text; background-clip: text;
+      -webkit-text-fill-color: transparent; color: transparent;
+      animation: shimmer 9s ease-in-out infinite;
+    }
+    @keyframes shimmer {
+      0%, 100% { background-position: 0% center; }
+      50%      { background-position: 100% center; }
+    }
+    .hero-logo { filter: drop-shadow(0 10px 36px rgba(45,212,191,0.35)) drop-shadow(0 6px 18px rgba(167,139,250,0.25)); }
+    .hero-quote blockquote { color: var(--text-dim); }
+    .hero-quote figcaption { color: var(--text-soft); }
+    .hero-trust {
+      color: var(--text-dim);
+    }
+    .hero-trust strong {
+      background: linear-gradient(90deg, var(--primary), var(--accent));
+      -webkit-background-clip: text; background-clip: text;
+      -webkit-text-fill-color: transparent; color: transparent;
+    }
+
+    /* Benchmark band — glass with gradient strong text. */
+    .benchmark {
+      background: linear-gradient(140deg, rgba(45,212,191,0.07), rgba(167,139,250,0.08));
+      border: 1px solid rgba(167,139,250,0.22);
+      backdrop-filter: blur(14px) saturate(140%);
+      -webkit-backdrop-filter: blur(14px) saturate(140%);
+      box-shadow: 0 20px 50px -24px rgba(0,0,0,0.65);
+    }
+    .benchmark .divider { background: rgba(167,139,250,0.22); }
+    .benchmark .cell .v { color: var(--text); }
+
+    /* Hero demo video frame. */
+    .screenshot img, .screenshot video {
+      border: 1px solid rgba(167,139,250,0.30);
+      box-shadow:
+        0 30px 90px -30px rgba(45,212,191,0.45),
+        0 18px 50px -20px rgba(167,139,250,0.40),
+        0 0 0 1px rgba(255,255,255,0.04) inset;
+      background: #000;
+    }
+
+    /* Hero CTAs — gradient sweep + glow on hover. */
+    .cta-btn {
+      position: relative; overflow: hidden; isolation: isolate;
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+    }
+    .cta-btn::after {
+      content: ""; position: absolute; inset: 0;
+      background: linear-gradient(120deg, transparent 30%, rgba(255,255,255,0.22) 50%, transparent 70%);
+      transform: translateX(-110%);
+      transition: transform 0.7s ease;
+      pointer-events: none;
+      z-index: 0;
+    }
+    .cta-btn:hover::after { transform: translateX(110%); }
+    .cta-btn > * { position: relative; z-index: 1; }
+
+    .cta-vscode {
+      background: linear-gradient(135deg, #2dd4bf, #14b8a6 70%, #a78bfa);
+      border-color: transparent;
+      color: #051815;
+      box-shadow: 0 12px 32px -10px rgba(45,212,191,0.55);
+    }
+    .cta-vscode:hover {
+      background: linear-gradient(135deg, #38e8d3, #2dd4bf 65%, #c4b0ff);
+      color: #051815;
+      transform: translateY(-2px);
+      box-shadow: 0 18px 42px -10px rgba(45,212,191,0.65), 0 0 0 1px rgba(255,255,255,0.15) inset;
+    }
+    .cta-pip {
+      background: rgba(11,16,32,0.65);
+      border-color: rgba(167,139,250,0.35);
+      color: var(--text);
+    }
+    .cta-pip:hover { border-color: var(--primary); color: var(--text); transform: translateY(-2px); box-shadow: 0 14px 32px -14px rgba(45,212,191,0.45); }
+    .cta-pip.copied { border-color: var(--primary); color: var(--primary); }
+    .cta-star {
+      background: linear-gradient(135deg, rgba(167,139,250,0.16), rgba(45,212,191,0.18));
+      border-color: rgba(167,139,250,0.35);
+      color: var(--text);
+    }
+    .cta-star:hover { transform: translateY(-2px); border-color: var(--accent); box-shadow: 0 14px 32px -14px rgba(167,139,250,0.55); }
+    .star-count {
+      background: linear-gradient(90deg, var(--primary), var(--accent));
+      -webkit-background-clip: text; background-clip: text;
+      -webkit-text-fill-color: transparent; color: transparent;
+      font-weight: 700;
+    }
+
+    /* Social proof + quickstart strips on dark. */
+    .social-proof, .social-proof-row { color: var(--text-dim); }
+    .social-proof-row strong, .social-proof-row span strong { color: var(--text); }
+    .quickstart {
+      background: linear-gradient(140deg, rgba(45,212,191,0.06), rgba(167,139,250,0.08));
+      border: 1px solid rgba(167,139,250,0.22);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      border-radius: 16px;
+      box-shadow: 0 24px 56px -24px rgba(0,0,0,0.6);
+    }
+    .quickstart-title { color: var(--text); }
+    .quickstart-copy {
+      background: rgba(11,16,32,0.7);
+      color: var(--code-text);
+      border: 1px solid rgba(167,139,250,0.28);
+    }
+    .quickstart-copy:hover { border-color: var(--primary); background: rgba(11,16,32,0.85); }
+    .quickstart-copy.copied { color: var(--primary); border-color: var(--primary); }
+
+    /* Sections — glassmorphic cards with vibrant border. */
+    .section-card {
+      background: linear-gradient(160deg, rgba(20,24,40,0.72), rgba(12,16,28,0.85));
+      backdrop-filter: blur(18px) saturate(140%);
+      -webkit-backdrop-filter: blur(18px) saturate(140%);
+      border: 1px solid rgba(167,139,250,0.10);
+      box-shadow:
+        0 30px 70px -30px rgba(0,0,0,0.7),
+        0 0 0 1px rgba(255,255,255,0.02) inset;
+      color: var(--text);
+    }
+    .section-card::after {
+      background:
+        radial-gradient(circle at 8% 0%, rgba(45,212,191,0.10), transparent 55%),
+        radial-gradient(circle at 95% 100%, rgba(167,139,250,0.10), transparent 60%);
+    }
+    .section-card h2 { color: var(--text); }
+    .section-card h2 .anchor { color: var(--text-soft); }
+    .section-card .sub { color: var(--text-dim); }
+    .section-card .num {
+      color: var(--primary);
+      background: linear-gradient(135deg, rgba(45,212,191,0.18), rgba(167,139,250,0.18));
+      border: 1px solid rgba(45,212,191,0.30);
+      letter-spacing: 0.06em;
+    }
+
+    /* Inner cards — glass tiles with vivid hover lift. */
+    .inner-card {
+      background: linear-gradient(160deg, rgba(255,255,255,0.04), rgba(255,255,255,0.015));
+      border: 1px solid rgba(167,139,250,0.16);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      color: var(--text);
+    }
+    .inner-card::before {
+      background: radial-gradient(circle 240px at var(--mx, -200px) var(--my, -200px),
+        rgba(45,212,191,0.18), rgba(167,139,250,0.12) 40%, transparent 65%);
+    }
+    .inner-card:hover {
+      border-color: rgba(45,212,191,0.45);
+      box-shadow:
+        0 22px 48px -22px rgba(45,212,191,0.45),
+        0 14px 32px -14px rgba(167,139,250,0.35);
+    }
+    .inner-card h3, .inner-card h4 { color: var(--text); }
+    .inner-card h3::before, .inner-card h4::before {
+      background: linear-gradient(135deg, var(--primary), var(--accent));
+      box-shadow: 0 0 12px rgba(45,212,191,0.55);
+    }
+    .inner-card p, .inner-card li { color: var(--text-dim); }
+    .inner-card code {
+      background: rgba(11,16,32,0.6);
+      border: 1px solid rgba(167,139,250,0.22);
+      color: var(--primary);
+    }
+
+    /* Tables in dark. */
+    .compare-wrap { border-color: rgba(167,139,250,0.22); }
+    table.compare { background: transparent; color: var(--text); }
+    table.compare th, table.compare td {
+      border-bottom-color: rgba(167,139,250,0.14);
+    }
+    table.compare thead th {
+      background: rgba(11,16,32,0.55);
+      color: var(--text);
+    }
+    table.compare thead th.kiss {
+      background: linear-gradient(135deg, rgba(45,212,191,0.25), rgba(167,139,250,0.22));
+      color: #fff;
+    }
+    table.compare th.cap { color: var(--text-dim); }
+    table.compare td.kiss {
+      background: linear-gradient(135deg, rgba(45,212,191,0.10), rgba(167,139,250,0.10));
+      color: var(--text);
+    }
+    table.compare .yes { color: #2dd4bf; }
+    table.compare .no  { color: #f87171; }
+    table.compare .warn { color: #fbbf24; }
+    table.compare small { color: var(--text-dim); }
+
+    .opt-table-wrap { border-color: rgba(167,139,250,0.22); }
+    table.opts th, table.opts td { border-bottom-color: rgba(167,139,250,0.14); color: var(--text); }
+    table.opts thead th { background: rgba(11,16,32,0.55); color: var(--text); }
+    table.opts code {
+      background: rgba(11,16,32,0.6); color: var(--primary);
+      border: 1px solid rgba(167,139,250,0.22);
+    }
+
+    /* Code panels — slightly punchier. */
+    .code-panel {
+      background: linear-gradient(170deg, #0b1020, #060912);
+      border: 1px solid rgba(167,139,250,0.22);
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.03);
+    }
+
+    /* Chips on dark. */
+    .chip {
+      background: linear-gradient(135deg, rgba(45,212,191,0.10), rgba(167,139,250,0.10));
+      border: 1px solid rgba(167,139,250,0.22);
+      color: var(--text);
+    }
+    .chip:hover {
+      background: linear-gradient(135deg, rgba(45,212,191,0.22), rgba(167,139,250,0.25));
+      border-color: rgba(45,212,191,0.55);
+      transform: translateY(-1px);
+      color: #fff;
+    }
+
+    /* Footer on dark. */
+    footer {
+      background: transparent;
+      border-top: 1px solid rgba(167,139,250,0.18);
+      color: var(--text-dim);
+    }
+    footer a { color: var(--primary); }
+    footer a:hover { color: var(--accent); }
+
+    /* Buttons — generic. */
+    .btn-main { background: linear-gradient(135deg, #2dd4bf, #14b8a6 60%, #a78bfa); border-color: transparent; color: #051815; }
+    .btn-main:hover { background: linear-gradient(135deg, #38e8d3, #2dd4bf 60%, #c4b0ff); color: #051815; transform: translateY(-2px); box-shadow: 0 16px 36px -14px rgba(45,212,191,0.55); }
+    .btn-ghost { background: rgba(11,16,32,0.6); color: var(--primary); border-color: rgba(167,139,250,0.30); }
+    .btn-ghost:hover { background: rgba(11,16,32,0.85); color: var(--text); border-color: var(--primary); transform: translateY(-2px); }
+
+    /* Custom scrollbars. */
+    * { scrollbar-color: rgba(167,139,250,0.55) transparent; scrollbar-width: thin; }
+    *::-webkit-scrollbar { width: 10px; height: 10px; }
+    *::-webkit-scrollbar-track { background: transparent; }
+    *::-webkit-scrollbar-thumb {
+      background: linear-gradient(180deg, rgba(45,212,191,0.55), rgba(167,139,250,0.65));
+      border-radius: 999px; border: 2px solid transparent; background-clip: padding-box;
+    }
+    *::-webkit-scrollbar-thumb:hover {
+      background: linear-gradient(180deg, rgba(45,212,191,0.8), rgba(167,139,250,0.9));
+      background-clip: padding-box;
+    }
+
+    /* Selection. */
+    ::selection { background: rgba(45,212,191,0.35); color: #fff; }
+
+    /* Scroll-reveal — JS toggles .in-view (also used by sections); add fade variant. */
+    .reveal { opacity: 0; transform: translateY(22px); transition: opacity 0.85s ease, transform 0.85s ease; }
+    .reveal.in-view { opacity: 1; transform: none; }
+
+    /* Tiny gradient divider helper. */
+    .grad-divider {
+      height: 1px; border: 0; margin: 2rem auto;
+      background: linear-gradient(90deg, transparent, rgba(45,212,191,0.4), rgba(167,139,250,0.5), transparent);
+    }
+
+    /* Reduced motion — disable ambient orb and shimmer. */
+    @media (prefers-reduced-motion: reduce) {
+      body::before { animation: none; }
+      .hero h1 { animation: none; background-position: 0 center; }
+      .cta-btn::after { transition: none; }
+      .reveal { opacity: 1; transform: none; transition: none; }
+    }
   </style>
 </head>
 <body>
@@ -2524,7 +2902,7 @@ In each step, keep track of the best prompt which has the maximum number of succ
       if (reduced || !canvas) { if (canvas) canvas.remove(); return; }
       const ctx = canvas.getContext('2d');
       let w = 0, h = 0, dpr = Math.min(window.devicePixelRatio || 1, 2);
-      const COLORS = ['#1976d2', '#00897b', '#f7c948', '#d81b60'];
+      const COLORS = ['#2dd4bf', '#a78bfa', '#fbbf24', '#ec4899'];
       const particles = [];
 
       function resize() {
@@ -2598,6 +2976,85 @@ In each step, keep track of the best prompt which has the maximum number of succ
         }, { threshold: 0 });
         heroIO.observe(hero);
       }
+    })();
+
+    // ---------------------------------------------------------------
+    // Scroll-reveal — fade in inner-cards, chips, quickstart steps,
+    // and any element with .reveal as it enters the viewport.
+    // ---------------------------------------------------------------
+    (function () {
+      if (!('IntersectionObserver' in window)) return;
+      const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      const targets = document.querySelectorAll(
+        '.section-card .inner-card, .quickstart-grid > div, .social-proof-row > *, .chip, .reveal'
+      );
+      if (reduced) {
+        targets.forEach(el => el.classList.add('in-view'));
+        return;
+      }
+      targets.forEach(el => el.classList.add('reveal'));
+      const io = new IntersectionObserver((entries, obs) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            entry.target.classList.add('in-view');
+            obs.unobserve(entry.target);
+          }
+        }
+      }, { threshold: 0.08, rootMargin: '0px 0px -8% 0px' });
+      targets.forEach(el => io.observe(el));
+    })();
+
+    // ---------------------------------------------------------------
+    // Animated number counters — count up to the value of any element
+    // marked with [data-count] (e.g. hero-trust strong numbers).
+    // ---------------------------------------------------------------
+    (function () {
+      if (!('IntersectionObserver' in window)) return;
+      const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      // Find hero-trust strong elements containing numeric content (e.g. "62.2%", "502 models").
+      const strongs = document.querySelectorAll('.hero-trust strong');
+      const items = [];
+      strongs.forEach(el => {
+        const text = el.textContent.trim();
+        const m = text.match(/^(\d+(?:\.\d+)?)(.*)$/);
+        if (!m) return;
+        const target = parseFloat(m[1]);
+        const suffix = m[2] || '';
+        const decimals = (m[1].split('.')[1] || '').length;
+        items.push({ el, target, suffix, decimals, original: text });
+      });
+      if (!items.length) return;
+      if (reduced) return; // leave originals in place
+
+      // Pre-fill with starting value so layout doesn't jump.
+      items.forEach(it => { it.el.textContent = (0).toFixed(it.decimals) + it.suffix; });
+
+      const animate = (it) => {
+        const DURATION = 1400;
+        const start = performance.now();
+        function step(now) {
+          const t = Math.min(1, (now - start) / DURATION);
+          const eased = 1 - Math.pow(1 - t, 3); // ease-out cubic
+          const v = it.target * eased;
+          it.el.textContent = v.toFixed(it.decimals) + it.suffix;
+          if (t < 1) requestAnimationFrame(step);
+          else it.el.textContent = it.original;
+        }
+        requestAnimationFrame(step);
+      };
+
+      const trust = document.querySelector('.hero-trust');
+      if (!trust) { items.forEach(animate); return; }
+      const io = new IntersectionObserver((entries, obs) => {
+        for (const e of entries) {
+          if (e.isIntersecting) {
+            items.forEach(animate);
+            obs.disconnect();
+            break;
+          }
+        }
+      }, { threshold: 0.4 });
+      io.observe(trust);
     })();
   </script>
 </body>
