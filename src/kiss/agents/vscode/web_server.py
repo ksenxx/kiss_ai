@@ -2198,9 +2198,17 @@ def _build_html() -> str:
         "TRICKS_JSON": tricks_json,
     }
     tpl = (MEDIA_DIR / "chat.html").read_text(encoding="utf-8")
-    for key, value in subs.items():
-        tpl = tpl.replace("{{" + key + "}}", value)
-    return tpl
+    # Single-pass substitution: injected values (e.g. the JS shim's
+    # documentation comment that mentions ``{{AUTH_MODAL}}`` by name)
+    # must NOT be re-scanned, otherwise stray placeholder-shaped tokens
+    # inside substituted JS/HTML would either be wrongly replaced or
+    # (when their key happens to be processed earlier in the dict)
+    # survive into the served page as unsubstituted placeholders.
+    return re.sub(
+        r"\{\{([A-Z_]+)\}\}",
+        lambda m: subs.get(m.group(1), m.group(0)),
+        tpl,
+    )
 
 
 def _read_version() -> str:
@@ -2422,8 +2430,9 @@ _WS_SHIM_JS = r"""
         // re-prompts instead of silently retrying the bad value.
         try { localStorage.removeItem('sorcar-remote-pwd'); } catch(e) {}
         // Reveal ``#app`` so the auth modal (which lives INSIDE #app
-        // in the chat.html template — see ``{{AUTH_MODAL}}``) is no
-        // longer hidden by its display:none parent.  Without this
+        // in the chat.html template — see the ``AUTH_MODAL`` template
+        // placeholder substituted by ``_build_html``) is no longer
+        // hidden by its display:none parent.  Without this
         // dispatch a password-protected webapp shows the loading
         // overlay forever and the user can never enter their
         // password.  Symmetric to the auth_ok dispatch above — both
