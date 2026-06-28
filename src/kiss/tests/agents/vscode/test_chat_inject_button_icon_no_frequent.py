@@ -218,6 +218,36 @@ def test_inject_instruction_button_uses_syringe_icon(_page) -> None:
         )
 
 
+def test_inject_instruction_needle_is_eighty_percent_of_body(_page) -> None:
+    """The syringe needle must be 80% as long as the syringe body.
+
+    The SVG has a long diagonal body side beginning with ``M19 9``
+    and a diagonal needle path beginning with ``m6 18``.  The visual
+    requirement is that the needle length is 80% of that body side.
+    This checks the rendered inline SVG in the real chat template,
+    not a separate fixture.
+    """
+    ratio = _page.evaluate(
+        """
+        () => {
+            const btn = document.getElementById('tricks-btn');
+            if (!btn) return null;
+            const body = btn.querySelector('path[d^="M19 9"]');
+            const needle = btn.querySelector('path[d^="m6 18"]');
+            if (!body || !needle) return null;
+            const bodyNums = body.getAttribute('d').match(/-?\\d+(?:\\.\\d+)?/g).map(Number);
+            const needleNums = needle.getAttribute('d').match(/-?\\d+(?:\\.\\d+)?/g).map(Number);
+            const bodyLength = Math.hypot(bodyNums[2] - bodyNums[0], bodyNums[3] - bodyNums[1]);
+            const needleLength = Math.hypot(needleNums[2], needleNums[3]);
+            return needleLength / bodyLength;
+        }
+        """,
+    )
+    assert ratio is not None, "Could not locate syringe body and needle paths"
+    assert ratio == pytest.approx(0.8, abs=0.001)
+
+
+
 def test_inject_instruction_button_is_visible(_page) -> None:
     """The Inject-instruction button must remain visible/clickable
     in the toolbar after the icon swap.
