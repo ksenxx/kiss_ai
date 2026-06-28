@@ -45,16 +45,27 @@ _FAKE_INJECTIONS = (
 
 @pytest.fixture
 def kiss_db(tmp_path: Path):
-    """Redirect the history DB AND ``$KISS_HOME`` to an isolated temp dir."""
+    """Redirect the history DB AND ``$KISS_HOME`` to an isolated temp dir.
+
+    Pins the bundled INJECTIONS.md tricks via ``KISS_INJECTIONS_PATH``
+    so the test is independent of the package's real bundled tricks.
+    A zero-byte ``MY_INJECTION.md`` is created in the temp ``~/.kiss/``
+    so the auto-seeded default trick does not contribute extra entries
+    to the prefix-match dictionary.
+    """
     kiss_dir = tmp_path / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
-    (kiss_dir / "INJECTIONS.md").write_text(_FAKE_INJECTIONS)
+    fake_path = kiss_dir / "fake_INJECTIONS.md"
+    fake_path.write_text(_FAKE_INJECTIONS)
+    (kiss_dir / "MY_INJECTION.md").write_text("")
     saved_db = (th._DB_PATH, th._db_conn, th._KISS_DIR)
     th._KISS_DIR = kiss_dir
     th._DB_PATH = kiss_dir / "sorcar.db"
     th._db_conn = None
     saved_home = os.environ.get("KISS_HOME")
+    saved_inj = os.environ.get("KISS_INJECTIONS_PATH")
     os.environ["KISS_HOME"] = str(kiss_dir)
+    os.environ["KISS_INJECTIONS_PATH"] = str(fake_path)
     yield kiss_dir
     if th._db_conn is not None:
         th._db_conn.close()
@@ -63,6 +74,10 @@ def kiss_db(tmp_path: Path):
         os.environ.pop("KISS_HOME", None)
     else:
         os.environ["KISS_HOME"] = saved_home
+    if saved_inj is None:
+        os.environ.pop("KISS_INJECTIONS_PATH", None)
+    else:
+        os.environ["KISS_INJECTIONS_PATH"] = saved_inj
 
 
 def test_cli_trick_suggested_at_start_of_line(tmp_path: Path, kiss_db) -> None:

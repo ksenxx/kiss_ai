@@ -461,6 +461,10 @@ async function runFinalization(
 
   if (progress) progress.report({message: 'Refreshing model info...'});
   installModelInfoJson(kissProjectPath);
+  // INJECTIONS.md is intentionally NOT copied into ``~/.kiss/``; see
+  // the docstring on ``installMarkdownAssets`` below for the
+  // rationale.  ``MY_INJECTION.md`` is lazily seeded by
+  // ``ensureUserAssetFromDefault`` on the first ``getTricks()`` call.
   installMarkdownAssets(kissProjectPath);
 
   if (progress) progress.report({message: 'Checking cloudflared...'});
@@ -1318,42 +1322,41 @@ function computeKissWebFingerprint(
 }
 
 /**
- * Always overwrite ``~/.kiss/INJECTIONS.md`` with the copy bundled
- * inside the installed kiss_project.  Called on every install/update
- * (both fast and slow paths in ``runFinalization``) so that the
- * kiss-web daemon's Tricks button always reflects the latest bundled
- * Markdown after a version upgrade — matching the
- * ``installModelInfoJson`` pattern.  Failures are logged and swallowed
- * so a read-only ``~/.kiss/`` cannot break the overall install flow.
+ * No-op install step retained for log narrative.
  *
- * ``SAMPLE_TASKS.md`` is intentionally NOT copied: the welcome-screen
+ * ``INJECTIONS.md`` is **intentionally NOT copied** into
+ * ``~/.kiss/``.  The bundled ``src/kiss/INJECTIONS.md`` is read
+ * directly from the installed package at runtime by
+ * ``kiss.agents.vscode.tricks.read_tricks`` (Python, daemon) and
+ * ``getTricks`` in ``SorcarTab.ts`` (TypeScript, extension), so every
+ * version upgrade automatically delivers the latest bundled tricks
+ * without clobbering user edits.
+ *
+ * User-curated tricks live in ``~/.kiss/MY_INJECTION.md`` —
+ * auto-seeded on first read with the single ``## Trick`` starter
+ * ("Write end-to-end 100% coverage tests for the feature first.  Then
+ * implement the feature.") — matching the ``MY_TASK_TEMPLATES.md`` /
+ * ``SAMPLE_TASKS.md`` pattern.
+ *
+ * ``SAMPLE_TASKS.md`` is similarly NOT copied: the welcome-screen
  * chip loader (``readSampleTasks`` in ``SorcarTab.ts``) reads the
  * bundled package copy directly, while user-curated chips live in
- * ``~/.kiss/MY_TASK_TEMPLATES.md`` (auto-seeded on first read with
- * the starter task ``## Task\n\nHi!\n``).
+ * ``~/.kiss/MY_TASK_TEMPLATES.md``.
+ *
+ * The function is preserved (as a no-op) so the call site in
+ * ``runFinalization`` keeps documenting why no markdown asset copy
+ * happens at install time.
  */
 function installMarkdownAssets(kissProjectPath: string): void {
+  // Reference kissProjectPath so TypeScript does not flag the
+  // documented parameter as unused while we keep the install-time
+  // narrative comment alive for future maintainers.
+  void kissProjectPath;
   if (!HOME_DIR) return;
-  const kissHomeDir = LOG_DIR; // ~/.kiss
-  const assets: Array<[string, string]> = [
-    [
-      path.join(kissProjectPath, 'src', 'kiss', 'INJECTIONS.md'),
-      path.join(kissHomeDir, 'INJECTIONS.md'),
-    ],
-  ];
-  for (const [src, dst] of assets) {
-    try {
-      if (!fs.existsSync(src)) {
-        log(`${path.basename(src)} not found at ${src}; skipping copy`);
-        continue;
-      }
-      fs.mkdirSync(kissHomeDir, {recursive: true});
-      fs.copyFileSync(src, dst);
-      log(`Installed ${path.basename(src)} at ${dst}`);
-    } catch (e: unknown) {
-      log(`Failed to install ${path.basename(src)}: ${(e as Error).message}`);
-    }
-  }
+  log(
+    'INJECTIONS.md is read directly from the bundled package; ' +
+      'no copy is made into ~/.kiss/ (user tricks live in MY_INJECTION.md).',
+  );
 }
 
 /**
