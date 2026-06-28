@@ -160,7 +160,11 @@ class TestHttpEndpointMatrix(_ServerTestBase):
             "served chat page contains unsubstituted template placeholders",
         )
         self.assertIn('id="auth-modal"', html)
-        self.assertIn('"/media/main.js"', html)
+        self.assertRegex(
+            html,
+            r'"/media/main\.js\?v=[0-9a-f]+"',
+            "served chat page is missing a cache-busted main.js script tag",
+        )
         self.assertIn('class="remote-chat"', html)
 
     async def test_media_file_served_with_mime_type(self) -> None:
