@@ -859,33 +859,23 @@ update_repo() {
         echo "   WARNING: $MODEL_INFO_SRC missing — model table not refreshed."
     fi
 
-    # Always overwrite the bundled INJECTIONS.md into the user's kiss
-    # home directory on every install/update.  This ensures the
-    # kiss-web daemon's Tricks button always reflects the latest
-    # bundled Markdown when the extension is updated — matching the
-    # MODEL_INFO.json pattern directly above.
+    # INJECTIONS.md is intentionally NOT copied into the user's kiss
+    # home directory.  The bundled ``src/kiss/INJECTIONS.md`` is read
+    # directly from the installed package at runtime by
+    # ``kiss.agents.vscode.tricks.read_tricks`` and ``getTricks`` in
+    # ``SorcarTab.ts``, so every extension upgrade automatically
+    # delivers the latest bundled tricks without clobbering user
+    # edits.  User-curated tricks live in ``~/.kiss/MY_INJECTION.md``
+    # — auto-seeded on first read with a single ``## Trick`` starter
+    # ("Write end-to-end 100% coverage tests for the feature first.
+    # Then implement the feature.") — matching the
+    # ``MY_TASK_TEMPLATES.md`` / ``SAMPLE_TASKS.md`` pattern.
     #
-    # SAMPLE_TASKS.md is intentionally NOT copied: the welcome-screen
-    # chip loader (``readSampleTasks`` in SorcarTab.ts) reads the
-    # bundled package copy directly so every extension upgrade
-    # automatically delivers the latest chips, while user-curated
-    # chips live in ``~/.kiss/MY_TASK_TEMPLATES.md`` (auto-seeded on
-    # first read with the starter task ``## Task\n\nHi!\n``).
-    #
-    # ``${KISS_HOME:-$HOME/.kiss}`` matches the runtime resolution in
-    # ``user_assets.kiss_home_dir`` so a developer with a custom
-    # ``KISS_HOME`` exported lands the files where the runtime will
-    # read them.
+    # Re-introducing the copy here would mean a stale user-side
+    # ``~/.kiss/INJECTIONS.md`` shadowing the freshly installed
+    # bundled file forever after the first install.
     KISS_HOME_DIR="${KISS_HOME:-$HOME/.kiss}"
     mkdir -p "$KISS_HOME_DIR"
-    INJECTIONS_SRC="$PROJECT_DIR/src/kiss/INJECTIONS.md"
-    INJECTIONS_DST="$KISS_HOME_DIR/INJECTIONS.md"
-    if [ -f "$INJECTIONS_SRC" ]; then
-        cp "$INJECTIONS_SRC" "$INJECTIONS_DST"
-        echo "   Installed INJECTIONS.md at $INJECTIONS_DST"
-    else
-        echo "   WARNING: $INJECTIONS_SRC missing — tricks not refreshed."
-    fi
 
     date -u +%Y-%m-%dT%H:%M:%SZ > "$HOME/.kiss/.extension-updated"
     # Remove any stale source-install marker from older versions of this

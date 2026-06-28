@@ -4,25 +4,42 @@
 # add your name here
 """Load and prefix-match user "Inject instruction" tricks.
 
-The user's trick strings live at ``~/.kiss/INJECTIONS.md`` (seeded
-from the package copy bundled at ``src/kiss/INJECTIONS.md`` on first
-install).  They power two UI features:
+The "Inject instruction" panel and the ghost-text fast-complete
+suggestions both consume a single ordered list of trick strings
+returned by :func:`read_tricks`, built from two sources:
 
-* The "Inject" sidebar panel — exposed via ``window.__TRICKS__`` by
-  the HTML builder.
-* Ghost-text fast-complete suggestions — surfaced at the start of
-  each sentence by :func:`prefix_match_trick`.
+1. ``~/.kiss/MY_INJECTION.md`` — user-curated tricks.  Auto-seeded on
+   first read with the default starter
 
-Both consumers parse the same ``## Trick`` section format so the two
-features stay in sync as the file is edited.
+       ## Trick
+
+       Write end-to-end 100% coverage tests for the feature first.  Then implement the feature.
+
+   so a fresh install always shows at least one user-editable trick.
+   Never overwritten once it exists — user edits survive every read.
+
+2. The bundled ``src/kiss/INJECTIONS.md`` shipped with the package.
+   Read **directly from the package**; no copy is ever written into
+   ``~/.kiss/``.  This way every extension upgrade automatically
+   delivers the latest bundled tricks without clobbering the user's
+   curated list.
+
+Order matters — user-curated tricks come first so a user who adds
+their own trick at the top of MY_INJECTION.md sees it before the
+bundled defaults in both the panel and ghost-text suggestions.
+
+The bundled-file path can be overridden via the ``KISS_INJECTIONS_PATH``
+environment variable, which the test suite uses to pin a known set of
+bundled tricks for assertions.
 """
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
-from kiss.agents.vscode.user_assets import ensure_user_asset
+from kiss.agents.vscode.user_assets import ensure_user_asset_from_default
 
 # ``[.!?]`` followed by whitespace marks a sentence boundary.  The
 # trailing ``\s+`` is greedy: any run of whitespace (including
@@ -30,38 +47,27 @@ from kiss.agents.vscode.user_assets import ensure_user_asset
 # first non-whitespace character of the next sentence.
 _SENTENCE_BOUNDARY = re.compile(r"[.!?]\s+")
 
+#: User-visible body of the default ``## Trick`` section auto-seeded
+#: into ``~/.kiss/MY_INJECTION.md`` on first read.  Two spaces between
+#: sentences (matches the task spec verbatim).
+MY_INJECTION_DEFAULT_BODY = (
+    "Write end-to-end 100% coverage tests for the feature first."
+    "  Then implement the feature."
+)
 
-def read_tricks() -> list[str]:
-    """Parse ``~/.kiss/INJECTIONS.md`` and return the trick texts.
+#: Full default file content for ``~/.kiss/MY_INJECTION.md``.  A single
+#: ``## Trick`` section whose body is :data:`MY_INJECTION_DEFAULT_BODY`.
+#: A trailing newline matches the convention used by
+#: ``MY_TASK_TEMPLATES.md`` (``## Task\n\nHi!\n``).
+DEFAULT_MY_INJECTION = "## Trick\n\n" + MY_INJECTION_DEFAULT_BODY + "\n"
 
-    The user-local copy at ``~/.kiss/INJECTIONS.md`` is the runtime
-    source of truth — ``install.sh`` seeds it from the package copy
-    bundled at ``src/kiss/INJECTIONS.md`` on first install, and
-    :func:`ensure_user_asset` seeds it again the first time it is
-    read after a user wipes it; once present, user edits survive
-    every read.
 
-    The file contains a series of ``## Trick`` sections, each followed
-    by a blank line and the trick text.  Returns an empty list if the
-    file is missing or unparseable, so a deployment without
-    INJECTIONS.md still degrades gracefully (no tricks rendered, no
-    ghost suggestions).
+def _parse_trick_sections(text: str) -> list[str]:
+    """Return the body of every ``## Trick`` section in *text*.
 
-    Returns:
-        Ordered list of trick text strings (one per ``## Trick``
-        section), preserving file order.
+    Bodies are trimmed; empty bodies are skipped.  Mirrors the
+    TypeScript ``readMarkdownSections`` parser used by ``SorcarTab.ts``.
     """
-    try:
-        package_path = Path(__file__).parent.parent.parent / "INJECTIONS.md"
-        tfile = ensure_user_asset("INJECTIONS.md", package_path)
-        text = tfile.read_text()
-    except (OSError, UnicodeDecodeError):
-        # ``read_text`` raises ``UnicodeDecodeError`` (a ``ValueError``,
-        # NOT an ``OSError``) when INJECTIONS.md has been corrupted into
-        # a binary blob.  Letting it propagate would kill the singleton
-        # autocomplete worker thread (which has no restart path), so
-        # ghost text for the daemon's whole lifetime.
-        return []
     tricks: list[str] = []
     sections = re.split(r"^##\s+", text, flags=re.MULTILINE)
     for section in sections[1:]:
@@ -72,6 +78,80 @@ def read_tricks() -> list[str]:
         if body:
             tricks.append(body)
     return tricks
+
+
+def _read_my_injection_tricks() -> list[str]:
+    """Return the user-curated tricks from ``~/.kiss/MY_INJECTION.md``.
+
+    Auto-seeds the file with :data:`DEFAULT_MY_INJECTION` on first read.
+    Returns an empty list when ``~/.kiss/`` is not writable (so the
+    seed cannot be written) or when the file is unreadable / corrupt.
+    """
+    user_path = ensure_user_asset_from_default(
+        "MY_INJECTION.md", DEFAULT_MY_INJECTION,
+    )
+    if user_path is None:
+        return []
+    try:
+        text = user_path.read_text()
+    except (OSError, UnicodeDecodeError):
+        # A corrupted MY_INJECTION.md (binary blob, bad encoding) must
+        # not kill the singleton autocomplete worker thread — let the
+        # daemon keep serving the bundled tricks.
+        return []
+    return _parse_trick_sections(text)
+
+
+def _bundled_injections_path() -> Path:
+    """Return the path to the bundled ``src/kiss/INJECTIONS.md``.
+
+    Honours the ``KISS_INJECTIONS_PATH`` env override (used by the test
+    suite to pin a deterministic set of bundled tricks), falling back
+    to the file shipped inside the package.
+    """
+    override = os.environ.get("KISS_INJECTIONS_PATH")
+    if override:
+        return Path(override)
+    # ``__file__`` is ``…/kiss/agents/vscode/tricks.py``; the bundled
+    # INJECTIONS.md lives at ``…/kiss/INJECTIONS.md`` (two ``parent``s
+    # up from ``vscode/``).
+    return Path(__file__).parent.parent.parent / "INJECTIONS.md"
+
+
+def _read_bundled_tricks() -> list[str]:
+    """Return the tricks shipped in the bundled ``src/kiss/INJECTIONS.md``.
+
+    Read directly from the package — no copy into ``~/.kiss/`` ever
+    happens.  Returns an empty list if the file is missing or
+    unreadable (graceful degradation).
+    """
+    path = _bundled_injections_path()
+    try:
+        text = path.read_text()
+    except (OSError, UnicodeDecodeError):
+        return []
+    return _parse_trick_sections(text)
+
+
+def read_tricks() -> list[str]:
+    """Return the ordered "Inject instruction" trick list.
+
+    The list is built by concatenating, in order:
+
+    1. ``~/.kiss/MY_INJECTION.md`` (user-curated, auto-seeded with the
+       default test-first trick on first read).
+    2. The bundled ``src/kiss/INJECTIONS.md`` (read directly from the
+       package; never copied into ``~/.kiss/``).
+
+    Empty list if both files are unavailable so a deployment without
+    either still degrades gracefully (no tricks rendered, no ghost
+    suggestions).
+
+    Returns:
+        Ordered list of trick text strings, MY_INJECTION first then
+        bundled.
+    """
+    return _read_my_injection_tricks() + _read_bundled_tricks()
 
 
 def current_sentence_partial(query: str) -> str:
@@ -118,7 +198,7 @@ def current_sentence_partial(query: str) -> str:
 
 
 def prefix_match_tricks(query: str, min_partial_len: int = 2) -> list[str]:
-    """Return every INJECTIONS.md trick whose prefix matches *query*'s sentence start.
+    """Return every trick whose prefix matches *query*'s current-sentence start.
 
     Identifies the partial currently being typed *at the start of the
     most recent sentence* (see :func:`current_sentence_partial`) and
@@ -130,8 +210,9 @@ def prefix_match_tricks(query: str, min_partial_len: int = 2) -> list[str]:
     by writing …`` tricks — one for integration tests, one for
     end-to-end tests).
 
-    Tricks are returned in INJECTIONS.md file order; deduplication
-    handles the case where an editor inadvertently duplicates a trick.
+    Tricks are returned in file order (MY_INJECTION.md first, then
+    bundled); deduplication handles the case where an editor
+    inadvertently duplicates a trick.
 
     Args:
         query: The full input string from the chat textarea.
@@ -144,7 +225,7 @@ def prefix_match_tricks(query: str, min_partial_len: int = 2) -> list[str]:
     Returns:
         Ordered list of full trick strings that the partial prefixes,
         empty when no trick matches (or the partial is too short, or
-        INJECTIONS.md is unavailable).
+        the tricks files are unavailable).
     """
     partial = current_sentence_partial(query)
     if len(partial) < min_partial_len:
@@ -161,7 +242,7 @@ def prefix_match_tricks(query: str, min_partial_len: int = 2) -> list[str]:
 
 
 def prefix_match_trick(query: str, min_partial_len: int = 2) -> str:
-    """Return the first INJECTIONS.md trick whose prefix matches *query*'s sentence start.
+    """Return the first trick whose prefix matches *query*'s current-sentence start.
 
     Singular convenience wrapper over :func:`prefix_match_tricks`,
     returning only the first match in file order.  The VS Code
