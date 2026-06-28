@@ -144,18 +144,26 @@ def test_task_runner_broadcasts_end_ts_on_task_end():
 def test_task_runner_persists_start_end_ts_to_extra():
     """``_save_task_extra`` must persist both timestamps to the
     ``extra`` JSON column so a later history load can flip "Running …"
-    to "Done (…)" without a live ``task_done`` event."""
-    src = _read(TASK_RUNNER)
-    # The single _save_task_extra dict literal in task_runner.py.
-    m = re.search(r"_save_task_extra\(\s*\{(.+?)\},", src, re.DOTALL)
-    assert m, "_save_task_extra({...}) call not found"
-    body = m.group(1)
-    assert '"startTs"' in body, (
-        "extra dict must include startTs"
+    to "Done (…)" without a live ``task_done`` event.  The payload is
+    built by :func:`build_task_extra_payload`, so verify the returned
+    dict carries ``startTs`` and ``endTs`` end-to-end."""
+    from kiss.agents.vscode.task_runner import build_task_extra_payload
+
+    payload = build_task_extra_payload(
+        model="m",
+        work_dir="/repo",
+        version="v",
+        tokens=0,
+        cost=0.0,
+        steps=0,
+        is_parallel=False,
+        is_worktree=False,
+        auto_commit_mode=False,
+        start_ms=123,
+        end_ms=456,
     )
-    assert '"endTs"' in body, (
-        "extra dict must include endTs"
-    )
+    assert payload["startTs"] == 123, "payload must carry startTs"
+    assert payload["endTs"] == 456, "payload must carry endTs"
 
 
 # ---------- Backend: server._get_history surfaces startTs/endTs ----------
