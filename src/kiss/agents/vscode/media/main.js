@@ -3193,9 +3193,7 @@
         const askTabId = ev.tabId !== undefined ? ev.tabId : activeTabId;
         const askTab = getTab(askTabId);
         if (!askTab) break;
-        askTab.askPendingQuestion = null;
-        if (askTab.askInputEl) askTab.askInputEl.value = '';
-        if (askTab.id === activeTabId) clearAskSlot();
+        clearAskForMatchingChatTabs(askTab);
         break;
       }
       case 'error':
@@ -5813,13 +5811,32 @@
     if (tab.id === activeTabId) mountAskForTab(tab);
   }
 
+  /** Return true when an ask-clear for sourceTab should also clear candidate. */
+  function isAskSameChatTab(sourceTab, candidate) {
+    if (!sourceTab || !candidate) return false;
+    if (candidate.id === sourceTab.id) return true;
+    const chatId = String(sourceTab.backendChatId || '');
+    return !!chatId && String(candidate.backendChatId || '') === chatId;
+  }
+
+  /** Clear pending ask-user UI for sourceTab and sibling tabs on the same chat. */
+  function clearAskForMatchingChatTabs(sourceTab) {
+    let shouldClearSlot = false;
+    for (let i = 0; i < tabs.length; i++) {
+      const tab = tabs[i];
+      if (!isAskSameChatTab(sourceTab, tab)) continue;
+      tab.askPendingQuestion = null;
+      if (tab.askInputEl) tab.askInputEl.value = '';
+      if (tab.id === activeTabId) shouldClearSlot = true;
+    }
+    if (shouldClearSlot) clearAskSlot();
+  }
+
   /** Submit the current answer for the given tab; clear pending question. */
   function submitAskForTab(tab) {
     const answer = tab.askInputEl ? tab.askInputEl.value : '';
     vscode.postMessage({type: 'userAnswer', answer: answer, tabId: tab.id});
-    tab.askPendingQuestion = null;
-    if (tab.askInputEl) tab.askInputEl.value = '';
-    if (tab.id === activeTabId) clearAskSlot();
+    clearAskForMatchingChatTabs(tab);
   }
 
   /**
