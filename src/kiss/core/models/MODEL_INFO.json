@@ -167,6 +167,24 @@
     "emb": false,
     "gen": true
   },
+  "Qwen/Qwen3.7-Max": {
+    "context_length": 1000000,
+    "input_price_per_1M": 1.25,
+    "output_price_per_1M": 3.75,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW"
+  },
+  "Qwen/Qwen3.7-Plus": {
+    "context_length": 1000000,
+    "input_price_per_1M": 0.32,
+    "output_price_per_1M": 1.28,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW"
+  },
   "arcee-ai/trinity-mini": {
     "context_length": 128000,
     "input_price_per_1M": 0.04,
