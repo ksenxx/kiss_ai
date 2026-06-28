@@ -18,6 +18,7 @@ from typing import Any
 import yaml
 
 from kiss._version import __version__
+from kiss.agents.sorcar.git_worktree import strip_worktree_suffix
 from kiss.agents.sorcar.persistence import (
     _add_task,
     _append_chat_event,
@@ -206,9 +207,12 @@ class ChatSorcarAgent(SorcarAgent):
         Returns:
             The extra-payload dict.
         """
+        # Persist the user-visible workspace folder, not the ephemeral
+        # ``<repo>/.kiss-worktrees/kiss_wt-<slug>`` directory that gets
+        # removed when the worktree is merged or discarded.
         payload: dict[str, object] = {
             "model": model,
-            "work_dir": work_dir,
+            "work_dir": strip_worktree_suffix(work_dir),
             "version": __version__,
             "is_parallel": is_parallel,
             "is_worktree": is_worktree,
