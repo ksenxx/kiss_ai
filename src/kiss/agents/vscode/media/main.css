@@ -771,6 +771,26 @@ body.remote-chat #welcome-config { display: none !important; }
 .tp[data-path] { cursor: pointer; text-decoration: underline dotted; }
 .tp[data-path]:hover { color: color-mix(in srgb, var(--accent) 82%, transparent); text-decoration: underline solid; }
 
+/*
+ * Clickable filepath token surfaced by ``linkifyFilePaths`` in
+ * ``main.js``.  Wraps any ``/abs/path``, ``./rel``, ``../rel``,
+ * ``~/home/path`` or ``src/workspace/path`` token (with optional
+ * ``:line`` suffix) appearing
+ * inside rendered chat content so the global ``[data-path]`` click
+ * handler can route a click to the extension's ``openFile`` viewer.
+ */
+.kiss-filelink {
+  color: var(--cyan);
+  cursor: pointer;
+  text-decoration: underline dotted;
+  word-break: break-all;
+}
+
+.kiss-filelink:hover {
+  color: color-mix(in srgb, var(--accent) 82%, transparent);
+  text-decoration: underline solid;
+}
+
 .tc-b {
   padding: 8px 12px; max-height: 200px; overflow-y: auto;
   font-family: var(--vscode-editor-font-family, monospace);

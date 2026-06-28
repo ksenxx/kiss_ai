@@ -1906,6 +1906,102 @@
     return e;
   }
 
+  // ------------------------------------------------------------------
+  // Filepath linkifier — walks every text node under ``root`` and
+  // wraps slash-bearing tokens that look like absolute paths
+  // (``/foo/bar``), home-relative paths (``~/foo``), dot-relative
+  // paths (``./foo``, ``../foo``), or workspace-relative paths with
+  // at least one directory component (``src/foo``) — with optional
+  // ``:line`` suffix — in a ``<span class="kiss-filelink"
+  // data-path="...">``.  The existing global click handler (see
+  // bottom of this file) dispatches on ``[data-path]`` to post an
+  // ``openFile`` message to the extension, which validates the path
+  // and dispatches it to the VS Code editor or the native viewer.
+  //
+  // We skip text nodes inside ``<a>`` (already a hyperlink — marked
+  // autolinks URLs) and inside any element that already carries a
+  // ``data-path`` attribute (e.g. the existing tool_call ``.tp``
+  // hooks).  The leading character class lookbehind avoids matching
+  // a URL's path component (``https://x/y``) as a filepath: the
+  // character before ``/y`` is the alphanumeric host suffix, which
+  // ``\w`` rejects.
+  //
+  // The path regex deliberately requires at least one ``/`` so bare
+  // filenames like ``package.json`` — which would noise-up sentences
+  // and ambiguous tokens like ``v1.0`` — are NOT linkified.  Trailing
+  // sentence punctuation (``,``, ``.``, ``;``, ``)``, ``]``) is
+  // excluded by the closing character class so ``/tmp/foo.py,`` is
+  // captured as ``/tmp/foo.py``.
+  const _LINK_FILEPATH_RE =
+    /(?<![\w@:%/.~-])((?:(?:~|\.{1,2})?\/|[A-Za-z0-9_+-]+\/)[A-Za-z0-9_./+-]*[A-Za-z0-9_+/-](?::\d+)?)/g;
+  const _LINK_SKIP_TAGS = new Set([
+    'A',
+    'SCRIPT',
+    'STYLE',
+    'TEXTAREA',
+    'INPUT',
+    'BUTTON',
+    'SELECT',
+  ]);
+
+  function linkifyFilePaths(root) {
+    if (!root || root.nodeType !== 1) return;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        let p = node.parentNode;
+        while (p && p !== root.parentNode) {
+          if (p.nodeType === 1) {
+            if (_LINK_SKIP_TAGS.has(p.tagName)) {
+              return NodeFilter.FILTER_REJECT;
+            }
+            if (p.dataset && p.dataset.path) {
+              return NodeFilter.FILTER_REJECT;
+            }
+          }
+          p = p.parentNode;
+        }
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+    const matches = [];
+    let n;
+    while ((n = walker.nextNode())) {
+      const text = n.nodeValue;
+      if (!text || text.indexOf('/') < 0) continue;
+      _LINK_FILEPATH_RE.lastIndex = 0;
+      if (_LINK_FILEPATH_RE.test(text)) {
+        matches.push(n);
+      }
+    }
+    for (const node of matches) {
+      const text = node.nodeValue;
+      _LINK_FILEPATH_RE.lastIndex = 0;
+      const frag = node.ownerDocument.createDocumentFragment();
+      let last = 0;
+      let m;
+      while ((m = _LINK_FILEPATH_RE.exec(text)) !== null) {
+        const start = m.index;
+        const end = start + m[1].length;
+        if (start > last) {
+          frag.appendChild(
+            node.ownerDocument.createTextNode(text.slice(last, start)),
+          );
+        }
+        const span = node.ownerDocument.createElement('span');
+        span.className = 'kiss-filelink';
+        span.setAttribute('data-path', m[1]);
+        span.title = 'Open ' + m[1];
+        span.textContent = m[1];
+        frag.appendChild(span);
+        last = end;
+      }
+      if (last < text.length) {
+        frag.appendChild(node.ownerDocument.createTextNode(text.slice(last)));
+      }
+      if (node.parentNode) node.parentNode.replaceChild(frag, node);
+    }
+  }
+
   function hlBlock(el) {
     if (typeof hljs === 'undefined') return;
     el.querySelectorAll('pre code').forEach(bl => {
@@ -2126,6 +2222,8 @@
       rb +
       '</div>';
     hlBlock(rc);
+    const rcBody = rc.querySelector('.rc-body');
+    if (rcBody) linkifyFilePaths(rcBody);
     addCopyButton(rc);
     return rc;
   }
@@ -2328,6 +2426,12 @@
           } else if (tState.txtNode && tState.txtPending) {
             tState.txtNode.appendData(tState.txtPending);
           }
+          // Surface clickable filepaths inside the streamed text
+          // body so the global click handler can route them to the
+          // extension's ``openFile`` viewer.  Runs regardless of
+          // whether ``marked`` is available — when it is not, the
+          // text node fallback still needs the linkifier.
+          linkifyFilePaths(tState.txtEl);
           tState.txtEl = null;
           tState.txtBuf = '';
           tState.txtNode = null;
@@ -2338,6 +2442,7 @@
         if (tState.bashPanel && tState.bashBuf) {
           tState.bashPanel.textContent += tState.bashBuf;
           tState.bashBuf = '';
+          linkifyFilePaths(tState.bashPanel);
         }
         tState.bashPanel = null;
         tState.bashRaf = 0;
@@ -2424,6 +2529,13 @@
         if (tState.bashPanel && tState.bashBuf) {
           tState.bashPanel.textContent += tState.bashBuf;
           tState.bashBuf = '';
+          linkifyFilePaths(tState.bashPanel);
+        } else if (tState.bashPanel) {
+          // Even if no pending buffer, the panel may have been
+          // populated by prior system_output flushes — make sure
+          // those text nodes are linkified before the bash panel is
+          // finalised.
+          linkifyFilePaths(tState.bashPanel);
         }
         const hadBash = !!tState.bashPanel;
         tState.bashPanel = null;
@@ -2444,10 +2556,13 @@
           r.dataset.rawText = 'FAILED\n' + (ev.content || '');
           addCollapse(r, r.querySelector('.rl'));
           resultTarget.appendChild(r);
+          const trBody = r.querySelector('.tr-content');
+          if (trBody) linkifyFilePaths(trBody);
         } else {
           const op = mkEl('div', 'bash-panel');
           const opContent = mkEl('div', 'bash-panel-content');
           opContent.textContent = ev.content;
+          linkifyFilePaths(opContent);
           op.appendChild(opContent);
           addCopyButton(op);
           resultTarget.appendChild(op);
@@ -2460,8 +2575,10 @@
           tState.bashBuf += ev.text || '';
           if (!tState.bashRaf) {
             tState.bashRaf = requestAnimationFrame(() => {
-              if (tState.bashPanel)
+              if (tState.bashPanel) {
                 tState.bashPanel.textContent += tState.bashBuf;
+                linkifyFilePaths(tState.bashPanel);
+              }
               tState.bashBuf = '';
               tState.bashRaf = 0;
               if (tState.bashPanel)
@@ -2471,6 +2588,7 @@
         } else {
           const s = mkEl('div', 'ev sys');
           s.textContent = (ev.text || '').replace(/\n\n+/g, '\n');
+          linkifyFilePaths(s);
           target.appendChild(s);
         }
         break;
@@ -2527,7 +2645,10 @@
         hlBlock(el);
         target.appendChild(el);
         const bodyEl = el.querySelector('.' + cls + '-body');
-        if (bodyEl) bodyEl.scrollTop = bodyEl.scrollHeight;
+        if (bodyEl) {
+          linkifyFilePaths(bodyEl);
+          bodyEl.scrollTop = bodyEl.scrollHeight;
+        }
         break;
       }
       case 'usage_info': {
