@@ -3829,6 +3829,7 @@
           ev.startTs,
           ev.endTs,
         );
+        focusFinishedTab(ev.tabId);
         break;
       }
       case 'task_error':
@@ -3846,6 +3847,7 @@
               ? 'Interrupted'
               : 'Stopped';
         setReady(label, ev.tabId, ev.startTs, ev.endTs);
+        focusFinishedTab(ev.tabId);
         break;
       }
       case 'new_tab': {
@@ -4131,6 +4133,33 @@
       tab.hasRunTask = true;
       tab.lastTaskFailed = !!failed;
     }
+  }
+
+  /**
+   * Auto-switch the active tab to ``tabId`` after the task running in
+   * that tab has just ended (task_done / task_error / task_stopped /
+   * task_interrupted).  Without this the user, who may have moved to
+   * a different chat tab while waiting for the background task to
+   * finish, would have to manually click back to see the result; the
+   * product contract is that the webview MUST switch to the tab
+   * whose task just completed so the result panel is immediately
+   * visible.
+   *
+   * Silently a no-op when:
+   *
+   *   * ``tabId`` is missing (legacy/global events without a
+   *     per-tab identity — there is no specific tab to focus),
+   *   * the tab is not present in this webview's ``tabs`` array
+   *     (events are broadcast to every connected client; a webview
+   *     that does not own the tab must ignore the focus request),
+   *   * the tab is already the active tab (no-op; ``switchToTab``
+   *     also short-circuits, but we filter here for clarity).
+   */
+  function focusFinishedTab(tabId) {
+    if (tabId === undefined || tabId === null) return;
+    if (tabId === activeTabId) return;
+    if (!getTab(tabId)) return;
+    switchToTab(tabId);
   }
 
   function setReady(label, tabId, doneStartTs, doneEndTs) {
