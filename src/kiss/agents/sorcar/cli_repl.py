@@ -77,6 +77,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from kiss.agents.sorcar.cli_helpers import (
+    _parse_resume_arg,
     _print_recent_chats,
     print_outcome,
 )
@@ -149,7 +150,10 @@ SLASH_COMMANDS: dict[str, str] = {
     "/help": "Show available commands",
     "/clear": "Start a new chat (clear conversation context)",
     "/new": "Alias for /clear",
-    "/resume": "Resume a chat: /resume <chat-id>, or list recent chats",
+    "/resume": (
+        "Resume a chat: /resume <chat-id>, or list recent chats "
+        "(/resume [--limit N], default 20)"
+    ),
     "/model": (
         "Switch model: /model <name>, list all models with /model list, "
         "or show the current model"
@@ -619,17 +623,29 @@ def _handle_autocommit(agent: SorcarAgent, work_dir: str) -> None:
 
 
 def _handle_resume(agent: SorcarAgent, arg: str) -> None:
-    """Resume a chat by id, or list recent chats when no id is given."""
+    """Resume a chat by id, or list recent chats when no id is given.
+
+    The argument string supports ``--limit N`` (or ``--limit=N``) to
+    override the default number of recent chats shown in the listing,
+    e.g. ``/resume --limit 50``.  When a chat id is provided the
+    ``--limit`` flag is ignored because resuming a specific chat does
+    not list anything.
+    """
     from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
     if not isinstance(agent, ChatSorcarAgent):
         print("Resume is only available in chat mode.\n")
         return
-    if arg:
-        agent.resume_chat_by_id(arg)
-        print(f"Resumed chat {arg}.\n")
+    try:
+        chat_id, limit = _parse_resume_arg(arg)
+    except ValueError as exc:
+        print(f"Invalid /resume argument: {exc}\n")
+        return
+    if chat_id:
+        agent.resume_chat_by_id(chat_id)
+        print(f"Resumed chat {chat_id}.\n")
     else:
-        _print_recent_chats()
+        _print_recent_chats(limit=limit)
         print("\nResume one with: /resume <chat-id>\n")
 
 
