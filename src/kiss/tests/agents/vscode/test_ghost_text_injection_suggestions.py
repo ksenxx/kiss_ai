@@ -5,12 +5,21 @@
 """Integration test: fast-complete ghost text must suggest INJECTIONS.md
 "trick" strings at the beginning of each sentence.
 
-The user's "Inject instruction" tricks (stored at
-``~/.kiss/INJECTIONS.md`` and bundled at ``src/kiss/INJECTIONS.md``)
-are exposed via a sidebar panel that copies them into the textarea on
-click.  This test verifies they are *also* offered as ghost-text
-fast-complete suggestions while typing — but ONLY at a sentence
-boundary (start of input or after ``.``/``!``/``?`` + whitespace).
+The user's "Inject instruction" tricks come from two files merged by
+:func:`kiss.agents.vscode.tricks.read_tricks`:
+
+* ``~/.kiss/MY_INJECTION.md`` — user-curated tricks, auto-seeded.
+* ``src/kiss/INJECTIONS.md`` — bundled tricks, read directly from the
+  package (no copy is ever written into ``~/.kiss/``).
+
+A sidebar panel copies them into the textarea on click; this test
+verifies they are *also* offered as ghost-text fast-complete
+suggestions while typing — but ONLY at a sentence boundary (start of
+input or after ``.``/``!``/``?`` + whitespace).
+
+The bundled tricks file is pinned via the ``KISS_INJECTIONS_PATH``
+environment variable so tests are independent of whatever the real
+``src/kiss/INJECTIONS.md`` happens to contain.
 """
 
 from __future__ import annotations
@@ -52,11 +61,19 @@ class TestGhostTextInjectionSuggestions:
         self._tmpdir = tempfile.mkdtemp()
         kiss_dir = Path(self._tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
-        # Override the user-asset resolver so _read_tricks reads our
-        # fake INJECTIONS.md instead of the user's real one.
-        (kiss_dir / "INJECTIONS.md").write_text(_FAKE_INJECTIONS)
+        # Pin the bundled tricks file via the env override so the
+        # daemon reads our fake INJECTIONS.md instead of the package
+        # copy.  ~/.kiss/MY_INJECTION.md is left empty so the user
+        # tricks list is empty and only the bundled fakes appear.
+        fake_path = kiss_dir / "fake_INJECTIONS.md"
+        fake_path.write_text(_FAKE_INJECTIONS)
+        # Empty MY_INJECTION.md so the auto-seed does not contribute
+        # extra tricks to the prefix-match dictionary.
+        (kiss_dir / "MY_INJECTION.md").write_text("")
         self._saved_kiss_home = os.environ.get("KISS_HOME")
+        self._saved_kiss_injections = os.environ.get("KISS_INJECTIONS_PATH")
         os.environ["KISS_HOME"] = str(kiss_dir)
+        os.environ["KISS_INJECTIONS_PATH"] = str(fake_path)
         # Isolate the persistence DB so _prefix_match_task can't shadow
         # the trick lookup with a stray history match.
         self._saved_persistence = (th._DB_PATH, th._db_conn, th._KISS_DIR)
@@ -69,6 +86,10 @@ class TestGhostTextInjectionSuggestions:
             os.environ.pop("KISS_HOME", None)
         else:
             os.environ["KISS_HOME"] = self._saved_kiss_home
+        if self._saved_kiss_injections is None:
+            os.environ.pop("KISS_INJECTIONS_PATH", None)
+        else:
+            os.environ["KISS_INJECTIONS_PATH"] = self._saved_kiss_injections
         th._DB_PATH, th._db_conn, th._KISS_DIR = self._saved_persistence
 
     def _ghost_for(self, server: VSCodeServer, query: str) -> str:
