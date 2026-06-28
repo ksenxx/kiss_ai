@@ -4,11 +4,15 @@ Search internet extensively.
 
 ## Trick
 
-Reproduce the issue by writing integration tests. Then fix the issue.
+Reproduce the issue by writing an integration test. Then fix the issue.
 
 ## Trick
 
-Reproduce the issue by writing end-to-end test. Then fix the issue.
+Reproduce the issue by writing an end-to-end test. Then fix the issue.
+
+## Trick
+
+Reproduce any violation of the ivariant by writing end-to-end tests. Then fix the issue.
 
 ## Trick
 
@@ -17,6 +21,10 @@ Use claude-opus-4-7 model for all tasks including coding, bug fixing, and test c
 ## Trick
 
 Can you review the updates made in the last task using gpt-5.5 (non codex) and find bugs or missing code. Then write end-to-end tests reproducing the bugs reported by the review, fix them, and test them using claude-opus-4-7? Run all the tests in parallel and fix bugs after thoroughly reviewing the fixes with gpt-5.5 (non codex). Repeat the process until you fail to reproduce the bugs reported by the review done by gpt-5.5 (non codex). No need to check if the models exist.
+
+## Trick
+
+Can you review the updates made in the current task using gpt-5.5 (non codex) and find bugs or missing code. Then write end-to-end tests reproducing the bugs reported by the review, fix them, and test them using claude-opus-4-7? Run all the tests in parallel and fix bugs after thoroughly reviewing the fixes with gpt-5.5 (non codex). Repeat the process until you fail to reproduce the bugs reported by the review done by gpt-5.5 (non codex). No need to check if the models exist.
 
 ## Trick
 
