@@ -2404,6 +2404,16 @@ _WS_SHIM_JS = r"""
         }
         for (var i = 0; i < _pending.length; i++) _ws.send(_pending[i]);
         _pending = [];
+        // Hide the "KISS Sorcar Server is starting ..." overlay now
+        // that the WebSocket is authenticated.  The remote webapp has
+        // no equivalent of the VS Code extension host's daemonStatus
+        // posts (the daemon == this WSS server), so we synthesise the
+        // same window ``message`` event ``media/main.js`` listens for.
+        // Without this the overlay covers ``#app`` forever and the
+        // user only ever sees "KISS Sorcar Server is starting ...".
+        window.dispatchEvent(new MessageEvent('message', {
+          data: {type: 'daemonStatus', connected: true}
+        }));
         return;
       }
       if (msg.type === 'auth_required') {
@@ -2411,6 +2421,16 @@ _WS_SHIM_JS = r"""
         // Stored password (if any) was rejected; drop it so a refresh
         // re-prompts instead of silently retrying the bad value.
         try { localStorage.removeItem('sorcar-remote-pwd'); } catch(e) {}
+        // Reveal ``#app`` so the auth modal (which lives INSIDE #app
+        // in the chat.html template — see ``{{AUTH_MODAL}}``) is no
+        // longer hidden by its display:none parent.  Without this
+        // dispatch a password-protected webapp shows the loading
+        // overlay forever and the user can never enter their
+        // password.  Symmetric to the auth_ok dispatch above — both
+        // states prove the server is reachable.
+        window.dispatchEvent(new MessageEvent('message', {
+          data: {type: 'daemonStatus', connected: true}
+        }));
         _showAuthModal().then(function(pwd) {
           if (pwd === null || pwd === undefined) return;
           try { localStorage.setItem('sorcar-remote-pwd', pwd); } catch(e) {}
@@ -2425,6 +2445,14 @@ _WS_SHIM_JS = r"""
 
     _ws.onclose = function() {
       _authenticated = false;
+      // Re-show the "KISS Sorcar Server is starting ..." overlay
+      // while the socket is down so the user knows actions will not
+      // reach the backend.  Symmetric to the ``auth_ok`` dispatch
+      // above and to ``SorcarSidebarView.ts``'s disconnect handler in
+      // the VS Code path.
+      window.dispatchEvent(new MessageEvent('message', {
+        data: {type: 'daemonStatus', connected: false}
+      }));
       setTimeout(connect, 3000);
     };
 
