@@ -429,7 +429,11 @@ class SorcarAgent(RelentlessAgent):
             return os.process_cpu_count() or 1
 
         def set_model(model_name: str) -> str:
-            """Change the agent's LLM model dynamically.
+            """Change only this running agent's LLM model dynamically.
+
+            This does not persist ``last_model`` and therefore cannot
+            change the user-facing model picker default.  Only an
+            explicit picker selection should update that preference.
 
             Args:
                 model_name: New LLM model name (for example
@@ -441,12 +445,9 @@ class SorcarAgent(RelentlessAgent):
                 change (or a "no change" message when the requested
                 model is already active).
             """
-            from kiss.agents.sorcar.persistence import _save_last_model
-
             old_model = getattr(self, "model", None)
             if old_model is None:
                 self.model_name = model_name
-                _save_last_model(model_name)
                 return (
                     f"Model deferred-changed to {model_name} "
                     "(no live model yet)."
@@ -490,7 +491,6 @@ class SorcarAgent(RelentlessAgent):
                 self._cached_tools_schema = new_model._build_openai_tools_schema(  # type: ignore[attr-defined]
                     self.function_map,
                 )
-            _save_last_model(model_name)
             return f"Model changed from {previous_name} to {model_name}."
 
         # Agent Skills (https://agentskills.io): the tool's docstring
