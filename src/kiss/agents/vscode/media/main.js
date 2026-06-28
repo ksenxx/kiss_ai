@@ -1209,6 +1209,12 @@
         chatId: t.id,
         backendChatId: t.backendChatId || '',
         parentTabId: t.parentTabId || '',
+        // Persist the tab's pinned work_dir so a window reload that
+        // restores the tab keeps the same effective work_dir even
+        // before ``resumeSession`` replays ``task_events`` (and even
+        // for older persisted rows whose ``extra`` carries no
+        // ``work_dir``).  See INVARIANTS.md → Tabs & chat webview.
+        workDir: t.workDir || '',
       };
     });
     let activeIdx = persistable.findIndex(t => {
@@ -1277,6 +1283,10 @@
           restoredBackendChatIds.add(persistedBackendChatId);
         }
         if (st.parentTabId) tab.parentTabId = st.parentTabId;
+        // Restore the tab's pinned work_dir (see persistTabState).
+        // Survives a settings-panel change made before the next
+        // ``resumeSession`` replay re-pins it from ``extra.work_dir``.
+        if (st.workDir) tab.workDir = st.workDir;
         tabs.push(tab);
       });
     }
@@ -3262,6 +3272,17 @@
         }
         if (ev.chat_id && clearTab) {
           clearTab.backendChatId = ev.chat_id;
+          // Pin the tab's ``workDir`` the moment a chat-id of a real
+          // persisted task is bound to it.  Once bound, a later
+          // settings-panel change to ``configWorkDir`` MUST NOT shift
+          // this tab's effective work_dir (INVARIANTS.md → Tabs &
+          // chat webview).  ``workDirForTab`` would otherwise fall
+          // back to the daemon-global ``configWorkDir`` and route
+          // follow-up commands (submit, autocommitAction, …) to the
+          // wrong repo.
+          if (!clearTab.workDir && configWorkDir) {
+            clearTab.workDir = configWorkDir;
+          }
           persistTabState();
         }
         const evTabId = ev.tabId;
@@ -3414,6 +3435,18 @@
         const teTab = getTab(teTabId);
         if (ev.chat_id && teTab) {
           teTab.backendChatId = ev.chat_id;
+          // Pin the tab's ``workDir`` when a chat-id of a real
+          // persisted task is bound (INVARIANTS.md → Tabs & chat
+          // webview).  ``extra.work_dir`` (parsed further down) takes
+          // priority and may overwrite this value with the task's
+          // recorded directory; this fallback only kicks in for
+          // replays whose ``extra`` is missing ``work_dir`` (older
+          // rows), keeping the tab pinned to whatever ``configWorkDir``
+          // was at bind time instead of leaking later settings-panel
+          // changes through ``workDirForTab``'s fallback.
+          if (!teTab.workDir && configWorkDir) {
+            teTab.workDir = configWorkDir;
+          }
           persistTabState();
         }
         // Track the task_id of the currently displayed task so a later

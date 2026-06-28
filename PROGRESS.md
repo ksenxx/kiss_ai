@@ -2,92 +2,136 @@
 
 ## Task
 
-Show "Restarting the KISS Sorcar web server…" as a notification (top-right
-toast) instead of a chat-output note in the chat webview.
+> When a tab has an associated chat-id of a real task, changing the
+> working directory in the settings page MUST not change the directory
+> of that tab and chat id. Reproduce a violation of the invariant by
+> writing an end-to-end test. Then fix the issue.
 
-## Implementation (claude-opus-4-7)
+Models:
 
-### `src/kiss/agents/vscode/web_server.py`
+- **claude-opus-4-7** drove the analysis, repro test, and code fix.
+- **gpt-5.5** reviewed coverage, looked for missed sites, and verified
+  no regressions before finish.
 
-`_handle_server_reset` (and the `_SERVER_RESET_DELAY` docstring) now
-broadcasts a `notification` event with a stable id, severity, and
-message instead of the old `notice` event:
+## Repro / fix (claude-opus-4-7)
 
-```py
-notification: dict[str, Any] = {
-    "type": "notification",
-    "id": "server-reset-restarting",
-    "severity": "info",
-    "message": "Restarting the KISS Sorcar web server…",
+### Root cause
+
+The chat webview routes follow-up commands (`submit`,
+`autocommitAction`, `worktreeAction`, `mergeAction`, …) through
+`workDirForTab(tabId)`:
+
+```js
+function workDirForTab(tabId) {
+  const tab = getTab(tabId);
+  if (tab && tab.workDir) return tab.workDir;
+  return configWorkDir || '';
 }
-if conn_id:
-    notification["connId"] = conn_id
-self._printer.broadcast(notification)
-loop.call_later(_SERVER_RESET_DELAY, self._trigger_server_reset)
 ```
 
-`broadcast()` strips `connId` and routes the notification to ONLY the
-requesting connection via `_send_to_conn`, so sibling windows do not
-pop a banner.
+`tab.workDir` was only pinned when a `task_events` replay carried
+`extra.work_dir` (i.e. when the user reopened a chat from history and
+the persisted `extra` happened to include the directory). Two
+production paths bind a chat-id of a real persisted task to a tab
+without ever pinning `tab.workDir`:
 
-### `src/kiss/tests/agents/vscode/test_server_reset.py`
+1. `clear` event — broadcast for a freshly-submitted task as soon as
+   `ChatSorcarAgent` persists it in the DB. No `task_events`
+   replay fires.
+1. `task_events` event whose `extra` is missing `work_dir` —
+   older persisted rows.
 
-- `test_server_reset_acks_and_triggers_restart` now asserts `type == "notification"`, `id == "server-reset-restarting"`, `severity == "info"`, the message contains "restart" / "web server", and `type != "notice"` as an explicit regression guard.
-- `test_server_reset_notification_only_to_requesting_window` (renamed
-  from `_notice_only_…`) checks the `notification` event does not leak
-  to sibling windows.
+Both leave `tab.workDir = ''`. A later settings-panel change to the
+work directory updates `configWorkDir` — and the very next command
+from that tab is routed to the **new** directory even though the
+bound chat-id still belongs to the **original** task. Auto-commit /
+merge then run on the wrong repo; follow-up submits inherit a wrong
+`work_dir` snapshot.
 
-### `src/kiss/agents/vscode/test/serverResetRestartingNotification.test.js` (new)
+### Reproduction test
 
-JSDOM-driven webview contract test that pins three properties of the
-new behaviour:
+`src/kiss/agents/vscode/test/tabWorkDirSettingsInvariant.test.js`
+drives production `media/chat.html` + `media/panelCopy.js` +
+`media/main.js` in JSDOM. Three sub-tests:
 
-1. Dispatching `{type:"notification", id:"server-reset-restarting", severity:"info", message:"Restarting the KISS Sorcar web server…"}`
-   renders a `.kiss-notification` toast whose text contains the
-   message, whose `data-notification-id` is
-   `server-reset-restarting`, and whose class set includes
-   `kiss-notification-info`.
-1. No `div.note` is appended in the chat output.
-1. Control case: a legacy `notice` event with the same text DOES still
-   render as a chat-output `div.note` and does NOT raise a
-   `.kiss-notification` toast — proves the absence of a note in (1) is
-   meaningful, not a false-positive from a webview that lost the
-   `notice` code path.
+1. `testInvariantHoldsAfterSettingsChange_ClearBind` — bind chat-id
+   via `clear`, change `configData.work_dir`, raise an
+   `autocommit_prompt`, click "Auto commit"; the posted
+   `autocommitAction.workDir` MUST equal the pre-change work_dir.
+   **Failed before the fix** (returned the new settings value),
+   passes after.
+1. `testInvariantHoldsAfterSettingsChange_TaskEventsBindNoExtraWorkdir` —
+   same flow but binding via `task_events` whose `extra` omits
+   `work_dir` (older rows).
+1. `testTaskEventsExtraWorkDirStillWinsOverConfig` — sanity: when
+   `extra.work_dir` IS present, it pins the tab and survives a later
+   settings change. Guards against future regression of the existing
+   path.
 
-### `src/kiss/agents/vscode/package.json`
+The first test reproducibly failed before the fix:
 
-`serverResetRestartingNotification.test.js` is added to the `test`
-script so it runs as part of the extension's regular `npm test` and
-`uv run check --full` cycles.
+```
+AssertionError [ERR_ASSERTION]: INVARIANT: ... — observed workDir = "/path/new"
++ actual - expected
++ '/path/new'
+- '/path/initial'
+```
 
-## Verification
+### Fix — `src/kiss/agents/vscode/media/main.js`
 
-- `uv run pytest -q src/kiss/tests/agents/vscode/test_server_reset.py`:
-  2 passed.
-- `node test/serverResetRestartingNotification.test.js`: passed.
-- `node test/serverResetConfirm.test.js`,
-  `serverResetDialog.test.js`, `serverResetDialogDoubleClick.test.js`,
-  `serverResetDialogGuardBypass.test.js`,
-  `webviewNotifications.test.js`, `updateNotification.test.js`: all
-  pass.
-- `uv run check --full`: all checks pass (ruff, mypy, pyright,
-  VS Code TS check + lint, mdformat).
+Three small additions:
+
+1. `case 'clear'` — when a chat-id is bound to a tab, pin
+   `tab.workDir` from `configWorkDir` if it is still empty:
+
+```js
+if (ev.chat_id && clearTab) {
+  clearTab.backendChatId = ev.chat_id;
+  if (!clearTab.workDir && configWorkDir) {
+    clearTab.workDir = configWorkDir;
+  }
+  persistTabState();
+}
+```
+
+2. `case 'task_events'` — same fallback at chat-id bind. The
+   `extra.work_dir` branch downstream still takes priority and
+   overwrites the value with the task's recorded directory; the
+   fallback only matters when `extra` carries no `work_dir`.
+
+1. `persistTabState` + initial restore — also persist
+   `tab.workDir` so a window reload that restores the tab keeps the
+   same effective work_dir even before `resumeSession` re-pins it
+   from the next `task_events` replay, even for older persisted
+   rows whose `extra` carries no `work_dir`.
+
+`package.json`'s `test` script now runs
+`test/tabWorkDirSettingsInvariant.test.js` so it's part of `npm test`
+and `uv run check --full`.
 
 ## Review (gpt-5.5)
 
-- Field names match `showNotification(ev)` in `media/main.js` (which
-  reads `ev.id`, `ev.severity`, `ev.message`).
-- Stable `id="server-reset-restarting"` prevents duplicate stacking if
-  the daemon ever re-broadcasts the event.
-- Targeted delivery via `connId` is preserved (`broadcast()` already
-  routes to a single connection when `connId` is set), so siblings are
-  unaffected — pinned by
-  `test_server_reset_notification_only_to_requesting_window`.
-- The `notice` event handler in `main.js` is intentionally left
-  untouched: other features still rely on it; the control case in the
-  new JS test exercises it to confirm.
-- Auto-dismiss of an `info` toast is acceptable here — the daemon
-  SIGTERMs itself after `_SERVER_RESET_DELAY` (0.4 s), and the
-  notification flushes to the client before the socket drops.
-- Regression guards in the integration test (`assertNotEqual(..., "notice")`) prevent a future refactor from silently restoring the
-  buried chat-output banner.
+- Verified every `backendChatId =` assignment site
+  (`grep -n "backendChatId =" media/main.js`) is now covered by a
+  matching `workDir` pin: lines 1267 (restore), 3245 (clear), 3408
+  (task_events).
+- Verified no other code path overwrites `tab.workDir` from
+  `configWorkDir` (greps for `tab.workDir =` / `.workDir =` show only
+  the deliberate `extra.work_dir` assignments in the active and
+  background `task_events` branches — both keep priority over the
+  bind-time fallback).
+- Verified `saveCurrentTab`/`restoreTab` do not touch `workDir` —
+  tabs live in the `tabs` array and survive tab switches without
+  losing the pin.
+- Ran the full JSDOM test suite individually
+  (`historyClickSwitchExistingChat`, `historyWorkspaceFilter`,
+  `historyTaskWorkspace`, `historyTaskMeta`, `historyBurgerMenuRunningTask`,
+  `historyRunningPulsingDot`, `ask_user_*`, `bughunt5_*`,
+  `bughunt6_files_stale`, `bughunt_submit_while_running`,
+  `bughunt_reopen_running_tab`, `syncWorkDir`, `panelTimeSpent`,
+  `panelTimeActiveTick`, `bashHeaderCyan`, `multiSessionResultOrder`,
+  `historyTaskDuration`, `tab_timer_per_tab`, `historyFilterDateGroup`,
+  `historyTaskRowIndicators`, …) plus the new
+  `tabWorkDirSettingsInvariant` test — all pass.
+- `uv run check --full` passes (ruff, mypy, pyright, VS Code TS
+  check + lint, mdformat).
