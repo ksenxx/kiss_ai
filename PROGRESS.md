@@ -2,136 +2,209 @@
 
 ## Task
 
-> When a tab has an associated chat-id of a real task, changing the
-> working directory in the settings page MUST not change the directory
-> of that tab and chat id. Reproduce a violation of the invariant by
-> writing an end-to-end test. Then fix the issue.
+> When the user clicks on a filepath in the web chatview, detect it
+> and — if it exists — open it in the VS Code editor or a native
+> viewer. Tests first, then implementation.
 
 Models:
 
-- **claude-opus-4-7** drove the analysis, repro test, and code fix.
-- **gpt-5.5** reviewed coverage, looked for missed sites, and verified
-  no regressions before finish.
+- **claude-opus-4-7** drove test creation, implementation, and
+  bug-fix iterations.
+- **gpt-5.5** drove the post-implementation review for missed sites
+  and regressions.
 
-## Repro / fix (claude-opus-4-7)
+## Tests (claude-opus-4-7)
 
-### Root cause
+Two end-to-end test files were added.
 
-The chat webview routes follow-up commands (`submit`,
-`autocommitAction`, `worktreeAction`, `mergeAction`, …) through
-`workDirForTab(tabId)`:
+### `src/kiss/agents/vscode/test/clickFilePathOpens.test.js` (JSDOM)
+
+Drives the real `media/chat.html` + `panelCopy.js` + `main.js` in
+jsdom and asserts that rendered chat content surfaces filepath
+tokens as clickable `[data-path]` elements which post `openFile` to
+the extension on click. 21 sub-tests cover:
+
+1. Absolute, dot-relative, workspace-relative, parent-relative, and
+   home-relative paths in `prompt` events.
+1. Path with `:line` suffix.
+1. Paths in `result` summary and `result` text.
+1. Paths in streamed `text_delta` / `text_end` flow.
+1. Paths in bash `system_output` stream and non-Bash `tool_result`
+   content (success branch's `bash-panel`).
+1. Paths in `tool_result` error content (`.tr-content`).
+1. Paths inside fenced code blocks.
+1. URL path slices (`https://x/y`) are NOT linkified (lookbehind
+   guard).
+1. Bare filenames (no slash) are NOT linkified.
+1. Trailing punctuation (`,`, `.`) is stripped from path matches.
+1. Click on the linkified span posts `{type:'openFile', path}` and
+   parses `:NN` into `line:NN`.
+1. Text inside an `<a>` element is NOT double-linkified.
+1. Existing tool_call `path:` argument (`.tp[data-path]`) keeps
+   posting `openFile` (no regression).
+1. Linkifier is idempotent — no nested `data-path` elements.
+
+### `src/kiss/agents/vscode/test/openFileNativeViewer.test.js`
+
+Drives the compiled `out/SorcarSidebarView.js` with a stubbed
+`vscode` module and a stub UDS daemon, mirroring the harness from
+`autocommitProgressSticky.test.js`. 7 sub-tests cover the
+extension's `openFile` handler:
+
+1. Text source file → `openTextDocument` + `showTextDocument` only.
+1. Text source file with `line:N` → cursor on 0-indexed line `N-1`,
+   `revealRange` fires.
+1. Image file (`.png`) → `vscode.commands.executeCommand('vscode.open', uri)`,
+   NOT `openTextDocument`.
+1. PDF file (`.pdf`) → same as image.
+1. Path outside workspace → silently refused (no call into vscode).
+1. Non-existent path → silently refused.
+1. Directory → silently refused (`isFile()` guard).
+
+## Implementation (claude-opus-4-7)
+
+### Webview linkifier — `src/kiss/agents/vscode/media/main.js`
+
+New `linkifyFilePaths(root)` helper (just above `hlBlock`) walks
+text nodes under `root`, skipping nodes inside `<a>`, `<script>`,
+`<style>`, `<textarea>`, `<input>`, `<button>`, `<select>` or any
+ancestor already carrying a `data-path` attribute. Each matching
+token is replaced with
+`<span class="kiss-filelink" data-path="..." title="Open ...">`.
+
+The matcher uses one regex:
 
 ```js
-function workDirForTab(tabId) {
-  const tab = getTab(tabId);
-  if (tab && tab.workDir) return tab.workDir;
-  return configWorkDir || '';
+const _LINK_FILEPATH_RE =
+  /(?<![\w@:%/.~-])((?:(?:~|\.{1,2})?\/|[A-Za-z0-9_+-]+\/)[A-Za-z0-9_./+-]*[A-Za-z0-9_+/-](?::\d+)?)/g;
+```
+
+- The pattern accepts absolute (`/tmp/a.py`), home-relative
+  (`~/work/a.py`), dot-relative (`./src/a.py`, `../README.md`), and
+  workspace-relative paths with a directory component
+  (`src/kiss/INJECTIONS.md`).
+- The lookbehind rejects matches inside URLs (`m/foo` etc.) so
+  `https://x.com/foo` is NOT mis-linkified as the path `/foo`.
+- The inner pattern requires at least one `/` and either an explicit
+  absolute/home/dot-relative prefix or a leading directory component,
+  so bare filenames like `package.json` and ambiguous tokens like
+  `v1.0` are ignored.
+- The final character class (`[A-Za-z0-9_+\-/]`) excludes trailing
+  `.`/`,` so sentence punctuation does not leak into the path.
+- `(?::\d+)?` captures an optional `:NN` line suffix.
+
+The linkifier is wired in at every chat-content render site:
+
+| Site | Where |
+| --- | --- |
+| `prompt` / `system_prompt` body | `bodyEl` after `innerHTML` |
+| `text_end` (streamed text) | `tState.txtEl` |
+| `tool_result` success bash-panel | `opContent` |
+| `tool_result` error `.tr-content` | inside `r` |
+| `system_output` (bash stream RAF flush) | `tState.bashPanel` |
+| `system_output` (non-bash) `<div class="ev sys">` | `s` |
+| `tool_call` flushing prior bash buffer | `tState.bashPanel` |
+| `tool_result` flushing prior bash buffer | `tState.bashPanel` |
+| `result` panel `.rc-body` | `rcBody` in `createResultPanel` |
+
+The existing global click handler (`document.addEventListener('click'…)`)
+already routes `[data-path]` clicks to `vscode.postMessage({type:'openFile', …})`
+with `path` / `line` parsed from a `path:NN` suffix, so the
+linkified spans inherit that wiring for free.
+
+CSS hook in `media/main.css`:
+
+```css
+.kiss-filelink {
+  color: var(--cyan);
+  cursor: pointer;
+  text-decoration: underline dotted;
+  word-break: break-all;
+}
+.kiss-filelink:hover {
+  color: color-mix(in srgb, var(--accent) 82%, transparent);
+  text-decoration: underline solid;
 }
 ```
 
-`tab.workDir` was only pinned when a `task_events` replay carried
-`extra.work_dir` (i.e. when the user reopened a chat from history and
-the persisted `extra` happened to include the directory). Two
-production paths bind a chat-id of a real persisted task to a tab
-without ever pinning `tab.workDir`:
+`NodeFilter` was added to `eslint.config.mjs` webview globals
+since the TreeWalker constructor uses it.
 
-1. `clear` event — broadcast for a freshly-submitted task as soon as
-   `ChatSorcarAgent` persists it in the DB. No `task_events`
-   replay fires.
-1. `task_events` event whose `extra` is missing `work_dir` —
-   older persisted rows.
+### Native-viewer routing — `src/kiss/agents/vscode/src/SorcarSidebarView.ts`
 
-Both leave `tab.workDir = ''`. A later settings-panel change to the
-work directory updates `configWorkDir` — and the very next command
-from that tab is routed to the **new** directory even though the
-bound chat-id still belongs to the **original** task. Auto-commit /
-merge then run on the wrong repo; follow-up submits inherit a wrong
-`work_dir` snapshot.
+The `openFile` handler now dispatches based on the file extension:
 
-### Reproduction test
+- Text-like (default): `vscode.workspace.openTextDocument` +
+  `vscode.window.showTextDocument`, with optional cursor positioning
+  on the requested 1-indexed line.
+- Native-viewer-only (binary): `vscode.commands.executeCommand('vscode.open', uri)`
+  delegates to whatever viewer VS Code has registered for the type
+  (image preview, PDF preview, default OS app, …).
 
-`src/kiss/agents/vscode/test/tabWorkDirSettingsInvariant.test.js`
-drives production `media/chat.html` + `media/panelCopy.js` +
-`media/main.js` in JSDOM. Three sub-tests:
+A new module-level constant `NATIVE_VIEWER_EXTENSIONS` enumerates the
+binary / preview-only extensions (images, PDFs, archives, Office
+docs, native binaries, audio/video, fonts, compiled artefacts).
+A new helper `isTextLikeExtension(filePath)` returns `true` when the
+extension is absent or not in the set. Defaulting to text means
+config / dotfiles / unknown source extensions keep opening in the
+editor.
 
-1. `testInvariantHoldsAfterSettingsChange_ClearBind` — bind chat-id
-   via `clear`, change `configData.work_dir`, raise an
-   `autocommit_prompt`, click "Auto commit"; the posted
-   `autocommitAction.workDir` MUST equal the pre-change work_dir.
-   **Failed before the fix** (returned the new settings value),
-   passes after.
-1. `testInvariantHoldsAfterSettingsChange_TaskEventsBindNoExtraWorkdir` —
-   same flow but binding via `task_events` whose `extra` omits
-   `work_dir` (older rows).
-1. `testTaskEventsExtraWorkDirStillWinsOverConfig` — sanity: when
-   `extra.work_dir` IS present, it pins the tab and survives a later
-   settings change. Guards against future regression of the existing
-   path.
-
-The first test reproducibly failed before the fix:
-
-```
-AssertionError [ERR_ASSERTION]: INVARIANT: ... — observed workDir = "/path/new"
-+ actual - expected
-+ '/path/new'
-- '/path/initial'
-```
-
-### Fix — `src/kiss/agents/vscode/media/main.js`
-
-Three small additions:
-
-1. `case 'clear'` — when a chat-id is bound to a tab, pin
-   `tab.workDir` from `configWorkDir` if it is still empty:
-
-```js
-if (ev.chat_id && clearTab) {
-  clearTab.backendChatId = ev.chat_id;
-  if (!clearTab.workDir && configWorkDir) {
-    clearTab.workDir = configWorkDir;
-  }
-  persistTabState();
-}
-```
-
-2. `case 'task_events'` — same fallback at chat-id bind. The
-   `extra.work_dir` branch downstream still takes priority and
-   overwrites the value with the task's recorded directory; the
-   fallback only matters when `extra` carries no `work_dir`.
-
-1. `persistTabState` + initial restore — also persist
-   `tab.workDir` so a window reload that restores the tab keeps the
-   same effective work_dir even before `resumeSession` re-pins it
-   from the next `task_events` replay, even for older persisted
-   rows whose `extra` carries no `work_dir`.
-
-`package.json`'s `test` script now runs
-`test/tabWorkDirSettingsInvariant.test.js` so it's part of `npm test`
-and `uv run check --full`.
+All of the prior safety gates (`isPathInside`, `fs.existsSync`,
+`isFile`) still run before either branch so the new wiring inherits
+the original H4 path-traversal defence.
 
 ## Review (gpt-5.5)
 
-- Verified every `backendChatId =` assignment site
-  (`grep -n "backendChatId =" media/main.js`) is now covered by a
-  matching `workDir` pin: lines 1267 (restore), 3245 (clear), 3408
-  (task_events).
-- Verified no other code path overwrites `tab.workDir` from
-  `configWorkDir` (greps for `tab.workDir =` / `.workDir =` show only
-  the deliberate `extra.work_dir` assignments in the active and
-  background `task_events` branches — both keep priority over the
-  bind-time fallback).
-- Verified `saveCurrentTab`/`restoreTab` do not touch `workDir` —
-  tabs live in the `tabs` array and survive tab switches without
-  losing the pin.
-- Ran the full JSDOM test suite individually
-  (`historyClickSwitchExistingChat`, `historyWorkspaceFilter`,
-  `historyTaskWorkspace`, `historyTaskMeta`, `historyBurgerMenuRunningTask`,
-  `historyRunningPulsingDot`, `ask_user_*`, `bughunt5_*`,
-  `bughunt6_files_stale`, `bughunt_submit_while_running`,
-  `bughunt_reopen_running_tab`, `syncWorkDir`, `panelTimeSpent`,
-  `panelTimeActiveTick`, `bashHeaderCyan`, `multiSessionResultOrder`,
-  `historyTaskDuration`, `tab_timer_per_tab`, `historyFilterDateGroup`,
-  `historyTaskRowIndicators`, …) plus the new
-  `tabWorkDirSettingsInvariant` test — all pass.
-- `uv run check --full` passes (ruff, mypy, pyright, VS Code TS
-  check + lint, mdformat).
+- Verified every chat-rendering site in `media/main.js` now feeds
+  its rendered body through `linkifyFilePaths`:
+  - `handleOutputEvent` text_end (≈ line 2425): ✔
+  - `handleOutputEvent` tool_call bash-buffer flush (≈ 2443): ✔
+  - `handleOutputEvent` tool_result bash-buffer flush + finalise
+    (≈ 2526): ✔
+  - `handleOutputEvent` tool_result error `.tr-content` (≈ 2546): ✔
+  - `handleOutputEvent` tool_result success `opContent` (≈ 2554): ✔
+  - `handleOutputEvent` system_output bash RAF flush (≈ 2567): ✔
+  - `handleOutputEvent` system_output non-bash sys panel (≈ 2581): ✔
+  - `handleOutputEvent` prompt / system_prompt body (≈ 2614): ✔
+  - `createResultPanel` `.rc-body` (≈ 2129): ✔
+- Replay (`replayEventsInto`) and background-tab streaming
+  (`processOutputEventForBgTab`) both delegate to `handleOutputEvent`
+  so they pick up the linkifier without separate wiring; spot-grepped
+  to confirm no chat-content innerHTML lives outside that helper.
+- Path detector accepts workspace-relative paths such as
+  `src/kiss/INJECTIONS.md` while still requiring a directory
+  component, so bare filenames remain unlinked.
+- Path detector lookbehind covers URL hosts (`m/foo`), arbitrary
+  port:port chains (`:8080/foo`), and prior `.`-/`-`-/`~`-bearing
+  identifiers, so cases that would otherwise emit spurious
+  `data-path` tokens are rejected.
+- `_LINK_FILEPATH_RE` `lastIndex` is reset to 0 before every
+  use to avoid the stateful-regex gotcha across multiple text
+  nodes.
+- Extension-side `openFile` still runs `isPathInside`, `fs.existsSync`
+  and `isFile()` BEFORE either branch — non-existent paths,
+  directories, and outside-workspace paths are silently refused, as
+  the previous behaviour required.
+- `NATIVE_VIEWER_EXTENSIONS` defaults to **text** for unknown
+  extensions; this preserves the prior behaviour for source code,
+  dotfiles, and config files while only routing well-known binary
+  formats to `vscode.open`.
+- Continuation review found one missed usability case: common
+  workspace-relative paths like `src/kiss/INJECTIONS.md` were not
+  linkified by the initial absolute/dot/home-relative regex. Added
+  an E2E assertion for that case first, then broadened the matcher to
+  accept a leading directory component while keeping bare filenames
+  unlinked.
+- Ran the full VS Code extension suite (`npm test`, 50+ test files
+  including the two new ones) and `uv run check --full` — both pass
+  (ruff, mypy, pyright, ESLint, stylelint, htmlhint, mdformat, all
+  JSDOM/UDS tests).
+
+## Result
+
+`uv run check --full` ⇒ **All checks passed**.
+
+New tests:
+
+- `clickFilePathOpens.test.js`: 21 passed.
+- `openFileNativeViewer.test.js`: 7 passed.
