@@ -6487,10 +6487,24 @@
         div.appendChild(actions);
       }
 
+      // Per-row info column — wraps the three stacked detail lines
+      // (metrics, workspace+meta, chat/task/parent ids) so they
+      // render flush, with no flex row-gap between them.  The
+      // container itself uses ``flex-basis: 100%`` to drop onto its
+      // own line below the running/failed dot, the task text, and
+      // the action column (mirroring the trick the metrics span used
+      // when it was a direct sibling).  Its inner ``flex-direction:
+      // column`` + ``gap: 0`` rule stacks the three lines tightly.
+      const info = document.createElement('div');
+      info.className = 'running-item-info';
+
       // Metrics row (steps • tokens • cost • duration) — matches the
-      // Running tab.  ``flex-basis: 100%`` on .running-item-metrics
-      // drops this onto its own line below the running/failed dot,
-      // the task text, and the delete button.
+      // Running tab.  Rendered as the first child of the info
+      // container above; ``.running-item-metrics`` no longer needs
+      // ``flex-basis: 100%`` (the container handles the line break)
+      // but the rule is kept for backwards compatibility with any
+      // other surface that may still render it as a direct child of
+      // ``.sidebar-item``.
       const metrics = document.createElement('span');
       metrics.className = 'running-item-metrics';
       const tokens = Number(s.tokens || 0);
@@ -6538,16 +6552,13 @@
         cost.toFixed(4) +
         dur +
         when;
-      div.appendChild(metrics);
+      info.appendChild(metrics);
 
       // Workspace + meta row — the task's ``work_dir`` and the
       // persisted run metadata (model name, wt/no-wt,
       // parallel/sequential, auto-commit/manual-commit) rendered
       // as a single dot-separated line IMMEDIATELY after the
-      // metrics line.  ``flex-basis: 100%`` on
-      // ``.running-item-workspace`` drops it onto its own line
-      // below the metrics row inside the ``.sidebar-item`` flex
-      // container.  Format:
+      // metrics line inside the per-row info column.  Format:
       //
       //   <work_dir> • <model> • <wt|no-wt>
       //     • <parallel|sequential> • <auto-commit|manual-commit>
@@ -6583,8 +6594,53 @@
         // long enough to be clipped by overflow:hidden in the
         // sidebar.
         workspace.title = text;
-        div.appendChild(workspace);
+        info.appendChild(workspace);
       }
+
+      // Ids row — chat id, task id, and parent task id rendered as
+      // a single dot-separated line right below the workspace+meta
+      // line.  Format:
+      //
+      //   chat <chat_id> • task <task_id> • parent <parent_task_id>
+      //
+      // Each field is omitted when not present so legacy rows that
+      // pre-date a particular id, plus regular (non-sub-agent) rows
+      // that have no ``parent_task_id``, render cleanly without
+      // dangling bullets or placeholder text.  When NONE of the
+      // three ids is set we skip the span entirely so the History
+      // panel does not show an empty third line.
+      const chatId = typeof s.id === 'string' ? s.id : '';
+      const taskIdRaw = s.task_id;
+      const taskIdStr =
+        taskIdRaw === undefined || taskIdRaw === null
+          ? ''
+          : String(taskIdRaw);
+      const parentIdRaw = s.parent_task_id;
+      const parentIdStr =
+        parentIdRaw === undefined || parentIdRaw === null
+          ? ''
+          : String(parentIdRaw);
+      const idParts = [];
+      if (chatId) idParts.push('chat ' + chatId);
+      if (taskIdStr) idParts.push('task ' + taskIdStr);
+      if (parentIdStr) idParts.push('parent ' + parentIdStr);
+      if (idParts.length > 0) {
+        const idsSpan = document.createElement('span');
+        idsSpan.className = 'running-item-ids';
+        const idsText = idParts.join(' • ');
+        idsSpan.textContent = idsText;
+        // Native HTML tooltip — useful when the combined line is
+        // long enough to be clipped by overflow:hidden in the
+        // sidebar.
+        idsSpan.title = idsText;
+        info.appendChild(idsSpan);
+      }
+
+      // Finally attach the per-row info column to the row itself.
+      // Appended LAST so the running/failed dot, the task text, and
+      // the action buttons sit on the row's first visual line and
+      // the info container drops onto the second visual line.
+      div.appendChild(info);
 
       div.addEventListener('click', () => {
         if (demoMode && typeof window._startDemoReplay === 'function') {

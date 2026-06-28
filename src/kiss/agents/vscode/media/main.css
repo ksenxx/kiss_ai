@@ -1754,27 +1754,58 @@ body.remote-chat #welcome-config { display: none !important; }
   -webkit-box-orient: vertical;
 }
 
+/* Per-row info column for the History sidebar.  Wraps the three
+   stacked detail lines (metrics, workspace+meta, chat/task/parent
+   ids) so they render flush, with NO flex row-gap between them.
+   The container itself drops onto its own visual line inside the
+   .sidebar-item flex container via ``flex-basis: 100%`` (the same
+   trick the metrics row used in the old layout); its inner
+   column flex with ``gap: 0`` stacks the three lines tightly so
+   the user does not see an empty 8px row-gap between the metrics
+   and workspace lines or between the workspace and ids lines. */
+.running-item-info {
+  flex-basis: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin-top: 2px;
+}
+
 .running-item-metrics {
   flex-basis: 100%;
   font-size: var(--fs-sm);
   font-variant-numeric: tabular-nums;
   color: color-mix(in srgb, #000 65%, transparent);
-  margin-top: 2px;
 }
 
 /* Workspace + meta row — the task's work_dir plus the per-task
    metadata (model name, wt/no-wt, parallel/sequential,
    auto-commit/manual-commit) rendered as a single dot-separated
-   line right below the metrics row.  ``flex-basis: 100%`` drops
-   it onto its own line inside the .sidebar-item flex container,
-   mirroring the metrics row above.  Long lines are clipped with
-   an ellipsis; the native ``title`` attribute (set in
+   line right below the metrics row.  ``flex-basis: 100%`` is kept
+   for backwards compatibility with any surface that may still
+   render it as a direct child of ``.sidebar-item``; in the
+   History sidebar the span sits inside ``.running-item-info``
+   which already handles the line break.  Long lines are clipped
+   with an ellipsis; the native ``title`` attribute (set in
    renderHistory) exposes the full text on hover. */
 .running-item-workspace {
   flex-basis: 100%;
   font-size: var(--fs-sm);
   color: color-mix(in srgb, #000 55%, transparent);
-  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Ids row — chat id, task id, and parent task id rendered as a
+   single dot-separated line right below the workspace+meta row.
+   Same compact small font and clipped overflow as the workspace
+   row so the History panel keeps a consistent three-line stack
+   for every task. */
+.running-item-ids {
+  flex-basis: 100%;
+  font-size: var(--fs-sm);
+  color: color-mix(in srgb, #000 50%, transparent);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
