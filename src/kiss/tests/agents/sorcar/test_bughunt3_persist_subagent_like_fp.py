@@ -72,12 +72,16 @@ class TestSubagentLikeFalsePositive(_TempDbTestBase):
         task_text = "review subagent documentation"
         task_id, chat_id = _add_task(task_text, extra=self.EXTRA)
 
-        # Canonical detector agrees this is NOT a sub-agent row …
-        assert not th._is_subagent_row(
-            th._get_db().execute(
-                "SELECT extra FROM task_history WHERE id = ?", (task_id,)
-            ).fetchone()["extra"]
-        )
+        # Canonical detector agrees this is NOT a sub-agent row.
+        # In the new schema, sub-agent identification uses the dedicated
+        # ``parent_task_id`` column, so a non-top-level "subagent" key
+        # in *extra* does not get persisted as a sub-agent at all.
+        row = th._get_db().execute(
+            "SELECT parent_task_id FROM task_history WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        assert (row["parent_task_id"] or "") == ""
+        assert not th._is_subagent_row(row["parent_task_id"])
         # … and the chat context (JSON-validating reader) includes it.
         ctx = _load_chat_context(chat_id)
         assert [e["task"] for e in ctx] == [task_text]
@@ -120,14 +124,15 @@ class TestSubagentLikeFalsePositive(_TempDbTestBase):
         assert prv["task_id"] == t2
 
     def test_legacy_malformed_extra_rows_stay_visible(self) -> None:
-        # Malformed / non-dict extra must behave like _is_subagent_row
-        # (False ⇒ regular row) in the SQL filter too.
+        # In the new flat-column schema, sub-agent classification is
+        # driven solely by the ``parent_task_id`` column.  An empty /
+        # whitespace value must keep the row visible in history lists.
         task_id, _ = _add_task("legacy row")
         db = th._get_db()
         with th._rw_lock.write_lock():
             db.execute(
-                "UPDATE task_history SET extra = ? WHERE id = ?",
-                ('{not json "subagent"', task_id),
+                "UPDATE task_history SET parent_task_id = ? WHERE id = ?",
+                ("", task_id),
             )
             db.commit()
         assert [h["id"] for h in _load_history()] == [task_id]

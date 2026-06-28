@@ -39,14 +39,14 @@ def _restore(saved):
     th._DB_PATH, th._db_conn, th._KISS_DIR = saved
 
 
-def _read_extra(task_id: int) -> dict:
-    """Return the parsed ``extra`` JSON object for *task_id*."""
+def _read_extra(task_id: str) -> dict:
+    """Return the synthesized ``extra`` JSON object for *task_id*."""
     db = th._get_db()
     row = db.execute(
-        "SELECT extra FROM task_history WHERE id = ?", (task_id,),
+        "SELECT * FROM task_history WHERE id = ?", (task_id,),
     ).fetchone()
     assert row is not None
-    raw = row["extra"] or ""
+    raw = th._row_to_extra_json(row)
     if not raw:
         return {}
     parsed: dict = json.loads(raw)
@@ -81,12 +81,18 @@ class TestSetTaskFavorite:
         assert extra.get("is_favorite") is True
 
     def test_set_favorite_false_overwrites_true(self) -> None:
-        """Setting False after True flips the persisted flag back."""
+        """Setting False after True flips the persisted flag back.
+
+        The synthesized ``extra`` JSON omits ``is_favorite`` when the
+        column is 0 (False) — server callers read it via
+        ``dict.get("is_favorite", False)`` which yields the same False
+        semantics.
+        """
         task_id, _ = th._add_task("toggle")
         th._set_task_favorite(task_id, True)
         th._set_task_favorite(task_id, False)
         extra = _read_extra(task_id)
-        assert extra.get("is_favorite") is False
+        assert extra.get("is_favorite", False) is False
 
     def test_set_favorite_preserves_other_keys(self) -> None:
         """Other extra keys must survive a favourite toggle."""
@@ -97,7 +103,9 @@ class TestSetTaskFavorite:
                 "cost": 0.05,
                 "steps": 7,
                 "model": "gpt-4o",
-                "subagent": {"parent_task_id": 99},
+                "subagent": {
+                    "parent_task_id": "99999999999999999999999999999999"
+                },
             },
             task_id=task_id,
         )
@@ -108,21 +116,40 @@ class TestSetTaskFavorite:
         assert extra["cost"] == 0.05
         assert extra["steps"] == 7
         assert extra["model"] == "gpt-4o"
-        assert extra["subagent"] == {"parent_task_id": 99}
+        assert extra["subagent"] == {
+            "parent_task_id": "99999999999999999999999999999999"
+        }
 
     def test_set_favorite_unknown_task_returns_false(self) -> None:
         """A non-existent task_id returns False and writes nothing."""
         assert th._set_task_favorite(987654, True) is False
 
-    def test_set_favorite_recovers_from_malformed_extra(self) -> None:
-        """Malformed JSON in ``extra`` is replaced cleanly."""
+    def test_set_favorite_recovers_from_corrupt_column_value(self) -> None:
+        """Corrupt ``is_favorite`` column value is replaced cleanly.
+
+        The legacy schema stored is_favorite inside a JSON ``extra``
+        column where malformed JSON had to be tolerated.  The new
+        schema stores it in a dedicated ``is_favorite INTEGER`` column,
+        so the corruption surface shrinks to non-0/1 integer values
+        (or NULL).  This test asserts ``_set_task_favorite`` overwrites
+        such values cleanly.
+        """
         task_id, _ = th._add_task("garbage")
         db = th._get_db()
         db.execute(
-            "UPDATE task_history SET extra = ? WHERE id = ?",
-            ("not json {", task_id),
+            "UPDATE task_history SET is_favorite = ? WHERE id = ?",
+            (42, task_id),
         )
         db.commit()
         assert th._set_task_favorite(task_id, True) is True
         extra = _read_extra(task_id)
+        # r3-H3: ``_row_to_extra_json`` emits every typed column.
+        # Pop the defaulted ones so the test focuses on the
+        # write-under-test: ``is_favorite`` flips to True.
+        for k in (
+            "auto_commit_mode", "is_parallel", "is_worktree",
+            "model", "work_dir", "version",
+            "tokens", "cost", "steps", "startTs", "endTs",
+        ):
+            extra.pop(k, None)
         assert extra == {"is_favorite": True}

@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import queue
+import re
 import sqlite3
 import threading
 import time
@@ -196,6 +197,46 @@ _HistoryEntry = dict[str, object]
 # goes through :func:`_parse_extra_dict` so the two sides can never
 # diverge.
 
+def _safe_int(value: object, default: int = 0) -> int:
+    """Coerce *value* to ``int``, returning *default* on failure.
+
+    Non-finite floats (NaN/Inf) yield *default* rather than raising
+    ``OverflowError``.  Any object whose ``__eq__`` raises an
+    arbitrary exception is treated as the default rather than
+    propagating — this keeps the task-completion finally robust
+    against caller-supplied misbehaving objects.
+    """
+    import math
+    try:
+        if value is None or value == "":
+            return default
+        if isinstance(value, float) and not math.isfinite(value):
+            return default
+        return int(value)  # type: ignore[arg-type]
+    except Exception:
+        return default
+
+
+def _safe_float(value: object, default: float = 0.0) -> float:
+    """Coerce *value* to ``float``, returning *default* on failure.
+
+    Non-finite floats (NaN/Inf) yield *default* so the value never
+    leaks into a JSON-serialised payload that would break SQLite's
+    ``json_valid``.  Any object whose ``__eq__`` raises an arbitrary
+    exception is treated as the default rather than propagating.
+    """
+    import math
+    try:
+        if value is None or value == "":
+            return default
+        result = float(value)  # type: ignore[arg-type]
+        if not math.isfinite(result):
+            return default
+        return result
+    except Exception:
+        return default
+
+
 def _sanitize_non_finite(value: object) -> object:
     """Recursively replace non-finite floats (NaN/±Inf) with ``None``."""
     import math
@@ -300,25 +341,98 @@ def _close_db() -> None:
 
 
 _HISTORY_SELECT = (
-    "SELECT id, timestamp, task, has_events, result, chat_id, extra "
+    "SELECT id, timestamp, task, has_events, result, chat_id, "
+    "model, work_dir, version, tokens, cost, steps, "
+    "is_parallel, is_worktree, auto_commit_mode, "
+    "start_ts, end_ts, is_favorite, parent_task_id "
     "FROM task_history "
 )
 
 # SQL predicate that is TRUE for every row that is NOT a sub-agent row.
-# Must match :func:`_is_subagent_row` exactly: a sub-agent row is a row
-# whose ``extra`` column is valid JSON whose TOP-LEVEL object carries a
-# ``subagent`` key.  A raw substring test (``NOT LIKE '%"subagent"%'``)
-# would wrongly hide regular rows whose extra merely *contains* the
-# quoted word — e.g. a nested ``{"opts": {"subagent": false}}`` or a
-# legacy malformed value.  ``CASE`` guarantees ``json_type`` is only
-# evaluated on valid JSON (it raises on malformed input); for non-object
-# top-level JSON, ``json_type(extra, '$.subagent')`` is NULL, matching
-# ``_is_subagent_row``'s ``isinstance(parsed, dict)`` guard.
-_HISTORY_NOT_SUBAGENT = (
-    "(CASE WHEN json_valid(COALESCE(extra, '')) "
-    "THEN json_type(COALESCE(extra, ''), '$.subagent') IS NULL "
-    "ELSE 1 END)"
-)
+# A sub-agent row carries a non-empty ``parent_task_id`` column.
+_HISTORY_NOT_SUBAGENT = "(parent_task_id IS NULL OR parent_task_id = '')"
+
+# Pattern for a task_history.id minted by ``uuid.uuid4().hex``.
+_TASK_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+
+
+def is_task_history_id(value: object) -> bool:
+    """Return True when *value* is shaped like a ``task_history.id``.
+
+    The canonical id format is the un-hyphenated 32-character
+    lowercase hex string produced by ``uuid.uuid4().hex``.  Callers
+    use this guard at IPC / SQL boundaries to reject malformed or
+    legacy-int payloads before they propagate.
+    """
+    return isinstance(value, str) and _TASK_ID_RE.fullmatch(value) is not None
+
+
+def _coerce_parent_task_id(value: object) -> str:
+    """Return a canonical ``parent_task_id`` column value.
+
+    Accepts only a 32-char lowercase-hex UUID string.  Any other
+    shape (None, empty, int, list, dict, non-UUID string) maps to the
+    empty-string sentinel that ``_HISTORY_NOT_SUBAGENT`` treats as
+    "not a sub-agent" — preventing garbage parent ids from being
+    silently persisted as text that never matches any real UUID.
+    """
+    if isinstance(value, str) and _TASK_ID_RE.fullmatch(value):
+        return value
+    return ""
+
+
+def _row_to_extra_json(row: sqlite3.Row) -> str:
+    """Build the legacy-compat ``extra`` JSON string from typed columns.
+
+    Many consumers (history sidebar, replay) read ``entry["extra"]`` as
+    a JSON-encoded string.  This helper synthesizes the same shape from
+    the new flat columns so those consumers continue to work unchanged.
+    """
+    payload: dict[str, object] = {}
+    try:
+        # r3-H3: emit every typed column consistently — including the
+        # falsy / zero cases — so consumers that test for key presence
+        # do not see a behaviour change between two rows that differ
+        # only in whether a numeric field happens to be zero.  Only
+        # the ``subagent`` nested dict remains gated on a non-empty
+        # ``parent_task_id`` because its absence is the canonical
+        # marker for a top-level (non-sub-agent) task in the
+        # downstream classifier.
+        payload["model"] = row["model"] or ""
+        payload["work_dir"] = row["work_dir"] or ""
+        payload["version"] = row["version"] or ""
+        payload["auto_commit_mode"] = bool(row["auto_commit_mode"])
+        payload["tokens"] = int(row["tokens"] or 0)
+        payload["cost"] = float(row["cost"] or 0.0)
+        payload["steps"] = int(row["steps"] or 0)
+        payload["is_parallel"] = bool(row["is_parallel"])
+        payload["is_worktree"] = bool(row["is_worktree"])
+        payload["startTs"] = int(row["start_ts"] or 0)
+        payload["endTs"] = int(row["end_ts"] or 0)
+        payload["is_favorite"] = bool(row["is_favorite"])
+        if row["parent_task_id"]:
+            payload["subagent"] = {"parent_task_id": row["parent_task_id"]}
+    except (KeyError, IndexError):
+        return ""
+    # Route through ``_dumps_extra`` so any non-finite ``cost`` (e.g.
+    # from a hand-edited / 3rd-party-source DB) gets normalised
+    # rather than emitted as a bare ``NaN``/``Infinity`` token that
+    # SQLite's ``json_valid`` and downstream strict parsers reject.
+    return _dumps_extra(payload) if payload else ""
+
+
+def _history_row_to_dict(row: sqlite3.Row) -> dict[str, object]:
+    """Convert a ``_HISTORY_SELECT`` row into a consumer-friendly dict.
+
+    Exposes every selected typed column (``model``, ``cost``, etc.) so
+    callers that switched to the new flat schema can read them
+    directly, AND synthesises the legacy ``extra`` JSON string so
+    callers that still parse ``entry["extra"]`` continue to work
+    without any migration on their end.
+    """
+    out: dict[str, object] = {col: row[col] for col in row.keys()}
+    out["extra"] = _row_to_extra_json(row)
+    return out
 
 
 def _is_failed_result(result: str) -> bool:
@@ -357,17 +471,29 @@ def _init_tables(conn: sqlite3.Connection) -> None:
     """Create all tables and indexes."""
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS task_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id TEXT PRIMARY KEY,
             timestamp REAL NOT NULL,
             task TEXT NOT NULL,
             has_events INTEGER DEFAULT 0,
             result TEXT DEFAULT '',
             chat_id CHAR(32) DEFAULT '',
-            extra TEXT DEFAULT ''
+            model TEXT DEFAULT '',
+            work_dir TEXT DEFAULT '',
+            version TEXT DEFAULT '',
+            tokens INTEGER DEFAULT 0,
+            cost REAL DEFAULT 0.0,
+            steps INTEGER DEFAULT 0,
+            is_parallel INTEGER DEFAULT 0,
+            is_worktree INTEGER DEFAULT 0,
+            auto_commit_mode INTEGER DEFAULT 0,
+            start_ts INTEGER DEFAULT 0,
+            end_ts INTEGER DEFAULT 0,
+            is_favorite INTEGER DEFAULT 0,
+            parent_task_id TEXT DEFAULT ''
         );
         CREATE TABLE IF NOT EXISTS events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            task_id INTEGER NOT NULL REFERENCES task_history(id),
+            task_id TEXT NOT NULL REFERENCES task_history(id),
             seq INTEGER NOT NULL,
             event_json TEXT NOT NULL,
             timestamp REAL NOT NULL
@@ -403,9 +529,289 @@ def _init_tables(conn: sqlite3.Connection) -> None:
             ON task_history(task);
         CREATE INDEX IF NOT EXISTS idx_th_chat_id
             ON task_history(chat_id);
+        CREATE INDEX IF NOT EXISTS idx_th_parent_task_id
+            ON task_history(parent_task_id);
         CREATE INDEX IF NOT EXISTS idx_ev_task_id
             ON events(task_id);
     """)
+
+
+def _migrate_old_schema_if_needed(conn: sqlite3.Connection) -> bool:
+    """Port a pre-UUID task_history DB to the new schema in-place.
+
+    Detects the old schema (``task_history.id`` is ``INTEGER`` and the
+    ``extra`` column exists), creates new-shaped tables under temporary
+    names, assigns each row a fresh ``uuid.uuid4().hex``, copies row
+    data into the typed columns, remaps every ``events.task_id`` to the
+    new UUID, then atomically replaces the old tables.
+
+    Returns ``True`` when migration was performed, ``False`` when the
+    DB already has the new schema or no ``task_history`` table yet.
+    """
+    # r3-C2: do a FAST autocommit probe first so we can early-return
+    # without entering a write transaction when the DB already has
+    # the new schema.  The DEFINITIVE probe must re-run inside the
+    # write transaction below to defeat a TOCTOU race against a
+    # concurrent process that migrates between the probe and our
+    # ``BEGIN IMMEDIATE``.
+    cols = {
+        r[1]: (r[2] or "").upper()
+        for r in conn.execute("PRAGMA table_info(task_history)").fetchall()
+    }
+    if not cols:
+        return False
+    if cols.get("id") == "TEXT":
+        return False
+    if "extra" not in cols:
+        return False
+    import uuid as _uuid
+
+    # r3-C3: use the module-level finite-aware coercion helpers
+    # rather than ad-hoc inline lambdas so NaN/Inf and OverflowError
+    # are guarded uniformly with ``_save_task_extra``.
+    def _ix(v: object) -> int:
+        return _safe_int(v, 0)
+
+    def _fx(v: object) -> float:
+        return _safe_float(v, 0.0)
+
+    def _sx(v: object) -> str:
+        if v is None or v == "":
+            return ""
+        return v if isinstance(v, str) else str(v)
+
+    def _bx(v: object) -> int:
+        # r6-persistence-H3: ``bool("false") == True`` and
+        # ``bool("0") == True`` — a naive ``bool(v)`` corrupts legacy
+        # JSON-extra payloads that happen to encode their flags as
+        # string literals ("false", "0", "False").  Normalise the
+        # common false-y string forms before falling back to
+        # ``bool()`` for everything else (int / real-bool / dict).
+        if isinstance(v, str):
+            return 0 if v.strip().lower() in {"", "0", "false", "no"} else 1
+        return 1 if bool(v) else 0
+
+    # Wrap the entire migration body in an explicit transaction so a
+    # mid-migration crash leaves the DB unchanged.  The connection is
+    # in autocommit mode (``isolation_level=None``); ``BEGIN IMMEDIATE``
+    # opens a write transaction that is rolled back unless ``COMMIT``
+    # runs at the end.  IMPORTANT: only ``execute()`` calls may run
+    # inside the transaction — ``executescript()`` issues an implicit
+    # COMMIT before its body which would silently end the
+    # transaction and defeat the atomicity guarantee.
+    # r6-persistence-H7: temporarily disable foreign-key enforcement
+    # during the rename dance.  The CREATE TABLE for ``events__new``
+    # declares ``REFERENCES task_history__new(id)``; after we
+    # ALTER ... RENAME TO ``task_history`` the FK target name no
+    # longer matches under SQLite < 3.26 or with
+    # ``legacy_alter_table=1``, which can leave a stale FK and break
+    # later inserts.  Restoring ``foreign_keys=ON`` after the
+    # rename is safe because the orphan-events pre-scan above
+    # already excluded events that would fail FK.
+    conn.execute("PRAGMA foreign_keys=OFF")
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        # r3-C2: re-probe inside the transaction so another process
+        # that migrated between our autocommit probe and our
+        # BEGIN IMMEDIATE is detected before we corrupt its work.
+        cols_locked = {
+            r[1]: (r[2] or "").upper()
+            for r in conn.execute(
+                "PRAGMA table_info(task_history)"
+            ).fetchall()
+        }
+        if (
+            not cols_locked
+            or cols_locked.get("id") == "TEXT"
+            or "extra" not in cols_locked
+        ):
+            conn.execute("ROLLBACK")
+            conn.execute("PRAGMA foreign_keys=ON")
+            return False
+        # r3-H4: drop any leftover ``__new`` tables from a prior
+        # crashed migration INSIDE the transaction so the DROPs are
+        # atomic with the rest of the migration.
+        conn.execute("DROP TABLE IF EXISTS task_history__new")
+        conn.execute("DROP TABLE IF EXISTS events__new")
+        conn.execute(
+            "CREATE TABLE task_history__new ("
+            "id TEXT PRIMARY KEY, "
+            "timestamp REAL NOT NULL, "
+            "task TEXT NOT NULL, "
+            "has_events INTEGER DEFAULT 0, "
+            "result TEXT DEFAULT '', "
+            "chat_id CHAR(32) DEFAULT '', "
+            "model TEXT DEFAULT '', "
+            "work_dir TEXT DEFAULT '', "
+            "version TEXT DEFAULT '', "
+            "tokens INTEGER DEFAULT 0, "
+            "cost REAL DEFAULT 0.0, "
+            "steps INTEGER DEFAULT 0, "
+            "is_parallel INTEGER DEFAULT 0, "
+            "is_worktree INTEGER DEFAULT 0, "
+            "auto_commit_mode INTEGER DEFAULT 0, "
+            "start_ts INTEGER DEFAULT 0, "
+            "end_ts INTEGER DEFAULT 0, "
+            "is_favorite INTEGER DEFAULT 0, "
+            "parent_task_id TEXT DEFAULT ''"
+            ")"
+        )
+        conn.execute(
+            "CREATE TABLE events__new ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "task_id TEXT NOT NULL REFERENCES task_history__new(id), "
+            "seq INTEGER NOT NULL, "
+            "event_json TEXT NOT NULL, "
+            "timestamp REAL NOT NULL"
+            ")"
+        )
+        # Read every legacy task_history row in stable insertion order
+        # so the post-migration ``rowid`` tiebreaker preserves
+        # chronology across the upgrade.
+        rows = conn.execute(
+            "SELECT id, timestamp, task, has_events, result, chat_id, "
+            "extra FROM task_history ORDER BY id ASC"
+        ).fetchall()
+        id_map: dict[int, str] = {int(r[0]): _uuid.uuid4().hex for r in rows}
+        dropped_unknown_keys = 0
+        known_extra_keys = {
+            "model", "work_dir", "version", "tokens", "cost", "steps",
+            "is_parallel", "is_worktree", "auto_commit_mode",
+            "startTs", "endTs", "is_favorite", "subagent",
+        }
+        for r in rows:
+            old_id = int(r[0])
+            extra_raw = r[6] or ""
+            try:
+                extra = json.loads(extra_raw) if extra_raw else {}
+            except (json.JSONDecodeError, TypeError):
+                extra = {}
+            if not isinstance(extra, dict):
+                extra = {}
+            parent_task_id = ""
+            sub = extra.get("subagent")
+            if isinstance(sub, dict):
+                old_parent = sub.get("parent_task_id")
+                if isinstance(old_parent, int):
+                    parent_task_id = id_map.get(old_parent, "")
+                elif (
+                    isinstance(old_parent, str)
+                    and _TASK_ID_RE.fullmatch(old_parent)
+                ):
+                    # Already-canonical UUID-shaped string survives.
+                    # Garbage strings (e.g. ``"123"`` from a buggy
+                    # 3rd-party migration) are rejected so they don't
+                    # land in the TEXT column as a value no future
+                    # query can resolve.
+                    parent_task_id = old_parent
+            # Count any unknown keys for an after-the-fact warning so
+            # the upgrade is auditable; the new schema has no overflow
+            # column so unknown keys are necessarily lost.
+            for k in extra:
+                if k not in known_extra_keys:
+                    dropped_unknown_keys += 1
+            conn.execute(
+                "INSERT INTO task_history__new (id, timestamp, task, "
+                "has_events, result, chat_id, model, work_dir, version, "
+                "tokens, cost, steps, is_parallel, is_worktree, "
+                "auto_commit_mode, start_ts, end_ts, is_favorite, "
+                "parent_task_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    id_map[old_id], r[1], r[2],
+                    r[3] or 0, r[4] or "", r[5] or "",
+                    _sx(extra.get("model")), _sx(extra.get("work_dir")),
+                    _sx(extra.get("version")), _ix(extra.get("tokens")),
+                    _fx(extra.get("cost")), _ix(extra.get("steps")),
+                    _bx(extra.get("is_parallel")),
+                    _bx(extra.get("is_worktree")),
+                    _bx(extra.get("auto_commit_mode")),
+                    _ix(extra.get("startTs")), _ix(extra.get("endTs")),
+                    _bx(extra.get("is_favorite")), parent_task_id,
+                ),
+            )
+        # Probe for the events table — early/manually-wiped legacy DBs
+        # may have a task_history but no events table.  Without this
+        # guard the SELECT below raises and the migration aborts.
+        has_events_table = conn.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type='table' AND name='events'"
+        ).fetchone() is not None
+        dropped_events = 0
+        if has_events_table:
+            ev_rows = conn.execute(
+                "SELECT task_id, seq, event_json, timestamp FROM events"
+            ).fetchall()
+            for er in ev_rows:
+                try:
+                    new_tid = id_map.get(int(er[0]))
+                except (TypeError, ValueError):
+                    new_tid = None
+                if new_tid is None:
+                    dropped_events += 1
+                    continue
+                conn.execute(
+                    "INSERT INTO events__new "
+                    "(task_id, seq, event_json, timestamp) "
+                    "VALUES (?, ?, ?, ?)",
+                    (new_tid, er[1], er[2], er[3]),
+                )
+            conn.execute("DROP TABLE events")
+        conn.execute("DROP TABLE task_history")
+        conn.execute(
+            "ALTER TABLE task_history__new RENAME TO task_history"
+        )
+        conn.execute(
+            "ALTER TABLE events__new RENAME TO events"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_th_timestamp "
+            "ON task_history(timestamp)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_th_task "
+            "ON task_history(task)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_th_chat_id "
+            "ON task_history(chat_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_th_parent_task_id "
+            "ON task_history(parent_task_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ev_task_id "
+            "ON events(task_id)"
+        )
+        conn.execute("COMMIT")
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
+        # r6-persistence-H7: restore FK enforcement on the error path
+        # so the connection state remains symmetric with the OFF set
+        # above.
+        try:
+            conn.execute("PRAGMA foreign_keys=ON")
+        except sqlite3.Error:
+            pass
+        raise
+    # r6-persistence-H7: restore FK enforcement on the success path.
+    conn.execute("PRAGMA foreign_keys=ON")
+    if dropped_unknown_keys:
+        logger.warning(
+            "task_history migration dropped %d unknown extra key(s)",
+            dropped_unknown_keys,
+        )
+    if dropped_events:
+        logger.warning(
+            "task_history migration dropped %d orphan event row(s) "
+            "whose task_id had no surviving parent",
+            dropped_events,
+        )
+    return True
 
 
 def _get_db() -> sqlite3.Connection:
@@ -464,6 +870,7 @@ def _get_db() -> sqlite3.Connection:
     # already hold ``_rw_lock.read_lock()`` when invoking ``_get_db()``,
     # so reusing the RW lock for DDL would self-deadlock.
     with _init_tables_lock:
+        _migrate_old_schema_if_needed(conn)
         _init_tables(conn)
 
     tl.conn = conn
@@ -473,7 +880,7 @@ def _get_db() -> sqlite3.Connection:
     return conn
 
 
-def _most_recent_task_id(db: sqlite3.Connection, task: str | None) -> int | None:
+def _most_recent_task_id(db: sqlite3.Connection, task: str | None) -> str | None:
     """Return the row id of the most recent run of *task*, or the latest row.
 
     Uses the total order ``(timestamp, id)`` — the ``id`` tiebreak keeps
@@ -484,22 +891,22 @@ def _most_recent_task_id(db: sqlite3.Connection, task: str | None) -> int | None
     if task is not None:
         row = db.execute(
             "SELECT id FROM task_history WHERE task = ? "
-            "ORDER BY timestamp DESC, id DESC LIMIT 1",
+            "ORDER BY timestamp DESC, rowid DESC LIMIT 1",
             (task,),
         ).fetchone()
     else:
         row = db.execute(
             "SELECT id FROM task_history "
-            "ORDER BY timestamp DESC, id DESC LIMIT 1"
+            "ORDER BY timestamp DESC, rowid DESC LIMIT 1"
         ).fetchone()
-    return row["id"] if row else None
+    return str(row["id"]) if row else None
 
 
 def _add_task(
     task: str,
     chat_id: str = "",
     extra: dict[str, object] | None = None,
-) -> tuple[int, str]:
+) -> tuple[str, str]:
     """Append a task to the history and return ``(task_id, chat_id)``.
 
     When *chat_id* is ``""`` (new session), a new UUID-style string
@@ -527,25 +934,58 @@ def _add_task(
     """
     import uuid
     db = _get_db()
-    extra_str = _dumps_extra(extra) if extra else ""
+    payload = dict(extra) if extra else {}
+    parent_task_id = ""
+    sub = payload.get("subagent")
+    flat_parent = payload.get("parent_task_id")
+    # r4-persistence-C1/C2/H5: accept all three shapes symmetric with
+    # ``_save_task_extra``.  Reject collisions explicitly.
+    if sub is not None and flat_parent is not None:
+        raise ValueError(
+            "Cannot pass both 'parent_task_id' and 'subagent' to _add_task",
+        )
+    if isinstance(sub, dict):
+        parent_task_id = _coerce_parent_task_id(sub.get("parent_task_id"))
+    elif isinstance(sub, str):
+        # convenience ``{"subagent": "<uuid>"}`` shape.
+        parent_task_id = _coerce_parent_task_id(sub)
+    elif flat_parent is not None:
+        parent_task_id = _coerce_parent_task_id(flat_parent)
     with _rw_lock.write_lock():
         if chat_id == "":
             chat_id = uuid.uuid4().hex
-        cursor = db.execute(
-            "INSERT INTO task_history (timestamp, task, chat_id, result, extra) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (time.time(), task, chat_id, "Agent Failed Abruptly", extra_str),
+        task_id = uuid.uuid4().hex
+        db.execute(
+            "INSERT INTO task_history (id, timestamp, task, chat_id, result, "
+            "model, work_dir, version, tokens, cost, steps, is_parallel, "
+            "is_worktree, auto_commit_mode, start_ts, end_ts, is_favorite, "
+            "parent_task_id) VALUES "
+            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                task_id, time.time(), task, chat_id,
+                "Agent Failed Abruptly",
+                str(payload.get("model", "") or ""),
+                str(payload.get("work_dir", "") or ""),
+                str(payload.get("version", "") or ""),
+                _safe_int(payload.get("tokens"), 0),
+                _safe_float(payload.get("cost"), 0.0),
+                _safe_int(payload.get("steps"), 0),
+                1 if payload.get("is_parallel") else 0,
+                1 if payload.get("is_worktree") else 0,
+                1 if payload.get("auto_commit_mode") else 0,
+                _safe_int(payload.get("startTs"), 0),
+                _safe_int(payload.get("endTs"), 0),
+                1 if payload.get("is_favorite") else 0,
+                parent_task_id,
+            ),
         )
-        row_id = cursor.lastrowid
-        if row_id is None:  # pragma: no cover
-            raise RuntimeError("sqlite did not return lastrowid")
         db.commit()
     # Invalidate the autocomplete chat-context cache so the new task's
     # text becomes visible to ghost-text suggestions on the next
     # keystroke.  Done outside the write lock to keep the critical
     # section short.
     _invalidate_chat_context_cache(chat_id)
-    return row_id, chat_id
+    return task_id, chat_id
 
 
 def _allocate_chat_id() -> str:
@@ -564,7 +1004,7 @@ def _allocate_chat_id() -> str:
     return uuid.uuid4().hex
 
 
-def _get_task_chat_id(task_id: int) -> str:
+def _get_task_chat_id(task_id: str) -> str:
     """Return the chat_id of the task with the given row id, or ``""``.
 
     Args:
@@ -603,17 +1043,12 @@ def _chat_has_tasks(chat_id: str) -> bool:
 
 
 def _subagent_child_ids(
-    db: sqlite3.Connection, parent_task_id: int,
-) -> list[int]:
+    db: sqlite3.Connection, parent_task_id: str,
+) -> list[str]:
     """Return ids of persisted sub-agent rows whose parent is *parent_task_id*.
 
-    A sub-agent row carries ``{"subagent": {"parent_task_id": <id>}}``
-    in its ``extra`` JSON (written by
-    ``ChatSorcarAgent._run_tasks_parallel``).  The SQL ``LIKE``
-    pre-filter is re-validated by ``json.loads`` — the same
-    false-positive defense as
-    :func:`_load_subagent_rows_by_parent_task_id`.  Callers must hold
-    ``_rw_lock`` (read or write).
+    Children are identified by the dedicated ``parent_task_id`` column.
+    Callers must hold ``_rw_lock`` (read or write).
 
     Args:
         db: Active database connection.
@@ -622,22 +1057,16 @@ def _subagent_child_ids(
     Returns:
         List of child row ids (possibly empty).
     """
-    like = f'%"parent_task_id": {parent_task_id}%'
+    if not parent_task_id:
+        return []
     rows = db.execute(
-        "SELECT id, extra FROM task_history WHERE extra LIKE ?", (like,),
+        "SELECT id FROM task_history WHERE parent_task_id = ?",
+        (parent_task_id,),
     ).fetchall()
-    out: list[int] = []
-    for r in rows:
-        parsed = _parse_extra_dict(r["extra"])
-        if parsed is None:
-            continue
-        sub = parsed.get("subagent")
-        if isinstance(sub, dict) and sub.get("parent_task_id") == parent_task_id:
-            out.append(int(r["id"]))
-    return out
+    return [str(r["id"]) for r in rows]
 
 
-def _delete_task(task_id: int) -> bool:
+def _delete_task(task_id: str) -> bool:
     """Delete a task, its events, and its persisted sub-agent rows.
 
     Removes the events table rows that reference the given task_id,
@@ -668,17 +1097,17 @@ def _delete_task(task_id: int) -> bool:
             "SELECT chat_id FROM task_history WHERE id = ?", (task_id,),
         ).fetchone()
         chat_id = (row["chat_id"] or "") if row is not None else ""
-        doomed_ids = [task_id]
+        doomed_ids: list[str] = [task_id]
         if row is not None:
             # Breadth-first walk: a sub-agent is a full ChatSorcarAgent
             # that can itself call ``run_parallel``, so grandchildren
             # (and deeper) rows exist and must be cascade-deleted too.
             # The ``seen`` set guards against corrupt self/cyclic
             # ``parent_task_id`` references.
-            seen = {task_id}
-            frontier = [task_id]
+            seen: set[str] = {task_id}
+            frontier: list[str] = [task_id]
             while frontier:
-                next_frontier: list[int] = []
+                next_frontier: list[str] = []
                 for parent_id in frontier:
                     for child_id in _subagent_child_ids(db, parent_id):
                         if child_id not in seen:
@@ -724,10 +1153,10 @@ def _load_history(limit: int = 0, offset: int = 0) -> list[_HistoryEntry]:
         sql = (
             _HISTORY_SELECT
             + f"WHERE {_HISTORY_NOT_SUBAGENT} "
-            + "ORDER BY timestamp DESC, id DESC LIMIT ? OFFSET ?"
+            + "ORDER BY timestamp DESC, rowid DESC LIMIT ? OFFSET ?"
         )
         rows = db.execute(sql, (effective_limit, offset)).fetchall()
-        return [dict(r) for r in rows]
+        return [_history_row_to_dict(r) for r in rows]
 
 
 def _prefix_match_task(query: str) -> str:
@@ -773,7 +1202,7 @@ def _prefix_match_tasks(query: str, limit: int = 8) -> list[str]:
             "SELECT task FROM task_history "
             "WHERE task GLOB ? AND LENGTH(task) > ? "
             f"AND {_HISTORY_NOT_SUBAGENT} "
-            "ORDER BY timestamp DESC, id DESC LIMIT ?",
+            "ORDER BY timestamp DESC, rowid DESC LIMIT ?",
             (escaped + "*", len(query), limit * 4),
         ).fetchall()
     seen: set[str] = set()
@@ -811,17 +1240,17 @@ def _search_history(
             _HISTORY_SELECT
             + "WHERE task LIKE ? ESCAPE '\\' "
             + f"AND {_HISTORY_NOT_SUBAGENT} "
-            + "ORDER BY timestamp DESC, id DESC LIMIT ? OFFSET ?",
+            + "ORDER BY timestamp DESC, rowid DESC LIMIT ? OFFSET ?",
             (f"%{escaped}%", limit, offset),
         ).fetchall()
-        return [dict(r) for r in rows]
+        return [_history_row_to_dict(r) for r in rows]
 
 
 def _resolve_task_id(
     db: sqlite3.Connection,
-    task_id: int | None,
+    task_id: str | None,
     task: str | None,
-) -> int | None:
+) -> str | None:
     """Resolve a stable row id, falling back to the most recent task.
 
     Args:
@@ -832,17 +1261,26 @@ def _resolve_task_id(
     Returns:
         The resolved row id, or ``None`` if not found.
     """
-    if task_id is not None:
+    # r4-persistence-H3: reject non-string / malformed task_id values
+    # rather than letting them silently TEXT-coerce inside SQLite and
+    # never match.  Fall back to ``_most_recent_task_id`` so legacy
+    # JSON-RPC clients with stale int task_id are still resolvable.
+    if isinstance(task_id, str) and task_id != "":
+        if not is_task_history_id(task_id):
+            return _most_recent_task_id(db, task)
         row = db.execute(
             "SELECT id FROM task_history WHERE id = ?", (task_id,)
         ).fetchone()
-        return row["id"] if row else None
+        if row is not None:
+            return str(row["id"])
+        return _most_recent_task_id(db, task)
     return _most_recent_task_id(db, task)
 
 
 def _log_orphaned_task_forensics(
     db: sqlite3.Connection,
     not_in_clause: str,
+    active_ids: list[str] | None = None,
 ) -> None:
     """Log diagnostic info for each row still carrying the orphan sentinel.
 
@@ -857,16 +1295,21 @@ def _log_orphaned_task_forensics(
     Args:
         db: Active database connection.
         not_in_clause: SQL fragment excluding still-active task ids
-            (``""`` or ``"AND id NOT IN (...)"``).
+            (``""`` or ``"AND id NOT IN (?,?,...)"``).
+        active_ids: Bound-parameter values matching the placeholders
+            embedded in ``not_in_clause``.  Must be supplied (and
+            ordered) when the clause is non-empty.
     """
+    params: list[object] = ["Agent Failed Abruptly"]
+    if active_ids:
+        params.extend(active_ids)
     diag_rows = db.execute(
-        "SELECT id, task, chat_id, extra FROM task_history "
-        "WHERE result = ? " + not_in_clause,
-        ("Agent Failed Abruptly",),
+        "SELECT id, task, chat_id, model, start_ts, steps, cost "
+        "FROM task_history WHERE result = ? " + not_in_clause,
+        params,
     ).fetchall()
     for row in diag_rows:
         task_id_val = row["id"]
-        # Fetch the last few events to show where the agent was
         last_events = db.execute(
             "SELECT seq, event_json, timestamp FROM events "
             "WHERE task_id = ? ORDER BY seq DESC LIMIT 3",
@@ -884,18 +1327,10 @@ def _log_orphaned_task_forensics(
             last_event_summaries.append(
                 f"seq={ev['seq']} type={ev_type} ts={ev_ts:.1f}"
             )
-        extra_str = row["extra"] or "{}"
-        try:
-            extra = json.loads(extra_str)
-            model_name = extra.get("model", "unknown")
-            start_ts = extra.get("startTs", 0)
-            steps = extra.get("steps", "?")
-            cost = extra.get("cost", "?")
-        except Exception:
-            model_name = "unknown"
-            start_ts = 0
-            steps = "?"
-            cost = "?"
+        model_name = row["model"] or "unknown"
+        start_ts = row["start_ts"] or 0
+        steps = row["steps"] if row["steps"] is not None else "?"
+        cost = row["cost"] if row["cost"] is not None else "?"
         task_preview = (row["task"] or "")[:120]
         logger.warning(
             "Orphaned task recovered: id=%s chat_id=%s model=%s "
@@ -911,7 +1346,7 @@ def _log_orphaned_task_forensics(
         )
 
 
-def _recover_orphaned_tasks(active_task_ids: set[int]) -> int:
+def _recover_orphaned_tasks(active_task_ids: set[str]) -> int:
     """Replace the ``"Agent Failed Abruptly"`` sentinel on dead rows.
 
     The sentinel is written by :func:`_add_task` at task-creation
@@ -942,26 +1377,28 @@ def _recover_orphaned_tasks(active_task_ids: set[int]) -> int:
         The number of rows whose ``result`` column was rewritten.
     """
     db = _get_db()
-    # Inline the ids; SQLite has a hard limit on bound parameters
-    # (~999) but we never have that many live tasks, and the ids are
-    # integers so there is no injection surface.
-    not_in_clause = (
-        f"AND id NOT IN ({','.join(str(int(t)) for t in active_task_ids)})"
-        if active_task_ids
-        else ""
-    )
+    # r3-H5: use bound parameter placeholders for the active-task
+    # id list rather than inlining them as SQL string literals.
+    # SQLite's bound-parameter limit (~999) is far above any
+    # realistic active-task count and ``?`` placeholders sidestep
+    # the SQL-injection surface entirely.
+    active_ids = [str(t) for t in active_task_ids]
+    if active_ids:
+        placeholders = ",".join(["?"] * len(active_ids))
+        not_in_clause = f"AND id NOT IN ({placeholders})"
+    else:
+        not_in_clause = ""
     sql = (
         "UPDATE task_history SET result = ? WHERE result = ? " + not_in_clause
     )
+    params: list[object] = [
+        "Task terminated unexpectedly (process killed)",
+        "Agent Failed Abruptly",
+    ]
+    params.extend(active_ids)
     with _rw_lock.write_lock():
-        _log_orphaned_task_forensics(db, not_in_clause)
-        cursor = db.execute(
-            sql,
-            (
-                "Task terminated unexpectedly (process killed)",
-                "Agent Failed Abruptly",
-            ),
-        )
+        _log_orphaned_task_forensics(db, not_in_clause, active_ids)
+        cursor = db.execute(sql, params)
         rowcount = cursor.rowcount or 0
         db.commit()
     if rowcount:
@@ -976,7 +1413,7 @@ def _recover_orphaned_tasks(active_task_ids: set[int]) -> int:
     return rowcount
 
 
-def _shutdown_persist_in_flight_results(task_ids: set[int]) -> int:
+def _shutdown_persist_in_flight_results(task_ids: set[str]) -> int:
     """Pre-emptive sentinel rewrite for in-flight tasks during shutdown.
 
     Called by :meth:`RemoteAccessServer._stop_active_agent_tasks` BEFORE
@@ -1018,30 +1455,32 @@ def _shutdown_persist_in_flight_results(task_ids: set[int]) -> int:
     if not task_ids:
         return 0
     db = _get_db()
-    # Inline ids (integers, no injection surface; SQLite parameter
-    # limit is ~999 and the active-task set is always far smaller).
-    ids_clause = ",".join(str(int(t)) for t in task_ids)
+    # r3-H5: use ``?`` placeholders for the id list rather than
+    # inlining string literals.  Eliminates the SQL-injection
+    # surface (defensive even though valid hex never contains a
+    # quote) and tightens contract.
+    id_list = [str(t) for t in task_ids]
+    placeholders = ",".join(["?"] * len(id_list))
     sql = (
         f"UPDATE task_history SET result = ? "
-        f"WHERE id IN ({ids_clause}) AND result = ?"
+        f"WHERE id IN ({placeholders}) AND result = ?"
     )
     affected_chat_ids: list[str] = []
     with _rw_lock.write_lock():
         # Capture chat_ids of rows we are about to rewrite so we can
         # invalidate the autocomplete chat-context cache afterwards.
+        select_params: list[object] = list(id_list)
+        select_params.append("Agent Failed Abruptly")
         rows = db.execute(
             f"SELECT chat_id FROM task_history "
-            f"WHERE id IN ({ids_clause}) AND result = ?",
-            ("Agent Failed Abruptly",),
+            f"WHERE id IN ({placeholders}) AND result = ?",
+            select_params,
         ).fetchall()
         affected_chat_ids = [r["chat_id"] or "" for r in rows]
-        cursor = db.execute(
-            sql,
-            (
-                "Task interrupted by server restart/shutdown",
-                "Agent Failed Abruptly",
-            ),
-        )
+        update_params: list[object] = ["Task interrupted by server restart/shutdown"]
+        update_params.extend(id_list)
+        update_params.append("Agent Failed Abruptly")
+        cursor = db.execute(sql, update_params)
         rowcount = cursor.rowcount or 0
         db.commit()
     if rowcount:
@@ -1057,7 +1496,7 @@ def _shutdown_persist_in_flight_results(task_ids: set[int]) -> int:
 def _update_task_column(
     column: str,
     value: str,
-    task_id: int | None,
+    task_id: str | None,
     task: str | None,
 ) -> str | None:
     """Write *value* into *column* of the resolved ``task_history`` row.
@@ -1096,7 +1535,7 @@ def _update_task_column(
 
 def _save_task_result(
     result: str,
-    task_id: int | None = None,
+    task_id: str | None = None,
     task: str | None = None,
 ) -> None:
     """Save just the result summary for a task (no event table changes).
@@ -1116,15 +1555,8 @@ def _save_task_result(
     _invalidate_chat_context_cache(affected_chat_id)
 
 
-def _set_task_favorite(task_id: int, is_favorite: bool) -> bool:
-    """Toggle the ``is_favorite`` flag inside ``task_history.extra``.
-
-    Performs a merge-update on the JSON-encoded ``extra`` column:
-    loads any existing extra dict, sets ``is_favorite`` to the given
-    boolean, and writes the merged object back.  Unlike
-    :func:`_save_task_extra` (which overwrites the entire column),
-    this preserves other keys such as ``tokens``, ``cost``, ``steps``,
-    ``model``, and ``subagent``.
+def _set_task_favorite(task_id: str, is_favorite: bool) -> bool:
+    """Toggle the ``is_favorite`` column for a task row.
 
     Thread-safe: drains the background event queue first so the
     favourite flag write is ordered after any in-flight event inserts
@@ -1140,63 +1572,54 @@ def _set_task_favorite(task_id: int, is_favorite: bool) -> bool:
     _flush_chat_events()
     db = _get_db()
     with _rw_lock.write_lock():
-        row = db.execute(
-            "SELECT extra FROM task_history WHERE id = ?", (task_id,),
-        ).fetchone()
-        if row is None:
-            return False
-        extra_raw = row["extra"] or ""
-        extra_obj: dict[str, object]
-        if extra_raw:
-            strict = _parse_extra_dict(extra_raw)
-            if strict is not None:
-                extra_obj = strict
-            else:
-                # Legacy corrupt extra (e.g. a bare ``NaN`` token written
-                # by the pre-``_dumps_extra`` code path): strict parsing
-                # fails, so every reader and the ``_HISTORY_NOT_SUBAGENT``
-                # SQL predicate classify this row as NOT a sub-agent row.
-                # Recover the metadata leniently (the history sidebar
-                # displays it via plain ``json.loads``) but drop the
-                # never-effective top-level ``subagent`` key — otherwise
-                # re-encoding through ``_dumps_extra`` would mint VALID
-                # JSON whose ``subagent`` key suddenly starts classifying,
-                # and starring the row would make it vanish from
-                # ``_load_history`` / ``_list_recent_chats``.
-                try:
-                    parsed = json.loads(extra_raw)
-                except (json.JSONDecodeError, TypeError):
-                    parsed = None
-                extra_obj = parsed if isinstance(parsed, dict) else {}
-                extra_obj.pop("subagent", None)
-        else:
-            extra_obj = {}
-        extra_obj["is_favorite"] = bool(is_favorite)
-        db.execute(
-            "UPDATE task_history SET extra = ? WHERE id = ?",
-            (_dumps_extra(extra_obj), task_id),
+        cursor = db.execute(
+            "UPDATE task_history SET is_favorite = ? WHERE id = ?",
+            (1 if is_favorite else 0, task_id),
         )
         db.commit()
-        return True
+        return (cursor.rowcount or 0) > 0
+
+
+# Maps each legacy ``extra`` key to its (column_name, caster, default)
+# tuple.  Keys absent from *extra* are NOT included in the UPDATE,
+# which automatically preserves any other column (e.g. ``is_favorite``
+# set independently via :func:`_set_task_favorite`).
+_EXTRA_COL_MAP: dict[str, tuple[str, object, object]] = {
+    "model": ("model", str, ""),
+    "work_dir": ("work_dir", str, ""),
+    "version": ("version", str, ""),
+    "auto_commit_mode": ("auto_commit_mode", lambda v: 1 if v else 0, 0),
+    "tokens": ("tokens", int, 0),
+    "cost": ("cost", float, 0.0),
+    "steps": ("steps", int, 0),
+    "is_parallel": ("is_parallel", lambda v: 1 if v else 0, 0),
+    "is_worktree": ("is_worktree", lambda v: 1 if v else 0, 0),
+    # r3-H1: ``is_favorite`` is intentionally NOT in this map.
+    # ``_set_task_favorite`` is the only sanctioned writer for the
+    # favorite flag; including it here would let a future caller of
+    # ``_save_task_extra({"is_favorite": False})`` silently clear a
+    # previously-set star.
+    "startTs": ("start_ts", int, 0),
+    "endTs": ("end_ts", int, 0),
+}
 
 
 def _save_task_extra(
     extra: dict[str, object],
-    task_id: int | None = None,
+    task_id: str | None = None,
     task: str | None = None,
 ) -> None:
-    """Save extra metadata for a task as a JSON string.
+    """Save extra metadata for a task into typed columns.
 
-    Stores a JSON-serialized dict in the ``extra`` column of
-    ``task_history``.  Typical keys: ``model``, ``work_dir``,
-    ``version``, ``tokens``, ``cost``, ``is_parallel``, ``is_worktree``.
+    Writes each known key from *extra* to its column in
+    ``task_history``.  Unknown keys are silently ignored.  Keys absent
+    from *extra* are NOT included in the UPDATE — so the
+    ``is_favorite`` flag (set independently by
+    :func:`_set_task_favorite`) is automatically preserved.
 
-    The ``is_favorite`` flag written by :func:`_set_task_favorite` is
-    preserved: when the stored ``extra`` JSON carries ``is_favorite``
-    and the new *extra* payload does not, the stored value is merged
-    into the payload before writing.  Otherwise starring a task while
-    it is still running would be silently undone by the
-    completion-time extra write.
+    The legacy nested ``{"subagent": {"parent_task_id": <uuid>}}``
+    payload is translated to a write of the ``parent_task_id`` column
+    (only when the payload contains the dotted shape).
 
     Args:
         extra: Dictionary of metadata to persist.
@@ -1205,25 +1628,85 @@ def _save_task_extra(
     """
     _flush_chat_events()
     db = _get_db()
-    merged = dict(extra)
     with _rw_lock.write_lock():
         resolved = _resolve_task_id(db, task_id, task)
         if resolved is None:
             return
-        row = db.execute(
-            "SELECT extra FROM task_history WHERE id = ?", (resolved,),
-        ).fetchone()
-        existing_raw = (row["extra"] or "") if row is not None else ""
-        if existing_raw and "is_favorite" not in merged:
+        pairs: list[tuple[str, object]] = []
+        import math
+        for k, v in extra.items():
+            # r5-persistence-C2: ``is_favorite`` is intentionally NOT
+            # in ``_EXTRA_COL_MAP`` so the favorite flag (owned by
+            # ``_set_task_favorite``) is preserved across normal
+            # metadata updates.  Silently dropping a caller's
+            # ``{"is_favorite": True}`` would leave the caller
+            # convinced the flag was set when it wasn't.  Raise so
+            # the bug surfaces.
+            if k == "is_favorite":
+                raise ValueError(
+                    "_save_task_extra does not write 'is_favorite'; "
+                    "use _set_task_favorite() instead"
+                )
+            mapping = _EXTRA_COL_MAP.get(k)
+            if mapping is None:
+                # Top-level parent_task_id passthrough (new flat shape).
+                # r3-C1: only emit the UPDATE when the coerced value
+                # is a real UUID.  Writing ``""`` here would silently
+                # re-parent an existing sub-agent row to the
+                # top-level history sidebar (the same trap fixed for
+                # the ``subagent`` nested branch below).
+                if k == "parent_task_id":
+                    # r3-H2: refuse to silently honour both the flat
+                    # and nested shapes when both are present.
+                    if "subagent" in extra:
+                        raise ValueError(
+                            "Cannot pass both 'parent_task_id' and "
+                            "'subagent' to _save_task_extra"
+                        )
+                    coerced = _coerce_parent_task_id(v)
+                    if coerced:
+                        pairs.append(("parent_task_id = ?", coerced))
+                    continue
+                # Legacy nested {"subagent": {"parent_task_id": ...}}
+                # OR convenience {"subagent": "<uuid>"} shape.
+                if k == "subagent":
+                    if isinstance(v, dict):
+                        raw_parent = v.get("parent_task_id")
+                    else:
+                        raw_parent = v
+                    coerced = _coerce_parent_task_id(raw_parent)
+                    # CRITICAL: only emit the UPDATE when the coerced
+                    # value is a real UUID.  Writing ``""`` here would
+                    # silently re-parent an existing sub-agent row to
+                    # the top-level history sidebar.
+                    if coerced:
+                        pairs.append(("parent_task_id = ?", coerced))
+                continue
+            col, cast, default = mapping
             try:
-                existing = json.loads(existing_raw)
-            except (json.JSONDecodeError, TypeError):
-                existing = None
-            if isinstance(existing, dict) and "is_favorite" in existing:
-                merged["is_favorite"] = existing["is_favorite"]
+                if v is None or v == "":
+                    val: object = default
+                elif isinstance(v, float) and not math.isfinite(v):
+                    val = default
+                else:
+                    result = cast(v)  # type: ignore[operator]
+                    if (
+                        isinstance(result, float)
+                        and not math.isfinite(result)
+                    ):
+                        val = default
+                    else:
+                        val = result
+            except Exception:
+                val = default
+            pairs.append((f"{col} = ?", val))
+        if not pairs:
+            return
+        sets = [s for s, _ in pairs]
+        vals = [v for _, v in pairs]
+        vals.append(resolved)
         db.execute(
-            "UPDATE task_history SET extra = ? WHERE id = ?",
-            (_dumps_extra(merged), resolved),
+            f"UPDATE task_history SET {', '.join(sets)} WHERE id = ?", vals
         )
         db.commit()
 
@@ -1251,8 +1734,8 @@ _event_queue: queue.Queue = queue.Queue()
 _event_writer_thread: threading.Thread | None = None
 _event_writer_lock = threading.Lock()
 _event_writer_stop = threading.Event()
-_next_seq_cache: dict[int, int] = {}
-_marked_has_events: set[int] = set()
+_next_seq_cache: dict[str, int] = {}
+_marked_has_events: set[str] = set()
 # Path the seq/has_events caches were last populated against.  When
 # ``_DB_PATH`` is reassigned (test fixtures), the caches are stale and
 # must be cleared on the next ``_get_db()`` reconnect.
@@ -1337,7 +1820,7 @@ def _event_writer_loop() -> None:
             return
 
 
-def _write_event_batch(batch: list[tuple[int, str, float, str]]) -> None:
+def _write_event_batch(batch: list[tuple[str, str, float, str]]) -> None:
     """Persist a batch of (task_id, event_json, timestamp, origin_db_path) rows.
 
     Rows whose ``origin_db_path`` no longer matches the active
@@ -1375,7 +1858,7 @@ def _write_event_batch(batch: list[tuple[int, str, float, str]]) -> None:
                     (tid,),
                 ).fetchone()
                 _next_seq_cache[tid] = row["next_seq"] if row else 0
-        rows: list[tuple[int, int, str, float]] = []
+        rows: list[tuple[str, int, str, float]] = []
         for tid, ev_json, ts, _op in batch:
             seq = _next_seq_cache.get(tid)
             if seq is None:
@@ -1405,7 +1888,7 @@ def _write_event_batch(batch: list[tuple[int, str, float, str]]) -> None:
 
 def _queue_chat_event(
     event: dict[str, object],
-    task_id: int,
+    task_id: str,
     origin_db_path: str | None = None,
 ) -> None:
     """Asynchronously persist an event for a known task_id.
@@ -1482,7 +1965,7 @@ def _stop_event_writer() -> None:
 
 def _append_chat_event(
     event: dict[str, object],
-    task_id: int | None = None,
+    task_id: str | None = None,
     task: str | None = None,
     origin_db_path: str | None = None,
 ) -> None:
@@ -1520,7 +2003,7 @@ def _append_chat_event(
     _flush_chat_events()
 
 
-def _task_has_events(task_id: int) -> bool:
+def _task_has_events(task_id: str) -> bool:
     """Return whether any chat events are persisted for *task_id*.
 
     Flushes the asynchronous event queue first so events enqueued by a
@@ -1587,15 +2070,16 @@ def _list_recent_chats(limit: int = 10) -> list[dict[str, object]]:
         for cr in chat_rows:
             cid = cr["chat_id"]
             tasks = db.execute(
-                "SELECT task, result, timestamp, extra FROM task_history "
-                "WHERE chat_id = ? ORDER BY timestamp ASC, id ASC",
+                "SELECT task, result, timestamp, parent_task_id "
+                "FROM task_history "
+                "WHERE chat_id = ? ORDER BY timestamp ASC, rowid ASC",
                 (cid,),
             ).fetchall()
             task_dicts = [
                 {"task": t["task"], "result": t["result"],
                  "timestamp": t["timestamp"]}
                 for t in tasks
-                if not _is_subagent_row(t["extra"])
+                if not (t["parent_task_id"])
             ]
             if not task_dicts:
                 continue
@@ -1604,7 +2088,7 @@ def _list_recent_chats(limit: int = 10) -> list[dict[str, object]]:
 
 
 def _fetch_events_for_task_id(
-    db: sqlite3.Connection, task_id: int,
+    db: sqlite3.Connection, task_id: str,
 ) -> list[dict[str, object]]:
     """Load and decode the event rows for *task_id* in seq order.
 
@@ -1639,7 +2123,7 @@ def _fetch_events_for_task_id(
 
 def _events_session_dict(
     db: sqlite3.Connection,
-    task_id: int,
+    task_id: str,
     task: str,
     chat_id: str,
     extra: object,
@@ -1700,21 +2184,22 @@ def _load_latest_chat_events_by_chat_id(
     with _rw_lock.read_lock():
         db = _get_db()
         rows = db.execute(
-            "SELECT id, task, extra FROM task_history "
-            "WHERE chat_id = ? ORDER BY timestamp DESC, id DESC",
+            _HISTORY_SELECT
+            + "WHERE chat_id = ? ORDER BY timestamp DESC, rowid DESC",
             (chat_id,),
         ).fetchall()
         for row in rows:
-            if _is_subagent_row(row["extra"]):
+            if row["parent_task_id"]:
                 continue
             return _events_session_dict(
-                db, row["id"], row["task"], chat_id, row["extra"]
+                db, str(row["id"]), row["task"], chat_id,
+                _row_to_extra_json(row),
             )
         return None
 
 
 def _load_chat_events_by_task_id(
-    task_id: int,
+    task_id: str,
 ) -> dict[str, object] | None:
     """Load a specific task and its events by the task row ID.
 
@@ -1733,18 +2218,19 @@ def _load_chat_events_by_task_id(
     with _rw_lock.read_lock():
         db = _get_db()
         row = db.execute(
-            "SELECT id, task, chat_id, extra FROM task_history WHERE id = ?",
+            _HISTORY_SELECT + "WHERE id = ?",
             (task_id,),
         ).fetchone()
         if not row:
             return None
         return _events_session_dict(
-            db, task_id, row["task"], str(row["chat_id"] or ""), row["extra"]
+            db, str(row["id"]), row["task"], str(row["chat_id"] or ""),
+            _row_to_extra_json(row),
         )
 
 
 def _load_subagent_rows_by_parent_task_id(
-    parent_task_id: int,
+    parent_task_id: str,
 ) -> list[dict[str, object]]:
     """Return persisted sub-agent rows whose parent is *parent_task_id*.
 
@@ -1770,46 +2256,30 @@ def _load_subagent_rows_by_parent_task_id(
         ``events`` (list of event dicts), and ``extra`` (str, the raw
         JSON column).  Empty list when no sub-agent rows exist.
     """
-    if not isinstance(parent_task_id, int):
+    if not isinstance(parent_task_id, str) or not parent_task_id:
         return []
     out: list[dict[str, object]] = []
     with _rw_lock.read_lock():
         db = _get_db()
-        # Pre-filter at the SQL level on the substring of the JSON
-        # ``extra`` to avoid loading every history row into Python.
-        # The exact match (parent id + integer-valued field) is then
-        # re-validated by ``json.loads`` to defend against false
-        # positives (e.g. a row whose unrelated free-form metadata
-        # happened to embed the same substring).
-        like = f'%"parent_task_id": {parent_task_id}%'
         rows = db.execute(
-            "SELECT id, task, chat_id, extra FROM task_history "
-            "WHERE extra LIKE ? ORDER BY id ASC",
-            (like,),
+            _HISTORY_SELECT
+            + "WHERE parent_task_id = ? ORDER BY rowid ASC",
+            (parent_task_id,),
         ).fetchall()
         for r in rows:
-            extra_str = r["extra"] or ""
-            parsed = _parse_extra_dict(extra_str)
-            if parsed is None:
-                continue
-            sub = parsed.get("subagent")
-            if not isinstance(sub, dict):
-                continue
-            if sub.get("parent_task_id") != parent_task_id:
-                continue
-            sub_task_id = int(r["id"])
+            sub_task_id = str(r["id"])
             out.append({
                 "task_id": sub_task_id,
                 "task": r["task"],
                 "chat_id": str(r["chat_id"] or ""),
                 "events": _fetch_events_for_task_id(db, sub_task_id),
-                "extra": extra_str,
+                "extra": _row_to_extra_json(r),
             })
     return out
 
 
 def _get_adjacent_task_by_chat_id(
-    chat_id: str, current_task_id: int | None, direction: str
+    chat_id: str, current_task_id: str | None, direction: str
 ) -> dict[str, object] | None:
     """Return the adjacent task within a chat session, relative to *current_task_id*.
 
@@ -1832,13 +2302,14 @@ def _get_adjacent_task_by_chat_id(
     with _rw_lock.read_lock():
         db = _get_db()
         row = db.execute(
-            "SELECT id, timestamp FROM task_history "
+            "SELECT rowid, id, timestamp FROM task_history "
             "WHERE id = ? AND chat_id = ?",
             (current_task_id, chat_id),
         ).fetchone()
         if not row:
             return None
         ts = row["timestamp"]
+        cur_rowid = row["rowid"]
 
         # Sub-agent rows (those carrying a ``subagent`` marker in
         # ``extra``) are internal implementation detail of the parent's
@@ -1850,7 +2321,7 @@ def _get_adjacent_task_by_chat_id(
         # parent tasks chronologically.
         # Adjacency uses the total order ``(timestamp, id)`` — the same
         # id tiebreak as ``_load_latest_chat_events_by_chat_id``'s
-        # ``ORDER BY timestamp DESC, id DESC`` — so rows that share a
+        # ``ORDER BY timestamp DESC, rowid DESC`` — so rows that share a
         # timestamp value (concurrent inserts, imported databases)
         # remain mutually reachable instead of strict ``<`` / ``>``
         # timestamp comparison silently skipping them.
@@ -1858,25 +2329,25 @@ def _get_adjacent_task_by_chat_id(
             adj = db.execute(
                 "SELECT id, task FROM task_history "
                 "WHERE chat_id = ? "
-                "AND (timestamp < ? OR (timestamp = ? AND id < ?)) "
+                "AND (timestamp < ? OR (timestamp = ? AND rowid < ?)) "
                 f"AND {_HISTORY_NOT_SUBAGENT} "
-                "ORDER BY timestamp DESC, id DESC LIMIT 1",
-                (chat_id, ts, ts, row["id"]),
+                "ORDER BY timestamp DESC, rowid DESC LIMIT 1",
+                (chat_id, ts, ts, cur_rowid),
             ).fetchone()
         else:
             adj = db.execute(
                 "SELECT id, task FROM task_history "
                 "WHERE chat_id = ? "
-                "AND (timestamp > ? OR (timestamp = ? AND id > ?)) "
+                "AND (timestamp > ? OR (timestamp = ? AND rowid > ?)) "
                 f"AND {_HISTORY_NOT_SUBAGENT} "
-                "ORDER BY timestamp ASC, id ASC LIMIT 1",
-                (chat_id, ts, ts, row["id"]),
+                "ORDER BY timestamp ASC, rowid ASC LIMIT 1",
+                (chat_id, ts, ts, cur_rowid),
             ).fetchone()
 
         if not adj:
             return None
 
-        adj_id = adj["id"]
+        adj_id = str(adj["id"])
         return {
             "task": adj["task"],
             "task_id": adj_id,
@@ -1911,40 +2382,47 @@ def _load_chat_context(chat_id: str) -> list[_HistoryEntry]:
     with _rw_lock.read_lock():
         db = _get_db()
         rows = db.execute(
-            "SELECT task, result, extra FROM task_history "
-            "WHERE chat_id = ? ORDER BY timestamp ASC, id ASC",
+            "SELECT task, result, parent_task_id FROM task_history "
+            "WHERE chat_id = ? ORDER BY timestamp ASC, rowid ASC",
             (chat_id,),
         ).fetchall()
         entries: list[_HistoryEntry] = []
         for r in rows:
-            if _is_subagent_row(r["extra"]):
+            if r["parent_task_id"]:
                 continue
             entries.append({"task": r["task"], "result": r["result"]})
         return entries
 
 
 def _is_subagent_row(extra: object) -> bool:
-    """Return ``True`` when *extra* JSON encodes a sub-agent task row.
+    """Return ``True`` when *extra* identifies a sub-agent task row.
 
-    A sub-agent row is identified by the presence of a ``subagent``
-    key in the JSON object stored in ``task_history.extra`` — this
-    key is written by
-    :meth:`ChatSorcarAgent._run_tasks_parallel`'s worker thread for
-    every fan-out task.  Empty / missing / malformed ``extra``
-    values yield ``False`` so legacy rows that pre-date the
-    ``subagent`` marker continue to be treated as regular parent
-    tasks.
+    Accepts either:
+
+    * a ``sqlite3.Row`` carrying the new ``parent_task_id`` column
+      (preferred; the column is the canonical source of truth), or
+    * a JSON-encoded ``extra`` string built by :func:`_row_to_extra_json`
+      — kept for backward compat with external callers reading the
+      synthesized ``entry["extra"]`` field.
 
     Args:
-        extra: The raw ``extra`` column value (``None``, ``""``, or a
-            JSON-encoded string).
+        extra: A row or a JSON-encoded ``extra`` string.
 
     Returns:
-        ``True`` if *extra* parses as a dict containing a ``subagent``
-        key, ``False`` otherwise.
+        ``True`` when the row / string represents a sub-agent.
     """
-    parsed = _parse_extra_dict(extra)
-    return parsed is not None and "subagent" in parsed
+    if isinstance(extra, sqlite3.Row):
+        try:
+            return bool(extra["parent_task_id"])
+        except (IndexError, KeyError):
+            return False
+    if isinstance(extra, str):
+        # Delegate to the strict parser so SQLite's ``json_valid``
+        # semantics (which reject bare NaN/Infinity tokens) and the
+        # Python-side classifier agree on every row.
+        parsed = _parse_extra_dict(extra)
+        return parsed is not None and "subagent" in parsed
+    return False
 
 
 def _load_chat_context_text(chat_id: str) -> str:

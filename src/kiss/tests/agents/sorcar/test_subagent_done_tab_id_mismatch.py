@@ -102,7 +102,7 @@ class TestSubagentDoneTabIdMatchesViewerTab(unittest.TestCase):
         printer = _CapturePrinter()
         agent = ChatSorcarAgent("test-parent")
         agent._chat_id = "test-chat-123"
-        agent._last_task_id = 100
+        agent._last_task_id = "10000000000000000000000000000000"
         agent.printer = printer  # type: ignore[assignment]
 
         # Register the parent agent state so _run_tasks_parallel can
@@ -159,7 +159,7 @@ class TestSubagentDoneTabIdMatchesViewerTab(unittest.TestCase):
         printer = _CapturePrinter()
         agent = ChatSorcarAgent("test-parent")
         agent._chat_id = "test-chat-456"
-        agent._last_task_id = 200
+        agent._last_task_id = "20000000000000000000000000000000"
         agent.printer = printer  # type: ignore[assignment]
 
         parent_tab_id = "parent-tab-def"
@@ -198,7 +198,7 @@ class TestSubagentDoneTabIdMatchesViewerTab(unittest.TestCase):
         printer = _CapturePrinter()
         agent = ChatSorcarAgent("test-parent")
         agent._chat_id = "test-chat-789"
-        agent._last_task_id = 300
+        agent._last_task_id = "30000000000000000000000000000000"
         agent.printer = printer  # type: ignore[assignment]
 
         parent_tab_id = "parent-tab-ghi"
