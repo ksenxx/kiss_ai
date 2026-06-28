@@ -1232,6 +1232,21 @@
   }
 
   // Initialize tabs — restore from saved state if available, else create one default tab
+  // Race-fix: seed the closure-scoped ``selectedModel`` from the DOM
+  // BEFORE the launch IIFE creates any tab.  ``makeTab`` reads the
+  // closure variable to populate ``tab.selectedModel``; without this
+  // seeding every tab built during init (including the ones restored
+  // from ``vscode.getState()``) records ``''`` and the picker turns
+  // blank on the next tab switch — even though ``#model-name`` shows
+  // the correct template value on launch and the daemon's ``models``
+  // event later updates the live label.
+  {
+    const _initialModelEl = document.getElementById('model-name');
+    if (_initialModelEl && _initialModelEl.textContent) {
+      selectedModel = _initialModelEl.textContent;
+    }
+  }
+
   (function () {
     const saved = vscode.getState();
     if (saved && saved.tabs && saved.tabs.length > 0) {
@@ -3144,8 +3159,22 @@
       case 'models':
         allModels = ev.models || [];
         if (ev.selected) {
+          // Race-fix: propagate the new default into every tab whose
+          // ``selectedModel`` still mirrors the prior default (or is
+          // empty / ``"No model"`` from the launch IIFE).  Tabs where
+          // the user explicitly picked a different model are
+          // preserved.  Without this, ``restoreTab`` reverts the
+          // picker to the stale launch-time value as soon as the user
+          // switches tabs.
+          const _prevSelected = selectedModel;
           selectedModel = ev.selected;
           modelName.textContent = ev.selected;
+          tabs.forEach(t => {
+            const cur = t.selectedModel || '';
+            if (cur === '' || cur === 'No model' || cur === _prevSelected) {
+              t.selectedModel = ev.selected;
+            }
+          });
         }
         renderModelList('');
         break;
