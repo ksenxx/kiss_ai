@@ -174,7 +174,7 @@ class _CommandsMixin:
             conn_id: str = "",
         ) -> None: ...
         def _replay_session(
-            self, chat_id: str, tab_id: str = "", task_id: int | None = None,
+            self, chat_id: str, tab_id: str = "", task_id: str | None = None,
         ) -> None: ...
         def _finish_merge(
             self, tab_id: str = "", *, work_dir: str = "",
@@ -184,7 +184,7 @@ class _CommandsMixin:
         def _ensure_complete_worker(self) -> None: ...
         def _get_input_history(self, conn_id: str = "") -> None: ...
         def _get_adjacent_task(
-            self, chat_id: str, task_id: int | None, direction: str,
+            self, chat_id: str, task_id: str | None, direction: str,
             tab_id: str = "",
         ) -> None: ...
         def _generate_commit_message(
@@ -196,10 +196,10 @@ class _CommandsMixin:
         def _handle_autocommit_action(
             self, action: str, tab_id: str = "", *, work_dir: str = "",
         ) -> None: ...
-        def _handle_delete_task(self, task_id: int) -> None: ...
+        def _handle_delete_task(self, task_id: str) -> None: ...
         def _handle_delete_frequent_task(self, task: str) -> None: ...
         def _handle_set_favorite(
-            self, task_id: int, is_favorite: bool,
+            self, task_id: str, is_favorite: bool,
         ) -> None: ...
 
 
@@ -397,7 +397,12 @@ class _CommandsMixin:
 
     def _cmd_delete_task(self, cmd: dict[str, Any]) -> None:
         """Delete a task from the database and refresh history."""
-        task_id = _parse_int(cmd.get("taskId"))
+        raw_task_id = cmd.get("taskId")
+        task_id = (
+            raw_task_id
+            if isinstance(raw_task_id, str) and raw_task_id
+            else None
+        )
         if task_id is not None:
             self._handle_delete_task(task_id)
 
@@ -409,7 +414,12 @@ class _CommandsMixin:
 
     def _cmd_set_favorite(self, cmd: dict[str, Any]) -> None:
         """Persist the favourite flag on a task history row."""
-        task_id = _parse_int(cmd.get("taskId"))
+        raw_task_id = cmd.get("taskId")
+        task_id = (
+            raw_task_id
+            if isinstance(raw_task_id, str) and raw_task_id
+            else None
+        )
         if task_id is None:
             return
         is_favorite = bool(cmd.get("isFavorite", False))
@@ -680,7 +690,12 @@ class _CommandsMixin:
         """
         raw_id = cmd.get("chatId")
         chat_id = str(raw_id) if raw_id else ""
-        task_id = _parse_int(cmd.get("taskId"))
+        raw_task_id = cmd.get("taskId")
+        task_id = (
+            raw_task_id
+            if isinstance(raw_task_id, str) and raw_task_id
+            else None
+        )
         if chat_id or task_id is not None:
             self._replay_session(
                 chat_id, cmd.get("tabId", ""), task_id=task_id,
@@ -790,10 +805,11 @@ class _CommandsMixin:
             if not chat_id:
                 chat_id = self._tab_chat_views.get(tab_id, "")
         raw_task_id = cmd.get("taskId")
-        try:
-            task_id = int(raw_task_id) if raw_task_id is not None else None
-        except (TypeError, ValueError):
-            task_id = None
+        task_id = (
+            raw_task_id
+            if isinstance(raw_task_id, str) and raw_task_id
+            else None
+        )
         self._get_adjacent_task(
             chat_id,
             task_id,

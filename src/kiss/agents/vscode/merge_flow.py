@@ -457,7 +457,7 @@ class _MergeFlowMixin:
                 if tab_id:
                     with self._state_lock:
                         tab = _RunningAgentState.running_agent_states.get(tab_id)
-                    task_id: int | None = None
+                    task_id: str | None = None
                     if tab is not None:
                         # Prefer the in-flight task id: when the
                         # "Auto commit" toggle is ON this handler runs

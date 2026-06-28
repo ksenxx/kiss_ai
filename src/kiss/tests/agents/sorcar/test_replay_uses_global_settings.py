@@ -193,11 +193,11 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
         _restore_db(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def _persisted_extra_for(self, task_id: int) -> dict[str, object]:
+    def _persisted_extra_for(self, task_id: str) -> dict[str, object]:
         """Return the persisted ``task_history.extra`` JSON for *task_id*."""
         rows = th._load_history(limit=10)
         for row in rows:
-            if cast(int, row["id"]) == task_id:
+            if cast(str, row["id"]) == task_id:
                 raw = row.get("extra", "") or ""
                 if isinstance(raw, str) and raw:
                     return cast(dict[str, object], json.loads(raw))
@@ -229,7 +229,7 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
         )
         first_row = th._load_history(limit=10)[0]
         chat_id = str(first_row["chat_id"])
-        first_task_id = cast(int, first_row["id"])
+        first_task_id = cast(str, first_row["id"])
         assert chat_id, "first task should have a chat id"
 
         # Sanity-check the persisted snapshot — the bug is only
@@ -294,7 +294,7 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
         )
         first_row = th._load_history(limit=10)[0]
         chat_id = str(first_row["chat_id"])
-        first_task_id = cast(int, first_row["id"])
+        first_task_id = cast(str, first_row["id"])
 
         # Step 2: user clicks the history row for T1 → fresh tab.
         history_tab = "tab-history"
@@ -337,7 +337,7 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
         # most-recent-first order so the follow-up is row 0.
         rows = th._load_history(limit=10)
         assert len(rows) >= 2, rows
-        second_task_id = cast(int, rows[0]["id"])
+        second_task_id = cast(str, rows[0]["id"])
         assert second_task_id != first_task_id
         second_extra = self._persisted_extra_for(second_task_id)
         assert second_extra.get("is_worktree") is False, second_extra
@@ -366,7 +366,7 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
         )
         first_row = th._load_history(limit=10)[0]
         chat_id = str(first_row["chat_id"])
-        first_task_id = cast(int, first_row["id"])
+        first_task_id = cast(str, first_row["id"])
 
         history_tab = "tab-history-pa"
         self.server._handle_command(
@@ -404,7 +404,7 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
         )
         first_row = th._load_history(limit=10)[0]
         chat_id = str(first_row["chat_id"])
-        first_task_id = cast(int, first_row["id"])
+        first_task_id = cast(str, first_row["id"])
 
         # Now load that chat into a brand-new tab.  We seed
         # ``selected_model`` on the tab to a non-default value
@@ -454,7 +454,7 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
         )
         row = th._load_history(limit=10)[0]
         chat_id = str(row["chat_id"])
-        task_id = cast(int, row["id"])
+        task_id = cast(str, row["id"])
 
         tab = self.server._get_tab(tab_id)
         # Simulate mid-merge: task finished, merge review still open.
@@ -494,7 +494,7 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
         )
         row = th._load_history(limit=10)[0]
         chat_id = str(row["chat_id"])
-        task_id = cast(int, row["id"])
+        task_id = cast(str, row["id"])
 
         tab = self.server._get_tab(tab_id)
         stop_evt = threading.Event()
@@ -544,7 +544,7 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
         )
         row = th._load_history(limit=10)[0]
         chat_id = str(row["chat_id"])
-        task_id = cast(int, row["id"])
+        task_id = cast(str, row["id"])
 
         tab = self.server._get_tab(tab_id)
         # Simulate an in-flight run by flipping the "alive" flag.

@@ -11,6 +11,8 @@ management — the same workflow that the VS Code extension performs in
 
 from __future__ import annotations
 
+import logging
+import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -51,14 +53,24 @@ class ChatSorcarAgent(SorcarAgent):
     from the VS Code extension as a standalone reusable agent.
     """
 
-    running_agents: dict[int, ChatSorcarAgent] = {}
+    running_agents: dict[str, ChatSorcarAgent] = {}
+    # Guards every mutation of :attr:`running_agents` so concurrent
+    # ``run()`` invocations across threads (CLI multi-task, sub-agent
+    # parallel dispatch, VS Code task-runner worker pool) cannot corrupt
+    # the dict's internal hash table.
+    _running_agents_lock: threading.RLock = threading.RLock()
 
     def __init__(self, name: str) -> None:
         super().__init__(name)
         self._chat_id: str = ""
         self._subagent_info: dict[str, object] | None = None
-        self._last_task_id: int | None = None
+        self._last_task_id: str | None = None
         self._last_user_prompt: str = ""
+        # r4-sorcar-H3 — guards the paired ``self._last_task_id = ...``
+        # assignment and ``_register_running_state()`` /
+        # ``_unregister_running_state()`` calls so a concurrent reader
+        # cannot observe a half-applied clear+register pair.
+        self._task_id_lock: threading.RLock = threading.RLock()
 
     @property
     def chat_id(self) -> str:
@@ -121,7 +133,27 @@ class ChatSorcarAgent(SorcarAgent):
         # ``_state_lock`` alias).
         with _RunningAgentState._registry_lock:
             for state in _RunningAgentState.running_agent_states.values():
-                if state.chat_id == self._chat_id:
+                # r4-sorcar-H1: do NOT treat an existing entry for the
+                # same ``chat_id`` as the existing owner unless its
+                # ``agent`` is either ``None`` (a server-side
+                # pre-allocated entry waiting for a real agent) or
+                # ``self`` (idempotent re-register).  Two distinct
+                # agents sharing a ``chat_id`` (e.g. CLI + remote
+                # webapp picked the same chat) must each be
+                # discoverable through their own entry.
+                # r5-sorcar-H3 REJECTED: the round-5 review proposed
+                # binding ``state.agent = self`` here when
+                # ``state.agent is None``.  ``test_running_agent_state_on_run::
+                # test_run_does_not_clobber_preexisting_state``
+                # asserts the OPPOSITE contract: a pre-allocated
+                # entry with ``agent=None`` belongs to another owner
+                # (the server frame or parent worktree agent) and
+                # must NOT be hijacked by a standalone child agent
+                # that happens to share the chat_id.  Keep the
+                # original "skip without binding" semantics.
+                if state.chat_id == self._chat_id and (
+                    state.agent is None or state.agent is self
+                ):
                     return False
             state = _RunningAgentState(
                 self._chat_id,
@@ -223,7 +255,7 @@ class ChatSorcarAgent(SorcarAgent):
 
     def _persist_replay_events_if_missing(
         self,
-        task_id: int,
+        task_id: str,
         prompt: str,
         result_raw: str,
         result_summary: str,
@@ -289,7 +321,36 @@ class ChatSorcarAgent(SorcarAgent):
         model = self.model_name
         work_dir = self.work_dir
         chat_id = self._chat_id
-        parent_task_id = self._last_task_id
+        # IMPORTANT: keep two ids strictly separate.
+        #
+        # ``persisted_parent_task_id`` is the REAL ``task_history.id``
+        # of the parent task.  It (and only it) is allowed to land
+        # in the sub-agent's ``task_history.parent_task_id`` column.
+        # If we don't yet have one (e.g. CLI flow that called
+        # ``_run_tasks_parallel`` before its own ``_add_task``
+        # returned), pass empty so the sub-agent row appears as a
+        # normal top-level row rather than as an orphan pointing at
+        # a synthetic UUID that no real row carries.
+        #
+        # ``routing_parent_key`` is a process-local identifier used
+        # ONLY for building the in-memory tab key
+        # (``f"task-{routing_parent_key}__sub_<N>"``) and matching
+        # against ``_RunningAgentState.running_agent_states``.
+        # When no real parent id exists we still need a unique
+        # routing key so the bogus literal ``"task-None__sub_*"``
+        # cannot leak into the registry or the global ``new_tab``
+        # broadcast.
+        persisted_parent_task_id = self._last_task_id
+        if (
+            not isinstance(persisted_parent_task_id, str)
+            or not persisted_parent_task_id
+        ):
+            persisted_parent_task_id = ""
+        if persisted_parent_task_id:
+            routing_parent_key = persisted_parent_task_id
+        else:
+            routing_parent_key = uuid.uuid4().hex
+        parent_task_id = routing_parent_key
         # Resolve the parent's frontend tab id from the running-agent
         # registry so we can thread it through ``_subagent_info`` to
         # each sub-agent.  The sub-agent's ``new_tab`` broadcast (in
@@ -323,17 +384,54 @@ class ChatSorcarAgent(SorcarAgent):
             agent = ChatSorcarAgent(f"Parallel-{task[:40]}")
             if chat_id:
                 agent.resume_chat_by_id(chat_id)
+            sub_tab_id = f"task-{parent_task_id}__sub_{idx}"
+            # Only persist the REAL parent_task_id; the synthetic
+            # routing key (used for tab routing only) must NEVER
+            # land in the task_history.parent_task_id column, where
+            # it would orphan the sub-agent row.
+            #
+            # Re-snapshot the parent's persisted ``task_history.id`` at
+            # the moment this worker starts.  Defeats the TOCTOU window
+            # where the outer ``_run_tasks_parallel`` captured
+            # ``self._last_task_id`` BEFORE the parent's ``_add_task``
+            # had assigned a row (e.g. when a concurrent
+            # ``_run_tasks_parallel`` batch on the same parent agent
+            # had not yet returned).  When the outer snapshot was
+            # already real, this re-read is a no-op.
+            sub_persisted_parent = self._last_task_id
+            if (
+                not isinstance(sub_persisted_parent, str)
+                or not sub_persisted_parent
+            ):
+                sub_persisted_parent = persisted_parent_task_id
             agent._subagent_info = {
-                "parent_task_id": parent_task_id,
+                "parent_task_id": sub_persisted_parent,
                 "parent_tab_id": parent_tab_id,
             }
-            sub_tab_id = f"task-{parent_task_id}__sub_{idx}"
-            sub_state = _RunningAgentState(sub_tab_id, model or "")
-            sub_state.chat_id = chat_id
-            sub_state.is_subagent = True
-            sub_state.parent_task_id = parent_task_id
-            sub_state.is_task_active = True
-            sub_state.agent = agent  # type: ignore[assignment]
+            # Populate all sub-agent state fields via the constructor
+            # so peer threads holding :attr:`_registry_lock` never
+            # observe a half-built state object.  The post-construct
+            # attribute writes that previously sat between the
+            # constructor and ``register`` could be re-ordered relative
+            # to ``register``'s lock acquisition, which made the
+            # documented "never observe the dict mid-resize" invariant
+            # underdocument the equally important "never observe a
+            # half-built state" invariant.
+            sub_state = _RunningAgentState(
+                sub_tab_id,
+                model or "",
+                agent=agent,  # type: ignore[arg-type]
+                chat_id=chat_id,
+                is_subagent=True,
+                # r4-sorcar-H2: pass ``sub_persisted_parent`` directly
+                # (always a ``str``, possibly ``""``) so the sentinel
+                # matches ``_subagent_info["parent_task_id"]`` which is
+                # also ``""`` when no persisted parent exists.  Mapping
+                # ``""`` to ``None`` here produced split-brain sentinels
+                # (``parent_task_id is None`` vs ``parent_task_id == ""``).
+                parent_task_id=sub_persisted_parent,
+                is_task_active=True,
+            )
             # Route the insert through the locked helper so peer
             # parallel sub-agents and VS Code server iteration loops
             # never observe the dict mid-resize and never raise
@@ -434,32 +532,56 @@ class ChatSorcarAgent(SorcarAgent):
         # detects the existing entry and returns ``False`` so we do
         # not double-register and the existing owner remains
         # responsible for cleanup.
-        registered_here = self._register_running_state()
-        self._last_task_id = None
+        # Clear ``_last_task_id`` BEFORE registering so a concurrent
+        # consumer that wakes up between ``_register_running_state``
+        # and the upcoming ``_add_task`` cannot read a stale
+        # task_history_id from a previous run of this same agent
+        # instance (chat-resume / multi-task CLI use case).
+        # r4-sorcar-H3 — paired clear+register guarded by the
+        # per-instance lock so a concurrent reader cannot observe
+        # ``_last_task_id`` cleared *before* ``running_agent_states``
+        # has been re-published.
+        with self._task_id_lock:
+            self._last_task_id = None
+            registered_here = self._register_running_state()
 
-        self._last_user_prompt = prompt_template
+        # r3-sorcar-H1 — if anything between
+        # ``_register_running_state`` and the successful return of
+        # ``_add_task`` raises, the agent would otherwise be wedged in
+        # ``running_agent_states`` forever (the surrounding ``finally``
+        # only runs after the row exists).  Wrap the early section in
+        # a defensive try/except that unregisters on failure.
+        try:
+            self._last_user_prompt = prompt_template
 
-        agent_prompt = self.build_chat_prompt(prompt_template)
+            agent_prompt = self.build_chat_prompt(prompt_template)
 
-        early_extra = self._build_extra_payload(
-            model=kwargs.get("model_name", "") or "",
-            work_dir=kwargs.get("work_dir", "") or "",
-            is_parallel=bool(kwargs.get("is_parallel", False)),
-            # ``pop`` (not ``get``): ``SorcarAgent.run()`` has no
-            # ``use_worktree`` parameter, so forwarding it via
-            # ``**kwargs`` would raise ``TypeError``.  Only
-            # ``WorktreeSorcarAgent`` consumes this kwarg (and pops it
-            # before delegating here).
-            is_worktree=(
-                bool(kwargs.pop("use_worktree", False)) or self.uses_worktree
-            ),
-        )
+            early_extra = self._build_extra_payload(
+                model=kwargs.get("model_name", "") or "",
+                work_dir=kwargs.get("work_dir", "") or "",
+                is_parallel=bool(kwargs.get("is_parallel", False)),
+                # ``pop`` (not ``get``): ``SorcarAgent.run()`` has no
+                # ``use_worktree`` parameter, so forwarding it via
+                # ``**kwargs`` would raise ``TypeError``.  Only
+                # ``WorktreeSorcarAgent`` consumes this kwarg (and
+                # pops it before delegating here).
+                is_worktree=(
+                    bool(kwargs.pop("use_worktree", False))
+                    or self.uses_worktree
+                ),
+            )
 
-        task_id, self._chat_id = _add_task(
-            prompt_template, chat_id=self._chat_id, extra=early_extra,
-        )
-        self._last_task_id = task_id
-        ChatSorcarAgent.running_agents[task_id] = self
+            task_id, self._chat_id = _add_task(
+                prompt_template, chat_id=self._chat_id, extra=early_extra,
+            )
+        except BaseException:
+            if registered_here:
+                self._unregister_running_state()
+            raise
+        with self._task_id_lock:
+            self._last_task_id = task_id
+        with ChatSorcarAgent._running_agents_lock:
+            ChatSorcarAgent.running_agents[task_id] = self
         # Mirror this run's task_history_id onto the per-thread
         # sub-agent state so ``VSCodeServer._reattach_running_chat``
         # can disambiguate the sub-agent from its parent by task id.
@@ -515,7 +637,7 @@ class ChatSorcarAgent(SorcarAgent):
                         )
                         broadcast({
                             "type": "new_tab",
-                            "task_id": int(task_id),
+                            "task_id": task_id,
                             "parent_tab_id": parent_tab_id_payload,
                             "taskId": "",
                         })
@@ -570,9 +692,13 @@ class ChatSorcarAgent(SorcarAgent):
             # reach all viewers of the chat — not only the tab that
             # launched the run.
             try:
-                on_task_id_allocated(int(task_id), self._chat_id)
+                on_task_id_allocated(task_id, self._chat_id)
             except Exception:
-                pass
+                logging.getLogger(__name__).warning(
+                    "on_task_id_allocated(%r) raised",
+                    task_id,
+                    exc_info=True,
+                )
         if self._subagent_info is None:
             _record_frequent_task(prompt_template)
 
@@ -630,7 +756,8 @@ class ChatSorcarAgent(SorcarAgent):
             result_summary = "Task interrupted"
             raise
         finally:
-            ChatSorcarAgent.running_agents.pop(task_id, None)
+            with ChatSorcarAgent._running_agents_lock:
+                ChatSorcarAgent.running_agents.pop(task_id, None)
             if registered_here:
                 # Mirror the registration above — only the frame that
                 # added the entry removes it.  Frames that observed an

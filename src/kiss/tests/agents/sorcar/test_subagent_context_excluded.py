@@ -218,7 +218,7 @@ class TestSubagentRowsExcludedFromChatContext:
         chat_id = parent.chat_id
         assert chat_id
         parent_task_id = parent._last_task_id
-        assert isinstance(parent_task_id, int)
+        assert isinstance(parent_task_id, str)
 
         for i in range(3):
             sub = ChatSorcarAgent(f"sub-{i}")
