@@ -349,6 +349,22 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       // Hide the "KISS Sorcar Server is starting ..." overlay and
       // reveal the regular chat UI now that the daemon is reachable.
       this._sendToWebview({type: 'daemonStatus', connected: true});
+      // RACE FIX: re-issue every webview-init request the ``ready``
+      // handler had already dispatched whenever the daemon socket
+      // (re)connects AND there is a live webview that depends on the
+      // replies.  Without this, a daemon restart (or any transient
+      // socket drop) leaves the model picker blank, the input-history
+      // dropdown empty and the settings panel un-prefilled — because
+      // the original ``models`` / ``inputHistory`` / ``configData``
+      // events were broadcast to the per-connection endpoint that no
+      // longer exists, so the daemon dropped them, and the webview
+      // never re-asks on its own.  Gated on ``_view`` so a sidebar the
+      // user never opened does not spam the daemon on every reconnect.
+      if (this._view) {
+        client.sendCommand({type: 'getModels'});
+        client.sendCommand({type: 'getInputHistory'});
+        client.sendCommand({type: 'getConfig'});
+      }
     });
     client.on('disconnect', () => {
       this._daemonConnected = false;
