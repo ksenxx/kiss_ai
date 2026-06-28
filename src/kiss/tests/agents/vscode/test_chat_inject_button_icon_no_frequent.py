@@ -218,20 +218,33 @@ def test_inject_instruction_button_uses_syringe_icon(_page) -> None:
         )
 
 
-def test_inject_instruction_needle_is_eighty_percent_of_body(_page) -> None:
-    """The syringe needle must be 80% as long as the syringe body.
+def test_inject_instruction_syringe_looks_natural(_page) -> None:
+    """The syringe icon must render with natural, real-world proportions.
 
-    The SVG has a long diagonal body side beginning with ``M19 9``
-    and a diagonal needle path beginning with ``m6 18``.  The visual
-    requirement is that the needle length is 80% of that body side.
-    This checks the rendered inline SVG in the real chat template,
-    not a separate fixture.
+    A real syringe has a short needle protruding from the end of a
+    much longer barrel — the needle is a small fraction of the
+    barrel length, not nearly as long as the barrel itself.  This
+    test guards against regressions where the icon's needle is
+    stretched out to look like a sword (or where the whole glyph is
+    flipped upside-down via a 180° rotation and oversized viewBox).
+
+    Concretely, it asserts that the rendered inline SVG:
+
+    * uses the canonical ``0 0 24 24`` Lucide viewBox (no enlarged
+      box used to accommodate an oversized needle),
+    * contains no ``rotate(180 ...)`` transform that would flip the
+      syringe upside-down from its natural orientation,
+    * has a needle path (``m6 18 …``) whose length is between 10%
+      and 30% of the barrel diagonal (``M19 9 → 8.7 19.3``) — the
+      proportion you actually see on a real syringe.
     """
-    ratio = _page.evaluate(
+    info = _page.evaluate(
         """
         () => {
             const btn = document.getElementById('tricks-btn');
             if (!btn) return null;
+            const svg = btn.querySelector('svg');
+            if (!svg) return null;
             const body = btn.querySelector('path[d^="M19 9"]');
             const needle = btn.querySelector('path[d^="m6 18"]');
             if (!body || !needle) return null;
@@ -239,12 +252,34 @@ def test_inject_instruction_needle_is_eighty_percent_of_body(_page) -> None:
             const needleNums = needle.getAttribute('d').match(/-?\\d+(?:\\.\\d+)?/g).map(Number);
             const bodyLength = Math.hypot(bodyNums[2] - bodyNums[0], bodyNums[3] - bodyNums[1]);
             const needleLength = Math.hypot(needleNums[2], needleNums[3]);
-            return needleLength / bodyLength;
+            const rotated = Array.from(svg.querySelectorAll('[transform]'))
+                .some(el => /rotate\\(\\s*180\\b/.test(el.getAttribute('transform') || ''));
+            return {
+                viewBox: svg.getAttribute('viewBox') || '',
+                ratio: needleLength / bodyLength,
+                rotatedUpsideDown: rotated,
+            };
         }
         """,
     )
-    assert ratio is not None, "Could not locate syringe body and needle paths"
-    assert ratio == pytest.approx(0.8, abs=0.001)
+    assert info is not None, "Could not locate syringe body and needle paths"
+    assert info["viewBox"] == "0 0 24 24", (
+        f"Syringe icon should use the canonical 0 0 24 24 viewBox; "
+        f"got {info['viewBox']!r}.  An enlarged viewBox usually means "
+        f"the needle has been stretched outside the standard glyph "
+        f"box, which looks unnatural."
+    )
+    assert not info["rotatedUpsideDown"], (
+        "Syringe icon must not be flipped 180° — the natural "
+        "orientation has the needle pointing down-left, matching "
+        "the Lucide glyph."
+    )
+    assert 0.10 < info["ratio"] < 0.30, (
+        f"Syringe needle length is {info['ratio']:.2f}× the barrel "
+        f"diagonal; a natural syringe needle is roughly 15–25% of "
+        f"the barrel.  Values outside (0.10, 0.30) make the icon "
+        f"look like a sword or a stub."
+    )
 
 
 
