@@ -54,7 +54,7 @@ def _restore(saved) -> None:
     th._DB_PATH, th._db_conn, th._KISS_DIR = saved
 
 
-def _event_seqs(task_id: int) -> list[int]:
+def _event_seqs(task_id: str) -> list[int]:
     """Return the raw ``seq`` values for *task_id* in insertion order."""
     with th._rw_lock.read_lock():
         db = th._get_db()
@@ -253,7 +253,7 @@ class TestChatIdLookups(_PersistenceTestBase):
 
     def test_lookups_return_empty_for_missing(self) -> None:
         th._add_task("present task")
-        assert th._get_task_chat_id(999_999) == ""
+        assert th._get_task_chat_id("999999") == ""
 
 
 class TestHasEventsFlag(_PersistenceTestBase):
@@ -324,7 +324,7 @@ class TestDeletions(_PersistenceTestBase):
         assert all(r["id"] != task_id for r in th._load_history())
 
     def test_delete_task_missing_returns_false(self) -> None:
-        assert th._delete_task(424_242) is False
+        assert th._delete_task("424242") is False
         task_id, _ = th._add_task("delete twice")
         assert th._delete_task(task_id) is True
         assert th._delete_task(task_id) is False

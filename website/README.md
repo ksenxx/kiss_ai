@@ -14,16 +14,16 @@ was changed.
 
 The new section shows a deck of panels, one panel per entry from:
 
-- `./src/kiss/SAMPLE_TASKS.md` &mdash; **12 sample tasks** (rendered with a
+- `./src/kiss/SAMPLE_TASKS.md` — **12 sample tasks** (rendered with a
   `Task` badge), and
-- `./src/kiss/INJECTIONS.md` &mdash; **15 promptlet tricks** (rendered with
+- `./src/kiss/INJECTIONS.md` — **15 promptlet tricks** (rendered with
   a `Trick` badge).
 
 Each panel has:
 
 - A meaningful title.
-- A 1&ndash;2 sentence description.
-- The actual prompt rendered inside a fixed-height (180&nbsp;px) scrollable
+- A 1–2 sentence description.
+- The actual prompt rendered inside a fixed-height (180 px) scrollable
   area with a fade-out at the bottom.
 - A `more …` button that expands the panel to show the entire prompt
   (button toggles to `less …`).
@@ -33,15 +33,15 @@ top-to-bottom on every screen size.
 
 ## Files
 
-- `kisssorcar.github.io/index.html` &mdash; the updated page (drop-in
+- `kisssorcar.github.io/index.html` — the updated page (drop-in
   replacement for the file in the website repo).
-- `screenshots/` &mdash; screenshots captured while testing the page in a
+- `screenshots/` — screenshots captured while testing the page in a
   local browser served from `python3 -m http.server`:
-  - `01-prompts-top.png` &mdash; top of the page after `#prompts` jump.
-  - `02-prompts-mid.png` &mdash; middle of the prompt deck.
-  - `03-prompts-expanded.png` &mdash; one panel expanded via `more …`
+  - `01-prompts-top.png` — top of the page after `#prompts` jump.
+  - `02-prompts-mid.png` — middle of the prompt deck.
+  - `03-prompts-expanded.png` — one panel expanded via `more …`
     (button shows `less ▾` with `aria-expanded="true"`).
-  - `04-tricks-section.png` &mdash; further down the deck showing the
+  - `04-tricks-section.png` — further down the deck showing the
     `Promptlet tricks — INJECTIONS.md` group.
 
 ## How to push

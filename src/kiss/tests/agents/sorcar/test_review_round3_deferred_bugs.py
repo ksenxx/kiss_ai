@@ -24,6 +24,7 @@ from __future__ import annotations
 import threading
 import uuid
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -204,7 +205,9 @@ def test_run_single_resnapshots_parent_task_id_at_worker_start(
 
     def _fake_run(self: ChatSorcarAgent, **_kwargs: object) -> str:
         info = self._subagent_info  # noqa: SLF001
-        captured.append(info["parent_task_id"] if info else None)
+        captured.append(
+            cast("str | None", info["parent_task_id"]) if info else None,
+        )
         # On the first worker, simulate the parent's _add_task arriving
         # late: publish the real task_history.id BEFORE worker #2's
         # snapshot.

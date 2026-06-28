@@ -163,7 +163,7 @@ class TestChatEvents:
         assert next_of_a is not None
         assert next_of_a["task_id"] == dup_b_id
         # None when the id is not in the chat
-        assert th._get_adjacent_task_by_chat_id("dup", 999_999, "prev") is None
+        assert th._get_adjacent_task_by_chat_id("dup", "999999", "prev") is None
         # None when id is None
         assert th._get_adjacent_task_by_chat_id("dup", None, "prev") is None
 

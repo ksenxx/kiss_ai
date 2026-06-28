@@ -65,7 +65,7 @@ def _make_server() -> tuple[VSCodeServer, list[dict]]:
 
 def _seed_parent_with_subagents(
     chat_id: str,
-) -> tuple[int, list[int]]:
+) -> tuple[str, list[str]]:
     """Persist a finished parent task plus two finished sub-agent rows.
 
     Mirrors exactly what ``ChatSorcarAgent`` writes during a
@@ -93,7 +93,7 @@ def _seed_parent_with_subagents(
         },
         task_id=parent_id,
     )
-    sub_ids: list[int] = []
+    sub_ids: list[str] = []
     for idx in range(2):
         sub_id, _ = th._add_task(f"sub task {idx}", chat_id=chat_id)
         th._append_chat_event(
@@ -134,7 +134,7 @@ class TestRestoreParentTabWithSubagents:
 
     def _resume_restored_parent_tab(
         self,
-    ) -> tuple[VSCodeServer, list[dict], int, list[int], str]:
+    ) -> tuple[VSCodeServer, list[dict], str, list[str], str]:
         chat_id = "chat-restart-1"
         parent_id, sub_ids = _seed_parent_with_subagents(chat_id)
         server, events = _make_server()

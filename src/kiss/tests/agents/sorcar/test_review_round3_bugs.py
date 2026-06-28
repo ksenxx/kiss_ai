@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
+from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +26,9 @@ from kiss.agents.sorcar import persistence
 
 
 @pytest.fixture
-def temp_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def temp_db(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> Generator[Path]:
     db_path = tmp_path / "sorcar.db"
     monkeypatch.setattr(persistence, "_DB_PATH", db_path)
     persistence._close_db()
@@ -338,7 +341,7 @@ def test_cli_printer_releases_lock_before_daemon_send(
     )
 
     tid = uuid.uuid4().hex
-    printer._inject_task_id = lambda event: {**event, "taskId": tid}
+    printer._inject_task_id = lambda event: {**event, "taskId": tid}  # type: ignore[method-assign]
     printer.broadcast({"type": "step"})
     printer.broadcast({"type": "result"})
     # Lock was NOT held during either send.

@@ -13,6 +13,7 @@ import logging
 import sqlite3
 import threading
 import uuid
+from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +27,9 @@ from kiss.agents.sorcar import persistence
 
 
 @pytest.fixture
-def temp_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def temp_db(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> Generator[Path]:
     db_path = tmp_path / "sorcar.db"
     monkeypatch.setattr(persistence, "_DB_PATH", db_path)
     persistence._close_db()
@@ -419,7 +422,7 @@ def test_cli_printer_normalises_event_task_id_to_lowercase(
 
     upper = uuid.uuid4().hex.upper()
     printer = cli_printer.RecordingConsolePrinter()
-    printer._inject_task_id = lambda event: {**event, "taskId": upper}
+    printer._inject_task_id = lambda event: {**event, "taskId": upper}  # type: ignore[method-assign]
 
     printer.broadcast({"type": "step", "data": "x"})
     assert sent_events, "Event must be forwarded to bridge."
@@ -461,7 +464,7 @@ def test_cli_printer_emits_start_before_event_and_end_after(
 
     tid = uuid.uuid4().hex
     printer = cli_printer.RecordingConsolePrinter()
-    printer._inject_task_id = lambda event: {**event, "taskId": tid}
+    printer._inject_task_id = lambda event: {**event, "taskId": tid}  # type: ignore[method-assign]
 
     printer.broadcast({"type": "result", "data": "done"})
     # Required ordering: start, event:result, end.

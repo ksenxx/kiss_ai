@@ -122,7 +122,7 @@ class TestSetTaskFavorite:
 
     def test_set_favorite_unknown_task_returns_false(self) -> None:
         """A non-existent task_id returns False and writes nothing."""
-        assert th._set_task_favorite(987654, True) is False
+        assert th._set_task_favorite("987654", True) is False
 
     def test_set_favorite_recovers_from_corrupt_column_value(self) -> None:
         """Corrupt ``is_favorite`` column value is replaced cleanly.

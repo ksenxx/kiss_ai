@@ -50,7 +50,7 @@ class TestDeleteTask:
 
     def test_delete_nonexistent_task(self):
         """Deleting a non-existent task returns False."""
-        result = th._delete_task(99999)
+        result = th._delete_task("99999")
         assert result is False
 
     def test_delete_task_removes_events(self):

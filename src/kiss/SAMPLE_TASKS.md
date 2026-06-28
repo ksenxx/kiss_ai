@@ -51,13 +51,13 @@ RUN_GEPA: Sample 100 data points from the val set and call it sval set. Maintain
    d. if the agent predicts correctly on the minibatch, then evaluate it on the sval set and create the list of datapoints on which the agent with the new prompt predicts correctly.
    e. Add the new prompt and the list of datapoints to the pareto frontier
 
-2. pick two nodes from the pareto frontier randomly with the remaining probability.
+1. pick two nodes from the pareto frontier randomly with the remaining probability.
    a. sample a minibatch of 5 datapoints from the dev set
    b. merge the prompts from the two nodes into a new prompt.
    c. if the agent predicts correctly on the minibatch with the new prompt, then evaluate it on the sval set and create the list of datapoints on which the agent with the new prompt predicts correctly.
    d. Add the new prompt and the list of datapoints to the pareto frontier
 
-3. Repeat steps 1 and 2 until there is no change in the prompt after 3 iterations.
+1. Repeat steps 1 and 2 until there is no change in the prompt after 3 iterations.
    END_RUN_GEPA
    Repeat RUN_GEPA until there is no change in the prompt after 3 iterations.
 

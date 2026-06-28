@@ -58,7 +58,7 @@ class _TempDbTestBase:
         th._DB_PATH, th._db_conn, th._KISS_DIR = self.saved
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def _add_subagent(self, parent_id: int, chat_id: str, task: str) -> int:
+    def _add_subagent(self, parent_id: str, chat_id: str, task: str) -> str:
         sub_id, _ = _add_task(
             task,
             chat_id=chat_id,

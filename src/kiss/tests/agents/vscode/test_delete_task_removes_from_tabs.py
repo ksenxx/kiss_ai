@@ -127,7 +127,7 @@ class TestDeleteTaskBackendBroadcast:
     def test_delete_nonexistent_task_does_not_broadcast(self) -> None:
         """Deleting a non-existent task must not broadcast anything."""
         server, events = _make_server()
-        server._handle_delete_task(99999)
+        server._handle_delete_task("99999")
         assert [e for e in events if e.get("type") == "taskDeleted"] == []
 
 
