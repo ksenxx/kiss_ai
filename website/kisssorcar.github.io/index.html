@@ -631,15 +631,23 @@
     .prompt-stage {
       position: relative;
       border-radius: 14px;
+      /* Clip panels as they fly in/out horizontally. Small vertical    */
+      /* padding preserves the panel's drop-shadow above/below.         */
+      overflow: hidden;
+      padding: 6px 0;
+      margin: -6px 0;
     }
     .prompt-stage > .prompt-panel {
       position: absolute;
-      inset: 0;
+      inset: 6px 0;
       opacity: 0;
       visibility: hidden;
       pointer-events: none;
-      transform: translateX(14px);
-      transition: opacity 0.35s ease, transform 0.35s ease;
+      transform: translateX(100%);
+      transition:
+        transform 0.55s cubic-bezier(0.22, 0.61, 0.36, 1),
+        opacity 0.45s ease;
+      will-change: transform, opacity;
     }
     .prompt-stage > .prompt-panel.active {
       position: relative;
@@ -648,6 +656,34 @@
       visibility: visible;
       pointer-events: auto;
       transform: translateX(0);
+    }
+    /* Pre-position incoming panel just before it slides in.            */
+    .prompt-stage > .prompt-panel.enter-right {
+      transform: translateX(100%);
+      opacity: 0;
+      visibility: visible;
+    }
+    .prompt-stage > .prompt-panel.enter-left {
+      transform: translateX(-100%);
+      opacity: 0;
+      visibility: visible;
+    }
+    /* Outgoing panel flies off to the opposite side.                   */
+    .prompt-stage > .prompt-panel.exit-left {
+      position: absolute;
+      inset: 6px 0;
+      transform: translateX(-100%);
+      opacity: 0;
+      visibility: visible;
+      pointer-events: none;
+    }
+    .prompt-stage > .prompt-panel.exit-right {
+      position: absolute;
+      inset: 6px 0;
+      transform: translateX(100%);
+      opacity: 0;
+      visibility: visible;
+      pointer-events: none;
     }
     /* Cancel the section-card stagger animation inside the stage  */
     /* so its final opacity:1 fill doesn't reveal hidden panels.   */
@@ -709,7 +745,11 @@
     .carousel-dot:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 
     @media (prefers-reduced-motion: reduce) {
-      .prompt-stage > .prompt-panel { transition: none; transform: none; }
+      .prompt-stage > .prompt-panel,
+      .prompt-stage > .prompt-panel.enter-right,
+      .prompt-stage > .prompt-panel.enter-left,
+      .prompt-stage > .prompt-panel.exit-left,
+      .prompt-stage > .prompt-panel.exit-right { transition: none; transform: none; }
     }
     @media (max-width: 540px) {
       .carousel-counter { order: 3; flex-basis: 100%; }
@@ -1762,9 +1802,22 @@ In each step, keep track of the best prompt which has the maximum number of succ
       const dotsEl   = carousel.querySelector('#carousel-dots');
       const total    = panels.length;
       if (!total) return;
+
+      // Shuffle the panel order once per page load (Fisher–Yates) so
+      // the carousel presents Tasks and Tricks in a random sequence.
+      for (let i = panels.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [panels[i], panels[j]] = [panels[j], panels[i]];
+      }
+      // Reflect the shuffled order in the DOM so tab-order, dots, and
+      // counter all stay in sync with what is visually shown.
+      panels.forEach((p) => stage.appendChild(p));
+
       let index = 0;
       let autoplayTimer = null;
+      let transitioning = false;
       const AUTOPLAY_MS = 2000;
+      const TRANSITION_MS = 550;
 
       // Build dots, one per panel; mark trick dots with a class so   
       // they can use the accent colour when active.                  
@@ -1775,17 +1828,15 @@ In each step, keep track of the best prompt which has the maximum number of succ
         if (p.querySelector('.panel-badge.trick')) dot.classList.add('trick');
         dot.setAttribute('role', 'tab');
         dot.setAttribute('aria-label', `Show prompt ${i + 1} of ${total}`);
-        dot.addEventListener('click', () => goTo(i, true));
+        dot.addEventListener('click', () => {
+          const dir = (i >= index) ? 'next' : 'prev';
+          goTo(i, true, dir);
+        });
         dotsEl.appendChild(dot);
       });
       const dots = Array.from(dotsEl.children);
 
-      function render() {
-        panels.forEach((p, i) => {
-          const active = (i === index);
-          p.classList.toggle('active', active);
-          p.setAttribute('aria-hidden', active ? 'false' : 'true');
-        });
+      function updateMeta() {
         dots.forEach((d, i) => {
           const active = (i === index);
           d.classList.toggle('active', active);
@@ -1799,9 +1850,33 @@ In each step, keep track of the best prompt which has the maximum number of succ
           (kind ? ` <span class="${kindClass}">${kind}</span>` : '');
       }
 
-      function goTo(i, userInitiated) {
-        index = ((i % total) + total) % total;
-        // Collapse any expanded panel when navigating away.           
+      // Initial render: just mark the first panel active, no animation.
+      function initialRender() {
+        panels.forEach((p, i) => {
+          p.classList.remove('active', 'enter-right', 'enter-left',
+                             'exit-right', 'exit-left');
+          if (i === index) {
+            p.classList.add('active');
+            p.setAttribute('aria-hidden', 'false');
+          } else {
+            p.setAttribute('aria-hidden', 'true');
+          }
+        });
+        updateMeta();
+      }
+
+      function goTo(i, userInitiated, direction) {
+        const newIndex = ((i % total) + total) % total;
+        if (newIndex === index) return;
+        if (transitioning) return;          // ignore rapid clicks mid-flight
+        if (direction === undefined) direction = 'next';
+
+        const oldIndex = index;
+        index = newIndex;
+
+        // Collapse any expanded panel when navigating away (legacy:
+        // current build hides .prompt-more, but this keeps the state
+        // machine clean if that ever changes).
         panels.forEach((p, j) => {
           if (j !== index && p.classList.contains('expanded')) {
             p.classList.remove('expanded');
@@ -1812,11 +1887,43 @@ In each step, keep track of the best prompt which has the maximum number of succ
             }
           }
         });
-        render();
+
+        const outgoing = panels[oldIndex];
+        const incoming = panels[newIndex];
+
+        // 1) Pre-position the incoming panel off-screen on the side it
+        //    will fly in from. 'next' -> enters from the right.
+        incoming.classList.remove('active', 'exit-left', 'exit-right',
+                                  'enter-right', 'enter-left');
+        incoming.classList.add(direction === 'next' ? 'enter-right' : 'enter-left');
+        incoming.setAttribute('aria-hidden', 'false');
+
+        // 2) Force a reflow so the browser registers the starting
+        //    transform before we change classes.
+        void incoming.offsetWidth;
+
+        // 3) Slide the incoming panel into place and the outgoing one
+        //    out toward the opposite side.
+        transitioning = true;
+        incoming.classList.remove('enter-right', 'enter-left');
+        incoming.classList.add('active');
+
+        outgoing.classList.remove('active');
+        outgoing.classList.add(direction === 'next' ? 'exit-left' : 'exit-right');
+        outgoing.setAttribute('aria-hidden', 'true');
+
+        // 4) After the transition, drop the exit class so the panel
+        //    sits at its default off-stage position (translateX 100%).
+        window.setTimeout(() => {
+          outgoing.classList.remove('exit-left', 'exit-right');
+          transitioning = false;
+        }, TRANSITION_MS + 30);
+
+        updateMeta();
         if (userInitiated) restartAutoplay();
       }
-      const next = (u) => goTo(index + 1, u);
-      const prev = (u) => goTo(index - 1, u);
+      const next = (u) => goTo(index + 1, u, 'next');
+      const prev = (u) => goTo(index - 1, u, 'prev');
 
       prevBtn.addEventListener('click', () => prev(true));
       nextBtn.addEventListener('click', () => next(true));
@@ -1875,7 +1982,7 @@ In each step, keep track of the best prompt which has the maximum number of succ
         startAutoplay();
       }
 
-      render();
+      initialRender();
     })();
 
     // ---------------------------------------------------------------
