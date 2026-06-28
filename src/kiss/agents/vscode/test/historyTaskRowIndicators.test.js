@@ -10,17 +10,21 @@
 //       the freshly-started running task MUST appear at the TOP of
 //       the History list (no other row may come before it).
 //
-//   (b) Each row's MIDDLE-LEFT MUST carry a green circle status
-//       indicator:
+//   (b) Each row's status dot follows this spec:
 //         * ``is_running:true``  → ``.sidebar-item-running``
 //           (pulsing green via @keyframes sidebar-running-pulse).
-//         * Finished cleanly     → ``.sidebar-item-completed``
-//           (SOLID green, no animation).
 //         * ``failed:true``      → ``.sidebar-item-failed``
 //           (solid red).
-//       The indicator MUST be the FIRST child of the row so it sits
-//       to the left of the task title.  No row may render WITHOUT
-//       one of these indicators.
+//         * Finished cleanly AND the user just witnessed the
+//           running→completed transition in this page session →
+//           ``.sidebar-item-completed`` (SOLID green, no animation),
+//           which then STAYS solid green for the rest of the session.
+//         * Finished cleanly on a FRESH history load (never seen
+//           running in this session) → NO dot at all.  The History
+//           panel must not display a sea of solid green circles on
+//           old completed tasks the user didn't run this session.
+//       When present, the indicator MUST be the FIRST child of the
+//       row so it sits to the left of the task title.
 //
 // Run directly with ``node``:
 //
@@ -233,20 +237,25 @@ function testRunningTaskShowsAtTopAfterBurgerOpen() {
 }
 
 function testFinishedTaskShowsSolidGreenCircle() {
-  // Scenario: a task that has completed successfully (not running,
-  // not failed) must render a SOLID green circle (no pulsing) at
-  // the middle-left of its row, so the user can tell at a glance
-  // that the task finished cleanly.  Before this fix, finished
-  // rows rendered NO indicator at all — only running and failed
-  // rows had one — which is exactly the regression the user hit.
+  // Scenario: the user starts a task (rendered as running with the
+  // pulsing dot), then the same task finishes (re-rendered as
+  // ``is_running:false`` in the SAME page session).  The dot MUST
+  // swap from pulsing green to SOLID green and STAY solid green
+  // across subsequent history refreshes.  Meanwhile, a row the
+  // session NEVER saw running (a fresh completed row from the
+  // backend) MUST render with NO dot at all — the History panel
+  // must not surface solid green circles on every old completed
+  // task.
   const {win, posted} = makeWebview();
   openBurgerMenu(win);
   uncheckWorkspaceFilter(win);
   const getHist = posted.find(m => m && m.type === 'getHistory');
   assert.ok(getHist, 'burger menu open must post getHistory');
 
-  const sessions = [
-    makeRow({task_id: 1, title: 'completed task', is_running: false}),
+  // Step 1: deliver a batch with one fresh-completed row (never seen
+  // running this session), one running row, and one failed row.
+  const initialSessions = [
+    makeRow({task_id: 1, title: 'fresh completed task', is_running: false}),
     makeRow({
       task_id: 2,
       title: 'running task',
@@ -262,34 +271,93 @@ function testFinishedTaskShowsSolidGreenCircle() {
   ];
   send(win, {
     type: 'history',
-    sessions,
+    sessions: initialSessions,
     offset: 0,
     generation: getHist.generation,
   });
 
-  const byTitle = {};
+  let byTitle = {};
   rows(win).forEach(r => {
     const t = r.querySelector('.sidebar-item-text');
     if (t) byTitle[t.textContent] = r;
   });
 
-  // The completed row MUST render the solid green circle.
-  const completedRow = byTitle['completed task'];
-  assert.ok(completedRow, 'completed row must render');
-  const completedDot = completedRow.querySelector('.sidebar-item-completed');
-  assert.ok(
-    completedDot,
-    'finished task row MUST carry a .sidebar-item-completed dot ' +
-      'so the user sees a SOLID green circle at the middle-left',
+  // The fresh-completed row MUST NOT render any solid green dot.
+  const freshRow = byTitle['fresh completed task'];
+  assert.ok(freshRow, 'fresh completed row must render');
+  assert.strictEqual(
+    freshRow.querySelector('.sidebar-item-completed'),
+    null,
+    'fresh history load of a completed task MUST NOT render a ' +
+      'solid green circle — that is reserved for tasks the user ' +
+      'just watched transition from running to completed',
   );
   assert.strictEqual(
-    completedRow.firstElementChild,
+    freshRow.querySelector('.sidebar-item-running'),
+    null,
+    'fresh completed row must not render a pulsing dot either',
+  );
+
+  // Running row gets the pulsing dot.
+  const runningRow = byTitle['running task'];
+  assert.ok(
+    runningRow.querySelector('.sidebar-item-running'),
+    'running row must carry .sidebar-item-running',
+  );
+
+  // Failed row keeps the red dot.
+  const failedRow = byTitle['failed task'];
+  assert.ok(
+    failedRow.querySelector('.sidebar-item-failed'),
+    'failed row must carry .sidebar-item-failed',
+  );
+
+  // Step 2: the running task finishes — deliver a follow-up event
+  // with task_id=2 now ``is_running:false``.  The session WITNESSED
+  // the running state, so its row MUST now show a SOLID green dot.
+  const finishedSessions = [
+    makeRow({task_id: 1, title: 'fresh completed task', is_running: false}),
+    makeRow({
+      task_id: 2,
+      title: 'running task',
+      is_running: false,
+      endTs: 1_700_000_010_000,
+    }),
+    makeRow({
+      task_id: 3,
+      title: 'failed task',
+      is_running: false,
+      failed: true,
+    }),
+  ];
+  send(win, {
+    type: 'history',
+    sessions: finishedSessions,
+    offset: 0,
+    generation: getHist.generation,
+  });
+  byTitle = {};
+  rows(win).forEach(r => {
+    const t = r.querySelector('.sidebar-item-text');
+    if (t) byTitle[t.textContent] = r;
+  });
+
+  const transitionedRow = byTitle['running task'];
+  const completedDot = transitionedRow.querySelector(
+    '.sidebar-item-completed',
+  );
+  assert.ok(
+    completedDot,
+    'a row whose running→completed transition the session ' +
+      'witnessed MUST render a .sidebar-item-completed solid green dot',
+  );
+  assert.strictEqual(
+    transitionedRow.firstElementChild,
     completedDot,
     'solid green circle must be the FIRST child (middle-left) of the row',
   );
 
-  // Computed style: solid green (#2e7d32 == rgb(46, 125, 50)),
-  // no animation.
+  // Computed style: solid green, no animation.
   const cs = win.getComputedStyle(completedDot);
   assert.strictEqual(
     cs.backgroundColor,
@@ -299,9 +367,6 @@ function testFinishedTaskShowsSolidGreenCircle() {
   );
   const animName = cs.getPropertyValue('animation-name') || '';
   const animShort = cs.getPropertyValue('animation') || '';
-  // ``animation-name: none`` or empty / no ``sidebar-running-pulse``
-  // mention is fine; the key requirement is that the completed dot
-  // does NOT inherit the pulsing animation.
   assert.ok(
     animName.indexOf('sidebar-running-pulse') < 0 &&
       animShort.indexOf('sidebar-running-pulse') < 0,
@@ -310,43 +375,34 @@ function testFinishedTaskShowsSolidGreenCircle() {
       `animation="${animShort}"`,
   );
 
-  // Running row still gets the pulsing dot, not the completed dot.
-  const runningRow = byTitle['running task'];
-  assert.ok(
-    runningRow.querySelector('.sidebar-item-running'),
-    'running row must still carry .sidebar-item-running',
-  );
+  // The fresh-completed row STILL must not carry a solid green dot
+  // (unrelated to the witnessed transition).
+  const stillFreshRow = byTitle['fresh completed task'];
   assert.strictEqual(
-    runningRow.querySelector('.sidebar-item-completed'),
+    stillFreshRow.querySelector('.sidebar-item-completed'),
     null,
-    'running row must NOT carry the completed dot',
+    'an unrelated fresh-completed row MUST not inherit the solid ' +
+      'green circle just because another row transitioned',
   );
 
-  // Failed row keeps the red dot, not the completed dot.
-  const failedRow = byTitle['failed task'];
-  assert.ok(
-    failedRow.querySelector('.sidebar-item-failed'),
-    'failed row must still carry .sidebar-item-failed',
-  );
-  assert.strictEqual(
-    failedRow.querySelector('.sidebar-item-completed'),
-    null,
-    'failed row must NOT carry the completed dot',
-  );
-
-  // Every row must have SOME middle-left indicator dot.
-  rows(win).forEach(r => {
-    assert.ok(
-      indicatorOf(r),
-      'every history row MUST carry exactly one middle-left ' +
-        'status indicator (running / completed / failed); row ' +
-        `"${r.querySelector('.sidebar-item-text').textContent}" has none`,
-    );
+  // Step 3: a third reload (everything still finished) must KEEP the
+  // solid green dot on the transitioned row.
+  send(win, {
+    type: 'history',
+    sessions: finishedSessions,
+    offset: 0,
+    generation: getHist.generation,
   });
+  const persisted = rows(win)[1];
+  assert.ok(
+    persisted.querySelector('.sidebar-item-completed'),
+    'solid green circle MUST persist across subsequent ' +
+      'history reloads once it has appeared',
+  );
 
   win.close();
   console.log(
-    '  ok - finished task row shows SOLID green circle (middle-left)',
+    '  ok - solid green circle only after witnessed running→completed transition',
   );
 }
 
@@ -363,6 +419,36 @@ function testIndicatorsAreVerticallyCenteredInTaskPanels() {
   uncheckWorkspaceFilter(win);
   const getHist = posted.find(m => m && m.type === 'getHistory');
   assert.ok(getHist, 'burger menu open must post getHistory');
+
+  // Prime: send task_id 11 as running first so the session
+  // witnesses its later running→completed transition.  Without this
+  // priming step the fresh-completed row would render with NO dot
+  // (per the no-solid-green-on-fresh-load invariant) and would have
+  // nothing to vertically center.
+  send(win, {
+    type: 'history',
+    sessions: [
+      makeRow({
+        task_id: 11,
+        title: 'completed centered task',
+        is_running: true,
+        endTs: 0,
+      }),
+      makeRow({
+        task_id: 12,
+        title: 'running centered task',
+        is_running: true,
+        endTs: 0,
+      }),
+      makeRow({
+        task_id: 13,
+        title: 'failed centered task',
+        failed: true,
+      }),
+    ],
+    offset: 0,
+    generation: getHist.generation,
+  });
 
   send(win, {
     type: 'history',
