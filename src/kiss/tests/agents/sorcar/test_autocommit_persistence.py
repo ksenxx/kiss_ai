@@ -80,7 +80,7 @@ class TestAutocommitPersistence(unittest.TestCase):
         _merge_flow_module.generate_commit_message_from_diff = self._orig_gen
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def _create_task_for_tab(self, tab_id: str) -> tuple[int, str]:
+    def _create_task_for_tab(self, tab_id: str) -> tuple[str, str]:
         """Create a task history entry and wire it to the tab's agent."""
         task_id, chat_id = _add_task("test task", "")
         tab = self.server._get_tab(tab_id)
@@ -89,7 +89,7 @@ class TestAutocommitPersistence(unittest.TestCase):
         tab.agent._chat_id = chat_id
         return task_id, chat_id
 
-    def _load_events_for_task(self, task_id: int) -> list[dict]:
+    def _load_events_for_task(self, task_id: str) -> list[dict]:
         """Load persisted events for a task_id from the database."""
         db = _get_db()
         rows = db.execute(

@@ -117,8 +117,8 @@ class TestSubagentRowsExcludedFromChatContext:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _insert_subagent_row(
-        self, parent_task_id: int, chat_id: str, task: str, result: str,
-    ) -> int:
+        self, parent_task_id: str, chat_id: str, task: str, result: str,
+    ) -> str:
         """Persist a row that simulates one ``_run_tasks_parallel`` worker.
 
         Matches the ``extra`` payload written by

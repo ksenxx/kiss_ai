@@ -212,7 +212,7 @@ def _safe_int(value: object, default: int = 0) -> int:
             return default
         if isinstance(value, float) and not math.isfinite(value):
             return default
-        return int(value)  # type: ignore[arg-type]
+        return int(value)  # type: ignore[arg-type, call-overload, no-any-return]
     except Exception:
         return default
 
@@ -1793,7 +1793,7 @@ def _event_writer_loop() -> None:
             if _event_writer_stop.is_set():
                 return
             continue
-        batch: list[tuple[int, str, float, str]] = [first]
+        batch: list[tuple[str, str, float, str]] = [first]
         deadline = time.monotonic() + _BATCH_WINDOW_S
         shutdown_pending = False
         while len(batch) < _BATCH_MAX:
