@@ -1393,7 +1393,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         break;
 
       case 'runUpdate':
-        this._runUpdate();
+        this.runUpdate();
         break;
 
       case 'serverReset':
@@ -1441,7 +1441,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
    * the user at the canonical install root rather than their current
    * workspace.
    */
-  private _runUpdate(): void {
+  public runUpdate(): void {
     const scriptPath = findInstallScript();
     if (!scriptPath) {
       showErrorNotification(
