@@ -24,3 +24,4 @@ kiss_project/src/kiss/tests/**
 # Build/install scripts
 copy-kiss.sh
 install.sh
+scripts/**

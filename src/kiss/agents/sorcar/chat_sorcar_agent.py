@@ -18,6 +18,7 @@ from typing import Any
 import yaml
 
 from kiss._version import __version__
+from kiss.agents.sorcar.git_worktree import strip_worktree_suffix
 from kiss.agents.sorcar.persistence import (
     _add_task,
     _append_chat_event,
@@ -206,9 +207,12 @@ class ChatSorcarAgent(SorcarAgent):
         Returns:
             The extra-payload dict.
         """
+        # Persist the user-visible workspace folder, not the ephemeral
+        # ``<repo>/.kiss-worktrees/kiss_wt-<slug>`` directory that gets
+        # removed when the worktree is merged or discarded.
         payload: dict[str, object] = {
             "model": model,
-            "work_dir": work_dir,
+            "work_dir": strip_worktree_suffix(work_dir),
             "version": __version__,
             "is_parallel": is_parallel,
             "is_worktree": is_worktree,
@@ -535,6 +539,27 @@ class ChatSorcarAgent(SorcarAgent):
             start_rec = getattr(printer, "start_recording", None)
             if start_rec is not None:
                 start_rec()
+            # Notify the frontend that ``task_history`` has gained a
+            # new row so the History sidebar refreshes IMMEDIATELY
+            # at task start — not only when the task ends.  Without
+            # this, the only refresh trigger sent at start is
+            # ``status running=True`` (in ``web_server._run_task_inner``)
+            # which fires BEFORE ``_add_task`` has inserted the row;
+            # ``refreshHistory`` then fetches a history list that
+            # does not yet include the running task and the new
+            # task panel never appears in the History sidebar until
+            # the task finishes (where ``task_runner`` emits
+            # ``tasks_updated`` in its post-task block).  Broadcasting
+            # here, immediately after ``_add_task`` has committed
+            # the row, makes the running task appear in History
+            # right away across all launch paths (VS Code UI, CLI,
+            # remote browser, sub-agents).
+            broadcast = getattr(printer, "broadcast", None)
+            if broadcast is not None:
+                try:
+                    broadcast({"type": "tasks_updated", "taskId": ""})
+                except Exception:
+                    pass
         if on_task_id_allocated is not None:
             # Tell the caller (the VS Code task runner) which
             # ``task_history`` row id this run owns, BEFORE any agent

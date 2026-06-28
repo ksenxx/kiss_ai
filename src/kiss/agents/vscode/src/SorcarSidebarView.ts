@@ -27,6 +27,100 @@ function isPathInside(target: string, root: string): boolean {
   const rel = path.relative(rt, tg);
   return rel.length > 0 && !rel.startsWith('..') && !path.isAbsolute(rel);
 }
+
+/**
+ * File extensions that VS Code's text editor can open without
+ * corrupting the buffer.  Anything outside this set is routed to the
+ * native viewer (``vscode.open``) by the ``openFile`` message handler
+ * so binary / preview-only formats (images, PDFs, archives,
+ * executables, fonts, audio/video) get their proper preview instead
+ * of being loaded as garbled text.
+ *
+ * Files without an extension default to text (most config / dotfiles
+ * are textual).  The list intentionally covers only the binary /
+ * preview-only formats the user is likely to click in chat output;
+ * adding a new text-like extension here is the only change required
+ * to extend coverage.
+ */
+const NATIVE_VIEWER_EXTENSIONS = new Set([
+  // Images
+  '.png',
+  '.jpg',
+  '.jpeg',
+  '.gif',
+  '.bmp',
+  '.ico',
+  '.webp',
+  '.tiff',
+  '.tif',
+  '.avif',
+  '.heic',
+  // Documents
+  '.pdf',
+  // Archives
+  '.zip',
+  '.tar',
+  '.gz',
+  '.tgz',
+  '.bz2',
+  '.xz',
+  '.7z',
+  '.rar',
+  '.jar',
+  '.war',
+  // Office
+  '.doc',
+  '.docx',
+  '.xls',
+  '.xlsx',
+  '.ppt',
+  '.pptx',
+  '.odt',
+  '.ods',
+  '.odp',
+  // Executables / native binaries
+  '.exe',
+  '.dll',
+  '.so',
+  '.dylib',
+  '.a',
+  '.o',
+  '.class',
+  '.wasm',
+  // Audio / video
+  '.mp3',
+  '.wav',
+  '.ogg',
+  '.flac',
+  '.m4a',
+  '.aac',
+  '.mp4',
+  '.m4v',
+  '.mov',
+  '.avi',
+  '.mkv',
+  '.webm',
+  // Fonts
+  '.ttf',
+  '.otf',
+  '.woff',
+  '.woff2',
+  '.eot',
+  // Compiled / data
+  '.pyc',
+  '.pyo',
+  '.bin',
+  '.dat',
+  '.db',
+  '.sqlite',
+  '.sqlite3',
+]);
+
+function isTextLikeExtension(filePath: string): boolean {
+  const ext = path.extname(filePath).toLowerCase();
+  if (!ext) return true;
+  return !NATIVE_VIEWER_EXTENSIONS.has(ext);
+}
 import {AgentClient} from './AgentClient';
 import {getGitApi} from './gitApi';
 import {MergeManager} from './MergeManager';
@@ -152,6 +246,18 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     string,
     vscode.Progress<{message?: string}>
   > = new Map();
+  /**
+   * Safety-timeout (ms) for the "Auto-committing…" progress toast.
+   *
+   * ``undefined`` (the production default) disables the auto-dismiss
+   * timer entirely — the toast stays visible until ``autocommit_done``
+   * arrives or the view is disposed.  A finite value re-enables the
+   * timer at that interval; this is used by the E2E regression test
+   * (``autocommitProgressSticky.test.js``) to reproduce the bug where
+   * a fixed timeout dismissed the toast in the middle of a slow
+   * "Generating commit message…" LLM call.
+   */
+  public _autocommitProgressTimeoutMs: number | undefined = undefined;
   private _disposed: boolean = false;
   /** Last remote URL sent to the webview — avoids redundant messages. */
   private _lastSentUrl: string = '';
@@ -175,19 +281,31 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   private _workspaceFoldersSub: vscode.Disposable | undefined;
 
   /**
-   * Show a notification-progress dialog with a timeout-based auto-resolve.
+   * Show a notification-progress dialog backed by the chat webview.
    *
    * Stores the progress reporter and resolve callback in the given maps
    * so that incoming backend events can update the message or complete
-   * the dialog.  If no completion event arrives within *timeoutMs* the
-   * dialog is automatically dismissed.
+   * the dialog.
+   *
+   * When *timeoutMs* is a finite positive number, the dialog is
+   * automatically dismissed after that many milliseconds even if no
+   * completion event has arrived.  When *timeoutMs* is ``undefined``
+   * (or non-finite, or ``<= 0``) no auto-dismiss timer is started; the
+   * dialog stays visible until either (a) the matching completion event
+   * arrives and removes the resolver from *resolveMap*, or (b)
+   * ``_resolveAllWorktreeActions`` drains the maps on dispose /
+   * disconnect.  This sticky mode is used for autocommit, where the
+   * underlying LLM call ("Generating commit message…") can legitimately
+   * take much longer than any reasonable safety timeout — dismissing
+   * the progress toast early would mislead the user into thinking the
+   * commit failed or is no longer in progress.
    */
   private _showActionProgress(
     title: string,
     tabId: string | undefined,
     progressMap: Map<string, vscode.Progress<{message?: string}>>,
     resolveMap: Map<string, () => void>,
-    timeoutMs: number = 120_000,
+    timeoutMs: number | undefined = 120_000,
   ): void {
     withWebviewNotificationProgress(
       {
@@ -202,12 +320,18 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           if (tabId !== undefined) {
             resolveMap.set(tabId, resolve);
           }
-          setTimeout(() => {
-            if (tabId !== undefined && resolveMap.get(tabId) === resolve) {
-              resolveMap.delete(tabId);
-              resolve();
-            }
-          }, timeoutMs);
+          if (
+            timeoutMs !== undefined &&
+            Number.isFinite(timeoutMs) &&
+            timeoutMs > 0
+          ) {
+            setTimeout(() => {
+              if (tabId !== undefined && resolveMap.get(tabId) === resolve) {
+                resolveMap.delete(tabId);
+                resolve();
+              }
+            }, timeoutMs);
+          }
         });
       },
     );
@@ -319,6 +443,22 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       // Hide the "KISS Sorcar Server is starting ..." overlay and
       // reveal the regular chat UI now that the daemon is reachable.
       this._sendToWebview({type: 'daemonStatus', connected: true});
+      // RACE FIX: re-issue every webview-init request the ``ready``
+      // handler had already dispatched whenever the daemon socket
+      // (re)connects AND there is a live webview that depends on the
+      // replies.  Without this, a daemon restart (or any transient
+      // socket drop) leaves the model picker blank, the input-history
+      // dropdown empty and the settings panel un-prefilled — because
+      // the original ``models`` / ``inputHistory`` / ``configData``
+      // events were broadcast to the per-connection endpoint that no
+      // longer exists, so the daemon dropped them, and the webview
+      // never re-asks on its own.  Gated on ``_view`` so a sidebar the
+      // user never opened does not spam the daemon on every reconnect.
+      if (this._view) {
+        client.sendCommand({type: 'getModels'});
+        client.sendCommand({type: 'getInputHistory'});
+        client.sendCommand({type: 'getConfig'});
+      }
     });
     client.on('disconnect', () => {
       this._daemonConnected = false;
@@ -326,6 +466,16 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       // restart) — re-show the loading overlay until AgentClient's
       // auto-reconnect succeeds.
       this._sendToWebview({type: 'daemonStatus', connected: false});
+      // Any in-flight worktree / autocommit progress toast is
+      // orphaned now: the daemon's per-connection per-tab state was
+      // dropped with the socket, so ``autocommit_done`` /
+      // ``worktree_result`` can never arrive for the operation that
+      // was running pre-disconnect.  Drain the resolver maps so the
+      // sticky "Auto-committing… / Generating commit message…" toast
+      // does not linger forever — the inner promise resolves, then
+      // ``withWebviewNotificationProgress``'s ``.finally`` posts
+      // ``{close: true}`` to the still-active webview poster.
+      this._resolveAllWorktreeActions();
     });
     client.connect();
     // Keep the daemon in sync whenever the workspace folder set
@@ -1068,8 +1218,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
             );
             break;
           }
-          {
-            const uri = vscode.Uri.file(filePath);
+          const uri = vscode.Uri.file(filePath);
+          if (isTextLikeExtension(filePath)) {
+            // Text-like files open in the regular VS Code editor so
+            // we can position the caret on a 1-indexed line.
             const doc = await vscode.workspace.openTextDocument(uri);
             const editor = await vscode.window.showTextDocument(doc, {
               preview: false,
@@ -1083,6 +1235,15 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
                 vscode.TextEditorRevealType.InCenter,
               );
             }
+          } else {
+            // Binary / non-text files (images, PDFs, archives,
+            // executables, …) are routed to the native viewer via
+            // ``vscode.open`` so VS Code picks the right preview
+            // (built-in image preview, PDF preview extension,
+            // external default app, etc.).  Loading them as text
+            // would corrupt the buffer and prevent the preview
+            // from rendering.
+            await vscode.commands.executeCommand('vscode.open', uri);
           }
         }
         break;
@@ -1170,11 +1331,23 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         const acAction = message.action;
         const acTabId = message.tabId;
         if (acAction === 'commit') {
+          // No auto-dismiss timeout in production
+          // (``_autocommitProgressTimeoutMs`` is ``undefined`` by
+          // default).  The "Generating commit message…" phase is
+          // driven by an LLM call that can easily exceed any fixed
+          // timeout we might pick, so the progress toast must stay
+          // visible until ``autocommit_done`` arrives (or the view is
+          // disposed / the daemon disconnects, both of which drain
+          // the resolver map via ``_resolveAllWorktreeActions``).
+          // Tests can opt into a finite safety timer by setting
+          // ``_autocommitProgressTimeoutMs`` to reproduce the original
+          // bug.
           this._showActionProgress(
             'Auto-committing…',
             acTabId,
             this._autocommitProgresses,
             this._autocommitActionResolves,
+            this._autocommitProgressTimeoutMs,
           );
         }
         this._getClient().sendCommand({
@@ -1228,6 +1401,13 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         // supervising LaunchAgent/systemd unit respawns a fresh
         // process.  The AgentClient transparently reconnects over the
         // UDS once the new daemon is listening.
+        //
+        // The webview is responsible for surfacing an in-settings-
+        // panel floating confirmation dialog when an agent is still
+        // running on any tab — the extension only sees the
+        // ``serverReset`` message after the user has either confirmed
+        // (OK) or there was no agent running to begin with.  Cancel
+        // never reaches the extension.
         this._getClient().sendCommand({type: 'serverReset'});
         break;
 

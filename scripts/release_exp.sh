@@ -81,6 +81,8 @@ build_vscode_extension() {
     # `prebuild-install || node-gyp rebuild` can hang forever and neither script
     # is needed to package the VSIX (mirrors install.sh and release.sh).
     npm ci --ignore-scripts --no-audit --no-fund
+    npm run compile
+    npm run copy-kiss
     npm run package
 
     # npm run package hardcodes -o kiss-sorcar.vsix; rename to match the buggy name

@@ -199,11 +199,17 @@ class TestModelInfoFactory:
         m = model("text-embedding-004")
         assert m.model_name == "text-embedding-004"
 
-    def test_model_minimax(self) -> None:
+    def test_model_glm(self) -> None:
         from kiss.core.models.model_info import model
 
-        m = model("minimax-m1")
-        assert m.model_name == "minimax-m1"
+        m = model("glm-4.6")
+        assert m.model_name == "glm-4.6"
+
+    def test_model_moonshot(self) -> None:
+        from kiss.core.models.model_info import model
+
+        m = model("moonshot-v1-32k")
+        assert m.model_name == "moonshot-v1-32k"
 
 
 class TestGetAvailableModels:

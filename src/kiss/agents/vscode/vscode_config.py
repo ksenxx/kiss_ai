@@ -80,7 +80,8 @@ API_KEY_ENV_VARS: frozenset[str] = frozenset({
     "ANTHROPIC_API_KEY",
     "TOGETHER_API_KEY",
     "OPENROUTER_API_KEY",
-    "MINIMAX_API_KEY",
+    "ZAI_API_KEY",
+    "MOONSHOT_API_KEY",
 })
 
 

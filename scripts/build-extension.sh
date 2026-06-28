@@ -48,9 +48,25 @@ npm run copy-kiss
 echo "==> Packaging VSIX..."
 npm run package
 
+# Filter VS Code's own DEP0169 ``url.parse()`` deprecation noise out of
+# ``code --install-extension`` / ``--uninstall-extension`` stderr.  The
+# warning is emitted by VS Code's bundled
+# ``Resources/app/out/vs/code/node/cliProcessMain.js`` — verified by
+# reproducing it with an unrelated extension (``code --uninstall-extension
+# ms-python.debugpy``).  None of our TS/JS sources call ``url.parse()``;
+# ``src/UpdateChecker.js`` only imports the WHATWG ``URL`` class.  Neither
+# ``NODE_OPTIONS=--no-deprecation`` nor ``VSCODE_NODE_OPTIONS=--no-deprecation``
+# suppress it (the ``code`` wrapper unsets ``NODE_OPTIONS`` before
+# ``ELECTRON_RUN_AS_NODE=1`` re-execs Electron).  Stripping just the two
+# noise lines via stderr ``grep -v`` keeps real errors visible and
+# preserves ``$CODE``'s exit code.
+code_quiet() {
+    "$CODE" "$@" 2> >(grep -v -E 'DEP0169|url\.parse\(\)|trace-deprecation' >&2)
+}
+
 echo "==> Installing extension..."
-"$CODE" --uninstall-extension ksenxx.kiss-sorcar 2>/dev/null || true
-"$CODE" --install-extension kiss-sorcar.vsix --force
+code_quiet --uninstall-extension ksenxx.kiss-sorcar 2>/dev/null || true
+code_quiet --install-extension kiss-sorcar.vsix --force
 
 # Stop the old kiss-web daemon BEFORE the extension auto-reloads.  The
 # previous --uninstall-extension call deleted the directory tree the
