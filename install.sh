@@ -751,6 +751,11 @@ update_repo() {
     # warnings.  Neither script is needed to compile and package the VSIX.
     # --no-audit --no-fund skip more network round-trips and noise.
     npm ci --ignore-scripts --no-audit --no-fund
+    echo "   Compiling extension TypeScript..."
+    npm run compile
+    echo "   Copying bundled KISS runtime..."
+    npm run copy-kiss
+    echo "   Packaging VSIX..."
     npm run package
     cd "$PROJECT_DIR"
     if [ ! -f "$VSIX" ]; then
@@ -839,50 +844,40 @@ update_repo() {
     # client that is mid-flight during the launchd/systemd respawn window.
     rm -f "$HOME/.kiss/sorcar.sock"
 
-    # Copy the bundled MODEL_INFO.json into ~/.kiss/ so the freshly installed
-    # extension serves the latest model pricing/context table on startup
-    # without waiting for ``model_info.py``'s lazy auto-copy.  The Python
-    # loader in ``kiss.core.models.model_info`` also auto-refreshes when the
-    # package copy is newer, but doing it here makes the data the user sees
-    # match the just-installed source immediately.
-    MODEL_INFO_SRC="$PROJECT_DIR/src/kiss/core/models/MODEL_INFO.json"
-    MODEL_INFO_DST="$HOME/.kiss/MODEL_INFO.json"
-    if [ -f "$MODEL_INFO_SRC" ]; then
-        cp "$MODEL_INFO_SRC" "$MODEL_INFO_DST"
-        echo "   Installed MODEL_INFO.json at $MODEL_INFO_DST"
-    else
-        echo "   WARNING: $MODEL_INFO_SRC missing — model table not refreshed."
-    fi
-
-    # Always overwrite the bundled INJECTIONS.md and SAMPLE_TASKS.md into
-    # the user's kiss home directory on every install/update.  This ensures
-    # the kiss-web daemon's Tricks button and the VS Code extension's
-    # welcome-screen sample-task chips always reflect the latest bundled
-    # Markdown when the extension is updated — matching the MODEL_INFO.json
-    # pattern directly above.
+    # MODEL_INFO.json is intentionally NOT copied into the user's kiss
+    # home directory.  The bundled
+    # ``src/kiss/core/models/MODEL_INFO.json`` is read directly from
+    # the installed package at runtime by ``kiss.core.models.model_info``,
+    # so every extension upgrade automatically delivers the latest model
+    # pricing/context table without leaving a stale user-side copy
+    # shadowing the freshly installed bundled file.
     #
-    # ``${KISS_HOME:-$HOME/.kiss}`` matches the runtime resolution in
-    # ``user_assets.kiss_home_dir`` so a developer with a custom
-    # ``KISS_HOME`` exported lands the files where the runtime will
-    # read them.
+    # User-curated model overrides / extensions live in
+    # ``~/.kiss/MY_MODELS.json`` — auto-seeded on first import with a
+    # short documentation block and one commented-out example entry —
+    # matching the ``MY_INJECTION.md`` / ``MY_TASK_TEMPLATES.md`` pattern.
+    #
+    # Re-introducing the copy here would mean a stale user-side
+    # ``~/.kiss/MODEL_INFO.json`` shadowing the freshly installed
+    # bundled file forever after the first install.
+
+    # INJECTIONS.md is intentionally NOT copied into the user's kiss
+    # home directory.  The bundled ``src/kiss/INJECTIONS.md`` is read
+    # directly from the installed package at runtime by
+    # ``kiss.agents.vscode.tricks.read_tricks`` and ``getTricks`` in
+    # ``SorcarTab.ts``, so every extension upgrade automatically
+    # delivers the latest bundled tricks without clobbering user
+    # edits.  User-curated tricks live in ``~/.kiss/MY_INJECTION.md``
+    # — auto-seeded on first read with a single ``## Trick`` starter
+    # ("Write end-to-end 100% coverage tests for the feature first.
+    # Then implement the feature.") — matching the
+    # ``MY_TASK_TEMPLATES.md`` / ``SAMPLE_TASKS.md`` pattern.
+    #
+    # Re-introducing the copy here would mean a stale user-side
+    # ``~/.kiss/INJECTIONS.md`` shadowing the freshly installed
+    # bundled file forever after the first install.
     KISS_HOME_DIR="${KISS_HOME:-$HOME/.kiss}"
     mkdir -p "$KISS_HOME_DIR"
-    INJECTIONS_SRC="$PROJECT_DIR/src/kiss/INJECTIONS.md"
-    INJECTIONS_DST="$KISS_HOME_DIR/INJECTIONS.md"
-    if [ -f "$INJECTIONS_SRC" ]; then
-        cp "$INJECTIONS_SRC" "$INJECTIONS_DST"
-        echo "   Installed INJECTIONS.md at $INJECTIONS_DST"
-    else
-        echo "   WARNING: $INJECTIONS_SRC missing — tricks not refreshed."
-    fi
-    SAMPLE_TASKS_SRC="$PROJECT_DIR/src/kiss/SAMPLE_TASKS.md"
-    SAMPLE_TASKS_DST="$KISS_HOME_DIR/SAMPLE_TASKS.md"
-    if [ -f "$SAMPLE_TASKS_SRC" ]; then
-        cp "$SAMPLE_TASKS_SRC" "$SAMPLE_TASKS_DST"
-        echo "   Installed SAMPLE_TASKS.md at $SAMPLE_TASKS_DST"
-    else
-        echo "   WARNING: $SAMPLE_TASKS_SRC missing — welcome chips not refreshed."
-    fi
 
     date -u +%Y-%m-%dT%H:%M:%SZ > "$HOME/.kiss/.extension-updated"
     # Remove any stale source-install marker from older versions of this

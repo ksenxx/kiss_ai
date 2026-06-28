@@ -74,6 +74,12 @@ class TestHistoryFailedFlag(unittest.TestCase):
         stop_id, _ = th._add_task("stop task")
         th._save_task_result(result="Task stopped by user", task_id=stop_id)
 
+        restart_id, _ = th._add_task("restart task")
+        th._save_task_result(
+            result="Task interrupted by server restart/shutdown",
+            task_id=restart_id,
+        )
+
         self.server._handle_command({"type": "getHistory"})
         sessions = self._sessions()
         by_task = {s["preview"]: s for s in sessions}
@@ -82,7 +88,8 @@ class TestHistoryFailedFlag(unittest.TestCase):
         self.assertTrue(by_task["fail task"]["failed"])
         self.assertTrue(by_task["fail2 task"]["failed"])
         self.assertTrue(by_task["crash task"]["failed"])
-        self.assertFalse(by_task["stop task"]["failed"])
+        self.assertTrue(by_task["stop task"]["failed"])
+        self.assertTrue(by_task["restart task"]["failed"])
 
     def test_failed_flag_for_process_killed_recovery(self) -> None:
         """A row left as ``"Agent Failed Abruptly"`` by a SIGKILL'd

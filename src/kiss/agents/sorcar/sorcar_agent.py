@@ -70,6 +70,7 @@ def auto_commit_changes(
     commit_dir: Path,
     user_prompt: str | None,
     message_fn: Callable[[Path, str | None], str],
+    notify_fn: Callable[[str, str], None] | None = None,
 ) -> bool:
     """Stage all changes, generate a commit message, and commit.
 
@@ -97,6 +98,27 @@ def auto_commit_changes(
             message (or its fallback), or ``None`` when unavailable.
         message_fn: Callable producing a commit message from
             ``(commit_dir, user_prompt)``.
+        notify_fn: Optional UI callback invoked at two life-cycle
+            points so the chat webview can render toasts:
+
+            - ``notify_fn("generating", "")`` immediately before
+              *message_fn* runs (typically a slow LLM call) so the
+              user sees "Generating commit message" while the LLM
+              works.
+            - ``notify_fn("committed", subject)`` immediately after
+              a successful commit, where *subject* is the first
+              non-empty line of the committed message.
+
+            Both hooks are SKIPPED when there is nothing to commit
+            (no staged diff after the initial ``stage_all``), so the
+            webview never sees a misleading "Generating commit
+            message" toast without a follow-up.  The "committed"
+            hook is also not invoked when ``commit_staged`` returns
+            ``False`` after *message_fn* (e.g. pre-commit hook
+            rejected the commit).
+
+            All ``notify_fn`` exceptions are swallowed so a broken
+            UI hook can never block the commit itself.
 
     Returns:
         True if a commit was created, False if nothing to commit.
@@ -104,6 +126,14 @@ def auto_commit_changes(
     from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 
     GitWorktreeOps.stage_all(commit_dir)
+    # Short-circuit cleanly when there is nothing to commit: no
+    # "generating" toast (it would be misleading because no commit
+    # will happen), no LLM call (saves tokens), no follow-up
+    # "committed" toast.  Late-arriving files don't matter here
+    # because there's no slow message_fn window to race against.
+    if not GitWorktreeOps.staged_diff(commit_dir):
+        return False
+    _safe_notify(notify_fn, "generating", "")
     try:
         msg = message_fn(commit_dir, user_prompt)
     except Exception:
@@ -121,7 +151,44 @@ def auto_commit_changes(
     # closes.  Cheap when nothing changed (``git add -A`` is a no-op
     # against an unchanged tree).
     GitWorktreeOps.stage_all(commit_dir)
-    return GitWorktreeOps.commit_staged(commit_dir, msg)
+    committed = GitWorktreeOps.commit_staged(commit_dir, msg)
+    if committed:
+        _safe_notify(notify_fn, "committed", _commit_subject(msg))
+    return committed
+
+
+def _commit_subject(message: str) -> str:
+    """Return the first non-empty line of a commit *message*.
+
+    Used as the subject the chat webview renders inside the
+    "Committed <subject>" toast.  Falls back to an empty string when
+    the message has no printable line (defensive: in practice the
+    fallback message always starts with ``kiss:``).
+    """
+    for raw in message.splitlines():
+        line = raw.strip()
+        if line:
+            return line
+    return ""
+
+
+def _safe_notify(
+    notify_fn: Callable[[str, str], None] | None,
+    stage: str,
+    subject: str,
+) -> None:
+    """Invoke *notify_fn* swallowing any exception.
+
+    Errors in the optional UI hook must never prevent the commit
+    itself (and must never poison the surrounding ``except`` block
+    that the LLM-failure fallback relies on).
+    """
+    if notify_fn is None:
+        return
+    try:
+        notify_fn(stage, subject)
+    except Exception:
+        logger.debug("auto_commit_changes notify_fn raised", exc_info=True)
 
 
 def _yaml_failure(exc: BaseException) -> str:
@@ -362,7 +429,11 @@ class SorcarAgent(RelentlessAgent):
             return os.process_cpu_count() or 1
 
         def set_model(model_name: str) -> str:
-            """Change the agent's LLM model dynamically.
+            """Change only this running agent's LLM model dynamically.
+
+            This does not persist ``last_model`` and therefore cannot
+            change the user-facing model picker default.  Only an
+            explicit picker selection should update that preference.
 
             Args:
                 model_name: New LLM model name (for example
@@ -374,12 +445,9 @@ class SorcarAgent(RelentlessAgent):
                 change (or a "no change" message when the requested
                 model is already active).
             """
-            from kiss.agents.sorcar.persistence import _save_last_model
-
             old_model = getattr(self, "model", None)
             if old_model is None:
                 self.model_name = model_name
-                _save_last_model(model_name)
                 return (
                     f"Model deferred-changed to {model_name} "
                     "(no live model yet)."
@@ -423,7 +491,6 @@ class SorcarAgent(RelentlessAgent):
                 self._cached_tools_schema = new_model._build_openai_tools_schema(  # type: ignore[attr-defined]
                     self.function_map,
                 )
-            _save_last_model(model_name)
             return f"Model changed from {previous_name} to {model_name}."
 
         # Agent Skills (https://agentskills.io): the tool's docstring

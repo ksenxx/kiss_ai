@@ -9,15 +9,14 @@ place so the very next LLM call goes to the changed model.  These tests
 verify:
 
 * The tool appears in the agent's tool list.
-* Calling it without a live model just updates ``self.model_name`` and
-  persists the selection.
+* Calling it without a live model just updates ``self.model_name``.
 * Calling it with a live model swaps ``self.model`` to a fresh instance
   for the new model name while preserving the existing conversation
   history, ``model_config``, and callbacks.
 * The cached tools schema is rebuilt so it stays consistent with the
   (possibly different) provider of the new model.
 * The same-name no-op short-circuits.
-* The model selection is persisted via ``_save_last_model``.
+* The model picker default is NOT persisted or otherwise changed.
 """
 
 from __future__ import annotations
@@ -147,14 +146,18 @@ class TestChangeModelNoLiveModel:
         assert "gpt-4o-mini" in result
         assert agent.model_name == "gpt-4o-mini"
 
-    def test_persists_via_save_last_model(self) -> None:
-        from kiss.agents.sorcar.persistence import _load_last_model
+    def test_does_not_persist_or_change_model_picker_default(self) -> None:
+        """Internal set_model must not change the user's picker default."""
+        from kiss.agents.sorcar.persistence import _load_last_model, _save_last_model
 
+        _save_last_model("claude-opus-4-7")
         agent, tools = _make_agent()
         set_model = _find_tool(tools, "set_model")
 
         set_model("gemini-2.5-pro")
-        assert _load_last_model() == "gemini-2.5-pro"
+
+        assert agent.model_name == "gemini-2.5-pro"
+        assert _load_last_model() == "claude-opus-4-7"
 
 
 # ---------------------------------------------------------------------------
@@ -233,15 +236,20 @@ class TestChangeModelLiveSwap:
         assert "already" in result.lower() or "no change" in result.lower()
         assert agent.model is original
 
-    def test_persists_via_save_last_model(self) -> None:
-        from kiss.agents.sorcar.persistence import _load_last_model
+    def test_does_not_persist_or_change_model_picker_default(self) -> None:
+        """Swapping a live model must not change the user's picker default."""
+        from kiss.agents.sorcar.persistence import _load_last_model, _save_last_model
 
+        _save_last_model("claude-opus-4-7")
         agent, tools = _make_agent()
         _bootstrap_live_model(agent, "model-a")
         set_model = _find_tool(tools, "set_model")
 
         set_model("model-b")
-        assert _load_last_model() == "model-b"
+
+        assert agent.model.model_name == "model-b"
+        assert agent.model_name == "model-b"
+        assert _load_last_model() == "claude-opus-4-7"
 
 
 # ---------------------------------------------------------------------------

@@ -147,11 +147,13 @@ def model_vendor(name: str) -> tuple[str, int]:
         return "OpenAI", 1
     if name.startswith("gemini-"):
         return "Gemini", 2
-    if name.startswith("minimax-"):
-        return "MiniMax", 3
+    if name.startswith("glm-"):
+        return "Z.AI", 3
+    if name.startswith("kimi-") or name.startswith("moonshot-"):
+        return "Moonshot", 4
     if name.startswith("openrouter/"):
-        return "OpenRouter", 4
-    return "Together AI", 5
+        return "OpenRouter", 5
+    return "Together AI", 6
 
 
 def generate_commit_message_from_diff(

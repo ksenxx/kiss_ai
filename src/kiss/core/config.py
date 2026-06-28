@@ -124,9 +124,13 @@ class Config(BaseModel):
         default_factory=lambda: os.getenv("OPENROUTER_API_KEY", ""),
         description="OpenRouter API key (can also be set via OPENROUTER_API_KEY env var)",
     )
-    MINIMAX_API_KEY: str = Field(
-        default_factory=lambda: os.getenv("MINIMAX_API_KEY", ""),
-        description="MiniMax API key (can also be set via MINIMAX_API_KEY env var)",
+    ZAI_API_KEY: str = Field(
+        default_factory=lambda: os.getenv("ZAI_API_KEY", ""),
+        description="Z.AI (Zhipu/GLM) API key (can also be set via ZAI_API_KEY env var)",
+    )
+    MOONSHOT_API_KEY: str = Field(
+        default_factory=lambda: os.getenv("MOONSHOT_API_KEY", ""),
+        description="Moonshot AI (Kimi) API key (can also be set via MOONSHOT_API_KEY env var)",
     )
     max_budget: float = Field(
         default=200.0,

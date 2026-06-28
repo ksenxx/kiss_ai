@@ -65,7 +65,7 @@ from functools import partial
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any, cast
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 
 import websockets
 from websockets.asyncio.server import ServerConnection, serve
@@ -75,7 +75,6 @@ from websockets.http11 import Request, Response
 from kiss.agents.vscode.diff_merge import _read_lines_preserved
 from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.agents.vscode.server import VSCodeServer
-from kiss.agents.vscode.user_assets import ensure_user_asset
 from kiss.agents.vscode.vscode_config import load_config, source_shell_env
 from kiss.core.config import get_jobs_root
 from kiss.viz_trajectory.server import find_job_dir, list_jobs, load_job_trajectories
@@ -85,6 +84,7 @@ __all__ = ["RemoteAccessServer", "WebPrinter"]
 logger = logging.getLogger(__name__)
 
 MEDIA_DIR = Path(__file__).parent / "media"
+_MEDIA_VERSION_CACHE: dict[str, str] = {}
 
 # HTML page for the agent-trajectory visualizer, served at ``/trajectories/``.
 TRAJECTORY_TEMPLATE = (
@@ -238,9 +238,30 @@ _MAX_RESTORED_TABS = 32
 _MAX_ATTACHMENTS = 32
 
 # Seconds to wait after acknowledging a "Server reset" request before
-# SIGTERMing this daemon, so the ``notice`` event flushes to the
+# SIGTERMing this daemon, so the ``notification`` event flushes to the
 # clicking window before its socket drops on shutdown.
 _SERVER_RESET_DELAY = 0.4
+
+# Seconds after the freshly-restarted daemon binds its listeners
+# before it broadcasts the "Server restart complete" notification.
+# Long enough for the VS Code extension's ``AgentClient`` and any
+# reconnecting browser webview to reattach to the UDS / WSS so the
+# toast is delivered into a live socket instead of being dropped on
+# the floor.  Tests monkey-patch this constant to a tiny value so
+# they do not have to wait the full window.
+_SERVER_RESET_COMPLETE_DELAY = 3.0
+
+# File name of the pending-reset flag dropped by
+# :meth:`RemoteAccessServer._handle_server_reset` in the same
+# directory as ``remote-url.json`` (``~/.kiss`` in production, a
+# tmpdir in tests via ``url_file=``).  Its presence at daemon
+# startup means the previous instance SIGTERMed itself in response
+# to a user-initiated "Server reset" — the freshly-restarted daemon
+# deletes the flag and schedules a "Server restart complete"
+# notification to reconnecting clients.  Absent flag ⇒ this is a
+# regular launch / crash restart / install respawn and the
+# completion toast is intentionally suppressed.
+_SERVER_RESET_FLAG_NAME = "server-reset-pending.json"
 
 # M7: cap the prompt size echoed back via ``setTaskText`` so a giant
 # JSON payload cannot push tens of MB through the broadcast pipeline.
@@ -2070,6 +2091,16 @@ class WebPrinter(JsonPrinter):
                 pending.discard(fut)
 
 
+def _media_url(name: str) -> str:
+    """Return a cache-busted URL for a packaged web media asset."""
+    ver = _MEDIA_VERSION_CACHE.get(name)
+    if ver is None:
+        data = (MEDIA_DIR / name).read_bytes()
+        ver = hashlib.sha256(data).hexdigest()[:16]
+        _MEDIA_VERSION_CACHE[name] = ver
+    return f"/media/{name}?v={ver}"
+
+
 def _build_html() -> str:
     """Build the standalone HTML page for remote Sorcar access.
 
@@ -2148,8 +2179,8 @@ def _build_html() -> str:
     subs = {
         "VIEWPORT": "width=device-width,initial-scale=1,maximum-scale=1",
         "CSP_META": "",
-        "STYLE_HREF": "/media/main.css",
-        "HLJS_CSS_HREF": "/media/highlight-github-dark.min.css",
+        "STYLE_HREF": _media_url("main.css"),
+        "HLJS_CSS_HREF": _media_url("highlight-github-dark.min.css"),
         "HEAD_STYLE": head_style,
         "BODY_CLASS_ATTR": ' class="remote-chat"',
         "INPUT_PLACEHOLDER": "Ask anything... (@ for files)",
@@ -2158,11 +2189,11 @@ def _build_html() -> str:
         "VERSION_SUFFIX": f" {version}" if version else "",
         "AUTH_MODAL": auth_modal,
         "NONCE_ATTR": "",
-        "HLJS_SRC": "/media/highlight.min.js",
-        "MARKED_SRC": "/media/marked.min.js",
-        "PANEL_COPY_SRC": "/media/panelCopy.js",
-        "MAIN_SRC": "/media/main.js",
-        "DEMO_SRC": "/media/demo.js",
+        "HLJS_SRC": _media_url("highlight.min.js"),
+        "MARKED_SRC": _media_url("marked.min.js"),
+        "PANEL_COPY_SRC": _media_url("panelCopy.js"),
+        "MAIN_SRC": _media_url("main.js"),
+        "DEMO_SRC": _media_url("demo.js"),
         "SHIM_SCRIPT": f"<script>{_WS_SHIM_JS}</script>\n  ",
         "TRICKS_JSON": tricks_json,
     }
@@ -2254,37 +2285,20 @@ def _fetch_latest_version() -> str | None:
 def _read_tricks() -> list[str]:
     """Parse ``~/.kiss/INJECTIONS.md`` and return the trick texts.
 
-    The user-local copy at ``~/.kiss/INJECTIONS.md`` is the runtime
-    source of truth — ``install.sh`` seeds it from the package copy
-    bundled at ``src/kiss/INJECTIONS.md`` on first install, and
-    :func:`ensure_user_asset` seeds it again the first time it is
-    read after a user wipes it; once present, user edits survive
-    every read.  This mirrors the ``SAMPLE_TASKS.md`` handling.
+    Thin wrapper around :func:`kiss.agents.vscode.tricks.read_tricks`
+    kept for backward compatibility with existing call sites in
+    :mod:`web_server`.  The user-local copy at
+    ``~/.kiss/INJECTIONS.md`` is the runtime source of truth — the
+    sidebar "Inject" panel and the ghost-text fast-complete pipeline
+    share that same file via the helper module.
 
-    The file contains a series of ``## Trick`` sections, each followed
-    by a blank line and a one-line trick.  Returns an empty list if the
-    file is missing or unparseable, so a deployment without
-    INJECTIONS.md still renders the button (with an empty list).
+    Returns:
+        Ordered list of trick text strings (one per ``## Trick``
+        section), or an empty list when INJECTIONS.md is missing or
+        unparseable so the button still renders.
     """
-    try:
-        package_path = Path(__file__).parent.parent.parent / "INJECTIONS.md"
-        tfile = ensure_user_asset("INJECTIONS.md", package_path)
-        text = tfile.read_text()
-    except Exception:
-        return []
-    tricks: list[str] = []
-    # Split on H2 headings, then keep only sections whose title is
-    # "Trick".  ``re.split`` with a capturing group preserves the
-    # heading so we can identify each section.
-    sections = re.split(r"^##\s+", text, flags=re.MULTILINE)
-    for section in sections[1:]:
-        lines = section.splitlines()
-        if not lines or lines[0].strip() != "Trick":
-            continue
-        body = "\n".join(lines[1:]).strip()
-        if body:
-            tricks.append(body)
-    return tricks
+    from kiss.agents.vscode.tricks import read_tricks
+    return read_tricks()
 
 
 _WS_SHIM_JS = r"""
@@ -2390,6 +2404,16 @@ _WS_SHIM_JS = r"""
         }
         for (var i = 0; i < _pending.length; i++) _ws.send(_pending[i]);
         _pending = [];
+        // Hide the "KISS Sorcar Server is starting ..." overlay now
+        // that the WebSocket is authenticated.  The remote webapp has
+        // no equivalent of the VS Code extension host's daemonStatus
+        // posts (the daemon == this WSS server), so we synthesise the
+        // same window ``message`` event ``media/main.js`` listens for.
+        // Without this the overlay covers ``#app`` forever and the
+        // user only ever sees "KISS Sorcar Server is starting ...".
+        window.dispatchEvent(new MessageEvent('message', {
+          data: {type: 'daemonStatus', connected: true}
+        }));
         return;
       }
       if (msg.type === 'auth_required') {
@@ -2397,6 +2421,16 @@ _WS_SHIM_JS = r"""
         // Stored password (if any) was rejected; drop it so a refresh
         // re-prompts instead of silently retrying the bad value.
         try { localStorage.removeItem('sorcar-remote-pwd'); } catch(e) {}
+        // Reveal ``#app`` so the auth modal (which lives INSIDE #app
+        // in the chat.html template — see ``{{AUTH_MODAL}}``) is no
+        // longer hidden by its display:none parent.  Without this
+        // dispatch a password-protected webapp shows the loading
+        // overlay forever and the user can never enter their
+        // password.  Symmetric to the auth_ok dispatch above — both
+        // states prove the server is reachable.
+        window.dispatchEvent(new MessageEvent('message', {
+          data: {type: 'daemonStatus', connected: true}
+        }));
         _showAuthModal().then(function(pwd) {
           if (pwd === null || pwd === undefined) return;
           try { localStorage.setItem('sorcar-remote-pwd', pwd); } catch(e) {}
@@ -2411,6 +2445,14 @@ _WS_SHIM_JS = r"""
 
     _ws.onclose = function() {
       _authenticated = false;
+      // Re-show the "KISS Sorcar Server is starting ..." overlay
+      // while the socket is down so the user knows actions will not
+      // reach the backend.  Symmetric to the ``auth_ok`` dispatch
+      // above and to ``SorcarSidebarView.ts``'s disconnect handler in
+      // the VS Code path.
+      window.dispatchEvent(new MessageEvent('message', {
+        data: {type: 'daemonStatus', connected: false}
+      }));
       setTimeout(connect, 3000);
     };
 
@@ -2440,6 +2482,9 @@ def _http_response(status: int, content_type: str, body: bytes) -> Response:
             ("Content-Type", content_type),
             ("Content-Length", str(len(body))),
             ("Connection", "close"),
+            ("Cache-Control", "no-cache, no-store, must-revalidate"),
+            ("Pragma", "no-cache"),
+            ("Expires", "0"),
         ]),
         body,
     )
@@ -2897,7 +2942,8 @@ class RemoteAccessServer:
         Returns:
             An HTTP response, or ``None`` for WebSocket upgrade.
         """
-        path = request.path
+        request_path = urlsplit(request.path).path
+        path = unquote(request_path)
         if path == "/" or path == "":
             return _http_response(200, "text/html; charset=utf-8", self._html_bytes)
         if path == "/ws":
@@ -3534,10 +3580,10 @@ class RemoteAccessServer:
         """Restart the ``kiss-web`` daemon at the user's request.
 
         Server-side handler for the settings-panel "Server reset"
-        button.  Broadcasts an acknowledgement ``notice`` to the
+        button.  Broadcasts an acknowledgement ``notification`` to the
         requesting window (stamped with its ``connId`` so siblings do
         not pop a banner), then schedules a ``SIGTERM`` to this very
-        process after a short delay so the notice flushes to the client
+        process after a short delay so the notification flushes to the client
         before its socket drops.  The ``SIGTERM`` is caught by
         :meth:`_handle_shutdown_signal`, which raises
         :class:`KeyboardInterrupt` to unwind the ``asyncio.run`` loop in
@@ -3553,14 +3599,114 @@ class RemoteAccessServer:
         """
         loop = self._loop
         assert loop is not None
-        notice: dict[str, Any] = {
-            "type": "notice",
-            "text": "Restarting the KISS Sorcar web server…",
+        notification: dict[str, Any] = {
+            "type": "notification",
+            "id": "server-reset-restarting",
+            "severity": "info",
+            "message": "Restarting the KISS Sorcar web server…",
         }
         if conn_id:
-            notice["connId"] = conn_id
-        self._printer.broadcast(notice)
+            notification["connId"] = conn_id
+        self._printer.broadcast(notification)
+        # Drop a pending-reset flag so the freshly-respawned daemon
+        # knows to broadcast a paired "Server restart complete"
+        # notification once it is listening again — see
+        # :meth:`_setup_server`.  Written atomically (tmp + replace)
+        # so a crash mid-write never leaves a half-baked file the
+        # next daemon would read.  Best-effort: a filesystem error
+        # here only suppresses the post-restart toast, never blocks
+        # the actual restart.
+        self._write_server_reset_flag(conn_id)
         loop.call_later(_SERVER_RESET_DELAY, self._trigger_server_reset)
+
+    def _server_reset_flag_path(self) -> Path:
+        """Path of the pending-reset flag file.
+
+        Lives next to ``remote-url.json`` so tests that supply a
+        custom ``url_file=`` automatically get an isolated flag
+        location and never touch the user's real ``~/.kiss``.
+        """
+        return self._url_file.parent / _SERVER_RESET_FLAG_NAME
+
+    def _write_server_reset_flag(self, conn_id: str) -> None:
+        """Persist a pending-reset marker before the daemon SIGTERMs.
+
+        Args:
+            conn_id: Requesting connection id (kept for diagnostics
+                only — the connection itself cannot survive the
+                SIGTERM, so the post-restart notification is
+                broadcast to all reconnecting clients).
+        """
+        flag_path = self._server_reset_flag_path()
+        try:
+            flag_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = flag_path.with_suffix(flag_path.suffix + ".tmp")
+            tmp.write_text(
+                json.dumps(
+                    {"requested_at": time.time(), "conn_id": conn_id},
+                ),
+                encoding="utf-8",
+            )
+            os.replace(tmp, flag_path)
+        except OSError:
+            logger.debug(
+                "Could not write server-reset pending flag at %s",
+                flag_path, exc_info=True,
+            )
+
+    def _maybe_schedule_server_reset_complete(self) -> None:
+        """Schedule the post-restart broadcast iff a pending flag exists.
+
+        Called once from :meth:`_setup_server` after the WSS / UDS
+        listeners are bound and the watchdog tasks are armed.  When
+        the flag file written by :meth:`_write_server_reset_flag`
+        in the previous daemon instance is found, it is removed
+        eagerly (so the toast fires at most once per user-initiated
+        reset, even if the daemon restarts again before the timer
+        runs) and a delayed callback is queued to broadcast the
+        "Server restart complete" notification.
+        """
+        flag_path = self._server_reset_flag_path()
+        if not flag_path.exists():
+            return
+        try:
+            flag_path.unlink()
+        except OSError:
+            logger.debug(
+                "Could not remove server-reset pending flag at %s",
+                flag_path, exc_info=True,
+            )
+        loop = self._loop
+        assert loop is not None
+        loop.call_later(
+            _SERVER_RESET_COMPLETE_DELAY,
+            self._broadcast_server_reset_complete,
+        )
+
+    def _broadcast_server_reset_complete(self) -> None:
+        """Broadcast the "Server restart complete" notification.
+
+        Pair to the "Restarting the KISS Sorcar web server…" toast
+        sent by :meth:`_handle_server_reset` in the *previous*
+        daemon instance.  Scheduled from :meth:`_setup_server` when
+        a pending-reset flag file is found, and delivered to every
+        currently-connected client — the requesting connection
+        died with the previous daemon so ``connId`` cannot be
+        preserved across the restart, but every webview that was
+        disconnected by the SIGTERM benefits from the same
+        confirmation.  The stable ``id`` lets the existing webview
+        dedup (``data-notification-id`` in ``showNotification``)
+        replace any stale "restarting" toast in-place instead of
+        stacking a duplicate.
+        """
+        self._printer.broadcast(
+            {
+                "type": "notification",
+                "id": "server-reset-complete",
+                "severity": "info",
+                "message": "KISS Sorcar web server restart complete.",
+            },
+        )
 
     def _trigger_server_reset(self) -> None:
         """Send ``SIGTERM`` to this process to trigger a clean restart.
@@ -3777,7 +3923,8 @@ class RemoteAccessServer:
         actively harmful for the VS Code extension: the extension is
         a *second* client of the same broadcaster (over its UDS
         connection), and it populates its own ``#suggestions``
-        container locally from ``~/.kiss/SAMPLE_TASKS.md``.  The empty-list
+        container locally from ``~/.kiss/MY_TASK_TEMPLATES.md`` plus
+        the bundled ``src/kiss/SAMPLE_TASKS.md``.  The empty-list
         broadcast was forwarded to the extension's webview and
         cleared every chip on the welcome page whenever any webapp
         client opened a new chat tab — see
@@ -5176,6 +5323,20 @@ class RemoteAccessServer:
         self._version_check_task = asyncio.create_task(
             self._version_check_loop(),
         )
+
+        # If the previous instance of this daemon SIGTERMed itself in
+        # response to a user-initiated "Server reset", drop a delayed
+        # broadcast announcing the restart completed so reconnecting
+        # clients see a confirmation toast (paired with the
+        # "Restarting the KISS Sorcar web server…" toast emitted by
+        # the previous instance).  The flag file is removed eagerly
+        # so a *crash* respawn or a routine launchd kick — neither
+        # of which writes the flag — never replays an obsolete
+        # notification on the next launch.  The delay gives the VS
+        # Code extension's ``AgentClient`` and any reconnecting
+        # browser webview time to reattach to the freshly-bound UDS
+        # / WSS before the broadcast goes out.
+        self._maybe_schedule_server_reset_complete()
 
     async def _serve_async(self) -> None:
         """Internal async entry point for the server."""

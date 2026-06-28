@@ -15,6 +15,8 @@ import {getGitApi} from './gitApi';
 import {isReloadReady} from './reloadGuard';
 
 import {ensureDependencies, ensureLocalBinInPath} from './DependencyInstaller';
+import {findKissProject} from './kissPaths';
+import {checkForExtensionUpdate} from './UpdateChecker';
 import {
   showErrorNotification,
   showInformationNotification,
@@ -430,6 +432,36 @@ export function activate(context: vscode.ExtensionContext): void {
     showErrorNotification(
       `KISS Sorcar: Setup failed — ${msg}. Check ~/.kiss/install.log for details.`,
     );
+  });
+
+  // Active upstream update check.
+  //
+  // ``ensureDependencies()`` only restarts the kiss-web daemon on the
+  // slow (install) path; on the fast "all deps present" path the
+  // already-running daemon's PyPI poll is the only thing watching
+  // PyPI — and that poll's cached answer can be up to an hour stale.
+  // We additionally probe PyPI directly here so a fresh VS Code launch
+  // always sees the most recent release without waiting for the next
+  // daemon poll cycle.  All side effects are guarded:
+  //   * the helper rate-limits itself via ~/.kiss/.update-check.json
+  //     so we hit PyPI at most a few times per day;
+  //   * any error (network, malformed payload) is swallowed so update
+  //     checking can never break extension activation.
+  void checkForExtensionUpdate({
+    kissProjectPath: findKissProject() || undefined,
+    notify: ({latest, current}: {latest: string; current: string}) => {
+      void showInformationNotification(
+        `KISS Sorcar: a new release (${latest}) is available. ` +
+          `You are on ${current}.`,
+        'Update now',
+      ).then(action => {
+        if (action === 'Update now') {
+          void vscode.commands.executeCommand('workbench.action.terminal.new');
+        }
+      });
+    },
+  }).catch(err => {
+    console.error('[KISS Sorcar] Update check failed:', err);
   });
 
   console.log('KISS Sorcar extension activated');

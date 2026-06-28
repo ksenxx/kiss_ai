@@ -43,7 +43,8 @@ def _clear_all_keys() -> dict[str, str]:
         "GEMINI_API_KEY",
         "TOGETHER_API_KEY",
         "OPENROUTER_API_KEY",
-        "MINIMAX_API_KEY",
+        "ZAI_API_KEY",
+        "MOONSHOT_API_KEY",
     )
     saved = {n: os.environ.get(n, "") for n in names}
     for n in names:

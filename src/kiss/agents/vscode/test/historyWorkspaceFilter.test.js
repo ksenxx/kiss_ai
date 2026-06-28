@@ -248,15 +248,28 @@ function testWorkspaceFilterHidesNonMatchingRows() {
   );
   assert.strictEqual(byTitle['legacy task with no work_dir'], '');
 
-  // Workspace checkbox is CHECKED by default → only the two
-  // /repo/alpha rows should be visible.
+  // Workspace checkbox is CHECKED by default → rows whose work_dir
+  // matches the client work_dir are visible, AND rows whose
+  // work_dir is empty also pass per the documented contract in
+  // ``applyHistoryFilterVisibility`` (an empty row work_dir
+  // represents either a legacy row that pre-dates the
+  // ``extra.work_dir`` persistence change or a freshly-started
+  // running task whose extra has not been written yet — both
+  // must remain visible so the user never silently loses sight
+  // of a running task panel after opening the burger menu).
+  // Only rows with an explicit, non-matching work_dir are hidden.
   const visible = visibleRows(win);
   const visibleTitles = visible.map(r => r.text).sort();
   assert.deepStrictEqual(
     visibleTitles,
-    ['second task in /repo/alpha', 'task A in /repo/alpha'],
-    'Workspace filter ON must show ONLY rows whose work_dir ' +
-      `matches the client work_dir; got ${JSON.stringify(visibleTitles)}`,
+    [
+      'legacy task with no work_dir',
+      'second task in /repo/alpha',
+      'task A in /repo/alpha',
+    ],
+    'Workspace filter ON must show rows whose work_dir matches ' +
+      'the client work_dir AND rows whose work_dir is empty; only ' +
+      `rows with a different non-empty work_dir are hidden; got ${JSON.stringify(visibleTitles)}`,
   );
 
   win.close();
@@ -303,15 +316,19 @@ function testReconfiguringWorkDirReFiltersInPlace() {
   });
   send(win, {type: 'history', sessions: SESSIONS_FIXTURE, offset: 0});
 
-  // Sanity: workspace filter pinned to /repo/alpha.
+  // Sanity: workspace filter pinned to /repo/alpha; the legacy
+  // empty-work_dir row also passes per the documented contract.
   let visible = visibleRows(win).map(r => r.text).sort();
   assert.deepStrictEqual(visible, [
+    'legacy task with no work_dir',
     'second task in /repo/alpha',
     'task A in /repo/alpha',
   ]);
 
   // Reconfigure the client work_dir to /repo/beta — the already-
-  // rendered history list must re-filter in place.
+  // rendered history list must re-filter in place.  The legacy
+  // empty-work_dir row still passes; only the explicit
+  // /repo/alpha rows now drop out.
   send(win, {
     type: 'configData',
     config: {work_dir: '/repo/beta'},
@@ -321,7 +338,7 @@ function testReconfiguringWorkDirReFiltersInPlace() {
   visible = visibleRows(win).map(r => r.text).sort();
   assert.deepStrictEqual(
     visible,
-    ['task B in /repo/beta'],
+    ['legacy task with no work_dir', 'task B in /repo/beta'],
     'Switching the client work_dir must re-filter the already-' +
       `rendered history list in place; got ${JSON.stringify(visible)}`,
   );
@@ -341,12 +358,18 @@ function testEmptyClientWorkDirMatchesEmptyRows() {
   });
   send(win, {type: 'history', sessions: SESSIONS_FIXTURE, offset: 0});
 
-  const visible = visibleRows(win).map(r => r.text);
+  const visible = visibleRows(win).map(r => r.text).sort();
   assert.deepStrictEqual(
     visible,
-    ['legacy task with no work_dir'],
-    'When client work_dir is empty, only legacy rows with empty ' +
-      `work_dir must remain; got ${JSON.stringify(visible)}`,
+    [
+      'legacy task with no work_dir',
+      'second task in /repo/alpha',
+      'task A in /repo/alpha',
+      'task B in /repo/beta',
+    ],
+    'When client work_dir is empty, every row must remain visible ' +
+      'per the documented contract (an empty client work_dir bypasses ' +
+      `the workspace match); got ${JSON.stringify(visible)}`,
   );
 
   win.close();

@@ -30,7 +30,11 @@ if TYPE_CHECKING:
     from kiss.agents.sorcar.running_agent_state import _RunningAgentState
     from kiss.agents.vscode.json_printer import JsonPrinter
 
-from kiss.agents.sorcar.git_worktree import GitWorktreeOps, repo_lock
+from kiss.agents.sorcar.git_worktree import (
+    GitWorktreeOps,
+    repo_lock,
+    strip_worktree_suffix,
+)
 from kiss.agents.sorcar.persistence import (
     _append_chat_event,
     _save_task_extra,
@@ -55,6 +59,59 @@ ctypes.pythonapi.PyThreadState_SetAsyncExc.argtypes = [
     ctypes.c_ulong,
     ctypes.py_object,
 ]
+
+
+def build_task_extra_payload(
+    *,
+    model: str,
+    work_dir: str,
+    version: str,
+    tokens: int,
+    cost: float,
+    steps: int,
+    is_parallel: bool,
+    is_worktree: bool,
+    auto_commit_mode: bool,
+    start_ms: int,
+    end_ms: int,
+) -> dict[str, object]:
+    """Build the persisted ``task_history.extra`` payload for a completed task.
+
+    Strips the ``.kiss-worktrees/kiss_wt-<slug>`` suffix from *work_dir*
+    so the persisted path is the user-visible workspace folder rather
+    than an ephemeral worktree directory that would vanish on merge or
+    discard.
+
+    Args:
+        model: Model name used for the task.
+        work_dir: Working directory the task ran from.  Worktree paths
+            are stripped to their parent repo.
+        version: KISS version string.
+        tokens: Total tokens consumed by the agent.
+        cost: Total budget consumed by the agent (USD).
+        steps: Total agent steps taken.
+        is_parallel: Whether parallel sub-agents were enabled.
+        is_worktree: Whether the task ran inside a worktree.
+        auto_commit_mode: Auto-commit toggle state at completion.
+        start_ms: Agent start timestamp in milliseconds since epoch.
+        end_ms: Agent end timestamp in milliseconds since epoch.
+
+    Returns:
+        Dict ready to pass to ``_save_task_extra``.
+    """
+    return {
+        "model": model,
+        "work_dir": strip_worktree_suffix(work_dir),
+        "version": version,
+        "tokens": tokens,
+        "cost": cost,
+        "steps": steps,
+        "is_parallel": is_parallel,
+        "is_worktree": is_worktree,
+        "auto_commit_mode": auto_commit_mode,
+        "startTs": start_ms,
+        "endTs": end_ms,
+    }
 
 
 def parse_task_tags(text: str) -> list[str]:
@@ -857,19 +914,19 @@ class _TaskRunnerMixin:
                 # opened.
                 end_ms = int(time.time() * 1000)
                 _save_task_extra(
-                    {
-                        "model": model,
-                        "work_dir": work_dir,
-                        "version": __version__,
-                        "tokens": tab.agent.total_tokens_used,
-                        "cost": round(tab.agent.budget_used, 6),
-                        "steps": int(getattr(tab.agent, "total_steps", 0) or 0),
-                        "is_parallel": tab.use_parallel,
-                        "is_worktree": use_worktree,
-                        "auto_commit_mode": tab.auto_commit_mode,
-                        "startTs": start_ms,
-                        "endTs": end_ms,
-                    },
+                    build_task_extra_payload(
+                        model=model,
+                        work_dir=work_dir,
+                        version=__version__,
+                        tokens=tab.agent.total_tokens_used,
+                        cost=round(tab.agent.budget_used, 6),
+                        steps=int(getattr(tab.agent, "total_steps", 0) or 0),
+                        is_parallel=tab.use_parallel,
+                        is_worktree=use_worktree,
+                        auto_commit_mode=tab.auto_commit_mode,
+                        start_ms=start_ms,
+                        end_ms=end_ms,
+                    ),
                     task_id=tab.task_history_id,
                 )
                 self.printer.broadcast({"type": "tasks_updated"})

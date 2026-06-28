@@ -45,7 +45,8 @@ class TestNoModelAvailableResultEvent(TestCase):
             "GEMINI_API_KEY": keys.GEMINI_API_KEY,
             "TOGETHER_API_KEY": keys.TOGETHER_API_KEY,
             "OPENROUTER_API_KEY": keys.OPENROUTER_API_KEY,
-            "MINIMAX_API_KEY": getattr(keys, "MINIMAX_API_KEY", ""),
+            "ZAI_API_KEY": getattr(keys, "ZAI_API_KEY", ""),
+            "MOONSHOT_API_KEY": getattr(keys, "MOONSHOT_API_KEY", ""),
         }
         from kiss.core.models import codex_model as codex_module
 
@@ -57,7 +58,8 @@ class TestNoModelAvailableResultEvent(TestCase):
             keys.GEMINI_API_KEY = ""
             keys.TOGETHER_API_KEY = ""
             keys.OPENROUTER_API_KEY = ""
-            keys.MINIMAX_API_KEY = ""
+            keys.ZAI_API_KEY = ""
+            keys.MOONSHOT_API_KEY = ""
             os.environ["PATH"] = ""
             codex_module._UI_CANDIDATE_PATHS = ()
 
