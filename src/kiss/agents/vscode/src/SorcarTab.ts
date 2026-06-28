@@ -12,7 +12,16 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import {findKissProject} from './kissPaths';
-import {ensureUserAsset, ensureUserAssetFromDefault} from './userAssets';
+import {ensureUserAssetFromDefault} from './userAssets';
+
+/** Default ``## Trick`` body auto-seeded into ``~/.kiss/MY_INJECTION.md``. */
+export const MY_INJECTION_DEFAULT_BODY =
+  'Write end-to-end 100% coverage tests for the feature first.' +
+  '  Then implement the feature.';
+
+/** Full default file content for ``~/.kiss/MY_INJECTION.md``. */
+export const DEFAULT_MY_INJECTION =
+  '## Trick\n\n' + MY_INJECTION_DEFAULT_BODY + '\n';
 
 /** Read the KISS project version from ``_version.py`` on disk. */
 export function getVersion(): string {
@@ -74,25 +83,63 @@ function readMarkdownSections(markdownFile: string, heading: string): string[] {
 }
 
 /**
- * Read ``~/.kiss/INJECTIONS.md`` and return one entry per ``## Trick``
- * section.  The user-local copy is the runtime source of truth (so
- * authors can edit it without rebuilding the extension); it is
- * seeded from ``kissRoot/src/kiss/INJECTIONS.md`` by
- * :func:`ensureUserAsset` only when the user copy is missing, so
- * user edits survive every read.  Returns an empty list if the file
- * is missing — the Tricks button still renders, just with an empty
- * list.
+ * Build the "Inject instruction" trick list from two Markdown files.
+ *
+ * Order matters — user-curated tricks come first, bundled tricks
+ * second:
+ *
+ *   1. ``~/.kiss/MY_INJECTION.md`` — purely user-curated tricks.
+ *      Auto-created on first read with the seed content
+ *      ``## Trick\n\nWrite end-to-end 100% coverage tests for the
+ *      feature first.  Then implement the feature.\n`` so the file is
+ *      always present and editable.  Never overwritten once it
+ *      exists; user edits survive across upgrades and daemon
+ *      restarts.
+ *
+ *   2. ``<kissRoot>/src/kiss/INJECTIONS.md`` — the bundled tricks
+ *      shipped with the extension.  Read **directly from the package
+ *      copy**; never copied into ``~/.kiss/``.  This way every
+ *      extension upgrade automatically delivers the latest bundled
+ *      tricks without clobbering the user's curated list.
+ *
+ * Each ``## Trick`` section yields one string entry, with the body
+ * trimmed and mdformat backslash escapes reverted.  Returns ``[]``
+ * when no section is found in either file so the Tricks button still
+ * renders, just with an empty list.
+ *
+ * The bundled file path honours the ``KISS_INJECTIONS_PATH``
+ * environment variable (used by the test suite to pin a known set of
+ * bundled tricks), matching the Python helper
+ * :func:`kiss.agents.vscode.tricks._bundled_injections_path`.
  */
 export function getTricks(): string[] {
-  const kissRoot = findKissProject();
-  if (!kissRoot) return [];
-  return readMarkdownSections(
-    ensureUserAsset(
-      'INJECTIONS.md',
-      path.join(kissRoot, 'src', 'kiss', 'INJECTIONS.md'),
-    ),
-    'Trick',
+  const items: string[] = [];
+
+  // (1) User-curated tricks from ~/.kiss/MY_INJECTION.md.
+  const myInjectionPath = ensureUserAssetFromDefault(
+    'MY_INJECTION.md',
+    DEFAULT_MY_INJECTION,
   );
+  if (myInjectionPath !== null) {
+    items.push(...readMarkdownSections(myInjectionPath, 'Trick'));
+  }
+
+  // (2) Bundled tricks read directly from the package.  No
+  //     ``~/.kiss/INJECTIONS.md`` is ever created — the bundled file
+  //     is the only source of these entries.
+  const bundledOverride = process.env.KISS_INJECTIONS_PATH;
+  let bundledPath: string | null = bundledOverride || null;
+  if (!bundledPath) {
+    const kissRoot = findKissProject();
+    if (kissRoot) {
+      bundledPath = path.join(kissRoot, 'src', 'kiss', 'INJECTIONS.md');
+    }
+  }
+  if (bundledPath) {
+    items.push(...readMarkdownSections(bundledPath, 'Trick'));
+  }
+
+  return items;
 }
 
 /**
