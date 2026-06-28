@@ -6612,9 +6612,7 @@
       const chatId = typeof s.id === 'string' ? s.id : '';
       const taskIdRaw = s.task_id;
       const taskIdStr =
-        taskIdRaw === undefined || taskIdRaw === null
-          ? ''
-          : String(taskIdRaw);
+        taskIdRaw === undefined || taskIdRaw === null ? '' : String(taskIdRaw);
       const parentIdRaw = s.parent_task_id;
       const parentIdStr =
         parentIdRaw === undefined || parentIdRaw === null

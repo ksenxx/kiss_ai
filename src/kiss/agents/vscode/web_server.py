@@ -2317,6 +2317,16 @@ _WS_SHIM_JS = r"""
   var _pending = [];
   var _authenticated = false;
   var _needsPassword = false;
+  // Tracks whether this client has previously completed a full
+  // auth handshake.  Once true, the next successful ``auth_ok``
+  // after an ``onclose`` (i.e. a server restart or network blip)
+  // means the page state is stale relative to the freshly booted
+  // backend and we must reload the page so the normal load
+  // pipeline replays history, restored tabs, in-flight merges,
+  // etc.  Without this the page only re-binds the socket and the
+  // user is left staring at the "KISS Sorcar Server is starting
+  // ..." overlay (or stale UI) until they manually refresh.
+  var _hadAuthThenClosed = false;
 
   // Custom auth modal — replaces the browser-native prompt(), which is
   // rendered tall with wasted space below its buttons on most desktop
@@ -2396,6 +2406,19 @@ _WS_SHIM_JS = r"""
     _ws.onmessage = function(event) {
       var msg = JSON.parse(event.data);
       if (msg.type === 'auth_ok') {
+        // Recover from a server restart / network blip: if we had
+        // already authenticated at least once and the WS later
+        // closed, the page JS state is stale relative to the
+        // freshly booted backend.  Reload so the normal page-load
+        // pipeline (history replay, restored tabs, in-flight
+        // merge replay, ...) runs against the new server state.
+        // The reload is gated by ``_hadAuthThenClosed`` so the
+        // very first authentication on a fresh page load does NOT
+        // reload (otherwise we would loop forever).
+        if (_hadAuthThenClosed) {
+          try { window.location.reload(); } catch (e) {}
+          return;
+        }
         _authenticated = true;
         _needsPassword = false;
         // Re-establish this instance's pinned work_dir BEFORE flushing
@@ -2453,6 +2476,14 @@ _WS_SHIM_JS = r"""
     };
 
     _ws.onclose = function() {
+      // Latch "we had a real session and then lost it" so the next
+      // successful ``auth_ok`` reloads the page.  We only set the
+      // flag when the prior socket had completed its auth handshake
+      // — a fresh page that has not yet authenticated must NOT
+      // trigger a reload on its first ``auth_ok``.
+      if (_authenticated) {
+        _hadAuthThenClosed = true;
+      }
       _authenticated = false;
       // Re-show the "KISS Sorcar Server is starting ..." overlay
       // while the socket is down so the user knows actions will not
