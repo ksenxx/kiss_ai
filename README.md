@@ -432,6 +432,8 @@ Full model list:
 - `Qwen/Qwen3.5-397B-A17B`
 - `Qwen/Qwen3.5-9B`
 - `Qwen/Qwen3.6-Plus`
+- `Qwen/Qwen3.7-Max`
+- `Qwen/Qwen3.7-Plus`
 - `Qwen/QwQ-32B`
 - `zai-org/GLM-4.5-Air-FP8`
 - `zai-org/GLM-4.6`
