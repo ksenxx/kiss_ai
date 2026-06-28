@@ -36,12 +36,12 @@ git push origin
 
 ## Trick
 
-get rid of all commits after the following commit from both main and origin:
+Get rid of all commits after the following commit from both main and origin:
 
 ## Trick
 
-can you build the paper at
+Build the paper and take screenshots to check and fix formatting.
 
 ## Trick
 
-Why did the last task get interrupted? Thoroughly and precisely analyze the logs and the events of the task. Reproduce the issue by writing an integration test. Then fix the issue.
+Why did the last task failed? Thoroughly and precisely analyze the logs and the events of the task. Reproduce the issue by writing an integration test. Then fix the issue.

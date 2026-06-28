@@ -9,6 +9,9 @@
 \usepackage{booktabs}
 \usepackage{graphicx}
 \usepackage{amsfonts}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{float}
 \usepackage{nicefrac}
 \usepackage{microtype}
 \usepackage{xcolor}
@@ -45,7 +48,7 @@ Koushik Sen \\ EECS Department, UC Berkeley\\ \texttt{ksen@berkeley.edu} \\ }
 \maketitle
 
 \begin{center}
-\textit{"Everything should be made as simple as possible, but not simpler." — Albert Einstein}
+\textit{"Everything should be made as simple as possible, but not simpler." --- Albert Einstein}
 \end{center}
 
 
@@ -89,6 +92,36 @@ The name ``KISS'' reflects the \emph{Keep It Simple, Stupid} design philosophy i
 \caption{Screenshot of KISS Sorcar running as a VS~Code extension. The sidebar shows the agent's chat interface with real-time budget tracking, while the editor displays the code being modified.}
 \label{fig:kiss-sorcar-screenshot}
 \end{figure}
+
+Table~\ref{tab:assistant-comparison} reproduces the project README's high-level comparison of KISS Sorcar with Claude Code and Cursor.
+
+\begin{table}[H]
+\centering
+\caption{KISS Sorcar compared with Claude Code and Cursor, reproduced from the project README.}
+\label{tab:assistant-comparison}
+\scriptsize
+\setlength{\tabcolsep}{3pt}
+\renewcommand{\arraystretch}{1.15}
+\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{0.22\textwidth}>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X}
+\toprule
+\textbf{Capability} & \textbf{KISS Sorcar} & \textbf{Claude Code} & \textbf{Cursor} \\
+\midrule
+\textbf{Interfaces} & CLI + VS Code extension + web/mobile app & CLI + mobile app & Custom VS Code \\
+\textbf{AI Discovery} & \(\checkmark\) simply via prompt & \(\times\) & \(\times\) \\
+\textbf{GEPA Prompt Optimization} & \(\checkmark\) simply via prompt & \(\times\) & \(\times\) \\
+\textbf{Multiple models from multiple vendors in the same task} & \(\checkmark\) Mix OpenAI, Anthropic, Gemini, Together, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, and Codex CLI & \(\times\) Anthropic Claude models only & \(\times\) One model per task \\
+\textbf{Primary focus} & \(\checkmark\) \textbf{Quality}---rigorous review, end-to-end tests & Speed and developer ergonomics & Speed \\
+\textbf{Core Agents \# LoC} & \textbf{\textasciitilde{}2500} & Unknown & Unknown \\
+\textbf{Models in bundled catalog} & 502 across 9 provider categories & Claude family only & Subset chosen by Cursor \\
+\textbf{Bring your own API key / endpoint} & \(\checkmark\) Yes---keys stay on your machine & \(\checkmark\) Anthropic key & Routed through Cursor backend \\
+\textbf{Open source} & \(\checkmark\) Apache-2.0 & \(\times\) Proprietary & \(\times\) Proprietary \\
+\textbf{Price} & Free framework; pay only your chosen model provider & Subscription / API usage & Subscription \\
+\textbf{Run on top of Claude Code / Codex CLI} & \(\checkmark\) \texttt{cc/*} and \texttt{codex/*} namespaces & N/A & \(\times\) \\
+\textbf{Messaging and communication channels} & \(\checkmark\) 23 third-party agents, including Slack, Gmail, Phone Control, SMS, and WhatsApp & Partial: Slack, mobile Remote Control, and research-preview channels for Telegram, Discord, and iMessage; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel & Partial: Slack and Microsoft Teams Cloud Agent integrations; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel \\
+\textbf{Terminal Bench 2.0 score} & \textbf{62.2\%} & 58\% & 61.7\% (Cursor agent) \\
+\bottomrule
+\end{tabularx}
+\end{table}
 
 We implement KISS Sorcar, a general-purpose assistant and an integrated development environment (IDE), on top of the KISS Agent Framework.  KISS Sorcar ships as three surfaces over the same daemon: a Visual Studio Code extension, a Claude-Code-style command-line interface (\texttt{sorcar}), and a browser/mobile web app---all running locally.  The CLI has both an interactive REPL mode (with slash commands such as \texttt{/help}, \texttt{/clear}, \texttt{/resume}, \texttt{/model}, \texttt{/cost}, \texttt{/skills}, \texttt{/mcp}, \texttt{/autocommit}, and file/folder \texttt{@}-mentions) and a one-shot non-interactive mode (\texttt{-t}/\texttt{-f}).  KISS Sorcar has browser support (using open-source Chromium and Playwright), multimodal support, Docker container support, OpenClaw-like features (whose discussion is beyond the scope of the paper), a mobile/web app, integrated MCP server management (\texttt{sorcar mcp add/list/auth/debug/\ldots}), and a library of Agent Skills loaded from \texttt{\textasciitilde{}/.kiss/skills} and project-local directories. KISS Sorcar is free and open-source (Apache-2.0), distributed on PyPI as \texttt{kiss-agent-framework}; all one needs is a model API key from a major LLM provider, such as Anthropic, OpenAI, Google, Together, MiniMax, or OpenRouter, or a custom local endpoint configured via \texttt{--endpoint}/\texttt{--header}.  The framework can also run on top of the Claude Code CLI (\texttt{cc/*} models) and the Codex CLI (\texttt{codex/*} models), and mix models from multiple vendors within a single task simply by issuing prompts.  We implemented this framework in roughly 4 months, and the repository is available at \url{https://github.com/ksenxx/kiss_ai}. The name ``Sorcar'' pays homage to P.~C.~Sorcar, the Bengali magician.  The engineering principles described in Section~\ref{sec:system-prompt} are encoded in the agent's system prompt.
 
