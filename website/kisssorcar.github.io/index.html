@@ -221,11 +221,118 @@
     .benchmark .cell .v small { color: var(--text-dim); font-size: 0.85rem; margin-left: 0.3rem; font-weight: 400; }
 
     /* Hero screenshot/demo video */
-    .screenshot { margin: 0 auto 3rem; padding: 0 1.5rem; }
+    .screenshot { margin: 0 auto 1.5rem; padding: 0 1.5rem; }
     .screenshot img, .screenshot video {
       display: block; width: 100%;
       border: 1px solid var(--border); border-radius: 12px;
       box-shadow: var(--shadow-2); background: #000;
+    }
+
+    /* Hero CTA strip — three buttons directly under the demo video. */
+    .hero-ctas {
+      max-width: 960px;
+      margin: 0 auto 3rem;
+      padding: 0 1.5rem;
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 0.75rem;
+    }
+    .cta-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.7rem 1.25rem;
+      font-size: 0.95rem;
+      font-weight: 500;
+      border-radius: 8px;
+      border: 1px solid transparent;
+      cursor: pointer;
+      font-family: inherit;
+      line-height: 1.2;
+      transition: all 0.18s ease;
+      text-decoration: none;
+      white-space: nowrap;
+    }
+    .cta-btn svg { width: 18px; height: 18px; flex: none; }
+
+    /* Primary: Install (VS Code) */
+    .cta-vscode {
+      background: var(--primary);
+      color: #fff;
+      border-color: var(--primary);
+      box-shadow: var(--shadow-1);
+    }
+    .cta-vscode:hover {
+      background: var(--primary-dark);
+      border-color: var(--primary-dark);
+      color: #fff;
+      box-shadow: var(--shadow-2);
+      transform: translateY(-1px);
+    }
+
+    /* Secondary: pipx install (click to copy) */
+    .cta-pip {
+      background: var(--surface);
+      color: var(--text);
+      border-color: var(--border);
+      font-family: 'SF Mono', 'Menlo', 'Consolas', 'Monaco', monospace;
+      font-size: 0.88rem;
+      position: relative;
+    }
+    .cta-pip:hover {
+      background: var(--primary-soft);
+      border-color: var(--primary);
+      color: var(--primary-dark);
+      transform: translateY(-1px);
+    }
+    .cta-pip .cta-pip-prompt { color: var(--text-soft); user-select: none; margin-right: 0.1rem; }
+    .cta-pip .cta-pip-copy-icon { color: var(--text-soft); }
+    .cta-pip:hover .cta-pip-copy-icon { color: var(--primary); }
+    .cta-pip.copied {
+      background: rgba(0, 137, 123, 0.10);
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+    .cta-pip.copied .cta-pip-prompt,
+    .cta-pip.copied .cta-pip-copy-icon { color: var(--accent); }
+
+    /* Tertiary: Star on GitHub with live count */
+    .cta-star {
+      background: var(--bg);
+      color: var(--text);
+      border-color: var(--border);
+    }
+    .cta-star:hover {
+      background: var(--primary-soft);
+      border-color: var(--primary);
+      color: var(--primary-dark);
+      transform: translateY(-1px);
+    }
+    .cta-star .star-count {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 1.8rem;
+      padding: 0.12rem 0.5rem;
+      margin-left: 0.1rem;
+      background: var(--primary-soft);
+      color: var(--primary-dark);
+      border-radius: 999px;
+      font-size: 0.82rem;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+      transition: background 0.18s ease, color 0.18s ease;
+    }
+    .cta-star:hover .star-count {
+      background: #fff;
+      color: var(--primary-dark);
+    }
+    .cta-star .star-count[data-loading="true"] { opacity: 0.55; }
+
+    @media (max-width: 520px) {
+      .hero-ctas { gap: 0.6rem; }
+      .cta-btn { width: 100%; justify-content: center; }
     }
 
     /* ========================================================== */
@@ -886,6 +993,42 @@
            aria-label="KISS Sorcar demo video">
       <a href="assets/sorcar-main.mp4">Watch the KISS Sorcar demo video</a>
     </video>
+  </div>
+
+  <!-- Hero CTAs: Install (VS Code) · pipx install (click to copy) · Star on GitHub -->
+  <div class="hero-ctas" role="group" aria-label="Get started with KISS Sorcar">
+    <a class="cta-btn cta-vscode"
+       href="https://marketplace.visualstudio.com/items?itemName=ksenxx.kiss-sorcar"
+       target="_blank" rel="noopener"
+       aria-label="Install the KISS Sorcar VS Code extension">
+      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+        <path d="M23.15 2.587 18.21.21a1.494 1.494 0 0 0-1.705.29l-9.46 8.63-4.12-3.128a.999.999 0 0 0-1.276.057L.327 7.261A1 1 0 0 0 .326 8.74l3.574 3.26L.326 15.26a1 1 0 0 0 0 1.479l1.32 1.202a.999.999 0 0 0 1.276.057l4.12-3.128 9.46 8.63a1.493 1.493 0 0 0 1.705.29l4.942-2.377A1.5 1.5 0 0 0 24 19.957V3.943a1.5 1.5 0 0 0-.85-1.356zm-5.146 14.861L10.826 12l7.178-5.448v10.896z"/>
+      </svg>
+      Install (VS Code)
+    </a>
+
+    <button class="cta-btn cta-pip" type="button"
+            data-copy="pipx install kiss-agent-framework"
+            aria-label="Copy 'pipx install kiss-agent-framework' to clipboard">
+      <span class="cta-pip-prompt" aria-hidden="true">$</span>
+      <span class="cta-pip-text">pipx install kiss-agent-framework</span>
+      <svg class="cta-pip-copy-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+      </svg>
+    </button>
+
+    <a class="cta-btn cta-star"
+       href="https://github.com/ksenxx/kiss_ai"
+       target="_blank" rel="noopener"
+       aria-label="Star kiss_ai on GitHub">
+      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+        <path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.36-3.88-1.36-.52-1.33-1.27-1.69-1.27-1.69-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.18 1.76 1.18 1.02 1.75 2.69 1.24 3.34.95.1-.74.4-1.24.72-1.53-2.55-.29-5.24-1.27-5.24-5.66 0-1.25.45-2.27 1.18-3.07-.12-.29-.51-1.46.11-3.05 0 0 .96-.31 3.16 1.17.92-.26 1.91-.39 2.88-.39s1.96.13 2.88.39c2.2-1.48 3.16-1.17 3.16-1.17.62 1.59.23 2.76.11 3.05.74.8 1.18 1.82 1.18 3.07 0 4.4-2.69 5.37-5.25 5.65.41.36.78 1.05.78 2.12v3.14c0 .31.21.66.79.55C20.21 21.39 23.5 17.08 23.5 12 23.5 5.65 18.35.5 12 .5z"/>
+      </svg>
+      <span aria-hidden="true">★</span>
+      <span class="cta-star-label">Star on GitHub</span>
+      <span class="star-count" id="cta-star-count" data-loading="true" aria-label="Loading star count">…</span>
+    </a>
   </div>
 
   <!-- ================ § 01 — All you need is a short prompt ================ -->
@@ -1739,6 +1882,118 @@ In each step, keep track of the best prompt which has the maximum number of succ
   </footer>
 
   <script>
+    // ---------------------------------------------------------------
+    // Hero CTAs:
+    //  (a) click-to-copy on the "pipx install kiss-agent-framework" pill.
+    //  (b) live GitHub star count for the "Star on GitHub" button,
+    //      fetched from the public GitHub API with sessionStorage cache
+    //      and a graceful fallback if the API is rate-limited.
+    // ---------------------------------------------------------------
+    (function () {
+      // ---- (a) click-to-copy ---------------------------------------
+      const pipBtn = document.querySelector('.cta-pip');
+      if (pipBtn) {
+        const originalLabel = pipBtn.getAttribute('aria-label');
+        const textEl = pipBtn.querySelector('.cta-pip-text');
+        const originalText = textEl ? textEl.textContent : '';
+        let resetTimer = 0;
+
+        function flash(ok) {
+          if (resetTimer) { clearTimeout(resetTimer); resetTimer = 0; }
+          pipBtn.classList.toggle('copied', ok);
+          if (textEl) textEl.textContent = ok ? 'Copied!' : 'Copy failed';
+          pipBtn.setAttribute('aria-label', ok
+            ? 'Command copied to clipboard'
+            : 'Failed to copy command');
+          resetTimer = window.setTimeout(() => {
+            pipBtn.classList.remove('copied');
+            if (textEl) textEl.textContent = originalText;
+            pipBtn.setAttribute('aria-label', originalLabel || '');
+            resetTimer = 0;
+          }, 1600);
+        }
+
+        function fallbackCopy(text) {
+          try {
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.setAttribute('readonly', '');
+            ta.style.position = 'fixed';
+            ta.style.top = '-1000px';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            const ok = document.execCommand('copy');
+            document.body.removeChild(ta);
+            return ok;
+          } catch (_e) {
+            return false;
+          }
+        }
+
+        pipBtn.addEventListener('click', (e) => {
+          e.preventDefault();
+          const text = pipBtn.getAttribute('data-copy') || originalText;
+          if (navigator.clipboard && window.isSecureContext) {
+            navigator.clipboard.writeText(text)
+              .then(() => flash(true))
+              .catch(() => flash(fallbackCopy(text)));
+          } else {
+            flash(fallbackCopy(text));
+          }
+        });
+      }
+
+      // ---- (b) live GitHub star count ------------------------------
+      const starEl = document.getElementById('cta-star-count');
+      if (!starEl) return;
+
+      const REPO = 'ksenxx/kiss_ai';
+      const CACHE_KEY = 'kiss-gh-stars';
+      const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+      const formatCount = (n) => {
+        if (n >= 1000) return (n / 1000).toFixed(n >= 10000 ? 0 : 1).replace(/\.0$/, '') + 'k';
+        return String(n);
+      };
+      function setCount(n) {
+        starEl.textContent = formatCount(n);
+        starEl.removeAttribute('data-loading');
+        starEl.setAttribute('aria-label', n + ' stars on GitHub');
+      }
+      function hideCount() {
+        // API failed and we have no cached value — drop the badge.
+        starEl.remove();
+      }
+
+      // Use sessionStorage cache to avoid hammering the rate-limited API.
+      try {
+        const raw = sessionStorage.getItem(CACHE_KEY);
+        if (raw) {
+          const cached = JSON.parse(raw);
+          if (cached && typeof cached.count === 'number'
+              && (Date.now() - cached.ts) < CACHE_TTL_MS) {
+            setCount(cached.count);
+            return;
+          }
+        }
+      } catch (_e) { /* ignore storage errors */ }
+
+      fetch('https://api.github.com/repos/' + REPO, {
+        headers: { 'Accept': 'application/vnd.github+json' },
+      })
+        .then((r) => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
+        .then((data) => {
+          const n = data && typeof data.stargazers_count === 'number'
+            ? data.stargazers_count : null;
+          if (n === null) { hideCount(); return; }
+          setCount(n);
+          try {
+            sessionStorage.setItem(CACHE_KEY, JSON.stringify({ count: n, ts: Date.now() }));
+          } catch (_e) { /* ignore */ }
+        })
+        .catch(() => hideCount());
+    })();
+
     // ---------------------------------------------------------------
     // Scroll-reveal: tilt-rise each .section-card when it enters view.
     // ---------------------------------------------------------------
