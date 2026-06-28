@@ -65,7 +65,7 @@ from functools import partial
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any, cast
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 
 import websockets
 from websockets.asyncio.server import ServerConnection, serve
@@ -84,6 +84,7 @@ __all__ = ["RemoteAccessServer", "WebPrinter"]
 logger = logging.getLogger(__name__)
 
 MEDIA_DIR = Path(__file__).parent / "media"
+_MEDIA_VERSION_CACHE: dict[str, str] = {}
 
 # HTML page for the agent-trajectory visualizer, served at ``/trajectories/``.
 TRAJECTORY_TEMPLATE = (
@@ -2069,6 +2070,16 @@ class WebPrinter(JsonPrinter):
                 pending.discard(fut)
 
 
+def _media_url(name: str) -> str:
+    """Return a cache-busted URL for a packaged web media asset."""
+    ver = _MEDIA_VERSION_CACHE.get(name)
+    if ver is None:
+        data = (MEDIA_DIR / name).read_bytes()
+        ver = hashlib.sha256(data).hexdigest()[:16]
+        _MEDIA_VERSION_CACHE[name] = ver
+    return f"/media/{name}?v={ver}"
+
+
 def _build_html() -> str:
     """Build the standalone HTML page for remote Sorcar access.
 
@@ -2147,8 +2158,8 @@ def _build_html() -> str:
     subs = {
         "VIEWPORT": "width=device-width,initial-scale=1,maximum-scale=1",
         "CSP_META": "",
-        "STYLE_HREF": "/media/main.css",
-        "HLJS_CSS_HREF": "/media/highlight-github-dark.min.css",
+        "STYLE_HREF": _media_url("main.css"),
+        "HLJS_CSS_HREF": _media_url("highlight-github-dark.min.css"),
         "HEAD_STYLE": head_style,
         "BODY_CLASS_ATTR": ' class="remote-chat"',
         "INPUT_PLACEHOLDER": "Ask anything... (@ for files)",
@@ -2157,11 +2168,11 @@ def _build_html() -> str:
         "VERSION_SUFFIX": f" {version}" if version else "",
         "AUTH_MODAL": auth_modal,
         "NONCE_ATTR": "",
-        "HLJS_SRC": "/media/highlight.min.js",
-        "MARKED_SRC": "/media/marked.min.js",
-        "PANEL_COPY_SRC": "/media/panelCopy.js",
-        "MAIN_SRC": "/media/main.js",
-        "DEMO_SRC": "/media/demo.js",
+        "HLJS_SRC": _media_url("highlight.min.js"),
+        "MARKED_SRC": _media_url("marked.min.js"),
+        "PANEL_COPY_SRC": _media_url("panelCopy.js"),
+        "MAIN_SRC": _media_url("main.js"),
+        "DEMO_SRC": _media_url("demo.js"),
         "SHIM_SCRIPT": f"<script>{_WS_SHIM_JS}</script>\n  ",
         "TRICKS_JSON": tricks_json,
     }
@@ -2422,6 +2433,9 @@ def _http_response(status: int, content_type: str, body: bytes) -> Response:
             ("Content-Type", content_type),
             ("Content-Length", str(len(body))),
             ("Connection", "close"),
+            ("Cache-Control", "no-cache, no-store, must-revalidate"),
+            ("Pragma", "no-cache"),
+            ("Expires", "0"),
         ]),
         body,
     )
@@ -2879,7 +2893,8 @@ class RemoteAccessServer:
         Returns:
             An HTTP response, or ``None`` for WebSocket upgrade.
         """
-        path = request.path
+        request_path = urlsplit(request.path).path
+        path = unquote(request_path)
         if path == "/" or path == "":
             return _http_response(200, "text/html; charset=utf-8", self._html_bytes)
         if path == "/ws":
