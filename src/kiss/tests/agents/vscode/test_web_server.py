@@ -80,7 +80,7 @@ class TestBuildHtml(unittest.TestCase):
         self.assertIn("acquireVsCodeApi", html)
         self.assertIn("WebSocket", html)
         shim_pos = html.index("acquireVsCodeApi")
-        main_js_pos = html.index('src="/media/main.js"')
+        main_js_pos = html.index('src="/media/main.js?v=')
         self.assertLess(shim_pos, main_js_pos)
 
     def test_html_includes_media_refs(self) -> None:
@@ -110,6 +110,234 @@ class TestBuildHtml(unittest.TestCase):
         """
         html = _build_html()
         self.assertIn('<body class="remote-chat">', html)
+
+
+class TestWebappServerLoadingOverlay(unittest.TestCase):
+    """End-to-end regression for the "KISS Sorcar Server is starting ..."
+    overlay in the remote webapp.
+
+    Bug: the WebSocket shim served by :func:`_build_html` never
+    dispatched a ``daemonStatus`` message, so ``media/main.js``'s
+    overlay toggle (driven by that exact message) kept the
+    ``#kiss-server-loading`` overlay covering ``#app`` forever — the
+    remote webapp showed "KISS Sorcar Server is starting ..." on
+    every load and never recovered.
+
+    The fix synthesises ``daemonStatus`` events from the shim's
+    WebSocket lifecycle:
+      * ``auth_ok``   → ``daemonStatus connected:true``  (reveal #app)
+      * ``onclose``   → ``daemonStatus connected:false`` (re-show overlay)
+
+    These assertions pin the source-level contract.  The companion
+    end-to-end test ``test/webappServerLoadingOverlay.test.js`` runs
+    the shim inside jsdom against a fake WebSocket and verifies the
+    actual DOM toggles.
+    """
+
+    def test_overlay_visible_by_default_in_rendered_html(self) -> None:
+        """The rendered remote-webapp HTML must paint the overlay on top.
+
+        ``#kiss-server-loading`` is present, contains the user-visible
+        "KISS Sorcar Server is starting ..." string, and ``#app``
+        starts with ``display:none`` so the overlay is the only
+        visible UI until the daemonStatus toggle hides it.
+        """
+        html = _build_html()
+        self.assertIn('id="kiss-server-loading"', html)
+        self.assertIn("KISS Sorcar Server is starting ...", html)
+        self.assertIn('id="app" style="display:none;"', html)
+
+    def test_shim_dispatches_daemon_status_on_auth_ok(self) -> None:
+        """After ``auth_ok`` the shim must dispatch ``daemonStatus connected:true``.
+
+        Without this the overlay stays up forever — the exact bug the
+        user reported.  We pin the dispatch site to the auth_ok branch
+        of the shim's ``onmessage`` handler.
+        """
+        html = _build_html()
+        # Isolate the auth_ok branch ("auth_ok" … "return;").
+        marker = "msg.type === 'auth_ok'"
+        self.assertIn(marker, html)
+        after_auth_ok = html.split(marker, 1)[1]
+        auth_ok_branch, _rest = after_auth_ok.split("return;", 1)
+        self.assertIn("daemonStatus", auth_ok_branch)
+        self.assertIn("connected: true", auth_ok_branch)
+        self.assertIn(
+            "window.dispatchEvent",
+            auth_ok_branch,
+            "auth_ok must dispatch the daemonStatus event on window so "
+            "media/main.js hides the loading overlay",
+        )
+
+    def test_shim_dispatches_daemon_status_on_auth_required(self) -> None:
+        """``auth_required`` must also reveal ``#app``.
+
+        The ``#auth-modal`` element lives INSIDE ``#app`` in the
+        chat.html template (``{{AUTH_MODAL}}`` substitution is right
+        before the closing ``#app`` ``</div>``).  CSS ``display:none``
+        on a parent hides every descendant regardless of the child's
+        ``position: fixed``, so without a ``daemonStatus(connected:
+        true)`` dispatch on auth_required the password prompt is
+        invisible and a password-protected webapp can never be
+        unlocked — the user is stuck on "KISS Sorcar Server is
+        starting ..." even though the server is reachable.
+        """
+        html = _build_html()
+        marker = "msg.type === 'auth_required'"
+        self.assertIn(marker, html)
+        after_required = html.split(marker, 1)[1]
+        # The branch ends with the _showAuthModal().then(...) call —
+        # examine everything up to and including that call.
+        required_branch = after_required.split("_showAuthModal()", 1)[0]
+        self.assertIn("daemonStatus", required_branch)
+        self.assertIn("connected: true", required_branch)
+        self.assertIn(
+            "window.dispatchEvent",
+            required_branch,
+            "auth_required must dispatch daemonStatus(connected:true) "
+            "so #app is revealed and the auth modal becomes visible",
+        )
+
+    def test_shim_dispatches_daemon_status_on_close(self) -> None:
+        """On WebSocket ``onclose`` the shim must dispatch ``connected:false``.
+
+        Symmetric to the auth_ok dispatch: while the socket is down
+        the user must see the overlay again instead of a frozen #app.
+        """
+        html = _build_html()
+        marker = "_ws.onclose = function()"
+        self.assertIn(marker, html)
+        onclose_branch = html.split(marker, 1)[1].split("};", 1)[0]
+        self.assertIn("daemonStatus", onclose_branch)
+        self.assertIn("connected: false", onclose_branch)
+        self.assertIn("window.dispatchEvent", onclose_branch)
+
+    def test_webapp_e2e_with_jsdom(self) -> None:
+        """Drive the real shim through node + jsdom against a fake WSS.
+
+        Reproduces the full bug scenario: load the rendered remote
+        webapp HTML, stub ``WebSocket``, run the shim, simulate the
+        server replying with ``auth_ok``, and assert the overlay node
+        is hidden and ``#app`` is revealed.
+
+        Skipped automatically when node or jsdom are unavailable —
+        the source-level assertions above still pin the contract in
+        that case.
+        """
+        import shutil
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node not available")
+        vscode_dir = (
+            Path(__file__).resolve().parents[3]
+            / "agents"
+            / "vscode"
+        )
+        jsdom_dir = vscode_dir / "node_modules" / "jsdom"
+        if not jsdom_dir.exists():
+            self.skipTest("jsdom not installed in vscode/node_modules")
+
+        html = _build_html()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            html_file = tmp_path / "index.html"
+            html_file.write_text(html, encoding="utf-8")
+            script = tmp_path / "drive.js"
+            script.write_text(
+                """
+'use strict';
+const fs = require('fs');
+const path = require('path');
+const {JSDOM} = require(path.join(process.argv[3], 'node_modules', 'jsdom'));
+const html = fs.readFileSync(process.argv[2], 'utf-8');
+const dom = new JSDOM(html, {
+  url: 'https://example.test/',
+  runScripts: 'outside-only',
+});
+const {window} = dom;
+
+// Replace the inline shim's <script> tag impact: rebuild the auth
+// modal nodes the shim looks up (they are part of chat.html template).
+// jsdom did not run inline <script>s (runScripts:outside-only), so we
+// must locate and eval the shim ourselves.
+const shimTag = Array.from(window.document.querySelectorAll('script'))
+  .find((s) => s.textContent.indexOf('acquireVsCodeApi') !== -1);
+if (!shimTag) {
+  console.error('FAIL: shim <script> not found in HTML');
+  process.exit(2);
+}
+const shimSrc = shimTag.textContent;
+
+// Install a fake WebSocket.
+const sockets = [];
+function FakeWS(url) {
+  this.url = url; this.readyState = 0; this.sent = [];
+  this.onopen = null; this.onmessage = null; this.onclose = null; this.onerror = null;
+  sockets.push(this);
+}
+FakeWS.CONNECTING = 0; FakeWS.OPEN = 1; FakeWS.CLOSING = 2; FakeWS.CLOSED = 3;
+FakeWS.prototype.send = function(d) { this.sent.push(d); };
+FakeWS.prototype.close = function() {
+  this.readyState = FakeWS.CLOSED;
+  if (this.onclose) this.onclose();
+};
+window.WebSocket = FakeWS;
+
+// Mirror media/main.js's overlay toggle.
+window.addEventListener('message', (ev) => {
+  const d = ev.data;
+  if (d && d.type === 'daemonStatus') {
+    const ov = window.document.getElementById('kiss-server-loading');
+    const ap = window.document.getElementById('app');
+    if (ov) ov.style.display = d.connected ? 'none' : '';
+    if (ap) ap.style.display = d.connected ? '' : 'none';
+  }
+});
+
+window.eval(shimSrc);
+if (sockets.length !== 1) {
+  console.error('FAIL: expected 1 socket, got', sockets.length); process.exit(3);
+}
+const s = sockets[0];
+s.readyState = FakeWS.OPEN;
+s.onopen && s.onopen();
+s.onmessage && s.onmessage({data: JSON.stringify({type: 'auth_ok'})});
+
+const ov = window.document.getElementById('kiss-server-loading');
+const ap = window.document.getElementById('app');
+if (ov.style.display !== 'none') {
+  console.error('FAIL: overlay still visible after auth_ok:', JSON.stringify(ov.style.display));
+  process.exit(4);
+}
+if (ap.style.display === 'none') {
+  console.error('FAIL: #app still hidden after auth_ok'); process.exit(5);
+}
+
+s.readyState = FakeWS.CLOSED;
+s.onclose && s.onclose();
+if (ov.style.display === 'none') {
+  console.error('FAIL: overlay still hidden after socket close'); process.exit(6);
+}
+if (ap.style.display !== 'none') {
+  console.error('FAIL: #app still visible after socket close'); process.exit(7);
+}
+console.log('OK');
+                """,
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [node, str(script), str(html_file), str(vscode_dir)],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(
+                result.returncode,
+                0,
+                f"node drive failed:\nstdout={result.stdout}\nstderr={result.stderr}",
+            )
+            self.assertIn("OK", result.stdout)
 
 
 class TestTranslateWebviewCommand(unittest.TestCase):
