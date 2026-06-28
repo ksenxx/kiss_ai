@@ -333,6 +333,11 @@ ______________________________________________________________________
 - `repo`: Git repo root path.
 - **Returns:** A :class:`threading.RLock` specific to the resolved repo path.
 
+**`strip_worktree_suffix`** — Return *path* with the `.kiss-worktrees/kiss_wt-<slug>[/...]` suffix removed, leaving the parent repository path. Worktree directories are ephemeral — they are deleted when the worktree is merged or discarded. Persisting a worktree path in long-lived storage (e.g. `task_history.extra.work_dir`) would leave dangling references the user-visible UI cannot resolve. Use this helper at every persistence boundary that records a `work_dir` for later display or filtering. Paths that do not contain a `<repo>/.kiss-worktrees/kiss_wt-*` segment are returned unchanged, including the empty string.<br/>`def strip_worktree_suffix(path: str) -> str`
+
+- `path`: An absolute or relative filesystem path string.
+- **Returns:** The parent-repo path string, or the unchanged input when the path is not inside a KISS worktree.
+
 ______________________________________________________________________
 
 #### `kiss.agents.sorcar.worktree_sorcar_agent` — *Worktree-based agent that runs each task on an isolated git branch.*
