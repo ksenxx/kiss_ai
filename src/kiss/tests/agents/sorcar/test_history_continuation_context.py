@@ -195,7 +195,7 @@ class TestHistoryContinuationContext(unittest.TestCase):
         assert rows, "expected first task to be persisted"
         first_row = rows[0]
         chat_id = str(first_row["chat_id"])
-        task_id = cast(int, first_row["id"])
+        task_id = cast(str, first_row["id"])
         assert chat_id, "expected non-empty chat_id"
 
         # Step 2: simulate the user clicking the history row for that
@@ -285,7 +285,7 @@ class TestHistoryContinuationWhenTabIdMismatch(unittest.TestCase):
         rows = th._load_history(limit=10)
         assert rows
         chat_id = str(rows[0]["chat_id"])
-        task_id = cast(int, rows[0]["id"])
+        task_id = cast(str, rows[0]["id"])
 
         # Simulate a viewer browser that allocates a DIFFERENT tab id
         # to view this chat (e.g. a second viewer opening the row, or
