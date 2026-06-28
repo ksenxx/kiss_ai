@@ -641,6 +641,99 @@
     }
     .prompt-panel.expanded .prompt-more .chev { transform: rotate(180deg); }
 
+    /* ========================================================== */
+    /* PROMPT CAROUSEL — show one panel at a time at the same      */
+    /* location with prev/next, dots, counter, and autoplay.       */
+    /* ========================================================== */
+    .prompt-carousel { margin-top: 0.4rem; }
+    .prompt-stage {
+      position: relative;
+      border-radius: 14px;
+    }
+    .prompt-stage > .prompt-panel {
+      position: absolute;
+      inset: 0;
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+      transform: translateX(14px);
+      transition: opacity 0.35s ease, transform 0.35s ease;
+    }
+    .prompt-stage > .prompt-panel.active {
+      position: relative;
+      inset: auto;
+      opacity: 1;
+      visibility: visible;
+      pointer-events: auto;
+      transform: translateX(0);
+    }
+    /* Cancel the section-card stagger animation inside the stage  */
+    /* so its final opacity:1 fill doesn't reveal hidden panels.   */
+    .section-card.in-view .prompt-stage > .prompt-panel { animation: none; }
+
+    .carousel-controls {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 0.8rem; margin-top: 1.15rem; flex-wrap: wrap;
+    }
+    .carousel-counter {
+      font-family: 'Roboto Mono', monospace;
+      font-size: 0.86rem; color: var(--text-dim);
+      letter-spacing: 0.05em;
+      display: inline-flex; align-items: center; gap: 0.55rem;
+      flex: 1; justify-content: center; min-width: 0;
+    }
+    .carousel-counter strong { color: var(--text); font-weight: 600; }
+    .carousel-counter .kind {
+      display: inline-block;
+      padding: 0.18rem 0.55rem; border-radius: 999px;
+      font-family: 'Roboto Mono', monospace;
+      font-size: 0.70rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
+      background: var(--primary-soft); color: var(--primary-dark);
+    }
+    .carousel-counter .kind.trick {
+      background: rgba(0,137,123,0.10); color: var(--accent);
+    }
+
+    .carousel-btn {
+      background: transparent; color: var(--primary);
+      border: 1px solid var(--border);
+      font-family: inherit; font-size: 0.86rem; font-weight: 500;
+      padding: 0.45rem 1rem; border-radius: 8px;
+      cursor: pointer; display: inline-flex; align-items: center; gap: 0.4rem;
+      transition: background 0.15s, border-color 0.15s, color 0.15s, transform 0.1s;
+      flex-shrink: 0;
+    }
+    .carousel-btn:hover {
+      background: var(--primary-soft);
+      border-color: var(--primary);
+      color: var(--primary-dark);
+    }
+    .carousel-btn:active { transform: scale(0.97); }
+    .carousel-btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+    .carousel-btn .arrow { font-weight: 600; }
+
+    .carousel-dots {
+      display: flex; flex-wrap: wrap; gap: 0.38rem;
+      margin-top: 1rem; justify-content: center;
+    }
+    .carousel-dot {
+      width: 9px; height: 9px; border-radius: 50%;
+      background: var(--border); border: none; padding: 0;
+      cursor: pointer; transition: background 0.18s, transform 0.18s;
+    }
+    .carousel-dot:hover { background: var(--primary-soft); transform: scale(1.2); }
+    .carousel-dot.active { background: var(--primary); transform: scale(1.4); }
+    .carousel-dot.trick.active { background: var(--accent); }
+    .carousel-dot:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+
+    @media (prefers-reduced-motion: reduce) {
+      .prompt-stage > .prompt-panel { transition: none; transform: none; }
+    }
+    @media (max-width: 540px) {
+      .carousel-counter { order: 3; flex-basis: 100%; }
+      .carousel-controls { justify-content: space-between; }
+    }
+
     /* Footer */
     footer {
       border-top: 1px solid var(--border);
@@ -691,8 +784,8 @@
         <span>KISS Sorcar</span>
       </a>
       <ul class="links">
-        <li><a href="#compare">Compare</a></li>
         <li><a href="#prompts">Prompts</a></li>
+        <li><a href="#compare">Compare</a></li>
         <li><a href="#name">Name</a></li>
         <li><a href="#install">Install</a></li>
         <li><a href="#cli">CLI</a></li>
@@ -733,119 +826,16 @@
     </video>
   </div>
 
-  <!-- ================ § 01 — Compare ================ -->
-  <div class="section-wrap">
-  <section id="compare" class="section-card">
-    <span class="num">§ 01 — KISS Sorcar vs Claude Code vs Cursor</span>
-    <h2>How does it compare?<a href="#compare" class="anchor">¶</a></h2>
-    <p class="sub">A side-by-side look at the differences that matter for everyday use.</p>
-    <div class="section-body">
-      <div class="compare-wrap">
-        <table class="compare">
-          <thead>
-            <tr>
-              <th class="cap">Capability</th>
-              <th class="kiss">KISS Sorcar</th>
-              <th>Claude Code</th>
-              <th>Cursor</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <th class="cap">Interfaces</th>
-              <td class="kiss">CLI + VS Code extension + web/mobile app</td>
-              <td>CLI + mobile app</td>
-              <td>Custom VS Code</td>
-            </tr>
-            <tr>
-              <th class="cap">AI Discovery</th>
-              <td class="kiss"><span class="yes">✓</span> simply via prompt</td>
-              <td><span class="no">✗</span></td>
-              <td><span class="no">✗</span></td>
-            </tr>
-            <tr>
-              <th class="cap">GEPA Prompt Optimization</th>
-              <td class="kiss"><span class="yes">✓</span> simply via prompt</td>
-              <td><span class="no">✗</span></td>
-              <td><span class="no">✗</span></td>
-            </tr>
-            <tr>
-              <th class="cap">Multiple models from multiple vendors in the same task</th>
-              <td class="kiss"><span class="yes">✓</span> Mix OpenAI, Anthropic, Gemini, Together, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, and Codex CLI</td>
-              <td><span class="no">✗</span> Anthropic Claude models only</td>
-              <td><span class="no">✗</span> One model per task</td>
-            </tr>
-            <tr>
-              <th class="cap">Primary focus</th>
-              <td class="kiss"><span class="yes">✓</span> <strong>Quality</strong> &mdash; rigorous review, end-to-end tests</td>
-              <td>Speed and developer ergonomics</td>
-              <td>Speed</td>
-            </tr>
-            <tr>
-              <th class="cap">Core Agents # LoC</th>
-              <td class="kiss"><strong>~2500</strong></td>
-              <td>Unknown</td>
-              <td>Unknown</td>
-            </tr>
-            <tr>
-              <th class="cap">Models in bundled catalog</th>
-              <td class="kiss">502 across 9 provider categories</td>
-              <td>Claude family only</td>
-              <td>Subset chosen by Cursor</td>
-            </tr>
-            <tr>
-              <th class="cap">Bring your own API key / endpoint</th>
-              <td class="kiss"><span class="yes">✓</span> Yes &mdash; keys stay on your machine</td>
-              <td><span class="yes">✓</span> Anthropic key</td>
-              <td><span class="warn">⚠</span> Routed through Cursor backend</td>
-            </tr>
-            <tr>
-              <th class="cap">Open source</th>
-              <td class="kiss"><span class="yes">✓</span> Apache-2.0</td>
-              <td><span class="no">✗</span> Proprietary</td>
-              <td><span class="no">✗</span> Proprietary</td>
-            </tr>
-            <tr>
-              <th class="cap">Price</th>
-              <td class="kiss">Free framework; pay only your chosen model provider</td>
-              <td>Subscription / API usage</td>
-              <td>Subscription</td>
-            </tr>
-            <tr>
-              <th class="cap">Run on top of Claude Code / Codex CLI</th>
-              <td class="kiss"><span class="yes">✓</span> <code>cc/*</code> and <code>codex/*</code> namespaces</td>
-              <td>N/A</td>
-              <td><span class="no">✗</span></td>
-            </tr>
-            <tr>
-              <th class="cap">Messaging and communication channels</th>
-              <td class="kiss"><span class="yes">✓</span> 23 third-party agents, including Slack, Gmail, Phone Control, SMS, and WhatsApp</td>
-              <td><span class="warn">⚠</span> Slack, mobile Remote Control, and research-preview channels for Telegram, Discord, and iMessage; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel</td>
-              <td><span class="warn">⚠</span> Slack and Microsoft Teams Cloud Agent integrations; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel</td>
-            </tr>
-            <tr>
-              <th class="cap">Terminal Bench 2.0 score</th>
-              <td class="kiss"><strong>62.2%</strong></td>
-              <td>58%</td>
-              <td>61.7% <small>(Cursor agent)</small></td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-  </section>
-  </div>
-
-  <!-- ================ § 02 — All you need is a short prompt ================ -->
+  <!-- ================ § 01 — All you need is a short prompt ================ -->
   <div class="section-wrap">
   <section id="prompts" class="section-card">
-    <span class="num">§ 02 — All you need is a short prompt</span>
+    <span class="num">§ 01 — All you need is a short prompt</span>
     <h2>All you need is a short prompt.<a href="#prompts" class="anchor">¶</a></h2>
-    <p class="sub">KISS Sorcar ships with a curated set of <strong>sample tasks</strong> (long-horizon prompts you can drop straight into the CLI or VS Code extension) and <strong>promptlet tricks</strong> (short reusable directives that steer Sorcar's behaviour mid-task). The tasks live in <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/SAMPLE_TASKS.md"><code>src/kiss/SAMPLE_TASKS.md</code></a>; the tricks live in <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/INJECTIONS.md"><code>src/kiss/INJECTIONS.md</code></a>. Browse the deck below — click <em>more …</em> on any panel to expand the full prompt.</p>
+    <p class="sub">KISS Sorcar ships with a curated set of <strong>sample tasks</strong> (long-horizon prompts you can drop straight into the CLI or VS Code extension) and <strong>promptlet tricks</strong> (short reusable directives that steer Sorcar's behaviour mid-task). The tasks live in <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/SAMPLE_TASKS.md"><code>src/kiss/SAMPLE_TASKS.md</code></a>; the tricks live in <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/INJECTIONS.md"><code>src/kiss/INJECTIONS.md</code></a>. Flip through them one at a time below &mdash; use <kbd>Prev</kbd>/<kbd>Next</kbd>, the dots, or your <kbd>←</kbd>/<kbd>→</kbd> arrow keys, and click <em>more …</em> to expand the full prompt.</p>
     <div class="section-body">
 
-      <div class="deck-group-title">Sample tasks &mdash; SAMPLE_TASKS.md</div>
-      <div class="prompt-deck">
+      <div class="prompt-carousel" id="prompt-carousel" aria-roledescription="carousel" aria-label="Sample tasks and promptlet tricks">
+        <div class="prompt-stage">
 
         <article class="inner-card prompt-panel" style="--i:0">
           <div class="panel-head">
@@ -1023,11 +1013,6 @@ In each step, keep track of the best prompt which has the maximum number of succ
           </div>
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
         </article>
-
-      </div>
-
-      <div class="deck-group-title">Promptlet tricks &mdash; INJECTIONS.md</div>
-      <div class="prompt-deck">
 
         <article class="inner-card prompt-panel" style="--i:0">
           <div class="panel-head">
@@ -1224,6 +1209,118 @@ In each step, keep track of the best prompt which has the maximum number of succ
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
         </article>
 
+        </div>
+
+        <div class="carousel-controls">
+          <button type="button" class="carousel-btn carousel-prev" aria-label="Previous prompt"><span class="arrow" aria-hidden="true">←</span> Prev</button>
+          <div class="carousel-counter" aria-live="polite"></div>
+          <button type="button" class="carousel-btn carousel-next" aria-label="Next prompt">Next <span class="arrow" aria-hidden="true">→</span></button>
+        </div>
+
+        <div class="carousel-dots" id="carousel-dots" role="tablist" aria-label="Prompt navigation"></div>
+      </div>
+    </div>
+  </section>
+  </div>
+
+  <!-- ================ § 02 — Compare ================ -->
+  <div class="section-wrap">
+  <section id="compare" class="section-card">
+    <span class="num">§ 02 — KISS Sorcar vs Claude Code vs Cursor</span>
+    <h2>How does it compare?<a href="#compare" class="anchor">¶</a></h2>
+    <p class="sub">A side-by-side look at the differences that matter for everyday use.</p>
+    <div class="section-body">
+      <div class="compare-wrap">
+        <table class="compare">
+          <thead>
+            <tr>
+              <th class="cap">Capability</th>
+              <th class="kiss">KISS Sorcar</th>
+              <th>Claude Code</th>
+              <th>Cursor</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <th class="cap">Interfaces</th>
+              <td class="kiss">CLI + VS Code extension + web/mobile app</td>
+              <td>CLI + mobile app</td>
+              <td>Custom VS Code</td>
+            </tr>
+            <tr>
+              <th class="cap">AI Discovery</th>
+              <td class="kiss"><span class="yes">✓</span> simply via prompt</td>
+              <td><span class="no">✗</span></td>
+              <td><span class="no">✗</span></td>
+            </tr>
+            <tr>
+              <th class="cap">GEPA Prompt Optimization</th>
+              <td class="kiss"><span class="yes">✓</span> simply via prompt</td>
+              <td><span class="no">✗</span></td>
+              <td><span class="no">✗</span></td>
+            </tr>
+            <tr>
+              <th class="cap">Multiple models from multiple vendors in the same task</th>
+              <td class="kiss"><span class="yes">✓</span> Mix OpenAI, Anthropic, Gemini, Together, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, and Codex CLI</td>
+              <td><span class="no">✗</span> Anthropic Claude models only</td>
+              <td><span class="no">✗</span> One model per task</td>
+            </tr>
+            <tr>
+              <th class="cap">Primary focus</th>
+              <td class="kiss"><span class="yes">✓</span> <strong>Quality</strong> &mdash; rigorous review, end-to-end tests</td>
+              <td>Speed and developer ergonomics</td>
+              <td>Speed</td>
+            </tr>
+            <tr>
+              <th class="cap">Core Agents # LoC</th>
+              <td class="kiss"><strong>~2500</strong></td>
+              <td>Unknown</td>
+              <td>Unknown</td>
+            </tr>
+            <tr>
+              <th class="cap">Models in bundled catalog</th>
+              <td class="kiss">502 across 9 provider categories</td>
+              <td>Claude family only</td>
+              <td>Subset chosen by Cursor</td>
+            </tr>
+            <tr>
+              <th class="cap">Bring your own API key / endpoint</th>
+              <td class="kiss"><span class="yes">✓</span> Yes &mdash; keys stay on your machine</td>
+              <td><span class="yes">✓</span> Anthropic key</td>
+              <td><span class="warn">⚠</span> Routed through Cursor backend</td>
+            </tr>
+            <tr>
+              <th class="cap">Open source</th>
+              <td class="kiss"><span class="yes">✓</span> Apache-2.0</td>
+              <td><span class="no">✗</span> Proprietary</td>
+              <td><span class="no">✗</span> Proprietary</td>
+            </tr>
+            <tr>
+              <th class="cap">Price</th>
+              <td class="kiss">Free framework; pay only your chosen model provider</td>
+              <td>Subscription / API usage</td>
+              <td>Subscription</td>
+            </tr>
+            <tr>
+              <th class="cap">Run on top of Claude Code / Codex CLI</th>
+              <td class="kiss"><span class="yes">✓</span> <code>cc/*</code> and <code>codex/*</code> namespaces</td>
+              <td>N/A</td>
+              <td><span class="no">✗</span></td>
+            </tr>
+            <tr>
+              <th class="cap">Messaging and communication channels</th>
+              <td class="kiss"><span class="yes">✓</span> 23 third-party agents, including Slack, Gmail, Phone Control, SMS, and WhatsApp</td>
+              <td><span class="warn">⚠</span> Slack, mobile Remote Control, and research-preview channels for Telegram, Discord, and iMessage; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel</td>
+              <td><span class="warn">⚠</span> Slack and Microsoft Teams Cloud Agent integrations; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel</td>
+            </tr>
+            <tr>
+              <th class="cap">Terminal Bench 2.0 score</th>
+              <td class="kiss"><strong>62.2%</strong></td>
+              <td>58%</td>
+              <td>61.7% <small>(Cursor agent)</small></td>
+            </tr>
+          </tbody>
+        </table>
       </div>
     </div>
   </section>
@@ -1637,6 +1734,139 @@ In each step, keep track of the best prompt which has the maximum number of succ
         });
         btn.setAttribute('aria-expanded', 'false');
       });
+    })();
+
+    // ---------------------------------------------------------------
+    // Prompt carousel — shows one panel at a time at the same        
+    // location with prev/next buttons, dot navigation, a live        
+    // counter, keyboard arrows, and autoplay that pauses on hover,   
+    // when a panel is expanded, or when the section is off-screen.   
+    // ---------------------------------------------------------------
+    (function () {
+      const carousel = document.getElementById('prompt-carousel');
+      if (!carousel) return;
+      const stage    = carousel.querySelector('.prompt-stage');
+      const panels   = Array.from(stage.querySelectorAll(':scope > .prompt-panel'));
+      const prevBtn  = carousel.querySelector('.carousel-prev');
+      const nextBtn  = carousel.querySelector('.carousel-next');
+      const counter  = carousel.querySelector('.carousel-counter');
+      const dotsEl   = carousel.querySelector('#carousel-dots');
+      const total    = panels.length;
+      if (!total) return;
+      let index = 0;
+      let autoplayTimer = null;
+      const AUTOPLAY_MS = 7000;
+
+      // Build dots, one per panel; mark trick dots with a class so   
+      // they can use the accent colour when active.                  
+      panels.forEach((p, i) => {
+        const dot = document.createElement('button');
+        dot.type = 'button';
+        dot.className = 'carousel-dot';
+        if (p.querySelector('.panel-badge.trick')) dot.classList.add('trick');
+        dot.setAttribute('role', 'tab');
+        dot.setAttribute('aria-label', `Show prompt ${i + 1} of ${total}`);
+        dot.addEventListener('click', () => goTo(i, true));
+        dotsEl.appendChild(dot);
+      });
+      const dots = Array.from(dotsEl.children);
+
+      function render() {
+        panels.forEach((p, i) => {
+          const active = (i === index);
+          p.classList.toggle('active', active);
+          p.setAttribute('aria-hidden', active ? 'false' : 'true');
+        });
+        dots.forEach((d, i) => {
+          const active = (i === index);
+          d.classList.toggle('active', active);
+          d.setAttribute('aria-selected', active ? 'true' : 'false');
+        });
+        const badge = panels[index].querySelector('.panel-badge');
+        const kind  = badge ? badge.textContent.trim() : '';
+        const kindClass = (badge && badge.classList.contains('trick')) ? 'kind trick' : 'kind';
+        counter.innerHTML =
+          `<strong>${String(index + 1).padStart(2, '0')}</strong> / ${String(total).padStart(2, '0')}` +
+          (kind ? ` <span class="${kindClass}">${kind}</span>` : '');
+      }
+
+      function goTo(i, userInitiated) {
+        index = ((i % total) + total) % total;
+        // Collapse any expanded panel when navigating away.           
+        panels.forEach((p, j) => {
+          if (j !== index && p.classList.contains('expanded')) {
+            p.classList.remove('expanded');
+            const btn = p.querySelector('.prompt-more');
+            if (btn) {
+              btn.setAttribute('aria-expanded', 'false');
+              if (btn.firstChild) btn.firstChild.nodeValue = 'more ';
+            }
+          }
+        });
+        render();
+        if (userInitiated) restartAutoplay();
+      }
+      const next = (u) => goTo(index + 1, u);
+      const prev = (u) => goTo(index - 1, u);
+
+      prevBtn.addEventListener('click', () => prev(true));
+      nextBtn.addEventListener('click', () => next(true));
+
+      // Keyboard navigation: ArrowLeft/ArrowRight when the carousel  
+      // is visible on screen and the user is not typing in a field.  
+      document.addEventListener('keydown', (e) => {
+        const t = e.target;
+        if (t && t.matches && t.matches('input, textarea, select, [contenteditable="true"]')) return;
+        const r = carousel.getBoundingClientRect();
+        const visible = r.top < window.innerHeight - 80 && r.bottom > 80;
+        if (!visible) return;
+        if (e.key === 'ArrowLeft')  { e.preventDefault(); prev(true); }
+        else if (e.key === 'ArrowRight') { e.preventDefault(); next(true); }
+      });
+
+      // Basic touch swipe support for mobile.                        
+      let touchStartX = null;
+      stage.addEventListener('touchstart', (e) => {
+        if (e.touches.length === 1) touchStartX = e.touches[0].clientX;
+      }, { passive: true });
+      stage.addEventListener('touchend', (e) => {
+        if (touchStartX == null) return;
+        const dx = e.changedTouches[0].clientX - touchStartX;
+        touchStartX = null;
+        if (Math.abs(dx) > 40) (dx < 0 ? next : prev)(true);
+      });
+
+      function tick() {
+        if (carousel.querySelector('.prompt-panel.expanded')) return; // pause while reading
+        if (carousel.matches(':hover')) return;                        // pause on hover
+        if (document.hidden) return;                                   // pause when tab hidden
+        next(false);
+      }
+      function startAutoplay() {
+        stopAutoplay();
+        autoplayTimer = setInterval(tick, AUTOPLAY_MS);
+      }
+      function stopAutoplay() {
+        if (autoplayTimer) { clearInterval(autoplayTimer); autoplayTimer = null; }
+      }
+      function restartAutoplay() {
+        if (autoplayTimer) startAutoplay();
+      }
+
+      // Only autoplay while the carousel is in view.                  
+      if ('IntersectionObserver' in window) {
+        const io = new IntersectionObserver((entries) => {
+          for (const entry of entries) {
+            if (entry.isIntersecting) startAutoplay();
+            else stopAutoplay();
+          }
+        }, { threshold: 0.15 });
+        io.observe(carousel);
+      } else {
+        startAutoplay();
+      }
+
+      render();
     })();
 
     // ---------------------------------------------------------------
