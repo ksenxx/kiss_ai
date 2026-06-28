@@ -559,7 +559,11 @@
       display: flex; flex-direction: column; gap: 1rem;
     }
 
-    .prompt-panel { padding: 1.3rem 1.4rem; }
+    .prompt-panel {
+      padding: 1.3rem 1.4rem;
+      background: #e6f1fb;
+      border-color: rgba(25,118,210,0.22);
+    }
     .prompt-panel .panel-head {
       display: flex; align-items: flex-start; justify-content: space-between;
       gap: 0.8rem; flex-wrap: wrap;
@@ -599,7 +603,9 @@
       font-family: 'Roboto Mono', 'JetBrains Mono', monospace;
       font-size: 0.84rem; line-height: 1.65;
       white-space: pre-wrap; word-wrap: break-word;
-      max-height: 180px; overflow-y: auto;
+      /* Show at least 5 lines (5 * 1.65em + vertical padding). */
+      max-height: calc(5 * 1.65 * 0.84rem + 1.8rem);
+      overflow: hidden;
       color: inherit;
       scrollbar-width: thin;
       scrollbar-color: rgba(255,255,255,0.25) transparent;
@@ -617,9 +623,18 @@
       transition: opacity 0.2s;
     }
     .prompt-panel.expanded .prompt-body pre {
-      max-height: none;
+      /* When expanded, make the entire prompt scrollable inside a   */
+      /* bounded area instead of letting it grow unboundedly.        */
+      max-height: 22rem;
+      overflow-y: auto;
     }
     .prompt-panel.expanded .prompt-fade { opacity: 0; }
+
+    /* Hide the "more" button + fade gradient for prompts that       */
+    /* already fit in the 5-line collapsed view. The .fits class is  */
+    /* added by JS after measuring scrollHeight vs. clientHeight.    */
+    .prompt-panel.fits .prompt-more { display: none; }
+    .prompt-panel.fits .prompt-fade { display: none; }
 
     .prompt-more {
       margin-top: 0.65rem;
@@ -1718,15 +1733,16 @@ In each step, keep track of the best prompt which has the maximum number of succ
     })();
 
     // ---------------------------------------------------------------
-    // Prompt-deck "more …" toggle. Expands a .prompt-panel to show
-    // the full prompt text instead of the clipped, scrollable view.
+    // Prompt-deck "more …" toggle. Expands a .prompt-panel to make
+    // the entire prompt scrollable instead of clipped to 5 lines.
+    // Also tags panels whose prompt fits in 5 lines with .fits so
+    // the "more" button + fade gradient can be hidden via CSS.
     // ---------------------------------------------------------------
     (function () {
       document.querySelectorAll('.prompt-panel').forEach((panel) => {
         const btn = panel.querySelector('.prompt-more');
         if (!btn) return;
         const label = btn.firstChild;
-        const chev = btn.querySelector('.chev');
         btn.addEventListener('click', () => {
           const expanded = panel.classList.toggle('expanded');
           if (label) label.nodeValue = expanded ? 'less ' : 'more ';
@@ -1734,6 +1750,32 @@ In each step, keep track of the best prompt which has the maximum number of succ
         });
         btn.setAttribute('aria-expanded', 'false');
       });
+
+      // Measure whether each prompt's collapsed view already shows
+      // the whole text. If so, mark the panel .fits.
+      function measureFits() {
+        document.querySelectorAll('.prompt-panel').forEach((panel) => {
+          const pre = panel.querySelector('.prompt-body pre');
+          if (!pre) return;
+          const wasExpanded = panel.classList.contains('expanded');
+          // Measure against the collapsed sizing.
+          if (wasExpanded) panel.classList.remove('expanded');
+          const fits = pre.scrollHeight <= pre.clientHeight + 1;
+          panel.classList.toggle('fits', fits);
+          if (wasExpanded) panel.classList.add('expanded');
+        });
+      }
+      if (document.readyState === 'complete') measureFits();
+      else window.addEventListener('load', measureFits);
+      // Fonts can change the line box, so re-measure once they load.
+      if (document.fonts && document.fonts.ready) {
+        document.fonts.ready.then(measureFits).catch(() => {});
+      }
+      window.addEventListener('resize', measureFits);
+      // Expose so the carousel can re-measure after navigation if it
+      // ever needs to (panel widths can change between active states
+      // when the stage resizes).
+      window.__measurePromptFits = measureFits;
     })();
 
     // ---------------------------------------------------------------
