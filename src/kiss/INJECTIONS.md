@@ -24,11 +24,15 @@ Can you review the updates made in the last task using gpt-5.5 (non codex) and f
 
 ## Trick
 
-Can you review the updates made in the current task using gpt-5.5 (non codex) and find bugs or missing code. Then write end-to-end tests reproducing the bugs reported by the review, fix them, and test them using claude-opus-4-7? Run all the tests in parallel and fix bugs after thoroughly reviewing the fixes with gpt-5.5 (non codex). Repeat the process until you fail to reproduce the bugs reported by the review done by gpt-5.5 (non codex). No need to check if the models exist.
+Review the updates made in the current task using gpt-5.5 (non codex) and find bugs or missing code. Then write end-to-end tests reproducing the bugs reported by the review, fix them, and test them using claude-opus-4-7? Run all the tests in parallel and fix bugs after thoroughly reviewing the fixes with gpt-5.5 (non codex). Repeat the process until you fail to reproduce the bugs reported by the review done by gpt-5.5 (non codex). No need to check if the models exist.
 
 ## Trick
 
 Use openrouter/z-ai/glm-5.2 model for all tasks including coding, bug fixing, and test creation. ALWAYS use gpt-5.5 model (not codex) to carefully and thoroughly review and debug the work done by openrouter/z-ai/glm-5.2 for bugs and missing code. Then use claude-opus-4-7 to do the same thing.
+
+## Trick
+
+Can you check the following message on merge conflict and help me fix it? 
 
 ## Trick
 
@@ -48,7 +52,7 @@ Get rid of all commits after the following commit from both main and origin:
 
 ## Trick
 
-Build the paper and take screenshots to check and fix formatting.
+Build the paper, and take screenshots to check and fix formatting.
 
 ## Trick
 

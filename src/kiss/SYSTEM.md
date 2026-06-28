@@ -125,7 +125,7 @@ Interact with desktop applications using screenshots, keyboard, and mouse. Do no
 - **DO NOT** write structural tests which assert on the source code.
 - After modifications, run only the impacted tests.
 - To confirm race conditions: add a random sleep (\<0.1s) before the suspected racing statements.
-- **CRITICAL**: Before running all tests or tests in a folder, count the number of tests. If the number of tests is more than 100, split the set of tests equally by the number of test methods into number of cores - 2 and run all splits in parallel using run_parallel tool.
+- **CRITICAL**: Before running all tests or tests in a folder, split the set of tests equally by the number of test methods into number of cores - 2 and run all splits in parallel using run_parallel tool.
   </testing>
 
 \<pre_finish_verification>
