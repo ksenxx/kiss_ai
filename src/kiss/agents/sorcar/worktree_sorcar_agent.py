@@ -133,6 +133,13 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         # the owning :class:`_RunningAgentState` and pull queued
         # follow-up prompts before each model call.
         self._tab_id: str = ""
+        # Notification id for the in-flight auto-commit toast.
+        # Set at the start of every ``_auto_commit_worktree`` call so
+        # the "generating" and "committed" stages share a single id —
+        # ``media/main.js`` ``showNotification`` then updates the
+        # existing toast in place instead of stacking two notifications
+        # (see Bug 2 in tmp/review-round-1.md).
+        self._commit_run_id: str = ""
         # Wall-clock start of the current task in epoch milliseconds,
         # stamped by the VS Code ``task_runner`` just before the run
         # starts; read (via ``getattr`` with a 0 default) by
@@ -179,6 +186,15 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         re-staging).  Falls back to a generic commit message when the
         LLM-based message generator is unavailable.
 
+        Emits two best-effort UI notifications via
+        :meth:`_broadcast_commit_notification` when a printer with a
+        ``broadcast`` method is attached: ``"Generating commit
+        message"`` immediately before the (typically slow) LLM call
+        that produces the commit message, and ``"Committed
+        <subject>"`` once the commit lands in git.  The notifications
+        are routed by tab so they appear on the owning chat webview,
+        not on every open tab.
+
         Returns:
             True if a commit was created, False if nothing to commit.
         """
@@ -186,11 +202,83 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             return False
         if not self.auto_commit_enabled:
             return False
+        # Stash a single notification id for the whole
+        # ``auto_commit_changes`` lifecycle so both the "generating"
+        # and "committed" toasts share it (Bug 2 from gpt-5.5
+        # review).  Includes ``time.time_ns()`` so concurrent agents
+        # on the same tab (e.g. sub-agent sessions) don't collide.
+        self._commit_run_id = (
+            f"autocommit-{self._tab_id}-{time.time_ns()}"
+        )
         return auto_commit_changes(
             self._wt.wt_dir,
             self._last_user_prompt or None,
             _generate_commit_message,
+            notify_fn=self._broadcast_commit_notification,
         )
+
+    def _broadcast_commit_notification(self, stage: str, subject: str) -> None:
+        """Broadcast an auto-commit life-cycle notification to the webview.
+
+        Hook used by
+        :func:`~kiss.agents.sorcar.sorcar_agent.auto_commit_changes`:
+        ``stage="generating"`` arrives immediately before the LLM
+        call that generates the commit message; ``stage="committed"``
+        arrives immediately after a successful commit, with
+        *subject* set to the first non-empty line of the commit
+        message.  Other stage values are ignored.
+
+        Silently no-ops when no printer with a ``broadcast`` method
+        is attached (e.g. the printer-free unit-test path), and never
+        raises into the caller — broken UI plumbing must not block
+        the commit itself.
+
+        Args:
+            stage: ``"generating"`` or ``"committed"``.
+            subject: First non-empty line of the commit message
+                (used as the toast body for the ``"committed"``
+                stage; ignored for ``"generating"``).
+        """
+        printer = getattr(self, "printer", None)
+        if printer is None or not hasattr(printer, "broadcast"):
+            return
+        if stage == "generating":
+            message = "Generating commit message"
+        elif stage == "committed":
+            message = f"Committed {subject}" if subject else "Committed"
+        else:
+            return
+        # Share a single id across both lifecycle stages so the
+        # webview updates the existing toast in place ("Generating
+        # commit message" → "Committed <subject>") instead of stacking
+        # two toasts and leaving the "Generating" toast lingering
+        # until its own auto-dismiss timer fires (Bug 2, gpt-5.5
+        # round-1 review).
+        notification_id = self._commit_run_id or (
+            f"autocommit-{self._tab_id}-{time.time_ns()}"
+        )
+        # The ``"generating"`` toast must remain visible for the
+        # entire (potentially long) LLM-driven commit-message call —
+        # the webview's transient auto-dismiss timer (~5 s) would
+        # otherwise hide it mid-flight and mislead the user into
+        # thinking the commit had stalled.  Mark it ``sticky`` so
+        # ``scheduleNotificationDismiss`` short-circuits, and rely on
+        # the subsequent ``"committed"`` event (which reuses the same
+        # ``id`` but omits ``sticky``) to replace it with a regular
+        # transient toast that fades out normally.
+        event: dict[str, object] = {
+            "type": "notification",
+            "id": notification_id,
+            "severity": "info",
+            "message": message,
+            "tabId": self._tab_id,
+        }
+        if stage == "generating":
+            event["sticky"] = True
+        try:
+            printer.broadcast(event)
+        except Exception:  # pragma: no cover — best-effort UI hook
+            logger.debug("autocommit notification broadcast failed", exc_info=True)
 
 
     def _finalize_worktree(self) -> bool:

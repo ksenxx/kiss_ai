@@ -459,8 +459,15 @@ async function runFinalization(
     installCliScript(kissProjectPath, uvPath);
   }
 
-  if (progress) progress.report({message: 'Refreshing model info...'});
+  // MODEL_INFO.json is intentionally NOT copied into ``~/.kiss/``;
+  // see the docstring on ``installModelInfoJson`` below for the
+  // rationale.  User overrides live in ``~/.kiss/MY_MODELS.json``,
+  // auto-seeded by ``kiss.core.models.model_info`` on first import.
   installModelInfoJson(kissProjectPath);
+  // INJECTIONS.md is intentionally NOT copied into ``~/.kiss/``; see
+  // the docstring on ``installMarkdownAssets`` below for the
+  // rationale.  ``MY_INJECTION.md`` is lazily seeded by
+  // ``ensureUserAssetFromDefault`` on the first ``getTricks()`` call.
   installMarkdownAssets(kissProjectPath);
 
   if (progress) progress.report({message: 'Checking cloudflared...'});
@@ -1318,75 +1325,66 @@ function computeKissWebFingerprint(
 }
 
 /**
- * Always overwrite ``~/.kiss/INJECTIONS.md`` and ``~/.kiss/SAMPLE_TASKS.md``
- * with the copies bundled inside the installed kiss_project.  Called on
- * every install/update (both fast and slow paths in ``runFinalization``) so
- * that the kiss-web daemon's Tricks button and the VS Code extension's
- * welcome-screen sample-task chips always reflect the latest bundled
- * Markdown after a version upgrade — matching the ``installModelInfoJson``
- * pattern.  Failures are logged and swallowed so a read-only ``~/.kiss/``
- * cannot break the overall install flow.
+ * No-op install step retained for log narrative.
+ *
+ * ``INJECTIONS.md`` is **intentionally NOT copied** into
+ * ``~/.kiss/``.  The bundled ``src/kiss/INJECTIONS.md`` is read
+ * directly from the installed package at runtime by
+ * ``kiss.agents.vscode.tricks.read_tricks`` (Python, daemon) and
+ * ``getTricks`` in ``SorcarTab.ts`` (TypeScript, extension), so every
+ * version upgrade automatically delivers the latest bundled tricks
+ * without clobbering user edits.
+ *
+ * User-curated tricks live in ``~/.kiss/MY_INJECTION.md`` —
+ * auto-seeded on first read with the single ``## Trick`` starter
+ * ("Write end-to-end 100% coverage tests for the feature first.  Then
+ * implement the feature.") — matching the ``MY_TASK_TEMPLATES.md`` /
+ * ``SAMPLE_TASKS.md`` pattern.
+ *
+ * ``SAMPLE_TASKS.md`` is similarly NOT copied: the welcome-screen
+ * chip loader (``readSampleTasks`` in ``SorcarTab.ts``) reads the
+ * bundled package copy directly, while user-curated chips live in
+ * ``~/.kiss/MY_TASK_TEMPLATES.md``.
+ *
+ * The function is preserved (as a no-op) so the call site in
+ * ``runFinalization`` keeps documenting why no markdown asset copy
+ * happens at install time.
  */
 function installMarkdownAssets(kissProjectPath: string): void {
+  // Reference kissProjectPath so TypeScript does not flag the
+  // documented parameter as unused while we keep the install-time
+  // narrative comment alive for future maintainers.
+  void kissProjectPath;
   if (!HOME_DIR) return;
-  const kissHomeDir = LOG_DIR; // ~/.kiss
-  const assets: Array<[string, string]> = [
-    [
-      path.join(kissProjectPath, 'src', 'kiss', 'INJECTIONS.md'),
-      path.join(kissHomeDir, 'INJECTIONS.md'),
-    ],
-    [
-      path.join(kissProjectPath, 'src', 'kiss', 'SAMPLE_TASKS.md'),
-      path.join(kissHomeDir, 'SAMPLE_TASKS.md'),
-    ],
-  ];
-  for (const [src, dst] of assets) {
-    try {
-      if (!fs.existsSync(src)) {
-        log(`${path.basename(src)} not found at ${src}; skipping copy`);
-        continue;
-      }
-      fs.mkdirSync(kissHomeDir, {recursive: true});
-      fs.copyFileSync(src, dst);
-      log(`Installed ${path.basename(src)} at ${dst}`);
-    } catch (e: unknown) {
-      log(`Failed to install ${path.basename(src)}: ${(e as Error).message}`);
-    }
-  }
+  log(
+    'INJECTIONS.md is read directly from the bundled package; ' +
+      'no copy is made into ~/.kiss/ (user tricks live in MY_INJECTION.md).',
+  );
 }
 
 /**
- * Copy the kiss_project's bundled ``MODEL_INFO.json`` to
- * ``~/.kiss/MODEL_INFO.json``.  The Python loader in
- * ``kiss.core.models.model_info`` reads the user-local copy at runtime
- * (with an mtime-based auto-refresh from the package copy), so seeding
- * it here on every install means the freshly installed extension serves
- * the up-to-date pricing/context table immediately.  Failures are logged
- * and swallowed: model_info.py's loader falls back to the package copy
- * if ~/.kiss/MODEL_INFO.json is missing or unreadable.
+ * ``MODEL_INFO.json`` is intentionally NOT copied into ``~/.kiss/``.
+ *
+ * The bundled ``src/kiss/core/models/MODEL_INFO.json`` is the runtime
+ * source of truth for shipped model pricing/context tables; the Python
+ * loader in ``kiss.core.models.model_info`` reads it directly from the
+ * installed package.  User-curated overrides / extensions live in
+ * ``~/.kiss/MY_MODELS.json`` instead, auto-seeded on first import with
+ * a short documentation block and a commented-out example entry —
+ * matching the ``MY_INJECTION.md`` / ``MY_TASK_TEMPLATES.md`` pattern.
+ *
+ * The function is preserved (as a no-op) so the call site in
+ * ``runFinalization`` keeps documenting why no MODEL_INFO.json copy
+ * happens at install time.
  */
 function installModelInfoJson(kissProjectPath: string): void {
+  void kissProjectPath;
   if (!HOME_DIR) return;
-  const src = path.join(
-    kissProjectPath,
-    'src',
-    'kiss',
-    'core',
-    'models',
-    'MODEL_INFO.json',
+  log(
+    'MODEL_INFO.json is read directly from the bundled package; no copy is ' +
+      'made into ~/.kiss/ (user model overrides live in MY_MODELS.json, ' +
+      'auto-seeded on first import by kiss.core.models.model_info).',
   );
-  const dst = path.join(LOG_DIR, 'MODEL_INFO.json');
-  try {
-    if (!fs.existsSync(src)) {
-      log(`MODEL_INFO.json not found at ${src}; skipping copy`);
-      return;
-    }
-    fs.mkdirSync(LOG_DIR, {recursive: true});
-    fs.copyFileSync(src, dst);
-    log(`Installed MODEL_INFO.json at ${dst}`);
-  } catch (e: unknown) {
-    log(`Failed to install MODEL_INFO.json: ${(e as Error).message}`);
-  }
 }
 
 /**

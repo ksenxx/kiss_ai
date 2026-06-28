@@ -271,7 +271,7 @@
     clearNotificationTimer(id);
     if (sticky) return;
     const delay =
-      severity === 'error' ? 15000 : severity === 'warning' ? 12000 : 10000;
+      severity === 'error' ? 7500 : severity === 'warning' ? 6000 : 5000;
     notificationTimers.set(
       id,
       setTimeout(() => removeNotification(id, undefined, false), delay),
@@ -501,6 +501,22 @@
   let historyLoading = false;
   let historyHasMore = true;
   let historyGeneration = 0;
+  // Session-scoped sets tracking the live running→completed
+  // transition for the History panel's status dot.  The invariant:
+  //   * A running row renders the pulsing green dot.
+  //   * On completion, the dot becomes SOLID green and STAYS that
+  //     way for the rest of the page session, even across
+  //     ``refreshHistory()`` reloads.
+  //   * A completed row that we never saw running in this session
+  //     (e.g. on a fresh history load) renders NO dot.
+  // ``historyLastRunningTaskIds`` is the snapshot of which task_ids
+  // were rendered as ``is_running:true`` on the previous
+  // ``renderHistory`` call.  When the next render drops a task_id
+  // (it transitioned to is_running:false / failed:false), we move
+  // it into ``historyJustCompletedTaskIds``, which sticks until the
+  // page is reloaded.
+  const historyLastRunningTaskIds = new Set();
+  const historyJustCompletedTaskIds = new Set();
 
   // Adjacent task scroll state (Cursor-style chat thread navigation)
   // Tab.id is a frontend-only UUID string; chat_id is an int assigned by the DB.
@@ -605,6 +621,13 @@
   /** Find a tab object by its id (null when absent). */
   function getTab(id) {
     return tabs.find(t => t.id === id) || null;
+  }
+
+  /** Find the local tab that already displays a backend chat id. */
+  function getTabByBackendChatId(chatId) {
+    if (chatId === undefined || chatId === null || chatId === '') return null;
+    const key = String(chatId);
+    return tabs.find(t => String(t.backendChatId || '') === key) || null;
   }
 
   /**
@@ -1202,6 +1225,12 @@
         chatId: t.id,
         backendChatId: t.backendChatId || '',
         parentTabId: t.parentTabId || '',
+        // Persist the tab's pinned work_dir so a window reload that
+        // restores the tab keeps the same effective work_dir even
+        // before ``resumeSession`` replays ``task_events`` (and even
+        // for older persisted rows whose ``extra`` carries no
+        // ``work_dir``).  See INVARIANTS.md → Tabs & chat webview.
+        workDir: t.workDir || '',
       };
     });
     let activeIdx = persistable.findIndex(t => {
@@ -1225,10 +1254,26 @@
   }
 
   // Initialize tabs — restore from saved state if available, else create one default tab
+  // Race-fix: seed the closure-scoped ``selectedModel`` from the DOM
+  // BEFORE the launch IIFE creates any tab.  ``makeTab`` reads the
+  // closure variable to populate ``tab.selectedModel``; without this
+  // seeding every tab built during init (including the ones restored
+  // from ``vscode.getState()``) records ``''`` and the picker turns
+  // blank on the next tab switch — even though ``#model-name`` shows
+  // the correct template value on launch and the daemon's ``models``
+  // event later updates the live label.
+  {
+    const _initialModelEl = document.getElementById('model-name');
+    if (_initialModelEl && _initialModelEl.textContent) {
+      selectedModel = _initialModelEl.textContent;
+    }
+  }
+
   (function () {
     const saved = vscode.getState();
     if (saved && saved.tabs && saved.tabs.length > 0) {
       tabs = [];
+      const restoredBackendChatIds = new Set();
       saved.tabs.forEach(st => {
         // Sub-agent tabs (persisted by older versions of
         // persistTabState) are dropped: they cannot be resumed by
@@ -1237,11 +1282,27 @@
         // sub-agent row, with the row's own events, right of the
         // parent.
         if (st.isSubagentTab) return;
+        const persistedBackendChatId = st.backendChatId
+          ? String(st.backendChatId)
+          : '';
+        if (
+          persistedBackendChatId &&
+          restoredBackendChatIds.has(persistedBackendChatId)
+        ) {
+          return;
+        }
         const tab = makeTab(st.title);
         // Restore tab.id from persisted chatId (frontend tab identifier)
         if (st.chatId) tab.id = st.chatId;
-        if (st.backendChatId) tab.backendChatId = st.backendChatId;
+        if (persistedBackendChatId) {
+          tab.backendChatId = persistedBackendChatId;
+          restoredBackendChatIds.add(persistedBackendChatId);
+        }
         if (st.parentTabId) tab.parentTabId = st.parentTabId;
+        // Restore the tab's pinned work_dir (see persistTabState).
+        // Survives a settings-panel change made before the next
+        // ``resumeSession`` replay re-pins it from ``extra.work_dir``.
+        if (st.workDir) tab.workDir = st.workDir;
         tabs.push(tab);
       });
     }
@@ -1320,6 +1381,15 @@
   const demoToggleBtn = document.getElementById('cfg-demo-mode');
   const updateBtn = document.getElementById('cfg-update-btn');
   const serverResetBtn = document.getElementById('cfg-server-reset-btn');
+  const serverResetConfirmModal = document.getElementById(
+    'server-reset-confirm-modal',
+  );
+  const serverResetConfirmOkBtn = document.getElementById(
+    'server-reset-confirm-ok',
+  );
+  const serverResetConfirmCancelBtn = document.getElementById(
+    'server-reset-confirm-cancel',
+  );
   const autocommitToggleBtn = document.getElementById('cfg-auto-commit');
   const taskPanel = document.getElementById('task-panel');
   const taskPanelText = document.getElementById('task-panel-text');
@@ -1836,6 +1906,102 @@
     return e;
   }
 
+  // ------------------------------------------------------------------
+  // Filepath linkifier — walks every text node under ``root`` and
+  // wraps slash-bearing tokens that look like absolute paths
+  // (``/foo/bar``), home-relative paths (``~/foo``), dot-relative
+  // paths (``./foo``, ``../foo``), or workspace-relative paths with
+  // at least one directory component (``src/foo``) — with optional
+  // ``:line`` suffix — in a ``<span class="kiss-filelink"
+  // data-path="...">``.  The existing global click handler (see
+  // bottom of this file) dispatches on ``[data-path]`` to post an
+  // ``openFile`` message to the extension, which validates the path
+  // and dispatches it to the VS Code editor or the native viewer.
+  //
+  // We skip text nodes inside ``<a>`` (already a hyperlink — marked
+  // autolinks URLs) and inside any element that already carries a
+  // ``data-path`` attribute (e.g. the existing tool_call ``.tp``
+  // hooks).  The leading character class lookbehind avoids matching
+  // a URL's path component (``https://x/y``) as a filepath: the
+  // character before ``/y`` is the alphanumeric host suffix, which
+  // ``\w`` rejects.
+  //
+  // The path regex deliberately requires at least one ``/`` so bare
+  // filenames like ``package.json`` — which would noise-up sentences
+  // and ambiguous tokens like ``v1.0`` — are NOT linkified.  Trailing
+  // sentence punctuation (``,``, ``.``, ``;``, ``)``, ``]``) is
+  // excluded by the closing character class so ``/tmp/foo.py,`` is
+  // captured as ``/tmp/foo.py``.
+  const _LINK_FILEPATH_RE =
+    /(?<![\w@:%/.~-])((?:(?:~|\.{1,2})?\/|[A-Za-z0-9_+-]+\/)[A-Za-z0-9_./+-]*[A-Za-z0-9_+/-](?::\d+)?)/g;
+  const _LINK_SKIP_TAGS = new Set([
+    'A',
+    'SCRIPT',
+    'STYLE',
+    'TEXTAREA',
+    'INPUT',
+    'BUTTON',
+    'SELECT',
+  ]);
+
+  function linkifyFilePaths(root) {
+    if (!root || root.nodeType !== 1) return;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        let p = node.parentNode;
+        while (p && p !== root.parentNode) {
+          if (p.nodeType === 1) {
+            if (_LINK_SKIP_TAGS.has(p.tagName)) {
+              return NodeFilter.FILTER_REJECT;
+            }
+            if (p.dataset && p.dataset.path) {
+              return NodeFilter.FILTER_REJECT;
+            }
+          }
+          p = p.parentNode;
+        }
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+    const matches = [];
+    let n;
+    while ((n = walker.nextNode())) {
+      const text = n.nodeValue;
+      if (!text || text.indexOf('/') < 0) continue;
+      _LINK_FILEPATH_RE.lastIndex = 0;
+      if (_LINK_FILEPATH_RE.test(text)) {
+        matches.push(n);
+      }
+    }
+    for (const node of matches) {
+      const text = node.nodeValue;
+      _LINK_FILEPATH_RE.lastIndex = 0;
+      const frag = node.ownerDocument.createDocumentFragment();
+      let last = 0;
+      let m;
+      while ((m = _LINK_FILEPATH_RE.exec(text)) !== null) {
+        const start = m.index;
+        const end = start + m[1].length;
+        if (start > last) {
+          frag.appendChild(
+            node.ownerDocument.createTextNode(text.slice(last, start)),
+          );
+        }
+        const span = node.ownerDocument.createElement('span');
+        span.className = 'kiss-filelink';
+        span.setAttribute('data-path', m[1]);
+        span.title = 'Open ' + m[1];
+        span.textContent = m[1];
+        frag.appendChild(span);
+        last = end;
+      }
+      if (last < text.length) {
+        frag.appendChild(node.ownerDocument.createTextNode(text.slice(last)));
+      }
+      if (node.parentNode) node.parentNode.replaceChild(frag, node);
+    }
+  }
+
   function hlBlock(el) {
     if (typeof hljs === 'undefined') return;
     el.querySelectorAll('pre code').forEach(bl => {
@@ -1979,6 +2145,87 @@
         collapsePreview(panels[i]);
       }
     }
+  }
+
+  function splitMultiSessionSummary(summary) {
+    const text = typeof summary === 'string' ? summary : '';
+    const finalMarker = '\n\n---\n\n### Final Session\n';
+    let markerIdx = text.indexOf(finalMarker);
+    let markerLen = finalMarker.length;
+    if (markerIdx <= 0) {
+      const separator = '\n\n---\n\n';
+      markerIdx = text.lastIndexOf(separator);
+      markerLen = separator.length;
+    }
+    if (markerIdx <= 0) return null;
+    const previous = text.substring(0, markerIdx).trim();
+    const final = text.substring(markerIdx + markerLen).trim();
+    if (!previous || !final) return null;
+    if (!previous.includes('### Previous Session')) return null;
+    return {previous: previous, final: final};
+  }
+
+  function removeResultPanels(container) {
+    if (!container || !container.children) return;
+    for (let i = container.children.length - 1; i >= 0; i--) {
+      const child = container.children[i];
+      if (child.classList && child.classList.contains('rc')) child.remove();
+    }
+  }
+
+  function createResultPanel(ev, summaryOverride, titleOverride, showStatus) {
+    const rc = mkEl('div', 'ev rc');
+    let rb = '';
+    let rawBody = '';
+    if (showStatus && ev.is_continue) {
+      rb +=
+        '<div style="color:var(--yellow);font-weight:700;font-size:var(--fs-xl);margin-bottom:10px">Status: Continue</div>';
+      rawBody += 'Status: Continue\n\n';
+    } else if (showStatus && ev.success === false) {
+      rb +=
+        '<div style="color:var(--red);font-weight:700;font-size:var(--fs-xl);margin-bottom:10px">Status: FAILED</div>';
+      rawBody += 'Status: FAILED\n\n';
+    }
+    let usePre = true;
+    const summaryText =
+      summaryOverride !== undefined ? summaryOverride : ev.summary;
+    if (summaryText) {
+      const sum = String(summaryText)
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+      if (typeof marked !== 'undefined') {
+        rb += kissSanitize(marked.parse(sum));
+        usePre = false;
+      } else {
+        rb += esc(sum);
+      }
+      rawBody += sum;
+    } else {
+      const txt = (ev.text || '(no result)').replace(/\n{3,}/g, '\n\n').trim();
+      rb += esc(txt);
+      rawBody += txt;
+    }
+    rc.dataset.rawText = rawBody;
+    rc.innerHTML =
+      '<div class="rc-h"><h3>' +
+      esc(titleOverride || 'Result') +
+      '</h3><div class="rs">' +
+      '<span>Tokens <b>' +
+      fmtN(ev.total_tokens || 0) +
+      '</b></span>' +
+      '<span>Cost <b>' +
+      esc(ev.cost || 'N/A') +
+      '</b></span>' +
+      '</div></div><div class="rc-body md-body' +
+      (usePre ? ' pre' : '') +
+      '">' +
+      rb +
+      '</div>';
+    hlBlock(rc);
+    const rcBody = rc.querySelector('.rc-body');
+    if (rcBody) linkifyFilePaths(rcBody);
+    addCopyButton(rc);
+    return rc;
   }
 
   window.toggleThink = toggleThink;
@@ -2179,6 +2426,12 @@
           } else if (tState.txtNode && tState.txtPending) {
             tState.txtNode.appendData(tState.txtPending);
           }
+          // Surface clickable filepaths inside the streamed text
+          // body so the global click handler can route them to the
+          // extension's ``openFile`` viewer.  Runs regardless of
+          // whether ``marked`` is available — when it is not, the
+          // text node fallback still needs the linkifier.
+          linkifyFilePaths(tState.txtEl);
           tState.txtEl = null;
           tState.txtBuf = '';
           tState.txtNode = null;
@@ -2189,12 +2442,23 @@
         if (tState.bashPanel && tState.bashBuf) {
           tState.bashPanel.textContent += tState.bashBuf;
           tState.bashBuf = '';
+          linkifyFilePaths(tState.bashPanel);
         }
         tState.bashPanel = null;
         tState.bashRaf = 0;
         const c = mkEl('div', 'ev tc');
         const hdr = mkEl('div', 'tc-h');
         hdr.textContent = ev.name || 'Tool';
+        // The Bash tool-call panel header is painted in the cyan
+        // theme colour to visually distinguish shell invocations from
+        // every other tool (which use the orange accent).  Tag the
+        // header (and outer container) with a Bash-specific CSS hook
+        // so ``main.css`` can target it without touching the generic
+        // ``.tc-h`` rule that every other tool depends on.
+        if (ev.name === 'Bash') {
+          hdr.classList.add('tc-h-bash');
+          c.classList.add('tc-bash');
+        }
         let b = '';
         if (ev.path) {
           const ep = esc(ev.path).replace(/"/g, '&quot;');
@@ -2265,6 +2529,13 @@
         if (tState.bashPanel && tState.bashBuf) {
           tState.bashPanel.textContent += tState.bashBuf;
           tState.bashBuf = '';
+          linkifyFilePaths(tState.bashPanel);
+        } else if (tState.bashPanel) {
+          // Even if no pending buffer, the panel may have been
+          // populated by prior system_output flushes — make sure
+          // those text nodes are linkified before the bash panel is
+          // finalised.
+          linkifyFilePaths(tState.bashPanel);
         }
         const hadBash = !!tState.bashPanel;
         tState.bashPanel = null;
@@ -2285,10 +2556,13 @@
           r.dataset.rawText = 'FAILED\n' + (ev.content || '');
           addCollapse(r, r.querySelector('.rl'));
           resultTarget.appendChild(r);
+          const trBody = r.querySelector('.tr-content');
+          if (trBody) linkifyFilePaths(trBody);
         } else {
           const op = mkEl('div', 'bash-panel');
           const opContent = mkEl('div', 'bash-panel-content');
           opContent.textContent = ev.content;
+          linkifyFilePaths(opContent);
           op.appendChild(opContent);
           addCopyButton(op);
           resultTarget.appendChild(op);
@@ -2301,8 +2575,10 @@
           tState.bashBuf += ev.text || '';
           if (!tState.bashRaf) {
             tState.bashRaf = requestAnimationFrame(() => {
-              if (tState.bashPanel)
+              if (tState.bashPanel) {
                 tState.bashPanel.textContent += tState.bashBuf;
+                linkifyFilePaths(tState.bashPanel);
+              }
               tState.bashBuf = '';
               tState.bashRaf = 0;
               if (tState.bashPanel)
@@ -2312,60 +2588,29 @@
         } else {
           const s = mkEl('div', 'ev sys');
           s.textContent = (ev.text || '').replace(/\n\n+/g, '\n');
+          linkifyFilePaths(s);
           target.appendChild(s);
         }
         break;
       }
       case 'result': {
-        const rc = mkEl('div', 'ev rc');
-        let rb = '';
-        let rawBody = '';
-        if (ev.is_continue) {
-          rb +=
-            '<div style="color:var(--yellow);font-weight:700;font-size:var(--fs-xl);margin-bottom:10px">Status: Continue</div>';
-          rawBody += 'Status: Continue\n\n';
-        } else if (ev.success === false) {
-          rb +=
-            '<div style="color:var(--red);font-weight:700;font-size:var(--fs-xl);margin-bottom:10px">Status: FAILED</div>';
-          rawBody += 'Status: FAILED\n\n';
-        }
-        let usePre = true;
-        if (ev.summary) {
-          const sum = (ev.summary || '').replace(/\n{3,}/g, '\n\n').trim();
-          if (typeof marked !== 'undefined') {
-            rb += kissSanitize(marked.parse(sum));
-            usePre = false;
-          } else {
-            rb += esc(sum);
-          }
-          rawBody += sum;
+        const multiSummary = splitMultiSessionSummary(ev.summary);
+        if (multiSummary) {
+          removeResultPanels(target);
+          target.appendChild(
+            createResultPanel(
+              ev,
+              multiSummary.previous,
+              'Previous Sessions',
+              false,
+            ),
+          );
+          target.appendChild(
+            createResultPanel(ev, multiSummary.final, 'Result', true),
+          );
         } else {
-          const txt = (ev.text || '(no result)')
-            .replace(/\n{3,}/g, '\n\n')
-            .trim();
-          rb += esc(txt);
-          rawBody += txt;
+          target.appendChild(createResultPanel(ev, undefined, 'Result', true));
         }
-        // Preserve raw markdown/text result so the panel Copy button
-        // reproduces the agent-supplied markdown rather than the rendered
-        // HTML's textContent (which strips #/`*/` markers).
-        rc.dataset.rawText = rawBody;
-        rc.innerHTML =
-          '<div class="rc-h"><h3>Result</h3><div class="rs">' +
-          '<span>Tokens <b>' +
-          fmtN(ev.total_tokens || 0) +
-          '</b></span>' +
-          '<span>Cost <b>' +
-          esc(ev.cost || 'N/A') +
-          '</b></span>' +
-          '</div></div><div class="rc-body md-body' +
-          (usePre ? ' pre' : '') +
-          '">' +
-          rb +
-          '</div>';
-        hlBlock(rc);
-        addCopyButton(rc);
-        target.appendChild(rc);
         if (statusTokens && ev.total_tokens)
           statusTokens.textContent = 'Tokens: ' + fmtN(ev.total_tokens);
         if (statusBudget && ev.cost && ev.cost !== 'N/A')
@@ -2400,7 +2645,10 @@
         hlBlock(el);
         target.appendChild(el);
         const bodyEl = el.querySelector('.' + cls + '-body');
-        if (bodyEl) bodyEl.scrollTop = bodyEl.scrollHeight;
+        if (bodyEl) {
+          linkifyFilePaths(bodyEl);
+          bodyEl.scrollTop = bodyEl.scrollHeight;
+        }
         break;
       }
       case 'usage_info': {
@@ -3058,8 +3306,22 @@
       case 'models':
         allModels = ev.models || [];
         if (ev.selected) {
+          // Race-fix: propagate the new default into every tab whose
+          // ``selectedModel`` still mirrors the prior default (or is
+          // empty / ``"No model"`` from the launch IIFE).  Tabs where
+          // the user explicitly picked a different model are
+          // preserved.  Without this, ``restoreTab`` reverts the
+          // picker to the stale launch-time value as soon as the user
+          // switches tabs.
+          const _prevSelected = selectedModel;
           selectedModel = ev.selected;
           modelName.textContent = ev.selected;
+          tabs.forEach(t => {
+            const cur = t.selectedModel || '';
+            if (cur === '' || cur === 'No model' || cur === _prevSelected) {
+              t.selectedModel = ev.selected;
+            }
+          });
         }
         renderModelList('');
         break;
@@ -3097,6 +3359,9 @@
         const askTab = getTab(askTabId);
         if (!askTab) break;
         askTab.askPendingQuestion = ev.question || '';
+        if (askTab.id !== activeTabId) {
+          switchToTab(askTab.id);
+        }
         showAskForTab(askTab);
         break;
       }
@@ -3104,9 +3369,7 @@
         const askTabId = ev.tabId !== undefined ? ev.tabId : activeTabId;
         const askTab = getTab(askTabId);
         if (!askTab) break;
-        askTab.askPendingQuestion = null;
-        if (askTab.askInputEl) askTab.askInputEl.value = '';
-        if (askTab.id === activeTabId) clearAskSlot();
+        clearAskForMatchingChatTabs(askTab);
         break;
       }
       case 'error':
@@ -3146,6 +3409,17 @@
         }
         if (ev.chat_id && clearTab) {
           clearTab.backendChatId = ev.chat_id;
+          // Pin the tab's ``workDir`` the moment a chat-id of a real
+          // persisted task is bound to it.  Once bound, a later
+          // settings-panel change to ``configWorkDir`` MUST NOT shift
+          // this tab's effective work_dir (INVARIANTS.md → Tabs &
+          // chat webview).  ``workDirForTab`` would otherwise fall
+          // back to the daemon-global ``configWorkDir`` and route
+          // follow-up commands (submit, autocommitAction, …) to the
+          // wrong repo.
+          if (!clearTab.workDir && configWorkDir) {
+            clearTab.workDir = configWorkDir;
+          }
           persistTabState();
         }
         const evTabId = ev.tabId;
@@ -3298,6 +3572,18 @@
         const teTab = getTab(teTabId);
         if (ev.chat_id && teTab) {
           teTab.backendChatId = ev.chat_id;
+          // Pin the tab's ``workDir`` when a chat-id of a real
+          // persisted task is bound (INVARIANTS.md → Tabs & chat
+          // webview).  ``extra.work_dir`` (parsed further down) takes
+          // priority and may overwrite this value with the task's
+          // recorded directory; this fallback only kicks in for
+          // replays whose ``extra`` is missing ``work_dir`` (older
+          // rows), keeping the tab pinned to whatever ``configWorkDir``
+          // was at bind time instead of leaking later settings-panel
+          // changes through ``workDirForTab``'s fallback.
+          if (!teTab.workDir && configWorkDir) {
+            teTab.workDir = configWorkDir;
+          }
           persistTabState();
         }
         // Track the task_id of the currently displayed task so a later
@@ -3548,7 +3834,8 @@
             anthropic_api_key: 'ANTHROPIC_API_KEY',
             together_api_key: 'TOGETHER_API_KEY',
             openrouter_api_key: 'OPENROUTER_API_KEY',
-            minimax_api_key: 'MINIMAX_API_KEY',
+            zai_api_key: 'ZAI_API_KEY',
+            moonshot_api_key: 'MOONSHOT_API_KEY',
           };
           const envVar = envMap[sKey];
           if (envVar) {
@@ -3762,6 +4049,7 @@
           ev.startTs,
           ev.endTs,
         );
+        focusFinishedTab(ev.tabId);
         break;
       }
       case 'task_error':
@@ -3779,6 +4067,7 @@
               ? 'Interrupted'
               : 'Stopped';
         setReady(label, ev.tabId, ev.startTs, ev.endTs);
+        focusFinishedTab(ev.tabId);
         break;
       }
       case 'new_tab': {
@@ -4039,6 +4328,23 @@
     updateInputDisabled();
     if (running) {
       startTimer();
+      // Show the wait-spinner whenever the UI flips to running.
+      // Without this, the spinner is only (re)started inside
+      // ``processOutputEvent`` when an event arrives on the active
+      // tab.  During ``run_parallel`` the parent agent emits one
+      // ``tool_call`` event and then blocks while sub-agents run —
+      // meanwhile each sub-agent's ``new_tab`` broadcast causes the
+      // frontend to ``createNewTab`` (which calls
+      // ``setRunningState(false)`` + ``removeSpinner`` on the new
+      // sub-tab) and ``switchToTab`` back to the still-running parent
+      // (calling ``setRunningState(true)`` here).  Without
+      // ``showSpinner`` in this branch the parent tab is left with a
+      // cancelled timer and no visible spinner for the entire
+      // duration of the parallel fan-out.  Calling ``showSpinner``
+      // here makes the spinner consistent across (a) task start
+      // (``status running:true``), (b) tab switch back to a running
+      // tab, and (c) ``run_parallel`` sub-agent spawn/switch-back.
+      showSpinner();
     } else {
       // Safety net: ensure the timer always stops when the running
       // state flips to false.  Without this, if a ``status: running:
@@ -4064,6 +4370,33 @@
       tab.hasRunTask = true;
       tab.lastTaskFailed = !!failed;
     }
+  }
+
+  /**
+   * Auto-switch the active tab to ``tabId`` after the task running in
+   * that tab has just ended (task_done / task_error / task_stopped /
+   * task_interrupted).  Without this the user, who may have moved to
+   * a different chat tab while waiting for the background task to
+   * finish, would have to manually click back to see the result; the
+   * product contract is that the webview MUST switch to the tab
+   * whose task just completed so the result panel is immediately
+   * visible.
+   *
+   * Silently a no-op when:
+   *
+   *   * ``tabId`` is missing (legacy/global events without a
+   *     per-tab identity — there is no specific tab to focus),
+   *   * the tab is not present in this webview's ``tabs`` array
+   *     (events are broadcast to every connected client; a webview
+   *     that does not own the tab must ignore the focus request),
+   *   * the tab is already the active tab (no-op; ``switchToTab``
+   *     also short-circuits, but we filter here for clarity).
+   */
+  function focusFinishedTab(tabId) {
+    if (tabId === undefined || tabId === null) return;
+    if (tabId === activeTabId) return;
+    if (!getTab(tabId)) return;
+    switchToTab(tabId);
   }
 
   function setReady(label, tabId, doneStartTs, doneEndTs) {
@@ -5067,7 +5400,8 @@
       'cfg-key-ANTHROPIC_API_KEY',
       'cfg-key-TOGETHER_API_KEY',
       'cfg-key-OPENROUTER_API_KEY',
-      'cfg-key-MINIMAX_API_KEY',
+      'cfg-key-ZAI_API_KEY',
+      'cfg-key-MOONSHOT_API_KEY',
       'cfg-custom-api-key',
     ].forEach(setupSecretInput);
     // The welcome-page remote-password input and the settings-panel
@@ -5137,11 +5471,89 @@
       });
     }
 
+    // Open/close helpers for the in-settings-panel floating confirmation
+    // box.  The dialog replaces the native VS Code modal warning so the
+    // confirmation lives WITHIN the settings panel itself.  Only OK
+    // forwards ``{type:'serverReset'}`` to the extension; Cancel, the
+    // backdrop, and Escape all simply close the box.
+    function openServerResetConfirm() {
+      if (!serverResetConfirmModal) return;
+      serverResetConfirmModal.classList.add('open');
+      // Focus the OK button so keyboard users can confirm with Enter
+      // (or dismiss with Escape) without reaching for the mouse.
+      if (serverResetConfirmOkBtn) {
+        try {
+          serverResetConfirmOkBtn.focus();
+        } catch (_err) {
+          // ``focus()`` can throw if the element is detached or in a
+          // hidden subtree (some JSDOM versions); the dialog still
+          // works without focus, so swallow.
+        }
+      }
+    }
+    function closeServerResetConfirm() {
+      if (!serverResetConfirmModal) return;
+      serverResetConfirmModal.classList.remove('open');
+    }
+    function isServerResetConfirmOpen() {
+      return !!(
+        serverResetConfirmModal &&
+        serverResetConfirmModal.classList.contains('open')
+      );
+    }
+
     if (serverResetBtn) {
       serverResetBtn.addEventListener('click', e => {
         e.preventDefault();
         e.stopPropagation();
+        // Server reset SIGTERMs the kiss-web daemon, killing every
+        // in-flight agent.  When any tab still has a running agent we
+        // surface an in-webview floating confirmation box anchored to
+        // the settings panel; only OK forwards the reset.  When no
+        // agent is running we fast-path the reset.
+        //
+        // Guard: if the confirmation box is already open, ignore the
+        // click — otherwise rapid double-clicks would re-open / stack
+        // the dialog.
+        if (isServerResetConfirmOpen()) return;
+        const agentRunning = tabs.some(tab => tab && tab.isRunning);
+        if (!agentRunning) {
+          vscode.postMessage({type: 'serverReset'});
+          return;
+        }
+        openServerResetConfirm();
+      });
+    }
+
+    if (serverResetConfirmOkBtn) {
+      serverResetConfirmOkBtn.addEventListener('click', e => {
+        e.preventDefault();
+        e.stopPropagation();
+        closeServerResetConfirm();
         vscode.postMessage({type: 'serverReset'});
+      });
+    }
+    if (serverResetConfirmCancelBtn) {
+      serverResetConfirmCancelBtn.addEventListener('click', e => {
+        e.preventDefault();
+        e.stopPropagation();
+        closeServerResetConfirm();
+      });
+    }
+    if (serverResetConfirmModal) {
+      // Clicking the dimmed backdrop (the modal element itself, not its
+      // inner content box) dismisses the dialog without confirming.
+      serverResetConfirmModal.addEventListener('click', e => {
+        if (e.target === serverResetConfirmModal) closeServerResetConfirm();
+      });
+      // Escape closes the dialog — only when it's open, so we don't
+      // swallow Escape for the rest of the webview.
+      document.addEventListener('keydown', e => {
+        if (e.key === 'Escape' && isServerResetConfirmOpen()) {
+          e.preventDefault();
+          e.stopPropagation();
+          closeServerResetConfirm();
+        }
       });
     }
 
@@ -5615,13 +6027,32 @@
     if (tab.id === activeTabId) mountAskForTab(tab);
   }
 
+  /** Return true when an ask-clear for sourceTab should also clear candidate. */
+  function isAskSameChatTab(sourceTab, candidate) {
+    if (!sourceTab || !candidate) return false;
+    if (candidate.id === sourceTab.id) return true;
+    const chatId = String(sourceTab.backendChatId || '');
+    return !!chatId && String(candidate.backendChatId || '') === chatId;
+  }
+
+  /** Clear pending ask-user UI for sourceTab and sibling tabs on the same chat. */
+  function clearAskForMatchingChatTabs(sourceTab) {
+    let shouldClearSlot = false;
+    for (let i = 0; i < tabs.length; i++) {
+      const tab = tabs[i];
+      if (!isAskSameChatTab(sourceTab, tab)) continue;
+      tab.askPendingQuestion = null;
+      if (tab.askInputEl) tab.askInputEl.value = '';
+      if (tab.id === activeTabId) shouldClearSlot = true;
+    }
+    if (shouldClearSlot) clearAskSlot();
+  }
+
   /** Submit the current answer for the given tab; clear pending question. */
   function submitAskForTab(tab) {
     const answer = tab.askInputEl ? tab.askInputEl.value : '';
     vscode.postMessage({type: 'userAnswer', answer: answer, tabId: tab.id});
-    tab.askPendingQuestion = null;
-    if (tab.askInputEl) tab.askInputEl.value = '';
-    if (tab.id === activeTabId) clearAskSlot();
+    clearAskForMatchingChatTabs(tab);
   }
 
   /**
@@ -5819,6 +6250,25 @@
     }
     allHistSessions = allHistSessions.concat(sessions);
 
+    // Compute the live running→completed transitions BEFORE
+    // rendering: any task_id that was rendered as running on the
+    // previous ``renderHistory`` call but is no longer running on
+    // this call has just completed in the user's current session,
+    // so its row must show the SOLID green dot from now on (and
+    // STAY that way for the rest of the page session).  We compute
+    // the new running set from the full ``allHistSessions`` (not
+    // just this batch) so pagination batches don't artificially
+    // drop ids that are simply absent from the current chunk.
+    const newRunningTaskIds = new Set();
+    allHistSessions.forEach(s => {
+      if (s.is_running && s.task_id) newRunningTaskIds.add(s.task_id);
+    });
+    historyLastRunningTaskIds.forEach(id => {
+      if (!newRunningTaskIds.has(id)) historyJustCompletedTaskIds.add(id);
+    });
+    historyLastRunningTaskIds.clear();
+    newRunningTaskIds.forEach(id => historyLastRunningTaskIds.add(id));
+
     sessions.forEach(s => {
       const div = document.createElement('div');
       // Match the Running tab's visual layout: the ``running-item``
@@ -5860,6 +6310,21 @@
         failedDot.dataset.tooltip = 'Task failed';
         failedDot.setAttribute('aria-label', 'Task failed');
         div.appendChild(failedDot);
+      } else if (s.task_id && historyJustCompletedTaskIds.has(s.task_id)) {
+        // The row was rendered as ``is_running:true`` earlier in
+        // this page session and has now transitioned to
+        // finished-cleanly.  Render the SOLID green circle (no
+        // animation) and KEEP it for the rest of the session — even
+        // after subsequent ``refreshHistory()`` reloads.  Tasks
+        // that the user never saw running in this session (e.g.
+        // every row on a fresh page-load) intentionally render NO
+        // dot, so the History panel doesn't show a sea of solid
+        // green circles for old completed tasks.
+        const completedDot = document.createElement('span');
+        completedDot.className = 'sidebar-item-completed';
+        completedDot.dataset.tooltip = 'Task completed';
+        completedDot.setAttribute('aria-label', 'Task completed');
+        div.appendChild(completedDot);
       }
 
       const textSpan = document.createElement('span');
@@ -6079,21 +6544,30 @@
           window._startDemoReplay(allHistSessions);
           return;
         }
-        // Sub-agent history rows reopen as a regular chat tab that
-        // the backend (``_replay_session``) will then flip into a
-        // sub-agent tab via ``openSubagentTab`` (purple accent,
-        // no input bar, no adjacent-task loading).  We do
-        // not look up "is the original sub-agent tab still open?" —
-        // sub-agent rows are persisted with just their parent
-        // task_history.id, so the simplest UX is a fresh tab whose
-        // events are replayed from the row's own events table.
-        // When the clicked history row has a known chat_id (s.id)
-        // and persisted events, allocate a fresh tab id and let the
-        // backend route the chat lookup by chat_id (passed in the
-        // ``resumeSession`` payload).  ``tab_id`` and ``chat_id``
-        // are orthogonal — the same chat may be live-viewed from
-        // multiple tabs, each with its own routing key.
-        if (s.has_events && s.id) {
+        // A client must never display the same backend chat id in two
+        // local tabs.  If this history row's chat is already open (for
+        // example the user is on a blank tab and clicks an older row
+        // for a chat that is open to the left), simply switch focus to
+        // that tab instead of creating a duplicate tab and issuing a
+        // second resumeSession for the same chat.
+        const existingChatTab = getTabByBackendChatId(s.id);
+        if (existingChatTab) {
+          switchToTab(existingChatTab.id);
+        } else if (s.has_events && s.id) {
+          // Sub-agent history rows reopen as a regular chat tab that
+          // the backend (``_replay_session``) will then flip into a
+          // sub-agent tab via ``openSubagentTab`` (purple accent,
+          // no input bar, no adjacent-task loading).  We do
+          // not look up "is the original sub-agent tab still open?" —
+          // sub-agent rows are persisted with just their parent
+          // task_history.id, so the simplest UX is a fresh tab whose
+          // events are replayed from the row's own events table.
+          // When the clicked history row has a known chat_id (s.id)
+          // and persisted events, allocate a fresh tab id and let the
+          // backend route the chat lookup by chat_id (passed in the
+          // ``resumeSession`` payload).  ``tab_id`` and ``chat_id``
+          // are orthogonal — each local tab has its own routing key,
+          // but there is at most one local tab per backend chat id.
           createNewTab();
           const taskText = s.preview || s.title || '';
           setTaskText(taskText);
@@ -6371,7 +6845,23 @@
       const dateOk = ts >= fromTs && ts <= toTs;
       const favOk = !onlyFavorite || row.dataset.favorite === '1';
       const rowWorkDir = row.dataset.workDir || '';
-      const wsOk = !onlyWorkspace || rowWorkDir === clientWorkDir;
+      // Workspace match honors the documented contract above: an
+      // empty client work_dir or an empty row work_dir BOTH pass so
+      // (a) freshly-started running tasks whose ``extra.work_dir``
+      //     hasn't been persisted yet still appear in History when
+      //     the user opens the burger menu in a real workspace, and
+      // (b) standalone web clients with no folder open ("client
+      //     work_dir empty") see every row.
+      // Without this, the strict ``rowWorkDir === clientWorkDir``
+      // test silently hides every running-task row whose work_dir
+      // hasn't been written yet — exactly the user-reported
+      // "task panel does not show up in History after burger open"
+      // regression.
+      const wsOk =
+        !onlyWorkspace ||
+        rowWorkDir === '' ||
+        clientWorkDir === '' ||
+        rowWorkDir === clientWorkDir;
       if (catOk && dateOk && favOk && wsOk) {
         row.style.display = '';
         visible++;
@@ -6781,7 +7271,8 @@
       'ANTHROPIC_API_KEY',
       'TOGETHER_API_KEY',
       'OPENROUTER_API_KEY',
-      'MINIMAX_API_KEY',
+      'ZAI_API_KEY',
+      'MOONSHOT_API_KEY',
     ];
     keyIds.forEach(k => {
       el('cfg-key-' + k).value = (apiKeys && apiKeys[k]) || '';
@@ -6813,7 +7304,8 @@
       'ANTHROPIC_API_KEY',
       'TOGETHER_API_KEY',
       'OPENROUTER_API_KEY',
-      'MINIMAX_API_KEY',
+      'ZAI_API_KEY',
+      'MOONSHOT_API_KEY',
     ];
     keyIds.forEach(k => {
       const v = el('cfg-key-' + k).value.trim();
