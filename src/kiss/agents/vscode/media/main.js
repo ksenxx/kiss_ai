@@ -4328,6 +4328,23 @@
     updateInputDisabled();
     if (running) {
       startTimer();
+      // Show the wait-spinner whenever the UI flips to running.
+      // Without this, the spinner is only (re)started inside
+      // ``processOutputEvent`` when an event arrives on the active
+      // tab.  During ``run_parallel`` the parent agent emits one
+      // ``tool_call`` event and then blocks while sub-agents run —
+      // meanwhile each sub-agent's ``new_tab`` broadcast causes the
+      // frontend to ``createNewTab`` (which calls
+      // ``setRunningState(false)`` + ``removeSpinner`` on the new
+      // sub-tab) and ``switchToTab`` back to the still-running parent
+      // (calling ``setRunningState(true)`` here).  Without
+      // ``showSpinner`` in this branch the parent tab is left with a
+      // cancelled timer and no visible spinner for the entire
+      // duration of the parallel fan-out.  Calling ``showSpinner``
+      // here makes the spinner consistent across (a) task start
+      // (``status running:true``), (b) tab switch back to a running
+      // tab, and (c) ``run_parallel`` sub-agent spawn/switch-back.
+      showSpinner();
     } else {
       // Safety net: ensure the timer always stops when the running
       // state flips to false.  Without this, if a ``status: running:
