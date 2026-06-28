@@ -2426,51 +2426,6 @@
     "emb": false,
     "gen": true
   },
-  "openrouter/minimax/minimax-m2": {
-    "context_length": 204800,
-    "input_price_per_1M": 0.255,
-    "output_price_per_1M": 1.0,
-    "fc": true,
-    "emb": false,
-    "gen": true,
-    "comment": "NEW"
-  },
-  "openrouter/minimax/minimax-m2-her": {
-    "context_length": 65536,
-    "input_price_per_1M": 0.3,
-    "output_price_per_1M": 1.2,
-    "fc": false,
-    "emb": false,
-    "gen": true,
-    "comment": "NEW"
-  },
-  "openrouter/minimax/minimax-m2.5": {
-    "context_length": 204800,
-    "input_price_per_1M": 0.12,
-    "output_price_per_1M": 0.48,
-    "fc": true,
-    "emb": false,
-    "gen": true,
-    "comment": "NEW"
-  },
-  "openrouter/minimax/minimax-m2.7": {
-    "context_length": 204800,
-    "input_price_per_1M": 0.18,
-    "output_price_per_1M": 0.72,
-    "fc": true,
-    "emb": false,
-    "gen": true,
-    "comment": "NEW"
-  },
-  "openrouter/minimax/minimax-m3": {
-    "context_length": 1048576,
-    "input_price_per_1M": 0.3,
-    "output_price_per_1M": 1.2,
-    "fc": true,
-    "emb": false,
-    "gen": true,
-    "comment": "NEW"
-  },
   "openrouter/mistralai/codestral-2508": {
     "context_length": 256000,
     "input_price_per_1M": 0.3,
