@@ -65,16 +65,97 @@ def cli_ask_user_question(question: str) -> str:
     return input("Your answer: ")
 
 
-def _print_recent_chats() -> None:
-    """Print the last 20 chat sessions with their tasks and results.
+DEFAULT_RECENT_CHATS_LIMIT = 20
+
+
+def _parse_resume_arg(arg: str) -> tuple[str, int]:
+    """Parse the argument string of ``/resume`` into a chat id and limit.
+
+    Supports the following forms (in any order, whitespace separated):
+
+    * ``""`` — list the default number of recent chats.
+    * ``"<chat-id>"`` — resume the chat with the given id.
+    * ``"--limit N"`` or ``"--limit=N"`` — list the most recent ``N``
+      chats (only valid when no chat id is also supplied).
+    * ``"<chat-id> --limit N"`` — the ``--limit`` flag is ignored when
+      a chat id is present (resuming a chat does not use a limit).
+
+    Args:
+        arg: The raw argument string after ``/resume``.
+
+    Returns:
+        A ``(chat_id, limit)`` pair.  ``chat_id`` is the empty string
+        when the user is requesting the recent-chats listing.
+        ``limit`` is the resolved listing limit (defaulting to
+        :data:`DEFAULT_RECENT_CHATS_LIMIT`).
+
+    Raises:
+        ValueError: If ``--limit`` is given without a value, with a
+            non-integer value, or with a non-positive value.
+    """
+    tokens = arg.split()
+    chat_id = ""
+    limit = DEFAULT_RECENT_CHATS_LIMIT
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        if token == "--limit":
+            if i + 1 >= len(tokens):
+                raise ValueError("--limit requires a positive integer value")
+            limit = _coerce_positive_int(tokens[i + 1])
+            i += 2
+            continue
+        if token.startswith("--limit="):
+            limit = _coerce_positive_int(token[len("--limit="):])
+            i += 1
+            continue
+        if chat_id:
+            raise ValueError(f"unexpected extra argument: {token!r}")
+        chat_id = token
+        i += 1
+    return chat_id, limit
+
+
+def _coerce_positive_int(value: str) -> int:
+    """Coerce ``value`` to a strictly positive integer.
+
+    Args:
+        value: The string to parse.
+
+    Returns:
+        The parsed positive integer.
+
+    Raises:
+        ValueError: If ``value`` is not a positive integer.
+    """
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ValueError(
+            f"--limit must be a positive integer, got {value!r}",
+        ) from exc
+    if parsed <= 0:
+        raise ValueError(
+            f"--limit must be a positive integer, got {value!r}",
+        )
+    return parsed
+
+
+def _print_recent_chats(limit: int = DEFAULT_RECENT_CHATS_LIMIT) -> None:
+    """Print the most recent chat sessions with their tasks and results.
 
     Each task line also surfaces the row's own ``Task ID`` and the
     ``Parent Task ID`` so the ``/resume`` picker can show per-task
     identity and the sub-agent parent relationship at a glance.
     Top-level (non-sub-agent) tasks have no parent, so the parent
     column is rendered as ``(none)``.
+
+    Args:
+        limit: Maximum number of chat sessions to display, defaulting
+            to :data:`DEFAULT_RECENT_CHATS_LIMIT` (20).  Users can
+            override this with ``/resume --limit N``.
     """
-    chats = _list_recent_chats(limit=20)
+    chats = _list_recent_chats(limit=limit)
     if not chats:
         print("No chat sessions found.")
         return
