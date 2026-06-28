@@ -247,7 +247,7 @@ class TestTaskStartRefreshesHistory(unittest.TestCase):
         assert rows[0]["task"] == (
             "starting task that should appear in history"
         ), f"unexpected task text in row: {rows[0]}"
-        running_task_id = int(cast(Any, rows[0])["id"])
+        running_task_id = cast(str, rows[0]["id"])
 
         # Assertion B (the fix): a ``tasks_updated`` broadcast must
         # have been emitted by ``ChatSorcarAgent.run`` BEFORE the

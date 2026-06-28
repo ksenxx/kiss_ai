@@ -91,7 +91,11 @@ class TestListRecentChatsSkipsSubagents(_TempDbTestBase):
         _, orphan_chat = _add_task(
             "orphaned subagent task",
             extra={
-                "subagent": {"parent_task_id": 999_999, "parent_tab_id": "t"},
+                "subagent": {
+                    "parent_task_id":
+                        "ffffffffffffffffffffffffffffffff",
+                    "parent_tab_id": "t",
+                },
             },
         )
         assert orphan_chat != visible_chat

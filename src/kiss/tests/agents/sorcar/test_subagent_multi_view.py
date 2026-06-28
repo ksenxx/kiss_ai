@@ -165,8 +165,8 @@ class TestSubagentRegistersRunningState:
             assert observed["is_task_active"] is True
             # ``task_history_id`` must be set DURING the run so
             # ``_reattach_running_chat`` can match by task id.
-            assert isinstance(observed["task_history_id"], int)
-            assert observed["task_history_id"] > 0
+            assert isinstance(observed["task_history_id"], str)
+            assert observed["task_history_id"]
         finally:
             SorcarAgent.run = orig  # type: ignore[method-assign]
             done.set()
