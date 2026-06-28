@@ -99,7 +99,7 @@ def _make_server() -> tuple[VSCodeServer, list[dict]]:
 
 def _start_fake_running_task(
     server: VSCodeServer, tab_id: str, chat_id: str,
-    task_id: int | None = None,
+    task_id: str | None = None,
 ) -> tuple[threading.Event, threading.Event, threading.Thread]:
     """Install a fake task thread on ``tab_id`` that emits one event,
     then blocks on ``release_event`` until the test releases it.

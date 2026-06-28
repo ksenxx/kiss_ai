@@ -79,7 +79,7 @@ class _TempDbTestBase:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
 
-def _read_extra(task_id: int) -> dict[str, object]:
+def _read_extra(task_id: str) -> dict[str, object]:
     """Load the parsed ``extra`` JSON of a history row via the public reader."""
     for entry in _load_history():
         if entry["id"] == task_id:

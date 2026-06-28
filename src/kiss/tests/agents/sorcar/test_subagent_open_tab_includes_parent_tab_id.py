@@ -69,8 +69,8 @@ def _make_server() -> tuple[VSCodeServer, list[dict]]:
 
 
 def _seed_subagent_row(
-    *, parent_task_id: int, chat_id: str, description: str,
-) -> int:
+    *, parent_task_id: str, chat_id: str, description: str,
+) -> str:
     task_id, _ = th._add_task(description, chat_id=chat_id)
     th._save_task_extra(
         {
@@ -153,7 +153,7 @@ class TestOpenSubagentTabIncludesParentTabId:
         — this is the path the cascade-close bug travels."""
 
         class _StubAgent:
-            def __init__(self, last_task_id: int) -> None:
+            def __init__(self, last_task_id: str) -> None:
                 self._last_task_id = last_task_id
 
         chat_id = "chat-parent-live"
