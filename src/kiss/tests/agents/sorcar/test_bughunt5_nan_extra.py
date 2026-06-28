@@ -71,7 +71,7 @@ class _TempDbTestBase:
         th._DB_PATH, th._db_conn, th._KISS_DIR = self.saved
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def _set_timestamp(self, task_id: int, ts: float) -> None:
+    def _set_timestamp(self, task_id: str, ts: float) -> None:
         db = th._get_db()
         with th._rw_lock.write_lock():
             db.execute(
@@ -80,28 +80,33 @@ class _TempDbTestBase:
             )
             db.commit()
 
-    def _raw_extra(self, task_id: int) -> str:
+    def _raw_extra(self, task_id: str) -> str:
+        """Return synthesized JSON for the row's flat columns."""
         db = th._get_db()
         with th._rw_lock.read_lock():
             row = db.execute(
-                "SELECT extra FROM task_history WHERE id = ?", (task_id,),
+                "SELECT * FROM task_history WHERE id = ?", (task_id,),
             ).fetchone()
-        return str(row["extra"] or "")
+        return th._row_to_extra_json(row) if row else ""
 
-    def _insert_raw_extra(self, task: str, chat_id: str, extra_raw: str) -> int:
-        """Insert a row with a verbatim ``extra`` string (legacy-row shim)."""
+    def _insert_raw_subagent(
+        self, task: str, chat_id: str, parent_task_id: str,
+        cost: float = 0.0,
+    ) -> str:
+        """Insert a subagent row directly via SQL with the given values."""
+        import uuid
+        tid = uuid.uuid4().hex
         db = th._get_db()
         with th._rw_lock.write_lock():
-            cursor = db.execute(
+            db.execute(
                 "INSERT INTO task_history "
-                "(timestamp, task, chat_id, result, extra) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (time.time(), task, chat_id, "done", extra_raw),
+                "(id, timestamp, task, chat_id, result, cost, "
+                "parent_task_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (tid, time.time(), task, chat_id, "done", cost,
+                 parent_task_id),
             )
             db.commit()
-        row_id = cursor.lastrowid
-        assert row_id is not None
-        return int(row_id)
+        return tid
 
 
 class TestExtraWritesStayValidJson(_TempDbTestBase):
@@ -112,19 +117,19 @@ class TestExtraWritesStayValidJson(_TempDbTestBase):
             "task with nan cost",
             extra={"model": "m", "cost": float("nan")},
         )
-        raw = self._raw_extra(task_id)
-        parsed = json.loads(raw)  # must not need lenient NaN parsing
-        assert parsed["model"] == "m"
-        assert parsed["cost"] is None or (
-            isinstance(parsed["cost"], float) and math.isfinite(parsed["cost"])
-        )
+        # New schema: NaN never reaches the column — _safe_float drops it.
         db = th._get_db()
         with th._rw_lock.read_lock():
             row = db.execute(
-                "SELECT json_valid(extra) AS ok FROM task_history WHERE id = ?",
+                "SELECT cost, model FROM task_history WHERE id = ?",
                 (task_id,),
             ).fetchone()
-        assert row["ok"] == 1
+        assert row["model"] == "m"
+        assert math.isfinite(row["cost"])
+        # Synthesized JSON is always valid.
+        raw = self._raw_extra(task_id)
+        parsed = json.loads(raw)
+        assert parsed["model"] == "m"
 
     def test_save_task_extra_inf_tokens_writes_valid_json(self) -> None:
         task_id, _ = _add_task("task")
@@ -132,21 +137,22 @@ class TestExtraWritesStayValidJson(_TempDbTestBase):
             {"tokens": float("inf"), "cost": float("-inf"), "steps": 3},
             task_id=task_id,
         )
-        raw = self._raw_extra(task_id)
-        parsed = json.loads(raw)
-        assert parsed["steps"] == 3
         db = th._get_db()
         with th._rw_lock.read_lock():
             row = db.execute(
-                "SELECT json_valid(extra) AS ok FROM task_history WHERE id = ?",
+                "SELECT tokens, cost, steps FROM task_history WHERE id = ?",
                 (task_id,),
             ).fetchone()
-        assert row["ok"] == 1
+        # NaN/Inf collapsed to defaults; finite values preserved.
+        assert row["steps"] == 3
+        assert row["tokens"] == 0
+        assert math.isfinite(row["cost"])
+        raw = self._raw_extra(task_id)
+        parsed = json.loads(raw)
+        assert parsed["steps"] == 3
 
     def test_set_favorite_preserves_validity_with_nested_nan(self) -> None:
-        task_id, _ = _add_task(
-            "task", extra={"metrics": {"cost": float("nan")}},
-        )
+        task_id, _ = _add_task("task", extra={"cost": float("nan")})
         assert _set_task_favorite(task_id, True)
         raw = self._raw_extra(task_id)
         parsed = json.loads(raw)
@@ -154,10 +160,11 @@ class TestExtraWritesStayValidJson(_TempDbTestBase):
         db = th._get_db()
         with th._rw_lock.read_lock():
             row = db.execute(
-                "SELECT json_valid(extra) AS ok FROM task_history WHERE id = ?",
+                "SELECT is_favorite, cost FROM task_history WHERE id = ?",
                 (task_id,),
             ).fetchone()
-        assert row["ok"] == 1
+        assert row["is_favorite"] == 1
+        assert math.isfinite(row["cost"])
 
 
 class TestSubagentNanExtraConsistency(_TempDbTestBase):
@@ -188,7 +195,13 @@ class TestSubagentNanExtraConsistency(_TempDbTestBase):
         x_id, _chat_x = _add_task(
             "orphaned subagent task",
             extra={
-                "subagent": {"parent_task_id": 999_999},
+                # Use a valid UUID-shaped id that does not match any
+                # real task — exercises the orphaned-subagent path
+                # without triggering the parent_task_id validator.
+                "subagent": {
+                    "parent_task_id":
+                        "ffffffffffffffffffffffffffffffff"
+                },
                 "cost": float("nan"),
             },
         )
@@ -198,32 +211,47 @@ class TestSubagentNanExtraConsistency(_TempDbTestBase):
         chat_ids = [c["chat_id"] for c in chats]
         assert chat_ids == [chat_a, chat_b]
 
-    def test_legacy_nan_row_classified_identically_by_sql_and_python(
+    def test_sql_and_python_classify_subagent_identically(
         self,
     ) -> None:
-        # A legacy row written by the old code path: bare NaN token makes
-        # the stored extra invalid RFC 8259 JSON.  SQLite's json_valid
-        # rejects it, so _HISTORY_NOT_SUBAGENT shows the row; the
-        # Python-side detector must agree (NOT a sub-agent row) instead
-        # of silently dropping the row from _list_recent_chats /
-        # _load_chat_context while the SQL side displays it.
-        raw = '{"subagent": {"parent_task_id": 1}, "cost": NaN}'
-        row_id = self._insert_raw_extra("legacy nan row", "legacychat", raw)
+        # The new schema stores parent_task_id in a dedicated TEXT
+        # column — both SQL (``_HISTORY_NOT_SUBAGENT``) and Python
+        # (``_is_subagent_row``) read the same source, so they can
+        # never disagree.
+        parent_id, chat = _add_task("parent task")
+        sub_id = self._insert_raw_subagent(
+            "subagent row", chat, parent_id, cost=0.1,
+        )
 
         db = th._get_db()
         with th._rw_lock.read_lock():
-            sql_row = db.execute(
+            sub_row = db.execute(
                 "SELECT "
                 + th._HISTORY_NOT_SUBAGENT
                 + " AS not_sub FROM task_history WHERE id = ?",
-                (row_id,),
+                (sub_id,),
             ).fetchone()
-        sql_says_subagent = sql_row["not_sub"] == 0
-        python_says_subagent = _is_subagent_row(raw)
-        assert sql_says_subagent == python_says_subagent
+            parent_row = db.execute(
+                "SELECT "
+                + th._HISTORY_NOT_SUBAGENT
+                + " AS not_sub FROM task_history WHERE id = ?",
+                (parent_id,),
+            ).fetchone()
+        # Sub-agent row: SQL says hidden (not_sub == 0).
+        assert sub_row["not_sub"] == 0
+        # Python side: _is_subagent_row reads the column via row fetch.
+        with th._rw_lock.read_lock():
+            sub_full = db.execute(
+                "SELECT * FROM task_history WHERE id = ?", (sub_id,),
+            ).fetchone()
+            parent_full = db.execute(
+                "SELECT * FROM task_history WHERE id = ?", (parent_id,),
+            ).fetchone()
+        assert _is_subagent_row(sub_full) is True
+        # Parent row: SQL says visible (not_sub == 1); Python agrees.
+        assert parent_row["not_sub"] == 1
+        assert _is_subagent_row(parent_full) is False
 
-        # And the chat must be visible end-to-end: the SQL side lists
-        # the row, so the Python side must keep its chat too.
         chats = _list_recent_chats(limit=10)
         chat_ids = [c["chat_id"] for c in chats]
-        assert "legacychat" in chat_ids
+        assert chat in chat_ids

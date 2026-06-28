@@ -186,7 +186,7 @@ class TestCliHistoryClickResumesLiveStream(unittest.TestCase):
             f"registered (expected {expected})"
         )
 
-    def _wait_for_cli_running(self, task_id: int,
+    def _wait_for_cli_running(self, task_id: str,
                               timeout: float = 2.0) -> None:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -198,7 +198,7 @@ class TestCliHistoryClickResumesLiveStream(unittest.TestCase):
             f"task_id={task_id} never registered in _cli_running_tasks"
         )
 
-    def _wait_for_cli_not_running(self, task_id: int,
+    def _wait_for_cli_not_running(self, task_id: str,
                                   timeout: float = 2.0) -> None:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -362,7 +362,7 @@ class TestCliHistoryClickResumesLiveStream(unittest.TestCase):
         row would mis-display the blinking green circle forever for
         a task that is no longer running anywhere.
         """
-        task_id = 9999
+        task_id = "9999cccccccccccccccccccccccccccc"
 
         # Open a dedicated UDS connection that we will close abruptly
         # below.  Using the bridge directly is what the CLI does, but

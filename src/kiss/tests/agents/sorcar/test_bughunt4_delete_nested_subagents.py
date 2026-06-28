@@ -122,15 +122,15 @@ class TestDeleteCascadesThroughNestedSubagents(_TempDbTestBase):
             chat_id=chat_id,
             extra={"subagent": {"parent_task_id": parent_id}},
         )
-        # Corrupt it to point at itself as well as keep parent linkage.
+        # Corrupt it to point at itself: in the new flat-column schema
+        # sub-agent parenthood lives in the ``parent_task_id`` column,
+        # so the self-cycle is induced by pointing that column at the
+        # row's own id.
         db = th._get_db()
         with th._rw_lock.write_lock():
             db.execute(
-                "UPDATE task_history SET extra = ? WHERE id = ?",
-                (
-                    '{"subagent": {"parent_task_id": ' + str(weird) + "}}",
-                    weird,
-                ),
+                "UPDATE task_history SET parent_task_id = ? WHERE id = ?",
+                (weird, weird),
             )
             db.commit()
         # Deleting the weird row itself must terminate and succeed.
