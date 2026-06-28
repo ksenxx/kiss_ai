@@ -143,9 +143,10 @@ def test_apply_updates_writes_to_workdir_not_extension(
     resolved_path = resolved_root / "src" / "kiss" / "core" / "models" / "MODEL_INFO.json"
     monkeypatch.setattr(mod, "MODEL_INFO_PATH", resolved_path)
 
-    # Also redirect the user-local sync target so the test does not touch
-    # ``~/.kiss/MODEL_INFO.json`` on the developer's machine.
-    monkeypatch.setattr(mod, "USER_MODEL_INFO_PATH", tmp_path / "user-kiss" / "MODEL_INFO.json")
+    # ``USER_MODEL_INFO_PATH`` has been removed — the user-local copy at
+    # ``~/.kiss/MODEL_INFO.json`` is no longer maintained; the bundled
+    # MODEL_INFO.json is read directly from the installed package at
+    # runtime.  Nothing to redirect here.
 
     updates = [
         {

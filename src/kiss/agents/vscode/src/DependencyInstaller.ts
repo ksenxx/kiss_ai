@@ -459,7 +459,10 @@ async function runFinalization(
     installCliScript(kissProjectPath, uvPath);
   }
 
-  if (progress) progress.report({message: 'Refreshing model info...'});
+  // MODEL_INFO.json is intentionally NOT copied into ``~/.kiss/``;
+  // see the docstring on ``installModelInfoJson`` below for the
+  // rationale.  User overrides live in ``~/.kiss/MY_MODELS.json``,
+  // auto-seeded by ``kiss.core.models.model_info`` on first import.
   installModelInfoJson(kissProjectPath);
   // INJECTIONS.md is intentionally NOT copied into ``~/.kiss/``; see
   // the docstring on ``installMarkdownAssets`` below for the
@@ -1360,37 +1363,28 @@ function installMarkdownAssets(kissProjectPath: string): void {
 }
 
 /**
- * Copy the kiss_project's bundled ``MODEL_INFO.json`` to
- * ``~/.kiss/MODEL_INFO.json``.  The Python loader in
- * ``kiss.core.models.model_info`` reads the user-local copy at runtime
- * (with an mtime-based auto-refresh from the package copy), so seeding
- * it here on every install means the freshly installed extension serves
- * the up-to-date pricing/context table immediately.  Failures are logged
- * and swallowed: model_info.py's loader falls back to the package copy
- * if ~/.kiss/MODEL_INFO.json is missing or unreadable.
+ * ``MODEL_INFO.json`` is intentionally NOT copied into ``~/.kiss/``.
+ *
+ * The bundled ``src/kiss/core/models/MODEL_INFO.json`` is the runtime
+ * source of truth for shipped model pricing/context tables; the Python
+ * loader in ``kiss.core.models.model_info`` reads it directly from the
+ * installed package.  User-curated overrides / extensions live in
+ * ``~/.kiss/MY_MODELS.json`` instead, auto-seeded on first import with
+ * a short documentation block and a commented-out example entry —
+ * matching the ``MY_INJECTION.md`` / ``MY_TASK_TEMPLATES.md`` pattern.
+ *
+ * The function is preserved (as a no-op) so the call site in
+ * ``runFinalization`` keeps documenting why no MODEL_INFO.json copy
+ * happens at install time.
  */
 function installModelInfoJson(kissProjectPath: string): void {
+  void kissProjectPath;
   if (!HOME_DIR) return;
-  const src = path.join(
-    kissProjectPath,
-    'src',
-    'kiss',
-    'core',
-    'models',
-    'MODEL_INFO.json',
+  log(
+    'MODEL_INFO.json is read directly from the bundled package; no copy is ' +
+      'made into ~/.kiss/ (user model overrides live in MY_MODELS.json, ' +
+      'auto-seeded on first import by kiss.core.models.model_info).',
   );
-  const dst = path.join(LOG_DIR, 'MODEL_INFO.json');
-  try {
-    if (!fs.existsSync(src)) {
-      log(`MODEL_INFO.json not found at ${src}; skipping copy`);
-      return;
-    }
-    fs.mkdirSync(LOG_DIR, {recursive: true});
-    fs.copyFileSync(src, dst);
-    log(`Installed MODEL_INFO.json at ${dst}`);
-  } catch (e: unknown) {
-    log(`Failed to install MODEL_INFO.json: ${(e as Error).message}`);
-  }
 }
 
 /**
