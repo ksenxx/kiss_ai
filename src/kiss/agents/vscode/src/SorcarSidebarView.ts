@@ -27,6 +27,100 @@ function isPathInside(target: string, root: string): boolean {
   const rel = path.relative(rt, tg);
   return rel.length > 0 && !rel.startsWith('..') && !path.isAbsolute(rel);
 }
+
+/**
+ * File extensions that VS Code's text editor can open without
+ * corrupting the buffer.  Anything outside this set is routed to the
+ * native viewer (``vscode.open``) by the ``openFile`` message handler
+ * so binary / preview-only formats (images, PDFs, archives,
+ * executables, fonts, audio/video) get their proper preview instead
+ * of being loaded as garbled text.
+ *
+ * Files without an extension default to text (most config / dotfiles
+ * are textual).  The list intentionally covers only the binary /
+ * preview-only formats the user is likely to click in chat output;
+ * adding a new text-like extension here is the only change required
+ * to extend coverage.
+ */
+const NATIVE_VIEWER_EXTENSIONS = new Set([
+  // Images
+  '.png',
+  '.jpg',
+  '.jpeg',
+  '.gif',
+  '.bmp',
+  '.ico',
+  '.webp',
+  '.tiff',
+  '.tif',
+  '.avif',
+  '.heic',
+  // Documents
+  '.pdf',
+  // Archives
+  '.zip',
+  '.tar',
+  '.gz',
+  '.tgz',
+  '.bz2',
+  '.xz',
+  '.7z',
+  '.rar',
+  '.jar',
+  '.war',
+  // Office
+  '.doc',
+  '.docx',
+  '.xls',
+  '.xlsx',
+  '.ppt',
+  '.pptx',
+  '.odt',
+  '.ods',
+  '.odp',
+  // Executables / native binaries
+  '.exe',
+  '.dll',
+  '.so',
+  '.dylib',
+  '.a',
+  '.o',
+  '.class',
+  '.wasm',
+  // Audio / video
+  '.mp3',
+  '.wav',
+  '.ogg',
+  '.flac',
+  '.m4a',
+  '.aac',
+  '.mp4',
+  '.m4v',
+  '.mov',
+  '.avi',
+  '.mkv',
+  '.webm',
+  // Fonts
+  '.ttf',
+  '.otf',
+  '.woff',
+  '.woff2',
+  '.eot',
+  // Compiled / data
+  '.pyc',
+  '.pyo',
+  '.bin',
+  '.dat',
+  '.db',
+  '.sqlite',
+  '.sqlite3',
+]);
+
+function isTextLikeExtension(filePath: string): boolean {
+  const ext = path.extname(filePath).toLowerCase();
+  if (!ext) return true;
+  return !NATIVE_VIEWER_EXTENSIONS.has(ext);
+}
 import {AgentClient} from './AgentClient';
 import {getGitApi} from './gitApi';
 import {MergeManager} from './MergeManager';
@@ -1124,8 +1218,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
             );
             break;
           }
-          {
-            const uri = vscode.Uri.file(filePath);
+          const uri = vscode.Uri.file(filePath);
+          if (isTextLikeExtension(filePath)) {
+            // Text-like files open in the regular VS Code editor so
+            // we can position the caret on a 1-indexed line.
             const doc = await vscode.workspace.openTextDocument(uri);
             const editor = await vscode.window.showTextDocument(doc, {
               preview: false,
@@ -1139,6 +1235,15 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
                 vscode.TextEditorRevealType.InCenter,
               );
             }
+          } else {
+            // Binary / non-text files (images, PDFs, archives,
+            // executables, …) are routed to the native viewer via
+            // ``vscode.open`` so VS Code picks the right preview
+            // (built-in image preview, PDF preview extension,
+            // external default app, etc.).  Loading them as text
+            // would corrupt the buffer and prevent the preview
+            // from rendering.
+            await vscode.commands.executeCommand('vscode.open', uri);
           }
         }
         break;
