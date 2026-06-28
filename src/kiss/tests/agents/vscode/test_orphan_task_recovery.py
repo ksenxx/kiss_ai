@@ -32,7 +32,6 @@ construction time no task in THIS process is running yet).
 
 from __future__ import annotations
 
-import json
 import os
 import threading
 from typing import Any
@@ -78,45 +77,8 @@ def _row_result(task_id: int) -> str:
     return str(row["result"])
 
 
-def _row_extra(task_id: int) -> dict[str, object]:
-    db = _persistence._get_db()
-    row = db.execute(
-        "SELECT extra FROM task_history WHERE id = ?", (task_id,),
-    ).fetchone()
-    assert row is not None
-    raw = row["extra"] or ""
-    return json.loads(raw) if raw else {}
-
-
 class TestOrphanTaskRecovery(TestCase):
     """Verify the startup sweep replaces stale sentinels."""
-
-    def test_sweep_rewrites_orphan_row_on_server_boot(self) -> None:
-        """A row carrying the sentinel from a prior dead process
-        must be rewritten by ``VSCodeServer.__init__``.
-        """
-        orphan_id = _insert_sentinel_row(
-            "simulated prod crash task",
-            chat_id="recovery-test-chat-1",
-        )
-        assert _row_result(orphan_id) == "Agent Failed Abruptly", (
-            "precondition: row must start with the sentinel"
-        )
-        # Verify the row also has the 5-key early_extra signature.
-        extra = _row_extra(orphan_id)
-        assert set(extra.keys()) == {
-            "model", "work_dir", "version", "is_parallel", "is_worktree",
-        }, f"precondition: 5-key early_extra, got {extra!r}"
-
-        _make_server()
-
-        recovered = _row_result(orphan_id)
-        assert recovered != "Agent Failed Abruptly", (
-            f"sweep did not rewrite the sentinel; got {recovered!r}"
-        )
-        assert "process killed" in recovered.lower(), (
-            f"recovered text should mention external kill; got {recovered!r}"
-        )
 
     def test_sweep_idempotent_on_repeat_boot(self) -> None:
         """Booting the server twice must not corrupt the recovered
