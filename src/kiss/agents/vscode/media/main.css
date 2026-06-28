@@ -1725,7 +1725,7 @@ body.remote-chat #welcome-config { display: none !important; }
 .running-item > .sidebar-item-running,
 .running-item > .sidebar-item-completed {
   position: absolute;
-  left: 10px;
+  left: 5px;
   top: 50%;
   transform: translateY(-50%);
   margin-right: 0;
@@ -1739,7 +1739,7 @@ body.remote-chat #welcome-config { display: none !important; }
   row-gap: 8px;
   padding-top: 18px;
   padding-bottom: 9px;
-  padding-left: 26px;
+  padding-left: 13px;
   min-height: 96px;
 }
 
