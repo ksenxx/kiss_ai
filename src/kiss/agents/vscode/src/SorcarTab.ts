@@ -215,6 +215,13 @@ export function getNonce(): string {
     .slice(0, 32);
 }
 
+/** Return a short content hash for a packaged media asset. */
+function mediaAssetVersion(extensionUri: vscode.Uri, name: string): string {
+  const file = vscode.Uri.joinPath(extensionUri, 'media', name).fsPath;
+  const bytes = fs.readFileSync(file);
+  return crypto.createHash('sha256').update(bytes).digest('hex').slice(0, 16);
+}
+
 /**
  * Build the full chat HTML for a Sorcar webview.
  *
@@ -241,10 +248,13 @@ export function buildChatHtml(
   ).fsPath;
   const tpl = fs.readFileSync(tplPath, 'utf-8');
 
-  const u = (name: string): string =>
-    webview
-      .asWebviewUri(vscode.Uri.joinPath(extensionUri, 'media', name))
-      .toString();
+  const u = (name: string): string => {
+    const uri = webview.asWebviewUri(
+      vscode.Uri.joinPath(extensionUri, 'media', name),
+    );
+    const sep = uri.toString().includes('?') ? '&' : '?';
+    return uri.toString() + sep + 'v=' + mediaAssetVersion(extensionUri, name);
+  };
 
   /* eslint-disable quotes */
   const csp =
