@@ -13,6 +13,7 @@ against the pre-fix source fails.
 
 from __future__ import annotations
 
+from collections.abc import Generator
 from pathlib import Path
 
 import pytest
@@ -21,7 +22,9 @@ from kiss.agents.sorcar import persistence
 
 
 @pytest.fixture
-def temp_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def temp_db(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> Generator[Path]:
     db_path = tmp_path / "sorcar.db"
     monkeypatch.setattr(persistence, "_DB_PATH", db_path)
     persistence._close_db()

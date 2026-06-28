@@ -52,7 +52,7 @@ class _CapturePrinter(JsonPrinter):
 
 
 # A fixed fake task id the mock sub-agent will "allocate" during run().
-_FAKE_SUB_TASK_ID = 99999
+_FAKE_SUB_TASK_ID = "99999"
 
 # The frontend-generated tab id (simulates what createNewTab() produces).
 _FRONTEND_TAB_ID = "frontend-random-abc123"
@@ -210,7 +210,7 @@ class TestSubagentDoneTabIdMatchesViewerTab(unittest.TestCase):
             """Mock run() that sets _last_task_id but does NOT subscribe
             any frontend tab.
             """
-            self_agent._last_task_id = 77777
+            self_agent._last_task_id = "77777"
             return "success: true\nsummary: done"
 
         original_run = ChatSorcarAgent.run

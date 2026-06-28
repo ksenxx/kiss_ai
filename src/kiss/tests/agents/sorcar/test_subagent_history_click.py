@@ -87,10 +87,10 @@ def _make_server() -> tuple[VSCodeServer, list[dict]]:
 
 def _seed_subagent_row(
     *,
-    parent_task_id: int,
+    parent_task_id: str,
     chat_id: str,
     description: str,
-) -> int:
+) -> str:
     """Insert a sub-agent task_history row + one persisted event.
 
     Returns the inserted task id.

@@ -32,11 +32,11 @@ Use openrouter/z-ai/glm-5.2 model for all tasks including coding, bug fixing, an
 
 ## Trick
 
-Can you run all tests and report the cause of failing tests?  Do not modify any code.  Running all tests, collecting information, and fixing them is time consuming.  So split the set of tests by the number of test methods into number of cores - 2 and run all splits in parallel using run_parallel tool.
+Can you run all tests and report the cause of failing tests? Do not modify any code. Running all tests, collecting information, and fixing them is time consuming. So split the set of tests by the number of test methods into number of cores - 2 and run all splits in parallel using run_parallel tool.
 
 ## Trick
 
-Can you check the following message on merge conflict and help me fix it? 
+Can you check the following message on merge conflict and help me fix it?
 
 ## Trick
 

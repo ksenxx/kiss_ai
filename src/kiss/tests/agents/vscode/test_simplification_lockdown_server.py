@@ -252,18 +252,18 @@ class TestLiveTaskIdFallback(_DbTestBase):
         server, _ = _make_server()
         tab = server._get_tab("tab-live")
         assert tab.agent is not None
-        tab.agent._last_task_id = 7
-        tab.task_history_id = 42
+        tab.agent._last_task_id = "7"
+        tab.task_history_id = "42"
 
         release = threading.Event()
         worker = threading.Thread(target=release.wait, daemon=True)
         worker.start()
         tab.task_thread = worker
         try:
-            assert server._get_running_task_ids() == {7}
+            assert server._get_running_task_ids() == {"7"}
 
             tab.agent._last_task_id = None
-            assert server._get_running_task_ids() == {42}
+            assert server._get_running_task_ids() == {"42"}
         finally:
             release.set()
             worker.join(timeout=5)
@@ -272,8 +272,8 @@ class TestLiveTaskIdFallback(_DbTestBase):
         server, _ = _make_server()
         tab = server._get_tab("tab-dead")
         assert tab.agent is not None
-        tab.agent._last_task_id = 7
-        tab.task_history_id = 42
+        tab.agent._last_task_id = "7"
+        tab.task_history_id = "42"
 
         worker = threading.Thread(target=lambda: None, daemon=True)
         worker.start()
@@ -287,8 +287,8 @@ class TestLiveTaskIdFallback(_DbTestBase):
         tab = server._get_tab("tab-overlay")
         agent = tab.agent
         assert agent is not None
-        agent._last_task_id = 7
-        tab.task_history_id = 42
+        agent._last_task_id = "7"
+        tab.task_history_id = "42"
         agent.total_tokens_used = 555
         agent.budget_used = 1.25
         agent.total_steps = 9
@@ -298,7 +298,7 @@ class TestLiveTaskIdFallback(_DbTestBase):
         tab.auto_commit_mode = False
 
         matched: dict = {"tokens": 0, "cost": 0.0, "steps": 0}
-        server._overlay_live_metrics(matched, 7)
+        server._overlay_live_metrics(matched, "7")
         assert matched == {
             "tokens": 555,
             "cost": 1.25,
@@ -311,7 +311,7 @@ class TestLiveTaskIdFallback(_DbTestBase):
 
         # The fallback id must NOT match while the agent id is set.
         unmatched: dict = {"tokens": 0, "cost": 0.0, "steps": 0}
-        server._overlay_live_metrics(unmatched, 42)
+        server._overlay_live_metrics(unmatched, "42")
         assert unmatched == {"tokens": 0, "cost": 0.0, "steps": 0}
 
     def test_overlay_live_metrics_falls_back_to_task_history_id(self) -> None:
@@ -320,7 +320,7 @@ class TestLiveTaskIdFallback(_DbTestBase):
         agent = tab.agent
         assert agent is not None
         agent._last_task_id = None
-        tab.task_history_id = 42
+        tab.task_history_id = "42"
         agent.total_tokens_used = 100
         agent.budget_used = 0.5
         agent.total_steps = 4
@@ -330,7 +330,7 @@ class TestLiveTaskIdFallback(_DbTestBase):
         tab.auto_commit_mode = False
 
         session: dict = {"tokens": 0, "cost": 0.0, "steps": 0}
-        server._overlay_live_metrics(session, 42)
+        server._overlay_live_metrics(session, "42")
 
         assert session == {
             "tokens": 100,
