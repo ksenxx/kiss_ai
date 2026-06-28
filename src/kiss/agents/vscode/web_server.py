@@ -242,6 +242,27 @@ _MAX_ATTACHMENTS = 32
 # clicking window before its socket drops on shutdown.
 _SERVER_RESET_DELAY = 0.4
 
+# Seconds after the freshly-restarted daemon binds its listeners
+# before it broadcasts the "Server restart complete" notification.
+# Long enough for the VS Code extension's ``AgentClient`` and any
+# reconnecting browser webview to reattach to the UDS / WSS so the
+# toast is delivered into a live socket instead of being dropped on
+# the floor.  Tests monkey-patch this constant to a tiny value so
+# they do not have to wait the full window.
+_SERVER_RESET_COMPLETE_DELAY = 3.0
+
+# File name of the pending-reset flag dropped by
+# :meth:`RemoteAccessServer._handle_server_reset` in the same
+# directory as ``remote-url.json`` (``~/.kiss`` in production, a
+# tmpdir in tests via ``url_file=``).  Its presence at daemon
+# startup means the previous instance SIGTERMed itself in response
+# to a user-initiated "Server reset" — the freshly-restarted daemon
+# deletes the flag and schedules a "Server restart complete"
+# notification to reconnecting clients.  Absent flag ⇒ this is a
+# regular launch / crash restart / install respawn and the
+# completion toast is intentionally suppressed.
+_SERVER_RESET_FLAG_NAME = "server-reset-pending.json"
+
 # M7: cap the prompt size echoed back via ``setTaskText`` so a giant
 # JSON payload cannot push tens of MB through the broadcast pipeline.
 _MAX_PROMPT_BYTES = 1_000_000
@@ -3559,7 +3580,105 @@ class RemoteAccessServer:
         if conn_id:
             notification["connId"] = conn_id
         self._printer.broadcast(notification)
+        # Drop a pending-reset flag so the freshly-respawned daemon
+        # knows to broadcast a paired "Server restart complete"
+        # notification once it is listening again — see
+        # :meth:`_setup_server`.  Written atomically (tmp + replace)
+        # so a crash mid-write never leaves a half-baked file the
+        # next daemon would read.  Best-effort: a filesystem error
+        # here only suppresses the post-restart toast, never blocks
+        # the actual restart.
+        self._write_server_reset_flag(conn_id)
         loop.call_later(_SERVER_RESET_DELAY, self._trigger_server_reset)
+
+    def _server_reset_flag_path(self) -> Path:
+        """Path of the pending-reset flag file.
+
+        Lives next to ``remote-url.json`` so tests that supply a
+        custom ``url_file=`` automatically get an isolated flag
+        location and never touch the user's real ``~/.kiss``.
+        """
+        return self._url_file.parent / _SERVER_RESET_FLAG_NAME
+
+    def _write_server_reset_flag(self, conn_id: str) -> None:
+        """Persist a pending-reset marker before the daemon SIGTERMs.
+
+        Args:
+            conn_id: Requesting connection id (kept for diagnostics
+                only — the connection itself cannot survive the
+                SIGTERM, so the post-restart notification is
+                broadcast to all reconnecting clients).
+        """
+        flag_path = self._server_reset_flag_path()
+        try:
+            flag_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = flag_path.with_suffix(flag_path.suffix + ".tmp")
+            tmp.write_text(
+                json.dumps(
+                    {"requested_at": time.time(), "conn_id": conn_id},
+                ),
+                encoding="utf-8",
+            )
+            os.replace(tmp, flag_path)
+        except OSError:
+            logger.debug(
+                "Could not write server-reset pending flag at %s",
+                flag_path, exc_info=True,
+            )
+
+    def _maybe_schedule_server_reset_complete(self) -> None:
+        """Schedule the post-restart broadcast iff a pending flag exists.
+
+        Called once from :meth:`_setup_server` after the WSS / UDS
+        listeners are bound and the watchdog tasks are armed.  When
+        the flag file written by :meth:`_write_server_reset_flag`
+        in the previous daemon instance is found, it is removed
+        eagerly (so the toast fires at most once per user-initiated
+        reset, even if the daemon restarts again before the timer
+        runs) and a delayed callback is queued to broadcast the
+        "Server restart complete" notification.
+        """
+        flag_path = self._server_reset_flag_path()
+        if not flag_path.exists():
+            return
+        try:
+            flag_path.unlink()
+        except OSError:
+            logger.debug(
+                "Could not remove server-reset pending flag at %s",
+                flag_path, exc_info=True,
+            )
+        loop = self._loop
+        assert loop is not None
+        loop.call_later(
+            _SERVER_RESET_COMPLETE_DELAY,
+            self._broadcast_server_reset_complete,
+        )
+
+    def _broadcast_server_reset_complete(self) -> None:
+        """Broadcast the "Server restart complete" notification.
+
+        Pair to the "Restarting the KISS Sorcar web server…" toast
+        sent by :meth:`_handle_server_reset` in the *previous*
+        daemon instance.  Scheduled from :meth:`_setup_server` when
+        a pending-reset flag file is found, and delivered to every
+        currently-connected client — the requesting connection
+        died with the previous daemon so ``connId`` cannot be
+        preserved across the restart, but every webview that was
+        disconnected by the SIGTERM benefits from the same
+        confirmation.  The stable ``id`` lets the existing webview
+        dedup (``data-notification-id`` in ``showNotification``)
+        replace any stale "restarting" toast in-place instead of
+        stacking a duplicate.
+        """
+        self._printer.broadcast(
+            {
+                "type": "notification",
+                "id": "server-reset-complete",
+                "severity": "info",
+                "message": "KISS Sorcar web server restart complete.",
+            },
+        )
 
     def _trigger_server_reset(self) -> None:
         """Send ``SIGTERM`` to this process to trigger a clean restart.
@@ -5176,6 +5295,20 @@ class RemoteAccessServer:
         self._version_check_task = asyncio.create_task(
             self._version_check_loop(),
         )
+
+        # If the previous instance of this daemon SIGTERMed itself in
+        # response to a user-initiated "Server reset", drop a delayed
+        # broadcast announcing the restart completed so reconnecting
+        # clients see a confirmation toast (paired with the
+        # "Restarting the KISS Sorcar web server…" toast emitted by
+        # the previous instance).  The flag file is removed eagerly
+        # so a *crash* respawn or a routine launchd kick — neither
+        # of which writes the flag — never replays an obsolete
+        # notification on the next launch.  The delay gives the VS
+        # Code extension's ``AgentClient`` and any reconnecting
+        # browser webview time to reattach to the freshly-bound UDS
+        # / WSS before the broadcast goes out.
+        self._maybe_schedule_server_reset_complete()
 
     async def _serve_async(self) -> None:
         """Internal async entry point for the server."""
