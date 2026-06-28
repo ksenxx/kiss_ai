@@ -607,6 +607,13 @@
     return tabs.find(t => t.id === id) || null;
   }
 
+  /** Find the local tab that already displays a backend chat id. */
+  function getTabByBackendChatId(chatId) {
+    if (chatId === undefined || chatId === null || chatId === '') return null;
+    const key = String(chatId);
+    return tabs.find(t => String(t.backendChatId || '') === key) || null;
+  }
+
   /**
    * Place *subTab* immediately to the RIGHT of its parent tab — after
    * any sub-agent tabs of the same parent already sitting there — so
@@ -1229,6 +1236,7 @@
     const saved = vscode.getState();
     if (saved && saved.tabs && saved.tabs.length > 0) {
       tabs = [];
+      const restoredBackendChatIds = new Set();
       saved.tabs.forEach(st => {
         // Sub-agent tabs (persisted by older versions of
         // persistTabState) are dropped: they cannot be resumed by
@@ -1237,10 +1245,22 @@
         // sub-agent row, with the row's own events, right of the
         // parent.
         if (st.isSubagentTab) return;
+        const persistedBackendChatId = st.backendChatId
+          ? String(st.backendChatId)
+          : '';
+        if (
+          persistedBackendChatId &&
+          restoredBackendChatIds.has(persistedBackendChatId)
+        ) {
+          return;
+        }
         const tab = makeTab(st.title);
         // Restore tab.id from persisted chatId (frontend tab identifier)
         if (st.chatId) tab.id = st.chatId;
-        if (st.backendChatId) tab.backendChatId = st.backendChatId;
+        if (persistedBackendChatId) {
+          tab.backendChatId = persistedBackendChatId;
+          restoredBackendChatIds.add(persistedBackendChatId);
+        }
         if (st.parentTabId) tab.parentTabId = st.parentTabId;
         tabs.push(tab);
       });
@@ -6266,21 +6286,30 @@
           window._startDemoReplay(allHistSessions);
           return;
         }
-        // Sub-agent history rows reopen as a regular chat tab that
-        // the backend (``_replay_session``) will then flip into a
-        // sub-agent tab via ``openSubagentTab`` (purple accent,
-        // no input bar, no adjacent-task loading).  We do
-        // not look up "is the original sub-agent tab still open?" —
-        // sub-agent rows are persisted with just their parent
-        // task_history.id, so the simplest UX is a fresh tab whose
-        // events are replayed from the row's own events table.
-        // When the clicked history row has a known chat_id (s.id)
-        // and persisted events, allocate a fresh tab id and let the
-        // backend route the chat lookup by chat_id (passed in the
-        // ``resumeSession`` payload).  ``tab_id`` and ``chat_id``
-        // are orthogonal — the same chat may be live-viewed from
-        // multiple tabs, each with its own routing key.
-        if (s.has_events && s.id) {
+        // A client must never display the same backend chat id in two
+        // local tabs.  If this history row's chat is already open (for
+        // example the user is on a blank tab and clicks an older row
+        // for a chat that is open to the left), simply switch focus to
+        // that tab instead of creating a duplicate tab and issuing a
+        // second resumeSession for the same chat.
+        const existingChatTab = getTabByBackendChatId(s.id);
+        if (existingChatTab) {
+          switchToTab(existingChatTab.id);
+        } else if (s.has_events && s.id) {
+          // Sub-agent history rows reopen as a regular chat tab that
+          // the backend (``_replay_session``) will then flip into a
+          // sub-agent tab via ``openSubagentTab`` (purple accent,
+          // no input bar, no adjacent-task loading).  We do
+          // not look up "is the original sub-agent tab still open?" —
+          // sub-agent rows are persisted with just their parent
+          // task_history.id, so the simplest UX is a fresh tab whose
+          // events are replayed from the row's own events table.
+          // When the clicked history row has a known chat_id (s.id)
+          // and persisted events, allocate a fresh tab id and let the
+          // backend route the chat lookup by chat_id (passed in the
+          // ``resumeSession`` payload).  ``tab_id`` and ``chat_id``
+          // are orthogonal — each local tab has its own routing key,
+          // but there is at most one local tab per backend chat id.
           createNewTab();
           const taskText = s.preview || s.title || '';
           setTaskText(taskText);
