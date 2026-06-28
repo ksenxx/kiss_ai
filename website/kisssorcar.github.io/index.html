@@ -603,9 +603,10 @@
       font-family: 'Roboto Mono', 'JetBrains Mono', monospace;
       font-size: 0.84rem; line-height: 1.65;
       white-space: pre-wrap; word-wrap: break-word;
-      /* Show at least 5 lines (5 * 1.65em + vertical padding). */
-      max-height: calc(5 * 1.65 * 0.84rem + 1.8rem);
-      overflow: hidden;
+      /* Fixed height: exactly 5 lines (5 * 1.65em + vertical padding).  */
+      /* Any overflow becomes a scroller — no more/less expansion.       */
+      height: calc(5 * 1.65 * 0.84rem + 1.8rem);
+      overflow-y: auto;
       color: inherit;
       scrollbar-width: thin;
       scrollbar-color: rgba(255,255,255,0.25) transparent;
@@ -616,45 +617,11 @@
     }
     .prompt-body pre::-webkit-scrollbar-track { background: transparent; }
 
-    .prompt-fade {
-      position: absolute; left: 0; right: 0; bottom: 0; height: 56px;
-      pointer-events: none;
-      background: linear-gradient(180deg, rgba(30,35,41,0) 0%, var(--code-bg) 90%);
-      transition: opacity 0.2s;
-    }
-    .prompt-panel.expanded .prompt-body pre {
-      /* When expanded, make the entire prompt scrollable inside a   */
-      /* bounded area instead of letting it grow unboundedly.        */
-      max-height: 22rem;
-      overflow-y: auto;
-    }
-    .prompt-panel.expanded .prompt-fade { opacity: 0; }
-
-    /* Hide the "more" button + fade gradient for prompts that       */
-    /* already fit in the 5-line collapsed view. The .fits class is  */
-    /* added by JS after measuring scrollHeight vs. clientHeight.    */
-    .prompt-panel.fits .prompt-more { display: none; }
-    .prompt-panel.fits .prompt-fade { display: none; }
-
-    .prompt-more {
-      margin-top: 0.65rem;
-      display: inline-flex; align-items: center; gap: 0.35rem;
-      background: transparent; border: 1px solid var(--border);
-      color: var(--primary); font-family: inherit;
-      font-size: 0.82rem; font-weight: 500;
-      padding: 0.32rem 0.85rem; border-radius: 6px;
-      cursor: pointer;
-      transition: background 0.15s, border-color 0.15s, color 0.15s;
-    }
-    .prompt-more:hover {
-      background: var(--primary-soft);
-      border-color: var(--primary);
-      color: var(--primary-dark);
-    }
-    .prompt-more .chev {
-      display: inline-block; transition: transform 0.2s;
-    }
-    .prompt-panel.expanded .prompt-more .chev { transform: rotate(180deg); }
+    /* The fade overlay and "more …" button are no longer used now    */
+    /* that the prompt body has a fixed 5-line height and is always   */
+    /* scrollable for any overflow.                                   */
+    .prompt-fade { display: none; }
+    .prompt-more { display: none; }
 
     /* ========================================================== */
     /* PROMPT CAROUSEL — show one panel at a time at the same      */
@@ -844,9 +811,9 @@
   <!-- ================ § 01 — All you need is a short prompt ================ -->
   <div class="section-wrap">
   <section id="prompts" class="section-card">
-    <span class="num">§ 01 — All you need is a short prompt</span>
-    <h2>All you need is a short prompt.<a href="#prompts" class="anchor">¶</a></h2>
-    <p class="sub">KISS Sorcar ships with a curated set of <strong>sample tasks</strong> (long-horizon prompts you can drop straight into the CLI or VS Code extension) and <strong>promptlet tricks</strong> (short reusable directives that steer Sorcar's behaviour mid-task). The tasks live in <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/SAMPLE_TASKS.md"><code>src/kiss/SAMPLE_TASKS.md</code></a>; the tricks live in <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/INJECTIONS.md"><code>src/kiss/INJECTIONS.md</code></a>. Flip through them one at a time below &mdash; use <kbd>Prev</kbd>/<kbd>Next</kbd>, the dots, or your <kbd>←</kbd>/<kbd>→</kbd> arrow keys, and click <em>more …</em> to expand the full prompt.</p>
+    <span class="num">§ 01 — All you need is a short prompt in KISS Sorcar to do big complex tasks</span>
+    <h2>All You Need is a Short Prompt in KISS Sorcar to do Big Complex Tasks.<a href="#prompts" class="anchor">¶</a></h2>
+    <p class="sub">KISS Sorcar ships with a curated set of <strong>sample tasks</strong> (long-horizon prompts you can drop straight into the CLI or VS Code extension) and <strong>promptlet tricks</strong> (short reusable directives that steer Sorcar's behaviour mid-task). The tasks live in <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/SAMPLE_TASKS.md"><code>src/kiss/SAMPLE_TASKS.md</code></a>; the tricks live in <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/INJECTIONS.md"><code>src/kiss/INJECTIONS.md</code></a>. They auto-cycle one at a time below &mdash; or use <kbd>Prev</kbd>/<kbd>Next</kbd>, the dots, or your <kbd>←</kbd>/<kbd>→</kbd> arrow keys. Each prompt is shown in a fixed 5-line panel; scroll inside the panel to read the rest.</p>
     <div class="section-body">
 
       <div class="prompt-carousel" id="prompt-carousel" aria-roledescription="carousel" aria-label="Sample tasks and promptlet tricks">
@@ -1797,7 +1764,7 @@ In each step, keep track of the best prompt which has the maximum number of succ
       if (!total) return;
       let index = 0;
       let autoplayTimer = null;
-      const AUTOPLAY_MS = 7000;
+      const AUTOPLAY_MS = 2000;
 
       // Build dots, one per panel; mark trick dots with a class so   
       // they can use the accent colour when active.                  
