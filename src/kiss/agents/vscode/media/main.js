@@ -3183,6 +3183,9 @@
         const askTab = getTab(askTabId);
         if (!askTab) break;
         askTab.askPendingQuestion = ev.question || '';
+        if (askTab.id !== activeTabId) {
+          switchToTab(askTab.id);
+        }
         showAskForTab(askTab);
         break;
       }
