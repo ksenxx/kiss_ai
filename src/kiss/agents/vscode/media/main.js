@@ -6587,7 +6587,23 @@
       const dateOk = ts >= fromTs && ts <= toTs;
       const favOk = !onlyFavorite || row.dataset.favorite === '1';
       const rowWorkDir = row.dataset.workDir || '';
-      const wsOk = !onlyWorkspace || rowWorkDir === clientWorkDir;
+      // Workspace match honors the documented contract above: an
+      // empty client work_dir or an empty row work_dir BOTH pass so
+      // (a) freshly-started running tasks whose ``extra.work_dir``
+      //     hasn't been persisted yet still appear in History when
+      //     the user opens the burger menu in a real workspace, and
+      // (b) standalone web clients with no folder open ("client
+      //     work_dir empty") see every row.
+      // Without this, the strict ``rowWorkDir === clientWorkDir``
+      // test silently hides every running-task row whose work_dir
+      // hasn't been written yet — exactly the user-reported
+      // "task panel does not show up in History after burger open"
+      // regression.
+      const wsOk =
+        !onlyWorkspace ||
+        rowWorkDir === '' ||
+        clientWorkDir === '' ||
+        rowWorkDir === clientWorkDir;
       if (catOk && dateOk && favOk && wsOk) {
         row.style.display = '';
         visible++;
