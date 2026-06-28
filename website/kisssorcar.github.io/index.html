@@ -623,6 +623,46 @@
     .prompt-fade { display: none; }
     .prompt-more { display: none; }
 
+    /* ============================================================ */
+    /* Copy-to-clipboard button overlaid on the top-right of each    */
+    /* prompt body. Injected by JS; styled to be unobtrusive but     */
+    /* readable on the dark code background.                         */
+    /* ============================================================ */
+    .prompt-copy {
+      position: absolute;
+      top: 6px;
+      right: 6px;
+      z-index: 2;
+      display: inline-flex; align-items: center; gap: 0.32rem;
+      font-family: 'Roboto Mono', monospace;
+      font-size: 0.72rem; font-weight: 600;
+      letter-spacing: 0.04em; text-transform: uppercase;
+      color: #e8eefc;
+      background: rgba(255,255,255,0.10);
+      border: 1px solid rgba(255,255,255,0.22);
+      border-radius: 6px;
+      padding: 0.28rem 0.55rem;
+      cursor: pointer;
+      backdrop-filter: blur(4px);
+      -webkit-backdrop-filter: blur(4px);
+      transition: background 0.18s ease, color 0.18s ease, border-color 0.18s ease, transform 0.12s ease;
+    }
+    .prompt-copy:hover {
+      background: rgba(255,255,255,0.18);
+      border-color: rgba(255,255,255,0.35);
+    }
+    .prompt-copy:active { transform: translateY(1px); }
+    .prompt-copy:focus-visible {
+      outline: 2px solid var(--primary);
+      outline-offset: 2px;
+    }
+    .prompt-copy.copied {
+      background: rgba(0,137,123,0.85);
+      border-color: rgba(0,137,123,1);
+      color: #fff;
+    }
+    .prompt-copy .copy-icon { width: 13px; height: 13px; }
+
     /* ========================================================== */
     /* PROMPT CAROUSEL — show one panel at a time at the same      */
     /* location with prev/next, dots, counter, and autoplay.       */
@@ -1783,6 +1823,84 @@ In each step, keep track of the best prompt which has the maximum number of succ
       // ever needs to (panel widths can change between active states
       // when the stage resizes).
       window.__measurePromptFits = measureFits;
+    })();
+
+    // ---------------------------------------------------------------
+    // Copy-to-clipboard buttons — inject one into every .prompt-body
+    // and copy the panel's <pre> text on click. Uses the async
+    // Clipboard API where available with a textarea fallback for
+    // older browsers / non-secure contexts.
+    // ---------------------------------------------------------------
+    (function () {
+      const ICON_COPY =
+        '<svg class="copy-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+        'stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+        '<rect x="9" y="9" width="11" height="11" rx="2"></rect>' +
+        '<path d="M5 15V6a2 2 0 0 1 2-2h9"></path></svg>';
+      const ICON_CHECK =
+        '<svg class="copy-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+        'stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+        '<path d="M5 12.5l4.5 4.5L19 7"></path></svg>';
+
+      function fallbackCopy(text) {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.top = '-1000px';
+        ta.style.left = '-1000px';
+        document.body.appendChild(ta);
+        ta.select();
+        let ok = false;
+        try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+        document.body.removeChild(ta);
+        return ok;
+      }
+
+      async function copyText(text) {
+        if (navigator.clipboard && window.isSecureContext) {
+          try { await navigator.clipboard.writeText(text); return true; }
+          catch (e) { /* fall through */ }
+        }
+        return fallbackCopy(text);
+      }
+
+      function flashCopied(btn, ok) {
+        const labelSpan = btn.querySelector('.copy-label');
+        const original = btn.dataset.originalLabel || 'Copy';
+        btn.classList.add('copied');
+        if (labelSpan) labelSpan.textContent = ok ? 'Copied!' : 'Failed';
+        btn.innerHTML = (ok ? ICON_CHECK : ICON_COPY) +
+          '<span class="copy-label">' + (ok ? 'Copied!' : 'Failed') + '</span>';
+        btn.setAttribute('aria-label',
+          ok ? 'Prompt copied to clipboard' : 'Copy failed');
+        clearTimeout(btn._copyTimer);
+        btn._copyTimer = setTimeout(() => {
+          btn.classList.remove('copied');
+          btn.innerHTML = ICON_COPY +
+            '<span class="copy-label">' + original + '</span>';
+          btn.setAttribute('aria-label', 'Copy prompt to clipboard');
+        }, 1600);
+      }
+
+      document.querySelectorAll('.prompt-panel .prompt-body').forEach((body) => {
+        if (body.querySelector('.prompt-copy')) return; // idempotent
+        const pre = body.querySelector('pre');
+        if (!pre) return;
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'prompt-copy';
+        btn.dataset.originalLabel = 'Copy';
+        btn.setAttribute('aria-label', 'Copy prompt to clipboard');
+        btn.innerHTML = ICON_COPY + '<span class="copy-label">Copy</span>';
+        btn.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          const text = pre.innerText;
+          const ok = await copyText(text);
+          flashCopied(btn, ok);
+        });
+        body.appendChild(btn);
+      });
     })();
 
     // ---------------------------------------------------------------
