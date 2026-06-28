@@ -286,11 +286,41 @@ class _EventDispatcher:
             self.printer.print(event.get("text") or "", type="system_prompt")
             return
         if et == "tool_call":
-            ti = event.get("input")
+            # The daemon (``JsonPrinter._format_tool_call``) broadcasts
+            # a *flat* event whose argument fields sit at the top level
+            # (``path`` / ``lang`` / ``command`` / ``content`` /
+            # ``description`` / ``old_string`` / ``new_string`` /
+            # ``extras``).  It never emits an ``input`` key, so a naive
+            # ``event.get("input")`` lookup yields ``None`` and the
+            # console panel rendered ``(no arguments)`` for every tool
+            # call.  Rebuild the ``tool_input`` dict the shared
+            # :class:`ConsolePrinter` formatter expects.
+            tool_input: dict[str, Any] = {}
+            if path := event.get("path"):
+                # Use ``file_path`` so :func:`extract_path_and_lang`
+                # picks it up exactly like the in-process printer.
+                # The daemon's ``lang`` field is intentionally dropped —
+                # ``ConsolePrinter._format_tool_call`` recomputes it from
+                # the same path via ``lang_for_path``, so forwarding it
+                # would be redundant.
+                tool_input["file_path"] = str(path)
+            for key in ("description", "command", "content"):
+                if (val := event.get(key)) is not None:
+                    tool_input[key] = str(val)
+            for key in ("old_string", "new_string"):
+                if (val := event.get(key)) is not None:
+                    tool_input[key] = str(val)
+            extras = event.get("extras") or {}
+            if isinstance(extras, dict):
+                # ``extras`` keys are by definition not in ``KNOWN_KEYS``
+                # so merging them in straight is safe — they will be
+                # picked up by :func:`extract_extras` for display.
+                for k, v in extras.items():
+                    tool_input[str(k)] = v
             self.printer.print(
                 event.get("name") or "",
                 type="tool_call",
-                tool_input=ti if isinstance(ti, dict) else {},
+                tool_input=tool_input,
             )
             return
         if et == "tool_result":
