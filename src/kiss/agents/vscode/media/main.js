@@ -2262,9 +2262,9 @@
       rb +
       '</div>';
     hlBlock(rc);
+    addCopyButton(rc);
     const rcBody = rc.querySelector('.rc-body');
     if (rcBody) linkifyFilePaths(rcBody);
-    addCopyButton(rc);
     return rc;
   }
 
