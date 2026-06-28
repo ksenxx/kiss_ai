@@ -66,8 +66,15 @@ def cli_ask_user_question(question: str) -> str:
 
 
 def _print_recent_chats() -> None:
-    """Print the last 10 chat sessions with their tasks and results."""
-    chats = _list_recent_chats(limit=10)
+    """Print the last 20 chat sessions with their tasks and results.
+
+    Each task line also surfaces the row's own ``Task ID`` and the
+    ``Parent Task ID`` so the ``/resume`` picker can show per-task
+    identity and the sub-agent parent relationship at a glance.
+    Top-level (non-sub-agent) tasks have no parent, so the parent
+    column is rendered as ``(none)``.
+    """
+    chats = _list_recent_chats(limit=20)
     if not chats:
         print("No chat sessions found.")
         return
@@ -81,7 +88,12 @@ def _print_recent_chats() -> None:
             dt = datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
             task_text = str(t.get("task", ""))[:200]
             result_text = str(t.get("result", ""))[:200]
+            task_id = str(t.get("task_id", ""))
+            parent_task_id = str(t.get("parent_task_id", ""))
+            parent_display = parent_task_id if parent_task_id else "(none)"
             print(f"\n  Task {i} [{dt}]:")
+            print(f"    Task ID: {task_id}")
+            print(f"    Parent Task ID: {parent_display}")
             print(f"    {task_text}")
             if result_text:
                 print(f"  Result {i}:")

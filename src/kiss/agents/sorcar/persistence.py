@@ -2035,8 +2035,8 @@ def _list_recent_chats(limit: int = 10) -> list[dict[str, object]]:
 
     Returns the most recent *limit* distinct chat sessions, ordered by
     most-recent-first.  Each entry contains the ``chat_id`` and a list
-    of ``tasks`` (each with ``task``, ``result``, ``timestamp``) in
-    chronological order.
+    of ``tasks`` (each with ``task``, ``result``, ``timestamp``,
+    ``task_id``, and ``parent_task_id``) in chronological order.
 
     Sub-agent rows (``extra.subagent``, see :func:`_is_subagent_row`)
     are excluded — they are an internal implementation detail of the
@@ -2050,7 +2050,8 @@ def _list_recent_chats(limit: int = 10) -> list[dict[str, object]]:
 
     Returns:
         List of dicts, each with ``chat_id`` (str) and ``tasks``
-        (list of dicts with ``task``, ``result``, ``timestamp``).
+        (list of dicts with ``task``, ``result``, ``timestamp``,
+        ``task_id``, and ``parent_task_id``).
     """
     with _rw_lock.read_lock():
         db = _get_db()
@@ -2070,14 +2071,24 @@ def _list_recent_chats(limit: int = 10) -> list[dict[str, object]]:
         for cr in chat_rows:
             cid = cr["chat_id"]
             tasks = db.execute(
-                "SELECT task, result, timestamp, parent_task_id "
+                "SELECT id, task, result, timestamp, parent_task_id "
                 "FROM task_history "
                 "WHERE chat_id = ? ORDER BY timestamp ASC, rowid ASC",
                 (cid,),
             ).fetchall()
+            # Surface both the row's own ``task_id`` (``id`` column)
+            # and its ``parent_task_id`` so callers — chiefly the CLI
+            # ``/resume`` listing — can display per-task identity and
+            # the sub-agent parent relationship.  Sub-agent rows
+            # remain hidden so the resume picker stays focused on
+            # the user-driven tasks; consequently every returned
+            # ``parent_task_id`` is the empty string here, but the
+            # key is always present for a stable schema.
             task_dicts = [
                 {"task": t["task"], "result": t["result"],
-                 "timestamp": t["timestamp"]}
+                 "timestamp": t["timestamp"],
+                 "task_id": t["id"],
+                 "parent_task_id": t["parent_task_id"] or ""}
                 for t in tasks
                 if not (t["parent_task_id"])
             ]
