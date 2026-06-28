@@ -456,7 +456,7 @@ export function activate(context: vscode.ExtensionContext): void {
         'Update now',
       ).then(action => {
         if (action === 'Update now') {
-          void vscode.commands.executeCommand('workbench.action.terminal.new');
+          sidebarView?.runUpdate();
         }
       });
     },
