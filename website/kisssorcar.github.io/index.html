@@ -3,20 +3,20 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>KISS Sorcar — Open-source general-purpose AI agent for long-horizon tasks and AI discovery</title>
-  <meta name="description" content="Open-source general-purpose AI agent for long-horizon tasks and AI discovery. Free, simple, local-first — bring your own key. Runs as a VS Code extension, a Claude-Code-style CLI, and a browser / mobile web app.">
+  <title>KISS Sorcar — Tell it what to do, in English. It picks the best LLM and ships the work.</title>
+  <meta name="description" content="Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 502 models, 62.2% on Terminal Bench 2.0. Works as a VS Code extension, a Claude-Code-style CLI, and a web app.">
   <link rel="canonical" href="https://kisssorcar.github.io/">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://kisssorcar.github.io/">
-  <meta property="og:title" content="KISS Sorcar — Open-source general-purpose AI agent for long-horizon tasks and AI discovery">
-  <meta property="og:description" content="Open-source general-purpose AI agent for long-horizon tasks and AI discovery. Free, simple, local-first — bring your own key. Runs as a VS Code extension, a Claude-Code-style CLI, and a browser / mobile web app.">
+  <meta property="og:title" content="KISS Sorcar — Tell it what to do, in English. It picks the best LLM and ships the work.">
+  <meta property="og:description" content="Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 502 models, 62.2% on Terminal Bench 2.0.">
   <meta property="og:image" content="https://kisssorcar.github.io/assets/og-card.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:image:alt" content="KISS Sorcar — open-source general-purpose AI agent for long-horizon tasks and AI discovery.">
+  <meta property="og:image:alt" content="KISS Sorcar — open-source AI agent. Tell it what to do, in English.">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="KISS Sorcar — Open-source general-purpose AI agent for long-horizon tasks and AI discovery">
-  <meta name="twitter:description" content="Open-source general-purpose AI agent for long-horizon tasks and AI discovery. Free, simple, local-first — bring your own key.">
+  <meta name="twitter:title" content="KISS Sorcar — Tell it what to do, in English. It picks the best LLM and ships the work.">
+  <meta name="twitter:description" content="Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work.">
   <meta name="twitter:image" content="https://kisssorcar.github.io/assets/og-card.png">
   <meta name="twitter:image:alt" content="KISS Sorcar — open-source general-purpose AI agent for long-horizon tasks and AI discovery.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -334,6 +334,131 @@
       .hero-ctas { gap: 0.6rem; }
       .cta-btn { width: 100%; justify-content: center; }
     }
+
+    /* ========================================================== */
+    /* HERO TRUST STRIP — just under the H1.                      */
+    /* ========================================================== */
+    .hero-trust {
+      margin-top: 0.9rem;
+      font-size: 0.95rem;
+      color: var(--text-dim);
+      display: flex;
+      gap: 1.2rem 1.6rem;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+    .hero-trust strong { color: var(--text); font-weight: 700; }
+    @media (max-width: 520px) {
+      .hero-trust { font-size: 0.86rem; gap: 0.4rem 1rem; }
+    }
+
+    /* ========================================================== */
+    /* SOCIAL-PROOF STRIP — live stars + trust badges.            */
+    /* ========================================================== */
+    .social-proof {
+      max-width: 1200px;
+      margin: 0.4rem auto 2.4rem;
+      padding: 0 1.5rem;
+    }
+    .social-proof-row {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      align-items: center;
+      gap: 0.6rem 1.4rem;
+      font-size: 0.92rem;
+      color: var(--text-dim);
+    }
+    .sp-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.45rem 0.9rem;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--text-dim);
+      text-decoration: none;
+      transition: border-color 0.18s ease, color 0.18s ease, transform 0.18s ease;
+    }
+    .sp-item:hover:not(.sp-item--static) {
+      border-color: var(--primary);
+      color: var(--text);
+      transform: translateY(-1px);
+    }
+    .sp-item strong { color: var(--text); font-weight: 700; }
+    .sp-icon { font-size: 1.05rem; line-height: 1; }
+    @media (max-width: 520px) {
+      .social-proof-row { gap: 0.5rem 0.7rem; font-size: 0.86rem; }
+      .sp-item { padding: 0.4rem 0.75rem; }
+    }
+
+    /* ========================================================== */
+    /* QUICKSTART STRIP — 3 copy-to-clipboard cards.              */
+    /* ========================================================== */
+    .quickstart {
+      max-width: 1200px;
+      margin: 0 auto 3rem;
+      padding: 0 1.5rem;
+      text-align: center;
+    }
+    .quickstart-title {
+      font-size: 1.2rem;
+      margin: 0 0 1.2rem;
+      color: var(--text);
+      font-weight: 600;
+    }
+    .quickstart-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 1.2rem;
+    }
+    .qs-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1.2rem 1.3rem;
+      text-align: left;
+      transition: border-color 0.18s ease, transform 0.18s ease;
+    }
+    .qs-card:hover { border-color: var(--primary); transform: translateY(-2px); }
+    .qs-label {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-weight: 600;
+      color: var(--primary);
+      font-size: 0.95rem;
+      margin-bottom: 0.7rem;
+    }
+    .qs-step-num {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 1.6rem;
+      height: 1.6rem;
+      border-radius: 50%;
+      background: var(--primary);
+      color: #fff;
+      font-size: 0.85rem;
+      font-weight: 700;
+    }
+    .quickstart-copy {
+      background: var(--code-bg, #161821);
+      color: var(--code-text, #e8eaed);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.7rem 0.9rem;
+      font-family: 'Roboto Mono', ui-monospace, monospace;
+      font-size: 0.82rem;
+      width: 100%;
+      cursor: pointer;
+      text-align: left;
+      transition: background 0.15s ease, border-color 0.15s ease;
+      position: relative;
+    }
+    .quickstart-copy:hover { border-color: var(--primary); }
+    .quickstart-copy.copied { border-color: var(--primary); color: var(--primary); }
 
     /* ========================================================== */
     /* SECTION CARD — animated rotating conic-gradient border.    */
@@ -953,16 +1078,11 @@
         <span>KISS Sorcar</span>
       </a>
       <ul class="links">
-        <li><a href="#prompts">Prompts</a></li>
+        <li><a href="#">Demo</a></li>
         <li><a href="#compare">Compare</a></li>
-        <li><a href="#name">Name</a></li>
+        <li><a href="#prompts">Prompts</a></li>
         <li><a href="#install">Install</a></li>
-        <li><a href="#cli">CLI</a></li>
-        <li><a href="#agents">Agents</a></li>
         <li><a href="#models">Models</a></li>
-        <li><a href="#contributing">Contributing</a></li>
-        <li><a href="#license">License</a></li>
-        <li><a href="#citation">Citation</a></li>
       </ul>
       <a href="https://github.com/ksenxx/kiss_ai" class="gh-badge" aria-label="GitHub">
         <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.36-3.88-1.36-.52-1.33-1.27-1.69-1.27-1.69-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.18 1.76 1.18 1.02 1.75 2.69 1.24 3.34.95.1-.74.4-1.24.72-1.53-2.55-.29-5.24-1.27-5.24-5.66 0-1.25.45-2.27 1.18-3.07-.12-.29-.51-1.46.11-3.05 0 0 .96-.31 3.16 1.17.92-.26 1.91-.39 2.88-.39s1.96.13 2.88.39c2.2-1.48 3.16-1.17 3.16-1.17.62 1.59.23 2.76.11 3.05.74.8 1.18 1.82 1.18 3.07 0 4.4-2.69 5.37-5.25 5.65.41.36.78 1.05.78 2.12v3.14c0 .31.21.66.79.55C20.21 21.39 23.5 17.08 23.5 12 23.5 5.65 18.35.5 12 .5z"/></svg>
@@ -981,8 +1101,12 @@
         <figcaption>&mdash; Albert Einstein</figcaption>
       </figure>
     </div>
-    <div class="eyebrow">Open Source · Apache 2.0</div>
-    <h1>Open-source general-purpose AI agent for <em>long-horizon tasks</em> and AI discovery.</h1>
+    <h1>Tell it what to do, in English. It picks the best LLM, runs on your laptop, and ships the work.</h1>
+    <div class="hero-trust" aria-label="At a glance">
+      <span><strong>Apache 2.0</strong> · open source</span>
+      <span><strong>62.2%</strong> on Terminal Bench 2.0</span>
+      <span><strong>502 models</strong> · 9 providers</span>
+    </div>
   </div>
 
   <!-- Hero demo video -->
@@ -1031,10 +1155,158 @@
     </a>
   </div>
 
+  <!-- ================ Social Proof Strip ================ -->
+  <div class="social-proof" aria-label="KISS Sorcar at a glance">
+    <div class="social-proof-row">
+      <a class="sp-item" href="https://github.com/ksenxx/kiss_ai" target="_blank" rel="noopener" aria-label="View KISS Sorcar on GitHub">
+        <span class="sp-icon" aria-hidden="true">⭐</span>
+        <span><strong id="sp-stars">…</strong> stars on GitHub</span>
+      </a>
+      <a class="sp-item" href="https://pypi.org/project/kiss-agent-framework/" target="_blank" rel="noopener" aria-label="kiss-agent-framework on PyPI">
+        <span class="sp-icon" aria-hidden="true">📦</span>
+        <span><strong>pipx</strong>-installable on PyPI</span>
+      </a>
+      <span class="sp-item sp-item--static">
+        <span class="sp-icon" aria-hidden="true">🏆</span>
+        <span><strong>62.2%</strong> on Terminal Bench 2.0</span>
+      </span>
+      <span class="sp-item sp-item--static">
+        <span class="sp-icon" aria-hidden="true">🤖</span>
+        <span><strong>502</strong> models · <strong>9</strong> providers</span>
+      </span>
+      <span class="sp-item sp-item--static">
+        <span class="sp-icon" aria-hidden="true">🔒</span>
+        <span>Keys stay on <strong>your machine</strong></span>
+      </span>
+    </div>
+  </div>
+
+  <!-- ================ Get Started in 3 Steps ================ -->
+  <div class="quickstart" aria-label="Get started in 3 steps">
+    <h3 class="quickstart-title">Get started in 3 steps</h3>
+    <div class="quickstart-grid">
+      <div class="qs-card">
+        <div class="qs-label"><span class="qs-step-num">1</span>Install</div>
+        <button class="quickstart-copy" type="button" data-copy="pipx install kiss-agent-framework" aria-label="Copy install command to clipboard">$ pipx install kiss-agent-framework</button>
+      </div>
+      <div class="qs-card">
+        <div class="qs-label"><span class="qs-step-num">2</span>Set your API key</div>
+        <button class="quickstart-copy" type="button" data-copy="export OPENAI_API_KEY=sk-..." aria-label="Copy export command to clipboard">$ export OPENAI_API_KEY=sk-...</button>
+      </div>
+      <div class="qs-card">
+        <div class="qs-label"><span class="qs-step-num">3</span>Run your first task</div>
+        <button class="quickstart-copy" type="button" data-copy='sorcar -t "Open a PR that adds dark mode."' aria-label="Copy sorcar command to clipboard">$ sorcar -t "Open a PR that adds dark mode."</button>
+      </div>
+    </div>
+  </div>
+
   <!-- ================ § 01 — All you need is a short prompt ================ -->
   <div class="section-wrap">
+  <section id="compare" class="section-card">
+    <span class="num">§ 01 — KISS Sorcar vs Claude Code vs Cursor</span>
+    <h2>How does it compare?<a href="#compare" class="anchor">¶</a></h2>
+    <p class="sub">A side-by-side look at the differences that matter for everyday use.</p>
+    <div class="section-body">
+      <div class="compare-wrap">
+        <table class="compare">
+          <thead>
+            <tr>
+              <th class="cap">Capability</th>
+              <th class="kiss">KISS Sorcar</th>
+              <th>Claude Code</th>
+              <th>Cursor</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <th class="cap">Interfaces</th>
+              <td class="kiss">CLI + VS Code extension + web/mobile app</td>
+              <td>CLI + mobile app</td>
+              <td>Custom VS Code</td>
+            </tr>
+            <tr>
+              <th class="cap">AI Discovery</th>
+              <td class="kiss"><span class="yes">✓</span> simply via prompt</td>
+              <td><span class="no">✗</span></td>
+              <td><span class="no">✗</span></td>
+            </tr>
+            <tr>
+              <th class="cap">GEPA Prompt Optimization</th>
+              <td class="kiss"><span class="yes">✓</span> simply via prompt</td>
+              <td><span class="no">✗</span></td>
+              <td><span class="no">✗</span></td>
+            </tr>
+            <tr>
+              <th class="cap">Multiple models from multiple vendors in the same task</th>
+              <td class="kiss"><span class="yes">✓</span> Mix OpenAI, Anthropic, Gemini, Together, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, and Codex CLI</td>
+              <td><span class="no">✗</span> Anthropic Claude models only</td>
+              <td><span class="no">✗</span> One model per task</td>
+            </tr>
+            <tr>
+              <th class="cap">Primary focus</th>
+              <td class="kiss"><span class="yes">✓</span> <strong>Quality</strong> &mdash; rigorous review, end-to-end tests</td>
+              <td>Speed and developer ergonomics</td>
+              <td>Speed</td>
+            </tr>
+            <tr>
+              <th class="cap">Core Agents # LoC</th>
+              <td class="kiss"><strong>~2500</strong></td>
+              <td>Unknown</td>
+              <td>Unknown</td>
+            </tr>
+            <tr>
+              <th class="cap">Models in bundled catalog</th>
+              <td class="kiss">502 across 9 provider categories</td>
+              <td>Claude family only</td>
+              <td>Subset chosen by Cursor</td>
+            </tr>
+            <tr>
+              <th class="cap">Bring your own API key / endpoint</th>
+              <td class="kiss"><span class="yes">✓</span> Yes &mdash; keys stay on your machine</td>
+              <td><span class="yes">✓</span> Anthropic key</td>
+              <td><span class="warn">⚠</span> Routed through Cursor backend</td>
+            </tr>
+            <tr>
+              <th class="cap">Open source</th>
+              <td class="kiss"><span class="yes">✓</span> Apache-2.0</td>
+              <td><span class="no">✗</span> Proprietary</td>
+              <td><span class="no">✗</span> Proprietary</td>
+            </tr>
+            <tr>
+              <th class="cap">Price</th>
+              <td class="kiss">Free framework; pay only your chosen model provider</td>
+              <td>Subscription / API usage</td>
+              <td>Subscription</td>
+            </tr>
+            <tr>
+              <th class="cap">Run on top of Claude Code / Codex CLI</th>
+              <td class="kiss"><span class="yes">✓</span> <code>cc/*</code> and <code>codex/*</code> namespaces</td>
+              <td>N/A</td>
+              <td><span class="no">✗</span></td>
+            </tr>
+            <tr>
+              <th class="cap">Messaging and communication channels</th>
+              <td class="kiss"><span class="yes">✓</span> 23 third-party agents, including Slack, Gmail, Phone Control, SMS, and WhatsApp</td>
+              <td><span class="warn">⚠</span> Slack, mobile Remote Control, and research-preview channels for Telegram, Discord, and iMessage; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel</td>
+              <td><span class="warn">⚠</span> Slack and Microsoft Teams Cloud Agent integrations; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel</td>
+            </tr>
+            <tr>
+              <th class="cap">Terminal Bench 2.0 score</th>
+              <td class="kiss"><strong>62.2%</strong></td>
+              <td>58%</td>
+              <td>61.7% <small>(Cursor agent)</small></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+  </div>
+
+  <!-- ================ § 03 — What is in the Name ================ -->
+  <div class="section-wrap">
   <section id="prompts" class="section-card">
-    <span class="num">§ 01 — All you need is a short prompt in KISS Sorcar to do big complex tasks</span>
+    <span class="num">§ 02 — All you need is a short prompt in KISS Sorcar to do big complex tasks</span>
     <h2>All You Need is a Short Prompt in KISS Sorcar to do Big Complex Tasks.<a href="#prompts" class="anchor">¶</a></h2>
     <p class="sub">KISS Sorcar ships with a curated set of <strong>sample tasks</strong> (long-horizon prompts you can drop straight into the CLI or VS Code extension or Web app) and <strong>promptlet tricks</strong> (short reusable directives that steer Sorcar's behaviour by injecting to the prompt). The tasks live in <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/SAMPLE_TASKS.md"><code>src/kiss/SAMPLE_TASKS.md</code></a>; the tricks live in <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/INJECTIONS.md"><code>src/kiss/INJECTIONS.md</code></a>. You can add your tasks at <code>~/.kiss/MY_TASK_TEMPLATES.md</code> and your promptlets at <code>~/.kiss/MY_INJECTIONS.md</code>.</p>
     <div class="section-body">
@@ -1430,109 +1702,6 @@ In each step, keep track of the best prompt which has the maximum number of succ
 
   <!-- ================ § 02 — Compare ================ -->
   <div class="section-wrap">
-  <section id="compare" class="section-card">
-    <span class="num">§ 02 — KISS Sorcar vs Claude Code vs Cursor</span>
-    <h2>How does it compare?<a href="#compare" class="anchor">¶</a></h2>
-    <p class="sub">A side-by-side look at the differences that matter for everyday use.</p>
-    <div class="section-body">
-      <div class="compare-wrap">
-        <table class="compare">
-          <thead>
-            <tr>
-              <th class="cap">Capability</th>
-              <th class="kiss">KISS Sorcar</th>
-              <th>Claude Code</th>
-              <th>Cursor</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <th class="cap">Interfaces</th>
-              <td class="kiss">CLI + VS Code extension + web/mobile app</td>
-              <td>CLI + mobile app</td>
-              <td>Custom VS Code</td>
-            </tr>
-            <tr>
-              <th class="cap">AI Discovery</th>
-              <td class="kiss"><span class="yes">✓</span> simply via prompt</td>
-              <td><span class="no">✗</span></td>
-              <td><span class="no">✗</span></td>
-            </tr>
-            <tr>
-              <th class="cap">GEPA Prompt Optimization</th>
-              <td class="kiss"><span class="yes">✓</span> simply via prompt</td>
-              <td><span class="no">✗</span></td>
-              <td><span class="no">✗</span></td>
-            </tr>
-            <tr>
-              <th class="cap">Multiple models from multiple vendors in the same task</th>
-              <td class="kiss"><span class="yes">✓</span> Mix OpenAI, Anthropic, Gemini, Together, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, and Codex CLI</td>
-              <td><span class="no">✗</span> Anthropic Claude models only</td>
-              <td><span class="no">✗</span> One model per task</td>
-            </tr>
-            <tr>
-              <th class="cap">Primary focus</th>
-              <td class="kiss"><span class="yes">✓</span> <strong>Quality</strong> &mdash; rigorous review, end-to-end tests</td>
-              <td>Speed and developer ergonomics</td>
-              <td>Speed</td>
-            </tr>
-            <tr>
-              <th class="cap">Core Agents # LoC</th>
-              <td class="kiss"><strong>~2500</strong></td>
-              <td>Unknown</td>
-              <td>Unknown</td>
-            </tr>
-            <tr>
-              <th class="cap">Models in bundled catalog</th>
-              <td class="kiss">502 across 9 provider categories</td>
-              <td>Claude family only</td>
-              <td>Subset chosen by Cursor</td>
-            </tr>
-            <tr>
-              <th class="cap">Bring your own API key / endpoint</th>
-              <td class="kiss"><span class="yes">✓</span> Yes &mdash; keys stay on your machine</td>
-              <td><span class="yes">✓</span> Anthropic key</td>
-              <td><span class="warn">⚠</span> Routed through Cursor backend</td>
-            </tr>
-            <tr>
-              <th class="cap">Open source</th>
-              <td class="kiss"><span class="yes">✓</span> Apache-2.0</td>
-              <td><span class="no">✗</span> Proprietary</td>
-              <td><span class="no">✗</span> Proprietary</td>
-            </tr>
-            <tr>
-              <th class="cap">Price</th>
-              <td class="kiss">Free framework; pay only your chosen model provider</td>
-              <td>Subscription / API usage</td>
-              <td>Subscription</td>
-            </tr>
-            <tr>
-              <th class="cap">Run on top of Claude Code / Codex CLI</th>
-              <td class="kiss"><span class="yes">✓</span> <code>cc/*</code> and <code>codex/*</code> namespaces</td>
-              <td>N/A</td>
-              <td><span class="no">✗</span></td>
-            </tr>
-            <tr>
-              <th class="cap">Messaging and communication channels</th>
-              <td class="kiss"><span class="yes">✓</span> 23 third-party agents, including Slack, Gmail, Phone Control, SMS, and WhatsApp</td>
-              <td><span class="warn">⚠</span> Slack, mobile Remote Control, and research-preview channels for Telegram, Discord, and iMessage; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel</td>
-              <td><span class="warn">⚠</span> Slack and Microsoft Teams Cloud Agent integrations; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel</td>
-            </tr>
-            <tr>
-              <th class="cap">Terminal Bench 2.0 score</th>
-              <td class="kiss"><strong>62.2%</strong></td>
-              <td>58%</td>
-              <td>61.7% <small>(Cursor agent)</small></td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-  </section>
-  </div>
-
-  <!-- ================ § 03 — What is in the Name ================ -->
-  <div class="section-wrap">
   <section id="name" class="section-card">
     <span class="num">§ 03 — What is in the Name</span>
     <h2>What is in the Name?<a href="#name" class="anchor">¶</a></h2>
@@ -1605,110 +1774,34 @@ In each step, keep track of the best prompt which has the maximum number of succ
   </section>
   </div>
 
-  <!-- ================ § 05 — CLI Interface ================ -->
+  <!-- ================ § 05 — CLI Interface (condensed) ================ -->
   <div class="section-wrap">
   <section id="cli" class="section-card">
-    <span class="num">§ 05 — CLI Interface</span>
+    <span class="num">§ 05 — CLI in 30 seconds</span>
     <h2>The <code style="background:var(--surface);padding:0.05rem 0.45rem;border-radius:6px;font-size:0.85em;color:var(--primary-dark);">sorcar</code> CLI.<a href="#cli" class="anchor">¶</a></h2>
     <p class="sub">
-      <code>sorcar</code> runs in two modes. <strong>Interactive</strong> (no <code>-t/--task</code> or <code>-f/--file</code>) is a Claude-Code-style REPL that connects as a thin terminal client to the local <code>sorcar web</code> daemon; chat-session control (new chat, resume by id, list history) and worktree merge/discard prompts are driven from slash commands, and each task is isolated in a git worktree by default. <strong>Non-interactive</strong> (<code>-t</code> or <code>-f</code> supplied) runs a plain <code>SorcarAgent</code> once on the supplied task and exits; worktree isolation and chat-session control are unavailable in this mode, but display events are still streamed into the chat DB so the run is replayable in the chat webview.
+      Run <code>sorcar</code> alone for an interactive Claude-Code-style REPL with worktree-isolated tasks, slash commands, and chat history; pass <code>-t "…"</code> or <code>-f task.md</code> for a one-shot non-interactive run. Pick any model with <code>-m</code>, point at a self-hosted endpoint with <code>-e</code>, cap spend with <code>-b</code>, and add MCP servers with <code>sorcar mcp add</code>.
     </p>
 
     <div class="section-body">
       <div class="inner-card" style="--i:0;margin-bottom:1.1rem;">
-        <h3>Example invocations</h3>
+        <h3>Four invocations to get you started</h3>
         <div class="code-panel">
-          <div class="code-line"><span class="x"># Launch the interactive Sorcar CLI, similar to Claude Code.</span></div>
+          <div class="code-line"><span class="x"># 1. Interactive REPL (recommended for first run)</span></div>
           <div class="code-line"><span class="c">sorcar</span></div>
           <div class="code-line spacer"></div>
-          <div class="code-line"><span class="x"># Run a one-shot task (non-interactive).</span></div>
-          <div class="code-line"><span class="c">sorcar</span> <span class="f">-t</span> <span class="s">"What is 2435*234?"</span></div>
+          <div class="code-line"><span class="x"># 2. One-shot task on any model, with a $2 cap</span></div>
+          <div class="code-line"><span class="c">sorcar</span> <span class="f">-m</span> <span class="s">"claude-sonnet-4-6"</span> <span class="f">-b</span> <span class="s">2.0</span> <span class="f">-t</span> <span class="s">"Refactor utils.py for clarity."</span></div>
           <div class="code-line spacer"></div>
-          <div class="code-line"><span class="x"># Use a specific model.</span></div>
-          <div class="code-line"><span class="c">sorcar</span> <span class="f">-m</span> <span class="s">"claude-sonnet-4-6"</span> <span class="f">-t</span> <span class="s">"What is 2435*234?"</span></div>
+          <div class="code-line"><span class="x"># 3. Self-hosted or local model</span></div>
+          <div class="code-line"><span class="c">sorcar</span> <span class="f">-e</span> <span class="s">"http://localhost:8000/v1"</span> <span class="f">-t</span> <span class="s">"Summarise this codebase."</span></div>
           <div class="code-line spacer"></div>
-          <div class="code-line"><span class="x"># Custom endpoint and headers for a local or self-hosted model.</span></div>
-          <div class="code-line"><span class="c">sorcar</span> <span class="f">-e</span> <span class="s">"http://localhost:8000/v1"</span> <span class="f">--header</span> <span class="s">"Authorization:Bearer xxx"</span> \</div>
-          <div class="code-line">       <span class="f">-t</span> <span class="s">"Summarise this codebase."</span></div>
-          <div class="code-line spacer"></div>
-          <div class="code-line"><span class="x"># Cap spend at $2 and pin the working directory.</span></div>
-          <div class="code-line"><span class="c">sorcar</span> <span class="f">-b</span> <span class="s">2.0</span> <span class="f">-w</span> <span class="s">"$HOME/projects/my-repo"</span> <span class="f">-t</span> <span class="s">"Refactor utils.py for clarity."</span></div>
-          <div class="code-line spacer"></div>
-          <div class="code-line"><span class="x"># Use the contents of a file as the task.</span></div>
-          <div class="code-line"><span class="c">echo</span> <span class="s">"Can you find the cheapest non-stop flight from SFO to JFK on June 15?"</span> <span class="o">&gt;</span> prompt</div>
-          <div class="code-line"><span class="c">sorcar</span> <span class="f">-f</span> prompt</div>
-          <div class="code-line spacer"></div>
-          <div class="code-line"><span class="x"># Disable browser/web tools (terminal-only mode).</span></div>
-          <div class="code-line"><span class="c">sorcar</span> <span class="f">--no-web</span> <span class="f">-t</span> <span class="s">"Lint and fix every Python file under src/."</span></div>
-          <div class="code-line spacer"></div>
-          <div class="code-line"><span class="x"># Disable parallel sub-agents for a deterministic single-thread run.</span></div>
-          <div class="code-line"><span class="c">sorcar</span> <span class="f">--no-parallel</span> <span class="f">-t</span> <span class="s">'Run pytest and report which tests fail and why.'</span></div>
-          <div class="code-line spacer"></div>
-          <div class="code-line"><span class="x"># Ask Sorcar to use desktop/browser/messaging tools.</span></div>
-          <div class="code-line"><span class="c">sorcar</span> <span class="f">-t</span> <span class="s">'Can you send the message "Hello from Sorcar!" to ksen via the desktop Slack app?'</span></div>
-          <div class="code-line spacer"></div>
-          <div class="code-line"><span class="x"># Ask Sorcar to explain code.</span></div>
-          <div class="code-line"><span class="c">sorcar</span> <span class="f">-t</span> <span class="s">'Can you show me the detailed step-by-step workflow of gepa.py?'</span></div>
-          <div class="code-line spacer"></div>
-          <div class="code-line"><span class="x"># Manage MCP servers (see "sorcar mcp" subcommand below).</span></div>
-          <div class="code-line"><span class="c">sorcar</span> <span class="f">mcp list --ping</span></div>
+          <div class="code-line"><span class="x"># 4. Run a Slack/Gmail/SMS task via a third-party agent</span></div>
+          <div class="code-line"><span class="c">sorcar</span> <span class="f">-t</span> <span class="s">'Send "Hello from Sorcar!" to ksen via the desktop Slack app.'</span></div>
         </div>
-      </div>
-
-      <div class="inner-card" style="--i:1;margin-bottom:1.1rem;">
-        <h3>CLI options</h3>
-        <div class="opt-table-wrap">
-          <table class="opts">
-            <thead><tr><th style="width:32%;">Flag</th><th>Description</th></tr></thead>
-            <tbody>
-              <tr><td><code>-t</code>, <code>--task</code></td><td>Task description; switches to non-interactive mode</td></tr>
-              <tr><td><code>-f</code>, <code>--file</code></td><td>Path to a file whose contents are used as the task; switches to non-interactive mode</td></tr>
-              <tr><td><code>-m</code>, <code>--model_name</code></td><td>LLM model name; defaults to the best available model for the configured API keys</td></tr>
-              <tr><td><code>-e</code>, <code>--endpoint</code></td><td>Custom base URL for a local or self-hosted model</td></tr>
-              <tr><td><code>--header</code></td><td>Custom HTTP header in <code>Key:Value</code> form; may be repeated</td></tr>
-              <tr><td><code>-b</code>, <code>--max_budget</code></td><td>Maximum spend in USD for the run</td></tr>
-              <tr><td><code>-w</code>, <code>--work_dir</code></td><td>Working directory; defaults to the directory where <code>sorcar</code> is launched</td></tr>
-              <tr><td><code>-v</code>, <code>--verbose</code></td><td>Print Rich panels to the console (<code>true</code> by default; pass <code>false</code> for quiet mode)</td></tr>
-              <tr><td><code>-p</code>, <code>--parallel</code> / <code>--no-parallel</code></td><td>Enable/disable parallel sub-agents (enabled by default)</td></tr>
-              <tr><td><code>--worktree</code> / <code>--no-worktree</code></td><td><strong>Interactive only.</strong> Isolate each task in a git worktree branch (enabled by default); use <code>--no-worktree</code> to run directly in the working tree</td></tr>
-              <tr><td><code>--auto-commit</code> / <code>--no-auto-commit</code></td><td><strong>Interactive only.</strong> Auto-commit worktree changes when a task finishes (enabled by default); use <code>--no-auto-commit</code> to preserve the worktree for manual review</td></tr>
-              <tr><td><code>--no-web</code></td><td>Disable browser/web tools (terminal-only mode)</td></tr>
-            </tbody>
-          </table>
-        </div>
-        <p style="margin-top:0.8rem;font-size:0.88rem;color:var(--text-dim);"><code>--worktree</code> / <code>--no-worktree</code> / <code>--auto-commit</code> / <code>--no-auto-commit</code> are rejected with <code>exit 2</code> when combined with <code>-t</code>/<code>-f</code>, since the non-interactive path runs a bare <code>SorcarAgent</code> that does not implement them. Argparse prefix abbreviations are disabled, so each flag must be spelled out in full.</p>
-      </div>
-
-      <div class="inner-card" style="--i:2;margin-bottom:1.1rem;">
-        <h3>Interactive CLI features</h3>
-        <ul style="padding-left:1.2rem;">
-          <li><code>@</code> file/folder mentions with ranked project-file completion.</li>
-          <li>Slash commands: <code>/help</code>, <code>/clear</code> (alias <code>/new</code>), <code>/resume</code>, <code>/model</code>, <code>/model list</code>, <code>/cost</code> (aliases <code>/usage</code>, <code>/context</code>), <code>/commands</code>, <code>/skills</code>, <code>/mcp</code>, <code>/autocommit</code>, and <code>/exit</code> (alias <code>/quit</code>).</li>
-          <li>Custom Markdown slash commands loaded from <code>~/.kiss/commands</code>, <code>&lt;project&gt;/.kiss/commands</code>, <code>~/.claude/commands</code>, and <code>&lt;project&gt;/.claude/commands</code>.</li>
-          <li>Agent Skills loaded from <code>~/.kiss/skills</code>, <code>&lt;project&gt;/.kiss/skills</code>, Claude skill directories, <code>.agents/skills</code>, and bundled Sorcar skills.</li>
-          <li>MCP server discovery from <code>~/.kiss/mcp.json</code>, <code>&lt;project&gt;/.kiss/mcp.json</code>, and <code>&lt;project&gt;/.mcp.json</code>.</li>
-          <li>VS Code <strong>"Tricks"</strong> button entries read from <code>~/.kiss/INJECTIONS.md</code> (one per <code>## Trick</code> section), seeded on install from the bundled <code>src/kiss/INJECTIONS.md</code>. Edit the file to customise the dropdown; remove it to regenerate from the bundled defaults.</li>
-          <li>VS Code welcome-screen sample-task chips read from <code>~/.kiss/SAMPLE_TASKS.md</code> (one per <code>## Task</code> section), seeded on install from the bundled <code>src/kiss/agents/vscode/SAMPLE_TASKS.md</code>. Edit the file to customise the chips; remove it to regenerate from the bundled defaults.</li>
-        </ul>
-      </div>
-
-      <div class="inner-card" style="--i:3">
-        <h3><code>sorcar mcp</code> subcommand</h3>
-        <p style="margin-bottom:0.7rem;">Manage Model-Context-Protocol servers used by Sorcar:</p>
-        <div class="opt-table-wrap">
-          <table class="opts">
-            <thead><tr><th style="width:38%;">Subcommand</th><th>Purpose</th></tr></thead>
-            <tbody>
-              <tr><td><code>sorcar mcp add &lt;name&gt; &lt;cmd…&gt;</code></td><td>Register a stdio (default) or <code>--transport http</code>/<code>sse</code> server in <code>--scope user</code> (<code>~/.kiss/mcp.json</code>) or <code>--scope project</code> (<code>&lt;work_dir&gt;/.kiss/mcp.json</code>); supports <code>--env KEY=VALUE</code> and <code>--header 'Key: Value'</code> (repeatable).</td></tr>
-              <tr><td><code>sorcar mcp list [--ping]</code></td><td>List configured servers; <code>--ping</code> also connects and reports live status and tool counts.</td></tr>
-              <tr><td><code>sorcar mcp get &lt;name&gt;</code></td><td>Print one server's configuration as JSON.</td></tr>
-              <tr><td><code>sorcar mcp remove &lt;name&gt;</code></td><td>Delete a server from every writable config file.</td></tr>
-              <tr><td><code>sorcar mcp auth &lt;name&gt; [--no-browser]</code></td><td>Run the OAuth 2.1 browser flow (dynamic client registration + PKCE) and persist tokens under <code>~/.kiss/mcp_auth/</code>.</td></tr>
-              <tr><td><code>sorcar mcp logout &lt;name&gt;</code></td><td>Delete a server's stored OAuth tokens.</td></tr>
-              <tr><td><code>sorcar mcp debug &lt;name&gt;</code></td><td>Connect and dump capabilities, tools (with input schemas and permission status), resources, and prompts.</td></tr>
-            </tbody>
-          </table>
-        </div>
+        <p style="margin-top:1rem;font-size:0.95rem;color:var(--text-dim);">
+          Full reference (every flag, <code>sorcar mcp</code> subcommands, slash commands, skills, MCP discovery, and VS Code Tricks): <a href="https://github.com/ksenxx/kiss_ai/blob/main/README.md#-cli-reference" target="_blank" rel="noopener"><strong>Full CLI reference →</strong></a>
+        </p>
       </div>
     </div>
   </section>
@@ -1946,7 +2039,8 @@ In each step, keep track of the best prompt which has the maximum number of succ
 
       // ---- (b) live GitHub star count ------------------------------
       const starEl = document.getElementById('cta-star-count');
-      if (!starEl) return;
+      const spStarsEl = document.getElementById('sp-stars');
+      if (!starEl && !spStarsEl) return;
 
       const REPO = 'ksenxx/kiss_ai';
       const CACHE_KEY = 'kiss-gh-stars';
@@ -1956,13 +2050,20 @@ In each step, keep track of the best prompt which has the maximum number of succ
         return String(n);
       };
       function setCount(n) {
-        starEl.textContent = formatCount(n);
-        starEl.removeAttribute('data-loading');
-        starEl.setAttribute('aria-label', n + ' stars on GitHub');
+        if (starEl) {
+          starEl.textContent = formatCount(n);
+          starEl.removeAttribute('data-loading');
+          starEl.setAttribute('aria-label', n + ' stars on GitHub');
+        }
+        if (spStarsEl) {
+          spStarsEl.textContent = formatCount(n);
+        }
       }
       function hideCount() {
-        // API failed and we have no cached value — drop the badge.
-        starEl.remove();
+        // API failed and we have no cached value — drop the badge,
+        // but show a sensible fallback in the social-proof strip.
+        if (starEl) starEl.remove();
+        if (spStarsEl) spStarsEl.textContent = '500+';
       }
 
       // Use sessionStorage cache to avoid hammering the rate-limited API.
@@ -1992,6 +2093,61 @@ In each step, keep track of the best prompt which has the maximum number of succ
           } catch (_e) { /* ignore */ }
         })
         .catch(() => hideCount());
+    })();
+
+    // ---------------------------------------------------------------
+    // Quickstart copy buttons: "Get started in 3 steps"
+    // ---------------------------------------------------------------
+    (function () {
+      const buttons = document.querySelectorAll('.quickstart-copy');
+      buttons.forEach((btn) => {
+        const originalText = btn.textContent;
+        let resetTimer = 0;
+
+        function fallbackCopy(text) {
+          try {
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.setAttribute('readonly', '');
+            ta.style.position = 'fixed';
+            ta.style.top = '-1000px';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            const ok = document.execCommand('copy');
+            document.body.removeChild(ta);
+            return ok;
+          } catch (_e) {
+            return false;
+          }
+        }
+
+        btn.addEventListener('click', (e) => {
+          e.preventDefault();
+          const text = btn.getAttribute('data-copy') || originalText;
+          
+          function flash(ok) {
+            if (resetTimer) { clearTimeout(resetTimer); resetTimer = 0; }
+            btn.style.background = ok ? 'rgba(0, 137, 123, 0.15)' : 'rgba(217, 48, 37, 0.15)';
+            btn.style.color = ok ? 'var(--accent)' : '#d93025';
+            btn.textContent = ok ? '✓ Copied!' : '✗ Copy failed';
+            resetTimer = window.setTimeout(() => {
+              btn.style.background = 'var(--code-bg)';
+              btn.style.color = 'var(--code-text)';
+              btn.textContent = originalText;
+              resetTimer = 0;
+            }, 1600);
+          }
+
+          if (navigator.clipboard && window.isSecureContext) {
+            navigator.clipboard.writeText(text)
+              .then(() => flash(true))
+              .catch(() => flash(fallbackCopy(text)));
+          } else {
+            flash(fallbackCopy(text));
+          }
+        });
+      });
     })();
 
     // ---------------------------------------------------------------
