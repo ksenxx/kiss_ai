@@ -150,13 +150,14 @@ class TestSaveTaskExtraEndToEnd(unittest.TestCase):
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def _read_extra(self, task_id: int) -> dict:
+    def _read_extra(self, task_id: str) -> dict:
         db = th._get_db()
         row = db.execute(
-            "SELECT extra FROM task_history WHERE id = ?", (task_id,),
+            "SELECT * FROM task_history WHERE id = ?", (task_id,),
         ).fetchone()
         assert row is not None
-        result: dict = json.loads(row["extra"])
+        raw = th._row_to_extra_json(row)
+        result: dict = json.loads(raw) if raw else {}
         return result
 
     def test_chat_sorcar_agent_persists_stripped_work_dir(self) -> None:

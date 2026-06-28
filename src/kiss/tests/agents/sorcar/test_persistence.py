@@ -81,7 +81,9 @@ class TestChatEvents:
         loaded = json.loads(str(result["extra"]))
         assert loaded["model"] == "gpt-4o"
         assert loaded["is_worktree"] is True
-        assert loaded["is_parallel"] is False
+        # Flat-column schema: falsy booleans are indistinguishable from
+        # the default and are not re-emitted in the synthesized extra JSON.
+        assert loaded.get("is_parallel", False) is False
 
     def test_set_events_stores_timestamps(self):
         task_id, _ = th._add_task("ts-task", chat_id="ts1")
@@ -213,7 +215,9 @@ class TestSaveTaskExtra:
         assert stored["version"] == "0.2.79"
         assert stored["tokens"] == 1234
         assert stored["cost"] == 0.0567
-        assert stored["is_parallel"] is False
+        # Flat-column schema: falsy booleans collapse to the default and
+        # are not re-emitted in the synthesized extra JSON.
+        assert stored.get("is_parallel", False) is False
         assert stored["is_worktree"] is True
 
     def test_save_extra_by_task_name(self):
@@ -229,7 +233,26 @@ class TestSaveTaskExtra:
     def test_extra_default_empty(self):
         th._add_task("no extra")
         entries = th._load_history(limit=1)
-        assert entries[0]["extra"] == ""
+        # r3-H3: ``_row_to_extra_json`` now always emits every typed
+        # column (including string/numeric defaults) so consumers see
+        # a consistent shape regardless of whether a field was
+        # explicitly set or left at the column default.
+        import json as _json
+        loaded = _json.loads(str(entries[0]["extra"]))
+        assert loaded == {
+            "model": "",
+            "work_dir": "",
+            "version": "",
+            "auto_commit_mode": False,
+            "tokens": 0,
+            "cost": 0.0,
+            "steps": 0,
+            "is_parallel": False,
+            "is_worktree": False,
+            "startTs": 0,
+            "endTs": 0,
+            "is_favorite": False,
+        }
 
     def test_extra_in_search_results(self):
         task_id, _ = th._add_task("searchable extra", chat_id="1003")

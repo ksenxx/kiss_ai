@@ -264,6 +264,9 @@ class TestLatestChatEventsSkipSubagentRows:
         chat_id = "chat-restart-4"
         sub_id, _ = th._add_task("orphan sub task", chat_id=chat_id)
         th._save_task_extra(
-            {"subagent": {"parent_task_id": 999999}}, task_id=sub_id,
+            {"subagent": {
+                "parent_task_id":
+                    "ffffffffffffffffffffffffffffffff"
+            }}, task_id=sub_id,
         )
         assert th._load_latest_chat_events_by_chat_id(chat_id) is None

@@ -29,6 +29,7 @@ import threading
 from typing import Any
 
 from kiss.agents.sorcar import cli_daemon_bridge
+from kiss.agents.sorcar.persistence import is_task_history_id
 from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.core.print_to_console import ConsolePrinter
 
@@ -53,12 +54,13 @@ class RecordingConsolePrinter(JsonPrinter):
         self._console = ConsolePrinter()
         # Task ids for which we've already announced a
         # ``cliTaskStart`` envelope to the daemon — only the FIRST
-        # event for a fresh task triggers the announce.  Set of int
-        # task ids.  Guarded by ``_cli_task_lock`` because the printer
+        # event for a fresh task triggers the announce.  Set of
+        # 32-char lowercase-hex ``task_history.id`` strings.
+        # Guarded by ``_cli_task_lock`` because the printer
         # may be invoked from the agent loop AND the agent's
         # background worker threads concurrently.
         self._cli_task_lock = threading.Lock()
-        self._cli_running_task_ids: set[int] = set()
+        self._cli_running_task_ids: set[str] = set()
         # Process-exit safety net: if the CLI dies (Ctrl+C, crash,
         # uncaught exception) without broadcasting a ``result``
         # event, we still need to tell the daemon the task is no
@@ -90,24 +92,50 @@ class RecordingConsolePrinter(JsonPrinter):
         Args:
             event: The event dictionary to broadcast.
         """
+        # r3-sorcar-C1: Normalise any caller-provided ``taskId`` on
+        # the incoming ``event`` dict to canonical lowercase 32-hex
+        # BEFORE invoking ``super().broadcast(event)``.  The base
+        # class's recording / persistence layer consults
+        # ``event["taskId"]`` directly, so lowercasing only the
+        # forwarded daemon copy would leave the recording layer
+        # indexed under raw case (split-brain that breaks subscriber
+        # routing and resume-from-history).
+        raw_event_tid = event.get("taskId")
+        if raw_event_tid:
+            normed_event_tid = str(raw_event_tid).lower()
+            if (
+                normed_event_tid != raw_event_tid
+                and is_task_history_id(normed_event_tid)
+            ):
+                event = {**event, "taskId": normed_event_tid}
         super().broadcast(event)
         injected = self._inject_task_id(event)
-        raw_task_id = injected.get("taskId")
-        if not raw_task_id:
+        forwarded_id = injected.get("taskId")
+        # r4-sorcar-H5 / r5-sorcar-H7: forward ONLY explicit global
+        # system events (``new_tab`` / ``tasks_updated``) when taskId
+        # is empty.  The previous blanket forward let in-process
+        # diagnostics, lifecycle markers, and any future taskId-less
+        # event type flood the daemon UDS; gate on the type to limit
+        # the surface to the broadcasts the frontend actually needs
+        # to allocate new tabs and refresh history.
+        global_forward_types = {"new_tab", "tasks_updated"}
+        if not forwarded_id:
+            if injected.get("type") in global_forward_types:
+                cli_daemon_bridge.send_event(injected)
             return
-        # Only the ``int`` ``task_history.id`` form participates in
-        # the ``cliTaskStart`` / ``cliTaskEnd`` lifecycle — the
-        # blinking-green-circle indicator and the resume-from-history
-        # path key off real task ids that the chat webview can map
-        # back to a sidebar row.  Free-form string keys (used by
-        # tests, sub-agents, and pre-mint synthetic events) still
-        # need their events forwarded for live streaming but cannot
-        # be tracked as "running" against the history sidebar.
-        task_id: int | None
-        try:
-            task_id = int(raw_task_id)
-        except (TypeError, ValueError):
-            task_id = None
+        # Canonicalise the FORWARDED envelope's ``taskId`` to
+        # lowercase so the daemon registry and every connected
+        # webview see a single identity for what is really the same
+        # task — defends against an ``_inject_task_id`` override or
+        # subclass that yields uppercase / mixed case.
+        task_id_str = str(forwarded_id).lower()
+        task_id: str | None = (
+            task_id_str if is_task_history_id(task_id_str) else None
+        )
+        if task_id is not None and injected.get("taskId") != task_id:
+            injected = {**injected, "taskId": task_id}
+        # r3-sorcar-C2: mutate the running-set under the lock but
+        # release the lock BEFORE invoking the daemon bridge.
         if task_id is not None:
             with self._cli_task_lock:
                 is_new = task_id not in self._cli_running_task_ids
