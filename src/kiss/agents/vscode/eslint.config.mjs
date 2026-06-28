@@ -124,6 +124,7 @@ export default [
         acquireVsCodeApi: "readonly",
         marked: "readonly",
         hljs: "readonly",
+        NodeFilter: "readonly",
       },
     },
     rules: {
