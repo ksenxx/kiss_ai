@@ -1,2 +1,2 @@
 'use strict';
-module.exports = global.__kissVscodeStub;
+module.exports = global.__kissVscodeStub || {};
