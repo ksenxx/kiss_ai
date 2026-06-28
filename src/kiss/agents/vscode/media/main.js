@@ -501,6 +501,22 @@
   let historyLoading = false;
   let historyHasMore = true;
   let historyGeneration = 0;
+  // Session-scoped sets tracking the live running→completed
+  // transition for the History panel's status dot.  The invariant:
+  //   * A running row renders the pulsing green dot.
+  //   * On completion, the dot becomes SOLID green and STAYS that
+  //     way for the rest of the page session, even across
+  //     ``refreshHistory()`` reloads.
+  //   * A completed row that we never saw running in this session
+  //     (e.g. on a fresh history load) renders NO dot.
+  // ``historyLastRunningTaskIds`` is the snapshot of which task_ids
+  // were rendered as ``is_running:true`` on the previous
+  // ``renderHistory`` call.  When the next render drops a task_id
+  // (it transitioned to is_running:false / failed:false), we move
+  // it into ``historyJustCompletedTaskIds``, which sticks until the
+  // page is reloaded.
+  const historyLastRunningTaskIds = new Set();
+  const historyJustCompletedTaskIds = new Set();
 
   // Adjacent task scroll state (Cursor-style chat thread navigation)
   // Tab.id is a frontend-only UUID string; chat_id is an int assigned by the DB.
@@ -6096,6 +6112,25 @@
     }
     allHistSessions = allHistSessions.concat(sessions);
 
+    // Compute the live running→completed transitions BEFORE
+    // rendering: any task_id that was rendered as running on the
+    // previous ``renderHistory`` call but is no longer running on
+    // this call has just completed in the user's current session,
+    // so its row must show the SOLID green dot from now on (and
+    // STAY that way for the rest of the page session).  We compute
+    // the new running set from the full ``allHistSessions`` (not
+    // just this batch) so pagination batches don't artificially
+    // drop ids that are simply absent from the current chunk.
+    const newRunningTaskIds = new Set();
+    allHistSessions.forEach(s => {
+      if (s.is_running && s.task_id) newRunningTaskIds.add(s.task_id);
+    });
+    historyLastRunningTaskIds.forEach(id => {
+      if (!newRunningTaskIds.has(id)) historyJustCompletedTaskIds.add(id);
+    });
+    historyLastRunningTaskIds.clear();
+    newRunningTaskIds.forEach(id => historyLastRunningTaskIds.add(id));
+
     sessions.forEach(s => {
       const div = document.createElement('div');
       // Match the Running tab's visual layout: the ``running-item``
@@ -6137,13 +6172,16 @@
         failedDot.dataset.tooltip = 'Task failed';
         failedDot.setAttribute('aria-label', 'Task failed');
         div.appendChild(failedDot);
-      } else {
-        // Cleanly-finished task: render a SOLID green circle as the
-        // first child of the row so every History row carries some
-        // middle-left status indicator.  The shared #2e7d32 green is
-        // the same hue the running dot pulses to; the static
-        // ``.sidebar-item-completed`` rule omits the pulse animation
-        // so the user can tell at a glance "this one finished".
+      } else if (s.task_id && historyJustCompletedTaskIds.has(s.task_id)) {
+        // The row was rendered as ``is_running:true`` earlier in
+        // this page session and has now transitioned to
+        // finished-cleanly.  Render the SOLID green circle (no
+        // animation) and KEEP it for the rest of the session — even
+        // after subsequent ``refreshHistory()`` reloads.  Tasks
+        // that the user never saw running in this session (e.g.
+        // every row on a fresh page-load) intentionally render NO
+        // dot, so the History panel doesn't show a sea of solid
+        // green circles for old completed tasks.
         const completedDot = document.createElement('span');
         completedDot.className = 'sidebar-item-completed';
         completedDot.dataset.tooltip = 'Task completed';
