@@ -322,11 +322,23 @@ def get_current_model_info() -> dict[str, dict]:
     }
 
 
+def _noop_token_callback(_token: str) -> None:
+    """No-op token callback used during capability probes.
+
+    Some vendor models (e.g. ``Qwen/Qwen3.7-Max`` on Together AI) reject
+    Chat Completions requests without ``stream=true``. KISS's
+    ``OpenAICompatibleModel._stream_text`` only switches on streaming when
+    a ``token_callback`` is registered, so probes must register one even
+    if they don't care about the streamed deltas — otherwise the request
+    is sent non-streaming and the vendor returns HTTP 400.
+    """
+
+
 def test_generate(model_name: str) -> bool:
     from kiss.core.models.model_info import model as create_model
 
     try:
-        m = create_model(model_name)
+        m = create_model(model_name, token_callback=_noop_token_callback)
         m.initialize("Say hello in one word.")
         text, _ = m.generate()
         return bool(text and text.strip())
@@ -380,9 +392,7 @@ def detect_thinking_level(model_name: str) -> str | None:
     is_openai = model_name.startswith(_OPENAI_PREFIXES) and not model_name.startswith(
         "text-embedding"
     )
-    is_openrouter_openai = model_name.startswith(
-        ("openrouter/openai/", "openrouter/~openai/")
-    )
+    is_openrouter_openai = model_name.startswith(("openrouter/openai/", "openrouter/~openai/"))
     if not (is_openai or is_openrouter_openai):
         return None
 
@@ -390,7 +400,11 @@ def detect_thinking_level(model_name: str) -> str | None:
 
     for level in _THINKING_LEVELS_TO_PROBE:
         try:
-            m = create_model(model_name, model_config={"reasoning_effort": level})
+            m = create_model(
+                model_name,
+                model_config={"reasoning_effort": level},
+                token_callback=_noop_token_callback,
+            )
             m.initialize("Say hello in one word.")
             text, _ = m.generate()
             if text and text.strip():
@@ -417,7 +431,7 @@ def test_function_calling(model_name: str) -> bool:
             return "error"
 
     try:
-        m = create_model(model_name)
+        m = create_model(model_name, token_callback=_noop_token_callback)
         m.initialize("What is 2+3? Use the calculator tool.")
         calls, _, _ = m.generate_and_process_with_tools({"calculator": calculator})
         return len(calls) > 0
@@ -454,8 +468,7 @@ def test_model_capabilities(
 
     if verbose:  # pragma: no branch
         flags = " ".join(
-            f"{k}={v if isinstance(v, str) else ('Y' if v else 'N')}"
-            for k, v in results.items()
+            f"{k}={v if isinstance(v, str) else ('Y' if v else 'N')}" for k, v in results.items()
         )
         print(f" {flags}")
     return results
@@ -494,9 +507,7 @@ def find_deprecated_models(
             if codex_slugs and name != "codex/default":
                 slug = name.removeprefix("codex/")
                 if slug not in codex_slugs:
-                    deprecated.append(
-                        {"name": name, "reason": "not in Codex CLI models.json"}
-                    )
+                    deprecated.append({"name": name, "reason": "not in Codex CLI models.json"})
             continue
         if name.startswith("openrouter/"):  # pragma: no branch
             if openrouter and name not in openrouter:  # pragma: no branch
@@ -526,9 +537,7 @@ def find_deprecated_models(
                 if has_date:  # pragma: no branch
                     deprecated.append({"name": name, "reason": "not in OpenAI API"})
                 else:
-                    alias_re = re.compile(
-                        rf"^{re.escape(name)}-(\d{{8}}|\d{{4}}-\d{{2}}-\d{{2}})$"
-                    )
+                    alias_re = re.compile(rf"^{re.escape(name)}-(\d{{8}}|\d{{4}}-\d{{2}}-\d{{2}})$")
                     if not any(alias_re.match(n) for n in openai):
                         deprecated.append(
                             {"name": name, "reason": "alias with no snapshot in OpenAI API"}
@@ -538,6 +547,31 @@ def find_deprecated_models(
 
 
 _GPT_PRO_OR_CODEX_RE = re.compile(r"-(pro|codex)(-|$)")
+
+_OPENAI_RESPONSES_ONLY_RE = re.compile(r"^o\d+(?:\.\d+)?-pro(?:-|$)")
+
+
+def _is_excluded_openai_responses_only(name: str) -> bool:
+    """Return True for OpenAI reasoning models that only work via ``/v1/responses``.
+
+    Models in the ``o1-pro`` / ``o3-pro`` family (e.g. ``o1-pro``,
+    ``o1-pro-2025-03-19``, ``o3-pro``, ``o3-pro-2025-06-10``) are routed
+    exclusively through OpenAI's ``/v1/responses`` endpoint. KISS's
+    ``OpenAICompatibleModel`` invokes ``client.chat.completions.create``
+    (``/v1/chat/completions``), so probing or running these models there
+    returns HTTP 404 — there is no way for the discovery flow to test
+    them, and they would fail at runtime for KISS users anyway. Skipping
+    them upfront avoids a wasted (and billable) probe each ``update_models``
+    run and prevents broken entries from leaking into ``MODEL_INFO.json``.
+
+    Matches both bare OpenAI names (``o1-pro``, ``o3-pro``), their dated
+    snapshots (``o1-pro-2025-03-19``), and OpenRouter passthroughs
+    (``openrouter/openai/o1-pro``). The match is scoped to the
+    ``o<digits>-pro`` shape (last ``/``-separated segment) so unrelated
+    names that happen to contain ``o-pro`` aren't caught.
+    """
+    base = name.rsplit("/", 1)[-1]
+    return bool(_OPENAI_RESPONSES_ONLY_RE.match(base))
 
 
 def _is_excluded_gpt_pro_or_codex(name: str) -> bool:
@@ -580,8 +614,7 @@ _VENDOR_OR_PREFIX: dict[str, str] = {
 }
 
 _CODEX_MODELS_JSON_URL = (
-    "https://raw.githubusercontent.com/openai/codex/main/"
-    "codex-rs/models-manager/models.json"
+    "https://raw.githubusercontent.com/openai/codex/main/codex-rs/models-manager/models.json"
 )
 
 
@@ -630,6 +663,8 @@ def _add_codex_candidates(
         if codex_name in current:  # pragma: no branch
             continue
         if _is_excluded_gpt_pro_or_codex(codex_name):  # pragma: no branch
+            continue
+        if _is_excluded_openai_responses_only(codex_name):  # pragma: no branch
             continue
         or_info = _lookup_openrouter_pricing(slug, "openai", openrouter)
         ctx = or_info["context_length"] if or_info and or_info.get("context_length") else 400000
@@ -710,6 +745,8 @@ def compute_changes(
                 updates.append({"name": name, "changes": changed, "source": "openrouter"})
         else:
             if _is_excluded_gpt_pro_or_codex(name):
+                continue
+            if _is_excluded_openai_responses_only(name):
                 continue
             is_preview = "preview" in name.split("/")[-1]
             has_pricing = fetched["input_price_per_1M"] > 0
@@ -809,6 +846,8 @@ def compute_changes(
     for name in openai:  # pragma: no branch
         if name not in current:  # pragma: no branch
             if _is_excluded_gpt_pro_or_codex(name):  # pragma: no branch
+                continue
+            if _is_excluded_openai_responses_only(name):  # pragma: no branch
                 continue
             or_info = _lookup_openrouter_pricing(name, "openai", openrouter)
             ctx = or_info["context_length"] if or_info and or_info.get("context_length") else 0
@@ -1104,9 +1143,7 @@ def sync_readme_catalog(readme_path: Path, model_info_path: Path) -> bool:
         table_pat = rf"(\| {re.escape(category)} \| )\d+( \|)"
         text = re.sub(table_pat, rf"\g<1>{count}\g<2>", text)
         summary = _summary_label(category)
-        details_pat = (
-            rf"(<summary><strong>{re.escape(summary)} \()\d+(\)</strong></summary>)"
-        )
+        details_pat = rf"(<summary><strong>{re.escape(summary)} \()\d+(\)</strong></summary>)"
         text = re.sub(details_pat, rf"\g<1>{count}\g<2>", text)
 
     if text == original:
@@ -1287,8 +1324,7 @@ def main() -> None:
             if thinking_changed:  # pragma: no branch
                 existing["changes"]["thinking"] = caps["thinking"]
                 print(
-                    f"    {name}: thinking changed "
-                    f"{cur.get('thinking')!r} -> {caps['thinking']!r}"
+                    f"    {name}: thinking changed {cur.get('thinking')!r} -> {caps['thinking']!r}"
                 )
 
     print("\n[6/6] Applying changes...")
