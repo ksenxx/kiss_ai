@@ -74,7 +74,6 @@ PROJECT_ROOT = _find_project_root()
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 MODEL_INFO_PATH = PROJECT_ROOT / "src" / "kiss" / "core" / "models" / "MODEL_INFO.json"
-USER_MODEL_INFO_PATH = Path.home() / ".kiss" / "MODEL_INFO.json"
 
 _SSL_CTX = ssl.create_default_context()
 
@@ -979,9 +978,10 @@ def apply_updates_to_file(
         return
     _write_model_info_json(MODEL_INFO_PATH, data)
     print(f"  Written to {MODEL_INFO_PATH}")
-    if USER_MODEL_INFO_PATH.exists():  # pragma: no branch
-        _write_model_info_json(USER_MODEL_INFO_PATH, data)
-        print(f"  Also synced to {USER_MODEL_INFO_PATH}")
+    # ``~/.kiss/MODEL_INFO.json`` is no longer maintained — the bundled
+    # MODEL_INFO.json is the runtime source of truth and is read directly
+    # from the installed package by ``kiss.core.models.model_info``.  User
+    # overrides live in ``~/.kiss/MY_MODELS.json`` instead.
 
 
 def main() -> None:
