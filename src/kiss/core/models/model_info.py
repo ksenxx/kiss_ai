@@ -12,7 +12,6 @@ FLAKY MODEL MARKERS:
 """
 
 import json
-import shutil
 from pathlib import Path
 from typing import Any
 
@@ -50,39 +49,106 @@ class ModelInfo:
 
 
 PACKAGE_MODEL_INFO_PATH = Path(__file__).parent / "MODEL_INFO.json"
-USER_MODEL_INFO_PATH = Path.home() / ".kiss" / "MODEL_INFO.json"
+
+#: Optional user-curated model overrides / extensions file.
+#:
+#: The bundled ``MODEL_INFO.json`` next to this module is the read-only
+#: source of truth for shipped models — it is never copied into
+#: ``~/.kiss/``.  Users add personal models or override bundled pricing
+#: by editing ``~/.kiss/MY_MODELS.json``, which the loader merges on top
+#: of the bundled table at import time.
+USER_MY_MODELS_PATH = Path.home() / ".kiss" / "MY_MODELS.json"
+
+#: Default JSON content seeded into ``~/.kiss/MY_MODELS.json`` on first
+#: read.  Contains a short ``_documentation`` block and a single
+#: commented-out example entry (key starts with ``_`` so it is ignored
+#: by :func:`_read_my_models` until the user removes the prefix).
+#:
+#: Keeping the seed inert means a fresh install sees exactly the bundled
+#: model table — no spurious "example" model appears in the picker
+#: until the user opts in by renaming ``_example/my-org/my-custom-model``.
+MY_MODELS_DEFAULT_CONTENT = json.dumps(
+    {
+        "_documentation": [
+            "MY_MODELS.json — your personal model registry.",
+            "",
+            "Entries here OVERRIDE matching keys in the bundled MODEL_INFO.json,",
+            "and entries whose key does not appear in the bundled file are ADDED.",
+            "Any top-level key starting with '_' is treated as a comment and is",
+            "skipped by the loader (use it for documentation or to keep an",
+            "example entry inert).",
+            "",
+            "Per-model schema:",
+            "  context_length         (int)   max input+output tokens",
+            "  input_price_per_1M     (float) USD per 1M input tokens",
+            "  output_price_per_1M    (float) USD per 1M output tokens",
+            "  fc       (bool, default true)  function-calling supported",
+            "  emb      (bool, default false) embedding model",
+            "  gen      (bool, default true)  text generation supported",
+            "  thinking (str,  optional)      reasoning_effort cap, e.g. 'xhigh'",
+            "",
+            "To activate the example below, remove the leading '_example/'",
+            "from its key and adjust the values.",
+        ],
+        "_example/my-org/my-custom-model": {
+            "context_length": 128000,
+            "input_price_per_1M": 0.0,
+            "output_price_per_1M": 0.0,
+            "fc": True,
+            "emb": False,
+            "gen": True,
+        },
+    },
+    indent=2,
+) + "\n"
 
 
-def _ensure_user_model_info_path() -> Path:
-    """Return the path the loader will read MODEL_INFO.json from.
+def _seed_my_models_file() -> None:
+    """Create ``~/.kiss/MY_MODELS.json`` from the inline default if absent.
 
-    The user-local copy at ``~/.kiss/MODEL_INFO.json`` is the source of
-    truth at runtime; it is created (or refreshed) from the package copy
-    bundled with this module when:
-
-    * The user copy does not exist yet (fresh install / dev checkout), or
-    * The package copy is newer than the user copy (extension/package
-      upgrade brought in a more recent table).
-
-    When the user copy can't be created (read-only filesystem, missing
-    HOME), the package copy is returned directly so the module still
-    loads. This makes the loader resilient enough to import in sandboxed
-    test environments without losing the "user file is source of truth"
-    semantics in normal use.
+    Never overwrites an existing file — user edits survive every
+    restart.  Silently swallows :class:`OSError` so a read-only HOME or
+    missing parent does not break ``MODEL_INFO`` import.
     """
     try:
-        if USER_MODEL_INFO_PATH.exists():
-            user_mtime = USER_MODEL_INFO_PATH.stat().st_mtime
-            pkg_mtime = PACKAGE_MODEL_INFO_PATH.stat().st_mtime
-            if pkg_mtime > user_mtime:
-                USER_MODEL_INFO_PATH.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(PACKAGE_MODEL_INFO_PATH, USER_MODEL_INFO_PATH)
-            return USER_MODEL_INFO_PATH
-        USER_MODEL_INFO_PATH.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(PACKAGE_MODEL_INFO_PATH, USER_MODEL_INFO_PATH)
-        return USER_MODEL_INFO_PATH
+        if USER_MY_MODELS_PATH.exists():
+            return
+        USER_MY_MODELS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        USER_MY_MODELS_PATH.write_text(MY_MODELS_DEFAULT_CONTENT)
     except OSError:
-        return PACKAGE_MODEL_INFO_PATH
+        pass
+
+
+def _read_my_models() -> dict[str, dict[str, Any]]:
+    """Return parsed model entries from ``~/.kiss/MY_MODELS.json``.
+
+    Auto-seeds the file with :data:`MY_MODELS_DEFAULT_CONTENT` on first
+    read.  Returns an empty dict when:
+
+    * The file is missing AND cannot be seeded (read-only FS).
+    * The file is unreadable or contains malformed JSON.
+    * The top-level value is not a JSON object.
+
+    Filters out any key starting with ``_`` (documentation / inert
+    example entries) and any value that is not a JSON object, so
+    documentation lists and stray scalars never reach the model table.
+    """
+    _seed_my_models_file()
+    try:
+        text = USER_MY_MODELS_PATH.read_text()
+    except OSError:
+        return {}
+    try:
+        raw = json.loads(text)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        name: entry
+        for name, entry in raw.items()
+        if not name.startswith("_") and isinstance(entry, dict)
+    }
 
 
 def _build_model_info_entry(entry: dict[str, Any]) -> ModelInfo:
@@ -117,9 +183,16 @@ def _build_model_info_entry(entry: dict[str, Any]) -> ModelInfo:
 
 
 def _load_model_info() -> dict[str, ModelInfo]:
-    """Load ``MODEL_INFO`` from JSON, applying cache-pricing defaults."""
-    path = _ensure_user_model_info_path()
-    raw = json.loads(path.read_text())
+    """Load ``MODEL_INFO`` from JSON, applying cache-pricing defaults.
+
+    The bundled :data:`PACKAGE_MODEL_INFO_PATH` is the source of truth
+    for shipped models.  ``~/.kiss/MY_MODELS.json`` (auto-seeded on
+    first read) is then merged on top: matching keys override the
+    bundled entry, and brand-new keys are added.
+    """
+    raw = json.loads(PACKAGE_MODEL_INFO_PATH.read_text())
+    for name, entry in _read_my_models().items():
+        raw[name] = entry
     return {name: _build_model_info_entry(entry) for name, entry in raw.items()}
 
 
