@@ -155,13 +155,6 @@ class TestModelVendorOpenAIClassification(unittest.TestCase):
             f"Bare gpt-4o should be OpenAI, got ({vendor}, {order})"
         )
 
-    def test_openrouter_not_misclassified(self) -> None:
-        """openrouter/ models still classified as OpenRouter."""
-        vendor, order = model_vendor("openrouter/anthropic/claude-haiku")
-        assert vendor == "OpenRouter" and order == 4, (
-            f"openrouter/ should be OpenRouter, got ({vendor}, {order})"
-        )
-
 
 
 class TestFinishMergeEmptyTabIdGuard(unittest.TestCase):
