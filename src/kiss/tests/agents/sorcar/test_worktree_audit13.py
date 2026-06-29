@@ -254,7 +254,6 @@ class TestRed7DeadCodeRemoved:
             "current_branch",
             "discover_repo",
             "cleanup_partial",
-            "cleanup_orphans",
             "ensure_excluded",
             "stage_all",
             "staged_diff",

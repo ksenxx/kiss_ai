@@ -15,7 +15,26 @@ import threading
 import time
 import unittest
 
+from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.vscode.server import VSCodeServer
+
+
+def _sleep_swallowing_kbi(seconds: float) -> None:
+    """Sleep for *seconds*, swallowing ``KeyboardInterrupt``.
+
+    Used as a daemon thread target where a stop test injects a
+    ``KeyboardInterrupt`` via ``PyThreadState_SetAsyncExc``.  Without
+    this guard, the injected exception propagates out of the thread and
+    is captured by pytest's threading hook as
+    :class:`pytest.PytestUnhandledThreadExceptionWarning`, polluting the
+    test output (and, due to delayed delivery while the thread is
+    sleeping, attributing the warning to whichever test happens to run
+    next).
+    """
+    try:
+        time.sleep(seconds)
+    except KeyboardInterrupt:
+        pass
 
 
 def _make_server() -> tuple[VSCodeServer, list[dict]]:
@@ -177,8 +196,18 @@ class TestStopRouting(unittest.TestCase):
         tab2 = self.server._get_tab("2")
         tab1.stop_event = ev1
         tab2.stop_event = ev2
-        t1 = threading.Thread(target=lambda: time.sleep(5), daemon=True)
-        t2 = threading.Thread(target=lambda: time.sleep(5), daemon=True)
+        # ``_stop_task`` schedules a watchdog that injects a
+        # ``KeyboardInterrupt`` into the tab-1 task thread ~1s later.
+        # Use the swallowing sleeper so the KI does not propagate out
+        # of the thread and surface as a
+        # ``PytestUnhandledThreadExceptionWarning`` (potentially
+        # attributed to a later test in the same run).
+        t1 = threading.Thread(
+            target=_sleep_swallowing_kbi, args=(5,), daemon=True,
+        )
+        t2 = threading.Thread(
+            target=_sleep_swallowing_kbi, args=(5,), daemon=True,
+        )
         t1.start()
         t2.start()
         tab1.task_thread = t1
@@ -244,7 +273,7 @@ class TestConcurrentTabs(unittest.TestCase):
 
         time.sleep(2)
         threads = [
-            t.task_thread for t in self.server._running_agent_states.values()
+            t.task_thread for t in _RunningAgentState.running_agent_states.values()
             if t.task_thread is not None
         ]
         for t in threads:
@@ -277,7 +306,7 @@ class TestConcurrentTabs(unittest.TestCase):
             # The real ``_run_task_inner`` (stubbed here) flips
             # ``is_task_active`` True while the agent runs; mirror that so
             # the injection guard behaves as in production.
-            self.server._running_agent_states[
+            _RunningAgentState.running_agent_states[
                 cmd.get("tabId", "")
             ].is_task_active = True
             started.set()
@@ -301,7 +330,7 @@ class TestConcurrentTabs(unittest.TestCase):
         assert call_count[0] == 1
         # The second run's prompt is injected into the live agent rather
         # than dropped, and echoed back so the user sees it in chat.
-        tab = self.server._running_agent_states["1"]
+        tab = _RunningAgentState.running_agent_states["1"]
         assert tab.pending_user_messages == ["task2"]
         echoes = [
             e
@@ -556,15 +585,15 @@ class TestPerTabAgentIsolation(unittest.TestCase):
         server, _ = _make_server()
         tab1 = server._get_tab("1")
         tab2 = server._get_tab("2")
-        tab1.task_history_id = 42
+        tab1.task_history_id = "42"
         assert tab2.task_history_id is None
 
     def test_get_tab_creates_on_demand(self) -> None:
         """_get_tab creates a new _RunningAgentState if one doesn't exist."""
         server, _ = _make_server()
-        assert "99" not in server._running_agent_states
+        assert "99" not in _RunningAgentState.running_agent_states
         tab = server._get_tab("99")
-        assert "99" in server._running_agent_states
+        assert "99" in _RunningAgentState.running_agent_states
         assert tab is server._get_tab("99")
 
     def test_agent_is_transient_per_task(self) -> None:

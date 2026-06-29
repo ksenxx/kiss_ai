@@ -6,7 +6,8 @@
 
 ``_list_recent_chats(limit)`` selected the most recent *limit* distinct
 ``chat_id`` groups FIRST and only then dropped chats whose every row is
-a sub-agent row (``extra.subagent``, see ``_is_subagent_row``).  An
+a sub-agent row (a row whose ``parent_task_id`` column is non-NULL,
+populated from ``extra.subagent`` at insert time).  An
 omitted chat therefore still consumed one of the *limit* slots: with
 ``limit=2`` and history [newest: sub-agent-only chat X, older: real
 chat A, oldest: real chat B], the function returned only ``[A]`` even
@@ -55,7 +56,7 @@ class _TempDbTestBase:
         th._DB_PATH, th._db_conn, th._KISS_DIR = self.saved
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def _set_timestamp(self, task_id: int, ts: float) -> None:
+    def _set_timestamp(self, task_id: str, ts: float) -> None:
         db = th._get_db()
         with th._rw_lock.write_lock():
             db.execute(
@@ -81,7 +82,9 @@ class TestSubagentOnlyChatsDoNotConsumeLimit(_TempDbTestBase):
         # the listing but previously still consuming a limit slot.
         x_id, _chat_x = _add_task(
             "orphaned subagent task",
-            extra={"subagent": {"parent_task_id": 999_999}},
+            extra={"subagent": {
+                "parent_task_id": "ffffffffffffffffffffffffffffffff"
+            }},
         )
         self._set_timestamp(x_id, base - 10)
 

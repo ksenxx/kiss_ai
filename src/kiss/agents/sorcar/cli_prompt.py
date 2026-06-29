@@ -35,6 +35,12 @@ from prompt_toolkit.key_binding import KeyBindings
 from kiss.agents.sorcar.persistence import _load_file_usage
 from kiss.agents.vscode.helpers import rank_file_suggestions
 
+# ANSI styling that matches the framed input panel (kept local so this
+# module stays self-contained for the prompt_continuation callable).
+_ESC = "\x1b"
+_CYAN = f"{_ESC}[36m"
+_RESET = f"{_ESC}[0m"
+
 if TYPE_CHECKING:
     from collections.abc import Iterable
     from pathlib import Path
@@ -62,7 +68,8 @@ def _accept_completion_enter(event: KeyPressEvent) -> None:
     Navigating the menu (Up/Down/Tab) already placed the highlighted
     candidate's text in the buffer; closing the completion state keeps
     that text and lets the user continue editing.  Without a selection
-    this binding is inactive, so Enter submits the line as usual.
+    this binding submits the multi-line buffer instead (see
+    :func:`_submit_enter`).
     """
     event.current_buffer.complete_state = None
 
@@ -71,6 +78,83 @@ def _accept_completion_enter(event: KeyPressEvent) -> None:
 def _accept_completion_tab(event: KeyPressEvent) -> None:
     """Tab on a highlighted completion confirms it (same as Enter)."""
     event.current_buffer.complete_state = None
+
+
+@_KEY_BINDINGS.add("enter", filter=~completion_is_selected)
+def _submit_enter(event: KeyPressEvent) -> None:
+    """Enter submits the (possibly multi-line) buffer.
+
+    The session runs with ``multiline=True`` so prompt_toolkit's
+    default Enter binding inserts a newline; we override that here so
+    Enter still means *submit* — matching the "type a task, then
+    Enter" hint in the framed input panel.  Newlines are entered via
+    the alternative bindings below (Alt+Enter, Ctrl+J, Shift+Enter).
+    """
+    event.current_buffer.validate_and_handle()
+
+
+@_KEY_BINDINGS.add("escape", "enter")
+def _newline_alt_enter(event: KeyPressEvent) -> None:
+    """Alt+Enter (a.k.a. Meta+Enter / Esc+Enter) inserts a real newline.
+
+    This is the portable multi-line key — it works in every terminal
+    that delivers ``ESC <key>`` for Meta-modified keypresses (macOS
+    Terminal.app, iTerm2, gnome-terminal, xterm, …) without any
+    special keyboard-protocol opt-in.
+    """
+    event.current_buffer.insert_text("\n")
+
+
+@_KEY_BINDINGS.add("c-j")
+def _newline_ctrl_j(event: KeyPressEvent) -> None:
+    """Ctrl+J inserts a newline.
+
+    Ctrl+J transmits a literal Linefeed (``\\n``).  Many terminals
+    deliver this when the user presses Shift+Enter without a CSI-u /
+    modifyOtherKeys binding active, so Ctrl+J is a reliable
+    secondary multi-line key.
+    """
+    event.current_buffer.insert_text("\n")
+
+
+# Shift+Enter as delivered by terminals that opt in to the CSI-u
+# keyboard protocol (kitty, foot, WezTerm, …): ``ESC[13;2u``.  The
+# sequence is *not* part of prompt_toolkit's pre-mapped ANSI table,
+# so the parser falls back to per-character delivery and our tuple
+# binding matches it.  (The other common Shift+Enter encoding —
+# xterm's modifyOtherKeys ``ESC[27;2;13~`` — is pre-mapped by
+# prompt_toolkit to :data:`Keys.ControlM`, i.e. plain Enter, so on
+# those terminals the user must use Alt+Enter or Ctrl+J for newlines.)
+@_KEY_BINDINGS.add("escape", "[", "1", "3", ";", "2", "u")
+def _newline_shift_enter_csi_u(event: KeyPressEvent) -> None:
+    """kitty/foot/WezTerm CSI-u Shift+Enter (``ESC[13;2u``) inserts newline."""
+    event.current_buffer.insert_text("\n")
+
+
+def _prompt_continuation(
+    width: int, line_number: int, wrap_count: int,
+) -> ANSI:
+    """Render the left margin for wrapped / multi-line input rows.
+
+    The framed input panel paints a cyan ``│`` on its first row; for
+    every subsequent visual row (whether the user pressed
+    Alt+Enter/Shift+Enter or the line wrapped because of
+    ``wrap_lines=True``) prompt_toolkit calls this function, which
+    returns ``│`` + one space so the panel border stays continuous.
+
+    Args:
+        width: The first-line prompt's display width; unused — the
+            continuation line is the same fixed two columns.
+        line_number: Zero-based index of the current visual row;
+            unused.
+        wrap_count: Number of times the row was wrapped because of
+            ``wrap_lines=True``; unused.
+
+    Returns:
+        ANSI-styled ``│ `` so wrapped rows keep the panel left border.
+    """
+    del width, line_number, wrap_count
+    return ANSI(f"{_CYAN}│{_RESET} ")
 
 
 class PtkCompleter(Completer):
@@ -220,6 +304,21 @@ class PtkLineReader:
             complete_while_typing=True,
             key_bindings=_KEY_BINDINGS,
             history=FileHistory(str(ptk_path)),
+            # Multi-line input: Alt+Enter / Ctrl+J / Shift+Enter
+            # insert a real ``\n`` into the buffer (see the bindings
+            # at module level); plain Enter still submits via the
+            # ``~completion_is_selected`` Enter binding above.  Without
+            # ``multiline=True`` prompt_toolkit would short-circuit
+            # Enter to "accept-line" before our key bindings ever
+            # ran, so the user could never type a newline.
+            multiline=True,
+            # Word-wrap long lines onto the next visual row instead of
+            # scrolling the input horizontally off-screen.  The
+            # framed panel paints a ``│`` on each visual row via
+            # :func:`_prompt_continuation`, so the box stays closed
+            # even when the typed task wraps.
+            wrap_lines=True,
+            prompt_continuation=_prompt_continuation,
             # Reserve enough screen rows for the longest typing-triggered
             # menu — currently the ``/`` slash-command list with every
             # built-in command from :data:`SLASH_COMMANDS` (and a few

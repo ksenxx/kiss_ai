@@ -37,6 +37,7 @@ from unittest import IsolatedAsyncioTestCase
 import pytest
 
 import kiss.agents.sorcar.persistence as th
+from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.vscode.web_server import (
     _TAB_CLOSE_GRACE,
     RemoteAccessServer,
@@ -126,7 +127,7 @@ class TestDeferredWebTabClose(IsolatedAsyncioTestCase):
         longer contains *tab_id* (the deferred ``closeTab`` task has
         finished executing in the thread-pool executor)."""
         deadline = asyncio.get_event_loop().time() + timeout
-        while tab_id in self.server._vscode_server._running_agent_states:
+        while tab_id in _RunningAgentState.running_agent_states:
             if asyncio.get_event_loop().time() >= deadline:
                 raise AssertionError(
                     f"_running_agent_states[{tab_id!r}] not disposed in {timeout}s",
@@ -151,7 +152,7 @@ class TestDeferredWebTabClose(IsolatedAsyncioTestCase):
             self.assertNotIn("tab-B", self.server._pending_tab_closes)
         # Wait past the (tiny) grace window — the timer must NOT fire.
         await asyncio.sleep(0.15)
-        self.assertIn("tab-B", self.server._vscode_server._running_agent_states)
+        self.assertIn("tab-B", _RunningAgentState.running_agent_states)
 
     async def test_unknown_and_empty_ids_are_safe(self) -> None:
         """Empty / unknown tab ids cause no errors and arm no timers."""
@@ -196,7 +197,7 @@ class TestDeferredWebTabClose(IsolatedAsyncioTestCase):
                     break
                 await asyncio.sleep(0.01)
             # Deferred: state still present, frontend_closed flagged.
-            self.assertIn(tab_id, self.server._vscode_server._running_agent_states)
+            self.assertIn(tab_id, _RunningAgentState.running_agent_states)
             self.assertTrue(tab.frontend_closed)
 
             # Mirror _run_task's finally tail.
@@ -206,7 +207,7 @@ class TestDeferredWebTabClose(IsolatedAsyncioTestCase):
                 tab.task_thread = None
                 tab.is_task_active = False
             self.server._vscode_server._dispose_if_closed(tab_id)
-            self.assertNotIn(tab_id, self.server._vscode_server._running_agent_states)
+            self.assertNotIn(tab_id, _RunningAgentState.running_agent_states)
         finally:
             release.set()
             thr.join(timeout=5)
@@ -239,7 +240,7 @@ class TestDeferredWebTabClose(IsolatedAsyncioTestCase):
         # disposed.
         await asyncio.sleep(_TAB_CLOSE_GRACE + 0.05)
         for tab_id in ("tab-X", "tab-Y", "tab-Z"):
-            self.assertIn(tab_id, self.server._vscode_server._running_agent_states)
+            self.assertIn(tab_id, _RunningAgentState.running_agent_states)
 
     async def test_resume_session_clears_frontend_closed_flag(self) -> None:
         """If the grace timer fired during a slow reload and flagged a
@@ -271,7 +272,7 @@ class TestDeferredWebTabClose(IsolatedAsyncioTestCase):
         # Now if the lifecycle ends, _dispose_if_closed must NOT pop
         # this tab.
         self.server._vscode_server._dispose_if_closed(tab_id)
-        self.assertIn(tab_id, self.server._vscode_server._running_agent_states)
+        self.assertIn(tab_id, _RunningAgentState.running_agent_states)
 
     async def test_replay_session_clears_frontend_closed(self) -> None:
         """End-to-end: a real ``_replay_session`` call clears the
@@ -311,7 +312,7 @@ class TestDeferredWebTabClose(IsolatedAsyncioTestCase):
         self.assertFalse(tab.frontend_closed)
         # And the tab survived a subsequent ``_dispose_if_closed``.
         self.server._vscode_server._dispose_if_closed(tab_id)
-        self.assertIn(tab_id, self.server._vscode_server._running_agent_states)
+        self.assertIn(tab_id, _RunningAgentState.running_agent_states)
 
     async def test_double_schedule_replaces_existing_timer(self) -> None:
         """Re-scheduling the same tab id cancels the prior timer."""

@@ -224,7 +224,7 @@ class TestCliPersistsEventsForChatWebview:
         _restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def _run_cli_task(self) -> int:
+    def _run_cli_task(self) -> str:
         """Drive ``ChatSorcarAgent`` through the CLI's run-kwargs path.
 
         Returns the persisted ``task_history`` row id so the caller can
@@ -248,7 +248,7 @@ class TestCliPersistsEventsForChatWebview:
         # Ensure asynchronously queued events are flushed to disk
         # before the test reads them.
         th._flush_chat_events()
-        return int(agent._last_task_id)
+        return str(agent._last_task_id)
 
     def test_finish_tool_call_event_is_persisted(self) -> None:
         """The persisted event stream must include the ``tool_call`` event

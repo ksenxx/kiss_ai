@@ -1,0 +1,3433 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>KISS Sorcar — Tell it what to do, in English. It picks the best LLM and ships the work.</title>
+  <meta name="description" content="Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 502 models, 62.2% on Terminal Bench 2.0. Works as a VS Code extension, a Claude-Code-style CLI, and a web app.">
+  <link rel="canonical" href="https://kisssorcar.github.io/">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://kisssorcar.github.io/">
+  <meta property="og:title" content="KISS Sorcar — Tell it what to do, in English. It picks the best LLM and ships the work.">
+  <meta property="og:description" content="Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 502 models, 62.2% on Terminal Bench 2.0.">
+  <meta property="og:image" content="https://kisssorcar.github.io/assets/og-card.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="KISS Sorcar — open-source AI agent. Tell it what to do, in English.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="KISS Sorcar — Tell it what to do, in English. It picks the best LLM and ships the work.">
+  <meta name="twitter:description" content="Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work.">
+  <meta name="twitter:image" content="https://kisssorcar.github.io/assets/og-card.png">
+  <meta name="twitter:image:alt" content="KISS Sorcar — open-source general-purpose AI agent for long-horizon tasks and AI discovery.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script>
+    /* Theme bootstrap — runs synchronously before <style> parses to avoid FOUC.
+       Reads saved preference from localStorage; falls back to "dark" so the
+       site keeps its current first-load look for anyone without a preference. */
+    (function () {
+      try {
+        var saved = localStorage.getItem('kiss-theme');
+        var theme = (saved === 'light' || saved === 'dark') ? saved : 'dark';
+        document.documentElement.setAttribute('data-theme', theme);
+      } catch (e) {
+        document.documentElement.setAttribute('data-theme', 'dark');
+      }
+    })();
+  </script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    /* Custom property for rotating conic-gradient angle on the section-card border. */
+    @property --angle {
+      syntax: '<angle>';
+      initial-value: 0deg;
+      inherits: false;
+    }
+
+    :root {
+      --bg: #ffffff;
+      --surface: #f5f7fa;
+      --surface-2: #eef2f6;
+      --border: #e1e4e8;
+      --text: #212121;
+      --text-dim: #5b6470;
+      --text-soft: #8893a3;
+      --primary: #1976d2;
+      --primary-dark: #0d47a1;
+      --primary-soft: #e3f0fb;
+      --accent: #00897b;
+      --gold: #f7c948;
+      --magenta: #d81b60;
+      --code-bg: #1e2329;
+      --code-text: #e8eaed;
+      --shadow-1: 0 1px 2px rgba(0,0,0,0.06), 0 1px 3px rgba(0,0,0,0.04);
+      --shadow-2: 0 2px 6px rgba(0,0,0,0.07), 0 4px 12px rgba(0,0,0,0.05);
+      --shadow-3: 0 12px 38px rgba(25,118,210,0.13), 0 4px 14px rgba(0,0,0,0.06);
+    }
+
+    html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; }
+
+    body {
+      font-family: 'Roboto', -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.65;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      text-rendering: optimizeLegibility;
+      overflow-x: hidden;
+    }
+
+    a { color: var(--primary); text-decoration: none; }
+    a:hover { color: var(--primary-dark); }
+
+    /* Navigation */
+    nav {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      background: rgba(255,255,255,0.85);
+      backdrop-filter: saturate(180%) blur(12px);
+      -webkit-backdrop-filter: saturate(180%) blur(12px);
+      border-bottom: 1px solid var(--border);
+      box-shadow: var(--shadow-1);
+    }
+
+    nav .container {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 0.7rem 1.5rem; max-width: 1200px; margin: 0 auto; gap: 1.5rem;
+    }
+
+    nav .brand {
+      display: flex; align-items: center; gap: 0.6rem;
+      font-weight: 500; font-size: 1.05rem; color: var(--text); letter-spacing: -0.005em;
+    }
+
+    nav .brand .dot {
+      width: 24px; height: 24px; border-radius: 50%;
+      background: conic-gradient(from var(--angle), var(--primary), var(--accent), var(--gold), var(--magenta), var(--primary));
+      animation: spin 8s linear infinite;
+      flex-shrink: 0;
+      box-shadow: 0 0 12px rgba(25,118,210,0.45);
+    }
+
+    nav .links {
+      display: flex; gap: 1.2rem; list-style: none; flex: 1; justify-content: center;
+      flex-wrap: wrap;
+    }
+
+    nav .links a {
+      color: var(--text-dim); font-size: 0.88rem; font-weight: 400;
+      padding: 0.25rem 0; border-bottom: 2px solid transparent;
+      transition: color 0.15s, border-color 0.15s;
+    }
+    nav .links a:hover { color: var(--primary); border-bottom-color: var(--primary); }
+
+    nav .gh-badge {
+      display: inline-flex; align-items: center; gap: 0.45rem;
+      padding: 0.32rem 0.7rem; font-size: 0.78rem;
+      color: var(--text); background: var(--surface);
+      border: 1px solid var(--border); border-radius: 999px; font-weight: 500;
+    }
+    nav .gh-badge:hover { background: var(--surface-2); }
+    nav .gh-badge svg { width: 16px; height: 16px; }
+
+    /* Hero */
+    .hero {
+      position: relative;
+      padding: 4rem 1.5rem 2rem;
+      text-align: center;
+      max-width: 1100px;
+      margin: 0 auto;
+      z-index: 1;
+    }
+
+    /* Magic-dust canvas behind the hero (Sorcar = magician). */
+    #magic-dust {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      z-index: -1;
+    }
+
+    .hero-mark, .screenshot { max-width: 960px; margin-left: auto; margin-right: auto; }
+    .hero-mark { margin-bottom: 1.5rem; }
+    .hero-logo { display: block; width: 100%; height: auto; filter: drop-shadow(0 6px 24px rgba(25,118,210,0.18)); }
+
+    .hero-quote { margin: 1.5rem auto 0; max-width: 640px; text-align: center; }
+    .hero-quote blockquote {
+      font-style: italic; font-weight: 300; color: var(--text-dim);
+      font-size: clamp(1.05rem, 2vw, 1.25rem); line-height: 1.55;
+    }
+    .hero-quote figcaption {
+      margin-top: 0.5rem; font-size: 0.82rem; font-weight: 500; color: var(--text-soft);
+    }
+
+    .hero h1 {
+      font-size: clamp(2rem, 4.5vw, 3.1rem);
+      font-weight: 700; line-height: 1.15; letter-spacing: -0.02em;
+      margin: 1.5rem auto 1rem; color: var(--text); max-width: 820px;
+    }
+    .hero h1 em {
+      font-style: normal;
+      background: linear-gradient(90deg, var(--primary), var(--accent));
+      -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+    }
+
+    .hero .lead {
+      font-size: 1.1rem; color: var(--text-dim);
+      max-width: 680px; margin: 0 auto 1rem; font-weight: 400;
+    }
+    .hero .lead--accent {
+      max-width: 760px; margin: 0.25rem auto 1.5rem;
+      padding: 1rem 1.25rem; border-left: 3px solid var(--primary);
+      background: var(--primary-soft); color: var(--text);
+      text-align: left; border-radius: 0 6px 6px 0;
+    }
+    .hero .lead--accent em { font-style: italic; color: var(--primary); }
+    .hero .lead--accent strong { color: var(--text); font-weight: 600; }
+
+    .hero .eyebrow {
+      display: inline-block; font-size: 0.78rem; font-weight: 500;
+      color: var(--primary); background: var(--primary-soft);
+      padding: 0.25rem 0.85rem; border-radius: 999px;
+      margin-bottom: 0.5rem; letter-spacing: 0.02em;
+    }
+
+    .hero .actions { display: flex; gap: 0.7rem; justify-content: center; flex-wrap: wrap; margin-top: 1.5rem; }
+
+    .btn {
+      display: inline-flex; align-items: center; gap: 0.45rem;
+      padding: 0.6rem 1.25rem; font-size: 0.92rem; font-weight: 500;
+      transition: all 0.18s ease; cursor: pointer;
+      border: 1px solid transparent; border-radius: 6px; font-family: inherit;
+    }
+    .btn svg { width: 16px; height: 16px; }
+    .btn-main { background: var(--primary); color: #fff; border-color: var(--primary); box-shadow: var(--shadow-1); }
+    .btn-main:hover { background: var(--primary-dark); border-color: var(--primary-dark); color: #fff; box-shadow: var(--shadow-2); transform: translateY(-1px); }
+    .btn-ghost { background: var(--bg); color: var(--primary); border-color: var(--border); }
+    .btn-ghost:hover { background: var(--primary-soft); border-color: var(--primary); color: var(--primary-dark); transform: translateY(-1px); }
+
+    /* Benchmark band */
+    .benchmark {
+      max-width: 920px; margin: 2rem auto 2.5rem; padding: 1.5rem;
+      display: grid; grid-template-columns: auto 1px 1fr 1px 1fr;
+      align-items: center; gap: 1.5rem;
+      background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    }
+    .benchmark .divider { width: 1px; height: 48px; background: var(--border); }
+    .benchmark .score {
+      font-size: 2.8rem; font-weight: 700; letter-spacing: -0.03em;
+      background: linear-gradient(135deg, var(--primary), var(--accent));
+      -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+      line-height: 1;
+    }
+    .benchmark .score sup { font-size: 1rem; color: var(--text-dim); margin-left: 0.15rem; font-weight: 500; -webkit-text-fill-color: var(--text-dim); }
+    .benchmark .cell .k {
+      font-size: 0.74rem; font-weight: 500; letter-spacing: 0.04em;
+      text-transform: uppercase; color: var(--text-soft); margin-bottom: 0.3rem;
+    }
+    .benchmark .cell .v { font-size: 1rem; color: var(--text); font-weight: 500; }
+    .benchmark .cell .v small { color: var(--text-dim); font-size: 0.85rem; margin-left: 0.3rem; font-weight: 400; }
+
+    /* Hero screenshot/demo video */
+    .screenshot { margin: 0 auto 1.5rem; padding: 0 1.5rem; }
+    .screenshot img, .screenshot video {
+      display: block; width: 100%;
+      border: 1px solid var(--border); border-radius: 12px;
+      box-shadow: var(--shadow-2); background: #000;
+    }
+
+    /* ========================================================== */
+    /* HERO INSTALL — preferred full-stack install, sits directly */
+    /* below the demo video and above the CTA strip.              */
+    /* ========================================================== */
+    .hero-install {
+      max-width: 960px;
+      margin: 0 auto 1.4rem;
+      padding: 0 1.5rem;
+    }
+    .hero-install-card {
+      position: relative;
+      border: 1px solid var(--primary);
+      border-radius: 12px;
+      padding: 1rem 1.15rem 1.05rem;
+      background:
+        linear-gradient(180deg, rgba(25,118,210,0.08), rgba(0,137,123,0.04)),
+        var(--bg);
+      box-shadow:
+        0 0 0 1px var(--primary),
+        0 10px 30px -12px rgba(25,118,210,0.45);
+      display: flex;
+      flex-direction: column;
+      gap: 0.65rem;
+    }
+    .hero-install-head {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.45rem 0.8rem;
+    }
+    .hero-install-title {
+      margin: 0;
+      font-size: 1rem;
+      font-weight: 600;
+      color: var(--text);
+    }
+    .hero-install-badge {
+      display: inline-flex; align-items: center; gap: 0.3rem;
+      font-family: 'Roboto Mono', monospace;
+      font-size: 0.66rem; font-weight: 700; letter-spacing: 0.08em;
+      text-transform: uppercase;
+      padding: 0.18rem 0.55rem; border-radius: 999px;
+      background: linear-gradient(135deg, var(--primary), var(--accent));
+      color: #fff;
+      box-shadow: 0 2px 8px rgba(25,118,210,0.35);
+      white-space: nowrap;
+    }
+    .hero-install-note {
+      margin: 0 0 0 auto;
+      color: var(--text-dim);
+      font-size: 0.85rem;
+      line-height: 1.45;
+    }
+    .hero-install-copy {
+      /* Inherits .quickstart-copy base styling; tweak for a wider, hero-prominent panel. */
+      font-size: 0.85rem;
+      padding: 0.8rem 1rem;
+      overflow-x: auto;
+      white-space: nowrap;
+    }
+    @media (max-width: 640px) {
+      .hero-install-note { margin-left: 0; flex-basis: 100%; }
+      .hero-install-copy { font-size: 0.74rem; padding: 0.7rem 0.85rem; }
+    }
+
+    /* Hero CTA strip — three buttons directly under the demo video. */
+    .hero-ctas {
+      max-width: 960px;
+      margin: 0 auto 3rem;
+      padding: 0 1.5rem;
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 0.75rem;
+    }
+    .cta-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.7rem 1.25rem;
+      font-size: 0.95rem;
+      font-weight: 500;
+      border-radius: 8px;
+      border: 1px solid transparent;
+      cursor: pointer;
+      font-family: inherit;
+      line-height: 1.2;
+      transition: all 0.18s ease;
+      text-decoration: none;
+      white-space: nowrap;
+    }
+    .cta-btn svg { width: 18px; height: 18px; flex: none; }
+
+    /* Primary: Install (VS Code) */
+    .cta-vscode {
+      background: var(--primary);
+      color: #fff;
+      border-color: var(--primary);
+      box-shadow: var(--shadow-1);
+    }
+    .cta-vscode:hover {
+      background: var(--primary-dark);
+      border-color: var(--primary-dark);
+      color: #fff;
+      box-shadow: var(--shadow-2);
+      transform: translateY(-1px);
+    }
+
+    /* Secondary: pipx install (click to copy) */
+    .cta-pip {
+      background: var(--surface);
+      color: var(--text);
+      border-color: var(--border);
+      font-family: 'SF Mono', 'Menlo', 'Consolas', 'Monaco', monospace;
+      font-size: 0.88rem;
+      position: relative;
+    }
+    .cta-pip:hover {
+      background: var(--primary-soft);
+      border-color: var(--primary);
+      color: var(--primary-dark);
+      transform: translateY(-1px);
+    }
+    .cta-pip .cta-pip-prompt { color: var(--text-soft); user-select: none; margin-right: 0.1rem; }
+    .cta-pip .cta-pip-copy-icon { color: var(--text-soft); }
+    .cta-pip:hover .cta-pip-copy-icon { color: var(--primary); }
+    .cta-pip.copied {
+      background: rgba(0, 137, 123, 0.10);
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+    .cta-pip.copied .cta-pip-prompt,
+    .cta-pip.copied .cta-pip-copy-icon { color: var(--accent); }
+
+    /* Tertiary: Star on GitHub with live count */
+    .cta-star {
+      background: var(--bg);
+      color: var(--text);
+      border-color: var(--border);
+    }
+    .cta-star:hover {
+      background: var(--primary-soft);
+      border-color: var(--primary);
+      color: var(--primary-dark);
+      transform: translateY(-1px);
+    }
+    .cta-star .star-count {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 1.8rem;
+      padding: 0.12rem 0.5rem;
+      margin-left: 0.1rem;
+      background: var(--primary-soft);
+      color: var(--primary-dark);
+      border-radius: 999px;
+      font-size: 0.82rem;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+      transition: background 0.18s ease, color 0.18s ease;
+    }
+    .cta-star:hover .star-count {
+      background: #fff;
+      color: var(--primary-dark);
+    }
+    .cta-star .star-count[data-loading="true"] { opacity: 0.55; }
+
+    @media (max-width: 520px) {
+      .hero-ctas { gap: 0.6rem; }
+      .cta-btn { width: 100%; justify-content: center; }
+    }
+
+    /* ========================================================== */
+    /* HERO TRUST STRIP — just under the H1.                      */
+    /* ========================================================== */
+    .hero-trust {
+      margin-top: 0.9rem;
+      font-size: 0.95rem;
+      color: var(--text-dim);
+      display: flex;
+      gap: 1.2rem 1.6rem;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+    .hero-trust strong { color: var(--text); font-weight: 700; }
+    @media (max-width: 520px) {
+      .hero-trust { font-size: 0.86rem; gap: 0.4rem 1rem; }
+    }
+
+    /* ========================================================== */
+    /* SOCIAL-PROOF STRIP — live stars + trust badges.            */
+    /* ========================================================== */
+    .social-proof {
+      max-width: 1200px;
+      margin: 0.4rem auto 2.4rem;
+      padding: 0 1.5rem;
+    }
+    .social-proof-row {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      align-items: center;
+      gap: 0.6rem 1.4rem;
+      font-size: 0.92rem;
+      color: var(--text-dim);
+    }
+    .sp-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.45rem 0.9rem;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--text-dim);
+      text-decoration: none;
+      transition: border-color 0.18s ease, color 0.18s ease, transform 0.18s ease;
+    }
+    .sp-item:hover:not(.sp-item--static) {
+      border-color: var(--primary);
+      color: var(--text);
+      transform: translateY(-1px);
+    }
+    .sp-item strong { color: var(--text); font-weight: 700; }
+    .sp-icon { font-size: 1.05rem; line-height: 1; }
+    @media (max-width: 520px) {
+      .social-proof-row { gap: 0.5rem 0.7rem; font-size: 0.86rem; }
+      .sp-item { padding: 0.4rem 0.75rem; }
+    }
+
+    /* ========================================================== */
+    /* QUICKSTART STRIP — 3 copy-to-clipboard cards.              */
+    /* ========================================================== */
+    .quickstart {
+      max-width: 1200px;
+      margin: 0 auto 3rem;
+      padding: 0 1.5rem;
+      text-align: center;
+    }
+    .quickstart-title {
+      font-size: 1.2rem;
+      margin: 0 0 1.2rem;
+      color: var(--text);
+      font-weight: 600;
+    }
+    .quickstart-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 1.2rem;
+    }
+    .qs-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1.2rem 1.3rem;
+      text-align: left;
+      transition: border-color 0.18s ease, transform 0.18s ease;
+    }
+    .qs-card:hover { border-color: var(--primary); transform: translateY(-2px); }
+    .qs-label {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-weight: 600;
+      color: var(--primary);
+      font-size: 0.95rem;
+      margin-bottom: 0.7rem;
+    }
+    .qs-step-num {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 1.6rem;
+      height: 1.6rem;
+      border-radius: 50%;
+      background: var(--primary);
+      color: #fff;
+      font-size: 0.85rem;
+      font-weight: 700;
+    }
+    .quickstart-copy {
+      background: var(--code-bg, #161821);
+      color: var(--code-text, #e8eaed);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.7rem 0.9rem;
+      font-family: 'Roboto Mono', ui-monospace, monospace;
+      font-size: 0.82rem;
+      width: 100%;
+      cursor: pointer;
+      text-align: left;
+      transition: background 0.15s ease, border-color 0.15s ease;
+      position: relative;
+    }
+    .quickstart-copy:hover { border-color: var(--primary); }
+    .quickstart-copy.copied { border-color: var(--primary); color: var(--primary); }
+
+    /* ========================================================== */
+    /* SECTION CARD — animated rotating conic-gradient border.    */
+    /* Each section is wrapped in .section-card whose ::before    */
+    /* paints a slow-rotating conic-gradient as a border.         */
+    /* ========================================================== */
+
+    .section-wrap {
+      max-width: 1100px;
+      margin: 2.2rem auto;
+      padding: 0 1.5rem;
+    }
+
+    .section-card {
+      position: relative;
+      background: var(--bg);
+      border-radius: 18px;
+      padding: 2.6rem 2.2rem;
+      box-shadow: var(--shadow-2);
+      /* Reveal-on-scroll initial state */
+      opacity: 0;
+      transform: translateY(36px) rotateX(-6deg);
+      transform-origin: bottom center;
+      transition: opacity 0.85s cubic-bezier(.2,.7,.2,1),
+                  transform 0.85s cubic-bezier(.2,.7,.2,1);
+      isolation: isolate;
+    }
+    .section-card.in-view {
+      opacity: 1;
+      transform: none;
+    }
+
+    /* Rotating conic-gradient border drawn via ::before. */
+    .section-card::before {
+      content: "";
+      position: absolute;
+      inset: -2px;
+      border-radius: 20px;
+      padding: 2px;
+      background: conic-gradient(
+        from var(--angle),
+        var(--primary) 0deg,
+        var(--accent) 90deg,
+        var(--gold) 170deg,
+        var(--magenta) 240deg,
+        var(--primary) 360deg
+      );
+      -webkit-mask:
+        linear-gradient(#000 0 0) content-box,
+        linear-gradient(#000 0 0);
+      -webkit-mask-composite: xor;
+              mask-composite: exclude;
+      animation: spin 9s linear infinite;
+      pointer-events: none;
+      z-index: -1;
+      opacity: 0.85;
+    }
+
+    /* Soft halo behind each card for depth. */
+    .section-card::after {
+      content: "";
+      position: absolute;
+      inset: 8px;
+      border-radius: 16px;
+      background: radial-gradient(circle at 12% 0%, rgba(25,118,210,0.05), transparent 55%),
+                  radial-gradient(circle at 92% 100%, rgba(0,137,123,0.05), transparent 55%);
+      pointer-events: none;
+      z-index: -1;
+    }
+
+    @keyframes spin {
+      to { --angle: 360deg; }
+    }
+
+    .section-card h2 {
+      font-size: clamp(1.55rem, 2.8vw, 2.05rem);
+      font-weight: 700; letter-spacing: -0.018em;
+      color: var(--text); line-height: 1.2;
+      display: flex; align-items: baseline; gap: 0.4rem; flex-wrap: wrap;
+    }
+    .section-card h2 .anchor {
+      color: var(--text-soft); font-weight: 400; font-size: 0.85em;
+      opacity: 0; transition: opacity 0.15s; text-decoration: none;
+    }
+    .section-card h2:hover .anchor { opacity: 1; }
+
+    .section-card .num {
+      display: inline-block; font-family: 'Roboto Mono', monospace;
+      font-size: 0.78rem; font-weight: 500; color: var(--primary);
+      background: var(--primary-soft); padding: 0.18rem 0.6rem;
+      border-radius: 4px; margin-bottom: 0.8rem; letter-spacing: 0.02em;
+    }
+
+    .section-card .sub {
+      color: var(--text-dim); max-width: 760px;
+      font-size: 1.02rem; line-height: 1.65; margin-top: 0.6rem;
+    }
+
+    .section-body { margin-top: 1.8rem; }
+
+    /* Inner cards with cursor spotlight overlay. */
+    .inner-card {
+      position: relative;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.25rem 1.3rem;
+      transition: box-shadow 0.22s, transform 0.22s, border-color 0.22s;
+      overflow: hidden;
+      isolation: isolate;
+    }
+    .inner-card::before {
+      /* Cursor-tracked spotlight overlay. */
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: radial-gradient(circle 220px at var(--mx, -200px) var(--my, -200px),
+        rgba(25,118,210,0.14), transparent 60%);
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.25s;
+      z-index: 0;
+    }
+    .inner-card:hover::before { opacity: 1; }
+    .inner-card:hover {
+      box-shadow: var(--shadow-3);
+      transform: translateY(-3px);
+      border-color: rgba(25,118,210,0.35);
+    }
+    .inner-card > * { position: relative; z-index: 1; }
+
+    .inner-card h3, .inner-card h4 {
+      font-size: 1rem; font-weight: 600; margin-bottom: 0.45rem;
+      color: var(--text); display: flex; align-items: center; gap: 0.45rem;
+    }
+    .inner-card h3::before, .inner-card h4::before {
+      content: ""; width: 8px; height: 8px; border-radius: 50%;
+      background: linear-gradient(135deg, var(--primary), var(--accent));
+      flex-shrink: 0;
+      box-shadow: 0 0 8px rgba(25,118,210,0.4);
+    }
+    .inner-card p, .inner-card li { color: var(--text-dim); font-size: 0.93rem; line-height: 1.6; }
+    .inner-card code {
+      background: var(--surface); padding: 0.05rem 0.35rem;
+      border-radius: 4px; font-family: 'Roboto Mono', monospace; font-size: 0.85em;
+      color: var(--primary-dark);
+    }
+
+    /* Preferred / recommended inner-card variant — highlights the "best" choice. */
+    .inner-card--preferred {
+      border-color: var(--primary);
+      box-shadow:
+        0 0 0 1px var(--primary),
+        0 8px 28px -10px rgba(25,118,210,0.45);
+      background:
+        linear-gradient(180deg, rgba(25,118,210,0.06), rgba(0,137,123,0.03)) ,
+        var(--bg);
+    }
+    .inner-card--preferred:hover {
+      box-shadow:
+        0 0 0 1px var(--primary),
+        0 14px 36px -10px rgba(25,118,210,0.55);
+      border-color: var(--primary);
+    }
+    .inner-card--preferred .preferred-badge {
+      display: inline-flex; align-items: center; gap: 0.3rem;
+      font-family: 'Roboto Mono', monospace;
+      font-size: 0.66rem; font-weight: 700; letter-spacing: 0.08em;
+      text-transform: uppercase;
+      padding: 0.18rem 0.5rem; border-radius: 999px;
+      background: linear-gradient(135deg, var(--primary), var(--accent));
+      color: #fff;
+      box-shadow: 0 2px 8px rgba(25,118,210,0.35);
+      white-space: nowrap;
+      margin-left: auto;
+    }
+    .inner-card--preferred h3 { flex-wrap: wrap; }
+
+    /* Stagger reveal of inner cards inside a section. */
+    .section-card.in-view .inner-card {
+      animation: rise 0.7s cubic-bezier(.2,.7,.2,1) both;
+      animation-delay: calc(var(--i, 0) * 70ms);
+    }
+    @keyframes rise {
+      from { opacity: 0; transform: translateY(20px) scale(0.985); }
+      to   { opacity: 1; transform: none; }
+    }
+
+    /* Grids */
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+    .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; }
+    .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.85rem; }
+
+    /* Code panels */
+    .code-panel {
+      background: var(--code-bg); color: var(--code-text);
+      padding: 0.9rem 1.05rem;
+      font-family: 'Roboto Mono', 'JetBrains Mono', monospace;
+      font-size: 0.85rem; overflow-x: auto; border-radius: 8px;
+      line-height: 1.6;
+    }
+    .code-panel .prompt { color: #82c4ff; }
+    .code-panel .green { color: #b6e3a3; }
+    .code-panel .f { color: #ffd479; }
+    .code-panel .s { color: #d4b8e8; }
+    .code-panel .x { color: #888f99; font-style: italic; }
+    .code-panel .c { color: #b6e3a3; }
+    .code-panel .o { color: var(--code-text); }
+    .code-panel pre { margin: 0; white-space: pre; font: inherit; color: inherit; }
+    .code-line { white-space: nowrap; }
+    .code-line.spacer { height: 0.55rem; }
+
+    /* Comparison table */
+    .compare-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow-1); }
+    table.compare { width: 100%; border-collapse: collapse; background: var(--bg); font-size: 0.92rem; }
+    table.compare th, table.compare td {
+      text-align: left; padding: 0.8rem 1rem;
+      border-bottom: 1px solid var(--border); vertical-align: top; line-height: 1.5;
+    }
+    table.compare thead th {
+      background: var(--surface); font-weight: 500; color: var(--text);
+      font-size: 0.92rem; border-bottom: 1px solid var(--border);
+    }
+    table.compare thead th.kiss { color: var(--primary); }
+    table.compare th.cap { width: 22%; color: var(--text-dim); font-weight: 500; }
+    table.compare td.kiss { background: var(--primary-soft); font-weight: 500; color: var(--text); }
+    table.compare tr:last-child td { border-bottom: 0; }
+    table.compare .yes { color: var(--accent); font-weight: 600; }
+    table.compare .no  { color: #c62828; font-weight: 600; }
+    table.compare .warn { color: #ef6c00; font-weight: 600; }
+    table.compare small { color: var(--text-dim); font-weight: 400; }
+
+    /* CLI options table */
+    .opt-table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; }
+    table.opts { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+    table.opts th, table.opts td {
+      text-align: left; padding: 0.6rem 0.85rem;
+      border-bottom: 1px solid var(--border); vertical-align: top;
+    }
+    table.opts thead th { background: var(--surface); font-weight: 600; color: var(--text); }
+    table.opts tr:last-child td { border-bottom: 0; }
+    table.opts code {
+      background: var(--surface); padding: 0.05rem 0.35rem; border-radius: 4px;
+      font-family: 'Roboto Mono', monospace; font-size: 0.88em;
+      color: var(--primary-dark); white-space: nowrap;
+    }
+
+    /* Messaging chip cloud */
+    .chip-cloud { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+    .chip {
+      display: inline-flex; align-items: center;
+      padding: 0.35rem 0.75rem;
+      background: var(--surface); border: 1px solid var(--border); border-radius: 999px;
+      font-size: 0.85rem; color: var(--text);
+      transition: background 0.18s, transform 0.18s, color 0.18s, border-color 0.18s;
+      cursor: default;
+    }
+    .chip:hover {
+      background: linear-gradient(135deg, var(--primary), var(--accent));
+      color: #fff; border-color: transparent; transform: translateY(-2px);
+    }
+
+    /* Models provider rows */
+    .provider-row {
+      display: grid;
+      grid-template-columns: 1.2fr auto;
+      align-items: center;
+      padding: 0.55rem 0.85rem;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.95rem;
+    }
+    .provider-row:last-child { border-bottom: 0; }
+    .provider-row .label { color: var(--text); font-weight: 500; }
+    .provider-row .count {
+      font-family: 'Roboto Mono', monospace;
+      color: var(--primary-dark); font-weight: 600;
+      background: var(--primary-soft); padding: 0.1rem 0.55rem; border-radius: 999px;
+      font-size: 0.85rem;
+    }
+
+    .stat-row { display: flex; flex-wrap: wrap; gap: 0.8rem; margin-top: 1rem; }
+    .stat-pill {
+      flex: 1 1 140px;
+      background: linear-gradient(135deg, rgba(25,118,210,0.06), rgba(0,137,123,0.06));
+      border: 1px solid var(--border); border-radius: 10px;
+      padding: 0.75rem 0.95rem;
+    }
+    .stat-pill .n {
+      font-size: 1.55rem; font-weight: 700;
+      background: linear-gradient(135deg, var(--primary), var(--accent));
+      -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+      line-height: 1;
+    }
+    .stat-pill .l { color: var(--text-dim); font-size: 0.82rem; margin-top: 0.2rem; }
+
+    /* Name section */
+    .name-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+    .name-card {
+      padding: 1.3rem;
+      background: linear-gradient(135deg, var(--surface), var(--bg));
+      border-radius: 12px; border: 1px solid var(--border);
+    }
+    .name-card .k {
+      font-family: 'Roboto Mono', monospace; font-size: 0.72rem;
+      letter-spacing: 0.06em; text-transform: uppercase;
+      color: var(--primary); margin-bottom: 0.3rem;
+    }
+    .name-card h3 { font-size: 1.05rem; font-weight: 600; margin-bottom: 0.5rem; }
+    .name-card p { color: var(--text-dim); font-size: 0.93rem; }
+
+    /* Citation */
+    .citation-block {
+      position: relative;
+      background: var(--code-bg); color: var(--code-text);
+      border-radius: 10px; padding: 1.1rem 1.2rem;
+      font-family: 'Roboto Mono', monospace; font-size: 0.82rem;
+      line-height: 1.7; overflow-x: auto; box-shadow: var(--shadow-1);
+    }
+    .citation-block pre { margin: 0; white-space: pre; tab-size: 2; color: inherit; }
+    .citation-block .copy-btn {
+      position: absolute; top: 0.7rem; right: 0.7rem;
+      background: rgba(255,255,255,0.08); color: var(--code-text);
+      border: 1px solid rgba(255,255,255,0.15); border-radius: 6px;
+      padding: 0.3rem 0.6rem; font-size: 0.74rem; font-family: inherit;
+      cursor: pointer; transition: background 0.15s;
+    }
+    .citation-block .copy-btn:hover { background: rgba(255,255,255,0.16); }
+    .cite-meta { color: var(--text-dim); font-size: 0.95rem; margin-bottom: 1rem; }
+    .cite-meta a { color: var(--primary); }
+
+    /* License pill */
+    .license-pill {
+      display: inline-flex; align-items: center; gap: 0.5rem;
+      padding: 0.45rem 0.85rem;
+      background: linear-gradient(135deg, var(--accent), var(--primary));
+      color: #fff; border-radius: 999px;
+      font-size: 0.88rem; font-weight: 600; letter-spacing: 0.02em;
+      box-shadow: 0 6px 16px rgba(0,137,123,0.25);
+    }
+
+    /* ========================================================== */
+    /* PROMPT DECK — § 02 "All you need is a short prompt".        */
+    /* Each panel: title, 1–2 sentence description, scrollable     */
+    /* prompt area with a fade-out, and a "more …" toggle.         */
+    /* ========================================================== */
+
+    .deck-group-title {
+      display: flex; align-items: center; gap: 0.7rem;
+      font-size: 0.78rem; font-weight: 600;
+      letter-spacing: 0.08em; text-transform: uppercase;
+      color: var(--primary); margin: 1.6rem 0 0.9rem;
+    }
+    .deck-group-title:first-child { margin-top: 0.4rem; }
+    .deck-group-title::before, .deck-group-title::after {
+      content: ""; flex: 1; height: 1px;
+      background: linear-gradient(90deg, transparent, var(--border), transparent);
+    }
+
+    .prompt-deck {
+      display: flex; flex-direction: column; gap: 1rem;
+    }
+
+    .prompt-panel {
+      padding: 1.3rem 1.4rem;
+      background: #e6f1fb;
+      border-color: rgba(25,118,210,0.22);
+    }
+    .prompt-panel .panel-head {
+      display: flex; align-items: flex-start; justify-content: space-between;
+      gap: 0.8rem; flex-wrap: wrap;
+    }
+    .prompt-panel .panel-title {
+      font-size: 1.02rem; font-weight: 600; margin-bottom: 0;
+    }
+    .prompt-panel .panel-badge {
+      flex-shrink: 0;
+      font-family: 'Roboto Mono', monospace;
+      font-size: 0.7rem; font-weight: 600; letter-spacing: 0.04em;
+      text-transform: uppercase;
+      padding: 0.2rem 0.55rem; border-radius: 999px;
+      background: var(--primary-soft); color: var(--primary-dark);
+      white-space: nowrap;
+    }
+    .prompt-panel .panel-badge.trick {
+      background: rgba(0,137,123,0.10); color: var(--accent);
+    }
+    .prompt-panel .panel-desc {
+      color: var(--text-dim); font-size: 0.92rem; line-height: 1.6;
+      margin-top: 0.5rem;
+    }
+
+    .prompt-body {
+      position: relative;
+      margin-top: 0.85rem;
+      background: var(--code-bg);
+      color: var(--code-text);
+      border-radius: 8px;
+      overflow: hidden;
+      box-shadow: var(--shadow-1);
+    }
+    .prompt-body pre {
+      margin: 0;
+      padding: 0.9rem 1.05rem;
+      font-family: 'Roboto Mono', 'JetBrains Mono', monospace;
+      font-size: 0.95rem; line-height: 1.65;
+      white-space: pre-wrap; word-wrap: break-word;
+      /* Fixed height: exactly 8 lines (8 * 1.65em + vertical padding).  */
+      /* Any overflow becomes a scroller — no more/less expansion.       */
+      height: calc(8 * 1.65 * 0.95rem + 1.8rem);
+      overflow-y: auto;
+      color: inherit;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(255,255,255,0.25) transparent;
+    }
+    .prompt-body pre::-webkit-scrollbar { width: 8px; }
+    .prompt-body pre::-webkit-scrollbar-thumb {
+      background: rgba(255,255,255,0.20); border-radius: 4px;
+    }
+    .prompt-body pre::-webkit-scrollbar-track { background: transparent; }
+
+    /* The fade overlay and "more …" button are no longer used now    */
+    /* that the prompt body has a fixed 5-line height and is always   */
+    /* scrollable for any overflow.                                   */
+    .prompt-fade { display: none; }
+    .prompt-more { display: none; }
+
+    /* ============================================================ */
+    /* Copy-to-clipboard button overlaid on the top-right of each    */
+    /* prompt body. Injected by JS; styled to be unobtrusive but     */
+    /* readable on the dark code background.                         */
+    /* ============================================================ */
+    .prompt-copy {
+      position: absolute;
+      top: 6px;
+      right: 6px;
+      z-index: 2;
+      display: inline-flex; align-items: center; gap: 0.32rem;
+      font-family: 'Roboto Mono', monospace;
+      font-size: 0.72rem; font-weight: 600;
+      letter-spacing: 0.04em; text-transform: uppercase;
+      color: #e8eefc;
+      background: rgba(255,255,255,0.10);
+      border: 1px solid rgba(255,255,255,0.22);
+      border-radius: 6px;
+      padding: 0.28rem 0.55rem;
+      cursor: pointer;
+      backdrop-filter: blur(4px);
+      -webkit-backdrop-filter: blur(4px);
+      transition: background 0.18s ease, color 0.18s ease, border-color 0.18s ease, transform 0.12s ease;
+    }
+    .prompt-copy:hover {
+      background: rgba(255,255,255,0.18);
+      border-color: rgba(255,255,255,0.35);
+    }
+    .prompt-copy:active { transform: translateY(1px); }
+    .prompt-copy:focus-visible {
+      outline: 2px solid var(--primary);
+      outline-offset: 2px;
+    }
+    .prompt-copy.copied {
+      background: rgba(0,137,123,0.85);
+      border-color: rgba(0,137,123,1);
+      color: #fff;
+    }
+    .prompt-copy .copy-icon { width: 13px; height: 13px; }
+
+    /* ========================================================== */
+    /* PROMPT CAROUSEL — show one panel at a time at the same      */
+    /* location with prev/next, dots, counter, and autoplay.       */
+    /* ========================================================== */
+    .prompt-carousel { margin-top: 0.4rem; }
+    .prompt-stage {
+      position: relative;
+      border-radius: 14px;
+      /* Clip panels as they fly in/out horizontally. Small vertical    */
+      /* padding preserves the panel's drop-shadow above/below.         */
+      overflow: hidden;
+      padding: 6px 0;
+      margin: -6px 0;
+    }
+    .prompt-stage > .prompt-panel {
+      position: absolute;
+      inset: 6px 0;
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+      transform: translateX(100%);
+      transition:
+        transform 0.55s cubic-bezier(0.22, 0.61, 0.36, 1),
+        opacity 0.45s ease;
+      will-change: transform, opacity;
+    }
+    .prompt-stage > .prompt-panel.active {
+      position: relative;
+      inset: auto;
+      opacity: 1;
+      visibility: visible;
+      pointer-events: auto;
+      transform: translateX(0);
+    }
+    /* Pre-position incoming panel just before it slides in.            */
+    .prompt-stage > .prompt-panel.enter-right {
+      transform: translateX(100%);
+      opacity: 0;
+      visibility: visible;
+    }
+    .prompt-stage > .prompt-panel.enter-left {
+      transform: translateX(-100%);
+      opacity: 0;
+      visibility: visible;
+    }
+    /* Outgoing panel flies off to the opposite side.                   */
+    .prompt-stage > .prompt-panel.exit-left {
+      position: absolute;
+      inset: 6px 0;
+      transform: translateX(-100%);
+      opacity: 0;
+      visibility: visible;
+      pointer-events: none;
+    }
+    .prompt-stage > .prompt-panel.exit-right {
+      position: absolute;
+      inset: 6px 0;
+      transform: translateX(100%);
+      opacity: 0;
+      visibility: visible;
+      pointer-events: none;
+    }
+    /* Cancel the section-card stagger animation inside the stage  */
+    /* so its final opacity:1 fill doesn't reveal hidden panels.   */
+    .section-card.in-view .prompt-stage > .prompt-panel { animation: none; }
+
+    .carousel-controls {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 0.8rem; margin-top: 1.15rem; flex-wrap: wrap;
+    }
+    .carousel-counter {
+      font-family: 'Roboto Mono', monospace;
+      font-size: 0.86rem; color: var(--text-dim);
+      letter-spacing: 0.05em;
+      display: inline-flex; align-items: center; gap: 0.55rem;
+      flex: 1; justify-content: center; min-width: 0;
+    }
+    .carousel-counter strong { color: var(--text); font-weight: 600; }
+    .carousel-counter .kind {
+      display: inline-block;
+      padding: 0.18rem 0.55rem; border-radius: 999px;
+      font-family: 'Roboto Mono', monospace;
+      font-size: 0.70rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
+      background: var(--primary-soft); color: var(--primary-dark);
+    }
+    .carousel-counter .kind.trick {
+      background: rgba(0,137,123,0.10); color: var(--accent);
+    }
+
+    .carousel-btn {
+      background: transparent; color: var(--primary);
+      border: 1px solid var(--border);
+      font-family: inherit; font-size: 0.86rem; font-weight: 500;
+      padding: 0.45rem 1rem; border-radius: 8px;
+      cursor: pointer; display: inline-flex; align-items: center; gap: 0.4rem;
+      transition: background 0.15s, border-color 0.15s, color 0.15s, transform 0.1s;
+      flex-shrink: 0;
+    }
+    .carousel-btn:hover {
+      background: var(--primary-soft);
+      border-color: var(--primary);
+      color: var(--primary-dark);
+    }
+    .carousel-btn:active { transform: scale(0.97); }
+    .carousel-btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+    .carousel-btn .arrow { font-weight: 600; }
+
+    .carousel-dots {
+      display: flex; flex-wrap: wrap; gap: 0.38rem;
+      margin-top: 1rem; justify-content: center;
+    }
+    .carousel-dot {
+      width: 9px; height: 9px; border-radius: 50%;
+      background: var(--border); border: none; padding: 0;
+      cursor: pointer; transition: background 0.18s, transform 0.18s;
+    }
+    .carousel-dot:hover { background: var(--primary-soft); transform: scale(1.2); }
+    .carousel-dot.active { background: var(--primary); transform: scale(1.4); }
+    .carousel-dot.trick.active { background: var(--accent); }
+    .carousel-dot:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+
+    @media (prefers-reduced-motion: reduce) {
+      .prompt-stage > .prompt-panel,
+      .prompt-stage > .prompt-panel.enter-right,
+      .prompt-stage > .prompt-panel.enter-left,
+      .prompt-stage > .prompt-panel.exit-left,
+      .prompt-stage > .prompt-panel.exit-right { transition: none; transform: none; }
+    }
+    @media (max-width: 540px) {
+      .carousel-counter { order: 3; flex-basis: 100%; }
+      .carousel-controls { justify-content: space-between; }
+    }
+
+    /* Footer */
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 2rem 1.5rem; text-align: center;
+      color: var(--text-dim); font-size: 0.88rem; background: var(--surface);
+      margin-top: 2.5rem;
+    }
+    footer a { color: var(--primary); text-decoration: none; }
+    footer a:hover { text-decoration: underline; }
+
+    /* Mobile */
+    @media (max-width: 900px) {
+      .grid-3 { grid-template-columns: 1fr 1fr; }
+      .grid-4 { grid-template-columns: 1fr 1fr; }
+      .name-grid { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 820px) {
+      nav .links { display: none; }
+      .benchmark { grid-template-columns: 1fr; text-align: center; }
+      .benchmark .divider { width: 60%; height: 1px; margin: 0 auto; }
+      .section-card { padding: 2rem 1.4rem; }
+    }
+    @media (max-width: 540px) {
+      .grid-3 { grid-template-columns: 1fr; }
+      .grid-2 { grid-template-columns: 1fr; }
+      .grid-4 { grid-template-columns: 1fr; }
+    }
+
+    /* Respect reduced motion. */
+    @media (prefers-reduced-motion: reduce) {
+      .section-card::before { animation: none; }
+      nav .brand .dot { animation: none; background: linear-gradient(135deg, var(--primary), var(--accent)); }
+      .section-card {
+        opacity: 1; transform: none;
+        transition: none;
+      }
+      .section-card.in-view .inner-card { animation: none; }
+      #magic-dust { display: none; }
+      html { scroll-behavior: auto; }
+    }
+
+    /* ============================================================
+       VISUAL OVERHAUL — modern dark theme, ambient gradients,
+       glassmorphism, gradient sweeps, scroll-reveal, animated stats.
+       Applied via :root[data-theme="dark"] override so the same
+       file can be flipped back to the original light palette by
+       setting <html data-theme="light">.
+       ============================================================ */
+    :root[data-theme="dark"] {
+      --bg: #07090f;
+      --surface: rgba(255,255,255,0.035);
+      --surface-2: rgba(255,255,255,0.07);
+      --border: rgba(167,139,250,0.18);
+      --text: #ecedf3;
+      --text-dim: #a8b0c2;
+      --text-soft: #7c869a;
+      --primary: #2dd4bf;
+      --primary-dark: #14b8a6;
+      --primary-soft: rgba(45,212,191,0.12);
+      --accent: #a78bfa;
+      --gold: #fbbf24;
+      --magenta: #ec4899;
+      --code-bg: #0b1020;
+      --code-text: #e8eaed;
+      --shadow-1: 0 2px 8px rgba(0,0,0,0.45), 0 1px 2px rgba(0,0,0,0.5);
+      --shadow-2: 0 8px 26px rgba(0,0,0,0.55), 0 2px 6px rgba(0,0,0,0.4);
+      --shadow-3: 0 22px 60px -18px rgba(45,212,191,0.42), 0 14px 36px -16px rgba(167,139,250,0.40);
+    }
+
+    /* Everything below is scoped to dark theme via CSS native nesting.
+       Type selectors inside a nested block are matched as descendants
+       of the parent selector — modern browsers (Chrome 120+, Safari 17.2+,
+       Firefox 117+) support this out of the box. */
+    html[data-theme="dark"] {
+
+    &, body { background: var(--bg); color: var(--text); }
+
+    /* Ambient animated gradient orbs behind everything. */
+    body {
+      position: relative;
+      background:
+        radial-gradient(ellipse 80% 60% at 20% 0%, rgba(45,212,191,0.10), transparent 60%),
+        radial-gradient(ellipse 70% 60% at 85% 15%, rgba(167,139,250,0.12), transparent 60%),
+        radial-gradient(ellipse 90% 60% at 50% 100%, rgba(236,72,153,0.07), transparent 65%),
+        var(--bg);
+      background-attachment: fixed;
+    }
+    body::before {
+      content: "";
+      position: fixed; inset: -10%;
+      z-index: -2; pointer-events: none;
+      background:
+        radial-gradient(circle 380px at 12% 18%, rgba(45,212,191,0.18), transparent 60%),
+        radial-gradient(circle 460px at 88% 28%, rgba(167,139,250,0.22), transparent 60%),
+        radial-gradient(circle 520px at 22% 78%, rgba(236,72,153,0.14), transparent 60%),
+        radial-gradient(circle 420px at 78% 92%, rgba(251,191,36,0.10), transparent 60%);
+      filter: blur(40px) saturate(140%);
+      animation: orb-float 22s ease-in-out infinite alternate;
+    }
+    body::after {
+      content: "";
+      position: fixed; inset: 0;
+      z-index: -1; pointer-events: none;
+      background-image: radial-gradient(circle, rgba(255,255,255,0.045) 1px, transparent 1px);
+      background-size: 26px 26px;
+      mask-image: radial-gradient(ellipse 80% 70% at 50% 35%, #000 30%, transparent 75%);
+      -webkit-mask-image: radial-gradient(ellipse 80% 70% at 50% 35%, #000 30%, transparent 75%);
+      opacity: 0.7;
+    }
+    } /* end html[data-theme="dark"] (extract @keyframes to top level) */
+    @keyframes orb-float {
+      0%   { transform: translate3d(0, 0, 0)   scale(1);    }
+      50%  { transform: translate3d(2%, -3%, 0) scale(1.06); }
+      100% { transform: translate3d(-3%, 2%, 0) scale(0.96); }
+    }
+    html[data-theme="dark"] {
+
+    /* Navigation — glass dark bar with gradient bottom edge. */
+    nav {
+      background: rgba(9,12,22,0.72);
+      border-bottom: 1px solid rgba(167,139,250,0.18);
+      box-shadow: 0 1px 0 rgba(45,212,191,0.08), 0 18px 40px -28px rgba(0,0,0,0.7);
+    }
+    nav::after {
+      content: "";
+      position: absolute; left: 0; right: 0; bottom: -1px; height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(45,212,191,0.55), rgba(167,139,250,0.55), transparent);
+      pointer-events: none;
+    }
+    nav .brand { color: var(--text); }
+    nav .links a {
+      position: relative; color: var(--text-dim); border-bottom-color: transparent;
+    }
+    nav .links a::after {
+      content: ""; position: absolute; left: 50%; bottom: -2px;
+      width: 0; height: 2px; transform: translateX(-50%);
+      background: linear-gradient(90deg, var(--primary), var(--accent));
+      border-radius: 2px;
+      transition: width 0.25s ease;
+    }
+    nav .links a:hover { color: var(--text); border-bottom-color: transparent; }
+    nav .links a:hover::after { width: 100%; }
+    nav .gh-badge {
+      background: linear-gradient(140deg, rgba(45,212,191,0.16), rgba(167,139,250,0.18));
+      border-color: rgba(167,139,250,0.30);
+      color: var(--text);
+      backdrop-filter: blur(8px);
+      box-shadow: 0 6px 18px -10px rgba(45,212,191,0.4);
+    }
+    nav .gh-badge:hover {
+      background: linear-gradient(140deg, rgba(45,212,191,0.30), rgba(167,139,250,0.32));
+      border-color: rgba(45,212,191,0.5);
+      transform: translateY(-1px);
+    }
+
+    /* Hero h1 — gradient sweep with subtle shimmer. */
+    .hero h1 {
+      background: linear-gradient(110deg,
+        #ecedf3 0%, #ecedf3 30%,
+        #2dd4bf 45%, #a78bfa 60%,
+        #ecedf3 75%, #ecedf3 100%);
+      background-size: 250% auto;
+      -webkit-background-clip: text; background-clip: text;
+      -webkit-text-fill-color: transparent; color: transparent;
+      animation: shimmer 9s ease-in-out infinite;
+    }
+    } /* end html[data-theme="dark"] (extract @keyframes to top level) */
+    @keyframes shimmer {
+      0%, 100% { background-position: 0% center; }
+      50%      { background-position: 100% center; }
+    }
+    html[data-theme="dark"] {
+    .hero-logo { filter: drop-shadow(0 10px 36px rgba(45,212,191,0.35)) drop-shadow(0 6px 18px rgba(167,139,250,0.25)); }
+    .hero-quote blockquote { color: var(--text-dim); }
+    .hero-quote figcaption { color: var(--text-soft); }
+    .hero-trust {
+      color: var(--text-dim);
+    }
+    .hero-trust strong {
+      background: linear-gradient(90deg, var(--primary), var(--accent));
+      -webkit-background-clip: text; background-clip: text;
+      -webkit-text-fill-color: transparent; color: transparent;
+    }
+
+    /* Benchmark band — glass with gradient strong text. */
+    .benchmark {
+      background: linear-gradient(140deg, rgba(45,212,191,0.07), rgba(167,139,250,0.08));
+      border: 1px solid rgba(167,139,250,0.22);
+      backdrop-filter: blur(14px) saturate(140%);
+      -webkit-backdrop-filter: blur(14px) saturate(140%);
+      box-shadow: 0 20px 50px -24px rgba(0,0,0,0.65);
+    }
+    .benchmark .divider { background: rgba(167,139,250,0.22); }
+    .benchmark .cell .v { color: var(--text); }
+
+    /* Hero demo video frame. */
+    .screenshot img, .screenshot video {
+      border: 1px solid rgba(167,139,250,0.30);
+      box-shadow:
+        0 30px 90px -30px rgba(45,212,191,0.45),
+        0 18px 50px -20px rgba(167,139,250,0.40),
+        0 0 0 1px rgba(255,255,255,0.04) inset;
+      background: #000;
+    }
+
+    /* Hero CTAs — gradient sweep + glow on hover. */
+    .cta-btn {
+      position: relative; overflow: hidden; isolation: isolate;
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+    }
+    .cta-btn::after {
+      content: ""; position: absolute; inset: 0;
+      background: linear-gradient(120deg, transparent 30%, rgba(255,255,255,0.22) 50%, transparent 70%);
+      transform: translateX(-110%);
+      transition: transform 0.7s ease;
+      pointer-events: none;
+      z-index: 0;
+    }
+    .cta-btn:hover::after { transform: translateX(110%); }
+    .cta-btn > * { position: relative; z-index: 1; }
+
+    .cta-vscode {
+      background: linear-gradient(135deg, #2dd4bf, #14b8a6 70%, #a78bfa);
+      border-color: transparent;
+      color: #051815;
+      box-shadow: 0 12px 32px -10px rgba(45,212,191,0.55);
+    }
+    .cta-vscode:hover {
+      background: linear-gradient(135deg, #38e8d3, #2dd4bf 65%, #c4b0ff);
+      color: #051815;
+      transform: translateY(-2px);
+      box-shadow: 0 18px 42px -10px rgba(45,212,191,0.65), 0 0 0 1px rgba(255,255,255,0.15) inset;
+    }
+    .cta-pip {
+      background: rgba(11,16,32,0.65);
+      border-color: rgba(167,139,250,0.35);
+      color: var(--text);
+    }
+    .cta-pip:hover { border-color: var(--primary); color: var(--text); transform: translateY(-2px); box-shadow: 0 14px 32px -14px rgba(45,212,191,0.45); }
+    .cta-pip.copied { border-color: var(--primary); color: var(--primary); }
+    .cta-star {
+      background: linear-gradient(135deg, rgba(167,139,250,0.16), rgba(45,212,191,0.18));
+      border-color: rgba(167,139,250,0.35);
+      color: var(--text);
+    }
+    .cta-star:hover { transform: translateY(-2px); border-color: var(--accent); box-shadow: 0 14px 32px -14px rgba(167,139,250,0.55); }
+    .star-count {
+      background: linear-gradient(90deg, var(--primary), var(--accent));
+      -webkit-background-clip: text; background-clip: text;
+      -webkit-text-fill-color: transparent; color: transparent;
+      font-weight: 700;
+    }
+
+    /* Social proof + quickstart strips on dark. */
+    .social-proof, .social-proof-row { color: var(--text-dim); }
+    .social-proof-row strong, .social-proof-row span strong { color: var(--text); }
+    .quickstart {
+      background: linear-gradient(140deg, rgba(45,212,191,0.06), rgba(167,139,250,0.08));
+      border: 1px solid rgba(167,139,250,0.22);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      border-radius: 16px;
+      box-shadow: 0 24px 56px -24px rgba(0,0,0,0.6);
+    }
+    .quickstart-title { color: var(--text); }
+    .quickstart-copy {
+      background: rgba(11,16,32,0.7);
+      color: var(--code-text);
+      border: 1px solid rgba(167,139,250,0.28);
+    }
+    .quickstart-copy:hover { border-color: var(--primary); background: rgba(11,16,32,0.85); }
+    .quickstart-copy.copied { color: var(--primary); border-color: var(--primary); }
+
+    /* Sections — glassmorphic cards with vibrant border. */
+    .section-card {
+      background: linear-gradient(160deg, rgba(20,24,40,0.72), rgba(12,16,28,0.85));
+      backdrop-filter: blur(18px) saturate(140%);
+      -webkit-backdrop-filter: blur(18px) saturate(140%);
+      border: 1px solid rgba(167,139,250,0.10);
+      box-shadow:
+        0 30px 70px -30px rgba(0,0,0,0.7),
+        0 0 0 1px rgba(255,255,255,0.02) inset;
+      color: var(--text);
+    }
+    .section-card::after {
+      background:
+        radial-gradient(circle at 8% 0%, rgba(45,212,191,0.10), transparent 55%),
+        radial-gradient(circle at 95% 100%, rgba(167,139,250,0.10), transparent 60%);
+    }
+    .section-card h2 { color: var(--text); }
+    .section-card h2 .anchor { color: var(--text-soft); }
+    .section-card .sub { color: var(--text-dim); }
+    .section-card .num {
+      color: var(--primary);
+      background: linear-gradient(135deg, rgba(45,212,191,0.18), rgba(167,139,250,0.18));
+      border: 1px solid rgba(45,212,191,0.30);
+      letter-spacing: 0.06em;
+    }
+
+    /* Inner cards — glass tiles with vivid hover lift. */
+    .inner-card {
+      background: linear-gradient(160deg, rgba(255,255,255,0.04), rgba(255,255,255,0.015));
+      border: 1px solid rgba(167,139,250,0.16);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      color: var(--text);
+    }
+    .inner-card::before {
+      background: radial-gradient(circle 240px at var(--mx, -200px) var(--my, -200px),
+        rgba(45,212,191,0.18), rgba(167,139,250,0.12) 40%, transparent 65%);
+    }
+    .inner-card:hover {
+      border-color: rgba(45,212,191,0.45);
+      box-shadow:
+        0 22px 48px -22px rgba(45,212,191,0.45),
+        0 14px 32px -14px rgba(167,139,250,0.35);
+    }
+    .inner-card h3, .inner-card h4 { color: var(--text); }
+    .inner-card h3::before, .inner-card h4::before {
+      background: linear-gradient(135deg, var(--primary), var(--accent));
+      box-shadow: 0 0 12px rgba(45,212,191,0.55);
+    }
+    .inner-card p, .inner-card li { color: var(--text-dim); }
+    .inner-card code {
+      background: rgba(11,16,32,0.6);
+      border: 1px solid rgba(167,139,250,0.22);
+      color: var(--primary);
+    }
+
+    /* Tables in dark. */
+    .compare-wrap { border-color: rgba(167,139,250,0.22); }
+    table.compare { background: transparent; color: var(--text); }
+    table.compare th, table.compare td {
+      border-bottom-color: rgba(167,139,250,0.14);
+    }
+    table.compare thead th {
+      background: rgba(11,16,32,0.55);
+      color: var(--text);
+    }
+    table.compare thead th.kiss {
+      background: linear-gradient(135deg, rgba(45,212,191,0.25), rgba(167,139,250,0.22));
+      color: #fff;
+    }
+    table.compare th.cap { color: var(--text-dim); }
+    table.compare td.kiss {
+      background: linear-gradient(135deg, rgba(45,212,191,0.10), rgba(167,139,250,0.10));
+      color: var(--text);
+    }
+    table.compare .yes { color: #2dd4bf; }
+    table.compare .no  { color: #f87171; }
+    table.compare .warn { color: #fbbf24; }
+    table.compare small { color: var(--text-dim); }
+
+    .opt-table-wrap { border-color: rgba(167,139,250,0.22); }
+    table.opts th, table.opts td { border-bottom-color: rgba(167,139,250,0.14); color: var(--text); }
+    table.opts thead th { background: rgba(11,16,32,0.55); color: var(--text); }
+    table.opts code {
+      background: rgba(11,16,32,0.6); color: var(--primary);
+      border: 1px solid rgba(167,139,250,0.22);
+    }
+
+    /* Code panels — slightly punchier. */
+    .code-panel {
+      background: linear-gradient(170deg, #0b1020, #060912);
+      border: 1px solid rgba(167,139,250,0.22);
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.03);
+    }
+
+    /* Chips on dark. */
+    .chip {
+      background: linear-gradient(135deg, rgba(45,212,191,0.10), rgba(167,139,250,0.10));
+      border: 1px solid rgba(167,139,250,0.22);
+      color: var(--text);
+    }
+    .chip:hover {
+      background: linear-gradient(135deg, rgba(45,212,191,0.22), rgba(167,139,250,0.25));
+      border-color: rgba(45,212,191,0.55);
+      transform: translateY(-1px);
+      color: #fff;
+    }
+
+    /* Footer on dark. */
+    footer {
+      background: transparent;
+      border-top: 1px solid rgba(167,139,250,0.18);
+      color: var(--text-dim);
+    }
+    footer a { color: var(--primary); }
+    footer a:hover { color: var(--accent); }
+
+    /* Buttons — generic. */
+    .btn-main { background: linear-gradient(135deg, #2dd4bf, #14b8a6 60%, #a78bfa); border-color: transparent; color: #051815; }
+    .btn-main:hover { background: linear-gradient(135deg, #38e8d3, #2dd4bf 60%, #c4b0ff); color: #051815; transform: translateY(-2px); box-shadow: 0 16px 36px -14px rgba(45,212,191,0.55); }
+    .btn-ghost { background: rgba(11,16,32,0.6); color: var(--primary); border-color: rgba(167,139,250,0.30); }
+    .btn-ghost:hover { background: rgba(11,16,32,0.85); color: var(--text); border-color: var(--primary); transform: translateY(-2px); }
+
+    /* Custom scrollbars. */
+    * { scrollbar-color: rgba(167,139,250,0.55) transparent; scrollbar-width: thin; }
+    *::-webkit-scrollbar { width: 10px; height: 10px; }
+    *::-webkit-scrollbar-track { background: transparent; }
+    *::-webkit-scrollbar-thumb {
+      background: linear-gradient(180deg, rgba(45,212,191,0.55), rgba(167,139,250,0.65));
+      border-radius: 999px; border: 2px solid transparent; background-clip: padding-box;
+    }
+    *::-webkit-scrollbar-thumb:hover {
+      background: linear-gradient(180deg, rgba(45,212,191,0.8), rgba(167,139,250,0.9));
+      background-clip: padding-box;
+    }
+
+    /* Selection. */
+    ::selection { background: rgba(45,212,191,0.35); color: #fff; }
+
+    /* Scroll-reveal — JS toggles .in-view (also used by sections); add fade variant. */
+    .reveal { opacity: 0; transform: translateY(22px); transition: opacity 0.85s ease, transform 0.85s ease; }
+    .reveal.in-view { opacity: 1; transform: none; }
+
+    /* Tiny gradient divider helper. */
+    .grad-divider {
+      height: 1px; border: 0; margin: 2rem auto;
+      background: linear-gradient(90deg, transparent, rgba(45,212,191,0.4), rgba(167,139,250,0.5), transparent);
+    }
+
+    /* Reduced motion — disable ambient orb and shimmer. */
+    @media (prefers-reduced-motion: reduce) {
+      body::before { animation: none; }
+      .hero h1 { animation: none; background-position: 0 center; }
+      .cta-btn::after { transition: none; }
+      .reveal { opacity: 1; transform: none; transition: none; }
+    }
+    } /* end html[data-theme="dark"] wrapper */
+
+    /* ============================================================
+       LIGHT-THEME POLISH — when html[data-theme="light"], the dark
+       wrapper above is skipped entirely, falling back to the original
+       light palette from the first :root block.  These small tweaks
+       give the light theme its own polish: subtle pastel ambient
+       background, gradient bottom edge on nav, gradient h1 sweep,
+       gradient CTAs, and animated counters/scroll-reveal that re-use
+       the same JS classes as dark mode.
+       ============================================================ */
+    @keyframes orb-float-light {
+      0%   { transform: translate3d(0, 0, 0)   scale(1);    }
+      50%  { transform: translate3d(2%, -3%, 0) scale(1.05); }
+      100% { transform: translate3d(-3%, 2%, 0) scale(0.97); }
+    }
+    @keyframes shimmer-light {
+      0%, 100% { background-position: 0% center; }
+      50%      { background-position: 100% center; }
+    }
+
+    html[data-theme="light"] {
+      color-scheme: light;
+    }
+    html[data-theme="light"] body {
+      position: relative;
+      background:
+        radial-gradient(ellipse 80% 60% at 20% 0%, rgba(25,118,210,0.06), transparent 60%),
+        radial-gradient(ellipse 70% 60% at 85% 15%, rgba(0,137,123,0.05), transparent 60%),
+        radial-gradient(ellipse 90% 60% at 50% 100%, rgba(247,201,72,0.05), transparent 65%),
+        var(--bg);
+      background-attachment: fixed;
+    }
+    html[data-theme="light"] body::before {
+      content: "";
+      position: fixed; inset: -10%;
+      z-index: -2; pointer-events: none;
+      background:
+        radial-gradient(circle 380px at 12% 18%, rgba(25,118,210,0.10), transparent 60%),
+        radial-gradient(circle 460px at 88% 28%, rgba(0,137,123,0.10), transparent 60%),
+        radial-gradient(circle 520px at 22% 78%, rgba(247,201,72,0.08), transparent 60%);
+      filter: blur(40px) saturate(140%);
+      animation: orb-float-light 22s ease-in-out infinite alternate;
+    }
+    html[data-theme="light"] body::after {
+      content: "";
+      position: fixed; inset: 0;
+      z-index: -1; pointer-events: none;
+      background-image: radial-gradient(circle, rgba(25,118,210,0.06) 1px, transparent 1px);
+      background-size: 26px 26px;
+      mask-image: radial-gradient(ellipse 80% 70% at 50% 35%, #000 30%, transparent 75%);
+      -webkit-mask-image: radial-gradient(ellipse 80% 70% at 50% 35%, #000 30%, transparent 75%);
+      opacity: 0.55;
+    }
+    html[data-theme="light"] nav {
+      background: rgba(255,255,255,0.78);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+      box-shadow: 0 1px 0 rgba(25,118,210,0.05), 0 18px 40px -30px rgba(0,0,0,0.12);
+    }
+    html[data-theme="light"] nav::after {
+      content: "";
+      position: absolute; left: 0; right: 0; bottom: -1px; height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(25,118,210,0.45), rgba(0,137,123,0.45), transparent);
+      pointer-events: none;
+    }
+    html[data-theme="light"] nav .links a {
+      position: relative; border-bottom-color: transparent;
+    }
+    html[data-theme="light"] nav .links a::after {
+      content: ""; position: absolute; left: 50%; bottom: -2px;
+      width: 0; height: 2px; transform: translateX(-50%);
+      background: linear-gradient(90deg, var(--primary), var(--accent));
+      border-radius: 2px;
+      transition: width 0.25s ease;
+    }
+    html[data-theme="light"] nav .links a:hover { border-bottom-color: transparent; }
+    html[data-theme="light"] nav .links a:hover::after { width: 100%; }
+    html[data-theme="light"] .hero h1 {
+      background: linear-gradient(110deg,
+        #212121 0%, #212121 30%,
+        #1976d2 45%, #00897b 60%,
+        #212121 75%, #212121 100%);
+      background-size: 250% auto;
+      -webkit-background-clip: text; background-clip: text;
+      -webkit-text-fill-color: transparent; color: transparent;
+      animation: shimmer-light 9s ease-in-out infinite;
+    }
+    html[data-theme="light"] .hero-trust strong {
+      background: linear-gradient(90deg, var(--primary), var(--accent));
+      -webkit-background-clip: text; background-clip: text;
+      -webkit-text-fill-color: transparent; color: transparent;
+    }
+    html[data-theme="light"] .star-count {
+      background: linear-gradient(90deg, var(--primary), var(--accent));
+      -webkit-background-clip: text; background-clip: text;
+      -webkit-text-fill-color: transparent; color: transparent;
+      font-weight: 700;
+    }
+    html[data-theme="light"] .cta-btn { position: relative; overflow: hidden; isolation: isolate; }
+    html[data-theme="light"] .cta-btn::after {
+      content: ""; position: absolute; inset: 0;
+      background: linear-gradient(120deg, transparent 30%, rgba(255,255,255,0.45) 50%, transparent 70%);
+      transform: translateX(-110%);
+      transition: transform 0.7s ease;
+      pointer-events: none;
+      z-index: 0;
+    }
+    html[data-theme="light"] .cta-btn:hover::after { transform: translateX(110%); }
+    html[data-theme="light"] .cta-btn > * { position: relative; z-index: 1; }
+    html[data-theme="light"] .cta-vscode {
+      background: linear-gradient(135deg, #1976d2, #00897b 70%, #1976d2);
+      border-color: transparent;
+      color: #fff;
+      box-shadow: 0 10px 24px -10px rgba(25,118,210,0.45);
+    }
+    html[data-theme="light"] .cta-vscode:hover {
+      background: linear-gradient(135deg, #2186e8, #00a392 70%, #2186e8);
+      color: #fff;
+      transform: translateY(-2px);
+      box-shadow: 0 16px 36px -10px rgba(25,118,210,0.55);
+    }
+    html[data-theme="light"] .inner-card,
+    html[data-theme="light"] .section-card,
+    html[data-theme="light"] .quickstart {
+      transition: transform 0.3s ease, box-shadow 0.3s ease, border-color 0.3s ease;
+    }
+    html[data-theme="light"] .inner-card:hover {
+      transform: translateY(-3px);
+      border-color: rgba(25,118,210,0.40);
+      box-shadow: 0 18px 36px -18px rgba(25,118,210,0.30), 0 10px 24px -14px rgba(0,137,123,0.25);
+    }
+    /* Custom scrollbars + selection in light theme. */
+    html[data-theme="light"] *,
+    html[data-theme="light"] { scrollbar-color: rgba(25,118,210,0.45) transparent; scrollbar-width: thin; }
+    html[data-theme="light"] *::-webkit-scrollbar { width: 10px; height: 10px; }
+    html[data-theme="light"] *::-webkit-scrollbar-track { background: transparent; }
+    html[data-theme="light"] *::-webkit-scrollbar-thumb {
+      background: linear-gradient(180deg, rgba(25,118,210,0.55), rgba(0,137,123,0.65));
+      border-radius: 999px; border: 2px solid transparent; background-clip: padding-box;
+    }
+    html[data-theme="light"] *::-webkit-scrollbar-thumb:hover {
+      background: linear-gradient(180deg, rgba(25,118,210,0.8), rgba(0,137,123,0.9));
+      background-clip: padding-box;
+    }
+    html[data-theme="light"] ::selection { background: rgba(25,118,210,0.25); color: #0d1117; }
+    html[data-theme="light"] .reveal { opacity: 0; transform: translateY(22px); transition: opacity 0.85s ease, transform 0.85s ease; }
+    html[data-theme="light"] .reveal.in-view { opacity: 1; transform: none; }
+    @media (prefers-reduced-motion: reduce) {
+      html[data-theme="light"] body::before { animation: none; }
+      html[data-theme="light"] .hero h1 { animation: none; background-position: 0 center; }
+      html[data-theme="light"] .cta-btn::after { transition: none; }
+      html[data-theme="light"] .reveal { opacity: 1; transform: none; transition: none; }
+    }
+
+    /* ============================================================
+       THEME TOGGLE BUTTON — sits in the nav, swaps sun/moon icon.
+       Works in both light and dark via :root[data-theme="..."].
+       ============================================================ */
+    .theme-toggle {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 38px; height: 38px;
+      padding: 0; margin-left: 0.4rem;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--text);
+      cursor: pointer;
+      transition: transform 0.25s ease, background 0.25s ease, border-color 0.25s ease, box-shadow 0.25s ease, color 0.25s ease;
+      position: relative;
+      overflow: hidden;
+    }
+    .theme-toggle:hover {
+      transform: translateY(-1px) rotate(-10deg);
+      border-color: var(--primary);
+      color: var(--primary);
+    }
+    .theme-toggle:focus-visible {
+      outline: 2px solid var(--primary);
+      outline-offset: 2px;
+    }
+    .theme-toggle svg {
+      width: 18px; height: 18px;
+      transition: transform 0.45s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.25s ease;
+    }
+    .theme-toggle .icon-sun,
+    .theme-toggle .icon-moon {
+      position: absolute;
+      top: 50%; left: 50%;
+      transform: translate(-50%, -50%) scale(1) rotate(0);
+    }
+    /* Dark theme: show the SUN (click to switch to light). Moon hidden. */
+    html[data-theme="dark"] .theme-toggle .icon-moon {
+      opacity: 0; transform: translate(-50%, -50%) scale(0.4) rotate(-90deg);
+    }
+    html[data-theme="dark"] .theme-toggle .icon-sun {
+      opacity: 1; transform: translate(-50%, -50%) scale(1) rotate(0);
+    }
+    html[data-theme="dark"] .theme-toggle {
+      background: linear-gradient(140deg, rgba(45,212,191,0.16), rgba(167,139,250,0.18));
+      border-color: rgba(167,139,250,0.35);
+      color: var(--gold);
+      box-shadow: 0 6px 18px -10px rgba(45,212,191,0.4);
+    }
+    html[data-theme="dark"] .theme-toggle:hover {
+      background: linear-gradient(140deg, rgba(45,212,191,0.28), rgba(167,139,250,0.30));
+      border-color: var(--primary);
+      color: var(--gold);
+      box-shadow: 0 10px 24px -10px rgba(45,212,191,0.55);
+    }
+    /* Light theme: show the MOON (click to switch to dark). Sun hidden. */
+    html[data-theme="light"] .theme-toggle .icon-sun,
+    :root:not([data-theme="dark"]) .theme-toggle .icon-sun {
+      opacity: 0; transform: translate(-50%, -50%) scale(0.4) rotate(90deg);
+    }
+    html[data-theme="light"] .theme-toggle .icon-moon,
+    :root:not([data-theme="dark"]) .theme-toggle .icon-moon {
+      opacity: 1; transform: translate(-50%, -50%) scale(1) rotate(0);
+    }
+    html[data-theme="light"] .theme-toggle {
+      background: var(--surface);
+      border-color: var(--border);
+      color: var(--primary);
+    }
+    html[data-theme="light"] .theme-toggle:hover {
+      background: var(--primary-soft);
+      border-color: var(--primary);
+      color: var(--primary-dark);
+      box-shadow: 0 8px 20px -12px rgba(25,118,210,0.45);
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .theme-toggle, .theme-toggle svg { transition: none !important; }
+    }
+  </style>
+</head>
+<body>
+
+  <nav>
+    <div class="container">
+      <a href="#" class="brand">
+        <span>KISS Sorcar</span>
+      </a>
+      <ul class="links">
+        <li><a href="#">Demo</a></li>
+        <li><a href="#compare">Compare</a></li>
+        <li><a href="#prompts">Prompts</a></li>
+        <li><a href="#install">Install</a></li>
+        <li><a href="#models">Models</a></li>
+      </ul>
+      <a href="https://github.com/ksenxx/kiss_ai" class="gh-badge" aria-label="GitHub">
+        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.36-3.88-1.36-.52-1.33-1.27-1.69-1.27-1.69-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.18 1.76 1.18 1.02 1.75 2.69 1.24 3.34.95.1-.74.4-1.24.72-1.53-2.55-.29-5.24-1.27-5.24-5.66 0-1.25.45-2.27 1.18-3.07-.12-.29-.51-1.46.11-3.05 0 0 .96-.31 3.16 1.17.92-.26 1.91-.39 2.88-.39s1.96.13 2.88.39c2.2-1.48 3.16-1.17 3.16-1.17.62 1.59.23 2.76.11 3.05.74.8 1.18 1.82 1.18 3.07 0 4.4-2.69 5.37-5.25 5.65.41.36.78 1.05.78 2.12v3.14c0 .31.21.66.79.55C20.21 21.39 23.5 17.08 23.5 12 23.5 5.65 18.35.5 12 .5z"/></svg>
+        GitHub
+      </a>
+      <button type="button" id="theme-toggle" class="theme-toggle" aria-label="Switch to light theme" title="Switch theme">
+        <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="4"></circle>
+          <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"></path>
+        </svg>
+        <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+        </svg>
+      </button>
+    </div>
+  </nav>
+
+  <!-- Hero -->
+  <div class="hero">
+    <canvas id="magic-dust" aria-hidden="true"></canvas>
+    <div class="hero-mark">
+      <img src="assets/KISS-Sorcar.png" alt="KISS Sorcar" class="hero-logo">
+      <figure class="hero-quote">
+        <blockquote>Everything should be made as simple as possible, but not simpler.</blockquote>
+        <figcaption>&mdash; Albert Einstein</figcaption>
+      </figure>
+    </div>
+    <h1>Tell it what to do, in English and give it a concrete goal. It picks the best LLMs, runs on your laptop, and ships the work.</h1>
+    <div class="hero-trust" aria-label="At a glance">
+      <span><strong>Apache 2.0</strong> · open source</span>
+      <span><strong>62.2%</strong> on Terminal Bench 2.0</span>
+      <span><strong>502 models</strong> · 9 providers</span>
+      <span><strong>~2,500 lines</strong> of core agents code</span>
+    </div>
+  </div>
+
+  <!-- Intro blurb shown directly above the demo video -->
+  <div class="hero" style="padding-top: 0; padding-bottom: 1.5rem;">
+    <p class="lead lead--accent">
+      <strong>KISS Sorcar</strong> is an open-source general-purpose AI agent for long-horizon tasks and AI discovery.
+      It is a simple, local-first, bring-your-own-key AI agent framework. It runs as a VS Code extension,
+      a Claude-Code-style CLI, and a browser/mobile web app. Your prompts and code are sent directly to
+      the model provider or local endpoint you configure &mdash; <em>not through our servers</em>. It supports
+      multi-model workflows just via prompts. All agents run as daemons.
+    </p>
+  </div>
+
+  <!-- Hero demo video -->
+  <div class="screenshot">
+    <video src="assets/sorcar-main.mp4"
+           controls autoplay muted loop playsinline preload="auto"
+           poster="assets/KISS-Sorcar-UI.png"
+           aria-label="KISS Sorcar demo video">
+      <a href="assets/sorcar-main.mp4">Watch the KISS Sorcar demo video</a>
+    </video>
+  </div>
+
+  <!-- Preferred way to install KISS Sorcar (full stack) — directly below the demo video. -->
+  <div class="hero-install" aria-label="Full installation script for KISS Sorcar">
+    <div class="hero-install-card">
+      <div class="hero-install-head">
+        <h3 class="hero-install-title">Full installation script</h3>
+        <span class="hero-install-badge" aria-label="Recommended install method">★ Recommended</span>
+        <p class="hero-install-note">Preferred way to install KISS Sorcar &mdash; macOS &amp; Linux, one command, no extra steps.</p>
+      </div>
+      <button class="quickstart-copy hero-install-copy" type="button"
+              data-copy="curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install.sh | bash"
+              aria-label="Copy full installation script to clipboard">$ curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install.sh | bash</button>
+    </div>
+  </div>
+
+  <!-- Hero CTAs: Install (VS Code) · pipx install (click to copy) · Star on GitHub -->
+  <div class="hero-ctas" role="group" aria-label="Get started with KISS Sorcar">
+    <a class="cta-btn cta-vscode"
+       href="https://marketplace.visualstudio.com/items?itemName=ksenxx.kiss-sorcar"
+       target="_blank" rel="noopener"
+       aria-label="Install the KISS Sorcar VS Code extension">
+      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+        <path d="M23.15 2.587 18.21.21a1.494 1.494 0 0 0-1.705.29l-9.46 8.63-4.12-3.128a.999.999 0 0 0-1.276.057L.327 7.261A1 1 0 0 0 .326 8.74l3.574 3.26L.326 15.26a1 1 0 0 0 0 1.479l1.32 1.202a.999.999 0 0 0 1.276.057l4.12-3.128 9.46 8.63a1.493 1.493 0 0 0 1.705.29l4.942-2.377A1.5 1.5 0 0 0 24 19.957V3.943a1.5 1.5 0 0 0-.85-1.356zm-5.146 14.861L10.826 12l7.178-5.448v10.896z"/>
+      </svg>
+      Install (VS Code)
+    </a>
+
+    <button class="cta-btn cta-pip" type="button"
+            data-copy="pipx install kiss-agent-framework"
+            aria-label="Copy 'pipx install kiss-agent-framework' to clipboard">
+      <span class="cta-pip-prompt" aria-hidden="true">$</span>
+      <span class="cta-pip-text">pipx install kiss-agent-framework</span>
+      <svg class="cta-pip-copy-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+      </svg>
+    </button>
+
+    <a class="cta-btn cta-star"
+       href="https://github.com/ksenxx/kiss_ai"
+       target="_blank" rel="noopener"
+       aria-label="Star kiss_ai on GitHub">
+      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+        <path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.36-3.88-1.36-.52-1.33-1.27-1.69-1.27-1.69-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.18 1.76 1.18 1.02 1.75 2.69 1.24 3.34.95.1-.74.4-1.24.72-1.53-2.55-.29-5.24-1.27-5.24-5.66 0-1.25.45-2.27 1.18-3.07-.12-.29-.51-1.46.11-3.05 0 0 .96-.31 3.16 1.17.92-.26 1.91-.39 2.88-.39s1.96.13 2.88.39c2.2-1.48 3.16-1.17 3.16-1.17.62 1.59.23 2.76.11 3.05.74.8 1.18 1.82 1.18 3.07 0 4.4-2.69 5.37-5.25 5.65.41.36.78 1.05.78 2.12v3.14c0 .31.21.66.79.55C20.21 21.39 23.5 17.08 23.5 12 23.5 5.65 18.35.5 12 .5z"/>
+      </svg>
+      <span aria-hidden="true">★</span>
+      <span class="cta-star-label">Star on GitHub</span>
+      <span class="star-count" id="cta-star-count" data-loading="true" aria-label="Loading star count">…</span>
+    </a>
+  </div>
+
+  <!-- ================ § 01 — All you need is a short prompt ================ -->
+  <div class="section-wrap">
+  <section id="compare" class="section-card">
+    <span class="num">§ 01 — KISS Sorcar vs Claude Code vs Cursor</span>
+    <h2>How does it compare?<a href="#compare" class="anchor">¶</a></h2>
+    <p class="sub">A side-by-side look at the differences that matter for everyday use.</p>
+    <div class="section-body">
+      <div class="compare-wrap">
+        <table class="compare">
+          <thead>
+            <tr>
+              <th class="cap">Capability</th>
+              <th class="kiss">KISS Sorcar</th>
+              <th>Claude Code</th>
+              <th>Cursor</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <th class="cap">Interfaces</th>
+              <td class="kiss">CLI + VS Code extension + web/mobile app</td>
+              <td>CLI + mobile app</td>
+              <td>Custom VS Code</td>
+            </tr>
+            <tr>
+              <th class="cap">AI Discovery</th>
+              <td class="kiss"><span class="yes">✓</span> simply via prompt</td>
+              <td><span class="no">✗</span></td>
+              <td><span class="no">✗</span></td>
+            </tr>
+            <tr>
+              <th class="cap">GEPA Prompt Optimization</th>
+              <td class="kiss"><span class="yes">✓</span> simply via prompt</td>
+              <td><span class="no">✗</span></td>
+              <td><span class="no">✗</span></td>
+            </tr>
+            <tr>
+              <th class="cap">Multiple models from multiple vendors in the same task</th>
+              <td class="kiss"><span class="yes">✓</span> Mix OpenAI, Anthropic, Gemini, Together, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, and Codex CLI</td>
+              <td><span class="no">✗</span> Anthropic Claude models only</td>
+              <td><span class="no">✗</span> One model per task</td>
+            </tr>
+            <tr>
+              <th class="cap">Primary focus</th>
+              <td class="kiss"><span class="yes">✓</span> <strong>Quality</strong> &mdash; rigorous review, end-to-end tests</td>
+              <td>Speed and developer ergonomics</td>
+              <td>Speed</td>
+            </tr>
+            <tr>
+              <th class="cap">Core Agents # LoC</th>
+              <td class="kiss"><strong>~2500</strong></td>
+              <td>Unknown</td>
+              <td>Unknown</td>
+            </tr>
+            <tr>
+              <th class="cap">Models in bundled catalog</th>
+              <td class="kiss">502 across 9 provider categories</td>
+              <td>Claude family only</td>
+              <td>Subset chosen by Cursor</td>
+            </tr>
+            <tr>
+              <th class="cap">Bring your own API key / endpoint</th>
+              <td class="kiss"><span class="yes">✓</span> Yes &mdash; keys stay on your machine</td>
+              <td><span class="yes">✓</span> Anthropic key</td>
+              <td><span class="warn">⚠</span> Routed through Cursor backend</td>
+            </tr>
+            <tr>
+              <th class="cap">Open source</th>
+              <td class="kiss"><span class="yes">✓</span> Apache-2.0</td>
+              <td><span class="no">✗</span> Proprietary</td>
+              <td><span class="no">✗</span> Proprietary</td>
+            </tr>
+            <tr>
+              <th class="cap">Price</th>
+              <td class="kiss">Free framework; pay only your chosen model provider</td>
+              <td>Subscription / API usage</td>
+              <td>Subscription</td>
+            </tr>
+            <tr>
+              <th class="cap">Run on top of Claude Code / Codex CLI</th>
+              <td class="kiss"><span class="yes">✓</span> <code>cc/*</code> and <code>codex/*</code> namespaces</td>
+              <td>N/A</td>
+              <td><span class="no">✗</span></td>
+            </tr>
+            <tr>
+              <th class="cap">Messaging and communication channels</th>
+              <td class="kiss"><span class="yes">✓</span> 23 third-party agents, including Slack, Gmail, Phone Control, SMS, and WhatsApp</td>
+              <td><span class="warn">⚠</span> Slack, mobile Remote Control, and research-preview channels for Telegram, Discord, and iMessage; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel</td>
+              <td><span class="warn">⚠</span> Slack and Microsoft Teams Cloud Agent integrations; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel</td>
+            </tr>
+            <tr>
+              <th class="cap">Terminal Bench 2.0 score</th>
+              <td class="kiss"><strong>62.2%</strong></td>
+              <td>58%</td>
+              <td>61.7% <small>(Cursor agent)</small></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+  </div>
+
+  <!-- ================ § 03 — What is in the Name ================ -->
+  <div class="section-wrap">
+  <section id="prompts" class="section-card">
+    <span class="num">§ 02 — All you need is a short prompt in KISS Sorcar to do big complex tasks</span>
+    <h2>All You Need is a Short Prompt in KISS Sorcar to do Big Complex Tasks.<a href="#prompts" class="anchor">¶</a></h2>
+    <p class="sub" style="font-size:0.88rem; line-height:1.55;">KISS Sorcar ships with a curated set of <strong>sample tasks</strong> (long-horizon prompts you can drop straight into the CLI or VS Code extension or Web app) and <strong>promptlet tricks</strong> (short reusable directives that steer Sorcar's behaviour by injecting to the prompt). The tasks live in <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/SAMPLE_TASKS.md"><code>src/kiss/SAMPLE_TASKS.md</code></a>; the tricks live in <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/INJECTIONS.md"><code>src/kiss/INJECTIONS.md</code></a>. You can add your tasks at <code>~/.kiss/MY_TASK_TEMPLATES.md</code> and your promptlets at <code>~/.kiss/MY_INJECTIONS.md</code>.</p>
+    <div class="section-body">
+
+      <div class="prompt-carousel" id="prompt-carousel" aria-roledescription="carousel" aria-label="Sample tasks and promptlet tricks">
+        <div class="prompt-stage">
+
+        <article class="inner-card prompt-panel" style="--i:0">
+          <div class="panel-head">
+            <h3 class="panel-title">Explain a workflow step-by-step</h3>
+            <span class="panel-badge">Task</span>
+          </div>
+          <p class="panel-desc">Ask Sorcar to walk you through the detailed step-by-step workflow of any algorithm or feature in your codebase, so you can understand it before changing it.</p>
+          <div class="prompt-body">
+            <pre>Can you show me the detailed step-by-step workflow of &lt;&lt;your algorithm or feature&gt;&gt;</pre>
+            <div class="prompt-fade"></div>
+          </div>
+          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
+        </article>
+
+        <article class="inner-card prompt-panel" style="--i:1">
+          <div class="panel-head">
+            <h3 class="panel-title">Edit a specific step of a workflow</h3>
+            <span class="panel-badge">Task</span>
+          </div>
+          <p class="panel-desc">Modify a specific step of an existing workflow with a precise natural-language instruction — no need to point Sorcar at the file, it will find the right code.</p>
+          <div class="prompt-body">
+            <pre>Can you change the step &lt;&lt;specify step&gt;&gt; as follows: &lt;&lt;whatever way you want to change&gt;&gt;</pre>
+            <div class="prompt-fade"></div>
+          </div>
+          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
+        </article>
+
+        <article class="inner-card prompt-panel" style="--i:2">
+          <div class="panel-head">
+            <h3 class="panel-title">Authenticate with a Slack workspace</h3>
+            <span class="panel-badge">Task</span>
+          </div>
+          <p class="panel-desc">Have Sorcar log you into a Slack workspace using the bundled Slack agent, so it can send and receive messages on your behalf.</p>
+          <div class="prompt-body">
+            <pre>can you authenticate me with the &lt;&lt;workspace name&gt;&gt; workspace on Slack using the Slack agent?</pre>
+            <div class="prompt-fade"></div>
+          </div>
+          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
+        </article>
+
+        <article class="inner-card prompt-panel" style="--i:3">
+          <div class="panel-head">
+            <h3 class="panel-title">Run a Slack-driven cron job</h3>
+            <span class="panel-badge">Task</span>
+          </div>
+          <p class="panel-desc">Spin up a named cron job that polls a Slack channel for unanswered messages, runs them as Sorcar tasks in arrival order, and replies with Slack-formatted results.</p>
+          <div class="prompt-body">
+            <pre>Can you create a cron job with a name prefixed with "kiss-" which will check every 3 seconds if there are latest unanswered messages from /&lt;&lt;user name&gt;&gt; in the channel sorcar using the Slack agent, then it will run the messages as tasks one-by-one in the order of arrival and respond with the result suitably formatted for Slack.</pre>
+            <div class="prompt-fade"></div>
+          </div>
+          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
+        </article>
+
+        <article class="inner-card prompt-panel" style="--i:4">
+          <div class="panel-head">
+            <h3 class="panel-title">Authenticate with iMessage</h3>
+            <span class="panel-badge">Task</span>
+          </div>
+          <p class="panel-desc">Connect Sorcar to your iMessage account so it can send and receive texts directly from macOS.</p>
+          <div class="prompt-body">
+            <pre>can you authenticate me with the iMessage agent?</pre>
+            <div class="prompt-fade"></div>
+          </div>
+          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
+        </article>
+
+        <article class="inner-card prompt-panel" style="--i:5">
+          <div class="panel-head">
+            <h3 class="panel-title">Send an SMS to a phone number</h3>
+            <span class="panel-badge">Task</span>
+          </div>
+          <p class="panel-desc">Dispatch a one-line SMS to any phone number through Sorcar's messaging agents — no scripting required.</p>
+          <div class="prompt-body">
+            <pre>can you send "Hello" to 1-800-772-1213?</pre>
+            <div class="prompt-fade"></div>
+          </div>
+          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
+        </article>
+
+        <article class="inner-card prompt-panel" style="--i:6">
+          <div class="panel-head">
+            <h3 class="panel-title">Authenticate with Gmail</h3>
+            <span class="panel-badge">Task</span>
+          </div>
+          <p class="panel-desc">Walk through the OAuth login flow for Gmail using the bundled Gmail agent, with the browser handling consent and Sorcar storing the token locally.</p>
+          <div class="prompt-body">
+            <pre>can you authenticate me with Gmail using the Gmail agent? Use the user's default browser to ask the user to log in and to get the authentication token.</pre>
+            <div class="prompt-fade"></div>
+          </div>
+          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
+        </article>
+
+        <article class="inner-card prompt-panel" style="--i:7">
+          <div class="panel-head">
+            <h3 class="panel-title">Audit a paper or repo for fraud</h3>
+            <span class="panel-badge">Task</span>
+          </div>
+          <p class="panel-desc">Have Sorcar fact-check a URL for wrong assumptions, cheating, irreproducibility, fraud, AI slop, and security vulnerabilities — verifying every claim and shipping an HTML report.</p>
+          <div class="prompt-body">
+            <pre>Can you read &lt;&lt;url&gt;&gt;, and thoroughly and precisely check for **wrong assumptions**, **cheating**, **irreproducibility issues**, **fraud**, **potential for cheating in evaluation**, **AI Slop**, and **security vulnerabilities**? Use internet search extensively and do not believe what people say -- verify them yourself. Do not hesitate to download code and run it to validate results. For security vulnerabilities, create a POC and test it. Generate an html report in ./sorcar_reported_frauds/ and open in the user's default browser. Thoroughly fact check everything you claim in the report.</pre>
+            <div class="prompt-fade"></div>
+          </div>
+          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
+        </article>
+
+        <article class="inner-card prompt-panel" style="--i:8">
+          <div class="panel-head">
+            <h3 class="panel-title">Sorcar for AI Discovery</h3>
+            <span class="panel-badge">Task</span>
+          </div>
+          <p class="panel-desc">Let Sorcar search, train, and benchmark candidate models on your data to find the lightest, fastest, cheapest model that hits a target accuracy and recall — without reward-hacking the evals.</p>
+          <div class="prompt-body">
+            <pre>Sorcar for AI Discovery: Can you discover the lightest and fastest AI model that will give the best accuracy and recall on the data at &lt;&lt;/path/to/data&gt;&gt; at the cheapest price? Analyze the data and search the internet extensively to propose the first few models. Implement and experiment with each of your proposals. Note down the ideas you used to optimize the accuracy/recall and speed/cost metrics achieved in a file, so that you can use the file to not repeat ideas that have already been tried and/or failed. You can also use the file to combine ideas that have been successful in the past. Separate 20% of the data for evals, and your discovery strategy must not look at the evals data. Use 'lambda' CLI to train your models on GPUs and evaluate if needed. Total budget for Lambda Labs is $1000. Experiment with a smaller subset of data and fewer parameters in a model to do experiments quickly, and then extrapolate. Use internet search extensively at every step. MAKE SURE THAT YOU DO NOT DO REWARD HACKING OR CHEATING IN THE MODELS OR AGENTS YOU ARE IMPLEMENTING TO FIT DATA. YOUR SOLUTION MUST GENERALIZE BEYOND THE DATA PROVIDED. Do not STOP until accuracy/recall reaches 95% on evals and you can process each query in less than 600 seconds and under 50 USD per query amortized over all queries. Create an html report with diagrams and illustrations in ./reports and open it in the user's default browser?</pre>
+            <div class="prompt-fade"></div>
+          </div>
+          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
+        </article>
+
+        <article class="inner-card prompt-panel" style="--i:9">
+          <div class="panel-head">
+            <h3 class="panel-title">Sorcar for Optimization</h3>
+            <span class="panel-badge">Task</span>
+          </div>
+          <p class="panel-desc">Run a command in the background, let Sorcar instrument and monitor its output, and iteratively rewrite the code to hit your speed, accuracy, recall, and cost targets.</p>
+          <div class="prompt-body">
+            <pre>Sorcar for Optimization: Can you run the command &lt;&lt;command&gt;&gt; in the background and monitor its output in real time to optimize the code at &lt;&lt;folder_name_or_url&gt;&gt; with respect to the following metrics: &lt;&lt;speed,accuracy,recall,cost&gt;&gt;. You can add diagnostic code which will print the metrics, such as running time at a finer level of granularity. Check for opportunities to optimize the code on the basis of the metrics information. If you discover any opportunities to optimize the metric based on the code, logs, events, and the command output, optimize the code and run the command again. Note down the ideas you used to optimize the code and the metric you achieved in a file, so that you can use the file to not repeat ideas that have already been tried and failed. You can also use the file to combine ideas that have been successful in the past. Repeat the process. Do not forget to remove the diagnostic code after the optimization is complete. You MUST NOT STOP until the metrics achieve the following values:&lt;&lt;give_concrete_values_for_metrics&gt;&gt;. Use the internet extensively to get new ideas for optimization. Create an html report with diagrams and illustrations in ./reports and open it in the user's default browser?</pre>
+            <div class="prompt-fade"></div>
+          </div>
+          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
+        </article>
+
+        <article class="inner-card prompt-panel" style="--i:10">
+          <div class="panel-head">
+            <h3 class="panel-title">Sorcar GEPA Prompt Optimizer</h3>
+            <span class="panel-badge">Task</span>
+          </div>
+          <p class="panel-desc">Run a full GEPA Pareto-frontier prompt-optimization loop over your dataset to evolve the best prompt for a <code>ChatSorcarAgent</code>, with cross-model review and no reward hacking.</p>
+          <div class="prompt-body">
+            <pre>Sorcar GEPA Prompt Optimizer: Can you optimize a prompt for a ChatSorcarAgent of the kiss-agent-framework Python library using the following GEPA algorithm on the data at &lt;&lt;url_or_db_file_of_data&gt;&gt; using claude-opus-4-7? You can find the trajectory events of an agent execution in ~/.kiss/sorcar.db after the agent has finished its execution. Split the dataset into 50% dev set and 50% val set.
+
+RUN_GEPA: Sample 100 data points from the val set and call it sval set. Maintain a pareto frontier in the folder ./pareto where we have a sub-folder for each node in the frontier. A node contains a prompt file (prompt.md) and a json file, say score.json, containing the list of datapoints (ids) from the sval set that were correctly predicted with the prompt. When you add a node to the pareto frontier make sure that the list of correctly predicted datapoints is not a subset or equal to an existing list of datpoints in some node in the frontier. If such a node exists, do not add the new node. After adding a node, remove all nodes whose list of datapoints is a subset or equal to the list of datapoints in the added node. Then run the following algorithm.
+
+1. pick a node from the pareto frontier with probability 0.5
+   a. sample a minibatch of 5 datapoints from the dev set
+   b. run the agent with the prompt from the node on the minibatch
+   c. if the agent incorrectly predicts for some datapoints, analyze and reflect on the trajectory events of the agent on those datapoints available at ~/.kiss/sorcar.db and propose a new prompt which will fix the mistakes made by the agent on datapoints incorrectly predicted.
+   d. if the agent predicts correctly on the minibatch, then evaluate it on the sval set and create the list of datapoints on which the agent with the new prompt predicts correctly.
+   e. Add the new prompt and the list of datapoints to the pareto frontier
+
+2. pick two nodes from the pareto frontier randomly with the remaining probability.
+   a. sample a minibatch of 5 datapoints from the dev set
+   b. merge the prompts from the two nodes into a new prompt.
+   c. if the agent predicts correctly on the minibatch with the new prompt, then evaluate it on the sval set and create the list of datapoints on which the agent with the new prompt predicts correctly.
+   d. Add the new prompt and the list of datapoints to the pareto frontier
+
+3. Repeat steps 1 and 2 until there is no change in the prompt after 3 iterations.
+END_RUN_GEPA
+Repeat RUN_GEPA until there is no change in the prompt after 3 iterations.
+
+In each step, keep track of the best prompt which has the maximum number of successfully predicted datapoints in ./pareto/optimal.md. MAKE SURE THAT YOU DO NOT DO REWARD HACKING OR CHEATING IN THE AGENT YOU ARE IMPLEMENTING TO FIT DATA. YOUR SOLUTION MUST GENERALIZE BEYOND THE DATA PROVIDED. Use internet search extensively at every step. Do not worry about budget. Create an html report with diagrams and illustrations in ./reports and open it in the user's default browser. Do NOT STOP until you could not improve the accuracy and recall after three consecutive rollouts. Use gpt-5.5 model (not codex) for thorough review of the work done at every step by the other model.</pre>
+            <div class="prompt-fade"></div>
+          </div>
+          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
+        </article>
+
+        <article class="inner-card prompt-panel" style="--i:11">
+          <div class="panel-head">
+            <h3 class="panel-title">Run GEPA on HotpotQA</h3>
+            <span class="panel-badge">Task</span>
+          </div>
+          <p class="panel-desc">A one-liner to invoke <code>gepa.py</code> on the HotpotQA dataset with <code>gpt-4o-mini</code> as both the task model and the optimizer.</p>
+          <div class="prompt-body">
+            <pre>Can you run gepa.py on hotpotqa using gpt-4o-mini as both models</pre>
+            <div class="prompt-fade"></div>
+          </div>
+          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
+        </article>
+
+        <article class="inner-card prompt-panel" style="--i:0">
+          <div class="panel-head">
+            <h3 class="panel-title">Force exhaustive web search</h3>
+            <span class="panel-badge trick">Trick</span>
+          </div>
+          <p class="panel-desc">Drop this trick into any task so Sorcar grounds its reasoning in current web evidence instead of stale training data.</p>
+          <div class="prompt-body">
+            <pre>Search internet extensively.</pre>
+            <div class="prompt-fade"></div>
+          </div>
+          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
+        </article>
+
+        <article class="inner-card prompt-panel" style="--i:1">
+          <div class="panel-head">
+            <h3 class="panel-title">Reproduce with an integration test</h3>
+            <span class="panel-badge trick">Trick</span>
+          </div>
+          <p class="panel-desc">Enforce a test-first workflow for bug fixes — write a failing integration test that reproduces the issue before changing any production code.</p>
+          <div class="prompt-body">
+            <pre>Reproduce the issue by writing an integration test. Then fix the issue.</pre>
+            <div class="prompt-fade"></div>
+          </div>
+          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
+        </article>
+
+        <article class="inner-card prompt-panel" style="--i:2">
+          <div class="panel-head">
+            <h3 class="panel-title">Reproduce with an end-to-end test</h3>
+            <span class="panel-badge trick">Trick</span>
+          </div>
+          <p class="panel-desc">Same as the integration-test trick, but demands full end-to-end coverage so the regression is locked down across module boundaries.</p>
+          <div class="prompt-body">
+            <pre>Reproduce the issue by writing an end-to-end test. Then fix the issue.</pre>
+            <div class="prompt-fade"></div>
+          </div>
+          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
+        </article>
+
+        <article class="inner-card prompt-panel" style="--i:3">
+          <div class="panel-head">
+            <h3 class="panel-title">Reproduce invariant violations</h3>
+            <span class="panel-badge trick">Trick</span>
+          </div>
+          <p class="panel-desc">Codify suspected invariant breaks as end-to-end tests first, then let Sorcar fix the offending code so the invariant holds forever.</p>
+          <div class="prompt-body">
+            <pre>Reproduce any violation of the ivariant by writing end-to-end tests. Then fix the issue.</pre>
+            <div class="prompt-fade"></div>
+          </div>
+          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
+        </article>
+
+        <article class="inner-card prompt-panel" style="--i:4">
+          <div class="panel-head">
+            <h3 class="panel-title">Pair-program with multi-model review</h3>
+            <span class="panel-badge trick">Trick</span>
+          </div>
+          <p class="panel-desc">Use Claude Opus as the implementer and GPT-5.5 as the reviewer/debugger so missed code paths and silent bugs are caught before they ship.</p>
+          <div class="prompt-body">
+            <pre>Use claude-opus-4-7 model for all tasks including coding, bug fixing, and test creation. Use gpt-5.5 model (not codex) for thorough review and debugging of the work done by the other model. Check if the other model has missed some code or has introduced bugs. No need to check if the models exist.</pre>
+            <div class="prompt-fade"></div>
+          </div>
+          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
+        </article>
+
+        <article class="inner-card prompt-panel" style="--i:5">
+          <div class="panel-head">
+            <h3 class="panel-title">Review the last task with GPT-5.5</h3>
+            <span class="panel-badge trick">Trick</span>
+          </div>
+          <p class="panel-desc">Spawn a review pass on your previous task: GPT-5.5 finds bugs and missing code, Claude Opus reproduces and fixes them with end-to-end tests, in a loop until the review is clean.</p>
+          <div class="prompt-body">
+            <pre>Can you review the updates made in the last task using gpt-5.5 (non codex) and find bugs or missing code. Then write end-to-end tests reproducing the bugs reported by the review, fix them, and test them using claude-opus-4-7? Run all the tests in parallel and fix bugs after thoroughly reviewing the fixes with gpt-5.5 (non codex). Repeat the process until you fail to reproduce the bugs reported by the review done by gpt-5.5 (non codex). No need to check if the models exist.</pre>
+            <div class="prompt-fade"></div>
+          </div>
+          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
+        </article>
+
+        <article class="inner-card prompt-panel" style="--i:6">
+          <div class="panel-head">
+            <h3 class="panel-title">Self-review the current task</h3>
+            <span class="panel-badge trick">Trick</span>
+          </div>
+          <p class="panel-desc">The same dual-model review loop, but applied to the in-flight task before you finish — bugs are reproduced, fixed, and re-reviewed in place.</p>
+          <div class="prompt-body">
+            <pre>Review the updates made in the current task using gpt-5.5 (non codex) and find bugs or missing code. Then write end-to-end tests reproducing the bugs reported by the review, fix them, and test them using claude-opus-4-7? Run all the tests in parallel and fix bugs after thoroughly reviewing the fixes with gpt-5.5 (non codex). Repeat the process until you fail to reproduce the bugs reported by the review done by gpt-5.5 (non codex). No need to check if the models exist.</pre>
+            <div class="prompt-fade"></div>
+          </div>
+          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
+        </article>
+
+        <article class="inner-card prompt-panel" style="--i:7">
+          <div class="panel-head">
+            <h3 class="panel-title">Use GLM-5.2 with dual review</h3>
+            <span class="panel-badge trick">Trick</span>
+          </div>
+          <p class="panel-desc">Switch the implementer to OpenRouter's GLM-5.2 and have both GPT-5.5 and Claude Opus carefully review its output for bugs and missing code.</p>
+          <div class="prompt-body">
+            <pre>Use openrouter/z-ai/glm-5.2 model for all tasks including coding, bug fixing, and test creation. ALWAYS use gpt-5.5 model (not codex) to carefully and thoroughly review and debug the work done by openrouter/z-ai/glm-5.2 for bugs and missing code. Then use claude-opus-4-7 to do the same thing.</pre>
+            <div class="prompt-fade"></div>
+          </div>
+          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
+        </article>
+
+        <article class="inner-card prompt-panel" style="--i:8">
+          <div class="panel-head">
+            <h3 class="panel-title">Resolve a merge conflict</h3>
+            <span class="panel-badge trick">Trick</span>
+          </div>
+          <p class="panel-desc">Paste the merge-conflict message after this trick and let Sorcar analyse the diff and resolve the conflict for you.</p>
+          <div class="prompt-body">
+            <pre>Can you check the following message on merge conflict and help me fix it? </pre>
+            <div class="prompt-fade"></div>
+          </div>
+          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
+        </article>
+
+        <article class="inner-card prompt-panel" style="--i:9">
+          <div class="panel-head">
+            <h3 class="panel-title">Generate an HTML report</h3>
+            <span class="panel-badge trick">Trick</span>
+          </div>
+          <p class="panel-desc">Have Sorcar package its findings into a polished HTML report with diagrams and illustrations under <code>./reports</code>, and open it in your default browser.</p>
+          <div class="prompt-body">
+            <pre>Can you create an html report with diagrams and illustrations in ./reports and open it in the user's default browser?</pre>
+            <div class="prompt-fade"></div>
+          </div>
+          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
+        </article>
+
+        <article class="inner-card prompt-panel" style="--i:10">
+          <div class="panel-head">
+            <h3 class="panel-title">Guard against reward hacking</h3>
+            <span class="panel-badge trick">Trick</span>
+          </div>
+          <p class="panel-desc">Add this guard so Sorcar audits its own implementation for shortcuts, overfitting, or cheating that would inflate metrics but fail to generalise.</p>
+          <div class="prompt-body">
+            <pre>Make sure that there is no reward hacking and cheating when reviewing your implementation.</pre>
+            <div class="prompt-fade"></div>
+          </div>
+          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
+        </article>
+
+        <article class="inner-card prompt-panel" style="--i:11">
+          <div class="panel-head">
+            <h3 class="panel-title">Push to origin</h3>
+            <span class="panel-badge trick">Trick</span>
+          </div>
+          <p class="panel-desc">A quick reminder for Sorcar to push your committed work upstream when you're done.</p>
+          <div class="prompt-body">
+            <pre>git push origin</pre>
+            <div class="prompt-fade"></div>
+          </div>
+          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
+        </article>
+
+        <article class="inner-card prompt-panel" style="--i:12">
+          <div class="panel-head">
+            <h3 class="panel-title">Rewind to a specific commit</h3>
+            <span class="panel-badge trick">Trick</span>
+          </div>
+          <p class="panel-desc">Reset both your local branch and the remote to a specific commit, discarding every commit that came after it.</p>
+          <div class="prompt-body">
+            <pre>Get rid of all commits after the following commit from both main and origin:</pre>
+            <div class="prompt-fade"></div>
+          </div>
+          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
+        </article>
+
+        <article class="inner-card prompt-panel" style="--i:13">
+          <div class="panel-head">
+            <h3 class="panel-title">Build paper &amp; screenshot-check formatting</h3>
+            <span class="panel-badge trick">Trick</span>
+          </div>
+          <p class="panel-desc">Have Sorcar compile your LaTeX paper, take screenshots of the rendered PDF, and iterate on the source until the layout is right.</p>
+          <div class="prompt-body">
+            <pre>Build the paper, and take screenshots to check and fix formatting.</pre>
+            <div class="prompt-fade"></div>
+          </div>
+          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
+        </article>
+
+        <article class="inner-card prompt-panel" style="--i:14">
+          <div class="panel-head">
+            <h3 class="panel-title">Debug the last failure</h3>
+            <span class="panel-badge trick">Trick</span>
+          </div>
+          <p class="panel-desc">Analyse the previous task's logs and trajectory events, reproduce the issue with an integration test, then fix the underlying cause.</p>
+          <div class="prompt-body">
+            <pre>Why did the last task failed? Thoroughly and precisely analyze the logs and the events of the task. Reproduce the issue by writing an integration test. Then fix the issue.</pre>
+            <div class="prompt-fade"></div>
+          </div>
+          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
+        </article>
+
+        </div>
+
+        <div class="carousel-controls">
+          <button type="button" class="carousel-btn carousel-prev" aria-label="Previous prompt"><span class="arrow" aria-hidden="true">←</span> Prev</button>
+          <div class="carousel-counter" aria-live="polite"></div>
+          <button type="button" class="carousel-btn carousel-next" aria-label="Next prompt">Next <span class="arrow" aria-hidden="true">→</span></button>
+        </div>
+
+        <div class="carousel-dots" id="carousel-dots" role="tablist" aria-label="Prompt navigation"></div>
+      </div>
+    </div>
+  </section>
+  </div>
+
+  <!-- ================ § 02 — Compare ================ -->
+  <div class="section-wrap">
+  <section id="name" class="section-card">
+    <span class="num">§ 03 — What is in the Name</span>
+    <h2>What is in the Name?<a href="#name" class="anchor">¶</a></h2>
+    <p class="sub">Two names. One principle. A nod to a Bengali magician.</p>
+    <div class="section-body">
+      <div class="name-grid">
+        <div class="inner-card name-card" style="--i:0">
+          <div class="k">KISS Agent Framework</div>
+          <h3>Keep it Simple, Stupid.</h3>
+          <p><strong>KISS Agent Framework</strong> is a deliberately small agent runtime organized around the <a href="https://en.wikipedia.org/wiki/KISS_principle">KISS principle</a> &mdash; "Keep it Simple, Stupid."</p>
+        </div>
+        <div class="inner-card name-card" style="--i:1">
+          <div class="k">KISS Sorcar</div>
+          <h3>Named after P. C. Sorcar.</h3>
+          <p>KISS Sorcar is named after <a href="https://en.wikipedia.org/wiki/P._C._Sorcar">P. C. Sorcar, the Bengali magician</a>. Note: <strong>Sorcar</strong> also means <em>government</em> in Bengali.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+  </div>
+
+  <!-- ================ § 04 — Installation ================ -->
+  <div class="section-wrap">
+  <section id="install" class="section-card">
+    <span class="num">§ 04 — Installation</span>
+    <h2>Install in one line.<a href="#install" class="anchor">¶</a></h2>
+    <p class="sub">Pick the install path that fits you &mdash; full source, Python package, or the VS Code extension. All you need is at least one API key from a major LLM provider. <strong>The one-line install script below is the recommended way to install the full KISS Sorcar stack.</strong></p>
+    <div class="section-body">
+      <div class="grid-2">
+        <div class="inner-card inner-card--preferred" style="--i:0">
+          <h3>Full install from source <span class="preferred-badge" aria-label="Recommended install method">★ Recommended</span></h3>
+          <p style="margin-bottom:0.7rem;"><strong>Preferred way to install the full KISS Sorcar stack.</strong> Works on macOS and Linux (<code>x86_64</code>, <code>aarch64</code>, <code>arm64</code>). Installs or checks every tool needed to run KISS Sorcar and build/install the VS Code extension &mdash; one command, no extra steps.</p>
+          <div class="code-panel">
+            <div class="code-line"><span class="prompt">$</span> <span class="green">curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install.sh | bash</span></div>
+          </div>
+        </div>
+
+        <div class="inner-card" style="--i:1">
+          <h3>Python package / CLI install</h3>
+          <p style="margin-bottom:0.7rem;">For just the Python package and CLI entry points. KISS Sorcar requires <strong>Python 3.13+</strong>.</p>
+          <div class="code-panel">
+            <div class="code-line"><span class="prompt">$</span> <span class="green">pipx install kiss-agent-framework</span></div>
+            <div class="code-line"><span class="x"># or</span></div>
+            <div class="code-line"><span class="prompt">$</span> <span class="green">uv tool install kiss-agent-framework</span></div>
+          </div>
+        </div>
+
+        <div class="inner-card" style="--i:2">
+          <h3>Configure model access</h3>
+          <p style="margin-bottom:0.7rem;">Provide at least one model backend through environment variables:</p>
+          <div class="code-panel">
+            <div class="code-line"><span class="c">export</span> <span class="f">ANTHROPIC_API_KEY</span>=<span class="s">...</span></div>
+            <div class="code-line"><span class="c">export</span> <span class="f">OPENAI_API_KEY</span>=<span class="s">...</span></div>
+            <div class="code-line"><span class="c">export</span> <span class="f">GEMINI_API_KEY</span>=<span class="s">...</span></div>
+            <div class="code-line"><span class="c">export</span> <span class="f">TOGETHER_API_KEY</span>=<span class="s">...</span></div>
+            <div class="code-line"><span class="c">export</span> <span class="f">ZAI_API_KEY</span>=<span class="s">...</span></div>
+            <div class="code-line"><span class="c">export</span> <span class="f">MOONSHOT_API_KEY</span>=<span class="s">...</span></div>
+            <div class="code-line"><span class="c">export</span> <span class="f">OPENROUTER_API_KEY</span>=<span class="s">...</span></div>
+          </div>
+          <p style="margin-top:0.7rem;">Or configure a custom endpoint with <code>--endpoint</code> / <code>-e</code> and optional repeated <code>--header Key:Value</code> CLI flags.</p>
+        </div>
+
+        <div class="inner-card" style="--i:3">
+          <h3>VS Code Extension</h3>
+          <p>To install only the KISS Sorcar extension, open Visual Studio Code, search for <strong>KISS Sorcar</strong> in the <a href="https://marketplace.visualstudio.com/items?itemName=ksenxx.kiss-sorcar">extension marketplace</a>, install it, and relaunch VS Code.</p>
+          <p style="margin-top:0.6rem;">Press <kbd style="background:var(--surface);padding:0.05rem 0.4rem;border-radius:4px;border:1px solid var(--border);font-family:'Roboto Mono',monospace;font-size:0.82em;">ESC</kbd> if you do not have a specific API key ready, but configure at least one model backend before running tasks.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+  </div>
+
+  <!-- ================ § 05 — CLI Interface (condensed) ================ -->
+  <div class="section-wrap">
+  <section id="cli" class="section-card">
+    <span class="num">§ 05 — CLI in 30 seconds</span>
+    <h2>The <code style="background:var(--surface);padding:0.05rem 0.45rem;border-radius:6px;font-size:0.85em;color:var(--primary-dark);">sorcar</code> CLI.<a href="#cli" class="anchor">¶</a></h2>
+    <p class="sub">
+      Run <code>sorcar</code> alone for an interactive Claude-Code-style REPL with worktree-isolated tasks, slash commands, and chat history; pass <code>-t "…"</code> or <code>-f task.md</code> for a one-shot non-interactive run. Pick any model with <code>-m</code>, point at a self-hosted endpoint with <code>-e</code>, cap spend with <code>-b</code>, and add MCP servers with <code>sorcar mcp add</code>.
+    </p>
+
+    <div class="section-body">
+      <div class="inner-card" style="--i:0;margin-bottom:1.1rem;">
+        <h3>Four invocations to get you started</h3>
+        <div class="code-panel">
+          <div class="code-line"><span class="x"># 1. Interactive REPL (recommended for first run)</span></div>
+          <div class="code-line"><span class="c">sorcar</span></div>
+          <div class="code-line spacer"></div>
+          <div class="code-line"><span class="x"># 2. One-shot task on any model, with a $2 cap</span></div>
+          <div class="code-line"><span class="c">sorcar</span> <span class="f">-m</span> <span class="s">"claude-sonnet-4-6"</span> <span class="f">-b</span> <span class="s">2.0</span> <span class="f">-t</span> <span class="s">"Refactor utils.py for clarity."</span></div>
+          <div class="code-line spacer"></div>
+          <div class="code-line"><span class="x"># 3. Self-hosted or local model</span></div>
+          <div class="code-line"><span class="c">sorcar</span> <span class="f">-e</span> <span class="s">"http://localhost:8000/v1"</span> <span class="f">-t</span> <span class="s">"Summarise this codebase."</span></div>
+          <div class="code-line spacer"></div>
+          <div class="code-line"><span class="x"># 4. Run a Slack/Gmail/SMS task via a third-party agent</span></div>
+          <div class="code-line"><span class="c">sorcar</span> <span class="f">-t</span> <span class="s">'Send "Hello from Sorcar!" to ksen via the desktop Slack app.'</span></div>
+        </div>
+        <p style="margin-top:1rem;font-size:0.95rem;color:var(--text-dim);">
+          Full reference (every flag, <code>sorcar mcp</code> subcommands, slash commands, skills, MCP discovery, and VS Code Tricks): <a href="https://github.com/ksenxx/kiss_ai/blob/main/README.md#-cli-reference" target="_blank" rel="noopener"><strong>Full CLI reference →</strong></a>
+        </p>
+      </div>
+    </div>
+  </section>
+  </div>
+
+  <!-- ================ § 06 — Messaging & Third-Party Agents ================ -->
+  <div class="section-wrap">
+  <section id="agents" class="section-card">
+    <span class="num">§ 06 — Messaging &amp; Third-Party Agents</span>
+    <h2>💬 Reach the agent from anywhere.<a href="#agents" class="anchor">¶</a></h2>
+    <p class="sub">KISS Sorcar includes <strong>23 third-party messaging agents</strong> that can send and receive messages on your behalf. It also ships a <strong>Govee smart-home CLI</strong> for controlling IoT lights (on/off, brightness, color, and color temperature) via the Govee Developer API. These agents live in <code>src/kiss/agents/third_party_agents/</code>.</p>
+    <div class="section-body">
+      <div class="inner-card" style="--i:0;margin-bottom:1.1rem;">
+        <h3>23 messaging channels</h3>
+        <div class="chip-cloud" style="margin-top:0.7rem;">
+          <span class="chip">BlueBubbles</span>
+          <span class="chip">Discord</span>
+          <span class="chip">Feishu</span>
+          <span class="chip">Gmail</span>
+          <span class="chip">Google Chat</span>
+          <span class="chip">iMessage</span>
+          <span class="chip">IRC</span>
+          <span class="chip">LINE</span>
+          <span class="chip">Matrix</span>
+          <span class="chip">Mattermost</span>
+          <span class="chip">Microsoft Teams</span>
+          <span class="chip">Nextcloud Talk</span>
+          <span class="chip">Nostr</span>
+          <span class="chip">Phone Control</span>
+          <span class="chip">Signal</span>
+          <span class="chip">Slack</span>
+          <span class="chip">SMS</span>
+          <span class="chip">Synology Chat</span>
+          <span class="chip">Telegram</span>
+          <span class="chip">Tlon</span>
+          <span class="chip">Twitch</span>
+          <span class="chip">WhatsApp</span>
+          <span class="chip">Zalo</span>
+        </div>
+      </div>
+      <div class="inner-card" style="--i:1">
+        <h3>Plus: smart-home control</h3>
+        <p>A <strong>Govee smart-home CLI</strong> for controlling IoT lights — on/off, brightness, color, and color temperature — directly via the Govee Developer API.</p>
+      </div>
+    </div>
+  </section>
+  </div>
+
+  <!-- ================ § 07 — Models Supported ================ -->
+  <div class="section-wrap">
+  <section id="models" class="section-card">
+    <span class="num">§ 07 — Models Supported</span>
+    <h2>🤖 502 models. 9 provider categories.<a href="#models" class="anchor">¶</a></h2>
+    <p class="sub">KISS Sorcar ships a catalog of <strong>502 models</strong> across <strong>9 provider categories</strong>, with built-in prices, context lengths, and capability flags (<code>fc</code> function calling, <code>gen</code> generation, <code>emb</code> embedding). The source of truth is <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/core/models/MODEL_INFO.json">src/kiss/core/models/MODEL_INFO.json</a>.</p>
+
+    <div class="section-body">
+      <div class="grid-2">
+        <div class="inner-card" style="--i:0">
+          <h3>Provider categories</h3>
+          <div style="margin-top:0.5rem;">
+            <div class="provider-row"><span class="label">OpenAI</span><span class="count">70</span></div>
+            <div class="provider-row"><span class="label">Anthropic</span><span class="count">13</span></div>
+            <div class="provider-row"><span class="label">Gemini / Google</span><span class="count">23</span></div>
+            <div class="provider-row"><span class="label">Together AI</span><span class="count">77</span></div>
+            <div class="provider-row"><span class="label">Z.AI</span><span class="count">8</span></div>
+            <div class="provider-row"><span class="label">Moonshot AI</span><span class="count">6</span></div>
+            <div class="provider-row"><span class="label">OpenRouter</span><span class="count">295</span></div>
+            <div class="provider-row"><span class="label">Claude Code CLI (<code>cc/*</code>)</span><span class="count">3</span></div>
+            <div class="provider-row"><span class="label">Codex CLI (<code>codex/*</code>)</span><span class="count">7</span></div>
+          </div>
+        </div>
+
+        <div class="inner-card" style="--i:1">
+          <h3>Catalog capability totals</h3>
+          <p>Across all bundled providers, the catalog currently reports:</p>
+          <div class="stat-row">
+            <div class="stat-pill">
+              <div class="n">486</div>
+              <div class="l">generation-capable models</div>
+            </div>
+            <div class="stat-pill">
+              <div class="n">326</div>
+              <div class="l">function-calling-capable models</div>
+            </div>
+            <div class="stat-pill">
+              <div class="n">7</div>
+              <div class="l">embedding models</div>
+            </div>
+          </div>
+          <p style="margin-top:0.9rem;font-size:0.88rem;">See the <a href="https://github.com/ksenxx/kiss_ai/blob/main/README.md#-models-supported">full per-provider model list</a> in the README, including the <code>cc/*</code> and <code>codex/*</code> namespaces that let KISS Sorcar run on top of the Claude Code and Codex CLIs.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+  </div>
+
+  <!-- ================ § 08 — Contributing ================ -->
+  <div class="section-wrap">
+  <section id="contributing" class="section-card">
+    <span class="num">§ 08 — Contributing</span>
+    <h2>🤗 Contributing.<a href="#contributing" class="anchor">¶</a></h2>
+    <p class="sub">Contributions in the form of issues are welcome. KISS Sorcar should be able to help implement and review them.</p>
+    <div class="section-body">
+      <div class="grid-2">
+        <div class="inner-card" style="--i:0">
+          <h3>Open an issue</h3>
+          <p>Report bugs, request features, or share ideas. Each issue becomes a candidate task KISS Sorcar can pick up and work on.</p>
+          <p style="margin-top:0.8rem;"><a href="https://github.com/ksenxx/kiss_ai/issues" class="btn btn-ghost" style="font-size:0.85rem; padding:0.45rem 1rem;">Open an issue →</a></p>
+        </div>
+        <div class="inner-card" style="--i:1">
+          <h3>Let KISS Sorcar implement and review</h3>
+          <p>Drop an issue link into a Sorcar task and it will draft a fix, run tests, and self-review before opening a PR.</p>
+          <p style="margin-top:0.8rem;"><a href="https://github.com/ksenxx/kiss_ai" class="btn btn-ghost" style="font-size:0.85rem; padding:0.45rem 1rem;">GitHub repo →</a></p>
+        </div>
+      </div>
+    </div>
+  </section>
+  </div>
+
+  <!-- ================ § 09 — License ================ -->
+  <div class="section-wrap">
+  <section id="license" class="section-card">
+    <span class="num">§ 09 — License</span>
+    <h2>📄 License.<a href="#license" class="anchor">¶</a></h2>
+    <p class="sub">KISS Sorcar is released under a permissive open-source license.</p>
+    <div class="section-body">
+      <div class="inner-card" style="--i:0">
+        <h3>Apache-2.0</h3>
+        <p style="margin-bottom:0.9rem;">Use it for anything &mdash; personal, commercial, research, education. See <a href="https://github.com/ksenxx/kiss_ai/blob/main/LICENSE">LICENSE</a> for the full text.</p>
+        <a href="https://github.com/ksenxx/kiss_ai/blob/main/LICENSE" class="license-pill">Apache License 2.0</a>
+      </div>
+    </div>
+  </section>
+  </div>
+
+  <!-- ================ § 10 — Citation ================ -->
+  <div class="section-wrap">
+  <section id="citation" class="section-card">
+    <span class="num">§ 10 — Citation</span>
+    <h2>📚 Cite the paper.<a href="#citation" class="anchor">¶</a></h2>
+    <p class="sub">If you use KISS Sorcar in your research, please cite:</p>
+    <div class="section-body">
+      <p class="cite-meta">
+        Koushik Sen. <em>KISS Sorcar: A Stupidly-Simple General-Purpose and Software Engineering AI Assistant.</em>
+        arXiv preprint <a href="https://arxiv.org/abs/2604.23822">arXiv:2604.23822</a>, 2026.
+      </p>
+      <div class="citation-block">
+        <button class="copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('bibtex').innerText); this.innerText='Copied'; setTimeout(()=>this.innerText='Copy',1500);">Copy</button>
+<pre id="bibtex">@misc{sen2026kisssorcar,
+  title         = {KISS Sorcar: A Stupidly-Simple General-Purpose and Software Engineering AI Assistant},
+  author        = {Sen, Koushik},
+  year          = {2026},
+  eprint        = {2604.23822},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.SE},
+  url           = {https://arxiv.org/abs/2604.23822}
+}</pre>
+      </div>
+    </div>
+  </section>
+  </div>
+
+  <footer>
+    <p>
+      KISS Sorcar &middot; Apache 2.0 &middot;
+      <a href="https://github.com/ksenxx/kiss_ai">GitHub</a> &middot;
+      <a href="assets/kiss_sorcar.pdf">Paper</a> &middot;
+      <a href="https://arxiv.org/abs/2604.23822">arXiv</a>
+    </p>
+    <p style="margin-top:0.4rem;">Named after <a href="https://en.wikipedia.org/wiki/P._C._Sorcar">P. C. Sorcar</a>, the legendary Bengali magician.</p>
+  </footer>
+
+  <script>
+    // ---------------------------------------------------------------
+    // Theme toggle — swaps <html data-theme="dark"|"light">, persists
+    // the choice to localStorage, and updates the button's aria-label
+    // so screen readers describe the action correctly.  The icon flip
+    // (sun <-> moon) is handled entirely in CSS via the data-theme
+    // attribute; this script just changes the attribute.
+    // ---------------------------------------------------------------
+    (function () {
+      var btn = document.getElementById('theme-toggle');
+      if (!btn) return;
+      var root = document.documentElement;
+      function applyAria(theme) {
+        // Show the action the click will perform, not the current state.
+        var nextLabel = theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme';
+        btn.setAttribute('aria-label', nextLabel);
+        btn.setAttribute('title', nextLabel);
+      }
+      applyAria(root.getAttribute('data-theme') || 'dark');
+      btn.addEventListener('click', function () {
+        var current = root.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+        var next = current === 'dark' ? 'light' : 'dark';
+        root.setAttribute('data-theme', next);
+        try { localStorage.setItem('kiss-theme', next); } catch (e) { /* localStorage may be blocked */ }
+        applyAria(next);
+      });
+    })();
+
+    // ---------------------------------------------------------------
+    // Hero CTAs:
+    //  (a) click-to-copy on the "pipx install kiss-agent-framework" pill.
+    //  (b) live GitHub star count for the "Star on GitHub" button,
+    //      fetched from the public GitHub API with sessionStorage cache
+    //      and a graceful fallback if the API is rate-limited.
+    // ---------------------------------------------------------------
+    (function () {
+      // ---- (a) click-to-copy ---------------------------------------
+      const pipBtn = document.querySelector('.cta-pip');
+      if (pipBtn) {
+        const originalLabel = pipBtn.getAttribute('aria-label');
+        const textEl = pipBtn.querySelector('.cta-pip-text');
+        const originalText = textEl ? textEl.textContent : '';
+        let resetTimer = 0;
+
+        function flash(ok) {
+          if (resetTimer) { clearTimeout(resetTimer); resetTimer = 0; }
+          pipBtn.classList.toggle('copied', ok);
+          if (textEl) textEl.textContent = ok ? 'Copied!' : 'Copy failed';
+          pipBtn.setAttribute('aria-label', ok
+            ? 'Command copied to clipboard'
+            : 'Failed to copy command');
+          resetTimer = window.setTimeout(() => {
+            pipBtn.classList.remove('copied');
+            if (textEl) textEl.textContent = originalText;
+            pipBtn.setAttribute('aria-label', originalLabel || '');
+            resetTimer = 0;
+          }, 1600);
+        }
+
+        function fallbackCopy(text) {
+          try {
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.setAttribute('readonly', '');
+            ta.style.position = 'fixed';
+            ta.style.top = '-1000px';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            const ok = document.execCommand('copy');
+            document.body.removeChild(ta);
+            return ok;
+          } catch (_e) {
+            return false;
+          }
+        }
+
+        pipBtn.addEventListener('click', (e) => {
+          e.preventDefault();
+          const text = pipBtn.getAttribute('data-copy') || originalText;
+          if (navigator.clipboard && window.isSecureContext) {
+            navigator.clipboard.writeText(text)
+              .then(() => flash(true))
+              .catch(() => flash(fallbackCopy(text)));
+          } else {
+            flash(fallbackCopy(text));
+          }
+        });
+      }
+
+      // ---- (b) live GitHub star count ------------------------------
+      const starEl = document.getElementById('cta-star-count');
+      const spStarsEl = document.getElementById('sp-stars');
+      if (!starEl && !spStarsEl) return;
+
+      const REPO = 'ksenxx/kiss_ai';
+      const CACHE_KEY = 'kiss-gh-stars';
+      const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+      const formatCount = (n) => {
+        if (n >= 1000) return (n / 1000).toFixed(n >= 10000 ? 0 : 1).replace(/\.0$/, '') + 'k';
+        return String(n);
+      };
+      function setCount(n) {
+        if (starEl) {
+          starEl.textContent = formatCount(n);
+          starEl.removeAttribute('data-loading');
+          starEl.setAttribute('aria-label', n + ' stars on GitHub');
+        }
+        if (spStarsEl) {
+          spStarsEl.textContent = formatCount(n);
+        }
+      }
+      function hideCount() {
+        // API failed and we have no cached value — drop the badge,
+        // but show a sensible fallback in the social-proof strip.
+        if (starEl) starEl.remove();
+        if (spStarsEl) spStarsEl.textContent = '500+';
+      }
+
+      // Use sessionStorage cache to avoid hammering the rate-limited API.
+      try {
+        const raw = sessionStorage.getItem(CACHE_KEY);
+        if (raw) {
+          const cached = JSON.parse(raw);
+          if (cached && typeof cached.count === 'number'
+              && (Date.now() - cached.ts) < CACHE_TTL_MS) {
+            setCount(cached.count);
+            return;
+          }
+        }
+      } catch (_e) { /* ignore storage errors */ }
+
+      fetch('https://api.github.com/repos/' + REPO, {
+        headers: { 'Accept': 'application/vnd.github+json' },
+      })
+        .then((r) => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
+        .then((data) => {
+          const n = data && typeof data.stargazers_count === 'number'
+            ? data.stargazers_count : null;
+          if (n === null) { hideCount(); return; }
+          setCount(n);
+          try {
+            sessionStorage.setItem(CACHE_KEY, JSON.stringify({ count: n, ts: Date.now() }));
+          } catch (_e) { /* ignore */ }
+        })
+        .catch(() => hideCount());
+    })();
+
+    // ---------------------------------------------------------------
+    // Quickstart copy buttons: "Get started in 3 steps"
+    // ---------------------------------------------------------------
+    (function () {
+      const buttons = document.querySelectorAll('.quickstart-copy');
+      buttons.forEach((btn) => {
+        const originalText = btn.textContent;
+        let resetTimer = 0;
+
+        function fallbackCopy(text) {
+          try {
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.setAttribute('readonly', '');
+            ta.style.position = 'fixed';
+            ta.style.top = '-1000px';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            const ok = document.execCommand('copy');
+            document.body.removeChild(ta);
+            return ok;
+          } catch (_e) {
+            return false;
+          }
+        }
+
+        btn.addEventListener('click', (e) => {
+          e.preventDefault();
+          const text = btn.getAttribute('data-copy') || originalText;
+          
+          function flash(ok) {
+            if (resetTimer) { clearTimeout(resetTimer); resetTimer = 0; }
+            btn.style.background = ok ? 'rgba(0, 137, 123, 0.15)' : 'rgba(217, 48, 37, 0.15)';
+            btn.style.color = ok ? 'var(--accent)' : '#d93025';
+            btn.textContent = ok ? '✓ Copied!' : '✗ Copy failed';
+            resetTimer = window.setTimeout(() => {
+              btn.style.background = 'var(--code-bg)';
+              btn.style.color = 'var(--code-text)';
+              btn.textContent = originalText;
+              resetTimer = 0;
+            }, 1600);
+          }
+
+          if (navigator.clipboard && window.isSecureContext) {
+            navigator.clipboard.writeText(text)
+              .then(() => flash(true))
+              .catch(() => flash(fallbackCopy(text)));
+          } else {
+            flash(fallbackCopy(text));
+          }
+        });
+      });
+    })();
+
+    // ---------------------------------------------------------------
+    // Scroll-reveal: tilt-rise each .section-card when it enters view.
+    // ---------------------------------------------------------------
+    (function () {
+      const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      const cards = document.querySelectorAll('.section-card');
+      if (reduced || !('IntersectionObserver' in window)) {
+        cards.forEach(c => c.classList.add('in-view'));
+        return;
+      }
+      const io = new IntersectionObserver((entries) => {
+        entries.forEach((e) => {
+          if (e.isIntersecting) {
+            e.target.classList.add('in-view');
+            io.unobserve(e.target);
+          }
+        });
+      }, { threshold: 0.12, rootMargin: '0px 0px -60px 0px' });
+      cards.forEach((c) => io.observe(c));
+    })();
+
+    // ---------------------------------------------------------------
+    // Cursor spotlight: update --mx/--my on each .inner-card on move.
+    // ---------------------------------------------------------------
+    (function () {
+      const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      if (reduced) return;
+      document.querySelectorAll('.inner-card').forEach((card) => {
+        card.addEventListener('mousemove', (ev) => {
+          const r = card.getBoundingClientRect();
+          card.style.setProperty('--mx', (ev.clientX - r.left) + 'px');
+          card.style.setProperty('--my', (ev.clientY - r.top)  + 'px');
+        });
+        card.addEventListener('mouseleave', () => {
+          card.style.setProperty('--mx', '-300px');
+          card.style.setProperty('--my', '-300px');
+        });
+      });
+    })();
+
+    // ---------------------------------------------------------------
+    // Prompt-deck "more …" toggle. Expands a .prompt-panel to make
+    // the entire prompt scrollable instead of clipped to 5 lines.
+    // Also tags panels whose prompt fits in 5 lines with .fits so
+    // the "more" button + fade gradient can be hidden via CSS.
+    // ---------------------------------------------------------------
+    (function () {
+      document.querySelectorAll('.prompt-panel').forEach((panel) => {
+        const btn = panel.querySelector('.prompt-more');
+        if (!btn) return;
+        const label = btn.firstChild;
+        btn.addEventListener('click', () => {
+          const expanded = panel.classList.toggle('expanded');
+          if (label) label.nodeValue = expanded ? 'less ' : 'more ';
+          btn.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+        });
+        btn.setAttribute('aria-expanded', 'false');
+      });
+
+      // Measure whether each prompt's collapsed view already shows
+      // the whole text. If so, mark the panel .fits.
+      function measureFits() {
+        document.querySelectorAll('.prompt-panel').forEach((panel) => {
+          const pre = panel.querySelector('.prompt-body pre');
+          if (!pre) return;
+          const wasExpanded = panel.classList.contains('expanded');
+          // Measure against the collapsed sizing.
+          if (wasExpanded) panel.classList.remove('expanded');
+          const fits = pre.scrollHeight <= pre.clientHeight + 1;
+          panel.classList.toggle('fits', fits);
+          if (wasExpanded) panel.classList.add('expanded');
+        });
+      }
+      if (document.readyState === 'complete') measureFits();
+      else window.addEventListener('load', measureFits);
+      // Fonts can change the line box, so re-measure once they load.
+      if (document.fonts && document.fonts.ready) {
+        document.fonts.ready.then(measureFits).catch(() => {});
+      }
+      window.addEventListener('resize', measureFits);
+      // Expose so the carousel can re-measure after navigation if it
+      // ever needs to (panel widths can change between active states
+      // when the stage resizes).
+      window.__measurePromptFits = measureFits;
+    })();
+
+    // ---------------------------------------------------------------
+    // Copy-to-clipboard buttons — inject one into every .prompt-body
+    // and copy the panel's <pre> text on click. Uses the async
+    // Clipboard API where available with a textarea fallback for
+    // older browsers / non-secure contexts.
+    // ---------------------------------------------------------------
+    (function () {
+      const ICON_COPY =
+        '<svg class="copy-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+        'stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+        '<rect x="9" y="9" width="11" height="11" rx="2"></rect>' +
+        '<path d="M5 15V6a2 2 0 0 1 2-2h9"></path></svg>';
+      const ICON_CHECK =
+        '<svg class="copy-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+        'stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+        '<path d="M5 12.5l4.5 4.5L19 7"></path></svg>';
+
+      function fallbackCopy(text) {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.top = '-1000px';
+        ta.style.left = '-1000px';
+        document.body.appendChild(ta);
+        ta.select();
+        let ok = false;
+        try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+        document.body.removeChild(ta);
+        return ok;
+      }
+
+      async function copyText(text) {
+        if (navigator.clipboard && window.isSecureContext) {
+          try { await navigator.clipboard.writeText(text); return true; }
+          catch (e) { /* fall through */ }
+        }
+        return fallbackCopy(text);
+      }
+
+      function flashCopied(btn, ok) {
+        const labelSpan = btn.querySelector('.copy-label');
+        const original = btn.dataset.originalLabel || 'Copy';
+        btn.classList.add('copied');
+        if (labelSpan) labelSpan.textContent = ok ? 'Copied!' : 'Failed';
+        btn.innerHTML = (ok ? ICON_CHECK : ICON_COPY) +
+          '<span class="copy-label">' + (ok ? 'Copied!' : 'Failed') + '</span>';
+        btn.setAttribute('aria-label',
+          ok ? 'Prompt copied to clipboard' : 'Copy failed');
+        clearTimeout(btn._copyTimer);
+        btn._copyTimer = setTimeout(() => {
+          btn.classList.remove('copied');
+          btn.innerHTML = ICON_COPY +
+            '<span class="copy-label">' + original + '</span>';
+          btn.setAttribute('aria-label', 'Copy prompt to clipboard');
+        }, 1600);
+      }
+
+      document.querySelectorAll('.prompt-panel .prompt-body').forEach((body) => {
+        if (body.querySelector('.prompt-copy')) return; // idempotent
+        const pre = body.querySelector('pre');
+        if (!pre) return;
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'prompt-copy';
+        btn.dataset.originalLabel = 'Copy';
+        btn.setAttribute('aria-label', 'Copy prompt to clipboard');
+        btn.innerHTML = ICON_COPY + '<span class="copy-label">Copy</span>';
+        btn.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          const text = pre.innerText;
+          const ok = await copyText(text);
+          flashCopied(btn, ok);
+        });
+        body.appendChild(btn);
+      });
+    })();
+
+    // ---------------------------------------------------------------
+    // Prompt carousel — shows one panel at a time at the same        
+    // location with prev/next buttons, dot navigation, a live        
+    // counter, keyboard arrows, and autoplay that pauses on hover,   
+    // when a panel is expanded, or when the section is off-screen.   
+    // ---------------------------------------------------------------
+    (function () {
+      const carousel = document.getElementById('prompt-carousel');
+      if (!carousel) return;
+      const stage    = carousel.querySelector('.prompt-stage');
+      const panels   = Array.from(stage.querySelectorAll(':scope > .prompt-panel'));
+      const prevBtn  = carousel.querySelector('.carousel-prev');
+      const nextBtn  = carousel.querySelector('.carousel-next');
+      const counter  = carousel.querySelector('.carousel-counter');
+      const dotsEl   = carousel.querySelector('#carousel-dots');
+      const total    = panels.length;
+      if (!total) return;
+
+      // Shuffle the panel order once per page load (Fisher–Yates) so
+      // the carousel presents Tasks and Tricks in a random sequence.
+      for (let i = panels.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [panels[i], panels[j]] = [panels[j], panels[i]];
+      }
+      // Reflect the shuffled order in the DOM so tab-order, dots, and
+      // counter all stay in sync with what is visually shown.
+      panels.forEach((p) => stage.appendChild(p));
+
+      let index = 0;
+      let autoplayTimer = null;
+      let transitioning = false;
+      const AUTOPLAY_MS = 5000;
+      const TRANSITION_MS = 550;
+
+      // Build dots, one per panel; mark trick dots with a class so   
+      // they can use the accent colour when active.                  
+      panels.forEach((p, i) => {
+        const dot = document.createElement('button');
+        dot.type = 'button';
+        dot.className = 'carousel-dot';
+        if (p.querySelector('.panel-badge.trick')) dot.classList.add('trick');
+        dot.setAttribute('role', 'tab');
+        dot.setAttribute('aria-label', `Show prompt ${i + 1} of ${total}`);
+        dot.addEventListener('click', () => {
+          const dir = (i >= index) ? 'next' : 'prev';
+          goTo(i, true, dir);
+        });
+        dotsEl.appendChild(dot);
+      });
+      const dots = Array.from(dotsEl.children);
+
+      function updateMeta() {
+        dots.forEach((d, i) => {
+          const active = (i === index);
+          d.classList.toggle('active', active);
+          d.setAttribute('aria-selected', active ? 'true' : 'false');
+        });
+        const badge = panels[index].querySelector('.panel-badge');
+        const kind  = badge ? badge.textContent.trim() : '';
+        const kindClass = (badge && badge.classList.contains('trick')) ? 'kind trick' : 'kind';
+        counter.innerHTML =
+          `<strong>${String(index + 1).padStart(2, '0')}</strong> / ${String(total).padStart(2, '0')}` +
+          (kind ? ` <span class="${kindClass}">${kind}</span>` : '');
+      }
+
+      // Initial render: just mark the first panel active, no animation.
+      function initialRender() {
+        panels.forEach((p, i) => {
+          p.classList.remove('active', 'enter-right', 'enter-left',
+                             'exit-right', 'exit-left');
+          if (i === index) {
+            p.classList.add('active');
+            p.setAttribute('aria-hidden', 'false');
+          } else {
+            p.setAttribute('aria-hidden', 'true');
+          }
+        });
+        updateMeta();
+      }
+
+      function goTo(i, userInitiated, direction) {
+        const newIndex = ((i % total) + total) % total;
+        if (newIndex === index) return;
+        if (transitioning) return;          // ignore rapid clicks mid-flight
+        if (direction === undefined) direction = 'next';
+
+        const oldIndex = index;
+        index = newIndex;
+
+        // Collapse any expanded panel when navigating away (legacy:
+        // current build hides .prompt-more, but this keeps the state
+        // machine clean if that ever changes).
+        panels.forEach((p, j) => {
+          if (j !== index && p.classList.contains('expanded')) {
+            p.classList.remove('expanded');
+            const btn = p.querySelector('.prompt-more');
+            if (btn) {
+              btn.setAttribute('aria-expanded', 'false');
+              if (btn.firstChild) btn.firstChild.nodeValue = 'more ';
+            }
+          }
+        });
+
+        const outgoing = panels[oldIndex];
+        const incoming = panels[newIndex];
+
+        // 1) Pre-position the incoming panel off-screen on the side it
+        //    will fly in from. 'next' -> enters from the right.
+        incoming.classList.remove('active', 'exit-left', 'exit-right',
+                                  'enter-right', 'enter-left');
+        incoming.classList.add(direction === 'next' ? 'enter-right' : 'enter-left');
+        incoming.setAttribute('aria-hidden', 'false');
+
+        // 2) Force a reflow so the browser registers the starting
+        //    transform before we change classes.
+        void incoming.offsetWidth;
+
+        // 3) Slide the incoming panel into place and the outgoing one
+        //    out toward the opposite side.
+        transitioning = true;
+        incoming.classList.remove('enter-right', 'enter-left');
+        incoming.classList.add('active');
+
+        outgoing.classList.remove('active');
+        outgoing.classList.add(direction === 'next' ? 'exit-left' : 'exit-right');
+        outgoing.setAttribute('aria-hidden', 'true');
+
+        // 4) After the transition, drop the exit class so the panel
+        //    sits at its default off-stage position (translateX 100%).
+        window.setTimeout(() => {
+          outgoing.classList.remove('exit-left', 'exit-right');
+          transitioning = false;
+        }, TRANSITION_MS + 30);
+
+        updateMeta();
+        if (userInitiated) restartAutoplay();
+      }
+      const next = (u) => goTo(index + 1, u, 'next');
+      const prev = (u) => goTo(index - 1, u, 'prev');
+
+      prevBtn.addEventListener('click', () => prev(true));
+      nextBtn.addEventListener('click', () => next(true));
+
+      // Keyboard navigation: ArrowLeft/ArrowRight when the carousel  
+      // is visible on screen and the user is not typing in a field.  
+      document.addEventListener('keydown', (e) => {
+        const t = e.target;
+        if (t && t.matches && t.matches('input, textarea, select, [contenteditable="true"]')) return;
+        const r = carousel.getBoundingClientRect();
+        const visible = r.top < window.innerHeight - 80 && r.bottom > 80;
+        if (!visible) return;
+        if (e.key === 'ArrowLeft')  { e.preventDefault(); prev(true); }
+        else if (e.key === 'ArrowRight') { e.preventDefault(); next(true); }
+      });
+
+      // Basic touch swipe support for mobile.                        
+      let touchStartX = null;
+      stage.addEventListener('touchstart', (e) => {
+        if (e.touches.length === 1) touchStartX = e.touches[0].clientX;
+      }, { passive: true });
+      stage.addEventListener('touchend', (e) => {
+        if (touchStartX == null) return;
+        const dx = e.changedTouches[0].clientX - touchStartX;
+        touchStartX = null;
+        if (Math.abs(dx) > 40) (dx < 0 ? next : prev)(true);
+      });
+
+      function tick() {
+        if (carousel.querySelector('.prompt-panel.expanded')) return; // pause while reading
+        if (carousel.matches(':hover')) return;                        // pause on hover
+        if (document.hidden) return;                                   // pause when tab hidden
+        next(false);
+      }
+      function startAutoplay() {
+        stopAutoplay();
+        autoplayTimer = setInterval(tick, AUTOPLAY_MS);
+      }
+      function stopAutoplay() {
+        if (autoplayTimer) { clearInterval(autoplayTimer); autoplayTimer = null; }
+      }
+      function restartAutoplay() {
+        if (autoplayTimer) startAutoplay();
+      }
+
+      // Only autoplay while the carousel is in view.                  
+      if ('IntersectionObserver' in window) {
+        const io = new IntersectionObserver((entries) => {
+          for (const entry of entries) {
+            if (entry.isIntersecting) startAutoplay();
+            else stopAutoplay();
+          }
+        }, { threshold: 0.15 });
+        io.observe(carousel);
+      } else {
+        startAutoplay();
+      }
+
+      initialRender();
+    })();
+
+    // ---------------------------------------------------------------
+    // Magic-dust hero canvas. Tiny floating particles, thematic for
+    // P. C. Sorcar the magician. Pauses when tab is hidden.
+    // ---------------------------------------------------------------
+    (function () {
+      const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      const canvas = document.getElementById('magic-dust');
+      if (reduced || !canvas) { if (canvas) canvas.remove(); return; }
+      const ctx = canvas.getContext('2d');
+      let w = 0, h = 0, dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const COLORS = ['#2dd4bf', '#a78bfa', '#fbbf24', '#ec4899'];
+      const particles = [];
+
+      function resize() {
+        const r = canvas.getBoundingClientRect();
+        w = r.width; h = r.height;
+        canvas.width = Math.floor(w * dpr);
+        canvas.height = Math.floor(h * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      }
+      window.addEventListener('resize', resize);
+      resize();
+
+      const COUNT = Math.min(80, Math.max(36, Math.floor((w * h) / 14000)));
+      for (let i = 0; i < COUNT; i++) {
+        particles.push({
+          x: Math.random() * w,
+          y: Math.random() * h,
+          vx: (Math.random() - 0.5) * 0.18,
+          vy: -Math.random() * 0.35 - 0.05,
+          r: Math.random() * 1.6 + 0.4,
+          c: COLORS[(Math.random() * COLORS.length) | 0],
+          a: Math.random() * Math.PI * 2,
+          tw: Math.random() * 0.02 + 0.008,
+        });
+      }
+
+      let raf = 0, running = true;
+      function frame() {
+        ctx.clearRect(0, 0, w, h);
+        for (const p of particles) {
+          p.x += p.vx;
+          p.y += p.vy;
+          p.a += p.tw;
+          if (p.y < -8) { p.y = h + 8; p.x = Math.random() * w; }
+          if (p.x < -8) p.x = w + 8;
+          if (p.x > w + 8) p.x = -8;
+          const alpha = 0.35 + 0.35 * Math.sin(p.a);
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+          ctx.fillStyle = p.c;
+          ctx.globalAlpha = alpha;
+          ctx.shadowColor = p.c;
+          ctx.shadowBlur = 8;
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+        ctx.shadowBlur = 0;
+        if (running) raf = requestAnimationFrame(frame);
+      }
+      frame();
+
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) {
+          running = false; cancelAnimationFrame(raf);
+        } else if (!running) {
+          running = true; frame();
+        }
+      });
+
+      // Pause when hero scrolls off screen to save battery.
+      const hero = document.querySelector('.hero');
+      if (hero && 'IntersectionObserver' in window) {
+        const heroIO = new IntersectionObserver((entries) => {
+          for (const e of entries) {
+            if (e.isIntersecting) {
+              if (!running) { running = true; frame(); }
+            } else {
+              running = false; cancelAnimationFrame(raf);
+            }
+          }
+        }, { threshold: 0 });
+        heroIO.observe(hero);
+      }
+    })();
+
+    // ---------------------------------------------------------------
+    // Scroll-reveal — fade in inner-cards, chips, quickstart steps,
+    // and any element with .reveal as it enters the viewport.
+    // ---------------------------------------------------------------
+    (function () {
+      if (!('IntersectionObserver' in window)) return;
+      const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      const targets = document.querySelectorAll(
+        '.section-card .inner-card, .quickstart-grid > div, .social-proof-row > *, .chip, .reveal'
+      );
+      if (reduced) {
+        targets.forEach(el => el.classList.add('in-view'));
+        return;
+      }
+      targets.forEach(el => el.classList.add('reveal'));
+      const io = new IntersectionObserver((entries, obs) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            entry.target.classList.add('in-view');
+            obs.unobserve(entry.target);
+          }
+        }
+      }, { threshold: 0.08, rootMargin: '0px 0px -8% 0px' });
+      targets.forEach(el => io.observe(el));
+    })();
+
+    // ---------------------------------------------------------------
+    // Animated number counters — count up to the value of any element
+    // marked with [data-count] (e.g. hero-trust strong numbers).
+    // ---------------------------------------------------------------
+    (function () {
+      if (!('IntersectionObserver' in window)) return;
+      const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      // Find hero-trust strong elements containing numeric content (e.g. "62.2%", "502 models").
+      const strongs = document.querySelectorAll('.hero-trust strong');
+      const items = [];
+      strongs.forEach(el => {
+        const text = el.textContent.trim();
+        const m = text.match(/^(\d+(?:\.\d+)?)(.*)$/);
+        if (!m) return;
+        const target = parseFloat(m[1]);
+        const suffix = m[2] || '';
+        const decimals = (m[1].split('.')[1] || '').length;
+        items.push({ el, target, suffix, decimals, original: text });
+      });
+      if (!items.length) return;
+      if (reduced) return; // leave originals in place
+
+      // Pre-fill with starting value so layout doesn't jump.
+      items.forEach(it => { it.el.textContent = (0).toFixed(it.decimals) + it.suffix; });
+
+      const animate = (it) => {
+        const DURATION = 1400;
+        const start = performance.now();
+        function step(now) {
+          const t = Math.min(1, (now - start) / DURATION);
+          const eased = 1 - Math.pow(1 - t, 3); // ease-out cubic
+          const v = it.target * eased;
+          it.el.textContent = v.toFixed(it.decimals) + it.suffix;
+          if (t < 1) requestAnimationFrame(step);
+          else it.el.textContent = it.original;
+        }
+        requestAnimationFrame(step);
+      };
+
+      const trust = document.querySelector('.hero-trust');
+      if (!trust) { items.forEach(animate); return; }
+      const io = new IntersectionObserver((entries, obs) => {
+        for (const e of entries) {
+          if (e.isIntersecting) {
+            items.forEach(animate);
+            obs.disconnect();
+            break;
+          }
+        }
+      }, { threshold: 0.4 });
+      io.observe(trust);
+    })();
+  </script>
+</body>
+</html>

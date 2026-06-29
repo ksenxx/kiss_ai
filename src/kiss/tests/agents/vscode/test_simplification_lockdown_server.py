@@ -35,6 +35,7 @@ from pathlib import Path
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree
+from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.vscode.server import VSCodeServer
 
 
@@ -252,18 +253,18 @@ class TestLiveTaskIdFallback(_DbTestBase):
         server, _ = _make_server()
         tab = server._get_tab("tab-live")
         assert tab.agent is not None
-        tab.agent._last_task_id = 7
-        tab.task_history_id = 42
+        tab.agent._last_task_id = "7"
+        tab.task_history_id = "42"
 
         release = threading.Event()
         worker = threading.Thread(target=release.wait, daemon=True)
         worker.start()
         tab.task_thread = worker
         try:
-            assert server._get_running_task_ids() == {7}
+            assert server._get_running_task_ids() == {"7"}
 
             tab.agent._last_task_id = None
-            assert server._get_running_task_ids() == {42}
+            assert server._get_running_task_ids() == {"42"}
         finally:
             release.set()
             worker.join(timeout=5)
@@ -272,8 +273,8 @@ class TestLiveTaskIdFallback(_DbTestBase):
         server, _ = _make_server()
         tab = server._get_tab("tab-dead")
         assert tab.agent is not None
-        tab.agent._last_task_id = 7
-        tab.task_history_id = 42
+        tab.agent._last_task_id = "7"
+        tab.task_history_id = "42"
 
         worker = threading.Thread(target=lambda: None, daemon=True)
         worker.start()
@@ -287,8 +288,8 @@ class TestLiveTaskIdFallback(_DbTestBase):
         tab = server._get_tab("tab-overlay")
         agent = tab.agent
         assert agent is not None
-        agent._last_task_id = 7
-        tab.task_history_id = 42
+        agent._last_task_id = "7"
+        tab.task_history_id = "42"
         agent.total_tokens_used = 555
         agent.budget_used = 1.25
         agent.total_steps = 9
@@ -298,7 +299,7 @@ class TestLiveTaskIdFallback(_DbTestBase):
         tab.auto_commit_mode = False
 
         matched: dict = {"tokens": 0, "cost": 0.0, "steps": 0}
-        server._overlay_live_metrics(matched, 7)
+        server._overlay_live_metrics(matched, "7")
         assert matched == {
             "tokens": 555,
             "cost": 1.25,
@@ -311,7 +312,7 @@ class TestLiveTaskIdFallback(_DbTestBase):
 
         # The fallback id must NOT match while the agent id is set.
         unmatched: dict = {"tokens": 0, "cost": 0.0, "steps": 0}
-        server._overlay_live_metrics(unmatched, 42)
+        server._overlay_live_metrics(unmatched, "42")
         assert unmatched == {"tokens": 0, "cost": 0.0, "steps": 0}
 
     def test_overlay_live_metrics_falls_back_to_task_history_id(self) -> None:
@@ -320,7 +321,7 @@ class TestLiveTaskIdFallback(_DbTestBase):
         agent = tab.agent
         assert agent is not None
         agent._last_task_id = None
-        tab.task_history_id = 42
+        tab.task_history_id = "42"
         agent.total_tokens_used = 100
         agent.budget_used = 0.5
         agent.total_steps = 4
@@ -330,7 +331,7 @@ class TestLiveTaskIdFallback(_DbTestBase):
         tab.auto_commit_mode = False
 
         session: dict = {"tokens": 0, "cost": 0.0, "steps": 0}
-        server._overlay_live_metrics(session, 42)
+        server._overlay_live_metrics(session, "42")
 
         assert session == {
             "tokens": 100,
@@ -354,7 +355,7 @@ class TestDeferredTabDisposal(_DbTestBase):
         server._handle_command({"type": "closeTab", "tabId": "tab-busy"})
 
         assert tab.frontend_closed is True
-        assert "tab-busy" in server._running_agent_states
+        assert "tab-busy" in _RunningAgentState.running_agent_states
 
     def test_close_during_merge_keeps_state(self) -> None:
         server, _ = _make_server()
@@ -364,7 +365,7 @@ class TestDeferredTabDisposal(_DbTestBase):
         server._handle_command({"type": "closeTab", "tabId": "tab-merging"})
 
         assert tab.frontend_closed is True
-        assert "tab-merging" in server._running_agent_states
+        assert "tab-merging" in _RunningAgentState.running_agent_states
 
     def test_close_with_live_thread_keeps_state(self) -> None:
         server, _ = _make_server()
@@ -377,7 +378,7 @@ class TestDeferredTabDisposal(_DbTestBase):
             server._handle_command({"type": "closeTab", "tabId": "tab-thread"})
 
             assert tab.frontend_closed is True
-            assert "tab-thread" in server._running_agent_states
+            assert "tab-thread" in _RunningAgentState.running_agent_states
         finally:
             release.set()
             worker.join(timeout=5)
@@ -388,19 +389,19 @@ class TestDeferredTabDisposal(_DbTestBase):
 
         server._handle_command({"type": "closeTab", "tabId": "tab-idle"})
 
-        assert "tab-idle" not in server._running_agent_states
+        assert "tab-idle" not in _RunningAgentState.running_agent_states
 
     def test_dispose_if_closed_after_task_end(self) -> None:
         server, _ = _make_server()
         tab = server._get_tab("tab-deferred")
         tab.is_task_active = True
         server._handle_command({"type": "closeTab", "tabId": "tab-deferred"})
-        assert "tab-deferred" in server._running_agent_states
+        assert "tab-deferred" in _RunningAgentState.running_agent_states
 
         tab.is_task_active = False
         server._dispose_if_closed("tab-deferred")
 
-        assert "tab-deferred" not in server._running_agent_states
+        assert "tab-deferred" not in _RunningAgentState.running_agent_states
 
     def test_dispose_if_closed_noop_when_frontend_open(self) -> None:
         server, _ = _make_server()
@@ -408,7 +409,7 @@ class TestDeferredTabDisposal(_DbTestBase):
 
         server._dispose_if_closed("tab-open")
 
-        assert "tab-open" in server._running_agent_states
+        assert "tab-open" in _RunningAgentState.running_agent_states
 
 
 class TestMergeFlowDelegates(_DbTestBase):

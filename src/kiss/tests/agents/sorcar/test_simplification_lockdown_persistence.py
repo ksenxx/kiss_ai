@@ -54,7 +54,7 @@ def _restore(saved) -> None:
     th._DB_PATH, th._db_conn, th._KISS_DIR = saved
 
 
-def _event_seqs(task_id: int) -> list[int]:
+def _event_seqs(task_id: str) -> list[int]:
     """Return the raw ``seq`` values for *task_id* in insertion order."""
     with th._rw_lock.read_lock():
         db = th._get_db()
@@ -65,7 +65,7 @@ def _event_seqs(task_id: int) -> list[int]:
         return [r["seq"] for r in rows]
 
 
-def _history_row(task_id: int) -> dict:
+def _history_row(task_id: str) -> dict:
     """Return the ``_load_history`` entry matching *task_id*."""
     rows = [r for r in th._load_history() if r["id"] == task_id]
     assert len(rows) == 1
@@ -207,15 +207,36 @@ class TestSaveResultAndExtra(_PersistenceTestBase):
     def test_save_task_extra_round_trips_json(self) -> None:
         task_id, _ = th._add_task("extra task")
         th._queue_chat_event({"type": "agent_text", "text": "q"}, task_id)
-        extra = {"model": "m1", "tokens": 123, "cost": 0.5, "nested": {"a": 1}}
+        # Only known flat-column keys round-trip in the new schema; an
+        # arbitrary "nested" key is silently dropped by ``_save_task_extra``.
+        extra = {"model": "m1", "tokens": 123, "cost": 0.5}
         th._save_task_extra(extra, task_id=task_id)
 
         # Queued event persisted before the extra write.
         assert len(_event_seqs(task_id)) == 1
         session = th._load_chat_events_by_task_id(task_id)
         assert session is not None
-        assert json.loads(str(session["extra"])) == extra
-        assert json.loads(str(_history_row(task_id)["extra"])) == extra
+        # r3-H3: ``_row_to_extra_json`` emits every typed column
+        # consistently.  Pop the defaulted ones; the assertion is
+        # that the explicitly-written keys round-trip.
+        loaded = json.loads(str(session["extra"]))
+        for k in (
+            "auto_commit_mode", "is_parallel", "is_worktree",
+            "work_dir", "version", "steps", "startTs", "endTs",
+            "is_favorite",
+        ):
+            loaded.pop(k, None)
+        assert loaded == extra
+        # Row in history table mirrors the same flat-column shape.
+        # r3-H3: pop every defaulted key consistently.
+        row_extra = json.loads(str(_history_row(task_id)["extra"]))
+        for k in (
+            "auto_commit_mode", "is_parallel", "is_worktree",
+            "work_dir", "version", "steps", "startTs", "endTs",
+            "is_favorite",
+        ):
+            row_extra.pop(k, None)
+        assert row_extra == extra
 
 
 class TestChatIdLookups(_PersistenceTestBase):
@@ -232,7 +253,7 @@ class TestChatIdLookups(_PersistenceTestBase):
 
     def test_lookups_return_empty_for_missing(self) -> None:
         th._add_task("present task")
-        assert th._get_task_chat_id(999_999) == ""
+        assert th._get_task_chat_id("999999") == ""
 
 
 class TestHasEventsFlag(_PersistenceTestBase):
@@ -303,7 +324,7 @@ class TestDeletions(_PersistenceTestBase):
         assert all(r["id"] != task_id for r in th._load_history())
 
     def test_delete_task_missing_returns_false(self) -> None:
-        assert th._delete_task(424_242) is False
+        assert th._delete_task("424242") is False
         task_id, _ = th._add_task("delete twice")
         assert th._delete_task(task_id) is True
         assert th._delete_task(task_id) is False

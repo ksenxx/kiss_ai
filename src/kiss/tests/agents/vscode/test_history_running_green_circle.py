@@ -262,8 +262,8 @@ def _post_history(
 def _history_event_from_real_backend(
     *,
     result: str = "",
-    fake_running_task_id: int | None = None,
-    fake_cli_running_ids: set[int] | None = None,
+    fake_running_task_id: str | None = None,
+    fake_cli_running_ids: set[str] | None = None,
 ) -> dict[str, Any]:
     """Persist one task and return the real ``getHistory`` broadcast.
 
@@ -311,7 +311,7 @@ def _history_event_from_real_backend(
 
         if fake_running_task_id is not None:
             resolved = (
-                task_id if fake_running_task_id == -1
+                task_id if fake_running_task_id == "-1"
                 else fake_running_task_id
             )
             state = _RunningAgentState(
@@ -332,9 +332,9 @@ def _history_event_from_real_backend(
             _RunningAgentState.register(fake_tab_id, state)
 
         if fake_cli_running_ids is not None:
-            cli_ids: set[int] = set(fake_cli_running_ids)
+            cli_ids: set[str] = set(fake_cli_running_ids)
 
-            def lookup() -> set[int]:
+            def lookup() -> set[str]:
                 return cli_ids
 
             server.set_cli_running_task_ids_lookup(lookup)
@@ -430,7 +430,7 @@ def test_backend_overrides_failed_sentinel_for_running_task() -> None:
     # persisted id (see _history_event_from_real_backend).
     event = _history_event_from_real_backend(
         result="Agent Failed Abruptly",
-        fake_running_task_id=-1,  # sentinel: use the persisted id
+        fake_running_task_id="-1",  # sentinel: use the persisted id
     )
     sessions = event["sessions"]
     row = next(
@@ -926,7 +926,7 @@ def test_backend_history_event_renders_green_circle_end_to_end(
         # ``-1`` sentinel asks the helper to re-use the just-persisted
         # task id for the alive-thread fixture so we don't have to
         # predict the auto-assigned id.
-        event = _history_event_from_real_backend(fake_running_task_id=-1)
+        event = _history_event_from_real_backend(fake_running_task_id="-1")
         row = next(
             s for s in event["sessions"]
             if s["preview"] == "running task from real backend"

@@ -156,7 +156,7 @@ class TestResumeSessionWithTaskId:
             assert len(evts) == 1
 
             # Non-existent task_id returns None
-            assert th._load_chat_events_by_task_id(999999) is None
+            assert th._load_chat_events_by_task_id("999999") is None
         finally:
             th._close_db()
             th._db_conn = orig_conn
@@ -234,7 +234,7 @@ class TestResumeSessionWithTaskId:
 
             # Non-existent task_id → should fall back to latest
             server._replay_session(
-                chat_id, tab_id="tab-inv", task_id=999999,
+                chat_id, tab_id="tab-inv", task_id="999999",
             )
             te = [e for e in captured if e.get("type") == "task_events"]
             assert len(te) == 1

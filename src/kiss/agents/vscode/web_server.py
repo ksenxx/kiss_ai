@@ -2198,9 +2198,17 @@ def _build_html() -> str:
         "TRICKS_JSON": tricks_json,
     }
     tpl = (MEDIA_DIR / "chat.html").read_text(encoding="utf-8")
-    for key, value in subs.items():
-        tpl = tpl.replace("{{" + key + "}}", value)
-    return tpl
+    # Single-pass substitution: injected values (e.g. the JS shim's
+    # documentation comment that mentions ``{{AUTH_MODAL}}`` by name)
+    # must NOT be re-scanned, otherwise stray placeholder-shaped tokens
+    # inside substituted JS/HTML would either be wrongly replaced or
+    # (when their key happens to be processed earlier in the dict)
+    # survive into the served page as unsubstituted placeholders.
+    return re.sub(
+        r"\{\{([A-Z_]+)\}\}",
+        lambda m: subs.get(m.group(1), m.group(0)),
+        tpl,
+    )
 
 
 def _read_version() -> str:
@@ -2309,6 +2317,16 @@ _WS_SHIM_JS = r"""
   var _pending = [];
   var _authenticated = false;
   var _needsPassword = false;
+  // Tracks whether this client has previously completed a full
+  // auth handshake.  Once true, the next successful ``auth_ok``
+  // after an ``onclose`` (i.e. a server restart or network blip)
+  // means the page state is stale relative to the freshly booted
+  // backend and we must reload the page so the normal load
+  // pipeline replays history, restored tabs, in-flight merges,
+  // etc.  Without this the page only re-binds the socket and the
+  // user is left staring at the "KISS Sorcar Server is starting
+  // ..." overlay (or stale UI) until they manually refresh.
+  var _hadAuthThenClosed = false;
 
   // Custom auth modal — replaces the browser-native prompt(), which is
   // rendered tall with wasted space below its buttons on most desktop
@@ -2388,6 +2406,19 @@ _WS_SHIM_JS = r"""
     _ws.onmessage = function(event) {
       var msg = JSON.parse(event.data);
       if (msg.type === 'auth_ok') {
+        // Recover from a server restart / network blip: if we had
+        // already authenticated at least once and the WS later
+        // closed, the page JS state is stale relative to the
+        // freshly booted backend.  Reload so the normal page-load
+        // pipeline (history replay, restored tabs, in-flight
+        // merge replay, ...) runs against the new server state.
+        // The reload is gated by ``_hadAuthThenClosed`` so the
+        // very first authentication on a fresh page load does NOT
+        // reload (otherwise we would loop forever).
+        if (_hadAuthThenClosed) {
+          try { window.location.reload(); } catch (e) {}
+          return;
+        }
         _authenticated = true;
         _needsPassword = false;
         // Re-establish this instance's pinned work_dir BEFORE flushing
@@ -2422,8 +2453,9 @@ _WS_SHIM_JS = r"""
         // re-prompts instead of silently retrying the bad value.
         try { localStorage.removeItem('sorcar-remote-pwd'); } catch(e) {}
         // Reveal ``#app`` so the auth modal (which lives INSIDE #app
-        // in the chat.html template — see ``{{AUTH_MODAL}}``) is no
-        // longer hidden by its display:none parent.  Without this
+        // in the chat.html template — see the ``AUTH_MODAL`` template
+        // placeholder substituted by ``_build_html``) is no longer
+        // hidden by its display:none parent.  Without this
         // dispatch a password-protected webapp shows the loading
         // overlay forever and the user can never enter their
         // password.  Symmetric to the auth_ok dispatch above — both
@@ -2444,6 +2476,14 @@ _WS_SHIM_JS = r"""
     };
 
     _ws.onclose = function() {
+      // Latch "we had a real session and then lost it" so the next
+      // successful ``auth_ok`` reloads the page.  We only set the
+      // flag when the prior socket had completed its auth handshake
+      // — a fresh page that has not yet authenticated must NOT
+      // trigger a reload on its first ``auth_ok``.
+      if (_authenticated) {
+        _hadAuthThenClosed = true;
+      }
       _authenticated = false;
       // Re-show the "KISS Sorcar Server is starting ..." overlay
       // while the socket is down so the user knows actions will not
@@ -2835,7 +2875,7 @@ class RemoteAccessServer:
         # Guarded by ``_cli_running_lock`` because the UDS handler
         # mutates it from the asyncio thread and ``_replay_session``
         # reads it from agent / handler threads.
-        self._cli_running_tasks: set[int] = set()
+        self._cli_running_tasks: set[str] = set()
         self._cli_running_lock = threading.Lock()
         # Expose the running-set lookup to ``VSCodeServer`` so its
         # ``_replay_session`` can subscribe a freshly opened webview
@@ -2852,7 +2892,7 @@ class RemoteAccessServer:
             self._snapshot_cli_running_task_ids,
         )
 
-    def _snapshot_cli_running_task_ids(self) -> set[int]:
+    def _snapshot_cli_running_task_ids(self) -> set[str]:
         """Return a thread-safe copy of the CLI-running task id set.
 
         Returned set is a fresh copy so callers can iterate / mutate
@@ -2862,7 +2902,7 @@ class RemoteAccessServer:
         with self._cli_running_lock:
             return set(self._cli_running_tasks)
 
-    def _is_cli_task_running(self, task_id: int) -> bool:
+    def _is_cli_task_running(self, task_id: str) -> bool:
         """Return ``True`` when *task_id* is being run by the CLI.
 
         Used by :meth:`VSCodeServer._replay_session` to decide whether
@@ -2874,7 +2914,7 @@ class RemoteAccessServer:
         with self._cli_running_lock:
             return task_id in self._cli_running_tasks
 
-    def _handle_cli_task_start(self, task_id: int, conn_state: dict[str, Any]) -> None:
+    def _handle_cli_task_start(self, task_id: str, conn_state: dict[str, Any]) -> None:
         """Record *task_id* as a CLI-launched running task.
 
         Also stamps the task id into the UDS connection's per-conn
@@ -2888,7 +2928,7 @@ class RemoteAccessServer:
         if isinstance(cli_tasks, set):
             cli_tasks.add(task_id)
 
-    def _handle_cli_task_end(self, task_id: int, conn_state: dict[str, Any]) -> None:
+    def _handle_cli_task_end(self, task_id: str, conn_state: dict[str, Any]) -> None:
         """Mark *task_id* as no longer running and stop the indicator.
 
         Drops the task id from :attr:`_cli_running_tasks` and from
@@ -2905,7 +2945,7 @@ class RemoteAccessServer:
             cli_tasks.discard(task_id)
         self._fanout_cli_status(task_id, running=False)
 
-    def _fanout_cli_status(self, task_id: int, *, running: bool) -> None:
+    def _fanout_cli_status(self, task_id: str, *, running: bool) -> None:
         """Send ``status:running`` to every tab subscribed to *task_id*.
 
         Mirrors the per-tab fan-out idiom from
@@ -3355,7 +3395,7 @@ class RemoteAccessServer:
             stale_cli_tasks = cast("Any", conn_state.get("cli_tasks"))
             if isinstance(stale_cli_tasks, set):
                 for task_id in list(stale_cli_tasks):
-                    if isinstance(task_id, int):
+                    if isinstance(task_id, str) and task_id:
                         self._handle_cli_task_end(
                             task_id, cast("dict[str, Any]", conn_state),
                         )
@@ -3470,12 +3510,13 @@ class RemoteAccessServer:
             # blinking-green-circle "running" indicator in its tab
             # title.  See ``_handle_cli_task_start``.
             raw_id = cmd.get("taskId")
-            try:
-                task_id_int = int(raw_id)  # type: ignore[arg-type]
-            except (TypeError, ValueError):
+            task_id_str = (
+                raw_id if isinstance(raw_id, str) and raw_id else ""
+            )
+            if not task_id_str:
                 logger.debug("cliTaskStart with bad taskId %r", raw_id)
                 return
-            self._handle_cli_task_start(task_id_int, conn_state)
+            self._handle_cli_task_start(task_id_str, conn_state)
             return
         if cmd_type == "cliTaskEnd":
             # CLI announces a previously-running task has finished
@@ -3483,12 +3524,13 @@ class RemoteAccessServer:
             # on every subscribed webview tab.  See
             # ``_handle_cli_task_end``.
             raw_id = cmd.get("taskId")
-            try:
-                task_id_int = int(raw_id)  # type: ignore[arg-type]
-            except (TypeError, ValueError):
+            task_id_str = (
+                raw_id if isinstance(raw_id, str) and raw_id else ""
+            )
+            if not task_id_str:
                 logger.debug("cliTaskEnd with bad taskId %r", raw_id)
                 return
-            self._handle_cli_task_end(task_id_int, conn_state)
+            self._handle_cli_task_end(task_id_str, conn_state)
             return
         if cmd_type == "setWorkDir":
             new_wd = cmd.get("workDir", "")
@@ -5442,7 +5484,7 @@ class RemoteAccessServer:
         from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 
         active: list[tuple[str, threading.Event | None, threading.Thread]] = []
-        active_task_history_ids: set[int] = set()
+        active_task_history_ids: set[str] = set()
         with _RunningAgentState._registry_lock:
             for tab_id, tab in _RunningAgentState.running_agent_states.items():
                 thread = tab.task_thread
@@ -5473,8 +5515,8 @@ class RemoteAccessServer:
                     th_id = tab.task_history_id
                     if th_id is None and tab.agent is not None:
                         th_id = getattr(tab.agent, "_last_task_id", None)
-                    if th_id is not None:
-                        active_task_history_ids.add(int(th_id))
+                    if th_id:
+                        active_task_history_ids.add(str(th_id))
 
         if not active:
             return

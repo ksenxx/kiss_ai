@@ -237,7 +237,7 @@ class TestNewTabStaleTaskId:
         )
 
         # The three new_tab payloads must carry three DISTINCT task ids.
-        payload_ids = [int(ev["task_id"]) for ev in new_tab_events]
+        payload_ids = [str(ev["task_id"]) for ev in new_tab_events]
         assert len(set(payload_ids)) == 3, (
             f"Expected 3 distinct sub-agent task ids in new_tab payloads, "
             f"got {payload_ids}"

@@ -177,6 +177,14 @@ class TestSubagentEventsPersisted:
             parent.model_name = "stub"
             parent.work_dir = "/tmp"
             parent._chat_id = "chat-parent-shared"
+            # ``_run_tasks_parallel`` reads ``parent._last_task_id``
+            # to stamp the ``parent_task_id`` column on each sub-agent
+            # row.  In production the parent's run() sets this very
+            # early; here we set it explicitly so the assertion below
+            # finds the sub-agent rows by parent_task_id.
+            # Must be a 32-char lowercase-hex string to satisfy the
+            # persistence ``_coerce_parent_task_id`` contract.
+            parent._last_task_id = "aaaaaaaabbbbccccddddeeeeffff0000"
             printer._persist_agents["tab-parent"] = parent
 
             tasks = ["sub task A", "sub task B", "sub task C"]
@@ -190,12 +198,12 @@ class TestSubagentEventsPersisted:
             # to find them.
             db = th._get_db()
             rows = db.execute(
-                "SELECT id, extra, has_events FROM task_history "
-                "WHERE COALESCE(extra, '') LIKE '%\"subagent\"%' "
-                "ORDER BY id ASC"
+                "SELECT id, parent_task_id, has_events FROM task_history "
+                "WHERE parent_task_id IS NOT NULL AND parent_task_id != '' "
+                "ORDER BY rowid ASC"
             ).fetchall()
             sub_rows = [
-                {"id": r[0], "extra": r[1], "has_events": r[2]}
+                {"id": r[0], "parent_task_id": r[1], "has_events": r[2]}
                 for r in rows
             ]
             assert len(sub_rows) == 3, f"expected 3 sub-agent rows, got {sub_rows}"
@@ -205,7 +213,7 @@ class TestSubagentEventsPersisted:
                     f"were not persisted: {h}"
                 )
                 row_id = h["id"]
-                assert isinstance(row_id, int)
+                assert isinstance(row_id, str)
                 loaded = _load_chat_events_by_task_id(row_id)
                 assert loaded is not None
                 evs = loaded.get("events", [])

@@ -98,7 +98,7 @@ def send_event(event: dict[str, Any]) -> None:
     _send_envelope({"type": "cliEvent", "event": event})
 
 
-def send_cli_task_start(task_id: int) -> None:
+def send_cli_task_start(task_id: str) -> None:
     """Announce that the CLI process has begun running *task_id*.
 
     The daemon records the task id in
@@ -107,10 +107,10 @@ def send_cli_task_start(task_id: int) -> None:
     to the live event stream and shown the blinking-green-circle
     "running" indicator in its tab title.
     """
-    _send_envelope({"type": "cliTaskStart", "taskId": int(task_id)})
+    _send_envelope({"type": "cliTaskStart", "taskId": str(task_id)})
 
 
-def send_cli_task_end(task_id: int) -> None:
+def send_cli_task_end(task_id: str) -> None:
     """Announce that the CLI process has finished running *task_id*.
 
     The daemon drops the task id from
@@ -118,6 +118,6 @@ def send_cli_task_end(task_id: int) -> None:
     ``status:running=false`` event to every subscribed webview so
     the blinking-green-circle indicator stops.
     """
-    _send_envelope({"type": "cliTaskEnd", "taskId": int(task_id)})
+    _send_envelope({"type": "cliTaskEnd", "taskId": str(task_id)})
 
 

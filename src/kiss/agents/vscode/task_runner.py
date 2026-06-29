@@ -179,8 +179,9 @@ class _TaskRunnerMixin:
         def _get_worktree_changed_files(self, tab_id: str = "") -> list[str]: ...
         def _extract_result_summary(self) -> str: ...
         def _generate_followup_async(
-            self, task: str, result: str, task_id: int | None,
+            self, task: str, result: str, task_id: str | None,
         ) -> None: ...
+        def _refresh_files_after_task(self, work_dir: str = "") -> None: ...
 
     def _run_task(self, cmd: dict[str, Any]) -> None:
         """Run the agent with the given task.
@@ -208,7 +209,12 @@ class _TaskRunnerMixin:
         # (review #3 / #4 round 2 — A2 critical).  Echo the id verbatim
         # on every ``status`` broadcast for this run so the client's
         # ``current_task_id`` filter actually works in production.
-        client_task_id = cmd.get("taskId", "") or ""
+        # r3-vscode-H1: reject non-string ``taskId`` payloads (list,
+        # dict, bool, int) so they do not silently flow into the
+        # ``status`` envelope echo where they would later be compared
+        # by ``str ==`` against UUID strings on the client.
+        _raw_ctid = cmd.get("taskId", "")
+        client_task_id = _raw_ctid if isinstance(_raw_ctid, str) and _raw_ctid else ""
         try:
             status_start: dict[str, Any] = {
                 "type": "status",
@@ -310,7 +316,7 @@ class _TaskRunnerMixin:
             self._dispose_if_closed(tab_id)
 
     def _broadcast_status_end_to_viewers(
-        self, task_id: int | None, launcher_tab_id: str,
+        self, task_id: str | None, launcher_tab_id: str,
         *, client_task_id: str = "",
     ) -> None:
         """Broadcast ``status running=False`` to every viewer subscribed
@@ -631,7 +637,11 @@ class _TaskRunnerMixin:
                 self._subscribe_chat_viewers,
                 source_tab_id=tab_id,
                 start_ms=start_ms,
-                client_task_id=cmd.get("taskId", "") or "",
+                client_task_id=(
+                    cmd["taskId"]
+                    if isinstance(cmd.get("taskId"), str) and cmd["taskId"]
+                    else ""
+                ),
             )
 
             for task_prompt in subtasks:
@@ -1019,6 +1029,19 @@ class _TaskRunnerMixin:
                     "startTs": start_ms,
                     "endTs": end_ms,
                 })
+                # Refresh the ``@``-mention file cache for this
+                # work_dir: the agent may have created or deleted
+                # files during its turn, but the cache is only
+                # otherwise updated on cold start, daemon-wide
+                # ``setWorkDir``, or an explicit refresh.  Without
+                # this call the next ``@`` mention serves stale
+                # suggestions — new files invisible, deleted files
+                # still listed.  The hook is a background rescan
+                # that no-ops when the file set is unchanged (only
+                # modifications) and broadcasts an updated ``files``
+                # event when files were actually added or removed
+                # so any open picker UI refreshes immediately.
+                self._refresh_files_after_task(work_dir)
                 logger.info(
                     "Task lifecycle complete: tab_id=%s task_id=%s "
                     "elapsed_ms=%d event_type=%s",
@@ -1104,7 +1127,7 @@ class _TaskRunnerMixin:
 
     def _subscribe_chat_viewers(
         self,
-        task_id: int,
+        task_id: str,
         chat_id: str,
         *,
         source_tab_id: str,

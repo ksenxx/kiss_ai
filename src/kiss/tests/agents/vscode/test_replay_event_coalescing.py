@@ -101,7 +101,7 @@ _COALESCED_TYPES: list[str] = [
 ]
 
 
-def _persist_stream(task_id: int, stream: list[dict]) -> None:
+def _persist_stream(task_id: str, stream: list[dict]) -> None:
     """Persist *stream* one event per row, mirroring live streaming."""
     for ev in stream:
         th._queue_chat_event(dict(ev), task_id=task_id)

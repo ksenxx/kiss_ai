@@ -84,7 +84,7 @@ def _make_remote_server() -> Any:
     )
 
 
-def _insert_sentinel_row(chat_id: str) -> int:
+def _insert_sentinel_row(chat_id: str) -> str:
     """Insert a fresh ``task_history`` row carrying the sentinel.
 
     Mirrors what :meth:`ChatSorcarAgent.run` does at the start of every
@@ -105,7 +105,7 @@ def _insert_sentinel_row(chat_id: str) -> int:
     return task_id
 
 
-def _row_result(task_id: int) -> str:
+def _row_result(task_id: str) -> str:
     db = _persistence._get_db()
     row = db.execute(
         "SELECT result FROM task_history WHERE id = ?", (task_id,),

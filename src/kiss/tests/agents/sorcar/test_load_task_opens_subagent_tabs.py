@@ -77,7 +77,7 @@ def _make_server() -> tuple[VSCodeServer, list[dict]]:
     return server, events
 
 
-def _seed_parent(chat_id: str, description: str = "parent task") -> int:
+def _seed_parent(chat_id: str, description: str = "parent task") -> str:
     """Insert a parent ``task_history`` row + one persisted event."""
     task_id, _ = th._add_task(description, chat_id=chat_id)
     th._append_chat_event(
@@ -100,8 +100,8 @@ def _seed_parent(chat_id: str, description: str = "parent task") -> int:
 
 
 def _seed_subagent(
-    *, parent_task_id: int, chat_id: str, description: str, event_text: str,
-) -> int:
+    *, parent_task_id: str, chat_id: str, description: str, event_text: str,
+) -> str:
     """Insert a sub-agent ``task_history`` row + one persisted event."""
     task_id, _ = th._add_task(description, chat_id=chat_id)
     th._append_chat_event(
