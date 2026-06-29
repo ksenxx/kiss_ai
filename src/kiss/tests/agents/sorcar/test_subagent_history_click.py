@@ -45,6 +45,7 @@ import threading
 from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
+from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.agents.vscode.server import VSCodeServer
@@ -265,11 +266,11 @@ class TestReplaySessionOpensSubagentTab:
 
         # Parent tab MUST remain keyed under "tab-parent" — not
         # rebound to "tab-history-click".
-        assert "tab-parent" in server._running_agent_states
-        assert server._running_agent_states["tab-parent"] is parent_tab
+        assert "tab-parent" in _RunningAgentState.running_agent_states
+        assert _RunningAgentState.running_agent_states["tab-parent"] is parent_tab
         # Replay is a VIEW operation: the viewer tab must NOT get its
         # own ``_RunningAgentState`` registry entry (no agent runs
         # there), and in particular the parent's state must not have
         # been rebound under the new tab id.
-        assert "tab-history-click" not in server._running_agent_states
+        assert "tab-history-click" not in _RunningAgentState.running_agent_states
         parent_thread.join(timeout=1)

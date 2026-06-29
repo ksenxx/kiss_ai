@@ -36,6 +36,7 @@ import threading
 import unittest
 from typing import Any
 
+from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.vscode.json_printer import JsonPrinter
 
 
@@ -804,9 +805,9 @@ class TestCloseTabServer(unittest.TestCase):
         """_close_tab removes the tab from _running_agent_states."""
         server = self._make_server()
         server._get_tab("tab1")
-        assert "tab1" in server._running_agent_states
+        assert "tab1" in _RunningAgentState.running_agent_states
         server._close_tab("tab1")
-        assert "tab1" not in server._running_agent_states
+        assert "tab1" not in _RunningAgentState.running_agent_states
 
     def test_close_tab_clears_subscribers(self) -> None:
         """_close_tab removes the tab from every task's subscriber set."""
@@ -826,7 +827,7 @@ class TestCloseTabServer(unittest.TestCase):
         tab = server._get_tab("tab1")
         tab.is_task_active = True
         server._close_tab("tab1")
-        assert "tab1" in server._running_agent_states
+        assert "tab1" in _RunningAgentState.running_agent_states
 
     def test_close_tab_skips_merging_tab(self) -> None:
         """_close_tab does not remove a tab that is in a merge review."""
@@ -834,7 +835,7 @@ class TestCloseTabServer(unittest.TestCase):
         tab = server._get_tab("tab1")
         tab.is_merging = True
         server._close_tab("tab1")
-        assert "tab1" in server._running_agent_states
+        assert "tab1" in _RunningAgentState.running_agent_states
 
     def test_close_tab_nonexistent_is_noop(self) -> None:
         """_close_tab for an unknown tab_id does not raise."""
@@ -845,9 +846,9 @@ class TestCloseTabServer(unittest.TestCase):
         """The closeTab command dispatches to _close_tab."""
         server = self._make_server()
         server._get_tab("tab1")
-        assert "tab1" in server._running_agent_states
+        assert "tab1" in _RunningAgentState.running_agent_states
         server._handle_command({"type": "closeTab", "tabId": "tab1"})
-        assert "tab1" not in server._running_agent_states
+        assert "tab1" not in _RunningAgentState.running_agent_states
 
 
 if __name__ == "__main__":
