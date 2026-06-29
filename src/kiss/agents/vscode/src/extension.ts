@@ -235,18 +235,29 @@ export function activate(context: vscode.ExtensionContext): void {
     );
   }
 
-  // Auto-reload when this extension's files are replaced (e.g. VSIX reinstall).
-  // fs.watchFile uses stat-polling so it works even when the file is deleted
-  // and recreated, which is what happens during VSIX installation.
+  // Auto-reload when this extension has been (re)installed.
   //
-  // Two watchers are needed:
-  //   1. extension.js — fires when the VSIX is reinstalled with the *same*
-  //      version (files overwritten in-place).
-  //   2. ~/.kiss/.extension-updated marker — fires when build-extension.sh
-  //      (or install.sh / release.sh) writes the marker *after* installing a
-  //      *new* version.  A version bump puts the new extension in a separate
-  //      directory, so the old extension.js is never modified and watcher #1
-  //      never fires.
+  // We watch *only* ``~/.kiss/.extension-updated``.  ``install.sh``,
+  // ``scripts/build-extension.sh`` and ``scripts/release.sh`` all touch
+  // that marker as their *final* step, after ``code --install-extension``
+  // has returned and the kiss-web daemon has been restarted.  A reload
+  // triggered by the marker is therefore guaranteed to bring up fully
+  // installed extension files.
+  //
+  // We deliberately do NOT watch ``out/extension.js``.  An earlier version
+  // did, but ``install.sh``'s ``tsc`` step rewrites ``out/extension.js``
+  // ~5–15 s *before* the rest of the install (``copy-kiss.sh``, daemon
+  // restart, ``code --install-extension``) completes.  Polling that file
+  // raced with the in-flight install and reloaded the window mid-step,
+  // tearing down the integrated terminal that was running ``install.sh``
+  // (the terminal shutdown writes ``\x03`` to the PTY, which is why users
+  // saw an unexplained ``^C`` and an aborted install).  Marker-only
+  // watching breaks that race: the reload can only fire after install.sh
+  // is done.
+  //
+  // ``fs.watchFile`` uses stat-polling, so it works even though the marker
+  // is repeatedly deleted and recreated (``ensureDependencies()`` clears
+  // it after consuming it).
   const extJsPath = path.join(context.extensionPath, 'out', 'extension.js');
   const markerPath = path.join(os.homedir(), '.kiss', '.extension-updated');
   const sockPath = path.join(os.homedir(), '.kiss', 'sorcar.sock');
@@ -261,7 +272,6 @@ export function activate(context: vscode.ExtensionContext): void {
       clearInterval(settleTimer);
       settleTimer = undefined;
     }
-    fs.unwatchFile(extJsPath);
     fs.unwatchFile(markerPath);
     vscode.commands.executeCommand('workbench.action.reloadWindow');
   };
@@ -321,18 +331,15 @@ export function activate(context: vscode.ExtensionContext): void {
     }, RELOAD_SETTLE_INTERVAL_MS);
   };
 
-  // Two watchers feed the same settle gate:
-  //   1. extension.js — fires when the VSIX is reinstalled with the *same*
-  //      version (files overwritten in-place).
-  //   2. ~/.kiss/.extension-updated marker — fires when install.sh /
-  //      build-extension.sh write the marker *after* installing the
-  //      extension and restarting the daemon.
-  fs.watchFile(extJsPath, {interval: 2000}, (curr, prev) => {
-    if (curr.mtimeMs !== prev.mtimeMs || curr.ino !== prev.ino) {
-      triggerReload();
-    }
-  });
-
+  // Single watcher: the ``~/.kiss/.extension-updated`` marker file.
+  //
+  // install.sh / build-extension.sh / release.sh all write this marker as
+  // their final step (after ``code --install-extension`` has returned and
+  // the kiss-web daemon has been restarted), so a stat change on it
+  // signals "extension is fully installed; safe to reload".  This covers
+  // both same-version reinstalls (where ``out/extension.js`` would be
+  // overwritten in place) and version bumps (where the new extension is
+  // extracted into a fresh directory).
   fs.watchFile(markerPath, {interval: 2000}, (curr, prev) => {
     // Only reload when the marker is *created* or *modified* (size > 0),
     // not when ensureDependencies() deletes it (size === 0).
@@ -347,7 +354,6 @@ export function activate(context: vscode.ExtensionContext): void {
         clearInterval(settleTimer);
         settleTimer = undefined;
       }
-      fs.unwatchFile(extJsPath);
       fs.unwatchFile(markerPath);
     },
   });
