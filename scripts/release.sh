@@ -25,6 +25,10 @@
 
 set -e  # Exit on error
 
+# Suppress the "A new release of gh is available" notice during release output.
+# Update gh out-of-band when convenient; the release flow does not need it.
+export GH_NO_UPDATE_NOTIFIER=1
+
 # =============================================================================
 # Constants
 # =============================================================================
@@ -243,12 +247,12 @@ build_vscode_extension() {
     # --no-audit/--no-fund: silence post-install audit summary and funding nag
     # (vulnerabilities live in transitive dev-deps of gts/inquirer with no fix
     # available; users were seeing the audit summary at the end of every release).
-    # --ignore-scripts: keytar (optional vsce dep, publish-credentials only) and
-    # @vscode/vsce-sign are the lockfile's only packages with install scripts;
-    # keytar's `prebuild-install || node-gyp rebuild` can hang forever on
-    # network/toolchain issues and neither script is needed to package the VSIX
-    # (mirrors install.sh).
-    npm ci --ignore-scripts --no-audit --no-fund
+    # --ignore-scripts: @vscode/vsce-sign is the lockfile's only remaining package
+    # with an install script (keytar is excluded via --omit=optional below).
+    # --omit=optional: skip keytar (an optional vsce dep used only for storing the
+    # PAT in an OS keychain — we pass --pat explicitly). Dropping keytar removes
+    # its `prebuild-install` transitive dep, which npm warns is deprecated.
+    npm ci --ignore-scripts --no-audit --no-fund --omit=optional
     npm run compile
     npm run copy-kiss
     npm run package
@@ -302,7 +306,11 @@ install_local_extension() {
     done
     if [[ -n "$code_cli" ]]; then
         print_step "Installing extension into VS Code..."
-        if "$code_cli" --install-extension "$vsix_path" --force 2>&1; then
+        # VS Code's bundled Node emits DEP0169 (url.parse) when its CLI installs
+        # an extension; --no-deprecation silences that noise (the warning is
+        # internal to VS Code and not actionable for us).
+        if NODE_OPTIONS="--no-deprecation${NODE_OPTIONS:+ $NODE_OPTIONS}" \
+            "$code_cli" --install-extension "$vsix_path" --force 2>&1; then
             print_info "Extension installed into VS Code"
             # Write marker so the running extension detects the update and reloads.
             mkdir -p "$HOME/.kiss"
@@ -323,7 +331,8 @@ install_local_extension() {
     fi
     if [[ -n "$cursor_cli" ]]; then
         print_step "Installing extension into Cursor IDE..."
-        if "$cursor_cli" --install-extension "$vsix_path" --force 2>&1; then
+        if NODE_OPTIONS="--no-deprecation${NODE_OPTIONS:+ $NODE_OPTIONS}" \
+            "$cursor_cli" --install-extension "$vsix_path" --force 2>&1; then
             print_info "Extension installed into Cursor IDE"
         else
             print_warn "Failed to install extension into Cursor IDE — continuing"
