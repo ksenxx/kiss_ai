@@ -237,21 +237,6 @@ def test_save_task_extra_top_level_parent_task_id_validates(
 
 
 # ---------------------------------------------------------------------------
-# Persistence Round-2 #6 (HIGH):
-#   _is_subagent_row uses plain `json.loads` (accepts NaN/Infinity).
-#   Must delegate to _parse_extra_dict so SQL-side and Python-side
-#   classifiers agree.
-# ---------------------------------------------------------------------------
-
-
-def test_is_subagent_row_rejects_non_rfc8259_extra_string() -> None:
-    bad_extra = '{"subagent": {"parent_task_id": "a"}, "cost": NaN}'
-    # Lax json.loads (pre-fix) would accept NaN and return True.
-    # _parse_extra_dict-backed (post-fix) must reject the row.
-    assert persistence._is_subagent_row(bad_extra) is False
-
-
-# ---------------------------------------------------------------------------
 # Persistence Round-2 #7 (HIGH):
 #   _row_to_extra_json uses plain `json.dumps` which would emit
 #   bare NaN tokens for non-finite cost.  Must round-trip via

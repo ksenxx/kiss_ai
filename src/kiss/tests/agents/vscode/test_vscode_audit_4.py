@@ -35,6 +35,7 @@ import queue
 import threading
 import unittest
 
+from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.vscode.server import VSCodeServer
 
 
@@ -222,19 +223,18 @@ class TestCmdRunSingleLockFixed(unittest.TestCase):
         tab_id = "tab-a6"
 
         with server._state_lock:
-            tab = server._running_agent_states.get(tab_id)
+            tab = _RunningAgentState.running_agent_states.get(tab_id)
             if tab is None:
-                from kiss.agents.sorcar.running_agent_state import _RunningAgentState
                 tab = _RunningAgentState(tab_id, server._default_model)
-                server._running_agent_states[tab_id] = tab
+                _RunningAgentState.running_agent_states[tab_id] = tab
 
-            assert tab_id in server._running_agent_states, (
+            assert tab_id in _RunningAgentState.running_agent_states, (
                 "Tab is tracked throughout the single lock block"
             )
             tab.stop_event = threading.Event()
             tab.task_thread = threading.Thread(target=lambda: None, daemon=True)
 
-        assert tab_id in server._running_agent_states
+        assert tab_id in _RunningAgentState.running_agent_states
         assert tab.task_thread is not None
 
 

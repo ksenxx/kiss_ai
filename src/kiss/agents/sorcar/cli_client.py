@@ -669,8 +669,7 @@ def _handle_client_slash(  # noqa: PLR0911,PLR0912 - branchy by design
     Returns ``True`` when the caller should exit the REPL (``/exit``
     or ``/quit``), ``False`` otherwise.
 
-    The command surface mirrors :func:`cli_repl._handle_slash` but
-    every action now flows through the daemon: information panels
+    Every action flows through the daemon: information panels
     (``/help`` / ``/commands`` / ``/skills`` / ``/mcp`` / ``/cost``)
     are answered by the new server-side ``cliInfo`` command (see
     :meth:`_CommandsMixin._cmd_cli_info`), state-changing commands
@@ -736,11 +735,8 @@ def _handle_client_slash(  # noqa: PLR0911,PLR0912 - branchy by design
             print(f"Resumed chat {chat_id}.\n")
         else:
             # List recent chats from the shared kiss DB the daemon
-            # also writes to.  Bypassing ``cli_repl._handle_resume``
-            # avoids its mandatory ``ChatSorcarAgent`` type check
-            # (there is no in-process agent in client mode); the
-            # original "list recent chats" behaviour is preserved
-            # via :func:`_print_recent_chats` directly.
+            # also writes to (there is no in-process agent in client
+            # mode), via :func:`_print_recent_chats` directly.
             _print_recent_chats(limit=limit)
             print("\nResume one with: /resume <chat-id>\n")
         return False
@@ -1234,10 +1230,9 @@ def run_client(
 
     This is the entry point invoked by
     :func:`worktree_sorcar_agent.main` in interactive mode (no
-    ``-t/--task`` / ``-f/--file``).  Mirrors the surface of the old
-    :func:`cli_repl.run_repl` so the on-screen behaviour — prompt
+    ``-t/--task`` / ``-f/--file``).  The on-screen behaviour — prompt
     panel, fast-completes, slash commands, streamed agent events,
-    rich Result panel — is preserved while the actual execution
+    rich Result panel — runs locally while the actual execution
     happens in the local ``sorcar web`` daemon process.
 
     Args:

@@ -23,13 +23,6 @@ BUG-57: ``_file_changed`` in ``_prepare_merge_view`` returns ``False``
     building loop also skips files where ``current_path.is_file()`` is
     False.  The user cannot see or reject file deletions.
 
-BUG-58: ``cleanup_orphans`` classifies branches by checking whether they
-    have an active git worktree directory.  After ``_finalize_worktree``
-    removes the worktree directory but before ``_do_merge`` completes,
-    the branch has no active worktree.  ``cleanup_orphans`` would delete
-    it, permanently losing agent work.  Fix: also check the branch's
-    ``kiss-original`` config entry — if it exists, the branch is pending
-    merge, not orphaned.
 """
 
 from __future__ import annotations
@@ -397,82 +390,4 @@ class TestBug57DeletedFilesInMergeView:
         assert result.get("error") == "No changes"
 
 
-class TestBug58CleanupOrphansDeletesPending:
-    """BUG-58: After ``_finalize_worktree`` removes the worktree
-    directory, the branch no longer has an active worktree.
-    ``cleanup_orphans`` classifies it as orphaned and deletes it,
-    permanently losing agent work that was pending merge.
 
-    FIX: ``cleanup_orphans`` checks for the ``branch.<name>.kiss-original``
-    git config entry.  If it exists, the branch is pending merge (not
-    orphaned) and is skipped.
-    """
-
-    def test_pending_branch_not_deleted(self, tmp_path: Path) -> None:
-        """A branch with kiss-original config must NOT be deleted."""
-        repo = _make_repo(tmp_path)
-        branch = "kiss/wt-bug58a-1"
-        wt_dir = repo / ".kiss-worktrees" / branch.replace("/", "_")
-        assert GitWorktreeOps.create(repo, branch, wt_dir)
-        GitWorktreeOps.save_original_branch(repo, branch, "main")
-        _add_agent_commit(wt_dir, "agent.txt", "agent work\n")
-
-        GitWorktreeOps.remove(repo, wt_dir)
-        GitWorktreeOps.prune(repo)
-
-        assert GitWorktreeOps.branch_exists(repo, branch)
-
-        result = GitWorktreeOps.cleanup_orphans(repo)
-
-        assert GitWorktreeOps.branch_exists(repo, branch), (
-            "BUG-58: cleanup_orphans deleted a branch with kiss-original "
-            "config — pending merge work lost"
-        )
-        assert "Deleted" not in result or branch not in result, (
-            "BUG-58: cleanup report should not mention deleting "
-            "a pending-merge branch"
-        )
-
-        _cleanup(repo, branch, wt_dir)
-
-    def test_true_orphan_still_deleted(self, tmp_path: Path) -> None:
-        """A branch with NO kiss-original config (true orphan) IS deleted."""
-        repo = _make_repo(tmp_path)
-        branch = "kiss/wt-bug58b-1"
-
-        subprocess.run(
-            ["git", "branch", branch],
-            cwd=repo, capture_output=True,
-        )
-        assert GitWorktreeOps.branch_exists(repo, branch)
-
-        result = GitWorktreeOps.cleanup_orphans(repo)
-        assert not GitWorktreeOps.branch_exists(repo, branch), (
-            "True orphan branch should be deleted"
-        )
-        assert "Deleted" in result
-
-    def test_orphan_with_stale_config_still_deleted(
-        self, tmp_path: Path,
-    ) -> None:
-        """A branch whose kiss-original points to a non-existent branch
-        IS still deleted (truly orphaned, stale config)."""
-        repo = _make_repo(tmp_path)
-        branch = "kiss/wt-bug58c-1"
-
-        subprocess.run(
-            ["git", "branch", branch],
-            cwd=repo, capture_output=True,
-        )
-        GitWorktreeOps.save_original_branch(
-            repo, branch, "nonexistent-branch-42",
-        )
-        assert GitWorktreeOps.branch_exists(repo, branch)
-
-        GitWorktreeOps.cleanup_orphans(repo)
-
-        assert GitWorktreeOps.branch_exists(repo, branch), (
-            "Branch with any kiss-original config should be kept for safety"
-        )
-
-        _cleanup(repo, branch, repo / "nonexistent")

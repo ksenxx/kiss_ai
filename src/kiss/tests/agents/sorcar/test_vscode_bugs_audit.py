@@ -29,6 +29,7 @@ from __future__ import annotations
 import threading
 import unittest
 
+from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.agents.vscode.diff_merge import _diff_files, _hunk_to_dict
 from kiss.agents.vscode.server import VSCodeServer
@@ -99,7 +100,7 @@ class TestCloseTabRaceWithTaskStartup(unittest.TestCase):
 
         self.server._close_tab("t1")
 
-        assert "t1" in self.server._running_agent_states, (
+        assert "t1" in _RunningAgentState.running_agent_states, (
             "B2 fix: tab should NOT be removed while task_thread is alive"
         )
 
@@ -172,7 +173,7 @@ class TestFinishMergeRedundantLookup(unittest.TestCase):
 
         def intercept_present(tid: str, **kw: object) -> None:
             with server._state_lock:
-                server._running_agent_states.pop(tid, None)
+                _RunningAgentState.running_agent_states.pop(tid, None)
             removed.set()
 
         server._present_pending_worktree = intercept_present  # type: ignore[assignment,method-assign]

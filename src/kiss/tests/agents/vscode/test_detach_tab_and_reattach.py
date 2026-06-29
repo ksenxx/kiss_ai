@@ -45,6 +45,7 @@ import threading
 from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
+from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.agents.vscode.server import VSCodeServer
@@ -186,7 +187,7 @@ class TestCloseTabDoesNotStopRunningTask:
         server._handle_command({"type": "closeTab", "tabId": tab_id_a})
 
         # Backend MUST keep the _RunningAgentState so the task can finish.
-        assert tab_id_a in server._running_agent_states
+        assert tab_id_a in _RunningAgentState.running_agent_states
         assert thread.is_alive(), (
             "Agent thread must continue to run after closeTab"
         )
@@ -244,7 +245,7 @@ class TestResumeRunningTaskReattachesLiveEvents:
 
         # Close tab A; backend retains _RunningAgentState because task active.
         server._handle_command({"type": "closeTab", "tabId": tab_id_a})
-        assert tab_id_a in server._running_agent_states
+        assert tab_id_a in _RunningAgentState.running_agent_states
 
         # User clicks the running task in history → frontend allocates
         # a new tab id and sends resumeSession.
@@ -260,9 +261,9 @@ class TestResumeRunningTaskReattachesLiveEvents:
         # invariant in ``_replay_session`` it gets NO registry entry —
         # multi-viewer fan-out is wired through the printer's
         # subscriber map, not through ``_running_agent_states``.
-        assert tab_id_a in server._running_agent_states
-        assert tab_id_b not in server._running_agent_states
-        assert server._running_agent_states[tab_id_a].task_thread is thread
+        assert tab_id_a in _RunningAgentState.running_agent_states
+        assert tab_id_b not in _RunningAgentState.running_agent_states
+        assert _RunningAgentState.running_agent_states[tab_id_a].task_thread is thread
 
         # Replay broadcast went to the new tab id.
         replays = [e for e in events if e.get("type") == "task_events"]

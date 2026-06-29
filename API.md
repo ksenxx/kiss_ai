@@ -323,11 +323,6 @@ ______________________________________________________________________
   - `branch`: The branch name to delete.
   - `wt_dir`: The worktree directory to remove.
 
-- **cleanup_orphans** — Scan for orphaned `kiss/wt-*` branches and worktrees. Serialized under :func:`repo_lock`: the scan snapshots `git worktree list` and later deletes branches and rmtree's unregistered directories under `.kiss-worktrees/`. Without the lock, a worktree registered by a concurrent task start (`_try_setup_worktree`) after the snapshot would look like an orphan directory and be deleted out from under the active task.<br/>`cleanup_orphans(repo: Path) -> str`
-
-  - `repo`: Root of the git repository to scan.
-  - **Returns:** Summary of findings and any cleanup actions taken.
-
 **`repo_lock`** — Return a per-repo re-entrant lock for multi-step git operations. Concurrent tabs operating on the same main repository must serialize their checkout → stash → merge → pop sequences to prevent interleaving that could corrupt the working tree. The lock is an :class:`threading.RLock` (re-entrant) so a caller holding the lock for an outer multi-step operation (e.g. `_try_setup_worktree` releasing a previous worktree before creating a new one) can safely call inner helpers (`_do_merge`, `discard`) that re-acquire the same lock on the same thread. Cross-thread acquisitions still block as expected.<br/>`def repo_lock(repo: Path) -> threading.RLock`
 
 - `repo`: Git repo root path.

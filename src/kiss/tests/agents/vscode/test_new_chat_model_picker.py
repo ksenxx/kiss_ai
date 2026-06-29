@@ -33,6 +33,7 @@ from kiss.agents.sorcar.persistence import (
     _load_last_model,
     _record_model_usage,
 )
+from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.vscode.server import VSCodeServer
 
 MAIN_JS = (
@@ -136,7 +137,7 @@ class TestNewChatModelPicker:
             "tabId": "tab-new",
         })
 
-        tab = server._running_agent_states.get("tab-new")
+        tab = _RunningAgentState.running_agent_states.get("tab-new")
         assert tab is not None
         assert tab.selected_model == "fresh-model", (
             f"New tab should use DB model 'fresh-model', "
@@ -171,7 +172,7 @@ class TestNewChatModelPicker:
         assert len(welcome_events) == 1
         assert welcome_events[0].get("model") == "model-B"
 
-        tab = server._running_agent_states.get("tab-new")
+        tab = _RunningAgentState.running_agent_states.get("tab-new")
         assert tab is not None
         assert tab.selected_model == "model-B"
 
