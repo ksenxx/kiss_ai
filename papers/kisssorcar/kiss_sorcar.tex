@@ -108,7 +108,7 @@ The name ``KISS'' reflects the \emph{Keep It Simple, Stupid} design philosophy i
 \label{fig:kiss-sorcar-screenshot}
 \end{figure}
 
-Table~\ref{tab:assistant-comparison} reproduces the project README's high-level comparison of KISS Sorcar with Claude Code and Cursor.
+Table~\ref{tab:assistant-comparison} shows a high-level comparison of KISS Sorcar with Claude Code and Cursor.
 
 \begin{table}[H]
 \centering
@@ -259,7 +259,7 @@ The Sorcar Agent adds the tools that make the system useful for software develop
 
 \textbf{Browser automation.}  A web-use tool provides programmatic browser control: navigating to URLs, reading page accessibility trees, clicking elements, typing text, pressing keys, scrolling, and taking screenshots.  This enables the agent to research documentation, verify deployed applications, and interact with web-based tools. It uses the open-source Chromium browser using the Playwright library. 
 
-\textbf{Parallel sub-agents.}  An optional parallel execution tool spawns independent Sorcar Agent instances in a thread pool.  Each sub-agent gets its own LLM context and tool set.  This is useful for embarrassingly parallel tasks such as summarizing multiple files or researching independent topics.  We collect the results and return them in input order.  We do not activate this tool by default because in the IDE, we cannot stream multiple agent outputs coherently in the chat window.
+\textbf{Parallel sub-agents.}  A parallel execution tool spawns independent Sorcar Agent instances in a thread pool.  Each sub-agent gets its own LLM context and tool set.  This is useful for embarrassingly parallel tasks such as summarizing multiple files or researching independent topics.  We collect the results and return them in input order.  
 
 \textbf{User interaction.}  An ask-user-question tool allows the agent to pause execution and request clarification from the user.  In the VS~Code integration, this renders as a text input in the sidebar; in CLI mode, it reads from standard input.
 
