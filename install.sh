@@ -13,6 +13,173 @@
 #
 # Log saved to ~/.kiss/install.log
 #
+# ---------------------------------------------------------------------------
+# Bulletproof terminal-signal immunity via new-session detachment
+# ---------------------------------------------------------------------------
+#
+# Failure mode this block cures
+# -----------------------------
+# A user clicked the VS Code "Update" button (settings panel), which calls
+# ``runUpdate()`` in ``SorcarSidebarView.ts``.  That method opens a VS Code
+# integrated terminal and ``terminal.sendText``s a compound command ending in
+# ``bash '/Users/ksen/kiss_ai/install.sh'``.  The install ran through Xcode
+# CLT, Homebrew, git, node, VS Code CLI and Claude-skill download, then died
+# right in the middle of the TypeScript compile::
+#
+#     >>> [5/6] Building VS Code extension...
+#        Compiling extension TypeScript...
+#
+#     > kiss-sorcar@2026.6.38 compile
+#     > tsc -p ./
+#
+#     ^C
+#        ⚠ Interrupt received but ignored — long npm/git steps can sit
+#           silent for 30-60 s while they download or extract.  Press
+#           Ctrl+C again within 3 s to really abort.
+#     ksen@Mac kiss_ai %
+#
+# The user explicitly says they did NOT press Ctrl-C — something delivered
+# SIGINT (or ``\x03`` into the PTY) during ``tsc``.  install.sh's outer
+# ``handle_interrupt`` trap fired (the diagnostic printed) but the script
+# STILL exited (the shell prompt returned).
+#
+# Why the existing trap defences are not enough
+# ---------------------------------------------
+# 1. SIGINT delivered to a terminal foreground process group is delivered to
+#    EVERY process in that group simultaneously — including ``npm``, ``node``,
+#    and ``tsc``.  install.sh's own SIGINT trap only protects install.sh's
+#    own bash process.
+# 2. ``run_with_heartbeat`` wraps its child in ``( trap '' INT TERM; exec ... )``
+#    so the child inherits SIG_IGN across exec.  POSIX says SIG_IGN survives
+#    exec, BUT Node.js installs its own SIGINT handling in some configurations
+#    and may not respect inherited SIG_IGN — so ``tsc`` (which runs on Node)
+#    can still die on a stray SIGINT, npm returns non-zero, and ``set -e``
+#    aborts install.sh.
+# 3. Many child processes (``bash scripts/fetch-claude-skills.sh``,
+#    ``python3 scripts/check-kiss-web-active-tasks.py``,
+#    ``"$CODE_CLI" --install-extension``, ``xargs kill``) are NOT wrapped in
+#    ``run_with_heartbeat`` and therefore are NOT protected by the SIG_IGN
+#    subshell at all.
+#
+# Why ``setsid`` (a new session with no controlling TTY) is the bulletproof
+# answer
+# -----------------------------------------------------------------------
+# Terminal-driven signals (Ctrl-C / Ctrl-Z / hangup on ``\x03``-and-close
+# from a PTY teardown) are delivered by the kernel ONLY to the process
+# group(s) of the controlling terminal's session.  A session with NO
+# controlling terminal literally cannot receive ``SIGINT`` from any
+# terminal — the kernel has nowhere to deliver them from.  Once the install
+# body runs inside a fresh session created with ``setsid(2)``, no amount of
+# ``\x03`` injected into the original VS Code PTY can reach it.
+#
+# Why we fork via perl instead of ``exec setsid`` directly
+# --------------------------------------------------------
+# Running install.sh from bash makes install.sh the leader of its own
+# process group (typically also of its session, depending on how it was
+# launched).  ``setsid(2)`` refuses with EPERM when called by a process
+# group leader — so a direct ``exec setsid bash install.sh`` would fail
+# immediately.  We must fork FIRST: the child (not the leader) can then
+# successfully call ``setsid`` and exec a fresh ``bash`` on this script.
+# ``perl`` is available at ``/usr/bin/perl`` on every macOS release and
+# every standard Linux distro the install supports, and ``POSIX::setsid``
+# is part of the core POSIX module that ships with perl itself — no CPAN
+# dependencies.
+#
+# The parent perl IGNOREs INT/TERM/HUP, then ``waitpid``s the child and
+# forwards its exit code.  Ignoring those three signals in the parent is
+# important too: a stray ``\x03`` from the original terminal can still hit
+# the parent's process group, and if the parent died the user would see
+# the same "shell prompt returned, install aborted" symptom even though
+# the install child is happily continuing in its detached session.
+#
+# Defense in depth
+# ----------------
+# The existing ``handle_interrupt``/``handle_hup`` traps below, the
+# ``run_with_heartbeat`` SIG_IGN subshell, and the
+# ``exec > >(tee -a "$LOG_FILE") 2>&1`` redirect remain unchanged — they
+# stay as belt-and-braces defence in depth (and keep the existing
+# regression tests passing).  The new-session detachment is now the
+# PRIMARY defence.
+#
+# Sentinel: ``_KISS_NEW_SESSION=1`` is exported before the re-exec so the
+# re-exec'd child does NOT fork again (no infinite loop).
+#
+# Graceful fallback: if ``perl`` is unavailable (extremely unlikely on
+# macOS / mainstream Linux), the script simply continues without
+# detachment, preserving the previous trap-only behaviour.
+# ---------------------------------------------------------------------------
+# BEGIN: kiss-new-session-reexec  (tests extract this block verbatim)
+if [ -z "${_KISS_NEW_SESSION:-}" ] && command -v perl >/dev/null 2>&1; then
+    # Probe POSIX::setsid availability before committing to the re-exec —
+    # if perl is present but the POSIX module fails to load (custom
+    # micro-perl builds), fall through to the trap-only path.
+    if perl -e 'use POSIX qw(setsid); exit 0' >/dev/null 2>&1; then
+        export _KISS_NEW_SESSION=1
+        # ``exec`` replaces the current bash with perl so a stray SIGINT to
+        # the original terminal's process group hits perl (which ignores it)
+        # rather than this bash (which would default-terminate).  The
+        # heredoc is the perl program; ``$0`` and ``$@`` are passed as
+        # positional args so the child can re-exec ``bash <script> <args>``.
+        exec /usr/bin/env perl - "$0" "$@" <<'KISS_PERL_REEXEC'
+use strict;
+use warnings;
+use POSIX ();
+
+my $script = shift @ARGV;
+my $pid = fork();
+die "kiss-install: fork failed: $!\n" unless defined $pid;
+
+if ($pid == 0) {
+    # Child: create a brand-new session with no controlling terminal so
+    # the kernel cannot deliver terminal-driven signals (SIGINT from
+    # ``\x03``, SIGHUP from PTY close) to this process or any of its
+    # descendants.  POSIX::setsid only fails with EPERM for a process
+    # group leader; we just forked so we are not the leader.
+    POSIX::setsid() or die "kiss-install: setsid failed: $!\n";
+    # Reopen STDIN from /dev/null.  The detached session has no
+    # controlling TTY anyway, but explicit /dev/null prevents any
+    # accidental read() blocking on the dead inherited FD.  STDOUT and
+    # STDERR are inherited unchanged so the user still sees progress
+    # in the original VS Code terminal.
+    open(STDIN, "<", "/dev/null") or die "kiss-install: reopen stdin: $!\n";
+    exec { "bash" } "bash", $script, @ARGV
+        or die "kiss-install: exec bash failed: $!\n";
+}
+
+# Parent: ignore every terminal-driven signal so that even if the
+# original VS Code PTY injects ``\x03`` (SIGINT) or closes (SIGHUP), or
+# something kills our pgrp with SIGTERM, this waitpid loop continues
+# undisturbed until the install child finishes.
+$SIG{INT}  = "IGNORE";
+$SIG{TERM} = "IGNORE";
+$SIG{HUP}  = "IGNORE";
+$SIG{QUIT} = "IGNORE";
+
+my $status;
+while (1) {
+    my $w = waitpid($pid, 0);
+    if ($w == $pid) { $status = $?; last; }
+    # waitpid returns -1 with EINTR if a signal interrupted it even
+    # though we asked the kernel to ignore those signals (very rare —
+    # only on some platforms for SIGCHLD races).  Just retry.
+    next if $w == -1 && $!{EINTR};
+    # ECHILD = the child already reaped (shouldn't happen given we did
+    # not set $SIG{CHLD} = "IGNORE", but be defensive).
+    if ($w == -1) { $status = 0; last; }
+}
+
+if (($status & 0xff) == 0) {
+    # Normal exit — forward exit code.
+    exit($status >> 8);
+} else {
+    # Killed by signal — surface as 128+signum so callers can tell.
+    exit(128 + ($status & 0x7f));
+}
+KISS_PERL_REEXEC
+    fi
+fi
+# END: kiss-new-session-reexec
+
 # `pipefail` is required so any internal pipeline whose tail is `tee` (or
 # any always-zero command) propagates a non-zero exit from its body
 # (e.g. a failed `npm run package`) instead of returning `tee`'s
