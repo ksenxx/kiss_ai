@@ -22,6 +22,7 @@ from kiss.agents.sorcar.git_worktree import (
     GitWorktreeOps,
     repo_lock,
 )
+from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.agents.vscode.diff_merge import (
     _merge_data_dir,
@@ -29,7 +30,7 @@ from kiss.agents.vscode.diff_merge import (
     _prepare_merge_view,
     _save_untracked_base,
 )
-from kiss.agents.vscode.server import VSCodeServer, _RunningAgentState
+from kiss.agents.vscode.server import VSCodeServer
 
 
 def _redirect_db(tmpdir: str) -> tuple:
@@ -345,7 +346,7 @@ class TestFix4SymmetricGuard:
         with server._state_lock:
             would_block = any(
                 t.is_merging and t.use_worktree
-                for t in server._running_agent_states.values()
+                for t in _RunningAgentState.running_agent_states.values()
             )
         assert would_block, (
             "Fix 4: non-wt task must be blocked when wt merge is active"
@@ -361,7 +362,7 @@ class TestFix4SymmetricGuard:
         with server._state_lock:
             would_block = any(
                 t.is_merging and t.use_worktree
-                for t in server._running_agent_states.values()
+                for t in _RunningAgentState.running_agent_states.values()
             )
         assert not would_block, (
             "Fix 4: non-wt merge should not block another non-wt task"

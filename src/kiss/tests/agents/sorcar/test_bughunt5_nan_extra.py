@@ -9,24 +9,15 @@ Every ``extra`` write (``_add_task``, ``_save_task_extra``,
 ``allow_nan=True`` serialises ``float("nan")`` / ``float("inf")`` as the
 bare tokens ``NaN`` / ``Infinity`` — NOT valid RFC 8259 JSON.  SQLite's
 ``json_valid`` (used by the ``_HISTORY_NOT_SUBAGENT`` predicate that
-hides sub-agent rows from every history reader) rejects those tokens,
-while Python's ``json.loads`` (used by ``_is_subagent_row``) accepts
-them.  The two sub-agent detectors therefore DISAGREE for any sub-agent
-row whose metrics contain a non-finite float (e.g. a NaN ``cost``):
-
-* ``_load_history`` / ``_search_history`` / ``_prefix_match_task``
-  (SQL side) treat the row as a REGULAR task and
-  surface it in the history sidebar;
-* ``_list_recent_chats``'s chat-selection query counts the row's chat
-  against ``limit`` but the Python-side ``_is_subagent_row`` filter then
-  drops every task — the slot is consumed and an older REAL chat
-  silently disappears (resurrecting the iteration-4 limit-slot bug).
+hides sub-agent rows from every history reader) rejected those tokens
+so any sub-agent row whose metrics contained a non-finite float
+(e.g. a NaN ``cost``) was surfaced in the history sidebar as if it
+were a regular task.
 
 Fix: serialise ``extra`` through ``_dumps_extra`` which replaces
-non-finite floats with ``None`` so the column always holds valid JSON,
-and make ``_is_subagent_row`` (and the other Python-side sub-agent
-parsers) reject NaN/Infinity via ``parse_constant`` so legacy corrupt
-rows are classified identically by SQL and Python.
+non-finite floats with ``None`` so the column always holds valid JSON
+and the dedicated ``parent_task_id`` column remains the single source
+of truth for sub-agent classification.
 
 Runs against a real SQLite database redirected to a temp dir.
 No mocks, patches, fakes, or test doubles.
@@ -44,7 +35,6 @@ from pathlib import Path
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.persistence import (
     _add_task,
-    _is_subagent_row,
     _list_recent_chats,
     _load_history,
     _save_task_extra,
@@ -211,13 +201,13 @@ class TestSubagentNanExtraConsistency(_TempDbTestBase):
         chat_ids = [c["chat_id"] for c in chats]
         assert chat_ids == [chat_a, chat_b]
 
-    def test_sql_and_python_classify_subagent_identically(
+    def test_sql_classify_subagent_via_parent_task_id_column(
         self,
     ) -> None:
-        # The new schema stores parent_task_id in a dedicated TEXT
-        # column — both SQL (``_HISTORY_NOT_SUBAGENT``) and Python
-        # (``_is_subagent_row``) read the same source, so they can
-        # never disagree.
+        # The schema stores parent_task_id in a dedicated TEXT
+        # column — the SQL predicate ``_HISTORY_NOT_SUBAGENT`` reads
+        # it directly so NaN/Infinity values in the ``extra`` payload
+        # can no longer confuse sub-agent classification.
         parent_id, chat = _add_task("parent task")
         sub_id = self._insert_raw_subagent(
             "subagent row", chat, parent_id, cost=0.1,
@@ -228,29 +218,23 @@ class TestSubagentNanExtraConsistency(_TempDbTestBase):
             sub_row = db.execute(
                 "SELECT "
                 + th._HISTORY_NOT_SUBAGENT
-                + " AS not_sub FROM task_history WHERE id = ?",
+                + " AS not_sub, parent_task_id "
+                "FROM task_history WHERE id = ?",
                 (sub_id,),
             ).fetchone()
             parent_row = db.execute(
                 "SELECT "
                 + th._HISTORY_NOT_SUBAGENT
-                + " AS not_sub FROM task_history WHERE id = ?",
+                + " AS not_sub, parent_task_id "
+                "FROM task_history WHERE id = ?",
                 (parent_id,),
             ).fetchone()
-        # Sub-agent row: SQL says hidden (not_sub == 0).
+        # Sub-agent row: SQL says hidden (not_sub == 0); column matches.
         assert sub_row["not_sub"] == 0
-        # Python side: _is_subagent_row reads the column via row fetch.
-        with th._rw_lock.read_lock():
-            sub_full = db.execute(
-                "SELECT * FROM task_history WHERE id = ?", (sub_id,),
-            ).fetchone()
-            parent_full = db.execute(
-                "SELECT * FROM task_history WHERE id = ?", (parent_id,),
-            ).fetchone()
-        assert _is_subagent_row(sub_full) is True
-        # Parent row: SQL says visible (not_sub == 1); Python agrees.
+        assert sub_row["parent_task_id"] == parent_id
+        # Parent row: SQL says visible (not_sub == 1); column empty.
         assert parent_row["not_sub"] == 1
-        assert _is_subagent_row(parent_full) is False
+        assert not parent_row["parent_task_id"]
 
         chats = _list_recent_chats(limit=10)
         chat_ids = [c["chat_id"] for c in chats]

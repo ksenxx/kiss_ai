@@ -127,7 +127,7 @@ class TestAdjacentSkipsSubagent:
 
     def test_extra_is_subagent_marker(self):
         """Sanity check: the marker we write matches the production
-        format that ``_is_subagent_row`` recognises."""
+        format the history readers recognise."""
         chat_id = "marker-check"
         a_id, _ = th._add_task("parent", chat_id=chat_id)
         sub_id, _ = th._add_task("sub", chat_id=chat_id)
@@ -146,4 +146,4 @@ class TestAdjacentSkipsSubagent:
         )
         parsed = json.loads(synth)
         assert "subagent" in parsed
-        assert th._is_subagent_row(synth) is True
+        assert parsed["subagent"]["parent_task_id"] == a_id

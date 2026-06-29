@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import threading
 
+from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+
 # ── Redundancy 1: _cmd_run must keep get-or-create + alive-check + thread
 #    start in a single _state_lock block (no nested re-acquisition) ──
 
@@ -35,20 +37,20 @@ class TestCmdRunUsesGetTab:
         from kiss.agents.vscode.server import VSCodeServer
 
         server = VSCodeServer.__new__(VSCodeServer)
-        server._running_agent_states.clear()
+        _RunningAgentState.running_agent_states.clear()
         server._default_model = "test-model"
         server._state_lock = threading.RLock()
         tab = server._get_tab("new-tab")
         assert tab is not None
         assert tab.selected_model == "test-model"
-        assert "new-tab" in server._running_agent_states
+        assert "new-tab" in _RunningAgentState.running_agent_states
 
     def test_get_tab_returns_existing_tab(self) -> None:
         """_get_tab must return the same object for repeated calls."""
         from kiss.agents.vscode.server import VSCodeServer
 
         server = VSCodeServer.__new__(VSCodeServer)
-        server._running_agent_states.clear()
+        _RunningAgentState.running_agent_states.clear()
         server._default_model = "test-model"
         server._state_lock = threading.RLock()
         tab1 = server._get_tab("t1")
