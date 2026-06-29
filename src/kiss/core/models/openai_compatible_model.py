@@ -26,6 +26,45 @@ from kiss.core.models.model import (
 
 logger = logging.getLogger(__name__)
 
+# Generated alias suffix produced by ``scripts/update_models.py`` to expose
+# the uncapped ``reasoning_effort="xhigh"`` level as its own catalog entry.
+# Both this module and ``OpenAICompatibleModel2`` strip it from the model
+# name they send to the provider so the alias routes to the same upstream
+# model id as the base entry while still carrying ``thinking="xhigh"`` in
+# ``MODEL_INFO``.
+_XHIGH_SUFFIX = "-xhigh"
+
+
+def _provider_model_name(model_name: str) -> str:
+    """Return the upstream provider id for a KISS catalog ``model_name``.
+
+    Two transformations are applied in order:
+
+    * An ``openrouter/`` routing prefix is removed (callers reach
+      OpenRouter via the catalog key ``openrouter/<provider>/<id>`` but
+      the OpenRouter API itself wants the bare ``<provider>/<id>``).
+    * A trailing ``-xhigh`` is stripped so the synthetic xhigh alias
+      maps back to its base model id.  ``MODEL_INFO`` carries the
+      sibling entry purely so callers can select ``reasoning_effort=
+      "xhigh"`` by model name; the provider's HTTP endpoint only knows
+      the base name.
+
+    Args:
+        model_name: The catalog model name as passed in.
+
+    Returns:
+        The string to send as ``model=`` over the wire.
+    """
+    provider_name = (
+        model_name[len("openrouter/") :]
+        if model_name.startswith("openrouter/")
+        else model_name
+    )
+    if provider_name.endswith(_XHIGH_SUFFIX):
+        return provider_name.removesuffix(_XHIGH_SUFFIX)
+    return provider_name
+
+
 def _model_thinking_level(model_name: str) -> str | None:
     """Return the default ``reasoning_effort`` level for *model_name*, if any.
 
@@ -159,9 +198,7 @@ class OpenAICompatibleModel(Model):
         )
         self.base_url = base_url
         self.api_key = api_key
-        self._api_model_name = (
-            model_name[len("openrouter/") :] if model_name.startswith("openrouter/") else model_name
-        )
+        self._api_model_name = _provider_model_name(model_name)
         # Default ``reasoning_effort`` to the level declared on the model's
         # MODEL_INFO entry (e.g. ``"xhigh"`` for gpt-5.5).  Copy first so we
         # never mutate the caller's dict.  Caller-supplied values always win.
