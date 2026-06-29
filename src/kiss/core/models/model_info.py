@@ -252,6 +252,28 @@ _QUARTER_CACHE_OPENROUTER_PREFIXES = (
     "openrouter/x-ai/",
 )
 
+_XHIGH_SUFFIX = "-xhigh"
+
+
+def _strip_xhigh_alias(bare: str) -> str:
+    """Strip the synthetic ``-xhigh`` alias suffix from a model name.
+
+    ``-xhigh`` is a KISS-internal alias suffix (see ``update_models.py``)
+    that maps onto the same provider model id as its base entry. Provider
+    pricing tables only mention the base names, so every pricing lookup
+    must consult the base name. Returning the input unchanged when the
+    suffix is absent keeps callers simple.
+
+    Args:
+        bare: A model name, possibly ending in ``-xhigh``.
+
+    Returns:
+        ``bare`` with a trailing ``-xhigh`` removed if present.
+    """
+    if bare.endswith(_XHIGH_SUFFIX):
+        return bare[: -len(_XHIGH_SUFFIX)]
+    return bare
+
 
 def _openai_cache_read_multiplier(bare: str) -> float:
     """Return the cached-input price multiplier for an OpenAI model.
@@ -308,11 +330,13 @@ def _openai_bare_name(name: str) -> str | None:
     """
     if name.startswith(_OPENAI_OPENROUTER_PREFIXES):
         bare = name.split("/", 2)[2]
-        return None if bare.startswith("gpt-oss") else bare
+        if bare.startswith("gpt-oss"):
+            return None
+        return _strip_xhigh_alias(bare)
     if name.startswith(_OPENAI_PREFIXES) and not name.startswith(
         ("text-embedding", "openai/", "codex/")
     ):
-        return name
+        return _strip_xhigh_alias(name)
     return None
 
 
@@ -835,6 +859,7 @@ def _openai_long_context_prices(model_name: str) -> tuple[int, float, float, flo
     bare = _strip_provider_prefix(model_name)
     if bare.startswith(_OPENAI_OPENROUTER_PREFIXES):
         bare = bare.split("/", 2)[2]
+    bare = _strip_xhigh_alias(bare)
     if bare.startswith("gpt-5.5") and "-pro" not in bare:
         return 200_000, 10.00, 45.00, 1.00
     if (
@@ -852,6 +877,7 @@ def _gemini_long_context_prices(model_name: str) -> tuple[int, float, float, flo
     bare = _strip_provider_prefix(model_name)
     if bare.startswith(_GOOGLE_OPENROUTER_PREFIXES):
         bare = bare.split("/", 2)[2]
+    bare = _strip_xhigh_alias(bare)
     if bare.startswith("gemini-2.5-pro"):
         return 200_000, 2.50, 15.00, 0.25
     return None
