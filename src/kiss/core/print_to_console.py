@@ -175,6 +175,16 @@ class ConsolePrinter(Printer):
             self._handle_message(content, **kwargs)
             return ""
         if type == "bash_stream":
+            if not self._bash_streamed:
+                # First streamed chunk of a Bash tool call: open the
+                # RESULT rule HERE so the live-streamed output renders
+                # INSIDE the Result panel (between the opening RESULT
+                # rule and the closing rule the matching ``tool_result``
+                # event will emit) — without this, every streamed
+                # chunk lands above the opening rule and the panel
+                # body is empty.
+                self._flush_newline()
+                self._console.rule("RESULT", style="green", align="center")
             self._file.write(str(content))
             self._file.flush()
             self._mid_line = not str(content).endswith("\n")
@@ -182,7 +192,15 @@ class ConsolePrinter(Printer):
             return ""
         if type == "tool_call":
             self._flush_newline()
-            self._bash_streamed = False
+            if self._bash_streamed:
+                # Defensive: a previous Bash call opened the RESULT
+                # rule via the bash_stream path but never received a
+                # matching ``tool_result`` (e.g. the call was
+                # cancelled mid-stream).  Close the panel now so the
+                # next tool_call's blue panel doesn't render inside
+                # the still-open Result panel.
+                self._console.rule(style="green")
+                self._bash_streamed = False
             self._format_tool_call(str(content), kwargs.get("tool_input", {}))
             return ""
         if type == "tool_result":
@@ -293,14 +311,27 @@ class ConsolePrinter(Printer):
     def _print_tool_result(self, content: str, is_error: bool = False) -> None:
         label = "FAILED" if is_error else "RESULT"
         style = "red" if is_error else "green"
-        self._console.rule(label, style=style, align="center")
         if not self._bash_streamed:
+            # Normal (non-streamed) path: open the panel here, write
+            # the full captured content, then close it.
+            self._console.rule(label, style=style, align="center")
             display = truncate_result(content)
             for line in display.splitlines():
                 self._file.write(line + "\n")
                 self._file.flush()
+            self._console.rule(style=style)
+        else:
+            # The ``bash_stream`` handler already opened the RESULT
+            # rule and printed the live output INSIDE the panel.  All
+            # that's left to do is close the panel.  When the command
+            # failed, surface a "FAILED" label on the closing rule so
+            # the user still sees the error status without a duplicate
+            # dump of the streamed content.
+            if is_error:
+                self._console.rule(label, style=style, align="center")
+            else:
+                self._console.rule(style=style)
         self._bash_streamed = False
-        self._console.rule(style=style)
 
     def _handle_message(self, message: Any, **kwargs: Any) -> None:
         if hasattr(message, "subtype") and hasattr(message, "data"):
