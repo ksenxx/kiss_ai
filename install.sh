@@ -71,14 +71,40 @@ export PATH="$BIN_DIR:$PATH"
 # Trap SIGINT/SIGTERM at the bash level so a single stray signal prints a
 # diagnostic instead of silently terminating, and so the user can see how
 # far they got.  A *second* signal within 3 s is honored as a real abort.
+#
+# CRITICAL: install.sh ignoring SIGINT in its own trap is not enough.  The
+# signal is delivered to the entire foreground process group, so any
+# wrapped child (``npm ci``, ``bash copy-kiss.sh``, ``git ls-files``…)
+# that does NOT trap SIGINT itself dies immediately — which made the
+# subsequent ``wait`` in ``run_with_heartbeat`` return non-zero and
+# triggered ``set -e``, aborting the install at e.g.
+# "Copying source files..." even though install.sh's own trap had run.
+# The fix below: ``run_with_heartbeat`` spawns the wrapped command inside
+# a subshell that sets ``trap '' INT TERM`` and then ``exec``s the binary.
+# POSIX guarantees that a signal *ignored* at exec time stays ignored in
+# the new process, so npm and its descendants survive a single stray
+# signal too.  A confirmed double-Ctrl+C in ``handle_interrupt`` kills the
+# tracked child explicitly to give the user a real escape hatch.
 # ---------------------------------------------------------------------------
 LAST_SIGNAL_TS=0
+# PID of the wrapped command currently running under ``run_with_heartbeat``
+# — used by ``handle_interrupt`` to forcibly stop it on a confirmed
+# double-interrupt (since the child ignores SIGINT by design).
+CURRENT_CMD_PID=""
 handle_interrupt() {
     local now
     now=$(date +%s)
     if [ $((now - LAST_SIGNAL_TS)) -lt 3 ]; then
         echo ""
         echo "   Second interrupt received — aborting install."
+        if [ -n "$CURRENT_CMD_PID" ]; then
+            # The wrapped command ignores SIGINT (``trap '' INT TERM`` in
+            # its subshell), so SIGINT alone would do nothing.  Send
+            # SIGTERM, give it a moment to clean up, then SIGKILL.
+            kill -TERM "$CURRENT_CMD_PID" 2>/dev/null || true
+            sleep 1
+            kill -KILL "$CURRENT_CMD_PID" 2>/dev/null || true
+        fi
         echo "   Re-run 'bash $0' to resume; the build cache is preserved."
         exit 130
     fi
@@ -100,13 +126,22 @@ run_with_heartbeat() {
     shift
     local start
     start=$(date +%s)
-    # Run the command in the background and capture its PID.  We do NOT
-    # exec it because we need to wait for it explicitly to harvest the
-    # exit code through ``wait``.
-    "$@" &
+    # Run the command inside a subshell that ignores SIGINT/SIGTERM, then
+    # ``exec`` the real binary.  POSIX says SIG_IGN survives exec, so npm
+    # and every descendant inherit "ignore" for INT/TERM — a stray signal
+    # delivered to install.sh's terminal process group can no longer kill
+    # them, which was the actual root cause of the
+    # "Copying source files..." abort.  The install.sh-level trap above
+    # remains the only way to actually stop the build (double-Ctrl+C).
+    ( trap '' INT TERM; exec "$@" ) &
     local cmd_pid=$!
+    CURRENT_CMD_PID=$cmd_pid
     # Heartbeat loop runs in its own subshell so a failing ``sleep`` (rare)
-    # cannot abort the parent script under ``set -e``.
+    # cannot abort the parent script under ``set -e``.  We deliberately do
+    # NOT trap INT/TERM here: the parent's cleanup at end-of-function uses
+    # SIGTERM to stop the heartbeat, and a stray SIGINT killing the
+    # heartbeat is harmless — at worst one elapsed-time message is lost;
+    # the wrapped command itself stays alive via its own SIG_IGN above.
     (
         set +e
         while kill -0 "$cmd_pid" 2>/dev/null; do
@@ -120,11 +155,25 @@ run_with_heartbeat() {
     local hb_pid=$!
     # Use ``+e`` so a non-zero exit from the wrapped command is returned to
     # the caller instead of aborting the whole script — callers (e.g. the
-    # npm ci retry loop) need to inspect the exit code.
+    # npm ci retry loop) need to inspect the exit code.  ``wait`` itself
+    # can also return early under signal delivery; loop until the child
+    # is actually gone so a stray signal during this exact instant cannot
+    # leave the caller seeing a bogus non-zero rc while the child keeps
+    # running.
     set +e
-    wait "$cmd_pid"
-    local rc=$?
+    local rc
+    while :; do
+        wait "$cmd_pid"
+        rc=$?
+        # ``wait`` returns >128 when interrupted by a trapped signal but
+        # the child is still alive.  Detect that case and keep waiting.
+        if [ $rc -gt 128 ] && kill -0 "$cmd_pid" 2>/dev/null; then
+            continue
+        fi
+        break
+    done
     set -e
+    CURRENT_CMD_PID=""
     kill "$hb_pid" 2>/dev/null || true
     wait "$hb_pid" 2>/dev/null || true
     return $rc
