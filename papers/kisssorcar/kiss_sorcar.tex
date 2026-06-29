@@ -483,6 +483,24 @@ The 62.2\% overall pass rate is comparable to other agents using the same underl
 We release our system as three coordinated surfaces over a single local daemon: a VS~Code extension, a Claude-Code-style command-line interface (\texttt{sorcar}), and a browser/mobile web app.  While the underlying agent architecture (Sections~\ref{sec:architecture} and~\ref{sec:system-prompt}) already differs from existing AI coding assistants, the user-facing design introduces several features that differ from those in existing IDE assistants such as GitHub Copilot~\citep{copilot2021}, Cursor~\citep{cursor2024}, Windsurf~\citep{windsurf2024}, Devin~\citep{devin2024}, and Aider~\citep{aider2023}.  We describe these features below.
 
 %......................................................................
+\subsection{Multi-Model, Multi-Vendor Workflows}
+\label{sec:multi-model-feature}
+%......................................................................
+
+KISS Sorcar ships with a catalog of 501 models spanning eight provider categories---70 OpenAI, 13 Anthropic, 23 Gemini/Google, 77 Together AI, 5 MiniMax, 303 OpenRouter, 3 Claude~Code CLI (exposed under the \texttt{cc/*} namespace), and 7 OpenAI Codex CLI (\texttt{codex/*} namespace) entries---of which 485 are generation-capable, 321 are function-calling-capable, and 7 are embedding models.  A task may mix models simply by issuing prompts that reference a different model id; the framework swaps the backend per call without reinitializing the agent or the chat session.  Beyond bundled providers, \texttt{--endpoint}/\texttt{--header} (and the corresponding \texttt{update\_settings} controls inside the agent) configure any OpenAI-compatible HTTP server---including local models served by, for example, vLLM or llama.cpp---which keeps the bring-your-own-key, local-first posture even for self-hosted backends.  Because keys and prompts travel directly from the developer's machine to the chosen provider, no Sorcar-operated intermediary observes the traffic.
+
+%......................................................................
+\subsection{Dynamic Steering of a Running Task}
+\label{sec:dynamic-steering-feature}
+%......................................................................
+
+A common failure mode of long-running AI tasks is that the user notices a misunderstanding, an additional constraint, or a wrong direction \emph{while} the agent is already executing.  KISS Sorcar lets the user type a follow-up natural-language message at any moment during a live task, and that message is appended to the running conversation before the next model step---without halting the in-flight tool call, discarding the work done so far, or starting a new task from scratch.
+
+Steering is uniform across all three surfaces.  In the VS~Code sidebar, the running-task input bar accepts follow-up messages instead of starting a new task.  In the \texttt{sorcar} CLI, a bordered input box is pinned to the bottom of the terminal while agent output keeps scrolling above it, so the user can compose a message at any time without interrupting the stream.  The browser and mobile surfaces expose the same input through the local daemon.  In every case the new message is delivered to the running agent before its next model turn and enters the live conversation as a user message, so the model sees the new guidance the moment it begins its next step.
+
+Dynamic steering is orthogonal to the continuation mechanism of Section~\ref{sec:relentless-agent} (which preserves progress across context-window and step-budget boundaries) and to worktree isolation (Section~\ref{sec:worktree-agent}); a steered task can still be committed-and-merged or discarded as a whole branch.  Because external backends such as Claude~Code CLI and the Codex CLI are exposed as model providers and third-party agents are exposed through the same tool layer (Section~\ref{sec:ext-feature}), the same user message can steer a local KISS Agent, a worktree-isolated Sorcar task, parallel sub-agents, or work delegated to a supported external backend.  We compare KISS Sorcar's dynamic steering with related in-flight control mechanisms---Claude~Code Remote Control, GitHub Copilot cloud agent follow-ups, Cursor Cloud Agents, Codex queue-versus-steer mode, Aider \texttt{AI!} comments, and the LangChain/LangGraph human-in-the-loop middleware---in Section~\ref{sec:dynamic-steering}.
+
+%......................................................................
 \subsection{Real-Time Budget Accountability}
 \label{sec:budget-feature}
 %......................................................................
@@ -543,23 +561,6 @@ The third surface is the \emph{user-provided} side of the previous two---and of 
 
 The three files are scope-uniform: they live in the same \texttt{\textasciitilde/.kiss/} directory used by MCP configuration (\texttt{mcp.json}), MCP OAuth tokens (\texttt{mcp\_auth/}), the persistence DB, and per-user Markdown slash commands (\texttt{commands/}, Section~\ref{sec:cli-feature}), so a user's entire customization profile is a single self-contained directory that can be version-controlled, shared across machines, or scoped per-project by placing equivalents under \texttt{<project>/.kiss/}.
 
-%......................................................................
-\subsection{Multi-Model, Multi-Vendor Workflows}
-\label{sec:multi-model-feature}
-%......................................................................
-
-KISS Sorcar ships with a catalog of 501 models spanning eight provider categories---70 OpenAI, 13 Anthropic, 23 Gemini/Google, 77 Together AI, 5 MiniMax, 303 OpenRouter, 3 Claude~Code CLI (exposed under the \texttt{cc/*} namespace), and 7 OpenAI Codex CLI (\texttt{codex/*} namespace) entries---of which 485 are generation-capable, 321 are function-calling-capable, and 7 are embedding models.  A task may mix models simply by issuing prompts that reference a different model id; the framework swaps the backend per call without reinitializing the agent or the chat session.  Beyond bundled providers, \texttt{--endpoint}/\texttt{--header} (and the corresponding \texttt{update\_settings} controls inside the agent) configure any OpenAI-compatible HTTP server---including local models served by, for example, vLLM or llama.cpp---which keeps the bring-your-own-key, local-first posture even for self-hosted backends.  Because keys and prompts travel directly from the developer's machine to the chosen provider, no Sorcar-operated intermediary observes the traffic.
-
-%......................................................................
-\subsection{Dynamic Steering of a Running Task}
-\label{sec:dynamic-steering-feature}
-%......................................................................
-
-A common failure mode of long-running AI tasks is that the user notices a misunderstanding, an additional constraint, or a wrong direction \emph{while} the agent is already executing.  KISS Sorcar lets the user type a follow-up natural-language message at any moment during a live task, and that message is appended to the running conversation before the next model step---without halting the in-flight tool call, discarding the work done so far, or starting a new task from scratch.
-
-Steering is uniform across all three surfaces.  In the VS~Code sidebar, the running-task input bar accepts follow-up messages instead of starting a new task.  In the \texttt{sorcar} CLI, a bordered input box is pinned to the bottom of the terminal while agent output keeps scrolling above it, so the user can compose a message at any time without interrupting the stream.  The browser and mobile surfaces expose the same input through the local daemon.  In every case the new message is delivered to the running agent before its next model turn and enters the live conversation as a user message, so the model sees the new guidance the moment it begins its next step.
-
-Dynamic steering is orthogonal to the continuation mechanism of Section~\ref{sec:relentless-agent} (which preserves progress across context-window and step-budget boundaries) and to worktree isolation (Section~\ref{sec:worktree-agent}); a steered task can still be committed-and-merged or discarded as a whole branch.  Because external backends such as Claude~Code CLI and the Codex CLI are exposed as model providers and third-party agents are exposed through the same tool layer (Section~\ref{sec:ext-feature}), the same user message can steer a local KISS Agent, a worktree-isolated Sorcar task, parallel sub-agents, or work delegated to a supported external backend.  We compare KISS Sorcar's dynamic steering with related in-flight control mechanisms---Claude~Code Remote Control, GitHub Copilot cloud agent follow-ups, Cursor Cloud Agents, Codex queue-versus-steer mode, Aider \texttt{AI!} comments, and the LangChain/LangGraph human-in-the-loop middleware---in Section~\ref{sec:dynamic-steering}.
 
 %----------------------------------------------------------------------
 \section{The System Prompt}\nopagebreak
