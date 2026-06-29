@@ -43,10 +43,14 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import re
 import shutil
+import signal
 import subprocess
 import tarfile
+import textwrap
+import time
 from pathlib import Path
 
 import pytest
@@ -314,6 +318,192 @@ def _run_npm_ci(flags: list[str], tmp_path: Path, name: str) -> Path:
         "npm ci must still install the dependency tree"
     )
     return marker
+
+
+def _extract_signal_helpers(script: Path) -> str:
+    """Return the bash source defining the signal-handling helpers.
+
+    The chunk covers ``LAST_SIGNAL_TS``, ``CURRENT_CMD_PID``,
+    ``handle_interrupt``, the ``trap`` installation and
+    ``run_with_heartbeat`` — everything the regression test needs to
+    exercise without sourcing all of ``install.sh`` (which would run the
+    whole installer).
+    """
+    src = script.read_text(encoding="utf-8")
+    start = src.index("LAST_SIGNAL_TS=0")
+    end = src.index('OS="$(uname -s)"')
+    chunk = src[start:end]
+    # ``return $rc`` inside ``run_with_heartbeat`` requires the function
+    # body — included in the slice — so the chunk is self-contained.
+    return chunk
+
+
+def test_run_with_heartbeat_survives_stray_sigint(tmp_path: Path) -> None:
+    """A single stray SIGINT must NOT kill the wrapped command.
+
+    Regression: the user reported '^C' appearing during
+    "Copying source files..." even though they did not press Ctrl+C, and
+    install.sh aborted right there.  Root cause: SIGINT delivered to
+    install.sh's terminal process group killed ``npm``/``copy-kiss.sh``
+    children even though install.sh's own SIGINT trap ignored it.  The
+    wrapped child's death made ``wait`` in ``run_with_heartbeat`` return
+    non-zero and ``set -e`` aborted the install.
+
+    Fix: ``run_with_heartbeat`` now spawns the wrapped command inside a
+    subshell that sets ``trap '' INT TERM`` and ``exec``s the binary, so
+    SIG_IGN is inherited and a stray signal can no longer kill it.
+
+    This end-to-end test extracts the signal helpers from install.sh,
+    runs ``run_with_heartbeat`` against a 2-second ``sleep``, sends a
+    stray SIGINT to the harness's process group ~0.5 s in, and verifies
+    that the sleep completed normally and the harness exited 0.
+    """
+    helpers = _extract_signal_helpers(INSTALL_SCRIPT)
+    marker = tmp_path / "sleep_finished"
+    log = tmp_path / "harness.log"
+    # The harness:
+    #   * pulls in the extracted helpers verbatim,
+    #   * runs ``sleep`` under ``run_with_heartbeat`` with a wide
+    #     heartbeat interval so its output doesn't race the test,
+    #   * touches a marker file if and only if the wrapped command
+    #     exited 0 (i.e. wasn't killed by the stray signal).
+    harness = tmp_path / "harness.sh"
+    harness.write_text(
+        "#!/bin/bash\n"
+        "set -eo pipefail\n"
+        'export KISS_HEARTBEAT_INTERVAL=60\n'
+        + helpers
+        + "\n"
+        + textwrap.dedent(
+            f"""\
+            if run_with_heartbeat "sleep" sleep 2; then
+                : > "{marker}"
+            fi
+            """
+        ),
+        encoding="utf-8",
+    )
+    harness.chmod(0o755)
+
+    # Redirect harness output to a file rather than a pipe: the heartbeat
+    # subshell spawns a ``sleep $HEARTBEAT_INTERVAL`` child that, after a
+    # stray SIGINT kills its parent shell, is reparented to init and keeps
+    # the inherited stdout fd open until it finishes — which would hold
+    # ``proc.communicate()`` open until the heartbeat interval elapses.
+    # A file fd does not have that EOF dependency.
+    with open(log, "wb") as out:
+        proc = subprocess.Popen(
+            ["bash", str(harness)],
+            stdout=out,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            cwd=str(tmp_path),
+        )
+        try:
+            # Give the harness a moment to start the wrapped sleep, then
+            # deliver SIGINT to its entire process group — the exact
+            # condition that previously killed npm/copy-kiss.sh.
+            time.sleep(0.5)
+            os.killpg(proc.pid, signal.SIGINT)
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
+                raise
+        finally:
+            if proc.poll() is None:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    stdout = log.read_text(encoding="utf-8", errors="replace")
+    assert proc.returncode == 0, (
+        "run_with_heartbeat must NOT abort on a single stray SIGINT — the "
+        "harness exited "
+        f"{proc.returncode}.  Output:\n{stdout}"
+    )
+    assert marker.exists(), (
+        "sleep was killed by the stray SIGINT — the wrapped command must "
+        "inherit SIG_IGN for INT/TERM via the subshell `trap '' INT TERM; "
+        f"exec ...` wrapper.  Output:\n{stdout}"
+    )
+    # And the install.sh-level trap must have printed the "Interrupt
+    # received but ignored" diagnostic so the user knows what happened.
+    assert "Interrupt received but ignored" in stdout, (
+        "the install.sh-level SIGINT trap did not fire — handle_interrupt "
+        f"is wired wrong.  Output:\n{stdout}"
+    )
+
+
+def test_run_with_heartbeat_double_sigint_aborts(tmp_path: Path) -> None:
+    """A confirmed double-Ctrl+C must still abort the install.
+
+    The protective subshell makes the wrapped command ignore SIGINT, so a
+    determined abort needs ``handle_interrupt`` to forcibly kill the
+    tracked ``CURRENT_CMD_PID`` on the second signal.  Without this kill
+    a user could no longer stop a runaway build at all.
+    """
+    helpers = _extract_signal_helpers(INSTALL_SCRIPT)
+    marker = tmp_path / "should_not_exist"
+    log = tmp_path / "harness.log"
+    harness = tmp_path / "harness.sh"
+    harness.write_text(
+        "#!/bin/bash\n"
+        "set -eo pipefail\n"
+        'export KISS_HEARTBEAT_INTERVAL=60\n'
+        + helpers
+        + "\n"
+        + textwrap.dedent(
+            f"""\
+            run_with_heartbeat "sleep" sleep 30
+            : > "{marker}"
+            """
+        ),
+        encoding="utf-8",
+    )
+    harness.chmod(0o755)
+
+    with open(log, "wb") as out:
+        proc = subprocess.Popen(
+            ["bash", str(harness)],
+            stdout=out,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            cwd=str(tmp_path),
+        )
+        try:
+            time.sleep(0.5)
+            os.killpg(proc.pid, signal.SIGINT)
+            time.sleep(0.5)
+            os.killpg(proc.pid, signal.SIGINT)
+            try:
+                proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
+                raise
+        finally:
+            if proc.poll() is None:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    stdout = log.read_text(encoding="utf-8", errors="replace")
+    assert proc.returncode == 130, (
+        "double-Ctrl+C must abort with exit 130; got "
+        f"{proc.returncode}.  Output:\n{stdout}"
+    )
+    assert not marker.exists(), (
+        "the line after run_with_heartbeat ran — the abort did not stop "
+        f"the script.  Output:\n{stdout}"
+    )
+    assert "Second interrupt received" in stdout, (
+        "the second-signal branch of handle_interrupt did not run — its "
+        f"diagnostic is missing.  Output:\n{stdout}"
+    )
 
 
 @pytest.mark.skipif(shutil.which("npm") is None, reason="npm not installed")
