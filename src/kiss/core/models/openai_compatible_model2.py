@@ -42,6 +42,7 @@ from kiss.core.models.openai_compatible_model import (
     _audio_mime_to_format,
     _extract_deepseek_reasoning,
     _model_thinking_level,
+    _provider_model_name,
 )
 
 # The Responses API ``input_audio`` part only accepts ``mp3`` and ``wav``
@@ -128,11 +129,7 @@ class OpenAICompatibleModel2(Model):
         # rather than by the compacted list position.
         self._last_stream_item_indexes: dict[str, int] = {}
         self._last_stream_message_output_index: int | None = None
-        self._api_model_name = (
-            model_name[len("openrouter/") :]
-            if model_name.startswith("openrouter/")
-            else model_name
-        )
+        self._api_model_name = _provider_model_name(model_name)
         thinking_level = _model_thinking_level(self.model_name)
         reasoning_cfg = self.model_config.get("reasoning")
         has_native_effort = (
