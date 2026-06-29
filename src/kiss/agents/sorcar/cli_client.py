@@ -177,8 +177,27 @@ class _EventDispatcher:
     :class:`kiss.agents.sorcar.cli_printer.RecordingConsolePrinter`.
     """
 
-    def __init__(self, printer: ConsolePrinter) -> None:
+    def __init__(
+        self, printer: ConsolePrinter, tab_id: str = "",
+    ) -> None:
         self.printer = printer
+        # The CLI client's own tab id.  Every task event the daemon
+        # fans out is stamped with the *recipient* tab's id (the
+        # subscribed tab id in ``WebPrinter.broadcast``) and then
+        # broadcast verbatim to ALL connected clients — both WSS
+        # clients and UDS clients in lockstep.  The chat webview
+        # filters incoming events client-side by ``tabId`` so one
+        # window only renders panels for its own tab; pre-fix the
+        # CLI did NOT filter and therefore rendered every other
+        # client's task panels (VS Code extension webview, remote
+        # browser tab, parallel sorcar CLI instance) on the local
+        # terminal.  Set the recipient tab id here so ``dispatch``
+        # can drop foreign-tab events before they reach the printer
+        # or mutate per-task state (``task_active``, ``chat_id``,
+        # waiting queues).  Empty string preserves backwards-compat
+        # behaviour (no filtering) so tests / callers that construct
+        # a dispatcher without a tab id keep working.
+        self.tab_id = tab_id
         # Synchronous waiters used by ``CliClient`` slash commands.
         self.cli_info_q: queue.Queue[dict[str, Any]] = queue.Queue()
         self.models_q: queue.Queue[dict[str, Any]] = queue.Queue()
@@ -202,6 +221,24 @@ class _EventDispatcher:
     def dispatch(self, event: dict[str, Any]) -> None:
         """Route one event to the appropriate handler."""
         et = event.get("type", "")
+        # Drop events that target a different client's tab BEFORE any
+        # rendering or per-task state mutation happens.  The daemon
+        # fans out task events to every connected client (WSS +
+        # UDS) — see :meth:`WebPrinter.broadcast` — and stamps each
+        # copy with the *recipient* tab id.  Without this filter the
+        # CLI silently rendered another window's ``text_delta`` /
+        # ``tool_call`` / ``tool_result`` / ``result`` panels as soon
+        # as that other client started a task, and corrupted its own
+        # cached ``chat_id`` / ``task_active`` / waiter queues from
+        # broadcasts targeted at other tabs.  An empty ``self.tab_id``
+        # (back-compat construction without a tab id) disables the
+        # filter so existing callers keep working.  Events with no
+        # ``tabId`` are global (``configData`` / ``models`` from
+        # ``ready`` fanout, server-reset notifications, etc.) and
+        # always pass through.
+        ev_tab = event.get("tabId", "")
+        if self.tab_id and ev_tab and ev_tab != self.tab_id:
+            return
         # Capture ``taskId`` BEFORE we pop it so status filtering can
         # match against the dispatcher's currently armed task id
         # (review #3).  Routing metadata is then stripped so consumers
@@ -397,7 +434,7 @@ class CliClient:
         self.sock_path = sock_path
         self.work_dir = work_dir
         self.tab_id = tab_id
-        self.dispatcher = _EventDispatcher(printer)
+        self.dispatcher = _EventDispatcher(printer, tab_id=tab_id)
         self._loop: asyncio.AbstractEventLoop | None = None
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
