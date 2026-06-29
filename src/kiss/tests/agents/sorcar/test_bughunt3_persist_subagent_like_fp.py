@@ -13,11 +13,10 @@ re-validation.  A regular (parent) task whose ``extra`` JSON merely
 value embedding the quoted word — is therefore wrongly hidden from
 the history sidebar, history search, and prefix autocomplete.
 
-This is inconsistent with ``_is_subagent_row`` — the canonical
-sub-agent detector (proper ``json.loads`` + dict + key check) used by
-``_load_chat_context``, ``_list_recent_chats`` and
-``_load_latest_chat_events_by_chat_id`` — which correctly classifies
-such a row as a normal parent task.  The same row is visible in the
+This is inconsistent with the canonical sub-agent detector — the
+dedicated ``parent_task_id`` column read by ``_load_chat_context``,
+``_list_recent_chats`` and ``_load_latest_chat_events_by_chat_id`` —
+which correctly classifies such a row as a normal parent task.  The same row is visible in the
 chat context but invisible in the history list.
 
 Runs against a real SQLite database redirected to a temp dir.  No
@@ -64,8 +63,10 @@ class TestSubagentLikeFalsePositive(_TempDbTestBase):
     """Rows that merely CONTAIN '"subagent"' in extra must stay visible."""
 
     # A nested "subagent" key: NOT a sub-agent row per the canonical
-    # detector (_is_subagent_row checks only the TOP-LEVEL key), yet
-    # its JSON encoding contains the literal substring '"subagent"'.
+    # detector (the dedicated ``parent_task_id`` column is the source
+    # of truth, and only the TOP-LEVEL ``subagent`` key in *extra*
+    # populates it), yet its JSON encoding contains the literal
+    # substring '"subagent"'.
     EXTRA: dict[str, object] = {"model": "m1", "opts": {"subagent": False}}
 
     def test_history_readers_keep_false_positive_row(self) -> None:
@@ -81,7 +82,6 @@ class TestSubagentLikeFalsePositive(_TempDbTestBase):
             (task_id,),
         ).fetchone()
         assert (row["parent_task_id"] or "") == ""
-        assert not th._is_subagent_row(row["parent_task_id"])
         # … and the chat context (JSON-validating reader) includes it.
         ctx = _load_chat_context(chat_id)
         assert [e["task"] for e in ctx] == [task_text]

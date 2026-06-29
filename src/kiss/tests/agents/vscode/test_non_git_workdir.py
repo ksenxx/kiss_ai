@@ -28,6 +28,7 @@ import unittest
 from pathlib import Path
 from typing import Any
 
+from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.agents.vscode.server import VSCodeServer
 
@@ -132,7 +133,7 @@ class TestNonGitCommandsDoNotCrash(_NonGitHarness):
     def test_close_tab_clean(self) -> None:
         self.server._get_tab("t-close")
         self.server._handle_command({"type": "closeTab", "tabId": "t-close"})
-        assert "t-close" not in self.server._running_agent_states
+        assert "t-close" not in _RunningAgentState.running_agent_states
 
     def test_user_answer_no_queue(self) -> None:
         self.server._handle_command(
