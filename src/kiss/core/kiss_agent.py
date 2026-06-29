@@ -445,6 +445,7 @@ class KISSAgent(Base):
         if self.printer:
             self.printer.print(function_name, type="tool_call", tool_input=function_args)
 
+        is_error = False
         try:
             if function_name not in self.function_map:  # pragma: no cover
                 raise KISSError(f"Function {function_name} is not a registered tool")
@@ -457,12 +458,24 @@ class KISSAgent(Base):
             function_response = (
                 f"Failed to call {function_name} with {function_args}: {e}{sig_str}\n"
             )
+            # The tool invocation itself raised — mark the printed
+            # ``tool_result`` as an error so the terminal surfaces the
+            # red ``FAILED`` rule (and so the Read-specific
+            # syntax-highlighting branch in ``ConsolePrinter`` cannot
+            # misrender the "Failed to call …" diagnostic as Python
+            # source).  Note: in-tool sentinels like "Error:" or
+            # "(file is empty)" do NOT set this flag — those are
+            # valid (non-raised) tool return values and are filtered
+            # by the printer's own content-based guard.
+            is_error = True
 
         if self.printer:
             self.printer.print(
                 function_response,
                 type="tool_result",
                 tool_name=function_name,
+                tool_input=function_args,
+                is_error=is_error,
             )
 
         return function_name, function_response
