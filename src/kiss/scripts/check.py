@@ -11,6 +11,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Force UTF-8 output so emoji (❌/✅/🔍) render correctly on
+# Windows.  On Linux/macOS the default locale is already UTF-8, so
+# this is a no-op there.
+sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+
 
 def run_command(cmd: list[str], description: str) -> bool:
     """Run a command and return True if successful.
