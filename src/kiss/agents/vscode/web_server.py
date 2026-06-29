@@ -50,6 +50,7 @@ import os
 import platform
 import re
 import secrets
+import shutil
 import signal
 import socket
 import ssl
@@ -3006,6 +3007,10 @@ class RemoteAccessServer:
             ):
                 ctype = mimetypes.guess_type(str(filepath))[0] or "application/octet-stream"
                 return _http_response(200, ctype, filepath.read_bytes())
+        if path == "/favicon.ico":
+            favicon = MEDIA_DIR / "kiss-icon.png"
+            if favicon.is_file():
+                return _http_response(200, "image/png", favicon.read_bytes())
         return _http_response(404, "text/plain", b"Not Found")
 
 
@@ -3059,12 +3064,19 @@ class RemoteAccessServer:
 
         Returns True on success, False (and closes the socket) on failure.
 
-        When the configured ``remote_password`` is empty, all clients
-        are still required to send an empty-password ``auth`` message
-        (using a constant-time compare).  See also
-        :meth:`_setup_server` which refuses to advertise the public
-        cloudflared tunnel when no password is configured.
+        When the configured ``remote_password`` is empty, authentication
+        is skipped entirely for local connections — the public
+        cloudflared tunnel is already disabled in :meth:`_setup_server`
+        when no password is set, so no unauthenticated client can
+        reach the daemon from the public internet.  This makes the
+        webapp immediately usable on ``localhost`` without any
+        configuration.
         """
+        password = load_config().get("remote_password", "")
+        if not password:
+            logger.info("No remote_password configured; skipping auth")
+            await websocket.send(json.dumps({"type": "auth_ok"}))
+            return True
         ip = self._client_ip(websocket)
         if self._is_auth_locked(ip):
             logger.warning("Auth rate-limit hit for %s; closing socket", ip)
@@ -3073,7 +3085,6 @@ class RemoteAccessServer:
             except Exception:
                 pass
             return False
-        password = load_config().get("remote_password", "")
         try:
             # Two attempts: the first wrong password elicits an
             # ``auth_required`` retry prompt; the second failure (or a
@@ -5275,30 +5286,49 @@ class RemoteAccessServer:
         # Bind the local Unix-domain socket for the VS Code extension.
         # File permissions (mode 0o600) restrict access to the owning
         # user, replacing the WSS password challenge for local peers.
-        try:
-            self._uds_path.parent.mkdir(parents=True, exist_ok=True)
-            if self._uds_path.exists() or self._uds_path.is_symlink():
-                try:
-                    self._uds_path.unlink()
-                except OSError:
-                    logger.debug(
-                        "Could not unlink stale UDS socket at %s",
-                        self._uds_path, exc_info=True,
-                    )
-            self._uds_server = await asyncio.start_unix_server(
-                self._uds_handler, path=str(self._uds_path),
-                limit=_MAX_LINE_BYTES,
-            )
-            os.chmod(self._uds_path, 0o600)
-        except Exception:
-            logger.warning(
-                "Failed to bind UDS at %s; local extension clients "
-                "will fall back to WSS",
-                self._uds_path, exc_info=True,
+        #
+        # Windows does not support Unix-domain sockets; skip the bind
+        # attempt so the ``except Exception`` below is not used for
+        # platform detection.
+        if sys.platform == "win32":
+            logger.info(
+                "UDS not supported on Windows; local extension "
+                "clients will fall back to WSS",
             )
             self._uds_server = None
+        else:
+            try:
+                self._uds_path.parent.mkdir(parents=True, exist_ok=True)
+                if self._uds_path.exists() or self._uds_path.is_symlink():
+                    try:
+                        self._uds_path.unlink()
+                    except OSError:
+                        logger.debug(
+                            "Could not unlink stale UDS socket at %s",
+                            self._uds_path, exc_info=True,
+                        )
+                self._uds_server = await asyncio.start_unix_server(
+                    self._uds_handler, path=str(self._uds_path),
+                    limit=_MAX_LINE_BYTES,
+                )
+                os.chmod(self._uds_path, 0o600)
+            except Exception:
+                logger.warning(
+                    "Failed to bind UDS at %s; local extension clients "
+                    "will fall back to WSS",
+                    self._uds_path, exc_info=True,
+                )
+                self._uds_server = None
 
         tunnel_url: str | None = None
+        # Skip the tunnel startup when ``cloudflared`` is not installed
+        # — without this the spawn raises ``FileNotFoundError`` deep
+        # inside ``_start_tunnel`` and we log a misleading warning.
+        if self.use_tunnel and not shutil.which("cloudflared"):
+            logger.warning(
+                "cloudflared not found in PATH; tunnel disabled",
+            )
+            self.use_tunnel = False
         if self.use_tunnel:
             # Refuse to expose the server to the public internet
             # (cloudflared tunnel) when no authentication password is
