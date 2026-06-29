@@ -117,9 +117,17 @@ def test_get_current_model_info_exposes_thinking_field():
 
 
 def test_get_current_model_info_marks_gpt_5_5_thinking_xhigh():
-    """gpt-5.5 is the canonical xhigh-capable model and must be flagged."""
+    """The split xhigh sibling carries the uncapped reasoning level.
+
+    After the split-on-xhigh refactor in :mod:`update_models`, base
+    entries that previously stored ``thinking="xhigh"`` are demoted to
+    ``"high"`` and a synthetic ``<name>-xhigh`` sibling holds the
+    uncapped level.  The canonical assertion therefore moves to the
+    ``gpt-5.5-xhigh`` alias.
+    """
     snapshot = get_current_model_info()
-    assert snapshot["gpt-5.5"]["thinking"] == "xhigh"
+    assert snapshot["gpt-5.5"]["thinking"] == "high"
+    assert snapshot["gpt-5.5-xhigh"]["thinking"] == "xhigh"
 
 
 def test_get_current_model_info_gpt_4o_thinking_is_none():

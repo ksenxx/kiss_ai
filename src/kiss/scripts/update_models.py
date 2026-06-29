@@ -503,6 +503,8 @@ def find_deprecated_models(
         if _is_excluded_provider(name):  # pragma: no branch
             deprecated.append({"name": name, "reason": "excluded provider"})
             continue
+        if name.endswith(_XHIGH_SUFFIX):
+            continue
         if name.startswith("codex/"):  # pragma: no branch
             if codex_slugs and name != "codex/default":
                 slug = name.removeprefix("codex/")
@@ -950,6 +952,103 @@ def _build_entry(
     return entry
 
 
+_XHIGH_SUFFIX = "-xhigh"
+
+
+def _write_entry_with_xhigh_split(
+    data: dict[str, dict],
+    name: str,
+    entry: dict[str, Any],
+    *,
+    remove_stale_sibling: bool = True,
+) -> None:
+    """Write ``entry`` under ``name`` in ``data``, splitting xhigh into two siblings.
+
+    When the resulting ``entry["thinking"]`` is ``"xhigh"`` the catalog
+    emits **two** entries instead of one:
+
+    * the base ``name`` with ``thinking`` downgraded to ``"high"`` so users
+      who reference the original model name still get a working
+      ``reasoning_effort`` setting, and
+    * a sibling at ``name + "-xhigh"`` with ``thinking="xhigh"`` so the
+      uncapped reasoning level is selectable explicitly.
+
+    The sibling inherits every other field on ``entry`` (context length,
+    pricing, ``fc`` / ``emb`` / ``gen`` flags, ``comment``), so its
+    pricing / capability signature matches the base byte for byte aside
+    from the ``thinking`` key.
+
+    When ``entry["thinking"]`` is anything other than ``"xhigh"`` (``None``,
+    ``"high"``, ``"medium"``, ...) this is a plain ``data[name] = entry``
+    write. When ``remove_stale_sibling`` is true, any pre-existing stale
+    ``name + "-xhigh"`` sibling left over from a previous run is removed so
+    the catalog stays consistent with the latest probe results: a model that
+    no longer accepts xhigh must not advertise the ``-xhigh`` alias. Set
+    ``remove_stale_sibling`` false for routine updates that did not explicitly
+    re-test ``thinking``; those updates are not evidence that xhigh support was
+    lost, so an existing sibling is preserved and synchronized.
+
+    The helper short-circuits when ``name`` already ends in ``"-xhigh"`` to
+    keep the split idempotent on re-runs (we never produce
+    ``foo-xhigh-xhigh``).
+    """
+    if name.endswith(_XHIGH_SUFFIX):
+        data[name] = entry
+        return
+    sibling_name = name + _XHIGH_SUFFIX
+    if entry.get("thinking") != "xhigh":
+        data[name] = entry
+        if remove_stale_sibling:
+            data.pop(sibling_name, None)
+            return
+        if sibling_name in data:
+            data[sibling_name] = _expected_xhigh_sibling(entry)
+        return
+    base = dict(entry)
+    base["thinking"] = "high"
+    sibling = dict(entry)
+    sibling["thinking"] = "xhigh"
+    data[name] = base
+    data[sibling_name] = sibling
+
+
+def _expected_xhigh_sibling(base: dict[str, Any]) -> dict[str, Any]:
+    """Return the generated ``-xhigh`` sibling expected for ``base``."""
+    sibling = dict(base)
+    sibling["thinking"] = "xhigh"
+    return sibling
+
+
+def _has_xhigh_normalization_changes(data: dict[str, dict]) -> bool:
+    """Return True when ``data`` needs generated xhigh alias normalization."""
+    for name, entry in data.items():
+        if name.endswith(_XHIGH_SUFFIX):
+            base_name = name.removesuffix(_XHIGH_SUFFIX)
+            base = data.get(base_name)
+            if base is None:
+                return True
+            if base.get("thinking") == "high" and entry != _expected_xhigh_sibling(base):
+                return True
+        elif entry.get("thinking") == "xhigh":
+            return True
+    return False
+
+
+def _normalize_xhigh_splits(data: dict[str, dict]) -> None:
+    """Normalize existing entries to the base-high plus ``-xhigh`` convention."""
+    for name, entry in list(data.items()):
+        if name.endswith(_XHIGH_SUFFIX):
+            base_name = name.removesuffix(_XHIGH_SUFFIX)
+            base = data.get(base_name)
+            if base is None:
+                data.pop(name, None)
+            elif base.get("thinking") == "high":
+                data[name] = _expected_xhigh_sibling(base)
+            continue
+        if entry.get("thinking") == "xhigh":
+            _write_entry_with_xhigh_split(data, name, entry)
+
+
 def _read_model_info_json(path: Path) -> dict[str, dict]:
     """Read MODEL_INFO.json into a name → entry-dict mapping.
 
@@ -999,9 +1098,17 @@ def apply_updates_to_file(
             touching disk.
     """
     data = _read_model_info_json(MODEL_INFO_PATH)
+    _normalize_xhigh_splits(data)
 
     deprecated_names = {d["name"] for d in deprecated}
-    removed = sum(1 for name in deprecated_names if data.pop(name, None) is not None)
+    removed = 0
+    for name in deprecated_names:
+        if data.pop(name, None) is not None:
+            removed += 1
+        # Also drop any auto-generated xhigh sibling so deprecation is
+        # complete (the sibling is meaningless without its base).
+        if data.pop(name + _XHIGH_SUFFIX, None) is not None:
+            removed += 1
 
     applied = 0
     for upd in updates:  # pragma: no branch
@@ -1016,18 +1123,24 @@ def apply_updates_to_file(
             gen=cur.get("gen", True),
             thinking=cur.get("thinking"),
         )
-        for field, value in upd["changes"].items():  # pragma: no branch
+        changes = upd["changes"]
+        for field, value in changes.items():  # pragma: no branch
             if field == "thinking" and value is None:  # pragma: no branch
                 entry.pop("thinking", None)
             else:
                 entry[field] = value
-        data[name] = entry
+        _write_entry_with_xhigh_split(
+            data,
+            name,
+            entry,
+            remove_stale_sibling="thinking" in changes,
+        )
         applied += 1
 
     added = 0
     for nm in new_models:  # pragma: no branch
         comment = "NEW: needs pricing" if nm.get("needs_pricing") else "NEW"
-        data[nm["name"]] = _build_entry(
+        entry = _build_entry(
             ctx=nm["context_length"],
             inp=nm["input_price_per_1M"],
             out=nm["output_price_per_1M"],
@@ -1037,6 +1150,7 @@ def apply_updates_to_file(
             thinking=nm.get("thinking"),
             comment=comment,
         )
+        _write_entry_with_xhigh_split(data, nm["name"], entry)
         added += 1
 
     print(f"\n  Removed {removed} deprecated, applied {applied} updates, added {added} new")
@@ -1276,7 +1390,16 @@ def main() -> None:
     deprecated_names = {d["name"] for d in deprecated}
     new_models = [nm for nm in new_models if nm["name"] not in deprecated_names]
 
-    if not updates and not new_models and not deprecated:  # pragma: no branch
+    needs_xhigh_normalization = _has_xhigh_normalization_changes(
+        _read_model_info_json(MODEL_INFO_PATH)
+    )
+    if (  # pragma: no branch
+        not updates
+        and not new_models
+        and not deprecated
+        and not args.test_existing
+        and not needs_xhigh_normalization
+    ):
         print("\nEverything is up to date!")
         return
 
@@ -1308,9 +1431,15 @@ def main() -> None:
         print("\n  Re-testing existing models...")
         update_by_name = {upd["name"]: upd for upd in updates}
         for name, cur in current.items():  # pragma: no branch
+            if name.endswith(_XHIGH_SUFFIX):
+                continue
             caps = test_model_capabilities(name, verbose=args.verbose)
             fc_changed = caps["fc"] != cur["fc"]
-            thinking_changed = caps["thinking"] != cur.get("thinking")
+            stored_thinking = cur.get("thinking")
+            sibling_thinking = current.get(name + _XHIGH_SUFFIX, {}).get("thinking")
+            if stored_thinking == "high" and sibling_thinking == "xhigh":
+                stored_thinking = "xhigh"
+            thinking_changed = caps["thinking"] != stored_thinking
             if not (fc_changed or thinking_changed):  # pragma: no branch
                 continue
             existing = update_by_name.get(name)
