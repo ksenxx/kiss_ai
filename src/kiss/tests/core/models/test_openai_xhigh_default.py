@@ -107,8 +107,8 @@ def capture_server() -> Generator[str]:
 class TestOpenAIXhighDefault:
     """gpt-5.5 family must send reasoning_effort='xhigh' by default."""
 
-    def test_gpt_5_5_defaults_to_xhigh(self, capture_server: str) -> None:
-        """A bare gpt-5.5 call must send reasoning_effort='xhigh'."""
+    def test_gpt_5_5_defaults_to_high(self, capture_server: str) -> None:
+        """A bare gpt-5.5 call must use the capped base reasoning level."""
         m = OpenAICompatibleModel(
             "gpt-5.5",
             base_url=capture_server,
@@ -118,12 +118,28 @@ class TestOpenAIXhighDefault:
         m.generate()
         assert _CapturingHandler.captured_bodies, "no request reached the server"
         body = _CapturingHandler.captured_bodies[-1]
+        assert body.get("reasoning_effort") == "high"
+        assert body.get("model") == "gpt-5.5"
+
+    def test_gpt_5_5_xhigh_alias_sends_base_model_with_xhigh(
+        self, capture_server: str
+    ) -> None:
+        """The synthetic xhigh alias must call the provider's base model name."""
+        m = OpenAICompatibleModel(
+            "gpt-5.5-xhigh",
+            base_url=capture_server,
+            api_key="test-key",
+        )
+        m.initialize("hi")
+        m.generate()
+        body = _CapturingHandler.captured_bodies[-1]
         assert body.get("reasoning_effort") == "xhigh"
+        assert body.get("model") == "gpt-5.5"
 
     def test_explicit_value_is_not_overridden(self, capture_server: str) -> None:
         """A caller-supplied reasoning_effort must win over the default."""
         m = OpenAICompatibleModel(
-            "gpt-5.5",
+            "gpt-5.5-xhigh",
             base_url=capture_server,
             api_key="test-key",
             model_config={"reasoning_effort": "high"},
@@ -137,7 +153,7 @@ class TestOpenAIXhighDefault:
         """Defaulting xhigh must NOT mutate the caller's model_config dict."""
         caller_config: dict[str, object] = {}
         OpenAICompatibleModel(
-            "gpt-5.5",
+            "gpt-5.5-xhigh",
             base_url=capture_server,
             api_key="test-key",
             model_config=caller_config,
@@ -146,10 +162,10 @@ class TestOpenAIXhighDefault:
             "OpenAICompatibleModel must not mutate the caller's model_config dict"
         )
 
-    def test_gpt_5_5_dated_variant_defaults_to_xhigh(
+    def test_gpt_5_5_dated_variant_defaults_to_high(
         self, capture_server: str
     ) -> None:
-        """Dated gpt-5.5 model names must also default to xhigh."""
+        """Dated gpt-5.5 base names default to ``high`` after the xhigh split."""
         m = OpenAICompatibleModel(
             "gpt-5.5-2026-04-23",
             base_url=capture_server,
@@ -158,7 +174,23 @@ class TestOpenAIXhighDefault:
         m.initialize("hi")
         m.generate()
         body = _CapturingHandler.captured_bodies[-1]
+        assert body.get("reasoning_effort") == "high"
+        assert body.get("model") == "gpt-5.5-2026-04-23"
+
+    def test_gpt_5_5_dated_variant_xhigh_alias_sends_base_model(
+        self, capture_server: str
+    ) -> None:
+        """The dated ``-xhigh`` alias must route to its base provider id."""
+        m = OpenAICompatibleModel(
+            "gpt-5.5-2026-04-23-xhigh",
+            base_url=capture_server,
+            api_key="test-key",
+        )
+        m.initialize("hi")
+        m.generate()
+        body = _CapturingHandler.captured_bodies[-1]
         assert body.get("reasoning_effort") == "xhigh"
+        assert body.get("model") == "gpt-5.5-2026-04-23"
 
     def test_gpt_5_5_pro_does_not_default(self, capture_server: str) -> None:
         """gpt-5.5-pro does not accept reasoning_effort and must NOT default."""
@@ -196,10 +228,10 @@ class TestOpenAIXhighDefault:
         body = _CapturingHandler.captured_bodies[-1]
         assert "reasoning_effort" not in body
 
-    def test_openrouter_gpt_5_5_defaults_to_xhigh(
+    def test_openrouter_gpt_5_5_defaults_to_high(
         self, capture_server: str
     ) -> None:
-        """openrouter/openai/gpt-5.5 (after openrouter/ strip) defaults too."""
+        """openrouter/openai/gpt-5.5 base name defaults to ``high``."""
         m = OpenAICompatibleModel(
             "openrouter/openai/gpt-5.5",
             base_url=capture_server,
@@ -208,12 +240,28 @@ class TestOpenAIXhighDefault:
         m.initialize("hi")
         m.generate()
         body = _CapturingHandler.captured_bodies[-1]
-        assert body.get("reasoning_effort") == "xhigh"
+        assert body.get("reasoning_effort") == "high"
+        assert body.get("model") == "openai/gpt-5.5"
 
-    def test_model_factory_routes_gpt_5_5_with_xhigh_default(
+    def test_openrouter_gpt_5_5_xhigh_alias_routes_to_base(
         self, capture_server: str
     ) -> None:
-        """The model() factory path must also default to xhigh."""
+        """openrouter/openai/gpt-5.5-xhigh sends openai/gpt-5.5 with xhigh."""
+        m = OpenAICompatibleModel(
+            "openrouter/openai/gpt-5.5-xhigh",
+            base_url=capture_server,
+            api_key="test-key",
+        )
+        m.initialize("hi")
+        m.generate()
+        body = _CapturingHandler.captured_bodies[-1]
+        assert body.get("reasoning_effort") == "xhigh"
+        assert body.get("model") == "openai/gpt-5.5"
+
+    def test_model_factory_routes_gpt_5_5_with_high_default(
+        self, capture_server: str
+    ) -> None:
+        """The model() factory path must default the base to ``high``."""
         m = model(
             "gpt-5.5",
             model_config={"base_url": capture_server, "api_key": "test-key"},
@@ -221,12 +269,27 @@ class TestOpenAIXhighDefault:
         m.initialize("hi")
         m.generate()
         body = _CapturingHandler.captured_bodies[-1]
-        assert body.get("reasoning_effort") == "xhigh"
+        assert body.get("reasoning_effort") == "high"
+        assert body.get("model") == "gpt-5.5"
 
-    def test_openrouter_gpt_latest_alias_defaults_to_xhigh(
+    def test_model_factory_routes_gpt_5_5_xhigh_alias_to_base(
         self, capture_server: str
     ) -> None:
-        """openrouter/~openai/gpt-latest (alias for current best GPT) defaults too."""
+        """The model() factory path resolves the -xhigh alias to its base id."""
+        m = model(
+            "gpt-5.5-xhigh",
+            model_config={"base_url": capture_server, "api_key": "test-key"},
+        )
+        m.initialize("hi")
+        m.generate()
+        body = _CapturingHandler.captured_bodies[-1]
+        assert body.get("reasoning_effort") == "xhigh"
+        assert body.get("model") == "gpt-5.5"
+
+    def test_openrouter_gpt_latest_alias_defaults_to_high(
+        self, capture_server: str
+    ) -> None:
+        """openrouter/~openai/gpt-latest base entry defaults to ``high``."""
         m = OpenAICompatibleModel(
             "openrouter/~openai/gpt-latest",
             base_url=capture_server,
@@ -235,7 +298,23 @@ class TestOpenAIXhighDefault:
         m.initialize("hi")
         m.generate()
         body = _CapturingHandler.captured_bodies[-1]
+        assert body.get("reasoning_effort") == "high"
+        assert body.get("model") == "~openai/gpt-latest"
+
+    def test_openrouter_gpt_latest_xhigh_alias_routes_to_base(
+        self, capture_server: str
+    ) -> None:
+        """The synthetic -xhigh alias of an openrouter latest entry routes too."""
+        m = OpenAICompatibleModel(
+            "openrouter/~openai/gpt-latest-xhigh",
+            base_url=capture_server,
+            api_key="test-key",
+        )
+        m.initialize("hi")
+        m.generate()
+        body = _CapturingHandler.captured_bodies[-1]
         assert body.get("reasoning_effort") == "xhigh"
+        assert body.get("model") == "~openai/gpt-latest"
 
     def test_unknown_model_does_not_default(self, capture_server: str) -> None:
         """A model name not present in MODEL_INFO must NOT receive xhigh.
@@ -285,11 +364,11 @@ class TestOpenAIXhighDefault:
     def test_reasoning_effort_kept_when_no_tools(
         self, capture_server: str
     ) -> None:
-        """The plain ``generate()`` (no tools) path must still send xhigh.
+        """The plain ``generate()`` (no tools) path keeps the high default.
 
         Sanity check that the strip-when-tools fix above is scoped strictly
         to the tool-bearing code path and does not regress the existing
-        xhigh default for the no-tools ``generate()`` flow.
+        reasoning-effort default for the no-tools ``generate()`` flow.
         """
         m = OpenAICompatibleModel(
             "gpt-5.5",
@@ -299,7 +378,7 @@ class TestOpenAIXhighDefault:
         m.initialize("hi")
         m.generate()
         body = _CapturingHandler.captured_bodies[-1]
-        assert body.get("reasoning_effort") == "xhigh"
+        assert body.get("reasoning_effort") == "high"
         assert not body.get("tools"), "no tools should be sent on plain generate()"
 
     def test_openrouter_gpt_5_5_tools_strips_reasoning_effort(
