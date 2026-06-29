@@ -50,6 +50,7 @@ from typing import Any, cast
 import yaml
 
 import kiss.agents.sorcar.persistence as th
+from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.vscode.server import VSCodeServer
 from kiss.core.models.model_info import get_available_models
@@ -258,7 +259,7 @@ class TestChatViewerLiveStream(unittest.TestCase):
         # registry alone cannot route this viewer, only the
         # ``_tab_chat_views`` map can.
         self._open_chat_in_tab(tab_c, chat_id, with_new_chat=False)
-        state = self.server._running_agent_states.get(tab_c)
+        state = _RunningAgentState.running_agent_states.get(tab_c)
         assert state is None or state.chat_id == "", (
             "precondition: viewer tab's registry entry must be chat-less"
         )

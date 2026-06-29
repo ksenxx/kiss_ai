@@ -46,6 +46,7 @@ from typing import Any, cast
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps, _git
+from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.agents.vscode.server import VSCodeServer
 
@@ -369,7 +370,7 @@ class TestBug4CloseTabOrphansWorktree:
 
         server._close_tab(tab_id)
 
-        assert tab_id in server._running_agent_states
+        assert tab_id in _RunningAgentState.running_agent_states
         assert GitWorktreeOps.branch_exists(self.repo, branch)
 
         tab.is_task_active = False

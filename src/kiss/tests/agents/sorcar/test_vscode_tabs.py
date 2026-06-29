@@ -15,6 +15,7 @@ import threading
 import time
 import unittest
 
+from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.vscode.server import VSCodeServer
 
 
@@ -244,7 +245,7 @@ class TestConcurrentTabs(unittest.TestCase):
 
         time.sleep(2)
         threads = [
-            t.task_thread for t in self.server._running_agent_states.values()
+            t.task_thread for t in _RunningAgentState.running_agent_states.values()
             if t.task_thread is not None
         ]
         for t in threads:
@@ -277,7 +278,7 @@ class TestConcurrentTabs(unittest.TestCase):
             # The real ``_run_task_inner`` (stubbed here) flips
             # ``is_task_active`` True while the agent runs; mirror that so
             # the injection guard behaves as in production.
-            self.server._running_agent_states[
+            _RunningAgentState.running_agent_states[
                 cmd.get("tabId", "")
             ].is_task_active = True
             started.set()
@@ -301,7 +302,7 @@ class TestConcurrentTabs(unittest.TestCase):
         assert call_count[0] == 1
         # The second run's prompt is injected into the live agent rather
         # than dropped, and echoed back so the user sees it in chat.
-        tab = self.server._running_agent_states["1"]
+        tab = _RunningAgentState.running_agent_states["1"]
         assert tab.pending_user_messages == ["task2"]
         echoes = [
             e
@@ -562,9 +563,9 @@ class TestPerTabAgentIsolation(unittest.TestCase):
     def test_get_tab_creates_on_demand(self) -> None:
         """_get_tab creates a new _RunningAgentState if one doesn't exist."""
         server, _ = _make_server()
-        assert "99" not in server._running_agent_states
+        assert "99" not in _RunningAgentState.running_agent_states
         tab = server._get_tab("99")
-        assert "99" in server._running_agent_states
+        assert "99" in _RunningAgentState.running_agent_states
         assert tab is server._get_tab("99")
 
     def test_agent_is_transient_per_task(self) -> None:

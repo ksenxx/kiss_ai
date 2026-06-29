@@ -2038,9 +2038,10 @@ def _list_recent_chats(limit: int = 10) -> list[dict[str, object]]:
     of ``tasks`` (each with ``task``, ``result``, ``timestamp``,
     ``task_id``, and ``parent_task_id``) in chronological order.
 
-    Sub-agent rows (``extra.subagent``, see :func:`_is_subagent_row`)
-    are excluded — they are an internal implementation detail of the
-    parent's ``run_parallel`` tool call, exactly as in every other
+    Sub-agent rows (``extra.subagent``, identified by a non-NULL
+    ``parent_task_id`` column) are excluded — they are an internal
+    implementation detail of the parent's ``run_parallel`` tool call,
+    exactly as in every other
     chat/history reader (:func:`_load_history`,
     :func:`_load_chat_context`, ...).  A chat whose only rows are
     sub-agent rows is omitted entirely.
@@ -2172,9 +2173,10 @@ def _load_latest_chat_events_by_chat_id(
 
     Finds the most recent NON-sub-agent task in the given chat session
     and returns its task description string and recorded events.
-    Sub-agent rows (``extra.subagent`` present, see
-    :func:`_is_subagent_row`) share the parent's ``chat_id`` and are
-    persisted AFTER the parent row, so a chat-id-only lookup (e.g. the
+    Sub-agent rows (``extra.subagent`` present, identified by a
+    non-NULL ``parent_task_id`` column) share the parent's ``chat_id``
+    and are persisted AFTER the parent row, so a chat-id-only lookup
+    (e.g. the
     webview's post-restart ``resumeSession``) must skip them —
     otherwise a restored parent tab would replay the last sub-agent's
     events and be styled as a sub-agent tab.  Sub-agent rows are only
@@ -2403,37 +2405,6 @@ def _load_chat_context(chat_id: str) -> list[_HistoryEntry]:
                 continue
             entries.append({"task": r["task"], "result": r["result"]})
         return entries
-
-
-def _is_subagent_row(extra: object) -> bool:
-    """Return ``True`` when *extra* identifies a sub-agent task row.
-
-    Accepts either:
-
-    * a ``sqlite3.Row`` carrying the new ``parent_task_id`` column
-      (preferred; the column is the canonical source of truth), or
-    * a JSON-encoded ``extra`` string built by :func:`_row_to_extra_json`
-      — kept for backward compat with external callers reading the
-      synthesized ``entry["extra"]`` field.
-
-    Args:
-        extra: A row or a JSON-encoded ``extra`` string.
-
-    Returns:
-        ``True`` when the row / string represents a sub-agent.
-    """
-    if isinstance(extra, sqlite3.Row):
-        try:
-            return bool(extra["parent_task_id"])
-        except (IndexError, KeyError):
-            return False
-    if isinstance(extra, str):
-        # Delegate to the strict parser so SQLite's ``json_valid``
-        # semantics (which reject bare NaN/Infinity tokens) and the
-        # Python-side classifier agree on every row.
-        parsed = _parse_extra_dict(extra)
-        return parsed is not None and "subagent" in parsed
-    return False
 
 
 def _load_chat_context_text(chat_id: str) -> str:

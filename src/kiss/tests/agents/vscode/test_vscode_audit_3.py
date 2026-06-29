@@ -40,6 +40,7 @@ import threading
 import unittest
 from pathlib import Path, PurePath
 
+from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.vscode.diff_merge import (
     _merge_data_dir,
     _scan_files,
@@ -95,13 +96,13 @@ class TestAwaitUserResponseNoLock(unittest.TestCase):
 
         server.printer._thread_local.stop_event = tab.stop_event
         server.printer._thread_local.task_id = "t1"
-        pre_close_tab = server._running_agent_states.get("t1")
+        pre_close_tab = _RunningAgentState.running_agent_states.get("t1")
         assert pre_close_tab is not None, "Tab exists before close"
 
         with server._state_lock:
-            server._running_agent_states.pop("t1", None)
+            _RunningAgentState.running_agent_states.pop("t1", None)
 
-        post_close_tab = server._running_agent_states.get("t1")
+        post_close_tab = _RunningAgentState.running_agent_states.get("t1")
         assert post_close_tab is None, (
             "N2: after close, unlocked read returns None — answer is lost"
         )
