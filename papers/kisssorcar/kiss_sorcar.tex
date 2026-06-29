@@ -562,7 +562,7 @@ Steering is uniform across all three surfaces.  In the VS~Code sidebar, the runn
 Dynamic steering is orthogonal to the continuation mechanism of Section~\ref{sec:relentless-agent} (which preserves progress across context-window and step-budget boundaries) and to worktree isolation (Section~\ref{sec:worktree-agent}); a steered task can still be committed-and-merged or discarded as a whole branch.  Because external backends such as Claude~Code CLI and the Codex CLI are exposed as model providers and third-party agents are exposed through the same tool layer (Section~\ref{sec:ext-feature}), the same user message can steer a local KISS Agent, a worktree-isolated Sorcar task, parallel sub-agents, or work delegated to a supported external backend.  We compare KISS Sorcar's dynamic steering with related in-flight control mechanisms---Claude~Code Remote Control, GitHub Copilot cloud agent follow-ups, Cursor Cloud Agents, Codex queue-versus-steer mode, Aider \texttt{AI!} comments, and the LangChain/LangGraph human-in-the-loop middleware---in Section~\ref{sec:dynamic-steering}.
 
 %----------------------------------------------------------------------
-\section{The System Prompt}
+\section{The System Prompt}\nopagebreak
 \label{sec:system-prompt}
 %----------------------------------------------------------------------
 
@@ -573,6 +573,85 @@ The system prompt is a structured document that governs the agent's behavior acr
 \textbf{Identity-first ordering.}  We place the agent's identity and visibility constraints before any behavioral rules.  This follows the recommended prompt ordering for frontier models: the model should know \emph{what it is} before learning \emph{what to do}.
 
 We describe the key sections below.
+
+%......................................................................
+\subsection{Planning for Complex Tasks}
+%......................................................................
+
+The planning instructions use a complexity threshold---three or more files, cross-module changes, or architectural work---to decide when formal planning is required:
+
+\begin{prompt}
+## Complex Task Planning
+
+For work spanning 3+ files, crossing module boundaries,
+or changing architecture:
+
+1. List every file to change and why.
+2. State the exact intended change per file.
+3. Identify dependencies and execution order.
+4. State the verification method per change.
+
+Skip this planning step for simple single-file
+modifications.
+\end{prompt}
+
+\noindent Each planning step targets a specific failure mode:
+
+\textbf{``List files to change and why.''}  This forces the model to enumerate the full blast radius of a change before touching any file.  Without this step, the model often discovers mid-task that additional files need changes, leading to incomplete or inconsistent modifications.
+
+\textbf{``State exact intended change per file.''} Listing files alone is insufficient; the model must also articulate \emph{what} will change in each file.  This converts a vague plan (``update the database module'') into a concrete specification (``add a \texttt{cache\_ttl} parameter to \texttt{DatabaseClient.\_\_init\_\_}, modify the query method to check the cache before hitting the database, add a cache invalidation method).
+
+\textbf{``Identify dependencies and execution order.''}  Some changes must precede others: a new utility function must be written before callers can import it, a migration must run before code that depends on the new schema.  Identifying these dependencies prevents the model from applying changes in an order that produces intermediate states where the code does not compile, or tests do not pass.
+
+\textbf{``State verification method per change.''}  The verification requirement from the Deep Work section is reinforced here at the planning stage, ensuring that verification is planned alongside the changes rather than treated as an afterthought.
+
+\noindent The escape clause---``Skip for simple single-file tasks''---avoids the overhead of planning trivial changes.  Requiring a formal plan for a one-line typo fix would waste tokens and slow down the agent without any compensating benefit.
+
+%......................................................................
+\subsection{Testing Instructions}
+%......................................................................
+
+The testing section is perhaps the most opinionated:
+
+\begin{prompt}
+## Testing
+
+- Run lint and typecheckers; fix all errors including
+  pre-existing ones.
+- Aim for 100% branch coverage on new and modified code.
+- Write end-to-end tests only. Do not use mocks,
+  patches, fakes, or test doubles. Each test must be
+  independent and verify actual behavior.
+- **DO NOT** write structural tests which assert on
+  the source code.
+- After modifications, run only the impacted tests.
+- To confirm race conditions: add a random sleep (<0.1s)
+  before the suspected racing statements.
+- **CRITICAL**: Before running all tests or tests in
+  a folder, count the number of tests. If the number
+  of tests is more than 100,
+  split the set of tests equally by the number of test
+  methods into number of cores - 2 and run all splits
+  in parallel using run_parallel tool.
+\end{prompt}
+
+\noindent Each testing instruction addresses a specific concern:
+
+\textbf{``Run lint and typecheckers; fix all errors including pre-existing ones.''}  Before committing any change, the agent must ensure it does not introduce lint violations or type errors.  This catches a broad class of issues---unused imports, type mismatches, style violations---that would otherwise accumulate across tasks.  The clause ``including pre-existing ones'' prevents the model from rationalizing existing errors as ``not my problem'' and calling \texttt{finish} with a passing result despite a broken build.  The instruction makes the agent responsible for the entire codebase health, not just the delta it introduced.
+
+\textbf{``Aim for 100\% branch coverage on new and modified code.''}  LLMs tend to write happy-path tests that cover the main code path but ignore error handling, edge cases, and early-return branches.  The 100\% target forces the model to write tests for every branch, including error paths and boundary conditions.  Moreover, such tests help with regression---developers can use AI coding agents with less risk that changes will break existing program behavior.  The wording ``aim for'' rather than ``achieve'' acknowledges that perfect coverage is not always feasible, while still setting an ambitious target.
+
+\textbf{``Write end-to-end tests only.\ Do not use mocks, patches, fakes, or test doubles.''}  This is the most opinionated rule.  Mock tests that verify code calls certain methods in a certain order test the implementation, not the behavior.  A test suite built on mocks can pass with flying colors while the system is fundamentally broken, because the mocks hide the real dependencies.  End-to-end tests that exercise actual behavior are more expensive to run but provide stronger evidence that the system works.  Moreover, writing end-to-end tests forces the model to reason about the system's actual dependencies, often enabling the agent to find additional bugs.  The distinction between unit and end-to-end tests matters: a unit test in isolation may verify that a function produces the right output for a given input, but an end-to-end test verifies that the function works correctly within the larger system---with real file I/O, real database connections, and real inter-module interactions.
+
+\textbf{``Each test independent, verifying actual behavior.''}  Test independence means that running tests in any order produces the same results.  Tests that depend on shared state or execution order are brittle and difficult to debug when they fail.  ``Verifying actual behavior'' reiterates that tests should assert on observable outcomes (return values, side effects, system state) rather than implementation details.
+
+\textbf{``Only run impacted tests after modifications.''}  Running the full test suite after every small change is wasteful when only a few modules are affected.  For a large project, a full test run may take minutes, and doing it after every edit adds up to significant wasted time and compute.  This instruction directs the model to identify which tests are affected by its changes and run only those, improving iteration speed.
+
+\textbf{``To confirm races: add random sleep (<0.1s) before racing statements.''}  Race conditions are notoriously difficult to reproduce because they depend on precise timing.  By inserting small sleep delays at strategic points, the model can widen the race window and make the bug manifest deterministically during testing.  The 0.1-second upper bound keeps the test fast while still being sufficient to expose most races.
+
+\textbf{``Do not write structural tests which assert on the source code.''}  LLMs frequently fall back on \emph{structural} assertions when they cannot easily exercise a behavior: asserting that a particular function exists, that a class has a certain attribute, that an import appears in a specific order, or that a file contains a specific substring.  Such tests do not exercise the system---they merely encode the current shape of the code.  They fail spuriously after harmless refactors (renaming a private helper, reordering imports, inlining a function) while providing no evidence that the program actually works.  Worse, they create a false sense of coverage: a green suite that consists mostly of structural assertions can coexist with a completely broken runtime.  The explicit prohibition steers the agent back to behavioral assertions that survive refactoring and genuinely guard correctness.
+
+\textbf{Parallel test execution above 100 tests (CRITICAL).}  Once a suite grows beyond roughly a hundred tests, running it serially dominates the agent's iteration time and inflates token cost (because the model waits, then re-reads, then re-reasons about a long output).  The instruction tells the agent to count tests first, and if the count exceeds 100, to partition the test set evenly into \emph{number of cores~\(-\)~2} shards and dispatch them concurrently via the \texttt{run\_parallel} tool.  The ``cores~\(-\)~2'' reservation deliberately leaves headroom for the agent's own process and for the IDE so that aggressive parallelism does not starve the foreground experience.  The 100-test threshold is the empirical break-even point at which the orchestration overhead of \texttt{run\_parallel} (spawning shards, collecting and merging results) is amortized by the wall-clock savings; below the threshold, sequential execution is simpler and faster overall.  This rule is marked CRITICAL because, like the lint/typecheck obligation, agents otherwise revert to the path of least resistance---a single \texttt{pytest} invocation---and pay a large hidden cost on every long-running task.
 
 %......................................................................
 \subsection{Identity and Visibility}
@@ -820,85 +899,6 @@ exhibited by LLM-generated code:
 \textbf{``List concrete planned changes before executing multi-part work.''}  When a task requires changes to multiple files, executing them one at a time without a plan leads to inconsistencies: the model may change a function signature in one file but forget to update a caller in another.  Listing all planned changes before executing any of them forces the model to consider the full scope of the change and identify dependencies.
 
 \textbf{``Every meaningful change needs a concrete verification method.''}  A change without a verification method is a change that cannot be confirmed to work.  This instruction requires the model to pair each change with a specific check---a test, a grep for the expected pattern, a CLI command that exercises the changed behavior---ensuring that the change can be validated programmatically rather than by visual inspection of a diff.
-
-%......................................................................
-\subsection{Planning for Complex Tasks}
-%......................................................................
-
-The planning instructions use a complexity threshold---three or more files, cross-module changes, or architectural work---to decide when formal planning is required:
-
-\begin{prompt}
-## Complex Task Planning
-
-For work spanning 3+ files, crossing module boundaries,
-or changing architecture:
-
-1. List every file to change and why.
-2. State the exact intended change per file.
-3. Identify dependencies and execution order.
-4. State the verification method per change.
-
-Skip this planning step for simple single-file
-modifications.
-\end{prompt}
-
-\noindent Each planning step targets a specific failure mode:
-
-\textbf{``List files to change and why.''}  This forces the model to enumerate the full blast radius of a change before touching any file.  Without this step, the model often discovers mid-task that additional files need changes, leading to incomplete or inconsistent modifications.
-
-\textbf{``State exact intended change per file.''} Listing files alone is insufficient; the model must also articulate \emph{what} will change in each file.  This converts a vague plan (``update the database module'') into a concrete specification (``add a \texttt{cache\_ttl} parameter to \texttt{DatabaseClient.\_\_init\_\_}, modify the query method to check the cache before hitting the database, add a cache invalidation method).
-
-\textbf{``Identify dependencies and execution order.''}  Some changes must precede others: a new utility function must be written before callers can import it, a migration must run before code that depends on the new schema.  Identifying these dependencies prevents the model from applying changes in an order that produces intermediate states where the code does not compile, or tests do not pass.
-
-\textbf{``State verification method per change.''}  The verification requirement from the Deep Work section is reinforced here at the planning stage, ensuring that verification is planned alongside the changes rather than treated as an afterthought.
-
-\noindent The escape clause---``Skip for simple single-file tasks''---avoids the overhead of planning trivial changes.  Requiring a formal plan for a one-line typo fix would waste tokens and slow down the agent without any compensating benefit.
-
-%......................................................................
-\subsection{Testing Instructions}
-%......................................................................
-
-The testing section is perhaps the most opinionated:
-
-\begin{prompt}
-## Testing
-
-- Run lint and typecheckers; fix all errors including
-  pre-existing ones.
-- Aim for 100% branch coverage on new and modified code.
-- Write end-to-end tests only. Do not use mocks,
-  patches, fakes, or test doubles. Each test must be
-  independent and verify actual behavior.
-- **DO NOT** write structural tests which assert on
-  the source code.
-- After modifications, run only the impacted tests.
-- To confirm race conditions: add a random sleep (<0.1s)
-  before the suspected racing statements.
-- **CRITICAL**: Before running all tests or tests in
-  a folder, count the number of tests. If the number
-  of tests is more than 100,
-  split the set of tests equally by the number of test
-  methods into number of cores - 2 and run all splits
-  in parallel using run_parallel tool.
-\end{prompt}
-
-\noindent Each testing instruction addresses a specific concern:
-
-\textbf{``Run lint and typecheckers; fix all errors including pre-existing ones.''}  Before committing any change, the agent must ensure it does not introduce lint violations or type errors.  This catches a broad class of issues---unused imports, type mismatches, style violations---that would otherwise accumulate across tasks.  The clause ``including pre-existing ones'' prevents the model from rationalizing existing errors as ``not my problem'' and calling \texttt{finish} with a passing result despite a broken build.  The instruction makes the agent responsible for the entire codebase health, not just the delta it introduced.
-
-\textbf{``Aim for 100\% branch coverage on new and modified code.''}  LLMs tend to write happy-path tests that cover the main code path but ignore error handling, edge cases, and early-return branches.  The 100\% target forces the model to write tests for every branch, including error paths and boundary conditions.  Moreover, such tests help with regression---developers can use AI coding agents with less risk that changes will break existing program behavior.  The wording ``aim for'' rather than ``achieve'' acknowledges that perfect coverage is not always feasible, while still setting an ambitious target.
-
-\textbf{``Write end-to-end tests only.\ Do not use mocks, patches, fakes, or test doubles.''}  This is the most opinionated rule.  Mock tests that verify code calls certain methods in a certain order test the implementation, not the behavior.  A test suite built on mocks can pass with flying colors while the system is fundamentally broken, because the mocks hide the real dependencies.  End-to-end tests that exercise actual behavior are more expensive to run but provide stronger evidence that the system works.  Moreover, writing end-to-end tests forces the model to reason about the system's actual dependencies, often enabling the agent to find additional bugs.  The distinction between unit and end-to-end tests matters: a unit test in isolation may verify that a function produces the right output for a given input, but an end-to-end test verifies that the function works correctly within the larger system---with real file I/O, real database connections, and real inter-module interactions.
-
-\textbf{``Each test independent, verifying actual behavior.''}  Test independence means that running tests in any order produces the same results.  Tests that depend on shared state or execution order are brittle and difficult to debug when they fail.  ``Verifying actual behavior'' reiterates that tests should assert on observable outcomes (return values, side effects, system state) rather than implementation details.
-
-\textbf{``Only run impacted tests after modifications.''}  Running the full test suite after every small change is wasteful when only a few modules are affected.  For a large project, a full test run may take minutes, and doing it after every edit adds up to significant wasted time and compute.  This instruction directs the model to identify which tests are affected by its changes and run only those, improving iteration speed.
-
-\textbf{``To confirm races: add random sleep (<0.1s) before racing statements.''}  Race conditions are notoriously difficult to reproduce because they depend on precise timing.  By inserting small sleep delays at strategic points, the model can widen the race window and make the bug manifest deterministically during testing.  The 0.1-second upper bound keeps the test fast while still being sufficient to expose most races.
-
-\textbf{``Do not write structural tests which assert on the source code.''}  LLMs frequently fall back on \emph{structural} assertions when they cannot easily exercise a behavior: asserting that a particular function exists, that a class has a certain attribute, that an import appears in a specific order, or that a file contains a specific substring.  Such tests do not exercise the system---they merely encode the current shape of the code.  They fail spuriously after harmless refactors (renaming a private helper, reordering imports, inlining a function) while providing no evidence that the program actually works.  Worse, they create a false sense of coverage: a green suite that consists mostly of structural assertions can coexist with a completely broken runtime.  The explicit prohibition steers the agent back to behavioral assertions that survive refactoring and genuinely guard correctness.
-
-\textbf{Parallel test execution above 100 tests (CRITICAL).}  Once a suite grows beyond roughly a hundred tests, running it serially dominates the agent's iteration time and inflates token cost (because the model waits, then re-reads, then re-reasons about a long output).  The instruction tells the agent to count tests first, and if the count exceeds 100, to partition the test set evenly into \emph{number of cores~\(-\)~2} shards and dispatch them concurrently via the \texttt{run\_parallel} tool.  The ``cores~\(-\)~2'' reservation deliberately leaves headroom for the agent's own process and for the IDE so that aggressive parallelism does not starve the foreground experience.  The 100-test threshold is the empirical break-even point at which the orchestration overhead of \texttt{run\_parallel} (spawning shards, collecting and merging results) is amortized by the wall-clock savings; below the threshold, sequential execution is simpler and faster overall.  This rule is marked CRITICAL because, like the lint/typecheck obligation, agents otherwise revert to the path of least resistance---a single \texttt{pytest} invocation---and pay a large hidden cost on every long-running task.
 
 %......................................................................
 \subsection{Self-Improvement via the Framework}
