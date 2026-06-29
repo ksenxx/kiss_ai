@@ -379,12 +379,16 @@ def make_skill_tool(work_dir: str) -> Callable[[str], str] | None:
         work_dir: The project directory whose skills to expose.
 
     Returns:
-        The tool callable, or ``None`` when no skills are available
-        (per the Agent Skills implementor guide, no tool should be
-        registered when there is nothing to activate).
+        The tool callable, or ``None`` when no user or project skills
+        are configured (per the Agent Skills implementor guide, no tool
+        should be registered when there is nothing to activate).
+        Bundled plugin skills alone do not cause the tool to be
+        registered: they are infrastructural defaults that the user
+        opts into by creating a skill in their user or project
+        directories.
     """
     skills = discover_skills(work_dir)
-    if not skills:
+    if not any(s.source != "bundled" for s in skills.values()):
         return None
 
     def skill(name: str) -> str:
