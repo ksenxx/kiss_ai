@@ -6,7 +6,8 @@
 
 ``_list_recent_chats(limit)`` selected the most recent *limit* distinct
 ``chat_id`` groups FIRST and only then dropped chats whose every row is
-a sub-agent row (``extra.subagent``, see ``_is_subagent_row``).  An
+a sub-agent row (a row whose ``parent_task_id`` column is non-NULL,
+populated from ``extra.subagent`` at insert time).  An
 omitted chat therefore still consumed one of the *limit* slots: with
 ``limit=2`` and history [newest: sub-agent-only chat X, older: real
 chat A, oldest: real chat B], the function returned only ``[A]`` even

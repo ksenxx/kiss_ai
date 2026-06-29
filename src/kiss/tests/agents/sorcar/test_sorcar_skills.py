@@ -15,9 +15,6 @@ real subprocess reading piped stdin.  No model calls are made.
 from __future__ import annotations
 
 import json
-import os
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -456,105 +453,4 @@ def test_sorcar_agent_no_skill_tool_without_skills(
     assert "skill" not in names
 
 
-# ---------------------------------------------------------------------------
-# REPL subprocess (actually running the sorcar CLI loop, no model calls)
 
-
-def _run_repl_subprocess(
-    project: Path, homes: Path, stdin: str,
-) -> subprocess.CompletedProcess:
-    """Drive ``run_repl`` in a subprocess feeding *stdin*, no model calls."""
-    script = (
-        "from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent\n"
-        "from kiss.agents.sorcar.cli_repl import run_repl\n"
-        "agent = ChatSorcarAgent('test')\n"
-        "run_repl(agent, {'work_dir': '.', 'model_name': 'demo-model'})\n"
-    )
-    env = dict(
-        os.environ,
-        KISS_HOME=str(homes / ".kisshome"),
-        CLAUDE_CONFIG_DIR=str(homes / ".claudehome"),
-        HOME=str(homes / "home"),
-    )
-    return subprocess.run(
-        [sys.executable, "-c", script],
-        input=stdin,
-        text=True,
-        capture_output=True,
-        cwd=str(project),
-        env=env,
-        timeout=120,
-    )
-
-
-def test_repl_skills_lists_skills(isolated_homes: Path) -> None:
-    """``/skills`` prints discovered skills in the live REPL."""
-    project = isolated_homes / "project"
-    _write_skill(project / ".kiss" / "skills", "deploy", "Deploy the app")
-    _write_skill(
-        isolated_homes / ".claudehome" / "skills", "review", "Review code"
-    )
-    proc = _run_repl_subprocess(project, isolated_homes, "/skills\n/exit\n")
-    assert proc.returncode == 0, proc.stderr
-    assert "deploy" in proc.stdout
-    assert "Deploy the app" in proc.stdout
-    assert "review" in proc.stdout
-    assert "(claude-user)" in proc.stdout
-
-
-def test_repl_skills_empty_hint(isolated_homes: Path) -> None:
-    """``/skills`` prints the creation hint when no skills exist."""
-    project = isolated_homes / "project"
-    proc = _run_repl_subprocess(project, isolated_homes, "/skills\n/exit\n")
-    assert proc.returncode == 0, proc.stderr
-    assert "No skills found" in proc.stdout
-
-
-def test_repl_skills_shows_one_skill(isolated_homes: Path) -> None:
-    """``/skills <name>`` prints the full skill content."""
-    project = isolated_homes / "project"
-    _write_skill(
-        project / ".kiss" / "skills", "deploy", "Deploy", "Run make deploy."
-    )
-    proc = _run_repl_subprocess(
-        project, isolated_homes, "/skills deploy\n/exit\n"
-    )
-    assert proc.returncode == 0, proc.stderr
-    assert "Run make deploy." in proc.stdout
-    assert '<skill_content name="deploy">' in proc.stdout
-
-
-def test_repl_skills_unknown_name(isolated_homes: Path) -> None:
-    """``/skills <bad-name>`` reports the unknown skill."""
-    project = isolated_homes / "project"
-    _write_skill(project / ".kiss" / "skills", "deploy", "Deploy")
-    proc = _run_repl_subprocess(
-        project, isolated_homes, "/skills nope\n/exit\n"
-    )
-    assert proc.returncode == 0, proc.stderr
-    assert "Unknown skill: nope" in proc.stdout
-
-
-def test_repl_skills_denied_hidden(isolated_homes: Path) -> None:
-    """Denied skills (internal-*: deny in config.json) are hidden in the REPL."""
-    project = isolated_homes / "project"
-    _write_skill(project / ".kiss" / "skills", "internal-secret", "Hidden")
-    _write_skill(project / ".kiss" / "skills", "public-tool", "Visible")
-    kiss_home = isolated_homes / ".kisshome"
-    kiss_home.mkdir(exist_ok=True)
-    (kiss_home / "config.json").write_text(
-        json.dumps({"skill_permissions": {"*": "allow", "internal-*": "deny"}}),
-        encoding="utf-8",
-    )
-    proc = _run_repl_subprocess(project, isolated_homes, "/skills\n/exit\n")
-    assert proc.returncode == 0, proc.stderr
-    assert "public-tool" in proc.stdout
-    assert "internal-secret" not in proc.stdout
-
-
-def test_repl_help_mentions_skills(isolated_homes: Path) -> None:
-    """``/help`` lists the /skills command."""
-    project = isolated_homes / "project"
-    proc = _run_repl_subprocess(project, isolated_homes, "/help\n/exit\n")
-    assert proc.returncode == 0, proc.stderr
-    assert "/skills" in proc.stdout

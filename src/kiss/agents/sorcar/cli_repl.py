@@ -70,48 +70,30 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-import subprocess
 import sys
-import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
 
-from kiss.agents.sorcar.cli_helpers import (
-    _parse_resume_arg,
-    _print_recent_chats,
-    print_outcome,
-)
 from kiss.agents.sorcar.cli_panel import (
     _ESC,
     CYAN,
     IDLE_TITLE,
     PROMPT_MARKER,
     RESET,
-    _term_size,
     panel_bottom,
     panel_cols,
     panel_top,
 )
 from kiss.agents.sorcar.cli_prompt import _AT_RE, _MODEL_CMD_RE, PtkLineReader
-from kiss.agents.sorcar.cli_steering import (
-    _MIN_ROWS,
-    AnchoredRepl,
-    run_with_steering,
-    supports_steering,
-)
 from kiss.agents.sorcar.custom_commands import (
     discover_commands,
-    expand_command,
     format_command_listing,
 )
 from kiss.agents.sorcar.persistence import (
-    _allocate_chat_id,
     _default_kiss_dir,
     _ensure_kiss_dir,
     _load_file_usage,
     _prefix_match_tasks,
 )
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.vscode.helpers import (
     clip_autocomplete_suggestion,
     rank_file_suggestions,
@@ -120,9 +102,6 @@ from kiss.agents.vscode.tricks import (
     current_sentence_partial,
     prefix_match_tricks,
 )
-
-if TYPE_CHECKING:
-    from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 
 logger = logging.getLogger(__name__)
 
@@ -487,194 +466,6 @@ def _print_help(work_dir: str = "") -> None:
     )
 
 
-def _handle_slash(
-    agent: SorcarAgent, line: str, run_kwargs: dict[str, Any],
-) -> bool:
-    """Handle a ``/`` slash command.
-
-    Args:
-        agent: The live agent.
-        line: The raw input line beginning with ``/``.
-        run_kwargs: The mutable run kwargs (e.g. for ``/model``).
-
-    Returns:
-        ``True`` if the caller should exit the REPL, ``False`` otherwise.
-    """
-    parts = line.strip().split(maxsplit=1)
-    cmd = parts[0]
-    arg = parts[1].strip() if len(parts) > 1 else ""
-    work_dir = str(run_kwargs.get("work_dir") or Path(".").resolve())
-
-    if cmd in ("/exit", "/quit"):
-        return True
-    if cmd == "/help":
-        _print_help(work_dir)
-        return False
-    if cmd == "/commands":
-        print(f"\n{format_command_listing(discover_commands(work_dir))}\n")
-        return False
-    if cmd == "/skills":
-        from kiss.agents.sorcar.skills import (
-            discover_skills,
-            format_skill_listing,
-            load_skill_content,
-        )
-
-        skills = discover_skills(work_dir)
-        if arg:
-            found = skills.get(arg)
-            if found is None:
-                print(f"\nUnknown skill: {arg}. /skills lists them.\n")
-            else:
-                print(f"\n{load_skill_content(found)}\n")
-        else:
-            print(f"\n{format_skill_listing(skills)}\n")
-        return False
-    if cmd == "/mcp":
-        from kiss.agents.sorcar.mcp_servers import format_mcp_listing
-
-        print(f"\n{format_mcp_listing(work_dir, connect=True)}\n")
-        return False
-    if cmd in ("/clear", "/new"):
-        from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-
-        if isinstance(agent, ChatSorcarAgent):
-            agent.new_chat()
-        print("Started a new chat — context cleared.\n")
-        return False
-    if cmd == "/resume":
-        _handle_resume(agent, arg)
-        return False
-    if cmd == "/model":
-        _handle_model(agent, arg, run_kwargs)
-        return False
-    if cmd in ("/cost", "/usage", "/context"):
-        _print_usage(agent)
-        return False
-    if cmd == "/autocommit":
-        _handle_autocommit(agent, work_dir)
-        return False
-    custom = discover_commands(work_dir).get(cmd[1:])
-    if custom is not None:
-        prompt = expand_command(custom, arg, work_dir)
-        print(f"⚡ Running custom command {cmd} ({custom.source}:{custom.path})")
-        _run_one(agent, prompt, run_kwargs)
-        return False
-    print(f"Unknown command: {cmd}. Type /help for the list of commands.\n")
-    return False
-
-
-def _handle_autocommit(agent: SorcarAgent, work_dir: str) -> None:
-    """Stage all changes, generate a commit message, and commit.
-
-    Mirrors the VS Code extension's ``Auto-commit`` action (see
-    :mod:`kiss.agents.vscode.merge_flow`) by delegating to
-    :func:`kiss.agents.sorcar.sorcar_agent.auto_commit_changes` with the
-    same LLM-backed
-    :func:`~kiss.agents.sorcar.sorcar_agent._generate_commit_message`
-    and the agent's last user prompt (if any), and falls back to a
-    generic message when the LLM call fails.
-
-    Args:
-        agent: The live agent (its ``_last_user_prompt`` is forwarded
-            to the commit message generator for context).
-        work_dir: The current working directory; used to locate the
-            git repository.
-    """
-    from kiss.agents.sorcar.git_worktree import GitWorktreeOps, repo_lock
-    from kiss.agents.sorcar.sorcar_agent import (
-        _generate_commit_message,
-        auto_commit_changes,
-    )
-
-    wd = Path(work_dir).resolve()
-    repo = GitWorktreeOps.discover_repo(wd)
-    if repo is None:
-        print("Not a git repository.\n")
-        return
-    try:
-        with repo_lock(repo):
-            GitWorktreeOps.stage_all(repo)
-            if not GitWorktreeOps.staged_diff(repo):
-                print("Nothing to commit.\n")
-                return
-            print("⚡ Generating commit message…")
-            committed = auto_commit_changes(
-                repo,
-                getattr(agent, "_last_user_prompt", "") or None,
-                _generate_commit_message,
-            )
-    except Exception as exc:  # pragma: no cover - defensive
-        print(f"✗ Auto-commit failed: {exc}\n")
-        return
-    if not committed:
-        print("✗ git commit failed (pre-commit hook?).\n")
-        return
-    # Show the resulting commit's subject line for confirmation.
-    result = subprocess.run(
-        ["git", "log", "-1", "--pretty=%s"],
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    subject = result.stdout.strip() or "(unknown)"
-    print(f"✓ Committed: {subject}\n")
-
-
-def _handle_resume(agent: SorcarAgent, arg: str) -> None:
-    """Resume a chat by id, or list recent chats when no id is given.
-
-    The argument string supports ``--limit N`` (or ``--limit=N``) to
-    override the default number of recent chats shown in the listing,
-    e.g. ``/resume --limit 50``.  When a chat id is provided the
-    ``--limit`` flag is ignored because resuming a specific chat does
-    not list anything.
-    """
-    from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-
-    if not isinstance(agent, ChatSorcarAgent):
-        print("Resume is only available in chat mode.\n")
-        return
-    try:
-        chat_id, limit = _parse_resume_arg(arg)
-    except ValueError as exc:
-        print(f"Invalid /resume argument: {exc}\n")
-        return
-    if chat_id:
-        agent.resume_chat_by_id(chat_id)
-        print(f"Resumed chat {chat_id}.\n")
-    else:
-        _print_recent_chats(limit=limit)
-        print("\nResume one with: /resume <chat-id>\n")
-
-
-def _handle_model(
-    agent: SorcarAgent, arg: str, run_kwargs: dict[str, Any],
-) -> None:
-    """Switch the model, list all models, or show the current one.
-
-    Args:
-        agent: The live agent whose ``model_name`` is switched.
-        arg: The argument after ``/model``: ``"list"`` prints every
-            generation model with its provider and API-key status, an
-            empty string shows the current model, and anything else is
-            treated as a model name to switch to.
-        run_kwargs: The mutable run kwargs whose ``model_name`` is
-            updated when switching.
-    """
-    current = getattr(agent, "model_name", "") or run_kwargs.get("model_name", "")
-    if arg == "list":
-        _print_model_list(current)
-        return
-    if not arg:
-        print(f"Current model: {current}\n")
-        return
-    agent.model_name = arg  # type: ignore[attr-defined]
-    run_kwargs["model_name"] = arg
-    print(f"Model switched to {arg} for subsequent tasks.\n")
-
-
 def _print_model_list(current: str = "") -> None:
     """Print every generation model with provider and API-key status.
 
@@ -709,16 +500,6 @@ def _print_model_list(current: str = "") -> None:
             f"{status}{here}"
         )
     print()
-
-
-def _print_usage(agent: SorcarAgent) -> None:
-    """Print cost and token usage for the session."""
-    budget = float(getattr(agent, "budget_used", 0.0) or 0.0)
-    tokens = int(getattr(agent, "total_tokens_used", 0) or 0)
-    chat_id = getattr(agent, "chat_id", "") or "(new)"
-    print(f"\nChat ID: {chat_id}")
-    print(f"Cost: ${budget:.4f}")
-    print(f"Total tokens: {tokens}\n")
 
 
 def _make_ptk_reader(
@@ -963,243 +744,3 @@ def _save_history_lines(path: Path, history: list[str]) -> None:
         path.write_text(text, encoding="utf-8")
     except OSError:  # pragma: no cover - disk/permission error
         logger.debug("could not save anchored history", exc_info=True)
-
-
-def _run_anchored_repl(
-    agent: SorcarAgent, run_kwargs: dict[str, Any],
-) -> None:
-    """Run the interactive REPL with the input bar pinned to the bottom.
-
-    Used when the terminal supports the steering box (POSIX TTY with
-    termios) and is at least :data:`_MIN_ROWS` tall.  The same box
-    handles both idle reads (next instruction) and task execution
-    (queueing follow-ups), matching Claude Code's fullscreen TUI
-    behaviour where the input bar is visible at all times.
-
-    Args:
-        agent: The live agent to drive.
-        run_kwargs: Base keyword arguments for ``agent.run``.
-    """
-    work_dir = run_kwargs.get("work_dir") or str(Path(".").resolve())
-    model_name = (
-        run_kwargs.get("model_name", "")
-        or getattr(agent, "model_name", "")
-    )
-    active_file = run_kwargs.get("current_editor_file") or ""
-    completer = CliCompleter(work_dir, active_file)
-    history_path = _history_path(work_dir)
-    history = _load_history_lines(history_path)
-
-    def completer_fn(buf: str) -> list[str]:
-        try:
-            return completer._build_matches(buf)
-        except Exception:  # pragma: no cover - defensive
-            logger.debug("anchored completion failed", exc_info=True)
-            return []
-
-    with AnchoredRepl(completer_fn=completer_fn, history=history) as repl:
-        _print_welcome(work_dir, model_name)
-        interrupt_armed = False
-        while True:
-            try:
-                line = repl.read_idle_line()
-            except KeyboardInterrupt:
-                if interrupt_armed:
-                    print("\nGoodbye.")
-                    break
-                interrupt_armed = True
-                print("\n(Press Ctrl+C again or type /exit to quit)")
-                continue
-            if line is None:  # EOF / Ctrl+D
-                print("\nGoodbye.")
-                break
-            interrupt_armed = False
-            text = line.strip()
-            if not text:
-                continue
-            if text in _EXIT_WORDS:
-                break
-            if text.startswith("/"):
-                try:
-                    if _handle_slash(agent, line, run_kwargs):
-                        break
-                except Exception as exc:
-                    logger.debug(
-                        "slash command failed", exc_info=True,
-                    )
-                    print(f"\n✗ Command failed: {exc}\n")
-                continue
-            _run_one_anchored(agent, line, run_kwargs, repl)
-        _save_history_lines(history_path, repl.box.history)
-
-
-def _run_one_anchored(
-    agent: SorcarAgent,
-    prompt: str,
-    run_kwargs: dict[str, Any],
-    repl: AnchoredRepl,
-) -> None:
-    """Run one task line through the shared anchored input box.
-
-    Mirrors :func:`_run_one` but reuses ``repl``'s already-drawn box
-    (via :meth:`AnchoredRepl.run_task`) so the bottom input bar stays
-    pinned across the idle → running → idle transition.
-
-    Args:
-        agent: The live agent to drive.
-        prompt: The user's instruction for this turn.
-        run_kwargs: Base run kwargs (copied; prompt is overlaid).
-        repl: The anchored REPL whose box runs the task.
-    """
-    kwargs = dict(run_kwargs)
-    kwargs["prompt_template"] = prompt
-    chat_id = getattr(agent, "_chat_id", "") or _allocate_chat_id()
-    agent._chat_id = chat_id  # type: ignore[attr-defined]
-    agent._tab_id = chat_id  # type: ignore[attr-defined]
-    state = _RunningAgentState(
-        chat_id,
-        getattr(agent, "model_name", "") or "",
-        agent=cast("Any", agent),
-    )
-    state.chat_id = chat_id
-    state.is_task_active = True
-    _RunningAgentState.register(chat_id, state)
-    start = time.time()
-    try:
-        result = repl.run_task(agent, state, chat_id, kwargs)
-    except KeyboardInterrupt:
-        print("\n⏹  Task interrupted.\n")
-        return
-    except Exception as exc:
-        logger.debug("task failed", exc_info=True)
-        print(f"\n✗ Task failed: {exc}\n")
-        return
-    finally:
-        with _RunningAgentState._registry_lock:
-            if (
-                _RunningAgentState.running_agent_states.get(chat_id) is state
-            ):
-                state.is_task_active = False
-                _RunningAgentState.unregister(chat_id)
-    elapsed = time.time() - start
-    verbose = bool(kwargs.get("verbose", True))
-    print_outcome(agent, result, elapsed, verbose)
-    if not verbose:
-        print()
-
-
-def run_repl(
-    agent: SorcarAgent, run_kwargs: dict[str, Any],
-) -> None:
-    """Run the interactive Claude-Code-style REPL loop.
-
-    Reads instructions, runs each through :func:`run_with_steering`
-    (so follow-ups can be queued while a task runs), prints the result,
-    then waits for the next instruction.  The same agent instance is
-    reused so the conversation is stateful across tasks.
-
-    Args:
-        agent: The agent to drive (chat, worktree, or base Sorcar).
-        run_kwargs: Base keyword arguments for ``agent.run``; the
-            ``prompt_template`` is replaced for each submitted line and
-            any default task placeholder is ignored.
-    """
-    # When the terminal supports the steering box (POSIX TTY with
-    # termios) and is tall enough, run the REPL with the input bar
-    # pinned to the bottom of the screen for both idle reads and task
-    # execution — matching Claude Code's fullscreen TUI behaviour.
-    # Off-TTY (pytest, pipes), Windows, or tiny terminals fall back to
-    # the inline readline / prompt_toolkit path below.
-    rows, _ = _term_size()
-    if supports_steering() and rows >= _MIN_ROWS:
-        _run_anchored_repl(agent, run_kwargs)
-        return
-    work_dir = run_kwargs.get("work_dir") or str(Path(".").resolve())
-    model_name = run_kwargs.get("model_name", "") or getattr(agent, "model_name", "")
-    active_file = run_kwargs.get("current_editor_file") or ""
-
-    completer = CliCompleter(work_dir, active_file)
-    history_path = _history_path(work_dir)
-    reader = _make_ptk_reader(completer, history_path)
-    using_readline = reader is None
-    if using_readline:
-        _setup_readline(completer, history_path)
-
-    _print_welcome(work_dir, model_name)
-
-    interrupt_armed = False
-    try:
-        while True:
-            try:
-                line = _read_line(_PROMPT, reader)
-            except KeyboardInterrupt:
-                if interrupt_armed:
-                    print("\nGoodbye.")
-                    break
-                interrupt_armed = True
-                print("\n(Press Ctrl+C again or type /exit to quit)")
-                continue
-            if line is None:  # EOF / Ctrl+D
-                print("\nGoodbye.")
-                break
-            interrupt_armed = False
-            text = line.strip()
-            if not text:
-                continue
-            if text in _EXIT_WORDS:
-                break
-            if text.startswith("/"):
-                # A failing command must not kill the interactive
-                # session (mirrors the task-error guard in _run_one):
-                # e.g. /resume listing chats from a corrupt database
-                # raises sqlite3.DatabaseError — report and re-prompt.
-                try:
-                    if _handle_slash(agent, line, run_kwargs):
-                        break
-                except Exception as exc:
-                    logger.debug("slash command failed", exc_info=True)
-                    print(f"\n✗ Command failed: {exc}\n")
-                continue
-            _run_one(agent, line, run_kwargs)
-    finally:
-        # prompt_toolkit's FileHistory persists as it goes; writing the
-        # (empty) in-process readline history here would clobber the
-        # existing readline history file, so save only when readline
-        # was actually set up for this session.
-        if using_readline:
-            _save_history(history_path)
-
-
-def _run_one(
-    agent: SorcarAgent, prompt: str, run_kwargs: dict[str, Any],
-) -> None:
-    """Run a single task line and print its result and statistics.
-
-    Args:
-        agent: The live agent.
-        prompt: The user's instruction for this turn.
-        run_kwargs: Base run kwargs; a copy is made with the prompt set.
-    """
-    kwargs = dict(run_kwargs)
-    kwargs["prompt_template"] = prompt
-    start = time.time()
-    try:
-        result = run_with_steering(agent, kwargs)
-    except KeyboardInterrupt:
-        print("\n⏹  Task interrupted.\n")
-        return
-    except Exception as exc:
-        # A failing task must not kill the interactive session: report
-        # the error and return to the prompt (the module contract is
-        # that the prompt waits for the next instruction after a task).
-        logger.debug("task failed", exc_info=True)
-        print(f"\n✗ Task failed: {exc}\n")
-        return
-    elapsed = time.time() - start
-    # ``print_outcome`` stays silent when running verbosely (the green
-    # "Result" panel is then the last thing on screen) and prints the
-    # summary plus run stats when running quietly.
-    verbose = bool(kwargs.get("verbose", True))
-    print_outcome(agent, result, elapsed, verbose)
-    if not verbose:
-        print()

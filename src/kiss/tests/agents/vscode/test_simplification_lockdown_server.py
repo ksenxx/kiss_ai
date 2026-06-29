@@ -35,6 +35,7 @@ from pathlib import Path
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree
+from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.vscode.server import VSCodeServer
 
 
@@ -354,7 +355,7 @@ class TestDeferredTabDisposal(_DbTestBase):
         server._handle_command({"type": "closeTab", "tabId": "tab-busy"})
 
         assert tab.frontend_closed is True
-        assert "tab-busy" in server._running_agent_states
+        assert "tab-busy" in _RunningAgentState.running_agent_states
 
     def test_close_during_merge_keeps_state(self) -> None:
         server, _ = _make_server()
@@ -364,7 +365,7 @@ class TestDeferredTabDisposal(_DbTestBase):
         server._handle_command({"type": "closeTab", "tabId": "tab-merging"})
 
         assert tab.frontend_closed is True
-        assert "tab-merging" in server._running_agent_states
+        assert "tab-merging" in _RunningAgentState.running_agent_states
 
     def test_close_with_live_thread_keeps_state(self) -> None:
         server, _ = _make_server()
@@ -377,7 +378,7 @@ class TestDeferredTabDisposal(_DbTestBase):
             server._handle_command({"type": "closeTab", "tabId": "tab-thread"})
 
             assert tab.frontend_closed is True
-            assert "tab-thread" in server._running_agent_states
+            assert "tab-thread" in _RunningAgentState.running_agent_states
         finally:
             release.set()
             worker.join(timeout=5)
@@ -388,19 +389,19 @@ class TestDeferredTabDisposal(_DbTestBase):
 
         server._handle_command({"type": "closeTab", "tabId": "tab-idle"})
 
-        assert "tab-idle" not in server._running_agent_states
+        assert "tab-idle" not in _RunningAgentState.running_agent_states
 
     def test_dispose_if_closed_after_task_end(self) -> None:
         server, _ = _make_server()
         tab = server._get_tab("tab-deferred")
         tab.is_task_active = True
         server._handle_command({"type": "closeTab", "tabId": "tab-deferred"})
-        assert "tab-deferred" in server._running_agent_states
+        assert "tab-deferred" in _RunningAgentState.running_agent_states
 
         tab.is_task_active = False
         server._dispose_if_closed("tab-deferred")
 
-        assert "tab-deferred" not in server._running_agent_states
+        assert "tab-deferred" not in _RunningAgentState.running_agent_states
 
     def test_dispose_if_closed_noop_when_frontend_open(self) -> None:
         server, _ = _make_server()
@@ -408,7 +409,7 @@ class TestDeferredTabDisposal(_DbTestBase):
 
         server._dispose_if_closed("tab-open")
 
-        assert "tab-open" in server._running_agent_states
+        assert "tab-open" in _RunningAgentState.running_agent_states
 
 
 class TestMergeFlowDelegates(_DbTestBase):

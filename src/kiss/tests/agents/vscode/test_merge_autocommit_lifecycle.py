@@ -24,6 +24,7 @@ import unittest
 from pathlib import Path
 
 import kiss.agents.vscode.merge_flow as _merge_flow_module
+from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.vscode.server import VSCodeServer
 from kiss.agents.vscode.task_runner import _TaskRunnerMixin
 
@@ -445,7 +446,7 @@ class TestFinishMergeTabMissing(_LifecycleHarness):
         """_finish_merge must send autocommit_prompt even when the tab
         is not pre-existing in _running_agent_states."""
         tab_id = "missing-tab-id"
-        assert tab_id not in self.server._running_agent_states
+        assert tab_id not in _RunningAgentState.running_agent_states
 
         Path(self.tmpdir, "README.md").write_text("# Modified\n")
 
@@ -461,7 +462,7 @@ class TestFinishMergeTabMissing(_LifecycleHarness):
     def test_merge_ended_still_sent_when_tab_missing(self) -> None:
         """merge_ended must always be broadcast, even when tab is missing."""
         tab_id = "missing-tab-2"
-        assert tab_id not in self.server._running_agent_states
+        assert tab_id not in _RunningAgentState.running_agent_states
 
         self.server._finish_merge(tab_id)
 

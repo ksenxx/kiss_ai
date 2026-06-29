@@ -430,19 +430,6 @@ class VSCodeServer(
             self._last_active_content.pop(conn_id, None)
             self._complete_seq_latest.pop(conn_id, None)
 
-    @property
-    def _running_agent_states(self) -> dict[str, _RunningAgentState]:
-        """Process-global running-agent-state dict.
-
-        Backward-compat accessor for existing test fixtures and audit
-        tests that read ``server._running_agent_states``.  The
-        canonical home is the class attribute
-        :attr:`kiss.agents.sorcar.running_agent_state._RunningAgentState.running_agent_states`;
-        production code inside this package accesses it directly via
-        :class:`_RunningAgentState`.
-        """
-        return _RunningAgentState.running_agent_states
-
     def _get_tab(self, tab_id: str) -> _RunningAgentState:
         """Get or create per-tab state for the given tab.
 
