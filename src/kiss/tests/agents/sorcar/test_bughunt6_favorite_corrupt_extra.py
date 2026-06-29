@@ -28,7 +28,6 @@ from pathlib import Path
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.persistence import (
     _add_task,
-    _is_subagent_row,
     _list_recent_chats,
     _load_history,
     _search_history,
@@ -89,7 +88,7 @@ class TestFavoriteDoesNotFlipClassification(_TempDbTestBase):
         task_id, chat_id = _add_task("plain row", extra={"model": "m"})
         # Pre-condition: classified as regular task.
         assert "plain row" in [e["task"] for e in _load_history()]
-        assert not _is_subagent_row(self._row(task_id))
+        assert not self._row(task_id)["parent_task_id"]
 
         assert _set_task_favorite(task_id, True)
 
@@ -99,7 +98,7 @@ class TestFavoriteDoesNotFlipClassification(_TempDbTestBase):
         assert "plain row" in [
             e["task"] for e in _search_history("plain")
         ]
-        assert not _is_subagent_row(self._row(task_id))
+        assert not self._row(task_id)["parent_task_id"]
         assert self._is_favorite(task_id)
 
     def test_star_row_keeps_chat_in_recent_chats(self) -> None:
@@ -149,4 +148,4 @@ class TestFavoriteDoesNotFlipClassification(_TempDbTestBase):
         assert "fanned-out subtask" not in [
             e["task"] for e in _load_history()
         ]
-        assert _is_subagent_row(self._row(sub_id))
+        assert self._row(sub_id)["parent_task_id"] == parent_id

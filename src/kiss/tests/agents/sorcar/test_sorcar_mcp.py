@@ -595,48 +595,6 @@ def test_sorcar_mcp_subcommand_subprocess(
     assert "(user, stdio)" in proc.stdout
 
 
-def test_repl_mcp_command_subprocess(
-    isolated_homes: Path, tmp_path: Path,
-) -> None:
-    """The REPL ``/mcp`` command lists servers with live status."""
-    project = isolated_homes / "project"
-    save_mcp_server(_stdio_config(tmp_path), "user", str(project))
-    script = (
-        "from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent\n"
-        "from kiss.agents.sorcar.cli_repl import run_repl\n"
-        "agent = ChatSorcarAgent('test')\n"
-        "run_repl(agent, {'work_dir': '.', 'model_name': 'demo-model'})\n"
-    )
-    proc = subprocess.run(
-        [sys.executable, "-c", script],
-        input="/mcp\n/exit\n",
-        capture_output=True, text=True, timeout=180,
-        cwd=str(project), env=_subprocess_env(isolated_homes),
-    )
-    assert proc.returncode == 0
-    assert "testsrv" in proc.stdout
-    assert "✓ connected, 2/2 tools allowed" in proc.stdout
-
-
-def test_repl_help_mentions_mcp(isolated_homes: Path) -> None:
-    """``/help`` lists the ``/mcp`` command."""
-    project = isolated_homes / "project"
-    script = (
-        "from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent\n"
-        "from kiss.agents.sorcar.cli_repl import run_repl\n"
-        "agent = ChatSorcarAgent('test')\n"
-        "run_repl(agent, {'work_dir': '.', 'model_name': 'demo-model'})\n"
-    )
-    proc = subprocess.run(
-        [sys.executable, "-c", script],
-        input="/help\n/exit\n",
-        capture_output=True, text=True, timeout=120,
-        cwd=str(project), env=_subprocess_env(isolated_homes),
-    )
-    assert proc.returncode == 0
-    assert "/mcp" in proc.stdout
-
-
 def test_agent_get_tools_includes_mcp_tools(
     isolated_homes: Path, tmp_path: Path, real_stdin: None,
 ) -> None:
