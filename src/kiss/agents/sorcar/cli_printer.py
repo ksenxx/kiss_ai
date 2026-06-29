@@ -109,6 +109,20 @@ class RecordingConsolePrinter(JsonPrinter):
             ):
                 event = {**event, "taskId": normed_event_tid}
         super().broadcast(event)
+        # Mirror webview-style notification toasts on the terminal so
+        # the in-process CLI (cli_repl) sees the same auto-commit
+        # life-cycle / server-reset notifications a chat webview sees.
+        # Other broadcast event types are control-plane (``status``,
+        # ``clear``, ``configData``…) and are intentionally silent
+        # on the terminal — the live display events still arrive
+        # through :meth:`print` from the agentic loop.
+        if event.get("type") == "notification":
+            self._console.print(
+                event.get("message") or "",
+                type="notification",
+                severity=event.get("severity") or "info",
+                progress_message=event.get("progressMessage") or "",
+            )
         injected = self._inject_task_id(event)
         forwarded_id = injected.get("taskId")
         # r4-sorcar-H5 / r5-sorcar-H7: forward ONLY explicit global
