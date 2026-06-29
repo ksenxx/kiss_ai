@@ -175,6 +175,16 @@ class ConsolePrinter(Printer):
             self._handle_message(content, **kwargs)
             return ""
         if type == "bash_stream":
+            if not self._bash_streamed:
+                # First streamed chunk of a Bash tool call: open the
+                # RESULT rule HERE so the live-streamed output renders
+                # INSIDE the Result panel (between the opening RESULT
+                # rule and the closing rule the matching ``tool_result``
+                # event will emit) — without this, every streamed
+                # chunk lands above the opening rule and the panel
+                # body is empty.
+                self._flush_newline()
+                self._console.rule("RESULT", style="green", align="center")
             self._file.write(str(content))
             self._file.flush()
             self._mid_line = not str(content).endswith("\n")
@@ -182,7 +192,15 @@ class ConsolePrinter(Printer):
             return ""
         if type == "tool_call":
             self._flush_newline()
-            self._bash_streamed = False
+            if self._bash_streamed:
+                # Defensive: a previous Bash call opened the RESULT
+                # rule via the bash_stream path but never received a
+                # matching ``tool_result`` (e.g. the call was
+                # cancelled mid-stream).  Close the panel now so the
+                # next tool_call's blue panel doesn't render inside
+                # the still-open Result panel.
+                self._console.rule(style="green")
+                self._bash_streamed = False
             self._format_tool_call(str(content), kwargs.get("tool_input", {}))
             return ""
         if type == "tool_result":
@@ -193,9 +211,15 @@ class ConsolePrinter(Printer):
             # it here would be a duplicate.
             is_error = bool(kwargs.get("is_error", False))
             tool_name = kwargs.get("tool_name", "")
+            tool_input = kwargs.get("tool_input")
             if tool_name != "finish":
                 self._flush_newline()
-                self._print_tool_result(str(content), is_error=is_error)
+                self._print_tool_result(
+                    str(content),
+                    is_error=is_error,
+                    tool_name=tool_name,
+                    tool_input=tool_input,
+                )
             return ""
         if type == "usage_info":
             # Match JsonPrinter: surface per-step usage info so the
@@ -206,6 +230,47 @@ class ConsolePrinter(Printer):
             if text.strip():
                 self._flush_newline()
                 self._console.print(text, style="dim", highlight=False)
+            return ""
+        if type == "notification":
+            # Render webview-style toast notifications (e.g. the
+            # auto-commit life-cycle messages "Generating commit
+            # message" / "Committed <subject>", or the server-reset
+            # toast "Restarting the KISS Sorcar web server…") as a
+            # compact Rich panel on the terminal so an operator using
+            # the sorcar CLI sees the same notifications a chat
+            # webview user sees.  The severity controls the panel
+            # border colour and the leading label, matching
+            # ``media/main.js::notificationTitle`` /
+            # ``notificationIcon``:
+            #     info     ⇒ cyan border, "ℹ INFO" label
+            #     warning  ⇒ yellow border, "⚠ WARNING" label
+            #     error    ⇒ red border, "✕ ERROR" label
+            # A ``progressMessage`` (the dim subtitle on the webview
+            # toast) is rendered below the main message in dim style.
+            severity = str(kwargs.get("severity", "info")).lower()
+            if severity == "error":
+                border = "red"
+                label = "✕ ERROR"
+            elif severity == "warning":
+                border = "yellow"
+                label = "⚠ WARNING"
+            else:
+                border = "cyan"
+                label = "ℹ INFO"
+            message = str(content) if content is not None else ""
+            parts: list[Any] = [Text(message)]
+            progress_message = kwargs.get("progress_message") or ""
+            if progress_message:
+                parts.append(Text(str(progress_message), style="dim"))
+            self._flush_newline()
+            self._console.print(
+                Panel(
+                    Group(*parts),
+                    title=f"[bold]{label}[/bold]",
+                    border_style=border,
+                    padding=(0, 1),
+                )
+            )
             return ""
         if type == "result":
             self._flush_newline()
@@ -290,17 +355,95 @@ class ConsolePrinter(Printer):
             )
         )
 
-    def _print_tool_result(self, content: str, is_error: bool = False) -> None:
+    @staticmethod
+    def _should_syntax_highlight_read(
+        tool_name: str,
+        is_error: bool,
+        tool_input: dict[str, Any] | None,
+        display: str,
+    ) -> bool:
+        """Return True iff a ``Read`` tool_result should be syntax-highlighted.
+
+        The output of the ``Read`` tool is the textual content of the
+        file the model asked to read.  The sorcar CLI interactive
+        terminal MUST render that content with syntax highlighting
+        derived from the file extension (matching the language picker
+        used by ``_format_tool_call`` for the inverse direction —
+        ``Write`` / ``Edit`` inputs).  Non-content results (errors,
+        the ``(file is empty)`` sentinel, the binary-attachment
+        header) are NOT real file body so they are left as plain
+        text so the user can still read the diagnostic message.
+        """
+        if tool_name != "Read" or is_error or not tool_input:
+            return False
+        file_path = tool_input.get("file_path") or tool_input.get("path")
+        if not file_path:
+            return False
+        stripped = display.lstrip()
+        if stripped.startswith("Error:"):
+            return False
+        if display.strip() == "(file is empty)":
+            return False
+        # Binary files emit a "Read binary file ... content attached
+        # below." header followed by an attachment marker that
+        # ``truncate_result`` already strips out.  Don't try to
+        # syntax-highlight the leftover header text as source code.
+        if display.startswith("Read binary file "):
+            return False
+        return True
+
+    def _print_tool_result(
+        self,
+        content: str,
+        is_error: bool = False,
+        tool_name: str = "",
+        tool_input: dict[str, Any] | None = None,
+    ) -> None:
         label = "FAILED" if is_error else "RESULT"
         style = "red" if is_error else "green"
-        self._console.rule(label, style=style, align="center")
         if not self._bash_streamed:
+            # Normal (non-streamed) path: open the panel here, write
+            # the full captured content, then close it.
+            self._console.rule(label, style=style, align="center")
             display = truncate_result(content)
-            for line in display.splitlines():
-                self._file.write(line + "\n")
-                self._file.flush()
+            if self._should_syntax_highlight_read(
+                tool_name=tool_name,
+                is_error=is_error,
+                tool_input=tool_input,
+                display=display,
+            ):
+                assert tool_input is not None
+                _, lang = extract_path_and_lang(tool_input)
+                start_line = tool_input.get("start_line", 1)
+                if not isinstance(start_line, int) or start_line < 1:
+                    start_line = 1
+                self._console.print(
+                    Syntax(
+                        display,
+                        lang,
+                        theme="monokai",
+                        line_numbers=True,
+                        word_wrap=True,
+                        start_line=start_line,
+                    )
+                )
+            else:
+                for line in display.splitlines():
+                    self._file.write(line + "\n")
+                    self._file.flush()
+            self._console.rule(style=style)
+        else:
+            # The ``bash_stream`` handler already opened the RESULT
+            # rule and printed the live output INSIDE the panel.  All
+            # that's left to do is close the panel.  When the command
+            # failed, surface a "FAILED" label on the closing rule so
+            # the user still sees the error status without a duplicate
+            # dump of the streamed content.
+            if is_error:
+                self._console.rule(label, style=style, align="center")
+            else:
+                self._console.rule(style=style)
         self._bash_streamed = False
-        self._console.rule(style=style)
 
     def _handle_message(self, message: Any, **kwargs: Any) -> None:
         if hasattr(message, "subtype") and hasattr(message, "data"):

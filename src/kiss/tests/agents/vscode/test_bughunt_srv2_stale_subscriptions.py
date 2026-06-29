@@ -69,7 +69,7 @@ class _StaleSubscriptionBase(unittest.TestCase):
             if e.get("tabId") == tab_id and e.get("type") == "text_delta"
         ]
 
-    def _resume(self, chat_id: str, task_id: int, tab_id: str) -> None:
+    def _resume(self, chat_id: str, task_id: str, tab_id: str) -> None:
         self.server._handle_command({
             "type": "resumeSession",
             "chatId": chat_id,

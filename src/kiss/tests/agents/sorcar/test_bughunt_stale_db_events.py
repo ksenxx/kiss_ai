@@ -4,12 +4,14 @@
 # add your name here
 """Stale asynchronous events must never leak into a swapped database.
 
-``task_history`` ids are AUTOINCREMENT — unique within ONE database
-file.  When ``_DB_PATH`` is reassigned (test fixtures, a daemon
-restarted against another home dir) the id counter restarts, so an
-event that was enqueued against the OLD database carries a numeric
-``task_id`` that resolves to a completely unrelated task in the NEW
-database.  Before the fix, the background event writer (and the late
+``task_history`` ids are UUID strings — globally unique in practice
+but reuse is still possible across test DBs that explicitly re-insert
+the same id, or when a DB file is replaced wholesale.  When
+``_DB_PATH`` is reassigned (test fixtures, a daemon restarted against
+another home dir), an event enqueued against the OLD database carries
+a string ``task_id`` that can in principle resolve to a different task
+in the NEW database if the same id is present.  Before the fix, the
+background event writer (and the late
 ``followup_suggestion`` append from the server's fire-and-forget
 thread) happily wrote such stale events into whatever database was
 active at drain time, attaching them to the wrong task.  This was the
@@ -61,7 +63,7 @@ class TestStaleDbEvents:
         shutil.rmtree(self.tmpdir_a, ignore_errors=True)
         shutil.rmtree(self.tmpdir_b, ignore_errors=True)
 
-    def _events_for(self, task_id: int) -> list:
+    def _events_for(self, task_id: str) -> list:
         loaded = th._load_chat_events_by_task_id(task_id)
         if not loaded:
             return []
@@ -79,12 +81,22 @@ class TestStaleDbEvents:
             th._queue_chat_event(
                 {"type": "text_delta", "content": f"x{i}"}, task_id=task_a,
             )
-        # Swap to a fresh database B; its AUTOINCREMENT counter restarts
-        # so the first task reuses the same numeric id as DB A's task.
+        # Swap to a fresh database B and re-INSERT a task with the same
+        # UUID into B (UUIDs no longer collide naturally, so we force
+        # the collision to reproduce the original cross-DB pollution
+        # precondition).
         th._DB_PATH = Path(self.tmpdir_b) / "sorcar.db"
         th._db_conn = None
-        task_b, _ = th._add_task("task-b", chat_id="chat-b")
-        assert task_b == task_a, "precondition: ids collide across DBs"
+        db_b = th._get_db()
+        import time as _time
+        with th._rw_lock.write_lock():
+            db_b.execute(
+                "INSERT INTO task_history (id, timestamp, task, chat_id, "
+                "result) VALUES (?, ?, ?, ?, ?)",
+                (task_a, _time.time(), "task-b", "chat-b", ""),
+            )
+            db_b.commit()
+        task_b = task_a
         th._flush_chat_events()
         leaked = self._events_for(task_b)
         assert leaked == [], (

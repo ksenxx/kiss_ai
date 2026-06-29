@@ -92,7 +92,7 @@ class TestShutdownStopsActiveTask(TestCase):
         tab.agent = agent
         tab.chat_id = ""
 
-        captured: dict[str, int] = {}
+        captured: dict[str, str] = {}
         entered = threading.Event()
 
         def fake_run(**kwargs: Any) -> None:

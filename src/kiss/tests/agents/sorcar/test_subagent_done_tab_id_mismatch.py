@@ -52,7 +52,7 @@ class _CapturePrinter(JsonPrinter):
 
 
 # A fixed fake task id the mock sub-agent will "allocate" during run().
-_FAKE_SUB_TASK_ID = 99999
+_FAKE_SUB_TASK_ID = "99999"
 
 # The frontend-generated tab id (simulates what createNewTab() produces).
 _FRONTEND_TAB_ID = "frontend-random-abc123"
@@ -102,7 +102,7 @@ class TestSubagentDoneTabIdMatchesViewerTab(unittest.TestCase):
         printer = _CapturePrinter()
         agent = ChatSorcarAgent("test-parent")
         agent._chat_id = "test-chat-123"
-        agent._last_task_id = 100
+        agent._last_task_id = "10000000000000000000000000000000"
         agent.printer = printer  # type: ignore[assignment]
 
         # Register the parent agent state so _run_tasks_parallel can
@@ -159,7 +159,7 @@ class TestSubagentDoneTabIdMatchesViewerTab(unittest.TestCase):
         printer = _CapturePrinter()
         agent = ChatSorcarAgent("test-parent")
         agent._chat_id = "test-chat-456"
-        agent._last_task_id = 200
+        agent._last_task_id = "20000000000000000000000000000000"
         agent.printer = printer  # type: ignore[assignment]
 
         parent_tab_id = "parent-tab-def"
@@ -198,7 +198,7 @@ class TestSubagentDoneTabIdMatchesViewerTab(unittest.TestCase):
         printer = _CapturePrinter()
         agent = ChatSorcarAgent("test-parent")
         agent._chat_id = "test-chat-789"
-        agent._last_task_id = 300
+        agent._last_task_id = "30000000000000000000000000000000"
         agent.printer = printer  # type: ignore[assignment]
 
         parent_tab_id = "parent-tab-ghi"
@@ -210,7 +210,7 @@ class TestSubagentDoneTabIdMatchesViewerTab(unittest.TestCase):
             """Mock run() that sets _last_task_id but does NOT subscribe
             any frontend tab.
             """
-            self_agent._last_task_id = 77777
+            self_agent._last_task_id = "77777"
             return "success: true\nsummary: done"
 
         original_run = ChatSorcarAgent.run

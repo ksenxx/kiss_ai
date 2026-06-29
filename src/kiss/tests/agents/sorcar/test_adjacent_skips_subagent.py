@@ -51,7 +51,7 @@ class TestAdjacentSkipsSubagent:
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def _mark_subagent(self, task_id: int, parent_task_id: int) -> None:
+    def _mark_subagent(self, task_id: str, parent_task_id: str) -> None:
         """Persist the subagent marker on a task_history row, mirroring
         what :class:`ChatSorcarAgent._run_tasks_parallel` writes."""
         th._save_task_extra(
@@ -127,15 +127,23 @@ class TestAdjacentSkipsSubagent:
 
     def test_extra_is_subagent_marker(self):
         """Sanity check: the marker we write matches the production
-        format that ``_is_subagent_row`` recognises."""
+        format the history readers recognise."""
         chat_id = "marker-check"
         a_id, _ = th._add_task("parent", chat_id=chat_id)
         sub_id, _ = th._add_task("sub", chat_id=chat_id)
         self._mark_subagent(sub_id, parent_task_id=a_id)
         db = th._get_db()
         row = db.execute(
-            "SELECT extra FROM task_history WHERE id = ?", (sub_id,)
+            "SELECT parent_task_id FROM task_history WHERE id = ?", (sub_id,)
         ).fetchone()
-        parsed = json.loads(row["extra"])
+        # Sub-agent rows now carry the parent's UUID in the
+        # ``parent_task_id`` column (flat-column schema).
+        assert row["parent_task_id"] == a_id
+        synth = th._row_to_extra_json(
+            db.execute(
+                th._HISTORY_SELECT + "WHERE id = ?", (sub_id,)
+            ).fetchone()
+        )
+        parsed = json.loads(synth)
         assert "subagent" in parsed
-        assert th._is_subagent_row(row["extra"]) is True
+        assert parsed["subagent"]["parent_task_id"] == a_id
