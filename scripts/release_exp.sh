@@ -77,10 +77,12 @@ build_vscode_extension() {
     print_info "Set extension name to 'kiss-sorcar-buggy', displayName to 'KISS Sorcar Buggy', version to '$EXP_VERSION'"
 
     cd "$VSCODE_EXT_DIR"
-    # --ignore-scripts: skip keytar/@vscode/vsce-sign install scripts — keytar's
-    # `prebuild-install || node-gyp rebuild` can hang forever and neither script
-    # is needed to package the VSIX (mirrors install.sh and release.sh).
-    npm ci --ignore-scripts --no-audit --no-fund
+    # --ignore-scripts: skip @vscode/vsce-sign install script — not needed for
+    # packaging the VSIX (mirrors install.sh and release.sh).
+    # --omit=optional: skip keytar (optional vsce dep, only used for OS-keychain
+    # PAT storage which we don't use); this also drops keytar's `prebuild-install`
+    # transitive dep, which npm warns is deprecated.
+    npm ci --ignore-scripts --no-audit --no-fund --omit=optional
     npm run compile
     npm run copy-kiss
     npm run package
