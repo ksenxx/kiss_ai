@@ -225,6 +225,47 @@ class ConsolePrinter(Printer):
                 self._flush_newline()
                 self._console.print(text, style="dim", highlight=False)
             return ""
+        if type == "notification":
+            # Render webview-style toast notifications (e.g. the
+            # auto-commit life-cycle messages "Generating commit
+            # message" / "Committed <subject>", or the server-reset
+            # toast "Restarting the KISS Sorcar web server…") as a
+            # compact Rich panel on the terminal so an operator using
+            # the sorcar CLI sees the same notifications a chat
+            # webview user sees.  The severity controls the panel
+            # border colour and the leading label, matching
+            # ``media/main.js::notificationTitle`` /
+            # ``notificationIcon``:
+            #     info     ⇒ cyan border, "ℹ INFO" label
+            #     warning  ⇒ yellow border, "⚠ WARNING" label
+            #     error    ⇒ red border, "✕ ERROR" label
+            # A ``progressMessage`` (the dim subtitle on the webview
+            # toast) is rendered below the main message in dim style.
+            severity = str(kwargs.get("severity", "info")).lower()
+            if severity == "error":
+                border = "red"
+                label = "✕ ERROR"
+            elif severity == "warning":
+                border = "yellow"
+                label = "⚠ WARNING"
+            else:
+                border = "cyan"
+                label = "ℹ INFO"
+            message = str(content) if content is not None else ""
+            parts: list[Any] = [Text(message)]
+            progress_message = kwargs.get("progress_message") or ""
+            if progress_message:
+                parts.append(Text(str(progress_message), style="dim"))
+            self._flush_newline()
+            self._console.print(
+                Panel(
+                    Group(*parts),
+                    title=f"[bold]{label}[/bold]",
+                    border_style=border,
+                    padding=(0, 1),
+                )
+            )
+            return ""
         if type == "result":
             self._flush_newline()
             cost = self._apply_budget_offset(kwargs.get("cost", "N/A"))

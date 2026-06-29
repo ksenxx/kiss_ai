@@ -352,6 +352,20 @@ class _EventDispatcher:
                 step_count=event.get("step_count", 0),
             )
             return
+        if et == "notification":
+            # Webview-style toast notifications (auto-commit
+            # life-cycle, server-reset, etc.).  Pre-fix these were
+            # dropped into the "frontend-only" silent-ignore branch
+            # below, so a sorcar CLI user saw none of the toasts a
+            # chat webview user saw.  Route to the printer so the
+            # operator at the terminal sees the same information.
+            self.printer.print(
+                event.get("message") or "",
+                type="notification",
+                severity=event.get("severity") or "info",
+                progress_message=event.get("progressMessage") or "",
+            )
+            return
         # Silently ignore frontend-only / merge / setTaskText / focus
         # events that have no useful CLI rendering.
 
