@@ -181,6 +181,7 @@ class _TaskRunnerMixin:
         def _generate_followup_async(
             self, task: str, result: str, task_id: str | None,
         ) -> None: ...
+        def _refresh_files_after_task(self, work_dir: str = "") -> None: ...
 
     def _run_task(self, cmd: dict[str, Any]) -> None:
         """Run the agent with the given task.
@@ -1028,6 +1029,19 @@ class _TaskRunnerMixin:
                     "startTs": start_ms,
                     "endTs": end_ms,
                 })
+                # Refresh the ``@``-mention file cache for this
+                # work_dir: the agent may have created or deleted
+                # files during its turn, but the cache is only
+                # otherwise updated on cold start, daemon-wide
+                # ``setWorkDir``, or an explicit refresh.  Without
+                # this call the next ``@`` mention serves stale
+                # suggestions — new files invisible, deleted files
+                # still listed.  The hook is a background rescan
+                # that no-ops when the file set is unchanged (only
+                # modifications) and broadcasts an updated ``files``
+                # event when files were actually added or removed
+                # so any open picker UI refreshes immediately.
+                self._refresh_files_after_task(work_dir)
                 logger.info(
                     "Task lifecycle complete: tab_id=%s task_id=%s "
                     "elapsed_ms=%d event_type=%s",

@@ -312,6 +312,59 @@ class _AutocompleteMixin:
 
         threading.Thread(target=_do_refresh, daemon=True).start()
 
+    def _refresh_files_after_task(self, work_dir: str = "") -> None:
+        """Refresh the ``@``-mention file cache after an agent task ends.
+
+        The cache is populated lazily on the first ``getFiles`` for a
+        ``work_dir`` and is otherwise only refreshed on a daemon-wide
+        ``setWorkDir`` or an explicit refresh request.  When an agent
+        creates or deletes files during its turn those changes never
+        reach the cache, so the next ``@``-mention serves stale
+        suggestions: brand-new files (e.g. the test file the agent
+        just authored) are invisible and deleted files linger.
+
+        This hook is invoked by :meth:`_TaskRunnerMixin._run_task_inner`
+        at the tail of every task's cleanup ``finally``.  It rescans
+        *work_dir* in a background thread (no caller blocking) and:
+
+        * only updates the cache when the *set* of files actually
+          changed — pure modifications never alter the picker's list
+          so the rescan is a no-op; and
+        * broadcasts a fresh ``files`` event (with no ``connId`` so
+          every connected client receives it) only when the list
+          changed, so any open ``@``-mention picker UI refreshes
+          without further user action.
+
+        When *work_dir* has no cache entry (no ``@``-mention picker
+        has ever opened there) the hook is a no-op: there is nothing
+        to keep fresh, and the next ``getFiles`` will scan from
+        scratch anyway.  This avoids paying a directory-scan cost
+        for tabs whose picker was never used.
+        """
+        from kiss.agents.vscode.diff_merge import _scan_files
+
+        wd = self._resolve_work_dir(work_dir)
+        with self._state_lock:
+            cached = self._file_cache.get(wd)
+        if cached is None:
+            return
+        cached_set = set(cached)
+
+        def _do_refresh() -> None:
+            result = _scan_files(wd)
+            if set(result) == cached_set:
+                # Only modifications (or no change at all) — nothing
+                # to publish.  The cached list is still accurate so
+                # no overwrite is needed either.
+                return
+            with self._state_lock:
+                self._file_cache[wd] = result
+            usage = _load_file_usage()
+            ranked = rank_file_suggestions(result, "", usage)
+            self._emit_files(ranked, conn_id="", prefix="")
+
+        threading.Thread(target=_do_refresh, daemon=True).start()
+
     def _emit_files(
         self,
         ranked: list[dict[str, Any]],
