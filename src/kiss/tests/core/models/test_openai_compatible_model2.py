@@ -469,29 +469,61 @@ class TestEndpointAndDefaults:
         assert text == "ok"
         assert _last_path().endswith("/responses")
 
-    def test_gpt_5_5_defaults_reasoning_effort_xhigh(
+    def test_gpt_5_5_defaults_reasoning_effort_high(
         self, capture_server: str
     ) -> None:
-        """gpt-5.5 defaults to reasoning.effort='xhigh' (not the legacy top-level key)."""
+        """gpt-5.5 base entry defaults to ``reasoning.effort='high'``.
+
+        After the xhigh-split refactor the base entry is capped at
+        ``high``; the uncapped ``xhigh`` level lives on the synthetic
+        ``gpt-5.5-xhigh`` sibling.
+        """
         m = OpenAICompatibleModel2(
             "gpt-5.5", base_url=capture_server, api_key="k"
         )
         m.initialize("hi")
         m.generate()
         body = _last_body()
-        assert body.get("reasoning", {}).get("effort") == "xhigh"
+        assert body.get("reasoning", {}).get("effort") == "high"
         assert "reasoning_effort" not in body, (
             "Responses API uses nested reasoning.effort, not flat reasoning_effort"
         )
+        assert body.get("model") == "gpt-5.5"
 
-    def test_dated_gpt_5_5_defaults_xhigh(self, capture_server: str) -> None:
-        """Dated alias gpt-5.5-2026-04-23 also defaults to xhigh."""
+    def test_gpt_5_5_xhigh_alias_routes_to_base_with_xhigh(
+        self, capture_server: str
+    ) -> None:
+        """The xhigh alias must POST the base model id with xhigh effort."""
+        m = OpenAICompatibleModel2(
+            "gpt-5.5-xhigh", base_url=capture_server, api_key="k"
+        )
+        m.initialize("hi")
+        m.generate()
+        body = _last_body()
+        assert body.get("reasoning", {}).get("effort") == "xhigh"
+        assert body.get("model") == "gpt-5.5"
+
+    def test_dated_gpt_5_5_defaults_high(self, capture_server: str) -> None:
+        """Dated alias gpt-5.5-2026-04-23 also defaults to high."""
         m = OpenAICompatibleModel2(
             "gpt-5.5-2026-04-23", base_url=capture_server, api_key="k"
         )
         m.initialize("hi")
         m.generate()
-        assert _last_body().get("reasoning", {}).get("effort") == "xhigh"
+        assert _last_body().get("reasoning", {}).get("effort") == "high"
+
+    def test_dated_gpt_5_5_xhigh_alias_routes_to_base(
+        self, capture_server: str
+    ) -> None:
+        """gpt-5.5-2026-04-23-xhigh sends gpt-5.5-2026-04-23 with xhigh effort."""
+        m = OpenAICompatibleModel2(
+            "gpt-5.5-2026-04-23-xhigh", base_url=capture_server, api_key="k"
+        )
+        m.initialize("hi")
+        m.generate()
+        body = _last_body()
+        assert body.get("reasoning", {}).get("effort") == "xhigh"
+        assert body.get("model") == "gpt-5.5-2026-04-23"
 
     def test_explicit_reasoning_effort_wins(self, capture_server: str) -> None:
         """A caller-supplied reasoning_effort overrides the xhigh default."""
@@ -513,23 +545,38 @@ class TestEndpointAndDefaults:
         )
         assert cfg == {}
 
-    def test_openrouter_gpt_5_5_defaults_xhigh(self, capture_server: str) -> None:
-        """openrouter/openai/gpt-5.5 (after openrouter/ strip) defaults to xhigh."""
+    def test_openrouter_gpt_5_5_defaults_high(self, capture_server: str) -> None:
+        """openrouter/openai/gpt-5.5 (after openrouter/ strip) defaults to high."""
         m = OpenAICompatibleModel2(
             "openrouter/openai/gpt-5.5", base_url=capture_server, api_key="k"
         )
         m.initialize("hi")
         m.generate()
         body = _last_body()
-        assert body.get("reasoning", {}).get("effort") == "xhigh"
+        assert body.get("reasoning", {}).get("effort") == "high"
         # The model name sent on the wire must be the bare alias (no
         # ``openrouter/`` prefix), matching v1's behaviour.
         assert body.get("model") == "openai/gpt-5.5"
 
-    def test_openrouter_gpt_latest_alias_defaults_xhigh(
+    def test_openrouter_gpt_5_5_xhigh_alias_routes_to_base(
         self, capture_server: str
     ) -> None:
-        """openrouter/~openai/gpt-latest also defaults to xhigh."""
+        """openrouter/openai/gpt-5.5-xhigh sends openai/gpt-5.5 with xhigh."""
+        m = OpenAICompatibleModel2(
+            "openrouter/openai/gpt-5.5-xhigh",
+            base_url=capture_server,
+            api_key="k",
+        )
+        m.initialize("hi")
+        m.generate()
+        body = _last_body()
+        assert body.get("reasoning", {}).get("effort") == "xhigh"
+        assert body.get("model") == "openai/gpt-5.5"
+
+    def test_openrouter_gpt_latest_alias_defaults_high(
+        self, capture_server: str
+    ) -> None:
+        """openrouter/~openai/gpt-latest also defaults to high."""
         m = OpenAICompatibleModel2(
             "openrouter/~openai/gpt-latest",
             base_url=capture_server,
@@ -537,7 +584,7 @@ class TestEndpointAndDefaults:
         )
         m.initialize("hi")
         m.generate()
-        assert _last_body().get("reasoning", {}).get("effort") == "xhigh"
+        assert _last_body().get("reasoning", {}).get("effort") == "high"
 
     def test_gpt_5_does_not_default_xhigh(self, capture_server: str) -> None:
         """gpt-5 caps at high; no xhigh default."""
@@ -588,9 +635,9 @@ class TestToolsCoexistWithReasoning:
     """The whole point of v2: tools + reasoning.effort coexist."""
 
     def test_tools_and_xhigh_coexist(self, capture_server: str) -> None:
-        """gpt-5.5 + tools must send BOTH tools and reasoning.effort=xhigh."""
+        """gpt-5.5-xhigh + tools must send BOTH tools and reasoning.effort=xhigh."""
         m = OpenAICompatibleModel2(
-            "gpt-5.5", base_url=capture_server, api_key="k"
+            "gpt-5.5-xhigh", base_url=capture_server, api_key="k"
         )
         m.initialize("hi")
         _CapturingHandler.next_response_body = _text_response_json().encode()
@@ -603,6 +650,7 @@ class TestToolsCoexistWithReasoning:
         assert body.get("reasoning", {}).get("effort") == "xhigh", (
             "v2 must keep reasoning.effort even when tools are present"
         )
+        assert body.get("model") == "gpt-5.5"
 
     def test_tools_schema_is_flattened_for_responses_api(
         self, capture_server: str
