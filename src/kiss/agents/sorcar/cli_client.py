@@ -58,7 +58,10 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar.cli_helpers import _print_recent_chats
+from kiss.agents.sorcar.cli_helpers import (
+    _parse_resume_arg,
+    _print_recent_chats,
+)
 from kiss.agents.sorcar.cli_panel import (
     CYAN,
     PROMPT_MARKER,
@@ -174,8 +177,27 @@ class _EventDispatcher:
     :class:`kiss.agents.sorcar.cli_printer.RecordingConsolePrinter`.
     """
 
-    def __init__(self, printer: ConsolePrinter) -> None:
+    def __init__(
+        self, printer: ConsolePrinter, tab_id: str = "",
+    ) -> None:
         self.printer = printer
+        # The CLI client's own tab id.  Every task event the daemon
+        # fans out is stamped with the *recipient* tab's id (the
+        # subscribed tab id in ``WebPrinter.broadcast``) and then
+        # broadcast verbatim to ALL connected clients — both WSS
+        # clients and UDS clients in lockstep.  The chat webview
+        # filters incoming events client-side by ``tabId`` so one
+        # window only renders panels for its own tab; pre-fix the
+        # CLI did NOT filter and therefore rendered every other
+        # client's task panels (VS Code extension webview, remote
+        # browser tab, parallel sorcar CLI instance) on the local
+        # terminal.  Set the recipient tab id here so ``dispatch``
+        # can drop foreign-tab events before they reach the printer
+        # or mutate per-task state (``task_active``, ``chat_id``,
+        # waiting queues).  Empty string preserves backwards-compat
+        # behaviour (no filtering) so tests / callers that construct
+        # a dispatcher without a tab id keep working.
+        self.tab_id = tab_id
         # Synchronous waiters used by ``CliClient`` slash commands.
         self.cli_info_q: queue.Queue[dict[str, Any]] = queue.Queue()
         self.models_q: queue.Queue[dict[str, Any]] = queue.Queue()
@@ -199,6 +221,24 @@ class _EventDispatcher:
     def dispatch(self, event: dict[str, Any]) -> None:
         """Route one event to the appropriate handler."""
         et = event.get("type", "")
+        # Drop events that target a different client's tab BEFORE any
+        # rendering or per-task state mutation happens.  The daemon
+        # fans out task events to every connected client (WSS +
+        # UDS) — see :meth:`WebPrinter.broadcast` — and stamps each
+        # copy with the *recipient* tab id.  Without this filter the
+        # CLI silently rendered another window's ``text_delta`` /
+        # ``tool_call`` / ``tool_result`` / ``result`` panels as soon
+        # as that other client started a task, and corrupted its own
+        # cached ``chat_id`` / ``task_active`` / waiter queues from
+        # broadcasts targeted at other tabs.  An empty ``self.tab_id``
+        # (back-compat construction without a tab id) disables the
+        # filter so existing callers keep working.  Events with no
+        # ``tabId`` are global (``configData`` / ``models`` from
+        # ``ready`` fanout, server-reset notifications, etc.) and
+        # always pass through.
+        ev_tab = event.get("tabId", "")
+        if self.tab_id and ev_tab and ev_tab != self.tab_id:
+            return
         # Capture ``taskId`` BEFORE we pop it so status filtering can
         # match against the dispatcher's currently armed task id
         # (review #3).  Routing metadata is then stripped so consumers
@@ -283,19 +323,65 @@ class _EventDispatcher:
             self.printer.print(event.get("text") or "", type="system_prompt")
             return
         if et == "tool_call":
-            ti = event.get("input")
+            # The daemon (``JsonPrinter._format_tool_call``) broadcasts
+            # a *flat* event whose argument fields sit at the top level
+            # (``path`` / ``lang`` / ``command`` / ``content`` /
+            # ``description`` / ``old_string`` / ``new_string`` /
+            # ``extras``).  It never emits an ``input`` key, so a naive
+            # ``event.get("input")`` lookup yields ``None`` and the
+            # console panel rendered ``(no arguments)`` for every tool
+            # call.  Rebuild the ``tool_input`` dict the shared
+            # :class:`ConsolePrinter` formatter expects.
+            tool_input: dict[str, Any] = {}
+            if path := event.get("path"):
+                # Use ``file_path`` so :func:`extract_path_and_lang`
+                # picks it up exactly like the in-process printer.
+                # The daemon's ``lang`` field is intentionally dropped —
+                # ``ConsolePrinter._format_tool_call`` recomputes it from
+                # the same path via ``lang_for_path``, so forwarding it
+                # would be redundant.
+                tool_input["file_path"] = str(path)
+            for key in ("description", "command", "content"):
+                if (val := event.get(key)) is not None:
+                    tool_input[key] = str(val)
+            for key in ("old_string", "new_string"):
+                if (val := event.get(key)) is not None:
+                    tool_input[key] = str(val)
+            extras = event.get("extras") or {}
+            if isinstance(extras, dict):
+                # ``extras`` keys are by definition not in ``KNOWN_KEYS``
+                # so merging them in straight is safe — they will be
+                # picked up by :func:`extract_extras` for display.
+                for k, v in extras.items():
+                    tool_input[str(k)] = v
             self.printer.print(
                 event.get("name") or "",
                 type="tool_call",
-                tool_input=ti if isinstance(ti, dict) else {},
+                tool_input=tool_input,
             )
             return
         if et == "tool_result":
+            # Reconstruct the minimal ``tool_input`` slice the
+            # ConsolePrinter needs to syntax-highlight the body of a
+            # ``Read`` result (the only tool whose return value is a
+            # raw source-file body).  When the daemon-side broadcast
+            # carries a ``path``/``start_line`` we forward it so the
+            # local Rich ``Syntax`` widget picks the right lexer and
+            # gutter offset; otherwise we omit ``tool_input`` and
+            # fall back to the plain-write panel.
+            result_tool_input: dict[str, Any] | None = None
+            path = event.get("path")
+            if path:
+                result_tool_input = {"file_path": str(path)}
+                start_line = event.get("start_line")
+                if isinstance(start_line, int) and start_line >= 1:
+                    result_tool_input["start_line"] = start_line
             self.printer.print(
                 event.get("content") or "",
                 type="tool_result",
                 is_error=bool(event.get("is_error", False)),
                 tool_name=event.get("tool_name") or "",
+                tool_input=result_tool_input,
             )
             return
         if et == "system_output":
@@ -317,6 +403,20 @@ class _EventDispatcher:
                 total_tokens=event.get("total_tokens", 0),
                 cost=event.get("cost", "N/A"),
                 step_count=event.get("step_count", 0),
+            )
+            return
+        if et == "notification":
+            # Webview-style toast notifications (auto-commit
+            # life-cycle, server-reset, etc.).  Pre-fix these were
+            # dropped into the "frontend-only" silent-ignore branch
+            # below, so a sorcar CLI user saw none of the toasts a
+            # chat webview user saw.  Route to the printer so the
+            # operator at the terminal sees the same information.
+            self.printer.print(
+                event.get("message") or "",
+                type="notification",
+                severity=event.get("severity") or "info",
+                progress_message=event.get("progressMessage") or "",
             )
             return
         # Silently ignore frontend-only / merge / setTaskText / focus
@@ -350,7 +450,7 @@ class CliClient:
         self.sock_path = sock_path
         self.work_dir = work_dir
         self.tab_id = tab_id
-        self.dispatcher = _EventDispatcher(printer)
+        self.dispatcher = _EventDispatcher(printer, tab_id=tab_id)
         self._loop: asyncio.AbstractEventLoop | None = None
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
@@ -636,8 +736,7 @@ def _handle_client_slash(  # noqa: PLR0911,PLR0912 - branchy by design
     Returns ``True`` when the caller should exit the REPL (``/exit``
     or ``/quit``), ``False`` otherwise.
 
-    The command surface mirrors :func:`cli_repl._handle_slash` but
-    every action now flows through the daemon: information panels
+    Every action flows through the daemon: information panels
     (``/help`` / ``/commands`` / ``/skills`` / ``/mcp`` / ``/cost``)
     are answered by the new server-side ``cliInfo`` command (see
     :meth:`_CommandsMixin._cmd_cli_info`), state-changing commands
@@ -692,18 +791,20 @@ def _handle_client_slash(  # noqa: PLR0911,PLR0912 - branchy by design
         print("Started a new chat — context cleared.\n")
         return False
     if cmd == "/resume":
-        if arg:
-            client.send({"type": "resumeSession", "chatId": arg})
-            client.dispatcher.chat_id = arg
-            print(f"Resumed chat {arg}.\n")
+        try:
+            chat_id, limit = _parse_resume_arg(arg)
+        except ValueError as exc:
+            print(f"Invalid /resume argument: {exc}\n")
+            return False
+        if chat_id:
+            client.send({"type": "resumeSession", "chatId": chat_id})
+            client.dispatcher.chat_id = chat_id
+            print(f"Resumed chat {chat_id}.\n")
         else:
             # List recent chats from the shared kiss DB the daemon
-            # also writes to.  Bypassing ``cli_repl._handle_resume``
-            # avoids its mandatory ``ChatSorcarAgent`` type check
-            # (there is no in-process agent in client mode); the
-            # original "list recent chats" behaviour is preserved
-            # via :func:`_print_recent_chats` directly.
-            _print_recent_chats()
+            # also writes to (there is no in-process agent in client
+            # mode), via :func:`_print_recent_chats` directly.
+            _print_recent_chats(limit=limit)
             print("\nResume one with: /resume <chat-id>\n")
         return False
     if cmd == "/model":
@@ -1196,10 +1297,9 @@ def run_client(
 
     This is the entry point invoked by
     :func:`worktree_sorcar_agent.main` in interactive mode (no
-    ``-t/--task`` / ``-f/--file``).  Mirrors the surface of the old
-    :func:`cli_repl.run_repl` so the on-screen behaviour — prompt
+    ``-t/--task`` / ``-f/--file``).  The on-screen behaviour — prompt
     panel, fast-completes, slash commands, streamed agent events,
-    rich Result panel — is preserved while the actual execution
+    rich Result panel — runs locally while the actual execution
     happens in the local ``sorcar web`` daemon process.
 
     Args:

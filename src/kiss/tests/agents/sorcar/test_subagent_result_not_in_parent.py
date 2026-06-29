@@ -527,11 +527,11 @@ class TestSubagentResultNotInParent:
 
         db = th._get_db()
         rows = db.execute(
-            "SELECT id, extra FROM task_history "
-            "WHERE COALESCE(extra, '') LIKE '%\"subagent\"%' "
-            "ORDER BY id ASC"
+            "SELECT id, parent_task_id FROM task_history "
+            "WHERE parent_task_id IS NOT NULL AND parent_task_id != '' "
+            "ORDER BY rowid ASC"
         ).fetchall()
-        sub_rows = [{"id": r[0], "extra": r[1]} for r in rows]
+        sub_rows = [{"id": r[0], "parent_task_id": r[1]} for r in rows]
         assert len(sub_rows) == 3, (
             f"Expected 3 sub-agent rows, got {len(sub_rows)}"
         )

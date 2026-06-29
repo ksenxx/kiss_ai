@@ -421,12 +421,48 @@ class UsefulTools:
         ENTIRE output (and, on the streaming path, leak the exception
         out of the tool) even when the command itself succeeded.
 
+        Vanished-worktree fallback: if ``self.work_dir`` points at a
+        directory that no longer exists on disk (e.g. the per-task
+        ``.kiss-worktrees/kiss_wt-*`` worktree was torn down by a
+        concurrent cleanup, discard, or crashed merge between
+        ``RelentlessAgent`` sub-sessions), launching the subprocess
+        with that missing ``cwd`` would crash *every* Bash call with
+        ``FileNotFoundError: [Errno 2] No such file or directory``
+        before any output is produced.  In that case we transparently
+        fall back to the parent repository root (with the
+        ``.kiss-worktrees/kiss_wt-<slug>`` segment stripped) so the
+        agent can keep working from the user's main checkout instead
+        of dying on every command.  If even the fallback path does
+        not exist we drop ``cwd`` entirely and let the child inherit
+        the agent process's cwd.
+
         Args:
             command: The shell command to execute.
 
         Returns:
             The started subprocess.
         """
+        cwd: str | None = self.work_dir or None
+        env_work_dir: str | None = self.work_dir
+        if cwd is not None and not os.path.isdir(cwd):
+            fallback = _stale_worktree_fallback(Path(cwd))
+            if fallback is not None and fallback.is_dir():
+                logger.warning(
+                    "Bash work_dir %r vanished mid-task; "
+                    "falling back to parent repo root %r",
+                    cwd,
+                    str(fallback),
+                )
+                cwd = str(fallback)
+                env_work_dir = cwd
+            else:
+                logger.warning(
+                    "Bash work_dir %r vanished mid-task and no "
+                    "fallback parent exists; running without cwd",
+                    cwd,
+                )
+                cwd = None
+                env_work_dir = None
         return subprocess.Popen(
             **_popen_kwargs(command),
             stdout=subprocess.PIPE,
@@ -434,8 +470,8 @@ class UsefulTools:
             text=True,
             encoding="utf-8",
             errors="replace",
-            env=_clean_env(self.work_dir),
-            cwd=self.work_dir or None,
+            env=_clean_env(env_work_dir),
+            cwd=cwd,
         )
 
     def _start_stop_monitor(

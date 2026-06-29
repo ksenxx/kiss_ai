@@ -25,6 +25,7 @@ import time
 import unittest
 from typing import Any
 
+from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
 
@@ -355,8 +356,8 @@ class TestMultiClientStopResolvesSubscriber(unittest.TestCase):
         # so the source_tab_id remains in every subscriber set until
         # _dispose_if_closed runs at task end.
         server._close_tab(source_tab_id)
-        assert source_tab_id in server._running_agent_states
-        assert server._running_agent_states[source_tab_id].frontend_closed is True
+        assert source_tab_id in _RunningAgentState.running_agent_states
+        assert _RunningAgentState.running_agent_states[source_tab_id].frontend_closed is True
         assert viewer_tab_id in server.printer._subscribers[source_tab_id]
 
         # ── 4. Viewer clicks Stop → resolves through subscription ───────
@@ -374,9 +375,9 @@ class TestMultiClientStopResolvesSubscriber(unittest.TestCase):
         # viewer's subscription entry survives because the viewer
         # tab is still open in the frontend.
         deadline = time.time() + 5.0
-        while time.time() < deadline and source_tab_id in server._running_agent_states:
+        while time.time() < deadline and source_tab_id in _RunningAgentState.running_agent_states:
             time.sleep(0.01)
-        assert source_tab_id not in server._running_agent_states, (
+        assert source_tab_id not in _RunningAgentState.running_agent_states, (
             "Source _RunningAgentState should be disposed after task end "
             "because frontend_closed=True"
         )
@@ -417,7 +418,7 @@ class TestMultiClientStopResolvesSubscriber(unittest.TestCase):
         server.printer.subscribe_tab("ghost-source-id", viewer_tab_id)
 
         # No source state exists.
-        assert "ghost-source-id" not in server._running_agent_states
+        assert "ghost-source-id" not in _RunningAgentState.running_agent_states
         # But the subscription points to it.
         assert viewer_tab_id in server.printer._subscribers.get(
             "ghost-source-id", set(),

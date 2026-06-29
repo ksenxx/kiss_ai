@@ -74,8 +74,31 @@ PROJECT_ROOT = _find_project_root()
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 MODEL_INFO_PATH = PROJECT_ROOT / "src" / "kiss" / "core" / "models" / "MODEL_INFO.json"
+README_PATH = PROJECT_ROOT / "README.md"
+
+# Provider prefixes we intentionally exclude from the bundled catalog.
+# These are removed on every run regardless of whether they still appear
+# in upstream APIs.  Currently used to keep MiniMax models out: we replaced
+# MiniMax API-key support with Z.AI and Moonshot AI, and several tests
+# (``test_zai_moonshot_keys.test_model_info_json_has_no_minimax_entries``)
+# assert that no minimax entries leak back into ``MODEL_INFO.json``.
+_EXCLUDED_PREFIXES: tuple[str, ...] = (
+    "minimax-",
+    "MiniMaxAI/",
+    "openrouter/minimax/",
+)
 
 _SSL_CTX = ssl.create_default_context()
+
+
+def _is_excluded_provider(name: str) -> bool:
+    """Return True if ``name`` belongs to a permanently excluded provider.
+
+    Used to drop entries from upstream fetches and to mark any leftover
+    catalog entries as deprecated so they are removed from
+    ``MODEL_INFO.json`` on the next run.
+    """
+    return name.startswith(_EXCLUDED_PREFIXES)
 
 
 def api_get(url: str, headers: dict[str, str] | None = None) -> Any:
@@ -116,6 +139,8 @@ def fetch_openrouter(verbose: bool = False) -> dict[str, dict]:
         completion_per_tok = float(pricing.get("completion") or "0")
         ctx = m.get("context_length", 0)
         name = f"openrouter/{model_id}"
+        if _is_excluded_provider(name):  # pragma: no branch
+            continue
         models[name] = {
             "context_length": ctx,
             "input_price_per_1M": round(prompt_per_tok * 1_000_000, 3),
@@ -297,11 +322,23 @@ def get_current_model_info() -> dict[str, dict]:
     }
 
 
+def _noop_token_callback(_token: str) -> None:
+    """No-op token callback used during capability probes.
+
+    Some vendor models (e.g. ``Qwen/Qwen3.7-Max`` on Together AI) reject
+    Chat Completions requests without ``stream=true``. KISS's
+    ``OpenAICompatibleModel._stream_text`` only switches on streaming when
+    a ``token_callback`` is registered, so probes must register one even
+    if they don't care about the streamed deltas — otherwise the request
+    is sent non-streaming and the vendor returns HTTP 400.
+    """
+
+
 def test_generate(model_name: str) -> bool:
     from kiss.core.models.model_info import model as create_model
 
     try:
-        m = create_model(model_name)
+        m = create_model(model_name, token_callback=_noop_token_callback)
         m.initialize("Say hello in one word.")
         text, _ = m.generate()
         return bool(text and text.strip())
@@ -355,9 +392,7 @@ def detect_thinking_level(model_name: str) -> str | None:
     is_openai = model_name.startswith(_OPENAI_PREFIXES) and not model_name.startswith(
         "text-embedding"
     )
-    is_openrouter_openai = model_name.startswith(
-        ("openrouter/openai/", "openrouter/~openai/")
-    )
+    is_openrouter_openai = model_name.startswith(("openrouter/openai/", "openrouter/~openai/"))
     if not (is_openai or is_openrouter_openai):
         return None
 
@@ -365,7 +400,11 @@ def detect_thinking_level(model_name: str) -> str | None:
 
     for level in _THINKING_LEVELS_TO_PROBE:
         try:
-            m = create_model(model_name, model_config={"reasoning_effort": level})
+            m = create_model(
+                model_name,
+                model_config={"reasoning_effort": level},
+                token_callback=_noop_token_callback,
+            )
             m.initialize("Say hello in one word.")
             text, _ = m.generate()
             if text and text.strip():
@@ -392,7 +431,7 @@ def test_function_calling(model_name: str) -> bool:
             return "error"
 
     try:
-        m = create_model(model_name)
+        m = create_model(model_name, token_callback=_noop_token_callback)
         m.initialize("What is 2+3? Use the calculator tool.")
         calls, _, _ = m.generate_and_process_with_tools({"calculator": calculator})
         return len(calls) > 0
@@ -429,8 +468,7 @@ def test_model_capabilities(
 
     if verbose:  # pragma: no branch
         flags = " ".join(
-            f"{k}={v if isinstance(v, str) else ('Y' if v else 'N')}"
-            for k, v in results.items()
+            f"{k}={v if isinstance(v, str) else ('Y' if v else 'N')}" for k, v in results.items()
         )
         print(f" {flags}")
     return results
@@ -462,13 +500,14 @@ def find_deprecated_models(
     deprecated: list[dict] = []
 
     for name in current:  # pragma: no branch
+        if _is_excluded_provider(name):  # pragma: no branch
+            deprecated.append({"name": name, "reason": "excluded provider"})
+            continue
         if name.startswith("codex/"):  # pragma: no branch
             if codex_slugs and name != "codex/default":
                 slug = name.removeprefix("codex/")
                 if slug not in codex_slugs:
-                    deprecated.append(
-                        {"name": name, "reason": "not in Codex CLI models.json"}
-                    )
+                    deprecated.append({"name": name, "reason": "not in Codex CLI models.json"})
             continue
         if name.startswith("openrouter/"):  # pragma: no branch
             if openrouter and name not in openrouter:  # pragma: no branch
@@ -498,9 +537,7 @@ def find_deprecated_models(
                 if has_date:  # pragma: no branch
                     deprecated.append({"name": name, "reason": "not in OpenAI API"})
                 else:
-                    alias_re = re.compile(
-                        rf"^{re.escape(name)}-(\d{{8}}|\d{{4}}-\d{{2}}-\d{{2}})$"
-                    )
+                    alias_re = re.compile(rf"^{re.escape(name)}-(\d{{8}}|\d{{4}}-\d{{2}}-\d{{2}})$")
                     if not any(alias_re.match(n) for n in openai):
                         deprecated.append(
                             {"name": name, "reason": "alias with no snapshot in OpenAI API"}
@@ -510,6 +547,31 @@ def find_deprecated_models(
 
 
 _GPT_PRO_OR_CODEX_RE = re.compile(r"-(pro|codex)(-|$)")
+
+_OPENAI_RESPONSES_ONLY_RE = re.compile(r"^o\d+(?:\.\d+)?-pro(?:-|$)")
+
+
+def _is_excluded_openai_responses_only(name: str) -> bool:
+    """Return True for OpenAI reasoning models that only work via ``/v1/responses``.
+
+    Models in the ``o1-pro`` / ``o3-pro`` family (e.g. ``o1-pro``,
+    ``o1-pro-2025-03-19``, ``o3-pro``, ``o3-pro-2025-06-10``) are routed
+    exclusively through OpenAI's ``/v1/responses`` endpoint. KISS's
+    ``OpenAICompatibleModel`` invokes ``client.chat.completions.create``
+    (``/v1/chat/completions``), so probing or running these models there
+    returns HTTP 404 — there is no way for the discovery flow to test
+    them, and they would fail at runtime for KISS users anyway. Skipping
+    them upfront avoids a wasted (and billable) probe each ``update_models``
+    run and prevents broken entries from leaking into ``MODEL_INFO.json``.
+
+    Matches both bare OpenAI names (``o1-pro``, ``o3-pro``), their dated
+    snapshots (``o1-pro-2025-03-19``), and OpenRouter passthroughs
+    (``openrouter/openai/o1-pro``). The match is scoped to the
+    ``o<digits>-pro`` shape (last ``/``-separated segment) so unrelated
+    names that happen to contain ``o-pro`` aren't caught.
+    """
+    base = name.rsplit("/", 1)[-1]
+    return bool(_OPENAI_RESPONSES_ONLY_RE.match(base))
 
 
 def _is_excluded_gpt_pro_or_codex(name: str) -> bool:
@@ -552,8 +614,7 @@ _VENDOR_OR_PREFIX: dict[str, str] = {
 }
 
 _CODEX_MODELS_JSON_URL = (
-    "https://raw.githubusercontent.com/openai/codex/main/"
-    "codex-rs/models-manager/models.json"
+    "https://raw.githubusercontent.com/openai/codex/main/codex-rs/models-manager/models.json"
 )
 
 
@@ -602,6 +663,8 @@ def _add_codex_candidates(
         if codex_name in current:  # pragma: no branch
             continue
         if _is_excluded_gpt_pro_or_codex(codex_name):  # pragma: no branch
+            continue
+        if _is_excluded_openai_responses_only(codex_name):  # pragma: no branch
             continue
         or_info = _lookup_openrouter_pricing(slug, "openai", openrouter)
         ctx = or_info["context_length"] if or_info and or_info.get("context_length") else 400000
@@ -682,6 +745,8 @@ def compute_changes(
                 updates.append({"name": name, "changes": changed, "source": "openrouter"})
         else:
             if _is_excluded_gpt_pro_or_codex(name):
+                continue
+            if _is_excluded_openai_responses_only(name):
                 continue
             is_preview = "preview" in name.split("/")[-1]
             has_pricing = fetched["input_price_per_1M"] > 0
@@ -781,6 +846,8 @@ def compute_changes(
     for name in openai:  # pragma: no branch
         if name not in current:  # pragma: no branch
             if _is_excluded_gpt_pro_or_codex(name):  # pragma: no branch
+                continue
+            if _is_excluded_openai_responses_only(name):  # pragma: no branch
                 continue
             or_info = _lookup_openrouter_pricing(name, "openai", openrouter)
             ctx = or_info["context_length"] if or_info and or_info.get("context_length") else 0
@@ -984,6 +1051,138 @@ def apply_updates_to_file(
     # overrides live in ``~/.kiss/MY_MODELS.json`` instead.
 
 
+def _readme_provider_category(model_name: str) -> str:
+    """Return the README provider-category label for ``model_name``.
+
+    Mirrors ``tests/test_readme_zai_moonshot._provider_category`` so that
+    counts emitted into ``README.md`` are guaranteed to agree with the
+    test's expectations after :func:`sync_readme_catalog` rewrites the
+    "Models Supported" section. The ``cc/*`` and ``codex/*`` labels keep
+    the backticks (and matching parentheses) so they can be matched
+    verbatim by the test's ``| Provider | count |`` regex.
+    """
+    if model_name.startswith("openrouter/"):
+        return "OpenRouter"
+    if model_name.startswith("cc/"):
+        return "Claude Code CLI (`cc/*`)"
+    if model_name.startswith("codex/"):
+        return "Codex CLI (`codex/*`)"
+    if model_name.startswith("claude-"):
+        return "Anthropic"
+    if model_name.startswith("glm-"):
+        return "Z.AI"
+    if model_name.startswith(("kimi-", "moonshot-")):
+        return "Moonshot AI"
+    if model_name.startswith(("gemini-", "google/")):
+        return "Gemini / Google"
+    if model_name.startswith(("gpt-", "o", "computer-use-preview", "text-embedding-")):
+        return "OpenAI"
+    return "Together AI"
+
+
+def _summary_label(category: str) -> str:
+    """Map a README category label to its ``<summary>`` form (no backticks).
+
+    The table rows keep the backticks (``| Claude Code CLI (`cc/*`) | 3 |``)
+    but the collapsible-section headers strip them
+    (``<summary><strong>Claude Code CLI (cc/*) (3)</strong></summary>``),
+    so the rewriter must produce both spellings.
+    """
+    return category.replace("`", "")
+
+
+def sync_readme_catalog(readme_path: Path, model_info_path: Path) -> bool:
+    """Rewrite the catalog totals in ``README.md`` to match MODEL_INFO.json.
+
+    Updates the catalog totals, capability counts, per-provider table
+    counts, and ``<summary>`` headers in place using targeted regex
+    substitutions, leaving the rest of the file untouched. Returns
+    ``True`` when the file was modified.
+    """
+    data: dict[str, dict[str, Any]] = json.loads(model_info_path.read_text())
+    counts: dict[str, int] = {}
+    for name in data:
+        category = _readme_provider_category(name)
+        counts[category] = counts.get(category, 0) + 1
+    total = sum(counts.values())
+    cat_count = len(counts)
+    generation = sum(1 for entry in data.values() if entry.get("gen"))
+    function_calling = sum(1 for entry in data.values() if entry.get("fc"))
+    embedding = sum(1 for entry in data.values() if entry.get("emb"))
+
+    text = readme_path.read_text()
+    original = text
+
+    text = re.sub(
+        r"(\| \*\*Models in bundled catalog\*\* \| )\d+ across \d+ provider categories",
+        rf"\g<1>{total} across {cat_count} provider categories",
+        text,
+    )
+    text = re.sub(
+        r"(ships a catalog of \*\*)\d+( models\*\* across \*\*)\d+( provider categories\*\*)",
+        rf"\g<1>{total}\g<2>{cat_count}\g<3>",
+        text,
+    )
+    text = re.sub(
+        r"- \*\*\d+\*\* generation-capable models",
+        f"- **{generation}** generation-capable models",
+        text,
+    )
+    text = re.sub(
+        r"- \*\*\d+\*\* function-calling-capable models",
+        f"- **{function_calling}** function-calling-capable models",
+        text,
+    )
+    text = re.sub(
+        r"- \*\*\d+\*\* embedding models",
+        f"- **{embedding}** embedding models",
+        text,
+    )
+
+    for category, count in counts.items():
+        table_pat = rf"(\| {re.escape(category)} \| )\d+( \|)"
+        text = re.sub(table_pat, rf"\g<1>{count}\g<2>", text)
+        summary = _summary_label(category)
+        details_pat = rf"(<summary><strong>{re.escape(summary)} \()\d+(\)</strong></summary>)"
+        text = re.sub(details_pat, rf"\g<1>{count}\g<2>", text)
+
+    if text == original:
+        return False
+    readme_path.write_text(text)
+    return True
+
+
+def _run_scrub_only(dry_run: bool = False) -> None:
+    """Offline path: drop excluded-provider entries and resync README.
+
+    Reads ``MODEL_INFO.json`` directly (rather than going through
+    ``get_current_model_info``) so the script can run without importing
+    any provider backends, then writes the trimmed JSON and refreshes the
+    README's catalog totals. Used to apply provider-removal fixes (e.g.
+    purging MiniMax) without requiring any vendor API keys.
+    """
+    print("=" * 60)
+    print("Model Info Updater (scrub-only mode)")
+    print("=" * 60)
+    data = _read_model_info_json(MODEL_INFO_PATH)
+    print(f"\n[1/3] Loaded {len(data)} entries from {MODEL_INFO_PATH}")
+    removed = [name for name in list(data) if _is_excluded_provider(name)]
+    print(f"\n[2/3] {len(removed)} excluded-provider entries to remove:")
+    for name in removed:
+        print(f"    {name}")
+    if dry_run:
+        print("  (dry-run, no files modified)")
+        return
+    for name in removed:
+        data.pop(name, None)
+    _write_model_info_json(MODEL_INFO_PATH, data)
+    print(f"  Written to {MODEL_INFO_PATH}")
+    print("\n[3/3] Syncing README catalog totals...")
+    changed = sync_readme_catalog(README_PATH, MODEL_INFO_PATH)
+    print(f"  README updated: {changed} ({README_PATH})")
+    print("\nDone!")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Update MODEL_INFO.json from vendor APIs")
     parser.add_argument(
@@ -993,8 +1192,21 @@ def main() -> None:
     )
     parser.add_argument("--skip-test", action="store_true", help="Skip capability testing")
     parser.add_argument("--test-existing", action="store_true", help="Re-test existing models")
+    parser.add_argument(
+        "--scrub-only",
+        action="store_true",
+        help=(
+            "Offline mode: skip vendor API fetches, drop catalog entries "
+            "belonging to permanently excluded providers, and resync "
+            "README.md catalog totals. Requires no API keys."
+        ),
+    )
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
+
+    if args.scrub_only:
+        _run_scrub_only(dry_run=args.dry_run)
+        return
 
     print("=" * 60)
     print("Model Info Updater")
@@ -1112,12 +1324,16 @@ def main() -> None:
             if thinking_changed:  # pragma: no branch
                 existing["changes"]["thinking"] = caps["thinking"]
                 print(
-                    f"    {name}: thinking changed "
-                    f"{cur.get('thinking')!r} -> {caps['thinking']!r}"
+                    f"    {name}: thinking changed {cur.get('thinking')!r} -> {caps['thinking']!r}"
                 )
 
     print("\n[6/6] Applying changes...")
     apply_updates_to_file(updates, new_models, deprecated, current, dry_run=args.dry_run)
+
+    if not args.dry_run and README_PATH.exists():
+        print("\n  Syncing README catalog totals...")
+        changed = sync_readme_catalog(README_PATH, MODEL_INFO_PATH)
+        print(f"  README updated: {changed} ({README_PATH})")
 
     print("\nDone!")
 

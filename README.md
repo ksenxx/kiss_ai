@@ -2,7 +2,7 @@
 
 ![KISS Framework](assets/KISS-Sorcar.png)
 
-[![Version](https://img.shields.io/badge/version-2026.6.31-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
+[![Version](https://img.shields.io/badge/version-2026.6.32-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.13-blue?style=flat-square)](https://www.python.org/)
 [![Website](https://img.shields.io/badge/website-kisssorcar.github.io-1976d2?style=flat-square)](https://kisssorcar.github.io/)
@@ -56,7 +56,7 @@ ______________________________________________________________________
 | **Multiple models from multiple vendors in the same task** | ✅ Mix OpenAI, Anthropic, Gemini, Together, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, and Codex CLI | ❌ Anthropic Claude models only | ❌ One model per task |
 | **Primary focus** | ✅ **Quality** — rigorous review, end-to-end tests | Speed and developer ergonomics | Speed |
 | **Core Agents # LoC** | **~2500** | Unknown | Unknown |
-| **Models in bundled catalog** | 502 across 9 provider categories | Claude family only | Subset chosen by Cursor |
+| **Models in bundled catalog** | 504 across 9 provider categories | Claude family only | Subset chosen by Cursor |
 | **Bring your own API key / endpoint** | ✅ Yes — keys stay on your machine | ✅ Anthropic key | ⚠️ Routed through Cursor backend |
 | **Open source** | ✅ Apache-2.0 | ❌ Proprietary | ❌ Proprietary |
 | **Price** | Free framework; pay only your chosen model provider | Subscription / API usage | Subscription |
@@ -213,14 +213,14 @@ These agents live in `src/kiss/agents/third_party_agents/`.
 
 ## 🤖 Models Supported
 
-KISS Sorcar ships a catalog of **502 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json).
+KISS Sorcar ships a catalog of **504 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json).
 
 | Provider category | Catalog entries |
 |---|---:|
 | OpenAI | 70 |
 | Anthropic | 13 |
 | Gemini / Google | 23 |
-| Together AI | 77 |
+| Together AI | 79 |
 | Z.AI | 8 |
 | Moonshot AI | 6 |
 | OpenRouter | 295 |
@@ -229,8 +229,8 @@ KISS Sorcar ships a catalog of **502 models** across **9 provider categories**, 
 
 Current catalog capability totals:
 
-- **486** generation-capable models
-- **326** function-calling-capable models
+- **488** generation-capable models
+- **329** function-calling-capable models
 - **7** embedding models
 
 Full model list:
@@ -360,7 +360,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>Together AI (77)</strong></summary>
+<summary><strong>Together AI (79)</strong></summary>
 
 - `arcee-ai/trinity-mini`
 - `BAAI/bge-base-en-v1.5`
@@ -432,6 +432,8 @@ Full model list:
 - `Qwen/Qwen3.5-397B-A17B`
 - `Qwen/Qwen3.5-9B`
 - `Qwen/Qwen3.6-Plus`
+- `Qwen/Qwen3.7-Max`
+- `Qwen/Qwen3.7-Plus`
 - `Qwen/QwQ-32B`
 - `zai-org/GLM-4.5-Air-FP8`
 - `zai-org/GLM-4.6`

@@ -160,7 +160,7 @@ class TestCliRunningTaskHistoryDot(unittest.TestCase):
         th._DB_PATH, th._db_conn, th._KISS_DIR = self._saved_persistence
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def _wait_for_cli_running(self, task_id: int,
+    def _wait_for_cli_running(self, task_id: str,
                               timeout: float = 2.0) -> None:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -172,7 +172,7 @@ class TestCliRunningTaskHistoryDot(unittest.TestCase):
             f"task_id={task_id} never registered in _cli_running_tasks",
         )
 
-    def _wait_for_cli_not_running(self, task_id: int,
+    def _wait_for_cli_not_running(self, task_id: str,
                                   timeout: float = 2.0) -> None:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -185,7 +185,7 @@ class TestCliRunningTaskHistoryDot(unittest.TestCase):
         )
 
     def _latest_history_session(
-        self, task_id: int,
+        self, task_id: str,
     ) -> dict[str, Any] | None:
         """Return the most recent ``history`` broadcast row for *task_id*."""
         for event in reversed(self.captured):

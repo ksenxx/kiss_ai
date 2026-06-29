@@ -78,7 +78,7 @@ class TestBackendBroadcastsDistinctSubagentTabs:
         task_ids = [e["task_id"] for e in new_tab_evts]
         assert len(set(task_ids)) == 3, "task_ids must be unique"
         for evt in new_tab_evts:
-            assert isinstance(evt["task_id"], int), (
+            assert isinstance(evt["task_id"], str), (
                 f"new_tab event must carry an int task_id: {evt}"
             )
 
@@ -116,7 +116,7 @@ class TestBackendBroadcastsDistinctSubagentTabs:
         task_ids = [e["task_id"] for e in new_tab_evts]
         assert len(set(task_ids)) == 3, "task_ids must be unique"
         for evt in new_tab_evts:
-            assert isinstance(evt["task_id"], int), (
+            assert isinstance(evt["task_id"], str), (
                 f"new_tab event must carry an int task_id: {evt}"
             )
 

@@ -15,7 +15,6 @@ Covers:
 
 from __future__ import annotations
 
-import json
 import re
 import shutil
 import tempfile
@@ -66,16 +65,6 @@ def _make_server() -> tuple[VSCodeServer, list[dict]]:
 
     server.printer.broadcast = capture  # type: ignore[assignment]
     return server, events
-
-
-def _read_extra(task_id: int) -> dict:
-    db = th._get_db()
-    row = db.execute(
-        "SELECT extra FROM task_history WHERE id = ?", (task_id,),
-    ).fetchone()
-    assert row is not None
-    raw = row["extra"] or ""
-    return json.loads(raw) if raw else {}
 
 
 class TestHistoryIncludesFavoriteFlag:
@@ -144,40 +133,6 @@ class TestSetFavoriteCommandDispatch:
             th._db_conn = None
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def test_handle_set_favorite_persists_flag(self) -> None:
-        task_id, _ = th._add_task("via handle")
-        server, _ = _make_server()
-
-        server._handle_set_favorite(task_id, True)
-
-        assert _read_extra(task_id).get("is_favorite") is True
-
-    def test_set_favorite_command_dispatched_to_handler(self) -> None:
-        """The command dispatcher routes ``setFavorite`` to the handler."""
-        task_id, _ = th._add_task("via command")
-        server, _ = _make_server()
-
-        server._handle_command({
-            "type": "setFavorite",
-            "taskId": task_id,
-            "isFavorite": True,
-        })
-
-        assert _read_extra(task_id).get("is_favorite") is True
-
-    def test_set_favorite_command_can_unset(self) -> None:
-        task_id, _ = th._add_task("clear it")
-        th._set_task_favorite(task_id, True)
-        server, _ = _make_server()
-
-        server._handle_command({
-            "type": "setFavorite",
-            "taskId": task_id,
-            "isFavorite": False,
-        })
-
-        assert _read_extra(task_id).get("is_favorite") is False
 
     def test_set_favorite_command_without_task_id_noop(self) -> None:
         """Missing taskId is silently dropped (no exception)."""

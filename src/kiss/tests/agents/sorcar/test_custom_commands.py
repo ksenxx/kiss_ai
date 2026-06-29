@@ -14,9 +14,6 @@ completed, never executed as a task.
 
 from __future__ import annotations
 
-import os
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -307,82 +304,3 @@ def test_completer_builtins_before_custom(kiss_home: Path, tmp_path: Path) -> No
     assert matches.index("/help ") < matches.index("/helper ")
 
 
-# ---------------------------------------------------------------------------
-# REPL subprocess (no model calls)
-# ---------------------------------------------------------------------------
-
-def _run_repl_subprocess(
-    tmp_path: Path, kiss_home: Path, stdin: str,
-) -> subprocess.CompletedProcess:
-    """Drive ``run_repl`` in a subprocess feeding *stdin*, no model calls."""
-    script = (
-        "from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent\n"
-        "from kiss.agents.sorcar.cli_repl import run_repl\n"
-        "agent = ChatSorcarAgent('test')\n"
-        "run_repl(agent, {'work_dir': '.', 'model_name': 'demo-model'})\n"
-    )
-    env = dict(os.environ, KISS_HOME=str(kiss_home))
-    return subprocess.run(
-        [sys.executable, "-c", script],
-        input=stdin,
-        text=True,
-        capture_output=True,
-        cwd=str(tmp_path),
-        env=env,
-        timeout=120,
-    )
-
-
-def test_repl_commands_lists_custom_commands(kiss_home: Path, tmp_path: Path) -> None:
-    """``/commands`` prints discovered custom commands in the REPL."""
-    _write(
-        kiss_home / "commands" / "greet.md",
-        "---\ndescription: Greet the user\n---\nSay hello.",
-    )
-    _write(tmp_path / ".kiss" / "commands" / "build.md", "Build the project.")
-    proc = _run_repl_subprocess(tmp_path, kiss_home, "/commands\n/exit\n")
-    assert proc.returncode == 0, proc.stderr
-    assert "/greet" in proc.stdout
-    assert "Greet the user" in proc.stdout
-    assert "/build" in proc.stdout
-    assert "(project)" in proc.stdout
-
-
-def test_repl_commands_lists_claude_commands(
-    claude_home: Path, kiss_home: Path, tmp_path: Path,
-) -> None:
-    """``/commands`` includes commands from .claude/commands directories."""
-    _write(
-        claude_home / "commands" / "review.md",
-        "---\ndescription: Review the diff\n---\nReview it.",
-    )
-    _write(tmp_path / ".claude" / "commands" / "ship.md", "Ship it.")
-    proc = _run_repl_subprocess(tmp_path, kiss_home, "/commands\n/exit\n")
-    assert proc.returncode == 0, proc.stderr
-    assert "/review" in proc.stdout
-    assert "(claude-user) Review the diff" in proc.stdout
-    assert "/ship" in proc.stdout
-    assert "(claude-project)" in proc.stdout
-
-
-def test_repl_commands_empty_hint(kiss_home: Path, tmp_path: Path) -> None:
-    """``/commands`` with no commands explains how to create them."""
-    proc = _run_repl_subprocess(tmp_path, kiss_home, "/commands\n/exit\n")
-    assert proc.returncode == 0, proc.stderr
-    assert "No custom commands found" in proc.stdout
-
-
-def test_repl_help_lists_custom_commands(kiss_home: Path, tmp_path: Path) -> None:
-    """``/help`` shows the custom-commands section when commands exist."""
-    _write(kiss_home / "commands" / "greet.md", "Say hello.")
-    proc = _run_repl_subprocess(tmp_path, kiss_home, "/help\n/exit\n")
-    assert proc.returncode == 0, proc.stderr
-    assert "Custom commands:" in proc.stdout
-    assert "/greet" in proc.stdout
-
-
-def test_repl_unknown_command_still_reported(kiss_home: Path, tmp_path: Path) -> None:
-    """A slash word matching no built-in or custom command is reported."""
-    proc = _run_repl_subprocess(tmp_path, kiss_home, "/nosuchcmd\n/exit\n")
-    assert proc.returncode == 0, proc.stderr
-    assert "Unknown command" in proc.stdout

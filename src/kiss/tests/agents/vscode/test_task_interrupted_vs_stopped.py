@@ -65,7 +65,7 @@ def _make_remote_server() -> Any:
     )
 
 
-def _start_blocked_worker(vscode: Any, tab_id: str) -> tuple[Any, int]:
+def _start_blocked_worker(vscode: Any, tab_id: str) -> tuple[Any, str]:
     """Start a worker whose stub agent blocks in a non-cooperative sleep.
 
     Mirrors a real agent wedged inside an LLM API call: it registers a
@@ -86,7 +86,7 @@ def _start_blocked_worker(vscode: Any, tab_id: str) -> tuple[Any, int]:
     tab.agent = agent
     tab.chat_id = ""
 
-    captured: dict[str, int] = {}
+    captured: dict[str, str] = {}
     entered = threading.Event()
 
     def fake_run(**kwargs: Any) -> None:
@@ -142,7 +142,7 @@ def _start_blocked_worker(vscode: Any, tab_id: str) -> tuple[Any, int]:
     return worker, captured["id"]
 
 
-def _persisted_result_and_event(task_id: int) -> tuple[str, list[str]]:
+def _persisted_result_and_event(task_id: str) -> tuple[str, list[str]]:
     """Return ``(result, event_types)`` persisted for *task_id*.
 
     Flushes any buffered chat events first so the lifecycle end event is

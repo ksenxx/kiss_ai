@@ -110,7 +110,7 @@ class TestCrossTabChatPollution:
 
         # tabB is actively running an unrelated task.
         printer.subscribe_tab("200", "tabB")
-        server._get_tab("tabB").task_history_id = 200
+        server._get_tab("tabB").task_history_id = "200"
 
         server._run_task_inner({
             "tabId": "tabA",
@@ -144,7 +144,7 @@ class TestCrossTabChatPollution:
         server, printer = _make_server()
 
         printer.subscribe_tab("200", "tabB")
-        server._get_tab("tabB").task_history_id = 200
+        server._get_tab("tabB").task_history_id = "200"
 
         server._run_task_inner({
             "tabId": "tabA",

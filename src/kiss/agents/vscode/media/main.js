@@ -1158,6 +1158,46 @@
    * "focus the existing tab keyed by this id" shortcut would only
    * be correct for a single-client setup.
    */
+  /**
+   * Materialise a sub-agent tab in the background — without changing
+   * ``activeTabId`` and without any of the side effects that
+   * ``createNewTab`` triggers for a user-initiated new chat
+   * (``saveCurrentTab``/``restoreTab`` DOM swap, ``newChat`` and
+   * ``getWelcomeSuggestions`` posts to the backend, focus theft).
+   *
+   * Called from the new_tab message handler when the backend's
+   * broadcast carries a ``parent_tab_id`` — i.e. when the new tab is
+   * a sub-agent tab spawned under a ``run_parallel`` call.  The
+   * sub-agent run shares the parent's ``chat_id`` so minting a fresh
+   * backend chat (which ``createNewTab`` does via ``newChat``) would
+   * be incorrect.
+   *
+   * The fresh tab is anchored immediately to the right of its parent
+   * via ``placeSubagentTabAfterParent`` so the tab bar reads
+   * parent → sub-agents left-to-right.  Returns the new tab object;
+   * callers use ``returned.id`` to address it in subsequent
+   * ``resumeSession`` posts.
+   */
+  function createBackgroundSubagentTab(parentId) {
+    const subTab = makeTab('new chat');
+    if (parentId) subTab.parentTabId = parentId;
+    // Mark the tab as a sub-agent tab immediately so the brief window
+    // between this ``new_tab`` and the follow-up ``openSubagentTab``
+    // event is consistent with the tab's final identity.  In
+    // particular, ``persistTabState`` filters sub-agent tabs out of
+    // the persisted set (they are reopened by the parent's
+    // ``resumeSession`` flow on restart — see
+    // ``_open_persisted_subagent_tabs`` in server.py).  Without this
+    // flag a window reload landing inside the
+    // ``new_tab → openSubagentTab`` window would persist a stray
+    // regular tab with no backend chat id.
+    subTab.isSubagentTab = true;
+    placeSubagentTabAfterParent(subTab, parentId);
+    renderTabBar();
+    persistTabState();
+    return subTab;
+  }
+
   function createNewTab() {
     // Preserve any typed text so it carries over to the new tab
     const pendingText = inp.value || '';
@@ -2222,9 +2262,9 @@
       rb +
       '</div>';
     hlBlock(rc);
+    addCopyButton(rc);
     const rcBody = rc.querySelector('.rc-body');
     if (rcBody) linkifyFilePaths(rcBody);
-    addCopyButton(rc);
     return rc;
   }
 
@@ -4074,10 +4114,10 @@
         // Backend → frontend request to open a fresh chat tab and
         // resume an existing task into it.  ``task_id`` is the
         // backend's identity for the task; the frontend allocates a
-        // tab id via ``createNewTab`` (frontend-only concept) and
-        // then posts ``resumeSession`` back to the backend.  The
-        // server's ``_cmd_resume_session`` handler supports a
-        // task-id-only resume (no ``chatId`` required).
+        // tab id (frontend-only concept) and then posts
+        // ``resumeSession`` back to the backend.  The server's
+        // ``_cmd_resume_session`` handler supports a task-id-only
+        // resume (no ``chatId`` required).
         //
         // Sub-agent ``new_tab`` events carry ``parent_tab_id``.  The
         // backend broadcasts them to ALL connected webviews (no
@@ -4088,25 +4128,34 @@
         if (ev.parent_tab_id && !tabs.find(t => t.id === ev.parent_tab_id))
           break;
         if (ev.task_id === undefined || ev.task_id === null) break;
-        // Remember the parent tab id BEFORE createNewTab changes
-        // activeTabId, so we can switch back after wiring the
-        // sub-agent tab.
         const parentTabBeforeNew = ev.parent_tab_id || '';
-        createNewTab();
-        // Capture the sub-agent tab id before switching back.
-        const subAgentTabId = activeTabId;
+        let subAgentTabId;
+        if (parentTabBeforeNew) {
+          // Sub-agent path: build the new tab in the BACKGROUND so the
+          // user's foreground tab is never disturbed.  Calling
+          // ``createNewTab`` here would (1) flip ``activeTabId`` to
+          // the new tab, painting its empty welcome screen for one
+          // frame before a follow-up ``switchToTab`` reverted it,
+          // (2) post a spurious ``newChat`` for what is really the
+          // parent's chat session, (3) post ``getWelcomeSuggestions``
+          // for a tab that will never show a welcome screen, and (4)
+          // steal keyboard focus from the parent the user is typing
+          // in.  ``createBackgroundSubagentTab`` does none of that.
+          const subTab = createBackgroundSubagentTab(parentTabBeforeNew);
+          subAgentTabId = subTab.id;
+        } else {
+          // Defensive path: a ``new_tab`` event with no
+          // ``parent_tab_id`` is not produced by any current backend
+          // emitter, but if a future code path emits one we keep the
+          // legacy "create + activate" behaviour for it.
+          createNewTab();
+          subAgentTabId = activeTabId;
+        }
         vscode.postMessage({
           type: 'resumeSession',
           taskId: ev.task_id,
           tabId: subAgentTabId,
         });
-        // Switch back to the parent (non-sub-agent) tab so the
-        // user stays focused on the main task.  Sub-agent tabs
-        // are still accessible via the tab bar if the user wants
-        // to inspect them.
-        if (parentTabBeforeNew) {
-          switchToTab(parentTabBeforeNew);
-        }
         break;
       }
       case 'openSubagentTab': {
@@ -6438,10 +6487,24 @@
         div.appendChild(actions);
       }
 
+      // Per-row info column — wraps the three stacked detail lines
+      // (metrics, workspace+meta, chat/task/parent ids) so they
+      // render flush, with no flex row-gap between them.  The
+      // container itself uses ``flex-basis: 100%`` to drop onto its
+      // own line below the running/failed dot, the task text, and
+      // the action column (mirroring the trick the metrics span used
+      // when it was a direct sibling).  Its inner ``flex-direction:
+      // column`` + ``gap: 0`` rule stacks the three lines tightly.
+      const info = document.createElement('div');
+      info.className = 'running-item-info';
+
       // Metrics row (steps • tokens • cost • duration) — matches the
-      // Running tab.  ``flex-basis: 100%`` on .running-item-metrics
-      // drops this onto its own line below the running/failed dot,
-      // the task text, and the delete button.
+      // Running tab.  Rendered as the first child of the info
+      // container above; ``.running-item-metrics`` no longer needs
+      // ``flex-basis: 100%`` (the container handles the line break)
+      // but the rule is kept for backwards compatibility with any
+      // other surface that may still render it as a direct child of
+      // ``.sidebar-item``.
       const metrics = document.createElement('span');
       metrics.className = 'running-item-metrics';
       const tokens = Number(s.tokens || 0);
@@ -6489,16 +6552,13 @@
         cost.toFixed(4) +
         dur +
         when;
-      div.appendChild(metrics);
+      info.appendChild(metrics);
 
       // Workspace + meta row — the task's ``work_dir`` and the
       // persisted run metadata (model name, wt/no-wt,
       // parallel/sequential, auto-commit/manual-commit) rendered
       // as a single dot-separated line IMMEDIATELY after the
-      // metrics line.  ``flex-basis: 100%`` on
-      // ``.running-item-workspace`` drops it onto its own line
-      // below the metrics row inside the ``.sidebar-item`` flex
-      // container.  Format:
+      // metrics line inside the per-row info column.  Format:
       //
       //   <work_dir> • <model> • <wt|no-wt>
       //     • <parallel|sequential> • <auto-commit|manual-commit>
@@ -6534,8 +6594,51 @@
         // long enough to be clipped by overflow:hidden in the
         // sidebar.
         workspace.title = text;
-        div.appendChild(workspace);
+        info.appendChild(workspace);
       }
+
+      // Ids row — chat id, task id, and parent task id rendered as
+      // a single dot-separated line right below the workspace+meta
+      // line.  Format:
+      //
+      //   chat <chat_id> • task <task_id> • parent <parent_task_id>
+      //
+      // Each field is omitted when not present so legacy rows that
+      // pre-date a particular id, plus regular (non-sub-agent) rows
+      // that have no ``parent_task_id``, render cleanly without
+      // dangling bullets or placeholder text.  When NONE of the
+      // three ids is set we skip the span entirely so the History
+      // panel does not show an empty third line.
+      const chatId = typeof s.id === 'string' ? s.id : '';
+      const taskIdRaw = s.task_id;
+      const taskIdStr =
+        taskIdRaw === undefined || taskIdRaw === null ? '' : String(taskIdRaw);
+      const parentIdRaw = s.parent_task_id;
+      const parentIdStr =
+        parentIdRaw === undefined || parentIdRaw === null
+          ? ''
+          : String(parentIdRaw);
+      const idParts = [];
+      if (chatId) idParts.push('chat ' + chatId);
+      if (taskIdStr) idParts.push('task ' + taskIdStr);
+      if (parentIdStr) idParts.push('parent ' + parentIdStr);
+      if (idParts.length > 0) {
+        const idsSpan = document.createElement('span');
+        idsSpan.className = 'running-item-ids';
+        const idsText = idParts.join(' • ');
+        idsSpan.textContent = idsText;
+        // Native HTML tooltip — useful when the combined line is
+        // long enough to be clipped by overflow:hidden in the
+        // sidebar.
+        idsSpan.title = idsText;
+        info.appendChild(idsSpan);
+      }
+
+      // Finally attach the per-row info column to the row itself.
+      // Appended LAST so the running/failed dot, the task text, and
+      // the action buttons sit on the row's first visual line and
+      // the info container drops onto the second visual line.
+      div.appendChild(info);
 
       div.addEventListener('click', () => {
         if (demoMode && typeof window._startDemoReplay === 'function') {
