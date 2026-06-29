@@ -1440,6 +1440,31 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
    * is visible.  When the script is missing an error message points
    * the user at the canonical install root rather than their current
    * workspace.
+   *
+   * Pre-flight divergence reset — chicken-and-egg fix
+   * --------------------------------------------------
+   * Before invoking ``bash install.sh`` we synchronize the on-disk
+   * checkout with ``origin`` so a stale ``install.sh`` (one predating
+   * the divergence-handling fix in :func:`update_repo`) is replaced
+   * BEFORE bash reads it.  The bug it cures:
+   *
+   *     >>> Pulling latest changes...
+   *     fatal: Not possible to fast-forward, aborting.
+   *     hint: You have divergent branches and need to specify how to
+   *           reconcile them.
+   *        WARNING: git pull failed (offline or diverged); continuing
+   *        with the current checkout.
+   *
+   * The old install.sh swallowed the divergence error and then rebuilt
+   * the SAME stale source forever — so the Update button was a no-op
+   * on any machine whose ``main`` had been force-pushed (release
+   * retags, history rewrites).  Resetting to ``@{upstream}`` here
+   * means the running bash always reads the freshest install.sh, even
+   * if the user's extension predates this fix.  Dirty edits are
+   * stashed/popped around the reset so the user never loses work, and
+   * every step is best-effort (``|| true``) so an offline machine
+   * still falls through to ``bash install.sh`` (which itself handles
+   * offline / no-upstream gracefully).
    */
   public runUpdate(): void {
     const scriptPath = findInstallScript();
@@ -1457,7 +1482,27 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       cwd: path.dirname(scriptPath),
     });
     terminal.show();
-    terminal.sendText(`bash '${scriptPath.replace(/'/g, "'\\''")}'`);
+    const escScript = scriptPath.replace(/'/g, "'\\''");
+    const escDir = path.dirname(scriptPath).replace(/'/g, "'\\''");
+    // Single compound command so the terminal shows one prompt invocation.
+    // Each git step is guarded with ``|| true`` so an offline machine,
+    // a missing upstream, or a repo without ``origin`` still proceeds to
+    // ``bash install.sh`` (the script then handles those same cases).
+    // ``@{upstream}`` is the configured tracking branch (e.g.
+    // origin/main); ``origin/HEAD`` is the fallback for repos where the
+    // current branch lacks an explicit upstream config.
+    const preflight = [
+      `cd '${escDir}'`,
+      "echo '>>> Pre-flight: synchronizing repo with origin before install.sh...'",
+      'git fetch --force --tags --prune origin 2>/dev/null || true',
+      // Stash dirty / untracked edits so the hard reset below never loses
+      // user work.  We record the success so the pop is conditional.
+      "_kiss_stashed=; if [ -n \"$(git status --porcelain 2>/dev/null)\" ]; then git stash push --include-untracked -m 'kiss-update-preflight' >/dev/null 2>&1 && _kiss_stashed=1 || _kiss_stashed=; fi",
+      "git reset --hard '@{upstream}' 2>/dev/null || git reset --hard origin/HEAD 2>/dev/null || true",
+      'if [ -n "$_kiss_stashed" ]; then git stash pop >/dev/null 2>&1 || true; fi',
+      `bash '${escScript}'`,
+    ].join('; ');
+    terminal.sendText(preflight);
   }
 
   /**
