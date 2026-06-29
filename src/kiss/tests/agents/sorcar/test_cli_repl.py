@@ -193,7 +193,7 @@ def _read_line_over_pty(typed: str) -> tuple[str, str]:
     Returns:
         A ``(before_enter, full)`` tuple of decoded terminal output.
     """
-    import pty
+    from kiss.tests.agents.sorcar._pty_helper import pty_spawn
 
     child_code = (
         "from kiss.agents.sorcar.cli_repl import _PROMPT, _read_line\n"
@@ -202,10 +202,7 @@ def _read_line_over_pty(typed: str) -> tuple[str, str]:
         "sys.stdout.write(f'RESULT[{line}]\\n')\n"
         "sys.stdout.flush()\n"
     )
-    pid, fd = pty.fork()
-    if pid == 0:  # child: a fresh interpreter attached to the PTY slave
-        os.execvp(sys.executable, [sys.executable, "-c", child_code])
-        os._exit(0)  # pragma: no cover - exec never returns
+    pid, fd = pty_spawn([sys.executable, "-c", child_code])
 
     def drain(seconds: float) -> str:
         out = b""
@@ -277,7 +274,7 @@ def _complete_line_over_pty(
         ordering (file-scan order can differ between processes, so the
         child reports the order its readline session actually cycles).
     """
-    import pty
+    from kiss.tests.agents.sorcar._pty_helper import pty_spawn
 
     child_code = (
         "import os, sys\n"
@@ -291,10 +288,7 @@ def _complete_line_over_pty(
         "sys.stdout.write(f'RESULT[{line}]\\n')\n"
         "sys.stdout.flush()\n"
     )
-    pid, fd = pty.fork()
-    if pid == 0:  # child: fresh interpreter on the PTY slave
-        os.execvp(sys.executable, [sys.executable, "-c", child_code])
-        os._exit(0)  # pragma: no cover - exec never returns
+    pid, fd = pty_spawn([sys.executable, "-c", child_code])
 
     def drain(seconds: float) -> str:
         out = b""
