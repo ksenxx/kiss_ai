@@ -13,11 +13,11 @@
 #
 # Log saved to ~/.kiss/install.log
 #
-# `pipefail` is required so the trailing `{ ... } 2>&1 | tee "$LOG_FILE"`
-# pipeline propagates a non-zero exit from the body (e.g. a failed
-# `npm run package`) instead of returning `tee`'s always-zero status.
-# Without it, a broken VSIX build was silently masked and the container
-# ended up shipping the stale committed VSIX.
+# `pipefail` is required so any internal pipeline whose tail is `tee` (or
+# any always-zero command) propagates a non-zero exit from its body
+# (e.g. a failed `npm run package`) instead of returning `tee`'s
+# always-zero status.  Without it, a broken VSIX build was silently
+# masked and the container ended up shipping the stale committed VSIX.
 set -eo pipefail
 
 # Capture the user's working directory *before* any `cd` so that VS Code can
@@ -114,7 +114,33 @@ handle_interrupt() {
     echo "      silent for 30-60 s while they download or extract.  Press"
     echo "      Ctrl+C again within 3 s to really abort."
 }
+
+# Re-route stdout/stderr to the log file when the controlling terminal
+# closes (SIGHUP).  This matters when the VS Code "Update" button runs
+# ``install.sh`` in an integrated terminal: VS Code disposes that
+# terminal when the extension is deactivated, which is exactly what
+# ``code --install-extension --force`` triggers inside step [6/6] —
+# VS Code's extension manager detects the on-disk update, deactivates
+# the running extension, and the documented behavior is to "dispose the
+# terminal and exit the underlying process".  Terminal disposal first
+# writes ``\x03`` (Ctrl+C) to the PTY (caught by ``handle_interrupt``
+# above) and then closes the PTY (SIGHUP).  Without this trap the SIGHUP
+# kills bash mid-step, leaving kiss-web alive on the *old* code path and
+# the ``.extension-updated`` marker unwritten — exactly the symptom
+# users see: an unexplained ``^C`` right after "Stopping old kiss-web
+# daemon (PIDs: ...)" with the install aborted before the marker write.
+# ``2>/dev/null`` swallows EBADF/ENXIO from the closed PTY; ``|| true``
+# keeps ``set -e`` from killing the script if the re-route itself fails
+# (the script then continues writing into the dead PTY, which is no
+# worse than the pre-fix behavior).
+handle_hup() {
+    exec >>"$LOG_FILE" 2>&1 || true
+    echo ""
+    echo "   ⚠ Controlling terminal closed (SIGHUP) — continuing with"
+    echo "      output redirected to $LOG_FILE only."
+}
 trap handle_interrupt INT TERM
+trap handle_hup HUP
 
 # Run "$@" while printing a heartbeat every HEARTBEAT_INTERVAL seconds so
 # the user can tell the install is still working.  Without this the npm ci
@@ -780,6 +806,27 @@ update_repo() {
     fi
 }
 
+# Tee stdout+stderr to the install log AND the terminal.  We use ``exec``
+# process substitution rather than wrapping the install body in
+# ``{ ... } 2>&1 | tee "$LOG_FILE"`` because the latter forks a subshell
+# for the entire install body, and POSIX bash *resets* trapped signals
+# back to their default disposition inside that subshell (see bash(1)
+# "TRAPS / Trapped signals that are not being ignored are reset to their
+# original values in a subshell or subshell environment when one is
+# created").  In other words, the ``trap handle_interrupt INT TERM``
+# above had no effect inside the pipeline subshell — a stray ``\x03``
+# injected into the PTY by VS Code's terminal-disposal teardown killed
+# the subshell instantly, manifesting as an unexplained ``^C`` right
+# after "Stopping old kiss-web daemon (PIDs: ...)" with the install
+# aborted before the ``.extension-updated`` marker write.
+#
+# ``exec > >(tee -a "$LOG_FILE") 2>&1`` keeps the install body running
+# in the outer (trap-handled) shell while still streaming output to
+# both the user's terminal AND the log file.  ``-a`` appends so a
+# previous install's log is preserved when this run is itself a retry
+# after an interrupted attempt.
+exec > >(tee -a "$LOG_FILE") 2>&1
+
 {
     echo "=== KISS Sorcar Source Install ==="
     echo "Date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
@@ -1067,7 +1114,7 @@ update_repo() {
     echo "KISS Sorcar runtime setup will finish inside VS Code."
     echo "The extension will install/check uv, Python dependencies, Playwright,"
     echo "cloudflared, shell PATH entries, API keys, remote access auth, and kiss-web."
-} 2>&1 | tee "$LOG_FILE"
+}
 
 echo ""
 echo "Log saved to $LOG_FILE"
