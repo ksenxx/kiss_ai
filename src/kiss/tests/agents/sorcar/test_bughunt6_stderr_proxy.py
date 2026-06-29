@@ -68,7 +68,7 @@ def test_worker_stderr_goes_to_scroll_region_not_box_body(
     instead appears at the parked cursor on the box body row,
     overprinting the input panel.
     """
-    import pty
+    from kiss.tests.agents.sorcar._pty_helper import pty_spawn
 
     started = tmp_path / "started"
     kiss_home = tmp_path / ".kisshome"
@@ -104,10 +104,7 @@ sys.stdout.write("RESTORED:" + str(sys.stderr is real_stderr) + "\\n")
 sys.stdout.flush()
 """
 
-    pid, fd = pty.fork()
-    if pid == 0:  # child: fresh interpreter attached to the PTY slave
-        os.execvp(sys.executable, [sys.executable, "-c", child_code])
-        os._exit(0)  # pragma: no cover - exec never returns
+    pid, fd = pty_spawn([sys.executable, "-c", child_code])
 
     try:
         deadline = time.time() + 30.0
