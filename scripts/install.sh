@@ -83,7 +83,21 @@ cd
 if [ -d ~/kiss_ai ]; then
   if [ -d ~/kiss_ai/.git ]; then
     cd ~/kiss_ai
-    git pull
+    # Try a fast-forward pull; if the branch diverged (e.g. upstream was
+    # force-pushed), stash any local edits and reset hard to upstream so the
+    # bootstrap doesn't abort.  The main ./install.sh below will restore the
+    # stash via its own helpers if it can.
+    if ! git pull --ff-only; then
+      echo "git pull --ff-only failed; attempting to reset to upstream..."
+      git stash push --include-untracked -m "scripts/install.sh auto-stash" || true
+      git fetch --tags --prune origin || true
+      if git rev-parse --abbrev-ref '@{upstream}' &>/dev/null; then
+        git reset --hard '@{upstream}' \
+          || echo "WARNING: reset to upstream failed; continuing with current checkout."
+      else
+        echo "WARNING: no upstream tracking branch; continuing with current checkout."
+      fi
+    fi
   else
     rm -rf ~/kiss_ai
     if have_working_git; then

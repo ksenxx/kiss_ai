@@ -628,8 +628,30 @@ update_repo() {
     echo "   Pulling latest changes..."
     # Non-fatal: offline machines must still be able to rebuild/reinstall
     # from the current checkout instead of crashing under `set -e`.
-    git -C "$PROJECT_DIR" pull --ff-only || git -C "$PROJECT_DIR" pull \
-        || echo "   WARNING: git pull failed (offline or diverged); continuing with the current checkout."
+    #
+    # Strategy:
+    #   1. ``git fetch`` so we know the remote state even if the working tree
+    #      ends up untouched.
+    #   2. Try a fast-forward pull (the common, safe case).
+    #   3. If fast-forward fails, the local branch has diverged from upstream
+    #      — typically because the remote was force-pushed (e.g. release
+    #      retag).  Reset hard to the upstream tip so the "Update" action in
+    #      the settings panel actually updates.  Any local edits were already
+    #      stashed above, so this is non-destructive.
+    if ! git -C "$PROJECT_DIR" fetch --tags --prune origin 2>/dev/null; then
+        echo "   WARNING: git fetch failed (offline?); continuing with the current checkout."
+        return 0
+    fi
+    if git -C "$PROJECT_DIR" pull --ff-only; then
+        return 0
+    fi
+    if git -C "$PROJECT_DIR" rev-parse --abbrev-ref '@{upstream}' &>/dev/null; then
+        echo "   Branches diverged (upstream likely force-pushed) — resetting to upstream..."
+        git -C "$PROJECT_DIR" reset --hard '@{upstream}' \
+            || echo "   WARNING: git reset to upstream failed; continuing with the current checkout."
+    else
+        echo "   WARNING: no upstream tracking branch; continuing with the current checkout."
+    fi
 }
 
 {
