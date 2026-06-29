@@ -442,6 +442,8 @@ def _print_welcome(work_dir: str, model_name: str) -> None:
     print(f"  cwd:   {work_dir}")
     print("  Type your task and press Enter. "
           "@ to mention files, / for commands, Tab to complete.")
+    print("  Alt+Enter (or Shift+Enter / Ctrl+J) inserts a newline for "
+          "multi-line input; long lines word-wrap inside the box.")
     print("  /help for commands, /exit (or Ctrl+D) to quit.\n")
 
 
