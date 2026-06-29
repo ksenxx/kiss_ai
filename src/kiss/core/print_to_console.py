@@ -211,9 +211,15 @@ class ConsolePrinter(Printer):
             # it here would be a duplicate.
             is_error = bool(kwargs.get("is_error", False))
             tool_name = kwargs.get("tool_name", "")
+            tool_input = kwargs.get("tool_input")
             if tool_name != "finish":
                 self._flush_newline()
-                self._print_tool_result(str(content), is_error=is_error)
+                self._print_tool_result(
+                    str(content),
+                    is_error=is_error,
+                    tool_name=tool_name,
+                    tool_input=tool_input,
+                )
             return ""
         if type == "usage_info":
             # Match JsonPrinter: surface per-step usage info so the
@@ -349,7 +355,50 @@ class ConsolePrinter(Printer):
             )
         )
 
-    def _print_tool_result(self, content: str, is_error: bool = False) -> None:
+    @staticmethod
+    def _should_syntax_highlight_read(
+        tool_name: str,
+        is_error: bool,
+        tool_input: dict[str, Any] | None,
+        display: str,
+    ) -> bool:
+        """Return True iff a ``Read`` tool_result should be syntax-highlighted.
+
+        The output of the ``Read`` tool is the textual content of the
+        file the model asked to read.  The sorcar CLI interactive
+        terminal MUST render that content with syntax highlighting
+        derived from the file extension (matching the language picker
+        used by ``_format_tool_call`` for the inverse direction —
+        ``Write`` / ``Edit`` inputs).  Non-content results (errors,
+        the ``(file is empty)`` sentinel, the binary-attachment
+        header) are NOT real file body so they are left as plain
+        text so the user can still read the diagnostic message.
+        """
+        if tool_name != "Read" or is_error or not tool_input:
+            return False
+        file_path = tool_input.get("file_path") or tool_input.get("path")
+        if not file_path:
+            return False
+        stripped = display.lstrip()
+        if stripped.startswith("Error:"):
+            return False
+        if display.strip() == "(file is empty)":
+            return False
+        # Binary files emit a "Read binary file ... content attached
+        # below." header followed by an attachment marker that
+        # ``truncate_result`` already strips out.  Don't try to
+        # syntax-highlight the leftover header text as source code.
+        if display.startswith("Read binary file "):
+            return False
+        return True
+
+    def _print_tool_result(
+        self,
+        content: str,
+        is_error: bool = False,
+        tool_name: str = "",
+        tool_input: dict[str, Any] | None = None,
+    ) -> None:
         label = "FAILED" if is_error else "RESULT"
         style = "red" if is_error else "green"
         if not self._bash_streamed:
@@ -357,9 +406,31 @@ class ConsolePrinter(Printer):
             # the full captured content, then close it.
             self._console.rule(label, style=style, align="center")
             display = truncate_result(content)
-            for line in display.splitlines():
-                self._file.write(line + "\n")
-                self._file.flush()
+            if self._should_syntax_highlight_read(
+                tool_name=tool_name,
+                is_error=is_error,
+                tool_input=tool_input,
+                display=display,
+            ):
+                assert tool_input is not None
+                _, lang = extract_path_and_lang(tool_input)
+                start_line = tool_input.get("start_line", 1)
+                if not isinstance(start_line, int) or start_line < 1:
+                    start_line = 1
+                self._console.print(
+                    Syntax(
+                        display,
+                        lang,
+                        theme="monokai",
+                        line_numbers=True,
+                        word_wrap=True,
+                        start_line=start_line,
+                    )
+                )
+            else:
+                for line in display.splitlines():
+                    self._file.write(line + "\n")
+                    self._file.flush()
             self._console.rule(style=style)
         else:
             # The ``bash_stream`` handler already opened the RESULT
