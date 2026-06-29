@@ -19,6 +19,24 @@ from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.vscode.server import VSCodeServer
 
 
+def _sleep_swallowing_kbi(seconds: float) -> None:
+    """Sleep for *seconds*, swallowing ``KeyboardInterrupt``.
+
+    Used as a daemon thread target where a stop test injects a
+    ``KeyboardInterrupt`` via ``PyThreadState_SetAsyncExc``.  Without
+    this guard, the injected exception propagates out of the thread and
+    is captured by pytest's threading hook as
+    :class:`pytest.PytestUnhandledThreadExceptionWarning`, polluting the
+    test output (and, due to delayed delivery while the thread is
+    sleeping, attributing the warning to whichever test happens to run
+    next).
+    """
+    try:
+        time.sleep(seconds)
+    except KeyboardInterrupt:
+        pass
+
+
 def _make_server() -> tuple[VSCodeServer, list[dict]]:
     """Create a VSCodeServer with broadcast capture.
 
@@ -178,8 +196,18 @@ class TestStopRouting(unittest.TestCase):
         tab2 = self.server._get_tab("2")
         tab1.stop_event = ev1
         tab2.stop_event = ev2
-        t1 = threading.Thread(target=lambda: time.sleep(5), daemon=True)
-        t2 = threading.Thread(target=lambda: time.sleep(5), daemon=True)
+        # ``_stop_task`` schedules a watchdog that injects a
+        # ``KeyboardInterrupt`` into the tab-1 task thread ~1s later.
+        # Use the swallowing sleeper so the KI does not propagate out
+        # of the thread and surface as a
+        # ``PytestUnhandledThreadExceptionWarning`` (potentially
+        # attributed to a later test in the same run).
+        t1 = threading.Thread(
+            target=_sleep_swallowing_kbi, args=(5,), daemon=True,
+        )
+        t2 = threading.Thread(
+            target=_sleep_swallowing_kbi, args=(5,), daemon=True,
+        )
         t1.start()
         t2.start()
         tab1.task_thread = t1
