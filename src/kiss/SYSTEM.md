@@ -148,6 +148,8 @@ Before calling `finish(success=True)`:
 
 - Lint/typecheck/format: `uv run check --full`. Tests: `uv run pytest -v` (timeout 900s).
 - Your SYSTEM.md (the system prompt) is located at ~/.vscode/extensions/ksenxx.kiss-sorcar-2026.6.37/kiss_project/src/kiss/SYSTEM.md
+- The list of models accessible to you is located at ~/.vscode/extensions/ksenxx.kiss-sorcar-2026.6.37/kiss_project/src/kiss/core/models/MODEL_INFO.json
+- The database of all tasks and their events are avilable at ~/.kiss/sorcar.db
 - KISS Sorcar paper: https://github.com/ksenxx/kiss_ai/blob/main/papers/kisssorcar/kiss_sorcar.tex
 - Third-party agents: kiss/agents/third_party_agents
 - Claude SKILLS: kiss/agents/claude_skills. You can use them as necessary.
