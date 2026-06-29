@@ -617,13 +617,29 @@ class JsonPrinter(Printer):
                 self._bash_state.streamed = False
             result_content = "" if streamed else truncate_result(str(content))
             if show_result:
-                self.broadcast(
-                    {
-                        "type": "tool_result",
-                        "content": result_content,
-                        "is_error": kwargs.get("is_error", False),
-                    }
-                )
+                # Carry ``tool_name`` and (for Read calls) the
+                # originating ``path`` / ``start_line`` over the wire
+                # so a daemon-attached sorcar CLI client can
+                # reconstruct the ``tool_input`` slice its local
+                # ``ConsolePrinter`` needs to syntax-highlight a Read
+                # result body.  Without this the daemon→CLI replay
+                # would always plain-write the file contents, even
+                # though the in-process CLI does highlight them.
+                event: dict[str, Any] = {
+                    "type": "tool_result",
+                    "content": result_content,
+                    "is_error": kwargs.get("is_error", False),
+                    "tool_name": tool_name,
+                }
+                tool_input = kwargs.get("tool_input") or {}
+                if isinstance(tool_input, dict):
+                    path = tool_input.get("file_path") or tool_input.get("path")
+                    if path:
+                        event["path"] = str(path)
+                    start_line = tool_input.get("start_line")
+                    if isinstance(start_line, int) and start_line >= 1:
+                        event["start_line"] = start_line
+                self.broadcast(event)
             return ""
         if type == "usage_info":
             raw_tokens = kwargs.get("total_tokens", 0)

@@ -361,11 +361,27 @@ class _EventDispatcher:
             )
             return
         if et == "tool_result":
+            # Reconstruct the minimal ``tool_input`` slice the
+            # ConsolePrinter needs to syntax-highlight the body of a
+            # ``Read`` result (the only tool whose return value is a
+            # raw source-file body).  When the daemon-side broadcast
+            # carries a ``path``/``start_line`` we forward it so the
+            # local Rich ``Syntax`` widget picks the right lexer and
+            # gutter offset; otherwise we omit ``tool_input`` and
+            # fall back to the plain-write panel.
+            result_tool_input: dict[str, Any] | None = None
+            path = event.get("path")
+            if path:
+                result_tool_input = {"file_path": str(path)}
+                start_line = event.get("start_line")
+                if isinstance(start_line, int) and start_line >= 1:
+                    result_tool_input["start_line"] = start_line
             self.printer.print(
                 event.get("content") or "",
                 type="tool_result",
                 is_error=bool(event.get("is_error", False)),
                 tool_name=event.get("tool_name") or "",
+                tool_input=result_tool_input,
             )
             return
         if et == "system_output":
