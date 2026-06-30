@@ -54,22 +54,25 @@ class TestPanelBorders:
 
 class TestPanelBody:
     def test_buffer_renders_marker_and_text(self) -> None:
-        body, is_placeholder = panel_body("do something", 80)
+        rows, is_placeholder = panel_body("do something", 80)
         assert is_placeholder is False
-        assert f"{PROMPT_MARKER}do something" in body
-        assert len(body) == 76  # cols - 4
+        assert len(rows) == 1
+        assert f"{PROMPT_MARKER}do something" in rows[0]
+        assert len(rows[0]) == 76  # cols - 4
 
     def test_empty_buffer_shows_placeholder(self) -> None:
-        body, is_placeholder = panel_body("", 80)
+        rows, is_placeholder = panel_body("", 80)
         assert is_placeholder is True
+        assert len(rows) == 1
         # The chevron is always shown on the left, then the placeholder.
-        assert body.startswith(PROMPT_MARKER)
-        assert body.startswith(f"{PROMPT_MARKER}{PLACEHOLDER}")
+        assert rows[0].startswith(PROMPT_MARKER)
+        assert rows[0].startswith(f"{PROMPT_MARKER}{PLACEHOLDER}")
 
     def test_long_buffer_is_tail_clipped(self) -> None:
-        body, _ = panel_body("x" * 200, 40)
-        assert len(body) == 36
-        assert body.startswith(PROMPT_MARKER)
+        rows, _ = panel_body("x" * 200, 40)
+        assert len(rows) == 1
+        assert len(rows[0]) == 36
+        assert rows[0].startswith(PROMPT_MARKER)
 
 
 class TestSharedPanelAcrossDialogs:
