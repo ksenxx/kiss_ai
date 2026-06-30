@@ -404,6 +404,22 @@ class PtkLineReader:
     def read(self, prompt: str) -> str:
         """Read one line, rendering *prompt* (which may contain ANSI).
 
+        Enables xterm ``modifyOtherKeys`` level 2 on the terminal for
+        the duration of the prompt (``\\x1b[>4;2m`` on entry,
+        ``\\x1b[>4;0m`` on exit) so the terminal disambiguates
+        modifier+Enter combinations from plain Enter — without this
+        opt-in iTerm2, macOS Terminal.app, and the VS Code integrated
+        terminal all deliver Shift/Alt/Ctrl+Enter as a bare ``\\r``,
+        defeating the tuple key-bindings registered at module load.
+        The matching unmap on
+        :data:`prompt_toolkit.input.ansi_escape_sequences.ANSI_SEQUENCES`
+        and the per-modifier bindings at module level only fire once
+        the terminal is actually delivering ``\\x1b[27;<mod>;13~`` for
+        modifier+Enter, which it does only after the application
+        writes the level-2 enable sequence.  Both writes are no-ops on
+        :class:`prompt_toolkit.output.DummyOutput` (used by the
+        pipe-based regression tests).
+
         Args:
             prompt: Prompt text, possibly containing SGR colour codes.
 
@@ -414,4 +430,14 @@ class PtkLineReader:
             EOFError: On Ctrl+D.
             KeyboardInterrupt: On Ctrl+C.
         """
-        return self.session.prompt(ANSI(prompt))
+        output = self.session.output
+        output.write_raw("\x1b[>4;2m")
+        output.flush()
+        try:
+            return self.session.prompt(ANSI(prompt))
+        finally:
+            try:
+                output.write_raw("\x1b[>4;0m")
+                output.flush()
+            except Exception:  # pragma: no cover - best-effort restore
+                logger.debug("failed to disable modifyOtherKeys", exc_info=True)
