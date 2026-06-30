@@ -137,6 +137,31 @@ _PASTE_START = f"{_ESC}[200~"
 _PASTE_END = f"{_ESC}[201~"
 _PASTE_SEQ_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b.")
 
+# Sub-sequences that appear immediately AFTER an ESC byte and must
+# insert a newline into the buffer (not submit).  This covers every
+# modifier+Enter encoding terminals emit:
+#
+# * ``\r``                — portable Alt+Enter (xterm-style: ESC + CR)
+# * ``\n``                — tmux M-Enter / some terminals' Alt+Enter
+#                           (ESC + LF)
+# * ``[13;<m>u``          — kitty / CSI-u modifyOtherKeys=1 form
+# * ``[27;<m>;13~``       — xterm modifyOtherKeys=2 form
+#
+# Modifier code ``<m>`` (per kitty / xterm conventions): bit 0 = Shift,
+# bit 1 = Alt, bit 2 = Ctrl, bit 3 = Cmd/Meta — encoded as ``<m> =
+# 1 + bits``.  Values 2..16 cover every Shift / Alt / Ctrl / Cmd
+# combination (and Cmd+Ctrl+Alt+Shift = 16).
+#
+# Order matters: longest multi-char sequences are listed before single
+# bytes so the prefix-startswith match in
+# :meth:`_InputBox.feed` cannot mistake a CSI prefix for a bare CR / LF.
+_NEWLINE_AFTER_ESC: tuple[str, ...] = (
+    *(f"[27;{_m};13~" for _m in range(2, 17)),
+    *(f"[13;{_m}u" for _m in range(2, 17)),
+    "\r",
+    "\n",
+)
+
 
 def _box_top_row(rows: int, box_h: int = _BOX_H) -> int:
     """Return the box's first screen row (1-based) for *rows* total rows.
@@ -355,6 +380,16 @@ class _InputBox:
         new = termios.tcgetattr(self._fd)
         # Disable canonical mode + echo; keep ISIG so Ctrl+C interrupts.
         new[3] = new[3] & ~(termios.ICANON | termios.ECHO)
+        # Also disable kernel CR<->LF translation on input so the box
+        # can distinguish Enter (``\r``) from Ctrl+J / Alt+Enter
+        # (``\n``).  With ICRNL the kernel quietly rewrites incoming
+        # ``\r`` bytes to ``\n``, so the bound terminal sequences for
+        # newline-insert (``ESC\r``, modifyOtherKeys 13, etc.) would
+        # arrive as ``ESC\n`` and the steering box would have no way
+        # to tell a real Enter from an Alt+Enter / Ctrl+J newline
+        # insert.  INLCR is the symmetric LF->CR mapping; clearing it
+        # makes an LF stay an LF.
+        new[0] = new[0] & ~(termios.ICRNL | termios.INLCR)
         new[6][termios.VMIN] = 1
         new[6][termios.VTIME] = 0
         termios.tcsetattr(self._fd, termios.TCSANOW, new)
@@ -940,22 +975,37 @@ class _InputBox:
                     self._pasting = True
                     i += len(_PASTE_START)
                     continue
-                # Shift+Enter (kitty CSI-u ``ESC[13;2u`` or xterm
-                # modifyOtherKeys ``ESC[27;2;13~``) inserts a newline
-                # into the buffer instead of submitting the line.
-                shift_enter = False
-                for seq in ("[13;2u", "[27;2;13~"):
+                # Modifier+Enter inserts a real newline into the buffer
+                # instead of submitting the line.  This covers every
+                # encoding terminals emit for Shift+Enter, Alt+Enter,
+                # Ctrl+Enter, Cmd+Enter and arbitrary combinations:
+                #
+                # * ``ESC\r`` — portable xterm-style Alt+Enter
+                # * ``ESC\n`` — tmux M-Enter / Alt+Enter on some
+                #               terminals
+                # * ``ESC[13;<m>u`` — kitty / CSI-u modifyOtherKeys=1
+                # * ``ESC[27;<m>;13~`` — xterm modifyOtherKeys=2
+                #
+                # See :data:`_NEWLINE_AFTER_ESC` for the full table.
+                # The tuple is iterated longest-first so a single-byte
+                # ``\r`` cannot eat the leading byte of a CSI sequence
+                # whose payload happens to start with another byte
+                # (``[``) — but the explicit order also protects
+                # against any future addition that *would* prefix-
+                # collide.
+                newline_insert = False
+                for seq in _NEWLINE_AFTER_ESC:
                     if text.startswith(seq, i + 1):
                         self.buf += "\n"
-                        # Shift+Enter is a buffer edit; refresh the
-                        # menu so suggestions track multi-line input
-                        # ("complete while typing").
+                        # The modifier+Enter is a buffer edit; refresh
+                        # the in-place completion menu so suggestions
+                        # track multi-line input.
                         self._refresh_typing_menu()
                         changed = True
                         i += 1 + len(seq)
-                        shift_enter = True
+                        newline_insert = True
                         break
-                if shift_enter:
+                if newline_insert:
                     continue
                 # A chunk ending right at the ESC may be the first half
                 # of a sequence split across reads; defer it so the next
@@ -1011,15 +1061,17 @@ class _InputBox:
                     continue
                 i += 1
                 continue
-            if ch in ("\r", "\n"):
+            if ch == "\r":
+                # Bare CR is the Enter key (after raw mode disables
+                # ICRNL the kernel no longer rewrites it to LF).  This
+                # submits the current buffer — or accepts an open
+                # completion candidate without submitting, matching the
+                # prompt_toolkit dropdown behavior in cli_prompt.py.
                 if self._menu_open:
                     # Enter on an open completion menu accepts the
                     # highlighted candidate (replacing the buffer) and
                     # closes the menu *without* submitting the line —
-                    # the next Enter actually submits.  This matches
-                    # the prompt_toolkit dropdown behavior and the
-                    # ``_accept_completion_enter`` binding in
-                    # ``cli_prompt.py``.
+                    # the next Enter actually submits.
                     self._menu_accept()
                     changed = True
                 else:
@@ -1030,6 +1082,21 @@ class _InputBox:
                     self._reset_completion_state()
                     changed = True
                     on_submit(line)
+            elif ch == "\n":
+                # Bare LF is Ctrl+J / Alt+Enter on terminals that
+                # send a lone LF for that key (e.g. tmux M-Enter
+                # decoded down to its newline byte) — it must INSERT
+                # a newline into the buffer, never submit.  With
+                # ICRNL disabled in start() a real Enter arrives as
+                # ``\r`` and follows the branch above, so the two
+                # are reliably distinguishable.
+                self.buf += "\n"
+                self._hist_idx = None
+                # Like the Shift+Enter newline-insert paths above,
+                # refresh the in-place completion menu so suggestions
+                # track multi-line input ("complete while typing").
+                self._refresh_typing_menu()
+                changed = True
             elif ch in ("\x7f", "\x08"):
                 if self.buf:
                     self.buf = self.buf[:-1]
