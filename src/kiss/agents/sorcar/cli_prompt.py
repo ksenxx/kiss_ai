@@ -30,6 +30,7 @@ from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.filters import completion_is_selected
 from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.history import FileHistory
+from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
 from prompt_toolkit.key_binding import KeyBindings
 
 from kiss.agents.sorcar.persistence import _load_file_usage
@@ -57,6 +58,44 @@ logger = logging.getLogger(__name__)
 _AT_RE = re.compile(r"@([^\s]*)$")
 # ``/model <partial>`` line whose partial model name is fast-completed.
 _MODEL_CMD_RE = re.compile(r"^/model\s+(.*)$")
+
+# Modifier+Enter escape sequences emitted by terminals via either
+# xterm's ``modifyOtherKeys`` mode (``ESC[27;<mod>;13~``) or the
+# kitty/CSI-u keyboard protocol (``ESC[13;<mod>u``).  prompt_toolkit
+# pre-maps the modifyOtherKeys variants for modifiers 2/5/6 to
+# :data:`Keys.ControlM` in
+# :data:`prompt_toolkit.input.ansi_escape_sequences.ANSI_SEQUENCES`
+# *before* any key bindings run, so without :func:`_unmap_enter_aliases`
+# below Shift/Ctrl/Ctrl-Shift+Enter on iTerm2 / macOS Terminal.app /
+# the VS Code integrated terminal would all be indistinguishable from
+# plain Enter and submit the buffer.  We delete those entries from the
+# table so the raw escape sequence reaches the tuple key-bindings
+# registered further down, which insert a real newline.
+_MODIFY_OTHER_KEYS_ENTER = (
+    "\x1b[27;2;13~",   # Shift+Enter
+    "\x1b[27;3;13~",   # Alt+Enter
+    "\x1b[27;4;13~",   # Alt+Shift+Enter
+    "\x1b[27;5;13~",   # Ctrl+Enter
+    "\x1b[27;6;13~",   # Ctrl+Shift+Enter
+    "\x1b[27;7;13~",   # Ctrl+Alt+Enter
+    "\x1b[27;8;13~",   # Ctrl+Alt+Shift+Enter
+)
+
+
+def _unmap_enter_aliases() -> None:
+    """Drop pre-mapped modifier+Enter aliases from prompt_toolkit's table.
+
+    Idempotent: deletes only the entries that map a modifier+Enter
+    modifyOtherKeys sequence to :data:`Keys.ControlM` so that our tuple
+    key-bindings below see the raw escape sequence and can insert a
+    newline.  Other ANSI sequences are left untouched.
+    """
+    for seq in _MODIFY_OTHER_KEYS_ENTER:
+        ANSI_SEQUENCES.pop(seq, None)
+
+
+_unmap_enter_aliases()
+
 
 _KEY_BINDINGS = KeyBindings()
 
@@ -117,18 +156,48 @@ def _newline_ctrl_j(event: KeyPressEvent) -> None:
     event.current_buffer.insert_text("\n")
 
 
-# Shift+Enter as delivered by terminals that opt in to the CSI-u
-# keyboard protocol (kitty, foot, WezTerm, …): ``ESC[13;2u``.  The
-# sequence is *not* part of prompt_toolkit's pre-mapped ANSI table,
-# so the parser falls back to per-character delivery and our tuple
-# binding matches it.  (The other common Shift+Enter encoding —
-# xterm's modifyOtherKeys ``ESC[27;2;13~`` — is pre-mapped by
-# prompt_toolkit to :data:`Keys.ControlM`, i.e. plain Enter, so on
-# those terminals the user must use Alt+Enter or Ctrl+J for newlines.)
-@_KEY_BINDINGS.add("escape", "[", "1", "3", ";", "2", "u")
-def _newline_shift_enter_csi_u(event: KeyPressEvent) -> None:
-    """kitty/foot/WezTerm CSI-u Shift+Enter (``ESC[13;2u``) inserts newline."""
-    event.current_buffer.insert_text("\n")
+# Modifier+Enter escape sequences delivered by modern terminals as
+# either the xterm ``modifyOtherKeys`` form ``ESC[27;<mod>;13~`` or the
+# kitty/CSI-u form ``ESC[13;<mod>u`` — with ``<mod>`` = 2 (Shift),
+# 3 (Alt), 4 (Alt+Shift), 5 (Ctrl), 6 (Ctrl+Shift), 7 (Ctrl+Alt),
+# 8 (Ctrl+Alt+Shift).  prompt_toolkit pre-maps the modifyOtherKeys
+# forms for 2/5/6 to :data:`Keys.ControlM` (plain Enter); the
+# :func:`_unmap_enter_aliases` call above removes them so the parser
+# falls back to per-character delivery and the tuple bindings below
+# match the raw escape sequence, inserting a real ``\n`` into the
+# buffer.  Every modifier+Enter combination would otherwise be
+# ambiguous with plain Enter on iTerm2 / macOS Terminal.app / the
+# VS Code integrated terminal — see the regression tests in
+# ``tests/agents/sorcar/test_cli_multiline_input.py``.
+
+
+def _bind_newline_sequence(*keys: str) -> None:
+    """Register *keys* as a multi-key binding that inserts ``\\n``."""
+
+    @_KEY_BINDINGS.add(*keys)
+    def _newline(event: KeyPressEvent) -> None:
+        event.current_buffer.insert_text("\n")
+
+
+def _sequence_keys(seq: str) -> tuple[str, ...]:
+    """Split an escape sequence into the per-character tuple keys.
+
+    prompt_toolkit's :class:`KeyBindings` matches multi-character
+    escape sequences as a tuple of single-character / named keys; the
+    leading ``ESC`` is the symbolic ``"escape"`` key and every other
+    byte becomes its own one-character entry.
+    """
+    assert seq.startswith("\x1b"), seq
+    return ("escape", *tuple(seq[1:]))
+
+
+# xterm modifyOtherKeys: ``ESC[27;<mod>;13~`` for every supported modifier.
+for _seq in _MODIFY_OTHER_KEYS_ENTER:
+    _bind_newline_sequence(*_sequence_keys(_seq))
+
+# kitty/CSI-u: ``ESC[13;<mod>u`` for Shift / Alt / Ctrl / Ctrl-Shift / …
+for _mod in ("2", "3", "4", "5", "6", "7", "8"):
+    _bind_newline_sequence("escape", "[", "1", "3", ";", _mod, "u")
 
 
 def _prompt_continuation(
@@ -304,13 +373,15 @@ class PtkLineReader:
             complete_while_typing=True,
             key_bindings=_KEY_BINDINGS,
             history=FileHistory(str(ptk_path)),
-            # Multi-line input: Alt+Enter / Ctrl+J / Shift+Enter
-            # insert a real ``\n`` into the buffer (see the bindings
-            # at module level); plain Enter still submits via the
-            # ``~completion_is_selected`` Enter binding above.  Without
-            # ``multiline=True`` prompt_toolkit would short-circuit
-            # Enter to "accept-line" before our key bindings ever
-            # ran, so the user could never type a newline.
+            # Multi-line input: Alt+Enter / Ctrl+J / Shift+Enter /
+            # Ctrl+Enter / Ctrl+Shift+Enter all insert a real ``\n``
+            # into the buffer (see the bindings at module level — both
+            # the xterm ``modifyOtherKeys`` and the kitty/CSI-u
+            # encodings are covered); plain Enter still submits via
+            # the ``~completion_is_selected`` Enter binding above.
+            # Without ``multiline=True`` prompt_toolkit would short-
+            # circuit Enter to "accept-line" before our key bindings
+            # ever ran, so the user could never type a newline.
             multiline=True,
             # Word-wrap long lines onto the next visual row instead of
             # scrolling the input horizontally off-screen.  The
