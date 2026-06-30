@@ -29,6 +29,8 @@ from pathlib import Path
 
 import pytest
 
+from kiss.agents.sorcar.cli_steering import _BOX_H
+
 pytestmark = pytest.mark.skipif(
     not hasattr(os, "fork"), reason="requires a POSIX pty",
 )
@@ -109,7 +111,7 @@ sys.stdout.flush()
         os.kill(pid, signal.SIGCONT)
         after = _drain(fd, 2.0)
 
-        region = f"\x1b[1;{24 - 3}r"  # rows=24, _BOX_H=3
+        region = f"\x1b[1;{24 - _BOX_H}r"  # rows=24, _BOX_H bottom rows reserved
         assert region in after, (
             "SIGCONT did not re-anchor the scroll region / redraw the "
             f"steering box; post-resume output: {after!r}"
