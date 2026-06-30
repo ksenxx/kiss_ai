@@ -848,6 +848,53 @@
     .name-card h3 { font-size: 1.05rem; font-weight: 600; margin-bottom: 0.5rem; }
     .name-card p { color: var(--text-dim); font-size: 0.93rem; }
 
+    /* Papers */
+    .papers-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 1rem;
+    }
+    .paper-card {
+      padding: 1.3rem;
+      background: linear-gradient(135deg, var(--surface), var(--bg));
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+    }
+    .paper-card .k {
+      font-family: 'Roboto Mono', monospace; font-size: 0.72rem;
+      letter-spacing: 0.06em; text-transform: uppercase;
+      color: var(--primary); margin-bottom: 0.3rem;
+    }
+    .paper-card h3 { font-size: 1.02rem; font-weight: 600; margin-bottom: 0.55rem; line-height: 1.3; }
+    .paper-card p { color: var(--text-dim); font-size: 0.92rem; flex: 1; }
+    .paper-card .paper-actions {
+      margin-top: 0.9rem;
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+    }
+    .paper-pill {
+      display: inline-block;
+      padding: 0.32rem 0.7rem;
+      border-radius: 999px;
+      font-size: 0.82rem;
+      font-weight: 500;
+      text-decoration: none;
+      border: 1px solid var(--border);
+      color: var(--text);
+      background: var(--surface-2);
+      transition: background 0.15s ease, border-color 0.15s ease;
+    }
+    .paper-pill:hover { background: var(--surface); border-color: var(--primary); }
+    .paper-pill.primary {
+      background: linear-gradient(135deg, var(--primary), var(--accent));
+      color: #fff;
+      border-color: transparent;
+    }
+    .paper-pill.primary:hover { filter: brightness(1.05); }
+
     /* Citation */
     .citation-block {
       position: relative;
@@ -1152,6 +1199,7 @@
       .grid-3 { grid-template-columns: 1fr 1fr; }
       .grid-4 { grid-template-columns: 1fr 1fr; }
       .name-grid { grid-template-columns: 1fr; }
+      .papers-grid { grid-template-columns: 1fr; }
     }
     @media (max-width: 820px) {
       nav .links { display: none; }
@@ -1814,6 +1862,7 @@
         <li><a href="#">Demo</a></li>
         <li><a href="#compare">Compare</a></li>
         <li><a href="#prompts">Prompts</a></li>
+        <li><a href="#papers">Papers</a></li>
         <li><a href="#install">Install</a></li>
         <li><a href="#models">Models</a></li>
       </ul>
@@ -1923,7 +1972,7 @@
     </a>
   </div>
 
-  <!-- ================ § 01 — All you need is a short prompt ================ -->
+  <!-- ================ § 01 — KISS Sorcar vs Claude Code vs Cursor ================ -->
   <div class="section-wrap">
   <section id="compare" class="section-card">
     <span class="num">§ 01 — KISS Sorcar vs Claude Code vs Cursor</span>
@@ -2026,7 +2075,7 @@
   </section>
   </div>
 
-  <!-- ================ § 03 — What is in the Name ================ -->
+  <!-- ================ § 02 — All you need is a short prompt ================ -->
   <div class="section-wrap">
   <section id="prompts" class="section-card">
     <span class="num">§ 02 — All you need is a short prompt in KISS Sorcar to do big complex tasks</span>
@@ -2260,7 +2309,7 @@ In each step, keep track of the best prompt which has the maximum number of succ
           </div>
           <p class="panel-desc">Codify suspected invariant breaks as end-to-end tests first, then let Sorcar fix the offending code so the invariant holds forever.</p>
           <div class="prompt-body">
-            <pre>Reproduce any violation of the ivariant by writing end-to-end tests. Then fix the issue.</pre>
+            <pre>Reproduce any violation of the invariant by writing end-to-end tests. Then fix the issue.</pre>
             <div class="prompt-fade"></div>
           </div>
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
@@ -2273,7 +2322,7 @@ In each step, keep track of the best prompt which has the maximum number of succ
           </div>
           <p class="panel-desc">Use Claude Opus as the implementer and GPT-5.5 as the reviewer/debugger so missed code paths and silent bugs are caught before they ship.</p>
           <div class="prompt-body">
-            <pre>Use claude-opus-4-7 model for all tasks including coding, bug fixing, and test creation. Use gpt-5.5 model (not codex) for thorough review and debugging of the work done by the other model. Check if the other model has missed some code or has introduced bugs. No need to check if the models exist.</pre>
+            <pre>Use claude-opus-4-7 model for all tasks including coding, bug fixing, and test creation. Use gpt-5.5-xhigh (not codex) for thorough review and debugging of the work done by the other model. Check if the other model has missed some code or has introduced bugs. No need to check if the models exist.</pre>
             <div class="prompt-fade"></div>
           </div>
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
@@ -2286,7 +2335,7 @@ In each step, keep track of the best prompt which has the maximum number of succ
           </div>
           <p class="panel-desc">Spawn a review pass on your previous task: GPT-5.5 finds bugs and missing code, Claude Opus reproduces and fixes them with end-to-end tests, in a loop until the review is clean.</p>
           <div class="prompt-body">
-            <pre>Can you review the updates made in the last task using gpt-5.5 (non codex) and find bugs or missing code. Then write end-to-end tests reproducing the bugs reported by the review, fix them, and test them using claude-opus-4-7? Run all the tests in parallel and fix bugs after thoroughly reviewing the fixes with gpt-5.5 (non codex). Repeat the process until you fail to reproduce the bugs reported by the review done by gpt-5.5 (non codex). No need to check if the models exist.</pre>
+            <pre>Can you review the updates made in the last task using gpt-5.5-xhigh (non codex) and find bugs or missing code. Then write end-to-end tests reproducing the bugs reported by the review, fix them, and test them using claude-opus-4-7? Run all the tests in parallel and fix bugs after thoroughly reviewing the fixes with gpt-5.5-xhigh (non codex). Repeat the process until you fail to reproduce the bugs reported by the review done by gpt-5.5-xhigh (non codex). No need to check if the models exist.</pre>
             <div class="prompt-fade"></div>
           </div>
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
@@ -2299,7 +2348,7 @@ In each step, keep track of the best prompt which has the maximum number of succ
           </div>
           <p class="panel-desc">The same dual-model review loop, but applied to the in-flight task before you finish — bugs are reproduced, fixed, and re-reviewed in place.</p>
           <div class="prompt-body">
-            <pre>Review the updates made in the current task using gpt-5.5 (non codex) and find bugs or missing code. Then write end-to-end tests reproducing the bugs reported by the review, fix them, and test them using claude-opus-4-7? Run all the tests in parallel and fix bugs after thoroughly reviewing the fixes with gpt-5.5 (non codex). Repeat the process until you fail to reproduce the bugs reported by the review done by gpt-5.5 (non codex). No need to check if the models exist.</pre>
+            <pre>Review the updates made in the current task using gpt-5.5-xhigh (non codex) and find bugs or missing code or wirings. Then write end-to-end tests reproducing the bugs reported by the review, fix them, and test them using claude-opus-4-7? Run all the tests in parallel and fix bugs after thoroughly reviewing the fixes with gpt-5.5-xhigh (non codex). Repeat the process until you fail to reproduce the bugs reported by the review done by gpt-5.5-xhigh (non codex). No need to check if the models exist.</pre>
             <div class="prompt-fade"></div>
           </div>
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
@@ -2312,13 +2361,26 @@ In each step, keep track of the best prompt which has the maximum number of succ
           </div>
           <p class="panel-desc">Switch the implementer to OpenRouter's GLM-5.2 and have both GPT-5.5 and Claude Opus carefully review its output for bugs and missing code.</p>
           <div class="prompt-body">
-            <pre>Use openrouter/z-ai/glm-5.2 model for all tasks including coding, bug fixing, and test creation. ALWAYS use gpt-5.5 model (not codex) to carefully and thoroughly review and debug the work done by openrouter/z-ai/glm-5.2 for bugs and missing code. Then use claude-opus-4-7 to do the same thing.</pre>
+            <pre>Use openrouter/z-ai/glm-5.2 model for all tasks including coding, bug fixing, and test creation. ALWAYS use gpt-5.5-xhigh (not codex) to carefully and thoroughly review and debug the work done by openrouter/z-ai/glm-5.2 for bugs and missing code. Then use claude-opus-4-7 to do the same thing.</pre>
             <div class="prompt-fade"></div>
           </div>
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
         </article>
 
         <article class="inner-card prompt-panel" style="--i:8">
+          <div class="panel-head">
+            <h3 class="panel-title">Split tests across cores in parallel</h3>
+            <span class="panel-badge trick">Trick</span>
+          </div>
+          <p class="panel-desc">Have Sorcar collect failure causes for the entire test suite without touching code &mdash; splitting the tests by method count into (cores &minus; 2) shards and running them with <code>run_parallel</code>.</p>
+          <div class="prompt-body">
+            <pre>Can you run all tests and report the cause of failing tests? Do not modify any code. Running all tests, collecting information, and fixing them is time consuming. So split the set of tests by the number of test methods into number of cores - 2, and run all splits in parallel using `run_parallel` tool.</pre>
+            <div class="prompt-fade"></div>
+          </div>
+          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
+        </article>
+
+        <article class="inner-card prompt-panel" style="--i:9">
           <div class="panel-head">
             <h3 class="panel-title">Resolve a merge conflict</h3>
             <span class="panel-badge trick">Trick</span>
@@ -2331,7 +2393,7 @@ In each step, keep track of the best prompt which has the maximum number of succ
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
         </article>
 
-        <article class="inner-card prompt-panel" style="--i:9">
+        <article class="inner-card prompt-panel" style="--i:10">
           <div class="panel-head">
             <h3 class="panel-title">Generate an HTML report</h3>
             <span class="panel-badge trick">Trick</span>
@@ -2344,7 +2406,7 @@ In each step, keep track of the best prompt which has the maximum number of succ
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
         </article>
 
-        <article class="inner-card prompt-panel" style="--i:10">
+        <article class="inner-card prompt-panel" style="--i:11">
           <div class="panel-head">
             <h3 class="panel-title">Guard against reward hacking</h3>
             <span class="panel-badge trick">Trick</span>
@@ -2357,7 +2419,7 @@ In each step, keep track of the best prompt which has the maximum number of succ
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
         </article>
 
-        <article class="inner-card prompt-panel" style="--i:11">
+        <article class="inner-card prompt-panel" style="--i:12">
           <div class="panel-head">
             <h3 class="panel-title">Push to origin</h3>
             <span class="panel-badge trick">Trick</span>
@@ -2370,7 +2432,7 @@ In each step, keep track of the best prompt which has the maximum number of succ
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
         </article>
 
-        <article class="inner-card prompt-panel" style="--i:12">
+        <article class="inner-card prompt-panel" style="--i:13">
           <div class="panel-head">
             <h3 class="panel-title">Rewind to a specific commit</h3>
             <span class="panel-badge trick">Trick</span>
@@ -2383,7 +2445,7 @@ In each step, keep track of the best prompt which has the maximum number of succ
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
         </article>
 
-        <article class="inner-card prompt-panel" style="--i:13">
+        <article class="inner-card prompt-panel" style="--i:14">
           <div class="panel-head">
             <h3 class="panel-title">Build paper &amp; screenshot-check formatting</h3>
             <span class="panel-badge trick">Trick</span>
@@ -2396,7 +2458,7 @@ In each step, keep track of the best prompt which has the maximum number of succ
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
         </article>
 
-        <article class="inner-card prompt-panel" style="--i:14">
+        <article class="inner-card prompt-panel" style="--i:15">
           <div class="panel-head">
             <h3 class="panel-title">Debug the last failure</h3>
             <span class="panel-badge trick">Trick</span>
@@ -2423,10 +2485,50 @@ In each step, keep track of the best prompt which has the maximum number of succ
   </section>
   </div>
 
-  <!-- ================ § 02 — Compare ================ -->
+  <!-- ================ § 03 — Papers ================ -->
+  <div class="section-wrap">
+  <section id="papers" class="section-card">
+    <span class="num">§ 03 — Papers</span>
+    <h2>📑 Papers.<a href="#papers" class="anchor">¶</a></h2>
+    <p class="sub">Read the research behind KISS Sorcar &mdash; the system, how it built itself, and how it wrote its own paper.</p>
+    <div class="section-body">
+      <div class="papers-grid">
+        <div class="inner-card paper-card" style="--i:0">
+          <div class="k">Main paper</div>
+          <h3>KISS Sorcar: A Stupidly-Simple General-Purpose and Software Engineering AI Assistant</h3>
+          <p>Introduces KISS Sorcar and the underlying KISS Agent Framework: a deliberately minimal, open-source agent runtime designed for long-horizon tasks, rigorous review, multi-model orchestration, and AI discovery.</p>
+          <div class="paper-actions">
+            <a class="paper-pill primary" href="assets/kiss_sorcar.pdf">PDF</a>
+            <a class="paper-pill" href="https://github.com/ksenxx/kiss_ai/blob/main/papers/kisssorcar/kiss_sorcar.tex">Source</a>
+          </div>
+        </div>
+        <div class="inner-card paper-card" style="--i:1">
+          <div class="k">Self-engineering</div>
+          <h3>Software Engineering KISS Sorcar with KISS Sorcar</h3>
+          <p>A case study of building KISS Sorcar with KISS Sorcar itself. Over 44 days the developer issued 3,099 tasks through the system's own interface; we analyze the SQLite usage log and surface nine recurring human&ndash;AI collaboration patterns.</p>
+          <div class="paper-actions">
+            <a class="paper-pill primary" href="assets/se_kiss_sorcar.pdf">PDF</a>
+            <a class="paper-pill" href="https://github.com/ksenxx/kiss_ai/blob/main/papers/sekisssorcar/se_kiss_sorcar.tex">Source</a>
+          </div>
+        </div>
+        <div class="inner-card paper-card" style="--i:2">
+          <div class="k">Meta / process</div>
+          <h3>Writing a Research Paper with an AI Agent: A Chronicle of KISS Sorcar Writing Its Own Paper</h3>
+          <p>A nine-day, hundred-task chronicle of KISS Sorcar drafting, citing, compiling, and debugging its own research paper &mdash; doubling as a stress test of the agent itself.</p>
+          <div class="paper-actions">
+            <a class="paper-pill primary" href="assets/writing_paper.pdf">PDF</a>
+            <a class="paper-pill" href="https://github.com/ksenxx/kiss_ai/blob/main/papers/writingpaper/writing_paper.tex">Source</a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+  </div>
+
+  <!-- ================ § 04 — What is in the Name ================ -->
   <div class="section-wrap">
   <section id="name" class="section-card">
-    <span class="num">§ 03 — What is in the Name</span>
+    <span class="num">§ 04 — What is in the Name</span>
     <h2>What is in the Name?<a href="#name" class="anchor">¶</a></h2>
     <p class="sub">Two names. One principle. A nod to a Bengali magician.</p>
     <div class="section-body">
@@ -2446,10 +2548,10 @@ In each step, keep track of the best prompt which has the maximum number of succ
   </section>
   </div>
 
-  <!-- ================ § 04 — Installation ================ -->
+  <!-- ================ § 05 — Installation ================ -->
   <div class="section-wrap">
   <section id="install" class="section-card">
-    <span class="num">§ 04 — Installation</span>
+    <span class="num">§ 05 — Installation</span>
     <h2>Install in one line.<a href="#install" class="anchor">¶</a></h2>
     <p class="sub">Pick the install path that fits you &mdash; full source, Python package, or the VS Code extension. All you need is at least one API key from a major LLM provider. <strong>The one-line install script below is the recommended way to install the full KISS Sorcar stack.</strong></p>
     <div class="section-body">
@@ -2497,10 +2599,10 @@ In each step, keep track of the best prompt which has the maximum number of succ
   </section>
   </div>
 
-  <!-- ================ § 05 — CLI Interface (condensed) ================ -->
+  <!-- ================ § 06 — CLI Interface (condensed) ================ -->
   <div class="section-wrap">
   <section id="cli" class="section-card">
-    <span class="num">§ 05 — CLI in 30 seconds</span>
+    <span class="num">§ 06 — CLI in 30 seconds</span>
     <h2>The <code style="background:var(--surface);padding:0.05rem 0.45rem;border-radius:6px;font-size:0.85em;color:var(--primary-dark);">sorcar</code> CLI.<a href="#cli" class="anchor">¶</a></h2>
     <p class="sub">
       Run <code>sorcar</code> alone for an interactive Claude-Code-style REPL with worktree-isolated tasks, slash commands, and chat history; pass <code>-t "…"</code> or <code>-f task.md</code> for a one-shot non-interactive run. Pick any model with <code>-m</code>, point at a self-hosted endpoint with <code>-e</code>, cap spend with <code>-b</code>, and add MCP servers with <code>sorcar mcp add</code>.
@@ -2530,10 +2632,10 @@ In each step, keep track of the best prompt which has the maximum number of succ
   </section>
   </div>
 
-  <!-- ================ § 06 — Messaging & Third-Party Agents ================ -->
+  <!-- ================ § 07 — Messaging & Third-Party Agents ================ -->
   <div class="section-wrap">
   <section id="agents" class="section-card">
-    <span class="num">§ 06 — Messaging &amp; Third-Party Agents</span>
+    <span class="num">§ 07 — Messaging &amp; Third-Party Agents</span>
     <h2>💬 Reach the agent from anywhere.<a href="#agents" class="anchor">¶</a></h2>
     <p class="sub">KISS Sorcar includes <strong>23 third-party messaging agents</strong> that can send and receive messages on your behalf. It also ships a <strong>Govee smart-home CLI</strong> for controlling IoT lights (on/off, brightness, color, and color temperature) via the Govee Developer API. These agents live in <code>src/kiss/agents/third_party_agents/</code>.</p>
     <div class="section-body">
@@ -2573,10 +2675,10 @@ In each step, keep track of the best prompt which has the maximum number of succ
   </section>
   </div>
 
-  <!-- ================ § 07 — Models Supported ================ -->
+  <!-- ================ § 08 — Models Supported ================ -->
   <div class="section-wrap">
   <section id="models" class="section-card">
-    <span class="num">§ 07 — Models Supported</span>
+    <span class="num">§ 08 — Models Supported</span>
     <h2>🤖 502 models. 9 provider categories.<a href="#models" class="anchor">¶</a></h2>
     <p class="sub">KISS Sorcar ships a catalog of <strong>502 models</strong> across <strong>9 provider categories</strong>, with built-in prices, context lengths, and capability flags (<code>fc</code> function calling, <code>gen</code> generation, <code>emb</code> embedding). The source of truth is <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/core/models/MODEL_INFO.json">src/kiss/core/models/MODEL_INFO.json</a>.</p>
 
@@ -2621,10 +2723,10 @@ In each step, keep track of the best prompt which has the maximum number of succ
   </section>
   </div>
 
-  <!-- ================ § 08 — Contributing ================ -->
+  <!-- ================ § 09 — Contributing ================ -->
   <div class="section-wrap">
   <section id="contributing" class="section-card">
-    <span class="num">§ 08 — Contributing</span>
+    <span class="num">§ 09 — Contributing</span>
     <h2>🤗 Contributing.<a href="#contributing" class="anchor">¶</a></h2>
     <p class="sub">Contributions in the form of issues are welcome. KISS Sorcar should be able to help implement and review them.</p>
     <div class="section-body">
@@ -2644,10 +2746,10 @@ In each step, keep track of the best prompt which has the maximum number of succ
   </section>
   </div>
 
-  <!-- ================ § 09 — License ================ -->
+  <!-- ================ § 10 — License ================ -->
   <div class="section-wrap">
   <section id="license" class="section-card">
-    <span class="num">§ 09 — License</span>
+    <span class="num">§ 10 — License</span>
     <h2>📄 License.<a href="#license" class="anchor">¶</a></h2>
     <p class="sub">KISS Sorcar is released under a permissive open-source license.</p>
     <div class="section-body">
@@ -2660,10 +2762,10 @@ In each step, keep track of the best prompt which has the maximum number of succ
   </section>
   </div>
 
-  <!-- ================ § 10 — Citation ================ -->
+  <!-- ================ § 11 — Citation ================ -->
   <div class="section-wrap">
   <section id="citation" class="section-card">
-    <span class="num">§ 10 — Citation</span>
+    <span class="num">§ 11 — Citation</span>
     <h2>📚 Cite the paper.<a href="#citation" class="anchor">¶</a></h2>
     <p class="sub">If you use KISS Sorcar in your research, please cite:</p>
     <div class="section-body">
@@ -2691,7 +2793,10 @@ In each step, keep track of the best prompt which has the maximum number of succ
     <p>
       KISS Sorcar &middot; Apache 2.0 &middot;
       <a href="https://github.com/ksenxx/kiss_ai">GitHub</a> &middot;
-      <a href="assets/kiss_sorcar.pdf">Paper</a> &middot;
+      <a href="#papers">Papers</a> &middot;
+      <a href="assets/kiss_sorcar.pdf">Main paper</a> &middot;
+      <a href="assets/se_kiss_sorcar.pdf">SE paper</a> &middot;
+      <a href="assets/writing_paper.pdf">Writing paper</a> &middot;
       <a href="https://arxiv.org/abs/2604.23822">arXiv</a>
     </p>
     <p style="margin-top:0.4rem;">Named after <a href="https://en.wikipedia.org/wiki/P._C._Sorcar">P. C. Sorcar</a>, the legendary Bengali magician.</p>
