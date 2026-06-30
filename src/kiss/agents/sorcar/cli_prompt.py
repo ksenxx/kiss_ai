@@ -82,6 +82,20 @@ _MODIFY_OTHER_KEYS_ENTER = (
     "\x1b[27;6;13~",   # Ctrl+Shift+Enter
     "\x1b[27;7;13~",   # Ctrl+Alt+Enter
     "\x1b[27;8;13~",   # Ctrl+Alt+Shift+Enter
+    # Meta-bit-set modifiers (``meta`` == Cmd on macOS in terminals
+    # that report it — iTerm2 with "Report modifiers using CSI u" or
+    # the modifyOtherKeys=2 equivalent, kitty/foot/WezTerm under the
+    # CSI-u keyboard protocol).  Cmd+Enter / Cmd+Shift+Enter / … must
+    # insert a newline (not autocomplete / not submit) the same way
+    # Shift+Enter does, so we cover every mod value 9..16.
+    "\x1b[27;9;13~",   # Cmd/Meta+Enter
+    "\x1b[27;10;13~",  # Cmd+Shift+Enter
+    "\x1b[27;11;13~",  # Cmd+Alt+Enter
+    "\x1b[27;12;13~",  # Cmd+Alt+Shift+Enter
+    "\x1b[27;13;13~",  # Cmd+Ctrl+Enter
+    "\x1b[27;14;13~",  # Cmd+Ctrl+Shift+Enter
+    "\x1b[27;15;13~",  # Cmd+Ctrl+Alt+Enter
+    "\x1b[27;16;13~",  # Cmd+Ctrl+Alt+Shift+Enter
 )
 
 
@@ -135,6 +149,31 @@ def _submit_enter(event: KeyPressEvent) -> None:
     event.current_buffer.validate_and_handle()
 
 
+def _insert_newline(event: KeyPressEvent) -> None:
+    """Cancel any open completion menu and insert a literal newline.
+
+    The cancel step is what distinguishes the modifier+Enter family
+    from plain Enter: when the user is navigating the live completion
+    dropdown (Up/Down highlights a candidate so
+    :attr:`~prompt_toolkit.buffer.Buffer.complete_state` holds a
+    selected completion and the buffer text shows the highlighted
+    candidate), pressing Shift / Alt / Option / Ctrl / Command+Enter
+    must **restore the originally-typed text** and add a newline — not
+    silently accept the autocomplete the user did not ask for.
+
+    :meth:`~prompt_toolkit.buffer.Buffer.cancel_completion` is the
+    documented prompt_toolkit entry point that calls
+    :meth:`~prompt_toolkit.buffer.Buffer.go_to_completion(None)`,
+    restoring ``complete_state.original_document``, and then clears
+    ``complete_state`` so the menu disappears.  Calling it on a buffer
+    without an open menu is a no-op (the ``if self.complete_state``
+    guard inside :meth:`cancel_completion`), so this helper is safe
+    for both the "menu open" and "no menu" code paths.
+    """
+    event.current_buffer.cancel_completion()
+    event.current_buffer.insert_text("\n")
+
+
 @_KEY_BINDINGS.add("escape", "enter")
 def _newline_alt_enter(event: KeyPressEvent) -> None:
     """Alt+Enter (a.k.a. Meta+Enter / Esc+Enter) inserts a real newline.
@@ -142,9 +181,12 @@ def _newline_alt_enter(event: KeyPressEvent) -> None:
     This is the portable multi-line key — it works in every terminal
     that delivers ``ESC <key>`` for Meta-modified keypresses (macOS
     Terminal.app, iTerm2, gnome-terminal, xterm, …) without any
-    special keyboard-protocol opt-in.
+    special keyboard-protocol opt-in.  Any open completion menu is
+    dismissed (restoring the originally-typed text) before the newline
+    is inserted, so Option+Enter never accepts a highlighted
+    autocomplete behind the user's back.
     """
-    event.current_buffer.insert_text("\n")
+    _insert_newline(event)
 
 
 @_KEY_BINDINGS.add("c-j")
@@ -154,9 +196,11 @@ def _newline_ctrl_j(event: KeyPressEvent) -> None:
     Ctrl+J transmits a literal Linefeed (``\\n``).  Many terminals
     deliver this when the user presses Shift+Enter without a CSI-u /
     modifyOtherKeys binding active, so Ctrl+J is a reliable
-    secondary multi-line key.
+    secondary multi-line key.  Like the other modifier+Enter
+    bindings, any open completion menu is dismissed first so the
+    highlighted completion is not accepted.
     """
-    event.current_buffer.insert_text("\n")
+    _insert_newline(event)
 
 
 # Modifier+Enter escape sequences delivered by modern terminals as
@@ -175,11 +219,18 @@ def _newline_ctrl_j(event: KeyPressEvent) -> None:
 
 
 def _bind_newline_sequence(*keys: str) -> None:
-    """Register *keys* as a multi-key binding that inserts ``\\n``."""
+    """Register *keys* as a multi-key binding that inserts ``\\n``.
+
+    Routes through :func:`_insert_newline` so the modifier+Enter
+    escape sequences also dismiss any open completion menu (restoring
+    the originally-typed text) before adding the newline — preventing
+    the user-reported bug where Shift/Alt/Ctrl+Enter silently accepted
+    the highlighted autocomplete instead of inserting a newline.
+    """
 
     @_KEY_BINDINGS.add(*keys)
     def _newline(event: KeyPressEvent) -> None:
-        event.current_buffer.insert_text("\n")
+        _insert_newline(event)
 
 
 def _sequence_keys(seq: str) -> tuple[str, ...]:
@@ -199,8 +250,16 @@ for _seq in _MODIFY_OTHER_KEYS_ENTER:
     _bind_newline_sequence(*_sequence_keys(_seq))
 
 # kitty/CSI-u: ``ESC[13;<mod>u`` for Shift / Alt / Ctrl / Ctrl-Shift / …
+# and the Meta-bit-set combinations 9..16 (Cmd+Enter and friends on
+# macOS terminals that report the Meta modifier).  Two-digit modifier
+# values are split across two tuple keys because the prompt_toolkit
+# parser matches one byte at a time.
 for _mod in ("2", "3", "4", "5", "6", "7", "8"):
     _bind_newline_sequence("escape", "[", "1", "3", ";", _mod, "u")
+for _two_digit in ("9", "10", "11", "12", "13", "14", "15", "16"):
+    _bind_newline_sequence(
+        "escape", "[", "1", "3", ";", *tuple(_two_digit), "u",
+    )
 
 
 def _prompt_continuation(

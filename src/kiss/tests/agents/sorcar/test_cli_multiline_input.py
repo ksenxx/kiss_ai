@@ -37,6 +37,21 @@ from kiss.agents.sorcar.cli_prompt import PtkLineReader, _prompt_continuation
 from kiss.agents.sorcar.cli_repl import CliCompleter
 
 
+def _make_project_tree(tmp_path: Path) -> Path:
+    """Create a tiny project tree so the ``@``-mention picker has files.
+
+    The completion-menu regression tests need at least one file the
+    picker can highlight when the user types ``@a`` so that pressing
+    Down moves the buffer into a "completion selected" state.
+    """
+    (tmp_path / "alpha.py").write_text("alpha\n")
+    (tmp_path / "another.md").write_text("another\n")
+    sub = tmp_path / "src"
+    sub.mkdir()
+    (sub / "a_module.py").write_text("module\n")
+    return tmp_path
+
+
 def _drive(
     tmp_path: Path, keystrokes: str, *, delay: float = 0.5,
 ) -> str:
@@ -264,6 +279,205 @@ def test_prompt_session_wraps_long_lines(tmp_path: Path) -> None:
     hist = tmp_path / "hist"
     reader = PtkLineReader(CliCompleter(str(tmp_path)), hist)
     assert bool(reader.session.wrap_lines) is True
+
+
+def test_cmd_enter_modify_other_keys_inserts_newline(
+    tmp_path: Path,
+) -> None:
+    """xterm modifyOtherKeys Cmd+Enter (``ESC[27;9;13~``) inserts ``\\n``.
+
+    macOS terminals that report the Meta modifier (iTerm2 with the
+    "Report modifiers using CSI u" option, kitty/foot/WezTerm under
+    the CSI-u keyboard protocol, the VS Code integrated terminal with
+    macOptionAsMeta enabled) deliver Cmd+Enter as the modifyOtherKeys
+    sequence ``ESC[27;9;13~`` (mod value 1 + Meta-bit 8 = 9).  The
+    binding must insert a real newline.
+    """
+    line = _drive(tmp_path, "left\x00\x1b[27;9;13~right\r")
+    assert line == "left\nright"
+
+
+def test_cmd_enter_csi_u_inserts_newline(tmp_path: Path) -> None:
+    """kitty/CSI-u Cmd+Enter (``ESC[13;9u``) inserts a newline."""
+    line = _drive(tmp_path, "head\x00\x1b[13;9utail\r")
+    assert line == "head\ntail"
+
+
+def test_cmd_enter_inserts_newline_when_completion_selected(
+    tmp_path: Path,
+) -> None:
+    """Cmd+Enter with a selected completion inserts ``\\n``, not autocomplete.
+
+    Same regression contract as the Shift+Enter / Alt+Enter / Ctrl+Enter
+    counterparts: the highlighted candidate must be discarded
+    (originally-typed text restored) and a real newline added.
+    """
+    project = _make_project_tree(tmp_path)
+    completer = CliCompleter(str(project))
+    hist = tmp_path / "hist"
+    with create_pipe_input() as pipe:
+        def _send_keys() -> None:
+            pipe.send_text("\x1b[B")  # Down: highlight first candidate
+            pipe.send_text("\x1b[27;9;13~")  # Cmd+Enter (modifyOtherKeys)
+            pipe.send_text("end\r")  # Enter: submit
+
+        timer = threading.Timer(0.5, _send_keys)
+        pipe.send_text("@a")
+        timer.start()
+        try:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                reader = PtkLineReader(completer, hist)
+                line = reader.read("> ")
+        finally:
+            timer.cancel()
+    assert line == "@a\nend", (
+        f"expected '@a\\nend' (no autocomplete), got {line!r}"
+    )
+
+
+def test_shift_enter_inserts_newline_when_completion_selected(
+    tmp_path: Path,
+) -> None:
+    """Shift+Enter (modifyOtherKeys) with a selected completion inserts ``\\n``.
+
+    Reproduces the user-reported bug: when the predictive / file-picker
+    dropdown is open *and* a candidate has been highlighted (Down),
+    pressing Shift+Enter must **not** accept the highlighted completion
+    — it must restore the originally-typed text and insert a real
+    newline so the user can continue on the next visual row.
+
+    Without the ``cancel_completion()`` call in the modifier+Enter
+    bindings, prompt_toolkit's :class:`Buffer` keeps the highlighted
+    completion's text in the buffer; ``insert_text("\\n")`` then
+    appends the newline *after* the completion text, so the line
+    submitted by the trailing ``Enter`` is the completion + ``\\n`` +
+    follow-up — i.e. the autocomplete was applied even though the user
+    pressed Shift+Enter.
+    """
+    project = _make_project_tree(tmp_path)
+    completer = CliCompleter(str(project))
+    hist = tmp_path / "hist"
+    with create_pipe_input() as pipe:
+        def _send_keys() -> None:
+            pipe.send_text("\x1b[B")  # Down: highlight first candidate
+            pipe.send_text("\x1b[27;2;13~")  # Shift+Enter (modifyOtherKeys)
+            pipe.send_text("rest\r")  # Enter: submit
+
+        timer = threading.Timer(0.5, _send_keys)
+        # ``@a`` filters the picker so a candidate is selectable.
+        pipe.send_text("@a")
+        timer.start()
+        try:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                reader = PtkLineReader(completer, hist)
+                line = reader.read("> ")
+        finally:
+            timer.cancel()
+    # The highlighted completion must NOT be applied; the originally
+    # typed ``@a`` is preserved and a real newline separates it from
+    # the follow-up text.
+    assert line == "@a\nrest", (
+        f"expected '@a\\nrest' (no autocomplete), got {line!r}"
+    )
+
+
+def test_alt_enter_inserts_newline_when_completion_selected(
+    tmp_path: Path,
+) -> None:
+    """Alt/Option+Enter with a selected completion inserts ``\\n``, not autocomplete.
+
+    Same regression as
+    :func:`test_shift_enter_inserts_newline_when_completion_selected`
+    but driven by the portable Esc+Enter byte pair that every
+    macOS / Linux terminal delivers for Option/Alt+Enter.
+    """
+    project = _make_project_tree(tmp_path)
+    completer = CliCompleter(str(project))
+    hist = tmp_path / "hist"
+    with create_pipe_input() as pipe:
+        def _send_keys() -> None:
+            pipe.send_text("\x1b[B")  # Down: highlight first candidate
+            pipe.send_text("\x1b\r")  # Alt+Enter (Esc + CR)
+            pipe.send_text("more\r")  # Enter: submit
+
+        timer = threading.Timer(0.5, _send_keys)
+        pipe.send_text("@a")
+        timer.start()
+        try:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                reader = PtkLineReader(completer, hist)
+                line = reader.read("> ")
+        finally:
+            timer.cancel()
+    assert line == "@a\nmore", (
+        f"expected '@a\\nmore' (no autocomplete), got {line!r}"
+    )
+
+
+def test_ctrl_enter_inserts_newline_when_completion_selected(
+    tmp_path: Path,
+) -> None:
+    """Ctrl+Enter (Command+Enter equivalent) with a selected completion inserts ``\\n``.
+
+    ``Command+Enter`` on macOS is not transmitted by every terminal,
+    but iTerm2 / WezTerm / kitty / the VS Code integrated terminal can
+    be configured to deliver it (and Ctrl+Enter) as the
+    modifyOtherKeys sequence ``ESC[27;5;13~``.  Same regression
+    contract: the highlighted completion must not be applied.
+    """
+    project = _make_project_tree(tmp_path)
+    completer = CliCompleter(str(project))
+    hist = tmp_path / "hist"
+    with create_pipe_input() as pipe:
+        def _send_keys() -> None:
+            pipe.send_text("\x1b[B")  # Down: highlight first candidate
+            pipe.send_text("\x1b[27;5;13~")  # Ctrl+Enter (modifyOtherKeys)
+            pipe.send_text("done\r")  # Enter: submit
+
+        timer = threading.Timer(0.5, _send_keys)
+        pipe.send_text("@a")
+        timer.start()
+        try:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                reader = PtkLineReader(completer, hist)
+                line = reader.read("> ")
+        finally:
+            timer.cancel()
+    assert line == "@a\ndone", (
+        f"expected '@a\\ndone' (no autocomplete), got {line!r}"
+    )
+
+
+def test_ctrl_j_inserts_newline_when_completion_selected(
+    tmp_path: Path,
+) -> None:
+    """Ctrl+J (LF) with a selected completion inserts ``\\n``, not autocomplete.
+
+    Some terminals (notably macOS Terminal.app) deliver Shift+Enter as
+    a literal Ctrl+J (``\\n``); the same "do not accept the highlighted
+    completion" guarantee must hold for that path.
+    """
+    project = _make_project_tree(tmp_path)
+    completer = CliCompleter(str(project))
+    hist = tmp_path / "hist"
+    with create_pipe_input() as pipe:
+        def _send_keys() -> None:
+            pipe.send_text("\x1b[B")  # Down: highlight first candidate
+            pipe.send_text("\n")  # Ctrl+J / LF
+            pipe.send_text("tail\r")  # Enter: submit
+
+        timer = threading.Timer(0.5, _send_keys)
+        pipe.send_text("@a")
+        timer.start()
+        try:
+            with create_app_session(input=pipe, output=DummyOutput()):
+                reader = PtkLineReader(completer, hist)
+                line = reader.read("> ")
+        finally:
+            timer.cancel()
+    assert line == "@a\ntail", (
+        f"expected '@a\\ntail' (no autocomplete), got {line!r}"
+    )
 
 
 def test_prompt_continuation_keeps_panel_left_border(tmp_path: Path) -> None:
