@@ -56,23 +56,39 @@ class TestPanelBody:
     def test_buffer_renders_marker_and_text(self) -> None:
         rows, is_placeholder = panel_body("do something", 80)
         assert is_placeholder is False
-        assert len(rows) == 1
+        # Single-line buffer pads up to the 3-row minimum (the framed
+        # input dialog always shows ≥3 lines of vertical space).
+        assert len(rows) == 3
         assert f"{PROMPT_MARKER}do something" in rows[0]
         assert len(rows[0]) == 76  # cols - 4
 
     def test_empty_buffer_shows_placeholder(self) -> None:
         rows, is_placeholder = panel_body("", 80)
         assert is_placeholder is True
-        assert len(rows) == 1
+        # Empty buffer: placeholder row + 2 blank padding rows.
+        assert len(rows) == 3
         # The chevron is always shown on the left, then the placeholder.
         assert rows[0].startswith(PROMPT_MARKER)
         assert rows[0].startswith(f"{PROMPT_MARKER}{PLACEHOLDER}")
+        # Padding rows are blank (no chevron, no placeholder leak).
+        for blank in rows[1:]:
+            assert blank.strip() == ""
 
     def test_long_buffer_is_tail_clipped(self) -> None:
         rows, _ = panel_body("x" * 200, 40)
-        assert len(rows) == 1
+        # Single-line buffer still pads to the 3-row minimum.
+        assert len(rows) == 3
         assert len(rows[0]) == 36
         assert rows[0].startswith(PROMPT_MARKER)
+
+    def test_legacy_single_row_minimum_via_override(self) -> None:
+        # Callers that want the legacy single-row behaviour (e.g.
+        # non-steering callers that paint their own surrounding box)
+        # can drop the floor by passing ``min_rows=1``.
+        rows, _ = panel_body("hello", 80, min_rows=1)
+        assert len(rows) == 1
+        empty, _ = panel_body("", 80, min_rows=1)
+        assert len(empty) == 1
 
 
 class TestSharedPanelAcrossDialogs:

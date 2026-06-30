@@ -39,7 +39,9 @@ def test_cjk_body_fits_panel_inner_width() -> None:
     cols = 40
     rows, is_placeholder = panel_body("汉" * 40, cols)
     assert not is_placeholder
-    assert len(rows) == 1
+    # Single-line buffer pads to the 3-row minimum; only the content
+    # row (index 0) carries the wide-char text.
+    assert len(rows) == 3
     body = rows[0]
     assert _width(body) == cols - 4, (
         f"wide-char body is {_width(body)} columns, expected {cols - 4}; "
@@ -51,7 +53,7 @@ def test_emoji_body_fits_panel_inner_width() -> None:
     """An emoji buffer must render a body of exactly ``cols - 4`` columns."""
     cols = 80
     rows, _ = panel_body("😀" * 50, cols)
-    assert len(rows) == 1
+    assert len(rows) == 3
     assert _width(rows[0]) == cols - 4
 
 
@@ -59,7 +61,7 @@ def test_short_emoji_body_padded_to_inner_width() -> None:
     """A short emoji buffer is padded to exactly the inner width."""
     cols = 80
     rows, _ = panel_body("😀" * 5, cols)
-    assert len(rows) == 1
+    assert len(rows) == 3
     assert _width(rows[0]) == cols - 4
 
 
@@ -92,7 +94,8 @@ def test_ascii_behavior_unchanged() -> None:
     """Sanity: ASCII buffers keep the historical geometry."""
     cols = 80
     rows, _ = panel_body("hello", cols)
-    assert len(rows) == 1
+    # 3-row minimum: 1 content row + 2 padding rows.
+    assert len(rows) == 3
     assert rows[0] == ("› hello").ljust(cols - 4)
     assert body_cursor_col("hello", cols) == (0, 3 + 2 + 5)
     assert clip_buf("x" * 100, cols) == "x" * (cols - 4 - 2)
