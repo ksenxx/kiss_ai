@@ -974,6 +974,16 @@
     .prompt-panel .panel-desc {
       color: var(--text-dim); font-size: 0.92rem; line-height: 1.6;
       margin-top: 0.5rem;
+      /* Fixed-height 3-line summary so every panel lines up uniformly.    */
+      /* Longer summaries are clipped with an ellipsis; shorter summaries  */
+      /* still reserve the full 3-line block.                              */
+      height: calc(3 * 1.6 * 0.92rem);
+      overflow: hidden;
+      display: -webkit-box;
+      -webkit-line-clamp: 3;
+      line-clamp: 3;
+      -webkit-box-orient: vertical;
+      text-overflow: ellipsis;
     }
 
     .prompt-body {
