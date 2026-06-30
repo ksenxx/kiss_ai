@@ -559,7 +559,49 @@ function testCompletionsHighlightsPrefix() {
   assert.strictEqual(hl[0].textContent, 'fix');
 }
 
-// 24. Tab inside the picker must call preventDefault so the chat
+// 25. Regression: an EMPTY ``completions`` reply that arrives
+//     while an ``@``-mention file picker is already open must NOT
+//     close the file picker.  The earlier code path called
+//     ``hideAC()`` on the empty-data branch before checking
+//     ``getAtCtx()``, which collapsed the visible file picker when
+//     a delayed empty completions reply for the previously-typed
+//     text raced in.
+function testEmptyCompletionsDoesNotClobberAtMentionPicker() {
+  const {win} = makeWebview();
+  setInput(win, 'open @util');
+  // Open the @-mention file picker with a non-empty 'files' reply.
+  send(win, {
+    type: 'files',
+    files: [
+      {type: 'file', text: 'util/index.ts'},
+      {type: 'file', text: 'util/parse.ts'},
+    ],
+    prefix: 'util',
+  });
+  assert.strictEqual(
+    visible(win),
+    true,
+    'precondition: file picker is open after `files` reply',
+  );
+  // Now a stale empty completions reply lands.
+  send(win, {
+    type: 'completions',
+    completions: [],
+    query: 'open @util',
+  });
+  assert.strictEqual(
+    visible(win),
+    true,
+    'empty completions reply must NOT close the file picker',
+  );
+  // Items still there.
+  assert.ok(
+    items(win).length >= 2,
+    'file picker items must be preserved',
+  );
+}
+
+// 26. Tab inside the picker must call preventDefault so the chat
 //    is not submitted (which Tab + Enter shares with the inline
 //    ghost-accept path).
 function testTabInPickerPreventsDefault() {
@@ -603,6 +645,7 @@ const tests = [
   testAcceptCompletionPreservesTrailingSpace,
   testCompletionsFooterContents,
   testCompletionsHighlightsPrefix,
+  testEmptyCompletionsDoesNotClobberAtMentionPicker,
   testTabInPickerPreventsDefault,
 ];
 
