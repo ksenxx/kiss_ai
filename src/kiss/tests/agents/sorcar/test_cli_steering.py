@@ -123,7 +123,7 @@ class TestInputBoxRender:
         # No static caret glyph is drawn — the real blinking cursor is
         # parked right after the typed text instead.
         assert "▏" not in text
-        col = body_cursor_col("do something", panel_cols())
+        _row, col = body_cursor_col("do something", panel_cols())
         assert f";{col}H" in text
 
     def test_draw_shows_placeholder_when_empty(self) -> None:
@@ -142,7 +142,7 @@ class TestInputBoxRender:
         box._active = True
         box.redraw()
         text = out.getvalue()
-        col = body_cursor_col("", panel_cols())
+        _row, col = body_cursor_col("", panel_cols())
         assert f";{col}H" in text
 
 
@@ -161,7 +161,7 @@ class TestStdoutProxyCaret:
         assert "\x1b8" in text  # restore output position
         assert "agent says hello" in text
         assert "\x1b7" in text  # re-save advanced output position
-        col = body_cursor_col("hi", panel_cols())
+        _row, col = body_cursor_col("hi", panel_cols())
         assert f";{col}H" in text  # caret re-parked in body
 
     def test_output_is_plain_when_box_inactive(self) -> None:
