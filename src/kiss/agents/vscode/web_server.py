@@ -2327,6 +2327,87 @@ _WS_SHIM_JS = r"""
   // user is left staring at the "KISS Sorcar Server is starting
   // ..." overlay (or stale UI) until they manually refresh.
   var _hadAuthThenClosed = false;
+  // Reconnect backoff attempt count — reset to 0 after a successful
+  // ``auth_ok`` so a fresh disconnect tries again almost immediately.
+  var _reconnectAttempt = 0;
+  // Pending reconnect timer id, used so visibilitychange / pageshow /
+  // online wake-ups can short-circuit the scheduled delay.
+  var _reconnectTimer = null;
+
+  // ``sessionStorage`` persists across the ``window.location.reload()``
+  // performed inside the ``_hadAuthThenClosed`` branch of ``auth_ok``,
+  // which lets the freshly-loaded page detect "this load is actually
+  // a reconnect from a previously-authenticated session" and label the
+  // loading overlay accordingly.
+  var _RECONNECT_FLAG = 'sorcar-reconnect-pending';
+
+  function _readReconnectingFlag() {
+    try { return sessionStorage.getItem(_RECONNECT_FLAG) === '1'; }
+    catch (e) { return false; }
+  }
+  function _setReconnectingFlag(on) {
+    try {
+      if (on) sessionStorage.setItem(_RECONNECT_FLAG, '1');
+      else sessionStorage.removeItem(_RECONNECT_FLAG);
+    } catch (e) {}
+  }
+
+  /**
+   * Replace the overlay text so the user sees an accurate status.
+   *
+   * On a brand-new tab the message is "KISS Sorcar Server is starting
+   * ..." because the server may legitimately not be up yet.  Once we
+   * have proven the server is reachable (a previous ``auth_ok`` came
+   * through, then the socket later closed) every subsequent display of
+   * the overlay represents a RECONNECT, not a cold start — say so.
+   */
+  function _updateLoadingMsg(reconnecting) {
+    var msg = document.getElementById('kiss-server-loading-msg');
+    if (!msg) return;
+    msg.textContent = reconnecting
+      ? 'Reconnecting to KISS Sorcar Server ...'
+      : 'KISS Sorcar Server is starting ...';
+  }
+
+  // Apply the reconnect label immediately on script start when the
+  // sessionStorage flag survives from the prior page instance.  Without
+  // this the user would briefly see "Server is starting ..." after
+  // backgrounding Safari and returning, even though we know the server
+  // is up and we are merely re-establishing the WebSocket.
+  if (_readReconnectingFlag()) {
+    _updateLoadingMsg(true);
+  }
+
+  function _scheduleReconnect() {
+    if (_reconnectTimer !== null) return;
+    // Aggressive backoff: 250ms, 500ms, 1s, 2s, 4s, capped at 5s.
+    // The old 3000ms fixed delay made reconnects feel sluggish on
+    // mobile Safari, which already pauses JS in backgrounded tabs.
+    var delay = Math.min(5000, 250 * Math.pow(2, _reconnectAttempt));
+    _reconnectAttempt++;
+    _reconnectTimer = setTimeout(function () {
+      _reconnectTimer = null;
+      connect();
+    }, delay);
+  }
+
+  function _reconnectNowIfNeeded() {
+    // Called from visibilitychange / pageshow / online handlers so a
+    // user who left Safari for another app does not wait the full
+    // backoff after returning.  We treat CONNECTING as "in flight,
+    // don't disturb"; CLOSED / CLOSING / null all warrant an
+    // immediate attempt.
+    if (_ws && (_ws.readyState === WebSocket.OPEN ||
+                _ws.readyState === WebSocket.CONNECTING)) {
+      return;
+    }
+    if (_reconnectTimer !== null) {
+      try { clearTimeout(_reconnectTimer); } catch (e) {}
+      _reconnectTimer = null;
+    }
+    _reconnectAttempt = 0;
+    connect();
+  }
 
   // Custom auth modal — replaces the browser-native prompt(), which is
   // rendered tall with wasted space below its buttons on most desktop
@@ -2394,6 +2475,27 @@ _WS_SHIM_JS = r"""
   };
 
   function connect() {
+    // Neutralise the previous socket BEFORE we install a fresh one.
+    // On iOS Safari the OS may kill the underlying WebSocket while
+    // the tab is backgrounded; when JS resumes, the wake-up listeners
+    // (visibilitychange / focus / pageshow) frequently fire BEFORE
+    // the queued ``onclose`` of the dead socket.  If we don't clear
+    // the old handlers, that late ``onclose`` will run against the
+    // module-level ``_ws`` we just replaced -- it would call
+    // ``_scheduleReconnect()`` (overwriting the in-flight new socket
+    // after the backoff fires) and any late ``onopen``/``onmessage``
+    // on the old socket would ``_ws.send(...)`` on the new one.
+    // Nulling the handlers and closing the old socket here makes the
+    // replacement atomic from the rest of the shim's perspective.
+    if (_ws) {
+      try {
+        _ws.onopen = null;
+        _ws.onmessage = null;
+        _ws.onclose = null;
+        _ws.onerror = null;
+      } catch (e) {}
+      try { _ws.close(); } catch (e) {}
+    }
     _ws = new WebSocket('wss://' + location.host + '/ws');
     _authenticated = false;
 
@@ -2421,6 +2523,15 @@ _WS_SHIM_JS = r"""
         }
         _authenticated = true;
         _needsPassword = false;
+        // We have a live, authenticated socket — any future
+        // disconnect IS a reconnect, but the just-completed
+        // handshake is not.  Drop the sessionStorage flag so a
+        // subsequent fresh tab (different browsing session, same
+        // device) doesn't mislabel its first overlay.  The
+        // _hadAuthThenClosed branch above keeps the flag intact
+        // during the reload it triggers.
+        _setReconnectingFlag(false);
+        _reconnectAttempt = 0;
         // Re-establish this instance's pinned work_dir BEFORE flushing
         // any queued commands: the server stamps each connection's
         // work_dir onto later commands, so the pin must arrive first.
@@ -2483,20 +2594,65 @@ _WS_SHIM_JS = r"""
       // trigger a reload on its first ``auth_ok``.
       if (_authenticated) {
         _hadAuthThenClosed = true;
+        // Persist the reconnect-state across the ``location.reload()``
+        // that ``auth_ok`` will trigger so the freshly-loaded page
+        // labels its overlay "Reconnecting ..." instead of the
+        // misleading "KISS Sorcar Server is starting ...".  Mobile
+        // Safari frequently kills the WebSocket whenever the user
+        // switches apps, so this is the common case, not an edge
+        // case.
+        _setReconnectingFlag(true);
       }
       _authenticated = false;
-      // Re-show the "KISS Sorcar Server is starting ..." overlay
-      // while the socket is down so the user knows actions will not
-      // reach the backend.  Symmetric to the ``auth_ok`` dispatch
-      // above and to ``SorcarSidebarView.ts``'s disconnect handler in
-      // the VS Code path.
+      // Switch the overlay text BEFORE re-revealing it: once we have
+      // had at least one successful handshake (current page or any
+      // previous one, latched via sessionStorage) every overlay
+      // appearance is a reconnect from the user's perspective.
+      _updateLoadingMsg(_hadAuthThenClosed || _readReconnectingFlag());
+      // Re-show the loading overlay while the socket is down so the
+      // user knows actions will not reach the backend.  Symmetric to
+      // the ``auth_ok`` dispatch above and to
+      // ``SorcarSidebarView.ts``'s disconnect handler in the VS Code
+      // path.
       window.dispatchEvent(new MessageEvent('message', {
         data: {type: 'daemonStatus', connected: false}
       }));
-      setTimeout(connect, 3000);
+      _scheduleReconnect();
     };
 
     _ws.onerror = function() {};
+  }
+
+  // Wake-up listeners — mobile Safari pauses JS in backgrounded tabs,
+  // so a scheduled ``setTimeout(connect, ...)`` may not fire until the
+  // user returns.  These events fire AS SOON AS the user comes back,
+  // triggering an immediate reconnect instead of waiting for the
+  // backoff timer.  Without them the user would stare at the loading
+  // overlay for the remainder of the (paused) backoff after every
+  // app-switch round-trip.
+  if (typeof document !== 'undefined' &&
+      typeof document.addEventListener === 'function') {
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState === 'visible') {
+        _reconnectNowIfNeeded();
+      }
+    });
+  }
+  if (typeof window !== 'undefined' &&
+      typeof window.addEventListener === 'function') {
+    // ``pageshow`` covers Safari's bfcache restore, which does not
+    // fire ``visibilitychange``.
+    window.addEventListener('pageshow', function () {
+      _reconnectNowIfNeeded();
+    });
+    window.addEventListener('online', function () {
+      _reconnectNowIfNeeded();
+    });
+    // ``focus`` is the universal fallback for older mobile browsers
+    // that ignore visibilitychange/pageshow under certain conditions.
+    window.addEventListener('focus', function () {
+      _reconnectNowIfNeeded();
+    });
   }
 
   connect();
