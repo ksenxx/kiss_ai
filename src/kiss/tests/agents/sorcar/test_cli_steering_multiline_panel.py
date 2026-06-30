@@ -53,23 +53,28 @@ class TestPanelBodyMultiLine:
     def test_single_line_returns_one_row(self) -> None:
         rows, is_placeholder = panel_body("hello", 80)
         assert isinstance(rows, list)
-        assert len(rows) == 1
+        # 3-row minimum: 1 content row + 2 blank padding rows.
+        assert len(rows) == 3
         assert is_placeholder is False
         assert PROMPT_MARKER in rows[0]
         assert "hello" in rows[0]
         assert len(rows[0]) == 80 - 4
+        for blank in rows[1:]:
+            assert blank.strip() == ""
 
     def test_two_line_buffer_returns_two_rows(self) -> None:
         rows, _ = panel_body("first\nsecond", 80)
-        assert len(rows) == 2
+        # Two content rows + 1 blank padding row to reach the floor.
+        assert len(rows) == 3
         # First row carries the chevron and the first line.
         assert rows[0].startswith(PROMPT_MARKER + "first")
         # Continuation row aligns under the chevron with two spaces,
         # then carries the second line — NO chevron repeated.
         assert rows[1].startswith("  second")
-        # Both rows are padded to the inner width.
-        for row in rows:
+        # Both content rows are padded to the inner width.
+        for row in rows[:2]:
             assert len(row) == 80 - 4
+        assert rows[2].strip() == ""
 
     def test_three_line_buffer_returns_three_rows(self) -> None:
         rows, _ = panel_body("a\nb\nc", 40)
@@ -78,21 +83,33 @@ class TestPanelBodyMultiLine:
         assert rows[1].startswith("  b")
         assert rows[2].startswith("  c")
 
+    def test_four_line_buffer_grows_above_minimum(self) -> None:
+        # Above the 3-row floor the panel is fully dynamic.
+        rows, _ = panel_body("a\nb\nc\nd", 40)
+        assert len(rows) == 4
+        assert rows[0].startswith(PROMPT_MARKER + "a")
+        assert rows[3].startswith("  d")
+
     def test_empty_buffer_returns_one_placeholder_row(self) -> None:
         rows, is_placeholder = panel_body("", 80)
-        assert len(rows) == 1
+        # Placeholder + 2 padding rows to reach the 3-row floor.
+        assert len(rows) == 3
         assert is_placeholder is True
         assert rows[0].startswith(PROMPT_MARKER + PLACEHOLDER)
+        for blank in rows[1:]:
+            assert blank.strip() == ""
 
     def test_trailing_newline_produces_empty_continuation_row(self) -> None:
         # A trailing \n means "the user pressed Shift+Enter and the
         # next line is empty"; that empty line must still be drawn so
         # the caret sits on its own row.
         rows, _ = panel_body("hello\n", 80)
-        assert len(rows) == 2
+        # Two buffer lines + 1 blank padding row to reach the floor.
+        assert len(rows) == 3
         assert rows[0].startswith(PROMPT_MARKER + "hello")
         # Second row is the two-space indent followed by padding.
         assert rows[1].startswith("  ")
+        assert rows[2].strip() == ""
 
     def test_no_carriage_glyph_in_multi_line_render(self) -> None:
         rows, _ = panel_body("a\nb\nc", 40)
@@ -174,7 +191,8 @@ class TestSteeringBoxGrowsForMultiLineBuffer:
         # (cleaned of ANSI escapes here): count `│` characters that are
         # NOT part of a border row.  The borders contribute 0 vertical
         # bars (they use ─), so every │ comes from a body row, with two
-        # bars (left + right) per body row → 6 total.
+        # bars (left + right) per body row → 6 total (matches the
+        # 3-row minimum the panel always shows).
         bars = text.count("│")
         assert bars == 6, (
             f"expected 6 vertical bars (3 body rows × 2), got {bars}"
