@@ -942,6 +942,19 @@ class _TaskRunnerMixin:
                 self.printer.broadcast({"type": "tasks_updated"})
                 self.printer.reset()
                 if use_worktree and tab.agent._wt_pending:
+                    # "Lost slides" bug fix: a task that ended in
+                    # failure / user-Stop leaves partial, unverified
+                    # work in the worktree.  Mark the agent as
+                    # pending review BEFORE any post-task presentation
+                    # so a subsequent tab teardown (which can fire
+                    # asynchronously the moment ``is_task_active``
+                    # drops below) preserves the branch instead of
+                    # silently squash-merging it into the user's
+                    # original branch.  When the user later
+                    # explicitly clicks Merge or Discard the flag
+                    # is cleared by ``_handle_worktree_action``.
+                    if task_failed:
+                        tab.agent._pending_review = True
                     try:
                         if effective_auto_commit:
                             # "Auto commit" toggle is ON in worktree
