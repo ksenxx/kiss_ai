@@ -3895,6 +3895,19 @@
           updateGhost(ev.suggestion);
         }
         break;
+      case 'completions': {
+        // Staleness guard (mirrors the ``ghost`` and ``files``
+        // handlers): the populated reply arrives asynchronously after
+        // the backend worker drains its queue, so only render while
+        // the user's input still matches the query this reply
+        // answers.  ``ev.query`` may be ``undefined`` on older
+        // backends (back-compat) — then we skip the check.
+        if (ev.query !== undefined && ev.query !== inp.value) {
+          break;
+        }
+        renderCompletions(ev.completions || []);
+        break;
+      }
 
       case 'merge_data': {
         const mdEl = renderMergeData(ev);
@@ -7441,9 +7454,19 @@
   const _acSvg = {
     file: '<svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>',
     star: '<svg viewBox="0 0 24 24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>',
+    // Lightning bolt for the fast-complete picker (history/tricks/identifiers).
+    bolt: '<svg viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>',
+    // Sparkle for INJECTIONS.md trick suggestions.
+    spark:
+      '<svg viewBox="0 0 24 24"><path d="M12 2l1.5 5L19 8.5 13.5 10 12 15 10.5 10 5 8.5 10.5 7 12 2z"/></svg>',
+    // Curly-brace identifier glyph.
+    code: '<svg viewBox="0 0 24 24"><path d="M8 4H6a2 2 0 00-2 2v4a2 2 0 01-2 2 2 2 0 012 2v4a2 2 0 002 2h2M16 4h2a2 2 0 012 2v4a2 2 0 002 2 2 2 0 00-2 2v4a2 2 0 01-2 2h-2"/></svg>',
   };
   function _acIcon(type) {
     if (type === 'frequent') return _acSvg.star;
+    if (type === 'task') return _acSvg.bolt;
+    if (type === 'trick') return _acSvg.spark;
+    if (type === 'identifier') return _acSvg.code;
     return _acSvg.file;
   }
   function hlMatch(text, query) {
@@ -7557,6 +7580,116 @@
     }
     hideAC();
     inp.focus();
+  }
+
+  /**
+   * Replace the input value with *full* and append a trailing space.
+   * Used by the fast-complete picker: every completion item carries the
+   * full line text (history task, trick, or identifier completion)
+   * that should land in the textarea on accept — mirroring the CLI
+   * dropdown's whole-line replacement contract.
+   */
+  function acceptCompletion(full) {
+    inp.value = full;
+    if (/\S$/.test(inp.value)) inp.value += ' ';
+    clearGhost();
+    syncClearBtn();
+    inp.style.height = 'auto';
+    inp.style.height = inp.scrollHeight + 'px';
+    const np = inp.value.length;
+    inp.setSelectionRange(np, np);
+    hideAC();
+    inp.focus();
+  }
+
+  /**
+   * Render the fast-complete dropdown picker for *data*: a list of
+   * ``{type, text}`` items where ``text`` is the full replacement
+   * line.  Reuses ``#autocomplete`` (and therefore the existing
+   * keyboard handler at line ~5334), grouped by section with the
+   * same DOM as the ``@``-mention file picker.
+   *
+   * The picker is suppressed while an ``@``-mention is active (file
+   * picker takes precedence), while a task is running, when the
+   * cursor is not at end, or when the input is empty.  The caller
+   * is responsible for the staleness guard (query == inp.value).
+   */
+  function renderCompletions(data) {
+    if (!data || !data.length) {
+      hideAC();
+      return;
+    }
+    if (isRunning) {
+      hideAC();
+      return;
+    }
+    if (getAtCtx()) {
+      // The ``@``-mention file picker owns ``#autocomplete`` in this
+      // mode; never let completions clobber it.
+      return;
+    }
+    if (!inp.value) {
+      hideAC();
+      return;
+    }
+    if (inp.selectionStart < inp.value.length) {
+      hideAC();
+      return;
+    }
+    autocomplete.innerHTML = '';
+    acIdx = -1;
+    const order = ['task', 'frequent', 'trick', 'identifier'];
+    const labels = {
+      task: 'History',
+      frequent: 'Frequent',
+      trick: 'Suggestions',
+      identifier: 'From editor',
+    };
+    const groups = {};
+    data.forEach(item => {
+      const t = item.type;
+      if (!groups[t]) groups[t] = [];
+      groups[t].push(item);
+    });
+    let isFirst = true;
+    order.forEach(type => {
+      const g = groups[type];
+      if (!g) return;
+      const lbl = labels[type] || type;
+      const hdr = mkEl('div', 'ac-section');
+      hdr.textContent = lbl;
+      autocomplete.appendChild(hdr);
+      g.forEach(item => {
+        const d = mkEl('div', 'ac-item');
+        d.dataset.text = item.text;
+        const textHtml = hlMatch(item.text, inp.value);
+        d.innerHTML =
+          '<span class="ac-icon">' +
+          _acIcon(item.type) +
+          '</span>' +
+          '<span class="ac-text">' +
+          textHtml +
+          '</span>';
+        if (isFirst) {
+          d.innerHTML += '<span class="ac-hint">tab</span>';
+          isFirst = false;
+        }
+        d.addEventListener('click', () => {
+          acceptCompletion(item.text);
+        });
+        autocomplete.appendChild(d);
+      });
+    });
+    const footer = mkEl('div', 'ac-footer');
+    footer.innerHTML =
+      '<span><kbd>\u2191\u2193</kbd> navigate</span>' +
+      '<span><kbd>Tab</kbd> accept</span>' +
+      '<span><kbd>Esc</kbd> dismiss</span>';
+    autocomplete.appendChild(footer);
+    autocomplete.style.display = 'block';
+    acIdx = 0;
+    const allItems = autocomplete.querySelectorAll('.ac-item');
+    updateSel(allItems, acIdx);
   }
 
   // Expose minimal API for demo.js
