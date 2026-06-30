@@ -60,7 +60,7 @@ def test_ctrl_c_during_lock_wait_still_stops_the_worker(
     tmp_path: Path,
 ) -> None:
     """SIGINT while blocked on the terminal lock must abort the worker."""
-    import pty
+    from kiss.tests.agents.sorcar._pty_helper import pty_spawn
 
     started = tmp_path / "started"
     result = tmp_path / "result"
@@ -107,10 +107,7 @@ except KeyboardInterrupt:
 sys.stdout.flush()
 """
 
-    pid, fd = pty.fork()
-    if pid == 0:  # child: fresh interpreter attached to the PTY slave
-        os.execvp(sys.executable, [sys.executable, "-c", child_code])
-        os._exit(0)  # pragma: no cover - exec never returns
+    pid, fd = pty_spawn([sys.executable, "-c", child_code])
 
     out = ""
     try:
