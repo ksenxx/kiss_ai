@@ -931,29 +931,90 @@ inside one continuous task.
 \label{sec:p-cross-model}
 %......................................................................
 
-A second distinctive workflow exploits a feature of the
-\texttt{update\_settings} tool exposed by the KISS Agent: the running
-agent can switch its own underlying LLM mid-session via the
-\texttt{model\_name} setting.
+A second distinctive workflow exploits the \texttt{set\_model} tool
+that the Sorcar Agent registers automatically on every task: the
+running agent can hand its live conversation off to a different LLM
+at any point without restarting the task.  When invoked,
+\texttt{set\_model} constructs the new backend through the same
+factory that built the original model, copies the conversation
+history and the cumulative usage counters into the new backend,
+rebuilds the cached tools schema in the new provider's dialect
+(Anthropic and OpenAI schemas differ in subtle ways), and persists
+the choice so subsequent turns in the same chat reuse it; if the
+requested model is already active the call is a no-op.  Model choice
+is therefore not a session-level setting but a programmable,
+task-level resource that the developer can switch as often as the
+prompt demands.
 The developer uses this to perform \emph{cross-model code review}.
 A task is first executed under the primary model (typically
-\texttt{claude-sonnet}); the developer then issues a follow-up task
-that switches to a different model---most often \texttt{gpt-5.5}---and
-asks the new model to review the prior change, find bugs, and propose
-fixes.
-The loop iterates until the reviewing model reports a clean pass.
+\texttt{claude-opus-4-7}); the developer then asks the same task to
+switch to a different vendor's model---most often
+\texttt{gpt-5.5}---and audit the prior change, find bugs, write
+end-to-end tests reproducing them, and repair them.
+The loop iterates until the reviewing model stops finding defects.
 
-\noindent The canonical phrasing recurs in the log as variants of:
+\paragraph{Three idiomatic patterns.}
+Three uses of \texttt{set\_model} recur throughout the log.
+\emph{(i)~Scout-then-edit:} a cheap fast model (e.g.,
+\texttt{gemini-2.5-flash}) reads the repository, grep-searches for
+relevant call sites, and gathers context, then
+\texttt{set\_model("claude-opus-4-7")} hands off to a stronger
+reasoner for the actual edit.
+\emph{(ii)~Generate-then-review:} a primary model produces a change
+and the agent calls \texttt{set\_model("gpt-5.5")} to switch to a
+second-opinion model from a different vendor that re-reads the diff,
+runs the tests, and verifies the change against the original
+request.
+\emph{(iii)~Cost-aware long-loop:} for an open-ended exploration
+(invariant sweep, AI-discovery driver, repository-optimization
+driver), the agent spends a cheap model on bookkeeping and
+journal-keeping but pays for a frontier model only at decision
+points.
+Pattern~9 is the second of these three, made adversarial by an
+explicit anti-self-review clause.
+
+\paragraph{Canonical phrasings.}
+The log contains three recurring templates, reproduced verbatim from
+the bundled \texttt{INJECTIONS.md} promptlets that the developer
+typically composes into a task with the IDE's promptlet picker.
+
+The simplest one designates an implementer and an independent
+reviewer:
 \begin{quote}\small
-``Switch to \texttt{gpt-5.5} and review the changes from the last
-task.  Find any bugs, regressions, or violations of \texttt{SYSTEM.md}.
-Write integration tests for any defect you find, then fix it.
-Iterate until the suite is clean and you have nothing more to
-report.''
+``Use \texttt{claude-opus-4-7} model for all tasks including
+coding, bug fixing, and test creation.  Use \texttt{gpt-5.5} model
+(not codex) for thorough review and debugging of the work done by
+the other model.  Check if the other model has missed some code or
+has introduced bugs.  No need to check if the models exist.''
+\end{quote}
+
+The iterative variant closes the loop by demanding a failing
+end-to-end test for every defect the reviewer reports:
+\begin{quote}\small
+``Can you review the updates made in the last task using
+\texttt{gpt-5.5} (non codex) and find bugs or missing code.  Then
+write end-to-end tests reproducing the bugs reported by the review,
+fix them, and test them using \texttt{claude-opus-4-7}?  Run all the
+tests in parallel and fix bugs after thoroughly reviewing the fixes
+with \texttt{gpt-5.5} (non codex).  Repeat the process until you
+fail to reproduce the bugs reported by the review done by
+\texttt{gpt-5.5} (non codex).  No need to check if the models
+exist.''
+\end{quote}
+
+A three-model variant introduces a cheap implementer and audits its
+work twice, with two different reviewer models from two different
+vendors:
+\begin{quote}\small
+``Use \texttt{openrouter/z-ai/glm-5.2} model for all tasks including
+coding, bug fixing, and test creation.  ALWAYS use \texttt{gpt-5.5}
+model (not codex) to carefully and thoroughly review and debug the
+work done by \texttt{openrouter/z-ai/glm-5.2} for bugs and missing
+code.  Then use \texttt{claude-opus-4-7} to do the same thing.''
 \end{quote}
 
 \noindent The mechanism is a single agent that swaps its weights
-between tasks, not two agents in a debate: the Chat Sorcar Agent
+mid-task, not two agents in a debate: the Chat Sorcar Agent
 preserves the conversation, the Worktree Sorcar Agent keeps the
 review on the same branch as the original change, and the KISS Agent
 tracks the cumulative cost across models in the sidebar so the
@@ -980,28 +1041,39 @@ falsify.
 Forcing the reviewer to be a different model breaks that loop.
 
 \paragraph{Example.}
-Tasks of the form ``switch to \texttt{gpt-5.5} and audit the worktree
-merge changes from the previous task'' appear repeatedly after major
-refactors of safety-critical code (\eg{} the merge-workflow redesign
-in Section~\ref{sec:iterative-case}).
-A representative session proceeds as follows:
-(i)~the primary model lands a multi-file edit and reports all tests
-green;
-(ii)~the developer issues ``\texttt{set\_model gpt-5.5}; now re-read
-the diff and write a failing test for any bug you can find'';
-(iii)~the reviewer finds, say, an unhandled \texttt{None} return on a
-rarely-taken code path and reproduces it in a new test;
-(iv)~the developer asks the reviewer to fix it, runs the now-larger
-suite, and either accepts the fix or rolls the round back via the
-defensive-revert variant of Pattern~1.
-The loop is typically iterated two or three times before the
-reviewing model stops finding defects.
-The cost of a review round is bounded by the budget tracker, so the
-developer can cap a cross-model audit at a fixed dollar amount, just
-as one caps a CI run at a fixed wall-clock budget.
+A representative two-model session begins with the first canonical
+phrasing pinned at the head of a multi-step task (\eg{} the
+merge-workflow redesign in Section~\ref{sec:iterative-case}).
+(i)~Under \texttt{claude-opus-4-7}, the agent lands a multi-file edit
+and reports all tests green.
+(ii)~The same agent calls \texttt{set\_model("gpt-5.5")}; because the
+conversation transcript and the cumulative usage counters travel
+across the switch, the reviewer model sees every prior tool call,
+every diff, and the current budget without any developer
+re-prompting.
+(iii)~The reviewer re-reads the diff and the surrounding modules and
+writes failing end-to-end tests for every defect it finds---an
+unhandled \texttt{None} return on a rarely-taken code path, a missed
+call site, a regression in a neighbouring file.
+(iv)~The reviewer either fixes the defects itself or hands back to
+\texttt{claude-opus-4-7} via another \texttt{set\_model} call (the
+choice is encoded in the prompt template).
+(v)~Steps~(ii)--(iv) repeat until \texttt{gpt-5.5} stops finding
+defects.
+The three-model variant adds a third leg in which
+\texttt{claude-opus-4-7} re-audits \texttt{gpt-5.5}'s review,
+catching the symmetric failure mode in which the reviewer's training
+distribution leads \emph{it} to miss a bug.
+Because the budget tracker accumulates spend across every
+\texttt{set\_model} call, the developer can cap a cross-model audit
+at a fixed dollar amount, just as one caps a CI run at a fixed
+wall-clock budget; the price of each second opinion is visible in
+real time in the sidebar.
 Pattern~9 thereby brings to a single-developer workflow the
 adversarial-review discipline that distributed teams obtain through
-pull-request review---without requiring a second human reviewer.
+pull-request review---without requiring a second human reviewer, and
+inside a single continuous task rather than across two separate
+sessions.
 
 %----------------------------------------------------------------------
 \section{Iterative Development: A Detailed Case Study}
