@@ -7,7 +7,7 @@ switching, §3 AI-Discovery / GEPA / Repo-Optimization sample tasks,
 Composer 2 61.7%), §5 user-facing features (504 models, 23 third-party
 messaging agents, MCP, Skills, browser, Docker, worktree isolation).
 
----
+______________________________________________________________________
 
 ## Option A — feature spotlight (recommended)
 
@@ -27,57 +27,58 @@ A non-exhaustive list of AI products that customers have already
 mimicked with a single prompt inside the IDE or CLI:
 
 • **Cursor / Claude Code / Codex.** Sorcar already *is* a coding
-  agent — it scores **62.2% on Terminal Bench 2.0** with Claude
-  Opus 4.6, ahead of Claude Code (58%) and Cursor Composer 2 (61.7%),
-  with no benchmark-specific tuning of the prompt or model.
+agent — it scores **62.2% on Terminal Bench 2.0** with Claude
+Opus 4.6, ahead of Claude Code (58%) and Cursor Composer 2 (61.7%),
+with no benchmark-specific tuning of the prompt or model.
 
 • **Lovable / v0 / Bolt / Replit Agent.** "Scaffold a Next.js SaaS
-  with auth, Stripe, and a Supabase backend, run the tests, deploy
-  to Vercel, open the live URL in the browser." The streaming shell,
-  Playwright browser, and worktree-per-task isolation make this a
-  one-prompt workflow.
+with auth, Stripe, and a Supabase backend, run the tests, deploy
+to Vercel, open the live URL in the browser." The streaming shell,
+Playwright browser, and worktree-per-task isolation make this a
+one-prompt workflow.
 
 • **Perplexity / GPT Researcher / Deep Research.** The system prompt's
-  `<web_research>` protocol forces the agent to visit at least 10
-  distinct sources, track them in a counter file, and cite them. Combined
-  with the Playwright browser tool and parallel sub-agents, you get a
-  research engine without writing one.
+`<web_research>` protocol forces the agent to visit at least 10
+distinct sources, track them in a counter file, and cite them. Combined
+with the Playwright browser tool and parallel sub-agents, you get a
+research engine without writing one.
 
 • **Intercom Fin / Decagon / Ada.** Sorcar ships 23 third-party
-  messaging agents (Slack, Gmail, WhatsApp, SMS, phone-control,
-  iMessage, Telegram, Discord, Microsoft Teams, and more) plus MCP
-  connectors for CRMs. A single prompt — "answer support tickets in
-  my brand voice, reading the knowledge base, and escalate edge cases
-  to #cx-escalations" — gets you a Fin-like customer agent without
-  buying one.
+messaging agents (Slack, Gmail, WhatsApp, SMS, phone-control,
+iMessage, Telegram, Discord, Microsoft Teams, and more) plus MCP
+connectors for CRMs. A single prompt — "answer support tickets in
+my brand voice, reading the knowledge base, and escalate edge cases
+to #cx-escalations" — gets you a Fin-like customer agent without
+buying one.
 
 • **Clay / 11x / Artisan (AI SDR).** Browser scout for prospect data,
-  parallel sub-agents for per-account research, a stronger model for
-  personalization, the Gmail/SMS agents for outbound. One prompt.
+parallel sub-agents for per-account research, a stronger model for
+personalization, the Gmail/SMS agents for outbound. One prompt.
 
 • **Granola / Otter / Fireflies (AI notetakers).** `Bash` to capture
-  computer audio, Whisper for transcription, a summarizer sub-agent,
-  Gmail follow-ups, calendar MCP for context. Same product, one prompt.
+computer audio, Whisper for transcription, a summarizer sub-agent,
+Gmail follow-ups, calendar MCP for context. Same product, one prompt.
 
 • **Manus / Genspark / OpenClaw (horizontal task agents).** Sorcar is
-  literally the same primitive: Bash + browser + parallel sub-agents
-  + persistent chat sessions + worktree isolation. Same surface area.
+literally the same primitive: Bash + browser + parallel sub-agents
+
+- persistent chat sessions + worktree isolation. Same surface area.
 
 • **AlphaEvolve / FunSearch / OpenEvolve / ShinkaEvolve (AI Discovery).**
-  Ships as a sample task in `SAMPLE_TASKS.md`: one prompt drives an
-  evolutionary code search with a held-out 20% eval split, explicit
-  numeric stopping rules, anti-reward-hacking clauses, and an HTML
-  report — no harness, no programs database, no orchestrator.
+Ships as a sample task in `SAMPLE_TASKS.md`: one prompt drives an
+evolutionary code search with a held-out 20% eval split, explicit
+numeric stopping rules, anti-reward-hacking clauses, and an HTML
+report — no harness, no programs database, no orchestrator.
 
 • **DSPy / GEPA / PromptBreeder (prompt optimizers).** The shipped
-  GEPA Prompt Optimizer template runs the full Pareto-frontier
-  algorithm against any `ChatSorcarAgent`, reading trajectory events
-  from `sorcar.db` for reflective rewrites. No Python library to wire.
+GEPA Prompt Optimizer template runs the full Pareto-frontier
+algorithm against any `ChatSorcarAgent`, reading trajectory events
+from `sorcar.db` for reflective rewrites. No Python library to wire.
 
 • **KernelBench-style repo optimizers.** The Repository Optimization
-  template runs your benchmark in the background, watches streaming
-  metrics, edits, reverts via worktrees, journals failed ideas, and
-  stops only when your numeric targets are hit.
+template runs your benchmark in the background, watches streaming
+metrics, edits, reverts via worktrees, journals failed ideas, and
+stops only when your numeric targets are hit.
 
 So why can a single prompt actually replace a product team?
 
@@ -96,7 +97,7 @@ Three reasons, all from §2 of the paper:
    protocol. The same prompt also forces an HTML report and an explicit
    numeric stopping rule for open-ended tasks.
 
-2. **On-the-fly model switching with `set_model`.** Every Sorcar Agent
+1. **On-the-fly model switching with `set_model`.** Every Sorcar Agent
    ships a `set_model` tool that swaps the underlying LLM *mid-task*
    without restarting the conversation. The framework copies the
    transcript and budget counters, rebuilds the tool schema in the new
@@ -108,7 +109,7 @@ Three reasons, all from §2 of the paper:
    That is the difference between a brittle single-model agent and one
    that catches its own mistakes.
 
-3. **504 models across 9 provider categories**, plus any
+1. **504 models across 9 provider categories**, plus any
    OpenAI-compatible local endpoint via `--endpoint`/`--header`. Pick
    the right model for every step, not for the whole session.
 
@@ -129,7 +130,7 @@ through any intermediary server.
 
 #AI #LLM #AgenticAI #SoftwareEngineering #DeveloperTools #OpenSource
 
----
+______________________________________________________________________
 
 ## Option B — narrative / "build vs. prompt" framing
 
@@ -147,40 +148,40 @@ A surprising number of products fail that test (i.e. they *can* be
 mimicked), including:
 
 • **AI coding assistants** (Cursor, Claude Code, Codex, Devin, Aider,
-  OpenHands). Sorcar already is one — 62.2% on Terminal Bench 2.0,
-  ahead of Claude Code (58%) and Cursor Composer 2 (61.7%), with no
-  benchmark-specific tuning.
+OpenHands). Sorcar already is one — 62.2% on Terminal Bench 2.0,
+ahead of Claude Code (58%) and Cursor Composer 2 (61.7%), with no
+benchmark-specific tuning.
 
 • **AI app builders** (Lovable, v0, Bolt, Replit Agent). "Scaffold a
-  CRUD SaaS, write the tests, deploy, screenshot the live URL." One
-  prompt.
+CRUD SaaS, write the tests, deploy, screenshot the live URL." One
+prompt.
 
 • **Deep research engines** (Perplexity, GPT Researcher, NotebookLM).
-  The system prompt's 10-source web-research protocol with a tracked
-  counter file plus the Playwright browser plus parallel sub-agents
-  is, in practice, the same product.
+The system prompt's 10-source web-research protocol with a tracked
+counter file plus the Playwright browser plus parallel sub-agents
+is, in practice, the same product.
 
 • **Customer-support agents** (Intercom Fin, Ada, Decagon). The
-  bundled Slack, Gmail, WhatsApp, SMS, iMessage, Telegram, and phone-
-  control agents give the channel coverage; one prompt gives the
-  policy.
+bundled Slack, Gmail, WhatsApp, SMS, iMessage, Telegram, and phone-
+control agents give the channel coverage; one prompt gives the
+policy.
 
 • **AI SDR / outbound tooling** (Clay, 11x, Artisan). A prompt that
-  drives the browser to scout prospects, parallel sub-agents to
-  research, a stronger model for personalization, the Gmail agent for
-  send.
+drives the browser to scout prospects, parallel sub-agents to
+research, a stronger model for personalization, the Gmail agent for
+send.
 
 • **AI notetakers** (Granola, Otter, Fireflies). Capture audio with
-  the streaming Bash tool, transcribe, summarize, email follow-ups.
+the streaming Bash tool, transcribe, summarize, email follow-ups.
 
 • **Horizontal task agents** (Manus, Genspark, OpenClaw, Poke). Same
-  primitives. Same surface area.
+primitives. Same surface area.
 
 • **Evolutionary AI discovery** (AlphaEvolve, FunSearch, OpenEvolve,
-  ShinkaEvolve) and **prompt optimizers** (DSPy, GEPA, PromptBreeder).
-  Already shipped as sample tasks in `SAMPLE_TASKS.md` — single
-  prompts that drive the entire loop, with explicit numeric stopping
-  rules, anti-reward-hacking clauses, and HTML reports.
+ShinkaEvolve) and **prompt optimizers** (DSPy, GEPA, PromptBreeder).
+Already shipped as sample tasks in `SAMPLE_TASKS.md` — single
+prompts that drive the entire loop, with explicit numeric stopping
+rules, anti-reward-hacking clauses, and HTML reports.
 
 Why one prompt is enough comes down to three properties of the agent
 framework, all documented in §2 of the paper:

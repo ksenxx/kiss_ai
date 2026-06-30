@@ -3,7 +3,7 @@
 Two variants. Both are honest summaries of what §2.3 of the paper actually
 claims; nothing is exaggerated beyond the text.
 
----
+______________________________________________________________________
 
 ## Option A — feature spotlight (recommended)
 
@@ -16,7 +16,7 @@ In Section 2.3 of our paper, we describe `set_model` — a tool that every
 Sorcar Agent has built in. When the agent calls it, the framework:
 
 • constructs the new backend (Anthropic / OpenAI / Google / OpenRouter)
-  through the same factory as the original
+through the same factory as the original
 • copies the conversation history and cumulative usage counters into it
 • rebuilds the tools schema in the new provider's dialect
 • persists the choice so the next task in the same chat session reuses it
@@ -29,10 +29,10 @@ This unlocks three patterns we use every day:
 1. **Scout-then-edit** — a cheap, fast model (e.g. gemini-2.5-flash) reads
    the repo and gathers context, then hands off to a stronger reasoner for
    the actual edit.
-2. **Generate-then-review** — a primary model produces a change; a
+1. **Generate-then-review** — a primary model produces a change; a
    second-opinion model re-reads the diff, runs the tests, and verifies the
    change against the original request.
-3. **Cost-aware long-loop** — an open-ended optimization task spends a
+1. **Cost-aware long-loop** — an open-ended optimization task spends a
    cheap model on bookkeeping and journal-keeping, and pays for a frontier
    model only at decision points.
 
@@ -40,9 +40,9 @@ What makes this practical is that none of it requires special APIs or
 modes. Each pattern is a single natural-language instruction you paste into
 the IDE or CLI. For example, straight from our INJECTIONS.md:
 
-  "Use claude-opus-4-7 for all coding, bug fixing, and test creation. Use
-   gpt-5.5 (not codex) for thorough review and debugging. Check if the
-   other model has missed code or introduced bugs."
+"Use claude-opus-4-7 for all coding, bug fixing, and test creation. Use
+gpt-5.5 (not codex) for thorough review and debugging. Check if the
+other model has missed code or introduced bugs."
 
 The rest of the Sorcar Agent tool layer is deliberately small: a shell
 executor with streaming output and cancellation, file Read/Edit/Write,
@@ -57,7 +57,7 @@ verification, budget control — lives in prompts on top of it.
 
 #AI #LLM #AgenticAI #SoftwareEngineering #DeveloperTools
 
----
+______________________________________________________________________
 
 ## Option B — narrative / problem-first
 
@@ -79,7 +79,7 @@ In practice this lets one task look like:
 • gemini-2.5-flash scouts the repository (cheap, fast)
 • claude-opus-4-7 writes the change and the tests (strong reasoner)
 • gpt-5.5 reviews the diff, runs the tests, and flags anything the first
-  model missed (independent second opinion)
+model missed (independent second opinion)
 
 All in one conversation. All under one budget. Triggered by a single
 sentence in the prompt.

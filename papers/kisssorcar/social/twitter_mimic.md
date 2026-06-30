@@ -10,7 +10,7 @@ Grounded in `papers/kisssorcar/kiss_sorcar.tex` (§2 architecture, §3
 AI-Discovery / GEPA / Repo-Optimization templates, §4 Terminal Bench 2.0
 results, §5 features).
 
----
+______________________________________________________________________
 
 ## Option A — short hook (recommended)
 
@@ -19,11 +19,11 @@ Do you actually need to *build* that AI product?
 Or can KISS Sorcar mimic it from one prompt?
 
 — Cursor / Claude Code → it's already a coding agent (62.2% on
-  Terminal Bench 2.0, beats Claude Code 58% and Cursor Composer 2 61.7%)
+Terminal Bench 2.0, beats Claude Code 58% and Cursor Composer 2 61.7%)
 — Lovable / v0 / Bolt → "build me a SaaS habit tracker, ship to Vercel"
 — Perplexity / Deep Research → web_research protocol + Playwright
 — Intercom Fin → Slack/Gmail/WhatsApp/SMS third-party agents +
-  knowledge prompt
+knowledge prompt
 — Clay / 11x → Claygent = browser scout + Gmail sequencer in one prompt
 — Granola → bash + Whisper + Gmail follow-ups
 — AlphaEvolve / FunSearch / DSPy-GEPA → already shipped as sample tasks
@@ -36,7 +36,7 @@ a system prompt that enforces lint, types, end-to-end tests, no AI slop.
 Apache-2.0. Local-first. BYO key.
 github.com/ksenxx/kiss_ai
 
----
+______________________________________________________________________
 
 ## Option B — thread, 5 tweets
 
@@ -85,7 +85,7 @@ All in one task. One conversation. One budget. One sentence in the prompt.
 
 Apache-2.0 · 504 models · BYO key · github.com/ksenxx/kiss_ai
 
----
+______________________________________________________________________
 
 ## Option C — punchier listicle (single tweet)
 
@@ -108,7 +108,7 @@ engineering (lint, types, e2e tests, anti-slop). Apache-2.0.
 
 github.com/ksenxx/kiss_ai
 
----
+______________________________________________________________________
 
 ## Option D — provocateur
 

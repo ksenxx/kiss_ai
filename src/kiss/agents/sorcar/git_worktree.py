@@ -1062,6 +1062,24 @@ class GitWorktreeOps:
         return sha if result.returncode == 0 and sha else None
 
     @staticmethod
+    def _head_matches_baseline_parent(repo: Path, baseline: str) -> bool:
+        """Return True when ``HEAD == baseline^`` in *repo*.
+
+        Used by :meth:`squash_merge_from_baseline` to decide whether
+        ``-X theirs`` is safe — see that method's docstring for the
+        full analysis.  Returns ``False`` on any git error: a
+        conservative default that disables ``-X theirs`` rather than
+        risk silently losing user commits.
+        """
+        head = _git("rev-parse", "HEAD", cwd=repo)
+        parent = _git("rev-parse", f"{baseline}^", cwd=repo)
+        if head.returncode != 0 or parent.returncode != 0:
+            return False
+        head_sha = head.stdout.strip()
+        parent_sha = parent.stdout.strip()
+        return bool(head_sha) and head_sha == parent_sha
+
+    @staticmethod
     def squash_merge_from_baseline(
         repo: Path,
         branch: str,
@@ -1075,6 +1093,38 @@ class GitWorktreeOps:
         as the merge base), so it handles cases where the user's dirty
         state (captured in the baseline) diverges from the committed
         HEAD content.
+
+        **The ``-X theirs`` strategy option is added precisely when —
+        and only when — ``HEAD == baseline^``** (i.e. main has not
+        advanced since worktree creation).  This is the common case
+        and is exactly when the cherry-pick would otherwise fabricate
+        a spurious modify/delete or modify/modify conflict:
+
+        - ``_do_merge`` stashes the user's dirty edits on main before
+          this call, so main HEAD == ``baseline^`` (clean).  But the
+          baseline commit captured the user's dirty state — so for the
+          first cherry-picked commit the 3-way merge sees:
+
+              base   = baseline                  (user dirty edits)
+              ours   = main HEAD == baseline^    (no dirty edits)
+              theirs = branch tip                (dirty edits + agent diff)
+
+        - ``base → ours`` is "revert the dirty edits"; when the agent
+          deleted or modified the same hunk on the branch, plain
+          cherry-pick raises a spurious conflict — even though the
+          agent's actual net diff (``baseline..branch``) and main
+          HEAD's actual content (``baseline^``) are perfectly
+          compatible.
+        - ``-X theirs`` is a hunk-level tie-breaker that resolves these
+          spurious conflicts in favour of the branch tip (= the agent's
+          intent), and is a NO-OP for hunks that already auto-merge.
+
+        When ``HEAD != baseline^`` (the user committed independent
+        work on main between WT creation and merge), ``-X theirs`` is
+        deliberately NOT added: any conflict in that case is a real
+        cross-branch divergence between the user's main commits and
+        the agent's branch tip, and silently letting the branch win
+        would destroy the user's intentional commits.
 
         Falls back to :meth:`squash_merge_branch` when *baseline* is
         ``None`` (legacy worktrees).
@@ -1105,12 +1155,15 @@ class GitWorktreeOps:
         if count == "0":
             return MergeResult.SUCCESS
 
-        result = _git(
-            "cherry-pick",
-            "--no-commit",
-            f"{baseline}..{branch}",
-            cwd=repo,
-        )
+        cherry_pick_args = ["cherry-pick", "--no-commit"]
+        if GitWorktreeOps._head_matches_baseline_parent(repo, baseline):
+            # Resolve hunk-level conflicts caused by the user's dirty
+            # edits living in ``baseline`` but not in ``HEAD`` in favor
+            # of the branch tip — see method docstring for the full
+            # 3-way-merge analysis.  Only safe when HEAD == baseline^.
+            cherry_pick_args.extend(["-X", "theirs"])
+        cherry_pick_args.append(f"{baseline}..{branch}")
+        result = _git(*cherry_pick_args, cwd=repo)
         if result.returncode != 0:
             logger.warning(
                 "squash merge from baseline failed: %s",

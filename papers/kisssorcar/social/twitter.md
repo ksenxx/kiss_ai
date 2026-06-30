@@ -5,7 +5,7 @@ which lets one running task hand off the live conversation to a different LLM
 without restarting it. The posts below are written to be attention-grabbing
 but factually grounded in the paper.
 
----
+______________________________________________________________________
 
 ## Option A — lead with set_model (recommended)
 
@@ -16,15 +16,15 @@ mid-task — same conversation, same history, same budget counters.
 
 Three patterns we actually use:
 
-🛰️  scout-then-edit: cheap model greps the repo, strong model writes the patch
-🔍  generate-then-review: model A codes, model B re-reads the diff + runs tests
-💸  cost-aware long-loop: cheap model does bookkeeping, frontier model only at decisions
+🛰️ scout-then-edit: cheap model greps the repo, strong model writes the patch
+🔍 generate-then-review: model A codes, model B re-reads the diff + runs tests
+💸 cost-aware long-loop: cheap model does bookkeeping, frontier model only at decisions
 
 It's not a special mode. It's a tool the agent calls.
 
 Paper §2.3 → github.com/ksenxx/kiss_ai
 
----
+______________________________________________________________________
 
 ## Option B — punchier, thread-style
 
@@ -37,8 +37,8 @@ different LLM — history, tool schemas, and usage counters all carried over.
 2/ This turns model choice from a session setting into a *programmable
 task-level resource*. You can literally paste this as a prompt:
 
-  "Use claude-opus-4-7 for coding. Use gpt-5.5 to review the work and find
-   bugs the first model missed."
+"Use claude-opus-4-7 for coding. Use gpt-5.5 to review the work and find
+bugs the first model missed."
 
 No API glue. No orchestrator. Just a sentence.
 
@@ -48,7 +48,7 @@ Docker isolation, and `set_model`. That's it. Everything else is prompts.
 
 Paper §2.3: github.com/ksenxx/kiss_ai
 
----
+______________________________________________________________________
 
 ## Option C — short and quotable
 
