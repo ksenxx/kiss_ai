@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any
 from kiss.agents.sorcar.persistence import (
     _load_chat_context_text,
     _load_file_usage,
-    _prefix_match_task,
+    _prefix_match_tasks,
 )
 from kiss.agents.vscode.helpers import (
     clip_autocomplete_suggestion,
@@ -27,8 +27,14 @@ from kiss.agents.vscode.helpers import (
 )
 from kiss.agents.vscode.tricks import (
     current_sentence_partial,
-    prefix_match_trick,
+    prefix_match_tricks,
 )
+
+# Maximum number of fast-complete dropdown items emitted to the
+# webview per ``complete`` request.  Mirrors the @-mention file
+# picker's 20-item cap so the dropdown stays scrollable without UI
+# tuning differences between the two pickers.
+_COMPLETIONS_LIMIT = 20
 
 if TYPE_CHECKING:
     from kiss.agents.vscode.json_printer import JsonPrinter
@@ -120,6 +126,62 @@ class _AutocompleteMixin:
                     best = suffix
         return best
 
+    def _active_file_identifier_matches(
+        self,
+        query: str,
+        snapshot_file: str = "",
+        snapshot_content: str = "",
+        chat_id: str = "",
+    ) -> list[str]:
+        """Return every identifier from the active file/chat context.
+
+        Multi-result counterpart of :meth:`_complete_from_active_file`:
+        scans the active editor buffer (or the on-disk fallback) plus
+        the chat context for single-word identifiers and dot-chained
+        identifiers that prefix-match the trailing token of *query*.
+        The result is sorted longest-first so the dropdown shows the
+        most informative completion at the top.
+
+        Returns the *full identifier strings* (not the suffix) so the
+        caller can build the textarea-replacement text by combining
+        the leading non-token portion of the query with each
+        identifier.
+        """
+        content = snapshot_content
+        if not content:
+            active_path = snapshot_file
+            if active_path:
+                try:
+                    with open(active_path) as f:
+                        content = f.read(50000)
+                except (OSError, UnicodeDecodeError):
+                    content = ""
+        if query and not (
+            query[-1].isalnum() or query[-1] == "_" or query[-1] == "."
+        ):
+            return []
+        m = re.search(r"([\w][\w.]*)$", query)
+        if not m:
+            return []
+        partial = m.group(1)
+        if len(partial) < 2:
+            return []
+        chat_text = _load_chat_context_text(chat_id)
+        if not content and not chat_text:
+            return []
+        combined = content + ("\n" + chat_text if chat_text else "")
+        words = set(re.findall(r"\b[A-Za-z_]\w{2,}\b", combined))
+        chains = set(re.findall(r"\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+\b", combined))
+        matches = [
+            c for c in (words | chains)
+            if c.startswith(partial) and len(c) > len(partial)
+        ]
+        # Longest-first so the dropdown's auto-selected first item is
+        # the most informative completion.  Tie-breaker is
+        # alphabetical for stable ordering across runs.
+        matches.sort(key=lambda c: (-len(c), c))
+        return matches
+
     def _complete_worker_loop(self) -> None:
         """Persistent worker that drains the complete queue.
 
@@ -184,27 +246,128 @@ class _AutocompleteMixin:
                     return
         if not query or len(query) < 2:
             self._emit_ghost("", query, conn_id)
+            self._emit_completions([], query, conn_id)
             return
 
-        match = _prefix_match_task(query)
-        if match:
-            fast = match[len(query):]
-        else:
-            trick = prefix_match_trick(query)
-            if trick:
-                # The trick's prefix matched the *partial* of the
-                # current sentence, not the whole query.  The ghost
-                # suffix is therefore the remainder of the trick past
-                # that partial, so appending it to ``query`` cleanly
-                # completes the in-progress sentence with the trick.
-                partial = current_sentence_partial(query)
-                fast = trick[len(partial):]
-            else:
-                fast = self._complete_from_active_file(
-                    query, snapshot_file, snapshot_content, chat_id,
-                )
+        completions = self._complete_many(
+            query, snapshot_file, snapshot_content, chat_id,
+        )
+        # Inline ghost text: derive the suffix from the top completion
+        # so the legacy overlay keeps working for users who prefer to
+        # accept with Tab without opening the dropdown.  When the top
+        # item is a history-task / trick / identifier line, its full
+        # replacement text starts with ``query`` and the ghost suffix
+        # is the remainder.  ``clip_autocomplete_suggestion`` then
+        # normalises the cursor-to-ghost gap exactly as before.
+        fast = ""
+        if completions:
+            top = completions[0]["text"]
+            if top.startswith(query):
+                fast = top[len(query):]
         fast = clip_autocomplete_suggestion(query, fast)
         self._emit_ghost(fast, query, conn_id)
+        self._emit_completions(completions, query, conn_id)
+
+    def _complete_many(
+        self,
+        query: str,
+        snapshot_file: str = "",
+        snapshot_content: str = "",
+        chat_id: str = "",
+    ) -> list[dict[str, str]]:
+        """Gather every fast-complete candidate for *query*.
+
+        Returns up to :data:`_COMPLETIONS_LIMIT` ranked candidates, each
+        a ``{"type": <kind>, "text": <full replacement>}`` dict.  The
+        ``text`` field is always the *complete replacement* the chat
+        textarea should hold when the candidate is accepted — never
+        just a suffix — so the frontend's accept path is a single
+        assignment regardless of source.
+
+        Sources, in dropdown order:
+
+        * ``task`` — full task strings from ``_prefix_match_tasks``
+          (most recent first).
+        * ``trick`` — INJECTIONS.md trick bodies from
+          ``prefix_match_tricks`` joined onto the head of the current
+          sentence so accepting one preserves any preceding sentences
+          the user already typed.
+        * ``identifier`` — single-word / dot-chained identifiers
+          harvested from the active editor and chat context by
+          :meth:`_active_file_identifier_matches`, joined onto the
+          query's leading non-token portion so accepting one preserves
+          everything the user typed before the trailing partial.
+
+        Duplicates (same ``text``) are removed while preserving the
+        earlier source's ordering so e.g. a history task that
+        happens to equal a trick body never appears twice.
+        """
+        out: list[dict[str, str]] = []
+        seen: set[str] = set()
+
+        def _add(kind: str, text: str) -> None:
+            if not text or text == query:
+                return
+            if text in seen:
+                return
+            seen.add(text)
+            out.append({"type": kind, "text": text})
+
+        for task in _prefix_match_tasks(query, limit=_COMPLETIONS_LIMIT):
+            _add("task", task)
+            if len(out) >= _COMPLETIONS_LIMIT:
+                return out
+
+        partial = current_sentence_partial(query)
+        head = query[: len(query) - len(partial)] if partial else query
+        for trick in prefix_match_tricks(query):
+            _add("trick", head + trick)
+            if len(out) >= _COMPLETIONS_LIMIT:
+                return out
+
+        # The trailing-token head is computed against the regex used
+        # by :meth:`_active_file_identifier_matches` so the
+        # concatenation is a clean splice — the slice ends right
+        # before the matched partial.
+        m = re.search(r"([\w][\w.]*)$", query)
+        if m:
+            token = m.group(1)
+            token_head = query[: len(query) - len(token)]
+            for ident in self._active_file_identifier_matches(
+                query, snapshot_file, snapshot_content, chat_id,
+            ):
+                _add("identifier", token_head + ident)
+                if len(out) >= _COMPLETIONS_LIMIT:
+                    return out
+        return out
+
+    def _emit_completions(
+        self,
+        completions: list[dict[str, str]],
+        query: str,
+        conn_id: str,
+    ) -> None:
+        """Emit one ``completions`` event for the fast-complete picker.
+
+        Mirrors :meth:`_emit_ghost`'s connection scoping (the
+        suggestion is delivered only to the typing VS Code window
+        when ``conn_id`` is non-empty) and echoes ``query`` so the
+        webview can drop stale replies for an input the user has
+        since edited.
+
+        Args:
+            completions: List of ``{"type", "text"}`` items.
+            query: The query string this list answers.
+            conn_id: Requesting connection id (``""`` for direct callers).
+        """
+        event: dict[str, Any] = {
+            "type": "completions",
+            "completions": completions,
+            "query": query,
+        }
+        if conn_id:
+            event["connId"] = conn_id
+        self.printer.broadcast(event)
 
     def _emit_ghost(self, suggestion: str, query: str, conn_id: str) -> None:
         """Emit one ``ghost`` autocomplete event.
