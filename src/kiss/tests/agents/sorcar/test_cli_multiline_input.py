@@ -12,9 +12,10 @@ horizontally off the panel.
 These tests drive a real :class:`PromptSession` through a pipe input
 (the same pattern as :mod:`test_at_mention_picker`) and assert that:
 
-* Alt+Enter (Esc+Enter), Ctrl+J, and the Shift+Enter CSI-u /
-  modifyOtherKeys escape sequences all insert a real ``\\n`` into the
-  buffer instead of submitting the line.
+* Alt+Enter (Esc+Enter byte pair *or* the modifyOtherKeys / CSI-u
+  combined sequences), Ctrl+J, Ctrl+Enter, Ctrl+Shift+Enter, and
+  Shift+Enter (CSI-u *and* xterm modifyOtherKeys) all insert a real
+  ``\\n`` into the buffer instead of submitting the line.
 * A bare ``Enter`` still submits.
 * The :class:`PromptSession` is configured with ``multiline=True`` and
   ``wrap_lines=True`` so long lines wrap inside the framed panel.
@@ -99,21 +100,71 @@ def test_shift_enter_csi_u_inserts_newline(tmp_path: Path) -> None:
     assert line == "first\nsecond"
 
 
-def test_shift_enter_modify_other_keys_is_treated_as_plain_enter(
+def test_shift_enter_modify_other_keys_inserts_newline(
     tmp_path: Path,
 ) -> None:
-    """xterm modifyOtherKeys Shift+Enter (``ESC[27;2;13~``) submits.
+    """xterm modifyOtherKeys Shift+Enter (``ESC[27;2;13~``) inserts ``\\n``.
 
-    Documents the prompt_toolkit limitation: that sequence is
-    pre-mapped to :data:`Keys.ControlM` inside
+    Reproduces the user-reported bug: on iTerm2 / macOS Terminal.app /
+    the VS Code integrated terminal, Shift+Enter is delivered as the
+    modifyOtherKeys escape sequence ``ESC[27;2;13~``.  prompt_toolkit
+    pre-maps that sequence to :data:`Keys.ControlM` (plain Enter) inside
     :data:`prompt_toolkit.input.ansi_escape_sequences.ANSI_SEQUENCES`
-    *before* any key bindings run, so on xterm modifyOtherKeys
-    terminals Shift+Enter is indistinguishable from plain Enter and
-    therefore submits.  Users on those terminals must use Alt+Enter
-    or Ctrl+J to insert a newline.
+    *before* any key bindings run, so without the unmap-on-import fix
+    in :mod:`cli_prompt` Shift+Enter would submit the line.  The fix
+    removes the entry from ANSI_SEQUENCES so the raw sequence reaches
+    our tuple key-binding, which inserts a real newline.
     """
-    line = _drive(tmp_path, "top\x00\x1b[27;2;13~")
-    assert line == "top"
+    line = _drive(tmp_path, "top\x00\x1b[27;2;13~bottom\r")
+    assert line == "top\nbottom"
+
+
+def test_alt_enter_modify_other_keys_inserts_newline(
+    tmp_path: Path,
+) -> None:
+    """xterm modifyOtherKeys Alt+Enter (``ESC[27;3;13~``) inserts ``\\n``.
+
+    Some terminals (notably iTerm2 with "Report modifiers" turned on,
+    or VS Code's integrated terminal in some configurations) deliver
+    Option/Alt+Enter as a single combined modifyOtherKeys sequence
+    instead of the portable ``ESC \\r`` byte pair, so the binding for
+    that sequence must also insert a newline.
+    """
+    line = _drive(tmp_path, "one\x00\x1b[27;3;13~two\r")
+    assert line == "one\ntwo"
+
+
+def test_alt_enter_csi_u_inserts_newline(tmp_path: Path) -> None:
+    """kitty/foot/WezTerm CSI-u Alt+Enter (``ESC[13;3u``) inserts a newline."""
+    line = _drive(tmp_path, "a\x00\x1b[13;3ub\r")
+    assert line == "a\nb"
+
+
+def test_ctrl_enter_modify_other_keys_inserts_newline(
+    tmp_path: Path,
+) -> None:
+    """xterm modifyOtherKeys Ctrl+Enter (``ESC[27;5;13~``) inserts ``\\n``.
+
+    Ctrl+Enter is delivered as ``ESC[27;5;13~`` under modifyOtherKeys;
+    prompt_toolkit also pre-maps that to :data:`Keys.ControlM`, so the
+    same unmap-on-import fix and tuple key-binding apply.
+    """
+    line = _drive(tmp_path, "x\x00\x1b[27;5;13~y\r")
+    assert line == "x\ny"
+
+
+def test_ctrl_shift_enter_modify_other_keys_inserts_newline(
+    tmp_path: Path,
+) -> None:
+    """modifyOtherKeys Ctrl+Shift+Enter (``ESC[27;6;13~``) inserts ``\\n``."""
+    line = _drive(tmp_path, "p\x00\x1b[27;6;13~q\r")
+    assert line == "p\nq"
+
+
+def test_ctrl_enter_csi_u_inserts_newline(tmp_path: Path) -> None:
+    """CSI-u Ctrl+Enter (``ESC[13;5u``) inserts a newline."""
+    line = _drive(tmp_path, "u\x00\x1b[13;5uv\r")
+    assert line == "u\nv"
 
 
 def test_plain_enter_still_submits_single_line_input(tmp_path: Path) -> None:
@@ -129,6 +180,65 @@ def test_three_line_input_via_alt_enter(tmp_path: Path) -> None:
         "one\x00\x1b\rtwo\x1b\rthree\r",
     )
     assert line == "one\ntwo\nthree"
+
+
+def test_plain_enter_submits_multiline_buffer_with_embedded_newlines(
+    tmp_path: Path,
+) -> None:
+    """Plain Enter on a buffer that already contains ``\\n`` still submits.
+
+    After Alt+Enter / Shift+Enter / Ctrl+Enter inserted a real newline
+    into the buffer, the next plain ``Enter`` must submit the *whole*
+    multi-line buffer (with the embedded ``\\n`` preserved) rather than
+    re-inserting another newline.  This guards against an accidental
+    "Enter inserts newline" override (e.g. a future
+    ``multiline=True`` default change in prompt_toolkit) that would
+    leave the user with no way to ever submit a multi-line task.
+    """
+    line = _drive(tmp_path, "foo\x00\x1b[27;2;13~bar\x1b[27;5;13~baz\r")
+    assert line == "foo\nbar\nbaz"
+
+
+def test_modify_other_keys_enter_at_end_of_buffer_then_submit(
+    tmp_path: Path,
+) -> None:
+    """Modifier+Enter immediately followed by plain ``\\r`` returns ``foo\\n``.
+
+    Catches a subtle regression where the tuple binding for the
+    modifyOtherKeys sequence might consume the trailing ``\\r`` as part
+    of the same key event (or fail to fire because no follow-up byte
+    arrives).  The buffer ends in a trailing newline and is then
+    submitted by the bare Enter.
+    """
+    line = _drive(tmp_path, "foo\x00\x1b[27;5;13~\r")
+    assert line == "foo\n"
+
+
+def test_unmap_enter_aliases_is_idempotent(tmp_path: Path) -> None:
+    """Re-running ``_unmap_enter_aliases`` does not crash or change behaviour.
+
+    The unmap fires once at import time; a second call (e.g. via
+    :func:`importlib.reload` or an explicit invocation) must be a
+    no-op even though the keys are already gone.  The follow-up
+    multi-line drive proves the bindings still work after the second
+    unmap.
+    """
+    from prompt_toolkit.input.ansi_escape_sequences import (  # noqa: PLC0415
+        ANSI_SEQUENCES,
+    )
+
+    from kiss.agents.sorcar.cli_prompt import (  # noqa: PLC0415
+        _MODIFY_OTHER_KEYS_ENTER,
+        _unmap_enter_aliases,
+    )
+
+    _unmap_enter_aliases()
+    _unmap_enter_aliases()
+    for seq in _MODIFY_OTHER_KEYS_ENTER:
+        assert seq not in ANSI_SEQUENCES, seq
+
+    line = _drive(tmp_path, "alpha\x00\x1b[27;2;13~omega\r")
+    assert line == "alpha\nomega"
 
 
 def test_prompt_session_is_multiline(tmp_path: Path) -> None:
