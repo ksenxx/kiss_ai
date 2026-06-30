@@ -32,7 +32,10 @@ from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.layout.containers import Window
+from prompt_toolkit.layout.dimension import Dimension
 
+from kiss.agents.sorcar.cli_panel import MIN_BODY_ROWS as _MIN_BODY_ROWS
 from kiss.agents.sorcar.persistence import _load_file_usage
 from kiss.agents.vscode.helpers import rank_file_suggestions
 
@@ -355,6 +358,43 @@ def _migrate_readline_history(history_path: Path, ptk_path: Path) -> None:
         logger.debug("readline history migration failed", exc_info=True)
 
 
+def _enforce_min_input_height(
+    session: PromptSession[str], min_rows: int,
+) -> None:
+    """Pin the prompt_toolkit input window to at least *min_rows* rows.
+
+    :class:`PromptSession` builds its layout lazily and the input
+    :class:`~prompt_toolkit.layout.containers.Window` (wrapping the
+    default :class:`~prompt_toolkit.buffer.Buffer`'s control) defaults
+    to ``Dimension()`` — auto-sizing based on the buffer's line count.
+    A one-line buffer therefore paints a one-row input area, which
+    leaves the framed input dialog drawn around the prompt visually
+    cramped (the user only sees one line of typing space even though
+    the box's purpose is multi-line task input).
+
+    Walk the layout, find the Window whose control's buffer is the
+    session's default buffer, and replace its ``height`` with a
+    :class:`Dimension` whose ``min`` is *min_rows* so prompt_toolkit
+    reserves at least *min_rows* terminal rows for the input area on
+    every render — matching the steering box's
+    :data:`~kiss.agents.sorcar.cli_panel.MIN_BODY_ROWS` floor.
+    Buffers with more lines still grow the area dynamically because
+    ``Dimension(min=...)`` leaves ``preferred`` / ``max`` unconstrained.
+
+    Args:
+        session: The freshly constructed :class:`PromptSession`.
+        min_rows: Floor for the input area's row count.
+    """
+    target = session.default_buffer
+    for container in session.layout.walk():
+        if not isinstance(container, Window):
+            continue
+        control = container.content
+        if getattr(control, "buffer", None) is target:
+            container.height = Dimension(min=min_rows)
+            return
+
+
 class PtkLineReader:
     """Reads REPL input lines with a live completion dropdown.
 
@@ -400,6 +440,7 @@ class PtkLineReader:
             # to scroll Up/Down to discover the rest).
             reserve_space_for_menu=16,
         )
+        _enforce_min_input_height(self.session, _MIN_BODY_ROWS)
 
     def read(self, prompt: str) -> str:
         """Read one line, rendering *prompt* (which may contain ANSI).
