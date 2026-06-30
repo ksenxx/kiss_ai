@@ -7615,17 +7615,19 @@
    * is responsible for the staleness guard (query == inp.value).
    */
   function renderCompletions(data) {
+    if (getAtCtx()) {
+      // The ``@``-mention file picker owns ``#autocomplete`` in this
+      // mode; never let completions clobber it — not even an empty
+      // reply, which would otherwise call ``hideAC()`` and close the
+      // file picker that arrived between request and reply.
+      return;
+    }
     if (!data || !data.length) {
       hideAC();
       return;
     }
     if (isRunning) {
       hideAC();
-      return;
-    }
-    if (getAtCtx()) {
-      // The ``@``-mention file picker owns ``#autocomplete`` in this
-      // mode; never let completions clobber it.
       return;
     }
     if (!inp.value) {
