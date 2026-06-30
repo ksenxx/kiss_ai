@@ -901,6 +901,16 @@ class _MergeFlowMixin:
                 if busy:
                     return busy
             tab.is_merging = True
+        # "Lost slides" fix: the user has now explicitly chosen to
+        # merge or discard the worktree branch, so the post-task
+        # ``_pending_review`` flag (set by ``_run_task_inner`` when
+        # the task ended in failure / user-Stop) no longer applies —
+        # the subsequent tab teardown must use the regular
+        # ``_release_worktree`` path (a no-op when the action below
+        # already cleared ``_wt``) instead of the preserve-for-review
+        # path.  Cleared OUTSIDE ``_state_lock`` because it only
+        # guards lifecycle flags on the tab, not agent attributes.
+        wt._pending_review = False
         try:
             with repo_lock(repo_root):
                 if action == "merge":

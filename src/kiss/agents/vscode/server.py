@@ -1082,10 +1082,23 @@ class VSCodeServer(
             # ended), there is nothing to release: each task creates
             # a fresh worktree and the agent is the sole authority on
             # its state.
+            #
+            # "Lost slides" bug fix: when the last task ended in
+            # failure / user-Stop (``_pending_review=True``) and the
+            # user has not yet explicitly chosen Merge or Discard,
+            # commit the partial work onto the worktree branch but
+            # do NOT silently squash-merge it.  Closing a chat tab
+            # while a stopped task's partial work is unreviewed must
+            # not be allowed to overwrite the user's original
+            # branch.  The branch survives in ``git branch`` for
+            # manual recovery via ``git checkout <branch>``.
             try:
                 wt_agent = self._ensure_wt_agent(tab)
                 if wt_agent is not None and wt_agent._wt_pending:
-                    wt_agent._release_worktree()
+                    if getattr(wt_agent, "_pending_review", False):
+                        wt_agent._preserve_pending_worktree_for_review()
+                    else:
+                        wt_agent._release_worktree()
             except Exception:
                 logger.debug("Worktree release on tab close failed", exc_info=True)
         # ``cleanup_tab`` removes *tab_id* from every task subscriber
