@@ -1024,8 +1024,10 @@ async function restartKissWebDaemon(
   // on a fingerprint change): the new code will be picked up on the
   // next activation once the running task has finished.
   let activeTasks:
-    | {ok: true; count: number; tabs: string[]}
-    | {ok: false; reason: string} = {ok: false, reason: 'not-probed'};
+    {ok: true; count: number; tabs: string[]} | {ok: false; reason: string} = {
+    ok: false,
+    reason: 'not-probed',
+  };
   if (health !== 'dead' && sockExists) {
     activeTasks = await daemonHasActiveTasks(sockPath, 1500);
   }
