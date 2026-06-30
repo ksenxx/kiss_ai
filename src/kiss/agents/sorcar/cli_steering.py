@@ -64,6 +64,9 @@ from kiss.agents.sorcar.cli_panel import (
     panel_cols,
     panel_top,
 )
+from kiss.agents.sorcar.cli_panel import (
+    MIN_BODY_ROWS as _MIN_BODY_ROWS,
+)
 from kiss.agents.sorcar.persistence import _allocate_chat_id
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 
@@ -81,10 +84,13 @@ except ImportError:  # pragma: no cover - exercised only on Windows
     _HAVE_TERMIOS = False
 
 # Minimum height (rows) reserved at the bottom of the screen for the
-# input box: 1 top-border row + 1 body row + 1 bottom-border row.  The
-# *effective* height grows when the edit buffer contains embedded
-# newlines (Shift+Enter / multi-line paste) — see :func:`_box_h_for`.
-_BOX_H = 3
+# input box: 1 top-border row + :data:`~kiss.agents.sorcar.cli_panel
+# .MIN_BODY_ROWS` body rows + 1 bottom-border row.  The *effective*
+# height grows when the edit buffer contains embedded newlines
+# (Shift+Enter / multi-line paste) — see :func:`_box_h_for`.  The
+# minimum body-row count is shared with :func:`panel_body` so the
+# rendered frame and the reserved scroll-region area always agree.
+_BOX_H = 2 + _MIN_BODY_ROWS
 # Minimum terminal height for which the anchored box is worthwhile.
 _MIN_ROWS = _BOX_H + 3
 
@@ -92,20 +98,22 @@ _MIN_ROWS = _BOX_H + 3
 def _box_body_h(buf: str) -> int:
     """Return the number of body rows required to show *buf*.
 
-    An empty buffer still occupies one body row (the placeholder).  A
-    buffer containing embedded ``\\n`` characters (from Shift+Enter,
-    bracketed paste, or programmatic assignment) needs one body row per
-    line so all lines are visible at once.
+    Always at least :data:`_MIN_BODY_ROWS` (3) so the framed input
+    dialog keeps a stable "text area" look — the user sees three lines
+    of vertical space whether the buffer is empty, a single line, or
+    holds embedded ``\\n`` characters.  Above the floor the count
+    grows with the buffer (one body row per ``\\n``) so multi-line
+    input (Shift+Enter / bracketed paste / programmatic assignment) is
+    fully visible.
 
     Args:
         buf: The current edit buffer.
 
     Returns:
-        The number of body rows (``>= 1``).
+        The number of body rows (``>= _MIN_BODY_ROWS``).
     """
-    if not buf:
-        return 1
-    return buf.count("\n") + 1
+    lines = 1 if not buf else buf.count("\n") + 1
+    return max(_MIN_BODY_ROWS, lines)
 
 
 def _box_h_for(buf: str) -> int:

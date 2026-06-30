@@ -177,8 +177,18 @@ def clip_buf(buf: str, cols: int) -> str:
 # block.
 _CONT_INDENT = "  "
 
+# Minimum number of body rows the input panel always shows.  The framed
+# dialog reserves three lines of vertical space (chevron / placeholder
+# row + two padding rows) even when the buffer is empty or a single
+# line, so the user has an obvious 3-row "text area" to type into.
+# Above three lines the panel dynamically grows with the buffer (see
+# :func:`panel_body`).
+MIN_BODY_ROWS = 3
 
-def panel_body(buf: str, cols: int) -> tuple[list[str], bool]:
+
+def panel_body(
+    buf: str, cols: int, *, min_rows: int = MIN_BODY_ROWS,
+) -> tuple[list[str], bool]:
     """Return the body row(s) for *buf*, one entry per buffer line.
 
     The first row opens with the :data:`PROMPT_MARKER` chevron — the
@@ -189,6 +199,13 @@ def panel_body(buf: str, cols: int) -> tuple[list[str], bool]:
     the steering box can paint a contiguous rectangle whose height
     grows with the number of lines in *buf*.
 
+    The returned list always contains at least *min_rows* entries
+    (default :data:`MIN_BODY_ROWS` = 3).  Buffers with fewer lines are
+    padded with all-blank rows below the content so the framed dialog
+    keeps a stable three-row "text area" look matching the user-visible
+    contract; buffers with more lines grow the list one row per
+    embedded ``\\n`` (dynamic adjustment upward).
+
     No caret glyph is appended: callers park the real (blinking) terminal
     cursor right after the typed text on the appropriate row (see
     :func:`body_cursor_col`), so the steering box shows the same blinking
@@ -197,26 +214,37 @@ def panel_body(buf: str, cols: int) -> tuple[list[str], bool]:
     Args:
         buf: The current edit buffer (empty shows the placeholder).
         cols: Total panel width in columns.
+        min_rows: Minimum number of body rows to return.  Defaults to
+            :data:`MIN_BODY_ROWS`; callers that want the legacy
+            single-row behaviour can pass ``min_rows=1``.
 
     Returns:
         A ``(rows, is_placeholder)`` tuple where *rows* is a list of
-        body strings (one per buffer line, each padded to ``cols - 4``)
-        and *is_placeholder* is ``True`` when the empty-buffer
-        placeholder is shown on the single row (so callers can dim the
-        text after the chevron).
+        body strings (one per buffer line, each padded to ``cols - 4``,
+        with trailing blank rows up to *min_rows*) and *is_placeholder*
+        is ``True`` when the empty-buffer placeholder is shown on the
+        first row (so callers can dim the text after the chevron).
     """
     inner_w = cols - 4  # room between "│ " and " │"
+    rows: list[str]
+    is_placeholder = False
     if not buf:
-        return [_clip_pad(PROMPT_MARKER + PLACEHOLDER, inner_w)], True
-    lines = buf.split("\n")
-    rows: list[str] = []
-    for i, line in enumerate(lines):
-        prefix = PROMPT_MARKER if i == 0 else _CONT_INDENT
-        # ``clip_buf`` tail-clips a single buffer line so a long line
-        # always shows the caret end.  After splitting on ``\n`` the
-        # ``\n`` → ``⏎`` substitution in ``clip_buf`` never fires.
-        rows.append(_clip_pad(prefix + clip_buf(line, cols), inner_w))
-    return rows, False
+        rows = [_clip_pad(PROMPT_MARKER + PLACEHOLDER, inner_w)]
+        is_placeholder = True
+    else:
+        lines = buf.split("\n")
+        rows = []
+        for i, line in enumerate(lines):
+            prefix = PROMPT_MARKER if i == 0 else _CONT_INDENT
+            # ``clip_buf`` tail-clips a single buffer line so a long
+            # line always shows the caret end.  After splitting on
+            # ``\n`` the ``\n`` → ``⏎`` substitution in ``clip_buf``
+            # never fires.
+            rows.append(_clip_pad(prefix + clip_buf(line, cols), inner_w))
+    blank = " " * inner_w
+    while len(rows) < max(min_rows, 1):
+        rows.append(blank)
+    return rows, is_placeholder
 
 
 def menu_row(text: str, selected: bool, cols: int) -> str:
