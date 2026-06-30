@@ -161,6 +161,16 @@ timeout = 0
 # is not loaded, so these addopts always parse cleanly. Prefer `--no-cov` to turn off
 # coverage while keeping the plugin loaded.
 addopts = "--cov=src/kiss --cov-branch -m 'not slow'"
+# Silence non-actionable third-party DeprecationWarnings that the test
+# session cannot fix locally:
+#   * ``google.genai`` re-exports ``typing._UnionGenericAlias`` (slated
+#     for removal in Python 3.17). We pin ``google-genai>=0.30.0`` and
+#     upstream tracks the migration there — no local code uses the
+#     private alias, so the warning is pure noise surfaced by importing
+#     the SDK.
+filterwarnings = [
+    "ignore:'_UnionGenericAlias' is deprecated.*:DeprecationWarning:google.genai.types",
+]
 
 [tool.coverage.run]
 branch = true

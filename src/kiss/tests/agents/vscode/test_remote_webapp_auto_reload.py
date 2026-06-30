@@ -151,11 +151,15 @@ def _build_test_page() -> str:
       ws.readyState = 3;
       if (ws.onclose) ws.onclose({{}});
     }};
-    // Run the shim's deferred reconnect (setTimeout(connect, 3000))
-    // immediately so the test does not have to actually wait 3s.
+    // Run the shim's deferred reconnect immediately so the test
+    // does not have to actually wait for the backoff.  The shim now
+    // uses an exponential backoff starting at 250ms (was a fixed
+    // 3000ms), so we intercept any setTimeout whose delay falls in
+    // the range used by the reconnect path.  Delays < 100ms (e.g.
+    // the 0ms auth-modal focus call) are left alone.
     var _origSetTimeout = window.setTimeout;
     window.setTimeout = function(fn, ms) {{
-      if (typeof fn === 'function' && ms === 3000) {{
+      if (typeof fn === 'function' && ms >= 100 && ms <= 5000) {{
         // Run synchronously, so __openSocket is replaced before we
         // return control to the test.
         try {{ fn(); }} catch (e) {{}}
