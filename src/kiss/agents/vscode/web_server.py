@@ -5341,6 +5341,116 @@ class RemoteAccessServer:
         self._tunnel_rate_limited = False
         self._active_url = None
 
+    def _detach_tunnel(self) -> None:
+        """Reset tunnel bookkeeping without killing ``cloudflared``.
+
+        Used by :meth:`start`'s shutdown ``finally`` so that a
+        ``kiss-web`` exit (SIGTERM / KeyboardInterrupt / launchd
+        restart / VS Code extension's ``pkill kiss-web``) does **not**
+        take the public Cloudflare tunnel down with it.  The spawned
+        ``cloudflared`` was launched with ``start_new_session=True``
+        and its pid + metrics port were persisted to
+        ``~/.kiss/cloudflared.pid`` by :meth:`_spawn_cloudflared`, so
+        the next ``kiss-web`` instance re-adopts it via
+        :func:`_try_adopt_existing_cloudflared` and keeps serving on
+        the same ``*.trycloudflare.com`` (or named-tunnel) hostname.
+
+        This is the difference between :meth:`_stop_tunnel` (kills
+        the spawned ``cloudflared`` immediately — used by the
+        watchdog when the tunnel is unhealthy and must be replaced)
+        and :meth:`_detach_tunnel` (leaves the spawned ``cloudflared``
+        running — used on graceful kiss-web shutdown so the public
+        URL survives the restart).
+
+        Critical detail: ``cloudflared`` was spawned with
+        ``stderr=PIPE``.  When this ``kiss-web`` process exits, the
+        pipe's read end (held only by this process) is closed by the
+        kernel; ``cloudflared``'s next stderr write then returns
+        ``EPIPE``, which the Go runtime turns into a fatal
+        ``SIGPIPE`` for writes to fd 1/2.  Without a workaround, the
+        spawned ``cloudflared`` would therefore die within seconds of
+        this ``kiss-web`` exit — defeating the whole adoption design.
+        To prevent that, ``_detach_tunnel`` hands the pipe's read end
+        off to a tiny detached ``cat`` shim (its own session via
+        ``start_new_session=True``) that drains the pipe forever.
+        The shim survives this ``kiss-web``'s exit, so the read end
+        stays open and ``cloudflared`` keeps writing happily until
+        the next ``kiss-web`` adopts it or it is intentionally
+        replaced.
+
+        Like :meth:`_stop_tunnel`, this method does not delete
+        ``~/.kiss/remote-url.json``: a sibling kiss-web that has
+        already taken over may have overwritten it, and removing it
+        would briefly blank the VS Code sidebar URL.
+        """
+        proc = self._tunnel_proc
+        if proc is not None and proc.poll() is None:
+            self._spawn_stderr_drain_shim(proc)
+        self._tunnel_proc = None
+        self._tunnel_adopted_pid = None
+        self._tunnel_metrics_port = None
+        self._tunnel_started_at = None
+        self._tunnel_unhealthy_ticks = 0
+        self._tunnel_failure_count = 0
+        self._tunnel_next_retry = 0.0
+        self._tunnel_rate_limited = False
+        self._active_url = None
+
+    @staticmethod
+    def _spawn_stderr_drain_shim(
+        proc: subprocess.Popen[str],
+    ) -> subprocess.Popen[bytes] | None:
+        """Hand off *proc*'s stderr pipe to a detached drain shim.
+
+        Spawns ``cat`` with ``proc.stderr`` as its stdin and detaches
+        it into its own session so it survives the current
+        ``kiss-web`` exit.  The shim continuously reads (and
+        discards) every byte ``cloudflared`` writes to its stderr,
+        keeping the pipe's read end open and preventing the
+        ``SIGPIPE``-on-next-write that would otherwise kill the
+        adopted ``cloudflared`` shortly after this ``kiss-web``
+        exits.  When ``cloudflared`` itself eventually dies, the
+        pipe closes from the write side and ``cat`` exits cleanly.
+
+        Best-effort: a ``cat`` spawn failure (missing binary, EMFILE,
+        permission error) is logged at DEBUG and otherwise ignored.
+        The worst case is a return to the pre-fix behaviour for that
+        particular shutdown — ``cloudflared`` may die from
+        ``SIGPIPE`` and the next ``kiss-web`` will mint a fresh
+        public URL — which is still no worse than no detach at all.
+
+        Args:
+            proc: The ``cloudflared`` subprocess; must have been
+                started with ``stderr=PIPE``.
+
+        Returns:
+            The detached shim's ``Popen`` handle on success, or
+            ``None`` if no stderr pipe was available or the shim
+            spawn failed.
+        """
+        stderr = proc.stderr
+        if stderr is None:
+            return None
+        try:
+            shim = subprocess.Popen(
+                ["cat"],
+                stdin=stderr.fileno(),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                # New session so the shim survives this kiss-web's
+                # exit *and* is not killed by a process-group signal
+                # sent to kiss-web (e.g. ``pkill -g``).
+                start_new_session=True,
+                close_fds=True,
+            )
+        except (OSError, ValueError):
+            logger.debug(
+                "Failed to spawn stderr drain shim for cloudflared",
+                exc_info=True,
+            )
+            return None
+        return shim
+
 
     async def _setup_server(self) -> None:
         """Shared setup for both blocking and async server start.
@@ -5791,7 +5901,10 @@ class RemoteAccessServer:
             # fix eliminates (see tasks 2968 in the bundled sorcar.db).
             self._stop_active_agent_tasks()
             logger.info("Server stopped: pid=%d", pid)
-            self._stop_tunnel()
+            # Leave the spawned ``cloudflared`` running so the next
+            # ``kiss-web`` adopts it (preserving the public tunnel
+            # URL across restarts) — see :meth:`_detach_tunnel`.
+            self._detach_tunnel()
 
     async def start_async(self) -> None:
         """Start the server asynchronously (for use in existing event loops).
