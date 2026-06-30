@@ -2327,6 +2327,87 @@ _WS_SHIM_JS = r"""
   // user is left staring at the "KISS Sorcar Server is starting
   // ..." overlay (or stale UI) until they manually refresh.
   var _hadAuthThenClosed = false;
+  // Reconnect backoff attempt count — reset to 0 after a successful
+  // ``auth_ok`` so a fresh disconnect tries again almost immediately.
+  var _reconnectAttempt = 0;
+  // Pending reconnect timer id, used so visibilitychange / pageshow /
+  // online wake-ups can short-circuit the scheduled delay.
+  var _reconnectTimer = null;
+
+  // ``sessionStorage`` persists across the ``window.location.reload()``
+  // performed inside the ``_hadAuthThenClosed`` branch of ``auth_ok``,
+  // which lets the freshly-loaded page detect "this load is actually
+  // a reconnect from a previously-authenticated session" and label the
+  // loading overlay accordingly.
+  var _RECONNECT_FLAG = 'sorcar-reconnect-pending';
+
+  function _readReconnectingFlag() {
+    try { return sessionStorage.getItem(_RECONNECT_FLAG) === '1'; }
+    catch (e) { return false; }
+  }
+  function _setReconnectingFlag(on) {
+    try {
+      if (on) sessionStorage.setItem(_RECONNECT_FLAG, '1');
+      else sessionStorage.removeItem(_RECONNECT_FLAG);
+    } catch (e) {}
+  }
+
+  /**
+   * Replace the overlay text so the user sees an accurate status.
+   *
+   * On a brand-new tab the message is "KISS Sorcar Server is starting
+   * ..." because the server may legitimately not be up yet.  Once we
+   * have proven the server is reachable (a previous ``auth_ok`` came
+   * through, then the socket later closed) every subsequent display of
+   * the overlay represents a RECONNECT, not a cold start — say so.
+   */
+  function _updateLoadingMsg(reconnecting) {
+    var msg = document.getElementById('kiss-server-loading-msg');
+    if (!msg) return;
+    msg.textContent = reconnecting
+      ? 'Reconnecting to KISS Sorcar Server ...'
+      : 'KISS Sorcar Server is starting ...';
+  }
+
+  // Apply the reconnect label immediately on script start when the
+  // sessionStorage flag survives from the prior page instance.  Without
+  // this the user would briefly see "Server is starting ..." after
+  // backgrounding Safari and returning, even though we know the server
+  // is up and we are merely re-establishing the WebSocket.
+  if (_readReconnectingFlag()) {
+    _updateLoadingMsg(true);
+  }
+
+  function _scheduleReconnect() {
+    if (_reconnectTimer !== null) return;
+    // Aggressive backoff: 250ms, 500ms, 1s, 2s, 4s, capped at 5s.
+    // The old 3000ms fixed delay made reconnects feel sluggish on
+    // mobile Safari, which already pauses JS in backgrounded tabs.
+    var delay = Math.min(5000, 250 * Math.pow(2, _reconnectAttempt));
+    _reconnectAttempt++;
+    _reconnectTimer = setTimeout(function () {
+      _reconnectTimer = null;
+      connect();
+    }, delay);
+  }
+
+  function _reconnectNowIfNeeded() {
+    // Called from visibilitychange / pageshow / online handlers so a
+    // user who left Safari for another app does not wait the full
+    // backoff after returning.  We treat CONNECTING as "in flight,
+    // don't disturb"; CLOSED / CLOSING / null all warrant an
+    // immediate attempt.
+    if (_ws && (_ws.readyState === WebSocket.OPEN ||
+                _ws.readyState === WebSocket.CONNECTING)) {
+      return;
+    }
+    if (_reconnectTimer !== null) {
+      try { clearTimeout(_reconnectTimer); } catch (e) {}
+      _reconnectTimer = null;
+    }
+    _reconnectAttempt = 0;
+    connect();
+  }
 
   // Custom auth modal — replaces the browser-native prompt(), which is
   // rendered tall with wasted space below its buttons on most desktop
@@ -2394,6 +2475,27 @@ _WS_SHIM_JS = r"""
   };
 
   function connect() {
+    // Neutralise the previous socket BEFORE we install a fresh one.
+    // On iOS Safari the OS may kill the underlying WebSocket while
+    // the tab is backgrounded; when JS resumes, the wake-up listeners
+    // (visibilitychange / focus / pageshow) frequently fire BEFORE
+    // the queued ``onclose`` of the dead socket.  If we don't clear
+    // the old handlers, that late ``onclose`` will run against the
+    // module-level ``_ws`` we just replaced -- it would call
+    // ``_scheduleReconnect()`` (overwriting the in-flight new socket
+    // after the backoff fires) and any late ``onopen``/``onmessage``
+    // on the old socket would ``_ws.send(...)`` on the new one.
+    // Nulling the handlers and closing the old socket here makes the
+    // replacement atomic from the rest of the shim's perspective.
+    if (_ws) {
+      try {
+        _ws.onopen = null;
+        _ws.onmessage = null;
+        _ws.onclose = null;
+        _ws.onerror = null;
+      } catch (e) {}
+      try { _ws.close(); } catch (e) {}
+    }
     _ws = new WebSocket('wss://' + location.host + '/ws');
     _authenticated = false;
 
@@ -2421,6 +2523,15 @@ _WS_SHIM_JS = r"""
         }
         _authenticated = true;
         _needsPassword = false;
+        // We have a live, authenticated socket — any future
+        // disconnect IS a reconnect, but the just-completed
+        // handshake is not.  Drop the sessionStorage flag so a
+        // subsequent fresh tab (different browsing session, same
+        // device) doesn't mislabel its first overlay.  The
+        // _hadAuthThenClosed branch above keeps the flag intact
+        // during the reload it triggers.
+        _setReconnectingFlag(false);
+        _reconnectAttempt = 0;
         // Re-establish this instance's pinned work_dir BEFORE flushing
         // any queued commands: the server stamps each connection's
         // work_dir onto later commands, so the pin must arrive first.
@@ -2483,20 +2594,65 @@ _WS_SHIM_JS = r"""
       // trigger a reload on its first ``auth_ok``.
       if (_authenticated) {
         _hadAuthThenClosed = true;
+        // Persist the reconnect-state across the ``location.reload()``
+        // that ``auth_ok`` will trigger so the freshly-loaded page
+        // labels its overlay "Reconnecting ..." instead of the
+        // misleading "KISS Sorcar Server is starting ...".  Mobile
+        // Safari frequently kills the WebSocket whenever the user
+        // switches apps, so this is the common case, not an edge
+        // case.
+        _setReconnectingFlag(true);
       }
       _authenticated = false;
-      // Re-show the "KISS Sorcar Server is starting ..." overlay
-      // while the socket is down so the user knows actions will not
-      // reach the backend.  Symmetric to the ``auth_ok`` dispatch
-      // above and to ``SorcarSidebarView.ts``'s disconnect handler in
-      // the VS Code path.
+      // Switch the overlay text BEFORE re-revealing it: once we have
+      // had at least one successful handshake (current page or any
+      // previous one, latched via sessionStorage) every overlay
+      // appearance is a reconnect from the user's perspective.
+      _updateLoadingMsg(_hadAuthThenClosed || _readReconnectingFlag());
+      // Re-show the loading overlay while the socket is down so the
+      // user knows actions will not reach the backend.  Symmetric to
+      // the ``auth_ok`` dispatch above and to
+      // ``SorcarSidebarView.ts``'s disconnect handler in the VS Code
+      // path.
       window.dispatchEvent(new MessageEvent('message', {
         data: {type: 'daemonStatus', connected: false}
       }));
-      setTimeout(connect, 3000);
+      _scheduleReconnect();
     };
 
     _ws.onerror = function() {};
+  }
+
+  // Wake-up listeners — mobile Safari pauses JS in backgrounded tabs,
+  // so a scheduled ``setTimeout(connect, ...)`` may not fire until the
+  // user returns.  These events fire AS SOON AS the user comes back,
+  // triggering an immediate reconnect instead of waiting for the
+  // backoff timer.  Without them the user would stare at the loading
+  // overlay for the remainder of the (paused) backoff after every
+  // app-switch round-trip.
+  if (typeof document !== 'undefined' &&
+      typeof document.addEventListener === 'function') {
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState === 'visible') {
+        _reconnectNowIfNeeded();
+      }
+    });
+  }
+  if (typeof window !== 'undefined' &&
+      typeof window.addEventListener === 'function') {
+    // ``pageshow`` covers Safari's bfcache restore, which does not
+    // fire ``visibilitychange``.
+    window.addEventListener('pageshow', function () {
+      _reconnectNowIfNeeded();
+    });
+    window.addEventListener('online', function () {
+      _reconnectNowIfNeeded();
+    });
+    // ``focus`` is the universal fallback for older mobile browsers
+    // that ignore visibilitychange/pageshow under certain conditions.
+    window.addEventListener('focus', function () {
+      _reconnectNowIfNeeded();
+    });
   }
 
   connect();
@@ -5185,6 +5341,116 @@ class RemoteAccessServer:
         self._tunnel_rate_limited = False
         self._active_url = None
 
+    def _detach_tunnel(self) -> None:
+        """Reset tunnel bookkeeping without killing ``cloudflared``.
+
+        Used by :meth:`start`'s shutdown ``finally`` so that a
+        ``kiss-web`` exit (SIGTERM / KeyboardInterrupt / launchd
+        restart / VS Code extension's ``pkill kiss-web``) does **not**
+        take the public Cloudflare tunnel down with it.  The spawned
+        ``cloudflared`` was launched with ``start_new_session=True``
+        and its pid + metrics port were persisted to
+        ``~/.kiss/cloudflared.pid`` by :meth:`_spawn_cloudflared`, so
+        the next ``kiss-web`` instance re-adopts it via
+        :func:`_try_adopt_existing_cloudflared` and keeps serving on
+        the same ``*.trycloudflare.com`` (or named-tunnel) hostname.
+
+        This is the difference between :meth:`_stop_tunnel` (kills
+        the spawned ``cloudflared`` immediately — used by the
+        watchdog when the tunnel is unhealthy and must be replaced)
+        and :meth:`_detach_tunnel` (leaves the spawned ``cloudflared``
+        running — used on graceful kiss-web shutdown so the public
+        URL survives the restart).
+
+        Critical detail: ``cloudflared`` was spawned with
+        ``stderr=PIPE``.  When this ``kiss-web`` process exits, the
+        pipe's read end (held only by this process) is closed by the
+        kernel; ``cloudflared``'s next stderr write then returns
+        ``EPIPE``, which the Go runtime turns into a fatal
+        ``SIGPIPE`` for writes to fd 1/2.  Without a workaround, the
+        spawned ``cloudflared`` would therefore die within seconds of
+        this ``kiss-web`` exit — defeating the whole adoption design.
+        To prevent that, ``_detach_tunnel`` hands the pipe's read end
+        off to a tiny detached ``cat`` shim (its own session via
+        ``start_new_session=True``) that drains the pipe forever.
+        The shim survives this ``kiss-web``'s exit, so the read end
+        stays open and ``cloudflared`` keeps writing happily until
+        the next ``kiss-web`` adopts it or it is intentionally
+        replaced.
+
+        Like :meth:`_stop_tunnel`, this method does not delete
+        ``~/.kiss/remote-url.json``: a sibling kiss-web that has
+        already taken over may have overwritten it, and removing it
+        would briefly blank the VS Code sidebar URL.
+        """
+        proc = self._tunnel_proc
+        if proc is not None and proc.poll() is None:
+            self._spawn_stderr_drain_shim(proc)
+        self._tunnel_proc = None
+        self._tunnel_adopted_pid = None
+        self._tunnel_metrics_port = None
+        self._tunnel_started_at = None
+        self._tunnel_unhealthy_ticks = 0
+        self._tunnel_failure_count = 0
+        self._tunnel_next_retry = 0.0
+        self._tunnel_rate_limited = False
+        self._active_url = None
+
+    @staticmethod
+    def _spawn_stderr_drain_shim(
+        proc: subprocess.Popen[str],
+    ) -> subprocess.Popen[bytes] | None:
+        """Hand off *proc*'s stderr pipe to a detached drain shim.
+
+        Spawns ``cat`` with ``proc.stderr`` as its stdin and detaches
+        it into its own session so it survives the current
+        ``kiss-web`` exit.  The shim continuously reads (and
+        discards) every byte ``cloudflared`` writes to its stderr,
+        keeping the pipe's read end open and preventing the
+        ``SIGPIPE``-on-next-write that would otherwise kill the
+        adopted ``cloudflared`` shortly after this ``kiss-web``
+        exits.  When ``cloudflared`` itself eventually dies, the
+        pipe closes from the write side and ``cat`` exits cleanly.
+
+        Best-effort: a ``cat`` spawn failure (missing binary, EMFILE,
+        permission error) is logged at DEBUG and otherwise ignored.
+        The worst case is a return to the pre-fix behaviour for that
+        particular shutdown — ``cloudflared`` may die from
+        ``SIGPIPE`` and the next ``kiss-web`` will mint a fresh
+        public URL — which is still no worse than no detach at all.
+
+        Args:
+            proc: The ``cloudflared`` subprocess; must have been
+                started with ``stderr=PIPE``.
+
+        Returns:
+            The detached shim's ``Popen`` handle on success, or
+            ``None`` if no stderr pipe was available or the shim
+            spawn failed.
+        """
+        stderr = proc.stderr
+        if stderr is None:
+            return None
+        try:
+            shim = subprocess.Popen(
+                ["cat"],
+                stdin=stderr.fileno(),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                # New session so the shim survives this kiss-web's
+                # exit *and* is not killed by a process-group signal
+                # sent to kiss-web (e.g. ``pkill -g``).
+                start_new_session=True,
+                close_fds=True,
+            )
+        except (OSError, ValueError):
+            logger.debug(
+                "Failed to spawn stderr drain shim for cloudflared",
+                exc_info=True,
+            )
+            return None
+        return shim
+
 
     async def _setup_server(self) -> None:
         """Shared setup for both blocking and async server start.
@@ -5635,7 +5901,10 @@ class RemoteAccessServer:
             # fix eliminates (see tasks 2968 in the bundled sorcar.db).
             self._stop_active_agent_tasks()
             logger.info("Server stopped: pid=%d", pid)
-            self._stop_tunnel()
+            # Leave the spawned ``cloudflared`` running so the next
+            # ``kiss-web`` adopts it (preserving the public tunnel
+            # URL across restarts) — see :meth:`_detach_tunnel`.
+            self._detach_tunnel()
 
     async def start_async(self) -> None:
         """Start the server asynchronously (for use in existing event loops).

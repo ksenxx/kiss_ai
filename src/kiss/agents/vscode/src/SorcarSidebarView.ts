@@ -275,8 +275,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   /** Pending resolver for the next ``sizeReport`` from the webview.
    *  Set by ``_measureSidebar`` and cleared by the ``sizeReport`` handler. */
   private _sizeReportResolver:
-    | ((s: {inner: number; screen: number}) => void)
-    | undefined;
+    ((s: {inner: number; screen: number}) => void) | undefined;
   /** Subscription to workspace-folder changes; disposes on dispose(). */
   private _workspaceFoldersSub: vscode.Disposable | undefined;
 
@@ -1497,7 +1496,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       'git fetch --force --tags --prune origin 2>/dev/null || true',
       // Stash dirty / untracked edits so the hard reset below never loses
       // user work.  We record the success so the pop is conditional.
-      "_kiss_stashed=; if [ -n \"$(git status --porcelain 2>/dev/null)\" ]; then git stash push --include-untracked -m 'kiss-update-preflight' >/dev/null 2>&1 && _kiss_stashed=1 || _kiss_stashed=; fi",
+      '_kiss_stashed=; if [ -n "$(git status --porcelain 2>/dev/null)" ]; then git stash push --include-untracked -m \'kiss-update-preflight\' >/dev/null 2>&1 && _kiss_stashed=1 || _kiss_stashed=; fi',
       "git reset --hard '@{upstream}' 2>/dev/null || git reset --hard origin/HEAD 2>/dev/null || true",
       'if [ -n "$_kiss_stashed" ]; then git stash pop >/dev/null 2>&1 || true; fi',
       `bash '${escScript}'`,

@@ -57,7 +57,7 @@ def test_typing_into_idle_prompt_does_not_redraw_on_narrow_terminal(
     tmp_path: Path,
 ) -> None:
     """Ten chars at 30 columns must echo cleanly (prompt width ~4)."""
-    import pty
+    from kiss.tests.agents.sorcar._pty_helper import pty_spawn
 
     kiss_home = tmp_path / ".kisshome"
     child_code = f"""
@@ -74,10 +74,7 @@ sys.stdout.write("\\nGOT[" + repr(line) + "]\\n")
 sys.stdout.flush()
 """
 
-    pid, fd = pty.fork()
-    if pid == 0:  # child: fresh interpreter attached to the PTY slave
-        os.execvp(sys.executable, [sys.executable, "-c", child_code])
-        os._exit(0)  # pragma: no cover - exec never returns
+    pid, fd = pty_spawn([sys.executable, "-c", child_code])
 
     try:
         # 24 rows x 30 cols, so a miscounted ~26-column prompt wraps
