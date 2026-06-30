@@ -759,57 +759,68 @@ uniformly whether the task is a code fix or a dinner reservation.
 %......................................................................
 
 A distinctive workflow that recurs throughout the log is one in which
-the developer states a global \emph{invariant}---a property that
-\emph{every} part of the codebase must satisfy---and then asks the
-agent to find and fix every place that violates it.
-The invariant is expressed in a single English sentence; the search
-and repair span the entire repository.
-The canonical phrasing has the form ``\textit{X must be Y everywhere;
-find and fix all violations.}''
+the developer never localizes the defect or even names the suspect
+file.  Instead, the prompt (i)~states a user-visible \emph{invariant}
+that the system MUST satisfy, (ii)~asks the agent to reproduce any
+violation by writing an end-to-end test \emph{before} touching the
+source, (iii)~asks for the fix, and (iv)~assigns one model to write
+the test and the fix and a second model from a different vendor to
+review and debug that work, explicitly asking the reviewer to look for
+missed call sites and newly introduced bugs.
+The invariant is expressed in a single English sentence; the search,
+reproduction, and repair span the entire repository.
+The canonical phrasing recurs in the log as a five-line template:
+\begin{quote}\small
+``\emph{X MUST hold.  Reproduce the issue by writing an integration
+test.  Then fix the issue.  Use model~A for coding, bug fixing, and
+test creation.  Use model~B (from a different vendor) for thorough
+review and debugging of the work done by the other model.}''
+\end{quote}
 
-\noindent Representative invariants drawn verbatim from the log
-include:
+\noindent Representative invariants drawn verbatim from the log span
+both user-visible behavior and repository-wide structure:
 \begin{itemize}[nosep]
+  \item \emph{Input-handling invariants:} ``In the Sorcar CLI
+        interactive prompt, the user MUST be able to enter multi-line
+        inputs in the input box.  Moreover, all text shown must be
+        word wrapped.''
+  \item \emph{UI-routing invariants:} ``Bash tool outputs MUST be
+        routed to the Result panel; locate any code path that drops
+        them silently and fix it.''
+  \item \emph{Notification invariants:} ``Stale CLI notifications
+        MUST not survive a task boundary; find any path that leaks
+        them across tasks.''
+  \item \emph{Rendering invariants:} ``The output of the \texttt{Read}
+        tool MUST be syntax-highlighted wherever it is displayed.''
   \item \emph{File-system invariants:} ``All temporary files MUST live
         under \texttt{PWD/tmp/}; find and fix every place that writes
-        a temporary file directly to \texttt{PWD/} or to the project
-        root.''
-  \item \emph{Module-boundary invariants:} ``All third-party
-        integrations MUST live in
-        \texttt{kiss/agents/third\_party\_agents}; relocate any that
-        do not, and update all imports.''
-  \item \emph{Tool-discipline invariants:} ``All file reads in the
-        codebase and in tests MUST go through the \texttt{Read()}
-        tool wrapper, never raw \texttt{open()} for source inspection;
-        flag every violation.''
+        a temporary file directly to the project root.''
   \item \emph{Test-discipline invariants:} ``No test in the suite may
         use mocks, patches, fakes, or test doubles; identify every
         offending test and rewrite it as a real end-to-end test.''
-  \item \emph{Concurrency invariants:} ``Every SQLite write to
-        \texttt{sorcar.db} MUST be guarded by the persistence
-        module's read-write lock; locate and fix any direct
-        connection that bypasses it.''
-  \item \emph{Lifecycle invariants:} ``Every background subprocess
-        spawned by an agent MUST be terminated when its parent task
-        finishes; find any code path that can leak a process and fix
-        it.''
 \end{itemize}
 
-\noindent The verbatim audit prompt that most often opens this pattern
-is ``can you thoroughly find all bugs, redundancies, and
-inconsistencies'' (Pattern~3), but the invariant variant differs in
-intent: Pattern~3 asks for an open-ended quality sweep, whereas
-Pattern~8 specifies a single, precise property and demands closure.
+\noindent The verbatim audit prompt that most often opens an
+open-ended sweep---``can you thoroughly find all bugs, redundancies,
+and inconsistencies'' (Pattern~3)---differs in intent from the
+invariant variant: Pattern~3 asks for an unbounded quality scan,
+whereas Pattern~8 specifies a single, precise property and demands
+closure, witnessed by a failing test that becomes a passing test.
 
 \paragraph{Why this works.}
-The invariant pattern leverages a strength specific to LLM agents
-that is hard to exploit in a manual workflow.
-A human enforcing a repository-wide invariant typically reaches for
-\texttt{grep} or a custom lint rule, both of which require the
-invariant to be expressible as a syntactic pattern.
-The agent, by contrast, can apply a \emph{semantic} filter: it reads
-each candidate site, decides whether the site actually violates the
-invariant in context, and edits only the genuine violations.
+Three properties make the loop effective.
+First, by phrasing the bug as an invariant rather than as a stack
+trace, the developer transfers diagnostic effort to the agent without
+having to localize the defect in advance.
+Second, requiring an executable end-to-end test \emph{before} the fix
+produces a reproducible artifact that the reviewer model can refute
+or confirm independently of the implementer's narrative, and that
+survives in the test suite as a regression guard.
+Third, splitting code production and code review across two vendors
+with different training distributions catches mistakes that a single
+model would systematically miss, including library-internal
+assumptions that no amount of self-reflection by one model is likely
+to surface (Pattern~9).
 The system prompt's File-Browsing protocol governs the search phase
 verbatim: the agent collects every candidate site into a
 \texttt{PWD/tmp/file-information-\{id\}.md} inventory, reviews the
@@ -820,22 +831,100 @@ failure mode in which a global search-and-replace silently breaks an
 unrelated call site that happens to share a syntactic shape.
 
 \paragraph{Example.}
-Task~1416 in the log states an invariant about temporary files:
-\emph{every} temporary file created by the agent must reside under
-\texttt{PWD/tmp/}, never in the project root.
-The agent ran the inventory phase, found multiple call sites in tests
-and in the research protocol that wrote scratch files into
-\texttt{PWD/}, fixed them, and---closing the invariant loop---added a
-clause to \texttt{SYSTEM.md} requiring the property to hold for
-\emph{future} edits as well.
-The pattern thereby produces two artifacts: a one-time repair sweep
-and a permanent specification clause that prevents the next agent
-session from regressing.
+A recent task drawn verbatim from \texttt{sorcar.db} states two
+invariants of the interactive \texttt{sorcar} CLI's input box
+together:
+\begin{quote}\small
+``\emph{In sorcar CLI interactive, the user MUST be able to enter
+multi-line inputs in the input box.  Moreover, all text shown must be
+word wrapped.  Reproduce the issue by writing an integration test.
+Then fix the issue.  Use \texttt{claude-opus-4-7} for all tasks
+including coding, bug fixing, and test creation.  Use
+\texttt{gpt-5.5} (not codex) for thorough review and debugging of the
+work done by the other model.  Check if the other model has missed
+some code or has introduced bugs.}''
+\end{quote}
+The agent executed the task in three phases.
+
+\begin{sloppypar}
+\emph{Phase~1: Reproduce.}
+Under \texttt{claude-opus-4-7}, the agent located the prompt loop in
+\texttt{src/\allowbreak kiss/\allowbreak agents/\allowbreak sorcar/\allowbreak cli\_prompt.py},
+wrote a new end-to-end test file
+\texttt{test\_cli\_\allowbreak multiline\_\allowbreak input.py}
+containing nine integration tests that drive a real
+\texttt{prompt\_toolkit} \texttt{PromptSession} through
+\texttt{create\_pipe\_input} (the same pattern as
+\texttt{test\_at\_\allowbreak mention\_\allowbreak picker.py}), and
+confirmed that the first test failed: typing ``\texttt{hello}'', then
+Esc+Enter, then ``\texttt{world}'', then Enter returned just
+``\texttt{hello}'', witnessing the multi-line invariant violation.
+The diagnosis was that \texttt{PromptSession} was instantiated without
+\texttt{multiline=True}, so Enter always submitted and the buffer
+never wrapped.
+\end{sloppypar}
+
+\begin{sloppypar}
+\emph{Phase~2: Fix.}
+Still under \texttt{claude-opus-4-7}, the agent passed
+\texttt{multiline=True}, \texttt{wrap\_lines=True}, and a
+\texttt{prompt\_continuation} callable to the session; the
+continuation callable returns an ANSI string that repaints the cyan
+\texttt{\textbar} left border on every wrapped or continuation row so
+the framed panel stays visually consistent.  An Enter binding
+filtered by \texttt{\textasciitilde completion\_is\_selected} calls
+\texttt{event.\allowbreak current\_buffer.\allowbreak validate\_and\_handle()}
+so plain Enter still submits, while \texttt{escape,enter} (Alt+Enter),
+\texttt{c-j} (Ctrl+J), and the kitty/foot/WezTerm CSI-u sequence
+\texttt{ESC[13;2u} (matched as a raw-char tuple because
+\texttt{prompt\_toolkit} does not pre-map it) insert real newlines.
+The welcome banner in \texttt{cli\_repl.py} was updated to document
+the new keys.
+\end{sloppypar}
+
+\begin{sloppypar}
+\emph{Phase~3: Cross-model review.}
+The agent switched itself to \texttt{gpt-5.5} (not Codex; see
+Pattern~9) and re-read the diff, the surrounding modules, and the
+new tests, looking specifically for missed call sites and broken edge
+cases.  The review surfaced a real \texttt{prompt\_toolkit} library
+limitation that \texttt{claude-opus-4-7} had failed to notice: the
+xterm \texttt{modifyOtherKeys} Shift+Enter escape
+\texttt{\textbackslash x1b[27;2;13\textasciitilde} is pre-mapped to
+\texttt{Keys.ControlM} inside
+\texttt{prompt\_toolkit.\allowbreak input.\allowbreak ansi\_escape\_sequences.\allowbreak ANSI\_SEQUENCES},
+which means any user binding for it can never fire.  A
+previously-added (always-failing) test asserting that this sequence
+inserts a newline was replaced with one asserting the documented
+fall-through behaviour (it submits like plain Enter), and the
+welcome banner was amended to direct users on those terminals to
+Alt+Enter or Ctrl+J.  The review also corrected ruff E402/I001
+import-ordering violations introduced during the fix.  Verification
+ran \texttt{uv run pytest -v} on the new file (9/9 pass) and on the
+neighbouring CLI suites \texttt{test\_at\_mention\_picker.py},
+\texttt{test\_cli\_repl.py}, and \texttt{test\_cli\_panel.py} (49/49
+pass), followed by \texttt{uv run check --full} (ruff, mypy,
+mdformat, syntax, api-docs) before the agent reported completion.
+\end{sloppypar}
+
+\paragraph{Generality.}
+The pattern generalizes well beyond a single bug.  Recent entries in
+\texttt{sorcar.db} apply the same five-line template to fix
+invariant violations in the Sorcar CLI's notification stream, in the
+routing of bash tool outputs to the Result panel, and in
+syntax-highlighting the output of the \texttt{Read} tool, as well as
+to repository-wide structural invariants such as the temporary-file
+location rule (Task~1416), which the agent enforced by sweeping every
+violating call site and then closing the loop with a permanent clause
+in \texttt{SYSTEM.md}.
 Pattern~8 is therefore the natural complement to Pattern~6 (system
-prompt engineering): the developer first observes a class of
-violations in the log, then states the invariant that excludes them,
-then asks the agent to repair the past and amend the prompt against
-the future.
+prompt engineering) and Pattern~9 (cross-model review): the developer
+states the invariant in English, asks the agent to reproduce and
+repair the past, and---when the violation recurs---amends the system
+prompt against the future.  Dynamic model switching
+(Section~\ref{sec:p-cross-model}) makes both halves of the
+implement-then-review split a single \texttt{set\_model()} call
+inside one continuous task.
 
 %......................................................................
 \subsection{Pattern 9: Cross-Model Iterative Review}
