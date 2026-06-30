@@ -37,8 +37,10 @@ def _width(text: str) -> int:
 def test_cjk_body_fits_panel_inner_width() -> None:
     """A CJK buffer must render a body of exactly ``cols - 4`` columns."""
     cols = 40
-    body, is_placeholder = panel_body("汉" * 40, cols)
+    rows, is_placeholder = panel_body("汉" * 40, cols)
     assert not is_placeholder
+    assert len(rows) == 1
+    body = rows[0]
     assert _width(body) == cols - 4, (
         f"wide-char body is {_width(body)} columns, expected {cols - 4}; "
         "the right border is pushed off the row"
@@ -48,15 +50,17 @@ def test_cjk_body_fits_panel_inner_width() -> None:
 def test_emoji_body_fits_panel_inner_width() -> None:
     """An emoji buffer must render a body of exactly ``cols - 4`` columns."""
     cols = 80
-    body, _ = panel_body("😀" * 50, cols)
-    assert _width(body) == cols - 4
+    rows, _ = panel_body("😀" * 50, cols)
+    assert len(rows) == 1
+    assert _width(rows[0]) == cols - 4
 
 
 def test_short_emoji_body_padded_to_inner_width() -> None:
     """A short emoji buffer is padded to exactly the inner width."""
     cols = 80
-    body, _ = panel_body("😀" * 5, cols)
-    assert _width(body) == cols - 4
+    rows, _ = panel_body("😀" * 5, cols)
+    assert len(rows) == 1
+    assert _width(rows[0]) == cols - 4
 
 
 def test_clip_buf_tail_respects_display_width() -> None:
@@ -72,13 +76,13 @@ def test_clip_buf_tail_respects_display_width() -> None:
 def test_cursor_col_counts_wide_chars_as_two_columns() -> None:
     """The caret must land after the rendered text, not after len() chars."""
     # body row: "│ " (cols 1-2) + "› " (2 cols) + "汉汉" (4 cols) → col 9.
-    assert body_cursor_col("汉汉", 80) == 9
+    assert body_cursor_col("汉汉", 80) == (0, 9)
 
 
 def test_cursor_never_overruns_right_border() -> None:
     """With a long wide-char buffer the caret stays inside the panel."""
     for cols in (20, 40, 80):
-        col = body_cursor_col("汉" * 200, cols)
+        _row, col = body_cursor_col("汉" * 200, cols)
         assert col <= cols - 1, (
             f"caret column {col} overruns the panel at width {cols}"
         )
@@ -87,9 +91,10 @@ def test_cursor_never_overruns_right_border() -> None:
 def test_ascii_behavior_unchanged() -> None:
     """Sanity: ASCII buffers keep the historical geometry."""
     cols = 80
-    body, _ = panel_body("hello", cols)
-    assert body == ("› hello").ljust(cols - 4)
-    assert body_cursor_col("hello", cols) == 3 + 2 + 5
+    rows, _ = panel_body("hello", cols)
+    assert len(rows) == 1
+    assert rows[0] == ("› hello").ljust(cols - 4)
+    assert body_cursor_col("hello", cols) == (0, 3 + 2 + 5)
     assert clip_buf("x" * 100, cols) == "x" * (cols - 4 - 2)
 
 
