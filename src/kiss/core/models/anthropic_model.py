@@ -65,12 +65,17 @@ class AnthropicModel(Model):
         model_config: dict[str, Any] | None = None,
         token_callback: TokenCallback | None = None,
         thinking_callback: ThinkingCallback | None = None,
+        auth_token: str = "",
+        base_url: str = "",
     ):
         """Initialize an AnthropicModel instance.
 
         Args:
             model_name: The name of the Claude model to use.
             api_key: The Anthropic API key for authentication.
+            auth_token: Optional bearer token sent via the ``Authorization``
+                header instead of ``x-api-key`` (e.g. for a proxy/gateway).
+            base_url: Optional custom API base URL (e.g. for a proxy/gateway).
             model_config: Optional dictionary of model configuration parameters.
             token_callback: Optional callback invoked with each streamed text token.
             thinking_callback: Optional callback invoked with ``True`` when a
@@ -83,6 +88,8 @@ class AnthropicModel(Model):
             thinking_callback=thinking_callback,
         )
         self.api_key = api_key
+        self.auth_token = auth_token
+        self.base_url = base_url
 
     def initialize(self, prompt: str, attachments: list[Attachment] | None = None) -> None:
         """Initializes the conversation with an initial user prompt.
@@ -95,7 +102,16 @@ class AnthropicModel(Model):
                 is available; otherwise they are skipped with a warning.  Video
                 attachments are always skipped.
         """
-        self.client = Anthropic(api_key=self.api_key)
+        client_kwargs: dict[str, Any] = {}
+        # Prefer an explicit auth token (Authorization: Bearer) when provided;
+        # otherwise fall back to the x-api-key based api_key.
+        if self.auth_token:
+            client_kwargs["auth_token"] = self.auth_token
+        else:
+            client_kwargs["api_key"] = self.api_key
+        if self.base_url:
+            client_kwargs["base_url"] = self.base_url
+        self.client = Anthropic(**client_kwargs)
         content: str | list[dict[str, Any]] = prompt
         if attachments:
             blocks: list[dict[str, Any]] = []

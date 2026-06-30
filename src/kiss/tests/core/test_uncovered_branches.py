@@ -228,6 +228,7 @@ class TestGetAvailableModels:
 
         env_keys = [
             "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
             "OPENROUTER_API_KEY",
             "GEMINI_API_KEY",
             "OPENAI_API_KEY",

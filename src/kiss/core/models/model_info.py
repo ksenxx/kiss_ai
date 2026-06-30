@@ -560,6 +560,8 @@ def model(
         return AnthropicModel(  # type: ignore[no-any-return]
             model_name=model_name,
             api_key=keys.ANTHROPIC_API_KEY,
+            auth_token=getattr(keys, "ANTHROPIC_AUTH_TOKEN", ""),
+            base_url=getattr(keys, "ANTHROPIC_BASE_URL", ""),
             model_config=model_config,
             token_callback=token_callback,
             thinking_callback=thinking_callback,
@@ -620,7 +622,7 @@ def get_available_models() -> list[str]:
     keys = config_module.DEFAULT_CONFIG
     prefix_to_key = {
         "openrouter/": keys.OPENROUTER_API_KEY,
-        "claude-": keys.ANTHROPIC_API_KEY,
+        "claude-": keys.ANTHROPIC_API_KEY or getattr(keys, "ANTHROPIC_AUTH_TOKEN", ""),
         "gemini-": keys.GEMINI_API_KEY,
         "glm-": keys.ZAI_API_KEY,
         "kimi-": keys.MOONSHOT_API_KEY,
@@ -717,7 +719,7 @@ def get_generation_model_listing() -> list[tuple[str, str, bool]]:
 
     keys = config_module.DEFAULT_CONFIG
     provider_configured = {
-        "Anthropic": bool(keys.ANTHROPIC_API_KEY),
+        "Anthropic": bool(keys.ANTHROPIC_API_KEY or getattr(keys, "ANTHROPIC_AUTH_TOKEN", "")),
         "OpenAI": bool(keys.OPENAI_API_KEY),
         "Gemini": bool(keys.GEMINI_API_KEY),
         "OpenRouter": bool(keys.OPENROUTER_API_KEY),
@@ -824,7 +826,7 @@ def get_default_model() -> str:
     from kiss.core.models.codex_model import find_codex_executable
 
     keys = config_module.DEFAULT_CONFIG
-    if keys.ANTHROPIC_API_KEY:
+    if keys.ANTHROPIC_API_KEY or getattr(keys, "ANTHROPIC_AUTH_TOKEN", ""):
         return "claude-opus-4-7"
     if keys.OPENAI_API_KEY:
         return "gpt-5.5"

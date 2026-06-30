@@ -116,6 +116,22 @@ class Config(BaseModel):
         default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", ""),
         description="Anthropic API key (can also be set via ANTHROPIC_API_KEY env var)",
     )
+    ANTHROPIC_AUTH_TOKEN: str = Field(
+        default_factory=lambda: os.getenv("ANTHROPIC_AUTH_TOKEN", ""),
+        description=(
+            "Anthropic auth token sent as an Authorization: Bearer header "
+            "(can also be set via ANTHROPIC_AUTH_TOKEN env var). Used by "
+            "proxies/gateways instead of ANTHROPIC_API_KEY."
+        ),
+    )
+    ANTHROPIC_BASE_URL: str = Field(
+        default_factory=lambda: os.getenv("ANTHROPIC_BASE_URL", ""),
+        description=(
+            "Custom Anthropic API base URL (can also be set via "
+            "ANTHROPIC_BASE_URL env var). Used to route requests through a "
+            "proxy or gateway."
+        ),
+    )
     TOGETHER_API_KEY: str = Field(
         default_factory=lambda: os.getenv("TOGETHER_API_KEY", ""),
         description="Together API key (can also be set via TOGETHER_API_KEY env var)",
