@@ -22,9 +22,10 @@ import asyncio
 import json
 import shutil
 import stat
+import sys
 import tempfile
 from pathlib import Path
-from unittest import IsolatedAsyncioTestCase
+from unittest import IsolatedAsyncioTestCase, skipIf
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.vscode.web_server import RemoteAccessServer
@@ -44,6 +45,7 @@ def _restore_persistence(saved: tuple[Path, object, Path]) -> None:
     th._DB_PATH, th._db_conn, th._KISS_DIR = saved  # type: ignore[assignment]
 
 
+@skipIf(sys.platform == "win32", "UDS not supported on Windows")
 class TestUdsListener(IsolatedAsyncioTestCase):
     """End-to-end tests for the UDS listener."""
 
