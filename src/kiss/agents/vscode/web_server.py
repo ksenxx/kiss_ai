@@ -150,6 +150,39 @@ _VERSION_CHECK_INTERVAL: float = 3600
 # real network access is required.
 _PYPI_LATEST_URL = "https://pypi.org/pypi/kiss-agent-framework/json"
 
+# Root directory scanned by :func:`_read_version` to discover the
+# NEWEST installed KISS Sorcar extension.  ``None`` means "use the real
+# ``~/.vscode/extensions`` directory"; tests override this to a
+# tempdir so they can seed multiple ``ksenxx.kiss-sorcar-<VERSION>``
+# subdirs without touching the developer's real VS Code install.
+#
+# Why this exists — regression fix for the sticky "update available"
+# toast that kept re-appearing after the user clicked "Update".  The
+# root cause is that ``install.sh`` only ``launchctl kickstart -k``\ s
+# the pre-existing kiss-web launch agent / systemd unit; the unit's
+# ``ProgramArguments`` / ``ExecStart`` still point at the OLD
+# extension's binary (``~/.vscode/extensions/ksenxx.kiss-sorcar-<OLD>/
+# kiss_project/.venv/bin/kiss-web``) until the fresh extension's next
+# activation gets a chance to rewrite it.  Meanwhile the OLD daemon
+# has already re-broadcast ``update_available`` with its own bundled
+# ``_version.py`` — the stale OLD version — so the client sees
+# ``{available: True, latest: NEW, current: OLD}`` and re-shows the
+# same "update available (NEW)" toast the user just clicked.
+#
+# The fix: :func:`_read_version` now returns the *highest* ``__version__``
+# it can find under ``<extensions_root>/ksenxx.kiss-sorcar-*/kiss_project/
+# src/kiss/_version.py``.  Once the install unpacks the new extension
+# dir the answer flips to the fresh version even if the daemon binary
+# is still the stale one, so the daemon broadcasts ``available: False``
+# and ``renderUpdateAvailableNotification`` (media/main.js) dismisses
+# the toast.
+_INSTALLED_EXTENSIONS_ROOT: Path | None = None
+
+# Publisher.name prefix of the KISS Sorcar VS Code extension.  Kept
+# in one place so ``_read_version`` and any future scanner stay in
+# lock-step with ``install.sh`` and the extension's ``package.json``.
+_EXTENSION_DIR_PREFIX = "ksenxx.kiss-sorcar-"
+
 # Timeout for the PyPI HTTP request — kept small so a slow PyPI
 # response cannot stall the periodic loop for long.
 _PYPI_FETCH_TIMEOUT = 5.0
@@ -2211,16 +2244,91 @@ def _build_html() -> str:
     )
 
 
-def _read_version() -> str:
-    """Read the KISS project version from ``_version.py``."""
+def _parse_version_py(vfile: Path) -> str:
+    """Return the ``__version__`` string from a ``_version.py`` file.
+
+    Returns an empty string when the file is missing, unreadable, or
+    does not define ``__version__``.  A best-effort parser that keeps
+    the daemon booting even if a foreign ``_version.py`` is malformed.
+    """
     try:
-        vfile = Path(__file__).parent.parent.parent / "_version.py"
         for line in vfile.read_text().splitlines():
             if line.startswith("__version__"):
                 return line.split("=", 1)[1].strip().strip("\"'")
     except Exception:
         pass
     return ""
+
+
+def _scan_installed_extension_versions(root: Path) -> list[str]:
+    """Return every ``__version__`` found under installed KISS extensions.
+
+    Scans direct children of ``root`` for the KISS Sorcar extension
+    naming convention (``ksenxx.kiss-sorcar-<VERSION>``) and reads
+    each ``kiss_project/src/kiss/_version.py``.  Malformed / missing
+    version files are silently skipped so a single broken sibling
+    cannot mask an otherwise-valid newer install.
+    """
+    out: list[str] = []
+    try:
+        entries = list(root.iterdir())
+    except (OSError, ValueError):
+        return out
+    for entry in entries:
+        try:
+            if not entry.is_dir():
+                continue
+        except OSError:
+            continue
+        if not entry.name.startswith(_EXTENSION_DIR_PREFIX):
+            continue
+        v = _parse_version_py(
+            entry / "kiss_project" / "src" / "kiss" / "_version.py",
+        )
+        if v:
+            out.append(v)
+    return out
+
+
+def _read_version() -> str:
+    r"""Return the version reported to ``update_available`` broadcasts.
+
+    Historically this only read the daemon's own bundled
+    ``_version.py``.  That was correct as long as the running daemon
+    binary and the currently-installed extension matched — but the
+    kiss-web launch agent / systemd unit is only ``launchctl
+    kickstart -k``\ ed by ``install.sh`` during an upgrade, so the
+    supervisor keeps respawning the OLD binary (bundled with the OLD
+    ``_version.py``) after the update finishes.  Reporting the OLD
+    version as "current" against a PyPI ``latest`` equal to the NEW
+    version caused the sticky "update available" toast to re-appear
+    with the same NEW-version text the user just clicked.
+
+    Fix: pick the newest ``__version__`` found under
+    ``<extensions_root>/ksenxx.kiss-sorcar-*/kiss_project/src/kiss/_version.py``
+    so a freshly-installed extension dominates the answer even when
+    the running daemon is still the stale one.  Falls back to the
+    bundled ``_version.py`` for developer / Docker installs where the
+    extension dir does not exist.
+    """
+    root = _INSTALLED_EXTENSIONS_ROOT
+    if root is None:
+        root = Path.home() / ".vscode" / "extensions"
+    best: tuple[int, ...] | None = None
+    best_str = ""
+    for v in _scan_installed_extension_versions(root):
+        t = _version_tuple(v)
+        if t is None:
+            continue
+        if best is None or t > best:
+            best = t
+            best_str = v
+    if best_str:
+        return best_str
+    # Fallback: developer / Docker / test-without-extdir install.
+    return _parse_version_py(
+        Path(__file__).parent.parent.parent / "_version.py",
+    )
 
 
 def _version_tuple(v: str) -> tuple[int, ...] | None:
