@@ -895,6 +895,36 @@
     }
     .paper-pill.primary:hover { filter: brightness(1.05); }
 
+    /* AI Software Engineering — YouTube video grid */
+    .videos-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 1rem;
+    }
+    .video-card {
+      padding: 0;
+      background: linear-gradient(135deg, var(--surface), var(--bg));
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    .video-embed {
+      position: relative;
+      width: 100%;
+      padding-bottom: 56.25%; /* 16:9 */
+      background: #000;
+    }
+    .video-embed iframe {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      border: 0;
+      display: block;
+    }
+
     /* Citation */
     .citation-block {
       position: relative;
@@ -1210,6 +1240,7 @@
       .grid-4 { grid-template-columns: 1fr 1fr; }
       .name-grid { grid-template-columns: 1fr; }
       .papers-grid { grid-template-columns: 1fr; }
+      .videos-grid { grid-template-columns: 1fr; }
     }
     @media (max-width: 820px) {
       nav .links { display: none; }
@@ -1873,6 +1904,7 @@
         <li><a href="#compare">Compare</a></li>
         <li><a href="#prompts">Prompts</a></li>
         <li><a href="#papers">Papers</a></li>
+        <li><a href="#ai-software-engineering">Videos</a></li>
         <li><a href="#install">Install</a></li>
         <li><a href="#models">Models</a></li>
       </ul>
@@ -2535,10 +2567,68 @@ In each step, keep track of the best prompt which has the maximum number of succ
   </section>
   </div>
 
-  <!-- ================ § 04 — What is in the Name ================ -->
+  <!-- ================ § 04 — AI Software Engineering ================ -->
+  <div class="section-wrap">
+  <section id="ai-software-engineering" class="section-card">
+    <span class="num">§ 04 — AI Software Engineering</span>
+    <h2>🛠️ AI Software Engineering.<a href="#ai-software-engineering" class="anchor">¶</a></h2>
+    <p class="sub">Talks, demos, and case studies on doing real software engineering with KISS Sorcar.</p>
+    <div class="section-body">
+      <div class="videos-grid">
+        <div class="inner-card video-card" style="--i:0">
+          <div class="video-embed">
+            <iframe src="https://www.youtube-nocookie.com/embed/CVLfQilidLs"
+                    title="AI Software Engineering — Video 1"
+                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                    referrerpolicy="strict-origin-when-cross-origin"
+                    allowfullscreen loading="lazy"></iframe>
+          </div>
+        </div>
+        <div class="inner-card video-card" style="--i:1">
+          <div class="video-embed">
+            <iframe src="https://www.youtube-nocookie.com/embed/iczGI84y6pY"
+                    title="AI Software Engineering — Video 2"
+                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                    referrerpolicy="strict-origin-when-cross-origin"
+                    allowfullscreen loading="lazy"></iframe>
+          </div>
+        </div>
+        <div class="inner-card video-card" style="--i:2">
+          <div class="video-embed">
+            <iframe src="https://www.youtube-nocookie.com/embed/Am83j4oVDLA"
+                    title="AI Software Engineering — Video 3"
+                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                    referrerpolicy="strict-origin-when-cross-origin"
+                    allowfullscreen loading="lazy"></iframe>
+          </div>
+        </div>
+        <div class="inner-card video-card" style="--i:3">
+          <div class="video-embed">
+            <iframe src="https://www.youtube-nocookie.com/embed/hpEmWIxhZ-A"
+                    title="AI Software Engineering — Video 4"
+                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                    referrerpolicy="strict-origin-when-cross-origin"
+                    allowfullscreen loading="lazy"></iframe>
+          </div>
+        </div>
+        <div class="inner-card video-card" style="--i:4">
+          <div class="video-embed">
+            <iframe src="https://www.youtube-nocookie.com/embed/JMLUvx4Je_o"
+                    title="AI Software Engineering — Video 5"
+                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                    referrerpolicy="strict-origin-when-cross-origin"
+                    allowfullscreen loading="lazy"></iframe>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+  </div>
+
+  <!-- ================ § 05 — What is in the Name ================ -->
   <div class="section-wrap">
   <section id="name" class="section-card">
-    <span class="num">§ 04 — What is in the Name</span>
+    <span class="num">§ 05 — What is in the Name</span>
     <h2>What is in the Name?<a href="#name" class="anchor">¶</a></h2>
     <p class="sub">Two names. One principle. A nod to a Bengali magician.</p>
     <div class="section-body">
@@ -2558,10 +2648,10 @@ In each step, keep track of the best prompt which has the maximum number of succ
   </section>
   </div>
 
-  <!-- ================ § 05 — Installation ================ -->
+  <!-- ================ § 06 — Installation ================ -->
   <div class="section-wrap">
   <section id="install" class="section-card">
-    <span class="num">§ 05 — Installation</span>
+    <span class="num">§ 06 — Installation</span>
     <h2>Install in one line.<a href="#install" class="anchor">¶</a></h2>
     <p class="sub">Pick the install path that fits you &mdash; full source, Python package, or the VS Code extension. All you need is at least one API key from a major LLM provider. <strong>The one-line install script below is the recommended way to install the full KISS Sorcar stack.</strong></p>
     <div class="section-body">
@@ -2609,10 +2699,10 @@ In each step, keep track of the best prompt which has the maximum number of succ
   </section>
   </div>
 
-  <!-- ================ § 06 — CLI Interface (condensed) ================ -->
+  <!-- ================ § 07 — CLI Interface (condensed) ================ -->
   <div class="section-wrap">
   <section id="cli" class="section-card">
-    <span class="num">§ 06 — CLI in 30 seconds</span>
+    <span class="num">§ 07 — CLI in 30 seconds</span>
     <h2>The <code style="background:var(--surface);padding:0.05rem 0.45rem;border-radius:6px;font-size:0.85em;color:var(--primary-dark);">sorcar</code> CLI.<a href="#cli" class="anchor">¶</a></h2>
     <p class="sub">
       Run <code>sorcar</code> alone for an interactive Claude-Code-style REPL with worktree-isolated tasks, slash commands, and chat history; pass <code>-t "…"</code> or <code>-f task.md</code> for a one-shot non-interactive run. Pick any model with <code>-m</code>, point at a self-hosted endpoint with <code>-e</code>, cap spend with <code>-b</code>, and add MCP servers with <code>sorcar mcp add</code>.
@@ -2642,10 +2732,10 @@ In each step, keep track of the best prompt which has the maximum number of succ
   </section>
   </div>
 
-  <!-- ================ § 07 — Messaging & Third-Party Agents ================ -->
+  <!-- ================ § 08 — Messaging & Third-Party Agents ================ -->
   <div class="section-wrap">
   <section id="agents" class="section-card">
-    <span class="num">§ 07 — Messaging &amp; Third-Party Agents</span>
+    <span class="num">§ 08 — Messaging &amp; Third-Party Agents</span>
     <h2>💬 Reach the agent from anywhere.<a href="#agents" class="anchor">¶</a></h2>
     <p class="sub">KISS Sorcar includes <strong>23 third-party messaging agents</strong> that can send and receive messages on your behalf. It also ships a <strong>Govee smart-home CLI</strong> for controlling IoT lights (on/off, brightness, color, and color temperature) via the Govee Developer API. These agents live in <code>src/kiss/agents/third_party_agents/</code>.</p>
     <div class="section-body">
@@ -2685,10 +2775,10 @@ In each step, keep track of the best prompt which has the maximum number of succ
   </section>
   </div>
 
-  <!-- ================ § 08 — Models Supported ================ -->
+  <!-- ================ § 09 — Models Supported ================ -->
   <div class="section-wrap">
   <section id="models" class="section-card">
-    <span class="num">§ 08 — Models Supported</span>
+    <span class="num">§ 09 — Models Supported</span>
     <h2>🤖 502 models. 9 provider categories.<a href="#models" class="anchor">¶</a></h2>
     <p class="sub">KISS Sorcar ships a catalog of <strong>502 models</strong> across <strong>9 provider categories</strong>, with built-in prices, context lengths, and capability flags (<code>fc</code> function calling, <code>gen</code> generation, <code>emb</code> embedding). The source of truth is <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/core/models/MODEL_INFO.json">src/kiss/core/models/MODEL_INFO.json</a>.</p>
 
@@ -2733,10 +2823,10 @@ In each step, keep track of the best prompt which has the maximum number of succ
   </section>
   </div>
 
-  <!-- ================ § 09 — Contributing ================ -->
+  <!-- ================ § 10 — Contributing ================ -->
   <div class="section-wrap">
   <section id="contributing" class="section-card">
-    <span class="num">§ 09 — Contributing</span>
+    <span class="num">§ 10 — Contributing</span>
     <h2>🤗 Contributing.<a href="#contributing" class="anchor">¶</a></h2>
     <p class="sub">Contributions in the form of issues are welcome. KISS Sorcar should be able to help implement and review them.</p>
     <div class="section-body">
@@ -2756,10 +2846,10 @@ In each step, keep track of the best prompt which has the maximum number of succ
   </section>
   </div>
 
-  <!-- ================ § 10 — License ================ -->
+  <!-- ================ § 11 — License ================ -->
   <div class="section-wrap">
   <section id="license" class="section-card">
-    <span class="num">§ 10 — License</span>
+    <span class="num">§ 11 — License</span>
     <h2>📄 License.<a href="#license" class="anchor">¶</a></h2>
     <p class="sub">KISS Sorcar is released under a permissive open-source license.</p>
     <div class="section-body">
@@ -2772,10 +2862,10 @@ In each step, keep track of the best prompt which has the maximum number of succ
   </section>
   </div>
 
-  <!-- ================ § 11 — Citation ================ -->
+  <!-- ================ § 12 — Citation ================ -->
   <div class="section-wrap">
   <section id="citation" class="section-card">
-    <span class="num">§ 11 — Citation</span>
+    <span class="num">§ 12 — Citation</span>
     <h2>📚 Cite the paper.<a href="#citation" class="anchor">¶</a></h2>
     <p class="sub">If you use KISS Sorcar in your research, please cite:</p>
     <div class="section-body">
