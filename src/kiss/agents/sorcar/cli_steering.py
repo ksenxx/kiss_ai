@@ -48,6 +48,9 @@ import threading
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
+from kiss.agents.sorcar.cli_line_continuation import (
+    ends_with_line_continuation,
+)
 from kiss.agents.sorcar.cli_panel import (
     _ESC,
     CYAN,
@@ -1113,13 +1116,32 @@ class _InputBox:
                     self._menu_accept()
                     changed = True
                 else:
-                    line = self.buf
-                    self.buf = ""
-                    self._hist_idx = None
-                    self._hist_saved = ""
-                    self._reset_completion_state()
-                    changed = True
-                    on_submit(line)
+                    # Universal backslash line-continuation.  On
+                    # terminals that cannot disambiguate Shift+Enter
+                    # from Enter (notably macOS Terminal.app), ending
+                    # the buffer with an unescaped ``\`` makes Enter
+                    # insert a newline into the buffer instead of
+                    # submitting — the same convention every POSIX
+                    # shell uses.  See
+                    # :func:`~kiss.agents.sorcar.cli_line_continuation.ends_with_line_continuation`.
+                    cont, keep = ends_with_line_continuation(self.buf)
+                    if cont:
+                        self.buf = self.buf[:keep] + "\n"
+                        self._hist_idx = None
+                        # A buffer edit — refresh the in-place
+                        # completion menu so suggestions track the
+                        # newly-added newline the same way the
+                        # Shift+Enter newline-insert paths do.
+                        self._refresh_typing_menu()
+                        changed = True
+                    else:
+                        line = self.buf
+                        self.buf = ""
+                        self._hist_idx = None
+                        self._hist_saved = ""
+                        self._reset_completion_state()
+                        changed = True
+                        on_submit(line)
             elif ch == "\n":
                 # Bare LF is Ctrl+J / Alt+Enter on terminals that
                 # send a lone LF for that key (e.g. tmux M-Enter
