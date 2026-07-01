@@ -98,10 +98,7 @@ from kiss.agents.vscode.helpers import (
     clip_autocomplete_suggestion,
     rank_file_suggestions,
 )
-from kiss.agents.vscode.tricks import (
-    current_sentence_partial,
-    prefix_match_tricks,
-)
+from kiss.agents.vscode.tricks import prefix_match_tricks
 
 logger = logging.getLogger(__name__)
 
@@ -295,12 +292,12 @@ class CliCompleter:
         # ``_prefix_match_tasks``' multi-alternative contract.
         tricks = prefix_match_tricks(line)
         if tricks:
-            partial = current_sentence_partial(line)
-            head = line[: len(line) - len(partial)]
-            return [head + trick for trick in tricks]
+            return list(tricks)
         suffix = self._active_file_suffix(line)
         if suffix:
-            return [line + suffix]
+            m = re.search(r"([\w][\w.]*)$", line)
+            partial = m.group(1) if m else ""
+            return [partial + suffix]
         return []
 
     def _active_file_suffix(self, line: str) -> str:

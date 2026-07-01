@@ -218,7 +218,34 @@ function daemonHasActiveTasks(sockPath, timeoutMs) {
       }
     });
     sock.once('error', err => {
-      finish({ok: false, reason: 'error:' + (err && err.code)});
+      // BUG FIX (Update-button hang TOCTOU): when ``install.sh``'s
+      // ``rm -f "$HOME/.kiss/sorcar.sock"`` races with this probe,
+      // the file can exist at ``existsSync`` time above but be gone
+      // by the time ``net.createConnection`` tries to connect — the
+      // kernel surfaces this as ``ENOENT`` on the connect rather than
+      // a stat failure.  Normalise it to the canonical
+      // ``sock-missing`` reason so ``decideRestart``'s
+      // ``unreachable-uds`` branch fires deterministically regardless
+      // of whether the rm landed before or after the stat.  Without
+      // this normalisation the TOCTOU window mis-classifies as
+      // ``error:ENOENT`` → generic ``alive-uncertain`` skip → user
+      // remains stranded on the loading overlay.  Same treatment for
+      // ``ECONNREFUSED`` on a stale leftover file the daemon failed
+      // to ``unlink`` on startup: the path resolves but the listening
+      // socket behind it is gone, so the daemon is unreachable via
+      // this path just like the missing-file case.
+      const code = err && err.code;
+      // ``ENOTSOCK`` arrives when the path resolves to a regular file
+      // (or other non-socket inode) — i.e. a stale leftover the
+      // daemon failed to ``unlink`` on startup.  From the extension's
+      // point of view this is the same failure mode as ``ENOENT`` /
+      // ``ECONNREFUSED``: there is no usable UDS endpoint at the path.
+      if (code === 'ENOENT' || code === 'ECONNREFUSED' ||
+          code === 'ENOTSOCK') {
+        finish({ok: false, reason: 'sock-missing'});
+        return;
+      }
+      finish({ok: false, reason: 'error:' + code});
     });
     sock.once('end', () => {
       // Server closed before sending a response.
@@ -235,12 +262,14 @@ function daemonHasActiveTasks(sockPath, timeoutMs) {
  *
  * Decision table (evaluated top-to-bottom; first match wins)::
  *
- *     activeTasks.ok && activeTasks.count > 0   → skip ("active-tasks")
- *     health === 'alive' && !activeTasks.ok     → skip ("alive-uncertain")
- *     fingerprintMatches && health !== 'dead'   → skip ("healthy-unchanged")
- *     otherwise                                  → restart
+ *     activeTasks.ok && activeTasks.count > 0       → skip ("active-tasks")
+ *     health === 'alive' &&
+ *         activeTasks.reason === 'sock-missing'     → restart ("unreachable-uds")
+ *     health === 'alive' && !activeTasks.ok         → skip ("alive-uncertain")
+ *     fingerprintMatches && health !== 'dead'       → skip ("healthy-unchanged")
+ *     otherwise                                      → restart
  *
- * Two safety properties drive this table:
+ * Three safety properties drive this table:
  *
  *   * ``health === 'unknown'`` is treated as "do not restart" when the
  *     fingerprint matches.  The original code conflated ``'unknown'``
@@ -248,17 +277,39 @@ function daemonHasActiveTasks(sockPath, timeoutMs) {
  *     timeouts.
  *
  *   * An ``'alive'`` daemon whose ``activeTasks`` status could NOT be
- *     confirmed (UDS timeout, socket missing during a transient
- *     startup window, parse failure, etc.) MUST NOT be SIGTERMed.
- *     This regression killed task_history row 3192 mid-flight: the
- *     fingerprint had changed (extension auto-update rewrote every
- *     bundled ``.py`` mtime), the UDS round-trip missed its 1500 ms
- *     deadline under load, and the previous decision table fell
- *     through to ``restart-required`` even though the daemon's own
- *     log line ``active_tasks=[a3b4ec24(task=3191)]`` proved it was
- *     mid-task.  The fingerprint change is applied lazily on the
- *     next activation that can prove the daemon is idle (or has died
- *     on its own).
+ *     confirmed by a UDS round-trip (timeout, parse failure, error
+ *     reply, EOF, …) MUST NOT be SIGTERMed.  This regression killed
+ *     task_history row 3192 mid-flight: the fingerprint had changed
+ *     (extension auto-update rewrote every bundled ``.py`` mtime),
+ *     the UDS round-trip missed its 1500 ms deadline under load, and
+ *     the previous decision table fell through to
+ *     ``restart-required`` even though the daemon's own log line
+ *     ``active_tasks=[a3b4ec24(task=3191)]`` proved it was mid-task.
+ *     The fingerprint change is applied lazily on the next activation
+ *     that can prove the daemon is idle (or has died on its own).
+ *
+ *   * An ``'alive'`` daemon whose UDS socket FILE is missing
+ *     (``activeTasks.reason === 'sock-missing'``) is qualitatively
+ *     different from the above: it is provably unreachable from the
+ *     VS Code extension.  This is the failure mode the user sees
+ *     after clicking the Update button — ``install.sh`` races with
+ *     the ``launchd`` ``KeepAlive`` / ``systemd`` ``Restart=always``
+ *     respawn and ends up deleting the freshly-respawned daemon's
+ *     UDS socket file with ``rm -f "$HOME/.kiss/sorcar.sock"``.  The
+ *     daemon is happily listening on port 8787 but the
+ *     ``AgentClient`` can never connect over ``~/.kiss/sorcar.sock``
+ *     (the path it ``unlink``-ed no longer resolves to its open
+ *     listening socket), so the webview hangs forever on the
+ *     "KISS Sorcar Server is starting ..." overlay.  Detecting this
+ *     specific failure and forcing a clean restart (which respawns
+ *     a daemon that re-binds the UDS file via
+ *     ``RemoteAccessServer._setup_server``) is the only way to
+ *     recover without the user manually restarting VS Code.  The
+ *     ``active-tasks`` guard above still wins on a daemon that
+ *     manages to admit it is busy — but a daemon with no UDS file
+ *     by definition cannot answer ``activeTasksQuery``, so prying
+ *     the ``sock-missing`` case out from the catch-all
+ *     ``alive-uncertain`` skip is safe.
  *
  * @param {{
  *   fingerprintMatches: boolean,
@@ -272,6 +323,21 @@ function decideRestart(state) {
   const {fingerprintMatches, health, activeTasks} = state;
   if (activeTasks && activeTasks.ok && activeTasks.count > 0) {
     return {skip: true, reason: 'active-tasks'};
+  }
+  // BUG FIX: a live daemon whose UDS socket file is missing is
+  // unreachable from the extension — see the docstring above for the
+  // Update-button race scenario this guards.  Must be evaluated
+  // BEFORE the generic ``alive-uncertain`` skip below or the user
+  // gets stranded on the loading overlay until they restart VS Code.
+  if (
+    health === 'alive' &&
+    activeTasks && !activeTasks.ok &&
+    activeTasks.reason === 'sock-missing'
+  ) {
+    return {
+      skip: false,
+      reason: 'unreachable-uds (alive but socket file missing)',
+    };
   }
   if (health === 'alive' && !(activeTasks && activeTasks.ok)) {
     const reason = activeTasks && activeTasks.reason

@@ -1231,6 +1231,40 @@ exec > >(tee -a "$LOG_FILE") 2>&1
     # client that is mid-flight during the launchd/systemd respawn window.
     rm -f "$HOME/.kiss/sorcar.sock"
 
+    # Defense-in-depth for the "KISS Sorcar Server is starting ..." hang
+    # reported after the Update button.  The lsof/kill block above is racy
+    # against launchd's ``KeepAlive`` (and systemd's ``Restart=always``):
+    # the supervisor can respawn a fresh kiss-web DURING the up-to-3 s
+    # wait loop, and its ``_setup_server`` binds a new
+    # ``~/.kiss/sorcar.sock`` BEFORE the ``rm -f`` above runs — so the
+    # rm deletes the freshly-respawned daemon's socket file out from
+    # under it.  The kernel-level listening socket survives the unlink
+    # (the open fd is independent of the directory entry), so the daemon
+    # stays "alive on port 8787" but is unreachable from the extension's
+    # ``AgentClient`` — every ``connect("$HOME/.kiss/sorcar.sock")`` from
+    # then on returns ENOENT until something kills the daemon again.
+    # Force a clean kickstart here so the supervisor brings up a fresh
+    # daemon whose ``_setup_server`` re-creates the UDS file.  Best-
+    # effort: a failure only forfeits the defense and falls back to the
+    # in-extension recovery (``restartKissWebDaemon``'s ``unreachable-uds``
+    # branch in ``daemonHealth.decideRestart``) — never aborts install.sh.
+    case "$(uname)" in
+        Darwin)
+            if command -v launchctl &>/dev/null; then
+                _kiss_uid=$(id -u 2>/dev/null || echo 0)
+                launchctl kickstart -k \
+                    "gui/${_kiss_uid}/com.kiss.web-server" \
+                    2>/dev/null || true
+                unset _kiss_uid
+            fi
+            ;;
+        Linux)
+            if command -v systemctl &>/dev/null; then
+                systemctl --user restart kiss-web 2>/dev/null || true
+            fi
+            ;;
+    esac
+
     # MODEL_INFO.json is intentionally NOT copied into the user's kiss
     # home directory.  The bundled
     # ``src/kiss/core/models/MODEL_INFO.json`` is read directly from
