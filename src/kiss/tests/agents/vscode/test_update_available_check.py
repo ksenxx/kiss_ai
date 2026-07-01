@@ -270,6 +270,181 @@ class TestUpdateCheckHandlesNetworkErrors(_UpdateCheckTestBase):
                 pass
 
 
+class TestUpdateAvailableUsesLatestInstalledExtension(_UpdateCheckTestBase):
+    r"""Regression: stale daemon must not falsely announce "update available".
+
+    Bug reproduced
+    --------------
+    When the user clicks "Update" on the sticky "update available" toast,
+    ``install.sh`` upgrades the extension to the new version but only
+    ``launchctl kickstart -k``\ s the pre-existing kiss-web plist / systemd
+    unit — it does NOT rewrite the unit's ``ProgramArguments`` /
+    ``ExecStart``.  Those paths still point at the OLD extension's binary
+    (``~/.vscode/extensions/ksenxx.kiss-sorcar-<OLD>/kiss_project/.venv/bin/kiss-web``),
+    so the supervisor respawns the OLD daemon after the update.
+
+    The old daemon's cached ``_latest_version`` is still the NEW PyPI
+    release and its ``_read_version()`` used to read only its own bundled
+    ``_version.py`` (= OLD version), so it kept broadcasting
+    ``{available: True, latest: NEW, current: OLD}`` — i.e. the same
+    "update available (NEW)" toast the user just clicked kept coming back.
+
+    Fix
+    ---
+    The daemon now discovers the LATEST installed extension version by
+    scanning ``~/.vscode/extensions/ksenxx.kiss-sorcar-*/kiss_project/src/kiss/_version.py``
+    and returns the highest parseable version.  After the install the
+    filesystem contains the NEW extension dir, so even a stale-old daemon
+    reports ``current == NEW`` and broadcasts ``available: False`` —
+    dismissing the sticky toast (``media/main.js:renderUpdateAvailableNotification``
+    dismisses when ``available === false``).
+
+    This test seeds a tempdir that simulates ``~/.vscode/extensions/``
+    with both an OLD (2026.6.30) and a NEW (2026.7.5) extension dir,
+    plus a decoy non-KISS extension.  The PyPI stub reports the NEW
+    version.  Before the fix the daemon (whose bundled ``_version.py``
+    is anything other than 2026.7.5) reported ``available: True``.
+    After the fix it reports ``available: False`` and ``current: 2026.7.5``.
+    """
+
+    PYPI_VERSION = "2026.7.5"
+    PYPI_PAYLOAD = {"info": {"version": "2026.7.5"}}
+
+    async def asyncSetUp(self) -> None:
+        # Build the fake ``~/.vscode/extensions/`` layout BEFORE the
+        # daemon starts so its first update-check reads the seeded root.
+        self._ext_root_tmp = tempfile.mkdtemp(prefix="kiss-extroot-")
+        for ver in ("2026.6.30", "2026.7.5"):
+            ext_dir = (
+                Path(self._ext_root_tmp)
+                / f"ksenxx.kiss-sorcar-{ver}"
+                / "kiss_project"
+                / "src"
+                / "kiss"
+            )
+            ext_dir.mkdir(parents=True)
+            (ext_dir / "_version.py").write_text(
+                f'__version__ = "{ver}"\n',
+            )
+        # Decoy dirs to ensure the scanner filters strictly on our
+        # publisher/name prefix and does not blow up on unrelated files.
+        (
+            Path(self._ext_root_tmp) / "someone.other-extension-1.0.0"
+        ).mkdir()
+        (Path(self._ext_root_tmp) / "not-a-directory.txt").write_text("junk")
+        # Also drop a broken KISS dir (no _version.py) — must be skipped.
+        (
+            Path(self._ext_root_tmp)
+            / "ksenxx.kiss-sorcar-broken"
+            / "kiss_project"
+        ).mkdir(parents=True)
+        # And one with a malformed _version.py — must be skipped without
+        # raising.
+        bad = (
+            Path(self._ext_root_tmp)
+            / "ksenxx.kiss-sorcar-2026.6.99"
+            / "kiss_project"
+            / "src"
+            / "kiss"
+        )
+        bad.mkdir(parents=True)
+        (bad / "_version.py").write_text("# no version here\n")
+
+        self._saved_ext_root = ws._INSTALLED_EXTENSIONS_ROOT
+        ws._INSTALLED_EXTENSIONS_ROOT = Path(self._ext_root_tmp)
+        await super().asyncSetUp()
+
+    async def asyncTearDown(self) -> None:
+        try:
+            await super().asyncTearDown()
+        finally:
+            ws._INSTALLED_EXTENSIONS_ROOT = self._saved_ext_root
+            shutil.rmtree(self._ext_root_tmp, ignore_errors=True)
+
+    async def test_stale_daemon_reports_latest_installed_version(
+        self,
+    ) -> None:
+        reader, writer = await self._connect_uds()
+        try:
+            await self._send_ready(writer, "tab-stale-daemon")
+            ev = await self._wait_for_event(reader, "update_available")
+            self.assertEqual(
+                ev.get("current"),
+                "2026.7.5",
+                "daemon must report the newest installed extension "
+                "version as the current one, not its own stale bundled "
+                "_version.py",
+            )
+            self.assertEqual(
+                ev.get("latest"),
+                "2026.7.5",
+                "PyPI stub is pinned to 2026.7.5",
+            )
+            self.assertEqual(
+                ev.get("available"),
+                False,
+                "with the new extension installed the daemon must not "
+                "keep announcing an update — regression guard for the "
+                "sticky-toast-after-update bug",
+            )
+        finally:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+
+class TestUpdateAvailableEmptyExtensionsRootFallback(_UpdateCheckTestBase):
+    """When the extensions root is empty (dev / Docker), fall back to bundled.
+
+    Ensures the new extension-dir scan does not regress the pre-existing
+    behavior: developers running the daemon from a source checkout do not
+    have a ``~/.vscode/extensions/ksenxx.kiss-sorcar-*`` directory, so the
+    daemon must fall back to reading the bundled ``_version.py`` and the
+    ``update_available`` broadcast still works as before.
+    """
+
+    PYPI_VERSION = "2099.1.1"
+    PYPI_PAYLOAD = {"info": {"version": "2099.1.1"}}
+
+    async def asyncSetUp(self) -> None:
+        self._ext_root_tmp = tempfile.mkdtemp(prefix="kiss-extroot-empty-")
+        self._saved_ext_root = ws._INSTALLED_EXTENSIONS_ROOT
+        ws._INSTALLED_EXTENSIONS_ROOT = Path(self._ext_root_tmp)
+        await super().asyncSetUp()
+
+    async def asyncTearDown(self) -> None:
+        try:
+            await super().asyncTearDown()
+        finally:
+            ws._INSTALLED_EXTENSIONS_ROOT = self._saved_ext_root
+            shutil.rmtree(self._ext_root_tmp, ignore_errors=True)
+
+    async def test_bundled_version_used_when_no_installed_extensions(
+        self,
+    ) -> None:
+        reader, writer = await self._connect_uds()
+        try:
+            await self._send_ready(writer, "tab-fallback")
+            ev = await self._wait_for_event(reader, "update_available")
+            self.assertEqual(ev.get("latest"), "2099.1.1")
+            current = ev.get("current")
+            # Whatever the bundled version is, it must be a non-empty
+            # string and different from the future PyPI version so the
+            # daemon still announces the update.
+            self.assertIsInstance(current, str)
+            self.assertNotEqual(current, "")
+            self.assertNotEqual(current, "2099.1.1")
+            self.assertEqual(ev.get("available"), True)
+        finally:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+
 class TestVersionCompare(IsolatedAsyncioTestCase):
     """Unit-style coverage for the version compare helper."""
 
