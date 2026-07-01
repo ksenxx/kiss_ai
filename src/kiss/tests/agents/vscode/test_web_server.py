@@ -4589,18 +4589,28 @@ class TestReadVersionException(unittest.TestCase):
     """Test _read_version when _version.py is unreadable (lines 901-903)."""
 
     def test_returns_empty_on_missing_version_file(self) -> None:
-        """_read_version returns '' when version file is missing."""
+        """_read_version returns '' when the bundled version file is missing.
+
+        The installed-extensions scan is redirected at an empty tmpdir so
+        the bundled ``_version.py`` fallback branch is actually exercised
+        (otherwise the scanner would pick up the machine's real installed
+        extension and mask the fallback).
+        """
         import kiss.agents.vscode.web_server as ws_mod
 
         vfile = Path(ws_mod.__file__).parent.parent.parent / "_version.py"
         backup = vfile.read_text()
         vfile.rename(vfile.with_suffix(".py.bak"))
-        try:
-            result = _read_version()
-            self.assertEqual(result, "")
-        finally:
-            vfile.with_suffix(".py.bak").rename(vfile)
-            vfile.write_text(backup)
+        saved_root = ws_mod._INSTALLED_EXTENSIONS_ROOT
+        with tempfile.TemporaryDirectory() as empty_root:
+            ws_mod._INSTALLED_EXTENSIONS_ROOT = Path(empty_root)
+            try:
+                result = _read_version()
+                self.assertEqual(result, "")
+            finally:
+                ws_mod._INSTALLED_EXTENSIONS_ROOT = saved_root
+                vfile.with_suffix(".py.bak").rename(vfile)
+                vfile.write_text(backup)
 
 
 class TestMergeActionCurNone(IsolatedAsyncioTestCase):
@@ -5354,15 +5364,27 @@ class TestReadVersionNoMatch(unittest.TestCase):
     """Test _read_version when _version.py has no __version__ line."""
 
     def test_no_version_line_returns_empty(self) -> None:
-        """When _version.py has no __version__ line, returns ''."""
+        """When the bundled _version.py has no __version__ line, returns ''.
+
+        The installed-extensions scan is redirected at an empty tmpdir so
+        the bundled ``_version.py`` fallback branch is actually exercised
+        (otherwise the scanner would pick up the machine's real installed
+        extension and mask the fallback).
+        """
+        import kiss.agents.vscode.web_server as ws_mod
+
         vfile = Path(__file__).parent.parent.parent.parent / "_version.py"
         original = vfile.read_text()
-        try:
-            vfile.write_text("# no version here\nfoo = 'bar'\n")
-            result = _read_version()
-            self.assertEqual(result, "")
-        finally:
-            vfile.write_text(original)
+        saved_root = ws_mod._INSTALLED_EXTENSIONS_ROOT
+        with tempfile.TemporaryDirectory() as empty_root:
+            ws_mod._INSTALLED_EXTENSIONS_ROOT = Path(empty_root)
+            try:
+                vfile.write_text("# no version here\nfoo = 'bar'\n")
+                result = _read_version()
+                self.assertEqual(result, "")
+            finally:
+                ws_mod._INSTALLED_EXTENSIONS_ROOT = saved_root
+                vfile.write_text(original)
 
 
 class TestBroadcastMergeDataNoTabId(IsolatedAsyncioTestCase):
