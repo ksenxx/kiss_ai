@@ -280,13 +280,33 @@ class _CommandsMixin:
                 # be cut off from the prior chat context
                 # (``ChatSorcarAgent.build_chat_prompt`` would query
                 # history for the tab id, find nothing, and send the LLM
-                # an empty preamble).  Otherwise allocate a fresh chat
-                # id.  ``tab_id`` (the frontend routing key) and
-                # ``chat_id`` (the persistence key) are kept orthogonal:
-                # every run gets its own chat id, regardless of which tab
-                # launched it.
+                # an empty preamble).
+                #
+                # If ``tab.chat_id`` is empty, this may be a tab that
+                # ``_replay_session`` associated with a chat AFTER a
+                # daemon cold-start (e.g. VS Code was closed and
+                # relaunched — the extension's ``ready`` handler replays
+                # ``resumeSession`` for every restored tab).  In that
+                # cold-start case no ``_RunningAgentState`` existed for
+                # the tab at the time ``_replay_session`` ran, so the
+                # chat id was only recorded in ``_tab_chat_views``
+                # (which is populated unconditionally, even when the
+                # per-tab state has not been allocated yet).  Consult
+                # that fallback here so the follow-up task continues
+                # the SAME chat_id the user was viewing rather than
+                # minting a fresh session and orphaning the prior
+                # conversation.
+                #
+                # Otherwise allocate a fresh chat id.  ``tab_id`` (the
+                # frontend routing key) and ``chat_id`` (the persistence
+                # key) are kept orthogonal: every run gets its own chat
+                # id, regardless of which tab launched it.
                 if not tab.chat_id:
-                    tab.chat_id = uuid.uuid4().hex
+                    resumed_chat_id = self._tab_chat_views.get(tab_id, "")
+                    if resumed_chat_id:
+                        tab.chat_id = resumed_chat_id
+                    else:
+                        tab.chat_id = uuid.uuid4().hex
                 chat_id = tab.chat_id
                 # The launching tab views this chat: record it so a later
                 # task started on the same chat from ANOTHER tab (in any
