@@ -191,6 +191,13 @@ class TestSubagentEventsPersisted:
             results = parent._run_tasks_parallel(tasks, max_workers=1)
             assert len(results) == 3
 
+            # Persistence goes through the async event-writer thread;
+            # under heavy parallel test load the sub-agent rows/events
+            # may not have been flushed to SQLite by the time
+            # ``_run_tasks_parallel`` returns.  Drain the queue before
+            # querying so the assertions below are deterministic.
+            th._flush_chat_events()
+
             # Each sub-agent's row must have has_events=1 AND its
             # events table must contain the emitted text_delta.
             # Note: _load_history filters out sub-agent rows via
