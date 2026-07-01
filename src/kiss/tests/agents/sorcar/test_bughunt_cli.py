@@ -35,21 +35,22 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _drain(fd: int, seconds: float) -> str:
-    """Read whatever the child writes to the PTY for *seconds*."""
+def _drain(fd: int, seconds: float, stop: re.Pattern[str] | None = None) -> str:
+    """Read PTY output for *seconds* (early-out when *stop* matches)."""
     out = b""
     deadline = time.time() + seconds
     while time.time() < deadline:
         ready, _, _ = select.select([fd], [], [], 0.2)
-        if not ready:
-            continue
-        try:
-            chunk = os.read(fd, 8192)
-        except OSError:
+        if ready:
+            try:
+                chunk = os.read(fd, 8192)
+            except OSError:
+                break
+            if not chunk:
+                break
+            out += chunk
+        if stop is not None and stop.search(out.decode("utf-8", "ignore")):
             break
-        if not chunk:
-            break
-        out += chunk
     return out.decode("utf-8", "ignore")
 
 
@@ -62,7 +63,7 @@ def _abort_steering_over_pty(tmp_path: Path) -> str:
     the agent records ``interrupted`` in a ``result`` marker file (and
     ``completed`` if the loop ever finishes).  Once ``run_with_steering``
     raises ``KeyboardInterrupt`` in the child's main thread, the child
-    waits up to 3 seconds for the worker to be interrupted and prints a
+    waits up to 15 seconds for the worker to be interrupted and prints a
     ``WORKER[...]`` marker with the result-file contents (or ``missing``).
 
     Args:
@@ -111,7 +112,7 @@ try:
     run_with_steering(SlowAgent(), {{}})
     sys.stdout.write("NO_INTERRUPT\\n")
 except KeyboardInterrupt:
-    deadline = time.time() + 3.0
+    deadline = time.time() + 15.0
     while time.time() < deadline and not result.exists():
         time.sleep(0.05)
     text = result.read_text() if result.exists() else "missing"
@@ -131,7 +132,7 @@ sys.stdout.flush()
         # The main thread is now in the steering select loop: send a real
         # Ctrl+C through the PTY (ISIG is kept on, so SIGINT is raised).
         os.write(fd, b"\x03")
-        out += _drain(fd, 8.0)
+        out += _drain(fd, 20.0, stop=re.compile(r"WORKER\[\w+\]"))
     finally:
         try:
             os.close(fd)

@@ -338,6 +338,29 @@ def _extract_signal_helpers(script: Path) -> str:
     return chunk
 
 
+def _wait_for_log_text(log: Path, needle: str, timeout: float = 10.0) -> str:
+    """Re-read *log* until *needle* appears or *timeout* elapses.
+
+    The harness writes its log through an inherited file descriptor; under
+    heavy parallel test load the final trap diagnostics can land a moment
+    after the harness process itself has been reaped.  Polling instead of
+    a single post-``wait`` read removes that flake window.  Returns the
+    last-read log text either way so assertion messages stay informative.
+    """
+    deadline = time.time() + timeout
+    text = ""
+    while time.time() < deadline:
+        text = (
+            log.read_text(encoding="utf-8", errors="replace")
+            if log.exists()
+            else ""
+        )
+        if needle in text:
+            return text
+        time.sleep(0.1)
+    return text
+
+
 def test_run_with_heartbeat_survives_stray_sigint(tmp_path: Path) -> None:
     """A single stray SIGINT must NOT kill the wrapped command.
 
@@ -360,6 +383,7 @@ def test_run_with_heartbeat_survives_stray_sigint(tmp_path: Path) -> None:
     """
     helpers = _extract_signal_helpers(INSTALL_SCRIPT)
     marker = tmp_path / "sleep_finished"
+    ready = tmp_path / "wrapped_started"
     log = tmp_path / "harness.log"
     # The harness:
     #   * pulls in the extracted helpers verbatim,
@@ -376,7 +400,7 @@ def test_run_with_heartbeat_survives_stray_sigint(tmp_path: Path) -> None:
         + "\n"
         + textwrap.dedent(
             f"""\
-            if run_with_heartbeat "sleep" sleep 2; then
+            if run_with_heartbeat "sleep" bash -c ': > "{ready}"; exec sleep 3'; then
                 : > "{marker}"
             fi
             """
@@ -400,13 +424,18 @@ def test_run_with_heartbeat_survives_stray_sigint(tmp_path: Path) -> None:
             cwd=str(tmp_path),
         )
         try:
-            # Give the harness a moment to start the wrapped sleep, then
-            # deliver SIGINT to its entire process group — the exact
-            # condition that previously killed npm/copy-kiss.sh.
-            time.sleep(0.5)
+            # Wait until the wrapped command is actually running (it writes
+            # the ready marker) before delivering SIGINT to the harness's
+            # entire process group — the exact condition that previously
+            # killed npm/copy-kiss.sh.  A fixed sleep raced bash's trap
+            # installation under heavy parallel test load.
+            deadline = time.time() + 15.0
+            while time.time() < deadline and not ready.exists():
+                time.sleep(0.05)
+            assert ready.exists(), "wrapped command never started"
             os.killpg(proc.pid, signal.SIGINT)
             try:
-                proc.wait(timeout=10)
+                proc.wait(timeout=30)
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait(timeout=5)
@@ -418,7 +447,7 @@ def test_run_with_heartbeat_survives_stray_sigint(tmp_path: Path) -> None:
                 except ProcessLookupError:
                     pass
 
-    stdout = log.read_text(encoding="utf-8", errors="replace")
+    stdout = _wait_for_log_text(log, "Interrupt received but ignored")
     assert proc.returncode == 0, (
         "run_with_heartbeat must NOT abort on a single stray SIGINT — the "
         "harness exited "
@@ -447,6 +476,7 @@ def test_run_with_heartbeat_double_sigint_aborts(tmp_path: Path) -> None:
     """
     helpers = _extract_signal_helpers(INSTALL_SCRIPT)
     marker = tmp_path / "should_not_exist"
+    ready = tmp_path / "wrapped_started"
     log = tmp_path / "harness.log"
     harness = tmp_path / "harness.sh"
     harness.write_text(
@@ -457,7 +487,7 @@ def test_run_with_heartbeat_double_sigint_aborts(tmp_path: Path) -> None:
         + "\n"
         + textwrap.dedent(
             f"""\
-            run_with_heartbeat "sleep" sleep 30
+            run_with_heartbeat "sleep" bash -c ': > "{ready}"; exec sleep 30'
             : > "{marker}"
             """
         ),
@@ -474,12 +504,26 @@ def test_run_with_heartbeat_double_sigint_aborts(tmp_path: Path) -> None:
             cwd=str(tmp_path),
         )
         try:
-            time.sleep(0.5)
+            deadline = time.time() + 15.0
+            while time.time() < deadline and not ready.exists():
+                time.sleep(0.05)
+            assert ready.exists(), "wrapped command never started"
             os.killpg(proc.pid, signal.SIGINT)
-            time.sleep(0.5)
+            # Wait until the FIRST trap has actually executed before
+            # sending the second signal: bash runs traps only between
+            # commands, so under heavy load two quick SIGINTs can coalesce
+            # into a single ``handle_interrupt`` invocation — the
+            # second-signal abort branch would then never run and the
+            # wrapped ``sleep 30`` would outlive the wait below.  The
+            # 3-second double-interrupt window starts at the first trap's
+            # execution, so detect-then-send stays safely inside it.
+            first = _wait_for_log_text(log, "Interrupt received but ignored")
+            assert "Interrupt received but ignored" in first, (
+                f"first SIGINT trap never fired.  Output:\n{first}"
+            )
             os.killpg(proc.pid, signal.SIGINT)
             try:
-                proc.wait(timeout=15)
+                proc.wait(timeout=30)
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait(timeout=5)
@@ -491,7 +535,7 @@ def test_run_with_heartbeat_double_sigint_aborts(tmp_path: Path) -> None:
                 except ProcessLookupError:
                     pass
 
-    stdout = log.read_text(encoding="utf-8", errors="replace")
+    stdout = _wait_for_log_text(log, "Second interrupt received")
     assert proc.returncode == 130, (
         "double-Ctrl+C must abort with exit 130; got "
         f"{proc.returncode}.  Output:\n{stdout}"

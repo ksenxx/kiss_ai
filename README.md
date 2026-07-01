@@ -2,7 +2,7 @@
 
 ![KISS Framework](assets/KISS-Sorcar.png)
 
-[![Version](https://img.shields.io/badge/version-2026.7.0-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
+[![Version](https://img.shields.io/badge/version-2026.7.1-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.13-blue?style=flat-square)](https://www.python.org/)
 [![Website](https://img.shields.io/badge/website-kisssorcar.github.io-1976d2?style=flat-square)](https://kisssorcar.github.io/)
@@ -29,6 +29,7 @@ ______________________________________________________________________
 
 - [KISS Sorcar vs Claude Code vs Cursor](#-kiss-sorcar-vs-claude-code-vs-cursor)
 - [What is in the Name](#what-is-in-the-name)
+- [See It in Action](#-see-it-in-action)
 - [Installation](#installation)
   - [Full install from source](#full-install-from-source)
   - [Python package / CLI install](#python-package--cli-install)
@@ -69,6 +70,20 @@ ______________________________________________________________________
 **KISS Agent Framework** is a deliberately small agent runtime organized around the [KISS principle](https://en.wikipedia.org/wiki/KISS_principle) ("Keep it Simple, Stupid").
 KISS Sorcar is named after [P. C. Sorcar, the Bengali magician](https://en.wikipedia.org/wiki/P._C._Sorcar).
 Note: **Sorcar** also means government in Bengali.
+
+## 🎬 See It in Action
+
+<div align="center">
+  <video src="https://github.com/ksenxx/kiss_ai/raw/main/assets/sorcar-main.mp4"
+         controls autoplay muted loop playsinline preload="auto"
+         poster="assets/KISS-Sorcar-UI.png"
+         width="100%"
+         aria-label="KISS Sorcar demo video">
+    <a href="assets/sorcar-main.mp4">▶ Watch the KISS Sorcar demo video</a>
+  </video>
+  <br>
+  <em>▶ <a href="assets/sorcar-main.mp4">Watch the KISS Sorcar demo video</a> · Also viewable on the <a href="https://kisssorcar.github.io/">project website</a>.</em>
+</div>
 
 ## Installation
 

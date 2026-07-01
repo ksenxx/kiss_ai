@@ -12,9 +12,10 @@ Covers:
   empty / whitespace-only / non-string prompts.
 * :meth:`SorcarAgent._drain_pending_user_messages` — drains the
   list under ``_registry_lock`` and calls
-  ``model.add_message_to_conversation("user", msg)`` for each
-  queued entry (then leaves the list empty so the same message is
-  never injected twice).
+  ``model.add_message_to_conversation("user", ...)`` for each
+  queued entry, wrapping it as ``User says: <msg>. Take the message
+  into account and finish your task.`` (then leaves the list empty
+  so the same message is never injected twice).
 * Lifecycle: the drain hook is a no-op when ``_tab_id`` is unset
   or points at no live tab.
 
@@ -175,9 +176,21 @@ class TestDrainPendingUserMessages:
         agent._drain_pending_user_messages(model)
 
         assert model.calls == [
-            ("user", "msg1"),
-            ("user", "msg2"),
-            ("user", "msg3"),
+            (
+                "user",
+                "User says: msg1. "
+                "Take the message into account and finish your task.",
+            ),
+            (
+                "user",
+                "User says: msg2. "
+                "Take the message into account and finish your task.",
+            ),
+            (
+                "user",
+                "User says: msg3. "
+                "Take the message into account and finish your task.",
+            ),
         ]
         assert tab.pending_user_messages == []
 
@@ -226,16 +239,22 @@ class TestDrainPendingUserMessages:
         model = _RecordingModel()
         agent._drain_pending_user_messages(model)
 
-        assert model.calls == [
-            ("user", "first follow-up"),
-            ("user", "second follow-up"),
+        expected = [
+            (
+                "user",
+                "User says: first follow-up. "
+                "Take the message into account and finish your task.",
+            ),
+            (
+                "user",
+                "User says: second follow-up. "
+                "Take the message into account and finish your task.",
+            ),
         ]
+        assert model.calls == expected
         # Second drain (next model step) must be a no-op.
         agent._drain_pending_user_messages(model)
-        assert model.calls == [
-            ("user", "first follow-up"),
-            ("user", "second follow-up"),
-        ]
+        assert model.calls == expected
 
 
 class _PreStepHookRecordingModel:
@@ -349,8 +368,16 @@ class TestPreStepHookIntegration:
             (m["role"], m["content"])
             for m in model.conversation_before_generate
         ]
-        assert ("user", "queued 1") in roles_and_contents
-        assert ("user", "queued 2") in roles_and_contents
+        assert (
+            "user",
+            "User says: queued 1. "
+            "Take the message into account and finish your task.",
+        ) in roles_and_contents
+        assert (
+            "user",
+            "User says: queued 2. "
+            "Take the message into account and finish your task.",
+        ) in roles_and_contents
         assert tab.pending_user_messages == []
 
     def test_pre_step_hook_none_does_not_break_step(self) -> None:
@@ -450,6 +477,80 @@ class TestPreStepHookSurvivesRunReset:
             KISSAgent.run = original_run  # type: ignore[assignment]
 
         assert captured.get("hook") is None
+
+
+class TestSteeringMessageWrappedForModel:
+    """Steering messages must be wrapped, not injected verbatim.
+
+    A steering message queued by the user while the agent is running
+    must reach the model's conversation as::
+
+        User says: <message>. Take the message into account and
+        finish your task.
+
+    (prefix ``"User says: "``, suffix ``". Take the message into
+    account and finish your task."``) — never as the bare message
+    text.  The queue itself keeps the raw text (that is what the UI
+    echoes back); the wrapping happens at drain time.
+    """
+
+    def setup_method(self) -> None:
+        _clear_registry()
+
+    def teardown_method(self) -> None:
+        _clear_registry()
+
+    def test_queued_steering_message_is_wrapped_end_to_end(self) -> None:
+        """End-to-end: frontend command → queue → drain → wrapped."""
+        server, _events = _make_server()
+        tab = _RunningAgentState("tab-wrap", "gemini")
+        tab.is_task_active = True
+        _RunningAgentState.running_agent_states["tab-wrap"] = tab
+
+        server._cmd_append_user_message(
+            {"tabId": "tab-wrap", "prompt": "focus on the login bug"},
+        )
+        # The queue (and the UI echo) keep the raw text.
+        assert tab.pending_user_messages == ["focus on the login bug"]
+
+        agent = SorcarAgent.__new__(SorcarAgent)
+        agent._tab_id = "tab-wrap"  # type: ignore[attr-defined]
+        model = _RecordingModel()
+        agent._drain_pending_user_messages(model)
+
+        assert model.calls == [
+            (
+                "user",
+                "User says: focus on the login bug. "
+                "Take the message into account and finish your task.",
+            ),
+        ]
+        assert tab.pending_user_messages == []
+
+    def test_every_drained_message_is_wrapped(self) -> None:
+        agent = SorcarAgent.__new__(SorcarAgent)
+        agent._tab_id = "tab-wrap-multi"  # type: ignore[attr-defined]
+
+        tab = _RunningAgentState("tab-wrap-multi", "gemini")
+        tab.is_task_active = True
+        tab.pending_user_messages = ["first steer", "second steer"]
+        _RunningAgentState.running_agent_states["tab-wrap-multi"] = tab
+
+        model = _RecordingModel()
+        agent._drain_pending_user_messages(model)
+
+        assert model.calls == [
+            (
+                "user",
+                "User says: first steer. "
+                "Take the message into account and finish your task.",
+            ),
+            (
+                "user",
+                "User says: second steer. "
+                "Take the message into account and finish your task.",
+            ),
+        ]
 
 
 class TestPendingMessagesClearedOnTaskFinish:

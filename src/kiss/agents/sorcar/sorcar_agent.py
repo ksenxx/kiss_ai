@@ -687,9 +687,12 @@ class SorcarAgent(RelentlessAgent):
         :attr:`_RunningAgentState._registry_lock` (to keep the drain
         atomic against concurrent ``appendUserMessage`` commands from
         the frontend) and pushes each entry into *model*'s
-        conversation as a ``user`` role message.  The list is emptied
-        on every drain so the same queued message is never injected
-        twice.
+        conversation as a ``user`` role message.  Each entry is
+        wrapped as ``User says: <message>. Take the message into
+        account and finish your task.`` so the model treats it as a
+        mid-task steering instruction rather than a bare trajectory
+        line.  The list is emptied on every drain so the same queued
+        message is never injected twice.
 
         Args:
             model: The live model whose conversation receives the
@@ -707,7 +710,11 @@ class SorcarAgent(RelentlessAgent):
             queued = list(tab.pending_user_messages)
             tab.pending_user_messages.clear()
         for msg in queued:
-            model.add_message_to_conversation("user", msg)
+            model.add_message_to_conversation(
+                "user",
+                f"User says: {msg}. "
+                "Take the message into account and finish your task.",
+            )
 
 
 def _coerce_tasks(tasks: Any) -> list[str]:
