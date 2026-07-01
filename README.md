@@ -29,6 +29,7 @@ ______________________________________________________________________
 
 - [KISS Sorcar vs Claude Code vs Cursor](#-kiss-sorcar-vs-claude-code-vs-cursor)
 - [What is in the Name](#what-is-in-the-name)
+- [See It in Action](#-see-it-in-action)
 - [Installation](#installation)
   - [Full install from source](#full-install-from-source)
   - [Python package / CLI install](#python-package--cli-install)
@@ -69,6 +70,10 @@ ______________________________________________________________________
 **KISS Agent Framework** is a deliberately small agent runtime organized around the [KISS principle](https://en.wikipedia.org/wiki/KISS_principle) ("Keep it Simple, Stupid").
 KISS Sorcar is named after [P. C. Sorcar, the Bengali magician](https://en.wikipedia.org/wiki/P._C._Sorcar).
 Note: **Sorcar** also means government in Bengali.
+
+## 🎬 See It in Action
+
+An older KISS Sorcar video is available at [https://www.youtube.com/watch?v=xnYxWvRqACE](https://www.youtube.com/watch?v=xnYxWvRqACE). We **no longer** recommend explicitly creating a plan in KISS Sorcar; see the paper for the current workflow guidance.
 
 ## Installation
 
