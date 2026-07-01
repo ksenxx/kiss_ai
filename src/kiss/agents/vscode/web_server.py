@@ -3220,19 +3220,12 @@ class RemoteAccessServer:
 
         Returns True on success, False (and closes the socket) on failure.
 
-        When the configured ``remote_password`` is empty, authentication
-        is skipped entirely for local connections — the public
-        cloudflared tunnel is already disabled in :meth:`_setup_server`
-        when no password is set, so no unauthenticated client can
-        reach the daemon from the public internet.  This makes the
-        webapp immediately usable on ``localhost`` without any
-        configuration.
+        When the configured ``remote_password`` is empty, all clients
+        are still required to send an empty-password ``auth`` message
+        (using a constant-time compare).  See also
+        :meth:`_setup_server` which refuses to advertise the public
+        cloudflared tunnel when no password is configured.
         """
-        password = load_config().get("remote_password", "")
-        if not password:
-            logger.info("No remote_password configured; skipping auth")
-            await websocket.send(json.dumps({"type": "auth_ok"}))
-            return True
         ip = self._client_ip(websocket)
         if self._is_auth_locked(ip):
             logger.warning("Auth rate-limit hit for %s; closing socket", ip)
@@ -3241,6 +3234,7 @@ class RemoteAccessServer:
             except Exception:
                 pass
             return False
+        password = load_config().get("remote_password", "")
         try:
             # Two attempts: the first wrong password elicits an
             # ``auth_required`` retry prompt; the second failure (or a
