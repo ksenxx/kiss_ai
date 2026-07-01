@@ -2474,14 +2474,6 @@
     "emb": false,
     "gen": true
   },
-  "openrouter/microsoft/phi-4-mini-instruct": {
-    "context_length": 131072,
-    "input_price_per_1M": 0.08,
-    "output_price_per_1M": 0.35,
-    "fc": false,
-    "emb": false,
-    "gen": true
-  },
   "openrouter/microsoft/wizardlm-2-8x22b": {
     "context_length": 65536,
     "input_price_per_1M": 0.62,
@@ -3345,8 +3337,8 @@
   },
   "openrouter/qwen/qwen3-235b-a22b-thinking-2507": {
     "context_length": 262144,
-    "input_price_per_1M": 0.1,
-    "output_price_per_1M": 0.1,
+    "input_price_per_1M": 0.15,
+    "output_price_per_1M": 1.495,
     "fc": true,
     "emb": false,
     "gen": true
@@ -3938,7 +3930,7 @@
   },
   "openrouter/z-ai/glm-5.2": {
     "context_length": 1048576,
-    "input_price_per_1M": 0.94,
+    "input_price_per_1M": 0.93,
     "output_price_per_1M": 3.0,
     "fc": true,
     "emb": false,
