@@ -35,6 +35,9 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout.containers import Window
 from prompt_toolkit.layout.dimension import Dimension
 
+from kiss.agents.sorcar.cli_line_continuation import (
+    ends_with_line_continuation,
+)
 from kiss.agents.sorcar.cli_panel import MIN_BODY_ROWS as _MIN_BODY_ROWS
 from kiss.agents.sorcar.persistence import _load_file_usage
 from kiss.agents.vscode.helpers import rank_file_suggestions
@@ -145,8 +148,30 @@ def _submit_enter(event: KeyPressEvent) -> None:
     Enter still means *submit* — matching the "type a task, then
     Enter" hint in the framed input panel.  Newlines are entered via
     the alternative bindings below (Alt+Enter, Ctrl+J, Shift+Enter).
+
+    Universal backslash line-continuation.  On terminals that cannot
+    disambiguate Shift+Enter from Enter (notably macOS Terminal.app),
+    ending the whole buffer with an unescaped ``\\`` (optionally
+    followed by trailing whitespace) makes this Enter insert a
+    newline instead of submitting — the same convention every POSIX
+    shell uses.  The check runs against ``buf.text`` (the entire
+    buffer) rather than only the text before the cursor so the rule
+    matches the steering box's :meth:`_InputBox.feed` implementation
+    exactly.  Any open completion menu is dismissed first so the
+    user's originally-typed text is restored (this branch runs only
+    under ``~completion_is_selected`` so ``complete_state`` is
+    ``None``, but calling :meth:`cancel_completion` is a documented
+    no-op in that case).  See
+    :func:`~kiss.agents.sorcar.cli_line_continuation.ends_with_line_continuation`.
     """
-    event.current_buffer.validate_and_handle()
+    buf = event.current_buffer
+    cont, keep = ends_with_line_continuation(buf.text)
+    if cont:
+        buf.cancel_completion()
+        buf.text = buf.text[:keep] + "\n"
+        buf.cursor_position = keep + 1
+        return
+    buf.validate_and_handle()
 
 
 def _insert_newline(event: KeyPressEvent) -> None:
