@@ -30,9 +30,21 @@ ORANGE = f"{_ESC}[38;5;208m"
 RESET = f"{_ESC}[0m"
 # Cursor marker shown before the editable text inside the panel body.
 PROMPT_MARKER = "› "
-# Titles shown in the panel's top border for each input mode.
-IDLE_TITLE = " sorcar · type a task, then Enter · Ctrl+D to exit "
-STEER_TITLE = " steer · type, then Enter to queue · Ctrl+C to abort "
+# Titles shown in the panel's top border for each input mode.  The
+# multi-line hint (Alt+Enter / Ctrl+J / trailing ``\`` for a new line)
+# is appended so users on terminals that cannot disambiguate
+# Shift+Enter from Enter (notably macOS Terminal.app) can discover
+# the universal backslash-continuation entry mechanism.
+IDLE_TITLE = (
+    " sorcar · type a task, Enter to submit · "
+    "end line with \\ (or Alt+Enter / Ctrl+J / Shift+Enter) for newline · "
+    "Ctrl+D to exit "
+)
+STEER_TITLE = (
+    " steer · Enter to queue · "
+    "end line with \\ (or Alt+Enter / Ctrl+J / Shift+Enter) for newline · "
+    "Ctrl+C to abort "
+)
 # Dim placeholder shown in the panel body when the edit buffer is empty.
 PLACEHOLDER = "Add an instruction for the agent while it works…"
 
