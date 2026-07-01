@@ -106,20 +106,25 @@ def test_pty_spawn_runs_child_and_captures_stdout() -> None:
 
 
 def test_pty_spawn_delivers_sigint_via_etx_byte() -> None:
-    """Writing ``\\x03`` to the master fd raises ``KeyboardInterrupt`` in the child.
+    """Writing ``\\x03`` to the master fd delivers ``SIGINT`` to the child.
 
-    The child installs a long ``time.sleep`` and prints a sentinel once
-    it catches ``KeyboardInterrupt``. If ``TIOCSCTTY`` failed in the
-    helper, the line discipline would discard the ETX byte and the
-    sentinel would never appear — the test would then fail on timeout.
+    The child installs a ``SIGINT`` handler *before* printing ``ready``
+    (so there is no window in which the signal could arrive with the
+    default disposition and kill the child uncaught — the source of a
+    rare flake under heavy parallel test load), then parks in a long
+    ``time.sleep``. The handler prints a sentinel and exits 0. If
+    ``TIOCSCTTY`` failed in the helper, the line discipline would
+    discard the ETX byte and the sentinel would never appear — the test
+    would then fail on timeout.
     """
     child_code = (
-        "import sys, time\n"
-        "sys.stdout.write('ready\\n'); sys.stdout.flush()\n"
-        "try:\n"
-        "    time.sleep(30)\n"
-        "except KeyboardInterrupt:\n"
+        "import signal, sys, time\n"
+        "def _on_sigint(signum, frame):\n"
         "    sys.stdout.write('interrupted\\n'); sys.stdout.flush()\n"
+        "    sys.exit(0)\n"
+        "signal.signal(signal.SIGINT, _on_sigint)\n"
+        "sys.stdout.write('ready\\n'); sys.stdout.flush()\n"
+        "time.sleep(30)\n"
     )
     pid, fd = pty_spawn([sys.executable, "-c", child_code])
     try:

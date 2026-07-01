@@ -225,8 +225,10 @@ class TestSteeringQueue:
         finally:
             _RunningAgentState.unregister(state.chat_id)
         assert [m["content"] for m in model.conversation] == [
-            "steer left",
-            "then steer right",
+            "User says: steer left. "
+            "Take the message into account and finish your task.",
+            "User says: then steer right. "
+            "Take the message into account and finish your task.",
         ]
         # Drained messages are not re-injected on a second drain.
         assert state.pending_user_messages == []
