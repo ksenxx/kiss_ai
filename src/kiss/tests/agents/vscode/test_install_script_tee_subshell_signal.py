@@ -134,17 +134,42 @@ def test_install_sh_traps_sighup_for_pty_teardown() -> None:
     )
 
 
-def _outer_trap_harness(tmp_path: Path) -> tuple[Path, Path, Path]:
+def _wait_for_log(log: Path, needle: str, timeout: float = 10.0) -> str:
+    """Re-read *log* until *needle* appears or *timeout* elapses.
+
+    The SIGINT diagnostic reaches the log through the process-substitution
+    ``tee -a`` child, which may not have been scheduled to drain its pipe
+    by the time the harness shell itself has exited — a flake seen only
+    under heavy parallel test load.  Polling removes that window.  Returns
+    the last-read log text either way so assertion messages stay useful.
+    """
+    deadline = time.time() + timeout
+    text = ""
+    while time.time() < deadline:
+        text = (
+            log.read_text(encoding="utf-8", errors="replace")
+            if log.exists()
+            else ""
+        )
+        if needle in text:
+            return text
+        time.sleep(0.1)
+    return text
+
+
+def _outer_trap_harness(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     """Build a harness mirroring install.sh's outer trap + exec-tee pattern.
 
-    Returns (harness_path, log_path, marker_path).  The harness sets up
-    ``handle_interrupt`` (single-signal: ignore + diagnostic), pipes
-    output through ``tee -a`` via ``exec``, then enters a long ``sleep``
-    in the outer shell.  If the trap fires the sleep is interrupted and
-    the script continues to touch the marker.
+    Returns (harness_path, log_path, marker_path, ready_path).  The
+    harness sets up ``handle_interrupt`` (single-signal: ignore +
+    diagnostic), pipes output through ``tee -a`` via ``exec``, touches
+    the ready marker (traps installed, redirection live), then enters a
+    long ``sleep`` in the outer shell.  If the trap fires the sleep is
+    interrupted and the script continues to touch the marker.
     """
     log = tmp_path / "install.log"
     marker = tmp_path / "post_signal_marker"
+    ready = tmp_path / "harness_ready"
     harness = tmp_path / "harness.sh"
     harness.write_text(
         textwrap.dedent(
@@ -163,6 +188,7 @@ def _outer_trap_harness(tmp_path: Path) -> tuple[Path, Path, Path]:
             trap handle_interrupt INT TERM
             trap handle_hup HUP
             exec > >(tee -a "$LOG_FILE") 2>&1
+            : > "{ready}"
             # Mimic install.sh's body — a long-running step that must
             # survive a stray PTY-injected signal.
             for _ in 1 2 3 4 5 6 7 8 9 10; do
@@ -174,7 +200,7 @@ def _outer_trap_harness(tmp_path: Path) -> tuple[Path, Path, Path]:
         encoding="utf-8",
     )
     harness.chmod(0o755)
-    return harness, log, marker
+    return harness, log, marker, ready
 
 
 def test_install_sh_outer_trap_survives_sigint(tmp_path: Path) -> None:
@@ -190,7 +216,7 @@ def test_install_sh_outer_trap_survives_sigint(tmp_path: Path) -> None:
     Before the fix this same harness — but with ``{ ... } | tee`` — would
     die instantly with a bare ``^C`` and the marker would never appear.
     """
-    harness, log, marker = _outer_trap_harness(tmp_path)
+    harness, log, marker, ready = _outer_trap_harness(tmp_path)
     proc = subprocess.Popen(
         ["bash", str(harness)],
         start_new_session=True,
@@ -198,9 +224,14 @@ def test_install_sh_outer_trap_survives_sigint(tmp_path: Path) -> None:
         stderr=subprocess.DEVNULL,
     )
     try:
-        # Let the harness pass through the `exec > >(tee ...)` redirection
-        # and enter the sleep loop before delivering the signal.
-        time.sleep(1.0)
+        # Wait until the harness has installed its traps and passed
+        # through the `exec > >(tee ...)` redirection (it touches the
+        # ready marker right after) before delivering the signal.  A
+        # fixed sleep raced bash's startup under heavy parallel load.
+        deadline = time.time() + 15.0
+        while time.time() < deadline and not ready.exists():
+            time.sleep(0.05)
+        assert ready.exists(), "harness never reached the install body"
         os.killpg(proc.pid, signal.SIGINT)
         try:
             rc = proc.wait(timeout=15)
@@ -215,7 +246,7 @@ def test_install_sh_outer_trap_survives_sigint(tmp_path: Path) -> None:
             except ProcessLookupError:
                 pass
 
-    log_text = log.read_text(encoding="utf-8", errors="replace") if log.exists() else ""
+    log_text = _wait_for_log(log, "Interrupt received but ignored")
     assert rc == 0, (
         "harness aborted on a single stray SIGINT — the outer trap is no "
         f"longer effective.  rc={rc!r}\nLog:\n{log_text}"
@@ -239,7 +270,7 @@ def test_install_sh_outer_trap_survives_sighup(tmp_path: Path) -> None:
     (writing into the log only) — which is what allows the kiss-web kill
     and the marker write to actually finish.
     """
-    harness, log, marker = _outer_trap_harness(tmp_path)
+    harness, log, marker, ready = _outer_trap_harness(tmp_path)
     proc = subprocess.Popen(
         ["bash", str(harness)],
         start_new_session=True,
@@ -247,7 +278,14 @@ def test_install_sh_outer_trap_survives_sighup(tmp_path: Path) -> None:
         stderr=subprocess.DEVNULL,
     )
     try:
-        time.sleep(1.0)
+        # Wait until the harness has installed its traps and passed
+        # through the `exec > >(tee ...)` redirection (it touches the
+        # ready marker right after) before delivering the signal.  A
+        # fixed sleep raced bash's startup under heavy parallel load.
+        deadline = time.time() + 15.0
+        while time.time() < deadline and not ready.exists():
+            time.sleep(0.05)
+        assert ready.exists(), "harness never reached the install body"
         # Send SIGHUP to bash specifically (not killpg) — that mirrors the
         # kernel's "controlling-terminal hangup" delivery to the session
         # leader.  Hitting the whole pgrp would also kill the ``tee -a``
@@ -267,7 +305,7 @@ def test_install_sh_outer_trap_survives_sighup(tmp_path: Path) -> None:
             except ProcessLookupError:
                 pass
 
-    log_text = log.read_text(encoding="utf-8", errors="replace") if log.exists() else ""
+    log_text = _wait_for_log(log, "Controlling terminal closed (SIGHUP)")
     assert rc == 0, (
         "harness aborted on SIGHUP — handle_hup did not absorb the PTY "
         f"closure.  rc={rc!r}\nLog:\n{log_text}"

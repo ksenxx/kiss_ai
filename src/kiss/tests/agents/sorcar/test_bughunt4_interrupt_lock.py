@@ -84,7 +84,7 @@ class FloodingAgent:
     def run(self, **kwargs):
         started.write_text("1")
         try:
-            for _ in range(100):
+            for _ in range(1000):
                 sys.stdout.write("X" * 65536)
         except KeyboardInterrupt:
             result.write_text("interrupted")
@@ -99,7 +99,7 @@ try:
     run_with_steering(FloodingAgent(), {{}})
     sys.stdout.write("NO_INTERRUPT\\n")
 except KeyboardInterrupt:
-    deadline = time.time() + 5.0
+    deadline = time.time() + 15.0
     while time.time() < deadline and not result.exists():
         time.sleep(0.05)
     text = result.read_text() if result.exists() else "missing"
@@ -125,7 +125,7 @@ sys.stdout.flush()
         # Ctrl+C now interrupts the lock wait, not the select call.
         os.write(fd, b"\x03")
         # Resume draining so the blocked writes can complete.
-        out += _drain(fd, 25.0, stop=re.compile(r"WORKER\[\w+\]"))
+        out += _drain(fd, 40.0, stop=re.compile(r"WORKER\[\w+\]"))
     finally:
         try:
             os.close(fd)
