@@ -112,22 +112,73 @@ function readVersionPy(versionPyPath) {
   }
 }
 
+// Publisher.name prefix of the KISS Sorcar extension.  Kept in one
+// place so the extension-dir scanner and ``install.sh`` /
+// ``package.json`` stay in lock-step.
+const EXTENSION_DIR_PREFIX = 'ksenxx.kiss-sorcar-';
+
 /**
- * Default current-version resolver: walk the candidate locations the
- * extension uses elsewhere (``out/kiss_project`` for installed VSIXs,
- * the editable checkout for dev installs) and return the first
- * ``__version__`` string we find.  ``kissProjectPath`` lets callers
- * point at a specific checkout (the integration test does this).
+ * Scan ``extensionsRoot`` (default ``~/.vscode/extensions``) for every
+ * installed KISS Sorcar extension directory and return the highest
+ * ``__version__`` found.  Returns ``null`` when no such directory
+ * exists or no directory contains a parseable ``_version.py``.
+ *
+ * Mirrors ``_scan_installed_extension_versions`` in ``web_server.py``
+ * so the daemon and the extension side agree on which installed
+ * version is authoritative — the fix for the sticky "update available"
+ * toast that kept re-appearing after the user clicked "Update".  See
+ * the comment above ``_INSTALLED_EXTENSIONS_ROOT`` in ``web_server.py``
+ * for the full root-cause analysis.
  */
-function resolveCurrentVersion(kissProjectPath) {
-  const candidates = [];
+function scanInstalledExtensionVersions(extensionsRoot) {
+  const root = extensionsRoot || path.join(os.homedir(), '.vscode', 'extensions');
+  let entries;
+  try {
+    entries = fs.readdirSync(root, {withFileTypes: true});
+  } catch {
+    return [];
+  }
+  const versions = [];
+  for (const e of entries) {
+    try {
+      if (!e.isDirectory()) continue;
+    } catch {
+      continue;
+    }
+    if (!e.name.startsWith(EXTENSION_DIR_PREFIX)) continue;
+    const v = readVersionPy(
+      path.join(root, e.name, 'kiss_project', 'src', 'kiss', '_version.py'),
+    );
+    if (v) versions.push(v);
+  }
+  return versions;
+}
+
+/**
+ * Default current-version resolver.  Returns the newest
+ * ``__version__`` string found in **any** installed KISS Sorcar
+ * extension directory under ``extensionsRoot`` (default
+ * ``~/.vscode/extensions``), falling back to the bundled
+ * ``_version.py`` for developer / Docker installs where no such dir
+ * exists.  ``kissProjectPath`` still points at a specific checkout
+ * (used by the integration test and the dev-checkout path).
+ */
+function resolveCurrentVersion(kissProjectPath, extensionsRoot) {
+  let best = null;
+  let bestTuple = null;
+  for (const v of scanInstalledExtensionVersions(extensionsRoot)) {
+    const t = versionTuple(v);
+    if (!t) continue;
+    if (!bestTuple || compareVersions(v, best) > 0) {
+      best = v;
+      bestTuple = t;
+    }
+  }
+  if (best) return best;
   if (kissProjectPath) {
-    candidates.push(
+    const v = readVersionPy(
       path.join(kissProjectPath, 'src', 'kiss', '_version.py'),
     );
-  }
-  for (const p of candidates) {
-    const v = readVersionPy(p);
     if (v) return v;
   }
   return null;
@@ -286,7 +337,9 @@ async function checkForExtensionUpdate(opts) {
       ? o.fetchLatest
       : url => defaultFetchLatest(url, fetchTimeoutMs);
 
-  const current = o.currentVersion || resolveCurrentVersion(o.kissProjectPath);
+  const current =
+    o.currentVersion ||
+    resolveCurrentVersion(o.kissProjectPath, o.extensionsRoot);
   if (!current) {
     return {
       checked: false,
@@ -365,8 +418,10 @@ module.exports = {
   versionTuple,
   readVersionPy,
   resolveCurrentVersion,
+  scanInstalledExtensionVersions,
   defaultFetchLatest,
   DEFAULT_PYPI_URL,
   DEFAULT_COOLDOWN_MS,
   DEFAULT_FETCH_TIMEOUT_MS,
+  EXTENSION_DIR_PREFIX,
 };
