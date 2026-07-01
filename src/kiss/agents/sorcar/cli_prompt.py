@@ -504,21 +504,42 @@ class PtkLineReader:
     def read(self, prompt: str) -> str:
         """Read one line, rendering *prompt* (which may contain ANSI).
 
-        Enables xterm ``modifyOtherKeys`` level 2 on the terminal for
-        the duration of the prompt (``\\x1b[>4;2m`` on entry,
-        ``\\x1b[>4;0m`` on exit) so the terminal disambiguates
-        modifier+Enter combinations from plain Enter — without this
-        opt-in iTerm2, macOS Terminal.app, and the VS Code integrated
-        terminal all deliver Shift/Alt/Ctrl+Enter as a bare ``\\r``,
-        defeating the tuple key-bindings registered at module load.
-        The matching unmap on
-        :data:`prompt_toolkit.input.ansi_escape_sequences.ANSI_SEQUENCES`
-        and the per-modifier bindings at module level only fire once
-        the terminal is actually delivering ``\\x1b[27;<mod>;13~`` for
-        modifier+Enter, which it does only after the application
-        writes the level-2 enable sequence.  Both writes are no-ops on
-        :class:`prompt_toolkit.output.DummyOutput` (used by the
-        pipe-based regression tests).
+        Opts into the terminal's extended-keyboard protocols for the
+        duration of the prompt so modifier+Enter chords (Shift+Enter,
+        Ctrl+Enter, Alt+Enter, Cmd+Enter and combinations) emit
+        *distinct* byte sequences the tuple key-bindings registered at
+        module load can match as newline-insert instead of a plain
+        Enter (submit).  Without these enable sequences most
+        terminals — iTerm2, macOS Terminal.app, the VS Code integrated
+        terminal, kitty / WezTerm / foot / ghostty (which ignore
+        modifyOtherKeys entirely in favour of the Kitty keyboard
+        protocol) — deliver Shift+Enter as a bare ``\\r``,
+        indistinguishable from plain Enter, and the whole multi-line
+        UX breaks:
+
+        * ``ESC[>4;2m``  — xterm ``modifyOtherKeys`` level 2.  Makes
+          Shift/Ctrl/Alt+Enter emit ``ESC[27;<m>;13~``.  Supported by
+          xterm, iTerm2, WezTerm, Alacritty and tmux (with
+          ``extended-keys always`` + ``extkeys`` feature).
+        * ``ESC[>1u``    — Kitty keyboard protocol, push flag 1
+          (disambiguate escape codes).  Makes Shift+Enter emit
+          ``ESC[13;<m>u``.  Supported by kitty, WezTerm, foot,
+          ghostty and (increasingly) other terminals.
+
+        These are the same two enable / disable pairs written by
+        :meth:`~kiss.agents.sorcar.cli_steering._InputBox.start` /
+        :meth:`~kiss.agents.sorcar.cli_steering._InputBox.stop` for
+        the mid-task steering box, so both the initial task prompt
+        and the running-task steering box behave identically on every
+        terminal.  Terminals that don't support one/both of these
+        silently ignore the CSI.  The matching disable sequences —
+        ``ESC[>4;0m`` (restore modifyOtherKeys level 0) and
+        ``ESC[<u`` (pop the Kitty keyboard flag entry we pushed) —
+        are written in the ``finally`` block on exit so a
+        subsequently-spawned child process does not inherit our mode
+        and we do not leak a stack entry into the shell.  All four
+        writes are no-ops on :class:`prompt_toolkit.output.DummyOutput`
+        (used by the pipe-based regression tests).
 
         Args:
             prompt: Prompt text, possibly containing SGR colour codes.
@@ -531,13 +552,16 @@ class PtkLineReader:
             KeyboardInterrupt: On Ctrl+C.
         """
         output = self.session.output
-        output.write_raw("\x1b[>4;2m")
+        output.write_raw(f"{_ESC}[>4;2m{_ESC}[>1u")
         output.flush()
         try:
             return self.session.prompt(ANSI(prompt))
         finally:
             try:
-                output.write_raw("\x1b[>4;0m")
+                output.write_raw(f"{_ESC}[>4;0m{_ESC}[<u")
                 output.flush()
             except Exception:  # pragma: no cover - best-effort restore
-                logger.debug("failed to disable modifyOtherKeys", exc_info=True)
+                logger.debug(
+                    "failed to disable extended keyboard protocols",
+                    exc_info=True,
+                )

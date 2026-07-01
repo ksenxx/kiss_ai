@@ -421,6 +421,30 @@ class _InputBox:
             # ``ESC[200~ … ESC[201~`` so embedded newlines insert line
             # breaks instead of submitting partial instructions.
             out.write(f"{_ESC}[?2004h")
+            # Opt into the terminal's extended-keyboard protocols so
+            # modifier+Enter chords (Shift+Enter, Ctrl+Enter, Alt+Enter,
+            # Cmd+Enter and combinations) emit *distinct* byte
+            # sequences the steering box can recognise as
+            # newline-insert instead of a plain Enter (submit).  Without
+            # these enable sequences most terminals collapse
+            # Shift+Enter to a bare ``\r`` — indistinguishable from
+            # Enter — and the whole multi-line UX breaks:
+            #
+            # * ``ESC[>4;2m``  — xterm modifyOtherKeys level 2.  Makes
+            #   Shift/Ctrl/Alt+Enter emit ``ESC[27;<m>;13~``.  Supported
+            #   by xterm, iTerm2, WezTerm, Alacritty, tmux (with
+            #   ``extended-keys always`` + ``extkeys`` feature).
+            # * ``ESC[>1u``    — Kitty keyboard protocol, push flag 1
+            #   (disambiguate escape codes).  Makes Shift+Enter emit
+            #   ``ESC[13;<m>u``.  Supported by kitty, WezTerm, foot,
+            #   ghostty and (increasingly) other terminals.
+            #
+            # Terminals that don't support one/both of these silently
+            # ignore the CSI (they may respond with a DA1-style reply
+            # which the CSI parser in :meth:`feed` swallows as an
+            # unknown sequence).  See :meth:`stop` for the matching
+            # disable sequences.
+            out.write(f"{_ESC}[>4;2m{_ESC}[>1u")
             # Keep the real cursor *visible*: it rests (blinking) in the
             # box body, mirroring the idle ``sorcar`` prompt's caret.
             out.write(f"{_ESC}[?25h")
@@ -455,6 +479,16 @@ class _InputBox:
         with self.lock:
             out = self._out
             out.write(f"{_ESC}[?2004l")  # leave bracketed-paste mode
+            # Restore the terminal's default keyboard reporting modes
+            # so downstream (or re-entered) processes see the vanilla
+            # behaviour they expect.  These are the disable / pop
+            # counterparts of the enable sequences written in
+            # :meth:`start`:
+            #
+            # * ``ESC[>4;0m`` — restore modifyOtherKeys to level 0.
+            # * ``ESC[<u``    — pop one Kitty keyboard flag entry off
+            #   the stack (matching the ``ESC[>1u`` push).
+            out.write(f"{_ESC}[>4;0m{_ESC}[<u")
             out.write(f"{_ESC}[r")  # reset scroll region to full screen
             # Erase the box's rows so the steering panel does not linger
             # once the task ends.  Otherwise the idle REPL prompt would
@@ -505,6 +539,10 @@ class _InputBox:
                 logger.debug("could not re-apply raw mode", exc_info=True)
         with self.lock:
             self._out.write(f"{_ESC}[?2004h")
+            # Re-opt into extended-keyboard protocols after resume —
+            # the shell may have popped them off while we were
+            # suspended.  Mirrors the enable sequences in :meth:`start`.
+            self._out.write(f"{_ESC}[>4;2m{_ESC}[>1u")
             # Force _draw_locked to re-emit the scroll region.
             self._rows = 0
             self._draw_locked()
