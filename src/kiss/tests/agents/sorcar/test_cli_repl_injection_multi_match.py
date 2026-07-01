@@ -111,9 +111,9 @@ def test_cli_returns_all_matching_tricks_after_sentence_boundary(
     line = "Some preamble text. Reproduce"
     matches = completer._build_matches(line)
     expected = {
-        line + " the issue by writing integration tests. Then fix the issue.",
-        line + " the issue by writing end-to-end test. Then fix the issue.",
-        line + " the bug step by step.",
+        "Reproduce the issue by writing integration tests. Then fix the issue.",
+        "Reproduce the issue by writing end-to-end test. Then fix the issue.",
+        "Reproduce the bug step by step.",
     }
     assert set(matches) >= expected, (
         f"Expected three trick completions after the sentence boundary, "
