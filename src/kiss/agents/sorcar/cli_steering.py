@@ -48,6 +48,9 @@ import threading
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
+from kiss.agents.sorcar.cli_line_continuation import (
+    ends_with_line_continuation,
+)
 from kiss.agents.sorcar.cli_panel import (
     _ESC,
     CYAN,
@@ -63,6 +66,9 @@ from kiss.agents.sorcar.cli_panel import (
     panel_bottom,
     panel_cols,
     panel_top,
+)
+from kiss.agents.sorcar.cli_panel import (
+    MIN_BODY_ROWS as _MIN_BODY_ROWS,
 )
 from kiss.agents.sorcar.persistence import _allocate_chat_id
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
@@ -80,10 +86,52 @@ except ImportError:  # pragma: no cover - exercised only on Windows
     termios = None  # type: ignore[assignment]
     _HAVE_TERMIOS = False
 
-# Height (rows) reserved at the bottom of the screen for the input box.
-_BOX_H = 3
+# Minimum height (rows) reserved at the bottom of the screen for the
+# input box: 1 top-border row + :data:`~kiss.agents.sorcar.cli_panel
+# .MIN_BODY_ROWS` body rows + 1 bottom-border row.  The *effective*
+# height grows when the edit buffer contains embedded newlines
+# (Shift+Enter / multi-line paste) — see :func:`_box_h_for`.  The
+# minimum body-row count is shared with :func:`panel_body` so the
+# rendered frame and the reserved scroll-region area always agree.
+_BOX_H = 2 + _MIN_BODY_ROWS
 # Minimum terminal height for which the anchored box is worthwhile.
 _MIN_ROWS = _BOX_H + 3
+
+
+def _box_body_h(buf: str) -> int:
+    """Return the number of body rows required to show *buf*.
+
+    Always at least :data:`_MIN_BODY_ROWS` (3) so the framed input
+    dialog keeps a stable "text area" look — the user sees three lines
+    of vertical space whether the buffer is empty, a single line, or
+    holds embedded ``\\n`` characters.  Above the floor the count
+    grows with the buffer (one body row per ``\\n``) so multi-line
+    input (Shift+Enter / bracketed paste / programmatic assignment) is
+    fully visible.
+
+    Args:
+        buf: The current edit buffer.
+
+    Returns:
+        The number of body rows (``>= _MIN_BODY_ROWS``).
+    """
+    lines = 1 if not buf else buf.count("\n") + 1
+    return max(_MIN_BODY_ROWS, lines)
+
+
+def _box_h_for(buf: str) -> int:
+    """Return the full reserved height (rows) for the box showing *buf*.
+
+    Equals ``2 + _box_body_h(buf)`` — one row each for the top and
+    bottom borders plus one body row per buffer line.
+
+    Args:
+        buf: The current edit buffer.
+
+    Returns:
+        The full box height in rows (``>= _BOX_H``).
+    """
+    return 2 + _box_body_h(buf)
 
 # Bracketed-paste markers (the terminal wraps pasted text in these once
 # mode 2004 is enabled), and a pattern stripping ANSI escape sequences
@@ -91,6 +139,31 @@ _MIN_ROWS = _BOX_H + 3
 _PASTE_START = f"{_ESC}[200~"
 _PASTE_END = f"{_ESC}[201~"
 _PASTE_SEQ_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b.")
+
+# Sub-sequences that appear immediately AFTER an ESC byte and must
+# insert a newline into the buffer (not submit).  This covers every
+# modifier+Enter encoding terminals emit:
+#
+# * ``\r``                — portable Alt+Enter (xterm-style: ESC + CR)
+# * ``\n``                — tmux M-Enter / some terminals' Alt+Enter
+#                           (ESC + LF)
+# * ``[13;<m>u``          — kitty / CSI-u modifyOtherKeys=1 form
+# * ``[27;<m>;13~``       — xterm modifyOtherKeys=2 form
+#
+# Modifier code ``<m>`` (per kitty / xterm conventions): bit 0 = Shift,
+# bit 1 = Alt, bit 2 = Ctrl, bit 3 = Cmd/Meta — encoded as ``<m> =
+# 1 + bits``.  Values 2..16 cover every Shift / Alt / Ctrl / Cmd
+# combination (and Cmd+Ctrl+Alt+Shift = 16).
+#
+# Order matters: longest multi-char sequences are listed before single
+# bytes so the prefix-startswith match in
+# :meth:`_InputBox.feed` cannot mistake a CSI prefix for a bare CR / LF.
+_NEWLINE_AFTER_ESC: tuple[str, ...] = (
+    *(f"[27;{_m};13~" for _m in range(2, 17)),
+    *(f"[13;{_m}u" for _m in range(2, 17)),
+    "\r",
+    "\n",
+)
 
 
 def _box_top_row(rows: int, box_h: int = _BOX_H) -> int:
@@ -286,6 +359,13 @@ class _InputBox:
         # cleared (otherwise stale menu glyphs linger inside the
         # scroll region).
         self._drawn_menu_h = 0
+        # Effective box height (top border + body rows + bottom border)
+        # as last rendered.  A change between redraws — caused by the
+        # edit buffer gaining / losing an embedded newline (Shift+Enter,
+        # paste, history recall) — also triggers a re-anchor of the
+        # DECSTBM scroll region and a clear of any rows that are no
+        # longer covered by the smaller reserved area.
+        self._drawn_box_h = 0
         # Tiny ``(buf, candidates)`` cache used by
         # :meth:`_refresh_typing_menu` to short-circuit repeat
         # completer calls (auto-repeat, idempotent edits, etc.) so a
@@ -303,6 +383,16 @@ class _InputBox:
         new = termios.tcgetattr(self._fd)
         # Disable canonical mode + echo; keep ISIG so Ctrl+C interrupts.
         new[3] = new[3] & ~(termios.ICANON | termios.ECHO)
+        # Also disable kernel CR<->LF translation on input so the box
+        # can distinguish Enter (``\r``) from Ctrl+J / Alt+Enter
+        # (``\n``).  With ICRNL the kernel quietly rewrites incoming
+        # ``\r`` bytes to ``\n``, so the bound terminal sequences for
+        # newline-insert (``ESC\r``, modifyOtherKeys 13, etc.) would
+        # arrive as ``ESC\n`` and the steering box would have no way
+        # to tell a real Enter from an Alt+Enter / Ctrl+J newline
+        # insert.  INLCR is the symmetric LF->CR mapping; clearing it
+        # makes an LF stay an LF.
+        new[0] = new[0] & ~(termios.ICRNL | termios.INLCR)
         new[6][termios.VMIN] = 1
         new[6][termios.VTIME] = 0
         termios.tcsetattr(self._fd, termios.TCSANOW, new)
@@ -334,12 +424,40 @@ class _InputBox:
             # ``ESC[200~ … ESC[201~`` so embedded newlines insert line
             # breaks instead of submitting partial instructions.
             out.write(f"{_ESC}[?2004h")
+            # Opt into the terminal's extended-keyboard protocols so
+            # modifier+Enter chords (Shift+Enter, Ctrl+Enter, Alt+Enter,
+            # Cmd+Enter and combinations) emit *distinct* byte
+            # sequences the steering box can recognise as
+            # newline-insert instead of a plain Enter (submit).  Without
+            # these enable sequences most terminals collapse
+            # Shift+Enter to a bare ``\r`` — indistinguishable from
+            # Enter — and the whole multi-line UX breaks:
+            #
+            # * ``ESC[>4;2m``  — xterm modifyOtherKeys level 2.  Makes
+            #   Shift/Ctrl/Alt+Enter emit ``ESC[27;<m>;13~``.  Supported
+            #   by xterm, iTerm2, WezTerm, Alacritty, tmux (with
+            #   ``extended-keys always`` + ``extkeys`` feature).
+            # * ``ESC[>1u``    — Kitty keyboard protocol, push flag 1
+            #   (disambiguate escape codes).  Makes Shift+Enter emit
+            #   ``ESC[13;<m>u``.  Supported by kitty, WezTerm, foot,
+            #   ghostty and (increasingly) other terminals.
+            #
+            # Terminals that don't support one/both of these silently
+            # ignore the CSI (they may respond with a DA1-style reply
+            # which the CSI parser in :meth:`feed` swallows as an
+            # unknown sequence).  See :meth:`stop` for the matching
+            # disable sequences.
+            out.write(f"{_ESC}[>4;2m{_ESC}[>1u")
             # Keep the real cursor *visible*: it rests (blinking) in the
             # box body, mirroring the idle ``sorcar`` prompt's caret.
             out.write(f"{_ESC}[?25h")
             out.flush()
             self._active = True
             self._rows = rows
+            # The initial buffer is empty, so the starting reserved
+            # height is the minimum :data:`_BOX_H`.  ``_draw_locked``
+            # tracks subsequent changes via ``self._drawn_box_h``.
+            self._drawn_box_h = _BOX_H
             self._draw_locked()
 
     def stop(self) -> None:
@@ -348,12 +466,13 @@ class _InputBox:
             return
         assert termios is not None
         rows, _ = _term_size()
-        # Clear *all* rows the box (possibly including the in-place
-        # completion menu stacked above its top border) currently
-        # occupies, not just the three input-panel rows; otherwise a
-        # menu open at the moment ``stop`` is called would leak its
-        # rows under the returning idle prompt.
-        top_row = _box_top_row(rows, _BOX_H + self._menu_h())
+        # Clear *all* rows the box (possibly grown to multiple body
+        # rows by Shift+Enter and possibly stacked under an in-place
+        # completion menu) currently occupies, not just the three
+        # minimum input-panel rows; otherwise a grown box or open menu
+        # would leak its rows under the returning idle prompt.
+        drawn_box_h = self._drawn_box_h or _BOX_H
+        top_row = _box_top_row(rows, drawn_box_h + self._menu_h())
         if self._prev_sigcont is not None:
             try:
                 signal.signal(signal.SIGCONT, self._prev_sigcont)
@@ -363,6 +482,16 @@ class _InputBox:
         with self.lock:
             out = self._out
             out.write(f"{_ESC}[?2004l")  # leave bracketed-paste mode
+            # Restore the terminal's default keyboard reporting modes
+            # so downstream (or re-entered) processes see the vanilla
+            # behaviour they expect.  These are the disable / pop
+            # counterparts of the enable sequences written in
+            # :meth:`start`:
+            #
+            # * ``ESC[>4;0m`` — restore modifyOtherKeys to level 0.
+            # * ``ESC[<u``    — pop one Kitty keyboard flag entry off
+            #   the stack (matching the ``ESC[>1u`` push).
+            out.write(f"{_ESC}[>4;0m{_ESC}[<u")
             out.write(f"{_ESC}[r")  # reset scroll region to full screen
             # Erase the box's rows so the steering panel does not linger
             # once the task ends.  Otherwise the idle REPL prompt would
@@ -385,6 +514,10 @@ class _InputBox:
         # ``_menu_h()`` against ``_drawn_menu_h`` from this run).
         self._reset_completion_state()
         self._drawn_menu_h = 0
+        # Reset the drawn box height so a later ``start()`` does not
+        # wrongly trip the "box shrank" clear path against the last
+        # run's tall buffer.
+        self._drawn_box_h = 0
 
     def _on_sigcont(self, signum: int, frame: Any) -> None:
         """Restore the box after the process is resumed (``fg``).
@@ -409,6 +542,10 @@ class _InputBox:
                 logger.debug("could not re-apply raw mode", exc_info=True)
         with self.lock:
             self._out.write(f"{_ESC}[?2004h")
+            # Re-opt into extended-keyboard protocols after resume —
+            # the shell may have popped them off while we were
+            # suspended.  Mirrors the enable sequences in :meth:`start`.
+            self._out.write(f"{_ESC}[>4;2m{_ESC}[>1u")
             # Force _draw_locked to re-emit the scroll region.
             self._rows = 0
             self._draw_locked()
@@ -438,8 +575,11 @@ class _InputBox:
             return 0
         rows, _ = _term_size()
         # Leave at least one scroll-region row above the menu so the
-        # last line of agent output stays visible.
-        room = max(rows - _BOX_H - 1, 0)
+        # last line of agent output stays visible.  The box is taller
+        # than :data:`_BOX_H` when the edit buffer contains embedded
+        # newlines, so use the effective height for the *current*
+        # buffer (not the minimum) when computing the leftover room.
+        room = max(rows - _box_h_for(self.buf) - 1, 0)
         h = min(len(self._menu_items), _MENU_MAX_H, room)
         if h == 0:
             # No room to render the menu — collapse to closed so the
@@ -455,38 +595,53 @@ class _InputBox:
         rows, _ = _term_size()
         cols = panel_cols()
         menu_h = self._menu_h()
-        eff_box_h = _BOX_H + menu_h
+        body_rows, is_placeholder = panel_body(self.buf, cols)
+        box_body_h = len(body_rows)
+        box_h = 2 + box_body_h
+        eff_box_h = box_h + menu_h
         top_row = _box_top_row(rows, eff_box_h)
         out = self._out
         # Either the terminal was resized OR the menu opened/closed/
-        # changed height: in both cases the DECSTBM scroll region must
-        # be re-anchored to ``rows - eff_box_h`` so agent output cannot
-        # scroll over the menu or the box, and the saved output cursor
-        # must be re-parked inside the new region.  Row values are
-        # clamped to >= 1 so a terminal shrunk below the box height
-        # never receives invalid control sequences.
-        if rows != self._rows or menu_h != self._drawn_menu_h:
+        # changed height OR the edit buffer gained/lost an embedded
+        # newline that changes the body-row count: in all three cases
+        # the DECSTBM scroll region must be re-anchored to
+        # ``rows - eff_box_h`` so agent output cannot scroll over the
+        # menu or the box, and the saved output cursor must be re-parked
+        # inside the new region.  Row values are clamped to >= 1 so a
+        # terminal shrunk below the box height never receives invalid
+        # control sequences.
+        if (
+            rows != self._rows
+            or menu_h != self._drawn_menu_h
+            or box_h != self._drawn_box_h
+        ):
             region_bottom = max(rows - eff_box_h, 1)
-            # When the menu shrinks (e.g. on close) the rows that were
-            # menu rows are now back in the scroll region; clear them
-            # so leftover candidate glyphs don't linger as ghost text
-            # at the bottom of the agent output area.
-            if self._drawn_menu_h:
-                # Use the previous terminal row count so that a resize
-                # which also shrinks the menu clears the menu rows at
-                # their OLD on-screen positions, not the post-resize
-                # positions (which would leave ghost glyphs behind).
+            # When the reserved area shrinks (the menu closed and/or
+            # the buffer lost a newline) the rows that were reserved
+            # are now back in the scroll region; clear them so
+            # leftover menu/body glyphs don't linger as ghost text
+            # at the bottom of the agent output area.  Use the
+            # previous terminal row count so a resize that also
+            # shrinks the reserved area clears the freed rows at their
+            # OLD on-screen positions.
+            prev_eff_h = (self._drawn_box_h or 0) + self._drawn_menu_h
+            if prev_eff_h:
                 prev_rows = self._rows or rows
-                prev_top = _box_top_row(
-                    prev_rows, _BOX_H + self._drawn_menu_h,
-                )
-                for r in range(prev_top, prev_top + self._drawn_menu_h):
+                prev_top = _box_top_row(prev_rows, prev_eff_h)
+                prev_bottom = prev_top + prev_eff_h - 1
+                # Rows that used to be reserved but now sit in the new
+                # scroll region (i.e., above the new top row).  When
+                # the area grew, this range is empty and nothing is
+                # cleared.
+                clear_to = min(prev_bottom, top_row - 1)
+                for r in range(prev_top, clear_to + 1):
                     out.write(f"{_ESC}[{r};1H{_ESC}[2K")
             out.write(f"{_ESC}[1;{region_bottom}r")
             out.write(f"{_ESC}[{region_bottom};1H")
             out.write(f"{_ESC}7")
             self._rows = rows
             self._drawn_menu_h = menu_h
+            self._drawn_box_h = box_h
 
         # Draw the in-place completion menu rows (if open) right above
         # the box's top border, sharing the same column layout so the
@@ -497,22 +652,30 @@ class _InputBox:
         box_top = top_row + menu_h
         top = panel_top(self.title, cols)
         bottom = panel_bottom(self.status, cols)
-        body, is_placeholder = panel_body(self.buf, cols)
-        # ``body`` always opens with the chevron; keep it cyan (like the
-        # idle ``sorcar`` prompt) and dim only the placeholder text that
-        # follows it when the buffer is empty.
-        marker = body[: len(PROMPT_MARKER)]
-        rest = body[len(PROMPT_MARKER) :]
-        rest_color = DIM if is_placeholder else ""
-        mid_inner = f" {CYAN}{marker}{RESET}{rest_color}{rest}{RESET} "
 
-        # The box rows use absolute positioning, so they never disturb the
-        # saved *output* position (held by the ``ESC 7`` register and
-        # restored by :class:`_StdoutProxy`).  After painting, the visible
-        # caret is parked in the body so it blinks after the chevron.
         out.write(f"{_ESC}[{box_top};1H{_ESC}[2K{CYAN}{top}{RESET}")
-        out.write(f"{_ESC}[{box_top + 1};1H{_ESC}[2K{CYAN}│{RESET}{mid_inner}{CYAN}│{RESET}")
-        out.write(f"{_ESC}[{box_top + 2};1H{_ESC}[2K{CYAN}{bottom}{RESET}")
+        # Each body row is drawn at ``box_top + 1 + i`` (the first body
+        # row sits immediately under the top border).  Every body row
+        # opens with a two-column prefix — the cyan ``PROMPT_MARKER``
+        # chevron on row 0 and the two-space ``_CONT_INDENT`` on every
+        # continuation row — followed by the typed text.  The dim
+        # styling only applies to the empty-buffer placeholder shown on
+        # the single body row produced for an empty buffer.
+        for i, body in enumerate(body_rows):
+            prefix = body[: len(PROMPT_MARKER)]
+            rest = body[len(PROMPT_MARKER) :]
+            rest_color = DIM if (is_placeholder and i == 0) else ""
+            mid_inner = (
+                f" {CYAN}{prefix}{RESET}{rest_color}{rest}{RESET} "
+            )
+            out.write(
+                f"{_ESC}[{box_top + 1 + i};1H{_ESC}[2K"
+                f"{CYAN}│{RESET}{mid_inner}{CYAN}│{RESET}"
+            )
+        out.write(
+            f"{_ESC}[{box_top + 1 + box_body_h};1H{_ESC}[2K"
+            f"{CYAN}{bottom}{RESET}"
+        )
         self._park_cursor_locked(rows, cols)
         out.flush()
 
@@ -572,12 +735,22 @@ class _InputBox:
             rows, _ = _term_size()
         if cols is None:
             cols = panel_cols()
-        top_row = _box_top_row(rows, _BOX_H + self._menu_h())
-        # The body row sits one row below the panel's top border, which
-        # in turn sits ``_menu_h()`` rows below the menu's first row.
-        col = body_cursor_col(self.buf, cols)
+        # ``_StdoutProxy.write`` calls this between redraws, so the
+        # parking math must match the LAST drawn box geometry (held by
+        # ``_drawn_box_h``) — not what a fresh ``_draw_locked`` would
+        # produce — otherwise the caret would jump off the rendered box
+        # in the agent-output frame between buffer mutations.
+        drawn_box_h = self._drawn_box_h or _BOX_H
+        menu_h = self._menu_h()
+        top_row = _box_top_row(rows, drawn_box_h + menu_h)
+        # The first body row sits ``menu_h + 1`` rows below the panel's
+        # top row (1 row for the top border, ``menu_h`` rows for the
+        # menu above it).  ``body_cursor_col`` returns the body-row
+        # index of the caret (0 for the first body row, growing with
+        # each embedded newline).
+        caret_row, col = body_cursor_col(self.buf, cols)
         self._out.write(
-            f"{_ESC}[{top_row + self._menu_h() + 1};{col}H"
+            f"{_ESC}[{top_row + menu_h + 1 + caret_row};{col}H"
         )
 
     def _append_paste(self, chunk: str) -> bool:
@@ -843,22 +1016,37 @@ class _InputBox:
                     self._pasting = True
                     i += len(_PASTE_START)
                     continue
-                # Shift+Enter (kitty CSI-u ``ESC[13;2u`` or xterm
-                # modifyOtherKeys ``ESC[27;2;13~``) inserts a newline
-                # into the buffer instead of submitting the line.
-                shift_enter = False
-                for seq in ("[13;2u", "[27;2;13~"):
+                # Modifier+Enter inserts a real newline into the buffer
+                # instead of submitting the line.  This covers every
+                # encoding terminals emit for Shift+Enter, Alt+Enter,
+                # Ctrl+Enter, Cmd+Enter and arbitrary combinations:
+                #
+                # * ``ESC\r`` — portable xterm-style Alt+Enter
+                # * ``ESC\n`` — tmux M-Enter / Alt+Enter on some
+                #               terminals
+                # * ``ESC[13;<m>u`` — kitty / CSI-u modifyOtherKeys=1
+                # * ``ESC[27;<m>;13~`` — xterm modifyOtherKeys=2
+                #
+                # See :data:`_NEWLINE_AFTER_ESC` for the full table.
+                # The tuple is iterated longest-first so a single-byte
+                # ``\r`` cannot eat the leading byte of a CSI sequence
+                # whose payload happens to start with another byte
+                # (``[``) — but the explicit order also protects
+                # against any future addition that *would* prefix-
+                # collide.
+                newline_insert = False
+                for seq in _NEWLINE_AFTER_ESC:
                     if text.startswith(seq, i + 1):
                         self.buf += "\n"
-                        # Shift+Enter is a buffer edit; refresh the
-                        # menu so suggestions track multi-line input
-                        # ("complete while typing").
+                        # The modifier+Enter is a buffer edit; refresh
+                        # the in-place completion menu so suggestions
+                        # track multi-line input.
                         self._refresh_typing_menu()
                         changed = True
                         i += 1 + len(seq)
-                        shift_enter = True
+                        newline_insert = True
                         break
-                if shift_enter:
+                if newline_insert:
                     continue
                 # A chunk ending right at the ESC may be the first half
                 # of a sequence split across reads; defer it so the next
@@ -914,25 +1102,61 @@ class _InputBox:
                     continue
                 i += 1
                 continue
-            if ch in ("\r", "\n"):
+            if ch == "\r":
+                # Bare CR is the Enter key (after raw mode disables
+                # ICRNL the kernel no longer rewrites it to LF).  This
+                # submits the current buffer — or accepts an open
+                # completion candidate without submitting, matching the
+                # prompt_toolkit dropdown behavior in cli_prompt.py.
                 if self._menu_open:
                     # Enter on an open completion menu accepts the
                     # highlighted candidate (replacing the buffer) and
                     # closes the menu *without* submitting the line —
-                    # the next Enter actually submits.  This matches
-                    # the prompt_toolkit dropdown behavior and the
-                    # ``_accept_completion_enter`` binding in
-                    # ``cli_prompt.py``.
+                    # the next Enter actually submits.
                     self._menu_accept()
                     changed = True
                 else:
-                    line = self.buf
-                    self.buf = ""
-                    self._hist_idx = None
-                    self._hist_saved = ""
-                    self._reset_completion_state()
-                    changed = True
-                    on_submit(line)
+                    # Universal backslash line-continuation.  On
+                    # terminals that cannot disambiguate Shift+Enter
+                    # from Enter (notably macOS Terminal.app), ending
+                    # the buffer with an unescaped ``\`` makes Enter
+                    # insert a newline into the buffer instead of
+                    # submitting — the same convention every POSIX
+                    # shell uses.  See
+                    # :func:`~kiss.agents.sorcar.cli_line_continuation.ends_with_line_continuation`.
+                    cont, keep = ends_with_line_continuation(self.buf)
+                    if cont:
+                        self.buf = self.buf[:keep] + "\n"
+                        self._hist_idx = None
+                        # A buffer edit — refresh the in-place
+                        # completion menu so suggestions track the
+                        # newly-added newline the same way the
+                        # Shift+Enter newline-insert paths do.
+                        self._refresh_typing_menu()
+                        changed = True
+                    else:
+                        line = self.buf
+                        self.buf = ""
+                        self._hist_idx = None
+                        self._hist_saved = ""
+                        self._reset_completion_state()
+                        changed = True
+                        on_submit(line)
+            elif ch == "\n":
+                # Bare LF is Ctrl+J / Alt+Enter on terminals that
+                # send a lone LF for that key (e.g. tmux M-Enter
+                # decoded down to its newline byte) — it must INSERT
+                # a newline into the buffer, never submit.  With
+                # ICRNL disabled in start() a real Enter arrives as
+                # ``\r`` and follows the branch above, so the two
+                # are reliably distinguishable.
+                self.buf += "\n"
+                self._hist_idx = None
+                # Like the Shift+Enter newline-insert paths above,
+                # refresh the in-place completion menu so suggestions
+                # track multi-line input ("complete while typing").
+                self._refresh_typing_menu()
+                changed = True
             elif ch in ("\x7f", "\x08"):
                 if self.buf:
                     self.buf = self.buf[:-1]

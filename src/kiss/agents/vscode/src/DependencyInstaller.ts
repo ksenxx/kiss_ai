@@ -1023,12 +1023,23 @@ async function restartKissWebDaemon(
   // the daemon reports tasks, defer the restart unconditionally (even
   // on a fingerprint change): the new code will be picked up on the
   // next activation once the running task has finished.
+  //
+  // ALWAYS run ``daemonHasActiveTasks`` when ``health !== 'dead'`` so
+  // the ``sock-missing`` reason flows through to ``decideRestart``'s
+  // ``unreachable-uds`` branch — the Update-button hang fix.  Without
+  // this, when ``install.sh`` races with the LaunchAgent respawn and
+  // ends up deleting the freshly-respawned daemon's UDS file, the
+  // probe early-returned with ``reason: 'not-probed'`` (i.e. the
+  // generic ``alive-uncertain`` skip) instead of the specific
+  // ``sock-missing`` signal ``decideRestart`` needs to force the
+  // recovery restart.  ``daemonHasActiveTasks`` itself short-circuits
+  // on a missing socket path so this is cheap.
   let activeTasks:
     {ok: true; count: number; tabs: string[]} | {ok: false; reason: string} = {
     ok: false,
     reason: 'not-probed',
   };
-  if (health !== 'dead' && sockExists) {
+  if (health !== 'dead') {
     activeTasks = await daemonHasActiveTasks(sockPath, 1500);
   }
 

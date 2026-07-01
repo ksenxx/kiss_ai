@@ -443,18 +443,90 @@ const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-daemonhealth-'));
       `expected the skip reason to flag the uncertainty; got: ${decision.reason}`);
   });
 
-  await test('decideRestart: skips restart when daemon is ALIVE and UDS socket is missing (transient startup window)', () => {
-    // Same defensive policy: when probeDaemonHealth says 'alive' but
-    // daemonHasActiveTasks could not even open the UDS, do NOT kill
-    // the daemon.  This guards a real production window where the
-    // daemon has just bound TCP but the UDS hasn't been (re-)created
-    // yet on the new path.
+  await test('decideRestart: RESTARTS when daemon is ALIVE but UDS socket file is missing (Update-button hang fix)', () => {
+    // BUG FIX: After the Update button is clicked, ``install.sh``
+    // kills the kiss-web daemon by port (``lsof -ti :8787 | xargs
+    // kill``), waits, and removes ``~/.kiss/sorcar.sock``.  On macOS
+    // launchd's ``KeepAlive`` (or systemd's ``Restart=always``) may
+    // respawn the daemon BEFORE install.sh runs the ``rm -f``, so
+    // the freshly-respawned daemon's UDS socket FILE is deleted out
+    // from under it.  The daemon's open listening socket is in-
+    // kernel and still healthy on port 8787, but new clients trying
+    // to connect by path (``~/.kiss/sorcar.sock``) get ENOENT
+    // forever.  The webview hangs on
+    // "KISS Sorcar Server is starting ..." until the user restarts
+    // VS Code — and even that did NOT help under the OLD decision
+    // table, which lumped ``sock-missing`` together with the
+    // ``timeout`` / generic UDS failures and SKIPPED the restart on
+    // the assumption that the daemon was a "transient startup
+    // window" away from binding.  In the install.sh race the
+    // window is permanent — the daemon never re-binds on its own —
+    // so the only way to recover is to force a restart, which
+    // respawns a daemon whose ``_setup_server`` ``unlink`` + ``bind``
+    // re-creates the UDS file.
+    //
+    // The fix carves ``sock-missing`` out from the
+    // ``alive-uncertain`` skip and RESTARTS: this is safe because a
+    // daemon with no UDS file cannot answer ``activeTasksQuery``
+    // (the explicit ``active-tasks`` skip above always wins), and
+    // the original "transient" window is microseconds wide, so a
+    // false-positive restart there is a benign no-op.
     const decision = decideRestart({
-      fingerprintMatches: false,
+      fingerprintMatches: true,  // the install.sh race leaves the bundle untouched
       health: 'alive',
       activeTasks: {ok: false, reason: 'sock-missing'},
     });
+    assert.strictEqual(decision.skip, false,
+      `expected restart when daemon is alive but UDS socket file is missing; ` +
+      `got: ${JSON.stringify(decision)}`);
+    assert.ok(/unreachable-uds/.test(decision.reason),
+      `expected the restart reason to flag the unreachable UDS; got: ${decision.reason}`);
+  });
+
+  await test('decideRestart: still SKIPS restart when daemon is ALIVE and active-tasks probe TIMED OUT (task 3192 protection preserved)', () => {
+    // Regression guard: the BUG FIX above ONLY carves out
+    // ``sock-missing``.  The ``timeout`` failure mode is still
+    // protective — a busy daemon under load can legitimately miss
+    // the 1500 ms UDS deadline, and SIGTERMing it would abort the
+    // in-flight agent task (the original task 3192 regression).
+    const decision = decideRestart({
+      fingerprintMatches: false,
+      health: 'alive',
+      activeTasks: {ok: false, reason: 'timeout'},
+    });
+    assert.strictEqual(decision.skip, true,
+      `timeout must still defer to protect mid-task daemons; ` +
+      `got: ${JSON.stringify(decision)}`);
+    assert.ok(/alive-uncertain/.test(decision.reason));
+  });
+
+  await test('decideRestart: unreachable-uds restart wins over fingerprintMatches', () => {
+    // A daemon that is alive on TCP but has no UDS socket file must
+    // be restarted EVEN IF its source fingerprint matches the last
+    // known good build.  Without this, ``restartKissWebDaemon``
+    // would fall through to the ``healthy-unchanged`` skip and the
+    // webview would stay on the loading overlay forever.
+    const decision = decideRestart({
+      fingerprintMatches: true,
+      health: 'alive',
+      activeTasks: {ok: false, reason: 'sock-missing'},
+    });
+    assert.strictEqual(decision.skip, false);
+    assert.ok(/unreachable-uds/.test(decision.reason));
+  });
+
+  await test('decideRestart: explicit active-tasks reply still wins over sock-missing (defensive ordering)', () => {
+    // Mostly theoretical: a daemon with no UDS file cannot return
+    // ``ok: true``.  But pin the precedence anyway so a future
+    // refactor that defaults ``activeTasks`` to ``ok:true`` cannot
+    // accidentally restart a busy daemon.
+    const decision = decideRestart({
+      fingerprintMatches: false,
+      health: 'alive',
+      activeTasks: {ok: true, count: 1, tabs: ['x(task=1)']},
+    });
     assert.strictEqual(decision.skip, true);
+    assert.strictEqual(decision.reason, 'active-tasks');
   });
 
   await test('decideRestart: still RESTARTS when the daemon is fully unreachable (health=unknown + activeTasks failed + fingerprint mismatched)', () => {
