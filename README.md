@@ -73,6 +73,18 @@ Note: **Sorcar** also means government in Bengali.
 
 ## 🎬 See It in Action
 
+<div align="center">
+  <video src="https://github.com/ksenxx/kiss_ai/raw/main/assets/sorcar-main.mp4"
+         controls autoplay muted loop playsinline preload="auto"
+         poster="assets/KISS-Sorcar-UI.png"
+         width="100%"
+         aria-label="KISS Sorcar demo video">
+    <a href="assets/sorcar-main.mp4">▶ Watch the KISS Sorcar demo video</a>
+  </video>
+  <br>
+  <em>▶ <a href="assets/sorcar-main.mp4">Watch the KISS Sorcar demo video</a> · Also viewable on the <a href="https://kisssorcar.github.io/">project website</a>.</em>
+</div>
+
 An older KISS Sorcar video is available at [https://www.youtube.com/watch?v=xnYxWvRqACE](https://www.youtube.com/watch?v=xnYxWvRqACE). We **no longer** recommend explicitly creating a plan in KISS Sorcar; see the paper for the current workflow guidance.
 
 ## Installation
