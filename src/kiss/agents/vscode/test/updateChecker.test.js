@@ -60,6 +60,7 @@ const {
   checkForExtensionUpdate,
   compareVersions,
   resolveCurrentVersion,
+  scanInstalledExtensionVersions,
 } = require('../src/UpdateChecker.js');
 
 // ---------------------------------------------------------------------------
@@ -277,8 +278,14 @@ async function testResolvesCurrentVersionFromVersionPy() {
     path.join(versionPyDir, '_version.py'),
     "__version__ = '2099.9.9'\n",
   );
-  assert.strictEqual(resolveCurrentVersion(root), '2099.9.9');
-  assert.strictEqual(resolveCurrentVersion(undefined), null);
+  // Pass an empty extensionsRoot so the scanner short-circuits and the
+  // resolver falls back to the ``kissProjectPath`` bundled version.
+  const emptyExtRoot = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'kiss-updcheck-noext-'),
+  );
+  tmpDirs.push(emptyExtRoot);
+  assert.strictEqual(resolveCurrentVersion(root, emptyExtRoot), '2099.9.9');
+  assert.strictEqual(resolveCurrentVersion(undefined, emptyExtRoot), null);
 
   // And end-to-end: the helper uses it when no ``currentVersion`` is
   // passed explicitly.
@@ -291,6 +298,7 @@ async function testResolvesCurrentVersionFromVersionPy() {
       cacheFilePath: cachePath,
       cooldownMs: 60_000,
       kissProjectPath: root,
+      extensionsRoot: emptyExtRoot,
       notify: params => notified.push(params),
       now: () => 1_000_000,
     });
@@ -304,6 +312,95 @@ async function testResolvesCurrentVersionFromVersionPy() {
   } finally {
     await stopStub(stub);
   }
+}
+
+// ---------------------------------------------------------------------------
+// 8.  Regression: stale-daemon-after-update bug.  When multiple
+//     ``ksenxx.kiss-sorcar-*`` extension dirs exist (the OLD version the
+//     daemon binary was launched from AND the freshly-installed NEW
+//     version), ``resolveCurrentVersion`` must return the NEW version.
+//     This is the reason the sticky "update available" toast used to
+//     keep re-appearing after the user clicked Update: the OLD daemon
+//     reported OLD as ``current`` even though NEW was already
+//     installed.  Mirrors ``TestUpdateAvailableUsesLatestInstalledExtension``
+//     in ``test_update_available_check.py``.
+// ---------------------------------------------------------------------------
+async function testScansMaxInstalledExtensionVersion() {
+  const extRoot = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'kiss-updcheck-extroot-'),
+  );
+  tmpDirs.push(extRoot);
+  for (const ver of ['2026.6.30', '2026.7.5']) {
+    const d = path.join(
+      extRoot,
+      `ksenxx.kiss-sorcar-${ver}`,
+      'kiss_project',
+      'src',
+      'kiss',
+    );
+    fs.mkdirSync(d, {recursive: true});
+    fs.writeFileSync(
+      path.join(d, '_version.py'),
+      `__version__ = '${ver}'\n`,
+    );
+  }
+  // A non-KISS extension dir: must be ignored.
+  fs.mkdirSync(path.join(extRoot, 'someone.other-extension-1.0.0'));
+  // A KISS dir with no _version.py: must be silently skipped.
+  fs.mkdirSync(
+    path.join(extRoot, 'ksenxx.kiss-sorcar-broken', 'kiss_project'),
+    {recursive: true},
+  );
+  // A KISS dir with a malformed _version.py: must be silently skipped.
+  const bad = path.join(
+    extRoot,
+    'ksenxx.kiss-sorcar-2026.6.99',
+    'kiss_project',
+    'src',
+    'kiss',
+  );
+  fs.mkdirSync(bad, {recursive: true});
+  fs.writeFileSync(path.join(bad, '_version.py'), '# no version here\n');
+  // A stray file at the extensions root: must not crash the scanner.
+  fs.writeFileSync(path.join(extRoot, 'not-a-directory.txt'), 'junk');
+
+  const seen = scanInstalledExtensionVersions(extRoot);
+  seen.sort();
+  assert.deepStrictEqual(
+    seen,
+    ['2026.6.30', '2026.7.5'],
+    'scanner must return only the parseable KISS Sorcar versions',
+  );
+
+  // ``resolveCurrentVersion`` picks the MAX version even when the
+  // bundled ``kissProjectPath`` points at the OLD extension (which is
+  // exactly the post-update scenario).
+  const oldKissProject = path.join(
+    extRoot,
+    'ksenxx.kiss-sorcar-2026.6.30',
+    'kiss_project',
+  );
+  assert.strictEqual(
+    resolveCurrentVersion(oldKissProject, extRoot),
+    '2026.7.5',
+  );
+
+  // And when the extensions root is missing / unreadable, the scanner
+  // returns an empty list and the resolver falls back to the bundled
+  // ``kissProjectPath``.
+  assert.deepStrictEqual(
+    scanInstalledExtensionVersions(
+      path.join(extRoot, 'does-not-exist'),
+    ),
+    [],
+  );
+  assert.strictEqual(
+    resolveCurrentVersion(
+      oldKissProject,
+      path.join(extRoot, 'does-not-exist'),
+    ),
+    '2026.6.30',
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -328,9 +425,18 @@ async function testSkipsWhenCurrentVersionUnknown() {
   let fetched = 0;
   const notified = [];
   const cachePath = makeCachePath('nover');
+  // Point ``extensionsRoot`` at an empty tmpdir so the scanner does not
+  // discover the developer's real installed KISS Sorcar extension and
+  // resolve a "current" version through it — the intent of this test
+  // is the "unknown version" branch.
+  const emptyExtRoot = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'kiss-updcheck-nover-ext-'),
+  );
+  tmpDirs.push(emptyExtRoot);
   const result = await checkForExtensionUpdate({
     cacheFilePath: cachePath,
     currentVersion: '', // explicit empty + no kissProjectPath = unknown
+    extensionsRoot: emptyExtRoot,
     fetchLatest: () => {
       fetched += 1;
       return Promise.resolve('9999.9.9');
@@ -370,6 +476,10 @@ async function runTests() {
   await test(
     'helper skips check when the local version is unknown',
     testSkipsWhenCurrentVersionUnknown,
+  );
+  await test(
+    'reproduces stale-daemon bug: max installed extension version wins',
+    testScansMaxInstalledExtensionVersion,
   );
 }
 
