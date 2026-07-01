@@ -3361,8 +3361,8 @@
   },
   "openrouter/qwen/qwen3-30b-a3b-thinking-2507": {
     "context_length": 131072,
-    "input_price_per_1M": 0.08,
-    "output_price_per_1M": 0.4,
+    "input_price_per_1M": 0.13,
+    "output_price_per_1M": 1.56,
     "fc": true,
     "emb": false,
     "gen": true
@@ -3377,8 +3377,8 @@
   },
   "openrouter/qwen/qwen3-8b": {
     "context_length": 131072,
-    "input_price_per_1M": 0.05,
-    "output_price_per_1M": 0.4,
+    "input_price_per_1M": 0.117,
+    "output_price_per_1M": 0.455,
     "fc": false,
     "emb": false,
     "gen": true
