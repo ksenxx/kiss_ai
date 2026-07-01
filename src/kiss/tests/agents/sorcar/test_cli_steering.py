@@ -61,7 +61,7 @@ class TestInputBoxFeed:
     def test_enter_submits_and_clears(self) -> None:
         box = _make_box()
         submitted: list[str] = []
-        box.feed(b"fix the bug\n", submitted.append, lambda: None)
+        box.feed(b"fix the bug\r", submitted.append, lambda: None)
         assert submitted == ["fix the bug"]
         assert box.buf == ""
 
@@ -98,7 +98,7 @@ class TestInputBoxFeed:
     def test_multiple_lines_in_one_chunk(self) -> None:
         box = _make_box()
         submitted: list[str] = []
-        box.feed(b"one\ntwo\n", submitted.append, lambda: None)
+        box.feed(b"one\rtwo\r", submitted.append, lambda: None)
         assert submitted == ["one", "two"]
         assert box.buf == ""
 
@@ -123,7 +123,7 @@ class TestInputBoxRender:
         # No static caret glyph is drawn — the real blinking cursor is
         # parked right after the typed text instead.
         assert "▏" not in text
-        col = body_cursor_col("do something", panel_cols())
+        _row, col = body_cursor_col("do something", panel_cols())
         assert f";{col}H" in text
 
     def test_draw_shows_placeholder_when_empty(self) -> None:
@@ -142,7 +142,7 @@ class TestInputBoxRender:
         box._active = True
         box.redraw()
         text = out.getvalue()
-        col = body_cursor_col("", panel_cols())
+        _row, col = body_cursor_col("", panel_cols())
         assert f";{col}H" in text
 
 
@@ -161,7 +161,7 @@ class TestStdoutProxyCaret:
         assert "\x1b8" in text  # restore output position
         assert "agent says hello" in text
         assert "\x1b7" in text  # re-save advanced output position
-        col = body_cursor_col("hi", panel_cols())
+        _row, col = body_cursor_col("hi", panel_cols())
         assert f";{col}H" in text  # caret re-parked in body
 
     def test_output_is_plain_when_box_inactive(self) -> None:
@@ -341,13 +341,13 @@ class TestInputBoxCompletionMenu:
         box.feed(b"/he", lambda _s: None, lambda: None)
         assert box._menu_open is True
         submitted: list[str] = []
-        box.feed(b"\n", submitted.append, lambda: None)
+        box.feed(b"\r", submitted.append, lambda: None)
         # First Enter only accepts the highlighted candidate.
         assert submitted == []
         assert box.buf == "/help "
         assert box._menu_open is False
         # Next Enter submits the now-completed line.
-        box.feed(b"\n", submitted.append, lambda: None)
+        box.feed(b"\r", submitted.append, lambda: None)
         assert submitted == ["/help "]
 
     def test_tab_advances_selection_when_menu_open(self) -> None:
@@ -367,7 +367,7 @@ class TestInputBoxCompletionMenu:
         # ``buf`` only changes once Enter accepts the new selection.
         assert box.buf == "/"
         submitted: list[str] = []
-        box.feed(b"\n", submitted.append, lambda: None)
+        box.feed(b"\r", submitted.append, lambda: None)
         assert box.buf == "/quit "
         assert submitted == []
 

@@ -280,13 +280,33 @@ class _CommandsMixin:
                 # be cut off from the prior chat context
                 # (``ChatSorcarAgent.build_chat_prompt`` would query
                 # history for the tab id, find nothing, and send the LLM
-                # an empty preamble).  Otherwise allocate a fresh chat
-                # id.  ``tab_id`` (the frontend routing key) and
-                # ``chat_id`` (the persistence key) are kept orthogonal:
-                # every run gets its own chat id, regardless of which tab
-                # launched it.
+                # an empty preamble).
+                #
+                # If ``tab.chat_id`` is empty, this may be a tab that
+                # ``_replay_session`` associated with a chat AFTER a
+                # daemon cold-start (e.g. VS Code was closed and
+                # relaunched — the extension's ``ready`` handler replays
+                # ``resumeSession`` for every restored tab).  In that
+                # cold-start case no ``_RunningAgentState`` existed for
+                # the tab at the time ``_replay_session`` ran, so the
+                # chat id was only recorded in ``_tab_chat_views``
+                # (which is populated unconditionally, even when the
+                # per-tab state has not been allocated yet).  Consult
+                # that fallback here so the follow-up task continues
+                # the SAME chat_id the user was viewing rather than
+                # minting a fresh session and orphaning the prior
+                # conversation.
+                #
+                # Otherwise allocate a fresh chat id.  ``tab_id`` (the
+                # frontend routing key) and ``chat_id`` (the persistence
+                # key) are kept orthogonal: every run gets its own chat
+                # id, regardless of which tab launched it.
                 if not tab.chat_id:
-                    tab.chat_id = uuid.uuid4().hex
+                    resumed_chat_id = self._tab_chat_views.get(tab_id, "")
+                    if resumed_chat_id:
+                        tab.chat_id = resumed_chat_id
+                    else:
+                        tab.chat_id = uuid.uuid4().hex
                 chat_id = tab.chat_id
                 # The launching tab views this chat: record it so a later
                 # task started on the same chat from ANOTHER tab (in any
@@ -753,12 +773,32 @@ class _CommandsMixin:
             active_content = ""
         conn_id = cmd.get("connId", "")
         tab_id = cmd.get("tabId", "")
-        chat_id = ""
-        if tab_id:
-            tab = _RunningAgentState.running_agent_states.get(tab_id)
-            if tab is not None:
-                chat_id = tab.chat_id
         with self._state_lock:
+            # Resolve the chat id for this tab under the state lock so
+            # ``_tab_chat_views`` (written by ``_replay_session`` /
+            # ``_cmd_run`` / ``_new_chat``) cannot mutate mid-read.
+            #
+            # A pure-viewer tab or a tab restored after a daemon
+            # cold-start deliberately has NO ``_RunningAgentState``
+            # entry until the user submits — only a
+            # ``_tab_chat_views[tab_id]`` association written by the
+            # ``resumeSession`` replay.  Reading ``chat_id`` off the
+            # registry alone would return ``""`` in that window,
+            # dropping the chat-context signal that lets
+            # ``_active_file_completions`` harvest identifiers from
+            # prior tasks in the same conversation — autocomplete
+            # would then behave as if the chat had never happened
+            # until the next task started.  Consult the chat-viewer
+            # map as a fallback so ghost text stays chat-aware across
+            # a VS Code close/relaunch cycle and across
+            # history-sidebar-opened viewer tabs.
+            chat_id = ""
+            if tab_id:
+                tab = _RunningAgentState.running_agent_states.get(tab_id)
+                if tab is not None:
+                    chat_id = tab.chat_id
+                if not chat_id:
+                    chat_id = self._tab_chat_views.get(tab_id, "")
             if active_file:
                 self._last_active_file[conn_id] = active_file
             if active_content is not None:
@@ -1145,6 +1185,17 @@ class _CommandsMixin:
             chat_id = (tab.chat_id or "") if tab is not None else ""
             if not chat_id and agent_obj is not None:
                 chat_id = getattr(agent_obj, "chat_id", "") or ""
+            # Cold-start / viewer-tab fallback: a tab restored after
+            # a daemon relaunch (or opened as a pure viewer from the
+            # history sidebar) has NO ``_RunningAgentState`` entry
+            # yet — only ``_tab_chat_views[tab_id]`` records the chat
+            # it is displaying.  Without this fallback ``/cost``
+            # reports "(new)" and ``$0.0000`` for a tab the user
+            # actively considers "the resumed X chat", masking the
+            # real chat id (and preventing them from copying it out
+            # or using it in follow-up scripts).
+            if not chat_id and tab_id:
+                chat_id = self._tab_chat_views.get(tab_id, "")
             text = (
                 f"Chat ID: {chat_id or '(new)'}\n"
                 f"Cost: ${budget:.4f}\n"

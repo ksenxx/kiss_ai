@@ -30,9 +30,21 @@ ORANGE = f"{_ESC}[38;5;208m"
 RESET = f"{_ESC}[0m"
 # Cursor marker shown before the editable text inside the panel body.
 PROMPT_MARKER = "› "
-# Titles shown in the panel's top border for each input mode.
-IDLE_TITLE = " sorcar · type a task, then Enter · Ctrl+D to exit "
-STEER_TITLE = " steer · type, then Enter to queue · Ctrl+C to abort "
+# Titles shown in the panel's top border for each input mode.  The
+# multi-line hint (Alt+Enter / Ctrl+J / trailing ``\`` for a new line)
+# is appended so users on terminals that cannot disambiguate
+# Shift+Enter from Enter (notably macOS Terminal.app) can discover
+# the universal backslash-continuation entry mechanism.
+IDLE_TITLE = (
+    " sorcar · type a task, Enter to submit · "
+    "end line with \\ (or Alt+Enter / Ctrl+J / Shift+Enter) for newline · "
+    "Ctrl+D to exit "
+)
+STEER_TITLE = (
+    " steer · Enter to queue · "
+    "end line with \\ (or Alt+Enter / Ctrl+J / Shift+Enter) for newline · "
+    "Ctrl+C to abort "
+)
 # Dim placeholder shown in the panel body when the edit buffer is empty.
 PLACEHOLDER = "Add an instruction for the agent while it works…"
 
@@ -170,33 +182,81 @@ def clip_buf(buf: str, cols: int) -> str:
     return shown[idx:]
 
 
-def panel_body(buf: str, cols: int) -> tuple[str, bool]:
-    """Return the inner body text for *buf* padded to the panel width.
+# Continuation indent shown on every body row past the first when the
+# edit buffer contains embedded newlines (Shift+Enter inserts a real
+# ``\n``).  Two spaces aligns continuation text under the ``› `` chevron
+# on the opening row so a multi-line input visually reads as one
+# block.
+_CONT_INDENT = "  "
 
-    The body always opens with the :data:`PROMPT_MARKER` chevron — the
-    same ``› `` the idle ``sorcar`` prompt shows — so the steering box
-    carries the chevron on the left whether or not anything is typed.
+# Minimum number of body rows the input panel always shows.  The framed
+# dialog reserves three lines of vertical space (chevron / placeholder
+# row + two padding rows) even when the buffer is empty or a single
+# line, so the user has an obvious 3-row "text area" to type into.
+# Above three lines the panel dynamically grows with the buffer (see
+# :func:`panel_body`).
+MIN_BODY_ROWS = 3
+
+
+def panel_body(
+    buf: str, cols: int, *, min_rows: int = MIN_BODY_ROWS,
+) -> tuple[list[str], bool]:
+    """Return the body row(s) for *buf*, one entry per buffer line.
+
+    The first row opens with the :data:`PROMPT_MARKER` chevron — the
+    same ``› `` the idle ``sorcar`` prompt shows — and every subsequent
+    row (when *buf* contains embedded newlines) opens with a two-space
+    continuation indent (:data:`_CONT_INDENT`) so the lines align under
+    the chevron.  Each row is padded to the panel's inner width so
+    the steering box can paint a contiguous rectangle whose height
+    grows with the number of lines in *buf*.
+
+    The returned list always contains at least *min_rows* entries
+    (default :data:`MIN_BODY_ROWS` = 3).  Buffers with fewer lines are
+    padded with all-blank rows below the content so the framed dialog
+    keeps a stable three-row "text area" look matching the user-visible
+    contract; buffers with more lines grow the list one row per
+    embedded ``\\n`` (dynamic adjustment upward).
 
     No caret glyph is appended: callers park the real (blinking) terminal
-    cursor right after the typed text (see :func:`body_cursor_col`), so
-    the steering box shows the same blinking caret as the idle prompt
-    instead of a static block.
+    cursor right after the typed text on the appropriate row (see
+    :func:`body_cursor_col`), so the steering box shows the same blinking
+    caret as the idle prompt instead of a static block.
 
     Args:
         buf: The current edit buffer (empty shows the placeholder).
         cols: Total panel width in columns.
+        min_rows: Minimum number of body rows to return.  Defaults to
+            :data:`MIN_BODY_ROWS`; callers that want the legacy
+            single-row behaviour can pass ``min_rows=1``.
 
     Returns:
-        A ``(body, is_placeholder)`` tuple where *body* is padded to the
-        panel's inner width and starts with :data:`PROMPT_MARKER`, and
-        *is_placeholder* is ``True`` when the empty-buffer placeholder is
-        shown (so callers can dim the text after the chevron).
+        A ``(rows, is_placeholder)`` tuple where *rows* is a list of
+        body strings (one per buffer line, each padded to ``cols - 4``,
+        with trailing blank rows up to *min_rows*) and *is_placeholder*
+        is ``True`` when the empty-buffer placeholder is shown on the
+        first row (so callers can dim the text after the chevron).
     """
     inner_w = cols - 4  # room between "│ " and " │"
-    if buf:
-        body = PROMPT_MARKER + clip_buf(buf, cols)
-        return _clip_pad(body, inner_w), False
-    return _clip_pad(PROMPT_MARKER + PLACEHOLDER, inner_w), True
+    rows: list[str]
+    is_placeholder = False
+    if not buf:
+        rows = [_clip_pad(PROMPT_MARKER + PLACEHOLDER, inner_w)]
+        is_placeholder = True
+    else:
+        lines = buf.split("\n")
+        rows = []
+        for i, line in enumerate(lines):
+            prefix = PROMPT_MARKER if i == 0 else _CONT_INDENT
+            # ``clip_buf`` tail-clips a single buffer line so a long
+            # line always shows the caret end.  After splitting on
+            # ``\n`` the ``\n`` → ``⏎`` substitution in ``clip_buf``
+            # never fires.
+            rows.append(_clip_pad(prefix + clip_buf(line, cols), inner_w))
+    blank = " " * inner_w
+    while len(rows) < max(min_rows, 1):
+        rows.append(blank)
+    return rows, is_placeholder
 
 
 def menu_row(text: str, selected: bool, cols: int) -> str:
@@ -241,21 +301,37 @@ def menu_row(text: str, selected: bool, cols: int) -> str:
     return f"{CYAN}│{RESET} {inner} {CYAN}│{RESET}"
 
 
-def body_cursor_col(buf: str, cols: int) -> int:
-    """Return the 1-based terminal column for the body row's blinking caret.
+def body_cursor_col(buf: str, cols: int) -> tuple[int, int]:
+    """Return the ``(row, col)`` body-grid position for the blinking caret.
 
-    The caret sits right after the chevron and any visible typed text,
-    exactly where the idle ``sorcar`` prompt leaves the real cursor. The
-    body row is drawn as ``│`` (col 1), a space (col 2), then the body
-    text (starting at col 3), so the caret lands at
-    ``3 + len(PROMPT_MARKER) + len(visible_text)``.
+    The caret sits right after the chevron (or the continuation indent
+    on continuation rows) and any visible typed text on the *last*
+    buffer line, exactly where the idle ``sorcar`` prompt leaves the
+    real cursor.  Every body row is drawn as ``│`` (col 1), a space
+    (col 2), then the body text (starting at col 3); the first row's
+    text opens with the two-column :data:`PROMPT_MARKER` chevron and
+    every continuation row opens with the same-width
+    :data:`_CONT_INDENT`, so the column math is identical regardless of
+    which row the caret lands on.
 
     Args:
         buf: The current edit buffer.
         cols: Total panel width in columns.
 
     Returns:
-        The column (1-based) at which to park the blinking cursor.
+        A ``(row, col)`` tuple where *row* is the 0-based body-row
+        index of the caret (``0`` for a single-line buffer or an
+        empty buffer showing the placeholder, ``buf.count('\\n')`` for
+        a multi-line buffer) and *col* is the 1-based terminal column
+        at which to park the blinking cursor.
     """
-    shown = clip_buf(buf, cols) if buf else ""
-    return 3 + display_width(PROMPT_MARKER) + display_width(shown)
+    if not buf:
+        return 0, 3 + display_width(PROMPT_MARKER)
+    lines = buf.split("\n")
+    last = lines[-1]
+    # The continuation indent is exactly as wide as the chevron, so
+    # ``clip_buf`` (which subtracts the chevron's width from the
+    # available room) reports the right visible-tail width for both
+    # the first row and any continuation row.
+    shown = clip_buf(last, cols)
+    return len(lines) - 1, 3 + display_width(PROMPT_MARKER) + display_width(shown)

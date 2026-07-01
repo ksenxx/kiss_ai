@@ -145,6 +145,24 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         # starts; read (via ``getattr`` with a 0 default) by
         # ``server._live_task_start_ms`` for resume timelines.
         self._task_start_ms: int = 0
+        # "Lost slides" bug fix: when a worktree task ends in
+        # failure / user-Stop and the partial work is left for
+        # review (e.g. the merge view is opened, or the changes
+        # are binary-only and even the merge view cannot start),
+        # the VS Code ``task_runner`` sets this flag.  At tab
+        # teardown (:meth:`VSCodeServer._teardown_tab_resources`)
+        # the flag steers the worktree into
+        # :meth:`_preserve_pending_worktree_for_review` instead of
+        # :meth:`_release_worktree`, so the partial work is
+        # committed onto the ``kiss/wt-*`` branch but NOT silently
+        # squash-merged into the user's original branch — closing
+        # the chat tab can no longer overwrite the main branch
+        # with an incomplete, unverified deck.  Cleared whenever
+        # the user explicitly merges or discards via
+        # :meth:`_MergeFlowMixin._handle_worktree_action`, or when
+        # the agent boots a fresh worktree via
+        # :meth:`_try_setup_worktree` / :meth:`new_chat`.
+        self._pending_review: bool = False
 
 
     @property
@@ -570,6 +588,78 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         return None
 
 
+    def _preserve_pending_worktree_for_review(self) -> bool:
+        """Commit pending worktree changes onto the branch, no merge.
+
+        Called from :meth:`VSCodeServer._teardown_tab_resources` when
+        the agent is in ``_pending_review`` state — that is, the
+        current worktree task was stopped or failed and the user has
+        not yet explicitly chosen Merge or Discard.
+
+        Behavior:
+
+        * Auto-commits any uncommitted changes inside the worktree so
+          the in-flight partial work is captured as a real commit on
+          the ``kiss/wt-*`` branch (recoverable via
+          ``git checkout <branch>``).
+        * Removes the worktree directory and runs ``git worktree
+          prune`` so disk state is clean.
+        * Does **not** call :meth:`_do_merge`: the partial work is
+          NOT squash-merged into the user's original branch.  Closing
+          the chat tab (or the WebSocket all-done close path) can
+          therefore never silently overwrite the user's main branch
+          with incomplete, unverified work — the user must explicitly
+          recover the branch with ``git checkout <branch>``.
+
+        Idempotent / safe: no-op when no worktree is pending.
+
+        Returns:
+            True when a pending worktree was preserved (or had no
+            uncommitted work to preserve and was just cleaned up).
+            False when there was nothing to do.
+        """
+        if self._wt is None:
+            return False
+        wt = self._wt
+        if wt.wt_dir.exists():
+            # Capture any uncommitted partial work as a real commit
+            # so it survives the worktree directory removal.  Same
+            # late-arriver retry that ``_finalize_worktree`` uses,
+            # for the same reason (PROGRESS.md being rewritten, etc.).
+            self._auto_commit_worktree()
+            if GitWorktreeOps.has_uncommitted_changes(wt.wt_dir):
+                GitWorktreeOps.commit_all(
+                    wt.wt_dir,
+                    "kiss: auto-commit late-arriving changes",
+                )
+            if GitWorktreeOps.has_uncommitted_changes(wt.wt_dir):
+                # Same fallback as ``_finalize_worktree``: a
+                # pre-commit hook rejected the commit, or a real
+                # commit failure.  Preserve the worktree dir so no
+                # work is lost; the user can finish the commit
+                # manually with ``cd <wt_dir> && git commit``.
+                leftover = GitWorktreeOps.status_porcelain(wt.wt_dir)
+                logger.warning(
+                    "Worktree '%s' has uncommitted changes after "
+                    "preserve-for-review (likely a pre-commit hook "
+                    "rejection); preserving worktree directory %s\n"
+                    "git status --porcelain:\n%s",
+                    wt.branch, wt.wt_dir, leftover,
+                )
+                self._wt = None
+                self._pending_review = False
+                return True
+            GitWorktreeOps.remove(wt.repo_root, wt.wt_dir)
+        GitWorktreeOps.prune(wt.repo_root)
+        # Drop the in-memory worktree reference (the branch lives on
+        # in git and is recoverable manually) and clear the
+        # pending-review flag — future operations on this agent
+        # instance should not inherit the stopped-task state.
+        self._wt = None
+        self._pending_review = False
+        return True
+
+
     def new_chat(self) -> None:
         """Reset to a new chat session, auto-merging any pending worktree.
 
@@ -578,6 +668,10 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         into the original branch before the chat state is reset.
         """
         self._release_worktree()
+        # ``_release_worktree`` already cleared ``self._wt``; defensively
+        # clear the pending-review flag as well so a brand-new chat
+        # session never inherits stop-state from the previous task.
+        self._pending_review = False
         super().new_chat()
 
 
@@ -621,6 +715,13 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             # user's checkout to it.
             prev_repo_root = self._wt.repo_root if self._wt is not None else None
             released_branch = self._release_worktree()
+            # A brand-new task must never inherit the pending-review
+            # state of the previous worktree (e.g. a stopped task
+            # followed by an explicit new task on the same agent
+            # instance) — otherwise the next ``_teardown_tab_resources``
+            # would preserve THIS task's worktree branch even when the
+            # new task completes cleanly.
+            self._pending_review = False
 
             original_branch: str | None
             if (
