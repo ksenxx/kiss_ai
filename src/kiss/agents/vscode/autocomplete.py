@@ -42,6 +42,43 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _ghost_suffix(query: str, completions: list[dict[str, str]]) -> str:
+    """Return the ghost-text suffix for the top completion.
+
+    Completions carry raw suggestion text (no head splicing), so the
+    ghost overlay's suffix depends on which prefix of ``query`` the
+    top item actually completes:
+
+    * ``task`` — the full query (``_prefix_match_tasks`` guarantees
+      the task string starts with ``query``).
+    * ``trick`` — the current sentence's leading partial as computed
+      by :func:`current_sentence_partial`.
+    * ``identifier`` — the trailing word/dot-chain token of ``query``.
+
+    Returns an empty string when the top completion does not start
+    with the expected prefix (e.g. an identifier candidate that
+    doesn't start with the trailing token, which can only happen when
+    the suggestion source disagrees with the ranker).
+    """
+    if not completions:
+        return ""
+    top = completions[0]
+    text = top["text"]
+    kind = top["type"]
+    if kind == "task":
+        prefix = query
+    elif kind == "trick":
+        prefix = current_sentence_partial(query)
+    elif kind == "identifier":
+        m = re.search(r"([\w][\w.]*)$", query)
+        prefix = m.group(1) if m else ""
+    else:
+        prefix = query
+    if not prefix or not text.startswith(prefix):
+        return ""
+    return text[len(prefix):]
+
+
 class _AutocompleteMixin:
     """Ghost-text + file-path autocomplete methods."""
 
@@ -254,16 +291,13 @@ class _AutocompleteMixin:
         )
         # Inline ghost text: derive the suffix from the top completion
         # so the legacy overlay keeps working for users who prefer to
-        # accept with Tab without opening the dropdown.  When the top
-        # item is a history-task / trick / identifier line, its full
-        # replacement text starts with ``query`` and the ghost suffix
-        # is the remainder.  ``clip_autocomplete_suggestion`` then
-        # normalises the cursor-to-ghost gap exactly as before.
-        fast = ""
-        if completions:
-            top = completions[0]["text"]
-            if top.startswith(query):
-                fast = top[len(query):]
+        # accept with Tab without opening the dropdown.  Completions
+        # are raw suggestions — a history task starts with ``query``
+        # in full, a trick starts with the current sentence partial,
+        # and an identifier starts with the trailing token — so the
+        # ghost suffix is derived per source.  ``clip_autocomplete_
+        # suggestion`` then normalises the cursor-to-ghost gap.
+        fast = _ghost_suffix(query, completions)
         fast = clip_autocomplete_suggestion(query, fast)
         self._emit_ghost(fast, query, conn_id)
         self._emit_completions(completions, query, conn_id)
@@ -289,14 +323,16 @@ class _AutocompleteMixin:
         * ``task`` — full task strings from ``_prefix_match_tasks``
           (most recent first).
         * ``trick`` — INJECTIONS.md trick bodies from
-          ``prefix_match_tricks`` joined onto the head of the current
-          sentence so accepting one preserves any preceding sentences
-          the user already typed.
+          ``prefix_match_tricks``, emitted verbatim.
         * ``identifier`` — single-word / dot-chained identifiers
           harvested from the active editor and chat context by
-          :meth:`_active_file_identifier_matches`, joined onto the
-          query's leading non-token portion so accepting one preserves
-          everything the user typed before the trailing partial.
+          :meth:`_active_file_identifier_matches`, emitted verbatim.
+
+        Emitted texts are the raw suggestion — never a head-spliced
+        whole-input replacement.  Ghost-text and accept behaviour work
+        naturally when the query is exactly the piece being completed
+        (a single sentence for tricks, the trailing token for
+        identifiers).
 
         Duplicates (same ``text``) are removed while preserving the
         earlier source's ordering so e.g. a history task that
@@ -318,27 +354,17 @@ class _AutocompleteMixin:
             if len(out) >= _COMPLETIONS_LIMIT:
                 return out
 
-        partial = current_sentence_partial(query)
-        head = query[: len(query) - len(partial)] if partial else query
         for trick in prefix_match_tricks(query):
-            _add("trick", head + trick)
+            _add("trick", trick)
             if len(out) >= _COMPLETIONS_LIMIT:
                 return out
 
-        # The trailing-token head is computed against the regex used
-        # by :meth:`_active_file_identifier_matches` so the
-        # concatenation is a clean splice — the slice ends right
-        # before the matched partial.
-        m = re.search(r"([\w][\w.]*)$", query)
-        if m:
-            token = m.group(1)
-            token_head = query[: len(query) - len(token)]
-            for ident in self._active_file_identifier_matches(
-                query, snapshot_file, snapshot_content, chat_id,
-            ):
-                _add("identifier", token_head + ident)
-                if len(out) >= _COMPLETIONS_LIMIT:
-                    return out
+        for ident in self._active_file_identifier_matches(
+            query, snapshot_file, snapshot_content, chat_id,
+        ):
+            _add("identifier", ident)
+            if len(out) >= _COMPLETIONS_LIMIT:
+                return out
         return out
 
     def _emit_completions(
