@@ -1995,8 +1995,8 @@
   },
   "openrouter/deepseek/deepseek-chat-v3-0324": {
     "context_length": 163840,
-    "input_price_per_1M": 0.2,
-    "output_price_per_1M": 0.77,
+    "input_price_per_1M": 0.24,
+    "output_price_per_1M": 0.9,
     "fc": false,
     "emb": false,
     "gen": true
@@ -2059,8 +2059,8 @@
   },
   "openrouter/deepseek/deepseek-v4-flash": {
     "context_length": 1048576,
-    "input_price_per_1M": 0.098,
-    "output_price_per_1M": 0.196,
+    "input_price_per_1M": 0.09,
+    "output_price_per_1M": 0.18,
     "fc": true,
     "emb": false,
     "gen": true
