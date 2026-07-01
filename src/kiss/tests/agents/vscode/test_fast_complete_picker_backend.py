@@ -143,13 +143,14 @@ class TestFastCompletePickerBackend:
         trick = next(c for c in items if c["text"] == _TRICK_REPRO)
         assert trick["type"] == "trick"
 
-    def test_trick_preserves_leading_sentence_head(self) -> None:
-        """A trick joined onto the head of a multi-sentence query."""
+    def test_trick_emitted_as_raw_body_after_sentence_boundary(self) -> None:
+        """A trick after a sentence boundary is emitted as the raw body — no head."""
         server = VSCodeServer()
         query = "Some preamble. Reproduce"
         _, comps = self._run(server, query)
         texts = [c["text"] for c in comps[0]["completions"]]
-        assert "Some preamble. " + _TRICK_REPRO in texts
+        assert _TRICK_REPRO in texts
+        assert "Some preamble. " + _TRICK_REPRO not in texts
 
     # ----- task history suggestions ------------------------------------
 
@@ -194,9 +195,9 @@ class TestFastCompletePickerBackend:
         items = comps[0]["completions"]
         idents = [c for c in items if c["type"] == "identifier"]
         texts = {c["text"] for c in idents}
-        assert "x = zebraq_marker_alpha" in texts
-        assert "x = zebraq_marker_beta" in texts
-        assert "x = zebraq_marker_gamma" in texts
+        assert "zebraq_marker_alpha" in texts
+        assert "zebraq_marker_beta" in texts
+        assert "zebraq_marker_gamma" in texts
 
     # ----- ghost back-compat -------------------------------------------
 
@@ -318,8 +319,8 @@ class TestFastCompletePickerBackend:
         )
         comps = [e for e in events if e.get("type") == "completions"]
         texts = {c["text"] for c in comps[0]["completions"]}
-        assert "x = betaq_marker_one" in texts
-        assert "x = betaq_marker_two" in texts
+        assert "betaq_marker_one" in texts
+        assert "betaq_marker_two" in texts
 
     def test_active_file_oserror_yields_no_identifiers(self) -> None:
         """An unreadable snapshot_file path must not raise."""
