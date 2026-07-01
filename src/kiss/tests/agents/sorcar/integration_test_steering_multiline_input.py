@@ -421,10 +421,16 @@ def test_shift_enter_multiline_steering_grows_box_and_reaches_agent(
     # escaped, not a stripped/joined version.
     payload = json.loads(out_path.read_text())
     assert payload == [
-        {"role": "user", "content": "line one\nline two\nline three"},
+        {
+            "role": "user",
+            "content": (
+                "User says: line one\nline two\nline three. "
+                "Take the message into account and finish your task."
+            ),
+        },
     ], (
-        f"agent conversation mismatch.  Expected one user message with "
-        f"three newline-separated lines; got {payload!r}.  "
+        f"agent conversation mismatch.  Expected one wrapped user message "
+        f"with three newline-separated lines; got {payload!r}.  "
         f"Painted output tail:\n{rendered_before_submit[-2000:]!r}"
     )
 
