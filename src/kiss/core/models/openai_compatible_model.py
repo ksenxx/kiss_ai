@@ -9,9 +9,12 @@ import json
 import logging
 import re
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from openai import OpenAI
+
+if TYPE_CHECKING:  # pragma: no cover – import cycle avoided at runtime
+    from kiss.core.models.openai_compatible_model2 import OpenAICompatibleModel2
 
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model import (
@@ -280,6 +283,17 @@ class OpenAICompatibleModel(Model):
         self.base_url = base_url
         self.api_key = api_key
         self._api_model_name = _provider_model_name(model_name)
+        # Lazily-created ``OpenAICompatibleModel2`` used to send tool-bearing
+        # requests through ``/v1/responses`` so ``reasoning_effort`` (incl.
+        # ``"xhigh"``) survives instead of being stripped (see
+        # ``_generate_with_tools_via_responses``).
+        self._responses_delegate: OpenAICompatibleModel2 | None = None
+        # call_id -> raw Responses-API output items (reasoning / message /
+        # function_call) captured for the assistant turn that produced the
+        # call.  Replayed verbatim on later turns so OpenAI's "function_call
+        # provided without its required reasoning item" constraint is
+        # satisfied for reasoning models.
+        self._delegate_raw_items: dict[str, list[dict[str, Any]]] = {}
         # Default ``reasoning_effort`` to the level declared on the model's
         # MODEL_INFO entry (e.g. ``"xhigh"`` for gpt-5.5).  Copy first so we
         # never mutate the caller's dict.  Caller-supplied values always win.
@@ -776,6 +790,7 @@ class OpenAICompatibleModel(Model):
         """
         kwargs = self.model_config.copy()
         kwargs.pop("system_instruction", None)
+        kwargs.pop("use_responses_api", None)
         normalized_messages = self._normalize_conversation_for_api(self.conversation)
         if not normalized_messages:
             raise KISSError(
@@ -819,8 +834,25 @@ class OpenAICompatibleModel(Model):
             return self._generate_with_text_based_tools(function_map)
 
         tools = self._resolve_openai_tools_schema(function_map, tools_schema)
+
+        # OpenAI's /v1/chat/completions endpoint rejects the combination of
+        # ``tools`` + ``reasoning_effort`` for GPT-5.x / o-series reasoning
+        # models with: "Function tools with reasoning_effort are not supported
+        # ... in /v1/chat/completions. Please use /v1/responses instead."
+        # Tool-bearing requests to endpoints that implement ``/v1/responses``
+        # are therefore delegated to the Responses-API transport
+        # (:class:`OpenAICompatibleModel2`), which supports the combination
+        # natively — including ``"xhigh"``.
+        if (
+            tools
+            and "reasoning_effort" in self.model_config
+            and self._should_delegate_to_responses()
+        ):
+            return self._generate_with_tools_via_responses(function_map, tools)
+
         kwargs = self.model_config.copy()
         kwargs.pop("system_instruction", None)
+        kwargs.pop("use_responses_api", None)
         kwargs.update(
             {
                 "model": self._api_model_name,
@@ -830,14 +862,11 @@ class OpenAICompatibleModel(Model):
         )
         self._apply_cache_control_for_openrouter_anthropic(kwargs)
 
-        # OpenAI's /v1/chat/completions endpoint rejects the combination of
-        # ``tools`` + ``reasoning_effort`` for GPT-5.x / o-series reasoning
-        # models with: "Function tools with reasoning_effort are not supported
-        # ... in /v1/chat/completions. Please use /v1/responses instead."
-        # Migrating the whole transport to the Responses API is a major
-        # rewrite, so as a pragmatic fix we strip ``reasoning_effort`` from
-        # tool-bearing requests; the no-tools ``generate()`` path still keeps
-        # the high-reasoning default.
+        # Endpoints without ``/v1/responses`` support (OpenRouter, Together,
+        # custom gateways, ...) keep the pragmatic fallback: strip
+        # ``reasoning_effort`` from tool-bearing requests since Chat
+        # Completions rejects the combination for reasoning models; the
+        # no-tools ``generate()`` path still keeps the high-reasoning default.
         if tools and "reasoning_effort" in kwargs:
             dropped = kwargs.pop("reasoning_effort")
             logger.debug(
@@ -912,6 +941,224 @@ class OpenAICompatibleModel(Model):
             self.conversation.append({"role": "assistant", "content": content})
         return function_calls, content, response
 
+    def _should_delegate_to_responses(self) -> bool:
+        """Decide whether tool-bearing requests should use ``/v1/responses``.
+
+        The ``use_responses_api`` model-config flag forces the decision in
+        either direction (``True`` = always delegate, ``False`` = never).
+        When the flag is absent, delegation is enabled automatically for
+        OpenAI's own endpoint (``api.openai.com``), which is the provider
+        that both implements ``/v1/responses`` and rejects
+        ``tools`` + ``reasoning_effort`` on Chat Completions.
+
+        Returns:
+            True when the tool-calling transport should be the Responses API.
+        """
+        flag = self.model_config.get("use_responses_api")
+        if flag is not None:
+            return bool(flag)
+        return "api.openai.com" in self.base_url
+
+    @staticmethod
+    def _chat_parts_to_responses_parts(
+        parts: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Convert Chat-Completions user content parts to Responses parts.
+
+        ``text`` becomes ``input_text``, ``image_url`` becomes
+        ``input_image``, ``file`` becomes ``input_file`` and ``input_audio``
+        passes through.  Unknown part types are dropped with a warning.
+
+        Args:
+            parts: Chat-Completions content parts.
+
+        Returns:
+            Responses-API ``input_*`` content parts.
+        """
+        converted: list[dict[str, Any]] = []
+        for part in parts:
+            ptype = part.get("type")
+            if ptype == "text":
+                if str(part.get("text", "")).strip():
+                    converted.append({"type": "input_text", "text": part["text"]})
+            elif ptype == "image_url":
+                url = (part.get("image_url") or {}).get("url", "")
+                if url:
+                    converted.append(
+                        {"type": "input_image", "image_url": url, "detail": "auto"}
+                    )
+            elif ptype == "file":
+                file_info = part.get("file") or {}
+                file_data = file_info.get("file_data", "")
+                if file_data:
+                    converted.append(
+                        {
+                            "type": "input_file",
+                            "filename": file_info.get("filename", "attachment.pdf"),
+                            "file_data": file_data,
+                        }
+                    )
+            elif ptype == "input_audio":
+                converted.append(part)
+            else:
+                logger.warning(
+                    "Dropping unconvertible content part %r for the "
+                    "Responses API.",
+                    ptype,
+                )
+        return converted
+
+    def _chat_conversation_to_responses_input(self) -> list[dict[str, Any]]:
+        """Convert the chat-format conversation to Responses ``input`` items.
+
+        The conversation stays in OpenAI Chat Completions format as the
+        single source of truth (so hand-off between models keeps working);
+        this method derives the equivalent Responses-API ``input`` array
+        on demand for the delegated tool-calling transport:
+
+        * ``role="tool"`` messages become ``function_call_output`` items.
+        * Assistant messages with ``tool_calls`` are replaced by the raw
+          Responses output items cached for that turn (reasoning items
+          included) when available, and otherwise reconstructed as
+          ``function_call`` items.
+        * Content-part lists are mapped to ``input_*`` parts.
+
+        Returns:
+            The Responses-API ``input`` array.
+        """
+        items: list[dict[str, Any]] = []
+        for msg in self._normalize_conversation_for_api(self.conversation):
+            role = msg.get("role")
+            content = msg.get("content")
+            if role == "tool":
+                output = content if isinstance(content, str) else json.dumps(content)
+                items.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": msg.get("tool_call_id", ""),
+                        "output": output,
+                    }
+                )
+                continue
+            tool_calls = msg.get("tool_calls") or []
+            if role == "assistant" and tool_calls:
+                cached = self._delegate_raw_items.get(tool_calls[0].get("id", ""))
+                if cached is not None:
+                    items.extend(cached)
+                    continue
+                if isinstance(content, str) and content.strip():
+                    items.append({"role": "assistant", "content": content})
+                for tc in tool_calls:
+                    fn = tc.get("function") or {}
+                    args = fn.get("arguments")
+                    items.append(
+                        {
+                            "type": "function_call",
+                            "call_id": tc.get("id", ""),
+                            "name": fn.get("name", ""),
+                            "arguments": args
+                            if isinstance(args, str)
+                            else json.dumps(args or {}),
+                        }
+                    )
+                continue
+            if isinstance(content, list):
+                if role == "assistant":
+                    text = "".join(
+                        p.get("text", "")
+                        for p in content
+                        if isinstance(p, dict) and p.get("type") == "text"
+                    )
+                    if text.strip():
+                        items.append({"role": "assistant", "content": text})
+                    continue
+                parts = self._chat_parts_to_responses_parts(content)
+                if parts:
+                    items.append({"role": role, "content": parts})
+                continue
+            if isinstance(content, str) and content.strip():
+                items.append({"role": role, "content": content})
+        return items
+
+    def _generate_with_tools_via_responses(
+        self,
+        function_map: dict[str, Callable[..., Any]],
+        tools: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], str, Any]:
+        """Run one tool-bearing turn through the ``/v1/responses`` endpoint.
+
+        Delegates the request to a lazily-created
+        :class:`~kiss.core.models.openai_compatible_model2.OpenAICompatibleModel2`
+        so ``reasoning_effort`` (including ``"xhigh"``) is preserved instead
+        of being stripped.  The delegate is stateless across turns: its
+        conversation is rebuilt from this model's chat-format conversation
+        before every request, keeping the chat conversation the single
+        source of truth (and hand-off compatible).  The raw Responses output
+        items of the turn (reasoning items included) are cached per
+        ``call_id`` so follow-up turns replay them verbatim.
+
+        Args:
+            function_map: Mapping of tool name to callable.
+            tools: Chat-Completions-style tools schema (the delegate
+                flattens it to the Responses shape).
+
+        Returns:
+            ``(function_calls, content, response)`` matching
+            :meth:`generate_and_process_with_tools`.
+        """
+        from kiss.core.models.openai_compatible_model2 import OpenAICompatibleModel2
+
+        delegate = self._responses_delegate
+        if delegate is None:
+            delegate_config = {
+                k: v
+                for k, v in self.model_config.items()
+                if k not in ("system_instruction", "use_responses_api")
+            }
+            delegate = OpenAICompatibleModel2(
+                model_name=self.model_name,
+                base_url=self.base_url,
+                api_key=self.api_key,
+                model_config=delegate_config,
+                token_callback=self.token_callback,
+                thinking_callback=self.thinking_callback,
+            )
+            self._responses_delegate = delegate
+        delegate.initialize("_")
+        input_items = self._chat_conversation_to_responses_input()
+        delegate.conversation = list(input_items)
+
+        function_calls, content, response = delegate.generate_and_process_with_tools(
+            function_map, tools
+        )
+
+        new_items = [
+            item
+            for item in delegate.conversation[len(input_items) :]
+            if isinstance(item, dict)
+            and item.get("type") != "_kiss_pending_tool_result_attachment"
+        ]
+        raw_tool_calls = [
+            {
+                "id": fc["id"],
+                "type": "function",
+                "function": {
+                    "name": fc["name"],
+                    "arguments": json.dumps(fc["arguments"]),
+                },
+            }
+            for fc in function_calls
+        ]
+        for fc in function_calls:
+            self._delegate_raw_items[fc["id"]] = new_items
+        if function_calls:
+            self.conversation.append(
+                {"role": "assistant", "content": content, "tool_calls": raw_tool_calls}
+            )
+        else:
+            self.conversation.append({"role": "assistant", "content": content})
+        return function_calls, content, response
+
     def _generate_with_text_based_tools(
         self, function_map: dict[str, Callable[..., Any]]
     ) -> tuple[list[dict[str, Any]], str, Any]:
@@ -948,6 +1195,7 @@ class OpenAICompatibleModel(Model):
 
         kwargs = self.model_config.copy()
         kwargs.pop("system_instruction", None)
+        kwargs.pop("use_responses_api", None)
         kwargs.update(
             {
                 "model": self._api_model_name,
@@ -983,7 +1231,28 @@ class OpenAICompatibleModel(Model):
             OpenAI reasoning models may report reasoning tokens in
             completion_tokens_details.reasoning_tokens; those are counted as output
             tokens so Sorcar shows thinking-token usage.
+            Responses-API responses (produced by the delegated tool-calling
+            transport) report ``usage.input_tokens`` / ``usage.output_tokens``
+            instead; those are routed to the delegate's extractor.
         """
+        if self._responses_delegate is not None:
+            # Alias so isinstance narrowing does not affect ``response``,
+            # which the Chat-Completions path below still treats as ``Any``.
+            response_alias: Any = response
+            usage_obj: Any = (
+                response_alias.get("usage")
+                if isinstance(response_alias, dict)
+                else getattr(response_alias, "usage", None)
+            )
+            has_responses_usage = (
+                usage_obj.get("input_tokens") if isinstance(usage_obj, dict)
+                else getattr(usage_obj, "input_tokens", None)
+            ) is not None
+            if has_responses_usage:
+                return (
+                    self._responses_delegate
+                    .extract_input_output_token_counts_from_response(response)
+                )
         if hasattr(response, "usage") and response.usage:
             usage = response.usage
             prompt_tokens = getattr(usage, "prompt_tokens", None) or 0
