@@ -60,9 +60,15 @@ def _unquoted_name_lines(output: str) -> list[str]:
     Returns:
         List of unquoted relative file paths.
     """
+    # Split on ``\n`` only, WITHOUT stripping the whole output first:
+    # ``output.strip()`` would eat the leading spaces of the FIRST
+    # listed path (and trailing spaces of the last) — space-adjacent
+    # filenames are legal and not C-quoted by git.  ``splitlines`` is
+    # avoided too so a raw (unquoted, non-control) unicode
+    # line-separator byte sequence inside a name cannot split it.
     return [
         _unquote_git_path(line)
-        for line in output.strip().splitlines()
+        for line in output.split("\n")
         if line
     ]
 
@@ -415,7 +421,20 @@ class _MergeFlowMixin:
                     "message": "Staging changes…",
                     "tabId": tab_id,
                 })
-                _git(work_dir, "add", "-A")
+                add_result = _git(work_dir, "add", "-A")
+                if add_result.returncode != 0:
+                    # Staging failed (e.g. ``.git/index.lock`` held by
+                    # another git process).  Without this check, the
+                    # empty ``git diff --cached`` below would misreport
+                    # "Nothing to commit." with ``success=True`` while
+                    # the working tree still has uncommitted changes.
+                    err = (add_result.stderr or "").strip()
+                    first_line = err.splitlines()[0] if err else "git add failed"
+                    self._broadcast_autocommit_done(
+                        tab_id, success=False, committed=False,
+                        message=f"Staging failed: {first_line}",
+                    )
+                    return
                 diff = _git(work_dir, "diff", "--cached")
                 if not diff.stdout.strip():
                     self._broadcast_autocommit_done(
@@ -684,8 +703,19 @@ class _MergeFlowMixin:
         with self._state_lock:
             if self._any_non_wt_running():
                 return False
-        dirty = set(GitWorktreeOps.unstaged_files(wt.repo_root))
-        dirty.update(GitWorktreeOps.staged_files(wt.repo_root))
+        # Use the local quote/space-preserving parser rather than
+        # ``GitWorktreeOps.unstaged_files`` / ``staged_files``, whose
+        # whole-output ``strip()`` mangles leading/trailing-space
+        # filenames — a mangled name can never intersect ``wt_files``
+        # (parsed correctly above), so the conflict would be missed.
+        dirty: set[str] = set()
+        for extra_flags in ((), ("--cached",)):
+            res = _git(
+                str(wt.repo_root), "diff", "--name-only",
+                "--no-renames", *extra_flags,
+            )
+            if res.returncode == 0:
+                dirty.update(_unquoted_name_lines(res.stdout))
         dirty.update(_capture_untracked(str(wt.repo_root)))
         return bool(dirty & wt_files)
 

@@ -118,6 +118,28 @@ def panel_cols() -> int:
     return max(_term_size()[1], 10)
 
 
+def _clip_to_width(text: str, width: int) -> str:
+    """Clip *text* to at most *width* display columns (no padding).
+
+    Args:
+        text: The text to clip.
+        width: Maximum display width of the returned string.
+
+    Returns:
+        The longest prefix of *text* whose display width is at most
+        *width*.
+    """
+    w = 0
+    kept: list[str] = []
+    for ch in text:
+        cw = char_width(ch)
+        if w + cw > width:
+            break
+        kept.append(ch)
+        w += cw
+    return "".join(kept)
+
+
 def panel_top(title: str, cols: int) -> str:
     """Return the rounded top border line carrying *title*.
 
@@ -126,11 +148,14 @@ def panel_top(title: str, cols: int) -> str:
         cols: Total panel width in columns.
 
     Returns:
-        The ``╭─…╮`` border line, clipped to *cols*.
+        The ``╭─…╮`` border line, occupying exactly *cols* terminal
+        columns.  The title is clipped by display width (not
+        codepoints) so wide (CJK / emoji) characters cannot push the
+        border past the terminal edge.
     """
-    title = title[: cols - 4]
-    top = "╭─" + title + "─" * max(cols - 3 - len(title), 0) + "╮"
-    return top[:cols]
+    title = _clip_to_width(title, max(cols - 4, 0))
+    fill = "─" * max(cols - 3 - display_width(title), 0)
+    return _clip_to_width("╭─" + title + fill + "╮", cols)
 
 
 def panel_bottom(status: str, cols: int) -> str:
@@ -141,12 +166,14 @@ def panel_bottom(status: str, cols: int) -> str:
         cols: Total panel width in columns.
 
     Returns:
-        The ``╰…╯`` border line, clipped to *cols*.
+        The ``╰…╯`` border line, occupying exactly *cols* terminal
+        columns.  The status is clipped by display width (not
+        codepoints) so wide (CJK / emoji) characters cannot push the
+        border past the terminal edge.
     """
-    status = status[: cols - 4]
-    bfill = "─" * max(cols - 3 - len(status), 0)
-    bottom = "╰" + bfill + status + "─╯"
-    return bottom[:cols]
+    status = _clip_to_width(status, max(cols - 4, 0))
+    bfill = "─" * max(cols - 3 - display_width(status), 0)
+    return _clip_to_width("╰" + bfill + status + "─╯", cols)
 
 
 def clip_buf(buf: str, cols: int) -> str:

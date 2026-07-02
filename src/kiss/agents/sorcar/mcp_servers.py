@@ -749,8 +749,14 @@ def make_mcp_tool_wrapper(
     tool_name = str(tool.name)
     full_name = f"{_sanitize(server)}_{_sanitize(tool_name)}"
     schema = tool.inputSchema if isinstance(tool.inputSchema, dict) else {}
-    props = schema.get("properties") or {}
-    required = set(schema.get("required") or [])
+    # Nothing in MCP constrains the schema's inner values; be lenient
+    # with malformed shapes (e.g. a list ``properties`` or a string
+    # ``required``) so one bad tool never breaks agent startup.
+    props = schema.get("properties")
+    if not isinstance(props, dict):
+        props = {}
+    required_raw = schema.get("required")
+    required = set(required_raw) if isinstance(required_raw, list) else set()
 
     # (is_required, Parameter, doc line) per property; the Python
     # parameter name may differ from the JSON property name (which can

@@ -362,10 +362,16 @@ def _capture_untracked(work_dir: str) -> set[str]:
     # paths containing double-quotes, backslashes, or control chars
     # come back quoted (e.g. ``"new\"file.txt"``) and would not match
     # any path on disk.
+    #
+    # Do NOT ``strip()`` the lines: a filename with a leading or
+    # trailing space (legal on POSIX, and not C-quoted by git — space
+    # is a printable character) would be mangled into a name that does
+    # not exist on disk, silently dropping the file from the merge
+    # review.  Lines are already exact ``\n``-terminated paths.
     return {
-        _unquote_git_path(line.strip())
+        _unquote_git_path(line)
         for line in result.stdout.split("\n")
-        if line.strip()
+        if line
     }
 
 
@@ -753,6 +759,17 @@ def _prepare_merge_view(
         if not _file_changed(fname):
             continue
         fpath = Path(work_dir) / fname
+        if fpath.is_dir():
+            # A diff entry whose working-tree path is a DIRECTORY is a
+            # submodule gitlink (its ``git diff`` "content" is the
+            # synthetic ``Subproject commit <sha>`` line).  It cannot
+            # be reviewed as file hunks: ``is_file()`` is False, so the
+            # entry would be presented as a phantom DELETED file whose
+            # base (``git show {base_ref}:{fname}`` fails for a
+            # gitlink) and current sides are both empty — and rejecting
+            # it would write regular-file content where the submodule
+            # working directory lives.
+            continue
         if not hunks:
             # An empty hunk list can ONLY come from git printing
             # "Binary files … differ" (mode-only changes never create
@@ -807,6 +824,15 @@ def _prepare_merge_view(
     base_modes = _base_modes(
         work_dir, base_ref, set(file_hunks) | binary_files,
     )
+    # Submodule gitlinks (mode 160000) whose working directory was
+    # REMOVED slip past the ``is_dir()`` guard above (the path no
+    # longer exists on disk) and would be reviewed as a phantom
+    # deleted text file — rejecting it would write a regular file
+    # where the submodule directory belongs.  Drop them here.
+    for fname, mode in base_modes.items():
+        if mode == "160000":
+            file_hunks.pop(fname, None)
+            binary_files.discard(fname)
     # Executables (mode 100755) need their exec bit re-applied when a
     # rejected deletion re-creates the file — otherwise a full
     # reject-all leaves the tree dirty (old mode 100755 / new mode

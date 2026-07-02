@@ -4697,11 +4697,21 @@ class RemoteAccessServer:
         ``run_in_executor`` await inside the reject branches and drop a
         hunk resolution.
 
+        The lock is only minted when a merge review actually exists
+        for *tab_id* — mirroring :meth:`_replay_merge_review`'s guard.
+        Without the membership check, an authenticated-but-buggy (or
+        malicious) client spamming ``mergeAction`` commands with
+        random tab ids would grow ``_merge_action_locks`` without
+        bound, one permanent ``asyncio.Lock`` per never-seen tab id.
+
         Args:
             cmd: The ``mergeAction`` command from the browser, with
                 ``action`` and ``tabId`` fields.
         """
         tab_id = cmd.get("tabId", "")
+        with self._merge_states_lock:
+            if tab_id not in self._merge_states:
+                return
         async with self._merge_action_lock(tab_id):
             await self._apply_web_merge_action(cmd)
 
@@ -4723,6 +4733,16 @@ class RemoteAccessServer:
         with self._merge_states_lock:
             state = self._merge_states.get(tab_id)
         if state is None:
+            # The review vanished between the caller's membership
+            # check and our lookup (resolved / closed concurrently).
+            # Drop the per-tab lock entry too — but only while no NEW
+            # review exists for the tab (checked atomically under
+            # ``_merge_states_lock``, which ``_register_merge_state``
+            # also holds) — so the entry cannot leak for the daemon's
+            # lifetime.
+            with self._merge_states_lock:
+                if tab_id not in self._merge_states:
+                    self._merge_action_locks.pop(tab_id, None)
             return
 
         assert self._loop is not None
@@ -4834,8 +4854,19 @@ class RemoteAccessServer:
         })
 
         if not state.remaining:
+            # Pop the per-tab action lock alongside the merge state —
+            # every other cleanup site (``_fire_pending_tab_close``,
+            # the client ``all-done`` and web ``closeTab`` branches of
+            # ``_dispatch_client_command``) drops both together.
+            # Leaving the lock behind leaked one ``asyncio.Lock`` per
+            # finished review for the daemon's lifetime (tab ids are
+            # fresh UUIDs, so entries were never reused).  A waiter
+            # already queued on the popped lock object is harmless:
+            # it re-fetches the merge state and takes the
+            # ``state is None`` early return above.
             with self._merge_states_lock:
                 self._merge_states.pop(tab_id, None)
+                self._merge_action_locks.pop(tab_id, None)
             await self._run_cmd(
                 {
                     "type": "mergeAction",
