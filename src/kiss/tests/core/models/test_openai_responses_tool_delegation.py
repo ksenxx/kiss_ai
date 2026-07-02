@@ -440,6 +440,31 @@ class TestEndpointSelection:
         assert req["path"].endswith("/chat/completions")
         assert "reasoning_effort" not in req["body"]
 
+    def test_openrouter_endpoint_preserves_reasoning_effort_with_tools(
+        self, capture_server: str
+    ) -> None:
+        """An openrouter.ai base_url keeps tools + reasoning_effort on
+        chat.completions un-stripped.
+
+        OpenRouter's Chat Completions accepts the combination (including
+        ``"xhigh"``) and translates the effort per provider, so — unlike
+        other non-OpenAI gateways — the effort must survive on the wire.
+        The capture server's URL carries an ``openrouter.ai`` path segment
+        so the real endpoint-detection logic sees an OpenRouter base_url.
+        """
+        m = OpenAICompatibleModel(
+            "openrouter/openai/gpt-5.5-xhigh",
+            base_url=f"{capture_server}/openrouter.ai",
+            api_key="test-key",
+        )
+        assert m.model_config.get("reasoning_effort") == "xhigh"
+        m.initialize("hi")
+        m.generate_and_process_with_tools({"echo": echo})
+        req = _last_request()
+        assert req["path"].endswith("/chat/completions")
+        assert req["body"]["reasoning_effort"] == "xhigh"
+        assert req["body"]["tools"], "tools must still be attached"
+
     def test_flag_false_forces_chat_completions(
         self, capture_server: str
     ) -> None:
