@@ -12,6 +12,7 @@ FLAKY MODEL MARKERS:
 """
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -213,6 +214,174 @@ _TOGETHER_PREFIXES = (
     "BAAI/",
     "intfloat/",
 )
+
+
+@dataclass(frozen=True)
+class OpenAICompatibleProvider:
+    """A factory-routed OpenAI-compatible Chat Completions vendor endpoint.
+
+    This registry entry is the single source of truth for everything the
+    framework needs to know about a vendor: how model names route to it,
+    which credentials it uses, and — critically — its verified protocol
+    capabilities, so transport decisions (e.g. whether ``tools`` +
+    ``reasoning_effort`` survive on the same Chat Completions request) are
+    config-driven instead of hardcoded host allowlists scattered around the
+    code base.
+
+    Attributes:
+        name: Short unique vendor id (e.g. ``"openrouter"``).
+        host: Unique host substring used to look up capabilities from a
+            model's ``base_url`` (substring match, so tests can point at a
+            local capture server whose URL embeds the host as a path
+            segment).
+        base_url: The vendor's OpenAI-compatible API root used by the
+            ``model()`` factory.
+        prefixes: Model-name prefixes that route to this vendor.
+        excludes: Model-name prefixes that must NOT route here even though
+            they match ``prefixes`` (they are handled by later, non-OpenAI
+            branches of the factory).
+        api_key_name: Attribute name on ``config.DEFAULT_CONFIG`` holding
+            the vendor's API key.
+        tools_accept_reasoning_effort: Whether the vendor's Chat Completions
+            endpoint accepts ``tools`` + ``reasoning_effort`` on the same
+            request. ``True`` = verified live to accept (effort is kept),
+            ``False`` = verified live to reject (effort is stripped from
+            tool-bearing requests), ``None`` = unverified — the transport
+            keeps the effort optimistically and learns the verdict from the
+            vendor's actual response at runtime (adaptive probe).
+        delegate_tools_to_responses: Whether tool-bearing requests carrying
+            ``reasoning_effort`` should be transported via the vendor's
+            ``/v1/responses`` endpoint instead of Chat Completions.
+    """
+
+    name: str
+    host: str
+    base_url: str
+    prefixes: tuple[str, ...]
+    excludes: tuple[str, ...]
+    api_key_name: str
+    tools_accept_reasoning_effort: bool | None
+    delegate_tools_to_responses: bool
+
+
+# Single source of truth for OpenAI-compatible vendor endpoints. Adding a
+# new vendor here (with its declared ``tools_accept_reasoning_effort``
+# capability) is ALL that is required — routing, capability handling and
+# SorcarAgent's endpoint carry-over logic all derive from this table. A
+# regression test (test_reasoning_effort_capability_registry.py) trips when
+# an entry is added so the capability declaration is a conscious decision.
+OPENAI_COMPATIBLE_PROVIDERS: tuple[OpenAICompatibleProvider, ...] = (
+    OpenAICompatibleProvider(
+        name="openrouter",
+        host="openrouter.ai",
+        base_url="https://openrouter.ai/api/v1",
+        prefixes=("openrouter/",),
+        excludes=(),
+        api_key_name="OPENROUTER_API_KEY",
+        # Verified live: 200 with a real tool call for every effort level
+        # including "xhigh"; OpenRouter translates the effort per provider.
+        tools_accept_reasoning_effort=True,
+        delegate_tools_to_responses=False,
+    ),
+    OpenAICompatibleProvider(
+        name="openai",
+        host="api.openai.com",
+        base_url="https://api.openai.com/v1",
+        prefixes=_OPENAI_PREFIXES,
+        # gpt-oss models are served by Together; text-embedding-004 is a
+        # Gemini embedding model; codex/ is the Codex CLI transport. All
+        # three match _OPENAI_PREFIXES textually and are handled by later
+        # factory branches.
+        excludes=("openai/gpt-oss", "text-embedding-004", "codex/"),
+        api_key_name="OPENAI_API_KEY",
+        # Verified live: /v1/chat/completions rejects tools +
+        # reasoning_effort for GPT-5.x / o-series reasoning models
+        # ("please use /v1/responses instead") — hence the delegation.
+        tools_accept_reasoning_effort=False,
+        delegate_tools_to_responses=True,
+    ),
+    OpenAICompatibleProvider(
+        name="together",
+        host="api.together.xyz",
+        base_url="https://api.together.xyz/v1",
+        prefixes=_TOGETHER_PREFIXES,
+        excludes=(),
+        api_key_name="TOGETHER_API_KEY",
+        # Verified live: 200 with a real tool call for low/medium/high
+        # (non-reasoning models ignore the effort harmlessly; "xhigh" is
+        # rejected but no Together catalog entry defaults to xhigh).
+        # Together serverless does NOT implement /v1/responses.
+        tools_accept_reasoning_effort=True,
+        delegate_tools_to_responses=False,
+    ),
+    OpenAICompatibleProvider(
+        name="zai",
+        host="api.z.ai",
+        base_url="https://api.z.ai/api/paas/v4",
+        prefixes=("glm-",),
+        excludes=(),
+        api_key_name="ZAI_API_KEY",
+        # Unverified (no live probe possible without credentials): the
+        # transport keeps the effort optimistically and adapts at runtime.
+        tools_accept_reasoning_effort=None,
+        delegate_tools_to_responses=False,
+    ),
+    OpenAICompatibleProvider(
+        name="moonshot",
+        host="api.moonshot.ai",
+        base_url="https://api.moonshot.ai/v1",
+        prefixes=("kimi-", "moonshot-"),
+        excludes=(),
+        api_key_name="MOONSHOT_API_KEY",
+        # Unverified (no live probe possible without credentials): the
+        # transport keeps the effort optimistically and adapts at runtime.
+        tools_accept_reasoning_effort=None,
+        delegate_tools_to_responses=False,
+    ),
+)
+
+
+def openai_compatible_provider_for_base_url(
+    base_url: str,
+) -> OpenAICompatibleProvider | None:
+    """Return the registered vendor whose host appears in *base_url*.
+
+    Substring matching (rather than exact URL equality) lets wire tests
+    point a model at a local capture server whose URL embeds the vendor
+    host as a path segment, and tolerates trailing slashes or versioned
+    path variants.
+
+    Args:
+        base_url: The model's API root URL.
+
+    Returns:
+        The matching :class:`OpenAICompatibleProvider`, or None when the
+        endpoint is unknown (custom gateway).
+    """
+    for provider in OPENAI_COMPATIBLE_PROVIDERS:
+        if provider.host in base_url:
+            return provider
+    return None
+
+
+def _match_openai_compatible_provider(
+    model_name: str,
+) -> OpenAICompatibleProvider | None:
+    """Return the registered vendor that *model_name* routes to, if any.
+
+    Args:
+        model_name: Model name after provider-prefix stripping.
+
+    Returns:
+        The matching :class:`OpenAICompatibleProvider`, or None when the
+        name is handled by a non-OpenAI-compatible factory branch.
+    """
+    for provider in OPENAI_COMPATIBLE_PROVIDERS:
+        if model_name.startswith(provider.prefixes) and not (
+            provider.excludes and model_name.startswith(provider.excludes)
+        ):
+            return provider
+    return None
 
 
 def _openai_compatible(
@@ -498,11 +667,12 @@ def model(
             thinking_callback,
         )
     keys = config_module.DEFAULT_CONFIG
-    if model_name.startswith("openrouter/"):
+    provider = _match_openai_compatible_provider(model_name)
+    if provider is not None:
         return _openai_compatible(
             model_name,
-            "https://openrouter.ai/api/v1",
-            keys.OPENROUTER_API_KEY,
+            provider.base_url,
+            getattr(keys, provider.api_key_name),
             model_config,
             token_callback,
             thinking_callback,
@@ -532,24 +702,6 @@ def model(
             token_callback=token_callback,
             thinking_callback=thinking_callback,
         )
-    if model_name.startswith(_OPENAI_PREFIXES) and not model_name.startswith("openai/gpt-oss"):
-        return _openai_compatible(
-            model_name,
-            "https://api.openai.com/v1",
-            keys.OPENAI_API_KEY,
-            model_config,
-            token_callback,
-            thinking_callback,
-        )
-    if model_name.startswith(_TOGETHER_PREFIXES):
-        return _openai_compatible(
-            model_name,
-            "https://api.together.xyz/v1",
-            keys.TOGETHER_API_KEY,
-            model_config,
-            token_callback,
-            thinking_callback,
-        )
     if model_name.startswith("claude-"):
         from kiss.core.models import AnthropicModel
 
@@ -577,24 +729,6 @@ def model(
             model_config=model_config,
             token_callback=token_callback,
             thinking_callback=thinking_callback,
-        )
-    if model_name.startswith("glm-"):
-        return _openai_compatible(
-            model_name,
-            "https://api.z.ai/api/paas/v4",
-            keys.ZAI_API_KEY,
-            model_config,
-            token_callback,
-            thinking_callback,
-        )
-    if model_name.startswith("kimi-") or model_name.startswith("moonshot-"):
-        return _openai_compatible(
-            model_name,
-            "https://api.moonshot.ai/v1",
-            keys.MOONSHOT_API_KEY,
-            model_config,
-            token_callback,
-            thinking_callback,
         )
     if model_name.startswith("cc/"):
         from kiss.core.models import ClaudeCodeModel

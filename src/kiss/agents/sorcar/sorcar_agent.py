@@ -33,7 +33,11 @@ from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.agents.sorcar.web_use_tool import WebUseTool
 from kiss.core.base import SYSTEM_PROMPT
 from kiss.core.models.model import Attachment
-from kiss.core.models.model_info import get_default_model
+from kiss.core.models.model_info import (
+    MODEL_INFO,
+    OPENAI_COMPATIBLE_PROVIDERS,
+    get_default_model,
+)
 from kiss.core.models.model_info import model as _model_factory
 from kiss.core.printer import Printer
 from kiss.core.relentless_agent import RelentlessAgent
@@ -244,6 +248,19 @@ def _attribute_sub_usage(agent: Any, budget: float, tokens: int, steps: int) -> 
             agent.printer.steps_offset = agent.total_steps
         except Exception:
             pass
+
+
+# Base URLs the ``model()`` factory itself assigns when routing a model
+# name to its provider.  ``set_model`` must NOT carry one of these into the
+# new model's ``model_config``: the factory bypasses provider routing
+# whenever ``model_config`` contains ``base_url``, so restoring a default
+# endpoint would e.g. point ``claude-*`` at ``api.openai.com`` after an
+# OpenAI -> Anthropic switch.  Only *custom* endpoints (local gateways,
+# proxies) are worth preserving across a switch.  Derived from the vendor
+# registry so newly registered vendors are covered automatically.
+_FACTORY_DEFAULT_BASE_URLS: frozenset[str] = frozenset(
+    provider.base_url.rstrip("/") for provider in OPENAI_COMPATIBLE_PROVIDERS
+)
 
 
 # Attachment MIME-type prefixes and the human-readable labels used when
@@ -469,11 +486,38 @@ class SorcarAgent(RelentlessAgent):
             # ``OpenAICompatibleModel`` factory path strips ``base_url``
             # and ``api_key`` from ``model_config`` before storing it,
             # so we restore them from the live model's attributes so the
-            # new model lands on the same endpoint.
+            # new model lands on the same endpoint — but ONLY for custom
+            # endpoints.  A factory-default ``base_url`` (e.g.
+            # ``https://api.openai.com/v1`` on a routed ``gpt-*`` model)
+            # must not be carried over: ``model()`` bypasses provider
+            # routing whenever the config contains ``base_url``, which
+            # would wrongly build an OpenAI-compatible client for a
+            # ``claude-*``/``gemini-*`` name on a cross-provider switch.
             new_config: dict[str, Any] = dict(old_model.model_config or {})
+            # Drop a factory-injected ``reasoning_effort`` default.  The
+            # ``model()`` factory auto-defaults ``reasoning_effort`` into
+            # ``model_config`` for models whose MODEL_INFO entry declares a
+            # ``thinking`` level (e.g. ``"high"`` for gpt-5.5); such a value
+            # describes the OLD model, not a user choice.  Carrying it over
+            # breaks switches to non-reasoning models (OpenAI rejects
+            # ``reasoning_effort`` for e.g. gpt-4o with a 400) and would
+            # override the new model's own default (e.g. the ``-xhigh``
+            # alias's level leaking onto the base model).  The new model
+            # re-defaults its own level on construction.  A user-explicit
+            # non-default effort is preserved.
+            old_info = MODEL_INFO.get(old_model.model_name)
+            if (
+                old_info is not None
+                and new_config.get("reasoning_effort") == old_info.thinking
+            ):
+                new_config.pop("reasoning_effort", None)
             old_base_url = getattr(old_model, "base_url", None)
             old_api_key = getattr(old_model, "api_key", None)
-            if old_base_url and "base_url" not in new_config:
+            if (
+                old_base_url
+                and old_base_url.rstrip("/") not in _FACTORY_DEFAULT_BASE_URLS
+                and "base_url" not in new_config
+            ):
                 new_config["base_url"] = old_base_url
                 if old_api_key is not None:
                     new_config["api_key"] = old_api_key
