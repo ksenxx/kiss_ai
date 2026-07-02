@@ -526,6 +526,14 @@ class AnthropicModel(Model):
         kwargs = self.model_config.copy()
         enable_cache = kwargs.pop("enable_cache", True)
         system_instruction = kwargs.pop("system_instruction", None)
+        # ``reasoning_effort`` is an OpenAI-specific knob that the model
+        # factory auto-defaults into ``model_config`` for gpt-5.x reasoning
+        # models; it arrives here verbatim when a live conversation (and its
+        # config) is handed over by the Sorcar ``set_model`` tool.  The
+        # Anthropic API rejects unknown kwargs, so drop it — the extended-
+        # thinking default below already enables native reasoning for
+        # Claude 4+ models.
+        kwargs.pop("reasoning_effort", None)
 
         # Hoist OpenAI-style ``role="system"`` messages (present when the
         # conversation was handed off from an OpenAI-schema model, e.g. via

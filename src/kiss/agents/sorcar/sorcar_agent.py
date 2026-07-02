@@ -246,6 +246,22 @@ def _attribute_sub_usage(agent: Any, budget: float, tokens: int, steps: int) -> 
             pass
 
 
+# Base URLs the ``model()`` factory itself assigns when routing a model
+# name to its provider.  ``set_model`` must NOT carry one of these into the
+# new model's ``model_config``: the factory bypasses provider routing
+# whenever ``model_config`` contains ``base_url``, so restoring a default
+# endpoint would e.g. point ``claude-*`` at ``api.openai.com`` after an
+# OpenAI -> Anthropic switch.  Only *custom* endpoints (local gateways,
+# proxies) are worth preserving across a switch.
+_FACTORY_DEFAULT_BASE_URLS: frozenset[str] = frozenset({
+    "https://api.openai.com/v1",
+    "https://openrouter.ai/api/v1",
+    "https://api.together.xyz/v1",
+    "https://api.z.ai/api/paas/v4",
+    "https://api.moonshot.ai/v1",
+})
+
+
 # Attachment MIME-type prefixes and the human-readable labels used when
 # describing attachments in the initial prompt, in display order.
 _ATTACHMENT_KINDS: tuple[tuple[str, str], ...] = (
@@ -469,11 +485,21 @@ class SorcarAgent(RelentlessAgent):
             # ``OpenAICompatibleModel`` factory path strips ``base_url``
             # and ``api_key`` from ``model_config`` before storing it,
             # so we restore them from the live model's attributes so the
-            # new model lands on the same endpoint.
+            # new model lands on the same endpoint — but ONLY for custom
+            # endpoints.  A factory-default ``base_url`` (e.g.
+            # ``https://api.openai.com/v1`` on a routed ``gpt-*`` model)
+            # must not be carried over: ``model()`` bypasses provider
+            # routing whenever the config contains ``base_url``, which
+            # would wrongly build an OpenAI-compatible client for a
+            # ``claude-*``/``gemini-*`` name on a cross-provider switch.
             new_config: dict[str, Any] = dict(old_model.model_config or {})
             old_base_url = getattr(old_model, "base_url", None)
             old_api_key = getattr(old_model, "api_key", None)
-            if old_base_url and "base_url" not in new_config:
+            if (
+                old_base_url
+                and old_base_url.rstrip("/") not in _FACTORY_DEFAULT_BASE_URLS
+                and "base_url" not in new_config
+            ):
                 new_config["base_url"] = old_base_url
                 if old_api_key is not None:
                     new_config["api_key"] = old_api_key
