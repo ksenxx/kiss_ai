@@ -5,6 +5,9 @@
 
 """Model implementations for different LLM providers."""
 
+import importlib
+import logging
+
 from kiss.core.models.model import Attachment, Model
 
 __all__ = [
@@ -31,12 +34,8 @@ _LAZY_IMPORTS = {
 def __getattr__(name: str) -> type:
     """Lazily import model classes on first access to avoid loading LLM SDKs at import time."""
     if name in _LAZY_IMPORTS:
-        import importlib
-        import logging
-
-        module_path = _LAZY_IMPORTS[name]
         try:
-            module = importlib.import_module(module_path)
+            module = importlib.import_module(_LAZY_IMPORTS[name])
             cls: type = getattr(module, name)
             globals()[name] = cls
             return cls

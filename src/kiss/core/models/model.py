@@ -712,52 +712,6 @@ class Model(ABC):
         """
         self.usage_info_for_messages = usage_info
 
-    def _estimate_conversation_tokens(self, msgs: list[Any] | None = None) -> int:
-        """Rough estimate of conversation size in tokens (chars / 4).
-
-        Args:
-            msgs: Message list to estimate. Defaults to self.conversation.
-        """
-        total_chars = 0
-        for msg in (msgs if msgs is not None else self.conversation):
-            content = msg.get("content", "")
-            if isinstance(content, str):
-                total_chars += len(content)
-            elif isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict):
-                        for v in block.values():
-                            if isinstance(v, str):
-                                total_chars += len(v)
-        return total_chars // 2
-
-    def compact_conversation(self, max_context_tokens: int) -> None:
-        """Drop old messages to keep conversation within half the context limit.
-
-        Preserves the initial user/human messages and keeps the last N messages,
-        decrementing N from 50 until the conversation fits within half the token
-        limit. Falls back to keeping only the initial messages if nothing fits.
-        """
-        if self._estimate_conversation_tokens() <= int(max_context_tokens * 0.7):
-            return
-
-        keep_start = 0
-        for i, msg in enumerate(self.conversation):
-            if msg.get("role") in ("user", "human"):
-                keep_start = i + 1
-                break
-
-        keep_recent = 30
-        while keep_recent > 0:
-            tail_start = max(keep_start, len(self.conversation) - keep_recent)
-            candidate = self.conversation[:keep_start] + self.conversation[tail_start:]
-            if self._estimate_conversation_tokens(candidate) <= max_context_tokens // 2:
-                self.conversation = candidate
-                return
-            keep_recent -= 1
-
-        self.conversation = self.conversation[:keep_start]
-
     def _resolve_openai_tools_schema(
         self,
         function_map: dict[str, Callable[..., Any]],
@@ -773,9 +727,9 @@ class Model(ABC):
         Returns:
             list[dict[str, Any]]: The resolved OpenAI-format tool schema list.
         """
-        if tools_schema is not None:
-            return tools_schema
-        return self._build_openai_tools_schema(function_map)
+        return tools_schema if tools_schema is not None else self._build_openai_tools_schema(
+            function_map
+        )
 
     # =========================================================================
     # Helper methods for building tool schemas (shared across implementations)
@@ -792,11 +746,7 @@ class Model(ABC):
         Returns:
             list[dict[str, Any]]: A list of tool schemas in OpenAI format.
         """
-        tools = []
-        for func in function_map.values():
-            tool_schema = self._function_to_openai_tool(func)
-            tools.append(tool_schema)
-        return tools
+        return [self._function_to_openai_tool(func) for func in function_map.values()]
 
     def _function_to_openai_tool(self, func: Callable[..., Any]) -> dict[str, Any]:
         """Converts a Python function to an OpenAI tool schema.
@@ -950,7 +900,7 @@ def _build_text_based_tools_prompt(function_map: dict[str, Callable[..., Any]]) 
             params.append(f"    - {param_name} ({type_name})")
 
         params_str = "\n".join(params) if params else "    (no parameters)"
-        first_line = doc.split(chr(10))[0]
+        first_line = doc.split("\n")[0]
         tools_desc.append(f"- **{func_name}**: {first_line}\n  Parameters:\n{params_str}")
 
     return f"""

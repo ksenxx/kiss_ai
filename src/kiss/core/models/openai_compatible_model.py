@@ -64,9 +64,7 @@ def _provider_model_name(model_name: str) -> str:
         if model_name.startswith("openrouter/")
         else model_name
     )
-    if provider_name.endswith(_XHIGH_SUFFIX):
-        return provider_name.removesuffix(_XHIGH_SUFFIX)
-    return provider_name
+    return provider_name.removesuffix(_XHIGH_SUFFIX)
 
 
 def _model_thinking_level(model_name: str) -> str | None:
@@ -150,9 +148,8 @@ def _audio_mime_to_format(mime_type: str) -> str:
         The short format string (e.g. "mp3"). Falls back to the MIME subtype
         if no explicit mapping exists.
     """
-    if mime_type in _AUDIO_MIME_TO_FORMAT:
-        return _AUDIO_MIME_TO_FORMAT[mime_type]
-    return mime_type.split("/", 1)[1] if "/" in mime_type else mime_type
+    fallback = mime_type.split("/", 1)[1] if "/" in mime_type else mime_type
+    return _AUDIO_MIME_TO_FORMAT.get(mime_type, fallback)
 
 
 def _extract_deepseek_reasoning(content: str) -> tuple[str, str]:
@@ -797,6 +794,44 @@ class OpenAICompatibleModel(Model):
         response = self._finalize_stream_response(response, last_chunk)
         return content, response
 
+    def _build_chat_kwargs(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
+        """Build the base kwargs dict for a Chat Completions request.
+
+        Copies ``model_config`` (dropping keys that are not Chat Completions
+        parameters), attaches the provider model name and ``messages``, and
+        applies OpenRouter Anthropic cache control.
+
+        Args:
+            messages: The normalized messages to send.
+
+        Returns:
+            The kwargs dict for ``client.chat.completions.create(...)``.
+        """
+        kwargs = self.model_config.copy()
+        kwargs.pop("system_instruction", None)
+        kwargs.pop("use_responses_api", None)
+        kwargs.update({"model": self._api_model_name, "messages": messages})
+        self._apply_cache_control_for_openrouter_anthropic(kwargs)
+        return kwargs
+
+    def _normalized_conversation_checked(self) -> list[dict[str, Any]]:
+        """Normalize the conversation for the API, raising when nothing remains.
+
+        Returns:
+            The normalized conversation messages.
+
+        Raises:
+            KISSError: When every message was filtered out as whitespace-only.
+        """
+        normalized = self._normalize_conversation_for_api(self.conversation)
+        if not normalized:
+            raise KISSError(
+                "Cannot generate response: all messages have whitespace-only "
+                "content that was filtered out. At least one message with "
+                "non-whitespace content is required."
+            )
+        return normalized
+
     def generate(self) -> tuple[str, Any]:
         """Generate content from prompt without tools.
 
@@ -804,23 +839,7 @@ class OpenAICompatibleModel(Model):
             A tuple of (content, response) where content is the generated text
             and response is the raw API response object.
         """
-        kwargs = self.model_config.copy()
-        kwargs.pop("system_instruction", None)
-        kwargs.pop("use_responses_api", None)
-        normalized_messages = self._normalize_conversation_for_api(self.conversation)
-        if not normalized_messages:
-            raise KISSError(
-                "Cannot generate response: all messages have whitespace-only "
-                "content that was filtered out. At least one message with "
-                "non-whitespace content is required."
-            )
-        kwargs.update(
-            {
-                "model": self._api_model_name,
-                "messages": normalized_messages,
-            }
-        )
-        self._apply_cache_control_for_openrouter_anthropic(kwargs)
+        kwargs = self._build_chat_kwargs(self._normalized_conversation_checked())
 
         content, response = self._stream_text(kwargs)
 
@@ -866,17 +885,10 @@ class OpenAICompatibleModel(Model):
         ):
             return self._generate_with_tools_via_responses(function_map, tools)
 
-        kwargs = self.model_config.copy()
-        kwargs.pop("system_instruction", None)
-        kwargs.pop("use_responses_api", None)
-        kwargs.update(
-            {
-                "model": self._api_model_name,
-                "messages": self._normalize_conversation_for_api(self.conversation),
-                "tools": tools or None,
-            }
+        kwargs = self._build_chat_kwargs(
+            self._normalize_conversation_for_api(self.conversation)
         )
-        self._apply_cache_control_for_openrouter_anthropic(kwargs)
+        kwargs["tools"] = tools or None
 
         # Whether ``tools`` + ``reasoning_effort`` survive on the same Chat
         # Completions request is a per-vendor capability declared in
@@ -960,13 +972,27 @@ class OpenAICompatibleModel(Model):
             content = message.content or ""
             function_calls, raw_tool_calls = self._parse_tool_calls_from_message(message)
 
-        if function_calls:
-            self.conversation.append(
-                {"role": "assistant", "content": content, "tool_calls": raw_tool_calls}
-            )
-        else:
-            self.conversation.append({"role": "assistant", "content": content})
+        self._append_assistant_turn(content, function_calls, raw_tool_calls)
         return function_calls, content, response
+
+    def _append_assistant_turn(
+        self,
+        content: str,
+        function_calls: list[dict[str, Any]],
+        raw_tool_calls: list[dict[str, Any]],
+    ) -> None:
+        """Append the assistant turn, attaching ``tool_calls`` when calls were made.
+
+        Args:
+            content: The assistant text content.
+            function_calls: Parsed function calls (may be empty).
+            raw_tool_calls: Raw ``tool_calls`` entries to store when
+                ``function_calls`` is non-empty.
+        """
+        msg: dict[str, Any] = {"role": "assistant", "content": content}
+        if function_calls:
+            msg["tool_calls"] = raw_tool_calls
+        self.conversation.append(msg)
 
     def _should_delegate_to_responses(self) -> bool:
         """Decide whether tool-bearing requests should use ``/v1/responses``.
@@ -1281,12 +1307,7 @@ class OpenAICompatibleModel(Model):
         ]
         for fc in function_calls:
             self._delegate_raw_items[fc["id"]] = new_items
-        if function_calls:
-            self.conversation.append(
-                {"role": "assistant", "content": content, "tool_calls": raw_tool_calls}
-            )
-        else:
-            self.conversation.append({"role": "assistant", "content": content})
+        self._append_assistant_turn(content, function_calls, raw_tool_calls)
         return function_calls, content, response
 
     def _generate_with_text_based_tools(
@@ -1307,15 +1328,8 @@ class OpenAICompatibleModel(Model):
         """
         tools_prompt = _build_text_based_tools_prompt(function_map)
 
-        normalized_conv = self._normalize_conversation_for_api(self.conversation)
-        if not normalized_conv:
-            raise KISSError(
-                "Cannot generate response: all messages have whitespace-only "
-                "content that was filtered out. At least one message with "
-                "non-whitespace content is required."
-            )
-        modified_conversation = list(normalized_conv)
-        if modified_conversation and modified_conversation[0]["role"] == "user":
+        modified_conversation = self._normalized_conversation_checked()
+        if modified_conversation[0]["role"] == "user":
             modified_conversation[0] = {
                 "role": "user",
                 "content": modified_conversation[0]["content"] + "\n" + tools_prompt,
@@ -1323,16 +1337,7 @@ class OpenAICompatibleModel(Model):
         else:
             modified_conversation.insert(0, {"role": "system", "content": tools_prompt})
 
-        kwargs = self.model_config.copy()
-        kwargs.pop("system_instruction", None)
-        kwargs.pop("use_responses_api", None)
-        kwargs.update(
-            {
-                "model": self._api_model_name,
-                "messages": modified_conversation,
-            }
-        )
-        self._apply_cache_control_for_openrouter_anthropic(kwargs)
+        kwargs = self._build_chat_kwargs(modified_conversation)
 
         content, response = self._stream_text(kwargs)
 
@@ -1340,11 +1345,9 @@ class OpenAICompatibleModel(Model):
 
         function_calls = _parse_text_based_tool_calls(content_clean)
 
+        self.conversation.append({"role": "assistant", "content": content})
         if function_calls:
-            self.conversation.append({"role": "assistant", "content": content})
             self._replace_last_assistant_with_tool_calls(content, function_calls)
-        else:
-            self.conversation.append({"role": "assistant", "content": content})
 
         return function_calls, content, response
 
