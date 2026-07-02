@@ -1001,7 +1001,13 @@ class _CommandsMixin:
         if not cfg.get("remote_password") and prev_password:
             cfg.pop("remote_password", None)
         save_config(cfg)
-        apply_config_to_env(cfg)
+        # Apply the MERGED on-disk config, not the raw payload: a
+        # partial payload (any client saving a single setting) lacks
+        # ``max_budget``, and applying the payload directly would
+        # silently reset the live budget to DEFAULTS[...] while
+        # config.json (which ``save_config`` merges) still holds the
+        # user's configured value.
+        apply_config_to_env(load_config())
 
         new_work_dir = cfg.get("work_dir", "")
         if new_work_dir:
