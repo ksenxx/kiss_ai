@@ -328,15 +328,27 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         wt = self._wt
         if wt.wt_dir.exists():
             self._auto_commit_worktree()
-            # Single-shot retry: closes the residual race window
-            # between ``auto_commit_changes``'s second ``stage_all``
-            # and its ``commit_staged`` call.  ``commit_all`` is a
-            # no-op when nothing is uncommitted (its inner
-            # ``commit_staged`` short-circuits on an empty
-            # ``git diff --cached``), so it is safe to always invoke
-            # here — but skipping the call keeps the happy-path log
-            # quiet.
             if GitWorktreeOps.has_uncommitted_changes(wt.wt_dir):
+                # ``auto_commit_enabled=False`` contract (see the
+                # attribute docstring in ``__init__``): the worktree's
+                # uncommitted changes are preserved for manual review
+                # and this method returns False, keeping the worktree
+                # directory in place.  Without this gate the
+                # late-arriver retry below would commit the changes
+                # anyway (``_auto_commit_worktree`` no-ops when the
+                # flag is off, so EVERYTHING is still uncommitted
+                # here) and the worktree would be removed — exactly
+                # the behavior ``--no-auto-commit`` exists to prevent.
+                if not self.auto_commit_enabled:
+                    return False
+                # Single-shot retry: closes the residual race window
+                # between ``auto_commit_changes``'s second ``stage_all``
+                # and its ``commit_staged`` call.  ``commit_all`` is a
+                # no-op when nothing is uncommitted (its inner
+                # ``commit_staged`` short-circuits on an empty
+                # ``git diff --cached``), so it is safe to always invoke
+                # here — but skipping the call keeps the happy-path log
+                # quiet.
                 GitWorktreeOps.commit_all(
                     wt.wt_dir,
                     "kiss: auto-commit late-arriving changes",

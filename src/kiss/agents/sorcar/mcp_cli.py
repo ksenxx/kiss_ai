@@ -245,6 +245,7 @@ class _OAuthCallbackServer:
     def __init__(self) -> None:
         self.code: str | None = None
         self.state: str | None = None
+        self.error: str | None = None
         self._done = threading.Event()
         outer = self
 
@@ -253,21 +254,40 @@ class _OAuthCallbackServer:
                 query = urllib.parse.urlparse(self.path).query
                 params = urllib.parse.parse_qs(query)
                 code = (params.get("code") or [""])[0] or None
-                if code is None:
+                error = (params.get("error") or [""])[0] or None
+                if code is None and error is None:
                     # Not the OAuth redirect (e.g. a favicon probe):
                     # never clobber an already-captured code.
                     self.send_response(404)
                     self.end_headers()
                     return
-                outer.code = code
-                outer.state = (params.get("state") or [""])[0] or None
+                if code is not None:
+                    outer.code = code
+                    outer.state = (params.get("state") or [""])[0] or None
+                    body = (
+                        b"<html><body><h2>Sorcar MCP authentication "
+                        b"complete.</h2>You may close this tab.</body></html>"
+                    )
+                elif outer.code is None:
+                    # RFC 6749 4.1.2.1 error response (e.g. the user
+                    # denied access): record the reason so wait() can
+                    # fail fast instead of sitting out the timeout.
+                    desc = (params.get("error_description") or [""])[0]
+                    outer.error = f"{error}: {desc}" if desc else error
+                    body = (
+                        b"<html><body><h2>Sorcar MCP authentication "
+                        b"failed.</h2>You may close this tab.</body></html>"
+                    )
+                else:
+                    # A late error request never clobbers a captured code.
+                    body = (
+                        b"<html><body><h2>Sorcar MCP authentication "
+                        b"complete.</h2>You may close this tab.</body></html>"
+                    )
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html")
                 self.end_headers()
-                self.wfile.write(
-                    b"<html><body><h2>Sorcar MCP authentication complete."
-                    b"</h2>You may close this tab.</body></html>"
-                )
+                self.wfile.write(body)
                 outer._done.set()
 
             def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
@@ -288,9 +308,15 @@ class _OAuthCallbackServer:
 
         Raises:
             TimeoutError: When no redirect arrives in time.
+            RuntimeError: When the server sent an OAuth error response
+                (e.g. the user denied authorization).
         """
-        if not self._done.wait(timeout) or not self.code:
+        if not self._done.wait(timeout):
             raise TimeoutError("Timed out waiting for the OAuth redirect.")
+        if not self.code:
+            raise RuntimeError(
+                f"OAuth authorization failed: {self.error or 'no code returned'}"
+            )
         return self.code, self.state
 
     def close(self) -> None:
