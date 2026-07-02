@@ -445,7 +445,17 @@ class SorcarAgent(RelentlessAgent):
                 change (or a "no change" message when the requested
                 model is already active).
             """
-            old_model = getattr(self, "model", None)
+            # The model actually making LLM calls lives on the inner
+            # per-session executor (``RelentlessAgent.perform_task``
+            # creates a fresh ``KISSAgent`` per sub-session and stores
+            # it in ``self._current_executor``); the relentless parent
+            # (``self``) never instantiates a ``model`` of its own.
+            # Target the executor so the swap lands on the instance the
+            # ReAct loop reads on every step — otherwise the change
+            # would silently defer to the NEXT sub-session, which most
+            # runs never start.
+            target = getattr(self, "_current_executor", None) or self
+            old_model = getattr(target, "model", None)
             if old_model is None:
                 self.model_name = model_name
                 return (
@@ -473,6 +483,14 @@ class SorcarAgent(RelentlessAgent):
                 token_callback=old_model.token_callback,
                 thinking_callback=old_model.thinking_callback,
             )
+            # The provider client (``self.client``) is created only
+            # inside ``Model.initialize`` — a freshly-constructed
+            # model has ``client = None`` and its first ``generate``
+            # would crash with ``'NoneType' object has no attribute
+            # 'chat'``.  Initialize with a throwaway prompt (building
+            # the client), then hand off the live conversation below,
+            # which discards that placeholder message.
+            new_model.initialize("")
             # Carry over the live conversation state so the next LLM
             # call resumes from the same point.  The kiss-agent
             # conversation list shape is OpenAI-style (``role`` /
@@ -482,14 +500,20 @@ class SorcarAgent(RelentlessAgent):
             new_model.usage_info_for_messages = old_model.usage_info_for_messages
 
             previous_name = old_model.model_name
-            self.model = new_model  # type: ignore[attr-defined]
+            target.model = new_model  # type: ignore[attr-defined, union-attr]
+            target.model_name = model_name
+            # Keep the relentless parent's ``model_name`` in sync so
+            # any subsequent sub-session (which re-reads it when
+            # constructing its executor) stays on the new model.
             self.model_name = model_name
             # Rebuild the cached tools schema against the new model
             # (different providers can produce slightly different
-            # schemas — e.g. Anthropic vs OpenAI).
-            if getattr(self, "function_map", None):
-                self._cached_tools_schema = new_model._build_openai_tools_schema(  # type: ignore[attr-defined]
-                    self.function_map,
+            # schemas — e.g. Anthropic vs OpenAI).  The schema cache
+            # lives on the same object as the swapped model (the
+            # executor during a live run).
+            if getattr(target, "function_map", None):
+                target._cached_tools_schema = new_model._build_openai_tools_schema(  # type: ignore[attr-defined, union-attr]
+                    target.function_map,
                 )
             return f"Model changed from {previous_name} to {model_name}."
 

@@ -402,13 +402,21 @@ def _row_to_extra_json(row: sqlite3.Row) -> str:
         payload["work_dir"] = row["work_dir"] or ""
         payload["version"] = row["version"] or ""
         payload["auto_commit_mode"] = bool(row["auto_commit_mode"])
-        payload["tokens"] = int(row["tokens"] or 0)
-        payload["cost"] = float(row["cost"] or 0.0)
-        payload["steps"] = int(row["steps"] or 0)
+        # bughunt2: use the finite-aware safe coercers instead of bare
+        # ``int()``/``float()``.  SQLite's dynamic typing lets a
+        # hand-edited / 3rd-party-source DB store TEXT (e.g. ``'abc'``)
+        # in the REAL/INTEGER columns; bare coercion raised
+        # ``ValueError`` — uncaught by the (KeyError, IndexError)
+        # handler below — which propagated out of ``_load_history`` /
+        # ``_search_history`` / ``_load_chat_events_by_task_id`` and
+        # blanked the whole history sidebar over one corrupt row.
+        payload["tokens"] = _safe_int(row["tokens"], 0)
+        payload["cost"] = _safe_float(row["cost"], 0.0)
+        payload["steps"] = _safe_int(row["steps"], 0)
         payload["is_parallel"] = bool(row["is_parallel"])
         payload["is_worktree"] = bool(row["is_worktree"])
-        payload["startTs"] = int(row["start_ts"] or 0)
-        payload["endTs"] = int(row["end_ts"] or 0)
+        payload["startTs"] = _safe_int(row["start_ts"], 0)
+        payload["endTs"] = _safe_int(row["end_ts"], 0)
         payload["is_favorite"] = bool(row["is_favorite"])
         if row["parent_task_id"]:
             payload["subagent"] = {"parent_task_id": row["parent_task_id"]}
@@ -1273,7 +1281,16 @@ def _resolve_task_id(
         ).fetchone()
         if row is not None:
             return str(row["id"])
-        return _most_recent_task_id(db, task)
+        # bughunt2: a WELL-FORMED ``uuid4().hex`` id that matches no
+        # row belongs to a DELETED task (user removed a running task
+        # from the history sidebar, or a stale finished-tab id).  The
+        # write must be dropped — falling back to
+        # ``_most_recent_task_id`` here redirected the deleted task's
+        # result/extra/event writes onto an unrelated task (callers
+        # pass ``task=None``, so the fallback resolved to the most
+        # recent row overall).  The legacy fallback above is only for
+        # malformed (pre-UUID) ids that can never collide this way.
+        return None
     return _most_recent_task_id(db, task)
 
 

@@ -1264,11 +1264,21 @@ class _TaskRunnerMixin:
         """Find a peer tab id sharing the same task as *viewer_tab_id*.
 
         Scans the printer's ``_subscribers`` mapping
-        (``task_id -> {tab_ids}``) to locate the task that
+        (``task_id -> {tab_ids}``) to locate the tasks that
         *viewer_tab_id* is subscribed to, then returns another tab id
-        subscribed to the same task whose :class:`_RunningAgentState`
-        carries a live ``stop_event`` (i.e. the tab that actually
-        started the task).  Returns ``None`` when no such tab exists.
+        subscribed to one of those tasks whose
+        :class:`_RunningAgentState` carries a live ``stop_event``
+        (i.e. the tab that actually started the task).  Returns
+        ``None`` when no such tab exists.
+
+        Every subscribed task is considered — not just the first
+        match: ``JsonPrinter.cleanup_task`` intentionally preserves
+        subscriber sets when a task ends, so a viewer typically holds
+        stale subscriptions to FINISHED tasks alongside the one
+        RUNNING task.  Stopping the scan at the first (oldest) match
+        would resolve the finished task, find no peer with a live
+        ``stop_event`` there, and wrongly report "no source tab" for
+        a viewer that can in fact stop a running task.
 
         Args:
             viewer_tab_id: The subscriber/viewer tab id to look up.
@@ -1278,21 +1288,19 @@ class _TaskRunnerMixin:
             running task, or ``None`` if not found.
         """
         with self.printer._lock:
-            task_key: str | None = None
-            for task_id, viewers in self.printer._subscribers.items():
-                if viewer_tab_id in viewers:
-                    task_key = task_id
-                    break
-            if task_key is None:
-                return None
-            peers = list(self.printer._subscribers[task_key])
+            peer_lists = [
+                list(viewers)
+                for viewers in self.printer._subscribers.values()
+                if viewer_tab_id in viewers
+            ]
         with self._state_lock:
-            for peer in peers:
-                if peer == viewer_tab_id:
-                    continue
-                state = _RunningAgentState.running_agent_states.get(peer)
-                if state is not None and state.stop_event is not None:
-                    return peer
+            for peers in peer_lists:
+                for peer in peers:
+                    if peer == viewer_tab_id:
+                        continue
+                    state = _RunningAgentState.running_agent_states.get(peer)
+                    if state is not None and state.stop_event is not None:
+                        return peer
         return None
 
     @staticmethod
@@ -1386,24 +1394,48 @@ class _TaskRunnerMixin:
 
         Resolves via the printer's task-id → subscriber-tabs mapping:
         picks the first subscribed tab that has a live
-        ``user_answer_queue``.  Any tab subscribed to this task can
-        answer, but the queue always lives on the task-owner tab.
+        ``user_answer_queue`` owned by THIS task.  Any tab subscribed
+        to this task can answer, but the queue lives on the task-owner
+        tab.
+
+        A co-subscriber tab that is itself actively running a
+        *different* task also carries a live ``user_answer_queue`` —
+        owned by that other task.  Returning it would hijack the other
+        task's answers: this task's ``ask_user_question`` would
+        consume the answer the user submitted for the other task's
+        question, and the other agent would never receive it.  Such
+        tabs are skipped (their live agent's ``_last_task_id``
+        identifies which task their queue belongs to).
 
         Returns:
             The owner tab's answer queue, or ``None`` when the
             thread-local ``task_id`` is unset or no subscribed tab
-            carries a live queue (e.g. the tab was closed).
+            carries a live queue for this task (e.g. the owner tab was
+            closed).
         """
         task_key = getattr(self.printer._thread_local, "task_id", None)
         if not task_key:
             return None
+        task_key = self.printer._coerce_task_id(task_key)
         with self.printer._lock:
             tab_ids = list(self.printer._subscribers.get(task_key, ()))
         with self._state_lock:
             for tab_id in tab_ids:
                 tab = _RunningAgentState.running_agent_states.get(tab_id)
-                if tab is not None and tab.user_answer_queue is not None:
-                    return tab.user_answer_queue
+                if tab is None or tab.user_answer_queue is None:
+                    continue
+                agent_task = (
+                    self.printer._coerce_task_id(
+                        getattr(tab.agent, "_last_task_id", None),
+                    )
+                    if tab.agent is not None
+                    else ""
+                )
+                if tab.is_task_active and agent_task and agent_task != task_key:
+                    # This subscriber is running a DIFFERENT task; its
+                    # queue belongs to that task, not this one.
+                    continue
+                return tab.user_answer_queue
         return None
 
     def _ask_user_question(self, question: str) -> str:

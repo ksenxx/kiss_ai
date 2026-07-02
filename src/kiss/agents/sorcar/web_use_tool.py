@@ -87,7 +87,18 @@ INTERACTIVE_ROLES = {
     "treeitem",
 }
 
-_ROLE_LINE_RE = re.compile(r"^(\s*)-\s+([\w]+)\s*(.*)")
+# Role lines look like ``- button "Name"`` — but when the accessible
+# name contains ``": "`` Playwright single-quote-wraps the whole YAML
+# key (``- 'link "colon: \"q\""':``), so an optional leading ``'`` must
+# be accepted or the element is silently never numbered.
+_ROLE_LINE_RE = re.compile(r"^(\s*)-\s+('?)([\w]+)\s*(.*)")
+
+# Accessible names are double-quoted with YAML escaping: ``\"`` for an
+# embedded quote and ``\\`` for a backslash.  A naive ``"([^"]*)"``
+# stops at the first embedded quote and records a corrupted name that
+# get_by_role(name=..., exact=True) can never match.
+_NAME_RE = re.compile(r'"((?:\\.|[^"\\])*)"')
+_NAME_UNESCAPE_RE = re.compile(r'\\(["\\])')
 
 _SCROLL_DELTA = {"down": (0, 300), "up": (0, -300), "right": (300, 0), "left": (-300, 0)}
 
@@ -137,14 +148,15 @@ def _number_interactive_elements(snapshot: str) -> tuple[str, list[dict[str, str
         if not m:
             result_lines.append(line)
             continue
-        indent, role, rest = m.group(1), m.group(2), m.group(3)
+        indent, quote, role, rest = m.group(1), m.group(2), m.group(3), m.group(4)
         if role not in INTERACTIVE_ROLES:
             result_lines.append(line)
             continue
         counter += 1
-        name_match = re.match(r'"([^"]*)"', rest)
-        elements.append({"role": role, "name": name_match.group(1) if name_match else ""})
-        result_lines.append(f"{indent}- [{counter}] {role} {rest}".rstrip())
+        name_match = _NAME_RE.match(rest)
+        name = _NAME_UNESCAPE_RE.sub(r"\1", name_match.group(1)) if name_match else ""
+        elements.append({"role": role, "name": name})
+        result_lines.append(f"{indent}- [{counter}] {quote}{role} {rest}".rstrip())
     return "\n".join(result_lines), elements
 
 
