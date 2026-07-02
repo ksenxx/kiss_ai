@@ -193,6 +193,31 @@ def _anthropic_media_block_to_openai_part(block: dict[str, Any]) -> dict[str, An
     return {"type": "file", "file": {"file_data": url}}
 
 
+def _stringify_tool_call_arguments(tool_calls: list[Any]) -> list[Any]:
+    """Ensure every tool call's ``function.arguments`` is a JSON string.
+
+    GeminiModel stores tool-call arguments as dicts; the OpenAI Chat
+    Completions API requires a JSON string.  Such entries enter the
+    conversation when it is handed off from a :class:`GeminiModel`
+    (e.g. via the Sorcar ``set_model`` tool).
+
+    Args:
+        tool_calls: The ``tool_calls`` list of an assistant message.
+
+    Returns:
+        The list with dict arguments replaced by their JSON encoding.
+    """
+    result: list[Any] = []
+    for tc in tool_calls:
+        if isinstance(tc, dict):
+            fn = tc.get("function") or {}
+            args = fn.get("arguments")
+            if not isinstance(args, str):
+                tc = {**tc, "function": {**fn, "arguments": json.dumps(args or {})}}
+        result.append(tc)
+    return result
+
+
 def _tool_result_block_text(block: dict[str, Any]) -> str:
     """Extract the text payload of an Anthropic ``tool_result`` block.
 
@@ -524,6 +549,20 @@ class OpenAICompatibleModel(Model):
             list[dict[str, Any]]: OpenAI Chat Completions-format messages.
         """
         msg_copy = msg.copy()
+        if msg_copy.get("tool_calls"):
+            # Gemini hand-off: arguments may be dicts; OpenAI wants JSON strings.
+            msg_copy["tool_calls"] = _stringify_tool_call_arguments(msg_copy["tool_calls"])
+        attachments = msg_copy.pop("attachments", None)
+        if attachments:
+            # Gemini hand-off: lift the Attachment objects into OpenAI
+            # content parts (the API rejects unknown message fields).
+            parts = self._attachments_to_content_parts(attachments)
+            prior = msg_copy.get("content")
+            if isinstance(prior, str) and prior.strip():
+                parts.append({"type": "text", "text": prior})
+            elif isinstance(prior, list):
+                parts.extend(prior)
+            msg_copy["content"] = parts
         content = msg_copy.get("content")
         has_tool_calls = bool(msg_copy.get("tool_calls"))
 

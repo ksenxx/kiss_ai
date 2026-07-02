@@ -31,6 +31,7 @@ from kiss.core.models.model import (
     _iter_balanced_json_objects,
     _iter_tool_calls_lists,
     _parse_text_based_tool_calls,
+    flatten_content_to_text,
 )
 
 logger = logging.getLogger(__name__)
@@ -177,11 +178,11 @@ class ClaudeCodeModel(Model):
             The assembled prompt string.
         """
         if len(self.conversation) == 1:
-            return str(self.conversation[0]["content"])
+            return flatten_content_to_text(self.conversation[0]["content"])
         parts: list[str] = []
         for msg in self.conversation:
             role = msg["role"]
-            content = msg.get("content", "")
+            content = flatten_content_to_text(msg.get("content", ""))
             if role == "user":
                 parts.append(f"[User]: {content}")
             elif role == "assistant":
