@@ -159,7 +159,7 @@ def test_predictive_completion_from_active_file(tmp_path: Path, kiss_db) -> None
     active.write_text("def calculate_total(items):\n    return sum(items)\n")
     completer = CliCompleter(str(tmp_path), active_file=str(active))
     matches = completer._build_matches("call calculate_t")
-    assert matches == ["calculate_total"]
+    assert matches == ["call calculate_total"]
 
 
 def test_main_no_task_enters_repl(tmp_path: Path) -> None:

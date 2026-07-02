@@ -35,6 +35,11 @@ def _stale_worktree_fallback(resolved: Path) -> Path | None:
     remembers a worktree path from earlier in the task ends up with a
     dangling path.  Returning the equivalent in-repo path lets the
     subsequent read succeed transparently.
+
+    A worktree whose root directory still exists on disk is *live*,
+    not stale: its working tree is authoritative for paths under it
+    (it may have deleted or diverged from the parent repo's copy), so
+    no fallback applies and ``None`` is returned.
     """
     parts = resolved.parts
     for i, part in enumerate(parts):
@@ -43,6 +48,8 @@ def _stale_worktree_fallback(resolved: Path) -> Path | None:
             and i + 1 < len(parts)
             and parts[i + 1].startswith("kiss_wt-")
         ):
+            if Path(*parts[: i + 2]).is_dir():
+                return None
             return Path(*parts[:i], *parts[i + 2 :])
     return None
 
@@ -64,9 +71,17 @@ def _active_worktree_remap(resolved: Path, work_dir: str | None) -> Path | None:
     "why didn't you run the last task in worktree and why didn't you
     commit the changes?" failure mode.
 
-    The remap is purely structural — it only inspects path strings
+    The remap is structural — it only inspects path strings
     (``.kiss-worktrees/kiss_wt-*`` segments), so it works regardless
-    of whether the worktree is currently registered with git.
+    of whether the worktree is currently registered with git.  The
+    one exception is a worktree directory that no longer exists on
+    disk (torn down by a concurrent cleanup/discard/merge): remapping
+    into it would dead-end every Read/Edit ("File not found" for
+    files that DO exist in the parent repo) and make Write resurrect
+    a zombie worktree directory whose contents are never merged.  In
+    that case no remap applies — mirroring the vanished-worktree
+    fallback in ``UsefulTools._spawn``, which runs Bash commands from
+    the parent repo root in the same situation.
 
     Args:
         resolved: An already-resolved absolute path the caller is about
@@ -90,6 +105,11 @@ def _active_worktree_remap(resolved: Path, work_dir: str | None) -> Path | None:
         ):
             main_repo_parts = work_parts[:i]
             wt_root_parts = work_parts[: i + 2]
+            # Vanished worktree: no remap (see docstring).  The caller
+            # falls through to plain resolution against the parent
+            # repo, consistent with ``_spawn``'s cwd fallback.
+            if not Path(*wt_root_parts).is_dir():
+                return None
             res_parts = resolved.parts
             # *resolved* must be STRICTLY under the parent repo
             # (equal-length is no-op, shorter or different prefix is
@@ -125,11 +145,20 @@ def _absolutize(file_path: str, work_dir: str | None) -> str:
     Joining the relative path under ``work_dir`` first makes the
     subsequent ``_active_worktree_remap`` (and the plain resolution)
     behave consistently regardless of host cwd.
+
+    ``~``-prefixed paths are expanded to the user's home directory
+    first (matching the shell semantics the Bash tool already has);
+    without this, ``Write("~/notes.txt", ...)`` would silently create
+    a directory literally named ``~`` under *work_dir*.
     """
-    if not work_dir:
-        return file_path
-    p = Path(file_path)
+    try:
+        p = Path(file_path).expanduser()
+    except RuntimeError:
+        # ``~unknownuser/...`` — fall through to the literal path.
+        p = Path(file_path)
     if p.is_absolute():
+        return str(p)
+    if not work_dir:
         return file_path
     return str(Path(work_dir) / p)
 
@@ -167,7 +196,36 @@ def _bash_parent_repo_guard(command: str, work_dir: str | None) -> str | None:
     """
     if not work_dir:
         return None
-    wd_parts = Path(work_dir).resolve().parts
+    # Check BOTH the given and the resolved spelling of work_dir: when
+    # work_dir contains a symlinked component (e.g. /tmp → /private/tmp
+    # on macOS — the spelling the model sees in its "Work dir:" hint),
+    # a command using the unresolved spelling would never match the
+    # resolved prefix and bypass the guard entirely.  Read/Write/Edit
+    # resolve both sides and are immune; the guard must be too.
+    checked: set[tuple[str, ...]] = set()
+    for wd_parts in (Path(work_dir).parts, Path(work_dir).resolve().parts):
+        if wd_parts in checked:
+            continue
+        checked.add(wd_parts)
+        err = _parent_repo_guard_for_parts(command, wd_parts)
+        if err is not None:
+            return err
+    return None
+
+
+def _parent_repo_guard_for_parts(
+    command: str, wd_parts: tuple[str, ...]
+) -> str | None:
+    """Apply the parent-repo guard for one spelling of the work_dir parts.
+
+    Args:
+        command: The Bash command line the model wants to run.
+        wd_parts: ``Path.parts`` of one spelling (given or resolved) of
+            the agent's working directory.
+
+    Returns:
+        The refusal message, or ``None`` when the command is allowed.
+    """
     for i in range(len(wd_parts) - 1):
         if (
             wd_parts[i] == ".kiss-worktrees"
@@ -175,6 +233,13 @@ def _bash_parent_repo_guard(command: str, work_dir: str | None) -> str | None:
         ):
             main_repo = str(Path(*wd_parts[:i]))
             wt_root = str(Path(*wd_parts[: i + 2]))
+            # Vanished worktree: ``_spawn`` falls back to running the
+            # command with cwd = parent repo root, so refusing a
+            # parent-repo path here (and pointing the model at a
+            # worktree path that no longer exists) would be a dead
+            # end.  Let the command through.
+            if not os.path.isdir(wt_root):
+                return None
             # Match the parent-repo prefix followed by either end-of-
             # token or a path separator.  This avoids false positives
             # on unrelated paths that merely share a prefix substring
@@ -647,6 +712,16 @@ class UsefulTools:
             remapped = _active_worktree_remap(resolved, self.work_dir)
             if remapped is not None:
                 resolved = remapped
+            else:
+                # Stale-worktree fallback: writing to a path inside a
+                # now-deleted ``.kiss-worktrees/kiss_wt-*`` directory
+                # would silently resurrect a zombie worktree whose
+                # contents are never merged.  Redirect to the parent
+                # repo instead, mirroring Read's fallback and _spawn's
+                # cwd fallback.
+                fallback = _stale_worktree_fallback(resolved)
+                if fallback is not None:
+                    resolved = fallback
             # Refuse existing non-regular targets: opening a FIFO for
             # writing blocks forever when it has no reader, hanging the
             # agent with no timeout (directories/devices are also wrong).
@@ -693,6 +768,14 @@ class UsefulTools:
             remapped = _active_worktree_remap(resolved, self.work_dir)
             if remapped is not None:
                 resolved = remapped
+            elif not resolved.is_file():
+                # Stale-worktree fallback, mirroring Read: a path under
+                # a now-deleted ``.kiss-worktrees/kiss_wt-*`` directory
+                # edits the equivalent parent-repo file so a Read/Edit
+                # pair on the same remembered path stays consistent.
+                fallback = _stale_worktree_fallback(resolved)
+                if fallback is not None and fallback.is_file():
+                    resolved = fallback.resolve()
             if not resolved.is_file():
                 return f"Error: File not found: {file_path}"
             if old_string == new_string:

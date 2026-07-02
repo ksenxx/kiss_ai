@@ -262,11 +262,33 @@ class _CommandsMixin:
                 # prompt here instead of discarding it.  A tab that
                 # started a task then behaves exactly like a tab that
                 # loaded one: typed input never vanishes.
+                # ``is_task_active`` is only set once the worker
+                # thread has begun executing ``_run_task`` — but the
+                # winning submit calls ``thread.start()`` only after
+                # the ``clear`` broadcast (network I/O), so a second
+                # submit landing in that wide start window observes
+                # ``task_thread is not None`` with ``is_task_active
+                # == False``.  Requiring ``is_task_active`` alone
+                # silently dropped such a prompt (neither queued nor
+                # echoed, no new task) — a fast double-submit lost the
+                # second message.  A created-but-unstarted thread has
+                # ``is_alive() == False``; queue the prompt in that
+                # case too — the worker drains
+                # ``pending_user_messages`` before its first model
+                # call, so the message is injected exactly like any
+                # other follow-up.  When the thread IS alive but
+                # ``is_task_active`` is False the task is in teardown
+                # (its ``finally`` is about to clear the queue), so
+                # queueing would fake-echo a message no agent will
+                # ever see; keep dropping only in that narrow case.
                 prompt = cmd.get("prompt", "")
                 if (
                     isinstance(prompt, str)
                     and prompt.strip()
-                    and tab.is_task_active
+                    and (
+                        tab.is_task_active
+                        or not tab.task_thread.is_alive()
+                    )
                 ):
                     tab.pending_user_messages.append(prompt)
                     inject_prompt = prompt
@@ -767,10 +789,18 @@ class _CommandsMixin:
             query = ""
         active_file = cmd.get("activeFile")
         active_content = cmd.get("activeFileContent")
-        if active_file is not None and not isinstance(active_file, str):
-            active_file = ""
-        if active_content is not None and not isinstance(active_content, str):
-            active_content = ""
+        # A junk (non-string) value means "not supplied", i.e. ``None``.
+        # Coercing junk ``activeFileContent`` to ``""`` instead would
+        # pass the ``is not None`` storage guard below (which exists so
+        # a genuinely empty file can be snapshotted) and CLOBBER the
+        # connection's last-known content snapshot — pairing the
+        # retained ``_last_active_file`` with empty content, so ghost
+        # text completes against an empty active file until the editor
+        # regains focus.
+        if not isinstance(active_file, str):
+            active_file = None
+        if not isinstance(active_content, str):
+            active_content = None
         conn_id = cmd.get("connId", "")
         tab_id = cmd.get("tabId", "")
         with self._state_lock:
@@ -971,7 +1001,13 @@ class _CommandsMixin:
         if not cfg.get("remote_password") and prev_password:
             cfg.pop("remote_password", None)
         save_config(cfg)
-        apply_config_to_env(cfg)
+        # Apply the MERGED on-disk config, not the raw payload: a
+        # partial payload (any client saving a single setting) lacks
+        # ``max_budget``, and applying the payload directly would
+        # silently reset the live budget to DEFAULTS[...] while
+        # config.json (which ``save_config`` merges) still holds the
+        # user's configured value.
+        apply_config_to_env(load_config())
 
         new_work_dir = cfg.get("work_dir", "")
         if new_work_dir:
