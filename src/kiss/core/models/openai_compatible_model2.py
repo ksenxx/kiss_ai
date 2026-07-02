@@ -39,6 +39,7 @@ from kiss.core.models.model import (
 )
 from kiss.core.models.openai_compatible_model import (
     DEEPSEEK_REASONING_MODELS,
+    OpenAICompatibleModel,
     _audio_mime_to_format,
     _extract_deepseek_reasoning,
     _model_thinking_level,
@@ -600,6 +601,101 @@ class OpenAICompatibleModel2(Model):
             # would produce an ``invalid_request_error`` from the
             # Responses API ("content is required" or similar).
             continue
+        return out
+
+    # Item types native to the Responses API ``input`` array (plus the
+    # internal attachment sentinel) that must never be re-converted.
+    _NATIVE_INPUT_ITEM_TYPES = {
+        "function_call",
+        "function_call_output",
+        "reasoning",
+        "item_reference",
+        "_kiss_pending_tool_result_attachment",
+    }
+    # Content-part types accepted by Responses ``message`` items.
+    _NATIVE_INPUT_PART_TYPES = {
+        "input_text",
+        "output_text",
+        "input_image",
+        "input_file",
+        "input_audio",
+        "refusal",
+    }
+
+    @classmethod
+    def _is_native_input_item(cls, item: dict[str, Any]) -> bool:
+        """Return ``True`` when ``item`` is already a valid Responses input item.
+
+        Native items are standalone Responses items (``function_call``,
+        ``function_call_output``, ``reasoning``, ...), messages with plain
+        string content, and messages whose content parts all use Responses
+        part types (``input_text`` / ``output_text`` / ...).  Foreign items
+        — Chat-Completions messages with ``tool_calls`` arrays or
+        ``role="tool"``, Anthropic block lists, Gemini messages with an
+        ``attachments`` field — enter the conversation when it is handed
+        off from another provider's model (e.g. via the Sorcar
+        ``set_model`` tool) and require conversion.
+
+        Args:
+            item: A conversation item dict.
+
+        Returns:
+            ``True`` when the item can be sent to the Responses API as-is.
+        """
+        itype = item.get("type")
+        if itype in cls._NATIVE_INPUT_ITEM_TYPES:
+            return True
+        role = item.get("role")
+        if role is None:
+            # Unknown role-less standalone item; ``_normalize_input``
+            # already knows how to filter/repair these.
+            return True
+        if role == "tool" or item.get("tool_calls") or item.get("attachments"):
+            return False
+        content = item.get("content")
+        if isinstance(content, list):
+            return all(
+                not isinstance(part, dict)
+                or part.get("type") in cls._NATIVE_INPUT_PART_TYPES
+                for part in content
+            )
+        return True
+
+    def _foreign_items_to_native_input(
+        self, conversation: list[Any]
+    ) -> list[Any]:
+        """Convert handed-off foreign conversation items to Responses items.
+
+        When a live conversation is handed off from another provider's
+        model (``new_model.conversation = old_model.conversation``, e.g.
+        via the Sorcar ``set_model`` tool), it contains OpenAI
+        Chat-Completions messages (``tool_calls`` arrays, ``role="tool"``
+        messages, ``text`` / ``image_url`` / ``file`` parts), Anthropic
+        Messages block lists (``tool_use`` / ``tool_result`` / ``thinking``
+        blocks) or Gemini messages (dict tool-call arguments,
+        ``attachments`` fields).  Each foreign item is normalized to
+        Chat-Completions format via
+        :meth:`OpenAICompatibleModel._normalize_message_for_api` and then
+        translated to Responses ``input`` items via
+        :meth:`OpenAICompatibleModel._chat_message_to_responses_items`.
+        Native Responses items pass through unchanged, so the conversion
+        is idempotent.
+
+        Args:
+            conversation: The conversation, possibly containing foreign items.
+
+        Returns:
+            The conversation with every item in Responses input format.
+        """
+        out: list[Any] = []
+        for item in conversation:
+            if not isinstance(item, dict) or self._is_native_input_item(item):
+                out.append(item)
+                continue
+            for chat_msg in OpenAICompatibleModel._normalize_message_for_api(item):
+                out.extend(
+                    OpenAICompatibleModel._chat_message_to_responses_items(chat_msg)
+                )
         return out
 
     @staticmethod
@@ -2233,6 +2329,10 @@ class OpenAICompatibleModel2(Model):
             final ``response`` field of the terminating ``response.completed``
             event when streaming).
         """
+        # Convert any handed-off foreign conversation items (Chat
+        # Completions / Anthropic / Gemini formats) to native Responses
+        # input items before building the request.
+        self.conversation = self._foreign_items_to_native_input(self.conversation)
         kwargs = self._build_request_kwargs(tools=None)
         if self.token_callback is not None:
             kwargs["stream"] = True
@@ -2301,6 +2401,10 @@ class OpenAICompatibleModel2(Model):
         Returns:
             ``(function_calls, content, response)`` matching the v1 contract.
         """
+        # Convert any handed-off foreign conversation items (Chat
+        # Completions / Anthropic / Gemini formats) to native Responses
+        # input items before building the request.
+        self.conversation = self._foreign_items_to_native_input(self.conversation)
         if self._is_deepseek_reasoning_model():
             return self._generate_with_text_based_tools(function_map)
 
@@ -2657,6 +2761,12 @@ class OpenAICompatibleModel2(Model):
                 the same order as the preceding function_call items in
                 the conversation.
         """
+        # Convert any handed-off foreign conversation items (Chat
+        # Completions / Anthropic / Gemini formats) to native Responses
+        # input items so trailing foreign tool calls (e.g. the Sorcar
+        # ``set_model`` call that triggered the handoff) are visible to
+        # the unanswered-function_call scanning below.
+        self.conversation = self._foreign_items_to_native_input(self.conversation)
         # Snapshot pre-call state so we can roll back on a partial
         # error and keep the conversation atomic.  Callers that pass a
         # batch with one mismatched name must not be left with the

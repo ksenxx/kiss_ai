@@ -25,6 +25,7 @@ from kiss.core.models.model import (
     _build_text_based_tools_prompt,
     _parse_text_based_tool_calls,
     parse_binary_attachments,
+    responses_items_to_chat_messages,
 )
 
 logger = logging.getLogger(__name__)
@@ -456,7 +457,8 @@ class OpenAICompatibleModel(Model):
         """Check if this is an OpenRouter Anthropic model (Claude via OpenRouter)."""
         return self.model_name.startswith("openrouter/anthropic/")
 
-    def _normalize_content_blocks(self, content: Any) -> list[dict[str, Any]]:
+    @classmethod
+    def _normalize_content_blocks(cls, content: Any) -> list[dict[str, Any]]:
         """Normalize content blocks to JSON-serializable dicts.
 
         Drops text blocks whose text is empty or whitespace-only, because
@@ -536,6 +538,9 @@ class OpenAICompatibleModel(Model):
         e.g. via the Sorcar ``set_model`` tool — into the OpenAI Chat
         Completions equivalents (``tool_calls`` arrays, ``role="tool"``
         messages) so the API does not reject them with ``invalid_value``.
+        OpenAI Responses-API items (handed off from an
+        :class:`OpenAICompatibleModel2`) are converted first via
+        :func:`responses_items_to_chat_messages`.
 
         Args:
             conversation: The conversation to normalize.
@@ -544,11 +549,12 @@ class OpenAICompatibleModel(Model):
             list[dict[str, Any]]: The normalized conversation.
         """
         normalized: list[dict[str, Any]] = []
-        for msg in conversation:
+        for msg in responses_items_to_chat_messages(conversation):
             normalized.extend(self._normalize_message_for_api(msg))
         return normalized
 
-    def _normalize_message_for_api(self, msg: dict[str, Any]) -> list[dict[str, Any]]:
+    @classmethod
+    def _normalize_message_for_api(cls, msg: dict[str, Any]) -> list[dict[str, Any]]:
         """Normalize a single conversation message into OpenAI-format messages.
 
         A message may expand to zero messages (all content filtered out),
@@ -570,7 +576,7 @@ class OpenAICompatibleModel(Model):
         if attachments:
             # Gemini hand-off: lift the Attachment objects into OpenAI
             # content parts (the API rejects unknown message fields).
-            parts = self._attachments_to_content_parts(attachments)
+            parts = cls._attachments_to_content_parts(attachments)
             prior = msg_copy.get("content")
             if isinstance(prior, str) and prior.strip():
                 parts.append({"type": "text", "text": prior})
@@ -589,7 +595,7 @@ class OpenAICompatibleModel(Model):
         if not isinstance(content, list):
             return [msg_copy] if content is not None or has_tool_calls else []
 
-        blocks = self._normalize_content_blocks(content)
+        blocks = cls._normalize_content_blocks(content)
         tool_results = [b for b in blocks if b.get("type") == "tool_result"]
         tool_uses = [b for b in blocks if b.get("type") == "tool_use"]
         rest = [b for b in blocks if b.get("type") not in ("tool_result", "tool_use")]
@@ -1028,56 +1034,88 @@ class OpenAICompatibleModel(Model):
         """
         items: list[dict[str, Any]] = []
         for msg in self._normalize_conversation_for_api(self.conversation):
-            role = msg.get("role")
-            content = msg.get("content")
-            if role == "tool":
-                output = content if isinstance(content, str) else json.dumps(content)
-                items.append(
-                    {
-                        "type": "function_call_output",
-                        "call_id": msg.get("tool_call_id", ""),
-                        "output": output,
-                    }
-                )
-                continue
             tool_calls = msg.get("tool_calls") or []
-            if role == "assistant" and tool_calls:
+            if msg.get("role") == "assistant" and tool_calls:
                 cached = self._delegate_raw_items.get(tool_calls[0].get("id", ""))
                 if cached is not None:
                     items.extend(cached)
                     continue
-                if isinstance(content, str) and content.strip():
-                    items.append({"role": "assistant", "content": content})
-                for tc in tool_calls:
-                    fn = tc.get("function") or {}
-                    args = fn.get("arguments")
-                    items.append(
-                        {
-                            "type": "function_call",
-                            "call_id": tc.get("id", ""),
-                            "name": fn.get("name", ""),
-                            "arguments": args
-                            if isinstance(args, str)
-                            else json.dumps(args or {}),
-                        }
-                    )
-                continue
-            if isinstance(content, list):
-                if role == "assistant":
-                    text = "".join(
-                        p.get("text", "")
-                        for p in content
-                        if isinstance(p, dict) and p.get("type") == "text"
-                    )
-                    if text.strip():
-                        items.append({"role": "assistant", "content": text})
-                    continue
-                parts = self._chat_parts_to_responses_parts(content)
-                if parts:
-                    items.append({"role": role, "content": parts})
-                continue
+            items.extend(self._chat_message_to_responses_items(msg))
+        return items
+
+    @classmethod
+    def _chat_message_to_responses_items(
+        cls, msg: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Convert one Chat-Completions message to Responses ``input`` items.
+
+        * ``role="tool"`` messages become ``function_call_output`` items.
+        * Assistant messages with ``tool_calls`` become an optional
+          assistant text message plus one ``function_call`` item per call
+          (dict arguments are JSON-encoded).
+        * Content-part lists are mapped to ``input_*`` parts (assistant
+          part lists collapse to their concatenated text).
+
+        Args:
+            msg: A Chat-Completions-format message.
+
+        Returns:
+            Responses-API ``input`` items (possibly empty).
+        """
+        role = msg.get("role")
+        content = msg.get("content")
+        items: list[dict[str, Any]] = []
+        if role == "tool":
+            output = content if isinstance(content, str) else json.dumps(content)
+            return [
+                {
+                    "type": "function_call_output",
+                    "call_id": msg.get("tool_call_id", ""),
+                    "output": output,
+                }
+            ]
+        tool_calls = msg.get("tool_calls") or []
+        if role == "assistant" and tool_calls:
             if isinstance(content, str) and content.strip():
-                items.append({"role": role, "content": content})
+                items.append({"role": "assistant", "content": content})
+            elif isinstance(content, list):
+                text = "".join(
+                    p.get("text", "")
+                    for p in content
+                    if isinstance(p, dict) and p.get("type") == "text"
+                )
+                if text.strip():
+                    items.append({"role": "assistant", "content": text})
+            for tc in tool_calls:
+                fn = tc.get("function") or {}
+                args = fn.get("arguments")
+                items.append(
+                    {
+                        "type": "function_call",
+                        "call_id": tc.get("id", ""),
+                        "name": fn.get("name", ""),
+                        "arguments": args
+                        if isinstance(args, str)
+                        else json.dumps(args or {}),
+                    }
+                )
+            return items
+        if isinstance(content, list):
+            if role == "assistant":
+                text = "".join(
+                    p.get("text", "")
+                    for p in content
+                    if isinstance(p, dict) and p.get("type") == "text"
+                )
+                if text.strip():
+                    items.append({"role": "assistant", "content": text})
+                return items
+            parts = cls._chat_parts_to_responses_parts(content)
+            if parts:
+                items.append({"role": role, "content": parts})
+            return items
+        if isinstance(content, str) and content.strip():
+            items.append({"role": role, "content": content})
         return items
 
     def _generate_with_tools_via_responses(

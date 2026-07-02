@@ -51,6 +51,163 @@ SUPPORTED_MIME_TYPES = {
     "video/quicktime",
 }
 
+# Content-part types produced by the OpenAI Responses API
+# (:class:`OpenAICompatibleModel2` stores its conversation in this shape).
+_RESPONSES_PART_TYPES = {
+    "input_text",
+    "output_text",
+    "input_image",
+    "input_file",
+    "input_audio",
+    "refusal",
+}
+
+
+def _responses_parts_to_chat_parts(parts: list[Any]) -> list[dict[str, Any]]:
+    """Convert Responses-API message content parts to Chat-Completions parts.
+
+    ``input_text`` / ``output_text`` become ``text`` parts, ``refusal``
+    becomes a ``text`` part, ``input_image`` becomes an ``image_url`` part,
+    ``input_file`` becomes a ``file`` part and ``input_audio`` passes
+    through (the shapes match).  Parts already in Chat-Completions shape
+    are passed through unchanged.
+
+    Args:
+        parts: Content parts from a Responses-API message item.
+
+    Returns:
+        Chat-Completions-format content parts.
+    """
+    out: list[dict[str, Any]] = []
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        ptype = part.get("type")
+        if ptype in ("input_text", "output_text"):
+            out.append({"type": "text", "text": str(part.get("text", ""))})
+        elif ptype == "refusal":
+            text = str(part.get("refusal", ""))
+            if text.strip():
+                out.append({"type": "text", "text": text})
+        elif ptype == "input_image":
+            url = part.get("image_url", "")
+            if isinstance(url, str) and url:
+                out.append({"type": "image_url", "image_url": {"url": url}})
+        elif ptype == "input_file":
+            out.append(
+                {
+                    "type": "file",
+                    "file": {
+                        "filename": part.get("filename", "attachment.pdf"),
+                        "file_data": part.get("file_data", ""),
+                    },
+                }
+            )
+        else:
+            # ``input_audio`` has the same shape in both APIs; anything
+            # else is already Chat-Completions-shaped (text / image_url /
+            # file / tool_use / ...) and passes through unchanged.
+            out.append(part)
+    return out
+
+
+def responses_items_to_chat_messages(conversation: list[Any]) -> list[Any]:
+    """Convert OpenAI Responses-API input items to Chat-Completions messages.
+
+    :class:`~kiss.core.models.openai_compatible_model2.OpenAICompatibleModel2`
+    stores its conversation as Responses-API ``input`` items (``message``
+    items with ``input_text`` / ``output_text`` parts, standalone
+    ``function_call`` / ``function_call_output`` / ``reasoning`` items).
+    When such a conversation is handed off to another provider's model
+    (e.g. via the Sorcar ``set_model`` tool, which does
+    ``new_model.conversation = old_model.conversation``), those items must
+    first be translated to the OpenAI Chat Completions format that every
+    other model's normalizer understands:
+
+    * ``function_call`` items become ``tool_calls`` entries merged into the
+      immediately preceding assistant message (or a fresh assistant message
+      when none precedes),
+    * ``function_call_output`` items become ``role="tool"`` messages,
+    * ``reasoning`` items (hidden provider state) are dropped,
+    * ``message`` items keep their role and have their ``input_*`` /
+      ``output_*`` content parts converted to Chat-Completions parts.
+
+    Messages already in Chat-Completions (or another provider's) format are
+    passed through unchanged, so the conversion is safe to apply to any
+    conversation.  Shared message dicts are never mutated (copy-on-write).
+
+    Args:
+        conversation: The conversation, possibly containing Responses items.
+
+    Returns:
+        The conversation with all Responses-API items converted to
+        Chat-Completions format.
+    """
+    out: list[Any] = []
+    for item in conversation:
+        if not isinstance(item, dict):
+            out.append(item)
+            continue
+        itype = item.get("type")
+        role = item.get("role")
+        if itype == "function_call":
+            args = item.get("arguments")
+            tc = {
+                "id": item.get("call_id", ""),
+                "type": "function",
+                "function": {
+                    "name": item.get("name", ""),
+                    "arguments": args if isinstance(args, str) else json.dumps(args or {}),
+                },
+            }
+            prev = out[-1] if out else None
+            if (
+                isinstance(prev, dict)
+                and prev.get("role") == "assistant"
+                and prev.get("tool_call_id") is None
+            ):
+                merged = dict(prev)
+                merged["tool_calls"] = list(prev.get("tool_calls") or []) + [tc]
+                out[-1] = merged
+            else:
+                out.append({"role": "assistant", "content": "", "tool_calls": [tc]})
+            continue
+        if itype == "function_call_output":
+            output = item.get("output", "")
+            out.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": item.get("call_id", ""),
+                    "content": output if isinstance(output, str) else json.dumps(output),
+                }
+            )
+            continue
+        if role is None:
+            # Standalone non-message items (``reasoning``, the internal
+            # ``_kiss_pending_tool_result_attachment`` sentinel, ...) are
+            # hidden provider state with no Chat-Completions equivalent.
+            continue
+        content = item.get("content")
+        if isinstance(content, list) and any(
+            isinstance(p, dict) and p.get("type") in _RESPONSES_PART_TYPES for p in content
+        ):
+            converted: dict[str, Any] = {
+                "role": role,
+                "content": _responses_parts_to_chat_parts(content),
+            }
+            if item.get("tool_calls"):
+                converted["tool_calls"] = item["tool_calls"]
+            out.append(converted)
+            continue
+        if itype == "message":
+            # Responses ``message`` item whose content is already
+            # chat-compatible: keep only the Chat-Completions keys
+            # (``type`` / ``id`` / ``status`` are Responses-only).
+            out.append({"role": role, "content": content})
+            continue
+        out.append(item)
+    return out
+
 
 @dataclasses.dataclass
 class Attachment:
@@ -425,12 +582,36 @@ class Model(ABC):
 
         Searches backwards through the conversation for the most recent
         assistant message containing tool calls and extracts their IDs.
+        Also recognises trailing OpenAI Responses-API ``function_call``
+        items (present when the conversation was handed off from an
+        :class:`~kiss.core.models.openai_compatible_model2.OpenAICompatibleModel2`,
+        e.g. via the Sorcar ``set_model`` tool), skipping any that already
+        received a ``function_call_output``.
 
         Returns:
             list[tuple[str, str]]: A list of (function_name, tool_call_id) tuples,
                 or an empty list if no assistant message with tool calls is found.
         """
+        answered: set[str] = set()
+        native: list[tuple[str, str]] = []
         for msg in reversed(self.conversation):
+            if not isinstance(msg, dict):
+                continue
+            itype = msg.get("type")
+            if itype == "function_call_output":
+                answered.add(str(msg.get("call_id", "")))
+                continue
+            if itype == "function_call":
+                call_id = str(msg.get("call_id", ""))
+                if call_id not in answered:
+                    native.append((str(msg.get("name", "")), call_id))
+                continue
+            if itype == "reasoning":
+                continue
+            if native and msg.get("role") is not None:
+                # The trailing Responses-API ``function_call`` run ended
+                # at this role-bearing message.
+                break
             if msg.get("role") == "assistant":
                 if msg.get("tool_calls"):
                     return [
@@ -446,7 +627,7 @@ class Model(ABC):
                     if ids:
                         return ids
                 break
-        return []
+        return list(reversed(native))
 
     def add_function_results_to_conversation_and_return(
         self, function_results: list[tuple[str, dict[str, Any]]]
