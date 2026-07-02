@@ -844,6 +844,112 @@ class OpenAICompatibleModel2(Model):
         except (TypeError, ValueError):
             return default
 
+    @staticmethod
+    def _commit_final_text(
+        key: tuple[int, int],
+        final_text: str,
+        text_part_buffers: dict[tuple[int, int], str],
+        text_delta_seen: set[tuple[int, int]],
+        allow_suffix: bool = True,
+    ) -> str:
+        """Record an authoritative final text value for a content part.
+
+        Overrides the per-part buffer with ``final_text`` and returns the
+        text (if any) that the caller must append to ``content`` and forward
+        to the token callback: the full value for done-only parts (marking
+        ``key`` as seen so the terminal merge doesn't duplicate it), or —
+        when ``allow_suffix`` — the missing suffix when earlier deltas
+        streamed a strict prefix of the final value.
+        """
+        old_text = text_part_buffers.get(key, "")
+        text_part_buffers[key] = final_text
+        if key not in text_delta_seen and final_text:
+            text_delta_seen.add(key)
+            return final_text
+        if (
+            allow_suffix
+            and key in text_delta_seen
+            and final_text.startswith(old_text)
+        ):
+            return final_text[len(old_text):]
+        return ""
+
+    def _slot_for_argument_event(
+        self,
+        event: Any,
+        tool_calls: dict[int, dict[str, str]],
+        item_to_idx: dict[str, int],
+        args_from_delta: set[int],
+        args_from_added: set[int],
+    ) -> tuple[dict[str, str], int]:
+        """Locate (or create) the tool-call slot for an arguments event.
+
+        Resolves the ``(slot, idx)`` for a ``function_call_arguments.delta``
+        / ``.done`` event: prefers the slot already mapped to the event's
+        ``item_id``, re-keying it via :meth:`_move_tool_slot` when the event
+        carries a real ``output_index`` that differs from the provisional
+        one (the model's real output ordering must win — otherwise parallel
+        tool calls return in the wrong order).  Unknown ``item_id`` values
+        allocate a fresh slot at the event's ``output_index`` (or at the
+        next free position).
+        """
+        item_id = str(getattr(event, "item_id", "") or "")
+        idx_opt = item_to_idx.get(item_id)
+        if idx_opt is None:
+            idx = self._stream_output_index(event, len(tool_calls))
+        elif getattr(event, "output_index", None) is not None:
+            real_idx = self._stream_output_index(event, len(tool_calls))
+            if real_idx != idx_opt:
+                idx = self._move_tool_slot(
+                    tool_calls,
+                    item_to_idx,
+                    args_from_delta,
+                    args_from_added,
+                    item_id,
+                    idx_opt,
+                    real_idx,
+                )
+            else:
+                idx = idx_opt
+        else:
+            idx = idx_opt
+        slot = tool_calls.setdefault(
+            idx, {"id": "", "name": "", "arguments": "", "item_id": ""}
+        )
+        if item_id and not slot.get("item_id"):
+            slot["item_id"] = item_id
+            item_to_idx[item_id] = idx
+        return slot, idx
+
+    @staticmethod
+    def _relocate_slot(
+        tool_calls: dict[int, dict[str, str]],
+        item_to_idx: dict[str, int],
+        args_from_delta: set[int],
+        args_from_added: set[int],
+        from_idx: int,
+    ) -> None:
+        """Move the slot at ``from_idx`` to a fresh index past the maximum.
+
+        Used when a newly-arrived function_call item claims an
+        ``output_index`` already occupied by a DIFFERENT item: the occupant
+        (typically a provisional allocation) is relocated so both parallel
+        tool calls survive.  The occupant's ``item_id`` mapping and
+        marker-set membership follow it to the new index.
+        """
+        free_idx = max(tool_calls) + 1
+        relocated = tool_calls.pop(from_idx)
+        tool_calls[free_idx] = relocated
+        occupant_iid = str(relocated.get("item_id", "") or "")
+        if occupant_iid:
+            item_to_idx[occupant_iid] = free_idx
+        if from_idx in args_from_delta:
+            args_from_delta.discard(from_idx)
+            args_from_delta.add(free_idx)
+        if from_idx in args_from_added:
+            args_from_added.discard(from_idx)
+            args_from_added.add(free_idx)
+
     def _shape_responses_kwargs(
         self,
         *,
@@ -886,28 +992,27 @@ class OpenAICompatibleModel2(Model):
         system_instruction = kwargs.pop("system_instruction", None)
         reasoning_effort = kwargs.pop("reasoning_effort", None)
         kwargs.pop("enable_cache", None)
-        # Chat-Completions-only streaming controls; not part of the
-        # Responses API request shape.  Drop them so v1-compatible
-        # callers can pass the same ``model_config`` to v2.
-        kwargs.pop("stream_options", None)
-        kwargs.pop("stream", None)
-        # ``stop`` is a Chat-Completions-only knob; the Responses API
-        # rejects it.  Some callers retain v1-shaped configs.
-        kwargs.pop("stop", None)
-        # Other Chat-Completions-only / legacy keys that the Responses
-        # API does not accept.  Drop silently so v1-shaped configs keep
-        # working.
-        kwargs.pop("n", None)
-        kwargs.pop("functions", None)
-        kwargs.pop("function_call", None)
-        kwargs.pop("logit_bias", None)
-        kwargs.pop("logprobs", None)
-        kwargs.pop("top_logprobs", None)
-        kwargs.pop("seed", None)
-        kwargs.pop("presence_penalty", None)
-        kwargs.pop("frequency_penalty", None)
-        kwargs.pop("modalities", None)
-        kwargs.pop("audio", None)
+        # Chat-Completions-only / legacy keys that the Responses API does
+        # not accept (streaming controls, sampling knobs, legacy
+        # function-calling fields).  Drop silently so v1-shaped configs
+        # keep working.
+        for key in (
+            "stream_options",
+            "stream",
+            "stop",
+            "n",
+            "functions",
+            "function_call",
+            "logit_bias",
+            "logprobs",
+            "top_logprobs",
+            "seed",
+            "presence_penalty",
+            "frequency_penalty",
+            "modalities",
+            "audio",
+        ):
+            kwargs.pop(key, None)
 
         # max_tokens / max_completion_tokens → max_output_tokens.  The
         # newer ``max_completion_tokens`` takes precedence when both
@@ -1210,18 +1315,13 @@ class OpenAICompatibleModel2(Model):
         Returns:
             The matched index as ``int``; ``0`` when absent or malformed.
         """
-        summary_index = getattr(event, "summary_index", None)
-        if summary_index is not None:
-            try:
-                return int(summary_index)
-            except (TypeError, ValueError):
-                return 0
-        content_index = getattr(event, "content_index", None)
-        if content_index is not None:
-            try:
-                return int(content_index)
-            except (TypeError, ValueError):
-                return 0
+        for attr in ("summary_index", "content_index"):
+            value = getattr(event, attr, None)
+            if value is not None:
+                try:
+                    return int(value)
+                except (TypeError, ValueError):
+                    return 0
         return 0
 
     @staticmethod
@@ -1488,31 +1588,19 @@ class OpenAICompatibleModel2(Model):
                     final_text = str(getattr(event, "text", "") or "")
                 else:
                     final_text = str(getattr(event, "refusal", "") or "")
-                key = (output_index, content_index)
-                old_text = text_part_buffers.get(key, "")
                 # ``.done`` overrides the per-part buffer with the
-                # authoritative final value.
-                text_part_buffers[key] = final_text
-                # Done-only streams: forward the final value to the
+                # authoritative final value; done-only streams forward
+                # the final value (or the delta-to-final suffix) to the
                 # streaming callback so consumers see the tokens.
-                if key not in text_delta_seen and final_text:
-                    content += final_text
-                    self._invoke_token_callback(final_text)
-                    # Mark as seen so the terminal-merge step doesn't
-                    # duplicate the text via ``text_part_buffers``.
-                    text_delta_seen.add(key)
-                elif key in text_delta_seen and final_text.startswith(
-                    old_text
-                ):
-                    # Common case: ``.done`` carries the full final
-                    # text and the earlier deltas were a strict prefix.
-                    # Emit the missing suffix to the streaming callback
-                    # (``content`` is also extended; downstream callers
-                    # see the same final text either way).
-                    suffix = final_text[len(old_text):]
-                    if suffix:
-                        content += suffix
-                        self._invoke_token_callback(suffix)
+                emitted = self._commit_final_text(
+                    (output_index, content_index),
+                    final_text,
+                    text_part_buffers,
+                    text_delta_seen,
+                )
+                if emitted:
+                    content += emitted
+                    self._invoke_token_callback(emitted)
             elif etype == "response.content_part.done":
                 # Some gateways commit the final assistant text/refusal
                 # via ``response.content_part.done`` (no
@@ -1533,20 +1621,15 @@ class OpenAICompatibleModel2(Model):
                 else:
                     final_text = ""
                 if ptype in ("output_text", "refusal"):
-                    key = (output_index, content_index)
-                    old_text = text_part_buffers.get(key, "")
-                    text_part_buffers[key] = final_text
-                    if key not in text_delta_seen and final_text:
-                        content += final_text
-                        self._invoke_token_callback(final_text)
-                        text_delta_seen.add(key)
-                    elif key in text_delta_seen and final_text.startswith(
-                        old_text
-                    ):
-                        suffix = final_text[len(old_text):]
-                        if suffix:
-                            content += suffix
-                            self._invoke_token_callback(suffix)
+                    emitted = self._commit_final_text(
+                        (output_index, content_index),
+                        final_text,
+                        text_part_buffers,
+                        text_delta_seen,
+                    )
+                    if emitted:
+                        content += emitted
+                        self._invoke_token_callback(emitted)
             elif etype == "response.output_item.added":
                 if in_reasoning:
                     in_reasoning = False
@@ -1641,16 +1724,13 @@ class OpenAICompatibleModel2(Model):
                                     occupant.get("item_id", "") or ""
                                 )
                                 if occupant_iid and occupant_iid != item_id:
-                                    free_idx = max(tool_calls) + 1
-                                    relocated = tool_calls.pop(event_idx)
-                                    tool_calls[free_idx] = relocated
-                                    item_to_idx[occupant_iid] = free_idx
-                                    if event_idx in args_from_delta:
-                                        args_from_delta.discard(event_idx)
-                                        args_from_delta.add(free_idx)
-                                    if event_idx in args_from_added:
-                                        args_from_added.discard(event_idx)
-                                        args_from_added.add(free_idx)
+                                    self._relocate_slot(
+                                        tool_calls,
+                                        item_to_idx,
+                                        args_from_delta,
+                                        args_from_added,
+                                        event_idx,
+                                    )
                     slot = tool_calls.setdefault(
                         idx,
                         {"id": "", "name": "", "arguments": "", "item_id": ""},
@@ -1695,46 +1775,9 @@ class OpenAICompatibleModel2(Model):
                 if in_reasoning:
                     in_reasoning = False
                     self._invoke_thinking_callback(False)
-                item_id = str(getattr(event, "item_id", "") or "")
-                idx_opt = item_to_idx.get(item_id)
-                has_real_index = (
-                    getattr(event, "output_index", None) is not None
+                slot, idx = self._slot_for_argument_event(
+                    event, tool_calls, item_to_idx, args_from_delta, args_from_added
                 )
-                if idx_opt is None:
-                    idx = self._stream_output_index(event, len(tool_calls))
-                else:
-                    # Re-key the slot when this event carries the real
-                    # ``output_index`` and it differs from the
-                    # provisional slot allocated by an earlier
-                    # ``output_item.added`` (e.g. ``added`` events
-                    # without ``output_index`` followed by ``delta`` /
-                    # ``done`` events that DO carry it).  The model's
-                    # real output ordering must win — otherwise
-                    # parallel tool calls return in the wrong order.
-                    if has_real_index:
-                        real_idx = self._stream_output_index(
-                            event, len(tool_calls)
-                        )
-                        if real_idx != idx_opt:
-                            idx = self._move_tool_slot(
-                                tool_calls,
-                                item_to_idx,
-                                args_from_delta,
-                                args_from_added,
-                                item_id,
-                                idx_opt,
-                                real_idx,
-                            )
-                        else:
-                            idx = idx_opt
-                    else:
-                        idx = idx_opt
-                slot = tool_calls.setdefault(
-                    idx, {"id": "", "name": "", "arguments": "", "item_id": ""}
-                )
-                if item_id and not slot.get("item_id"):
-                    slot["item_id"] = item_id
-                    item_to_idx[item_id] = idx
                 arg_delta: str = str(getattr(event, "delta", "") or "")
                 # If the full arguments payload already arrived via
                 # ``output_item.added`` and this delta would restart /
@@ -1766,40 +1809,9 @@ class OpenAICompatibleModel2(Model):
                 if in_reasoning:
                     in_reasoning = False
                     self._invoke_thinking_callback(False)
-                item_id = str(getattr(event, "item_id", "") or "")
-                idx_opt = item_to_idx.get(item_id)
-                has_real_index = (
-                    getattr(event, "output_index", None) is not None
+                slot, _idx = self._slot_for_argument_event(
+                    event, tool_calls, item_to_idx, args_from_delta, args_from_added
                 )
-                if idx_opt is None:
-                    idx = self._stream_output_index(event, len(tool_calls))
-                else:
-                    # Re-key on real ``output_index`` (mirrors
-                    # ``arguments.delta`` and ``output_item.done``).
-                    if has_real_index:
-                        real_idx = self._stream_output_index(
-                            event, len(tool_calls)
-                        )
-                        if real_idx != idx_opt:
-                            idx = self._move_tool_slot(
-                                tool_calls,
-                                item_to_idx,
-                                args_from_delta,
-                                args_from_added,
-                                item_id,
-                                idx_opt,
-                                real_idx,
-                            )
-                        else:
-                            idx = idx_opt
-                    else:
-                        idx = idx_opt
-                slot = tool_calls.setdefault(
-                    idx, {"id": "", "name": "", "arguments": "", "item_id": ""}
-                )
-                if item_id and not slot.get("item_id"):
-                    slot["item_id"] = item_id
-                    item_to_idx[item_id] = idx
                 final_args = getattr(event, "arguments", None)
                 if final_args is not None:
                     slot["arguments"] = str(final_args)
@@ -1859,16 +1871,13 @@ class OpenAICompatibleModel2(Model):
                                     and item_id
                                     and occupant_iid != item_id
                                 ):
-                                    free_idx = max(tool_calls) + 1
-                                    relocated = tool_calls.pop(real_idx)
-                                    tool_calls[free_idx] = relocated
-                                    item_to_idx[occupant_iid] = free_idx
-                                    if real_idx in args_from_delta:
-                                        args_from_delta.discard(real_idx)
-                                        args_from_delta.add(free_idx)
-                                    if real_idx in args_from_added:
-                                        args_from_added.discard(real_idx)
-                                        args_from_added.add(free_idx)
+                                    self._relocate_slot(
+                                        tool_calls,
+                                        item_to_idx,
+                                        args_from_delta,
+                                        args_from_added,
+                                        real_idx,
+                                    )
                     slot = tool_calls.setdefault(
                         idx, {"id": "", "name": "", "arguments": "", "item_id": ""}
                     )
@@ -1909,12 +1918,16 @@ class OpenAICompatibleModel2(Model):
                             final_text = str(getattr(part, "refusal", "") or "")
                         else:
                             continue
-                        key = (output_index, content_index)
-                        text_part_buffers[key] = final_text
-                        if key not in text_delta_seen and final_text:
-                            content += final_text
-                            self._invoke_token_callback(final_text)
-                            text_delta_seen.add(key)
+                        emitted = self._commit_final_text(
+                            (output_index, content_index),
+                            final_text,
+                            text_part_buffers,
+                            text_delta_seen,
+                            allow_suffix=False,
+                        )
+                        if emitted:
+                            content += emitted
+                            self._invoke_token_callback(emitted)
             elif etype in ("response.failed", "error"):
                 # Surface server-side failures to the caller. Close any
                 # open thinking-callback bracket first so listeners see a

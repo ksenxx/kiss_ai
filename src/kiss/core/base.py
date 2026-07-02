@@ -150,10 +150,8 @@ class Base:
 
         The file is saved to {artifact_dir}/trajectories/trajectory_{name}_{id}_{timestamp}.yaml
         """
-        folder_path = Path(config_module.artifact_dir) / "trajectories"
-        folder_path.mkdir(parents=True, exist_ok=True)
-        name_safe = self.name.replace(" ", "_").replace("/", "_")
-        filename = folder_path / f"trajectory_{name_safe}_{self.id}_{self.run_start_timestamp}.yaml"
+        filename = self.get_trajectory_path()
+        filename.parent.mkdir(parents=True, exist_ok=True)
         with filename.open("w", encoding="utf-8") as f:
             yaml.dump(self._build_state_dict(), f, indent=2)
 

@@ -128,6 +128,22 @@ def _parse_int(value: Any) -> int | None:
         return None
 
 
+def _opt_str(value: Any) -> str | None:
+    """Return *value* when it is a non-empty string, else ``None``.
+
+    Used to validate frontend-supplied ids (e.g. ``taskId``) so
+    malformed payloads are ignored instead of raising out of a
+    command handler.
+
+    Args:
+        value: Arbitrary value taken from a client command dict.
+
+    Returns:
+        The non-empty string, or ``None`` otherwise.
+    """
+    return value if isinstance(value, str) and value else None
+
+
 class _CommandsMixin:
     """Methods that implement frontend command handlers."""
 
@@ -439,12 +455,7 @@ class _CommandsMixin:
 
     def _cmd_delete_task(self, cmd: dict[str, Any]) -> None:
         """Delete a task from the database and refresh history."""
-        raw_task_id = cmd.get("taskId")
-        task_id = (
-            raw_task_id
-            if isinstance(raw_task_id, str) and raw_task_id
-            else None
-        )
+        task_id = _opt_str(cmd.get("taskId"))
         if task_id is not None:
             self._handle_delete_task(task_id)
 
@@ -456,12 +467,7 @@ class _CommandsMixin:
 
     def _cmd_set_favorite(self, cmd: dict[str, Any]) -> None:
         """Persist the favourite flag on a task history row."""
-        raw_task_id = cmd.get("taskId")
-        task_id = (
-            raw_task_id
-            if isinstance(raw_task_id, str) and raw_task_id
-            else None
-        )
+        task_id = _opt_str(cmd.get("taskId"))
         if task_id is None:
             return
         is_favorite = bool(cmd.get("isFavorite", False))
@@ -732,12 +738,7 @@ class _CommandsMixin:
         """
         raw_id = cmd.get("chatId")
         chat_id = str(raw_id) if raw_id else ""
-        raw_task_id = cmd.get("taskId")
-        task_id = (
-            raw_task_id
-            if isinstance(raw_task_id, str) and raw_task_id
-            else None
-        )
+        task_id = _opt_str(cmd.get("taskId"))
         if chat_id or task_id is not None:
             self._replay_session(
                 chat_id, cmd.get("tabId", ""), task_id=task_id,
@@ -874,12 +875,7 @@ class _CommandsMixin:
             chat_id = adj_tab.chat_id if adj_tab is not None else ""
             if not chat_id:
                 chat_id = self._tab_chat_views.get(tab_id, "")
-        raw_task_id = cmd.get("taskId")
-        task_id = (
-            raw_task_id
-            if isinstance(raw_task_id, str) and raw_task_id
-            else None
-        )
+        task_id = _opt_str(cmd.get("taskId"))
         self._get_adjacent_task(
             chat_id,
             task_id,

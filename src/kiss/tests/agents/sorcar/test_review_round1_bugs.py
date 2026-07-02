@@ -273,28 +273,24 @@ def test_persist_bug14_history_dict_exposes_typed_columns(
 def test_vs_bug1_replay_uses_str_parent_task_id() -> None:
     """The ``parent_tid`` extraction in ``_replay_session`` must accept str.
 
-    Reproduces by importing the source and reading the isinstance check.
     Before the fix: ``isinstance(parent_tid_raw, int)`` — always False
-    for the str UUID round-trip.  After: ``isinstance(parent_tid_raw,
-    str) and parent_tid_raw``.
+    for the str UUID round-trip.  The coercion is now centralised in
+    ``_coerce_id``: str UUIDs pass through unchanged (the primary,
+    post-refactor canonical contract) and the r3-vscode-H2 int
+    fallback stringifies legacy ids rather than replacing the str path.
     """
+    from kiss.agents.vscode.server import _coerce_id
+
     src = Path(
         "src/kiss/agents/vscode/server.py"
     ).read_text()
-    # The primary check must be the str-path (the post-refactor
-    # canonical contract).  A subsequent ``elif isinstance(parent_tid_raw,
-    # int)`` was added by r3-vscode-H2 as a SECONDARY fallback for
-    # legacy DBs that escaped migration; verify it follows the str
-    # branch rather than replacing it.
-    assert "isinstance(parent_tid_raw, str) and parent_tid_raw" in src
-    str_idx = src.find("isinstance(parent_tid_raw, str) and parent_tid_raw")
-    int_idx = src.find("isinstance(parent_tid_raw, int)")
-    if int_idx != -1:
-        assert int_idx > str_idx, (
-            "Int fallback for legacy parent_task_id must come AFTER the "
-            "primary str check"
-        )
-    assert "parent_tid: str | None" in src
+    assert (
+        'parent_tid = _coerce_id(subagent_info.get("parent_task_id"))' in src
+    )
+    assert _coerce_id("deadbeef" * 4) == "deadbeef" * 4
+    assert _coerce_id(5) == "5"
+    assert _coerce_id("") is None
+    assert _coerce_id([5]) is None
 
 
 # ---------------------------------------------------------------------------
@@ -328,21 +324,25 @@ def test_vs_bug2_shutdown_helper_accepts_uuid_strings() -> None:
 def test_vs_bug3_commands_reject_non_string_taskid() -> None:
     """A non-string ``taskId`` payload must be dropped before SQL.
 
-    Drives the regression by reading the source; the previous pattern
-    ``str(raw_task_id) if raw_task_id else None`` accepted dicts and
-    lists and stringified them.
+    The previous pattern ``str(raw_task_id) if raw_task_id else None``
+    accepted dicts and lists and stringified them.  All four relevant
+    handlers now validate through the shared ``_opt_str`` guard, which
+    rejects every non-string payload.
     """
+    from kiss.agents.vscode.commands import _opt_str
+
     src = Path(
         "src/kiss/agents/vscode/commands.py"
     ).read_text()
-    # The old falsy-trap should be gone in the four relevant handlers.
-    # All four use the new ``isinstance(raw_task_id, str)`` guard.
-    occurrences = src.count(
-        "raw_task_id\n            if isinstance(raw_task_id, str) and raw_task_id"
-    )
+    occurrences = src.count('task_id = _opt_str(cmd.get("taskId"))')
     assert occurrences == 4, (
         f"expected 4 hardened taskId guards, found {occurrences}"
     )
+    assert _opt_str({"a": 1}) is None
+    assert _opt_str([1]) is None
+    assert _opt_str(7) is None
+    assert _opt_str("") is None
+    assert _opt_str("tid") == "tid"
 
 
 # ---------------------------------------------------------------------------
