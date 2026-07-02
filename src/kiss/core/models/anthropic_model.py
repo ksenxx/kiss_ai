@@ -5,6 +5,8 @@
 
 """Anthropic model implementation for Claude models."""
 
+import base64
+import json
 import logging
 from collections.abc import Callable
 from typing import Any
@@ -53,6 +55,147 @@ def _uses_adaptive_thinking(model_name: str) -> bool:
     except ValueError:
         return False
     return minor >= 6
+
+
+_AUDIO_FORMAT_TO_MIME: dict[str, str] = {
+    "mp3": "audio/mpeg",
+    "wav": "audio/wav",
+    "ogg": "audio/ogg",
+    "webm": "audio/webm",
+    "flac": "audio/flac",
+    "aac": "audio/aac",
+    "mp4": "audio/mp4",
+}
+
+
+def _parse_data_url(url: str) -> tuple[str, str] | None:
+    """Split a base64 data URL into its media type and base64 payload.
+
+    Args:
+        url: A URL that may be a ``data:<media_type>;base64,<data>`` URL.
+
+    Returns:
+        A ``(media_type, base64_data)`` tuple, or ``None`` when *url* is not
+        a base64 data URL.
+    """
+    if not url.startswith("data:"):
+        return None
+    header, _, data = url.partition(",")
+    if ";base64" not in header or not data:
+        return None
+    media_type = header[len("data:"):].split(";", 1)[0]
+    return media_type or "application/octet-stream", data
+
+
+def _openai_part_to_anthropic_block(part: dict[str, Any]) -> dict[str, Any] | None:
+    """Convert an OpenAI content part to the equivalent Anthropic block.
+
+    OpenAI Chat Completions content parts (``image_url`` / ``file`` /
+    ``input_audio``) enter the conversation when it is handed off from an
+    OpenAI-schema model (e.g. via the Sorcar ``set_model`` tool).  The
+    Anthropic Messages API instead expects ``image`` / ``document`` blocks;
+    audio has no Anthropic equivalent and is transcribed via Whisper when
+    possible.
+
+    Args:
+        part: The OpenAI content-part dict.
+
+    Returns:
+        The equivalent Anthropic block dict, or ``None`` when the part
+        cannot be represented (in which case it is dropped with a warning).
+    """
+    part_type = part.get("type")
+    if part_type == "image_url":
+        url = (part.get("image_url") or {}).get("url", "")
+        parsed = _parse_data_url(url)
+        if parsed is not None:
+            media_type, data = parsed
+            return {
+                "type": "image",
+                "source": {"type": "base64", "media_type": media_type, "data": data},
+            }
+        if url:
+            return {"type": "image", "source": {"type": "url", "url": url}}
+        logger.warning("Dropping unconvertible OpenAI image_url part.")
+        return None
+    if part_type == "file":
+        file_data = (part.get("file") or {}).get("file_data", "")
+        parsed = _parse_data_url(file_data)
+        if parsed is not None:
+            media_type, data = parsed
+            return {
+                "type": "document",
+                "source": {"type": "base64", "media_type": media_type, "data": data},
+            }
+        logger.warning("Dropping unconvertible OpenAI file part.")
+        return None
+    if part_type == "input_audio":
+        audio = part.get("input_audio") or {}
+        fmt = audio.get("format", "")
+        mime_type = _AUDIO_FORMAT_TO_MIME.get(fmt, f"audio/{fmt}" if fmt else "audio/mpeg")
+        try:
+            text = transcribe_audio(base64.b64decode(audio.get("data", "")), mime_type)
+            return {"type": "text", "text": f"[Audio transcription]\n{text}"}
+        except Exception:
+            logger.warning(
+                "Anthropic does not support input_audio content parts and "
+                "automatic transcription failed; dropping.",
+            )
+            return None
+    logger.warning("Dropping unconvertible OpenAI %s content part.", part_type)
+    return None
+
+
+def _tool_calls_to_tool_use_blocks(tool_calls: list[Any]) -> list[dict[str, Any]]:
+    """Convert OpenAI ``tool_calls`` entries into Anthropic ``tool_use`` blocks.
+
+    Args:
+        tool_calls: The ``tool_calls`` list of an OpenAI-format assistant
+            message (dicts or SDK objects with ``id`` / ``function`` attrs).
+
+    Returns:
+        The equivalent list of Anthropic ``tool_use`` block dicts.
+    """
+    blocks: list[dict[str, Any]] = []
+    for tc in tool_calls:
+        if isinstance(tc, dict):
+            fn = tc.get("function") or {}
+            call_id = tc.get("id", "")
+            name = fn.get("name", "")
+            arguments = fn.get("arguments", "")
+        else:
+            fn = getattr(tc, "function", None)
+            call_id = getattr(tc, "id", "")
+            name = getattr(fn, "name", "") if fn is not None else ""
+            arguments = getattr(fn, "arguments", "") if fn is not None else ""
+        if isinstance(arguments, str):
+            try:
+                input_dict = json.loads(arguments) if arguments.strip() else {}
+            except json.JSONDecodeError:
+                logger.debug("Exception caught", exc_info=True)
+                input_dict = {}
+        else:
+            input_dict = arguments or {}
+        if not isinstance(input_dict, dict):
+            input_dict = {}
+        blocks.append(
+            {"type": "tool_use", "id": call_id, "name": name, "input": input_dict}
+        )
+    return blocks
+
+
+def _content_as_block_list(content: Any) -> list[dict[str, Any]]:
+    """Return message content as a list of Anthropic content blocks.
+
+    Args:
+        content: A message ``content`` value (string or block list).
+
+    Returns:
+        The content as a block list, wrapping strings in a text block.
+    """
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+    return list(content)
 
 
 class AnthropicModel(Model):
@@ -151,8 +294,14 @@ class AnthropicModel(Model):
             return blocks
         for block in content:
             if isinstance(block, dict):
+                dict_block_type = block.get("type")
                 # Drop pre-existing whitespace-only text dicts too.
-                if block.get("type") == "text" and not block.get("text", "").strip():
+                if dict_block_type == "text" and not block.get("text", "").strip():
+                    continue
+                if dict_block_type in ("image_url", "file", "input_audio"):
+                    converted = _openai_part_to_anthropic_block(block)
+                    if converted is not None:
+                        blocks.append(converted)
                     continue
                 blocks.append(block)
                 continue
@@ -234,7 +383,16 @@ class AnthropicModel(Model):
         """Normalize all messages in a conversation before sending to the API.
 
         Ensures that all text content blocks are non-whitespace and that no
-        messages contain only whitespace-only text blocks.
+        messages contain only whitespace-only text blocks.  Also converts
+        OpenAI Chat Completions-format entries (assistant ``tool_calls``
+        arrays, ``role="tool"`` messages, ``image_url`` / ``file`` /
+        ``input_audio`` content parts) — which enter the conversation when it
+        is handed off from an OpenAI-schema model, e.g. via the Sorcar
+        ``set_model`` tool — into the Anthropic Messages equivalents
+        (``tool_use`` / ``tool_result`` / ``image`` / ``document`` blocks) so
+        the API does not reject them.  Consecutive user turns are merged so
+        that ``tool_result`` blocks land in the message immediately following
+        their ``tool_use`` turn, as the Anthropic API requires.
 
         Args:
             conversation: The conversation to normalize.
@@ -244,23 +402,88 @@ class AnthropicModel(Model):
         """
         normalized: list[dict[str, Any]] = []
         for msg in conversation:
-            msg_copy = msg.copy()
-            content = msg_copy.get("content")
+            for converted in self._normalize_message_for_api(msg):
+                prev = normalized[-1] if normalized else None
+                if (
+                    prev is not None
+                    and prev.get("role") == "user"
+                    and converted.get("role") == "user"
+                ):
+                    prev["content"] = _content_as_block_list(
+                        prev["content"]
+                    ) + _content_as_block_list(converted["content"])
+                else:
+                    normalized.append(converted)
+        return normalized
 
-            # If content is a string, ensure it's non-whitespace
+    def _normalize_message_for_api(self, msg: dict[str, Any]) -> list[dict[str, Any]]:
+        """Normalize a single message into Anthropic Messages-format messages.
+
+        A message may expand to zero messages (all content filtered out) or
+        one message.  OpenAI Chat Completions-format entries — which enter
+        the conversation when it is handed off from an OpenAI-schema model,
+        e.g. via the Sorcar ``set_model`` tool — are converted to their
+        Anthropic equivalents:
+
+        * ``role="system"`` messages are dropped here;
+          ``_build_create_kwargs`` hoists their text into the top-level
+          ``system`` parameter (the Messages API rejects the "system" role).
+        * ``role="tool"`` messages become user messages carrying a
+          ``tool_result`` block.
+        * assistant messages with ``tool_calls`` become assistant messages
+          whose content is text + ``tool_use`` blocks.
+
+        Args:
+            msg: The conversation message to normalize.
+
+        Returns:
+            list[dict[str, Any]]: Anthropic Messages-format messages.
+        """
+        role = msg.get("role")
+        if role == "system":
+            return []
+        if role == "tool":
+            block: dict[str, Any] = {
+                "type": "tool_result",
+                "tool_use_id": msg.get("tool_call_id", ""),
+            }
+            content = msg.get("content")
+            if isinstance(content, list):
+                nested = self._normalize_content_blocks(content)
+                if nested:
+                    block["content"] = nested
+            elif content is not None and str(content).strip():
+                block["content"] = str(content)
+            return [{"role": "user", "content": [block]}]
+
+        msg_copy = msg.copy()
+        content = msg_copy.get("content")
+        tool_calls = msg_copy.pop("tool_calls", None)
+        if tool_calls:
+            blocks: list[dict[str, Any]] = []
             if isinstance(content, str):
                 if content.strip():
-                    normalized.append(msg_copy)
-                # Skip messages with whitespace-only string content
-            # If content is a list of blocks, normalize them
+                    blocks.append({"type": "text", "text": content})
             elif isinstance(content, list):
-                normalized_blocks = self._normalize_content_blocks(content)
-                if normalized_blocks:
-                    msg_copy["content"] = normalized_blocks
-                    normalized.append(msg_copy)
-                # Skip messages where all blocks were dropped
+                blocks.extend(self._normalize_content_blocks(content))
+            blocks.extend(_tool_calls_to_tool_use_blocks(tool_calls))
+            return [{"role": msg_copy.get("role", "assistant"), "content": blocks}]
 
-        return normalized
+        # If content is a string, ensure it's non-whitespace
+        if isinstance(content, str):
+            if content.strip():
+                return [msg_copy]
+            # Skip messages with whitespace-only string content
+            return []
+        # If content is a list of blocks, normalize them
+        if isinstance(content, list):
+            normalized_blocks = self._normalize_content_blocks(content)
+            if normalized_blocks:
+                msg_copy["content"] = normalized_blocks
+                return [msg_copy]
+            # Skip messages where all blocks were dropped
+            return []
+        return []
 
     def _build_create_kwargs(self, tools: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         """Build keyword arguments for the Anthropic API create call.
@@ -274,6 +497,26 @@ class AnthropicModel(Model):
         kwargs = self.model_config.copy()
         enable_cache = kwargs.pop("enable_cache", True)
         system_instruction = kwargs.pop("system_instruction", None)
+
+        # Hoist OpenAI-style ``role="system"`` messages (present when the
+        # conversation was handed off from an OpenAI-schema model, e.g. via
+        # the Sorcar ``set_model`` tool) into the top-level ``system``
+        # parameter; the Anthropic Messages API rejects the "system" role.
+        system_texts: list[str] = [system_instruction] if system_instruction else []
+        for msg in self.conversation:
+            if msg.get("role") != "system":
+                continue
+            content = msg.get("content")
+            if isinstance(content, list):
+                content = "".join(
+                    p.get("text", "")
+                    for p in content
+                    if isinstance(p, dict) and p.get("type") == "text"
+                )
+            if isinstance(content, str) and content.strip() and content not in system_texts:
+                system_texts.append(content)
+        if system_texts:
+            system_instruction = "\n\n".join(system_texts)
 
         max_tokens = kwargs.pop("max_tokens", None)
         if max_tokens is None:

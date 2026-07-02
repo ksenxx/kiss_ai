@@ -496,10 +496,14 @@ class SorcarAgent(RelentlessAgent):
             # OpenAI-style messages (``role`` / ``content`` dicts plus
             # tool_call entries); AnthropicModel stores Anthropic
             # Messages-format block lists (``thinking`` / ``tool_use``
-            # / ``tool_result``), which ``OpenAICompatibleModel``
-            # converts to OpenAI format at request time (see
-            # ``_normalize_conversation_for_api``), so a direct
-            # hand-off is safe.
+            # / ``tool_result``).  A direct hand-off is safe in both
+            # directions because each side converts the foreign format
+            # at request time (see ``_normalize_conversation_for_api``):
+            # ``OpenAICompatibleModel`` translates Anthropic block lists
+            # to OpenAI format, and ``AnthropicModel`` translates OpenAI
+            # ``tool_calls`` / ``role="tool"`` / ``role="system"``
+            # messages to Anthropic blocks (system text is hoisted into
+            # the top-level ``system`` parameter).
             new_model.conversation = old_model.conversation
             new_model.usage_info_for_messages = old_model.usage_info_for_messages
 
