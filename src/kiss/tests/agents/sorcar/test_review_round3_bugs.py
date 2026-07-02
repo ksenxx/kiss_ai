@@ -420,12 +420,17 @@ def test_task_runner_rejects_non_string_task_id() -> None:
 
 
 def test_server_accepts_legacy_int_parent_task_id() -> None:
+    from kiss.agents.vscode.server import _coerce_id
+
     src = Path(
         "src/kiss/agents/vscode/server.py"
     ).read_text()
-    # Both branches present at the _replay_session subagent_info site:
-    # primary str check + secondary int fallback.
-    assert "isinstance(parent_tid_raw, str) and parent_tid_raw" in src
-    assert "isinstance(parent_tid_raw, int)" in src
-    # _get_history extra_obj path also accepts int fallback.
-    assert "isinstance(pid, int) and pid" in src
+    # Both the _replay_session subagent_info site and the _get_history
+    # extra_obj path coerce through the shared ``_coerce_id`` helper,
+    # which accepts the primary str shape AND the legacy int fallback.
+    assert (
+        'parent_tid = _coerce_id(subagent_info.get("parent_task_id"))' in src
+    )
+    assert 'pid = _coerce_id(sub.get("parent_task_id"))' in src
+    assert _coerce_id("a" * 32) == "a" * 32
+    assert _coerce_id(99) == "99"

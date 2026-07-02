@@ -60,6 +60,25 @@ def _add_model_arguments(parser: ArgumentParser, model: type[BaseModel], prefix:
             parser.add_argument(*names, type=arg_type, dest=dest_name, default=None, help=help_text)
 
 
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """Recursively merge *override* into a copy of *base*."""
+    result = base.copy()
+    for k, v in override.items():
+        if k in result and isinstance(result[k], dict) and isinstance(v, dict):
+            result[k] = _deep_merge(cast(dict[str, Any], result[k]), cast(dict[str, Any], v))
+        else:
+            result[k] = v
+    return result
+
+
+def _parse_cli_overrides(model_type: type[BaseModel]) -> dict[str, Any]:
+    """Parse known CLI arguments for *model_type* into a nested override dict."""
+    parser = ArgumentParser(description="KISS Configuration")
+    _add_model_arguments(parser, model_type)
+    parsed_args, _ = parser.parse_known_args()
+    return _flat_to_nested_dict(vars(parsed_args), model_type)
+
+
 def _flat_to_nested_dict(
     flat: dict[str, Any], model: type[BaseModel], prefix: str = ""
 ) -> dict[str, Any]:
@@ -105,27 +124,11 @@ def build_config() -> None:
     made available on the command line.
     """
     current_type = type(config_module.DEFAULT_CONFIG)
-
-    parser = ArgumentParser(description="KISS Configuration")
-    _add_model_arguments(parser, current_type)
-    parsed_args, _ = parser.parse_known_args()
-
-    overrides = _flat_to_nested_dict(vars(parsed_args), current_type)
-
+    overrides = _parse_cli_overrides(current_type)
     if overrides:
         defaults = config_module.DEFAULT_CONFIG.model_dump()
-
-        def merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
-            result = base.copy()
-            for k, v in override.items():
-                if k in result and isinstance(result[k], dict) and isinstance(v, dict):
-                    result[k] = merge(cast(dict[str, Any], result[k]), cast(dict[str, Any], v))
-                else:
-                    result[k] = v
-            return result
-
         config_module.DEFAULT_CONFIG = current_type.model_validate(
-            merge(defaults, overrides)
+            _deep_merge(defaults, overrides)
         )
 
 
@@ -180,25 +183,10 @@ def add_config(name: str, config_class: type[BaseModel]) -> None:
         {"model_config": SettingsConfigDict(extra="ignore")},
     )
 
-    parser = ArgumentParser(description="KISS Config Builder")
-    _add_model_arguments(parser, dynamic_config)
-    parsed_args, _ = parser.parse_known_args()
-
-    overrides = _flat_to_nested_dict(vars(parsed_args), dynamic_config)
-
+    overrides = _parse_cli_overrides(dynamic_config)
     if overrides:
         defaults = dynamic_config().model_dump()
-
-        def merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
-            result = base.copy()
-            for k, v in override.items():
-                if k in result and isinstance(result[k], dict) and isinstance(v, dict):
-                    result[k] = merge(cast(dict[str, Any], result[k]), cast(dict[str, Any], v))
-                else:
-                    result[k] = v
-            return result
-
-        config_instance = dynamic_config.model_validate(merge(defaults, overrides))  # type: ignore[attr-defined]
+        config_instance = dynamic_config.model_validate(_deep_merge(defaults, overrides))  # type: ignore[attr-defined]
     else:
         config_instance = dynamic_config()
 
