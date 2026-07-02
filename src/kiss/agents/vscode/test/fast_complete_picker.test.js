@@ -601,6 +601,76 @@ function testEmptyCompletionsDoesNotClobberAtMentionPicker() {
   );
 }
 
+// 27. REGRESSION — existing text erased on accept.  ``identifier``
+//    completions carry only the raw identifier (the backend completes
+//    the *trailing token* of the query, not the whole input), so
+//    accepting one must preserve everything the user already typed
+//    before that token.  The buggy accept path did
+//    ``inp.value = item.text`` and wiped the head of the input.
+function testIdentifierAcceptPreservesExistingText() {
+  const {win} = makeWebview();
+  const inp = setInput(win, 'please fix the bug in parse_arg');
+  send(win, {
+    type: 'completions',
+    completions: [{type: 'identifier', text: 'parse_arguments'}],
+    query: 'please fix the bug in parse_arg',
+  });
+  const ev = new win.KeyboardEvent('keydown', {
+    key: 'Tab',
+    bubbles: true,
+    cancelable: true,
+  });
+  inp.dispatchEvent(ev);
+  assert.strictEqual(
+    inp.value,
+    'please fix the bug in parse_arguments ',
+    'accepting an identifier completion must keep the existing text',
+  );
+}
+
+// 28. REGRESSION — same for ``trick`` completions: the backend
+//    matches the *current sentence's* leading partial, so accepting
+//    a trick must preserve every earlier sentence in the input.
+function testTrickAcceptPreservesEarlierSentences() {
+  const {win} = makeWebview();
+  const inp = setInput(win, 'Fix the crash. Then rep');
+  send(win, {
+    type: 'completions',
+    completions: [
+      {
+        type: 'trick',
+        text: 'Then reproduce the issue by writing an end-to-end test',
+      },
+    ],
+    query: 'Fix the crash. Then rep',
+  });
+  items(win)[0].click();
+  assert.strictEqual(
+    inp.value,
+    'Fix the crash. Then reproduce the issue by writing an ' +
+      'end-to-end test ',
+    'accepting a trick completion must keep earlier sentences',
+  );
+}
+
+// 29. REGRESSION — click-accepting an identifier completion (mouse
+//    path, not Tab) must also preserve the existing text.
+function testIdentifierClickAcceptPreservesExistingText() {
+  const {win} = makeWebview();
+  const inp = setInput(win, 'rename self.old_na');
+  send(win, {
+    type: 'completions',
+    completions: [{type: 'identifier', text: 'self.old_name'}],
+    query: 'rename self.old_na',
+  });
+  items(win)[0].click();
+  assert.strictEqual(
+    inp.value,
+    'rename self.old_name ',
+    'click-accepting an identifier completion must keep the existing text',
+  );
+}
+
 // 26. Tab inside the picker must call preventDefault so the chat
 //    is not submitted (which Tab + Enter shares with the inline
 //    ghost-accept path).
@@ -646,6 +716,9 @@ const tests = [
   testCompletionsFooterContents,
   testCompletionsHighlightsPrefix,
   testEmptyCompletionsDoesNotClobberAtMentionPicker,
+  testIdentifierAcceptPreservesExistingText,
+  testTrickAcceptPreservesEarlierSentences,
+  testIdentifierClickAcceptPreservesExistingText,
   testTabInPickerPreventsDefault,
 ];
 
