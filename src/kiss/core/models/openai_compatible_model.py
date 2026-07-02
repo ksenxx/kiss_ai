@@ -11,7 +11,7 @@ import re
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from openai import OpenAI
+from openai import BadRequestError, OpenAI
 
 if TYPE_CHECKING:  # pragma: no cover – import cycle avoided at runtime
     from kiss.core.models.openai_compatible_model2 import OpenAICompatibleModel2
@@ -116,14 +116,15 @@ DEEPSEEK_REASONING_MODELS = {
     "deepseek-ai/DeepSeek-R1-Distill-Llama-70B",
 }
 
-# Non-OpenAI Chat Completions hosts verified (live) to accept ``tools`` +
-# ``reasoning_effort`` on the same request, so the effort must NOT be
-# stripped from tool-bearing requests to them.  OpenRouter additionally
-# accepts ``"xhigh"`` and translates the effort per provider; Together
-# accepts ``low``/``medium``/``high`` (non-reasoning models ignore it
-# harmlessly).  api.openai.com is absent because it is handled earlier by
-# the ``/v1/responses`` delegation path.
-_TOOL_REASONING_EFFORT_HOSTS = ("openrouter.ai", "api.together.xyz")
+# Per-process cache of live verdicts on whether an endpoint accepts
+# ``tools`` + ``reasoning_effort`` on the same Chat Completions request,
+# keyed by ``base_url``.  Only consulted for endpoints whose capability is
+# not declared in ``model_info.OPENAI_COMPATIBLE_PROVIDERS`` (custom
+# gateways, or registered vendors declared ``None`` = unverified): the
+# first tool-bearing request keeps the effort optimistically and the
+# vendor's actual response records the verdict here (adaptive probe), so
+# future vendors work correctly without a manual host allowlist patch.
+_ADAPTIVE_TOOL_EFFORT_VERDICTS: dict[str, bool] = {}
 
 
 _AUDIO_MIME_TO_FORMAT: dict[str, str] = {
@@ -877,26 +878,28 @@ class OpenAICompatibleModel(Model):
         )
         self._apply_cache_control_for_openrouter_anthropic(kwargs)
 
-        # OpenRouter's Chat Completions accepts ``tools`` +
-        # ``reasoning_effort`` (including ``"xhigh"``) and translates the
-        # effort per provider, and Together's Chat Completions likewise
-        # accepts the combination (verified live: 200 with a real tool
-        # call for ``low``/``medium``/``high``; non-reasoning models
-        # ignore it harmlessly), so the effort is preserved for both.
-        # Other non-OpenAI endpoints (custom gateways, ...) keep the
-        # pragmatic fallback: strip ``reasoning_effort`` from tool-bearing
-        # requests since Chat Completions rejects the combination for
-        # reasoning models; the no-tools ``generate()`` path still keeps
-        # the high-reasoning default.
-        preserves_effort = any(
-            host in self.base_url for host in _TOOL_REASONING_EFFORT_HOSTS
-        )
-        if tools and "reasoning_effort" in kwargs and not preserves_effort:
+        # Whether ``tools`` + ``reasoning_effort`` survive on the same Chat
+        # Completions request is a per-vendor capability declared in
+        # ``model_info.OPENAI_COMPATIBLE_PROVIDERS`` (e.g. OpenRouter and
+        # Together accept the combination — verified live; api.openai.com
+        # rejects it, hence the Responses delegation above).  Endpoints
+        # with an unknown capability (custom gateways, or vendors declared
+        # ``None``) keep the effort optimistically —
+        # ``_create_chat_completion_adaptive`` learns the verdict from the
+        # vendor's actual response and caches it per endpoint, so no
+        # manual allowlist patch is needed for future vendors.  The
+        # no-tools ``generate()`` path always keeps the effort.
+        if (
+            tools
+            and "reasoning_effort" in kwargs
+            and self._tools_reasoning_effort_capability() is False
+        ):
             dropped = kwargs.pop("reasoning_effort")
             logger.debug(
-                "Dropping reasoning_effort=%r because tools are attached "
-                "(chat.completions rejects this combo for reasoning models).",
+                "Dropping reasoning_effort=%r because tools are attached and "
+                "endpoint %s is known to reject the combination.",
                 dropped,
+                self.base_url,
             )
 
         if self.token_callback is not None:  # pragma: no cover – API streaming
@@ -907,7 +910,7 @@ class OpenAICompatibleModel(Model):
             response = None
             last_chunk = None
             in_reasoning = False
-            for chunk in self.client.chat.completions.create(**kwargs):
+            for chunk in self._create_chat_completion_adaptive(kwargs):
                 last_chunk = chunk
                 if chunk.choices:
                     delta = chunk.choices[0].delta
@@ -952,7 +955,7 @@ class OpenAICompatibleModel(Model):
             response = self._finalize_stream_response(response, last_chunk)
             function_calls, raw_tool_calls = self._parse_tool_call_accum(tool_calls_accum)
         else:
-            response = self.client.chat.completions.create(**kwargs)
+            response = self._create_chat_completion_adaptive(kwargs)
             message = response.choices[0].message
             content = message.content or ""
             function_calls, raw_tool_calls = self._parse_tool_calls_from_message(message)
@@ -970,10 +973,12 @@ class OpenAICompatibleModel(Model):
 
         The ``use_responses_api`` model-config flag forces the decision in
         either direction (``True`` = always delegate, ``False`` = never).
-        When the flag is absent, delegation is enabled automatically for
-        OpenAI's own endpoint (``api.openai.com``), which is the provider
-        that both implements ``/v1/responses`` and rejects
-        ``tools`` + ``reasoning_effort`` on Chat Completions.
+        When the flag is absent, the decision is the vendor's declared
+        ``delegate_tools_to_responses`` capability from
+        ``model_info.OPENAI_COMPATIBLE_PROVIDERS`` (currently only
+        ``api.openai.com``, the provider that both implements
+        ``/v1/responses`` and rejects ``tools`` + ``reasoning_effort`` on
+        Chat Completions); unknown endpoints never delegate.
 
         Returns:
             True when the tool-calling transport should be the Responses API.
@@ -981,7 +986,76 @@ class OpenAICompatibleModel(Model):
         flag = self.model_config.get("use_responses_api")
         if flag is not None:
             return bool(flag)
-        return "api.openai.com" in self.base_url
+        # Imported lazily: ``model_info`` imports this module at load time.
+        from kiss.core.models.model_info import openai_compatible_provider_for_base_url
+
+        provider = openai_compatible_provider_for_base_url(self.base_url)
+        return provider is not None and provider.delegate_tools_to_responses
+
+    def _tools_reasoning_effort_capability(self) -> bool | None:
+        """Return whether this endpoint accepts ``tools`` + ``reasoning_effort``.
+
+        The verdict is the vendor's declared
+        ``tools_accept_reasoning_effort`` capability from
+        ``model_info.OPENAI_COMPATIBLE_PROVIDERS`` when the endpoint is
+        registered and verified; otherwise the cached adaptive verdict
+        learned from the endpoint's actual responses, if any.
+
+        Returns:
+            True when the combination is known to be accepted, False when
+            known to be rejected, None when unknown (send optimistically
+            and let ``_create_chat_completion_adaptive`` learn the verdict).
+        """
+        # Imported lazily: ``model_info`` imports this module at load time.
+        from kiss.core.models.model_info import openai_compatible_provider_for_base_url
+
+        provider = openai_compatible_provider_for_base_url(self.base_url)
+        declared = provider.tools_accept_reasoning_effort if provider else None
+        if declared is not None:
+            return declared
+        return _ADAPTIVE_TOOL_EFFORT_VERDICTS.get(self.base_url)
+
+    def _create_chat_completion_adaptive(self, kwargs: dict[str, Any]) -> Any:
+        """Create a chat completion, learning the effort capability if unknown.
+
+        For endpoints whose ``tools`` + ``reasoning_effort`` capability is
+        unknown (not declared in the vendor registry and not yet probed),
+        the request is sent optimistically with the effort attached. If the
+        endpoint rejects it with a 400 that mentions ``reasoning_effort``,
+        the verdict is cached as False and the request is retried once
+        without the effort; on success the verdict is cached as True. Known
+        endpoints and requests without tools or effort pass straight
+        through.
+
+        Args:
+            kwargs: Fully-built Chat Completions request arguments; mutated
+                (``reasoning_effort`` removed) when the endpoint rejects it.
+
+        Returns:
+            The API response (or stream iterator when ``stream=True``).
+        """
+        unverified = (
+            bool(kwargs.get("tools"))
+            and "reasoning_effort" in kwargs
+            and self._tools_reasoning_effort_capability() is None
+        )
+        try:
+            response = self.client.chat.completions.create(**kwargs)
+        except BadRequestError as e:
+            if unverified and "reasoning_effort" in str(e):
+                _ADAPTIVE_TOOL_EFFORT_VERDICTS[self.base_url] = False
+                dropped = kwargs.pop("reasoning_effort")
+                logger.debug(
+                    "Endpoint %s rejected tools + reasoning_effort=%r; "
+                    "retrying without it and caching the verdict.",
+                    self.base_url,
+                    dropped,
+                )
+                return self.client.chat.completions.create(**kwargs)
+            raise
+        if unverified:
+            _ADAPTIVE_TOOL_EFFORT_VERDICTS[self.base_url] = True
+        return response
 
     @staticmethod
     def _chat_parts_to_responses_parts(
