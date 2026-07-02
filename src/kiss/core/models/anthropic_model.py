@@ -20,6 +20,7 @@ from kiss.core.models.model import (
     ThinkingCallback,
     TokenCallback,
     parse_binary_attachments,
+    responses_items_to_chat_messages,
     transcribe_audio,
 )
 
@@ -404,9 +405,11 @@ class AnthropicModel(Model):
         is handed off from an OpenAI-schema model, e.g. via the Sorcar
         ``set_model`` tool — into the Anthropic Messages equivalents
         (``tool_use`` / ``tool_result`` / ``image`` / ``document`` blocks) so
-        the API does not reject them.  Consecutive user turns are merged so
-        that ``tool_result`` blocks land in the message immediately following
-        their ``tool_use`` turn, as the Anthropic API requires.
+        the API does not reject them.  OpenAI Responses-API items (handed
+        off from an ``OpenAICompatibleModel2``) are converted first via
+        :func:`responses_items_to_chat_messages`.  Consecutive user turns are
+        merged so that ``tool_result`` blocks land in the message immediately
+        following their ``tool_use`` turn, as the Anthropic API requires.
 
         Args:
             conversation: The conversation to normalize.
@@ -415,7 +418,7 @@ class AnthropicModel(Model):
             list[dict[str, Any]]: The normalized conversation.
         """
         normalized: list[dict[str, Any]] = []
-        for msg in conversation:
+        for msg in responses_items_to_chat_messages(conversation):
             for converted in self._normalize_message_for_api(msg):
                 prev = normalized[-1] if normalized else None
                 if (
@@ -523,6 +526,16 @@ class AnthropicModel(Model):
         kwargs = self.model_config.copy()
         enable_cache = kwargs.pop("enable_cache", True)
         system_instruction = kwargs.pop("system_instruction", None)
+        # ``reasoning_effort`` and ``use_responses_api`` are OpenAI-specific
+        # knobs (the factory auto-defaults the former into ``model_config``
+        # for gpt-5.x reasoning models; the latter forces/disables the
+        # /v1/responses delegation); they arrive here verbatim when a live
+        # conversation (and its config) is handed over by the Sorcar
+        # ``set_model`` tool.  The Anthropic API rejects unknown kwargs, so
+        # drop them — the extended-thinking default below already enables
+        # native reasoning for Claude 4+ models.
+        kwargs.pop("reasoning_effort", None)
+        kwargs.pop("use_responses_api", None)
 
         # Hoist OpenAI-style ``role="system"`` messages (present when the
         # conversation was handed off from an OpenAI-schema model, e.g. via

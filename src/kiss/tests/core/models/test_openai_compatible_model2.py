@@ -39,6 +39,7 @@ The core contract being verified:
 
 from __future__ import annotations
 
+import copy
 import json
 import threading
 from collections.abc import Generator
@@ -47,8 +48,11 @@ from typing import Any
 
 import pytest
 
-from kiss.core.models.model import Attachment
+from kiss.core.models.anthropic_model import AnthropicModel
+from kiss.core.models.gemini_model import GeminiModel
+from kiss.core.models.model import Attachment, responses_items_to_chat_messages
 from kiss.core.models.model_info import MODEL_INFO, model
+from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
 from kiss.core.models.openai_compatible_model2 import OpenAICompatibleModel2
 
 # ---------------------------------------------------------------------------
@@ -8424,3 +8428,508 @@ class TestReviewBugReproductions39:
             KISSError, match="completed|terminal|truncated|stream"
         ):
             m.generate()
+
+
+# ---------------------------------------------------------------------------
+# Model-switching (conversation hand-off) tests
+# ---------------------------------------------------------------------------
+
+# A conversation exactly as OpenAICompatibleModel2 stores it after one
+# tool-using turn (Responses-API input items, raw output replayed).
+_V2_NATIVE_CONVERSATION: list[dict[str, Any]] = [
+    {
+        "role": "user",
+        "content": [
+            {"type": "input_text", "text": "Use the add tool to compute 2 + 3."}
+        ],
+    },
+    {"type": "reasoning", "id": "rs_1", "summary": []},
+    {
+        "type": "message",
+        "id": "msg_1",
+        "role": "assistant",
+        "status": "completed",
+        "content": [
+            {
+                "type": "output_text",
+                "text": "Let me add those numbers.",
+                "annotations": [],
+            }
+        ],
+    },
+    {
+        "type": "function_call",
+        "id": "fc_1",
+        "call_id": "call_01",
+        "name": "add",
+        "arguments": '{"a": 2, "b": 3}',
+    },
+    {"type": "function_call_output", "call_id": "call_01", "output": "5"},
+]
+
+# The same conversation as OpenAICompatibleModel (Chat Completions) stores it.
+_CHAT_HANDOFF_CONVERSATION: list[dict[str, Any]] = [
+    {"role": "system", "content": "You are a concise assistant."},
+    {"role": "user", "content": "Use the add tool to compute 2 + 3."},
+    {
+        "role": "assistant",
+        "content": "Let me add those numbers.",
+        "tool_calls": [
+            {
+                "id": "call_01",
+                "type": "function",
+                "function": {"name": "add", "arguments": '{"a": 2, "b": 3}'},
+            }
+        ],
+    },
+    {"role": "tool", "tool_call_id": "call_01", "content": "5"},
+]
+
+
+def _chat_completion_response_json(text: str = "ok") -> str:
+    """Return a minimal /v1/chat/completions non-streaming JSON body."""
+    return json.dumps(
+        {
+            "id": "chatcmpl_test",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "gpt-4o",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": text},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 5,
+                "completion_tokens": 4,
+                "total_tokens": 9,
+            },
+        }
+    )
+
+
+def _wire_items_by_type(body: dict[str, Any], item_type: str) -> list[dict[str, Any]]:
+    """Return the ``input`` items of ``body`` matching ``item_type``."""
+    return [
+        item
+        for item in body.get("input", [])
+        if isinstance(item, dict) and item.get("type") == item_type
+    ]
+
+
+class TestModelSwitchingIntoV2:
+    """Conversations handed off from other providers must work in v2.
+
+    The Sorcar ``set_model`` tool hands a live conversation over verbatim
+    (``new_model.conversation = old_model.conversation``).  These tests
+    assign foreign-format conversations to an ``OpenAICompatibleModel2``
+    and assert on the exact JSON sent to ``/v1/responses``.
+    """
+
+    def test_chat_handoff_tool_turn_becomes_native_items(
+        self, capture_server: str
+    ) -> None:
+        """Chat tool_calls / role="tool" messages become function_call items."""
+        m = OpenAICompatibleModel2("gpt-5.5", base_url=capture_server, api_key="k")
+        m.initialize("seed")
+        m.conversation = copy.deepcopy(_CHAT_HANDOFF_CONVERSATION)
+        text, _resp = m.generate()
+        assert text == "ok"
+        body = _last_body()
+        input_items = body["input"]
+        assert {"role": "system", "content": "You are a concise assistant."} in input_items
+        assert {
+            "role": "user",
+            "content": "Use the add tool to compute 2 + 3.",
+        } in input_items
+        assert {"role": "assistant", "content": "Let me add those numbers."} in input_items
+        fcs = _wire_items_by_type(body, "function_call")
+        assert fcs == [
+            {
+                "type": "function_call",
+                "call_id": "call_01",
+                "name": "add",
+                "arguments": '{"a": 2, "b": 3}',
+            }
+        ]
+        outs = _wire_items_by_type(body, "function_call_output")
+        assert outs == [
+            {"type": "function_call_output", "call_id": "call_01", "output": "5"}
+        ]
+        # The function_call must precede its function_call_output.
+        assert input_items.index(fcs[0]) < input_items.index(outs[0])
+        # No Chat-Completions constructs may leak onto the wire.
+        assert all(item.get("role") != "tool" for item in input_items)
+        assert all("tool_calls" not in item for item in input_items)
+
+    def test_chat_handoff_content_parts_are_translated(
+        self, capture_server: str
+    ) -> None:
+        """Chat ``text`` / ``image_url`` parts become input_text / input_image."""
+        m = OpenAICompatibleModel2("gpt-5.5", base_url=capture_server, api_key="k")
+        m.initialize("seed")
+        m.conversation = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "what is in this image?"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,AAAA"},
+                    },
+                ],
+            }
+        ]
+        m.generate()
+        body = _last_body()
+        assert body["input"] == [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "what is in this image?"},
+                    {
+                        "type": "input_image",
+                        "image_url": "data:image/png;base64,AAAA",
+                        "detail": "auto",
+                    },
+                ],
+            }
+        ]
+
+    def test_anthropic_handoff_blocks_are_translated(
+        self, capture_server: str
+    ) -> None:
+        """Anthropic tool_use/tool_result/thinking blocks become native items."""
+        m = OpenAICompatibleModel2("gpt-5.5", base_url=capture_server, api_key="k")
+        m.initialize("seed")
+        m.conversation = [
+            {"role": "user", "content": "Use the add tool to compute 2 + 3."},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "2+3=5", "signature": "sig"},
+                    {"type": "text", "text": "Let me add those numbers."},
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_01",
+                        "name": "add",
+                        "input": {"a": 2, "b": 3},
+                    },
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_01", "content": "5"}
+                ],
+            },
+        ]
+        m.generate()
+        body = _last_body()
+        input_items = body["input"]
+        assert {"role": "assistant", "content": "Let me add those numbers."} in input_items
+        fcs = _wire_items_by_type(body, "function_call")
+        assert len(fcs) == 1
+        assert fcs[0]["call_id"] == "toolu_01"
+        assert fcs[0]["name"] == "add"
+        assert json.loads(fcs[0]["arguments"]) == {"a": 2, "b": 3}
+        assert _wire_items_by_type(body, "function_call_output") == [
+            {"type": "function_call_output", "call_id": "toolu_01", "output": "5"}
+        ]
+        # Hidden Anthropic thinking blocks must never reach the wire.
+        assert "thinking" not in json.dumps(input_items)
+
+    def test_gemini_handoff_dict_args_and_attachments(
+        self, capture_server: str
+    ) -> None:
+        """Gemini dict tool-call args and ``attachments`` fields are converted."""
+        m = OpenAICompatibleModel2("gpt-5.5", base_url=capture_server, api_key="k")
+        m.initialize("seed")
+        m.conversation = [
+            {"role": "user", "content": "Use the add tool to compute 2 + 3."},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_g1",
+                        "type": "function",
+                        # Gemini stores arguments as a dict, not a JSON string.
+                        "function": {"name": "add", "arguments": {"a": 2, "b": 3}},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_g1", "content": "5"},
+            {
+                "role": "user",
+                "content": "[attachments from previous tool result(s)]",
+                "attachments": [
+                    Attachment(data=b"\x89PNG\r\n", mime_type="image/png")
+                ],
+            },
+        ]
+        m.generate()
+        body = _last_body()
+        fcs = _wire_items_by_type(body, "function_call")
+        assert len(fcs) == 1
+        assert fcs[0]["call_id"] == "call_g1"
+        assert json.loads(fcs[0]["arguments"]) == {"a": 2, "b": 3}
+        assert _wire_items_by_type(body, "function_call_output") == [
+            {"type": "function_call_output", "call_id": "call_g1", "output": "5"}
+        ]
+        # The Attachment must surface as an input_image data URL part.
+        user_parts = [
+            part
+            for item in body["input"]
+            if isinstance(item.get("content"), list)
+            for part in item["content"]
+        ]
+        image_parts = [p for p in user_parts if p.get("type") == "input_image"]
+        assert len(image_parts) == 1
+        assert image_parts[0]["image_url"].startswith("data:image/png;base64,")
+        assert {"type": "input_text", "text": "[attachments from previous tool result(s)]"} in (
+            user_parts
+        )
+
+    def test_add_function_results_after_chat_handoff(
+        self, capture_server: str
+    ) -> None:
+        """Tool results submitted right after a hand-off keep the original id.
+
+        This is exactly what happens when the Sorcar ``set_model`` tool
+        switches models: the old conversation ends with the (unanswered)
+        ``set_model`` tool call, and its result is added to the NEW model.
+        """
+        m = OpenAICompatibleModel2("gpt-5.5", base_url=capture_server, api_key="k")
+        m.initialize("seed")
+        m.conversation = copy.deepcopy(_CHAT_HANDOFF_CONVERSATION[:3])
+        m.add_function_results_to_conversation_and_return(
+            [("add", {"result": "5"})]
+        )
+        assert m.conversation[-1] == {
+            "type": "function_call_output",
+            "call_id": "call_01",
+            "output": "5",
+        }
+        m.generate()
+        body = _last_body()
+        fcs = _wire_items_by_type(body, "function_call")
+        outs = _wire_items_by_type(body, "function_call_output")
+        assert [fc["call_id"] for fc in fcs] == ["call_01"]
+        assert [out["call_id"] for out in outs] == ["call_01"]
+
+    def test_native_conversation_passes_through_unchanged(
+        self, capture_server: str
+    ) -> None:
+        """A native v2 conversation must not be altered by the conversion."""
+        m = OpenAICompatibleModel2("gpt-5.5", base_url=capture_server, api_key="k")
+        m.initialize("seed")
+        native = copy.deepcopy(_V2_NATIVE_CONVERSATION)
+        assert m._foreign_items_to_native_input(native) == native
+        m.conversation = native
+        m.generate()
+        body = _last_body()
+        # The raw reasoning / message / function_call items are replayed.
+        assert _wire_items_by_type(body, "reasoning") == [
+            {"type": "reasoning", "id": "rs_1", "summary": []}
+        ]
+        assert [fc["call_id"] for fc in _wire_items_by_type(body, "function_call")] == (
+            ["call_01"]
+        )
+
+
+class TestModelSwitchingOutOfV2:
+    """Conversations handed off FROM v2 must work in every other model."""
+
+    def test_v2_conversation_to_chat_messages(self) -> None:
+        """The shared converter yields a fully paired chat conversation."""
+        chat = responses_items_to_chat_messages(
+            copy.deepcopy(_V2_NATIVE_CONVERSATION)
+        )
+        assert [msg["role"] for msg in chat] == ["user", "assistant", "tool"]
+        assistant = chat[1]
+        assert assistant["content"] == [
+            {"type": "text", "text": "Let me add those numbers."}
+        ]
+        assert assistant["tool_calls"] == [
+            {
+                "id": "call_01",
+                "type": "function",
+                "function": {"name": "add", "arguments": '{"a": 2, "b": 3}'},
+            }
+        ]
+        assert chat[2] == {"role": "tool", "tool_call_id": "call_01", "content": "5"}
+        # Responses-only constructs must be gone.
+        dumped = json.dumps(chat)
+        assert "reasoning" not in dumped
+        assert "output_text" not in dumped
+
+    def test_v2_conversation_to_v1_wire(self, capture_server: str) -> None:
+        """v1 replays a handed-off v2 conversation via /chat/completions."""
+        m = OpenAICompatibleModel("gpt-4o", base_url=capture_server, api_key="k")
+        m.initialize("seed")
+        m.conversation = copy.deepcopy(_V2_NATIVE_CONVERSATION)
+        _CapturingHandler.next_response_body = _chat_completion_response_json().encode()
+        text, _resp = m.generate()
+        assert text == "ok"
+        body = _last_body()
+        assert _last_path().endswith("/chat/completions")
+        messages = body["messages"]
+        assert [msg["role"] for msg in messages] == ["user", "assistant", "tool"]
+        assert messages[1]["tool_calls"][0]["id"] == "call_01"
+        assert messages[2] == {
+            "role": "tool",
+            "tool_call_id": "call_01",
+            "content": "5",
+        }
+        assert "function_call_output" not in json.dumps(messages)
+
+    def test_v2_conversation_to_anthropic_normalization(self) -> None:
+        """Anthropic's normalizer converts v2 items to tool_use/tool_result."""
+        m = AnthropicModel(model_name="claude-sonnet-4-20250514", api_key="k")
+        normalized = m._normalize_conversation_for_api(
+            copy.deepcopy(_V2_NATIVE_CONVERSATION)
+        )
+        assert [msg["role"] for msg in normalized] == ["user", "assistant", "user"]
+        assistant_blocks = normalized[1]["content"]
+        assert {
+            "type": "tool_use",
+            "id": "call_01",
+            "name": "add",
+            "input": {"a": 2, "b": 3},
+        } in assistant_blocks
+        assert {"type": "text", "text": "Let me add those numbers."} in assistant_blocks
+        assert normalized[2]["content"] == [
+            {"type": "tool_result", "tool_use_id": "call_01", "content": "5"}
+        ]
+
+    def test_v2_conversation_to_gemini_contents(self) -> None:
+        """Gemini's converter handles v2 items (regression: KeyError('role'))."""
+        m = GeminiModel(model_name="gemini-2.5-pro", api_key="k")
+        m.conversation = copy.deepcopy(_V2_NATIVE_CONVERSATION)
+        contents = m._convert_conversation_to_gemini_contents()
+        assert [c.role for c in contents] == ["user", "model", "user"]
+        model_parts = contents[1].parts or []
+        fcs = [p.function_call for p in model_parts if p.function_call is not None]
+        assert len(fcs) == 1
+        assert fcs[0].name == "add"
+        assert fcs[0].args == {"a": 2, "b": 3}
+        text_parts = [p.text for p in model_parts if p.text]
+        assert text_parts == ["Let me add those numbers."]
+        frs = [
+            p.function_response
+            for p in (contents[2].parts or [])
+            if p.function_response is not None
+        ]
+        assert len(frs) == 1
+        assert frs[0].name == "add"
+
+    def test_add_function_results_after_v2_handoff(
+        self, capture_server: str
+    ) -> None:
+        """v1 answers a trailing (unanswered) v2 function_call after hand-off."""
+        m = OpenAICompatibleModel("gpt-4o", base_url=capture_server, api_key="k")
+        m.initialize("seed")
+        m.conversation = [
+            {"role": "user", "content": [{"type": "input_text", "text": "switch"}]},
+            {"type": "reasoning", "id": "rs_9", "summary": []},
+            {
+                "type": "function_call",
+                "id": "fc_9",
+                "call_id": "call_09",
+                "name": "set_model",
+                "arguments": '{"model_name": "gpt-4o"}',
+            },
+        ]
+        assert m._find_tool_call_ids_from_last_assistant() == [
+            ("set_model", "call_09")
+        ]
+        m.add_function_results_to_conversation_and_return(
+            [("set_model", {"result": "switched"})]
+        )
+        assert m.conversation[-1] == {
+            "role": "tool",
+            "tool_call_id": "call_09",
+            "content": "switched",
+        }
+        _CapturingHandler.next_response_body = _chat_completion_response_json().encode()
+        m.generate()
+        messages = _last_body()["messages"]
+        assert messages[-1] == {
+            "role": "tool",
+            "tool_call_id": "call_09",
+            "content": "switched",
+        }
+        assert messages[-2]["role"] == "assistant"
+        assert messages[-2]["tool_calls"][0]["id"] == "call_09"
+
+    def test_answered_v2_function_calls_are_not_reanswered(self) -> None:
+        """function_calls that already have outputs yield no pending ids."""
+        m = OpenAICompatibleModel("gpt-4o", base_url="http://x/v1", api_key="k")
+        m.conversation = copy.deepcopy(_V2_NATIVE_CONVERSATION)
+        assert m._find_tool_call_ids_from_last_assistant() == []
+
+
+class TestModelSwitchingRoundTrip:
+    """Back-and-forth hand-offs must preserve the tool-call pairing."""
+
+    def test_chat_to_v2_to_chat_round_trip(self, capture_server: str) -> None:
+        """chat -> v2 -> chat keeps ids, names, arguments and results."""
+        m2 = OpenAICompatibleModel2("gpt-5.5", base_url=capture_server, api_key="k")
+        m2.initialize("seed")
+        native = m2._foreign_items_to_native_input(
+            copy.deepcopy(_CHAT_HANDOFF_CONVERSATION)
+        )
+        chat_again = responses_items_to_chat_messages(native)
+        assert [msg["role"] for msg in chat_again] == [
+            "system",
+            "user",
+            "assistant",
+            "tool",
+        ]
+        assistant = chat_again[2]
+        assert assistant["tool_calls"][0]["id"] == "call_01"
+        assert assistant["tool_calls"][0]["function"]["name"] == "add"
+        assert json.loads(assistant["tool_calls"][0]["function"]["arguments"]) == {
+            "a": 2,
+            "b": 3,
+        }
+        assert chat_again[3] == {
+            "role": "tool",
+            "tool_call_id": "call_01",
+            "content": "5",
+        }
+
+    def test_v2_to_chat_to_v2_round_trip(self, capture_server: str) -> None:
+        """v2 -> chat -> v2 keeps the function_call / output pairing."""
+        m2 = OpenAICompatibleModel2("gpt-5.5", base_url=capture_server, api_key="k")
+        m2.initialize("seed")
+        chat = responses_items_to_chat_messages(
+            copy.deepcopy(_V2_NATIVE_CONVERSATION)
+        )
+        native_again = m2._foreign_items_to_native_input(chat)
+        fcs = [
+            item
+            for item in native_again
+            if isinstance(item, dict) and item.get("type") == "function_call"
+        ]
+        outs = [
+            item
+            for item in native_again
+            if isinstance(item, dict)
+            and item.get("type") == "function_call_output"
+        ]
+        assert [fc["call_id"] for fc in fcs] == ["call_01"]
+        assert [out["call_id"] for out in outs] == ["call_01"]
+        assert {"role": "assistant", "content": "Let me add those numbers."} in (
+            native_again
+        )
+        # And the round-tripped conversation is actually sendable.
+        m2.conversation = native_again
+        m2.generate()
+        assert [
+            fc["call_id"]
+            for fc in _wire_items_by_type(_last_body(), "function_call")
+        ] == ["call_01"]

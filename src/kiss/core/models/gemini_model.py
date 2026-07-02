@@ -23,6 +23,7 @@ from kiss.core.models.model import (
     ThinkingCallback,
     TokenCallback,
     parse_binary_attachments,
+    responses_items_to_chat_messages,
 )
 
 logger = logging.getLogger(__name__)
@@ -242,7 +243,7 @@ class GeminiModel(Model):
             dict[str, str]: Mapping of tool-call id to function name.
         """
         mapping: dict[str, str] = {}
-        for msg in self.conversation:
+        for msg in responses_items_to_chat_messages(self.conversation):
             if msg.get("role") != "assistant":
                 continue
             for tc in msg.get("tool_calls") or []:
@@ -372,7 +373,7 @@ class GeminiModel(Model):
         """
         id_to_name = self._tool_call_id_to_name_map()
         contents = []
-        for msg in self.conversation:
+        for msg in responses_items_to_chat_messages(self.conversation):
             role = msg["role"]
             content = msg.get("content", "")
 
@@ -467,7 +468,7 @@ class GeminiModel(Model):
         """
         configured = self.model_config.get("system_instruction")
         system_texts: list[str] = [configured] if configured else []
-        for msg in self.conversation:
+        for msg in responses_items_to_chat_messages(self.conversation):
             if msg.get("role") != "system":
                 continue
             content = msg.get("content")
@@ -620,22 +621,22 @@ class GeminiModel(Model):
 
         content, function_calls = self._parse_parts(all_parts)
 
-        self.conversation.append(
-            {
-                "role": "assistant",
-                "content": content,
-                "tool_calls": [
-                    {
-                        "id": fc["id"],
-                        "type": "function",
-                        "function": {"name": fc["name"], "arguments": fc["arguments"]},
-                    }
-                    for fc in function_calls
-                ]
-                if function_calls
-                else None,
-            }
-        )
+        # Omit the ``tool_calls`` key entirely when the model made no
+        # calls: a ``tool_calls: None`` entry would be replayed verbatim
+        # after a model hand-off and rejected by other providers (e.g.
+        # the OpenAI Responses API fails with "Unknown parameter:
+        # 'input[N].tool_calls'").
+        assistant_msg: dict[str, Any] = {"role": "assistant", "content": content}
+        if function_calls:
+            assistant_msg["tool_calls"] = [
+                {
+                    "id": fc["id"],
+                    "type": "function",
+                    "function": {"name": fc["name"], "arguments": fc["arguments"]},
+                }
+                for fc in function_calls
+            ]
+        self.conversation.append(assistant_msg)
 
         return function_calls, content, response
 
