@@ -23,6 +23,7 @@ from kiss.core.models.model import (
     ThinkingCallback,
     TokenCallback,
     parse_binary_attachments,
+    responses_items_to_chat_messages,
 )
 
 logger = logging.getLogger(__name__)
@@ -242,7 +243,7 @@ class GeminiModel(Model):
             dict[str, str]: Mapping of tool-call id to function name.
         """
         mapping: dict[str, str] = {}
-        for msg in self.conversation:
+        for msg in responses_items_to_chat_messages(self.conversation):
             if msg.get("role") != "assistant":
                 continue
             for tc in msg.get("tool_calls") or []:
@@ -372,7 +373,7 @@ class GeminiModel(Model):
         """
         id_to_name = self._tool_call_id_to_name_map()
         contents = []
-        for msg in self.conversation:
+        for msg in responses_items_to_chat_messages(self.conversation):
             role = msg["role"]
             content = msg.get("content", "")
 
@@ -467,7 +468,7 @@ class GeminiModel(Model):
         """
         configured = self.model_config.get("system_instruction")
         system_texts: list[str] = [configured] if configured else []
-        for msg in self.conversation:
+        for msg in responses_items_to_chat_messages(self.conversation):
             if msg.get("role") != "system":
                 continue
             content = msg.get("content")
