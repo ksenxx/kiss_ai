@@ -320,8 +320,9 @@ class TestXhighAliasHandoffWire:
         assert tool_msg["role"] == "tool"
         assert tool_msg["tool_call_id"] == "toolu_01"
         assert tool_msg["content"] == "5"
-        # gpt-5.5 + tools on chat.completions must not send reasoning_effort.
-        assert "reasoning_effort" not in body
+        # The capture server is an unknown (unregistered) endpoint, so the
+        # transport keeps reasoning_effort optimistically (adaptive probe).
+        assert body["reasoning_effort"] == "xhigh"
 
     def test_generate_request_is_normalized_with_xhigh_effort(
         self, capture_server: str
