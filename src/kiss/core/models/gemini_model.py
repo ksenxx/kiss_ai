@@ -5,6 +5,9 @@
 
 """Gemini model implementation for Google's GenAI models."""
 
+import base64
+import binascii
+import json
 import logging
 import uuid
 from collections.abc import Callable
@@ -23,6 +26,111 @@ from kiss.core.models.model import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _coerce_args_dict(args: Any) -> dict[str, Any]:
+    """Coerce a tool-call ``arguments`` value into a dict.
+
+    GeminiModel stores arguments as dicts, but a conversation handed off
+    from an OpenAI-schema model (e.g. via the Sorcar ``set_model`` tool)
+    stores them as JSON strings.  Unparseable values degrade to ``{}``.
+
+    Args:
+        args: The arguments value (dict, JSON string, or anything else).
+
+    Returns:
+        The arguments as a dict.
+    """
+    if isinstance(args, dict):
+        return args
+    if isinstance(args, str):
+        try:
+            parsed = json.loads(args) if args.strip() else {}
+        except json.JSONDecodeError:
+            logger.debug("Exception caught", exc_info=True)
+            parsed = {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _decode_base64(data: str) -> bytes | None:
+    """Decode base64 text, returning ``None`` on invalid input."""
+    try:
+        return base64.b64decode(data)
+    except (ValueError, binascii.Error):
+        logger.debug("Exception caught", exc_info=True)
+        return None
+
+
+def _media_block_to_part(block: dict[str, Any]) -> types.Part | None:
+    """Convert a foreign media block/part into a Gemini ``Part``.
+
+    Handles Anthropic ``image`` / ``document`` blocks (base64 or url
+    source) and OpenAI ``image_url`` / ``file`` content parts (base64
+    data URLs).  Such blocks enter the conversation when it is handed off
+    from another provider's model (e.g. via the Sorcar ``set_model``
+    tool).  Remote (non-data) URLs cannot be inlined and are dropped.
+
+    Args:
+        block: The foreign media block/part dict.
+
+    Returns:
+        The equivalent Gemini ``Part``, or ``None`` when the block cannot
+        be represented (in which case it is dropped with a warning).
+    """
+    block_type = block.get("type")
+    if block_type in ("image", "document"):
+        source = block.get("source") or {}
+        if source.get("type") == "base64":
+            data = _decode_base64(source.get("data", ""))
+            if data is not None:
+                media_type = source.get("media_type", "application/octet-stream")
+                return types.Part.from_bytes(data=data, mime_type=media_type)
+    elif block_type == "image_url":
+        url = (block.get("image_url") or {}).get("url", "")
+        if url.startswith("data:") and ";base64," in url:
+            header, _, payload = url.partition(",")
+            data = _decode_base64(payload)
+            if data is not None:
+                media_type = header[len("data:"):].split(";", 1)[0] or "image/png"
+                return types.Part.from_bytes(data=data, mime_type=media_type)
+    elif block_type == "file":
+        file_data = (block.get("file") or {}).get("file_data", "")
+        if file_data.startswith("data:") and ";base64," in file_data:
+            header, _, payload = file_data.partition(",")
+            data = _decode_base64(payload)
+            if data is not None:
+                media_type = header[len("data:"):].split(";", 1)[0] or "application/pdf"
+                return types.Part.from_bytes(data=data, mime_type=media_type)
+    logger.warning("Dropping unconvertible %s block for Gemini.", block_type)
+    return None
+
+
+def _tool_result_response_dict(content: Any) -> dict[str, Any]:
+    """Build a ``FunctionResponse.response`` dict from tool-result content.
+
+    Args:
+        content: A tool result payload — a string (possibly JSON) or a
+            list of Anthropic nested blocks whose text is extracted.
+
+    Returns:
+        A JSON-serializable dict for ``FunctionResponse.response``.
+    """
+    if isinstance(content, list):
+        content = "".join(
+            b.get("text", "")
+            for b in content
+            if isinstance(b, dict) and b.get("type") == "text"
+        )
+    if isinstance(content, str):
+        try:
+            parsed = json.loads(content)
+            return parsed if isinstance(parsed, dict) else {"result": parsed}
+        except json.JSONDecodeError:
+            logger.debug("Exception caught", exc_info=True)
+            return {"result": content}
+    return {"result": content}
+
 
 class GeminiModel(Model):
     """A model that uses Google's GenAI API (Gemini)."""
@@ -122,18 +230,153 @@ class GeminiModel(Model):
                 }
             )
 
+    def _tool_call_id_to_name_map(self) -> dict[str, str]:
+        """Map tool-call ids to function names across the whole conversation.
+
+        Scans assistant messages for both OpenAI-style ``tool_calls``
+        entries and Anthropic-style ``tool_use`` content blocks (present
+        when the conversation was handed off from another provider's
+        model, e.g. via the Sorcar ``set_model`` tool).
+
+        Returns:
+            dict[str, str]: Mapping of tool-call id to function name.
+        """
+        mapping: dict[str, str] = {}
+        for msg in self.conversation:
+            if msg.get("role") != "assistant":
+                continue
+            for tc in msg.get("tool_calls") or []:
+                fn = tc.get("function") or {}
+                if tc.get("id"):
+                    mapping[tc["id"]] = fn.get("name", "unknown")
+            content = msg.get("content")
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_use":
+                        if block.get("id"):
+                            mapping[block["id"]] = block.get("name", "unknown")
+        return mapping
+
+    def _function_call_part(self, name: str, args: dict[str, Any], call_id: Any) -> types.Part:
+        """Build a Gemini ``function_call`` part, re-attaching any thought signature.
+
+        Args:
+            name: The function name.
+            args: The function arguments dict.
+            call_id: The tool-call id used to look up a stored thought signature.
+
+        Returns:
+            types.Part: The function-call part.
+        """
+        thought_sig = self._thought_signatures.get(call_id) if call_id else None
+        if thought_sig:
+            return types.Part(
+                function_call=types.FunctionCall(name=name, args=args),
+                thought_signature=thought_sig,
+            )
+        return types.Part.from_function_call(name=name, args=args)
+
+    def _function_response_part(
+        self, name: str, content: Any, call_id: Any
+    ) -> types.Part:
+        """Build a Gemini ``function_response`` part, re-attaching any thought signature.
+
+        Args:
+            name: The function name the result belongs to.
+            content: The tool result payload (string or nested block list).
+            call_id: The tool-call id used to look up a stored thought signature.
+
+        Returns:
+            types.Part: The function-response part.
+        """
+        response_dict = _tool_result_response_dict(content)
+        thought_sig = self._thought_signatures.get(call_id) if call_id else None
+        if thought_sig:
+            return types.Part(
+                function_response=types.FunctionResponse(name=name, response=response_dict),
+                thought_signature=thought_sig,
+            )
+        return types.Part.from_function_response(name=name, response=response_dict)
+
+    def _block_list_to_parts(
+        self, blocks: list[Any], id_to_name: dict[str, str]
+    ) -> list[types.Part]:
+        """Convert a foreign content-block list into Gemini parts.
+
+        Handles Anthropic Messages blocks (``text`` / ``tool_use`` /
+        ``tool_result`` / ``image`` / ``document``; ``thinking`` blocks are
+        hidden provider state and are dropped) and OpenAI Chat Completions
+        content parts (``text`` / ``image_url`` / ``file``).  Such block
+        lists enter the conversation when it is handed off from another
+        provider's model (e.g. via the Sorcar ``set_model`` tool).
+
+        Args:
+            blocks: The content-block list.
+            id_to_name: Mapping of tool-call id to function name.
+
+        Returns:
+            list[types.Part]: The equivalent Gemini parts.
+        """
+        parts: list[types.Part] = []
+        for block in blocks:
+            if not isinstance(block, dict):
+                text = str(block)
+                if text.strip():
+                    parts.append(types.Part.from_text(text=text))
+                continue
+            block_type = block.get("type")
+            if block_type in ("thinking", "redacted_thinking"):
+                continue
+            if block_type == "text":
+                text = block.get("text", "")
+                if text.strip():
+                    parts.append(types.Part.from_text(text=text))
+            elif block_type == "tool_use":
+                parts.append(
+                    self._function_call_part(
+                        block.get("name", "unknown"),
+                        _coerce_args_dict(block.get("input")),
+                        block.get("id"),
+                    )
+                )
+            elif block_type == "tool_result":
+                call_id = block.get("tool_use_id")
+                parts.append(
+                    self._function_response_part(
+                        id_to_name.get(call_id or "", "unknown"),
+                        block.get("content"),
+                        call_id,
+                    )
+                )
+            elif block_type in ("image", "document", "image_url", "file"):
+                part = _media_block_to_part(block)
+                if part is not None:
+                    parts.append(part)
+            else:
+                logger.warning("Dropping unsupported %s block for Gemini.", block_type)
+        return parts
+
     def _convert_conversation_to_gemini_contents(self) -> list[types.Content]:
         """Converts the internal conversation format to Gemini contents.
+
+        Besides GeminiModel's native format, this also converts foreign
+        formats that enter the conversation when it is handed off from
+        another provider's model (e.g. via the Sorcar ``set_model`` tool):
+        OpenAI ``tool_calls`` with JSON-string arguments, ``role="tool"``
+        messages, ``role="system"`` messages (hoisted into
+        ``system_instruction`` by :meth:`_build_config` and skipped here),
+        and Anthropic content-block lists.
 
         Returns:
             list[types.Content]: The conversation in Gemini API format.
         """
+        id_to_name = self._tool_call_id_to_name_map()
         contents = []
         for msg in self.conversation:
             role = msg["role"]
             content = msg.get("content", "")
 
-            parts = []
+            parts: list[types.Part] = []
 
             if role == "user":
                 gemini_role = "user"
@@ -141,75 +384,36 @@ class GeminiModel(Model):
                     for att in msg.get("attachments", []):
                         parts.append(types.Part.from_bytes(data=att.data, mime_type=att.mime_type))
                     parts.append(types.Part.from_text(text=content))
+                elif isinstance(content, list):
+                    parts.extend(self._block_list_to_parts(content, id_to_name))
 
             elif role == "assistant":
                 gemini_role = "model"
                 if isinstance(content, str) and content:
                     parts.append(types.Part.from_text(text=content))
+                elif isinstance(content, list):
+                    parts.extend(self._block_list_to_parts(content, id_to_name))
 
-                tool_calls = msg.get("tool_calls")
-                if tool_calls:
-                    for tc in tool_calls:
-                        fn = tc.get("function", {})
-                        args = fn.get("arguments")
-                        args = args if isinstance(args, dict) else {}
-                        call_id = tc.get("id")
-                        thought_sig = self._thought_signatures.get(call_id) if call_id else None
-                        if thought_sig:
-                            parts.append(
-                                types.Part(
-                                    function_call=types.FunctionCall(
-                                        name=fn.get("name"), args=args
-                                    ),
-                                    thought_signature=thought_sig,
-                                )
-                            )
-                        else:
-                            parts.append(
-                                types.Part.from_function_call(name=fn.get("name"), args=args)
-                            )
+                for tc in msg.get("tool_calls") or []:
+                    fn = tc.get("function", {})
+                    parts.append(
+                        self._function_call_part(
+                            fn.get("name"),
+                            _coerce_args_dict(fn.get("arguments")),
+                            tc.get("id"),
+                        )
+                    )
 
             elif role == "tool":
                 gemini_role = "user"
-
                 tool_call_id = msg.get("tool_call_id")
-                func_name = "unknown"
-                for prev_msg in reversed(self.conversation):
-                    if prev_msg is msg:
-                        continue
-                    if prev_msg["role"] == "assistant" and prev_msg.get("tool_calls"):
-                        for tc in prev_msg["tool_calls"]:
-                            if tc["id"] == tool_call_id:
-                                func_name = tc["function"]["name"]
-                                break
-                    if func_name != "unknown":
-                        break
-
-                import json
-
-                try:
-                    if isinstance(content, str):
-                        response_dict = json.loads(content)
-                    else:
-                        response_dict = {"result": content}
-                except json.JSONDecodeError:
-                    logger.debug("Exception caught", exc_info=True)
-                    response_dict = {"result": content}
-
-                thought_sig = self._thought_signatures.get(tool_call_id)
-                if thought_sig:
-                    parts.append(
-                        types.Part(
-                            function_response=types.FunctionResponse(
-                                name=func_name, response=response_dict
-                            ),
-                            thought_signature=thought_sig,
-                        )
+                parts.append(
+                    self._function_response_part(
+                        id_to_name.get(tool_call_id or "", "unknown"),
+                        content,
+                        tool_call_id,
                     )
-                else:
-                    parts.append(
-                        types.Part.from_function_response(name=func_name, response=response_dict)
-                    )
+                )
 
             else:
                 continue
@@ -248,6 +452,35 @@ class GeminiModel(Model):
                 )
         return content, function_calls
 
+    def _resolve_system_instruction(self) -> str | None:
+        """Merge configured and conversation-level system instructions.
+
+        OpenAI-style ``role="system"`` messages (present when the
+        conversation was handed off from an OpenAI-schema model, e.g. via
+        the Sorcar ``set_model`` tool) are hoisted into Gemini's
+        ``system_instruction`` config parameter, since Gemini contents
+        accept only ``user`` / ``model`` roles.  Duplicates of the
+        configured ``system_instruction`` are skipped.
+
+        Returns:
+            str | None: The merged system instruction, or ``None``.
+        """
+        configured = self.model_config.get("system_instruction")
+        system_texts: list[str] = [configured] if configured else []
+        for msg in self.conversation:
+            if msg.get("role") != "system":
+                continue
+            content = msg.get("content")
+            if isinstance(content, list):
+                content = "".join(
+                    p.get("text", "")
+                    for p in content
+                    if isinstance(p, dict) and p.get("type") == "text"
+                )
+            if isinstance(content, str) and content.strip() and content not in system_texts:
+                system_texts.append(content)
+        return "\n\n".join(system_texts) if system_texts else None
+
     def _build_config(self, tools: list[types.Tool] | None = None) -> types.GenerateContentConfig:
         thinking_config = self.model_config.get("thinking_config")
         if thinking_config is None:
@@ -259,7 +492,7 @@ class GeminiModel(Model):
             stop_sequences=self.model_config.get("stop"),
             thinking_config=thinking_config,
             tools=tools,  # type: ignore[arg-type]
-            system_instruction=self.model_config.get("system_instruction"),
+            system_instruction=self._resolve_system_instruction(),
         )
 
     def _stream_parts(self, parts: list[Any]) -> None:
