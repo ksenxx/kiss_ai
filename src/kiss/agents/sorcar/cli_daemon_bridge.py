@@ -35,6 +35,20 @@ _DEFAULT_SOCK_PATH = Path.home() / ".kiss" / "sorcar.sock"
 
 _LOCK = threading.Lock()
 _WRITER: socket.socket | None = None
+# Connect / send timeout (seconds) applied to the cached UDS socket.
+# The bridge is best-effort by contract: a daemon that accepted the
+# connection but stopped reading (wedged event loop, paused process)
+# must NOT freeze the CLI forever once the kernel socket buffer
+# fills.  ``socket.timeout`` is an ``OSError`` subclass, so a timed-out
+# send flows through the existing drop-and-reconnect error path.
+_SEND_TIMEOUT = 2.0
+# UDS path the cached ``_WRITER`` is connected to.  ``_sock_path()``
+# re-reads ``KISS_SORCAR_SOCK`` on every call (its documented
+# contract), so ``_send_envelope`` must compare the cached
+# connection's path against the current one and reconnect when they
+# differ — otherwise events emitted after the env var changed would
+# keep flowing to the OLD daemon socket.
+_WRITER_PATH: Path | None = None
 
 
 def _sock_path() -> Path:
@@ -56,6 +70,7 @@ def _connect() -> socket.socket | None:
     path = _sock_path()
     try:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(_SEND_TIMEOUT)
         s.connect(str(path))
     except OSError:
         return None
@@ -71,13 +86,25 @@ def _send_envelope(envelope: dict[str, Any]) -> None:
     call), and swallows all I/O failures so the CLI keeps working when
     no daemon is listening.
     """
-    global _WRITER
+    global _WRITER, _WRITER_PATH
     payload = json.dumps(envelope).encode() + b"\n"
     with _LOCK:
+        path = _sock_path()
+        if _WRITER is not None and _WRITER_PATH != path:
+            # ``KISS_SORCAR_SOCK`` changed since the connection was
+            # cached: drop the stale writer so this event reaches the
+            # daemon now listening at the new path.
+            try:
+                _WRITER.close()
+            except OSError:
+                pass
+            _WRITER = None
         if _WRITER is None:
             _WRITER = _connect()
             if _WRITER is None:
+                _WRITER_PATH = None
                 return
+            _WRITER_PATH = path
         try:
             _WRITER.sendall(payload)
         except OSError:
@@ -86,6 +113,7 @@ def _send_envelope(envelope: dict[str, Any]) -> None:
             except OSError:
                 pass
             _WRITER = None
+            _WRITER_PATH = None
 
 
 def send_event(event: dict[str, Any]) -> None:

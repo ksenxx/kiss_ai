@@ -13,6 +13,7 @@ from __future__ import annotations
 import fcntl
 import json
 import logging
+import math
 import os
 import shlex
 import shutil
@@ -112,8 +113,11 @@ def sanitize_config(data: dict[str, Any]) -> dict[str, Any]:
     restarting the kiss-web daemon and killing every in-flight task.
 
     Coercion rules (per the type of the key's default): booleans accept
-    any truthy/falsy value; numbers accept ints/floats and numeric
-    strings (falling back to the default otherwise); strings keep only
+    any truthy/falsy value; numbers accept *finite* ints/floats and
+    numeric strings — non-finite values (``NaN``/``Infinity`` literals
+    survive ``json.load`` and would silently disable every
+    ``cost > max_budget`` check) fall back to the default, as does
+    anything non-numeric; strings keep only
     genuine ``str`` values (falling back to the default otherwise).
     Non-DEFAULTS keys (e.g. ``tunnel_token``, ``email``) pass through
     untouched.
@@ -135,12 +139,24 @@ def sanitize_config(data: dict[str, Any]) -> dict[str, Any]:
         elif isinstance(default, int | float):
             if isinstance(value, bool) or not isinstance(value, int | float):
                 try:
-                    result[key] = float(value)
+                    value = float(value)
                 except (TypeError, ValueError):
                     logger.debug(
                         "Ignoring non-numeric config value %s=%r", key, value,
                     )
                     result[key] = default
+                    continue
+            # ``json.load`` accepts NaN/Infinity literals (and ``1e999``
+            # overflows to inf), and ``float("nan")`` succeeds above —
+            # a non-finite budget silently disables every
+            # ``cost > max_budget`` check, so reject it here.
+            if not math.isfinite(value):
+                logger.debug(
+                    "Ignoring non-finite config value %s=%r", key, value,
+                )
+                result[key] = default
+            else:
+                result[key] = value
         elif not isinstance(value, str):
             logger.debug(
                 "Ignoring non-string config value %s=%r", key, value,
@@ -401,6 +417,13 @@ def apply_config_to_env(cfg: dict[str, Any]) -> None:
         budget_value = float(budget)
     except (TypeError, ValueError):
         logger.debug("Ignoring non-numeric max_budget %r", budget)
+        budget_value = float(DEFAULTS["max_budget"])
+    # ``float("nan")`` / ``float("inf")`` raise nothing above, and a
+    # genuine non-finite float passes ``float()`` unchanged — but a
+    # nan/inf budget makes every ``cost > max_budget`` check False,
+    # silently disabling budget enforcement.  Fall back to the default.
+    if not math.isfinite(budget_value):
+        logger.debug("Ignoring non-finite max_budget %r", budget)
         budget_value = float(DEFAULTS["max_budget"])
     config_module.DEFAULT_CONFIG.max_budget = budget_value
 

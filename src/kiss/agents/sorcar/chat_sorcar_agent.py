@@ -15,6 +15,7 @@ import logging
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Any
 
 import yaml
@@ -42,6 +43,38 @@ from kiss.agents.sorcar.sorcar_agent import (
 from kiss.core.printer import parse_result_yaml
 
 MAX_TASKS = 10
+
+
+def _dir_inside_worktree(work_dir: str, wt_dir: object) -> bool:
+    """Return True when *work_dir* lies inside the agent's own worktree dir.
+
+    Used by :meth:`ChatSorcarAgent.run` to decide the persisted
+    ``is_worktree`` flag for worktree-capable subclasses whose ``run()``
+    consumed the ``use_worktree`` kwarg before delegating:
+    :class:`~kiss.agents.sorcar.worktree_sorcar_agent.WorktreeSorcarAgent`
+    redirects ``work_dir`` into ``self._wt_dir`` only when a worktree
+    was actually set up for the current run, so containment of the
+    effective ``work_dir`` in ``wt_dir`` is the ground truth (a stale
+    pending worktree from an earlier run does not match the current
+    run's plain ``work_dir``, and an explicit ``use_worktree=False``
+    fallback leaves ``work_dir`` untouched).
+
+    Args:
+        work_dir: The effective working directory of the current run.
+        wt_dir: The agent's current worktree directory (``Path`` or
+            ``None`` — typed loosely because plain ``ChatSorcarAgent``
+            has no ``_wt_dir`` attribute).
+
+    Returns:
+        True only when both paths exist as strings and *work_dir*
+        resolves to a path at or below *wt_dir*.
+    """
+    if not work_dir or wt_dir is None:
+        return False
+    try:
+        return Path(work_dir).resolve().is_relative_to(Path(str(wt_dir)).resolve())
+    except (OSError, ValueError):
+        return False
 
 
 class ChatSorcarAgent(SorcarAgent):
@@ -556,19 +589,37 @@ class ChatSorcarAgent(SorcarAgent):
 
             agent_prompt = self.build_chat_prompt(prompt_template)
 
+            # Resolve whether THIS run actually executes inside a git
+            # worktree — used by BOTH the early extra save below and
+            # the final extra save in the ``finally`` block, so the
+            # two can never disagree.
+            #
+            # ``pop`` (not ``get``): ``SorcarAgent.run()`` has no
+            # ``use_worktree`` parameter, so forwarding it via
+            # ``**kwargs`` would raise ``TypeError``.  An explicit
+            # kwarg wins.  When absent (``WorktreeSorcarAgent.run``
+            # pops it before delegating here), the class-level
+            # ``uses_worktree`` flag alone is WRONG — a
+            # ``WorktreeSorcarAgent`` invoked with
+            # ``use_worktree=False``, or falling back to direct
+            # execution (work_dir not a git repo, detached HEAD,
+            # setup failure), runs on the main working tree.  Probe
+            # whether the effective ``work_dir`` was actually
+            # redirected into this agent's own worktree directory.
+            explicit_worktree = kwargs.pop("use_worktree", None)
+            if explicit_worktree is not None:
+                is_worktree = bool(explicit_worktree)
+            else:
+                is_worktree = self.uses_worktree and _dir_inside_worktree(
+                    kwargs.get("work_dir", "") or "",
+                    getattr(self, "_wt_dir", None),
+                )
+
             early_extra = self._build_extra_payload(
                 model=kwargs.get("model_name", "") or "",
                 work_dir=kwargs.get("work_dir", "") or "",
                 is_parallel=bool(kwargs.get("is_parallel", False)),
-                # ``pop`` (not ``get``): ``SorcarAgent.run()`` has no
-                # ``use_worktree`` parameter, so forwarding it via
-                # ``**kwargs`` would raise ``TypeError``.  Only
-                # ``WorktreeSorcarAgent`` consumes this kwarg (and
-                # pops it before delegating here).
-                is_worktree=(
-                    bool(kwargs.pop("use_worktree", False))
-                    or self.uses_worktree
-                ),
+                is_worktree=is_worktree,
             )
 
             task_id, self._chat_id = _add_task(
@@ -786,7 +837,12 @@ class ChatSorcarAgent(SorcarAgent):
                     model=self.model_name,
                     work_dir=self.work_dir,
                     is_parallel=self._is_parallel,
-                    is_worktree=self.uses_worktree,
+                    # Reuse the value resolved at task start so the
+                    # final save can never contradict the early save
+                    # (``self.uses_worktree`` is a class-level
+                    # capability flag, not a statement about whether
+                    # THIS run actually used a worktree).
+                    is_worktree=is_worktree,
                 )
                 extra_payload["tokens"] = self.total_tokens_used
                 extra_payload["cost"] = round(self.budget_used, 6)

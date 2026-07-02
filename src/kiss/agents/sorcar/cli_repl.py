@@ -73,6 +73,9 @@ import re
 import sys
 from pathlib import Path
 
+from kiss.agents.sorcar.cli_line_continuation import (
+    ends_with_line_continuation,
+)
 from kiss.agents.sorcar.cli_panel import (
     _ESC,
     CYAN,
@@ -98,7 +101,10 @@ from kiss.agents.vscode.helpers import (
     clip_autocomplete_suggestion,
     rank_file_suggestions,
 )
-from kiss.agents.vscode.tricks import prefix_match_tricks
+from kiss.agents.vscode.tricks import (
+    current_sentence_partial,
+    prefix_match_tricks,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -275,6 +281,16 @@ class CliCompleter:
         the prompt_toolkit dropdown can show every prefix-matched prior
         task; an identifier suffix from the active file is appended as
         a final candidate when no history match is found.
+
+        Every candidate is a WHOLE-LINE replacement that starts with
+        *line*: both frontends substitute the candidate for the entire
+        input (readline runs with the word-break delimiters cleared;
+        the prompt_toolkit dropdown uses ``start_position=-len(line)``),
+        so trick and identifier suggestions — which natively begin only
+        at the current sentence / trailing token — are spliced onto the
+        untouched head of *line* here.  This mirrors the overlap-splice
+        accept in the VS Code webview's ``acceptCompletion`` and keeps
+        the text the user already typed from being erased on accept.
         """
         # ``_prefix_match_tasks`` already guarantees (via SQL) that
         # every match starts with *line* and is strictly longer than it.
@@ -292,12 +308,14 @@ class CliCompleter:
         # ``_prefix_match_tasks``' multi-alternative contract.
         tricks = prefix_match_tricks(line)
         if tricks:
-            return list(tricks)
+            # ``current_sentence_partial`` is always a suffix of *line*
+            # (leading whitespace only when no interior boundary), so
+            # the head before it is everything the trick must keep.
+            head = line[: len(line) - len(current_sentence_partial(line))]
+            return [head + trick for trick in tricks]
         suffix = self._active_file_suffix(line)
         if suffix:
-            m = re.search(r"([\w][\w.]*)$", line)
-            partial = m.group(1) if m else ""
-            return [partial + suffix]
+            return [line + suffix]
         return []
 
     def _active_file_suffix(self, line: str) -> str:
@@ -540,8 +558,17 @@ def _read_line_ptk(reader: PtkLineReader, prompt: str) -> str | None:
     ``@`` file/folder picker, slash-command and ``/model`` menus) can
     render there.
 
-    A line ending in a backslash continues on the next row, joined with
-    real newlines, matching the readline path.
+    A line ending in an *unescaped* backslash continues on the next
+    row, joined with real newlines, following the shared POSIX-shell
+    rule in :func:`~kiss.agents.sorcar.cli_line_continuation
+    .ends_with_line_continuation`.  The prompt_toolkit Enter binding
+    (:func:`~kiss.agents.sorcar.cli_prompt._submit_enter`) already
+    applies the same rule in-buffer before ever submitting, so a
+    submitted line can only end in an even (escaped-literal) number of
+    backslashes — which must be returned verbatim, NOT treated as a
+    continuation.  A naive ``endswith("\\")`` check here used to eat
+    one of the user's escaped literal backslashes and swallow the next
+    input line as a bogus continuation.
 
     Args:
         reader: The prompt_toolkit session wrapper.
@@ -566,16 +593,19 @@ def _read_line_ptk(reader: PtkLineReader, prompt: str) -> str | None:
     except KeyboardInterrupt:
         print(bottom)
         raise
-    while line.endswith("\\"):
+    while True:
+        cont, keep = ends_with_line_continuation(line)
+        if not cont:
+            break
         try:
             more = reader.read(framed_prompt)
         except EOFError:
-            line = line[:-1]
+            line = line[:keep]
             break
         except KeyboardInterrupt:
             print(bottom)
             raise
-        line = line[:-1] + "\n" + more
+        line = line[:keep] + "\n" + more
     print(bottom)
     return line
 
@@ -632,13 +662,16 @@ def _read_line(prompt: str, reader: PtkLineReader | None = None) -> str | None:
         except EOFError:
             print(bottom)
             return None
-        while line.endswith("\\"):
+        while True:
+            cont, keep = ends_with_line_continuation(line)
+            if not cont:
+                break
             try:
                 more = input(framed_prompt)
             except EOFError:
-                line = line[:-1]
+                line = line[:keep]
                 break
-            line = line[:-1] + "\n" + more
+            line = line[:keep] + "\n" + more
         print(bottom)
         return line
 
@@ -677,13 +710,20 @@ def _read_line(prompt: str, reader: PtkLineReader | None = None) -> str | None:
         sys.stdout.write(f"\n{_ESC}[2K")
         sys.stdout.flush()
         raise
-    # A trailing backslash (typed directly, or injected by the
-    # Shift+Enter readline macro bound in :func:`_setup_readline`)
-    # continues the message on the next line; the joined parts are
-    # separated by real newlines.  The cursor currently sits on the old
-    # bottom-rule row: clear it, frame it as the next body row, redraw
-    # the bottom rule one line down, and read the continuation there.
-    while line.endswith("\\"):
+    # An unescaped trailing backslash (typed directly, or injected by
+    # the Shift+Enter readline macro bound in :func:`_setup_readline`)
+    # continues the message on the next line, following the shared
+    # POSIX-shell rule in :func:`~kiss.agents.sorcar
+    # .cli_line_continuation.ends_with_line_continuation` (an even,
+    # escaped-literal number of backslashes submits); the joined parts
+    # are separated by real newlines.  The cursor currently sits on the
+    # old bottom-rule row: clear it, frame it as the next body row,
+    # redraw the bottom rule one line down, and read the continuation
+    # there.
+    while True:
+        cont, keep = ends_with_line_continuation(line)
+        if not cont:
+            break
         sys.stdout.write(
             f"\r{_ESC}[2K{_ESC}[{cols}G{CYAN}│{RESET}\r\n{bottom}{_ESC}[1A\r"
         )
@@ -693,14 +733,14 @@ def _read_line(prompt: str, reader: PtkLineReader | None = None) -> str | None:
         except EOFError:
             sys.stdout.write("\n")
             sys.stdout.flush()
-            line = line[:-1]
+            line = line[:keep]
             break
         except KeyboardInterrupt:
             # Same bottom-rule cleanup as the first input() above.
             sys.stdout.write(f"\n{_ESC}[2K")
             sys.stdout.flush()
             raise
-        line = line[:-1] + "\n" + more
+        line = line[:keep] + "\n" + more
     # Enter already moved the cursor onto the bottom rule line; step past
     # it so following output never overwrites the closed box.
     sys.stdout.write("\n")

@@ -145,7 +145,9 @@ def _parse_skill_file(path: Path, name: str, source: str) -> Skill | None:
         has no description.
     """
     try:
-        text = path.read_text(encoding="utf-8")
+        # utf-8-sig drops a leading BOM (common in Windows-authored
+        # files) that would otherwise defeat the \A frontmatter match.
+        text = path.read_text(encoding="utf-8-sig")
     except OSError:
         logger.debug("unreadable skill file: %s", path, exc_info=True)
         return None
@@ -160,10 +162,13 @@ def _parse_skill_file(path: Path, name: str, source: str) -> Skill | None:
                 meta = loaded
         except yaml.YAMLError:
             logger.debug("bad frontmatter in %s", path, exc_info=True)
-    description = str(meta.get("description", "") or "").strip()
+    # Collapse all whitespace (a YAML block scalar may span lines) so
+    # the description is the one-line summary the catalog and the
+    # /skills listing require.
+    description = " ".join(str(meta.get("description", "") or "").split())
     if not description:
         # Claude Code falls back to the first paragraph of the body.
-        first_paragraph = body.strip().split("\n\n", 1)[0].strip()
+        first_paragraph = body.strip().split("\n\n", 1)[0]
         description = " ".join(first_paragraph.split())
     if not description:
         logger.debug("skill %s has no description; skipping", path)
@@ -305,14 +310,20 @@ def _catalog_xml(skills: dict[str, Skill]) -> str:
     return "\n".join(lines)
 
 
-def _list_resources(skill_dir: Path) -> list[str]:
+def _list_resources(skill_dir: Path) -> tuple[list[str], bool]:
     """List the skill's bundled resource files (relative paths, capped).
 
     Files are listed — never read — so the agent can load specific
     resources on demand with its file tools.  ``SKILL.md`` itself and
     bookkeeping directories are excluded.
+
+    Returns:
+        ``(resources, truncated)`` where *truncated* is ``True`` only
+        when at least one further resource file exists beyond the
+        ``_MAX_RESOURCE_LISTING`` cap.
     """
     resources: list[str] = []
+    truncated = False
     try:
         for path in sorted(skill_dir.rglob("*")):
             if not path.is_file() or path.name == "SKILL.md":
@@ -320,12 +331,13 @@ def _list_resources(skill_dir: Path) -> list[str]:
             rel = path.relative_to(skill_dir)
             if any(part in _RESOURCE_SKIP_DIRS for part in rel.parts):
                 continue
-            resources.append(str(rel))
             if len(resources) >= _MAX_RESOURCE_LISTING:
+                truncated = True
                 break
+            resources.append(str(rel))
     except OSError:
         logger.debug("could not list resources in %s", skill_dir, exc_info=True)
-    return resources
+    return resources, truncated
 
 
 def load_skill_content(skill: Skill) -> str:
@@ -344,7 +356,7 @@ def load_skill_content(skill: Skill) -> str:
         the file has become unreadable.
     """
     try:
-        text = Path(skill.path).read_text(encoding="utf-8")
+        text = Path(skill.path).read_text(encoding="utf-8-sig")
     except OSError:
         return f"Error: skill file is no longer readable: {skill.path}"
     match = _FRONTMATTER_RE.match(text)
@@ -355,11 +367,11 @@ def load_skill_content(skill: Skill) -> str:
     parts.append(
         "Relative paths in this skill are relative to the skill directory."
     )
-    resources = _list_resources(skill_dir)
+    resources, truncated = _list_resources(skill_dir)
     if resources:
         parts.append("<skill_resources>")
         parts.extend(f"<file>{r}</file>" for r in resources)
-        if len(resources) >= _MAX_RESOURCE_LISTING:
+        if truncated:
             parts.append("<note>listing truncated</note>")
         parts.append("</skill_resources>")
     parts.append("</skill_content>")
