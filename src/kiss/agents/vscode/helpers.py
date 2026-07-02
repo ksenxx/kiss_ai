@@ -96,7 +96,9 @@ def clip_autocomplete_suggestion(query: str, suggestion: str) -> str:
     Quote-stripping belongs only to :func:`clean_llm_output`, which
     handles raw LLM responses.
 
-    Stops at newlines.
+    Stops at newlines — including CR/CRLF and unicode line
+    boundaries, so a CRLF-sourced suggestion never leaks a trailing
+    ``"\\r"`` (or an embedded lone CR) into the ghost text.
 
     Normalises the cursor-to-ghost gap so the overlay (which uses
     ``white-space: pre-wrap``) never renders visible extra spaces
@@ -122,7 +124,7 @@ def clip_autocomplete_suggestion(query: str, suggestion: str) -> str:
     s = suggestion
     if not s:
         return ""
-    s = s.split("\n")[0]
+    s = s.splitlines()[0]
     if not query or (query[-1:].isspace()):
         s = s.lstrip()
     else:

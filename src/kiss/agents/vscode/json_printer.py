@@ -648,7 +648,14 @@ class JsonPrinter(Printer):
             total_tokens = raw_tokens + self.tokens_offset
             total_steps = raw_steps + self.steps_offset
             if isinstance(raw_cost, str) and raw_cost.startswith("$"):
-                total_cost = f"${float(raw_cost[1:]) + self.budget_offset:.4f}"
+                # Tolerate a malformed dollar cost exactly like
+                # ``_broadcast_result`` does: pass it through verbatim
+                # rather than raising ValueError out of ``print()``
+                # (which would kill the emitting agent thread).
+                try:
+                    total_cost = f"${float(raw_cost[1:]) + self.budget_offset:.4f}"
+                except ValueError:
+                    total_cost = raw_cost
             else:
                 total_cost = raw_cost
             self.broadcast({

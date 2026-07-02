@@ -407,13 +407,17 @@ class PtkCompleter(Completer):
     def _predictive_completions(self, line: str) -> Iterable[Completion]:
         """Build the whole-line predictive dropdown entries.
 
-        Each match replaces the entire typed line.  The suffix added by
-        the completion is shown as the display text (so the menu is not
-        cluttered with the prefix the user already typed), and the
-        ``history`` meta marks where the suggestion came from.
+        Each match replaces the entire typed line and is guaranteed by
+        :meth:`CliCompleter._predictive_matches` to start with *line*
+        (trick / identifier suggestions arrive already spliced onto the
+        typed head), so accepting one never erases text the user
+        already typed.  The suffix added by the completion is shown as
+        the display text (so the menu is not cluttered with the prefix
+        the user already typed), and the ``history`` meta marks where
+        the suggestion came from.
         """
         for cand in self.cli._predictive_matches(line):
-            suffix = cand[len(line):] if cand.startswith(line) else cand
+            suffix = cand[len(line):]
             yield Completion(
                 cand,
                 start_position=-len(line),

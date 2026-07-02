@@ -95,14 +95,16 @@ def test_cli_trick_suggested_after_sentence_boundary(
 ) -> None:
     """A trick is offered after ``. `` in the middle of the line.
 
-    The suggestion is the raw trick body — no head-splicing onto the
-    preamble.  Accepting the completion replaces the input with just
-    the trick body.
+    The suggestion is the trick body spliced onto the untouched
+    preamble: both frontends replace the entire line with the
+    candidate, so the candidate must keep the text the user already
+    typed.
     """
     completer = CliCompleter(str(tmp_path))
     line = "Some preamble text. Reproduce"
     matches = completer._build_matches(line)
     assert matches == [
+        "Some preamble text. "
         "Reproduce the issue by writing end-to-end test. "
         "Then fix the issue."
     ], f"Got {matches!r}"
@@ -138,8 +140,10 @@ def test_cli_trick_falls_back_to_active_file_when_no_match(
     # ``calculate_t`` is not at a sentence start (no period before "call")
     # so no trick match — but also no trick prefixes "calculate_t", so
     # the trick branch correctly skips and the active-file branch runs.
+    # The candidate is the whole line plus the identifier suffix so the
+    # accept keeps the already-typed head.
     matches = completer._build_matches("call calculate_t")
-    assert matches == ["calculate_total"]
+    assert matches == ["call calculate_total"]
 
 
 def test_cli_case_sensitive_trick_match(tmp_path: Path, kiss_db) -> None:

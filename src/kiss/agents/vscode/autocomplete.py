@@ -312,11 +312,13 @@ class _AutocompleteMixin:
         """Gather every fast-complete candidate for *query*.
 
         Returns up to :data:`_COMPLETIONS_LIMIT` ranked candidates, each
-        a ``{"type": <kind>, "text": <full replacement>}`` dict.  The
-        ``text`` field is always the *complete replacement* the chat
-        textarea should hold when the candidate is accepted — never
-        just a suffix — so the frontend's accept path is a single
-        assignment regardless of source.
+        a ``{"type": <kind>, "text": <raw suggestion>}`` dict.  The
+        ``text`` field is the raw suggestion for the piece of the
+        query being completed (whole query for tasks, current sentence
+        partial for tricks, trailing token for identifiers); the
+        frontend's ``acceptCompletion`` splices it into the input by
+        replacing the longest input suffix that prefixes ``text``, so
+        text the user typed before that piece is preserved.
 
         Sources, in dropdown order:
 

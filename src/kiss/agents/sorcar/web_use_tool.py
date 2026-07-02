@@ -87,7 +87,18 @@ INTERACTIVE_ROLES = {
     "treeitem",
 }
 
-_ROLE_LINE_RE = re.compile(r"^(\s*)-\s+([\w]+)\s*(.*)")
+# Role lines look like ``- button "Name"`` — but when the accessible
+# name contains ``": "`` Playwright single-quote-wraps the whole YAML
+# key (``- 'link "colon: \"q\""':``), so an optional leading ``'`` must
+# be accepted or the element is silently never numbered.
+_ROLE_LINE_RE = re.compile(r"^(\s*)-\s+('?)([\w]+)\s*(.*)")
+
+# Accessible names are double-quoted with YAML escaping: ``\"`` for an
+# embedded quote and ``\\`` for a backslash.  A naive ``"([^"]*)"``
+# stops at the first embedded quote and records a corrupted name that
+# get_by_role(name=..., exact=True) can never match.
+_NAME_RE = re.compile(r'"((?:\\.|[^"\\])*)"')
+_NAME_UNESCAPE_RE = re.compile(r'\\(["\\])')
 
 _SCROLL_DELTA = {"down": (0, 300), "up": (0, -300), "right": (300, 0), "left": (-300, 0)}
 
@@ -137,14 +148,21 @@ def _number_interactive_elements(snapshot: str) -> tuple[str, list[dict[str, str
         if not m:
             result_lines.append(line)
             continue
-        indent, role, rest = m.group(1), m.group(2), m.group(3)
+        indent, quote, role, rest = m.group(1), m.group(2), m.group(3), m.group(4)
         if role not in INTERACTIVE_ROLES:
             result_lines.append(line)
             continue
         counter += 1
-        name_match = re.match(r'"([^"]*)"', rest)
-        elements.append({"role": role, "name": name_match.group(1) if name_match else ""})
-        result_lines.append(f"{indent}- [{counter}] {role} {rest}".rstrip())
+        name_match = _NAME_RE.match(rest)
+        name = _NAME_UNESCAPE_RE.sub(r"\1", name_match.group(1)) if name_match else ""
+        if quote:
+            # The whole key is a YAML *single-quoted* scalar, in which
+            # an embedded apostrophe is escaped by doubling it
+            # (``- 'link "Bob''s: list"':``).  Collapse the doubling or
+            # get_by_role(name=..., exact=True) can never match.
+            name = name.replace("''", "'")
+        elements.append({"role": role, "name": name})
+        result_lines.append(f"{indent}- [{counter}] {quote}{role} {rest}".rstrip())
     return "\n".join(result_lines), elements
 
 
@@ -246,6 +264,23 @@ class WebUseTool:
         """
         if self._is_alive():
             return
+        # Active tab closed (user hit the tab's ✕ / window.close()) but
+        # the context survives with other tabs: adopt the most recent
+        # surviving tab instead of tearing down the whole session and
+        # discarding every open tab.  ``self._page is None`` means a
+        # renderer *crash* (see _on_page_crash) — that path must still
+        # fall through to a full teardown + relaunch.
+        if self._page is not None and self._context is not None:
+            try:
+                pages = [p for p in self._context.pages if not p.is_closed()]
+            except Exception:  # pragma: no cover — context already dead
+                logger.debug("Exception caught", exc_info=True)
+                pages = []
+            if pages:
+                self._page = pages[-1]
+                self._page.on("crash", self._on_page_crash)
+                self._elements = []
+                return
         # Re-arm the atexit safety net (close() unregisters it).  The
         # unregister-then-register pattern keeps exactly one entry even
         # when the browser is relaunched many times.
@@ -563,11 +598,16 @@ class WebUseTool:
             "Error taking screenshot: <message>" on error."""
         self._ensure_browser()
         try:
-            # Anchor the path the same way the file tools do: resolve
-            # relative paths against the agent work_dir (NOT the
-            # daemon process cwd — in worktree mode that would
-            # silently escape the worktree).
-            path = Path(file_path)
+            # Anchor the path the same way the file tools do: expand
+            # ``~`` to the user's home (never a literal ``./~/`` dir),
+            # then resolve relative paths against the agent work_dir
+            # (NOT the daemon process cwd — in worktree mode that
+            # would silently escape the worktree).
+            try:
+                path = Path(file_path).expanduser()
+            except RuntimeError:
+                # ``~unknownuser/...`` — fall through to the literal path.
+                path = Path(file_path)
             if not path.is_absolute() and self.work_dir:
                 path = Path(self.work_dir) / path
             path = path.resolve()

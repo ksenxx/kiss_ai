@@ -1420,7 +1420,16 @@ class SteeringSession:
                 Any,
                 _StdoutProxy(self._real_stderr, self.lock, self.box),
             )
-            self.box.start()
+            try:
+                self.box.start()
+            except BaseException:
+                # The restoring ``finally`` below is not reached when
+                # ``start()`` raises here, so the streams must be
+                # restored in place — otherwise the process keeps
+                # writing through proxies of a dead box.
+                sys.stdout = prev_stdout
+                sys.stderr = prev_stderr
+                raise
         # Whether the box is owned or shared, the in-task title/status
         # come from the steering preset so the user sees the "queue
         # follow-ups" hint while the agent works.
@@ -1544,7 +1553,16 @@ class AnchoredRepl:
         sys.stderr = cast(
             Any, _StdoutProxy(self._real_stderr, self.lock, self.box),
         )
-        self.box.start()
+        try:
+            self.box.start()
+        except BaseException:
+            # ``__exit__`` never runs when ``__enter__`` raises, so the
+            # streams must be restored here — otherwise the process is
+            # left with its global stdout/stderr permanently proxied to
+            # a dead box.
+            sys.stdout = self._prev_stdout
+            sys.stderr = self._prev_stderr
+            raise
         return self
 
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:

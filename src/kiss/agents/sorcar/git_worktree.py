@@ -603,7 +603,13 @@ class GitWorktreeOps:
         Returns:
             A non-empty commit message string.
         """
-        result = _git("log", "-1", "--format=%B", branch, cwd=repo)
+        # bughunt8: terminate the revision list with ``--`` — without
+        # it, git refuses the command with "ambiguous argument
+        # '<branch>': both revision and filename" whenever the user's
+        # repo contains a file whose path equals the branch name,
+        # silently degrading every merge commit message to the
+        # synthetic fallback.
+        result = _git("log", "-1", "--format=%B", branch, "--", cwd=repo)
         msg = result.stdout.rstrip()
         if result.returncode != 0 or not msg:
             return f"kiss: merged from {branch}"
