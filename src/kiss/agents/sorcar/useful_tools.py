@@ -64,9 +64,17 @@ def _active_worktree_remap(resolved: Path, work_dir: str | None) -> Path | None:
     "why didn't you run the last task in worktree and why didn't you
     commit the changes?" failure mode.
 
-    The remap is purely structural — it only inspects path strings
+    The remap is structural — it only inspects path strings
     (``.kiss-worktrees/kiss_wt-*`` segments), so it works regardless
-    of whether the worktree is currently registered with git.
+    of whether the worktree is currently registered with git.  The
+    one exception is a worktree directory that no longer exists on
+    disk (torn down by a concurrent cleanup/discard/merge): remapping
+    into it would dead-end every Read/Edit ("File not found" for
+    files that DO exist in the parent repo) and make Write resurrect
+    a zombie worktree directory whose contents are never merged.  In
+    that case no remap applies — mirroring the vanished-worktree
+    fallback in ``UsefulTools._spawn``, which runs Bash commands from
+    the parent repo root in the same situation.
 
     Args:
         resolved: An already-resolved absolute path the caller is about
@@ -90,6 +98,11 @@ def _active_worktree_remap(resolved: Path, work_dir: str | None) -> Path | None:
         ):
             main_repo_parts = work_parts[:i]
             wt_root_parts = work_parts[: i + 2]
+            # Vanished worktree: no remap (see docstring).  The caller
+            # falls through to plain resolution against the parent
+            # repo, consistent with ``_spawn``'s cwd fallback.
+            if not Path(*wt_root_parts).is_dir():
+                return None
             res_parts = resolved.parts
             # *resolved* must be STRICTLY under the parent repo
             # (equal-length is no-op, shorter or different prefix is
@@ -175,6 +188,13 @@ def _bash_parent_repo_guard(command: str, work_dir: str | None) -> str | None:
         ):
             main_repo = str(Path(*wd_parts[:i]))
             wt_root = str(Path(*wd_parts[: i + 2]))
+            # Vanished worktree: ``_spawn`` falls back to running the
+            # command with cwd = parent repo root, so refusing a
+            # parent-repo path here (and pointing the model at a
+            # worktree path that no longer exists) would be a dead
+            # end.  Let the command through.
+            if not os.path.isdir(wt_root):
+                return None
             # Match the parent-repo prefix followed by either end-of-
             # token or a path separator.  This avoids false positives
             # on unrelated paths that merely share a prefix substring
