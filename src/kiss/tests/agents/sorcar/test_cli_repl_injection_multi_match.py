@@ -106,14 +106,22 @@ def test_cli_returns_all_matching_tricks_at_sentence_start(
 def test_cli_returns_all_matching_tricks_after_sentence_boundary(
     tmp_path: Path, kiss_db,
 ) -> None:
-    """Multiple tricks must be offered after a mid-line ``. `` boundary too."""
+    """Multiple tricks must be offered after a mid-line ``. `` boundary too.
+
+    Each candidate keeps the untouched preamble head: the frontends
+    replace the whole line, so head-less candidates would erase the
+    text the user already typed on accept.
+    """
     completer = CliCompleter(str(tmp_path))
     line = "Some preamble text. Reproduce"
     matches = completer._build_matches(line)
+    head = "Some preamble text. "
     expected = {
-        "Reproduce the issue by writing integration tests. Then fix the issue.",
-        "Reproduce the issue by writing end-to-end test. Then fix the issue.",
-        "Reproduce the bug step by step.",
+        head + "Reproduce the issue by writing integration tests. "
+               "Then fix the issue.",
+        head + "Reproduce the issue by writing end-to-end test. "
+               "Then fix the issue.",
+        head + "Reproduce the bug step by step.",
     }
     assert set(matches) >= expected, (
         f"Expected three trick completions after the sentence boundary, "

@@ -101,7 +101,10 @@ from kiss.agents.vscode.helpers import (
     clip_autocomplete_suggestion,
     rank_file_suggestions,
 )
-from kiss.agents.vscode.tricks import prefix_match_tricks
+from kiss.agents.vscode.tricks import (
+    current_sentence_partial,
+    prefix_match_tricks,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -278,6 +281,16 @@ class CliCompleter:
         the prompt_toolkit dropdown can show every prefix-matched prior
         task; an identifier suffix from the active file is appended as
         a final candidate when no history match is found.
+
+        Every candidate is a WHOLE-LINE replacement that starts with
+        *line*: both frontends substitute the candidate for the entire
+        input (readline runs with the word-break delimiters cleared;
+        the prompt_toolkit dropdown uses ``start_position=-len(line)``),
+        so trick and identifier suggestions — which natively begin only
+        at the current sentence / trailing token — are spliced onto the
+        untouched head of *line* here.  This mirrors the overlap-splice
+        accept in the VS Code webview's ``acceptCompletion`` and keeps
+        the text the user already typed from being erased on accept.
         """
         # ``_prefix_match_tasks`` already guarantees (via SQL) that
         # every match starts with *line* and is strictly longer than it.
@@ -295,12 +308,14 @@ class CliCompleter:
         # ``_prefix_match_tasks``' multi-alternative contract.
         tricks = prefix_match_tricks(line)
         if tricks:
-            return list(tricks)
+            # ``current_sentence_partial`` is always a suffix of *line*
+            # (leading whitespace only when no interior boundary), so
+            # the head before it is everything the trick must keep.
+            head = line[: len(line) - len(current_sentence_partial(line))]
+            return [head + trick for trick in tricks]
         suffix = self._active_file_suffix(line)
         if suffix:
-            m = re.search(r"([\w][\w.]*)$", line)
-            partial = m.group(1) if m else ""
-            return [partial + suffix]
+            return [line + suffix]
         return []
 
     def _active_file_suffix(self, line: str) -> str:
