@@ -145,7 +145,9 @@ def _parse_skill_file(path: Path, name: str, source: str) -> Skill | None:
         has no description.
     """
     try:
-        text = path.read_text(encoding="utf-8")
+        # utf-8-sig drops a leading BOM (common in Windows-authored
+        # files) that would otherwise defeat the \A frontmatter match.
+        text = path.read_text(encoding="utf-8-sig")
     except OSError:
         logger.debug("unreadable skill file: %s", path, exc_info=True)
         return None
@@ -160,10 +162,13 @@ def _parse_skill_file(path: Path, name: str, source: str) -> Skill | None:
                 meta = loaded
         except yaml.YAMLError:
             logger.debug("bad frontmatter in %s", path, exc_info=True)
-    description = str(meta.get("description", "") or "").strip()
+    # Collapse all whitespace (a YAML block scalar may span lines) so
+    # the description is the one-line summary the catalog and the
+    # /skills listing require.
+    description = " ".join(str(meta.get("description", "") or "").split())
     if not description:
         # Claude Code falls back to the first paragraph of the body.
-        first_paragraph = body.strip().split("\n\n", 1)[0].strip()
+        first_paragraph = body.strip().split("\n\n", 1)[0]
         description = " ".join(first_paragraph.split())
     if not description:
         logger.debug("skill %s has no description; skipping", path)
@@ -351,7 +356,7 @@ def load_skill_content(skill: Skill) -> str:
         the file has become unreadable.
     """
     try:
-        text = Path(skill.path).read_text(encoding="utf-8")
+        text = Path(skill.path).read_text(encoding="utf-8-sig")
     except OSError:
         return f"Error: skill file is no longer readable: {skill.path}"
     match = _FRONTMATTER_RE.match(text)

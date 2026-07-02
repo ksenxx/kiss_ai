@@ -647,13 +647,16 @@ def _read_line(prompt: str, reader: PtkLineReader | None = None) -> str | None:
         except EOFError:
             print(bottom)
             return None
-        while line.endswith("\\"):
+        while True:
+            cont, keep = ends_with_line_continuation(line)
+            if not cont:
+                break
             try:
                 more = input(framed_prompt)
             except EOFError:
-                line = line[:-1]
+                line = line[:keep]
                 break
-            line = line[:-1] + "\n" + more
+            line = line[:keep] + "\n" + more
         print(bottom)
         return line
 
@@ -692,13 +695,20 @@ def _read_line(prompt: str, reader: PtkLineReader | None = None) -> str | None:
         sys.stdout.write(f"\n{_ESC}[2K")
         sys.stdout.flush()
         raise
-    # A trailing backslash (typed directly, or injected by the
-    # Shift+Enter readline macro bound in :func:`_setup_readline`)
-    # continues the message on the next line; the joined parts are
-    # separated by real newlines.  The cursor currently sits on the old
-    # bottom-rule row: clear it, frame it as the next body row, redraw
-    # the bottom rule one line down, and read the continuation there.
-    while line.endswith("\\"):
+    # An unescaped trailing backslash (typed directly, or injected by
+    # the Shift+Enter readline macro bound in :func:`_setup_readline`)
+    # continues the message on the next line, following the shared
+    # POSIX-shell rule in :func:`~kiss.agents.sorcar
+    # .cli_line_continuation.ends_with_line_continuation` (an even,
+    # escaped-literal number of backslashes submits); the joined parts
+    # are separated by real newlines.  The cursor currently sits on the
+    # old bottom-rule row: clear it, frame it as the next body row,
+    # redraw the bottom rule one line down, and read the continuation
+    # there.
+    while True:
+        cont, keep = ends_with_line_continuation(line)
+        if not cont:
+            break
         sys.stdout.write(
             f"\r{_ESC}[2K{_ESC}[{cols}G{CYAN}│{RESET}\r\n{bottom}{_ESC}[1A\r"
         )
@@ -708,14 +718,14 @@ def _read_line(prompt: str, reader: PtkLineReader | None = None) -> str | None:
         except EOFError:
             sys.stdout.write("\n")
             sys.stdout.flush()
-            line = line[:-1]
+            line = line[:keep]
             break
         except KeyboardInterrupt:
             # Same bottom-rule cleanup as the first input() above.
             sys.stdout.write(f"\n{_ESC}[2K")
             sys.stdout.flush()
             raise
-        line = line[:-1] + "\n" + more
+        line = line[:keep] + "\n" + more
     # Enter already moved the cursor onto the bottom rule line; step past
     # it so following output never overwrites the closed box.
     sys.stdout.write("\n")
