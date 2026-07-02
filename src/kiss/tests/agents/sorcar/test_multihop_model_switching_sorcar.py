@@ -288,3 +288,116 @@ class TestSorcarAgentRunMultiHopLive:
             )
         # The last set_model call must have stuck on the agent's bookkeeping.
         assert agent.model_name == "gemini-2.5-flash"
+
+
+def _live_agent_with_set_model(
+    model_name: str, model_config: dict[str, Any] | None = None
+) -> tuple[Any, Any]:
+    """Build a SorcarAgent holding a live *model_name* plus its set_model tool.
+
+    Mirrors exactly how a running executor holds the model: routed through
+    the real ``model()`` factory, initialized (client built), with a tools
+    schema cached against a real function map.
+
+    Args:
+        model_name: Model for the agent's initial live model.
+        model_config: Optional config for the initial model (e.g. a
+            user-explicit ``reasoning_effort`` or ``use_responses_api``).
+
+    Returns:
+        ``(agent, set_model)`` — the agent and its real ``set_model`` tool.
+    """
+    agent: Any = SorcarAgent("set-model-config-sanitize")
+    agent._use_web_tools = False
+    tools = agent._get_tools()
+    set_model = _find_tool(tools, "set_model")
+    agent.model = model_factory(model_name, model_config=model_config)
+    agent.model_name = model_name
+    agent.model.initialize("You are a terse assistant.")
+    agent.function_map = {"reveal_secret": reveal_secret}
+    agent._cached_tools_schema = agent.model._build_openai_tools_schema(
+        agent.function_map
+    )
+    return agent, set_model
+
+
+@requires_openai_api_key
+class TestSetModelReasoningEffortSanitizationLive:
+    """set_model must not leak a stale auto-defaulted reasoning_effort.
+
+    The ``model()`` factory auto-defaults ``reasoning_effort`` into
+    ``model_config`` for models whose MODEL_INFO entry declares a
+    ``thinking`` level (the gpt-5.5 family).  ``set_model`` hands the old
+    config over verbatim, so without sanitization a switch to a
+    non-reasoning model (e.g. gpt-4o) carried ``reasoning_effort="high"``
+    and every subsequent no-tools ``generate()`` failed with
+    ``400 Unrecognized request argument supplied: reasoning_effort``.
+    """
+
+    def test_default_effort_dropped_on_switch_to_non_reasoning_model(self) -> None:
+        """gpt-5.5 -> gpt-4o: the auto-defaulted effort must be dropped and a
+        live no-tools generate() (the path that used to 400) must succeed."""
+        agent, set_model = _live_agent_with_set_model("gpt-5.5")
+        assert (agent.model.model_config or {}).get("reasoning_effort") == "high"
+
+        result = set_model("gpt-4o")
+        assert "to gpt-4o" in result, result
+        assert "reasoning_effort" not in (agent.model.model_config or {}), (
+            "factory-defaulted reasoning_effort leaked into gpt-4o's config"
+        )
+
+        agent.model.add_message_to_conversation(
+            "user", "Reply with exactly: OK"
+        )
+        content, _resp = agent.model.generate()
+        assert content
+
+    def test_default_effort_redefaults_on_reasoning_to_reasoning_switch(
+        self,
+    ) -> None:
+        """gpt-5.5-xhigh -> gpt-5.5: the xhigh default belongs to the alias
+        and must not override the target's own default of high."""
+        agent, set_model = _live_agent_with_set_model("gpt-5.5-xhigh")
+        assert (agent.model.model_config or {}).get("reasoning_effort") == "xhigh"
+
+        set_model("gpt-5.5")
+        assert (agent.model.model_config or {}).get("reasoning_effort") == "high"
+
+    def test_user_explicit_effort_is_preserved_across_switch(self) -> None:
+        """A user-chosen non-default effort (low on gpt-5.5, whose default is
+        high) must survive a switch to another reasoning model."""
+        agent, set_model = _live_agent_with_set_model(
+            "gpt-5.5", model_config={"reasoning_effort": "low"}
+        )
+        set_model("gpt-5.5-2026-04-23")
+        assert (agent.model.model_config or {}).get("reasoning_effort") == "low"
+
+
+@requires_openai_api_key
+@requires_anthropic_api_key
+class TestSetModelResponsesFlagToClaudeLive:
+    """A user-forced use_responses_api flag must not break a Claude switch.
+
+    ``use_responses_api`` is an OpenAI-transport knob (it forces/disables
+    the /v1/responses delegation).  set_model carries it over verbatim, and
+    ``AnthropicModel`` copies ``model_config`` into the API kwargs — without
+    sanitization the first Claude call crashed with ``TypeError:
+    Messages.stream() got an unexpected keyword argument
+    'use_responses_api'``.
+    """
+
+    def test_switch_to_claude_with_forced_responses_flag(self) -> None:
+        """gpt-5.5 (use_responses_api=True) -> claude-haiku-4-5: a live
+        no-tools generate() must succeed."""
+        agent, set_model = _live_agent_with_set_model(
+            "gpt-5.5", model_config={"use_responses_api": True}
+        )
+        set_model("claude-haiku-4-5")
+        assert isinstance(agent.model, AnthropicModel)
+        # The flag itself is carried (harmless bookkeeping) — it must simply
+        # never reach the Anthropic API call.
+        agent.model.add_message_to_conversation(
+            "user", "Reply with exactly: OK"
+        )
+        content, _resp = agent.model.generate()
+        assert content
