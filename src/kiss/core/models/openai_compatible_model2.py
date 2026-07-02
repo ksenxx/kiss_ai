@@ -650,7 +650,12 @@ class OpenAICompatibleModel2(Model):
             # Unknown role-less standalone item; ``_normalize_input``
             # already knows how to filter/repair these.
             return True
-        if role == "tool" or item.get("tool_calls") or item.get("attachments"):
+        if role == "tool" or "tool_calls" in item or item.get("attachments"):
+            # ``tool_calls`` marks a Chat-Completions assistant message
+            # even when its value is ``None``/``[]`` (older GeminiModel
+            # turns stored ``tool_calls: None``); the Responses API
+            # rejects the key outright, so such messages always need
+            # conversion (which drops the empty key).
             return False
         content = item.get("content")
         if isinstance(content, list):
