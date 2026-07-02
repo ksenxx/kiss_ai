@@ -33,7 +33,7 @@ from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.agents.sorcar.web_use_tool import WebUseTool
 from kiss.core.base import SYSTEM_PROMPT
 from kiss.core.models.model import Attachment
-from kiss.core.models.model_info import get_default_model
+from kiss.core.models.model_info import MODEL_INFO, get_default_model
 from kiss.core.models.model_info import model as _model_factory
 from kiss.core.printer import Printer
 from kiss.core.relentless_agent import RelentlessAgent
@@ -493,6 +493,23 @@ class SorcarAgent(RelentlessAgent):
             # would wrongly build an OpenAI-compatible client for a
             # ``claude-*``/``gemini-*`` name on a cross-provider switch.
             new_config: dict[str, Any] = dict(old_model.model_config or {})
+            # Drop a factory-injected ``reasoning_effort`` default.  The
+            # ``model()`` factory auto-defaults ``reasoning_effort`` into
+            # ``model_config`` for models whose MODEL_INFO entry declares a
+            # ``thinking`` level (e.g. ``"high"`` for gpt-5.5); such a value
+            # describes the OLD model, not a user choice.  Carrying it over
+            # breaks switches to non-reasoning models (OpenAI rejects
+            # ``reasoning_effort`` for e.g. gpt-4o with a 400) and would
+            # override the new model's own default (e.g. the ``-xhigh``
+            # alias's level leaking onto the base model).  The new model
+            # re-defaults its own level on construction.  A user-explicit
+            # non-default effort is preserved.
+            old_info = MODEL_INFO.get(old_model.model_name)
+            if (
+                old_info is not None
+                and new_config.get("reasoning_effort") == old_info.thinking
+            ):
+                new_config.pop("reasoning_effort", None)
             old_base_url = getattr(old_model, "base_url", None)
             old_api_key = getattr(old_model, "api_key", None)
             if (
