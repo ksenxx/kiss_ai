@@ -36,6 +36,7 @@ runs the agent normally with no box.
 from __future__ import annotations
 
 import codecs
+import contextlib
 import ctypes
 import logging
 import os
@@ -474,10 +475,9 @@ class _InputBox:
         drawn_box_h = self._drawn_box_h or _BOX_H
         top_row = _box_top_row(rows, drawn_box_h + self._menu_h())
         if self._prev_sigcont is not None:
-            try:
+            # Suppress ValueError for non-main-thread stop.
+            with contextlib.suppress(ValueError):
                 signal.signal(signal.SIGCONT, self._prev_sigcont)
-            except ValueError:  # pragma: no cover - non-main-thread stop
-                pass
             self._prev_sigcont = None
         with self.lock:
             out = self._out
@@ -1232,9 +1232,10 @@ class _InputBox:
                     else:
                         self._menu_move(1)
                         changed = True
-                elif self.completer_fn is not None:
-                    if self._open_completion_menu():
-                        changed = True
+                elif self._open_completion_menu():
+                    # ``_open_completion_menu`` is a no-op returning
+                    # False when no ``completer_fn`` is registered.
+                    changed = True
             elif ch >= " " and not ("\x80" <= ch <= "\x9f"):
                 # The C1 control range (U+0080–U+009F) must never reach
                 # the buffer: U+009B is a one-character CSI introducer
@@ -1256,6 +1257,72 @@ class _InputBox:
             self._pending_esc = ""
         if changed:
             self.redraw()
+
+
+def _pump_stdin(
+    box: _InputBox,
+    is_done: Callable[[], bool],
+    on_submit: Callable[[str], None],
+    on_abort: Callable[[], None],
+    on_eof: Callable[[], None] | None = None,
+    on_stdin_close: Callable[[], None] | None = None,
+    on_idle: Callable[[], None] | None = None,
+) -> None:
+    """Feed stdin through *box* until *is_done* returns ``True``.
+
+    Shared select/read pump behind :meth:`SteeringSession._loop`,
+    :meth:`AnchoredRepl.read_idle_line` and
+    :meth:`AnchoredRepl.run_steering_loop`.  Polls stdin with a 0.1 s
+    ``select`` timeout; on each idle tick it invokes *on_idle* (when
+    given) and redraws the box after a terminal resize.  A
+    ``KeyboardInterrupt`` raised out of ``select`` invokes *on_abort*
+    and keeps looping — callers whose abort should end the pump make
+    *is_done* observe the abort.
+
+    Args:
+        box: The anchored input box receiving raw keyboard bytes.
+        is_done: Predicate polled each iteration; ``True`` ends the pump.
+        on_submit: Forwarded to :meth:`_InputBox.feed` for completed lines.
+        on_abort: Invoked on Ctrl+C (both in-band and out-of-band).
+        on_eof: Forwarded to :meth:`_InputBox.feed` (Ctrl+D on empty
+            buffer) when given.
+        on_stdin_close: Invoked when ``os.read`` returns EOF (stdin
+            closed); when ``None`` the EOF read is ignored.
+        on_idle: Invoked once per select timeout while waiting;
+            exceptions are logged and swallowed.
+    """
+    fd = sys.stdin.fileno()
+    last_size = _term_size()
+    while not is_done():
+        try:
+            ready, _, _ = select.select([fd], [], [], 0.1)
+        except (InterruptedError, OSError):
+            continue
+        except KeyboardInterrupt:
+            on_abort()
+            continue
+        if not ready:
+            if on_idle is not None:
+                try:
+                    on_idle()
+                except Exception:  # noqa: BLE001 - defensive
+                    logger.debug("on_idle raised", exc_info=True)
+            # Poll for terminal resizes so the box re-anchors within
+            # one select timeout even when no key is pressed.
+            size = _term_size()
+            if size != last_size:
+                last_size = size
+                box.redraw()
+            continue
+        try:
+            data = os.read(fd, 4096)
+        except (InterruptedError, OSError):
+            continue
+        if not data:
+            if on_stdin_close is not None:
+                on_stdin_close()
+            continue
+        box.feed(data, on_submit, on_abort, on_eof)
 
 
 class SteeringSession:
@@ -1474,31 +1541,11 @@ class SteeringSession:
         return self._result
 
     def _loop(self) -> None:
-        fd = sys.stdin.fileno()
-        last_size = _term_size()
-        while not self._done.is_set():
-            try:
-                ready, _, _ = select.select([fd], [], [], 0.1)
-            except (InterruptedError, OSError):
-                continue
-            except KeyboardInterrupt:
-                self._on_abort()
-                return
-            if not ready:
-                # Poll for terminal resizes so the box re-anchors within
-                # one select timeout even when no key is pressed.
-                size = _term_size()
-                if size != last_size:
-                    last_size = size
-                    self.box.redraw()
-                continue
-            try:
-                data = os.read(fd, 4096)
-            except (InterruptedError, OSError):
-                continue
-            if not data:
-                continue
-            self.box.feed(data, self._on_submit, self._on_abort)
+        # A Ctrl+C inside the pump calls ``_on_abort`` which sets
+        # ``_done``, so the pump exits on its next ``is_done`` poll.
+        _pump_stdin(
+            self.box, self._done.is_set, self._on_submit, self._on_abort,
+        )
 
 
 class AnchoredRepl:
@@ -1604,30 +1651,14 @@ class AnchoredRepl:
         def on_eof() -> None:
             eof_flag.append(True)
 
-        fd = sys.stdin.fileno()
-        last_size = _term_size()
-        while not result and not eof_flag and not abort_flag:
-            try:
-                ready, _, _ = select.select([fd], [], [], 0.1)
-            except (InterruptedError, OSError):
-                continue
-            except KeyboardInterrupt:
-                abort_flag.append(True)
-                break
-            if not ready:
-                size = _term_size()
-                if size != last_size:
-                    last_size = size
-                    self.box.redraw()
-                continue
-            try:
-                data = os.read(fd, 4096)
-            except (InterruptedError, OSError):
-                continue
-            if not data:
-                eof_flag.append(True)
-                break
-            self.box.feed(data, on_submit, on_abort, on_eof)
+        def is_done() -> bool:
+            return bool(result or eof_flag or abort_flag)
+
+        # A closed stdin (EOF read) is treated exactly like Ctrl+D.
+        _pump_stdin(
+            self.box, is_done, on_submit, on_abort,
+            on_eof=on_eof, on_stdin_close=on_eof,
+        )
         if abort_flag:
             raise KeyboardInterrupt
         if eof_flag:
@@ -1681,35 +1712,10 @@ class AnchoredRepl:
             self.box.title = STEER_TITLE
             self.box.status = ""
             self.box.redraw()
-        fd = sys.stdin.fileno()
-        last_size = _term_size()
         try:
-            while not is_done():
-                try:
-                    ready, _, _ = select.select([fd], [], [], 0.1)
-                except (InterruptedError, OSError):
-                    continue
-                except KeyboardInterrupt:
-                    on_abort()
-                    continue
-                if not ready:
-                    if on_idle is not None:
-                        try:
-                            on_idle()
-                        except Exception:  # noqa: BLE001 - defensive
-                            logger.debug("on_idle raised", exc_info=True)
-                    size = _term_size()
-                    if size != last_size:
-                        last_size = size
-                        self.box.redraw()
-                    continue
-                try:
-                    data = os.read(fd, 4096)
-                except (InterruptedError, OSError):
-                    continue
-                if not data:
-                    continue
-                self.box.feed(data, on_submit, on_abort)
+            _pump_stdin(
+                self.box, is_done, on_submit, on_abort, on_idle=on_idle,
+            )
         finally:
             with self.lock:
                 self.box.title = prev_title
