@@ -492,10 +492,22 @@ class SorcarAgent(RelentlessAgent):
             # which discards that placeholder message.
             new_model.initialize("")
             # Carry over the live conversation state so the next LLM
-            # call resumes from the same point.  The kiss-agent
-            # conversation list shape is OpenAI-style (``role`` /
-            # ``content`` dicts plus tool_call entries) for every
-            # provider in this codebase, so a direct hand-off is safe.
+            # call resumes from the same point.  Each provider stores a
+            # different native format: OpenAI-schema models store
+            # ``tool_calls`` with JSON-string arguments plus
+            # ``role="tool"`` / ``role="system"`` messages;
+            # AnthropicModel stores Anthropic Messages-format block
+            # lists (``thinking`` / ``tool_use`` / ``tool_result``);
+            # GeminiModel stores OpenAI-like messages but with dict
+            # tool-call arguments and optional ``attachments`` keys.  A
+            # direct hand-off is safe in every direction because each
+            # model class converts the foreign format at request time:
+            # ``_normalize_conversation_for_api`` in
+            # ``OpenAICompatibleModel`` / ``AnthropicModel``,
+            # ``_convert_conversation_to_gemini_contents`` in
+            # ``GeminiModel`` (system text is hoisted into the
+            # provider's top-level system parameter), and
+            # ``flatten_content_to_text`` in the CLI-backed models.
             new_model.conversation = old_model.conversation
             new_model.usage_info_for_messages = old_model.usage_info_for_messages
 
