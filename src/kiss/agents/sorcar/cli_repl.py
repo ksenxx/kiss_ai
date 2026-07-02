@@ -73,6 +73,9 @@ import re
 import sys
 from pathlib import Path
 
+from kiss.agents.sorcar.cli_line_continuation import (
+    ends_with_line_continuation,
+)
 from kiss.agents.sorcar.cli_panel import (
     _ESC,
     CYAN,
@@ -540,8 +543,17 @@ def _read_line_ptk(reader: PtkLineReader, prompt: str) -> str | None:
     ``@`` file/folder picker, slash-command and ``/model`` menus) can
     render there.
 
-    A line ending in a backslash continues on the next row, joined with
-    real newlines, matching the readline path.
+    A line ending in an *unescaped* backslash continues on the next
+    row, joined with real newlines, following the shared POSIX-shell
+    rule in :func:`~kiss.agents.sorcar.cli_line_continuation
+    .ends_with_line_continuation`.  The prompt_toolkit Enter binding
+    (:func:`~kiss.agents.sorcar.cli_prompt._submit_enter`) already
+    applies the same rule in-buffer before ever submitting, so a
+    submitted line can only end in an even (escaped-literal) number of
+    backslashes — which must be returned verbatim, NOT treated as a
+    continuation.  A naive ``endswith("\\")`` check here used to eat
+    one of the user's escaped literal backslashes and swallow the next
+    input line as a bogus continuation.
 
     Args:
         reader: The prompt_toolkit session wrapper.
@@ -566,16 +578,19 @@ def _read_line_ptk(reader: PtkLineReader, prompt: str) -> str | None:
     except KeyboardInterrupt:
         print(bottom)
         raise
-    while line.endswith("\\"):
+    while True:
+        cont, keep = ends_with_line_continuation(line)
+        if not cont:
+            break
         try:
             more = reader.read(framed_prompt)
         except EOFError:
-            line = line[:-1]
+            line = line[:keep]
             break
         except KeyboardInterrupt:
             print(bottom)
             raise
-        line = line[:-1] + "\n" + more
+        line = line[:keep] + "\n" + more
     print(bottom)
     return line
 

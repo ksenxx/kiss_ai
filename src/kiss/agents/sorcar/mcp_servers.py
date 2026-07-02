@@ -53,6 +53,7 @@ import asyncio
 import atexit
 import inspect
 import json
+import keyword
 import logging
 import threading
 from dataclasses import dataclass, field
@@ -697,6 +698,36 @@ def _one_line(text: str) -> str:
     return " ".join(str(text).split())
 
 
+def _python_param_name(prop_name: str, used: set[str]) -> str:
+    """Derive a valid, unique Python parameter name for a JSON property.
+
+    JSON-schema property names may be hyphenated (``max-results``),
+    start with a digit, or be Python keywords (``from``) — all invalid
+    as Python parameter names.  Invalid characters become ``_``, a
+    leading digit gets a ``p_`` prefix, keywords get a ``_`` suffix,
+    and collisions get a numeric suffix.
+
+    Args:
+        prop_name: The original JSON property name.
+        used: Names already taken (updated in place).
+
+    Returns:
+        A valid Python identifier not present in *used*.
+    """
+    name = "".join(c if c.isalnum() or c == "_" else "_" for c in prop_name)
+    if not name or name[0].isdigit():
+        name = "p_" + name
+    if keyword.iskeyword(name) or keyword.issoftkeyword(name):
+        name += "_"
+    base = name
+    counter = 2
+    while name in used:
+        name = f"{base}_{counter}"
+        counter += 1
+    used.add(name)
+    return name
+
+
 def make_mcp_tool_wrapper(
     manager: MCPManager, server: str, tool: Any,
 ) -> Any:
@@ -721,28 +752,43 @@ def make_mcp_tool_wrapper(
     props = schema.get("properties") or {}
     required = set(schema.get("required") or [])
 
-    params: list[inspect.Parameter] = []
-    doc_args: list[str] = []
+    # (is_required, Parameter, doc line) per property; the Python
+    # parameter name may differ from the JSON property name (which can
+    # be hyphenated or a keyword), so param_map maps it back.
+    entries: list[tuple[bool, inspect.Parameter, str]] = []
+    param_map: dict[str, tuple[str, bool]] = {}
+    used_names: set[str] = set()
     for prop_name in props:
         prop = props[prop_name]
         ann = _json_schema_to_annotation(prop)
         is_required = prop_name in required
-        params.append(
-            inspect.Parameter(
-                prop_name,
-                kind=inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                default=inspect.Parameter.empty if is_required else None,
-                annotation=ann,
-            )
+        py_name = _python_param_name(str(prop_name), used_names)
+        param_map[py_name] = (str(prop_name), is_required)
+        param = inspect.Parameter(
+            py_name,
+            kind=inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            default=inspect.Parameter.empty if is_required else None,
+            annotation=ann,
         )
         desc = ""
         if isinstance(prop, dict):
             desc = _one_line(prop.get("description", "") or "")
         suffix = "" if is_required else " (optional)"
-        doc_args.append(f"    {prop_name}: {desc or 'See tool description.'}{suffix}")
+        doc_line = f"    {py_name}: {desc or 'See tool description.'}{suffix}"
+        entries.append((is_required, param, doc_line))
+    # Required parameters must precede optional ones in a Python
+    # signature; JSON object properties carry no such ordering.
+    entries.sort(key=lambda e: not e[0])
+    params = [e[1] for e in entries]
+    doc_args = [e[2] for e in entries]
 
     def wrapper(**kwargs: Any) -> str:
-        arguments = {k: v for k, v in kwargs.items() if not (v is None and k not in required)}
+        arguments: dict[str, Any] = {}
+        for py_name, value in kwargs.items():
+            original, is_required = param_map.get(py_name, (py_name, True))
+            if value is None and not is_required:
+                continue
+            arguments[original] = value
         return manager.call_tool(server, tool_name, arguments)
 
     description = _one_line(tool.description or f"MCP tool {tool_name} on server {server}.")

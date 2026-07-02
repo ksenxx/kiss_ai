@@ -717,15 +717,33 @@ def _request_cli_info(
 
 
 def _request_models(client: CliClient) -> list[dict[str, Any]]:
-    """Issue ``getModels`` and block for the ``models`` reply."""
+    """Issue ``getModels`` and block for the ``models`` reply.
+
+    Bails out early when the daemon connection drops
+    (``client._closed``) so a disconnect does not stall ``/model
+    list`` for the full 10-second timeout — the same early-bail
+    contract :func:`_request_cli_info` (review #8 / #25) and the
+    ``/autocommit`` wait loop (review A3) already honour.
+    """
     _drain_queue(client.dispatcher.models_q)
-    client.send({"type": "getModels"})
-    try:
-        ev = client.dispatcher.models_q.get(timeout=10)
-    except queue.Empty:
+    if client._closed.is_set():
         return []
-    raw = ev.get("models", [])
-    return list(raw) if isinstance(raw, list) else []
+    client.send({"type": "getModels"})
+    deadline = time.monotonic() + 10.0
+    while True:
+        if client._closed.is_set():
+            return []
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return []
+        try:
+            ev = client.dispatcher.models_q.get(
+                timeout=min(0.25, remaining),
+            )
+        except queue.Empty:
+            continue
+        raw = ev.get("models", [])
+        return list(raw) if isinstance(raw, list) else []
 
 
 def _handle_client_slash(  # noqa: PLR0911,PLR0912 - branchy by design

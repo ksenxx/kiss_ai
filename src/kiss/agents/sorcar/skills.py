@@ -305,14 +305,20 @@ def _catalog_xml(skills: dict[str, Skill]) -> str:
     return "\n".join(lines)
 
 
-def _list_resources(skill_dir: Path) -> list[str]:
+def _list_resources(skill_dir: Path) -> tuple[list[str], bool]:
     """List the skill's bundled resource files (relative paths, capped).
 
     Files are listed — never read — so the agent can load specific
     resources on demand with its file tools.  ``SKILL.md`` itself and
     bookkeeping directories are excluded.
+
+    Returns:
+        ``(resources, truncated)`` where *truncated* is ``True`` only
+        when at least one further resource file exists beyond the
+        ``_MAX_RESOURCE_LISTING`` cap.
     """
     resources: list[str] = []
+    truncated = False
     try:
         for path in sorted(skill_dir.rglob("*")):
             if not path.is_file() or path.name == "SKILL.md":
@@ -320,12 +326,13 @@ def _list_resources(skill_dir: Path) -> list[str]:
             rel = path.relative_to(skill_dir)
             if any(part in _RESOURCE_SKIP_DIRS for part in rel.parts):
                 continue
-            resources.append(str(rel))
             if len(resources) >= _MAX_RESOURCE_LISTING:
+                truncated = True
                 break
+            resources.append(str(rel))
     except OSError:
         logger.debug("could not list resources in %s", skill_dir, exc_info=True)
-    return resources
+    return resources, truncated
 
 
 def load_skill_content(skill: Skill) -> str:
@@ -355,11 +362,11 @@ def load_skill_content(skill: Skill) -> str:
     parts.append(
         "Relative paths in this skill are relative to the skill directory."
     )
-    resources = _list_resources(skill_dir)
+    resources, truncated = _list_resources(skill_dir)
     if resources:
         parts.append("<skill_resources>")
         parts.extend(f"<file>{r}</file>" for r in resources)
-        if len(resources) >= _MAX_RESOURCE_LISTING:
+        if truncated:
             parts.append("<note>listing truncated</note>")
         parts.append("</skill_resources>")
     parts.append("</skill_content>")
