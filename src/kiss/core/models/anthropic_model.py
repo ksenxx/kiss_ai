@@ -20,6 +20,7 @@ from kiss.core.models.model import (
     ThinkingCallback,
     TokenCallback,
     parse_binary_attachments,
+    responses_items_to_chat_messages,
     transcribe_audio,
 )
 
@@ -404,9 +405,11 @@ class AnthropicModel(Model):
         is handed off from an OpenAI-schema model, e.g. via the Sorcar
         ``set_model`` tool — into the Anthropic Messages equivalents
         (``tool_use`` / ``tool_result`` / ``image`` / ``document`` blocks) so
-        the API does not reject them.  Consecutive user turns are merged so
-        that ``tool_result`` blocks land in the message immediately following
-        their ``tool_use`` turn, as the Anthropic API requires.
+        the API does not reject them.  OpenAI Responses-API items (handed
+        off from an ``OpenAICompatibleModel2``) are converted first via
+        :func:`responses_items_to_chat_messages`.  Consecutive user turns are
+        merged so that ``tool_result`` blocks land in the message immediately
+        following their ``tool_use`` turn, as the Anthropic API requires.
 
         Args:
             conversation: The conversation to normalize.
@@ -415,7 +418,7 @@ class AnthropicModel(Model):
             list[dict[str, Any]]: The normalized conversation.
         """
         normalized: list[dict[str, Any]] = []
-        for msg in conversation:
+        for msg in responses_items_to_chat_messages(conversation):
             for converted in self._normalize_message_for_api(msg):
                 prev = normalized[-1] if normalized else None
                 if (
