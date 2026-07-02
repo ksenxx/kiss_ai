@@ -753,13 +753,16 @@ def _prepare_merge_view(
         if not _file_changed(fname):
             continue
         fpath = Path(work_dir) / fname
-        if not hunks and (not fpath.is_file() or _is_binary_file(fpath)):
-            # An empty hunk list means git printed "Binary files …
-            # differ" (or a mode-only change, excluded by the binary
-            # sniff).  When the file is MISSING on disk this is a
-            # deleted binary — text deletions always produce hunks —
-            # which must still be reviewable (and restorable on
-            # reject), like deleted text files are.
+        if not hunks:
+            # An empty hunk list can ONLY come from git printing
+            # "Binary files … differ" (mode-only changes never create
+            # a post_hunks entry at all).  This covers deleted
+            # binaries AND files forced binary via .gitattributes
+            # whose on-disk bytes are pure text — the NUL-byte sniff
+            # in _is_binary_file cannot see the attribute, so gating
+            # on it here silently dropped such files from the review
+            # entirely.  All of them must be reviewable as whole-file
+            # binary decisions (and restorable on reject).
             binary_files.add(fname)
             continue
         filtered = _agent_file_hunks(work_dir, fname, ub_dir, pre_hunks, hunks)

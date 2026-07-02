@@ -252,7 +252,14 @@ class _OAuthCallbackServer:
             def do_GET(self) -> None:  # noqa: N802 - http.server API
                 query = urllib.parse.urlparse(self.path).query
                 params = urllib.parse.parse_qs(query)
-                outer.code = (params.get("code") or [""])[0] or None
+                code = (params.get("code") or [""])[0] or None
+                if code is None:
+                    # Not the OAuth redirect (e.g. a favicon probe):
+                    # never clobber an already-captured code.
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                outer.code = code
                 outer.state = (params.get("state") or [""])[0] or None
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html")

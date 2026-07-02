@@ -64,7 +64,7 @@ from concurrent.futures import Future as ConcurrentFuture
 from functools import partial
 from http import HTTPStatus
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 from urllib.parse import unquote, urlsplit
 
 import websockets
@@ -3254,6 +3254,28 @@ class RemoteAccessServer:
             cli_tasks.discard(task_id)
         self._fanout_cli_status(task_id, running=False)
 
+    def _sweep_stale_cli_tasks(self, conn_state: dict[str, Any]) -> None:
+        """End every CLI task still registered on a dropped connection.
+
+        Shared by the ``finally`` blocks of :meth:`_ws_handler` and
+        :meth:`_uds_handler` — ``cliTaskStart`` is accepted from both
+        transports, so both must sweep task ids their peer announced
+        but never closed with a matching ``cliTaskEnd`` (crash,
+        Ctrl+C, dropped browser).  Without the sweep the ids stay in
+        :attr:`_cli_running_tasks` for the daemon's lifetime and every
+        subscribed webview keeps showing the blinking-green-circle
+        "running" indicator for a task no longer running anywhere.
+
+        Args:
+            conn_state: The dropped connection's per-conn state dict,
+                whose ``cli_tasks`` set holds the announced task ids.
+        """
+        stale_cli_tasks = conn_state.get("cli_tasks")
+        if isinstance(stale_cli_tasks, set):
+            for task_id in list(stale_cli_tasks):
+                if isinstance(task_id, str) and task_id:
+                    self._handle_cli_task_end(task_id, conn_state)
+
     def _fanout_cli_status(self, task_id: str, *, running: bool) -> None:
         """Send ``status:running`` to every tab subscribed to *task_id*.
 
@@ -3624,6 +3646,13 @@ class RemoteAccessServer:
             # the grace window keeps the merge review intact.
             for tab in tabs_seen:
                 self._schedule_tab_close(tab)
+            # Sweep any CLI task ids announced on this connection but
+            # never closed — ``_dispatch_client_command`` accepts
+            # ``cliTaskStart`` from BOTH transports, so a WSS peer
+            # that drops without ``cliTaskEnd`` must get the same
+            # stale-task cleanup as a UDS peer or the daemon keeps
+            # reporting the task as running forever.
+            self._sweep_stale_cli_tasks(conn_state)
             self._vscode_server.drop_connection_state(conn_state["conn_id"])
             self._printer.unbind_conn(conn_state["conn_id"])
             self._printer.remove_client(websocket)
@@ -3701,13 +3730,7 @@ class RemoteAccessServer:
             # resuming the task would mis-display the
             # blinking-green-circle "running" indicator for a task
             # that is no longer actually running anywhere.
-            stale_cli_tasks = cast("Any", conn_state.get("cli_tasks"))
-            if isinstance(stale_cli_tasks, set):
-                for task_id in list(stale_cli_tasks):
-                    if isinstance(task_id, str) and task_id:
-                        self._handle_cli_task_end(
-                            task_id, cast("dict[str, Any]", conn_state),
-                        )
+            self._sweep_stale_cli_tasks(conn_state)
             self._vscode_server.drop_connection_state(conn_state["conn_id"])
             self._printer.unbind_conn(conn_state["conn_id"])
             self._printer.remove_uds_writer(writer)
