@@ -248,6 +248,52 @@ def transcribe_audio(data: bytes, mime_type: str, api_key: str | None = None) ->
     return str(transcript).strip()
 
 
+def flatten_content_to_text(content: Any) -> str:
+    """Flatten a message ``content`` value into plain text.
+
+    Used by the stateless CLI-backed models (Claude Code, Codex) whose
+    prompt is a single text block.  Native content is a plain string, but a
+    conversation handed off from another provider's model (e.g. via the
+    Sorcar ``set_model`` tool) may carry Anthropic content-block lists or
+    OpenAI content-part lists; interpolating those verbatim would dump raw
+    dict reprs (including base64 payloads) into the prompt.
+
+    ``text`` block text is kept, ``tool_use`` blocks are rendered as
+    ``[Tool Call] name(args)``, ``tool_result`` blocks as their text
+    payload, and hidden/binary blocks (``thinking``, images, documents,
+    audio) are dropped or replaced by a short placeholder.
+
+    Args:
+        content: The message content (string, block list, or other).
+
+    Returns:
+        str: The flattened text.
+    """
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return "" if content is None else str(content)
+    parts: list[str] = []
+    for block in content:
+        if not isinstance(block, dict):
+            parts.append(str(block))
+            continue
+        block_type = block.get("type")
+        if block_type in ("thinking", "redacted_thinking"):
+            continue
+        if block_type == "text":
+            parts.append(block.get("text", ""))
+        elif block_type == "tool_use":
+            parts.append(
+                f"[Tool Call] {block.get('name', '')}({json.dumps(block.get('input') or {})})"
+            )
+        elif block_type == "tool_result":
+            parts.append(flatten_content_to_text(block.get("content")))
+        elif block_type in ("image", "image_url", "document", "file", "input_audio"):
+            parts.append(f"[{block_type} attachment omitted]")
+    return "\n".join(p for p in parts if p)
+
+
 class Model(ABC):
     """Abstract base class for LLM provider implementations."""
 

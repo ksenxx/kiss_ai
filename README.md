@@ -2,7 +2,7 @@
 
 ![KISS Framework](assets/KISS-Sorcar.png)
 
-[![Version](https://img.shields.io/badge/version-2026.7.2-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
+[![Version](https://img.shields.io/badge/version-2026.7.3-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.13-blue?style=flat-square)](https://www.python.org/)
 [![Website](https://img.shields.io/badge/website-kisssorcar.github.io-1976d2?style=flat-square)](https://kisssorcar.github.io/)
@@ -74,13 +74,7 @@ Note: **Sorcar** also means government in Bengali.
 ## 🎬 See It in Action
 
 <div align="center">
-  <video src="https://github.com/ksenxx/kiss_ai/raw/main/assets/sorcar-main.mp4"
-         controls autoplay muted loop playsinline preload="auto"
-         poster="assets/KISS-Sorcar-UI.png"
-         width="100%"
-         aria-label="KISS Sorcar demo video">
-    <a href="assets/sorcar-main.mp4">▶ Watch the KISS Sorcar demo video</a>
-  </video>
+  <img src="assets/sorcar-main.gif" alt="KISS Sorcar demo" width="100%">
   <br>
   <em>▶ <a href="assets/sorcar-main.mp4">Watch the KISS Sorcar demo video</a> · Also viewable on the <a href="https://kisssorcar.github.io/">project website</a>.</em>
 </div>
