@@ -162,6 +162,62 @@ def _extract_deepseek_reasoning(content: str) -> tuple[str, str]:
     return "", content
 
 
+def _anthropic_media_block_to_openai_part(block: dict[str, Any]) -> dict[str, Any] | None:
+    """Convert an Anthropic ``image``/``document`` block to an OpenAI content part.
+
+    Anthropic media blocks carry a ``source`` dict (``{"type": "base64",
+    "media_type": ..., "data": ...}`` or ``{"type": "url", "url": ...}``).
+    OpenAI Chat Completions instead uses ``image_url`` / ``file`` parts.
+    Such blocks enter the conversation when it is handed off from an
+    :class:`AnthropicModel` (e.g. via the Sorcar ``set_model`` tool).
+
+    Args:
+        block: The Anthropic media block dict.
+
+    Returns:
+        The equivalent OpenAI content-part dict, or ``None`` when the block
+        cannot be represented (in which case it is dropped with a warning).
+    """
+    source = block.get("source") or {}
+    url = ""
+    if source.get("type") == "base64":
+        media_type = source.get("media_type", "application/octet-stream")
+        url = f"data:{media_type};base64,{source.get('data', '')}"
+    elif source.get("type") == "url":
+        url = source.get("url", "")
+    if not url:
+        logger.warning("Dropping unconvertible Anthropic %s block.", block.get("type"))
+        return None
+    if block.get("type") == "image":
+        return {"type": "image_url", "image_url": {"url": url}}
+    return {"type": "file", "file": {"file_data": url}}
+
+
+def _tool_result_block_text(block: dict[str, Any]) -> str:
+    """Extract the text payload of an Anthropic ``tool_result`` block.
+
+    The block's ``content`` may be a plain string or a list of nested
+    blocks; only the text of nested ``text`` blocks is kept because the
+    OpenAI ``role="tool"`` message accepts string content only.
+
+    Args:
+        block: The Anthropic ``tool_result`` block dict.
+
+    Returns:
+        The concatenated text content of the block.
+    """
+    content = block.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            part.get("text", "")
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        )
+    return "" if content is None else str(content)
+
+
 class OpenAICompatibleModel(Model):
     """A model that uses an OpenAI-compatible API with a custom base URL.
 
@@ -367,6 +423,13 @@ class OpenAICompatibleModel(Model):
         Drops text blocks whose text is empty or whitespace-only, because
         many APIs reject them with invalid_request_error about non-whitespace text.
 
+        Also drops Anthropic ``thinking`` / ``redacted_thinking`` blocks: the
+        OpenAI Chat Completions API has no such content-part type and rejects
+        them with ``invalid_value`` (thinking blocks are hidden provider state
+        that must not be replayed to a different provider).  Such blocks enter
+        the conversation when it is handed off from an :class:`AnthropicModel`
+        (e.g. via the Sorcar ``set_model`` tool).
+
         Args:
             content: The content blocks from a response.
 
@@ -378,12 +441,22 @@ class OpenAICompatibleModel(Model):
             return blocks
         for block in content:
             if isinstance(block, dict):
+                block_type = block.get("type")
+                if block_type in ("thinking", "redacted_thinking"):
+                    continue
                 # Drop pre-existing whitespace-only text dicts too.
-                if block.get("type") == "text" and not block.get("text", "").strip():
+                if block_type == "text" and not block.get("text", "").strip():
+                    continue
+                if block_type in ("image", "document"):
+                    converted = _anthropic_media_block_to_openai_part(block)
+                    if converted is not None:
+                        blocks.append(converted)
                     continue
                 blocks.append(block)
                 continue
             block_type = getattr(block, "type", None)
+            if block_type in ("thinking", "redacted_thinking"):
+                continue
             if block_type == "text":
                 text = getattr(block, "text", "")
                 if not text.strip():
@@ -398,15 +471,6 @@ class OpenAICompatibleModel(Model):
                         "input": getattr(block, "input", {}) or {},
                     }
                 )
-            elif block_type == "thinking":
-                thinking_block: dict[str, Any] = {
-                    "type": "thinking",
-                    "thinking": getattr(block, "thinking", ""),
-                }
-                signature = getattr(block, "signature", None)
-                if signature is not None:
-                    thinking_block["signature"] = signature
-                blocks.append(thinking_block)
             elif hasattr(block, "model_dump"):
                 dumped = block.model_dump(exclude_none=True)
                 if dumped.get("type") == "text" and not dumped.get("text", "").strip():
@@ -426,7 +490,13 @@ class OpenAICompatibleModel(Model):
         """Normalize all messages in a conversation before sending to the API.
 
         Ensures that all text content blocks are non-whitespace and that no
-        messages contain only whitespace-only text blocks.
+        messages contain only whitespace-only text blocks.  Also converts
+        Anthropic Messages-format entries (assistant ``tool_use`` blocks,
+        user ``tool_result`` blocks, ``thinking`` blocks) — which enter the
+        conversation when it is handed off from an :class:`AnthropicModel`,
+        e.g. via the Sorcar ``set_model`` tool — into the OpenAI Chat
+        Completions equivalents (``tool_calls`` arrays, ``role="tool"``
+        messages) so the API does not reject them with ``invalid_value``.
 
         Args:
             conversation: The conversation to normalize.
@@ -436,23 +506,82 @@ class OpenAICompatibleModel(Model):
         """
         normalized: list[dict[str, Any]] = []
         for msg in conversation:
-            msg_copy = msg.copy()
-            content = msg_copy.get("content")
-
-            # If content is a string, ensure it's non-whitespace
-            if isinstance(content, str):
-                if content.strip():
-                    normalized.append(msg_copy)
-                # Skip messages with whitespace-only string content
-            # If content is a list of blocks, normalize them
-            elif isinstance(content, list):
-                normalized_blocks = self._normalize_content_blocks(content)
-                if normalized_blocks:
-                    msg_copy["content"] = normalized_blocks
-                    normalized.append(msg_copy)
-                # Skip messages where all blocks were dropped
-
+            normalized.extend(self._normalize_message_for_api(msg))
         return normalized
+
+    def _normalize_message_for_api(self, msg: dict[str, Any]) -> list[dict[str, Any]]:
+        """Normalize a single conversation message into OpenAI-format messages.
+
+        A message may expand to zero messages (all content filtered out),
+        one message (the common case), or several messages (an Anthropic
+        user message carrying multiple ``tool_result`` blocks becomes one
+        ``role="tool"`` message per block).
+
+        Args:
+            msg: The conversation message to normalize.
+
+        Returns:
+            list[dict[str, Any]]: OpenAI Chat Completions-format messages.
+        """
+        msg_copy = msg.copy()
+        content = msg_copy.get("content")
+        has_tool_calls = bool(msg_copy.get("tool_calls"))
+
+        if isinstance(content, str):
+            # Keep whitespace-only content when tool_calls are attached
+            # (OpenAI allows empty assistant content alongside tool_calls).
+            if content.strip() or has_tool_calls:
+                return [msg_copy]
+            return []
+        if not isinstance(content, list):
+            return [msg_copy] if content is not None or has_tool_calls else []
+
+        blocks = self._normalize_content_blocks(content)
+        tool_results = [b for b in blocks if b.get("type") == "tool_result"]
+        tool_uses = [b for b in blocks if b.get("type") == "tool_use"]
+        rest = [b for b in blocks if b.get("type") not in ("tool_result", "tool_use")]
+
+        if tool_uses:
+            # Anthropic assistant message: text blocks + tool_use blocks.
+            text = "".join(b.get("text", "") for b in rest if b.get("type") == "text")
+            tool_calls = list(msg_copy.get("tool_calls") or [])
+            for b in tool_uses:
+                tool_calls.append(
+                    {
+                        "id": b.get("id", ""),
+                        "type": "function",
+                        "function": {
+                            "name": b.get("name", ""),
+                            "arguments": json.dumps(b.get("input") or {}),
+                        },
+                    }
+                )
+            return [
+                {
+                    "role": msg_copy.get("role", "assistant"),
+                    "content": text,
+                    "tool_calls": tool_calls,
+                }
+            ]
+        if tool_results:
+            # Anthropic user message carrying tool results: one OpenAI
+            # ``role="tool"`` message per tool_result block.
+            converted = [
+                {
+                    "role": "tool",
+                    "tool_call_id": b.get("tool_use_id", ""),
+                    "content": _tool_result_block_text(b),
+                }
+                for b in tool_results
+            ]
+            if rest:
+                msg_copy["content"] = rest
+                converted.append(msg_copy)
+            return converted
+        if not blocks:
+            return [msg_copy] if has_tool_calls else []
+        msg_copy["content"] = blocks
+        return [msg_copy]
 
     def _apply_cache_control_for_openrouter_anthropic(self, kwargs: dict[str, Any]) -> None:
         """Add top-level cache_control for OpenRouter Anthropic prompt caching.
@@ -656,7 +785,7 @@ class OpenAICompatibleModel(Model):
         kwargs.update(
             {
                 "model": self._api_model_name,
-                "messages": self.conversation,
+                "messages": self._normalize_conversation_for_api(self.conversation),
                 "tools": tools or None,
             }
         )
