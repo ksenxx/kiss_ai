@@ -74,13 +74,7 @@ Note: **Sorcar** also means government in Bengali.
 ## 🎬 See It in Action
 
 <div align="center">
-  <video src="https://github.com/ksenxx/kiss_ai/raw/main/assets/sorcar-main.mp4"
-         controls autoplay muted loop playsinline preload="auto"
-         poster="assets/KISS-Sorcar-UI.png"
-         width="100%"
-         aria-label="KISS Sorcar demo video">
-    <a href="assets/sorcar-main.mp4">▶ Watch the KISS Sorcar demo video</a>
-  </video>
+  <img src="assets/sorcar-main.gif" alt="KISS Sorcar demo" width="100%">
   <br>
   <em>▶ <a href="assets/sorcar-main.mp4">Watch the KISS Sorcar demo video</a> · Also viewable on the <a href="https://kisssorcar.github.io/">project website</a>.</em>
 </div>
