@@ -81,6 +81,13 @@ _INJECT_RE = re.compile(
     r"|\$ARGUMENTS\b"
     r"|\$(?P<pos>[1-9])\b"
 )
+# The non-argument injection constructs alone (``@{path}`` and
+# ``!`command```).  Used to blank them out of the template before
+# deciding whether it contains a *real* argument placeholder: a ``$1``
+# or ``$ARGUMENTS`` inside a file path or shell command is consumed by
+# the earlier alternatives of ``_INJECT_RE`` and never substituted, so
+# it must not suppress the append-args fallback either.
+_NON_ARG_INJECT_RE = re.compile(r"@\{[^{}]+\}|!`[^`]+`")
 
 _SHELL_TIMEOUT_SECONDS = 60
 
@@ -147,7 +154,9 @@ def _parse_command_file(path: Path, root: Path, source: str) -> CustomCommand | 
         its template body is empty.
     """
     try:
-        text = path.read_text(encoding="utf-8")
+        # utf-8-sig drops a leading BOM (common in Windows-authored
+        # files) that would otherwise defeat the \A frontmatter match.
+        text = path.read_text(encoding="utf-8-sig")
     except OSError:
         logger.debug("unreadable command file: %s", path, exc_info=True)
         return None
@@ -292,12 +301,15 @@ def expand_command(command: CustomCommand, args_text: str, work_dir: str) -> str
         The fully expanded prompt text.
     """
     args_text = args_text.strip()
-    # Computed on the ORIGINAL template so placeholder-looking text
+    # Computed on the ORIGINAL template (so placeholder-looking text
     # inside injected file contents / shell output cannot suppress the
-    # append-args fallback below.
+    # append-args fallback below) with the ``@{path}`` / ``!`command```
+    # constructs blanked out first: a ``$1`` or ``$ARGUMENTS`` inside
+    # them is consumed by those alternatives of ``_INJECT_RE`` and never
+    # substituted, so it is not a real placeholder either.
+    scannable = _NON_ARG_INJECT_RE.sub("", command.template)
     has_placeholder = bool(
-        _ARGUMENTS_RE.search(command.template)
-        or _POSITIONAL_RE.search(command.template)
+        _ARGUMENTS_RE.search(scannable) or _POSITIONAL_RE.search(scannable)
     )
     try:
         positional = shlex.split(args_text)

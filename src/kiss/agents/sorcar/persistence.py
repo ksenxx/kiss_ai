@@ -237,6 +237,26 @@ def _safe_float(value: object, default: float = 0.0) -> float:
         return default
 
 
+def _safe_str(value: object, default: str = "") -> str:
+    """Coerce *value* to ``str`` for JSON-bound payloads.
+
+    bughunt8: SQLite's dynamic typing lets a hand-edited /
+    3rd-party-source DB store a BLOB in a TEXT column, and
+    ``json.dumps`` raises ``TypeError`` on ``bytes`` — uncaught by
+    ``_dumps_extra``'s ``ValueError`` handler — which blanked the
+    whole history sidebar over one corrupt row.  BLOBs are decoded as
+    UTF-8 with replacement so the result is always JSON-serialisable;
+    other non-string scalars go through ``str()``.
+    """
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value).decode("utf-8", errors="replace")
+    return str(value)
+
+
 def _sanitize_non_finite(value: object) -> object:
     """Recursively replace non-finite floats (NaN/±Inf) with ``None``."""
     import math
@@ -398,9 +418,12 @@ def _row_to_extra_json(row: sqlite3.Row) -> str:
         # ``parent_task_id`` because its absence is the canonical
         # marker for a top-level (non-sub-agent) task in the
         # downstream classifier.
-        payload["model"] = row["model"] or ""
-        payload["work_dir"] = row["work_dir"] or ""
-        payload["version"] = row["version"] or ""
+        # bughunt8: coerce through ``_safe_str`` — a BLOB stored in
+        # one of these TEXT columns made ``json.dumps`` raise
+        # ``TypeError`` out of ``_load_history``/``_search_history``.
+        payload["model"] = _safe_str(row["model"])
+        payload["work_dir"] = _safe_str(row["work_dir"])
+        payload["version"] = _safe_str(row["version"])
         payload["auto_commit_mode"] = bool(row["auto_commit_mode"])
         # bughunt2: use the finite-aware safe coercers instead of bare
         # ``int()``/``float()``.  SQLite's dynamic typing lets a
@@ -419,7 +442,9 @@ def _row_to_extra_json(row: sqlite3.Row) -> str:
         payload["endTs"] = _safe_int(row["end_ts"], 0)
         payload["is_favorite"] = bool(row["is_favorite"])
         if row["parent_task_id"]:
-            payload["subagent"] = {"parent_task_id": row["parent_task_id"]}
+            payload["subagent"] = {
+                "parent_task_id": _safe_str(row["parent_task_id"]),
+            }
     except (KeyError, IndexError):
         return ""
     # Route through ``_dumps_extra`` so any non-finite ``cost`` (e.g.
@@ -1337,7 +1362,14 @@ def _log_orphaned_task_forensics(
             try:
                 ev_data = json.loads(ev["event_json"])
                 ev_type = ev_data.get("type", "unknown")
-                ev_ts = ev["timestamp"]
+                # bughunt8: coerce through the finite-aware helper —
+                # SQLite's dynamic typing lets a hand-edited /
+                # 3rd-party-source DB store TEXT/BLOB in the REAL
+                # ``timestamp`` column, and the ``:.1f`` format below
+                # runs OUTSIDE this try, so a raw read raised
+                # ValueError out of ``_recover_orphaned_tasks`` and
+                # crashed the whole startup sweep over one corrupt row.
+                ev_ts = _safe_float(ev["timestamp"], 0.0)
             except Exception:
                 ev_type = "parse_error"
                 ev_ts = 0

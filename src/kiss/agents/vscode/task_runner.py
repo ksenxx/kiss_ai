@@ -28,7 +28,6 @@ from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-    from kiss.agents.vscode.json_printer import JsonPrinter
 
 from kiss.agents.sorcar.git_worktree import (
     GitWorktreeOps,
@@ -47,6 +46,17 @@ from kiss.agents.vscode.diff_merge import (
     _save_untracked_base,
     _snapshot_files,
 )
+
+# Imported at runtime (not just TYPE_CHECKING) so task-id keys can be
+# normalised via the ``JsonPrinter._coerce_task_id`` STATIC method
+# called on the class.  Calling it on ``self.printer`` instead would
+# couple this mixin to a private method of the concrete printer
+# instance — the mixin's printer contract is duck-typed (thread-local
+# ``task_id`` / ``stop_event``, ``_lock``, ``_subscribers``), and a
+# minimal printer without ``_coerce_task_id`` used to crash
+# ``_resolve_task_answer_queue`` with ``AttributeError`` (see
+# ``TestM4AwaitUserResponseEmptyQueue``).
+from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.core.models.model import Attachment
 from kiss.core.models.model_info import get_available_models
 from kiss.core.printer import parse_result_yaml
@@ -253,7 +263,31 @@ class _TaskRunnerMixin:
         finally:
             with self._state_lock:
                 tab = _RunningAgentState.running_agent_states.get(tab_id)
-                if tab is not None:
+                # Ownership guard: only reset the per-tab task slots
+                # when THIS worker still owns them.  The worker can
+                # spend a long time between the agent returning and
+                # this ``finally`` (autocommit git scans, merge-view
+                # preparation, persistence), during which the tab's
+                # state can be disposed (``closeTab`` while the task
+                # is wedged in cleanup) and RE-CREATED under the same
+                # tab id by a reopened frontend tab that immediately
+                # starts a NEW task.  Without the guard this stale
+                # cleanup would null the FRESH state's ``agent`` (the
+                # new worker crashes with ``'NoneType' object has no
+                # attribute 'run'``), drop its answer queue and stop
+                # event (unanswerable, unstoppable) and discard its
+                # queued follow-ups.  ``task_thread`` is the ownership
+                # token: ``_cmd_run`` stamps it with the worker thread
+                # it starts, so a different (alive) thread here means
+                # a newer task owns the tab — its own ``finally`` will
+                # clean up.  ``None`` is treated as owned for direct
+                # ``_run_task`` invocations that were never armed by
+                # ``_cmd_run`` (tests, embedding callers).
+                owns_tab = tab is None or (
+                    tab.task_thread is None
+                    or tab.task_thread is threading.current_thread()
+                )
+                if tab is not None and owns_tab:
                     tab.task_thread = None
                     tab.stop_event = None
                     tab.user_answer_queue = None
@@ -300,14 +334,23 @@ class _TaskRunnerMixin:
                 # had ended.  Mirrors the start-time per-viewer
                 # broadcast in :meth:`_subscribe_chat_viewers`.
                 task_id_for_end = (
-                    tab.last_task_id if tab is not None else None
+                    tab.last_task_id
+                    if tab is not None and owns_tab
+                    else None
                 )
-                status_end: dict[str, Any] = {
-                    "type": "status", "running": False, "tabId": tab_id,
-                }
-                if client_task_id:
-                    status_end["taskId"] = client_task_id
-                self.printer.broadcast(status_end)
+                # When a NEWER task owns the tab (see the ownership
+                # guard above), suppress the launcher-tab
+                # ``running=False`` broadcast too: the tab's spinner
+                # now belongs to the new task, and stopping it here
+                # would flip the frontend out of running mode while
+                # the new agent is still working.
+                if owns_tab:
+                    status_end: dict[str, Any] = {
+                        "type": "status", "running": False, "tabId": tab_id,
+                    }
+                    if client_task_id:
+                        status_end["taskId"] = client_task_id
+                    self.printer.broadcast(status_end)
             self._broadcast_status_end_to_viewers(
                 task_id_for_end, tab_id, client_task_id=client_task_id,
             )
@@ -345,9 +388,32 @@ class _TaskRunnerMixin:
         """
         if task_id is None:
             return
+        task_key = JsonPrinter._coerce_task_id(task_id)
         for viewer_tab_id in self.printer._fanout_targets(task_id):
             if viewer_tab_id == launcher_tab_id:
                 continue
+            # Skip viewers that are actively running their OWN task:
+            # a tab subscribed to this (now finished) task may have
+            # since started an unrelated task of its own — ``status``
+            # events are stamped with the viewer's tab id, so sending
+            # ``running=False`` would stop that tab's spinner and
+            # flip its input box out of "queue follow-up" mode while
+            # its own agent is still working.  Its own task's end
+            # path broadcasts the ``running=False`` it actually needs.
+            with self._state_lock:
+                viewer_state = _RunningAgentState.running_agent_states.get(
+                    viewer_tab_id,
+                )
+                if viewer_state is not None and viewer_state.is_task_active:
+                    viewer_task = (
+                        JsonPrinter._coerce_task_id(
+                            getattr(viewer_state.agent, "_last_task_id", None),
+                        )
+                        if viewer_state.agent is not None
+                        else ""
+                    )
+                    if viewer_task != task_key:
+                        continue
             payload: dict[str, Any] = {
                 "type": "status",
                 "running": False,
@@ -1180,11 +1246,25 @@ class _TaskRunnerMixin:
         if not chat_id:
             return
         with self._state_lock:
-            viewers = [
-                viewer_tab_id
-                for viewer_tab_id, viewed_chat_id in self._tab_chat_views.items()
-                if viewed_chat_id == chat_id and viewer_tab_id != source_tab_id
-            ]
+            viewers = []
+            for viewer_tab_id, viewed_chat_id in self._tab_chat_views.items():
+                if viewed_chat_id != chat_id or viewer_tab_id == source_tab_id:
+                    continue
+                # Skip viewers that are actively running their OWN
+                # task: two tabs can view the same chat and each run
+                # a task concurrently (``_cmd_run`` guards per TAB,
+                # not per chat).  Broadcasting ``clear`` here would
+                # wipe such a tab's live transcript mid-task, and the
+                # ``status running=True (startTs=this task's start)``
+                # would re-anchor its "Running …" timer to the WRONG
+                # task's start time.  A busy tab's transcript belongs
+                # to its own task until that task ends.
+                viewer_state = _RunningAgentState.running_agent_states.get(
+                    viewer_tab_id,
+                )
+                if viewer_state is not None and viewer_state.is_task_active:
+                    continue
+                viewers.append(viewer_tab_id)
         for viewer_tab_id in viewers:
             self.printer.subscribe_tab(task_id, viewer_tab_id)
             self.printer.broadcast({
@@ -1280,6 +1360,19 @@ class _TaskRunnerMixin:
         ``stop_event`` there, and wrongly report "no source tab" for
         a viewer that can in fact stop a running task.
 
+        A peer with a live ``stop_event`` is only accepted when the
+        task its agent is actually running (``agent._last_task_id``)
+        matches the subscribed task being scanned.  A stale
+        finished-task co-subscriber that has since started a brand-new
+        UNRELATED task (which the viewer is NOT subscribed to) also
+        carries a live ``stop_event`` — returning it would let the
+        viewer's Stop kill that unrelated task (cross-task stop
+        hijack, symmetric to the answer-queue hijack fixed as
+        BUG-TR2-2).  Peers whose running task cannot be identified
+        (no agent attached — e.g. bare test states or a task started
+        before the agent slot was populated) are kept as a fallback so
+        legitimate stops are not silently dropped.
+
         Args:
             viewer_tab_id: The subscriber/viewer tab id to look up.
 
@@ -1289,19 +1382,37 @@ class _TaskRunnerMixin:
         """
         with self.printer._lock:
             peer_lists = [
-                list(viewers)
-                for viewers in self.printer._subscribers.values()
+                (JsonPrinter._coerce_task_id(task_id), list(viewers))
+                for task_id, viewers in self.printer._subscribers.items()
                 if viewer_tab_id in viewers
             ]
+        fallback: str | None = None
         with self._state_lock:
-            for peers in peer_lists:
+            for task_key, peers in peer_lists:
                 for peer in peers:
                     if peer == viewer_tab_id:
                         continue
                     state = _RunningAgentState.running_agent_states.get(peer)
-                    if state is not None and state.stop_event is not None:
+                    if state is None or state.stop_event is None:
+                        continue
+                    agent_task = (
+                        JsonPrinter._coerce_task_id(
+                            getattr(state.agent, "_last_task_id", None),
+                        )
+                        if state.agent is not None
+                        else ""
+                    )
+                    if agent_task and agent_task != task_key:
+                        # This peer's live stop_event belongs to a
+                        # DIFFERENT task than the one the viewer is
+                        # subscribed to; stopping it would hijack an
+                        # unrelated task.
+                        continue
+                    if agent_task:
                         return peer
-        return None
+                    if fallback is None:
+                        fallback = peer
+        return fallback
 
     @staticmethod
     def _force_stop_thread(task_thread: threading.Thread) -> None:
@@ -1416,7 +1527,7 @@ class _TaskRunnerMixin:
         task_key = getattr(self.printer._thread_local, "task_id", None)
         if not task_key:
             return None
-        task_key = self.printer._coerce_task_id(task_key)
+        task_key = JsonPrinter._coerce_task_id(task_key)
         with self.printer._lock:
             tab_ids = list(self.printer._subscribers.get(task_key, ()))
         with self._state_lock:
@@ -1425,7 +1536,7 @@ class _TaskRunnerMixin:
                 if tab is None or tab.user_answer_queue is None:
                     continue
                 agent_task = (
-                    self.printer._coerce_task_id(
+                    JsonPrinter._coerce_task_id(
                         getattr(tab.agent, "_last_task_id", None),
                     )
                     if tab.agent is not None
@@ -1449,7 +1560,7 @@ class _TaskRunnerMixin:
         # THIS question instantly and the user would never see it.
         # Held under ``_state_lock`` so the drain cannot interleave
         # with ``_cmd_user_answer``'s drain-then-put sequence.
-        task_key = self.printer._coerce_task_id(
+        task_key = JsonPrinter._coerce_task_id(
             getattr(self.printer._thread_local, "task_id", None),
         )
         q = self._resolve_task_answer_queue()
