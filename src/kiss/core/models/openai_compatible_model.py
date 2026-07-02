@@ -868,12 +868,15 @@ class OpenAICompatibleModel(Model):
         )
         self._apply_cache_control_for_openrouter_anthropic(kwargs)
 
-        # Endpoints without ``/v1/responses`` support (OpenRouter, Together,
-        # custom gateways, ...) keep the pragmatic fallback: strip
-        # ``reasoning_effort`` from tool-bearing requests since Chat
-        # Completions rejects the combination for reasoning models; the
-        # no-tools ``generate()`` path still keeps the high-reasoning default.
-        if tools and "reasoning_effort" in kwargs:
+        # OpenRouter's Chat Completions accepts ``tools`` +
+        # ``reasoning_effort`` (including ``"xhigh"``) and translates the
+        # effort per provider, so the effort is preserved there.  Other
+        # non-OpenAI endpoints (Together, custom gateways, ...) keep the
+        # pragmatic fallback: strip ``reasoning_effort`` from tool-bearing
+        # requests since Chat Completions rejects the combination for
+        # reasoning models; the no-tools ``generate()`` path still keeps
+        # the high-reasoning default.
+        if tools and "reasoning_effort" in kwargs and "openrouter.ai" not in self.base_url:
             dropped = kwargs.pop("reasoning_effort")
             logger.debug(
                 "Dropping reasoning_effort=%r because tools are attached "
