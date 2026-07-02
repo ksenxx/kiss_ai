@@ -337,18 +337,21 @@ class TestOpenAIXhighDefault:
     def test_reasoning_effort_dropped_when_tools_attached(
         self, capture_server: str
     ) -> None:
-        """gpt-5.5 + tools must NOT send reasoning_effort.
+        """gpt-5.5 + tools on OpenAI's chat.completions must NOT send effort.
 
         OpenAI's /v1/chat/completions rejects ``tools`` + ``reasoning_effort``
         for GPT-5.x / o-series models with HTTP 400, demanding the
-        /v1/responses API instead.  KISS Sorcar's agentic loop always passes
-        tools, so we strip ``reasoning_effort`` from such requests to keep
-        chat.completions working.
+        /v1/responses API instead — the registry declares this rejecting
+        capability for ``api.openai.com``, so the effort is stripped when
+        the Responses delegation is disabled.  The capture server's URL
+        carries an ``api.openai.com`` path segment so the real capability
+        lookup sees OpenAI's endpoint.
         """
         m = OpenAICompatibleModel(
             "gpt-5.5",
-            base_url=capture_server,
+            base_url=f"{capture_server}/api.openai.com",
             api_key="test-key",
+            model_config={"use_responses_api": False},
         )
         m.initialize("hi")
         m.generate_and_process_with_tools(
@@ -381,19 +384,21 @@ class TestOpenAIXhighDefault:
         assert body.get("reasoning_effort") == "high"
         assert not body.get("tools"), "no tools should be sent on plain generate()"
 
-    def test_openrouter_gpt_5_5_tools_strips_reasoning_effort(
+    def test_openrouter_gpt_5_5_tools_keeps_reasoning_effort(
         self, capture_server: str
     ) -> None:
-        """openrouter/openai/gpt-5.5 with tools must also strip reasoning_effort.
+        """openrouter/openai/gpt-5.5 with tools must KEEP reasoning_effort.
 
-        OpenRouter forwards parameters to the OpenAI backend unchanged, so
-        the same /v1/chat/completions tools + reasoning_effort rejection
-        applies.  Confirm the strip kicks in for the OpenRouter-prefixed
-        model name too.
+        OpenRouter's Chat Completions accepts ``tools`` +
+        ``reasoning_effort`` (verified live, including ``"xhigh"``) and
+        translates the effort per provider, so the registry declares an
+        accepting capability for ``openrouter.ai`` and the effort survives
+        on the wire.  The capture server's URL carries an ``openrouter.ai``
+        path segment so the real capability lookup sees OpenRouter.
         """
         m = OpenAICompatibleModel(
             "openrouter/openai/gpt-5.5",
-            base_url=capture_server,
+            base_url=f"{capture_server}/openrouter.ai",
             api_key="test-key",
         )
         m.initialize("hi")
@@ -403,7 +408,7 @@ class TestOpenAIXhighDefault:
         )
         body = _CapturingHandler.captured_bodies[-1]
         assert body.get("tools"), "tools must be sent on the wire"
-        assert "reasoning_effort" not in body
+        assert body.get("reasoning_effort") == "high"
 
     def test_model_info_flag_drives_defaulting(self, capture_server: str) -> None:
         """The xhigh default must be driven solely by the MODEL_INFO flag.
