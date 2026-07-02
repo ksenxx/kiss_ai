@@ -184,6 +184,50 @@ def _tool_calls_to_tool_use_blocks(tool_calls: list[Any]) -> list[dict[str, Any]
     return blocks
 
 
+def _attachments_to_blocks(attachments: list[Attachment]) -> list[dict[str, Any]]:
+    """Convert :class:`Attachment` objects into Anthropic content blocks.
+
+    Images become ``image`` blocks, PDFs become ``document`` blocks, and
+    audio is transcribed to text via Whisper when possible.  Unsupported
+    MIME types (e.g. video) are dropped with a warning.
+
+    Args:
+        attachments: The attachments to convert.
+
+    Returns:
+        list[dict[str, Any]]: The equivalent Anthropic content blocks.
+    """
+    blocks: list[dict[str, Any]] = []
+    for att in attachments:
+        source = {
+            "type": "base64",
+            "media_type": att.mime_type,
+            "data": att.to_base64(),
+        }
+        if att.mime_type.startswith("image/"):
+            blocks.append({"type": "image", "source": source})
+        elif att.mime_type == "application/pdf":
+            blocks.append({"type": "document", "source": source})
+        elif att.mime_type.startswith("audio/"):
+            try:
+                text = transcribe_audio(att.data, att.mime_type)
+                blocks.append(
+                    {"type": "text", "text": f"[Audio transcription]\n{text}"}
+                )
+            except Exception:
+                logger.warning(
+                    "Anthropic does not support %s attachments and "
+                    "automatic transcription failed; skipping.",
+                    att.mime_type,
+                )
+        else:
+            logger.warning(
+                "Anthropic does not support %s attachments; skipping.",
+                att.mime_type,
+            )
+    return blocks
+
+
 def _content_as_block_list(content: Any) -> list[dict[str, Any]]:
     """Return message content as a list of Anthropic content blocks.
 
@@ -241,37 +285,7 @@ class AnthropicModel(Model):
         self.client = Anthropic(api_key=self.api_key)
         content: str | list[dict[str, Any]] = prompt
         if attachments:
-            blocks: list[dict[str, Any]] = []
-            for att in attachments:
-                source = {
-                    "type": "base64",
-                    "media_type": att.mime_type,
-                    "data": att.to_base64(),
-                }
-                if att.mime_type.startswith("image/"):
-                    blocks.append({"type": "image", "source": source})
-                elif att.mime_type == "application/pdf":
-                    blocks.append({"type": "document", "source": source})
-                elif att.mime_type.startswith("audio/"):
-                    try:
-                        text = transcribe_audio(att.data, att.mime_type)
-                        blocks.append(
-                            {
-                                "type": "text",
-                                "text": f"[Audio transcription]\n{text}",
-                            }
-                        )
-                    except Exception:
-                        logger.warning(
-                            "Anthropic does not support %s attachments and "
-                            "automatic transcription failed; skipping.",
-                            att.mime_type,
-                        )
-                elif att.mime_type.startswith("video/"):
-                    logger.warning(
-                        "Anthropic does not support %s attachments; skipping.",
-                        att.mime_type,
-                    )
+            blocks = _attachments_to_blocks(attachments)
             blocks.append({"type": "text", "text": prompt})
             content = blocks
         self.conversation = [{"role": "user", "content": content}]
@@ -457,6 +471,18 @@ class AnthropicModel(Model):
             return [{"role": "user", "content": [block]}]
 
         msg_copy = msg.copy()
+        attachments = msg_copy.pop("attachments", None)
+        if attachments:
+            # Gemini hand-off: lift the Attachment objects into Anthropic
+            # content blocks (the API rejects unknown message fields).
+            att_blocks = _attachments_to_blocks(attachments)
+            prior = msg_copy.get("content")
+            if isinstance(prior, str):
+                if prior.strip():
+                    att_blocks.append({"type": "text", "text": prior})
+            elif isinstance(prior, list):
+                att_blocks.extend(prior)
+            msg_copy["content"] = att_blocks
         content = msg_copy.get("content")
         tool_calls = msg_copy.pop("tool_calls", None)
         if tool_calls:
