@@ -7583,14 +7583,24 @@
   }
 
   /**
-   * Replace the input value with *full* and append a trailing space.
-   * Used by the fast-complete picker: every completion item carries the
-   * full line text (history task, trick, or identifier completion)
-   * that should land in the textarea on accept — mirroring the CLI
-   * dropdown's whole-line replacement contract.
+   * Splice *full* into the input value and append a trailing space.
+   * Used by the fast-complete picker.  Completion items carry the raw
+   * suggestion text — a history task starts with the whole query, a
+   * trick starts with the current sentence's leading partial, and an
+   * identifier starts with the trailing word/dot-chain token — so the
+   * accept path must PRESERVE whatever the user typed before the piece
+   * being completed.  It finds the longest suffix of the current input
+   * that is a prefix of *full* and replaces only that overlap: history
+   * tasks (overlap == whole input) still replace the entire line while
+   * tricks/identifiers keep the untouched head of the input.
    */
   function acceptCompletion(full) {
-    inp.value = full;
+    const cur = inp.value;
+    let overlap = Math.min(cur.length, full.length);
+    while (overlap > 0 && !cur.endsWith(full.slice(0, overlap))) {
+      overlap -= 1;
+    }
+    inp.value = cur.slice(0, cur.length - overlap) + full;
     if (/\S$/.test(inp.value)) inp.value += ' ';
     clearGhost();
     syncClearBtn();
