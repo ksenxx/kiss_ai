@@ -113,6 +113,22 @@ def _str_to_bool(value: str | bool) -> bool:
     return bool(value)
 
 
+def _result_yaml(success: bool, is_continue: bool, summary: str) -> str:
+    """Serialize a finish-style result payload (success/is_continue/summary) to YAML."""
+    result: str = yaml.dump(
+        {"success": success, "is_continue": is_continue, "summary": summary},
+        sort_keys=False,
+    )
+    return result
+
+
+def _prior_sessions_section(summaries: list[str]) -> str:
+    """Join prior session summaries into "### Previous Session N" markdown sections."""
+    return "\n\n---\n\n".join(
+        f"### Previous Session {i + 1}\n{s}" for i, s in enumerate(summaries)
+    )
+
+
 def finish(success: bool, is_continue: bool = False, summary: str = "") -> str:
     """Finish execution with status and summary.
 
@@ -123,15 +139,7 @@ def finish(success: bool, is_continue: bool = False, summary: str = "") -> str:
             agent did with the reason for doing that along with
             relevant code snippets
     """
-    result: str = yaml.dump(
-        {
-            "success": _str_to_bool(success),
-            "is_continue": _str_to_bool(is_continue),
-            "summary": summary,
-        },
-        sort_keys=False,
-    )
-    return result
+    return _result_yaml(_str_to_bool(success), _str_to_bool(is_continue), summary)
 
 
 class RelentlessAgent(Base):
@@ -179,6 +187,12 @@ class RelentlessAgent(Base):
         # per-session executor.
         self.pre_step_hook: Callable[..., None] | None = None
         self.set_printer(printer, verbose=verbose)
+
+    def _accumulate_usage(self, agent: Base) -> None:
+        """Fold a sub-agent's budget, tokens and steps into the running totals."""
+        self.budget_used += agent.budget_used
+        self.total_tokens_used += agent.total_tokens_used
+        self.total_steps += agent.step_count
 
     def _docker_bash(self, command: str, description: str) -> str:
         if self.docker_manager is None:
@@ -279,17 +293,8 @@ class RelentlessAgent(Base):
                     or executor.step_count <= 1
                 ):
                     self._current_executor = None
-                    self.budget_used += executor.budget_used
-                    self.total_tokens_used += executor.total_tokens_used
-                    self.total_steps += executor.step_count
-                    error_result: str = yaml.dump(
-                        {
-                            "success": False,
-                            "is_continue": False,
-                            "summary": str(exc),
-                        },
-                        sort_keys=False,
-                    )
+                    self._accumulate_usage(executor)
+                    error_result = _result_yaml(False, False, str(exc))
                     if self.printer:
                         self.printer.print(
                             error_result,
@@ -353,11 +358,7 @@ class RelentlessAgent(Base):
                         # This must run even when ``summarizer_agent.run``
                         # raises (e.g. budget exceeded mid-summary) so
                         # the partial spend is still attributed.
-                        self.budget_used += summarizer_agent.budget_used
-                        self.total_tokens_used += (
-                            summarizer_agent.total_tokens_used
-                        )
-                        self.total_steps += summarizer_agent.step_count
+                        self._accumulate_usage(summarizer_agent)
                     try:
                         parsed = yaml.safe_load(summarizer_result)
                         summary_text = (
@@ -374,15 +375,10 @@ class RelentlessAgent(Base):
                 finally:
                     if trajectory_path and trajectory_path.exists():  # pragma: no branch
                         trajectory_path.unlink()
-                result = yaml.dump(
-                    {"success": False, "is_continue": True, "summary": summary_text},
-                    sort_keys=False,
-                )
+                result = _result_yaml(False, True, summary_text)
 
             self._current_executor = None
-            self.budget_used += executor.budget_used
-            self.total_tokens_used += executor.total_tokens_used
-            self.total_steps += executor.step_count
+            self._accumulate_usage(executor)
 
             try:
                 payload = yaml.safe_load(result)
@@ -402,10 +398,7 @@ class RelentlessAgent(Base):
                     # (collected from ``is_continue=True`` returns).  Prepend
                     # them as historical context BEFORE the terminal session's
                     # summary, which stays the primary payload summary.
-                    prior_section = "\n\n---\n\n".join(
-                        f"### Previous Session {i + 1}\n{s}"
-                        for i, s in enumerate(summaries)
-                    )
+                    prior_section = _prior_sessions_section(summaries)
                     if final_summary:
                         payload["summary"] = (
                             f"{prior_section}\n\n---\n\n### Final Session\n"

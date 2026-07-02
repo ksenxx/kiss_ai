@@ -300,17 +300,11 @@ class _EventDispatcher:
         # coerce ``None`` to the empty string / empty dict so a daemon
         # version drift cannot crash the loop thread (review #36).
         et = event.get("type", "")
-        if et == "text_delta":
+        if et in ("text_delta", "thinking_delta"):
             self.printer.token_callback(event.get("text") or "")
             return
-        if et == "thinking_delta":
-            self.printer.token_callback(event.get("text") or "")
-            return
-        if et == "thinking_start":
-            self.printer.thinking_callback(True)
-            return
-        if et == "thinking_end":
-            self.printer.thinking_callback(False)
+        if et in ("thinking_start", "thinking_end"):
+            self.printer.thinking_callback(et == "thinking_start")
             return
         if et == "text_end":
             # Force a newline so the next panel starts on its own row.
@@ -341,10 +335,10 @@ class _EventDispatcher:
                 # the same path via ``lang_for_path``, so forwarding it
                 # would be redundant.
                 tool_input["file_path"] = str(path)
-            for key in ("description", "command", "content"):
-                if (val := event.get(key)) is not None:
-                    tool_input[key] = str(val)
-            for key in ("old_string", "new_string"):
+            for key in (
+                "description", "command", "content",
+                "old_string", "new_string",
+            ):
                 if (val := event.get(key)) is not None:
                     tool_input[key] = str(val)
             extras = event.get("extras") or {}
@@ -642,6 +636,79 @@ def _drain_queue(q: queue.Queue[Any]) -> None:
             return
 
 
+def _print_daemon_lost(printer: ConsolePrinter) -> None:
+    """Print the standard daemon-disconnect error line."""
+    printer.print(
+        "[red]✗ Daemon connection lost — type /exit to quit[/red]",
+        type="text",
+    )
+
+
+def _start_task(
+    client: CliClient,
+    prompt: str,
+    task_id: str,
+    *,
+    use_worktree: bool,
+    use_parallel: bool,
+    auto_commit: bool,
+    timeout_seconds: float,
+) -> bool:
+    """Send the ``run`` command and wait for the daemon to acknowledge.
+
+    Shared by :func:`_submit_task` and :func:`_submit_task_anchored`.
+    Blocks until the daemon's first ``status:running=true`` for
+    *task_id* arms ``task_active``, the connection drops, or
+    *timeout_seconds* expires — printing the matching error line on
+    either failure.  The full ``timeout_seconds`` budget is used so
+    slow daemon startup (worktree creation, MCP probe, cold model)
+    does not silently abandon the task — review #4.
+
+    Args:
+        client: The live :class:`CliClient`.
+        prompt: The user's instruction for this turn.
+        task_id: Freshly minted per-submission task id.
+        use_worktree: Forwarded as ``useWorktree`` to the daemon.
+        use_parallel: Forwarded as ``useParallel`` to the daemon.
+        auto_commit: Forwarded as ``autoCommit`` to the daemon.
+        timeout_seconds: Hard cap on the acknowledgement wait.
+
+    Returns:
+        ``True`` when the task was acknowledged and is running.
+    """
+    client.send({
+        "type": "run",
+        "prompt": prompt,
+        "model": client.dispatcher.current_model,
+        "workDir": client.work_dir,
+        "useWorktree": use_worktree,
+        "useParallel": use_parallel,
+        "autoCommit": auto_commit,
+        "taskId": task_id,
+    })
+    armed_deadline = time.monotonic() + timeout_seconds
+    while (
+        not client.dispatcher.task_active.is_set()
+        and time.monotonic() < armed_deadline
+        and not client._closed.is_set()
+    ):
+        time.sleep(0.05)
+    if client._closed.is_set():
+        _print_daemon_lost(client.dispatcher.printer)
+        return False
+    if not client.dispatcher.task_active.is_set():
+        # The daemon never acknowledged the task within the user's
+        # timeout budget; surface a clear error instead of pretending
+        # the task ran.
+        client.dispatcher.printer.print(
+            f"[yellow]⏹  Daemon did not acknowledge the task within "
+            f"{int(timeout_seconds)}s.[/yellow]",
+            type="text",
+        )
+        return False
+    return True
+
+
 def _request_cli_info(
     client: CliClient, subtype: str, *, timeout: float = 10.0, **extra: Any,
 ) -> dict[str, Any]:
@@ -671,19 +738,19 @@ def _request_cli_info(
     # string, which made the custom-command branch literally print
     # "True" on disconnect.
     disc_msg = "Daemon connection lost — type /exit to quit"
+    disc_reply: dict[str, Any] = {
+        "type": "cliInfo", "subtype": subtype, "text": f"✗ {disc_msg}",
+        "error": True, "errorMessage": disc_msg,
+    }
     # Early-fail when the daemon is already gone so the caller does
     # not block on a queue that no producer can write to.
     if client._closed.is_set():
-        return {"type": "cliInfo", "subtype": subtype,
-                "text": f"✗ {disc_msg}",
-                "error": True, "errorMessage": disc_msg}
+        return disc_reply
     client.send(cmd)
     deadline = time.monotonic() + timeout
     while True:
         if client._closed.is_set():
-            return {"type": "cliInfo", "subtype": subtype,
-                    "text": f"✗ {disc_msg}",
-                    "error": True, "errorMessage": disc_msg}
+            return disc_reply
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             timeout_msg = f"Daemon timed out waiting for {subtype} reply"
@@ -967,51 +1034,16 @@ def _submit_task(
     _drain_queue(client.dispatcher.ask_user_q)
     start = time.time()
     try:
-        client.send({
-            "type": "run",
-            "prompt": prompt,
-            "model": client.dispatcher.current_model,
-            "workDir": client.work_dir,
-            "useWorktree": use_worktree,
-            "useParallel": use_parallel,
-            "autoCommit": auto_commit,
-            "taskId": new_task_id,
-        })
-        # Wait for the daemon's first ``status:running=true`` for this
-        # task id.  Use the full ``timeout_seconds`` budget so slow
-        # daemon startup (worktree creation, MCP probe, cold model) does
-        # not silently abandon the task — review #4.
-        armed_deadline = time.monotonic() + timeout_seconds
-        while (
-            not client.dispatcher.task_active.is_set()
-            and time.monotonic() < armed_deadline
-            and not client._closed.is_set()
+        if not _start_task(
+            client, prompt, new_task_id,
+            use_worktree=use_worktree, use_parallel=use_parallel,
+            auto_commit=auto_commit, timeout_seconds=timeout_seconds,
         ):
-            time.sleep(0.05)
-        if client._closed.is_set():
-            client.dispatcher.printer.print(
-                "[red]✗ Daemon connection lost — type /exit to quit[/red]",
-                type="text",
-            )
-            return
-        if not client.dispatcher.task_active.is_set():
-            # The daemon never acknowledged the task within the user's
-            # timeout budget; surface a clear error instead of pretending
-            # the task ran.
-            client.dispatcher.printer.print(
-                f"[yellow]⏹  Daemon did not acknowledge the task within "
-                f"{int(timeout_seconds)}s.[/yellow]",
-                type="text",
-            )
             return
         deadline = time.monotonic() + timeout_seconds
         while client.dispatcher.task_active.is_set():
             if client._closed.is_set():
-                client.dispatcher.printer.print(
-                    "[red]✗ Daemon connection lost — type /exit to quit"
-                    "[/red]",
-                    type="text",
-                )
+                _print_daemon_lost(client.dispatcher.printer)
                 return
             if time.monotonic() > deadline:
                 client.dispatcher.printer.print(
@@ -1088,35 +1120,11 @@ def _submit_task_anchored(
     pending_question = [False]
     start = time.time()
     try:
-        client.send({
-            "type": "run",
-            "prompt": prompt,
-            "model": client.dispatcher.current_model,
-            "workDir": client.work_dir,
-            "useWorktree": use_worktree,
-            "useParallel": use_parallel,
-            "autoCommit": auto_commit,
-            "taskId": new_task_id,
-        })
-        armed_deadline = time.monotonic() + timeout_seconds
-        while (
-            not client.dispatcher.task_active.is_set()
-            and time.monotonic() < armed_deadline
-            and not client._closed.is_set()
+        if not _start_task(
+            client, prompt, new_task_id,
+            use_worktree=use_worktree, use_parallel=use_parallel,
+            auto_commit=auto_commit, timeout_seconds=timeout_seconds,
         ):
-            time.sleep(0.05)
-        if client._closed.is_set():
-            client.dispatcher.printer.print(
-                "[red]✗ Daemon connection lost — type /exit to quit[/red]",
-                type="text",
-            )
-            return
-        if not client.dispatcher.task_active.is_set():
-            client.dispatcher.printer.print(
-                f"[yellow]⏹  Daemon did not acknowledge the task within "
-                f"{int(timeout_seconds)}s.[/yellow]",
-                type="text",
-            )
             return
 
         def on_submit(line: str) -> None:
@@ -1176,10 +1184,7 @@ def _submit_task_anchored(
 
         repl.run_steering_loop(on_submit, on_abort, is_done, on_idle)
         if client._closed.is_set():
-            client.dispatcher.printer.print(
-                "[red]✗ Daemon connection lost — type /exit to quit[/red]",
-                type="text",
-            )
+            _print_daemon_lost(client.dispatcher.printer)
     finally:
         client.dispatcher.current_task_id = ""
         client.dispatcher.task_active.clear()

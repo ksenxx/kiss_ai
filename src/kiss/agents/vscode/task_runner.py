@@ -21,7 +21,7 @@ import queue
 import re
 import threading
 import time
-from contextlib import nullcontext
+from contextlib import nullcontext, suppress
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -615,21 +615,20 @@ class _TaskRunnerMixin:
             # behind any in-flight ``_handle_worktree_action`` /
             # ``_try_setup_worktree`` body on the same repo.
             repo = GitWorktreeOps.discover_repo(Path(work_dir))
-            with repo_lock(repo) if repo else nullcontext():
-                with self._state_lock:
-                    if any(
-                        t.is_merging and t.use_worktree
-                        for t in _RunningAgentState.running_agent_states.values()
-                    ):
-                        tab.is_task_active = False
-                        self.printer.broadcast({
-                            "type": "error",
-                            "text": "A worktree merge is in progress. "
-                            "Wait for it to finish before starting a task.",
-                            "tabId": tab_id,
-                        })
-                        return
-                    tab.is_running_non_wt = True
+            with repo_lock(repo) if repo else nullcontext(), self._state_lock:
+                if any(
+                    t.is_merging and t.use_worktree
+                    for t in _RunningAgentState.running_agent_states.values()
+                ):
+                    tab.is_task_active = False
+                    self.printer.broadcast({
+                        "type": "error",
+                        "text": "A worktree merge is in progress. "
+                        "Wait for it to finish before starting a task.",
+                        "tabId": tab_id,
+                    })
+                    return
+                tab.is_running_non_wt = True
             try:
                 pre_head_sha, pre_hunks, pre_untracked, pre_file_hashes = (
                     self._capture_pre_snapshot(work_dir, repo, tab_id)
@@ -681,16 +680,14 @@ class _TaskRunnerMixin:
             # to the task once the id exists.
             tab.task_history_id = None
             subtasks = parse_task_tags(prompt)
-            from kiss.agents.vscode.vscode_config import load_config as _load_cfg
-
-            _vcfg = _load_cfg()
-            _cfg_budget = float(_vcfg.get("max_budget", 100))
-            _cfg_web = _vcfg.get("use_web_browser", True)
-
             from kiss.agents.vscode.vscode_config import (
                 build_model_config,
+                load_config,
             )
 
+            _vcfg = load_config()
+            _cfg_budget = float(_vcfg.get("max_budget", 100))
+            _cfg_web = _vcfg.get("use_web_browser", True)
             _model_config = build_model_config(_vcfg)
 
             # Invoked by ``ChatSorcarAgent.run`` the moment the run's
@@ -1480,14 +1477,12 @@ class _TaskRunnerMixin:
             while not cancelled.is_set():
                 if stop.wait(0.1):
                     if not cancelled.is_set():
-                        try:
-                            # Sentinel is identity-checked below;
-                            # the queue's element type is ``str`` so
-                            # this single non-string put is narrowed
-                            # away by the ``is sentinel`` branch.
+                        # Sentinel is identity-checked below;
+                        # the queue's element type is ``str`` so
+                        # this single non-string put is narrowed
+                        # away by the ``is sentinel`` branch.
+                        with suppress(queue.Full):
                             q.put_nowait(cast(str, sentinel))
-                        except queue.Full:
-                            pass
                     return
 
         watcher = threading.Thread(target=_wake_on_stop, daemon=True)
