@@ -37,6 +37,7 @@ from kiss.core.models.model import (
     _build_text_based_tools_prompt,
     _parse_text_based_tool_calls,
     _strip_text_based_tool_calls,
+    flatten_content_to_text,
 )
 
 logger = logging.getLogger(__name__)
@@ -179,10 +180,10 @@ class CodexModel(Model):
         if system_instruction:
             parts.append(f"[System]: {system_instruction}")
         if len(self.conversation) == 1 and not system_instruction:
-            return str(self.conversation[0]["content"])
+            return flatten_content_to_text(self.conversation[0]["content"])
         for msg in self.conversation:
             role = msg["role"]
-            content = msg.get("content", "")
+            content = flatten_content_to_text(msg.get("content", ""))
             if role == "user":
                 parts.append(f"[User]: {content}")
             elif role == "assistant":
