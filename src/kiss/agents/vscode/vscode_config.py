@@ -428,6 +428,25 @@ def apply_config_to_env(cfg: dict[str, Any]) -> None:
     config_module.DEFAULT_CONFIG.max_budget = budget_value
 
 
+def _parse_custom_headers(raw_headers: str) -> dict[str, str]:
+    """Parse ``Key: Value`` lines from the custom-headers config string.
+
+    Lines without a ``:`` are ignored; keys and values are trimmed.
+
+    Args:
+        raw_headers: The multi-line ``custom_headers`` config value.
+
+    Returns:
+        Dict of parsed header names to values (empty when none parse).
+    """
+    headers: dict[str, str] = {}
+    for line in raw_headers.splitlines():
+        if ":" in line:
+            key, value = line.split(":", 1)
+            headers[key.strip()] = value.strip()
+    return headers
+
+
 def get_custom_model_entry(cfg: dict[str, Any]) -> dict[str, Any] | None:
     """Build a model-list entry for a custom endpoint if configured.
 
@@ -440,13 +459,7 @@ def get_custom_model_entry(cfg: dict[str, Any]) -> dict[str, Any] | None:
     endpoint = cfg.get("custom_endpoint", "")
     if not endpoint:
         return None
-    headers: dict[str, str] = {}
-    raw_headers = cfg.get("custom_headers", "")
-    if raw_headers:
-        for line in raw_headers.splitlines():
-            if ":" in line:
-                key, value = line.split(":", 1)
-                headers[key.strip()] = value.strip()
+    headers = _parse_custom_headers(cfg.get("custom_headers", ""))
     entry: dict[str, Any] = {
         "name": f"custom/{endpoint.rstrip('/').split('/')[-1]}",
         "inp": 0,
@@ -481,15 +494,9 @@ def build_model_config(cfg: dict[str, Any]) -> dict[str, Any] | None:
     api_key = cfg.get("custom_api_key", "")
     if api_key:
         result["api_key"] = api_key
-    raw_headers = cfg.get("custom_headers", "")
-    if raw_headers:
-        headers: dict[str, str] = {}
-        for line in raw_headers.splitlines():
-            if ":" in line:
-                key, value = line.split(":", 1)
-                headers[key.strip()] = value.strip()
-        if headers:
-            result["extra_headers"] = headers
+    headers = _parse_custom_headers(cfg.get("custom_headers", ""))
+    if headers:
+        result["extra_headers"] = headers
     return result
 
 

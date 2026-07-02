@@ -123,45 +123,16 @@ class _AutocompleteMixin:
         Returns:
             The remaining suffix to append, or empty string if no match.
         """
-        content = snapshot_content
-        if not content:
-            active_path = snapshot_file
-            if active_path:
-                try:
-                    with open(active_path) as f:
-                        content = f.read(50000)
-                except (OSError, UnicodeDecodeError):
-                    # UnicodeDecodeError (a binary / non-UTF-8 active
-                    # file) must not escape: it would kill the single
-                    # autocomplete worker thread permanently.
-                    content = ""
-
-        if query and not (query[-1].isalnum() or query[-1] == "_" or query[-1] == "."):
+        matches = self._active_file_identifier_matches(
+            query, snapshot_file, snapshot_content, chat_id,
+        )
+        if not matches:
             return ""
         m = re.search(r"([\w][\w.]*)$", query)
-        if not m:
-            return ""
-        partial = m.group(1)
-        if len(partial) < 2:
-            return ""
-
-        chat_text = _load_chat_context_text(chat_id)
-
-        if not content and not chat_text:
-            return ""
-
-        combined = content + ("\n" + chat_text if chat_text else "")
-        words = set(re.findall(r"\b[A-Za-z_]\w{2,}\b", combined))
-        chains = set(re.findall(r"\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+\b", combined))
-        candidates = words | chains
-
-        best = ""
-        for candidate in candidates:
-            if candidate.startswith(partial) and len(candidate) > len(partial):
-                suffix = candidate[len(partial):]
-                if len(suffix) > len(best):
-                    best = suffix
-        return best
+        assert m is not None  # matches non-empty implies a trailing token
+        # Matches are sorted longest-first, so the first one yields the
+        # longest suffix (every match starts with the same partial).
+        return matches[0][len(m.group(1)):]
 
     def _active_file_identifier_matches(
         self,

@@ -18,7 +18,7 @@ import json
 import logging
 import shutil
 import subprocess
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 
 from kiss.core.kiss_error import KISSError
@@ -64,6 +64,31 @@ def _find_claude_cli() -> str:
             "Install it from https://docs.anthropic.com/en/docs/claude-code"
         )
     return path
+
+
+def _iter_stream_json_events(lines: Iterable[str]) -> Iterator[dict[str, Any]]:
+    """Yield parsed stream-json events, unwrapping ``stream_event`` wrappers.
+
+    Blank lines and lines that are not valid JSON are skipped.
+
+    Args:
+        lines: An iterable of JSON strings (one event per line).
+
+    Yields:
+        The parsed event dicts, with ``stream_event`` wrappers replaced by
+        their inner event.
+    """
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("type") == "stream_event":
+            event = event.get("event", {})
+        yield event
 
 
 def _find_consecutive_tool_calls_end(content: str) -> int:
@@ -350,20 +375,9 @@ class ClaudeCodeModel(Model):
         found_tool_calls = False
         last_tc_end = -1
 
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-
+        events = _iter_stream_json_events(lines)
+        for event in events:
             event_type = event.get("type")
-
-            if event_type == "stream_event":
-                event = event.get("event", {})
-                event_type = event.get("type")
 
             if event_type == "assistant":
                 msg = event.get("message", {})
@@ -461,21 +475,8 @@ class ClaudeCodeModel(Model):
         # early break above.  Without this, every agentic Claude Code
         # call reports 0 tokens / $0 cost.
         if self._stopped_for_tool_calls and not result_json:
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-
-                etype = event.get("type")
-                if etype == "stream_event":
-                    event = event.get("event", {})
-                    etype = event.get("type")
-
-                if etype == "result":
+            for event in events:
+                if event.get("type") == "result":
                     result_json = event
                     break
 

@@ -502,6 +502,26 @@ class JsonPrinter(Printer):
             self._record_event(event)
         self._persist_event(event)
 
+    def _cost_with_offset(self, cost: Any) -> Any:
+        """Add the per-task budget offset to a ``"$…"`` cost string.
+
+        Non-dollar or malformed costs (e.g. ``"N/A"``, ``"$abc"``) are
+        returned verbatim so a junk value never raises out of the
+        emitting agent thread.
+
+        Args:
+            cost: The raw cost value (usually a ``"$1.2345"`` string).
+
+        Returns:
+            The offset-adjusted cost string, or *cost* unchanged.
+        """
+        if isinstance(cost, str) and cost.startswith("$"):
+            try:
+                return f"${float(cost[1:]) + self.budget_offset:.4f}"
+            except ValueError:
+                pass
+        return cost
+
     def _broadcast_result(
         self,
         text: str,
@@ -515,11 +535,7 @@ class JsonPrinter(Printer):
         # agent's displayed cost would be smaller than the sum of its
         # sub-agents' costs.  Matches the offset arithmetic in the
         # ``usage_info`` branch of :meth:`WebPrinter.print`.
-        if isinstance(cost, str) and cost.startswith("$"):
-            try:
-                cost = f"${float(cost[1:]) + self.budget_offset:.4f}"
-            except ValueError:
-                pass
+        cost = self._cost_with_offset(cost)
         total_tokens = total_tokens + self.tokens_offset
         step_count = step_count + self.steps_offset
         event: dict[str, Any] = {
@@ -647,17 +663,7 @@ class JsonPrinter(Printer):
             raw_steps = kwargs.get("total_steps", 0)
             total_tokens = raw_tokens + self.tokens_offset
             total_steps = raw_steps + self.steps_offset
-            if isinstance(raw_cost, str) and raw_cost.startswith("$"):
-                # Tolerate a malformed dollar cost exactly like
-                # ``_broadcast_result`` does: pass it through verbatim
-                # rather than raising ValueError out of ``print()``
-                # (which would kill the emitting agent thread).
-                try:
-                    total_cost = f"${float(raw_cost[1:]) + self.budget_offset:.4f}"
-                except ValueError:
-                    total_cost = raw_cost
-            else:
-                total_cost = raw_cost
+            total_cost = self._cost_with_offset(raw_cost)
             self.broadcast({
                 "type": "usage_info",
                 "text": str(content),

@@ -40,6 +40,12 @@ MAX_CONSECUTIVE_ERRORS = 3
 MAX_CONSECUTIVE_NO_TOOL_CALLS = 2
 
 
+def _call_args(function_call: dict[str, Any]) -> dict[str, Any]:
+    """Return the arguments dict of a function call, or {} if absent/malformed."""
+    raw_args = function_call.get("arguments")
+    return raw_args if isinstance(raw_args, dict) else {}
+
+
 def _is_retryable_error(e: Exception) -> bool:
     error_type = type(e).__name__
     if any(pattern in error_type for pattern in _NON_RETRYABLE_ERROR_TYPES):
@@ -395,9 +401,7 @@ class KISSAgent(Base):
 
         for fc in function_calls:
             name, response_str = self._execute_tool(fc)
-            raw_args = fc.get("arguments")
-            func_args = raw_args if isinstance(raw_args, dict) else {}
-            args_str = ", ".join(f"{k}={v!r}" for k, v in func_args.items())
+            args_str = ", ".join(f"{k}={v!r}" for k, v in _call_args(fc).items())
             call_reprs.append(f"```python\n{name}({args_str})\n```")
             function_results.append((name, {"result": response_str}))
             if name == "finish":
@@ -439,8 +443,7 @@ class KISSAgent(Base):
             tuple[str, str]: (function_name, function_response_string).
         """
         function_name = function_call["name"]
-        raw_args = function_call.get("arguments")
-        function_args = raw_args if isinstance(raw_args, dict) else {}
+        function_args = _call_args(function_call)
 
         if self.printer:
             self.printer.print(function_name, type="tool_call", tool_input=function_args)
