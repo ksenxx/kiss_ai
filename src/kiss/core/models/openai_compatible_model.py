@@ -116,6 +116,15 @@ DEEPSEEK_REASONING_MODELS = {
     "deepseek-ai/DeepSeek-R1-Distill-Llama-70B",
 }
 
+# Non-OpenAI Chat Completions hosts verified (live) to accept ``tools`` +
+# ``reasoning_effort`` on the same request, so the effort must NOT be
+# stripped from tool-bearing requests to them.  OpenRouter additionally
+# accepts ``"xhigh"`` and translates the effort per provider; Together
+# accepts ``low``/``medium``/``high`` (non-reasoning models ignore it
+# harmlessly).  api.openai.com is absent because it is handled earlier by
+# the ``/v1/responses`` delegation path.
+_TOOL_REASONING_EFFORT_HOSTS = ("openrouter.ai", "api.together.xyz")
+
 
 _AUDIO_MIME_TO_FORMAT: dict[str, str] = {
     "audio/mpeg": "mp3",
@@ -870,13 +879,19 @@ class OpenAICompatibleModel(Model):
 
         # OpenRouter's Chat Completions accepts ``tools`` +
         # ``reasoning_effort`` (including ``"xhigh"``) and translates the
-        # effort per provider, so the effort is preserved there.  Other
-        # non-OpenAI endpoints (Together, custom gateways, ...) keep the
+        # effort per provider, and Together's Chat Completions likewise
+        # accepts the combination (verified live: 200 with a real tool
+        # call for ``low``/``medium``/``high``; non-reasoning models
+        # ignore it harmlessly), so the effort is preserved for both.
+        # Other non-OpenAI endpoints (custom gateways, ...) keep the
         # pragmatic fallback: strip ``reasoning_effort`` from tool-bearing
         # requests since Chat Completions rejects the combination for
         # reasoning models; the no-tools ``generate()`` path still keeps
         # the high-reasoning default.
-        if tools and "reasoning_effort" in kwargs and "openrouter.ai" not in self.base_url:
+        preserves_effort = any(
+            host in self.base_url for host in _TOOL_REASONING_EFFORT_HOSTS
+        )
+        if tools and "reasoning_effort" in kwargs and not preserves_effort:
             dropped = kwargs.pop("reasoning_effort")
             logger.debug(
                 "Dropping reasoning_effort=%r because tools are attached "

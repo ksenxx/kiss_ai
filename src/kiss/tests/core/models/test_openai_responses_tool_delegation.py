@@ -465,6 +465,35 @@ class TestEndpointSelection:
         assert req["body"]["reasoning_effort"] == "xhigh"
         assert req["body"]["tools"], "tools must still be attached"
 
+    def test_together_endpoint_preserves_reasoning_effort_with_tools(
+        self, capture_server: str
+    ) -> None:
+        """An api.together.xyz base_url keeps tools + reasoning_effort on
+        chat.completions un-stripped.
+
+        Together's Chat Completions accepts the combination (verified live:
+        200 with a real tool call for ``low``/``medium``/``high``; models
+        without native reasoning ignore the effort harmlessly), so — like
+        OpenRouter — a user-chosen effort must survive on the wire.  No
+        Together-routed MODEL_INFO entry has a ``thinking`` default, so the
+        effort is always user-explicit via ``model_config``.  The capture
+        server's URL carries an ``api.together.xyz`` path segment so the
+        real endpoint-detection logic sees a Together base_url.
+        """
+        m = OpenAICompatibleModel(
+            "openai/gpt-oss-120b",
+            base_url=f"{capture_server}/api.together.xyz",
+            api_key="test-key",
+            model_config={"reasoning_effort": "high"},
+        )
+        m.initialize("hi")
+        m.generate_and_process_with_tools({"echo": echo})
+        req = _last_request()
+        assert req["path"].endswith("/chat/completions")
+        assert req["body"]["reasoning_effort"] == "high"
+        assert req["body"]["tools"], "tools must still be attached"
+        assert req["body"]["model"] == "openai/gpt-oss-120b"
+
     def test_flag_false_forces_chat_completions(
         self, capture_server: str
     ) -> None:
