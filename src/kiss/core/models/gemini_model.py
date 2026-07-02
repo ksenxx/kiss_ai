@@ -621,22 +621,22 @@ class GeminiModel(Model):
 
         content, function_calls = self._parse_parts(all_parts)
 
-        self.conversation.append(
-            {
-                "role": "assistant",
-                "content": content,
-                "tool_calls": [
-                    {
-                        "id": fc["id"],
-                        "type": "function",
-                        "function": {"name": fc["name"], "arguments": fc["arguments"]},
-                    }
-                    for fc in function_calls
-                ]
-                if function_calls
-                else None,
-            }
-        )
+        # Omit the ``tool_calls`` key entirely when the model made no
+        # calls: a ``tool_calls: None`` entry would be replayed verbatim
+        # after a model hand-off and rejected by other providers (e.g.
+        # the OpenAI Responses API fails with "Unknown parameter:
+        # 'input[N].tool_calls'").
+        assistant_msg: dict[str, Any] = {"role": "assistant", "content": content}
+        if function_calls:
+            assistant_msg["tool_calls"] = [
+                {
+                    "id": fc["id"],
+                    "type": "function",
+                    "function": {"name": fc["name"], "arguments": fc["arguments"]},
+                }
+                for fc in function_calls
+            ]
+        self.conversation.append(assistant_msg)
 
         return function_calls, content, response
 
