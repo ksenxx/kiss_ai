@@ -28,9 +28,11 @@ Contract verified here:
   items per request.
 * Raw Responses output items (reasoning items included) are replayed
   verbatim on follow-up turns.
-* Auto-detection: delegation only kicks in for ``api.openai.com`` unless
-  forced via ``model_config["use_responses_api"]``; the legacy stripping
-  fallback is preserved for other endpoints.
+* Auto-detection: delegation only kicks in for vendors whose registry
+  entry declares ``delegate_tools_to_responses`` (currently
+  ``api.openai.com``) unless forced via
+  ``model_config["use_responses_api"]``; other endpoints keep the chat
+  transport with capability-driven (or adaptive) effort handling.
 * The no-tools ``generate()`` path still uses ``/v1/chat/completions``
   with ``reasoning_effort`` intact.
 * Responses-shaped usage objects are extracted correctly.
@@ -425,20 +427,33 @@ class TestFollowUpTurns:
 class TestEndpointSelection:
     """Delegation must be scoped to endpoints that support /v1/responses."""
 
-    def test_non_openai_endpoint_keeps_stripping_fallback(
+    def test_unknown_endpoint_stays_on_chat_and_keeps_effort_adaptively(
         self, capture_server: str
     ) -> None:
-        """Without the flag, a non-OpenAI base_url stays on chat.completions."""
+        """Without the flag, an unknown base_url stays on chat.completions.
+
+        Unknown endpoints (not in ``OPENAI_COMPATIBLE_PROVIDERS``) never
+        delegate to ``/v1/responses``, and — since their ``tools`` +
+        ``reasoning_effort`` capability is unverified — the effort is kept
+        optimistically and the endpoint's 200 response is cached as an
+        accepting verdict (adaptive probe).
+        """
+        from kiss.core.models.openai_compatible_model import (
+            _ADAPTIVE_TOOL_EFFORT_VERDICTS,
+        )
+
         m = OpenAICompatibleModel(
             "gpt-5.5-xhigh",
             base_url=capture_server,
             api_key="test-key",
         )
+        _ADAPTIVE_TOOL_EFFORT_VERDICTS.pop(capture_server, None)
         m.initialize("hi")
         m.generate_and_process_with_tools({"echo": echo})
         req = _last_request()
         assert req["path"].endswith("/chat/completions")
-        assert "reasoning_effort" not in req["body"]
+        assert req["body"]["reasoning_effort"] == "xhigh"
+        assert _ADAPTIVE_TOOL_EFFORT_VERDICTS.pop(capture_server) is True
 
     def test_openrouter_endpoint_preserves_reasoning_effort_with_tools(
         self, capture_server: str
@@ -497,7 +512,11 @@ class TestEndpointSelection:
     def test_flag_false_forces_chat_completions(
         self, capture_server: str
     ) -> None:
-        """use_responses_api=False disables delegation even with effort set."""
+        """use_responses_api=False disables delegation even with effort set.
+
+        The unknown capture-server endpoint keeps the effort on the chat
+        transport (adaptive optimistic send).
+        """
         m = _make_model(
             capture_server, model_config={"use_responses_api": False}
         )
@@ -505,7 +524,7 @@ class TestEndpointSelection:
         m.generate_and_process_with_tools({"echo": echo})
         req = _last_request()
         assert req["path"].endswith("/chat/completions")
-        assert "reasoning_effort" not in req["body"]
+        assert req["body"]["reasoning_effort"] == "xhigh"
         assert "use_responses_api" not in req["body"]
 
     def test_openai_host_auto_delegates(self) -> None:

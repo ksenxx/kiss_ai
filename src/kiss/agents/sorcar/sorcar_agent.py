@@ -33,7 +33,11 @@ from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.agents.sorcar.web_use_tool import WebUseTool
 from kiss.core.base import SYSTEM_PROMPT
 from kiss.core.models.model import Attachment
-from kiss.core.models.model_info import MODEL_INFO, get_default_model
+from kiss.core.models.model_info import (
+    MODEL_INFO,
+    OPENAI_COMPATIBLE_PROVIDERS,
+    get_default_model,
+)
 from kiss.core.models.model_info import model as _model_factory
 from kiss.core.printer import Printer
 from kiss.core.relentless_agent import RelentlessAgent
@@ -252,14 +256,11 @@ def _attribute_sub_usage(agent: Any, budget: float, tokens: int, steps: int) -> 
 # whenever ``model_config`` contains ``base_url``, so restoring a default
 # endpoint would e.g. point ``claude-*`` at ``api.openai.com`` after an
 # OpenAI -> Anthropic switch.  Only *custom* endpoints (local gateways,
-# proxies) are worth preserving across a switch.
-_FACTORY_DEFAULT_BASE_URLS: frozenset[str] = frozenset({
-    "https://api.openai.com/v1",
-    "https://openrouter.ai/api/v1",
-    "https://api.together.xyz/v1",
-    "https://api.z.ai/api/paas/v4",
-    "https://api.moonshot.ai/v1",
-})
+# proxies) are worth preserving across a switch.  Derived from the vendor
+# registry so newly registered vendors are covered automatically.
+_FACTORY_DEFAULT_BASE_URLS: frozenset[str] = frozenset(
+    provider.base_url.rstrip("/") for provider in OPENAI_COMPATIBLE_PROVIDERS
+)
 
 
 # Attachment MIME-type prefixes and the human-readable labels used when
