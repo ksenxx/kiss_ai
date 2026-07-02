@@ -63,16 +63,24 @@ _FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
 _ARGUMENTS_RE = re.compile(r"\$ARGUMENTS\b")
 # ``$1`` … ``$9`` positional-argument placeholders.
 _POSITIONAL_RE = re.compile(r"\$([1-9])\b")
-# Combined placeholder pattern for the single-pass substitution in
-# :func:`expand_command`.  One pass is essential: placeholder-looking
-# text inside a *user-supplied argument value* (e.g. an argument that
-# literally contains ``$ARGUMENTS`` or ``$1``) must never be
-# re-expanded by a later pass.
-_PLACEHOLDER_RE = re.compile(r"\$ARGUMENTS\b|\$([1-9])\b")
-# ``@{path}`` file-content injection.
-_FILE_INJECT_RE = re.compile(r"@\{([^{}]+)\}")
-# ``!`command``` shell-output injection.
-_SHELL_INJECT_RE = re.compile(r"!`([^`]+)`")
+# Combined pattern for the single-pass substitution in
+# :func:`expand_command`, matching every injection construct the
+# template supports: ``@{path}`` (group ``file``), ``!`command```
+# (group ``shell``), ``$ARGUMENTS``, and ``$1`` … ``$9`` (group
+# ``pos``).  One pass over the ORIGINAL template is essential:
+# replacement text — a user-supplied argument value, an injected
+# file's contents, or a shell command's output — must never be
+# re-scanned by a later substitution.  Otherwise a data file merely
+# referenced with ``@{path}`` could get an embedded ``!`cmd```
+# EXECUTED, and literal ``$1`` / ``$ARGUMENTS`` text inside file
+# contents or shell output would be rewritten with the user's
+# arguments.
+_INJECT_RE = re.compile(
+    r"@\{(?P<file>[^{}]+)\}"
+    r"|!`(?P<shell>[^`]+)`"
+    r"|\$ARGUMENTS\b"
+    r"|\$(?P<pos>[1-9])\b"
+)
 
 _SHELL_TIMEOUT_SECONDS = 60
 
@@ -207,55 +215,73 @@ def discover_commands(work_dir: str) -> dict[str, CustomCommand]:
     return commands
 
 
-def _inject_files(template: str, work_dir: str) -> str:
-    """Replace every ``@{path}`` with the named file's contents."""
+def _read_injected_file(raw: str, work_dir: str) -> str:
+    """Return the contents of the ``@{path}`` file named by *raw*.
 
-    def repl(match: re.Match[str]) -> str:
-        raw = match.group(1).strip()
-        path = Path(raw)
-        if not path.is_absolute():
-            path = Path(work_dir) / raw
-        try:
-            return path.read_text(encoding="utf-8")
-        except OSError:
-            return f"[could not read file: {raw}]"
+    Relative paths resolve against *work_dir*.  Unreadable files inject
+    a readable error marker instead of raising.
 
-    return _FILE_INJECT_RE.sub(repl, template)
+    Args:
+        raw: The path text between ``@{`` and ``}``.
+        work_dir: Directory against which relative paths resolve.
+
+    Returns:
+        The file contents, or an error marker when unreadable.
+    """
+    raw = raw.strip()
+    path = Path(raw)
+    if not path.is_absolute():
+        path = Path(work_dir) / raw
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return f"[could not read file: {raw}]"
 
 
-def _inject_shell(template: str, work_dir: str) -> str:
-    """Replace every ``!`command``` with the command's output.
+def _run_injected_shell(command: str, work_dir: str) -> str:
+    """Return the output of the ``!`command``` shell injection *command*.
 
     Commands run in *work_dir*.  On failure the stderr output and an
     exit-status note are injected instead, so the model can see what
     went wrong (mirrors Gemini CLI's behaviour).
+
+    Args:
+        command: The command text between the backticks.
+        work_dir: Working directory for the command.
+
+    Returns:
+        The command's output (stdout, plus stderr and an exit-status
+        note on failure), stripped of surrounding newlines.
     """
-
-    def repl(match: re.Match[str]) -> str:
-        command = match.group(1).strip()
-        try:
-            proc = subprocess.run(
-                command, shell=True, cwd=work_dir, capture_output=True,
-                text=True, timeout=_SHELL_TIMEOUT_SECONDS,
-            )
-        except subprocess.TimeoutExpired:
-            return f"[shell command timed out: {command}]"
-        output = proc.stdout
-        if proc.returncode != 0:
-            output += proc.stderr
-            output += f"\n[Shell command exited with code {proc.returncode}]"
-        return output.strip("\n")
-
-    return _SHELL_INJECT_RE.sub(repl, template)
+    command = command.strip()
+    try:
+        proc = subprocess.run(
+            command, shell=True, cwd=work_dir, capture_output=True,
+            text=True, timeout=_SHELL_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return f"[shell command timed out: {command}]"
+    output = proc.stdout
+    if proc.returncode != 0:
+        output += proc.stderr
+        output += f"\n[Shell command exited with code {proc.returncode}]"
+    return output.strip("\n")
 
 
 def expand_command(command: CustomCommand, args_text: str, work_dir: str) -> str:
     """Expand *command*'s template into the prompt to send to the agent.
 
-    Substitution order follows Gemini CLI: file injection first, then
-    shell injection, then argument placeholders.  When the template has
-    no argument placeholder but arguments were provided, they are
-    appended after two newlines.
+    All injections — ``@{path}`` file contents, ``!`command``` shell
+    output, and the ``$ARGUMENTS`` / ``$1`` … ``$9`` argument
+    placeholders — are substituted in one pass over the original
+    template, evaluated left to right.  One pass is essential:
+    replacement text (argument values, file contents, shell output) is
+    never rescanned, so a data file containing ``!`cmd``` is injected
+    verbatim instead of having its command executed, and literal
+    ``$ARGUMENTS`` / ``$N`` text inside any injected content is never
+    rewritten with the user's arguments.  When the template has no
+    argument placeholder but arguments were provided, they are appended
+    after two newlines.
 
     Args:
         command: The custom command to expand.
@@ -265,28 +291,33 @@ def expand_command(command: CustomCommand, args_text: str, work_dir: str) -> str
     Returns:
         The fully expanded prompt text.
     """
-    text = _inject_files(command.template, work_dir)
-    text = _inject_shell(text, work_dir)
     args_text = args_text.strip()
+    # Computed on the ORIGINAL template so placeholder-looking text
+    # inside injected file contents / shell output cannot suppress the
+    # append-args fallback below.
     has_placeholder = bool(
-        _ARGUMENTS_RE.search(text) or _POSITIONAL_RE.search(text)
+        _ARGUMENTS_RE.search(command.template)
+        or _POSITIONAL_RE.search(command.template)
     )
     try:
         positional = shlex.split(args_text)
     except ValueError:
         positional = args_text.split()
 
-    def placeholder_repl(match: re.Match[str]) -> str:
-        if match.group(1) is None:
-            return args_text
-        index = int(match.group(1)) - 1
-        return positional[index] if index < len(positional) else ""
+    def inject_repl(match: re.Match[str]) -> str:
+        file_path = match.group("file")
+        if file_path is not None:
+            return _read_injected_file(file_path, work_dir)
+        shell_cmd = match.group("shell")
+        if shell_cmd is not None:
+            return _run_injected_shell(shell_cmd, work_dir)
+        pos = match.group("pos")
+        if pos is not None:
+            index = int(pos) - 1
+            return positional[index] if index < len(positional) else ""
+        return args_text  # bare $ARGUMENTS
 
-    # Single pass over the template: replacement text (the user's
-    # argument values) is never rescanned, so a value that literally
-    # contains ``$ARGUMENTS`` or ``$N`` is inserted verbatim instead of
-    # being re-expanded by a subsequent substitution pass.
-    text = _PLACEHOLDER_RE.sub(placeholder_repl, text)
+    text = _INJECT_RE.sub(inject_repl, command.template)
     if args_text and not has_placeholder:
         text = f"{text}\n\n{args_text}"
     return text

@@ -1268,6 +1268,29 @@ class VSCodeServer(
                     "extra": "",
                     "tabId": tab_id,
                 })
+            # Mirror the found-row path's tab-state bookkeeping.
+            # Without this the race-window resume leaves the tab in a
+            # half-initialised state: (a) it is never recorded in
+            # ``_tab_chat_views``, so ``_subscribe_chat_viewers`` never
+            # fans the NEXT task on this chat out to it and a
+            # follow-up ``_cmd_run`` cannot resolve the chat id it
+            # should continue; (b) ``frontend_closed`` stays raised on
+            # a close-marked busy tab that the user just re-opened, so
+            # the deferred ``_dispose_if_closed`` tears the tab down
+            # the moment its task ends; (c) an existing registry
+            # entry keeps the previously displayed chat's ``chat_id``.
+            # Sub-agent view tabs (live registry entries flagged
+            # ``is_subagent``) are NOT viewers of the (parent) chat —
+            # matching the normal path's ``subagent_info`` guard.
+            with self._state_lock:
+                tab = _RunningAgentState.running_agent_states.get(tab_id)
+                is_sub_view = tab is not None and tab.is_subagent
+                if tab is not None:
+                    if chat_id:
+                        tab.chat_id = chat_id
+                    tab.frontend_closed = False
+                if chat_id and not is_sub_view:
+                    self._tab_chat_views[tab_id] = chat_id
             return
         # NOTE: do NOT early-return on empty ``events``.  When a
         # sub-agent has just been spawned by ``run_parallel`` and
