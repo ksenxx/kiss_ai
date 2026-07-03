@@ -373,6 +373,13 @@ class PtkCompleter(Completer):
         if lstripped.startswith("/") and " " not in lstripped:
             return self._slash_completions(line)
         if lstripped.startswith("/"):
+            # A trailing value-taking flag (``--task `` / ``--model ``)
+            # completes the flag's VALUE; the branch is terminal (an
+            # empty candidate list must not fall back to the option
+            # menu, which would wrongly re-offer flags as the value).
+            value_matches = self.cli._flag_value_matches(line)
+            if value_matches is not None:
+                return self._slash_arg_completions(line, value_matches)
             arg_matches = self.cli._slash_arg_matches(line)
             if arg_matches:
                 return self._slash_arg_completions(line, arg_matches)
@@ -424,18 +431,24 @@ class PtkCompleter(Completer):
     def _slash_arg_completions(
         self, line: str, matches: list[tuple[str, str, str]],
     ) -> Iterable[Completion]:
-        """Build argument-option entries for a slash command line.
+        """Build argument option / flag-value entries for a slash line.
 
         Pops as soon as a slash command is followed by a space (e.g.
         ``/resume `` shows ``--task`` / ``--limit``; ``/skills `` shows
-        the discovered skill names).  Each entry displays the bare
-        option with its help text and replaces the whole line, exactly
-        like the readline completer.
+        the discovered skill names) and, one level deeper, as soon as a
+        value-taking flag is followed by a space (``/resume --task ``
+        shows the recent task ids as ``<id>: <description>``,
+        ``--model `` the model names in model-picker order).  Each
+        entry displays the given text with its help note and replaces
+        the whole line, exactly like the readline completer — so a
+        task-id candidate inserts only the bare id, never the colon or
+        the description shown in the menu.
 
         Args:
             line: The text before the cursor.
-            matches: ``(replacement, option, help)`` triples from
-                :meth:`CliCompleter._slash_arg_matches`.
+            matches: ``(replacement, display, help)`` triples from
+                :meth:`CliCompleter._slash_arg_matches` or
+                :meth:`CliCompleter._flag_value_matches`.
         """
         for full, opt, meta in matches:
             yield Completion(
