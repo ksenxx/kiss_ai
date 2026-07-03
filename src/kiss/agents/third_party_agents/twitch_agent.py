@@ -44,9 +44,11 @@ _config = ChannelConfig(
 class TwitchChannelBackend(ToolMethodBackend):
     """Channel backend for Twitch Helix API."""
 
-    def __init__(self) -> None:
+    def __init__(self, helix_base: str = _HELIX_BASE) -> None:
+        self._helix_base: str = helix_base
         self._client_id: str = ""
         self._access_token: str = ""
+        self._user_id: str = ""
         self._connection_info: str = ""
 
     def _headers(self) -> dict[str, str]:
@@ -57,15 +59,21 @@ class TwitchChannelBackend(ToolMethodBackend):
 
     def _get(self, path: str, params: dict | None = None) -> dict[str, Any]:  # type: ignore[type-arg]
         resp = requests.get(
-            f"{_HELIX_BASE}{path}", headers=self._headers(), params=params, timeout=30
+            f"{self._helix_base}{path}", headers=self._headers(), params=params, timeout=30
         )
-        return resp.json()  # type: ignore[no-any-return]
+        result: dict[str, Any] = resp.json() if resp.content else {}
+        if resp.status_code >= 400:  # pragma: no branch
+            result["ok"] = False
+        return result
 
     def _post(self, path: str, json_body: dict | None = None) -> dict[str, Any]:  # type: ignore[type-arg]
         resp = requests.post(
-            f"{_HELIX_BASE}{path}", headers=self._headers(), json=json_body, timeout=30
+            f"{self._helix_base}{path}", headers=self._headers(), json=json_body, timeout=30
         )
-        return resp.json() if resp.content else {"ok": True}  # type: ignore[no-any-return]
+        result: dict[str, Any] = resp.json() if resp.content else {"ok": True}
+        if resp.status_code >= 400:  # pragma: no branch
+            result["ok"] = False
+        return result
 
     def connect(self) -> bool:
         """Authenticate with Twitch using stored config."""
@@ -80,6 +88,7 @@ class TwitchChannelBackend(ToolMethodBackend):
             if "data" in result:  # pragma: no branch
                 users = result["data"]
                 name = users[0].get("login", "") if users else ""
+                self._user_id = users[0].get("id", "") if users else ""
                 self._connection_info = f"Authenticated as {name}"
                 return True
             self._connection_info = f"Twitch auth failed: {result}"
@@ -96,7 +105,15 @@ class TwitchChannelBackend(ToolMethodBackend):
 
     def send_message(self, channel_id: str, text: str, thread_ts: str = "") -> None:
         """Send a Twitch chat message."""
-        self._post("/chat/messages", {"broadcaster_id": channel_id, "message": text})
+        if not self._user_id:
+            users = self._get("/users").get("data", [])
+            self._user_id = users[0].get("id", "") if users else ""
+        result = self._post(
+            "/chat/messages",
+            {"broadcaster_id": channel_id, "sender_id": self._user_id, "message": text},
+        )
+        if result.get("ok") is False:  # pragma: no branch
+            raise RuntimeError(f"Twitch send_message failed: {result}")
 
     def wait_for_reply(
         self,
@@ -147,11 +164,11 @@ class TwitchChannelBackend(ToolMethodBackend):
             JSON string with channel info.
         """
         try:
-            result = self._get("/third_party_agents", params={"broadcaster_id": broadcaster_id})
-            third_party_agents = result.get("data", [])
-            if not third_party_agents:  # pragma: no branch
+            result = self._get("/channels", params={"broadcaster_id": broadcaster_id})
+            channels = result.get("data", [])
+            if not channels:  # pragma: no branch
                 return json.dumps({"ok": False, "error": "Channel not found"})
-            return json.dumps({"ok": True, "channel": third_party_agents[0]}, indent=2)[:8000]
+            return json.dumps({"ok": True, "channel": channels[0]}, indent=2)[:8000]
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
@@ -256,18 +273,18 @@ class TwitchChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
     def search_third_party_agents(self, query: str, limit: int = 10) -> str:
-        """Search for Twitch third_party_agents by name.
+        """Search for Twitch channels by name.
 
         Args:
             query: Search query.
-            limit: Maximum third_party_agents to return. Default: 10.
+            limit: Maximum channels to return. Default: 10.
 
         Returns:
-            JSON string with matching third_party_agents.
+            JSON string with matching channels.
         """
         try:
             params = {"query": query, "first": limit}
-            result = self._get("/search/third_party_agents", params=params)
+            result = self._get("/search/channels", params=params)
             data = {"ok": True, "third_party_agents": result.get("data", [])}
             return json.dumps(data, indent=2)[:8000]
         except Exception as e:

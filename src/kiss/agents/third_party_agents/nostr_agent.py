@@ -86,25 +86,28 @@ class NostrChannelBackend(ToolMethodBackend):
 
     def is_from_bot(self, msg: dict[str, Any]) -> bool:
         """Check if event is from this key."""
-        return bool(msg.get("pubkey", "") == self._public_key)
+        sender = msg.get("user") or msg.get("pubkey", "")
+        return bool(self._public_key and sender == self._public_key)
+
+    def _publish_signed_event(self, event: Any) -> None:
+        """Publish an already-signed event to all configured relays (pynostr flow)."""
+        from pynostr.relay_manager import RelayManager
+
+        manager = RelayManager(timeout=6)
+        for relay_url in self._relays:  # pragma: no branch
+            manager.add_relay(relay_url)
+        manager.publish_event(event)
+        manager.run_sync()
+        time.sleep(1.0)
+        manager.close_all_relay_connections()
 
     def _publish_event(self, kind: int, content: str, tags: list | None = None) -> dict[str, Any]:
         """Publish a Nostr event to all configured relays."""
         from pynostr.event import Event
-        from pynostr.relay_manager import RelayManager
 
         event = Event(kind=kind, content=content, tags=tags or [])
         event.sign(self._private_key.hex())
-
-        manager = RelayManager()
-        for relay_url in self._relays:  # pragma: no branch
-            manager.add_relay(relay_url)
-
-        manager.open_connections({"cert_reqs": False})
-        time.sleep(1.0)
-        manager.publish_event(event)
-        time.sleep(1.0)
-        manager.close_connections()
+        self._publish_signed_event(event)
         return {"event_id": event.id}
 
     def publish_note(self, content: str) -> str:
@@ -164,17 +167,7 @@ class NostrChannelBackend(ToolMethodBackend):
             dm.encrypt(self._private_key.hex(), cleartext_content=content)
             event = dm.to_event()
             event.sign(self._private_key.hex())
-
-            from pynostr.relay_manager import RelayManager
-
-            manager = RelayManager()
-            for relay_url in self._relays:  # pragma: no branch
-                manager.add_relay(relay_url)
-            manager.open_connections({"cert_reqs": False})
-            time.sleep(1.0)
-            manager.publish_event(event)
-            time.sleep(1.0)
-            manager.close_connections()
+            self._publish_signed_event(event)
             return json.dumps({"ok": True, "event_id": event.id})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})

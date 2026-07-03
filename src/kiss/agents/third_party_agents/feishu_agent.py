@@ -112,24 +112,27 @@ class FeishuChannelBackend(ToolMethodBackend):
             return [], oldest
 
     def send_message(self, channel_id: str, text: str, thread_ts: str = "") -> None:
-        """Send a Feishu message."""
-        if not self._client:  # pragma: no branch
-            return
-        try:
-            from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
+        """Send a Feishu message.
 
-            body = (
-                CreateMessageRequestBody.builder()
-                .receive_id(channel_id)
-                .receive_id_type("chat_id")
-                .msg_type("text")
-                .content(json.dumps({"text": text}))
-                .build()
-            )
-            req = CreateMessageRequest.builder().request_body(body).build()
-            self._client.im.v1.message.create(req)
-        except Exception:
-            pass
+        Raises:
+            RuntimeError: If not connected or the Feishu API reports a failure.
+        """
+        if not self._client:
+            raise RuntimeError("Not connected to Feishu")
+        from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
+
+        body = (
+            CreateMessageRequestBody.builder()
+            .receive_id(channel_id)
+            .receive_id_type("chat_id")
+            .msg_type("text")
+            .content(json.dumps({"text": text}))
+            .build()
+        )
+        req = CreateMessageRequest.builder().request_body(body).build()
+        resp = self._client.im.v1.message.create(req)
+        if not resp.success():
+            raise RuntimeError(resp.msg)
 
     def wait_for_reply(
         self,
@@ -259,13 +262,17 @@ class FeishuChannelBackend(ToolMethodBackend):
         try:
             from lark_oapi.api.im.v1 import ListMessageRequest
 
-            req = (
+            builder = (
                 ListMessageRequest.builder()
                 .container_id(container_id)
                 .container_id_type("chat_id")
                 .page_size(page_size)
-                .build()
             )
+            if start_time:  # pragma: no branch
+                builder = builder.start_time(start_time)
+            if end_time:  # pragma: no branch
+                builder = builder.end_time(end_time)
+            req = builder.build()
             resp = self._client.im.v1.message.list(req)
             if not resp.success():  # pragma: no branch
                 return json.dumps({"ok": False, "error": resp.msg})

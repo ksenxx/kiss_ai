@@ -99,11 +99,15 @@ def _acquire_lock() -> Any:
         process lifetime so the lock is held until exit.
     """
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    fp = LOCK_FILE.open("w")
+    # Open without truncating so a losing contender never clobbers the
+    # PID recorded by the current lock holder.
+    fp = LOCK_FILE.open("a+")
     try:
         fcntl.flock(fp.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
+        fp.close()
         sys.exit(0)
+    fp.truncate(0)
     fp.write(f"{os.getpid()}\n")
     fp.flush()
     return fp
@@ -329,9 +333,15 @@ def _poll_once(
         resp.get("messages", []), key=lambda m: float(m.get("ts", "0"))
     )
 
+    # Only process messages newer than the startup watermark so we never
+    # retroactively run old DM history as Sorcar tasks.
+    min_ts = float(state.get("min_ts", "0"))
+
     for msg in messages:
         ts = str(msg.get("ts", ""))
         if not ts:
+            continue
+        if float(ts) <= min_ts:
             continue
         if msg.get("user") != user_id:
             continue
@@ -383,6 +393,13 @@ def main() -> None:
     except Exception:
         logging.exception("Startup failed")
         raise
+
+    # On first run, set a watermark so we only process messages from now on.
+    state = _load_state()
+    if "min_ts" not in state:
+        state["min_ts"] = str(time.time())
+        _save_state(state)
+        logging.info("Initialized min_ts=%s (only new messages will be processed)", state["min_ts"])
 
     deadline = time.time() + RUN_DURATION
     while time.time() < deadline:
