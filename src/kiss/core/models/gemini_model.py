@@ -63,6 +63,27 @@ def _decode_base64(data: str) -> bytes | None:
         return None
 
 
+def _data_url_to_part(url: str, default_mime: str) -> types.Part | None:
+    """Convert a base64 ``data:`` URL into a Gemini ``Part``.
+
+    Args:
+        url: The candidate data URL.
+        default_mime: MIME type to use when the URL omits one.
+
+    Returns:
+        The equivalent Gemini ``Part``, or ``None`` when *url* is not a
+        decodable base64 data URL.
+    """
+    if not (url.startswith("data:") and ";base64," in url):
+        return None
+    header, _, payload = url.partition(",")
+    data = _decode_base64(payload)
+    if data is None:
+        return None
+    media_type = header[len("data:"):].split(";", 1)[0] or default_mime
+    return types.Part.from_bytes(data=data, mime_type=media_type)
+
+
 def _media_block_to_part(block: dict[str, Any]) -> types.Part | None:
     """Convert a foreign media block/part into a Gemini ``Part``.
 
@@ -89,20 +110,14 @@ def _media_block_to_part(block: dict[str, Any]) -> types.Part | None:
                 return types.Part.from_bytes(data=data, mime_type=media_type)
     elif block_type == "image_url":
         url = (block.get("image_url") or {}).get("url", "")
-        if url.startswith("data:") and ";base64," in url:
-            header, _, payload = url.partition(",")
-            data = _decode_base64(payload)
-            if data is not None:
-                media_type = header[len("data:"):].split(";", 1)[0] or "image/png"
-                return types.Part.from_bytes(data=data, mime_type=media_type)
+        part = _data_url_to_part(url, "image/png")
+        if part is not None:
+            return part
     elif block_type == "file":
         file_data = (block.get("file") or {}).get("file_data", "")
-        if file_data.startswith("data:") and ";base64," in file_data:
-            header, _, payload = file_data.partition(",")
-            data = _decode_base64(payload)
-            if data is not None:
-                media_type = header[len("data:"):].split(";", 1)[0] or "application/pdf"
-                return types.Part.from_bytes(data=data, mime_type=media_type)
+        part = _data_url_to_part(file_data, "application/pdf")
+        if part is not None:
+            return part
     logger.warning("Dropping unconvertible %s block for Gemini.", block_type)
     return None
 

@@ -21,6 +21,12 @@ from kiss.core.printer import (
     truncate_result,
 )
 
+_NOTIFICATION_STYLES = {
+    "error": ("red", "✕ ERROR"),
+    "warning": ("yellow", "⚠ WARNING"),
+    "info": ("cyan", "ℹ INFO"),
+}
+
 
 class ConsolePrinter(Printer):
     def __init__(self, file: Any = None) -> None:
@@ -248,15 +254,7 @@ class ConsolePrinter(Printer):
             # A ``progressMessage`` (the dim subtitle on the webview
             # toast) is rendered below the main message in dim style.
             severity = str(kwargs.get("severity", "info")).lower()
-            if severity == "error":
-                border = "red"
-                label = "✕ ERROR"
-            elif severity == "warning":
-                border = "yellow"
-                label = "⚠ WARNING"
-            else:
-                border = "cyan"
-                label = "ℹ INFO"
+            border, label = _NOTIFICATION_STYLES.get(severity, _NOTIFICATION_STYLES["info"])
             message = str(content) if content is not None else ""
             parts: list[Any] = [Text(message)]
             progress_message = kwargs.get("progress_message") or ""
@@ -273,22 +271,29 @@ class ConsolePrinter(Printer):
             )
             return ""
         if type == "result":
-            self._flush_newline()
             cost = self._apply_budget_offset(kwargs.get("cost", "N/A"))
             total_tokens = kwargs.get("total_tokens", 0) + self.tokens_offset
             step_count = kwargs.get("step_count", 0) + self.steps_offset
-            body = self._format_result_content(str(content)) if content else "(no result)"
-            self._console.print(
-                Panel(
-                    body,
-                    title="Result",
-                    subtitle=f"tokens={total_tokens:,}  cost={cost}  steps={step_count:,}",
-                    border_style="bold green",
-                    padding=(1, 2),
-                )
+            self._print_result_panel(
+                content,
+                f"tokens={total_tokens:,}  cost={cost}  steps={step_count:,}",
             )
             return ""
         return ""
+
+    def _print_result_panel(self, raw: Any, subtitle: str) -> None:
+        """Render the green "Result" panel shared by result and message events."""
+        self._flush_newline()
+        body = self._format_result_content(str(raw)) if raw else "(no result)"
+        self._console.print(
+            Panel(
+                body,
+                title="Result",
+                subtitle=subtitle,
+                border_style="bold green",
+                padding=(1, 2),
+            )
+        )
 
     def token_callback(self, token: str) -> None:
         """Stream a single token to the console, styled by current block type.
@@ -459,16 +464,8 @@ class ConsolePrinter(Printer):
             cost_str = self._apply_budget_offset(
                 f"${budget_used:.4f}" if budget_used else "N/A"
             )
-            self._flush_newline()
-            body = self._format_result_content(message.result) if message.result else "(no result)"
-            self._console.print(
-                Panel(
-                    body,
-                    title="Result",
-                    subtitle=(f"tokens={total_tokens_used:,}  cost={cost_str}"),
-                    border_style="bold green",
-                    padding=(1, 2),
-                )
+            self._print_result_panel(
+                message.result, f"tokens={total_tokens_used:,}  cost={cost_str}"
             )
         elif hasattr(message, "content"):
             for block in message.content:

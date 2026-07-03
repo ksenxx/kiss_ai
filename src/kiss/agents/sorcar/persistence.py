@@ -21,12 +21,14 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import queue
 import re
 import sqlite3
 import threading
 import time
+import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -193,9 +195,7 @@ _HistoryEntry = dict[str, object]
 # the SQL-side and Python-side sub-agent detectors disagree — a
 # sub-agent row would leak into the history sidebar while
 # ``_list_recent_chats`` burned a limit slot on its chat.  All writers
-# go through :func:`_dumps_extra` and all sub-agent classification
-# goes through :func:`_parse_extra_dict` so the two sides can never
-# diverge.
+# go through :func:`_dumps_extra` so the two sides can never diverge.
 
 def _safe_int(value: object, default: int = 0) -> int:
     """Coerce *value* to ``int``, returning *default* on failure.
@@ -206,7 +206,6 @@ def _safe_int(value: object, default: int = 0) -> int:
     propagating — this keeps the task-completion finally robust
     against caller-supplied misbehaving objects.
     """
-    import math
     try:
         if value is None or value == "":
             return default
@@ -225,7 +224,6 @@ def _safe_float(value: object, default: float = 0.0) -> float:
     ``json_valid``.  Any object whose ``__eq__`` raises an arbitrary
     exception is treated as the default rather than propagating.
     """
-    import math
     try:
         if value is None or value == "":
             return default
@@ -259,7 +257,6 @@ def _safe_str(value: object, default: str = "") -> str:
 
 def _sanitize_non_finite(value: object) -> object:
     """Recursively replace non-finite floats (NaN/±Inf) with ``None``."""
-    import math
     if isinstance(value, float) and not math.isfinite(value):
         return None
     if isinstance(value, dict):
@@ -288,37 +285,6 @@ def _dumps_extra(extra: dict[str, object]) -> str:
     except ValueError:
         sanitized = _sanitize_non_finite(extra)
         return json.dumps(sanitized, allow_nan=False)
-
-
-def _reject_json_constant(token: str) -> object:
-    """``parse_constant`` hook: reject ``NaN``/``Infinity`` tokens."""
-    raise ValueError(f"non-RFC8259 JSON constant: {token}")
-
-
-def _parse_extra_dict(extra: object) -> dict[str, object] | None:
-    """Parse an ``extra`` column value as a strict-JSON dict.
-
-    Mirrors SQLite's ``json_valid`` semantics (used by the
-    ``_HISTORY_NOT_SUBAGENT`` predicate): the bare ``NaN`` /
-    ``Infinity`` / ``-Infinity`` tokens — accepted by default by
-    Python's ``json.loads`` but invalid RFC 8259 — are rejected, so a
-    legacy corrupt row is classified identically by the SQL side and
-    the Python side.
-
-    Args:
-        extra: The raw column value (``None``, ``""``, or a string).
-
-    Returns:
-        The parsed dict, or ``None`` when *extra* is empty, not a
-        string, malformed, non-strict, or not a JSON object.
-    """
-    if not extra or not isinstance(extra, str):
-        return None
-    try:
-        parsed = json.loads(extra, parse_constant=_reject_json_constant)
-    except (ValueError, TypeError):
-        return None
-    return parsed if isinstance(parsed, dict) else None
 
 
 # ---------------------------------------------------------------------------
@@ -500,6 +466,17 @@ def _is_failed_result(result: str) -> bool:
     )
 
 
+# Index DDL shared by ``_init_tables`` and the legacy-schema migration.
+_INDEX_DDL: tuple[str, ...] = (
+    "CREATE INDEX IF NOT EXISTS idx_th_timestamp ON task_history(timestamp)",
+    "CREATE INDEX IF NOT EXISTS idx_th_task ON task_history(task)",
+    "CREATE INDEX IF NOT EXISTS idx_th_chat_id ON task_history(chat_id)",
+    "CREATE INDEX IF NOT EXISTS idx_th_parent_task_id "
+    "ON task_history(parent_task_id)",
+    "CREATE INDEX IF NOT EXISTS idx_ev_task_id ON events(task_id)",
+)
+
+
 def _init_tables(conn: sqlite3.Connection) -> None:
     """Create all tables and indexes."""
     conn.executescript("""
@@ -555,18 +532,8 @@ def _init_tables(conn: sqlite3.Connection) -> None:
             timestamp REAL NOT NULL DEFAULT 0
         );
     """)
-    conn.executescript("""
-        CREATE INDEX IF NOT EXISTS idx_th_timestamp
-            ON task_history(timestamp);
-        CREATE INDEX IF NOT EXISTS idx_th_task
-            ON task_history(task);
-        CREATE INDEX IF NOT EXISTS idx_th_chat_id
-            ON task_history(chat_id);
-        CREATE INDEX IF NOT EXISTS idx_th_parent_task_id
-            ON task_history(parent_task_id);
-        CREATE INDEX IF NOT EXISTS idx_ev_task_id
-            ON events(task_id);
-    """)
+    for ddl in _INDEX_DDL:
+        conn.execute(ddl)
 
 
 def _migrate_old_schema_if_needed(conn: sqlite3.Connection) -> bool:
@@ -597,16 +564,6 @@ def _migrate_old_schema_if_needed(conn: sqlite3.Connection) -> bool:
         return False
     if "extra" not in cols:
         return False
-    import uuid as _uuid
-
-    # r3-C3: use the module-level finite-aware coercion helpers
-    # rather than ad-hoc inline lambdas so NaN/Inf and OverflowError
-    # are guarded uniformly with ``_save_task_extra``.
-    def _ix(v: object) -> int:
-        return _safe_int(v, 0)
-
-    def _fx(v: object) -> float:
-        return _safe_float(v, 0.0)
 
     def _sx(v: object) -> str:
         if v is None or v == "":
@@ -705,7 +662,7 @@ def _migrate_old_schema_if_needed(conn: sqlite3.Connection) -> bool:
             "SELECT id, timestamp, task, has_events, result, chat_id, "
             "extra FROM task_history ORDER BY id ASC"
         ).fetchall()
-        id_map: dict[int, str] = {int(r[0]): _uuid.uuid4().hex for r in rows}
+        id_map: dict[int, str] = {int(r[0]): uuid.uuid4().hex for r in rows}
         dropped_unknown_keys = 0
         known_extra_keys = {
             "model", "work_dir", "version", "tokens", "cost", "steps",
@@ -754,12 +711,14 @@ def _migrate_old_schema_if_needed(conn: sqlite3.Connection) -> bool:
                     id_map[old_id], r[1], r[2],
                     r[3] or 0, r[4] or "", r[5] or "",
                     _sx(extra.get("model")), _sx(extra.get("work_dir")),
-                    _sx(extra.get("version")), _ix(extra.get("tokens")),
-                    _fx(extra.get("cost")), _ix(extra.get("steps")),
+                    _sx(extra.get("version")), _safe_int(extra.get("tokens")),
+                    _safe_float(extra.get("cost")),
+                    _safe_int(extra.get("steps")),
                     _bx(extra.get("is_parallel")),
                     _bx(extra.get("is_worktree")),
                     _bx(extra.get("auto_commit_mode")),
-                    _ix(extra.get("startTs")), _ix(extra.get("endTs")),
+                    _safe_int(extra.get("startTs")),
+                    _safe_int(extra.get("endTs")),
                     _bx(extra.get("is_favorite")), parent_task_id,
                 ),
             )
@@ -797,26 +756,8 @@ def _migrate_old_schema_if_needed(conn: sqlite3.Connection) -> bool:
         conn.execute(
             "ALTER TABLE events__new RENAME TO events"
         )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_th_timestamp "
-            "ON task_history(timestamp)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_th_task "
-            "ON task_history(task)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_th_chat_id "
-            "ON task_history(chat_id)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_th_parent_task_id "
-            "ON task_history(parent_task_id)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_ev_task_id "
-            "ON events(task_id)"
-        )
+        for ddl in _INDEX_DDL:
+            conn.execute(ddl)
         conn.execute("COMMIT")
     except Exception:
         try:
@@ -965,7 +906,6 @@ def _add_task(
         ``(task_id, chat_id)`` — the inserted row id and the
         chat session identifier.
     """
-    import uuid
     db = _get_db()
     payload = dict(extra) if extra else {}
     parent_task_id = ""
@@ -1033,7 +973,6 @@ def _allocate_chat_id() -> str:
     Returns:
         A unique 32-character string suitable for use as a ``chat_id``.
     """
-    import uuid
     return uuid.uuid4().hex
 
 
@@ -1148,18 +1087,17 @@ def _delete_task(task_id: str) -> bool:
                             next_frontier.append(child_id)
                 doomed_ids.extend(next_frontier)
                 frontier = next_frontier
+        deleted = False
         for did in doomed_ids:
             db.execute("DELETE FROM events WHERE task_id = ?", (did,))
-        cursor = db.execute(
-            "DELETE FROM task_history WHERE id = ?", (task_id,)
-        )
-        for did in doomed_ids[1:]:
-            db.execute("DELETE FROM task_history WHERE id = ?", (did,))
-        for did in doomed_ids:
+            cursor = db.execute(
+                "DELETE FROM task_history WHERE id = ?", (did,)
+            )
+            if did == task_id:
+                deleted = (cursor.rowcount or 0) > 0
             _next_seq_cache.pop(did, None)
             _marked_has_events.discard(did)
         db.commit()
-        deleted = (cursor.rowcount or 0) > 0
     # Invalidate the autocomplete chat-context cache so the deleted
     # task/result text stops being served to ghost-text suggestions.
     # Done outside the write lock to keep the critical section short.
@@ -1518,18 +1456,17 @@ def _shutdown_persist_in_flight_results(task_ids: set[str]) -> int:
     with _rw_lock.write_lock():
         # Capture chat_ids of rows we are about to rewrite so we can
         # invalidate the autocomplete chat-context cache afterwards.
-        select_params: list[object] = list(id_list)
-        select_params.append("Agent Failed Abruptly")
         rows = db.execute(
             f"SELECT chat_id FROM task_history "
             f"WHERE id IN ({placeholders}) AND result = ?",
-            select_params,
+            [*id_list, "Agent Failed Abruptly"],
         ).fetchall()
         affected_chat_ids = [r["chat_id"] or "" for r in rows]
-        update_params: list[object] = ["Task interrupted by server restart/shutdown"]
-        update_params.extend(id_list)
-        update_params.append("Agent Failed Abruptly")
-        cursor = db.execute(sql, update_params)
+        cursor = db.execute(
+            sql,
+            ["Task interrupted by server restart/shutdown",
+             *id_list, "Agent Failed Abruptly"],
+        )
         rowcount = cursor.rowcount or 0
         db.commit()
     if rowcount:
@@ -1682,7 +1619,6 @@ def _save_task_extra(
         if resolved is None:
             return
         pairs: list[tuple[str, object]] = []
-        import math
         for k, v in extra.items():
             # r5-persistence-C2: ``is_favorite`` is intentionally NOT
             # in ``_EXTRA_COL_MAP`` so the favorite flag (owned by

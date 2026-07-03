@@ -75,7 +75,26 @@ class TestModelPickerRefresh(TestCase):
         from kiss.core.models import codex_model as codex_module
 
         saved_codex_paths = codex_module._UI_CANDIDATE_PATHS
+        # A fresh install must also have no persisted ``last_model``
+        # preference and no ``KISS_MODEL`` override: the server
+        # constructor consults ``_load_last_model()`` (which reads
+        # ``vscode_config.CONFIG_PATH``) and ``$KISS_MODEL`` *before*
+        # ``get_default_model()``, so a value leaked into the shared
+        # per-process config by earlier tests would defeat the
+        # ``"No model"`` precondition.  Point the config at an empty
+        # temp dir for the duration of the test.
+        import shutil
+        import tempfile
+        from pathlib import Path
+
+        import kiss.agents.vscode.vscode_config as vc
+
+        saved_kiss_model = os.environ.pop("KISS_MODEL", None)
+        saved_config_dir, saved_config_path = vc.CONFIG_DIR, vc.CONFIG_PATH
+        tmpdir = tempfile.mkdtemp()
         try:
+            vc.CONFIG_DIR = Path(tmpdir)
+            vc.CONFIG_PATH = Path(tmpdir) / "config.json"
             os.environ["PATH"] = ""
             codex_module._UI_CANDIDATE_PATHS = ()
 
@@ -122,6 +141,10 @@ class TestModelPickerRefresh(TestCase):
         finally:
             os.environ["PATH"] = saved_path
             codex_module._UI_CANDIDATE_PATHS = saved_codex_paths
+            vc.CONFIG_DIR, vc.CONFIG_PATH = saved_config_dir, saved_config_path
+            if saved_kiss_model is not None:
+                os.environ["KISS_MODEL"] = saved_kiss_model
+            shutil.rmtree(tmpdir, ignore_errors=True)
             _restore_keys(saved)
 
     def test_picker_keeps_valid_user_selection(self) -> None:
