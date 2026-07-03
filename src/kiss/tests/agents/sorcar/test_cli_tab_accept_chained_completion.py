@@ -2,18 +2,26 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""End-to-end tests: Tab-accepting a completion on a slash-command line
-must IMMEDIATELY pop the next-level candidate menu.
+"""End-to-end tests: a SINGLE Tab accepts a completion candidate and,
+on a slash-command line, IMMEDIATELY pops the next-level menu.
 
-The chain under test (no keystroke other than Tab between levels):
+The user-reported bug: pressing Tab once on an open menu only
+*selected* the candidate (the text appeared in the buffer, so from the
+user's point of view the command WAS autocompleted) but the
+argument-candidate menu never popped — a second, non-obvious Tab press
+was required.  One Tab per level must therefore accept the highlighted
+candidate (or the first one when none is highlighted yet) and chain:
 
-* ``/resu`` → Tab Tab accepts ``/resume `` → the argument-option menu
+* ``/resu`` → Tab accepts ``/resume `` → the argument-option menu
   (``--task`` / ``--limit``) pops by itself;
-* Tab Tab accepts ``--task `` → the recent-task-id menu pops by
-  itself, each candidate DISPLAYED as ``<id>: <one-line description>``
-  while accepting inserts only the bare id;
-* Tab Tab accepts the id → the remaining-option menu (``--limit``)
-  pops; Enter then submits the typed line unchanged.
+* Tab accepts ``--task `` → the recent-task-id menu pops by itself,
+  each candidate DISPLAYED as ``<id>: <one-line description>`` while
+  accepting inserts only the bare id;
+* Tab accepts the id → the remaining-option menu (``--limit``) pops;
+  Enter then submits the typed line unchanged.
+
+Up/Down still navigate the menu, and Tab then accepts the navigated
+candidate instead of the first one.
 
 Everything runs through a real :class:`PtkLineReader` prompt session
 driven over a pipe input against a real isolated history database — no
@@ -106,10 +114,15 @@ def _drive_session(
     return line
 
 
-def test_tab_accept_chains_command_flag_and_value_menus(
+def test_single_tab_accepts_and_chains_all_menu_levels(
     tmp_path: Path, kiss_db,
 ) -> None:
-    """Command → flag → task-id menus pop on accept; ids show descriptions."""
+    """ONE Tab per level: command → flag → task-id → remaining options.
+
+    This is the user-reported bug reproduction: a single Tab press must
+    both insert the candidate AND pop the next-level menu — no second
+    Tab required at any level.
+    """
     task_id, _ = th._add_task("fix the parser bug", chat_id="c1")
     seen: dict[str, list[tuple[str, str, str]]] = {}
 
@@ -125,54 +138,38 @@ def test_tab_accept_chains_command_flag_and_value_menus(
             lambda: buf.text == "/resu" and bool(_menu(buf)),
             "the /resume command menu",
         )
-        pipe.send_text("\t")  # select the sole candidate: "/resume "
+        pipe.send_text("\t")  # ONE Tab: accept -> option menu pops
         _wait_for(
             lambda: buf.text == "/resume "
-            and buf.complete_state is not None
-            and buf.complete_state.current_completion is not None,
-            "the /resume candidate to be selected",
-        )
-        pipe.send_text("\t")  # accept -> option menu must pop by itself
-        _wait_for(
-            lambda: bool(_menu(buf))
+            and bool(_menu(buf))
             and _menu(buf)[0].display_text == "--task",
-            "the argument-option menu after accepting /resume",
+            "the argument-option menu after one Tab on /resume",
         )
         seen["options"] = snapshot(buf)
-        pipe.send_text("\t")  # select "--task"
+        pipe.send_text("\t")  # ONE Tab: accept --task -> task-id menu
         _wait_for(
             lambda: buf.text == "/resume --task "
-            and buf.complete_state is not None
-            and buf.complete_state.current_completion is not None,
-            "the --task candidate to be selected",
-        )
-        pipe.send_text("\t")  # accept -> task-id menu must pop by itself
-        _wait_for(
-            lambda: bool(_menu(buf))
+            and bool(_menu(buf))
             and _menu(buf)[0].display_text.startswith(f"{task_id}:"),
-            "the task-id menu after accepting --task",
+            "the task-id menu after one Tab on --task",
         )
         seen["task_ids"] = snapshot(buf)
-        pipe.send_text("\t")  # select the task id (inserts the bare id)
+        pipe.send_text("\t")  # ONE Tab: accept the id -> remaining menu
         _wait_for(
-            lambda: buf.text == f"/resume --task {task_id} ",
-            "the bare task id to be inserted",
-        )
-        pipe.send_text("\t")  # accept -> remaining-option menu pops
-        _wait_for(
-            lambda: bool(_menu(buf))
+            lambda: buf.text == f"/resume --task {task_id} "
+            and bool(_menu(buf))
             and _menu(buf)[0].display_text == "--limit",
-            "the remaining-option menu after accepting the task id",
+            "the remaining-option menu after one Tab on the task id",
         )
         seen["remaining"] = snapshot(buf)
         pipe.send_text("\r")  # Enter submits the typed line unchanged
 
     line = _drive_session(tmp_path, driver)
 
-    # Level 1: accepting "/resume" popped its argument options.
+    # Level 1: one Tab on "/resume" popped its argument options.
     assert [d for _, d, _ in seen["options"]] == ["--task", "--limit"]
     assert seen["options"][0][0] == "/resume --task "
-    # Level 2: accepting "--task" popped the task ids, DISPLAYED as
+    # Level 2: one Tab on "--task" popped the task ids, DISPLAYED as
     # "<id>: <description>" but inserting only the bare id.
     assert seen["task_ids"] == [
         (
@@ -181,16 +178,47 @@ def test_tab_accept_chains_command_flag_and_value_menus(
             "task",
         ),
     ]
-    # Level 3: accepting the id popped the not-yet-used options.
+    # Level 3: one Tab on the id popped the not-yet-used options.
     assert [d for _, d, _ in seen["remaining"]] == ["--limit"]
     # Enter submitted the typed text — never a completion candidate.
     assert line == f"/resume --task {task_id} "
 
 
+def test_down_navigation_then_tab_accepts_navigated_candidate(
+    tmp_path: Path, kiss_db,
+) -> None:
+    """Down highlights a later candidate; Tab accepts THAT one and chains."""
+    th._add_task("fix the parser bug", chat_id="c1")
+
+    def driver(pipe, buf) -> None:
+        pipe.send_text("/resume ")
+        _wait_for(
+            lambda: bool(_menu(buf))
+            and [c.display_text for c in _menu(buf)] == ["--task", "--limit"],
+            "the argument-option menu",
+        )
+        pipe.send_text("\x1b[B\x1b[B")  # Down Down: highlight --limit
+        _wait_for(
+            lambda: buf.complete_state is not None
+            and buf.complete_state.current_completion is not None
+            and buf.complete_state.current_completion.display_text
+            == "--limit",
+            "--limit to be highlighted",
+        )
+        pipe.send_text("\t")  # Tab accepts the NAVIGATED candidate
+        _wait_for(
+            lambda: buf.text == "/resume --limit ",
+            "--limit to be accepted",
+        )
+        pipe.send_text("\r")
+
+    assert _drive_session(tmp_path, driver) == "/resume --limit "
+
+
 def test_tab_accept_model_command_pops_model_names(
     tmp_path: Path, kiss_db,
 ) -> None:
-    """Accepting ``/model`` immediately pops ``list`` + the model names."""
+    """One Tab on ``/model`` immediately pops ``list`` + the model names."""
     seen: dict[str, list[str]] = {}
 
     def driver(pipe, buf) -> None:
@@ -200,16 +228,12 @@ def test_tab_accept_model_command_pops_model_names(
             and _menu(buf)[0].display_text == "/model",
             "the /model command candidate",
         )
-        pipe.send_text("\t")  # select "/model "
+        pipe.send_text("\t")  # ONE Tab: accept -> model-name menu pops
         _wait_for(
-            lambda: buf.text == "/model ",
-            "the /model command to be inserted",
-        )
-        pipe.send_text("\t")  # accept -> model-name menu pops by itself
-        _wait_for(
-            lambda: bool(_menu(buf))
+            lambda: buf.text == "/model "
+            and bool(_menu(buf))
             and _menu(buf)[0].display_text == "list",
-            "the model-name menu after accepting /model",
+            "the model-name menu after one Tab on /model",
         )
         seen["models"] = [c.display_text for c in _menu(buf)]
         pipe.send_text("\r")
@@ -232,9 +256,8 @@ def test_tab_accept_without_arguments_pops_no_menu(
             and _menu(buf)[0].display_text == "/help",
             "the /help command menu",
         )
-        pipe.send_text("\t")  # select "/help "
+        pipe.send_text("\t")  # ONE Tab: accept; no follow-up candidates
         _wait_for(lambda: buf.text == "/help ", "/help to be inserted")
-        pipe.send_text("\t")  # accept: no follow-up candidates exist
         # The restarted completion finds nothing; give it a moment and
         # assert no menu is (or becomes) visible.
         time.sleep(0.3)
@@ -257,12 +280,11 @@ def test_tab_accept_predictive_history_does_not_restart(
             and _menu(buf)[0].text == "fix the parser bug",
             "the predictive history menu",
         )
-        pipe.send_text("\t")  # select the history candidate
+        pipe.send_text("\t")  # ONE Tab: accept; non-slash line, no restart
         _wait_for(
             lambda: buf.text == "fix the parser bug",
             "the history candidate to be inserted",
         )
-        pipe.send_text("\t")  # accept: non-slash line, no restart
         time.sleep(0.3)
         assert not _menu(buf), "no menu expected after a non-slash accept"
         pipe.send_text("\r")
