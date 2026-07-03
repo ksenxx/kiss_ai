@@ -1252,9 +1252,9 @@ def _run_anchored_client(
     history_path = _history_path(work_dir)
     history = _load_history_lines(history_path)
 
-    def completer_fn(buf: str) -> list[str]:
+    def completer_fn(buf: str) -> list[tuple[str, str]]:
         try:
-            return completer._build_matches(buf)
+            return completer.build_menu(buf)
         except Exception:  # pragma: no cover - defensive
             logger.debug("anchored completion failed", exc_info=True)
             return []
