@@ -133,7 +133,8 @@ SLASH_COMMANDS: dict[str, str] = {
     "/clear": "Start a new chat (clear conversation context)",
     "/new": "Alias for /clear",
     "/resume": (
-        "Resume a chat: /resume <chat-id>, or list recent chats "
+        "Resume a chat: /resume <chat-id>, open a specific task with "
+        "/resume --task <task-id>, or list recent chats "
         "(/resume [--limit N], default 20)"
     ),
     "/model": (
