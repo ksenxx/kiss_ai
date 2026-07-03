@@ -20,6 +20,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from kiss.agents.sorcar.persistence import _default_kiss_dir
+
 logger = logging.getLogger(__name__)
 
 _SINGLETON_FILES = ("SingletonLock", "SingletonCookie", "SingletonSocket")
@@ -174,7 +176,11 @@ class WebUseTool:
     happens in this single Chromium instance.
     """
 
-    _DEFAULT_USER_DATA_DIR = str(Path.home() / ".kiss" / "browser_profile")
+    # Sentinel meaning "use the default profile dir under the KISS home".
+    # The actual path is resolved lazily at construction time via
+    # ``_default_kiss_dir()`` so it respects the ``KISS_HOME`` env var even
+    # when KISS_HOME is set after package import (as the test conftest does).
+    _DEFAULT_USER_DATA_DIR = "__kiss_default_browser_profile__"
 
     def __init__(
         self,
@@ -184,6 +190,8 @@ class WebUseTool:
         work_dir: str | None = None,
         **_kwargs: Any,
     ) -> None:
+        if user_data_dir == self._DEFAULT_USER_DATA_DIR:
+            user_data_dir = str(_default_kiss_dir() / "browser_profile")
         self.viewport = viewport
         self.user_data_dir = user_data_dir
         self._headless = headless

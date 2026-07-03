@@ -1902,7 +1902,8 @@ def _queue_chat_event(
         time.time(),
         origin_db_path or _current_db_path(),
     ))
-    if _event_writer_thread is None or not _event_writer_thread.is_alive():
+    t = _event_writer_thread
+    if t is None or not t.is_alive():
         _start_event_writer()
 
 
@@ -1914,14 +1915,15 @@ def _flush_chat_events() -> None:
     thread — the writer thread also takes that lock per batch, so
     calling this while holding the write lock would deadlock.
     """
-    if _event_writer_thread is None:
-        return
-    # Mirror ``_queue_chat_event``: if the writer thread died (e.g. it was
-    # stopped during a DB swap) while events are still queued, restart it
-    # so the backlog gets drained.  Otherwise ``_event_queue.join()`` would
-    # block forever waiting for a ``task_done()`` the dead writer can never
-    # call.
-    if not _event_writer_thread.is_alive() and _event_queue.unfinished_tasks:
+    # Snapshot the global once: a concurrent ``_stop_event_writer()`` may
+    # null it between a None-check and ``.is_alive()``.  Mirror
+    # ``_queue_chat_event``: if the writer thread hasn't started or died
+    # (e.g. it was stopped during a DB swap) while events are still queued,
+    # (re)start it so the backlog gets drained.  Otherwise
+    # ``_event_queue.join()`` would block forever waiting for a
+    # ``task_done()`` no writer will ever call.
+    t = _event_writer_thread
+    if (t is None or not t.is_alive()) and _event_queue.unfinished_tasks:
         _start_event_writer()
     _event_queue.join()
 
