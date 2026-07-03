@@ -26,8 +26,10 @@ details):
 * the picker is suppressed during ``@``-mentions, when the cursor
   is not at end-of-input, and when the input is empty;
 * stale replies (``ev.query !== inp.value``) are dropped;
-* Tab/Enter/Click accepts the highlighted suggestion in-place,
-  preserving any trailing whitespace already typed;
+* Tab/Click accepts the highlighted suggestion in-place, preserving
+  any trailing whitespace already typed;
+* Enter never accepts a suggestion — it dismisses the picker and
+  submits the typed text as-is;
 * ArrowDown moves the selection without losing focus;
 * Escape dismisses the picker;
 * the legacy ``ghost`` handler is unaffected.

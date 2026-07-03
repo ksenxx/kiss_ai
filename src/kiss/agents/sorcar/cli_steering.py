@@ -71,6 +71,7 @@ from kiss.agents.sorcar.cli_panel import (
 from kiss.agents.sorcar.cli_panel import (
     MIN_BODY_ROWS as _MIN_BODY_ROWS,
 )
+from kiss.agents.sorcar.cli_prompt import _AT_RE
 from kiss.agents.sorcar.persistence import _allocate_chat_id
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 
@@ -1104,44 +1105,53 @@ class _InputBox:
                 continue
             if ch == "\r":
                 # Bare CR is the Enter key (after raw mode disables
-                # ICRNL the kernel no longer rewrites it to LF).  This
-                # submits the current buffer — or accepts an open
-                # completion candidate without submitting, matching the
-                # prompt_toolkit dropdown behavior in cli_prompt.py.
+                # ICRNL the kernel no longer rewrites it to LF).  Enter
+                # NEVER accepts a highlighted completion candidate —
+                # except in the ``@``-mention file picker, where Enter
+                # still inserts the highlighted path without
+                # submitting.  For every other menu (predictive
+                # history, slash commands, /model) the open menu is
+                # simply dismissed (menu navigation never modifies
+                # :attr:`buf`, so the typed text is intact) and the
+                # buffer the user typed is submitted as-is.  Tab
+                # accepts in every menu — matching the prompt_toolkit
+                # dropdown in cli_prompt.py and the webview/webapp
+                # picker in main.js.
                 if self._menu_open:
-                    # Enter on an open completion menu accepts the
-                    # highlighted candidate (replacing the buffer) and
-                    # closes the menu *without* submitting the line —
-                    # the next Enter actually submits.
-                    self._menu_accept()
+                    if _AT_RE.search(self.buf):
+                        # File picker: accept the mention, keep typing.
+                        self._menu_accept()
+                        changed = True
+                        i += 1
+                        continue
+                    self._reset_completion_state()
+                    changed = True
+                # Universal backslash line-continuation.  On
+                # terminals that cannot disambiguate Shift+Enter
+                # from Enter (notably macOS Terminal.app), ending
+                # the buffer with an unescaped ``\`` makes Enter
+                # insert a newline into the buffer instead of
+                # submitting — the same convention every POSIX
+                # shell uses.  See
+                # :func:`~kiss.agents.sorcar.cli_line_continuation.ends_with_line_continuation`.
+                cont, keep = ends_with_line_continuation(self.buf)
+                if cont:
+                    self.buf = self.buf[:keep] + "\n"
+                    self._hist_idx = None
+                    # A buffer edit — refresh the in-place
+                    # completion menu so suggestions track the
+                    # newly-added newline the same way the
+                    # Shift+Enter newline-insert paths do.
+                    self._refresh_typing_menu()
                     changed = True
                 else:
-                    # Universal backslash line-continuation.  On
-                    # terminals that cannot disambiguate Shift+Enter
-                    # from Enter (notably macOS Terminal.app), ending
-                    # the buffer with an unescaped ``\`` makes Enter
-                    # insert a newline into the buffer instead of
-                    # submitting — the same convention every POSIX
-                    # shell uses.  See
-                    # :func:`~kiss.agents.sorcar.cli_line_continuation.ends_with_line_continuation`.
-                    cont, keep = ends_with_line_continuation(self.buf)
-                    if cont:
-                        self.buf = self.buf[:keep] + "\n"
-                        self._hist_idx = None
-                        # A buffer edit — refresh the in-place
-                        # completion menu so suggestions track the
-                        # newly-added newline the same way the
-                        # Shift+Enter newline-insert paths do.
-                        self._refresh_typing_menu()
-                        changed = True
-                    else:
-                        line = self.buf
-                        self.buf = ""
-                        self._hist_idx = None
-                        self._hist_saved = ""
-                        self._reset_completion_state()
-                        changed = True
-                        on_submit(line)
+                    line = self.buf
+                    self.buf = ""
+                    self._hist_idx = None
+                    self._hist_saved = ""
+                    self._reset_completion_state()
+                    changed = True
+                    on_submit(line)
             elif ch == "\n":
                 # Bare LF is Ctrl+J / Alt+Enter on terminals that
                 # send a lone LF for that key (e.g. tmux M-Enter
@@ -1208,14 +1218,13 @@ class _InputBox:
                 # buffer is replaced directly (no menu); with multiple
                 # candidates the menu opens with the first highlighted
                 # and the buffer is left untouched until the user picks
-                # one with Enter.  Tab while the menu is already open
-                # advances the highlighted candidate so the user can
-                # navigate the list from the home row too — except
-                # when only one candidate is showing (which can happen
-                # when "complete while typing" pre-opened the menu with
-                # a single-match preview), in which case Tab accepts
-                # it directly, matching the closed-menu single-match
-                # shortcut.
+                # one.  Tab while the menu is already open ACCEPTS the
+                # highlighted candidate (Enter never does — it submits
+                # the typed buffer), matching the prompt_toolkit
+                # dropdown in cli_prompt.py and the webview picker;
+                # Up/Down/Shift+Tab navigate the list.  A single-item
+                # preview is re-queried before accepting so a stale
+                # candidate cannot overwrite the buffer.
                 if self._menu_open:
                     if len(self._menu_items) == 1:
                         # Re-query before accepting so a stale
@@ -1230,7 +1239,7 @@ class _InputBox:
                         else:
                             changed = True
                     else:
-                        self._menu_move(1)
+                        self._menu_accept()
                         changed = True
                 elif self._open_completion_menu():
                     # ``_open_completion_menu`` is a no-op returning
