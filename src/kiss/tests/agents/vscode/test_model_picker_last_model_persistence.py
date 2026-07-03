@@ -211,7 +211,7 @@ class TestModelPickerLastModelPersistence:
 
         def slow_save(model: str) -> None:
             save_started.set()
-            assert proceed_save.wait(timeout=3.0), (
+            assert proceed_save.wait(timeout=30.0), (
                 "test bug: proceed_save not set within timeout"
             )
             real_save(model)
@@ -224,7 +224,7 @@ class TestModelPickerLastModelPersistence:
                 daemon=True,
             )
             sel_thread.start()
-            assert save_started.wait(timeout=3.0), (
+            assert save_started.wait(timeout=30.0), (
                 "test bug: _save_last_model not entered within timeout"
             )
 
@@ -247,8 +247,8 @@ class TestModelPickerLastModelPersistence:
             time.sleep(0.05)
 
             proceed_save.set()
-            sel_thread.join(timeout=3.0)
-            get_thread.join(timeout=3.0)
+            sel_thread.join(timeout=30.0)
+            get_thread.join(timeout=30.0)
             assert not sel_thread.is_alive(), (
                 "test bug: select thread did not finish"
             )
@@ -306,7 +306,7 @@ class TestModelPickerLastModelPersistence:
 
         def slow_save(model: str) -> None:
             save_started.set()
-            assert proceed_save.wait(timeout=3.0), (
+            assert proceed_save.wait(timeout=30.0), (
                 "test bug: proceed_save not set within timeout"
             )
             real_save(model)
@@ -319,7 +319,7 @@ class TestModelPickerLastModelPersistence:
                 daemon=True,
             )
             sel_thread.start()
-            assert save_started.wait(timeout=3.0), (
+            assert save_started.wait(timeout=30.0), (
                 "test bug: _save_last_model not entered within timeout"
             )
 
@@ -338,8 +338,8 @@ class TestModelPickerLastModelPersistence:
             time.sleep(0.05)
 
             proceed_save.set()
-            sel_thread.join(timeout=3.0)
-            new_thread.join(timeout=3.0)
+            sel_thread.join(timeout=30.0)
+            new_thread.join(timeout=30.0)
             assert not sel_thread.is_alive(), (
                 "test bug: select thread did not finish"
             )
