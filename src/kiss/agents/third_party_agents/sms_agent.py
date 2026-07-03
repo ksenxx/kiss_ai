@@ -36,6 +36,7 @@ _config = ChannelConfig(
     (
         "account_sid",
         "auth_token",
+        "from_number",
     ),
 )
 
@@ -58,7 +59,7 @@ class SMSChannelBackend(ToolMethodBackend):
             from twilio.rest import Client
 
             self._client = Client(cfg["account_sid"], cfg["auth_token"])
-            self._from_number = cfg.get("from_number", "")
+            self._from_number = cfg["from_number"]
             self._client.api.accounts(cfg["account_sid"]).fetch()
             self._connection_info = f"Authenticated with Twilio account {cfg['account_sid']}"
             return True
@@ -69,26 +70,41 @@ class SMSChannelBackend(ToolMethodBackend):
     def poll_messages(
         self, channel_id: str, oldest: str, limit: int = 10
     ) -> tuple[list[dict[str, Any]], str]:
-        """Poll Twilio for recent inbound messages."""
+        """Poll Twilio for recent inbound messages.
+
+        Twilio lists messages newest-first, so the returned cursor is the
+        numeric maximum timestamp of the new messages. When ``channel_id`` is
+        non-empty, only messages from that sender are fetched.
+        """
         if not self._client:  # pragma: no branch
             return [], oldest
         try:
-            messages_list = self._client.messages.list(to=self._from_number, limit=limit)
+            kwargs: dict[str, Any] = {"to": self._from_number, "limit": limit}
+            if channel_id:
+                kwargs["from_"] = channel_id
+            messages_list = self._client.messages.list(**kwargs)
             messages: list[dict[str, Any]] = []
-            new_oldest = oldest
+            try:
+                oldest_ts = float(oldest)
+            except ValueError:
+                oldest_ts = 0.0
+            new_oldest_ts = oldest_ts
             for msg in messages_list:  # pragma: no branch
-                ts = str(msg.date_sent.timestamp() if msg.date_sent else "")
-                if oldest and ts <= oldest:  # pragma: no branch
+                if msg.date_sent is None:
                     continue
-                new_oldest = ts
+                ts = msg.date_sent.timestamp()
+                if oldest_ts and ts <= oldest_ts:  # pragma: no branch
+                    continue
+                new_oldest_ts = max(new_oldest_ts, ts)
                 messages.append(
                     {
-                        "ts": ts,
+                        "ts": str(ts),
                         "user": msg.from_,
                         "text": msg.body,
                         "sid": msg.sid,
                     }
                 )
+            new_oldest = str(new_oldest_ts) if new_oldest_ts > oldest_ts else oldest
             return messages, new_oldest
         except Exception:
             return [], oldest
@@ -455,7 +471,11 @@ class SMSAgent(BaseChannelAgent, SorcarAgent):
             Returns:
                 Validation result or error message.
             """
-            for val, name in [(account_sid, "account_sid"), (auth_token, "auth_token")]:
+            for val, name in [
+                (account_sid, "account_sid"),
+                (auth_token, "auth_token"),
+                (from_number, "from_number"),
+            ]:
                 if not val.strip():  # pragma: no branch
                     return f"{name} cannot be empty."
             try:

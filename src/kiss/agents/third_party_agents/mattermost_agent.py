@@ -82,18 +82,21 @@ class MattermostChannelBackend(ToolMethodBackend):
             return [], oldest
         try:
             since = int(oldest) if oldest else self._last_post_time
-            posts = self._driver.posts.get_posts_for_channel(channel_id, params={"since": since})
+            posts = self._driver.posts.get_posts_for_channel(
+                channel_id, params={"since": since, "per_page": limit}
+            )
             order = posts.get("order", [])
             posts_data = posts.get("posts", {})
             messages: list[dict[str, Any]] = []
             new_oldest = oldest
-            for post_id in reversed(order):  # pragma: no branch
+            for post_id in reversed(order[:limit]):  # pragma: no branch
                 post = posts_data.get(post_id, {})
                 ts = str(post.get("create_at", ""))
                 new_oldest = ts
                 messages.append(
                     {
                         "ts": ts,
+                        "thread_ts": post.get("root_id") or post.get("id", ""),
                         "user": post.get("user_id", ""),
                         "text": post.get("message", ""),
                         "id": post.get("id", ""),
@@ -171,7 +174,7 @@ class MattermostChannelBackend(ToolMethodBackend):
         """
         assert self._driver is not None
         try:
-            third_party_agents = self._driver.third_party_agents.get_third_party_agents_for_user(
+            third_party_agents = self._driver.channels.get_channels_for_user(
                 "me", team_id, params={"page": page, "per_page": per_page}
             )
             result = [
@@ -198,7 +201,7 @@ class MattermostChannelBackend(ToolMethodBackend):
         """
         assert self._driver is not None
         try:
-            channel = self._driver.third_party_agents.get_channel(channel_id)
+            channel = self._driver.channels.get_channel(channel_id)
             return json.dumps({"ok": True, **channel}, indent=2)[:8000]
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
@@ -349,7 +352,7 @@ class MattermostChannelBackend(ToolMethodBackend):
         """
         assert self._driver is not None
         try:
-            channel = self._driver.third_party_agents.create_direct_message_channel(
+            channel = self._driver.channels.create_direct_message_channel(
                 options=[user1_id, user2_id]
             )
             return json.dumps({"ok": True, "channel_id": channel.get("id", "")})
