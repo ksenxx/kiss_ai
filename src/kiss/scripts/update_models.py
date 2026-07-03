@@ -267,6 +267,14 @@ def fetch_openai(verbose: bool = False) -> dict[str, dict]:
 
     Filters to models matching _OPENAI_PREFIXES so we only pick up chat /
     embedding models, not internal fine-tune artefacts.
+
+    Audio-capable chat models (e.g. ``gpt-audio``, ``gpt-audio-mini``,
+    ``gpt-4o-audio-preview``) are intentionally *not* filtered out: they
+    accept plain text requests on ``/v1/chat/completions`` (audio is an
+    optional input/output modality), so they work with KISS's
+    ``OpenAICompatibleModel`` and pass the capability probes. Models that
+    require entirely different endpoints (``/v1/realtime``,
+    ``/v1/audio/transcriptions``, ``/v1/audio/speech``) remain excluded.
     """
     api_key = os.getenv("OPENAI_API_KEY", "")
     if not api_key:  # pragma: no branch
@@ -282,7 +290,6 @@ def fetch_openai(verbose: bool = False) -> dict[str, dict]:
 
     skip_fragments = (
         "realtime",
-        "audio",
         "transcribe",
         "tts",
         "whisper",
@@ -334,12 +341,50 @@ def _noop_token_callback(_token: str) -> None:
     """
 
 
+def _tiny_wav_bytes() -> bytes:
+    """Return a minimal valid WAV file (0.1s of 16-bit mono silence at 8kHz).
+
+    Used as probe input for audio-capable chat models, which reject
+    text-only requests. Built in-process so the script has no test-asset
+    dependency.
+    """
+    import struct
+
+    sample_rate = 8000
+    data = b"\x00\x00" * (sample_rate // 10)  # 0.1 s of silence
+    fmt_chunk = b"fmt " + struct.pack(
+        "<IHHIIHH", 16, 1, 1, sample_rate, sample_rate * 2, 2, 16
+    )
+    data_chunk = b"data" + struct.pack("<I", len(data)) + data
+    riff_size = 4 + len(fmt_chunk) + len(data_chunk)
+    return b"RIFF" + struct.pack("<I", riff_size) + b"WAVE" + fmt_chunk + data_chunk
+
+
+def _probe_attachments(model_name: str) -> list[Any] | None:
+    """Return the attachments needed to capability-probe ``model_name``.
+
+    Audio-capable chat models (``gpt-audio``, ``gpt-audio-mini``,
+    ``gpt-4o-audio-preview``, and their dated snapshots / OpenRouter
+    passthroughs) reject text-only requests on ``/v1/chat/completions``
+    with HTTP 400: "This model requires that either input content or
+    output modality contain audio." Probes for those models must therefore
+    include an audio input part; this returns a single tiny silent WAV
+    attachment for them and ``None`` for every other model.
+    """
+    base = model_name.rsplit("/", 1)[-1]
+    if "audio" not in base:
+        return None
+    from kiss.core.models.model import Attachment
+
+    return [Attachment(data=_tiny_wav_bytes(), mime_type="audio/wav")]
+
+
 def test_generate(model_name: str) -> bool:
     from kiss.core.models.model_info import model as create_model
 
     try:
         m = create_model(model_name, token_callback=_noop_token_callback)
-        m.initialize("Say hello in one word.")
+        m.initialize("Say hello in one word.", attachments=_probe_attachments(model_name))
         text, _ = m.generate()
         return bool(text and text.strip())
     except Exception:
@@ -405,7 +450,7 @@ def detect_thinking_level(model_name: str) -> str | None:
                 model_config={"reasoning_effort": level},
                 token_callback=_noop_token_callback,
             )
-            m.initialize("Say hello in one word.")
+            m.initialize("Say hello in one word.", attachments=_probe_attachments(model_name))
             text, _ = m.generate()
             if text and text.strip():
                 return level
@@ -432,7 +477,10 @@ def test_function_calling(model_name: str) -> bool:
 
     try:
         m = create_model(model_name, token_callback=_noop_token_callback)
-        m.initialize("What is 2+3? Use the calculator tool.")
+        m.initialize(
+            "What is 2+3? Use the calculator tool.",
+            attachments=_probe_attachments(model_name),
+        )
         calls, _, _ = m.generate_and_process_with_tools({"calculator": calculator})
         return len(calls) > 0
     except Exception:

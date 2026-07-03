@@ -61,7 +61,7 @@ ______________________________________________________________________
 | **Multiple models from multiple vendors in the same task** | ✅ Mix OpenAI, Anthropic, Gemini, Together, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, and Codex CLI | ❌ Anthropic Claude models only | ❌ One model per task |
 | **Primary focus** | ✅ **Quality** — rigorous review, end-to-end tests | Speed and developer ergonomics | Speed |
 | **Core Agents # LoC** | **~2500** | Unknown | Unknown |
-| **Models in bundled catalog** | 510 across 9 provider categories | Claude family only | Subset chosen by Cursor |
+| **Models in bundled catalog** | 516 across 9 provider categories | Claude family only | Subset chosen by Cursor |
 | **Bring your own API key / endpoint** | ✅ Yes — keys stay on your machine | ✅ Anthropic key | ⚠️ Routed through Cursor backend |
 | **Open source** | ✅ Apache-2.0 | ❌ Proprietary | ❌ Proprietary |
 | **Price** | Free framework; pay only your chosen model provider | Subscription / API usage | Subscription |
@@ -218,11 +218,11 @@ These agents live in `src/kiss/agents/third_party_agents/`.
 
 ## 🤖 Models Supported
 
-KISS Sorcar ships a catalog of **510 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json).
+KISS Sorcar ships a catalog of **516 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json).
 
 | Provider category | Catalog entries |
 |---|---:|
-| OpenAI | 72 |
+| OpenAI | 78 |
 | Anthropic | 14 |
 | Gemini / Google | 24 |
 | Together AI | 79 |
@@ -234,14 +234,14 @@ KISS Sorcar ships a catalog of **510 models** across **9 provider categories**, 
 
 Current catalog capability totals:
 
-- **494** generation-capable models
-- **335** function-calling-capable models
+- **500** generation-capable models
+- **341** function-calling-capable models
 - **7** embedding models
 
 Full model list:
 
 <details>
-<summary><strong>OpenAI (72)</strong></summary>
+<summary><strong>OpenAI (78)</strong></summary>
 
 - `computer-use-preview`
 - `computer-use-preview-2025-03-11`
@@ -291,6 +291,12 @@ Full model list:
 - `gpt-5.4-nano-2026-03-17`
 - `gpt-5.5`
 - `gpt-5.5-2026-04-23`
+- `gpt-audio`
+- `gpt-audio-1.5`
+- `gpt-audio-2025-08-28`
+- `gpt-audio-mini`
+- `gpt-audio-mini-2025-10-06`
+- `gpt-audio-mini-2025-12-15`
 - `gpt-image-1`
 - `gpt-image-1-mini`
 - `gpt-image-1.5`
