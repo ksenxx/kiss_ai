@@ -612,20 +612,48 @@ class CliCompleter:
 
     def _build_matches(self, line: str) -> list[str]:
         """Compute the ordered candidate list for the current *line*."""
+        return [replacement for replacement, _ in self.build_menu(line)]
+
+    def build_menu(self, line: str) -> list[tuple[str, str]]:
+        """Compute ``(replacement, display)`` menu pairs for *line*.
+
+        Same ordered candidates as :meth:`_build_matches` (which
+        delegates here), but each candidate carries a separate menu
+        row text so the anchored steering box (see
+        :class:`~kiss.agents.sorcar.cli_steering._InputBox`) can show
+        rich rows while accepting inserts only the replacement:
+
+        * ``--task`` values display ``<id>: <one-line task
+          description>`` but insert only the bare id;
+        * ``--model`` values display ``<name> — <picker group>``
+          (recently used / vendor) but insert only the name;
+        * argument options display ``<option> — <help>``;
+        * every other category (slash commands, ``@``-mentions,
+          ``/model`` names, predictive history) displays the
+          replacement itself, unchanged.
+
+        Args:
+            line: The full input line being completed.
+
+        Returns:
+            Ordered ``(replacement, display)`` pairs; *replacement*
+            is always a whole-line substitution for *line*.
+        """
         at = _AT_RE.search(line)
         if at:
-            return self._at_mention_matches(
-                line, at.start(), at.group(1),
-            )
+            return [
+                (m, m)
+                for m in self._at_mention_matches(line, at.start(), at.group(1))
+            ]
         model_cmd = _MODEL_CMD_RE.match(line)
         if model_cmd:
-            return self._model_matches(model_cmd.group(1))
+            return [(m, m) for m in self._model_matches(model_cmd.group(1))]
         # Left-strip only: a trailing space after a slash command
         # (``/resume ``) switches from command-name completion to the
         # command's argument options.
         lstripped = line.lstrip()
         if lstripped.startswith("/") and " " not in lstripped:
-            return self._slash_matches(line)
+            return [(m, m) for m in self._slash_matches(line)]
         if lstripped.startswith("/"):
             # A trailing value-taking flag (``--task `` / ``--model ``)
             # completes the flag's VALUE; the branch is terminal (an
@@ -633,11 +661,20 @@ class CliCompleter:
             # menu, which would wrongly re-offer flags as the value).
             value_matches = self._flag_value_matches(line)
             if value_matches is not None:
-                return [full for full, _, _ in value_matches]
-            arg_matches = [full for full, _, _ in self._slash_arg_matches(line)]
+                # ``--task`` rows already embed the description; the
+                # ``task`` note would be noise.  Model rows append the
+                # picker group (vendor / recently used).
+                return [
+                    (full, disp if help_ == "task" else f"{disp} — {help_}")
+                    for full, disp, help_ in value_matches
+                ]
+            arg_matches = [
+                (full, f"{opt} — {help_}" if help_ else opt)
+                for full, opt, help_ in self._slash_arg_matches(line)
+            ]
             if arg_matches:
                 return arg_matches
-        return self._predictive_matches(line)
+        return [(m, m) for m in self._predictive_matches(line)]
 
 
 def _setup_readline(completer: CliCompleter, history_path: Path) -> None:
