@@ -88,6 +88,7 @@ from kiss.agents.sorcar.cli_steering import (
     AnchoredRepl,
     supports_steering,
 )
+from kiss.agents.sorcar.persistence import _load_chat_events_by_task_id
 from kiss.core.print_to_console import ConsolePrinter
 
 logger = logging.getLogger(__name__)
@@ -877,11 +878,29 @@ def _handle_client_slash(  # noqa: PLR0911,PLR0912 - branchy by design
         return False
     if cmd == "/resume":
         try:
-            chat_id, limit = _parse_resume_arg(arg)
+            chat_id, task_id, limit = _parse_resume_arg(arg)
         except ValueError as exc:
             print(f"Invalid /resume argument: {exc}\n")
             return False
-        if chat_id:
+        if task_id:
+            # Resolve the task's owning chat from the shared kiss DB
+            # the daemon also writes to (the daemon's resumeSession
+            # path resolves it the same way server-side, but the CLI
+            # needs the chat id locally so the next ``run`` continues
+            # the right chat).
+            row = _load_chat_events_by_task_id(task_id)
+            if row is None:
+                print(f"No task found with id {task_id}.\n")
+                return False
+            chat_id = str(row.get("chat_id", "") or "")
+            client.send({
+                "type": "resumeSession",
+                "chatId": chat_id,
+                "taskId": task_id,
+            })
+            client.dispatcher.chat_id = chat_id
+            print(f"Resumed task {task_id} (chat {chat_id}).\n")
+        elif chat_id:
             client.send({"type": "resumeSession", "chatId": chat_id})
             client.dispatcher.chat_id = chat_id
             print(f"Resumed chat {chat_id}.\n")
@@ -890,7 +909,10 @@ def _handle_client_slash(  # noqa: PLR0911,PLR0912 - branchy by design
             # also writes to (there is no in-process agent in client
             # mode), via :func:`_print_recent_chats` directly.
             _print_recent_chats(limit=limit)
-            print("\nResume one with: /resume <chat-id>\n")
+            print(
+                "\nResume one with: /resume <chat-id>  "
+                "or  /resume --task <task-id>\n"
+            )
         return False
     if cmd == "/model":
         if arg == "list":
