@@ -317,16 +317,17 @@ class TestInputBoxCompletionMenu:
     """In-place completion menu opened by Tab.
 
     With two or more candidates Tab opens a menu drawn above the input
-    box; ``buf`` stays at what the user typed until they select with
-    Enter.  With exactly one candidate Tab accepts it directly (no
-    menu).  Without a completer Tab is silently dropped.
+    box; ``buf`` stays at what the user typed until they accept the
+    highlighted candidate with Tab.  Enter never accepts — it submits
+    the typed buffer.  With exactly one candidate Tab accepts it
+    directly (no menu).  Without a completer Tab is silently dropped.
     """
 
     def test_tab_opens_menu_with_first_selected(self) -> None:
         # With "complete while typing" the menu auto-opens as the user
         # types so suggestions appear without an explicit Tab.  The
         # first candidate is highlighted; ``buf`` is left untouched
-        # until the user picks one with Enter.
+        # until the user accepts one with Tab.
         box = _make_box()
         box.completer_fn = lambda _buf: ["/help ", "/clear "]
         box.feed(b"/he", lambda _s: None, lambda: None)
@@ -335,43 +336,71 @@ class TestInputBoxCompletionMenu:
         assert box._menu_sel == 0
         assert box.buf == "/he"
 
-    def test_enter_on_open_menu_accepts_does_not_submit(self) -> None:
-        # Typing alone pops the menu (no Tab needed); first Enter
-        # accepts the highlighted candidate, next Enter submits.
+    def test_enter_on_open_menu_submits_typed_text(self) -> None:
+        # Enter must NEVER accept the highlighted candidate: it
+        # dismisses the menu and submits exactly what the user typed.
         box = _make_box()
         box.completer_fn = lambda _buf: ["/help ", "/clear "]
         box.feed(b"/he", lambda _s: None, lambda: None)
         assert box._menu_open is True
         submitted: list[str] = []
         box.feed(b"\r", submitted.append, lambda: None)
-        # First Enter only accepts the highlighted candidate.
-        assert submitted == []
-        assert box.buf == "/help "
+        assert submitted == ["/he"]
+        assert box.buf == ""
         assert box._menu_open is False
-        # Next Enter submits the now-completed line.
-        box.feed(b"\r", submitted.append, lambda: None)
-        assert submitted == ["/help "]
 
-    def test_tab_advances_selection_when_menu_open(self) -> None:
-        # Three candidates keeps Tab/Tab away from the wrap boundary
-        # so the menu reliably advances by two steps to sel=2.
+    def test_enter_after_menu_navigation_submits_typed_text(self) -> None:
+        # Even with a candidate highlighted via Down-arrow navigation,
+        # Enter submits the typed buffer — never the candidate.
+        box = _make_box()
+        box.completer_fn = lambda _buf: ["/help ", "/clear ", "/quit "]
+        box.feed(b"/", lambda _s: None, lambda: None)
+        assert box._menu_open is True
+        box.feed(b"\x1b[B", lambda _s: None, lambda: None)
+        assert box._menu_sel == 1
+        submitted: list[str] = []
+        box.feed(b"\r", submitted.append, lambda: None)
+        assert submitted == ["/"]
+        assert box.buf == ""
+        assert box._menu_open is False
+
+    def test_enter_accepts_file_mention_in_at_picker(self) -> None:
+        # The @-mention file picker is the one menu where Enter still
+        # accepts: the buffer ends with an ``@<partial>`` token, so
+        # Enter replaces it with the highlighted candidate WITHOUT
+        # submitting; the next Enter submits the completed line.
+        box = _make_box()
+        box.completer_fn = lambda _buf: [
+            "look at ./alpha.py ",
+            "look at ./another.md ",
+        ]
+        box.feed(b"look at @a", lambda _s: None, lambda: None)
+        assert box._menu_open is True
+        submitted: list[str] = []
+        box.feed(b"\r", submitted.append, lambda: None)
+        assert submitted == []
+        assert box.buf == "look at ./alpha.py "
+        assert box._menu_open is False
+        box.feed(b"\r", submitted.append, lambda: None)
+        assert submitted == ["look at ./alpha.py "]
+
+    def test_tab_accepts_highlighted_when_menu_open(self) -> None:
+        # Tab is the accept key: navigate with the arrows, Tab accepts
+        # the highlighted candidate (Enter would submit the typed text).
         box = _make_box()
         box.completer_fn = lambda _buf: ["/help ", "/clear ", "/quit "]
         # Typing pops the menu at sel=0 via "complete while typing".
         box.feed(b"/", lambda _s: None, lambda: None)
         assert box._menu_open is True
         assert box._menu_sel == 0
-        # Each Tab advances the highlighted candidate.
-        box.feed(b"\t", lambda _s: None, lambda: None)
+        # Down-arrow navigates; ``buf`` is untouched while navigating.
+        box.feed(b"\x1b[B", lambda _s: None, lambda: None)
         assert box._menu_sel == 1
-        box.feed(b"\t", lambda _s: None, lambda: None)
-        assert box._menu_sel == 2
-        # ``buf`` only changes once Enter accepts the new selection.
         assert box.buf == "/"
-        submitted: list[str] = []
-        box.feed(b"\r", submitted.append, lambda: None)
-        assert box.buf == "/quit "
-        assert submitted == []
+        # Tab accepts the highlighted candidate and closes the menu.
+        box.feed(b"\t", lambda _s: None, lambda: None)
+        assert box.buf == "/clear "
+        assert box._menu_open is False
 
     def test_down_arrow_navigates_menu(self) -> None:
         box = _make_box()
@@ -397,7 +426,10 @@ class TestInputBoxCompletionMenu:
     def test_shift_tab_moves_selection_up(self) -> None:
         box = _make_box()
         box.completer_fn = lambda _buf: ["a", "b", "c"]
-        box.feed(b"\t\t", lambda _s: None, lambda: None)
+        # Tab opens the menu; Down-arrow navigates to the second item
+        # (a second Tab would now ACCEPT the highlighted candidate).
+        box.feed(b"\t", lambda _s: None, lambda: None)
+        box.feed(b"\x1b[B", lambda _s: None, lambda: None)
         assert box._menu_sel == 1
         # CSI Z (Shift+Tab) goes back.
         box.feed(b"\x1b[Z", lambda _s: None, lambda: None)
