@@ -30,6 +30,7 @@ import requests
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
+    drain_queue_messages,
     stop_http_server,
     wait_for_matching_message,
 )
@@ -87,16 +88,23 @@ class SynologyChatChannelBackend(ToolMethodBackend):
                 body = self.rfile.read(length)
                 try:
                     params = parse_qs(body.decode("utf-8"))
-                    payload_str = params.get("payload", ["{}"])[0]
-                    payload = json.loads(payload_str)
-                    token = payload.get("token", "")
+                    if "payload" in params:
+                        # Fallback: Slack-style JSON blob in a 'payload' field.
+                        payload: dict[str, Any] = json.loads(params["payload"][0])
+                    else:
+                        # Synology Chat outgoing webhooks POST the fields
+                        # directly as form data (token, user_id, username,
+                        # post_id, timestamp, text).
+                        payload = {k: v[0] for k, v in params.items()}
+                    token = str(payload.get("token", ""))
                     if not backend._token or token == backend._token:  # pragma: no branch
                         backend._message_queue.put(
                             {
                                 "ts": str(payload.get("timestamp", "")),
-                                "user": payload.get("user_id", ""),
-                                "text": payload.get("text", ""),
-                                "channel_id": payload.get("channel_id", ""),
+                                "user": str(payload.get("user_id", "")),
+                                "username": str(payload.get("username", "")),
+                                "text": str(payload.get("text", "")),
+                                "channel_id": str(payload.get("channel_id", "")),
                             }
                         )
                 except Exception:
@@ -126,21 +134,38 @@ class SynologyChatChannelBackend(ToolMethodBackend):
     def poll_messages(
         self, channel_id: str, oldest: str, limit: int = 10
     ) -> tuple[list[dict[str, Any]], str]:
-        """Drain the webhook message queue."""
-        messages: list[dict[str, Any]] = []
-        while not self._message_queue.empty() and len(messages) < limit:  # pragma: no branch
-            msg = self._message_queue.get_nowait()
-            if not channel_id or msg.get("channel_id") == channel_id:  # pragma: no branch
-                messages.append(msg)
+        """Drain the webhook message queue.
+
+        Drained messages not matching ``channel_id`` are discarded.
+        """
+        messages = drain_queue_messages(
+            self._message_queue,
+            limit=limit,
+            keep=lambda msg: not channel_id or msg.get("channel_id") == channel_id,
+        )
         return messages, oldest
 
     def send_message(self, channel_id: str, text: str, thread_ts: str = "") -> None:
-        """Send a Synology Chat message via incoming webhook."""
+        """Send a Synology Chat message via the incoming webhook.
+
+        Incoming webhooks are bound to a fixed channel at creation, so
+        ``channel_id`` is ignored.
+
+        Raises:
+            RuntimeError: If the webhook request fails.
+        """
         with self._send_lock:
-            payload = {"text": text}
-            if channel_id:  # pragma: no branch
-                payload["channel_id"] = channel_id
-            requests.post(self._webhook_url, params={"payload": json.dumps(payload)}, timeout=30)
+            resp = requests.post(
+                self._webhook_url, data={"payload": json.dumps({"text": text})}, timeout=30
+            )
+        if resp.status_code != 200:
+            raise RuntimeError(f"Synology Chat send failed: HTTP {resp.status_code}")
+        try:
+            data = resp.json()
+        except ValueError:
+            data = {}
+        if isinstance(data, dict) and data.get("success") is False:
+            raise RuntimeError(f"Synology Chat send failed: {data}")
 
     def wait_for_reply(
         self,
