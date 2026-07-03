@@ -197,6 +197,22 @@ def _accept_first_completion_tab(event: KeyPressEvent) -> None:
     _accept_and_chain(buf)
 
 
+@_KEY_BINDINGS.add("escape", filter=has_completions)
+def _dismiss_completion_escape(event: KeyPressEvent) -> None:
+    """ESC closes the open completion menu without submitting anything.
+
+    :meth:`~prompt_toolkit.buffer.Buffer.cancel_completion` restores
+    ``complete_state.original_document`` — the text the user actually
+    typed (undoing any candidate text a previous Up/Down navigation
+    inserted into the buffer) — and closes the dropdown.  The binding
+    is deliberately NOT eager, so multi-key escape sequences
+    (``escape enter`` = Alt+Enter newline, arrow keys, Shift+Enter
+    CSI-u sequences, ...) still match first; a lone ESC key press
+    fires after prompt_toolkit's input-flush timeout.
+    """
+    event.current_buffer.cancel_completion()
+
+
 @_KEY_BINDINGS.add("enter")
 def _submit_enter(event: KeyPressEvent) -> None:
     """Enter submits the (possibly multi-line) buffer — never a completion.
