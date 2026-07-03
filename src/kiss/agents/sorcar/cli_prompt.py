@@ -11,8 +11,10 @@ Enter inserts the highlighted ``./<path>`` mention without submitting
 the line.  The same live menu serves ``/`` slash commands,
 ``/model <partial>`` model names, and whole-line predictive
 completion: whenever the typed prefix matches one or more prior tasks
-the menu pops with all of them so Up/Down + Tab/Enter can pick one
-without re-typing.
+the menu pops with all of them so Up/Down + Tab can pick one without
+re-typing.  Outside the ``@``-mention file picker Enter never accepts
+a completion candidate — it always submits the text the user actually
+typed.
 
 The candidate lists come from the very same
 :class:`~kiss.agents.sorcar.cli_repl.CliCompleter` backend used by the
@@ -120,28 +122,32 @@ _unmap_enter_aliases()
 _KEY_BINDINGS = KeyBindings()
 
 
-@_KEY_BINDINGS.add("enter", filter=completion_is_selected)
-def _accept_completion_enter(event: KeyPressEvent) -> None:
-    """Enter on a highlighted completion inserts it instead of submitting.
+@_KEY_BINDINGS.add("tab", filter=completion_is_selected)
+def _accept_completion_tab(event: KeyPressEvent) -> None:
+    """Tab on a highlighted completion confirms it.
 
-    Navigating the menu (Up/Down/Tab) already placed the highlighted
-    candidate's text in the buffer; closing the completion state keeps
-    that text and lets the user continue editing.  Without a selection
-    this binding submits the multi-line buffer instead (see
-    :func:`_submit_enter`).
+    Enter confirms only in the ``@``-mention file picker; for every
+    other menu Enter submits the typed text (see :func:`_submit_enter`).
     """
     event.current_buffer.complete_state = None
 
 
-@_KEY_BINDINGS.add("tab", filter=completion_is_selected)
-def _accept_completion_tab(event: KeyPressEvent) -> None:
-    """Tab on a highlighted completion confirms it (same as Enter)."""
-    event.current_buffer.complete_state = None
-
-
-@_KEY_BINDINGS.add("enter", filter=~completion_is_selected)
+@_KEY_BINDINGS.add("enter")
 def _submit_enter(event: KeyPressEvent) -> None:
-    """Enter submits the (possibly multi-line) buffer.
+    """Enter submits the (possibly multi-line) buffer — never a completion.
+
+    Enter MUST NOT accept a highlighted autocomplete candidate, with
+    one exception: the ``@``-mention file picker, where Enter still
+    inserts the highlighted ``./<path>`` mention without submitting
+    (matching the VS Code webview picker).  For every other menu —
+    predictive history, slash commands, ``/model`` names — when the
+    completion menu is open (even with a candidate highlighted via
+    Up/Down navigation, which temporarily places the candidate's text
+    in the buffer), :meth:`~prompt_toolkit.buffer.Buffer.cancel_completion`
+    first restores ``complete_state.original_document`` — the text the
+    user actually typed — and closes the menu; only then is the typed
+    text submitted.  Tab accepts in every menu (see
+    :func:`_accept_completion_tab`).
 
     The session runs with ``multiline=True`` so prompt_toolkit's
     default Enter binding inserts a newline; we override that here so
@@ -157,17 +163,23 @@ def _submit_enter(event: KeyPressEvent) -> None:
     shell uses.  The check runs against ``buf.text`` (the entire
     buffer) rather than only the text before the cursor so the rule
     matches the steering box's :meth:`_InputBox.feed` implementation
-    exactly.  Any open completion menu is dismissed first so the
-    user's originally-typed text is restored (this branch runs only
-    under ``~completion_is_selected`` so ``complete_state`` is
-    ``None``, but calling :meth:`cancel_completion` is a documented
-    no-op in that case).  See
+    exactly.  See
     :func:`~kiss.agents.sorcar.cli_line_continuation.ends_with_line_continuation`.
     """
     buf = event.current_buffer
+    state = buf.complete_state
+    if (
+        state is not None
+        and state.current_completion is not None
+        and _AT_RE.search(state.original_document.text_before_cursor)
+    ):
+        # @-mention file picker: keep the completed ``./<path>``
+        # mention in the buffer and close the menu without submitting.
+        buf.complete_state = None
+        return
+    buf.cancel_completion()
     cont, keep = ends_with_line_continuation(buf.text)
     if cont:
-        buf.cancel_completion()
         buf.text = buf.text[:keep] + "\n"
         buf.cursor_position = keep + 1
         return
@@ -488,9 +500,11 @@ class PtkLineReader:
 
     Wraps a :class:`PromptSession` configured so the menu pops while
     typing (``@`` immediately shows the file/folder list), Up/Down
-    navigate it, and Tab/Enter confirm the highlighted entry via the
-    bindings in ``_KEY_BINDINGS``.  History is persisted per working
-    directory next to the readline history file.
+    navigate it, and Tab confirms the highlighted entry via the
+    bindings in ``_KEY_BINDINGS`` (Enter also confirms, but only in
+    the ``@``-mention file picker — elsewhere Enter submits the typed
+    text).  History is persisted per working directory next to the
+    readline history file.
     """
 
     def __init__(self, completer: CliCompleter, history_path: Path) -> None:

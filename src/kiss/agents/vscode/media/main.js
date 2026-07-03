@@ -5363,10 +5363,22 @@
           if (items[ti]) items[ti].click();
           return;
         }
-        if (e.key === 'Enter' && acIdx >= 0) {
-          e.preventDefault();
-          items[acIdx].click();
-          return;
+        if (e.key === 'Enter') {
+          const atCtx = getAtCtx();
+          if (atCtx && acIdx >= 0) {
+            // @-mention file picker: Enter still accepts the
+            // highlighted ``./<path>`` mention without submitting,
+            // so file mentions can be completed with Enter.
+            e.preventDefault();
+            items[acIdx].click();
+            return;
+          }
+          // Fast-complete picker (history / tricks / identifiers):
+          // Enter must NEVER accept the highlighted candidate —
+          // hide the picker and fall through so the plain-Enter
+          // handler below submits the typed text (Shift+Enter
+          // still inserts a newline).  Tab is the accept key.
+          hideAC();
         }
         if (e.key === 'Escape') {
           hideAC();
