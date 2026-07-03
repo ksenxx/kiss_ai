@@ -855,6 +855,32 @@ class _InputBox:
             self._menu_sel = 0
             self._menu_scroll = 0
 
+    def flush_pending_escape(self) -> bool:
+        """Resolve a deferred lone ESC byte as a bare ESC key press.
+
+        :meth:`feed` defers a chunk-final ``\\x1b`` byte because it may
+        be the first byte of an escape sequence split across reads.
+        When no follow-up bytes arrive by the select pump's next idle
+        tick (0.1 s — the remainder of a real terminal-generated
+        sequence arrives immediately) the byte was a bare ESC key
+        press, which dismisses the open completion menu — the same
+        ttimeout-style disambiguation vim uses.  Longer pending
+        prefixes (e.g. ``ESC [`` of a split arrow key) are genuine
+        split sequences and stay deferred; a lone ESC with no menu
+        open is left pending too (it is harmlessly swallowed by the
+        next chunk, preserving the old behaviour).
+
+        Returns:
+            ``True`` when a pending lone ESC was consumed and the open
+            menu was closed (the box was redrawn), ``False`` otherwise.
+        """
+        if self._pending_esc != "\x1b" or not self._menu_open:
+            return False
+        self._pending_esc = ""
+        self._reset_completion_state()
+        self.redraw()
+        return True
+
     def _open_completion_menu(self) -> bool:
         """Pop the in-place completion menu using :attr:`completer_fn`.
 
@@ -1192,6 +1218,17 @@ class _InputBox:
                         break
                     i += 3
                     continue
+                # A bare ESC followed by an unrecognized byte (Alt+key,
+                # or ESC then a fast keystroke landing in the same
+                # read): ESC is the universal "close the list" gesture,
+                # so it dismisses the open completion menu.  The ESC
+                # byte itself is swallowed either way.  (A chunk-FINAL
+                # lone ESC is deferred above and resolved by
+                # :meth:`flush_pending_escape` on the pump's next idle
+                # tick.)
+                if self._menu_open:
+                    self._reset_completion_state()
+                    changed = True
                 i += 1
                 continue
             if ch == "\r":
@@ -1402,6 +1439,10 @@ def _pump_stdin(
             on_abort()
             continue
         if not ready:
+            # A chunk-final lone ESC deferred by feed() with no
+            # follow-up bytes by now was a bare ESC key press:
+            # dismiss the open completion menu.
+            box.flush_pending_escape()
             if on_idle is not None:
                 try:
                     on_idle()
