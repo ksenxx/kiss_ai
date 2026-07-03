@@ -213,6 +213,38 @@ def _partial_suffix_len(text: str, seq: str) -> int:
     return 0
 
 
+def _normalize_candidates(
+    raw: list[str] | list[tuple[str, str]],
+) -> tuple[list[str], list[str]]:
+    """Split completer candidates into replacement and display lists.
+
+    The :attr:`_InputBox.completer_fn` contract accepts either plain
+    replacement strings (replacement doubles as the menu row text) or
+    ``(replacement, display)`` pairs — e.g. a ``--task`` value whose
+    row displays ``<id>: <one-line task description>`` while accepting
+    inserts only the bare id.  Trailing newlines are stripped from
+    both parts so a candidate can never break the single-row menu
+    rendering.
+
+    Args:
+        raw: Candidates as returned by ``completer_fn``.
+
+    Returns:
+        ``(replacements, displays)`` — two parallel lists of equal
+        length.
+    """
+    repls: list[str] = []
+    displays: list[str] = []
+    for cand in raw:
+        if isinstance(cand, tuple):
+            repl, disp = cand
+        else:
+            repl = disp = cand
+        repls.append(repl.rstrip("\n"))
+        displays.append(disp.rstrip("\n"))
+    return repls, displays
+
+
 def supports_steering() -> bool:
     """Return whether an anchored input box can be rendered.
 
@@ -339,20 +371,29 @@ class _InputBox:
         self.history: list[str] = []
         self._hist_idx: int | None = None
         self._hist_saved: str = ""
-        # Tab-completion callback returning ranked replacement candidates
-        # for the current buffer.  Tab opens an in-place menu using
-        # the returned candidates; the menu state below tracks it.
-        self.completer_fn: Callable[[str], list[str]] | None = None
+        # Tab-completion callback returning ranked candidates for the
+        # current buffer.  Each candidate is either a plain replacement
+        # string or a ``(replacement, display)`` pair — *display* is
+        # the row text shown in the in-place menu (e.g. a task id with
+        # its one-line description) while *replacement* is what accept
+        # actually puts into the buffer.  Tab opens an in-place menu
+        # using the returned candidates; the menu state below tracks it.
+        self.completer_fn: (
+            Callable[[str], list[str] | list[tuple[str, str]]] | None
+        ) = None
         # In-place completion menu: when open, candidate rows are drawn
         # above the box's top border, the scroll region shrinks by the
         # menu's height so agent output cannot scroll over the menu,
         # and Tab/arrows navigate the candidates instead of editing.
-        # ``_menu_items`` is the full ranked candidate list,
+        # ``_menu_items`` is the full ranked candidate DISPLAY list
+        # (what the rows render), ``_menu_repls`` the parallel
+        # replacement list (what accept inserts into the buffer),
         # ``_menu_sel`` is the highlighted index, and ``_menu_scroll``
         # is the first visible item (so a long candidate list scrolls
         # within the menu height cap).
         self._menu_open = False
         self._menu_items: list[str] = []
+        self._menu_repls: list[str] = []
         self._menu_sel = 0
         self._menu_scroll = 0
         # Effective menu height as last rendered.  A mismatch on the
@@ -373,8 +414,10 @@ class _InputBox:
         # completer calls (auto-repeat, idempotent edits, etc.) so a
         # slow ``completer_fn`` does not stall keystroke processing
         # or block agent stdout writes contending for ``self.lock``.
+        # The cached value holds the normalised ``(replacements,
+        # displays)`` lists.
         self._last_completed_buf: str | None = None
-        self._last_completed_cands: list[str] = []
+        self._last_completed_cands: tuple[list[str], list[str]] = ([], [])
 
     def start(self) -> None:
         """Enter raw mode, reserve the scroll region and draw the box."""
@@ -808,6 +851,7 @@ class _InputBox:
         with self.lock:
             self._menu_open = False
             self._menu_items = []
+            self._menu_repls = []
             self._menu_sel = 0
             self._menu_scroll = 0
 
@@ -818,10 +862,13 @@ class _InputBox:
         completer returns zero candidates the menu stays closed and
         the call is a no-op.  With exactly one candidate the menu is
         not opened — instead :attr:`buf` is replaced with the single
-        candidate (so trivial single-match completions behave like a
-        normal Tab).  With two or more candidates the menu is opened
-        with the first candidate highlighted; :attr:`buf` is *not*
-        modified until the user actually picks one with Enter.
+        candidate's replacement text (so trivial single-match
+        completions behave like a normal Tab) and, on slash-command
+        lines, the next-level menu is chained open immediately (see
+        :meth:`_chain_slash_menu`).  With two or more candidates the
+        menu is opened with the first candidate highlighted;
+        :attr:`buf` is *not* modified until the user actually picks
+        one with Tab.
 
         Returns:
             ``True`` when the menu changed visible state (opened, or
@@ -830,18 +877,23 @@ class _InputBox:
         """
         if self.completer_fn is None:
             return False
-        cands = [c.rstrip("\n") for c in self.completer_fn(self.buf)]
-        if not cands:
+        repls, displays = _normalize_candidates(self.completer_fn(self.buf))
+        if not repls:
             return False
+        replaced = False
         with self.lock:
-            if len(cands) == 1:
-                self.buf = cands[0]
+            if len(repls) == 1:
+                self.buf = repls[0]
                 self._hist_idx = None
-                return True
-            self._menu_items = cands
-            self._menu_sel = 0
-            self._menu_scroll = 0
-            self._menu_open = True
+                replaced = True
+            else:
+                self._menu_items = displays
+                self._menu_repls = repls
+                self._menu_sel = 0
+                self._menu_scroll = 0
+                self._menu_open = True
+        if replaced:
+            self._chain_slash_menu()
         return True
 
     def _refresh_typing_menu(self) -> bool:
@@ -902,33 +954,43 @@ class _InputBox:
                     return True
                 return False
         if buf == self._last_completed_buf:
-            cands = self._last_completed_cands
+            repls, displays = self._last_completed_cands
         else:
             try:
-                cands = [c.rstrip("\n") for c in completer(buf)]
+                repls, displays = _normalize_candidates(completer(buf))
             except Exception:  # noqa: BLE001 - completer must not break editing
                 logger.debug(
                     "completer raised during typing refresh", exc_info=True,
                 )
-                cands = []
+                repls, displays = [], []
+            # Drop no-op candidates whose replacement is exactly the
+            # current buffer: previewing them is pure noise (accepting
+            # would change nothing).  This also keeps the chained menu
+            # after an accept (see :meth:`_chain_slash_menu`) from
+            # re-offering the just-accepted line.
+            keep = [i for i, r in enumerate(repls) if r != buf]
+            if len(keep) != len(repls):
+                repls = [repls[i] for i in keep]
+                displays = [displays[i] for i in keep]
             self._last_completed_buf = buf
-            self._last_completed_cands = cands
+            self._last_completed_cands = (repls, displays)
         with self.lock:
             if buf != self.buf:
                 # User kept typing while the completer ran; drop these
                 # stale results — the next refresh will reflect the
                 # now-current buffer.
                 return False
-            if not cands:
+            if not repls:
                 if not self._menu_open:
                     return False
                 self._reset_completion_state()
                 return True
-            self._menu_items = cands
+            self._menu_items = displays
+            self._menu_repls = repls
             # Preserve the highlighted candidate across the refresh if
             # it is still in the list; otherwise fall back to the top.
-            if prev_sel_text is not None and prev_sel_text in cands:
-                self._menu_sel = cands.index(prev_sel_text)
+            if prev_sel_text is not None and prev_sel_text in displays:
+                self._menu_sel = displays.index(prev_sel_text)
             else:
                 self._menu_sel = 0
                 self._menu_scroll = 0
@@ -950,15 +1012,44 @@ class _InputBox:
             self._menu_sel = (self._menu_sel + delta) % n
 
     def _menu_accept(self) -> None:
-        """Replace :attr:`buf` with the highlighted candidate and close the menu."""
+        """Accept the highlighted candidate and chain the next menu.
+
+        Replaces :attr:`buf` with the highlighted candidate's
+        *replacement* text (which may differ from the displayed row —
+        task-id rows show ``<id>: <description>`` but insert only the
+        bare id), closes the menu, and on slash-command lines
+        immediately re-opens the next-level menu (command → argument
+        options → flag values) via :meth:`_chain_slash_menu` so the
+        user never needs an extra keystroke to see what comes next.
+        """
         with self.lock:
-            if self._menu_open and self._menu_items:
-                self.buf = self._menu_items[self._menu_sel]
+            if self._menu_open and self._menu_repls:
+                self.buf = self._menu_repls[self._menu_sel]
                 self._hist_idx = None
         # ``_reset_completion_state`` is the single source of truth for
         # tearing down menu state; reuse it instead of duplicating the
         # field resets here.
         self._reset_completion_state()
+        self._chain_slash_menu()
+
+    def _chain_slash_menu(self) -> None:
+        """Pop the next-level completion menu after a slash-line accept.
+
+        Chained completion: accepting a candidate on a ``/`` line
+        immediately re-queries the completer against the new buffer so
+        the next-level menu pops without any further keystroke —
+        Tab-completing ``/resume`` instantly shows its argument options
+        (``--task`` / ``--limit``), Tab-completing ``--task`` instantly
+        shows the recent task ids (each displayed as ``<id>: <one-line
+        task description>``), and accepting a task id shows the
+        remaining options.  :meth:`_refresh_typing_menu` never
+        auto-replaces the buffer (preview only), so chaining cannot
+        recurse.  Non-slash accepts (``@``-mention file picker,
+        predictive history) keep the menu closed, matching the
+        prompt_toolkit fallback in cli_prompt.py.
+        """
+        if self.buf.lstrip().startswith("/"):
+            self._refresh_typing_menu()
 
     def feed(
         self,
@@ -1230,14 +1321,14 @@ class _InputBox:
                         # Re-query before accepting so a stale
                         # single-item preview cannot overwrite the
                         # buffer with an out-of-date candidate.
+                        # ``_open_completion_menu`` accepts a fresh
+                        # single candidate directly — replacing the
+                        # buffer and chaining the next-level menu on
+                        # slash-command lines — and re-opens the menu
+                        # when two or more candidates match now.
                         self._reset_completion_state()
-                        if not self._open_completion_menu():
-                            changed = True
-                        elif len(self._menu_items) == 1:
-                            self._menu_accept()
-                            changed = True
-                        else:
-                            changed = True
+                        self._open_completion_menu()
+                        changed = True
                     else:
                         self._menu_accept()
                         changed = True
@@ -1583,7 +1674,9 @@ class AnchoredRepl:
 
     def __init__(
         self,
-        completer_fn: Callable[[str], list[str]] | None = None,
+        completer_fn: (
+            Callable[[str], list[str] | list[tuple[str, str]]] | None
+        ) = None,
         history: list[str] | None = None,
     ) -> None:
         self.lock = threading.RLock()
