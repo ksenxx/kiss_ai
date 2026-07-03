@@ -12,9 +12,11 @@ the line.  The same live menu serves ``/`` slash commands,
 ``/model <partial>`` model names, and whole-line predictive
 completion: whenever the typed prefix matches one or more prior tasks
 the menu pops with all of them so Up/Down + Tab can pick one without
-re-typing.  Outside the ``@``-mention file picker Enter never accepts
-a completion candidate — it always submits the text the user actually
-typed.
+re-typing.  On slash-command lines Tab-accepting a candidate
+immediately pops the next-level menu (command → argument options →
+flag values) — see :func:`_accept_completion_tab`.  Outside the
+``@``-mention file picker Enter never accepts a completion
+candidate — it always submits the text the user actually typed.
 
 The candidate lists come from the very same
 :class:`~kiss.agents.sorcar.cli_repl.CliCompleter` backend used by the
@@ -128,8 +130,27 @@ def _accept_completion_tab(event: KeyPressEvent) -> None:
 
     Enter confirms only in the ``@``-mention file picker; for every
     other menu Enter submits the typed text (see :func:`_submit_enter`).
+
+    Chained completion on slash-command lines: accepting a candidate
+    on a ``/`` line immediately restarts completion so the next-level
+    menu pops without any further keystroke — Tab-completing ``/resume``
+    instantly shows its argument options (``--task`` / ``--limit``),
+    Tab-completing ``--task`` instantly shows the recent task ids
+    (each displayed as ``<id>: <one-line task description>``), and
+    Tab-completing ``--model`` instantly shows the model names in
+    model-picker order.  :meth:`~prompt_toolkit.buffer.Buffer
+    .start_completion` runs the same completer that
+    ``complete_while_typing`` uses, so the popped menu is identical to
+    the one the user would get by typing the trailing space by hand;
+    when the accepted candidate has no follow-up candidates (e.g.
+    ``/help ``) no menu appears.  Non-slash accepts (the ``@``-mention
+    file picker outside slash lines, predictive history) are
+    unchanged: the menu simply closes.
     """
-    event.current_buffer.complete_state = None
+    buf = event.current_buffer
+    buf.complete_state = None
+    if buf.document.text_before_cursor.lstrip().startswith("/"):
+        buf.start_completion(select_first=False)
 
 
 @_KEY_BINDINGS.add("enter")
