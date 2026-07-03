@@ -977,8 +977,14 @@ def _iter_balanced_json_objects(
                     break
             j += 1
         if end == -1:
-            # Unbalanced — no more complete objects can start here.
-            break
+            # Unbalanced — this "{" (e.g. a stray brace in prose) never
+            # closes, but a later "{" may still start a valid object.
+            # Resume the scan at the next "{" instead of aborting.
+            nxt = content.find("{", i + 1)
+            if nxt == -1:
+                break
+            i = nxt
+            continue
         try:
             # ``strict=False`` permits raw control characters (e.g. literal
             # newlines, tabs) inside JSON string values.  Reasoning models

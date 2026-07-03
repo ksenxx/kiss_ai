@@ -192,11 +192,12 @@ _WS_PING_TIMEOUT = 10
 _TUNNEL_UNHEALTHY_LIMIT_NAMED = 3
 
 # Quick tunnels get a new random URL on every restart, so be much more
-# conservative before force-restarting.  20 ticks × 30s = 10 minutes of
-# readyConnections=0 before the watchdog kills cloudflared.  This gives
-# cloudflared ample time to re-register a temporarily-dropped tunnel
-# without burning through dozens of distinct *.trycloudflare.com URLs.
-_TUNNEL_UNHEALTHY_LIMIT_QUICK = 20
+# conservative before force-restarting.  40 ticks × :data:`TUNNEL_CHECK_INTERVAL`
+# (15s) = 10 minutes of readyConnections=0 before the watchdog kills
+# cloudflared.  This gives cloudflared ample time to re-register a
+# temporarily-dropped tunnel without burning through dozens of distinct
+# *.trycloudflare.com URLs.
+_TUNNEL_UNHEALTHY_LIMIT_QUICK = 40
 
 _TUNNEL_STARTUP_GRACE = 120
 

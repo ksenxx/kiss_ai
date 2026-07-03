@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import inspect
 import logging
-import re
 import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
@@ -18,6 +17,7 @@ from kiss.core.base import Base
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model import Attachment
 from kiss.core.models.model_info import calculate_cost, get_max_context_length, model
+from kiss.core.utils import substitute_prompt_args
 
 logger = logging.getLogger(__name__)
 
@@ -136,23 +136,7 @@ class KISSAgent(Base):
         assert self.model is not None
         self.arguments = dict(arguments) if arguments is not None else {}
         self.prompt_template = prompt_template
-        full_prompt = self.prompt_template
-        if self.arguments:
-            # Substitute every ``{key}`` token in a SINGLE pass over the
-            # template.  Sequential per-key ``str.replace`` calls would
-            # rescan previously substituted values, so an argument value
-            # that literally contains another key's placeholder (e.g. a
-            # task string quoting ``{result}``) would be re-expanded —
-            # leaking the other argument into it, dependent on dict
-            # insertion order.
-            pattern = re.compile(
-                "|".join(
-                    re.escape("{" + key + "}") for key in self.arguments
-                )
-            )
-            full_prompt = pattern.sub(
-                lambda m: str(self.arguments[m.group(0)[1:-1]]), full_prompt
-            )
+        full_prompt = substitute_prompt_args(self.prompt_template, self.arguments)
 
         self._add_message("user", full_prompt)
         self.model.initialize(full_prompt, attachments=attachments)
