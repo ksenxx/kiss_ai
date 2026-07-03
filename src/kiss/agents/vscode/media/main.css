@@ -2436,3 +2436,43 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
 }
+
+/* ── Content tabs (remote-webapp file viewer) ─────────── */
+#content-tab-area {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+#content-tab-area .content-tab-view {
+  width: 100%;
+  height: 100%;
+}
+
+#content-tab-area .content-html-frame {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #fff;
+}
+
+#content-tab-area .content-monaco-holder {
+  width: 100%;
+  height: 100%;
+}
+
+#content-tab-area .content-code-fallback {
+  height: 100%;
+  overflow: auto;
+  margin: 0;
+  padding: 8px 12px;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 12px;
+  white-space: pre;
+}
+
+.chat-tab .content-tab-icon {
+  margin-right: 4px;
+  font-size: 11px;
+  line-height: 1;
+}
