@@ -1742,7 +1742,6 @@
   const inputContainer = document.getElementById('input-container');
   const inputClearBtn = document.getElementById('input-clear-btn');
   const worktreeToggleBtn = document.getElementById('cfg-use-worktree');
-  const parallelToggleBtn = document.getElementById('cfg-use-parallel');
   const demoToggleBtn = document.getElementById('cfg-demo-mode');
   const updateBtn = document.getElementById('cfg-update-btn');
   const serverResetBtn = document.getElementById('cfg-server-reset-btn');
@@ -4168,8 +4167,8 @@
       case 'updateSetting': {
         const sKey = ev.key;
         const sVal = ev.value;
-        if (sKey === 'is_parallel' && parallelToggleBtn) {
-          parallelToggleBtn.checked = !!sVal;
+        if (sKey === 'is_parallel') {
+          // Parallel-agents setting updated server-side (no UI toggle)
         } else if (sKey === 'is_worktree' && worktreeToggleBtn) {
           worktreeToggleBtn.checked = !!sVal;
         } else if (sKey === 'model' && typeof sVal === 'string') {
@@ -6333,7 +6332,7 @@
         return {name: a.name, mimeType: a.type, data: a.data};
       }),
       useWorktree: !!(worktreeToggleBtn && worktreeToggleBtn.checked),
-      useParallel: !!(parallelToggleBtn && parallelToggleBtn.checked),
+      useParallel: true,
       autoCommit: !!(autocommitToggleBtn && autocommitToggleBtn.checked),
     };
     if (curTab && curTab.workDir) msg.workDir = curTab.workDir;
@@ -7720,7 +7719,6 @@
     el('cfg-custom-endpoint').value = cfg.custom_endpoint || '';
     el('cfg-custom-api-key').value = cfg.custom_api_key || '';
     el('cfg-custom-headers').value = cfg.custom_headers || '';
-    el('cfg-use-web-browser').checked = cfg.use_web_browser !== false;
     el('cfg-demo-mode').checked = !!cfg.demo_mode || demoMode;
     demoMode = el('cfg-demo-mode').checked;
     el('cfg-remote-password').value = cfg.remote_password || '';
@@ -7750,7 +7748,6 @@
       custom_endpoint: el('cfg-custom-endpoint').value.trim(),
       custom_api_key: el('cfg-custom-api-key').value.trim(),
       custom_headers: el('cfg-custom-headers').value.trim(),
-      use_web_browser: el('cfg-use-web-browser').checked,
       demo_mode: el('cfg-demo-mode').checked,
       remote_password: el('cfg-remote-password').value.trim(),
     };
