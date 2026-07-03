@@ -512,8 +512,6 @@ class _WebMergeState:
         is unambiguously empty rather than silently pointing at the
         last (now-resolved) hunk.
         """
-        if not self._all_hunks:
-            return None
         if not self.remaining:
             return None
         if self._pos >= len(self._all_hunks):
@@ -1560,16 +1558,10 @@ def _get_local_ips() -> frozenset[str]:
             ips.add(addr)
     except Exception:
         pass
-    filtered: set[str] = set()
-    for addr in ips:
-        if addr.startswith("127."):
-            continue
-        if addr.startswith("169.254."):
-            continue
-        if addr.startswith("::ffff:"):
-            continue
-        filtered.add(addr)
-    return frozenset(filtered)
+    return frozenset(
+        addr for addr in ips
+        if not addr.startswith(("127.", "169.254.", "::ffff:"))
+    )
 
 
 def _print_url() -> None:
@@ -1922,22 +1914,25 @@ class WebPrinter(JsonPrinter):
 
         self._persist_event(event)
 
-        # Fan out one stamped copy per subscribed tab.  The frontend
-        # filters incoming events by ``tabId``; an event with no
-        # subscriber is silently swallowed (which is correct: no UI
-        # is currently watching this task).  The event is serialised
-        # ONCE and the per-tab ``tabId`` stamp is spliced into the
-        # JSON string, instead of re-encoding the whole event for
-        # every subscribed tab — this path runs once per streamed
-        # token, so avoiding the redundant ``json.dumps`` calls keeps
-        # multi-viewer streaming cheap.
+        # Fan out one stamped copy per subscribed tab (see
+        # :meth:`_fanout_stamped`).
+        self._fanout_stamped(event)
+
+    def _fanout_stamped(self, event: dict[str, Any]) -> None:
+        """Send one ``tabId``-stamped copy of *event* per subscribed tab.
+
+        The frontend filters incoming events by ``tabId``; an event
+        with no subscriber is silently swallowed.  The event is
+        serialised ONCE and the per-tab stamp spliced into the JSON
+        string — this path runs once per streamed token, so avoiding
+        redundant ``json.dumps`` calls keeps multi-viewer streaming
+        cheap.  ``event`` always carries at least ``type`` and
+        ``taskId``, so the splice below produces exactly
+        ``json.dumps({**event, "tabId": tab_id})`` (sans ordering).
+        """
         targets = self._fanout_targets(event.get("taskId"))
         if not targets:
             return
-        # ``event`` always carries at least ``type`` and ``taskId``
-        # here, so the serialised form ends with ``...}`` and the
-        # splice below produces exactly ``json.dumps({**event,
-        # "tabId": tab_id})`` (sans key ordering).
         base = json.dumps(event)[:-1]
         for tab_id in targets:
             self._send_to_ws_clients(
@@ -2065,35 +2060,49 @@ class WebPrinter(JsonPrinter):
             logger.debug("Failed to write to UDS client", exc_info=True)
             self.remove_uds_writer(writer)
 
+    def _add_endpoint(self, endpoint: Any, collection: set[Any]) -> None:
+        """Register a WSS/UDS *endpoint* in *collection* for broadcasting.
+
+        Shared body of :meth:`add_client` and :meth:`add_uds_writer`.
+        """
+        with self._ws_lock:
+            collection.add(endpoint)
+            self._pending_sends.setdefault(endpoint, set())
+
+    def _remove_endpoint(self, endpoint: Any, collection: set[Any]) -> None:
+        """Remove a WSS/UDS *endpoint* and cancel its pending sends.
+
+        Shared body of :meth:`remove_client` and
+        :meth:`remove_uds_writer`.  Cancelling the pending
+        ``run_coroutine_threadsafe`` futures (M8) ensures a
+        permanently stuck send queue cannot keep the underlying
+        coroutine alive after the peer is gone.
+        """
+        with self._ws_lock:
+            collection.discard(endpoint)
+            pending = self._pending_sends.pop(endpoint, set())
+            self._send_locks.pop(endpoint, None)
+        for fut in pending:
+            try:
+                fut.cancel()
+            except Exception:
+                logger.debug("Failed to cancel pending send", exc_info=True)
+
     def add_client(self, ws: ServerConnection) -> None:
         """Register a WebSocket client for event broadcasting.
 
         Args:
             ws: The WebSocket server connection to add.
         """
-        with self._ws_lock:
-            self._ws_clients.add(ws)
-            self._pending_sends.setdefault(ws, set())
+        self._add_endpoint(ws, self._ws_clients)
 
     def remove_client(self, ws: ServerConnection) -> None:
         """Remove a WebSocket client from event broadcasting.
 
-        Cancels any pending ``run_coroutine_threadsafe`` futures for
-        this client (M8) so a permanently stuck send queue cannot
-        keep the underlying coroutine alive after the peer is gone.
-
         Args:
             ws: The WebSocket server connection to remove.
         """
-        with self._ws_lock:
-            self._ws_clients.discard(ws)
-            pending = self._pending_sends.pop(ws, set())
-            self._send_locks.pop(ws, None)
-        for fut in pending:
-            try:
-                fut.cancel()
-            except Exception:
-                logger.debug("Failed to cancel pending send", exc_info=True)
+        self._remove_endpoint(ws, self._ws_clients)
 
     def bind_conn(self, conn_id: str, endpoint: Any) -> None:
         """Associate a connection id with its transport endpoint.
@@ -2126,31 +2135,15 @@ class WebPrinter(JsonPrinter):
         Args:
             writer: The asyncio stream writer to add.
         """
-        with self._ws_lock:
-            self._uds_writers.add(writer)
-            self._pending_sends.setdefault(writer, set())
+        self._add_endpoint(writer, self._uds_writers)
 
     def remove_uds_writer(self, writer: asyncio.StreamWriter) -> None:
         """Remove a Unix-domain socket writer from event broadcasting.
 
-        Cancels any pending ``run_coroutine_threadsafe`` futures for
-        this writer so a permanently stuck send queue cannot keep the
-        underlying coroutine alive after the peer is gone.
-
         Args:
             writer: The asyncio stream writer to remove.
         """
-        with self._ws_lock:
-            self._uds_writers.discard(writer)
-            pending = self._pending_sends.pop(writer, set())
-            self._send_locks.pop(writer, None)
-        for fut in pending:
-            try:
-                fut.cancel()
-            except Exception:
-                logger.debug(
-                    "Failed to cancel pending UDS send", exc_info=True,
-                )
+        self._remove_endpoint(writer, self._uds_writers)
 
     def _discard_pending_send(self, client: Any, fut: Any) -> None:
         """Remove a completed send future from the per-client pending set.
@@ -2969,6 +2962,21 @@ def _translate_webview_command(cmd: dict[str, Any]) -> dict[str, Any]:
     return cmd
 
 
+async def _cancel_task(task: asyncio.Task[None] | None) -> None:
+    """Cancel *task* (if any) and wait for it to unwind.
+
+    Args:
+        task: The asyncio task to cancel, or ``None`` for a no-op.
+    """
+    if task is None:
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
 class RemoteAccessServer:
     """Web server providing remote browser access to KISS Sorcar.
 
@@ -3233,9 +3241,7 @@ class RemoteAccessServer:
         """
         with self._cli_running_lock:
             self._cli_running_tasks.add(task_id)
-        cli_tasks = conn_state.setdefault("cli_tasks", set())
-        if isinstance(cli_tasks, set):
-            cli_tasks.add(task_id)
+        conn_state.setdefault("cli_tasks", set()).add(task_id)
 
     def _handle_cli_task_end(self, task_id: str, conn_state: dict[str, Any]) -> None:
         """Mark *task_id* as no longer running and stop the indicator.
@@ -3315,11 +3321,11 @@ class RemoteAccessServer:
         """
         request_path = urlsplit(request.path).path
         path = unquote(request_path)
-        if path == "/" or path == "":
+        if path in ("", "/"):
             return _http_response(200, "text/html; charset=utf-8", self._html_bytes)
         if path == "/ws":
             return None
-        if path == "/trajectories" or path == "/trajectories/":
+        if path in ("/trajectories", "/trajectories/"):
             return _http_response(
                 200,
                 "text/html; charset=utf-8",
@@ -3538,9 +3544,7 @@ class RemoteAccessServer:
         """
         with self._pending_tab_closes_lock:
             self._pending_tab_closes.pop(tab_id, None)
-        with self._merge_states_lock:
-            merge_state = self._merge_states.pop(tab_id, None)
-            self._merge_action_locks.pop(tab_id, None)
+        merge_state = self._pop_merge_state(tab_id)
         if self._loop is None or not self._loop.is_running():
             return
         task = asyncio.ensure_future(
@@ -3764,14 +3768,7 @@ class RemoteAccessServer:
             ev: The event dictionary the CLI emitted; expected to
                 carry at least ``type`` and ``taskId``.
         """
-        targets = self._printer._fanout_targets(ev.get("taskId"))
-        if not targets:
-            return
-        base = json.dumps(ev)[:-1]
-        for tab_id in targets:
-            self._printer._send_to_ws_clients(
-                f'{base}, "tabId": {json.dumps(tab_id)}}}'
-            )
+        self._printer._fanout_stamped(ev)
 
     async def _dispatch_client_command(
         self,
@@ -3836,11 +3833,10 @@ class RemoteAccessServer:
                 self._relay_cli_event(ev)
             return
         if cmd_type == "cliTaskStart":
-            # CLI announces a fresh task is now running so a webview
-            # tab later resuming the task from the history sidebar
-            # can be subscribed to the live stream and shown the
-            # blinking-green-circle "running" indicator in its tab
-            # title.  See ``_handle_cli_task_start``.
+            # CLI announces a fresh running task so a webview tab that
+            # later resumes it from the history sidebar is subscribed
+            # to the live stream and shows the blinking-green-circle
+            # "running" indicator.  See ``_handle_cli_task_start``.
             raw_id = cmd.get("taskId")
             task_id_str = (
                 raw_id if isinstance(raw_id, str) and raw_id else ""
@@ -3851,9 +3847,8 @@ class RemoteAccessServer:
             self._handle_cli_task_start(task_id_str, conn_state)
             return
         if cmd_type == "cliTaskEnd":
-            # CLI announces a previously-running task has finished
-            # so the daemon stops the blinking-green-circle indicator
-            # on every subscribed webview tab.  See
+            # CLI announces the task finished; the daemon stops the
+            # indicator on every subscribed webview tab.  See
             # ``_handle_cli_task_end``.
             raw_id = cmd.get("taskId")
             task_id_str = (
@@ -3922,9 +3917,7 @@ class RemoteAccessServer:
             # in the meantime.  The command still falls through to the
             # backend ``_cmd_merge_action`` → ``_finish_merge`` below.
             if isinstance(tab_id, str) and tab_id:
-                with self._merge_states_lock:
-                    self._merge_states.pop(tab_id, None)
-                    self._merge_action_locks.pop(tab_id, None)
+                self._pop_merge_state(tab_id)
         if (
             cmd_type == "closeTab"
             and isinstance(tab_id, str)
@@ -3942,13 +3935,23 @@ class RemoteAccessServer:
             # Code) clients are exempt: their TypeScript MergeManager
             # owns the review in real editor tabs that survive the
             # chat tab's closure and will still send ``all-done``.
-            with self._merge_states_lock:
-                merge_state = self._merge_states.pop(tab_id, None)
-                self._merge_action_locks.pop(tab_id, None)
+            merge_state = self._pop_merge_state(tab_id)
             await self._finish_merge_and_close_tab(tab_id, merge_state)
             return
         cmd = _translate_webview_command(cmd)
         await self._run_cmd(cmd)
+
+    def _broadcast_to_conn(self, event: dict[str, Any], conn_id: str) -> None:
+        """Broadcast *event*, stamped with *conn_id* when non-empty.
+
+        A non-empty ``conn_id`` makes :meth:`WebPrinter.broadcast`
+        deliver the event ONLY to the requesting connection (the VS
+        Code window / browser tab whose user triggered the command),
+        so siblings do not pop a banner; ``""`` broadcasts to all.
+        """
+        if conn_id:
+            event["connId"] = conn_id
+        self._printer.broadcast(event)
 
     async def _handle_server_reset(self, conn_id: str = "") -> None:
         """Restart the ``kiss-web`` daemon at the user's request.
@@ -3973,15 +3976,12 @@ class RemoteAccessServer:
         """
         loop = self._loop
         assert loop is not None
-        notification: dict[str, Any] = {
+        self._broadcast_to_conn({
             "type": "notification",
             "id": "server-reset-restarting",
             "severity": "info",
             "message": "Restarting the KISS Sorcar web server…",
-        }
-        if conn_id:
-            notification["connId"] = conn_id
-        self._printer.broadcast(notification)
+        }, conn_id)
         # Drop a pending-reset flag so the freshly-respawned daemon
         # knows to broadcast a paired "Server restart complete"
         # notification once it is listening again — see
@@ -4127,27 +4127,21 @@ class RemoteAccessServer:
             None, _find_install_script, self._install_root,
         )
         if script is None:
-            event: dict[str, Any] = {
+            self._broadcast_to_conn({
                 "type": "error",
                 "text": (
                     "Cannot update KISS Sorcar: install.sh not found "
                     f"in {self._install_root}."
                 ),
-            }
-            if conn_id:
-                event["connId"] = conn_id
-            self._printer.broadcast(event)
+            }, conn_id)
             return
-        notice: dict[str, Any] = {
+        self._broadcast_to_conn({
             "type": "notice",
             "text": (
                 "An update of KISS Sorcar is getting installed… "
                 f"(output: {self._update_log_path})"
             ),
-        }
-        if conn_id:
-            notice["connId"] = conn_id
-        self._printer.broadcast(notice)
+        }, conn_id)
         await loop.run_in_executor(
             None, self._spawn_update_script, script, conn_id,
         )
@@ -4182,13 +4176,10 @@ class RemoteAccessServer:
                     start_new_session=True,
                 )
         except OSError as exc:
-            event: dict[str, Any] = {
+            self._broadcast_to_conn({
                 "type": "error",
                 "text": f"Failed to start KISS Sorcar update: {exc}",
-            }
-            if conn_id:
-                event["connId"] = conn_id
-            self._printer.broadcast(event)
+            }, conn_id)
 
     async def _handle_active_tasks_query(self, endpoint: Any) -> None:
         """Report in-flight agent tasks back to a single client.
@@ -4634,6 +4625,20 @@ class RemoteAccessServer:
         with self._merge_states_lock:
             self._merge_states[tab_id] = _WebMergeState(merge_data)
 
+    def _pop_merge_state(self, tab_id: str) -> _WebMergeState | None:
+        """Atomically drop *tab_id*'s merge state and per-tab action lock.
+
+        Every cleanup site (deferred tab close, the client ``all-done``
+        and web ``closeTab`` branches of ``_dispatch_client_command``,
+        and the completion branch of ``_apply_web_merge_action``) must
+        drop BOTH entries together, or one of them leaks for the
+        daemon's lifetime (tab ids are fresh UUIDs, never reused).
+        Returns the popped state, or ``None`` when none was registered.
+        """
+        with self._merge_states_lock:
+            self._merge_action_locks.pop(tab_id, None)
+            return self._merge_states.pop(tab_id, None)
+
 
     def _merge_action_lock(self, tab_id: str) -> asyncio.Lock:
         """Return the per-tab :class:`asyncio.Lock` serialising merge actions.
@@ -4854,19 +4859,10 @@ class RemoteAccessServer:
         })
 
         if not state.remaining:
-            # Pop the per-tab action lock alongside the merge state —
-            # every other cleanup site (``_fire_pending_tab_close``,
-            # the client ``all-done`` and web ``closeTab`` branches of
-            # ``_dispatch_client_command``) drops both together.
-            # Leaving the lock behind leaked one ``asyncio.Lock`` per
-            # finished review for the daemon's lifetime (tab ids are
-            # fresh UUIDs, so entries were never reused).  A waiter
-            # already queued on the popped lock object is harmless:
-            # it re-fetches the merge state and takes the
+            # A waiter already queued on the popped lock object is
+            # harmless: it re-fetches the merge state and takes the
             # ``state is None`` early return above.
-            with self._merge_states_lock:
-                self._merge_states.pop(tab_id, None)
-                self._merge_action_locks.pop(tab_id, None)
+            self._pop_merge_state(tab_id)
             await self._run_cmd(
                 {
                     "type": "mergeAction",
@@ -4997,23 +4993,20 @@ class RemoteAccessServer:
             self._tunnel_proc, _parse_quick_tunnel_url, timeout=30,
             rate_limit_flag=rate_limit_flag,
         )
+        if not url:
+            for _ in range(20):
+                if self._tunnel_proc.poll() is not None:
+                    break
+                url = _discover_tunnel_url_from_metrics()
+                if url:
+                    break
+                time.sleep(1)
         if url:
             assert self._tunnel_metrics_port is not None
             _save_cloudflared_pidfile(
                 self._tunnel_proc.pid, self._tunnel_metrics_port, url,
             )
             return url
-        for _ in range(20):
-            if self._tunnel_proc.poll() is not None:
-                break
-            url = _discover_tunnel_url_from_metrics()
-            if url:
-                assert self._tunnel_metrics_port is not None
-                _save_cloudflared_pidfile(
-                    self._tunnel_proc.pid, self._tunnel_metrics_port, url,
-                )
-                return url
-            time.sleep(1)
         # Rate-limit detection: if cloudflared's stderr named HTTP
         # 429 / error 1015 (and we never got a URL out), tell the
         # restart machinery to use a longer cooldown.  Setting this
@@ -5302,11 +5295,7 @@ class RemoteAccessServer:
                     except (ProcessLookupError, PermissionError, OSError):
                         pass
             _unlink_cloudflared_pidfile()
-        self._tunnel_proc = None
-        self._tunnel_adopted_pid = None
-        self._tunnel_metrics_port = None
-        self._tunnel_started_at = None
-        self._tunnel_unhealthy_ticks = 0
+        self._reset_tunnel_proc_state()
 
     async def _ping_one_ws(self, ws: Any) -> None:
         """Send a ping to a single WebSocket client, closing if stale."""
@@ -5350,20 +5339,14 @@ class RemoteAccessServer:
         a pending upgrade as soon as the daemon starts, instead of
         waiting an entire hour for the first tick.
         """
-        try:
-            await self._check_for_update()
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.debug("Initial version check failed", exc_info=True)
         while True:
-            await asyncio.sleep(_VERSION_CHECK_INTERVAL)
             try:
                 await self._check_for_update()
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.debug("Periodic version check failed", exc_info=True)
+                logger.debug("Version check failed", exc_info=True)
+            await asyncio.sleep(_VERSION_CHECK_INTERVAL)
 
     async def _watchdog(self) -> None:
         """Unified periodic watchdog (runs every :data:`TUNNEL_CHECK_INTERVAL`).
@@ -5541,6 +5524,29 @@ class RemoteAccessServer:
                     return_exceptions=True,
                 )
 
+    def _reset_tunnel_proc_state(self) -> None:
+        """Reset per-process tunnel bookkeeping.
+
+        Shared by :meth:`_terminate_tunnel_proc` and
+        :meth:`_detach_tunnel` so the next tunnel (re)start begins
+        from a clean slate.
+        """
+        self._tunnel_proc = None
+        self._tunnel_adopted_pid = None
+        self._tunnel_metrics_port = None
+        self._tunnel_started_at = None
+        self._tunnel_unhealthy_ticks = 0
+
+    def _reset_tunnel_backoff_state(self) -> None:
+        """Reset tunnel backoff counters and clear the active URL.
+
+        Shared by :meth:`_stop_tunnel` and :meth:`_detach_tunnel`.
+        """
+        self._tunnel_failure_count = 0
+        self._tunnel_next_retry = 0.0
+        self._tunnel_rate_limited = False
+        self._active_url = None
+
     def _stop_tunnel(self) -> None:
         """Terminate the tunnel process and reset all tunnel state.
 
@@ -5552,10 +5558,7 @@ class RemoteAccessServer:
         VS Code sidebar to show no URL.
         """
         self._terminate_tunnel_proc()
-        self._tunnel_failure_count = 0
-        self._tunnel_next_retry = 0.0
-        self._tunnel_rate_limited = False
-        self._active_url = None
+        self._reset_tunnel_backoff_state()
 
     def _detach_tunnel(self) -> None:
         """Reset tunnel bookkeeping without killing ``cloudflared``.
@@ -5602,15 +5605,8 @@ class RemoteAccessServer:
         proc = self._tunnel_proc
         if proc is not None and proc.poll() is None:
             self._spawn_stderr_drain_shim(proc)
-        self._tunnel_proc = None
-        self._tunnel_adopted_pid = None
-        self._tunnel_metrics_port = None
-        self._tunnel_started_at = None
-        self._tunnel_unhealthy_ticks = 0
-        self._tunnel_failure_count = 0
-        self._tunnel_next_retry = 0.0
-        self._tunnel_rate_limited = False
-        self._active_url = None
+        self._reset_tunnel_proc_state()
+        self._reset_tunnel_backoff_state()
 
     @staticmethod
     def _spawn_stderr_drain_shim(
@@ -6132,20 +6128,10 @@ class RemoteAccessServer:
 
     async def stop_async(self) -> None:
         """Stop the server gracefully."""
-        if self._watchdog_task is not None:
-            self._watchdog_task.cancel()
-            try:
-                await self._watchdog_task
-            except asyncio.CancelledError:
-                pass
-            self._watchdog_task = None
-        if self._version_check_task is not None:
-            self._version_check_task.cancel()
-            try:
-                await self._version_check_task
-            except asyncio.CancelledError:
-                pass
-            self._version_check_task = None
+        await _cancel_task(self._watchdog_task)
+        self._watchdog_task = None
+        await _cancel_task(self._version_check_task)
+        self._version_check_task = None
         # Cancel any armed deferred-close timers so a server shutdown
         # does not leave dangling ``call_later`` handles in the loop.
         with self._pending_tab_closes_lock:

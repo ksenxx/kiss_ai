@@ -6,13 +6,20 @@
 
 Provides the interactive dropdown that :mod:`readline` cannot render:
 as soon as ``@`` is typed the file/folder picker pops up under the
-input line, Up/Down (and Tab) move through the candidates, and Tab or
-Enter inserts the highlighted ``./<path>`` mention without submitting
-the line.  The same live menu serves ``/`` slash commands,
-``/model <partial>`` model names, and whole-line predictive
+input line, Up/Down move through the candidates, and Tab (or Enter,
+in the file picker only) inserts the highlighted ``./<path>`` mention
+without submitting the line.  The same live menu serves ``/`` slash
+commands, ``/model <partial>`` model names, and whole-line predictive
 completion: whenever the typed prefix matches one or more prior tasks
-the menu pops with all of them so Up/Down + Tab/Enter can pick one
-without re-typing.
+the menu pops with all of them so Up/Down + Tab can pick one without
+re-typing.  A single Tab press on an open menu accepts the
+highlighted candidate — or the first one when none is highlighted
+yet — and, on slash-command lines, immediately pops the next-level
+menu (command → argument options → flag values) so each level of the
+chain needs exactly one Tab; see :func:`_accept_completion_tab` and
+:func:`_accept_first_completion_tab`.  Outside the ``@``-mention file
+picker Enter never accepts a completion candidate — it always submits
+the text the user actually typed.
 
 The candidate lists come from the very same
 :class:`~kiss.agents.sorcar.cli_repl.CliCompleter` backend used by the
@@ -27,7 +34,7 @@ from typing import TYPE_CHECKING
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
-from prompt_toolkit.filters import completion_is_selected
+from prompt_toolkit.filters import completion_is_selected, has_completions
 from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
@@ -52,6 +59,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
     from pathlib import Path
 
+    from prompt_toolkit.buffer import Buffer
     from prompt_toolkit.completion import CompleteEvent
     from prompt_toolkit.document import Document
     from prompt_toolkit.key_binding import KeyPressEvent
@@ -120,28 +128,107 @@ _unmap_enter_aliases()
 _KEY_BINDINGS = KeyBindings()
 
 
-@_KEY_BINDINGS.add("enter", filter=completion_is_selected)
-def _accept_completion_enter(event: KeyPressEvent) -> None:
-    """Enter on a highlighted completion inserts it instead of submitting.
+def _accept_and_chain(buf: Buffer) -> None:
+    """Close the completion menu, keep the completed text, and chain.
 
-    Navigating the menu (Up/Down/Tab) already placed the highlighted
-    candidate's text in the buffer; closing the completion state keeps
-    that text and lets the user continue editing.  Without a selection
-    this binding submits the multi-line buffer instead (see
-    :func:`_submit_enter`).
+    Chained completion on slash-command lines: accepting a candidate
+    on a ``/`` line immediately restarts completion so the next-level
+    menu pops without any further keystroke — Tab-completing ``/resume``
+    instantly shows its argument options (``--task`` / ``--limit``),
+    Tab-completing ``--task`` instantly shows the recent task ids
+    (each displayed as ``<id>: <one-line task description>``), and
+    Tab-completing ``--model`` instantly shows the model names in
+    model-picker order.  :meth:`~prompt_toolkit.buffer.Buffer
+    .start_completion` runs the same completer that
+    ``complete_while_typing`` uses, so the popped menu is identical to
+    the one the user would get by typing the trailing space by hand;
+    when the accepted candidate has no follow-up candidates (e.g.
+    ``/help ``) no menu appears.  Non-slash accepts (the ``@``-mention
+    file picker outside slash lines, predictive history) simply close
+    the menu.
     """
-    event.current_buffer.complete_state = None
+    buf.complete_state = None
+    if buf.document.text_before_cursor.lstrip().startswith("/"):
+        buf.start_completion(select_first=False)
 
 
 @_KEY_BINDINGS.add("tab", filter=completion_is_selected)
 def _accept_completion_tab(event: KeyPressEvent) -> None:
-    """Tab on a highlighted completion confirms it (same as Enter)."""
-    event.current_buffer.complete_state = None
+    """Tab on a highlighted (Up/Down-navigated) completion confirms it.
+
+    The candidate's text is already in the buffer (navigation inserts
+    it), so accepting means closing the menu and chaining the
+    next-level menu on slash-command lines — see
+    :func:`_accept_and_chain`.  Enter confirms only in the
+    ``@``-mention file picker; for every other menu Enter submits the
+    typed text (see :func:`_submit_enter`).
+    """
+    _accept_and_chain(event.current_buffer)
 
 
-@_KEY_BINDINGS.add("enter", filter=~completion_is_selected)
+@_KEY_BINDINGS.add("tab", filter=has_completions & ~completion_is_selected)
+def _accept_first_completion_tab(event: KeyPressEvent) -> None:
+    """Tab on an open menu with NO highlighted candidate accepts the first.
+
+    This fixes the user-reported "chained completion does not work"
+    bug: prompt_toolkit's default Tab binding only *selected* the first
+    candidate (inserting its text into the buffer, so the command
+    looked autocompleted) while keeping the menu open — the next-level
+    argument menu popped only after a second, non-obvious Tab press.
+    One Tab must complete AND chain, so this binding inserts the first
+    candidate's text via
+    :meth:`~prompt_toolkit.buffer.Buffer.go_to_completion` (the same
+    non-``insert_text`` path candidate navigation uses, which does not
+    re-fire the ``complete_while_typing`` completer on non-slash
+    lines) and then accepts it — closing the menu and popping the
+    next-level menu on slash-command lines via
+    :func:`_accept_and_chain`.  Up/Down still navigate the menu first;
+    Tab then accepts the navigated candidate through
+    :func:`_accept_completion_tab` instead of the first one.
+
+    When the async completer has opened an (still) empty menu the
+    binding does nothing, matching the default behaviour.
+    """
+    buf = event.current_buffer
+    state = buf.complete_state
+    if state is None or not state.completions:
+        return
+    buf.go_to_completion(0)
+    _accept_and_chain(buf)
+
+
+@_KEY_BINDINGS.add("escape", filter=has_completions)
+def _dismiss_completion_escape(event: KeyPressEvent) -> None:
+    """ESC closes the open completion menu without submitting anything.
+
+    :meth:`~prompt_toolkit.buffer.Buffer.cancel_completion` restores
+    ``complete_state.original_document`` — the text the user actually
+    typed (undoing any candidate text a previous Up/Down navigation
+    inserted into the buffer) — and closes the dropdown.  The binding
+    is deliberately NOT eager, so multi-key escape sequences
+    (``escape enter`` = Alt+Enter newline, arrow keys, Shift+Enter
+    CSI-u sequences, ...) still match first; a lone ESC key press
+    fires after prompt_toolkit's input-flush timeout.
+    """
+    event.current_buffer.cancel_completion()
+
+
+@_KEY_BINDINGS.add("enter")
 def _submit_enter(event: KeyPressEvent) -> None:
-    """Enter submits the (possibly multi-line) buffer.
+    """Enter submits the (possibly multi-line) buffer — never a completion.
+
+    Enter MUST NOT accept a highlighted autocomplete candidate, with
+    one exception: the ``@``-mention file picker, where Enter still
+    inserts the highlighted ``./<path>`` mention without submitting
+    (matching the VS Code webview picker).  For every other menu —
+    predictive history, slash commands, ``/model`` names — when the
+    completion menu is open (even with a candidate highlighted via
+    Up/Down navigation, which temporarily places the candidate's text
+    in the buffer), :meth:`~prompt_toolkit.buffer.Buffer.cancel_completion`
+    first restores ``complete_state.original_document`` — the text the
+    user actually typed — and closes the menu; only then is the typed
+    text submitted.  Tab accepts in every menu (see
+    :func:`_accept_completion_tab`).
 
     The session runs with ``multiline=True`` so prompt_toolkit's
     default Enter binding inserts a newline; we override that here so
@@ -157,17 +244,23 @@ def _submit_enter(event: KeyPressEvent) -> None:
     shell uses.  The check runs against ``buf.text`` (the entire
     buffer) rather than only the text before the cursor so the rule
     matches the steering box's :meth:`_InputBox.feed` implementation
-    exactly.  Any open completion menu is dismissed first so the
-    user's originally-typed text is restored (this branch runs only
-    under ``~completion_is_selected`` so ``complete_state`` is
-    ``None``, but calling :meth:`cancel_completion` is a documented
-    no-op in that case).  See
+    exactly.  See
     :func:`~kiss.agents.sorcar.cli_line_continuation.ends_with_line_continuation`.
     """
     buf = event.current_buffer
+    state = buf.complete_state
+    if (
+        state is not None
+        and state.current_completion is not None
+        and _AT_RE.search(state.original_document.text_before_cursor)
+    ):
+        # @-mention file picker: keep the completed ``./<path>``
+        # mention in the buffer and close the menu without submitting.
+        buf.complete_state = None
+        return
+    buf.cancel_completion()
     cont, keep = ends_with_line_continuation(buf.text)
     if cont:
-        buf.cancel_completion()
         buf.text = buf.text[:keep] + "\n"
         buf.cursor_position = keep + 1
         return
@@ -354,9 +447,23 @@ class PtkCompleter(Completer):
         model_cmd = _MODEL_CMD_RE.match(line)
         if model_cmd:
             return self._model_completions(model_cmd.group(1))
-        stripped = line.strip()
-        if stripped.startswith("/") and " " not in stripped:
+        # Left-strip only: a trailing space after a slash command
+        # (``/resume ``) switches from command-name completion to the
+        # command's argument options.
+        lstripped = line.lstrip()
+        if lstripped.startswith("/") and " " not in lstripped:
             return self._slash_completions(line)
+        if lstripped.startswith("/"):
+            # A trailing value-taking flag (``--task `` / ``--model ``)
+            # completes the flag's VALUE; the branch is terminal (an
+            # empty candidate list must not fall back to the option
+            # menu, which would wrongly re-offer flags as the value).
+            value_matches = self.cli._flag_value_matches(line)
+            if value_matches is not None:
+                return self._slash_arg_completions(line, value_matches)
+            arg_matches = self.cli._slash_arg_matches(line)
+            if arg_matches:
+                return self._slash_arg_completions(line, arg_matches)
         return self._predictive_completions(line)
 
     def _at_mention_completions(self, query: str) -> Iterable[Completion]:
@@ -385,11 +492,52 @@ class PtkCompleter(Completer):
             )
 
     def _model_completions(self, query: str) -> Iterable[Completion]:
-        """Build ``/model <name>`` entries for the partial *query*."""
+        """Build ``/model <name>`` entries for the partial *query*.
+
+        The ``list`` subcommand is offered first (whenever the partial
+        matches it) so ``/model `` pops the full argument space —
+        ``list`` plus every completable model name.
+        """
         from kiss.core.models.model_info import rank_model_suggestions
 
+        if "list".startswith(query):
+            yield Completion(
+                "list",
+                start_position=-len(query),
+                display_meta="List all generation models",
+            )
         for name in rank_model_suggestions(query):
             yield Completion(name, start_position=-len(query))
+
+    def _slash_arg_completions(
+        self, line: str, matches: list[tuple[str, str, str]],
+    ) -> Iterable[Completion]:
+        """Build argument option / flag-value entries for a slash line.
+
+        Pops as soon as a slash command is followed by a space (e.g.
+        ``/resume `` shows ``--task`` / ``--limit``; ``/skills `` shows
+        the discovered skill names) and, one level deeper, as soon as a
+        value-taking flag is followed by a space (``/resume --task ``
+        shows the recent task ids as ``<id>: <description>``,
+        ``--model `` the model names in model-picker order).  Each
+        entry displays the given text with its help note and replaces
+        the whole line, exactly like the readline completer — so a
+        task-id candidate inserts only the bare id, never the colon or
+        the description shown in the menu.
+
+        Args:
+            line: The text before the cursor.
+            matches: ``(replacement, display, help)`` triples from
+                :meth:`CliCompleter._slash_arg_matches` or
+                :meth:`CliCompleter._flag_value_matches`.
+        """
+        for full, opt, meta in matches:
+            yield Completion(
+                full,
+                start_position=-len(line),
+                display=opt,
+                display_meta=meta,
+            )
 
     def _slash_completions(self, line: str) -> Iterable[Completion]:
         """Build slash-command entries (built-in first, then custom)."""
@@ -488,9 +636,11 @@ class PtkLineReader:
 
     Wraps a :class:`PromptSession` configured so the menu pops while
     typing (``@`` immediately shows the file/folder list), Up/Down
-    navigate it, and Tab/Enter confirm the highlighted entry via the
-    bindings in ``_KEY_BINDINGS``.  History is persisted per working
-    directory next to the readline history file.
+    navigate it, and Tab confirms the highlighted entry via the
+    bindings in ``_KEY_BINDINGS`` (Enter also confirms, but only in
+    the ``@``-mention file picker — elsewhere Enter submits the typed
+    text).  History is persisted per working directory next to the
+    readline history file.
     """
 
     def __init__(self, completer: CliCompleter, history_path: Path) -> None:

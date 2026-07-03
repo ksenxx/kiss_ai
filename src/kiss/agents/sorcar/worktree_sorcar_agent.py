@@ -1131,12 +1131,10 @@ def _reject_interactive_only_flags(argv: list[str]) -> None:
     Args:
         argv: The process argument list (typically ``sys.argv``).
     """
-    bad: list[str] = []
-    seen: set[str] = set()
-    for token in argv[1:]:
-        if token in _INTERACTIVE_ONLY_FLAGS and token not in seen:
-            bad.append(token)
-            seen.add(token)
+    # dict.fromkeys = order-preserving dedup of the offending flags.
+    bad = list(dict.fromkeys(
+        token for token in argv[1:] if token in _INTERACTIVE_ONLY_FLAGS
+    ))
     if not bad:
         return
     flag_list = ", ".join(bad)
