@@ -353,7 +353,8 @@ class TestPrintToConsole:
 
 class TestAnthropicBuildKwargs:
 
-    def test_build_kwargs_user_set_max_tokens_with_thinking(self) -> None:
+    def test_build_kwargs_small_max_tokens_skips_thinking(self) -> None:
+        """No room for the 1024-token minimum thinking budget → no thinking."""
         from kiss.core.models.anthropic_model import AnthropicModel
 
         m = AnthropicModel("claude-sonnet-4-test", api_key="test")
@@ -361,7 +362,54 @@ class TestAnthropicBuildKwargs:
         m.conversation = [{"role": "user", "content": "hello"}]
         kwargs = m._build_create_kwargs()
         assert kwargs["max_tokens"] == 999
-        assert "thinking" in kwargs
+        assert "thinking" not in kwargs
+
+    def test_build_kwargs_thinking_budget_capped_below_max_tokens(self) -> None:
+        """The API requires max_tokens > budget_tokens; budget is capped."""
+        from kiss.core.models.anthropic_model import AnthropicModel
+
+        m = AnthropicModel("claude-sonnet-4-test", api_key="test")
+        m.model_config = {"max_tokens": 5000}
+        m.conversation = [{"role": "user", "content": "hello"}]
+        kwargs = m._build_create_kwargs()
+        assert kwargs["max_tokens"] == 5000
+        assert kwargs["thinking"] == {"type": "enabled", "budget_tokens": 4999}
+
+    def test_build_kwargs_large_max_tokens_default_thinking_budget(self) -> None:
+        from kiss.core.models.anthropic_model import AnthropicModel
+
+        m = AnthropicModel("claude-sonnet-4-test", api_key="test")
+        m.model_config = {"max_tokens": 20000}
+        m.conversation = [{"role": "user", "content": "hello"}]
+        kwargs = m._build_create_kwargs()
+        assert kwargs["thinking"] == {"type": "enabled", "budget_tokens": 10000}
+
+    def test_adaptive_thinking_date_stamped_ids(self) -> None:
+        """Date-stamped official ids are release dates, not minor versions."""
+        from kiss.core.models.anthropic_model import _uses_adaptive_thinking
+
+        assert not _uses_adaptive_thinking("claude-opus-4-20250514")
+        assert not _uses_adaptive_thinking("claude-opus-4-1-20250805")
+        assert not _uses_adaptive_thinking("claude-opus-4-5")
+        assert _uses_adaptive_thinking("claude-opus-4-6")
+        assert _uses_adaptive_thinking("claude-opus-4-7")
+
+    def test_substitute_prompt_args_literal_braces(self) -> None:
+        """Literal braces (JSON, ${VAR}) must survive placeholder substitution."""
+        from kiss.core.utils import substitute_prompt_args
+
+        template = 'Use ${VAR} and {"json": true} with {name}'
+        assert (
+            substitute_prompt_args(template, {"name": "X"})
+            == 'Use ${VAR} and {"json": true} with X'
+        )
+        assert substitute_prompt_args(template, None) == template
+        # Single pass: a value containing another key's placeholder is
+        # not re-expanded.
+        assert (
+            substitute_prompt_args("{a} {b}", {"a": "{b}", "b": "B"})
+            == "{b} B"
+        )
 
     def test_build_kwargs_custom_thinking_not_overridden(self) -> None:
         from kiss.core.models.anthropic_model import AnthropicModel

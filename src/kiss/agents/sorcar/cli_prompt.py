@@ -71,7 +71,7 @@ logger = logging.getLogger(__name__)
 # Trailing ``@<partial-path>`` token that triggers the file/folder picker.
 _AT_RE = re.compile(r"@([^\s]*)$")
 # ``/model <partial>`` line whose partial model name is fast-completed.
-_MODEL_CMD_RE = re.compile(r"^/model\s+(.*)$")
+_MODEL_CMD_RE = re.compile(r"^\s*/model\s+(.*)$")
 
 # Modifier+Enter escape sequences emitted by terminals via either
 # xterm's ``modifyOtherKeys`` mode (``ESC[27;<mod>;13~``) or the
