@@ -102,11 +102,15 @@ def _acquire_lock() -> Any:
         process lifetime so the lock is held until exit.
     """
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    fp = LOCK_FILE.open("w")
+    # Open without truncating so a losing contender never clobbers the
+    # PID recorded by the current lock holder.
+    fp = LOCK_FILE.open("a+")
     try:
         fcntl.flock(fp.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
+        fp.close()
         sys.exit(0)
+    fp.truncate(0)
     fp.write(f"{os.getpid()}\n")
     fp.flush()
     return fp
@@ -171,8 +175,11 @@ def _find_user_id(client: WebClient, username: str) -> str:
 def _find_channel_id(client: WebClient, channel_name: str) -> str:
     """Find a channel by name, searching both public and private channels.
 
-    If the channel is not found, creates it as a public channel.
-    Also ensures the bot has joined the channel.
+    Ensures the bot has joined the channel it finds.
+
+    Raises:
+        RuntimeError: If the channel is not found in the workspace; the
+            channel must be created in Slack first.
     """
     for types in ("public_channel", "private_channel"):
         cursor = ""

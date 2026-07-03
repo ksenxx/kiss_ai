@@ -18,6 +18,8 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import threading
+from collections.abc import Coroutine
 from pathlib import Path
 from typing import Any
 
@@ -47,9 +49,31 @@ class MatrixChannelBackend(ToolMethodBackend):
         self._client: Any = None
         self._next_batch: str = ""
         self._connection_info: str = ""
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._loop_thread: threading.Thread | None = None
+
+    def _ensure_loop(self) -> asyncio.AbstractEventLoop:
+        """Lazily start (and reuse) the persistent background event loop.
+
+        nio's ``AsyncClient`` caches its aiohttp session on the event loop
+        of the first request, so every coroutine must run on ONE loop that
+        stays alive for the backend's lifetime.
+        """
+        if self._loop is None:
+            loop = asyncio.new_event_loop()
+            thread = threading.Thread(target=loop.run_forever, name="matrix-loop", daemon=True)
+            thread.start()
+            self._loop = loop
+            self._loop_thread = thread
+        return self._loop
+
+    def _run(self, coro: Coroutine[Any, Any, Any], timeout: float = 120.0) -> Any:
+        """Run ``coro`` on the persistent background loop and return its result."""
+        future = asyncio.run_coroutine_threadsafe(coro, self._ensure_loop())
+        return future.result(timeout=timeout)
 
     def connect(self) -> bool:
-        """Authenticate with Matrix using stored config."""
+        """Authenticate with Matrix using stored config and validate the token."""
         cfg = _config.load()
         if not cfg:  # pragma: no branch
             self._connection_info = "No Matrix config found."
@@ -63,16 +87,60 @@ class MatrixChannelBackend(ToolMethodBackend):
                 self._client.device_id = cfg["device_id"]
             if cfg.get("user_id"):  # pragma: no branch
                 self._client.user_id = cfg["user_id"]
-            self._connection_info = f"Connected to {cfg['homeserver_url']}"
+            resp = self._run(self._client.whoami())
+            user_id = getattr(resp, "user_id", "")
+            if not user_id:
+                self._connection_info = f"Matrix auth failed: {resp}"
+                return False
+            if not self._client.user_id:  # pragma: no branch
+                self._client.user_id = user_id
+            self._connection_info = f"Connected to {cfg['homeserver_url']} as {user_id}"
             return True
         except Exception as e:
             self._connection_info = f"Matrix connection failed: {e}"
             return False
 
+    def disconnect(self) -> None:
+        """Close the Matrix client session and stop the background loop."""
+        if self._client is not None and self._loop is not None:
+            try:
+                self._run(self._client.close())
+            except Exception:
+                pass
+        loop = self._loop
+        thread = self._loop_thread
+        self._loop = None
+        self._loop_thread = None
+        if loop is not None:
+            loop.call_soon_threadsafe(loop.stop)
+            if thread is not None:  # pragma: no branch
+                thread.join(timeout=10)
+            loop.close()
+
+    def find_channel(self, name: str) -> str | None:
+        """Resolve a room alias (#room:server) to its room ID.
+
+        Args:
+            name: Room ID (!room:server) or alias (#room:server).
+
+        Returns:
+            The room ID, or ``None`` if *name* is empty or unresolvable.
+        """
+        if not name:
+            return None
+        if not name.startswith("#") or not self._client:
+            return name
+        try:
+            resp = self._run(self._client.room_resolve_alias(name))
+            room_id = getattr(resp, "room_id", "")
+            return str(room_id) if room_id else None
+        except Exception:
+            return None
+
     def join_channel(self, channel_id: str) -> None:
         """Join a Matrix room."""
         if self._client:  # pragma: no branch
-            asyncio.run(self._client.join(channel_id))
+            self._run(self._client.join(channel_id))
 
     def poll_messages(
         self, channel_id: str, oldest: str, limit: int = 10
@@ -86,7 +154,7 @@ class MatrixChannelBackend(ToolMethodBackend):
             async def _sync() -> Any:
                 return await self._client.sync(since=self._next_batch or None, timeout=0)
 
-            resp = asyncio.run(_sync())
+            resp = self._run(_sync())
             if hasattr(resp, "next_batch"):  # pragma: no branch
                 self._next_batch = resp.next_batch
             messages: list[dict[str, Any]] = []
@@ -119,7 +187,7 @@ class MatrixChannelBackend(ToolMethodBackend):
                 content={"msgtype": "m.text", "body": text},
             )
 
-        asyncio.run(_send())
+        self._run(_send())
 
     def wait_for_reply(
         self,
@@ -156,7 +224,7 @@ class MatrixChannelBackend(ToolMethodBackend):
             async def _get() -> Any:
                 return await self._client.joined_rooms()
 
-            resp = asyncio.run(_get())
+            resp = self._run(_get())
             rooms = [{"id": r} for r in getattr(resp, "rooms", [])]
             return json.dumps({"ok": True, "rooms": rooms}, indent=2)[:8000]
         except Exception as e:
@@ -178,7 +246,7 @@ class MatrixChannelBackend(ToolMethodBackend):
             async def _join() -> Any:
                 return await self._client.join(room_id_or_alias)
 
-            resp = asyncio.run(_join())
+            resp = self._run(_join())
             return json.dumps({"ok": True, "room_id": getattr(resp, "room_id", room_id_or_alias)})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
@@ -199,7 +267,7 @@ class MatrixChannelBackend(ToolMethodBackend):
             async def _leave() -> None:
                 await self._client.room_leave(room_id)
 
-            asyncio.run(_leave())
+            self._run(_leave())
             return json.dumps({"ok": True})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
@@ -225,7 +293,7 @@ class MatrixChannelBackend(ToolMethodBackend):
                     content={"msgtype": "m.text", "body": text},
                 )
 
-            resp = asyncio.run(_send())
+            resp = self._run(_send())
             return json.dumps({"ok": True, "event_id": getattr(resp, "event_id", "")})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
@@ -251,7 +319,7 @@ class MatrixChannelBackend(ToolMethodBackend):
                     content={"msgtype": "m.notice", "body": text},
                 )
 
-            resp = asyncio.run(_send())
+            resp = self._run(_send())
             return json.dumps({"ok": True, "event_id": getattr(resp, "event_id", "")})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
@@ -272,10 +340,10 @@ class MatrixChannelBackend(ToolMethodBackend):
             async def _get() -> Any:
                 return await self._client.joined_members(room_id)
 
-            resp = asyncio.run(_get())
+            resp = self._run(_get())
             members = [
-                {"user_id": uid, "display_name": m.display_name or ""}
-                for uid, m in getattr(resp, "members", {}).items()
+                {"user_id": m.user_id, "display_name": m.display_name or ""}
+                for m in getattr(resp, "members", [])
             ]
             return json.dumps({"ok": True, "members": members}, indent=2)[:8000]
         except Exception as e:
@@ -298,7 +366,7 @@ class MatrixChannelBackend(ToolMethodBackend):
             async def _invite() -> None:
                 await self._client.room_invite(room_id, user_id)
 
-            asyncio.run(_invite())
+            self._run(_invite())
             return json.dumps({"ok": True})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
@@ -321,7 +389,7 @@ class MatrixChannelBackend(ToolMethodBackend):
             async def _kick() -> None:
                 await self._client.room_kick(room_id, user_id, reason=reason)
 
-            asyncio.run(_kick())
+            self._run(_kick())
             return json.dumps({"ok": True})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
@@ -347,17 +415,18 @@ class MatrixChannelBackend(ToolMethodBackend):
         if not self._client:  # pragma: no branch
             return json.dumps({"ok": False, "error": "Not connected"})
         try:
+            from nio import RoomVisibility
 
             async def _create() -> Any:
                 return await self._client.room_create(
                     name=name,
                     topic=topic,
                     is_direct=False,
-                    visibility="public" if is_public else "private",
+                    visibility=RoomVisibility.public if is_public else RoomVisibility.private,
                     alias=alias or None,
                 )
 
-            resp = asyncio.run(_create())
+            resp = self._run(_create())
             return json.dumps({"ok": True, "room_id": getattr(resp, "room_id", "")})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
@@ -378,7 +447,7 @@ class MatrixChannelBackend(ToolMethodBackend):
             async def _get() -> Any:
                 return await self._client.get_profile(user_id)
 
-            resp = asyncio.run(_get())
+            resp = self._run(_get())
             return json.dumps(
                 {
                     "ok": True,
@@ -512,6 +581,10 @@ def _make_backend() -> MatrixChannelBackend:
 
     backend._client = AsyncClient(cfg["homeserver_url"])
     backend._client.access_token = cfg["access_token"]
+    if cfg.get("device_id"):  # pragma: no branch
+        backend._client.device_id = cfg["device_id"]
+    if cfg.get("user_id"):  # pragma: no branch
+        backend._client.user_id = cfg["user_id"]
     return backend
 
 

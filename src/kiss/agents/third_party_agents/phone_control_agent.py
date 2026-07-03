@@ -60,7 +60,7 @@ class PhoneControlChannelBackend(ToolMethodBackend):
         if not cfg:  # pragma: no branch
             self._connection_info = "No phone config found."
             return False
-        self._device_url = f"http://{cfg['device_ip']}:{cfg.get('device_port', '8080')}"
+        self._device_url = f"http://{cfg['device_ip']}:{cfg.get('device_port', 8080)}"
         self._api_key = cfg.get("api_key", "")
         try:
             resp = requests.get(self._url("/api/device/info"), headers=self._headers(), timeout=5)
@@ -77,7 +77,11 @@ class PhoneControlChannelBackend(ToolMethodBackend):
     def poll_messages(
         self, channel_id: str, oldest: str, limit: int = 10
     ) -> tuple[list[dict[str, Any]], str]:
-        """Poll for new SMS messages."""
+        """Poll for new SMS messages from the ``channel_id`` sender.
+
+        When ``channel_id`` is non-empty, SMS from other senders are dropped
+        (the cursor still advances past them); when empty, all are returned.
+        """
         try:
             params: dict[str, Any] = {"since": oldest or self._last_msg_id, "limit": limit}
             resp = requests.get(
@@ -89,14 +93,19 @@ class PhoneControlChannelBackend(ToolMethodBackend):
             for msg in data.get("messages", []):  # pragma: no branch
                 ts = str(msg.get("timestamp", ""))
                 new_oldest = ts
+                sender = msg.get("from", "")
+                if channel_id and sender != channel_id:
+                    continue
                 messages.append(
                     {
                         "ts": ts,
-                        "user": msg.get("from", ""),
+                        "user": sender,
                         "text": msg.get("body", ""),
                         "id": str(msg.get("id", "")),
                     }
                 )
+            if new_oldest:  # pragma: no branch
+                self._last_msg_id = new_oldest
             return messages, new_oldest
         except Exception:
             return [], oldest

@@ -81,7 +81,8 @@ class TelegramChannelBackend(ToolMethodBackend):
                     if not channel_id or chat_id == channel_id:  # pragma: no branch
                         messages.append(
                             {
-                                "ts": str(msg.date.timestamp()) if msg.date else "",
+                                "ts": str(msg.message_id),
+                                "date": str(msg.date.timestamp()) if msg.date else "",
                                 "user": str(msg.from_user.id) if msg.from_user else "",
                                 "text": msg.text,
                                 "message_id": str(msg.message_id),

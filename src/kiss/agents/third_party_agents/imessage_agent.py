@@ -52,6 +52,57 @@ def _run_osascript(script: str) -> tuple[str, str]:
     return result.stdout.strip(), result.stderr.strip()
 
 
+def _escape_applescript(value: str) -> str:
+    """Escape backslashes and double quotes for an AppleScript string literal."""
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _check_service(service: str) -> None:
+    """Validate the Messages service name, raising ValueError if unsupported."""
+    if service not in ("iMessage", "SMS"):
+        raise ValueError(f"Unsupported service: {service!r} (expected 'iMessage' or 'SMS')")
+
+
+def _build_send_message_script(recipient: str, text: str, service: str = "iMessage") -> str:
+    """Build the AppleScript source that sends *text* to *recipient*.
+
+    Args:
+        recipient: Phone number or Apple ID email to send to.
+        text: Message text.
+        service: "iMessage" or "SMS".
+
+    Returns:
+        AppleScript source with all interpolated values escaped.
+    """
+    _check_service(service)
+    return f'''tell application "Messages"
+    set targetService to 1st service whose service type = {service}
+    set targetBuddy to buddy "{_escape_applescript(recipient)}" of targetService
+    send "{_escape_applescript(text)}" to targetBuddy
+end tell'''
+
+
+def _build_send_attachment_script(
+    recipient: str, file_path: str, service: str = "iMessage"
+) -> str:
+    """Build the AppleScript source that sends the file at *file_path* to *recipient*.
+
+    Args:
+        recipient: Phone number or Apple ID email to send to.
+        file_path: Absolute path to the file to send.
+        service: "iMessage" or "SMS".
+
+    Returns:
+        AppleScript source with all interpolated values escaped.
+    """
+    _check_service(service)
+    return f'''tell application "Messages"
+    set targetService to 1st service whose service type = {service}
+    set targetBuddy to buddy "{_escape_applescript(recipient)}" of targetService
+    send POSIX file "{_escape_applescript(file_path)}" to targetBuddy
+end tell'''
+
+
 class IMessageChannelBackend(ToolMethodBackend):
     """Channel backend for iMessage via AppleScript."""
 
@@ -81,12 +132,7 @@ class IMessageChannelBackend(ToolMethodBackend):
 
     def send_message(self, channel_id: str, text: str, thread_ts: str = "") -> None:
         """Send an iMessage."""
-        script = f'''tell application "Messages"
-    set targetService to 1st service whose service type = iMessage
-    set targetBuddy to buddy "{channel_id}" of targetService
-    send "{text}" to targetBuddy
-end tell'''
-        _run_osascript(script)
+        _run_osascript(_build_send_message_script(channel_id, text))
 
     def wait_for_reply(
         self,
@@ -112,11 +158,7 @@ end tell'''
         if sys.platform != "darwin":  # pragma: no branch
             return _PLATFORM_ERROR
         try:
-            script = f'''tell application "Messages"
-    set targetService to 1st service whose service type = {service}
-    set targetBuddy to buddy "{recipient}" of targetService
-    send "{text}" to targetBuddy
-end tell'''
+            script = _build_send_message_script(recipient, text, service)
             _, stderr = _run_osascript(script)
             if stderr:  # pragma: no branch
                 return json.dumps({"ok": False, "error": stderr})
@@ -138,11 +180,7 @@ end tell'''
         if sys.platform != "darwin":  # pragma: no branch
             return _PLATFORM_ERROR
         try:
-            script = f'''tell application "Messages"
-    set targetService to 1st service whose service type = {service}
-    set targetBuddy to buddy "{recipient}" of targetService
-    send POSIX file "{file_path}" to targetBuddy
-end tell'''
+            script = _build_send_attachment_script(recipient, file_path, service)
             _, stderr = _run_osascript(script)
             if stderr:  # pragma: no branch
                 return json.dumps({"ok": False, "error": stderr})

@@ -117,9 +117,9 @@ def _run_oauth_flow() -> Credentials | None:
     Requires ``~/.kiss/third_party_agents/gmail/credentials.json`` to exist
     (downloaded from Google Cloud Console).
 
-    In headless/Docker environments, falls back to ``run_console()`` which
-    prints a URL and reads the auth code from stdin instead of opening a
-    browser window.
+    In headless/Docker environments, runs ``run_local_server`` with
+    ``open_browser=False`` so the auth URL is printed for manual visiting
+    instead of a browser window being opened.
 
     Returns:
         New Credentials object, or None if credentials.json not found.
@@ -129,7 +129,7 @@ def _run_oauth_flow() -> Credentials | None:
         return None
     flow = InstalledAppFlow.from_client_secrets_file(str(creds_path), _SCOPES)
     if is_headless_environment():  # pragma: no branch
-        creds = cast(Credentials, flow.run_console())
+        creds = cast(Credentials, flow.run_local_server(port=0, open_browser=False))
     else:
         creds = cast(Credentials, flow.run_local_server(port=0))
     _save_credentials(creds)
@@ -321,6 +321,7 @@ class GmailChannelBackend(ToolMethodBackend):
                             ),
                             "id": stub["id"],
                             "thread_id": msg.get("threadId", ""),
+                            "thread_ts": msg.get("threadId", ""),
                         }
                     )
                 except Exception:
@@ -329,18 +330,78 @@ class GmailChannelBackend(ToolMethodBackend):
         except Exception:
             return [], oldest
 
+    def _thread_reply_headers(self, thread_id: str) -> dict[str, str]:
+        """Return the From/Subject headers of the newest message in a thread.
+
+        Args:
+            thread_id: Gmail thread ID.
+
+        Returns:
+            Header name -> value dict, or empty dict if the thread cannot
+            be fetched.
+        """
+        assert self._service is not None
+        try:
+            thread = (
+                self._service.users()
+                .threads()
+                .get(
+                    userId="me",
+                    id=thread_id,
+                    format="metadata",
+                    metadataHeaders=["From", "Subject"],
+                )
+                .execute()
+            )
+            msgs = thread.get("messages", [])
+            if not msgs:  # pragma: no branch
+                return {}
+            headers = msgs[-1].get("payload", {}).get("headers", [])
+            return {h["name"]: h["value"] for h in headers}
+        except Exception:
+            return {}
+
     def send_message(self, channel_id: str, text: str, thread_ts: str = "") -> None:
         """Send an email (reply to a thread if thread_ts provided).
 
+        The recipient is ``channel_id`` when it is an email address
+        (contains ``"@"``). When replying to a thread (``thread_ts`` given)
+        and ``channel_id`` is not an address (e.g. a label ID such as
+        ``"INBOX"``), the recipient and subject are resolved from the
+        newest message in the thread instead.
+
         Args:
-            channel_id: Recipient email address.
+            channel_id: Recipient email address, or a label ID when replying
+                to a thread.
             text: Email body text.
-            thread_ts: Thread ID to reply to (optional).
+            thread_ts: Gmail thread ID to reply to (optional).
+
+        Raises:
+            ValueError: If no recipient email address can be determined.
         """
         assert self._service is not None
+        to = channel_id if "@" in channel_id else ""
+        subject = "" if thread_ts else "Message from KISS Agent"
+        if thread_ts:
+            headers = self._thread_reply_headers(thread_ts)
+            if not to:
+                to = headers.get("From", "")
+            orig_subject = headers.get("Subject", "")
+            if orig_subject:  # pragma: no branch
+                subject = (
+                    orig_subject
+                    if orig_subject.lower().startswith("re:")
+                    else f"Re: {orig_subject}"
+                )
+        if not to:
+            raise ValueError(
+                f"Cannot send Gmail message: {channel_id!r} is not an email "
+                "address and no recipient could be resolved from the thread."
+            )
         msg = MIMEMultipart()
-        msg["to"] = channel_id
-        msg["subject"] = "Re: " if thread_ts else "Message from KISS Agent"
+        msg["to"] = to
+        if subject:  # pragma: no branch
+            msg["subject"] = subject
         msg.attach(MIMEText(text, "plain"))
         raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
         body: dict[str, Any] = {"raw": raw}
@@ -367,6 +428,16 @@ class GmailChannelBackend(ToolMethodBackend):
         """
         assert self._service is not None
         seen: set[str] = set()
+        try:
+            existing = (
+                self._service.users()
+                .threads()
+                .get(userId="me", id=thread_ts, format="minimal")
+                .execute()
+            )
+            seen.update(m["id"] for m in existing.get("messages", []))
+        except Exception:
+            pass
 
         def poll() -> list[dict[str, Any]]:
             try:
