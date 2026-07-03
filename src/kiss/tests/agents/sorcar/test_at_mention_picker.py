@@ -7,8 +7,10 @@
 Covers the prompt_toolkit dropdown added in
 :mod:`kiss.agents.sorcar.cli_prompt`: pressing ``@`` must immediately
 offer the project's files and folders, Up/Down must navigate the menu,
-and Tab/Enter must insert the highlighted ``./<path>`` mention
-without submitting the line.
+and Tab or Enter must insert the highlighted ``./<path>`` mention
+without submitting the line.  Outside the ``@``-mention file picker
+(predictive history, slash commands, ``/model``) Enter must never
+accept a completion candidate — it submits the typed text as-is.
 """
 
 from __future__ import annotations
@@ -249,13 +251,50 @@ def test_predictive_arrow_down_then_tab_accepts(tmp_path: Path) -> None:
         _restore(saved)
 
 
+def test_predictive_arrow_down_then_enter_submits_typed_text(
+    tmp_path: Path,
+) -> None:
+    """End-to-end: typing + Down + Enter submits the typed prefix.
+
+    Enter must never accept the highlighted predictive suggestion —
+    only Tab does.  The submitted line is exactly what the user typed.
+    """
+    saved = _redirect(tmp_path)
+    try:
+        th._add_task("refactor the cli_prompt module")
+        completer = CliCompleter(str(tmp_path))
+        hist = tmp_path / "hist"
+        with create_pipe_input() as pipe:
+            def _send_keys() -> None:
+                pipe.send_text("\x1b[B")  # Down: highlight the suggestion
+                pipe.send_text("\r")  # Enter: submit typed text as-is
+
+            timer = threading.Timer(0.5, _send_keys)
+            pipe.send_text("ref")
+            timer.start()
+            try:
+                with create_app_session(input=pipe, output=DummyOutput()):
+                    reader = PtkLineReader(completer, hist)
+                    line = reader.read("> ")
+            finally:
+                timer.cancel()
+        assert line == "ref", (
+            f"Enter must submit the typed prefix, not the suggestion: {line!r}"
+        )
+    finally:
+        if th._db_conn is not None:
+            th._db_conn.close()
+            th._db_conn = None
+        _restore(saved)
+
+
 def test_arrow_down_then_enter_selects_mention(tmp_path: Path) -> None:
     """End-to-end: ``@`` + Down + Enter inserts the mention, Enter submits.
 
-    Drives a real PromptSession through a pipe: the first Enter lands
-    while a completion is highlighted, so it must *insert* the
-    ``./<path>`` mention (not submit); the second Enter submits the
-    line.
+    The ``@``-mention file picker is the one menu where Enter still
+    accepts: the first Enter lands while a completion is highlighted,
+    so it must *insert* the ``./<path>`` mention (not submit); the
+    second Enter submits the line.
     """
     project = _make_project(tmp_path)
     completer = CliCompleter(str(project))
