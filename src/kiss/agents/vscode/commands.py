@@ -1138,7 +1138,9 @@ class _CommandsMixin:
                 "Input fast-completes (Tab): @path mentions files, "
                 "/ completes commands, a command followed by a space "
                 "completes its argument options (e.g. /resume --task, "
-                "/model list, /skills <name>), and typing a prefix of a "
+                "/model list, /skills <name>), a value-taking flag "
+                "completes its value (--task pops recent task ids, "
+                "--model pops model names), and typing a prefix of a "
                 "previous task suggests its completion.",
             )
             text = "\n".join(lines)
