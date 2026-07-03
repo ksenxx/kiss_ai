@@ -28,7 +28,13 @@ extension precisely:
   ``/cost``, ``/context``, ``/exit`` …).  Typing a command followed by
   a space pops its *argument options* (see :data:`SLASH_ARG_OPTIONS`):
   ``/resume `` → ``--task`` / ``--limit``, ``/model `` → ``list`` plus
-  every model name, ``/skills `` → the discovered skill names.
+  every model name, ``/skills `` → the discovered skill names.  A
+  value-taking flag followed by a space completes the flag's *value*
+  (see :data:`_FLAG_VALUE_RE`): ``--task `` pops the recent task ids
+  (shown as ``<id>: <one-line description>``, inserting only the id)
+  and ``--model `` pops the matching model names in the same order as
+  the extension's model picker (recently used first, then grouped by
+  vendor, most expensive first).
 * custom slash commands defined as Markdown files in
   ``~/.kiss/commands`` (user) and ``<project>/.kiss/commands``
   (project), plus Claude Code's ``~/.claude/commands`` and
@@ -98,6 +104,7 @@ from kiss.agents.sorcar.persistence import (
     _default_kiss_dir,
     _ensure_kiss_dir,
     _load_file_usage,
+    _load_history,
     _prefix_match_tasks,
 )
 from kiss.agents.vscode.helpers import (
@@ -181,6 +188,15 @@ SLASH_ARG_OPTIONS: dict[str, dict[str, str]] = {
 # options are completed by :meth:`CliCompleter._slash_arg_matches`.
 _SLASH_ARG_RE = re.compile(r"^\s*(/\S+)\s")
 
+# ``--task <partial>`` / ``--model <partial>`` at the end of a slash-
+# command line: the flag's *value* is completed by
+# :meth:`CliCompleter._flag_value_matches` — recent task ids for
+# ``--task``, model names (in model-picker order) for ``--model``.
+_FLAG_VALUE_RE = re.compile(r"(--task|--model)\s+(\S*)$")
+
+# Longest one-line task description shown next to a task-id candidate.
+_TASK_DESC_WIDTH = 48
+
 # Bare words (no leading slash) that also exit, matching Claude Code.
 _EXIT_WORDS = {"exit", "quit"}
 
@@ -206,6 +222,107 @@ def _readline_prompt(prompt: str) -> str:
         The prompt with every SGR sequence wrapped in the markers.
     """
     return _ANSI_SGR_RE.sub("\x01\\1\x02", prompt)
+
+
+def _clip_task_description(task: str) -> str:
+    """Collapse a task's text into one clipped dropdown-description line.
+
+    Args:
+        task: The full (possibly multi-line) task text.
+
+    Returns:
+        The task text with all whitespace runs collapsed to single
+        spaces, clipped to :data:`_TASK_DESC_WIDTH` characters with a
+        trailing ellipsis when longer.
+    """
+    desc = " ".join(task.split())
+    if len(desc) > _TASK_DESC_WIDTH:
+        desc = desc[: _TASK_DESC_WIDTH - 1] + "…"
+    return desc
+
+
+def _recent_task_ids(partial: str, limit: int = 20) -> list[tuple[str, str]]:
+    """Return ``(task_id, description)`` for recent tasks, newest first.
+
+    Candidates come from the shared history database (the same source
+    as ``/resume``'s listing); only ids starting with *partial* are
+    kept, and each description is the task's text collapsed to one
+    clipped line via :func:`_clip_task_description`.
+
+    Args:
+        partial: Typed id prefix; empty keeps every recent task.
+        limit: Maximum number of history entries to consider.
+
+    Returns:
+        Up to *limit* ``(task_id, description)`` pairs.
+    """
+    out: list[tuple[str, str]] = []
+    for entry in _load_history(limit=limit):
+        task_id = str(entry.get("id", ""))
+        if task_id and task_id.startswith(partial):
+            out.append(
+                (task_id, _clip_task_description(str(entry.get("task", ""))))
+            )
+    return out
+
+
+def picker_ordered_models(query: str) -> list[tuple[str, str]]:
+    """Return ``(name, group)`` for models matching *query*, picker-ordered.
+
+    Reproduces the VS Code extension's model-picker ordering exactly:
+    recently-used models first (usage count descending, read from the
+    shared ``model_usage`` table like the daemon's ``_get_models``),
+    then the remaining models grouped by vendor with the most
+    expensive first within each vendor — the same
+    ``(vendor_order, -price)`` sort key the daemon uses to build the
+    picker list, over the same candidates (available models that
+    support function calling).  Filtering matches the picker's search
+    box: case-insensitive substring on the model name.
+
+    Args:
+        query: Partial model name typed by the user; empty (or
+            whitespace) keeps every candidate.
+
+    Returns:
+        ``(model_name, group)`` pairs, best first — *group* is
+        ``"recently used"`` for the usage-ranked entries and the
+        vendor display name otherwise.
+    """
+    from kiss.agents.sorcar.persistence import _load_model_usage
+    from kiss.agents.vscode.helpers import model_vendor
+    from kiss.core.models.model_info import MODEL_INFO, get_available_models
+
+    names = [
+        name for name in get_available_models()
+        if name in MODEL_INFO and MODEL_INFO[name].is_function_calling_supported
+    ]
+    if not names:
+        # No provider credential configured (e.g. a fresh checkout):
+        # offer every candidate model so the menu is never empty,
+        # mirroring ``get_completion_model_names``' fallback.
+        names = [
+            name for name, info in MODEL_INFO.items()
+            if info.is_generation_supported and info.is_function_calling_supported
+        ]
+    q = query.strip().lower()
+    if q:
+        names = [name for name in names if q in name.lower()]
+
+    def base_key(name: str) -> tuple[int, float]:
+        info = MODEL_INFO[name]
+        price = float(info.input_price_per_1M) + float(info.output_price_per_1M)
+        return (model_vendor(name)[1], -price)
+
+    names.sort(key=base_key)
+    usage = _load_model_usage()
+    used = [name for name in names if usage.get(name, 0) > 0]
+    # Stable sort: usage ties keep the vendor/price base order, exactly
+    # like the webview's ``used.sort((a, b) => b.uses - a.uses)``.
+    used.sort(key=lambda name: -usage[name])
+    rest = [name for name in names if usage.get(name, 0) <= 0]
+    return [(name, "recently used") for name in used] + [
+        (name, model_vendor(name)[0]) for name in rest
+    ]
 
 
 class CliCompleter:
@@ -367,6 +484,48 @@ class CliCompleter:
             if opt.startswith(partial) and opt not in used
         ]
 
+    def _flag_value_matches(
+        self, line: str,
+    ) -> list[tuple[str, str, str]] | None:
+        """Return value completions for a trailing ``--task`` / ``--model``.
+
+        Fires when a slash-command line ends with one of the
+        value-taking flags followed by a (possibly empty) partial
+        value: ``/resume --task `` pops the recent task ids and
+        ``/cmd --model gem`` the matching model names in model-picker
+        order (see :func:`picker_ordered_models`).  Task-id candidates
+        are *displayed* as ``<id>: <one-line description>`` but the
+        accepted completion inserts only the id — no colon, no
+        description.
+
+        Args:
+            line: The full input line being completed.
+
+        Returns:
+            ``None`` when the line is not in a flag-value position
+            (the caller falls through to option / predictive
+            completion); otherwise ``(replacement, display, help)``
+            triples — *replacement* is the whole-line substitution
+            (ending in a space, bare flag value only), *display* the
+            dropdown text, and *help* its right-column note.
+        """
+        if not _SLASH_ARG_RE.match(line):
+            return None
+        m = _FLAG_VALUE_RE.search(line)
+        if not m:
+            return None
+        partial = m.group(2)
+        head = line[: len(line) - len(partial)]
+        if m.group(1) == "--task":
+            return [
+                (f"{head}{task_id} ", f"{task_id}: {desc}", "task")
+                for task_id, desc in _recent_task_ids(partial)
+            ]
+        return [
+            (f"{head}{name} ", name, group)
+            for name, group in picker_ordered_models(partial)
+        ]
+
     def _predictive_matches(self, line: str) -> list[str]:
         """Return whole-line predictive completions, best match first.
 
@@ -468,6 +627,13 @@ class CliCompleter:
         if lstripped.startswith("/") and " " not in lstripped:
             return self._slash_matches(line)
         if lstripped.startswith("/"):
+            # A trailing value-taking flag (``--task `` / ``--model ``)
+            # completes the flag's VALUE; the branch is terminal (an
+            # empty candidate list must not fall back to the option
+            # menu, which would wrongly re-offer flags as the value).
+            value_matches = self._flag_value_matches(line)
+            if value_matches is not None:
+                return [full for full, _, _ in value_matches]
             arg_matches = [full for full, _, _ in self._slash_arg_matches(line)]
             if arg_matches:
                 return arg_matches
@@ -580,7 +746,9 @@ def _print_help(work_dir: str = "") -> None:
         "\nInput fast-completes (Tab): @path mentions files, "
         "/ completes commands, a command followed by a space completes "
         "its argument options (e.g. /resume --task, /model list, "
-        "/skills <name>), and typing a prefix of a previous task "
+        "/skills <name>), a value-taking flag completes its value "
+        "(--task pops recent task ids, --model pops model names), "
+        "and typing a prefix of a previous task "
         "suggests its completion.\n"
     )
 
