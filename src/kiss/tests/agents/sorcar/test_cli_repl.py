@@ -81,12 +81,14 @@ def test_slash_command_completion(tmp_path: Path) -> None:
 
 
 def test_model_command_completion_lists_all_models(tmp_path: Path) -> None:
-    """``/model `` with no partial completes to every candidate model."""
+    """``/model `` completes ``list`` plus every candidate model."""
     from kiss.core.models.model_info import get_completion_model_names
 
     completer = CliCompleter(str(tmp_path))
     matches = completer._build_matches("/model ")
-    expected = [f"/model {n}" for n in get_completion_model_names()]
+    expected = ["/model list"] + [
+        f"/model {n}" for n in get_completion_model_names()
+    ]
     assert matches == expected
     assert matches, "expected at least one model suggestion"
 
