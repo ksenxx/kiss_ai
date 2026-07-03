@@ -212,16 +212,26 @@ class TestCmdSaveConfigHandlesHeaders(unittest.TestCase):
 
     def setUp(self) -> None:
         import kiss.agents.vscode.vscode_config as vc
+        from kiss.core import config as config_module
 
         self._orig_dir = vc.CONFIG_DIR
         self._orig_path = vc.CONFIG_PATH
         self._tmpdir = tempfile.mkdtemp()
         vc.CONFIG_DIR = Path(self._tmpdir)
         vc.CONFIG_PATH = Path(self._tmpdir) / "config.json"
+        # ``_cmd_save_config`` calls ``apply_config_to_env`` which
+        # mutates the process-global ``DEFAULT_CONFIG`` (for example
+        # ``max_budget``).  Swap in a scratch Config so the mutation
+        # cannot leak into later tests, and restore the original
+        # object in tearDown.
+        self._orig_default_config = config_module.DEFAULT_CONFIG
+        config_module.DEFAULT_CONFIG = config_module.Config()
 
     def tearDown(self) -> None:
         import kiss.agents.vscode.vscode_config as vc
+        from kiss.core import config as config_module
 
+        config_module.DEFAULT_CONFIG = self._orig_default_config
         vc.CONFIG_DIR = self._orig_dir
         vc.CONFIG_PATH = self._orig_path
         import shutil
