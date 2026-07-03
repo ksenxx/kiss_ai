@@ -293,25 +293,85 @@ function testTabAcceptsCompletion() {
   assert.strictEqual(visible(win), false);
 }
 
-// 10. Pressing Enter inside the picker accepts the selected item.
-function testEnterAcceptsCompletion() {
-  const {win} = makeWebview();
+// 10. REGRESSION — pressing Enter inside the picker must NOT accept
+//     the highlighted item: the picker closes and the typed text is
+//     submitted as-is (Tab is the only keyboard accept key).
+function testEnterDoesNotAcceptCompletion() {
+  const {win, posted} = makeWebview();
   const inp = setInput(win, 'fix');
   send(win, {
     type: 'completions',
     completions: COMPLETIONS,
     query: 'fix',
   });
-  const ev = new win.KeyboardEvent('keydown', {
-    key: 'Enter',
-    bubbles: true,
-    cancelable: true,
-  });
-  inp.dispatchEvent(ev);
+  // Explicitly highlight a candidate via keyboard navigation first.
+  inp.dispatchEvent(
+    new win.KeyboardEvent('keydown', {
+      key: 'ArrowDown',
+      bubbles: true,
+      cancelable: true,
+    }),
+  );
+  inp.dispatchEvent(
+    new win.KeyboardEvent('keydown', {
+      key: 'Enter',
+      bubbles: true,
+      cancelable: true,
+    }),
+  );
+  const submits = posted.filter(m => m.type === 'submit');
+  assert.strictEqual(
+    submits.length,
+    1,
+    'Enter with the picker open must submit the typed text',
+  );
+  assert.strictEqual(
+    submits[0].prompt,
+    'fix',
+    'Enter must submit what the user typed — never the completion',
+  );
+  assert.strictEqual(
+    visible(win),
+    false,
+    'the picker must be dismissed by Enter',
+  );
   assert.strictEqual(
     inp.value,
-    'fix the parser bug now ',
-    'Enter inside picker accepts the selected completion',
+    '',
+    'submit clears the input; the completion text must not appear',
+  );
+}
+
+// 10b. The @-mention file picker is the one picker where Enter still
+//      accepts the highlighted item, so file mentions can be
+//      completed with Enter without submitting the chat message.
+function testEnterAcceptsFileMention() {
+  const {win, posted} = makeWebview();
+  const inp = setInput(win, 'open @util');
+  send(win, {
+    type: 'files',
+    files: [
+      {type: 'file', text: 'util/index.ts'},
+      {type: 'file', text: 'util/parse.ts'},
+    ],
+    prefix: 'util',
+  });
+  assert.strictEqual(visible(win), true, 'file picker opens');
+  inp.dispatchEvent(
+    new win.KeyboardEvent('keydown', {
+      key: 'Enter',
+      bubbles: true,
+      cancelable: true,
+    }),
+  );
+  assert.ok(
+    inp.value.indexOf('util/index.ts') !== -1,
+    `Enter in the @-mention picker must insert the mention: ${inp.value}`,
+  );
+  assert.strictEqual(
+    posted.filter(m => m.type === 'submit').length,
+    0,
+    'Enter in the @-mention picker must not submit the message',
   );
 }
 
@@ -701,7 +761,8 @@ const tests = [
   testClickAcceptsCompletion,
   testArrowDownMovesSelection,
   testTabAcceptsCompletion,
-  testEnterAcceptsCompletion,
+  testEnterDoesNotAcceptCompletion,
+  testEnterAcceptsFileMention,
   testEscapeDismissesPicker,
   testEmptyCompletionsHidesPicker,
   testGhostStillWorks,
