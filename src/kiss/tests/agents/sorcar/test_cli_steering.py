@@ -397,10 +397,17 @@ class TestInputBoxCompletionMenu:
         box.feed(b"\x1b[B", lambda _s: None, lambda: None)
         assert box._menu_sel == 1
         assert box.buf == "/"
-        # Tab accepts the highlighted candidate and closes the menu.
+        # Tab accepts the highlighted candidate.  On a slash-command
+        # line the accept chains: the completer is re-queried against
+        # the new buffer so the next-level menu pops immediately.  The
+        # just-accepted line itself is filtered out as a no-op
+        # candidate, so this constant completer re-opens the menu with
+        # the two remaining candidates at sel=0.
         box.feed(b"\t", lambda _s: None, lambda: None)
         assert box.buf == "/clear "
-        assert box._menu_open is False
+        assert box._menu_open is True
+        assert box._menu_items == ["/help ", "/quit "]
+        assert box._menu_sel == 0
 
     def test_down_arrow_navigates_menu(self) -> None:
         box = _make_box()
