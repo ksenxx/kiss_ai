@@ -9,6 +9,7 @@ import shutil
 import signal
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -222,6 +223,23 @@ class TestStreamingTimeout:
         ut = UsefulTools(stream_callback=streamed.append)
         result = ut.Bash("sleep 10", "should timeout", timeout_seconds=0.5)
         assert "timeout" in result.lower()
+
+    def test_timer_firing_after_completion_keeps_output(self, temp_test_dir):
+        """A timer that fires after the command already finished must not clobber output.
+
+        The command completes almost instantly, but a slow stream callback
+        delays the loop past the timeout, so the Timer deterministically
+        fires in the gap between command completion and ``timer.cancel()``.
+        The successful output must be preserved, not replaced with a
+        timeout error.
+        """
+        def slow_stream(_line: str) -> None:
+            time.sleep(1.0)
+
+        ut = UsefulTools(stream_callback=slow_stream)
+        result = ut.Bash("echo hi", "quick command", timeout_seconds=0.5)
+        assert "timeout" not in result.lower()
+        assert "hi" in result
 
 
 if __name__ == "__main__":

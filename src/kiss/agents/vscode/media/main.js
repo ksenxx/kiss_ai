@@ -1119,7 +1119,9 @@
     if (tab.contentEditor && tab.contentEditor.layout) {
       try {
         tab.contentEditor.layout();
-      } catch (e) {}
+      } catch (_e) {
+        /* ignore layout failures */
+      }
     }
   }
 
@@ -1165,7 +1167,9 @@
     if (tab.contentEditor) {
       try {
         tab.contentEditor.dispose();
-      } catch (e) {}
+      } catch (_e) {
+        /* ignore dispose failures */
+      }
       tab.contentEditor = null;
     }
     if (tab.contentViewEl && tab.contentViewEl.parentNode) {
@@ -1307,7 +1311,9 @@
         holder.appendChild(pre);
         try {
           if (window.hljs) window.hljs.highlightElement(code);
-        } catch (e) {}
+        } catch (_e) {
+          /* ignore highlight failures */
+        }
       });
   }
 
@@ -1317,7 +1323,9 @@
     if (tab.contentEditor) {
       try {
         tab.contentEditor.dispose();
-      } catch (e) {}
+      } catch (_e) {
+        /* ignore dispose failures */
+      }
       tab.contentEditor = null;
     }
     if (tab.contentViewEl && tab.contentViewEl.parentNode) {

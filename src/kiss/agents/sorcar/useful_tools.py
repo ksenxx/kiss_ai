@@ -888,6 +888,11 @@ class UsefulTools:
 
         def _kill() -> None:
             nonlocal timed_out
+            if process.poll() is not None:
+                # Command already finished — the timer fired in the gap
+                # between completion and ``timer.cancel()``; do not clobber
+                # a successful result with a timeout error.
+                return
             timed_out = True
             _kill_process_group(process)
 

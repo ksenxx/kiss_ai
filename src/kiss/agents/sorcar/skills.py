@@ -49,6 +49,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from xml.sax.saxutils import escape as xml_escape
 
 import yaml
 
@@ -303,8 +304,8 @@ def _catalog_xml(skills: dict[str, Skill]) -> str:
     lines = ["<available_skills>"]
     for skill in sorted(skills.values(), key=lambda s: s.name):
         lines.append("<skill>")
-        lines.append(f"<name>{skill.name}</name>")
-        lines.append(f"<description>{skill.description}</description>")
+        lines.append(f"<name>{xml_escape(skill.name)}</name>")
+        lines.append(f"<description>{xml_escape(skill.description)}</description>")
         lines.append("</skill>")
     lines.append("</available_skills>")
     return "\n".join(lines)
