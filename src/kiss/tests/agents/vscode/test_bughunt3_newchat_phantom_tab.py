@@ -14,25 +14,39 @@ tab id.  ``selectModel`` had the same hole via ``_get_tab``.
 
 from __future__ import annotations
 
+import shutil
+import tempfile
 import unittest
 from typing import Any
 
+import kiss.agents.sorcar.persistence as _pm
+import kiss.agents.vscode.vscode_config as _vc
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.vscode.server import VSCodeServer
-from kiss.agents.vscode.vscode_config import load_config, save_config
 
 
 class TestEmptyTabIdPhantom(unittest.TestCase):
     """Empty tabId must not create an undisposable registry entry."""
 
     def setUp(self) -> None:
+        # ``selectModel`` persists ``last_model`` into config.json and
+        # increments the bogus test model's ("m-x") count in the SQLite
+        # ``model_usage`` table via ``_record_model_usage``.  Redirect
+        # BOTH stores into a private temp dir so neither the developer's
+        # real ``~/.kiss`` data nor later tests in this process (e.g.
+        # ``_load_model_usage() == {}`` assertions) get polluted.
+        _pm._close_db()
+        self._tmpdir = tempfile.mkdtemp(prefix="kiss-bughunt3-")
+        self._saved_paths = (
+            _pm._KISS_DIR, _pm._DB_PATH, _vc.CONFIG_DIR, _vc.CONFIG_PATH,
+        )
+        _pm._KISS_DIR = type(_pm._KISS_DIR)(self._tmpdir)
+        _pm._DB_PATH = type(_pm._DB_PATH)(self._tmpdir) / "sorcar.db"
+        _vc.CONFIG_DIR = type(_vc.CONFIG_DIR)(self._tmpdir)
+        _vc.CONFIG_PATH = type(_vc.CONFIG_PATH)(self._tmpdir) / "config.json"
+
         self.server = VSCodeServer()
         self.events: list[dict[str, Any]] = []
-        # ``selectModel`` persists ``last_model`` into config.json via
-        # ``_record_model_usage``; snapshot it so the bogus test model
-        # ("m-x") does not poison every later ``SorcarAgent`` run in
-        # this process (``model_name or _load_last_model()``).
-        self._saved_last_model = load_config().get("last_model")
 
         def capture(event: dict[str, Any]) -> None:
             self.events.append(event)
@@ -41,12 +55,11 @@ class TestEmptyTabIdPhantom(unittest.TestCase):
 
     def tearDown(self) -> None:
         _RunningAgentState.running_agent_states.clear()
-        cfg = load_config()
-        if self._saved_last_model is None:
-            cfg.pop("last_model", None)
-        else:
-            cfg["last_model"] = self._saved_last_model
-        save_config(cfg)
+        _pm._close_db()
+        (
+            _pm._KISS_DIR, _pm._DB_PATH, _vc.CONFIG_DIR, _vc.CONFIG_PATH,
+        ) = self._saved_paths
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_new_chat_empty_tab_id_creates_no_phantom(self) -> None:
         self.server._handle_command({"type": "newChat"})
