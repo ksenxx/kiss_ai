@@ -697,6 +697,11 @@
   function saveCurrentTab() {
     const tab = getTab(activeTabId);
     if (!tab) return;
+    // Content tabs (file viewers) own no chat DOM: their view lives
+    // in #content-tab-area and the chat surface was already saved
+    // when the user left the last chat tab.  Capturing here would
+    // clobber that saved state with the empty, hidden chat surface.
+    if (tab.isContentTab) return;
     // Save welcome visibility and detach from O before capturing fragment
     tab.welcomeVisible = welcome ? welcome.style.display !== 'none' : true;
     if (welcome && welcome.parentNode === O) O.removeChild(welcome);
@@ -757,6 +762,11 @@
   }
 
   function restoreTab(tab) {
+    // Re-reveal the chat surface if a content tab (file viewer) was
+    // showing.  Idempotent; keeps every restoreTab caller (tab
+    // switch, tab close, history click, new chat, ...) correct
+    // without each one knowing about content tabs.
+    hideContentArea();
     activeTabId = tab.id;
     // Restore DOM subtree from fragment (preserves element references)
     O.innerHTML = '';
@@ -874,10 +884,19 @@
       el.className =
         'chat-tab' +
         (tab.id === activeTabId ? ' active' : '') +
-        (tab.isSubagentTab ? ' subagent-tab' : '');
+        (tab.isSubagentTab ? ' subagent-tab' : '') +
+        (tab.isContentTab ? ' content-tab' : '');
       el.dataset.tabId = tab.id;
 
-      if (tab.isSubagentTab) {
+      if (tab.isContentTab) {
+        // File-viewer tab indicator — a document glyph in place of
+        // the running spinner / status dot chat tabs use.
+        const fileIcon = document.createElement('span');
+        fileIcon.className = 'content-tab-icon';
+        fileIcon.textContent = '\uD83D\uDCC4';
+        fileIcon.title = tab.contentPath || '';
+        el.appendChild(fileIcon);
+      } else if (tab.isSubagentTab) {
         // Subagent tab indicator — purple ◉ (fisheye) glyph in the
         // tab title.  While the sub-agent is running we pulse its
         // opacity via the default ``.subagent-indicator`` animation.
@@ -973,9 +992,18 @@
 
   function switchToTab(tabId) {
     if (tabId === activeTabId) return;
-    saveCurrentTab();
     const tab = getTab(tabId);
     if (!tab) return;
+    saveCurrentTab();
+    if (tab.isContentTab) {
+      // File-viewer tab: swap the visible surface only.  No backend
+      // message, no chat save/restore, no running-state churn — the
+      // chat tabs' state is untouched by construction.
+      activeTabId = tabId;
+      showContentTab(tab);
+      renderTabBar();
+      return;
+    }
     restoreTab(tab);
     renderTabBar();
     persistTabState();
@@ -999,6 +1027,14 @@
       return t.id === tabId;
     });
     if (origIdx < 0) return;
+    if (tabs[origIdx].isContentTab) {
+      // File-viewer tabs are purely client-side: never notify the
+      // backend (a ``closeTab`` command would be meaningless — the
+      // backend never learned this tab id) and never touch the chat
+      // tabs' state.
+      closeContentTab(tabId);
+      return;
+    }
     // Collect *tabId* and every (transitive) descendant via
     // ``parentTabId`` chains so closing a parent tab also closes the
     // tabs of its sub-agents — and the sub-agents of those sub-agents,
@@ -1034,22 +1070,308 @@
       // Switch to an adjacent tab (clamp to the new array length).
       const newIdx = Math.min(origIdx, tabs.length - 1);
       const newTab = tabs[newIdx];
-      restoreTab(newTab);
-      // Restore running state for the new tab.  Keep the restored
-      // ``t0``/``endTs`` anchors (see switchToTab).
-      setRunningState(newTab.isRunning);
-      if (!newTab.isRunning) {
-        stopTimer();
-        removeSpinner();
-      }
-      applyChevronState(
-        !!newTab.panelsExpandedMap[currentTaskName],
-        currentTaskName,
-      );
-      focusInputWithRetry();
+      activateAdjacentTab(newTab);
     }
     renderTabBar();
     persistTabState();
+  }
+
+  // --- Content tabs (remote-webapp file viewer) ---
+  // A content tab shows a file the user clicked in a chat webview of
+  // the remote webapp: code in a read-only Monaco editor, .html/.htm
+  // rendered as a real webpage in a sandboxed iframe.  Content tabs
+  // are purely client-side: the backend never learns their tab ids,
+  // they are excluded from chat-state save/restore/persist, and
+  // closing them never posts a message — so they cannot interfere
+  // with the chat tabs of agents in any way.
+  let contentArea = null;
+  let _monacoPromise = null;
+
+  /** Lazily create the hidden container that hosts content-tab views. */
+  function ensureContentArea() {
+    if (contentArea) return contentArea;
+    contentArea = document.createElement('div');
+    contentArea.id = 'content-tab-area';
+    contentArea.style.display = 'none';
+    const app = document.getElementById('app');
+    const inputArea = document.getElementById('input-area');
+    if (app) app.insertBefore(contentArea, inputArea || null);
+    return contentArea;
+  }
+
+  /** Show/hide the chat surface (output, task panel, input area). */
+  function setChatSurfaceVisible(visible) {
+    ['output', 'task-panel', 'input-area'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.style.display = visible ? '' : 'none';
+    });
+  }
+
+  /** Reveal *tab*'s content view and hide the chat surface. */
+  function showContentTab(tab) {
+    const area = ensureContentArea();
+    setChatSurfaceVisible(false);
+    area.style.display = '';
+    Array.from(area.children).forEach(v => {
+      v.style.display = 'none';
+    });
+    if (tab.contentViewEl) tab.contentViewEl.style.display = '';
+    if (tab.contentEditor && tab.contentEditor.layout) {
+      try {
+        tab.contentEditor.layout();
+      } catch (e) {}
+    }
+  }
+
+  /** Hide the content area and re-reveal the chat surface. */
+  function hideContentArea() {
+    if (contentArea) contentArea.style.display = 'none';
+    setChatSurfaceVisible(true);
+  }
+
+  /**
+   * Make *newTab* active after a close: content tabs get their view
+   * swapped in; chat tabs go through the regular restore pipeline.
+   */
+  function activateAdjacentTab(newTab) {
+    if (newTab.isContentTab) {
+      activeTabId = newTab.id;
+      showContentTab(newTab);
+      return;
+    }
+    restoreTab(newTab);
+    // Restore running state for the new tab.  Keep the restored
+    // ``t0``/``endTs`` anchors (see switchToTab).
+    setRunningState(newTab.isRunning);
+    if (!newTab.isRunning) {
+      stopTimer();
+      removeSpinner();
+    }
+    applyChevronState(
+      !!newTab.panelsExpandedMap[currentTaskName],
+      currentTaskName,
+    );
+    focusInputWithRetry();
+  }
+
+  /** Close a content tab locally — the backend is never notified. */
+  function closeContentTab(tabId) {
+    const idx = tabs.findIndex(t => {
+      return t.id === tabId;
+    });
+    if (idx < 0) return;
+    const tab = tabs[idx];
+    tabs.splice(idx, 1);
+    if (tab.contentEditor) {
+      try {
+        tab.contentEditor.dispose();
+      } catch (e) {}
+      tab.contentEditor = null;
+    }
+    if (tab.contentViewEl && tab.contentViewEl.parentNode) {
+      tab.contentViewEl.parentNode.removeChild(tab.contentViewEl);
+    }
+    tab.contentViewEl = null;
+    if (activeTabId === tabId) {
+      if (tabs.length === 0) {
+        hideContentArea();
+        createNewTab();
+        return;
+      }
+      const newIdx = Math.min(idx, tabs.length - 1);
+      activateAdjacentTab(tabs[newIdx]);
+    }
+    renderTabBar();
+    persistTabState();
+  }
+
+  /** Map a lowercased file name to a Monaco language id. */
+  function languageFromPath(lowerName) {
+    const dot = lowerName.lastIndexOf('.');
+    const ext = dot >= 0 ? lowerName.slice(dot + 1) : '';
+    const map = {
+      py: 'python',
+      js: 'javascript',
+      mjs: 'javascript',
+      cjs: 'javascript',
+      jsx: 'javascript',
+      ts: 'typescript',
+      tsx: 'typescript',
+      json: 'json',
+      md: 'markdown',
+      css: 'css',
+      scss: 'scss',
+      less: 'less',
+      html: 'html',
+      htm: 'html',
+      xml: 'xml',
+      svg: 'xml',
+      sh: 'shell',
+      bash: 'shell',
+      zsh: 'shell',
+      yaml: 'yaml',
+      yml: 'yaml',
+      toml: 'ini',
+      ini: 'ini',
+      c: 'c',
+      h: 'c',
+      cpp: 'cpp',
+      hpp: 'cpp',
+      cc: 'cpp',
+      java: 'java',
+      go: 'go',
+      rs: 'rust',
+      rb: 'ruby',
+      php: 'php',
+      sql: 'sql',
+      swift: 'swift',
+      kt: 'kotlin',
+      dockerfile: 'dockerfile',
+      tex: 'latex',
+    };
+    return map[ext] || 'plaintext';
+  }
+
+  /**
+   * Lazily load the Monaco editor from the jsDelivr CDN (AMD loader).
+   * Returns a singleton promise resolving to ``window.monaco``; a
+   * failed load resets the singleton so a later click retries.
+   */
+  function ensureMonaco() {
+    if (_monacoPromise) return _monacoPromise;
+    _monacoPromise = new Promise((resolve, reject) => {
+      if (window.monaco && window.monaco.editor) {
+        resolve(window.monaco);
+        return;
+      }
+      const base = 'https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min';
+      const timer = setTimeout(() => {
+        _monacoPromise = null;
+        reject(new Error('Monaco load timeout'));
+      }, 10000);
+      const script = document.createElement('script');
+      script.src = base + '/vs/loader.js';
+      script.onload = () => {
+        try {
+          window.require.config({paths: {vs: base + '/vs'}});
+          window.require(
+            ['vs/editor/editor.main'],
+            () => {
+              clearTimeout(timer);
+              resolve(window.monaco);
+            },
+            err => {
+              clearTimeout(timer);
+              _monacoPromise = null;
+              reject(err);
+            },
+          );
+        } catch (e) {
+          clearTimeout(timer);
+          _monacoPromise = null;
+          reject(e);
+        }
+      };
+      script.onerror = () => {
+        clearTimeout(timer);
+        _monacoPromise = null;
+        reject(new Error('Monaco loader failed'));
+      };
+      document.head.appendChild(script);
+    });
+    return _monacoPromise;
+  }
+
+  /** Render code into *holder* via Monaco, falling back to pre/hljs. */
+  function renderCodeContent(tab, holder, text, language) {
+    ensureMonaco()
+      .then(monaco => {
+        if (!holder.isConnected || tab.contentEditor) return;
+        tab.contentEditor = monaco.editor.create(holder, {
+          value: text,
+          language: language,
+          readOnly: true,
+          automaticLayout: true,
+          minimap: {enabled: false},
+          scrollBeyondLastLine: false,
+          theme: 'vs-dark',
+        });
+      })
+      .catch(() => {
+        if (!holder.isConnected || holder.firstChild) return;
+        const pre = document.createElement('pre');
+        pre.className = 'content-code-fallback';
+        const code = document.createElement('code');
+        code.textContent = text;
+        pre.appendChild(code);
+        holder.appendChild(pre);
+        try {
+          if (window.hljs) window.hljs.highlightElement(code);
+        } catch (e) {}
+      });
+  }
+
+  /** (Re)build the content view DOM for *tab* from a fileContent event. */
+  function renderContentView(tab, ev) {
+    const area = ensureContentArea();
+    if (tab.contentEditor) {
+      try {
+        tab.contentEditor.dispose();
+      } catch (e) {}
+      tab.contentEditor = null;
+    }
+    if (tab.contentViewEl && tab.contentViewEl.parentNode) {
+      tab.contentViewEl.parentNode.removeChild(tab.contentViewEl);
+    }
+    const view = document.createElement('div');
+    view.className = 'content-tab-view';
+    view.style.display = 'none';
+    area.appendChild(view);
+    tab.contentViewEl = view;
+    const lower = (ev.name || '').toLowerCase();
+    if (lower.endsWith('.html') || lower.endsWith('.htm')) {
+      // Render HTML as a real webpage, isolated in a sandboxed
+      // iframe: no same-origin access, no top-navigation, no forms —
+      // scripts may run but only inside the opaque-origin sandbox.
+      const iframe = document.createElement('iframe');
+      iframe.className = 'content-html-frame';
+      iframe.setAttribute('sandbox', 'allow-scripts');
+      iframe.srcdoc = ev.content || '';
+      view.appendChild(iframe);
+      return;
+    }
+    const holder = document.createElement('div');
+    holder.className = 'content-monaco-holder';
+    view.appendChild(holder);
+    renderCodeContent(tab, holder, ev.content || '', languageFromPath(lower));
+  }
+
+  /** Handle a ``fileContent`` reply: open (or refresh) a content tab. */
+  function handleFileContent(ev) {
+    if (ev.error) {
+      updateNotification({
+        id: 'file-open-error',
+        message: ev.error,
+        severity: 'error',
+      });
+      return;
+    }
+    const path = ev.path || '';
+    const existing = tabs.find(t => {
+      return t.isContentTab && t.contentPath === path;
+    });
+    if (existing) {
+      renderContentView(existing, ev);
+      if (activeTabId === existing.id) showContentTab(existing);
+      else switchToTab(existing.id);
+      return;
+    }
+    const tab = makeTab(ev.name || path || 'file');
+    tab.isContentTab = true;
+    tab.contentPath = path;
+    tabs.push(tab);
+    renderContentView(tab, ev);
+    switchToTab(tab.id);
   }
 
   // --- Tab context menu ---
@@ -1254,8 +1576,11 @@
     // the 'openSubagentTab' handler below).  Persisting sub tabs
     // would duplicate those reopened tabs and load the parent's
     // events into them.
+    // Content tabs (file viewers) are not persisted either: their
+    // content lives only in this page's DOM and can always be
+    // re-fetched by clicking the file link again.
     const persistable = tabs.filter(t => {
-      return !t.isSubagentTab;
+      return !t.isSubagentTab && !t.isContentTab;
     });
     const serialized = persistable.map(t => {
       // Always use activeTabId for the active tab so the persisted
@@ -3280,6 +3605,12 @@
       case 'notification':
         updateNotification(ev);
         break;
+      case 'fileContent':
+        // Remote-webapp reply to an ``openFile`` command: show the
+        // file in a dedicated content tab (Monaco for code, sandboxed
+        // iframe for HTML).  Never sent by the VS Code extension host.
+        handleFileContent(ev);
+        return;
       case 'status': {
         const evTab = findTabByEvt(ev);
         if (evTab) {
@@ -5864,16 +6195,22 @@
       const el = e.target.closest('[data-path]');
       if (el && el.dataset.path) {
         const raw = el.dataset.path;
+        // ``workDir``/``tabId`` let the remote webapp's backend
+        // resolve relative paths against the clicking tab's repo and
+        // echo the tab id on its ``fileContent`` reply.  The VS Code
+        // extension host ignores the extra fields.
+        const msg = {
+          type: 'openFile',
+          path: raw,
+          workDir: workDirForTab(activeTabId),
+          tabId: activeTabId,
+        };
         const match = raw.match(/^(.+):(\d+)$/);
         if (match) {
-          vscode.postMessage({
-            type: 'openFile',
-            path: match[1],
-            line: parseInt(match[2], 10),
-          });
-        } else {
-          vscode.postMessage({type: 'openFile', path: raw});
+          msg.path = match[1];
+          msg.line = parseInt(match[2], 10);
         }
+        vscode.postMessage(msg);
       }
     });
     // Per-tab ask-user submit/keydown listeners are wired in
