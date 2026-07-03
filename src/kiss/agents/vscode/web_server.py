@@ -798,6 +798,12 @@ def _reject_all_hunks_in_file(
                 hunks[later_hi]["cs"] += delta
 
 
+# Maximum file size (bytes) the remote webapp's ``openFile`` handler
+# will read and ship to the browser as a ``fileContent`` reply.  Keeps
+# a stray click on a huge artifact from stalling the WebSocket with a
+# multi-hundred-megabyte JSON frame.
+_OPEN_FILE_MAX_BYTES = 2_000_000
+
 _VSCODE_ONLY_COMMANDS = frozenset({
     "focusEditor",
     "webviewFocusChanged",
@@ -3865,6 +3871,18 @@ class RemoteAccessServer:
                 conn_state["work_dir"] = new_wd
         elif conn_state["work_dir"] and not cmd.get("workDir"):
             cmd["workDir"] = conn_state["work_dir"]
+        if cmd_type == "openFile" and not isinstance(
+            endpoint, asyncio.StreamWriter,
+        ):
+            # A remote-web (WSS) client clicked a file link in a chat
+            # webview.  The browser has no editor to open the file in,
+            # so the server reads the file and replies with its content
+            # for an in-page content tab.  UDS clients (VS Code
+            # windows) never reach this branch: their webview's
+            # ``openFile`` is consumed by the extension host, which
+            # opens the file in a real editor tab.
+            await self._handle_open_file(cmd, endpoint)
+            return
         if cmd_type in _VSCODE_ONLY_COMMANDS:
             return
         if cmd_type == "activeTasksQuery":
@@ -4180,6 +4198,81 @@ class RemoteAccessServer:
                 "type": "error",
                 "text": f"Failed to start KISS Sorcar update: {exc}",
             }, conn_id)
+
+    async def _handle_open_file(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None:
+        """Read a file for a remote-web client and reply with its content.
+
+        Handles the ``openFile`` command sent by ``media/main.js`` when
+        the user clicks a file link (``span[data-path]``) in a chat
+        webview served by the remote webapp.  The reply is a single
+        ``fileContent`` JSON object sent directly to the requesting
+        *endpoint* via :meth:`_endpoint_send` — never broadcast — with
+        the shape::
+
+            {"type": "fileContent", "path": <resolved abs path>,
+             "name": <basename>, "tabId": <echo of cmd tabId>,
+             "content": <utf-8 text>}          # on success
+            {"type": "fileContent", "path": ..., "name": ...,
+             "tabId": ..., "error": <message>}  # on failure
+
+        Relative paths are resolved against the command's ``workDir``
+        (stamped per-connection by :meth:`_dispatch_client_cmd`) and
+        fall back to the daemon work dir.  Missing files, unreadable
+        files, files larger than :data:`_OPEN_FILE_MAX_BYTES`, and
+        binary files (NUL byte in the first 8 KiB) produce an ``error``
+        reply instead of content.
+
+        Args:
+            cmd: The parsed ``openFile`` command (``path``, optional
+                ``workDir``, ``tabId``, ``line``).
+            endpoint: The requesting WSS connection.
+        """
+        raw_path = cmd.get("path", "")
+        if not isinstance(raw_path, str) or not raw_path:
+            return
+        work_dir = cmd.get("workDir", "")
+        if not isinstance(work_dir, str) or not work_dir:
+            work_dir = self._vscode_server.work_dir or self.work_dir
+        tab_id = cmd.get("tabId", "")
+        if not isinstance(tab_id, str):
+            tab_id = ""
+
+        def _read_file() -> dict[str, Any]:
+            reply: dict[str, Any] = {
+                "type": "fileContent",
+                "path": raw_path,
+                "name": Path(raw_path).name,
+                "tabId": tab_id,
+            }
+            try:
+                path = Path(os.path.expanduser(raw_path))
+                if not path.is_absolute() and work_dir:
+                    path = Path(work_dir) / path
+                path = path.resolve()
+                if not path.is_file():
+                    reply["error"] = f"File not found: {raw_path}"
+                    return reply
+                if path.stat().st_size > _OPEN_FILE_MAX_BYTES:
+                    reply["error"] = f"File too large to display: {raw_path}"
+                    return reply
+                data = path.read_bytes()
+                if b"\0" in data[:8192]:
+                    reply["error"] = f"Cannot display binary file: {raw_path}"
+                    return reply
+                reply["path"] = str(path)
+                reply["name"] = path.name
+                reply["content"] = data.decode("utf-8", errors="replace")
+            except OSError as exc:
+                reply["error"] = f"Failed to read {raw_path}: {exc}"
+            return reply
+
+        reply = await asyncio.to_thread(_read_file)
+        try:
+            await self._endpoint_send(endpoint, json.dumps(reply))
+        except Exception:
+            logger.debug("openFile: failed to write reply", exc_info=True)
 
     async def _handle_active_tasks_query(self, endpoint: Any) -> None:
         """Report in-flight agent tasks back to a single client.
