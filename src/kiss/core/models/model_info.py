@@ -384,6 +384,27 @@ def _match_openai_compatible_provider(
     return None
 
 
+def _load_model_class(class_name: str, error_message: str) -> Any:
+    """Return a lazily-imported model class from :mod:`kiss.core.models`.
+
+    Args:
+        class_name: Class attribute name (e.g. ``"GeminiModel"``).
+        error_message: KISSError message raised when the class failed to import.
+
+    Returns:
+        The model class.
+
+    Raises:
+        KISSError: If the class (or its SDK) could not be imported.
+    """
+    import kiss.core.models as models
+
+    cls = getattr(models, class_name)
+    if cls is None:  # pragma: no cover – all model SDKs are always installed
+        raise KISSError(error_message)
+    return cls
+
+
 def _openai_compatible(
     model_name: str,
     base_url: str,
@@ -392,11 +413,11 @@ def _openai_compatible(
     token_callback: TokenCallback | None,
     thinking_callback: ThinkingCallback | None = None,
 ) -> Model:
-    from kiss.core.models import OpenAICompatibleModel
-
-    if OpenAICompatibleModel is None:  # pragma: no cover – openai always installed
-        raise KISSError("OpenAI SDK not installed. Install 'openai' to use this model.")
-    return OpenAICompatibleModel(  # type: ignore[no-any-return]
+    cls = _load_model_class(
+        "OpenAICompatibleModel",
+        "OpenAI SDK not installed. Install 'openai' to use this model.",
+    )
+    return cls(  # type: ignore[no-any-return]
         model_name=model_name,
         base_url=base_url,
         api_key=api_key,
@@ -618,11 +639,9 @@ def _strip_provider_prefix(model_name: str) -> str:
     for prefix in strip_prefixes:
         if model_name.startswith(prefix):
             bare = model_name[len(prefix):]
-            if bare.startswith(_OPENAI_PREFIXES) and not bare.startswith("gpt-oss"):
-                return bare
-            if bare.startswith("claude-"):
-                return bare
-            if bare.startswith("gemini-"):
+            if bare.startswith(("claude-", "gemini-")) or (
+                bare.startswith(_OPENAI_PREFIXES) and not bare.startswith("gpt-oss")
+            ):
                 return bare
     return model_name
 
@@ -677,65 +696,34 @@ def model(
             token_callback,
             thinking_callback,
         )
-    if model_name == "text-embedding-004":
-        from kiss.core.models import GeminiModel
-
-        if GeminiModel is None:  # pragma: no cover – google-genai always installed
-            raise KISSError(
-                "Google GenAI SDK not installed. Install 'google-genai' to use Gemini models."
-            )
-        return GeminiModel(  # type: ignore[no-any-return]
+    if model_name.startswith("gemini-") or model_name == "text-embedding-004":
+        cls = _load_model_class(
+            "GeminiModel",
+            "Google GenAI SDK not installed. Install 'google-genai' to use Gemini models.",
+        )
+        return cls(  # type: ignore[no-any-return]
             model_name=model_name,
             api_key=keys.GEMINI_API_KEY,
             model_config=model_config,
             token_callback=token_callback,
             thinking_callback=thinking_callback,
         )
-    if model_name.startswith("codex/"):
-        from kiss.core.models import CodexModel
-
-        if CodexModel is None:  # pragma: no cover – always available
-            raise KISSError("CodexModel could not be loaded.")
-        return CodexModel(  # type: ignore[no-any-return]
-            model_name=model_name,
-            model_config=model_config,
-            token_callback=token_callback,
-            thinking_callback=thinking_callback,
-        )
     if model_name.startswith("claude-"):
-        from kiss.core.models import AnthropicModel
-
-        if AnthropicModel is None:  # pragma: no cover – anthropic always installed
-            raise KISSError(
-                "Anthropic SDK not installed. Install 'anthropic' to use Claude models."
-            )
-        return AnthropicModel(  # type: ignore[no-any-return]
+        cls = _load_model_class(
+            "AnthropicModel",
+            "Anthropic SDK not installed. Install 'anthropic' to use Claude models.",
+        )
+        return cls(  # type: ignore[no-any-return]
             model_name=model_name,
             api_key=keys.ANTHROPIC_API_KEY,
             model_config=model_config,
             token_callback=token_callback,
             thinking_callback=thinking_callback,
         )
-    if model_name.startswith("gemini-"):
-        from kiss.core.models import GeminiModel
-
-        if GeminiModel is None:  # pragma: no cover – google-genai always installed
-            raise KISSError(
-                "Google GenAI SDK not installed. Install 'google-genai' to use Gemini models."
-            )
-        return GeminiModel(  # type: ignore[no-any-return]
-            model_name=model_name,
-            api_key=keys.GEMINI_API_KEY,
-            model_config=model_config,
-            token_callback=token_callback,
-            thinking_callback=thinking_callback,
-        )
-    if model_name.startswith("cc/"):
-        from kiss.core.models import ClaudeCodeModel
-
-        if ClaudeCodeModel is None:  # pragma: no cover – always available
-            raise KISSError("ClaudeCodeModel could not be loaded.")
-        return ClaudeCodeModel(  # type: ignore[no-any-return]
+    if model_name.startswith("codex/") or model_name.startswith("cc/"):
+        class_name = "CodexModel" if model_name.startswith("codex/") else "ClaudeCodeModel"
+        cls = _load_model_class(class_name, f"{class_name} could not be loaded.")
+        return cls(  # type: ignore[no-any-return]
             model_name=model_name,
             model_config=model_config,
             token_callback=token_callback,
@@ -917,6 +905,41 @@ def rank_model_suggestions(query: str, names: list[str] | None = None) -> list[s
     return prefix + substring
 
 
+def _model_for_first_configured_provider(choices: dict[str, str]) -> str:
+    """Return the choice for the first provider with a configured credential.
+
+    Providers are checked in priority order: Anthropic → OpenAI → Gemini →
+    OpenRouter → Together → Claude Code CLI → Codex CLI.
+
+    Args:
+        choices: Mapping from ``config.DEFAULT_CONFIG`` API-key attribute
+            names (plus ``"cc"`` / ``"codex"`` for the subscription CLIs) to
+            the model name to return for that provider.
+
+    Returns:
+        The chosen model name, or ``"No model"`` when nothing is configured.
+    """
+    import shutil
+
+    from kiss.core.models.codex_model import find_codex_executable
+
+    keys = config_module.DEFAULT_CONFIG
+    for key_name in (
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "GEMINI_API_KEY",
+        "OPENROUTER_API_KEY",
+        "TOGETHER_API_KEY",
+    ):
+        if getattr(keys, key_name):
+            return choices[key_name]
+    if shutil.which("claude") is not None:
+        return choices["cc"]
+    if find_codex_executable() is not None:
+        return choices["codex"]
+    return "No model"
+
+
 def get_fast_model() -> str:
     """Return a cheap/fast model based on which API keys are available.
 
@@ -925,26 +948,17 @@ def get_fast_model() -> str:
     Returns:
         A fast model name for the first available provider.
     """
-    import shutil
-
-    from kiss.core.models.codex_model import find_codex_executable
-
-    keys = config_module.DEFAULT_CONFIG
-    if keys.ANTHROPIC_API_KEY:
-        return "claude-sonnet-5"
-    if keys.OPENAI_API_KEY:
-        return "gpt-4o"
-    if keys.GEMINI_API_KEY:
-        return "gemini-2.0-flash"
-    if keys.OPENROUTER_API_KEY:
-        return "openrouter/anthropic/claude-haiku-4.5"
-    if keys.TOGETHER_API_KEY:
-        return "deepseek-ai/DeepSeek-R1-0528"
-    if shutil.which("claude") is not None:
-        return "cc/haiku"
-    if find_codex_executable() is not None:
-        return "codex/default"
-    return "No model"
+    return _model_for_first_configured_provider(
+        {
+            "ANTHROPIC_API_KEY": "claude-sonnet-5",
+            "OPENAI_API_KEY": "gpt-4o",
+            "GEMINI_API_KEY": "gemini-2.0-flash",
+            "OPENROUTER_API_KEY": "openrouter/anthropic/claude-haiku-4.5",
+            "TOGETHER_API_KEY": "deepseek-ai/DeepSeek-R1-0528",
+            "cc": "cc/haiku",
+            "codex": "codex/default",
+        }
+    )
 
 
 def get_default_model() -> str:
@@ -953,26 +967,17 @@ def get_default_model() -> str:
     Priority order: Anthropic > OpenAI > Gemini > OpenRouter > Together AI > Claude Code CLI.
     Falls back to ``"No model"`` if no keys are set.
     """
-    import shutil
-
-    from kiss.core.models.codex_model import find_codex_executable
-
-    keys = config_module.DEFAULT_CONFIG
-    if keys.ANTHROPIC_API_KEY:
-        return "claude-fable-5"
-    if keys.OPENAI_API_KEY:
-        return "gpt-5.5-xhigh"
-    if keys.GEMINI_API_KEY:
-        return "gemini-3.1-pro-preview"
-    if keys.OPENROUTER_API_KEY:
-        return "openrouter/anthropic/claude-opus-4.7"
-    if keys.TOGETHER_API_KEY:
-        return "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8"
-    if shutil.which("claude") is not None:
-        return "cc/opus"
-    if find_codex_executable() is not None:
-        return "codex/default"
-    return "No model"
+    return _model_for_first_configured_provider(
+        {
+            "ANTHROPIC_API_KEY": "claude-fable-5",
+            "OPENAI_API_KEY": "gpt-5.5-xhigh",
+            "GEMINI_API_KEY": "gemini-3.1-pro-preview",
+            "OPENROUTER_API_KEY": "openrouter/anthropic/claude-opus-4.7",
+            "TOGETHER_API_KEY": "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8",
+            "cc": "cc/opus",
+            "codex": "codex/default",
+        }
+    )
 
 
 def get_most_expensive_model(fc_only: bool = True) -> str:
@@ -1098,9 +1103,7 @@ def get_max_context_length(model_name: str) -> int:
     Returns:
         int: Maximum context length in tokens.
     """
-    stripped = _strip_provider_prefix(model_name)
-    if model_name in MODEL_INFO:
-        return MODEL_INFO[model_name].context_length
-    if stripped in MODEL_INFO:
-        return MODEL_INFO[stripped].context_length
-    raise KeyError(f"Model '{model_name}' not found in MODEL_INFO")
+    info = MODEL_INFO.get(model_name) or MODEL_INFO.get(_strip_provider_prefix(model_name))
+    if info is None:
+        raise KeyError(f"Model '{model_name}' not found in MODEL_INFO")
+    return info.context_length

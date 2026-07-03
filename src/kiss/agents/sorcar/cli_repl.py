@@ -25,7 +25,16 @@ extension precisely:
   Up/Down + Tab/Enter pick the desired completion without re-typing.
 * ``/`` slash commands matching Claude Code's quick commands
   (``/help``, ``/clear``, ``/resume``, ``/model``, ``/model list``,
-  ``/cost``, ``/context``, ``/exit`` …).
+  ``/cost``, ``/context``, ``/exit`` …).  Typing a command followed by
+  a space pops its *argument options* (see :data:`SLASH_ARG_OPTIONS`):
+  ``/resume `` → ``--task`` / ``--limit``, ``/model `` → ``list`` plus
+  every model name, ``/skills `` → the discovered skill names.  A
+  value-taking flag followed by a space completes the flag's *value*
+  (see :data:`_FLAG_VALUE_RE`): ``--task `` pops the recent task ids
+  (shown as ``<id>: <one-line description>``, inserting only the id)
+  and ``--model `` pops the matching model names in the same order as
+  the extension's model picker (recently used first, then grouped by
+  vendor, most expensive first).
 * custom slash commands defined as Markdown files in
   ``~/.kiss/commands`` (user) and ``<project>/.kiss/commands``
   (project), plus Claude Code's ``~/.claude/commands`` and
@@ -95,6 +104,7 @@ from kiss.agents.sorcar.persistence import (
     _default_kiss_dir,
     _ensure_kiss_dir,
     _load_file_usage,
+    _load_history,
     _prefix_match_tasks,
 )
 from kiss.agents.vscode.helpers import (
@@ -133,7 +143,8 @@ SLASH_COMMANDS: dict[str, str] = {
     "/clear": "Start a new chat (clear conversation context)",
     "/new": "Alias for /clear",
     "/resume": (
-        "Resume a chat: /resume <chat-id>, or list recent chats "
+        "Resume a chat: /resume <chat-id>, open a specific task with "
+        "/resume --task <task-id>, or list recent chats "
         "(/resume [--limit N], default 20)"
     ),
     "/model": (
@@ -156,6 +167,35 @@ SLASH_COMMANDS: dict[str, str] = {
     "/exit": "Exit the sorcar CLI",
     "/quit": "Alias for /exit",
 }
+
+# Argument options offered after a slash command followed by a space
+# (e.g. typing ``/resume `` pops ``--task`` / ``--limit``).  Maps
+# command -> {option: help}.  Commands absent here take no completable
+# arguments; ``/skills`` additionally completes the discovered skill
+# names (added dynamically in :meth:`CliCompleter._slash_arg_options`)
+# and ``/model`` completes model names through its dedicated
+# ``_MODEL_CMD_RE`` path (which also offers ``list``).
+SLASH_ARG_OPTIONS: dict[str, dict[str, str]] = {
+    "/resume": {
+        "--task": "Open the chat containing this task id",
+        "--limit": "How many recent chats to list (default 20)",
+    },
+    "/model": {"list": "List all generation models"},
+    "/skills": {},  # dynamic: discovered skill names
+}
+
+# ``/<cmd> `` — a slash command followed by whitespace, whose argument
+# options are completed by :meth:`CliCompleter._slash_arg_matches`.
+_SLASH_ARG_RE = re.compile(r"^\s*(/\S+)\s")
+
+# ``--task <partial>`` / ``--model <partial>`` at the end of a slash-
+# command line: the flag's *value* is completed by
+# :meth:`CliCompleter._flag_value_matches` — recent task ids for
+# ``--task``, model names (in model-picker order) for ``--model``.
+_FLAG_VALUE_RE = re.compile(r"(--task|--model)\s+(\S*)$")
+
+# Longest one-line task description shown next to a task-id candidate.
+_TASK_DESC_WIDTH = 48
 
 # Bare words (no leading slash) that also exit, matching Claude Code.
 _EXIT_WORDS = {"exit", "quit"}
@@ -182,6 +222,107 @@ def _readline_prompt(prompt: str) -> str:
         The prompt with every SGR sequence wrapped in the markers.
     """
     return _ANSI_SGR_RE.sub("\x01\\1\x02", prompt)
+
+
+def _clip_task_description(task: str) -> str:
+    """Collapse a task's text into one clipped dropdown-description line.
+
+    Args:
+        task: The full (possibly multi-line) task text.
+
+    Returns:
+        The task text with all whitespace runs collapsed to single
+        spaces, clipped to :data:`_TASK_DESC_WIDTH` characters with a
+        trailing ellipsis when longer.
+    """
+    desc = " ".join(task.split())
+    if len(desc) > _TASK_DESC_WIDTH:
+        desc = desc[: _TASK_DESC_WIDTH - 1] + "…"
+    return desc
+
+
+def _recent_task_ids(partial: str, limit: int = 20) -> list[tuple[str, str]]:
+    """Return ``(task_id, description)`` for recent tasks, newest first.
+
+    Candidates come from the shared history database (the same source
+    as ``/resume``'s listing); only ids starting with *partial* are
+    kept, and each description is the task's text collapsed to one
+    clipped line via :func:`_clip_task_description`.
+
+    Args:
+        partial: Typed id prefix; empty keeps every recent task.
+        limit: Maximum number of history entries to consider.
+
+    Returns:
+        Up to *limit* ``(task_id, description)`` pairs.
+    """
+    out: list[tuple[str, str]] = []
+    for entry in _load_history(limit=limit):
+        task_id = str(entry.get("id", ""))
+        if task_id and task_id.startswith(partial):
+            out.append(
+                (task_id, _clip_task_description(str(entry.get("task", ""))))
+            )
+    return out
+
+
+def picker_ordered_models(query: str) -> list[tuple[str, str]]:
+    """Return ``(name, group)`` for models matching *query*, picker-ordered.
+
+    Reproduces the VS Code extension's model-picker ordering exactly:
+    recently-used models first (usage count descending, read from the
+    shared ``model_usage`` table like the daemon's ``_get_models``),
+    then the remaining models grouped by vendor with the most
+    expensive first within each vendor — the same
+    ``(vendor_order, -price)`` sort key the daemon uses to build the
+    picker list, over the same candidates (available models that
+    support function calling).  Filtering matches the picker's search
+    box: case-insensitive substring on the model name.
+
+    Args:
+        query: Partial model name typed by the user; empty (or
+            whitespace) keeps every candidate.
+
+    Returns:
+        ``(model_name, group)`` pairs, best first — *group* is
+        ``"recently used"`` for the usage-ranked entries and the
+        vendor display name otherwise.
+    """
+    from kiss.agents.sorcar.persistence import _load_model_usage
+    from kiss.agents.vscode.helpers import model_vendor
+    from kiss.core.models.model_info import MODEL_INFO, get_available_models
+
+    names = [
+        name for name in get_available_models()
+        if name in MODEL_INFO and MODEL_INFO[name].is_function_calling_supported
+    ]
+    if not names:
+        # No provider credential configured (e.g. a fresh checkout):
+        # offer every candidate model so the menu is never empty,
+        # mirroring ``get_completion_model_names``' fallback.
+        names = [
+            name for name, info in MODEL_INFO.items()
+            if info.is_generation_supported and info.is_function_calling_supported
+        ]
+    q = query.strip().lower()
+    if q:
+        names = [name for name in names if q in name.lower()]
+
+    def base_key(name: str) -> tuple[int, float]:
+        info = MODEL_INFO[name]
+        price = float(info.input_price_per_1M) + float(info.output_price_per_1M)
+        return (model_vendor(name)[1], -price)
+
+    names.sort(key=base_key)
+    usage = _load_model_usage()
+    used = [name for name in names if usage.get(name, 0) > 0]
+    # Stable sort: usage ties keep the vendor/price base order, exactly
+    # like the webview's ``used.sort((a, b) => b.uses - a.uses)``.
+    used.sort(key=lambda name: -usage[name])
+    rest = [name for name in names if usage.get(name, 0) <= 0]
+    return [(name, "recently used") for name in used] + [
+        (name, model_vendor(name)[0]) for name in rest
+    ]
 
 
 class CliCompleter:
@@ -251,7 +392,12 @@ class CliCompleter:
         """
         from kiss.core.models.model_info import rank_model_suggestions
 
-        return [f"/model {name}" for name in rank_model_suggestions(query)]
+        matches = [f"/model {name}" for name in rank_model_suggestions(query)]
+        # ``/model list`` is a subcommand, not a model name; offer it
+        # alongside the model names whenever the partial matches.
+        if "list".startswith(query):
+            matches.insert(0, "/model list")
+        return matches
 
     def _slash_matches(self, line: str) -> list[str]:
         """Return slash-command completions for *line* (e.g. ``/he``).
@@ -273,6 +419,112 @@ class CliCompleter:
             if f"/{name}".startswith(token) and f"/{name} " not in matches
         )
         return matches
+
+    def _slash_arg_options(self, cmd: str) -> dict[str, str]:
+        """Return the ``{option: help}`` argument options for *cmd*.
+
+        Static options come from :data:`SLASH_ARG_OPTIONS`; for
+        ``/skills`` the discovered skill names are added dynamically
+        (each described by its ``SKILL.md`` frontmatter summary) so
+        ``/skills <Tab>`` completes real skill names.
+
+        Args:
+            cmd: The slash command token (e.g. ``"/resume"``).
+
+        Returns:
+            Mapping of completable option to its one-line help text;
+            empty when *cmd* takes no completable arguments.
+        """
+        options = dict(SLASH_ARG_OPTIONS.get(cmd, {}))
+        if cmd == "/skills":
+            try:
+                from kiss.agents.sorcar.skills import discover_skills
+
+                skills = discover_skills(self.work_dir)
+            except Exception:  # pragma: no cover - defensive discovery guard
+                logger.debug("skill discovery failed", exc_info=True)
+                skills = {}
+            for name in sorted(skills):
+                options[name] = skills[name].description or "agent skill"
+        return options
+
+    def _slash_arg_matches(self, line: str) -> list[tuple[str, str, str]]:
+        """Return argument-option completions for a ``/cmd …`` line.
+
+        Fires once a slash command is followed by whitespace (e.g.
+        ``/resume `` or ``/resume --task 5 --l``): the trailing
+        (possibly empty) token is completed against the command's
+        argument options, with options already present earlier on the
+        line filtered out.
+
+        Args:
+            line: The full input line being completed.
+
+        Returns:
+            ``(replacement, option, help)`` triples — *replacement* is
+            the whole-line substitution (ending in a space), *option*
+            the bare option shown in the dropdown, and *help* its
+            description; empty when the line is not a slash command
+            with arguments or the command has no matching options.
+        """
+        m = _SLASH_ARG_RE.match(line)
+        if not m:
+            return []
+        options = self._slash_arg_options(m.group(1))
+        if not options:
+            return []
+        tail = re.search(r"(\S*)$", line)
+        assert tail is not None  # ``\S*`` always matches (possibly empty)
+        partial = tail.group(1)
+        head = line[: len(line) - len(partial)]
+        used = set(line[m.end(1): len(line) - len(partial)].split())
+        return [
+            (f"{head}{opt} ", opt, help_)
+            for opt, help_ in options.items()
+            if opt.startswith(partial) and opt not in used
+        ]
+
+    def _flag_value_matches(
+        self, line: str,
+    ) -> list[tuple[str, str, str]] | None:
+        """Return value completions for a trailing ``--task`` / ``--model``.
+
+        Fires when a slash-command line ends with one of the
+        value-taking flags followed by a (possibly empty) partial
+        value: ``/resume --task `` pops the recent task ids and
+        ``/cmd --model gem`` the matching model names in model-picker
+        order (see :func:`picker_ordered_models`).  Task-id candidates
+        are *displayed* as ``<id>: <one-line description>`` but the
+        accepted completion inserts only the id — no colon, no
+        description.
+
+        Args:
+            line: The full input line being completed.
+
+        Returns:
+            ``None`` when the line is not in a flag-value position
+            (the caller falls through to option / predictive
+            completion); otherwise ``(replacement, display, help)``
+            triples — *replacement* is the whole-line substitution
+            (ending in a space, bare flag value only), *display* the
+            dropdown text, and *help* its right-column note.
+        """
+        if not _SLASH_ARG_RE.match(line):
+            return None
+        m = _FLAG_VALUE_RE.search(line)
+        if not m:
+            return None
+        partial = m.group(2)
+        head = line[: len(line) - len(partial)]
+        if m.group(1) == "--task":
+            return [
+                (f"{head}{task_id} ", f"{task_id}: {desc}", "task")
+                for task_id, desc in _recent_task_ids(partial)
+            ]
+        return [
+            (f"{head}{name} ", name, group)
+            for name, group in picker_ordered_models(partial)
+        ]
 
     def _predictive_matches(self, line: str) -> list[str]:
         """Return whole-line predictive completions, best match first.
@@ -360,18 +612,69 @@ class CliCompleter:
 
     def _build_matches(self, line: str) -> list[str]:
         """Compute the ordered candidate list for the current *line*."""
+        return [replacement for replacement, _ in self.build_menu(line)]
+
+    def build_menu(self, line: str) -> list[tuple[str, str]]:
+        """Compute ``(replacement, display)`` menu pairs for *line*.
+
+        Same ordered candidates as :meth:`_build_matches` (which
+        delegates here), but each candidate carries a separate menu
+        row text so the anchored steering box (see
+        :class:`~kiss.agents.sorcar.cli_steering._InputBox`) can show
+        rich rows while accepting inserts only the replacement:
+
+        * ``--task`` values display ``<id>: <one-line task
+          description>`` but insert only the bare id;
+        * ``--model`` values display ``<name> — <picker group>``
+          (recently used / vendor) but insert only the name;
+        * argument options display ``<option> — <help>``;
+        * every other category (slash commands, ``@``-mentions,
+          ``/model`` names, predictive history) displays the
+          replacement itself, unchanged.
+
+        Args:
+            line: The full input line being completed.
+
+        Returns:
+            Ordered ``(replacement, display)`` pairs; *replacement*
+            is always a whole-line substitution for *line*.
+        """
         at = _AT_RE.search(line)
         if at:
-            return self._at_mention_matches(
-                line, at.start(), at.group(1),
-            )
+            return [
+                (m, m)
+                for m in self._at_mention_matches(line, at.start(), at.group(1))
+            ]
         model_cmd = _MODEL_CMD_RE.match(line)
         if model_cmd:
-            return self._model_matches(model_cmd.group(1))
-        stripped = line.strip()
-        if stripped.startswith("/") and " " not in stripped:
-            return self._slash_matches(line)
-        return self._predictive_matches(line)
+            return [(m, m) for m in self._model_matches(model_cmd.group(1))]
+        # Left-strip only: a trailing space after a slash command
+        # (``/resume ``) switches from command-name completion to the
+        # command's argument options.
+        lstripped = line.lstrip()
+        if lstripped.startswith("/") and " " not in lstripped:
+            return [(m, m) for m in self._slash_matches(line)]
+        if lstripped.startswith("/"):
+            # A trailing value-taking flag (``--task `` / ``--model ``)
+            # completes the flag's VALUE; the branch is terminal (an
+            # empty candidate list must not fall back to the option
+            # menu, which would wrongly re-offer flags as the value).
+            value_matches = self._flag_value_matches(line)
+            if value_matches is not None:
+                # ``--task`` rows already embed the description; the
+                # ``task`` note would be noise.  Model rows append the
+                # picker group (vendor / recently used).
+                return [
+                    (full, disp if help_ == "task" else f"{disp} — {help_}")
+                    for full, disp, help_ in value_matches
+                ]
+            arg_matches = [
+                (full, f"{opt} — {help_}" if help_ else opt)
+                for full, opt, help_ in self._slash_arg_matches(line)
+            ]
+            if arg_matches:
+                return arg_matches
+        return [(m, m) for m in self._predictive_matches(line)]
 
 
 def _setup_readline(completer: CliCompleter, history_path: Path) -> None:
@@ -478,8 +781,12 @@ def _print_help(work_dir: str = "") -> None:
         print(format_command_listing(custom))
     print(
         "\nInput fast-completes (Tab): @path mentions files, "
-        "/ completes commands, /model <partial> completes model names, "
-        "and typing a prefix of a previous task suggests its completion.\n"
+        "/ completes commands, a command followed by a space completes "
+        "its argument options (e.g. /resume --task, /model list, "
+        "/skills <name>), a value-taking flag completes its value "
+        "(--task pops recent task ids, --model pops model names), "
+        "and typing a prefix of a previous task "
+        "suggests its completion.\n"
     )
 
 

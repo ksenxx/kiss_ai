@@ -68,13 +68,16 @@ def cli_ask_user_question(question: str) -> str:
 DEFAULT_RECENT_CHATS_LIMIT = 20
 
 
-def _parse_resume_arg(arg: str) -> tuple[str, int]:
-    """Parse the argument string of ``/resume`` into a chat id and limit.
+def _parse_resume_arg(arg: str) -> tuple[str, str, int]:
+    """Parse the argument string of ``/resume`` into ids and a limit.
 
     Supports the following forms (in any order, whitespace separated):
 
     * ``""`` — list the default number of recent chats.
     * ``"<chat-id>"`` — resume the chat with the given id.
+    * ``"--task <task-id>"`` or ``"--task=<task-id>"`` — resume the
+      chat containing the given task, opened at that specific task
+      (rather than the latest task of the chat).
     * ``"--limit N"`` or ``"--limit=N"`` — list the most recent ``N``
       chats (only valid when no chat id is also supplied).
     * ``"<chat-id> --limit N"`` — the ``--limit`` flag is ignored when
@@ -84,17 +87,22 @@ def _parse_resume_arg(arg: str) -> tuple[str, int]:
         arg: The raw argument string after ``/resume``.
 
     Returns:
-        A ``(chat_id, limit)`` pair.  ``chat_id`` is the empty string
-        when the user is requesting the recent-chats listing.
+        A ``(chat_id, task_id, limit)`` triple.  ``chat_id`` and
+        ``task_id`` are empty strings when not supplied (both empty
+        means the user is requesting the recent-chats listing).
         ``limit`` is the resolved listing limit (defaulting to
         :data:`DEFAULT_RECENT_CHATS_LIMIT`).
 
     Raises:
         ValueError: If ``--limit`` is given without a value, with a
-            non-integer value, or with a non-positive value.
+            non-integer value, or with a non-positive value; if
+            ``--task`` is given without a value; or if both a chat id
+            and ``--task`` are supplied (the task id alone identifies
+            the chat to open, so combining them is ambiguous).
     """
     tokens = arg.split()
     chat_id = ""
+    task_id = ""
     limit = DEFAULT_RECENT_CHATS_LIMIT
     i = 0
     while i < len(tokens):
@@ -109,11 +117,28 @@ def _parse_resume_arg(arg: str) -> tuple[str, int]:
             limit = _coerce_positive_int(token[len("--limit="):])
             i += 1
             continue
+        if token == "--task":
+            if i + 1 >= len(tokens):
+                raise ValueError("--task requires a task id value")
+            task_id = tokens[i + 1]
+            i += 2
+            continue
+        if token.startswith("--task="):
+            task_id = token[len("--task="):]
+            if not task_id:
+                raise ValueError("--task requires a task id value")
+            i += 1
+            continue
         if chat_id:
             raise ValueError(f"unexpected extra argument: {token!r}")
         chat_id = token
         i += 1
-    return chat_id, limit
+    if chat_id and task_id:
+        raise ValueError(
+            "give either a chat id or --task <task-id>, not both "
+            "(the task id alone identifies the chat to open)"
+        )
+    return chat_id, task_id, limit
 
 
 def _coerce_positive_int(value: str) -> int:

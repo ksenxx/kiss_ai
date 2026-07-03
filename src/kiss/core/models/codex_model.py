@@ -294,6 +294,16 @@ class CodexModel(Model):
         self.conversation.append({"role": "assistant", "content": content})
         return content, result_json
 
+    def _emit_as_thinking(self, text: str) -> None:
+        """Forward *text* to the token callback wrapped in a thinking block.
+
+        Args:
+            text: The text to stream inside a thinking start/end pair.
+        """
+        self._invoke_thinking_callback(True)
+        self._invoke_token_callback(text)
+        self._invoke_thinking_callback(False)
+
     def _parse_stream_events(
         self, lines: Iterable[str]
     ) -> tuple[str, dict[str, Any], str | None]:
@@ -347,9 +357,7 @@ class CodexModel(Model):
                 if item.get("type") == "command_execution":
                     command = item.get("command", "")
                     if command:
-                        self._invoke_thinking_callback(True)
-                        self._invoke_token_callback(f"$ {command}\n")
-                        self._invoke_thinking_callback(False)
+                        self._emit_as_thinking(f"$ {command}\n")
             elif event_type == "item.completed":
                 item = event.get("item", {})
                 item_type = item.get("type")
@@ -358,15 +366,11 @@ class CodexModel(Model):
                     content += text
                     self._invoke_token_callback(text)
                 elif item_type == "agent_reasoning" and text:
-                    self._invoke_thinking_callback(True)
-                    self._invoke_token_callback(text)
-                    self._invoke_thinking_callback(False)
+                    self._emit_as_thinking(text)
                 elif item_type == "command_execution":
                     output = item.get("aggregated_output", "")
                     if output:
-                        self._invoke_thinking_callback(True)
-                        self._invoke_token_callback(output)
-                        self._invoke_thinking_callback(False)
+                        self._emit_as_thinking(output)
             elif event_type == "text_delta":
                 # New streaming format for newer models like gpt-5.5-codex
                 delta = event.get("delta", {})
@@ -381,9 +385,7 @@ class CodexModel(Model):
                 if isinstance(delta, dict) and delta.get("type") == "thinking_delta":
                     text = delta.get("text", "")
                     if text:
-                        self._invoke_thinking_callback(True)
-                        self._invoke_token_callback(text)
-                        self._invoke_thinking_callback(False)
+                        self._emit_as_thinking(text)
             elif event_type == "thinking_start":
                 self._invoke_thinking_callback(True)
             elif event_type == "thinking_end":

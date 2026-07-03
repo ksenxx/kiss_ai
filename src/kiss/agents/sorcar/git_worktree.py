@@ -1000,17 +1000,12 @@ class GitWorktreeOps:
                 # must be removed from the task worktree even when the
                 # new file was subsequently deleted (e.g. status "RD").
                 old_dst = wt_dir / old_name
-                # Check is_symlink() FIRST: is_dir()/exists() follow
-                # symlinks, so a symlink to a directory would crash
-                # rmtree and a broken symlink would be left behind.
-                if old_dst.is_symlink():
-                    old_dst.unlink()
-                    copied = True
-                elif old_dst.is_dir():
-                    shutil.rmtree(str(old_dst))
-                    copied = True
-                elif old_dst.exists():
-                    old_dst.unlink()
+                # is_symlink() is checked (by _remove_path) FIRST:
+                # is_dir()/exists() follow symlinks, so a symlink to a
+                # directory must be unlinked (not rmtree'd) and a
+                # broken symlink reports exists() == False.
+                if old_dst.is_symlink() or old_dst.exists():
+                    GitWorktreeOps._remove_path(old_dst)
                     copied = True
 
             if src.is_symlink():

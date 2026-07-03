@@ -129,9 +129,7 @@ def _extra_for_replay(extra: object) -> str:
         or ``""`` when *extra* is missing, not a string, or parses
         to a non-dict value.
     """
-    if not isinstance(extra, str):
-        return ""
-    if not extra:
+    if not isinstance(extra, str) or not extra:
         return ""
     try:
         parsed = json.loads(extra)
@@ -146,14 +144,33 @@ def _extra_for_replay(extra: object) -> str:
         # tampered row.  The frontend's ``if (ev.extra)`` guard
         # handles the empty case cleanly.
         return ""
-    mutated = False
-    for key in _REPLAY_STRIPPED_EXTRA_KEYS:
-        if key in parsed:
-            parsed.pop(key, None)
-            mutated = True
-    if not mutated:
+    if not any(key in parsed for key in _REPLAY_STRIPPED_EXTRA_KEYS):
         return extra
-    return json.dumps(parsed)
+    return json.dumps({
+        key: value for key, value in parsed.items()
+        if key not in _REPLAY_STRIPPED_EXTRA_KEYS
+    })
+
+
+def _coerce_id(value: object) -> str | None:
+    """Coerce a DB row id that may be a str or a legacy int to a string.
+
+    Accepts legacy int ids from databases that escaped the UUID
+    auto-migration (r3-vscode-H2 / r4-vscode-H1/H2) and stringifies
+    them so the rest of the pipeline works uniformly with string ids.
+
+    Args:
+        value: The raw id value read from a DB row or persisted JSON.
+
+    Returns:
+        The non-empty string id, or ``None`` when *value* is missing,
+        empty, zero, or of any other type.
+    """
+    if isinstance(value, str) and value:
+        return value
+    if isinstance(value, int) and value:
+        return str(value)
+    return None
 
 
 def _coalesced_replay_events(events: object) -> list[dict[str, Any]]:
@@ -513,14 +530,41 @@ class VSCodeServer(
             tab_id = cmd.get("tabId")
             if tab_id is not None:
                 event["tabId"] = tab_id
-            conn_id = cmd.get("connId", "")
-            if conn_id:
-                # Reply only to the connection that sent the unknown
-                # command — other windows' webviews must not render
-                # an error banner for a command they never issued.
-                event["connId"] = conn_id
-            self.printer.broadcast(event)
+            # Reply only to the connection that sent the unknown
+            # command — other windows' webviews must not render
+            # an error banner for a command they never issued.
+            self._broadcast_to_conn(event, cmd.get("connId", ""))
 
+    def _broadcast_to_conn(
+        self, event: dict[str, Any], conn_id: str,
+    ) -> None:
+        """Broadcast *event*, stamped with *conn_id* when non-empty.
+
+        Stamping ``connId`` routes the reply only to the requesting
+        connection so one window's request never repaints another
+        window's UI.
+
+        Args:
+            event: The event payload to broadcast (mutated in place).
+            conn_id: Requesting connection id (``""`` reaches all).
+        """
+        if conn_id:
+            event["connId"] = conn_id
+        self.printer.broadcast(event)
+
+    def _printer_cleanup_tab(self, tab_id: str) -> None:
+        """Drop the printer's per-tab subscriptions/state for *tab_id*.
+
+        Resolved via ``getattr`` because some duck-typed test printers
+        implement only the broadcast/subscribe subset of the printer
+        protocol.
+
+        Args:
+            tab_id: The frontend tab identifier to clean up.
+        """
+        cleanup_tab = getattr(self.printer, "cleanup_tab", None)
+        if cleanup_tab is not None:
+            cleanup_tab(tab_id)
 
     def _get_models(self, conn_id: str = "") -> None:
         """Send available models list with usage counts and pricing.
@@ -600,9 +644,7 @@ class VSCodeServer(
             "models": models_list,
             "selected": selected,
         }
-        if conn_id:
-            event["connId"] = conn_id
-        self.printer.broadcast(event)
+        self._broadcast_to_conn(event, conn_id)
 
     def _get_running_task_ids(self) -> set[str]:
         """Return the set of task_history row ids with alive worker threads.
@@ -731,18 +773,11 @@ class VSCodeServer(
             has_events = bool(entry.get("has_events", False))
             chat_id = str(entry.get("chat_id", "") or "")
             result = str(entry.get("result", "") or "")
-            _raw_eid = entry.get("id")
             # r4-vscode-H2 — accept legacy int task_ids from DBs that
             # escaped auto-migration.  Coerce to str so the rest of
             # the history pipeline (which assumes a string id) works
             # uniformly.
-            entry_id: str | None
-            if isinstance(_raw_eid, str) and _raw_eid:
-                entry_id = _raw_eid
-            elif isinstance(_raw_eid, int) and _raw_eid:
-                entry_id = str(_raw_eid)
-            else:
-                entry_id = None
+            entry_id = _coerce_id(entry.get("id"))
             is_running = entry_id is not None and entry_id in running_task_ids
             session: dict[str, Any] = {
                 "id": chat_id,
@@ -825,14 +860,12 @@ class VSCodeServer(
                     sub = extra_obj.get("subagent")
                     if isinstance(sub, dict):
                         session["is_subagent"] = True
-                        pid = sub.get("parent_task_id")
                         # r3-vscode-H2: accept both UUID strings and
                         # legacy int parent ids written by pre-UUID
                         # task_history rows that escaped migration.
-                        if isinstance(pid, str) and pid:
+                        pid = _coerce_id(sub.get("parent_task_id"))
+                        if pid is not None:
                             session["parent_task_id"] = pid
-                        elif isinstance(pid, int) and pid:
-                            session["parent_task_id"] = str(pid)
                     # Field-by-field numeric coercion: garbage values
                     # fall back to the zero default, numeric strings
                     # round-trip through the cast.
@@ -890,9 +923,7 @@ class VSCodeServer(
             "type": "history", "sessions": sessions,
             "offset": offset, "generation": generation,
         }
-        if conn_id:
-            event["connId"] = conn_id
-        self.printer.broadcast(event)
+        self._broadcast_to_conn(event, conn_id)
 
     def _handle_delete_task(self, task_id: str) -> None:
         """Delete a task and its associated events from the database
@@ -978,9 +1009,7 @@ class VSCodeServer(
             "type": "frequentTasks",
             "tasks": _load_frequent_tasks(limit=limit),
         }
-        if conn_id:
-            event["connId"] = conn_id
-        self.printer.broadcast(event)
+        self._broadcast_to_conn(event, conn_id)
 
     def _get_input_history(self, conn_id: str = "") -> None:
         """Send deduplicated task texts for arrow-key cycling.
@@ -1003,9 +1032,7 @@ class VSCodeServer(
                 seen.add(task)
                 tasks.append(task)
         event: dict[str, Any] = {"type": "inputHistory", "tasks": tasks}
-        if conn_id:
-            event["connId"] = conn_id
-        self.printer.broadcast(event)
+        self._broadcast_to_conn(event, conn_id)
 
     def _close_tab(self, tab_id: str) -> None:
         """Clean up all backend state for a closed tab.
@@ -1181,9 +1208,7 @@ class VSCodeServer(
         # must no longer fan out to this tab.  Resolved via ``getattr``
         # because some duck-typed test printers implement only the
         # broadcast/subscribe subset of the printer protocol.
-        cleanup_tab = getattr(self.printer, "cleanup_tab", None)
-        if cleanup_tab is not None:
-            cleanup_tab(tab_id)
+        self._printer_cleanup_tab(tab_id)
         self.printer.broadcast({
             "type": "showWelcome",
             "tabId": tab_id,
@@ -1240,9 +1265,7 @@ class VSCodeServer(
             # appendUserMessage path because the webview never learned
             # the task was running in the first place.  Worst case is
             # silent: the user types and nothing happens.
-            cleanup_tab = getattr(self.printer, "cleanup_tab", None)
-            if cleanup_tab is not None:
-                cleanup_tab(tab_id)
+            self._printer_cleanup_tab(tab_id)
             rebound_running = self._reattach_running_chat(
                 chat_id,
                 tab_id,
@@ -1336,17 +1359,12 @@ class VSCodeServer(
         # ``chat_id``) is never matched when the user clicks a
         # sub-agent row.  When ``task_id`` is ``None`` (no specific
         # row, just a chat) the regular chat-id-based scan applies.
-        _raw_rebound_tid = result.get("task_id") if result else None
-        rebound_task_id: str | None
-        if isinstance(_raw_rebound_tid, str) and _raw_rebound_tid:
-            rebound_task_id = _raw_rebound_tid
-        elif isinstance(_raw_rebound_tid, int) and _raw_rebound_tid:
-            # r4-vscode-H1 — accept legacy int payloads from DBs that
-            # escaped the auto-migration; mirror the same defence
-            # applied to ``parent_task_id`` in r3-vscode-H2.
-            rebound_task_id = str(_raw_rebound_tid)
-        else:
-            rebound_task_id = None
+        # r4-vscode-H1 — accept legacy int payloads from DBs that
+        # escaped the auto-migration; mirror the same defence
+        # applied to ``parent_task_id`` in r3-vscode-H2.
+        rebound_task_id = _coerce_id(
+            result.get("task_id") if result else None
+        )
         # The tab is navigating to (possibly) another chat: drop every
         # live-task subscription it carried from whatever it displayed
         # before, so the previous chat's still-running task does not
@@ -1356,9 +1374,7 @@ class VSCodeServer(
         # re-subscribes this tab to the correct stream.  Resolved via
         # ``getattr`` because some duck-typed test printers implement
         # only the broadcast/subscribe subset of the printer protocol.
-        cleanup_tab = getattr(self.printer, "cleanup_tab", None)
-        if cleanup_tab is not None:
-            cleanup_tab(tab_id)
+        self._printer_cleanup_tab(tab_id)
         rebound_running = self._reattach_running_chat(
             chat_id,
             tab_id,
@@ -1500,18 +1516,12 @@ class VSCodeServer(
             # closing the parent tab would not cascade-close this
             # sub-agent tab (see ``closeTab`` in media/main.js, which
             # walks ``parentTabId`` chains).
-            parent_tid_raw = subagent_info.get("parent_task_id")
             # r3-vscode-H2: accept legacy int parent ids that may
             # appear in DBs that escaped migration (extra JSON in a
             # row that was never re-saved through the new typed
             # column path).  Stringify rather than drop so the
             # parent-tab resolver still has a value to match.
-            if isinstance(parent_tid_raw, str) and parent_tid_raw:
-                parent_tid: str | None = parent_tid_raw
-            elif isinstance(parent_tid_raw, int) and parent_tid_raw:
-                parent_tid = str(parent_tid_raw)
-            else:
-                parent_tid = None
+            parent_tid = _coerce_id(subagent_info.get("parent_task_id"))
             parent_tab_id_for_sub = self._resolve_parent_tab_id_for_sub(
                 parent_task_id=parent_tid,
                 chat_id=chat_id,

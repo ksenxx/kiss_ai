@@ -622,6 +622,20 @@ class AnthropicModel(Model):
 
         return kwargs
 
+    def _append_assistant_message(self, blocks: list[dict[str, Any]], content: str) -> None:
+        """Append the assistant response to the conversation when non-empty.
+
+        Prefers the normalized *blocks* over the plain *content* string and
+        skips the append entirely when both are empty.
+
+        Args:
+            blocks: Normalized content blocks from the response.
+            content: Text extracted from the response blocks.
+        """
+        msg_content: list[dict[str, Any]] | str = blocks if blocks else content
+        if msg_content:
+            self.conversation.append({"role": "assistant", "content": msg_content})
+
     def _create_message(self, kwargs: dict[str, Any]) -> Any:  # pragma: no cover – API call
         """Create a message, streaming tokens to the callback when set.
 
@@ -672,11 +686,7 @@ class AnthropicModel(Model):
 
         blocks = self._normalize_content_blocks(getattr(response, "content", None))
         content = self._extract_text_from_blocks(blocks)
-        # Prefer blocks (which have been normalized) over content string
-        msg_content = blocks if blocks else content
-        # Only append non-empty messages
-        if msg_content:
-            self.conversation.append({"role": "assistant", "content": msg_content})
+        self._append_assistant_message(blocks, content)
         return content, response
 
     def generate_and_process_with_tools(  # pragma: no cover – API call
@@ -718,11 +728,7 @@ class AnthropicModel(Model):
                     }
                 )
 
-        # Prefer blocks (which have been normalized) over content string
-        msg_content = blocks if blocks else content
-        # Only append non-empty messages
-        if msg_content:
-            self.conversation.append({"role": "assistant", "content": msg_content})
+        self._append_assistant_message(blocks, content)
         return function_calls, content, response
 
     def add_function_results_to_conversation_and_return(
@@ -755,42 +761,7 @@ class AnthropicModel(Model):
                 content_blocks: list[dict[str, Any]] = []
                 if plain_text.strip():
                     content_blocks.append({"type": "text", "text": plain_text})
-                for att in attachments:
-                    source = {
-                        "type": "base64",
-                        "media_type": att.mime_type,
-                        "data": att.to_base64(),
-                    }
-                    if att.mime_type.startswith("image/"):
-                        content_blocks.append({"type": "image", "source": source})
-                    elif att.mime_type == "application/pdf":
-                        content_blocks.append({"type": "document", "source": source})
-                    elif att.mime_type.startswith("audio/"):
-                        # Anthropic Messages API does not accept audio content
-                        # blocks.  Transcribe via Whisper when possible so the
-                        # model still sees the spoken content; otherwise drop
-                        # the bytes with a warning.
-                        try:
-                            text = transcribe_audio(att.data, att.mime_type)
-                            content_blocks.append(
-                                {
-                                    "type": "text",
-                                    "text": f"[Audio transcription]\n{text}",
-                                }
-                            )
-                        except Exception:
-                            logger.warning(
-                                "Anthropic does not support %s tool-result "
-                                "attachments and automatic transcription "
-                                "failed; dropping.",
-                                att.mime_type,
-                            )
-                    elif att.mime_type.startswith("video/"):
-                        logger.warning(
-                            "Anthropic does not support %s tool-result "
-                            "attachments; dropping.",
-                            att.mime_type,
-                        )
+                content_blocks.extend(_attachments_to_blocks(attachments))
                 if not content_blocks:
                     content_blocks.append(
                         {"type": "text", "text": plain_text or result_content}
@@ -819,7 +790,8 @@ class AnthropicModel(Model):
         """Extracts token counts from an Anthropic API response.
 
         Returns:
-            (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens).
+            (input_tokens, output_tokens, cache_read_tokens,
+            cache_write_5m_tokens, cache_write_1h_tokens).
         """
         if hasattr(response, "usage") and response.usage:
             cache_write_5m, cache_write_1h = _anthropic_cache_creation_tokens(response.usage)
