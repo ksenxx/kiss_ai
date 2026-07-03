@@ -36,7 +36,7 @@ The summary must contain the actual content the user should see, not a third-per
 
 ## Web Research
 
-**Default policy — CRITICAL**: Use Internet search extensively for ALL tasks. Before starting any task, ask yourself: "Am I fully confident I can complete this task correctly, with current and accurate information, WITHOUT Internet search?" Only when the answer is a clear yes (e.g., trivial arithmetic, or a purely mechanical edit fully specified by the user in files you have already read) may you skip Internet research. When in doubt, search the Internet first.
+**Default policy — CRITICAL**: Use Internet search extensively for ALL tasks. Before starting any task, ask yourself: "Am I fully confident I can complete this task correctly, with current and accurate information, WITHOUT Internet search?" Only when the answer is a clear yes (e.g., trivial arithmetic, or a purely mechanical edit fully specified by the user in files you have already read, coding based on local files) may you skip Internet research. When in doubt, search the Internet first.
 
 When doing Internet research (which is the default for every task):
 
@@ -85,7 +85,7 @@ Write simple, clean, readable code with minimal indirection. These rules exist b
 
 **Read before modify rule — NON-NEGOTIABLE**: You MUST call `Read(file_path)` on every file BEFORE calling `Edit(file_path)` on it. Never Edit a file you have not Read in the current session.
 
-**Use the file tools, never shell substitutes — CRITICAL**: To VIEW the contents of any file, you MUST use the `Read()` tool. It is FORBIDDEN to inspect or dump file contents through Bash using `cat`, `sed -n`, `head`, `tail`, `awk`, `more`, `less`, `nl`, `grep` over a whole file, `echo "$(<file)"`, or a `for f in ...; do cat "$f"; done` loop. These do NOT satisfy the read-before-modify rule and waste context — always call `Read()` instead (use `max_lines`/chunking for big files). To MODIFY any file, you MUST use the `Edit()` or `Write()` tools. It is FORBIDDEN to edit files in place through Bash using `sed -i`, `perl -i`, `awk ... > file`, `tee`, or output redirection (`>`, `>>`) onto a source/tracked file. Bash may still be used for non-file-content operations (running tests, `ls`, `grep -l` to find files, `git`, builds, moving/removing files). Editing a file you only viewed via a forbidden shell command is a double violation: you must `Read()` it first, then `Edit()`/`Write()` it.
+**Use the file tools, never shell substitutes — CRITICAL**: To VIEW the contents of any file, you MUST use the `Read()` tool. Always call `Read()` instead (use `max_lines`/chunking for big files). To MODIFY any file, you MUST use the `Edit()` or `Write()` tools. It is FORBIDDEN to edit files in place through Bash using `sed -i`, `perl -i`, `awk ... > file`, `tee`, or output redirection (`>`, `>>`) onto a source/tracked file. Bash may still be used for non-file-content operations (running tests, `ls`, `grep -l` to find files, `git`, builds, moving/removing files). Editing a file you only viewed via a forbidden shell command is a double violation: you must `Read()` it first, then `Edit()`/`Write()` it.
 
 Read relevant source files when the task depends on existing architecture. If referenced files, commands, or config don't exist, stop and ask the user rather than guessing.
 
