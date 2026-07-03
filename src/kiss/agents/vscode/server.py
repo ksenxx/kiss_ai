@@ -164,10 +164,14 @@ def _coerce_id(value: object) -> str | None:
 
     Returns:
         The non-empty string id, or ``None`` when *value* is missing,
-        empty, zero, or of any other type.
+        empty, zero, a bool, or of any other type.
     """
     if isinstance(value, str) and value:
         return value
+    if isinstance(value, bool):
+        # bool is a subclass of int; without this check ``True`` would be
+        # stringified to "True" and defeat the tamper guard.
+        return None
     if isinstance(value, int) and value:
         return str(value)
     return None
