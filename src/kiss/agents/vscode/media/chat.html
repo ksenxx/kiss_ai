@@ -191,8 +191,14 @@
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><line x1="1.05" y1="12" x2="7" y2="12"/><line x1="17.01" y1="12" x2="22.96" y2="12"/><line x1="12" y1="1.05" x2="12" y2="7"/><line x1="12" y1="17.01" x2="12" y2="22.96"/></svg>
               <span>Git Commit</span>
             </button>
-            <button type="button" id="cfg-update-btn" class="config-update-btn">Update</button>
-            <button type="button" id="cfg-server-reset-btn" class="config-update-btn">Server reset</button>
+            <button type="button" id="cfg-update-btn" class="config-update-btn">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.63 4.36A9 9 0 0 0 20.49 15"/></svg>
+              <span>Update</span>
+            </button>
+            <button type="button" id="cfg-server-reset-btn" class="config-update-btn">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/></svg>
+              <span>Reset Server</span>
+            </button>
           </div>
 
           <div class="config-divider"></div>
@@ -231,7 +237,7 @@
       </div>
 
       <!--
-        Floating confirmation box for the "Server reset" button.  Lives
+        Floating confirmation box for the "Reset Server" button.  Lives
         inside #settings-panel (so it floats above the settings content
         without leaving the panel) and replaces the native VS Code
         modal warning dialog.  Default hidden — main.js toggles
