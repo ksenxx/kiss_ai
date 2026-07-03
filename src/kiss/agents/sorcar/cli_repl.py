@@ -25,7 +25,10 @@ extension precisely:
   Up/Down + Tab/Enter pick the desired completion without re-typing.
 * ``/`` slash commands matching Claude Code's quick commands
   (``/help``, ``/clear``, ``/resume``, ``/model``, ``/model list``,
-  ``/cost``, ``/context``, ``/exit`` …).
+  ``/cost``, ``/context``, ``/exit`` …).  Typing a command followed by
+  a space pops its *argument options* (see :data:`SLASH_ARG_OPTIONS`):
+  ``/resume `` → ``--task`` / ``--limit``, ``/model `` → ``list`` plus
+  every model name, ``/skills `` → the discovered skill names.
 * custom slash commands defined as Markdown files in
   ``~/.kiss/commands`` (user) and ``<project>/.kiss/commands``
   (project), plus Claude Code's ``~/.claude/commands`` and
@@ -158,6 +161,26 @@ SLASH_COMMANDS: dict[str, str] = {
     "/quit": "Alias for /exit",
 }
 
+# Argument options offered after a slash command followed by a space
+# (e.g. typing ``/resume `` pops ``--task`` / ``--limit``).  Maps
+# command -> {option: help}.  Commands absent here take no completable
+# arguments; ``/skills`` additionally completes the discovered skill
+# names (added dynamically in :meth:`CliCompleter._slash_arg_options`)
+# and ``/model`` completes model names through its dedicated
+# ``_MODEL_CMD_RE`` path (which also offers ``list``).
+SLASH_ARG_OPTIONS: dict[str, dict[str, str]] = {
+    "/resume": {
+        "--task": "Open the chat containing this task id",
+        "--limit": "How many recent chats to list (default 20)",
+    },
+    "/model": {"list": "List all generation models"},
+    "/skills": {},  # dynamic: discovered skill names
+}
+
+# ``/<cmd> `` — a slash command followed by whitespace, whose argument
+# options are completed by :meth:`CliCompleter._slash_arg_matches`.
+_SLASH_ARG_RE = re.compile(r"^\s*(/\S+)\s")
+
 # Bare words (no leading slash) that also exit, matching Claude Code.
 _EXIT_WORDS = {"exit", "quit"}
 
@@ -252,7 +275,12 @@ class CliCompleter:
         """
         from kiss.core.models.model_info import rank_model_suggestions
 
-        return [f"/model {name}" for name in rank_model_suggestions(query)]
+        matches = [f"/model {name}" for name in rank_model_suggestions(query)]
+        # ``/model list`` is a subcommand, not a model name; offer it
+        # alongside the model names whenever the partial matches.
+        if "list".startswith(query):
+            matches.insert(0, "/model list")
+        return matches
 
     def _slash_matches(self, line: str) -> list[str]:
         """Return slash-command completions for *line* (e.g. ``/he``).
@@ -274,6 +302,70 @@ class CliCompleter:
             if f"/{name}".startswith(token) and f"/{name} " not in matches
         )
         return matches
+
+    def _slash_arg_options(self, cmd: str) -> dict[str, str]:
+        """Return the ``{option: help}`` argument options for *cmd*.
+
+        Static options come from :data:`SLASH_ARG_OPTIONS`; for
+        ``/skills`` the discovered skill names are added dynamically
+        (each described by its ``SKILL.md`` frontmatter summary) so
+        ``/skills <Tab>`` completes real skill names.
+
+        Args:
+            cmd: The slash command token (e.g. ``"/resume"``).
+
+        Returns:
+            Mapping of completable option to its one-line help text;
+            empty when *cmd* takes no completable arguments.
+        """
+        options = dict(SLASH_ARG_OPTIONS.get(cmd, {}))
+        if cmd == "/skills":
+            try:
+                from kiss.agents.sorcar.skills import discover_skills
+
+                skills = discover_skills(self.work_dir)
+            except Exception:  # pragma: no cover - defensive discovery guard
+                logger.debug("skill discovery failed", exc_info=True)
+                skills = {}
+            for name in sorted(skills):
+                options[name] = skills[name].description or "agent skill"
+        return options
+
+    def _slash_arg_matches(self, line: str) -> list[tuple[str, str, str]]:
+        """Return argument-option completions for a ``/cmd …`` line.
+
+        Fires once a slash command is followed by whitespace (e.g.
+        ``/resume `` or ``/resume --task 5 --l``): the trailing
+        (possibly empty) token is completed against the command's
+        argument options, with options already present earlier on the
+        line filtered out.
+
+        Args:
+            line: The full input line being completed.
+
+        Returns:
+            ``(replacement, option, help)`` triples — *replacement* is
+            the whole-line substitution (ending in a space), *option*
+            the bare option shown in the dropdown, and *help* its
+            description; empty when the line is not a slash command
+            with arguments or the command has no matching options.
+        """
+        m = _SLASH_ARG_RE.match(line)
+        if not m:
+            return []
+        options = self._slash_arg_options(m.group(1))
+        if not options:
+            return []
+        tail = re.search(r"(\S*)$", line)
+        assert tail is not None  # ``\S*`` always matches (possibly empty)
+        partial = tail.group(1)
+        head = line[: len(line) - len(partial)]
+        used = set(line[m.end(1): len(line) - len(partial)].split())
+        return [
+            (f"{head}{opt} ", opt, help_)
+            for opt, help_ in options.items()
+            if opt.startswith(partial) and opt not in used
+        ]
 
     def _predictive_matches(self, line: str) -> list[str]:
         """Return whole-line predictive completions, best match first.
@@ -369,9 +461,16 @@ class CliCompleter:
         model_cmd = _MODEL_CMD_RE.match(line)
         if model_cmd:
             return self._model_matches(model_cmd.group(1))
-        stripped = line.strip()
-        if stripped.startswith("/") and " " not in stripped:
+        # Left-strip only: a trailing space after a slash command
+        # (``/resume ``) switches from command-name completion to the
+        # command's argument options.
+        lstripped = line.lstrip()
+        if lstripped.startswith("/") and " " not in lstripped:
             return self._slash_matches(line)
+        if lstripped.startswith("/"):
+            arg_matches = [full for full, _, _ in self._slash_arg_matches(line)]
+            if arg_matches:
+                return arg_matches
         return self._predictive_matches(line)
 
 
@@ -479,8 +578,10 @@ def _print_help(work_dir: str = "") -> None:
         print(format_command_listing(custom))
     print(
         "\nInput fast-completes (Tab): @path mentions files, "
-        "/ completes commands, /model <partial> completes model names, "
-        "and typing a prefix of a previous task suggests its completion.\n"
+        "/ completes commands, a command followed by a space completes "
+        "its argument options (e.g. /resume --task, /model list, "
+        "/skills <name>), and typing a prefix of a previous task "
+        "suggests its completion.\n"
     )
 
 
