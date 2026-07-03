@@ -47,6 +47,10 @@ ______________________________________________________________________
 
 </details>
 
+<div align="center">
+  <img src="assets/sorcar-main.gif" alt="KISS Sorcar demo" width="100%">
+</div>
+
 ## 🆚 KISS Sorcar vs Claude Code vs Cursor
 
 | Capability | **KISS Sorcar** | **Claude Code** | **Cursor** |
@@ -70,14 +74,6 @@ ______________________________________________________________________
 **KISS Agent Framework** is a deliberately small agent runtime organized around the [KISS principle](https://en.wikipedia.org/wiki/KISS_principle) ("Keep it Simple, Stupid").
 KISS Sorcar is named after [P. C. Sorcar, the Bengali magician](https://en.wikipedia.org/wiki/P._C._Sorcar).
 Note: **Sorcar** also means government in Bengali.
-
-## 🎬 See It in Action
-
-<div align="center">
-  <img src="assets/sorcar-main.gif" alt="KISS Sorcar demo" width="100%">
-  <br>
-  <em>▶ <a href="assets/sorcar-main.mp4">Watch the KISS Sorcar demo video</a> · Also viewable on the <a href="https://kisssorcar.github.io/">project website</a>.</em>
-</div>
 
 ## Installation
 
