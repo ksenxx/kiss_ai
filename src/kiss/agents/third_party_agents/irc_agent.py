@@ -43,6 +43,15 @@ _config = ChannelConfig(
 )
 
 
+def _use_tls_enabled(cfg: dict[str, str]) -> bool:
+    """Return True if the config enables TLS.
+
+    Accepts canonical "true"/"false" as well as legacy "True"/"False"
+    values persisted by older versions via ``str(bool)``.
+    """
+    return cfg.get("use_tls", "").strip().lower() in ("true", "1", "yes")
+
+
 class IRCChannelBackend(ToolMethodBackend):
     """Channel backend for IRC via raw socket."""
 
@@ -63,7 +72,7 @@ class IRCChannelBackend(ToolMethodBackend):
             self._nick = cfg["nick"]
             port = int(cfg.get("port", "6667"))
             sock = socket.create_connection((cfg["server"], port), timeout=30)
-            if cfg.get("use_tls"):  # pragma: no branch
+            if _use_tls_enabled(cfg):
                 import ssl
 
                 context = ssl.create_default_context()
@@ -110,13 +119,13 @@ class IRCChannelBackend(ToolMethodBackend):
         """Handle a received IRC line."""
         if line.startswith("PING"):  # pragma: no branch
             self._send_raw(f"PONG {line[5:]}")
-        elif "PRIVMSG" in line:  # pragma: no branch
+        else:
             parts = line.split(" ", 3)
-            if len(parts) >= 4:  # pragma: no branch
+            if len(parts) >= 4 and parts[1] == "PRIVMSG":
                 prefix = parts[0].lstrip(":")
                 nick = prefix.split("!")[0]
                 target = parts[2]
-                text = parts[3].lstrip(":")
+                text = parts[3].removeprefix(":")
                 self._message_queue.put(
                     {
                         "ts": str(time.time()),
@@ -143,7 +152,13 @@ class IRCChannelBackend(ToolMethodBackend):
         return messages, oldest
 
     def send_message(self, channel_id: str, text: str, thread_ts: str = "") -> None:
-        """Send an IRC PRIVMSG."""
+        """Send an IRC PRIVMSG.
+
+        Raises:
+            RuntimeError: If the backend is not connected to a server.
+        """
+        if self._sock is None:
+            raise RuntimeError("Not connected to IRC")
         self._send_raw(f"PRIVMSG {channel_id} :{text}")
 
     def wait_for_reply(
@@ -216,7 +231,7 @@ class IRCChannelBackend(ToolMethodBackend):
                     "nick": nick.strip(),
                     "port": str(port),
                     "password": password,
-                    "use_tls": str(use_tls),
+                    "use_tls": "true" if use_tls else "false",
                 }
             )
             success = self.connect()
@@ -435,7 +450,7 @@ class IRCAgent(BaseChannelAgent, SorcarAgent):
                     "nick": nick.strip(),
                     "port": str(port),
                     "password": password,
-                    "use_tls": str(use_tls),
+                    "use_tls": "true" if use_tls else "false",
                 }
             )
             agent._backend._nick = nick.strip()

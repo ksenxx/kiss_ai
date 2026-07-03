@@ -53,20 +53,24 @@ class SignalChannelBackend(ToolMethodBackend):
         self._connection_info = f"Signal configured for {self._phone_number}"
         return True
 
-    def _run_cli(self, *args: str) -> tuple[str, str]:
-        """Run signal-cli command and return (stdout, stderr)."""
+    def _run_cli(self, *args: str, timeout: int = 30) -> tuple[str, str, int]:
+        """Run signal-cli command and return (stdout, stderr, returncode)."""
         cmd = [self._signal_cli, "-u", self._phone_number, *args]
         result = subprocess.run(
-            cmd, capture_output=True, text=True, encoding="utf-8", timeout=30
+            cmd, capture_output=True, text=True, encoding="utf-8", timeout=timeout
         )
-        return result.stdout, result.stderr
+        return result.stdout, result.stderr, result.returncode
 
     def poll_messages(
         self, channel_id: str, oldest: str, limit: int = 10
     ) -> tuple[list[dict[str, Any]], str]:
-        """Receive pending Signal messages via signal-cli."""
+        """Receive pending Signal messages via signal-cli.
+
+        When ``channel_id`` is non-empty, only messages from that sender are
+        returned; at most ``limit`` messages are returned.
+        """
         try:
-            stdout, _ = self._run_cli("receive", "--output=json", "--timeout", "5")
+            stdout, _, _ = self._run_cli("receive", "--output=json", "--timeout", "5")
             messages: list[dict[str, Any]] = []
             for line in stdout.strip().split("\n"):  # pragma: no branch
                 if not line.strip():  # pragma: no branch
@@ -75,14 +79,19 @@ class SignalChannelBackend(ToolMethodBackend):
                     data = json.loads(line)
                     msg = data.get("envelope", {}).get("dataMessage", {})
                     sender = data.get("envelope", {}).get("source", "")
-                    if msg.get("message"):  # pragma: no branch
-                        messages.append(
-                            {
-                                "ts": str(data.get("envelope", {}).get("timestamp", "")),
-                                "user": sender,
-                                "text": msg["message"],
-                            }
-                        )
+                    if not msg.get("message"):  # pragma: no branch
+                        continue
+                    if channel_id and sender != channel_id:
+                        continue
+                    if len(messages) >= limit:
+                        break
+                    messages.append(
+                        {
+                            "ts": str(data.get("envelope", {}).get("timestamp", "")),
+                            "user": sender,
+                            "text": msg["message"],
+                        }
+                    )
                 except json.JSONDecodeError:
                     pass
             return messages, oldest
@@ -90,8 +99,16 @@ class SignalChannelBackend(ToolMethodBackend):
             return [], oldest
 
     def send_message(self, channel_id: str, text: str, thread_ts: str = "") -> None:
-        """Send a Signal message."""
-        self._run_cli("send", "-m", text, channel_id)
+        """Send a Signal message.
+
+        Raises:
+            RuntimeError: If signal-cli exits nonzero or reports an error on stderr.
+        """
+        _, stderr, returncode = self._run_cli("send", "-m", text, channel_id)
+        if returncode != 0 or (stderr and "error" in stderr.lower()):
+            raise RuntimeError(
+                f"signal-cli send failed (exit {returncode}): {stderr.strip()}"
+            )
 
     def wait_for_reply(
         self,
@@ -124,8 +141,8 @@ class SignalChannelBackend(ToolMethodBackend):
             JSON string with ok status.
         """
         try:
-            _, stderr = self._run_cli("send", "-m", message, recipient)
-            if stderr and "error" in stderr.lower():  # pragma: no branch
+            _, stderr, returncode = self._run_cli("send", "-m", message, recipient)
+            if returncode != 0 or (stderr and "error" in stderr.lower()):
                 return json.dumps({"ok": False, "error": stderr.strip()})
             return json.dumps({"ok": True})
         except Exception as e:
@@ -141,7 +158,13 @@ class SignalChannelBackend(ToolMethodBackend):
             JSON string with list of received messages.
         """
         try:
-            stdout, _ = self._run_cli("receive", "--output=json", "--timeout", str(timeout))
+            stdout, _, _ = self._run_cli(
+                "receive",
+                "--output=json",
+                "--timeout",
+                str(timeout),
+                timeout=max(30, timeout + 10),
+            )
             messages = []
             for line in stdout.strip().split("\n"):  # pragma: no branch
                 if not line.strip():  # pragma: no branch
@@ -166,8 +189,10 @@ class SignalChannelBackend(ToolMethodBackend):
             JSON string with ok status.
         """
         try:
-            _, stderr = self._run_cli("send", "-m", message, "-a", file_path, recipient)
-            if stderr and "error" in stderr.lower():  # pragma: no branch
+            _, stderr, returncode = self._run_cli(
+                "send", "-m", message, "-a", file_path, recipient
+            )
+            if returncode != 0 or (stderr and "error" in stderr.lower()):
                 return json.dumps({"ok": False, "error": stderr.strip()})
             return json.dumps({"ok": True})
         except Exception as e:
@@ -180,7 +205,7 @@ class SignalChannelBackend(ToolMethodBackend):
             JSON string with contact list.
         """
         try:
-            stdout, _ = self._run_cli("listContacts", "--output=json")
+            stdout, _, _ = self._run_cli("listContacts", "--output=json")
             try:
                 contacts = json.loads(stdout)
             except json.JSONDecodeError:
@@ -196,7 +221,7 @@ class SignalChannelBackend(ToolMethodBackend):
             JSON string with group list.
         """
         try:
-            stdout, _ = self._run_cli("listGroups", "--output=json")
+            stdout, _, _ = self._run_cli("listGroups", "--output=json")
             try:
                 groups = json.loads(stdout)
             except json.JSONDecodeError:
