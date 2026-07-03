@@ -1136,9 +1136,10 @@ class _CommandsMixin:
             lines.append("")
             lines.append(
                 "Input fast-completes (Tab): @path mentions files, "
-                "/ completes commands, /model <partial> completes model "
-                "names, and typing a prefix of a previous task suggests "
-                "its completion.",
+                "/ completes commands, a command followed by a space "
+                "completes its argument options (e.g. /resume --task, "
+                "/model list, /skills <name>), and typing a prefix of a "
+                "previous task suggests its completion.",
             )
             text = "\n".join(lines)
         elif subtype == "commands":

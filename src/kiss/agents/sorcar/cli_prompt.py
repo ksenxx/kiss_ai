@@ -366,9 +366,16 @@ class PtkCompleter(Completer):
         model_cmd = _MODEL_CMD_RE.match(line)
         if model_cmd:
             return self._model_completions(model_cmd.group(1))
-        stripped = line.strip()
-        if stripped.startswith("/") and " " not in stripped:
+        # Left-strip only: a trailing space after a slash command
+        # (``/resume ``) switches from command-name completion to the
+        # command's argument options.
+        lstripped = line.lstrip()
+        if lstripped.startswith("/") and " " not in lstripped:
             return self._slash_completions(line)
+        if lstripped.startswith("/"):
+            arg_matches = self.cli._slash_arg_matches(line)
+            if arg_matches:
+                return self._slash_arg_completions(line, arg_matches)
         return self._predictive_completions(line)
 
     def _at_mention_completions(self, query: str) -> Iterable[Completion]:
@@ -397,11 +404,46 @@ class PtkCompleter(Completer):
             )
 
     def _model_completions(self, query: str) -> Iterable[Completion]:
-        """Build ``/model <name>`` entries for the partial *query*."""
+        """Build ``/model <name>`` entries for the partial *query*.
+
+        The ``list`` subcommand is offered first (whenever the partial
+        matches it) so ``/model `` pops the full argument space —
+        ``list`` plus every completable model name.
+        """
         from kiss.core.models.model_info import rank_model_suggestions
 
+        if "list".startswith(query):
+            yield Completion(
+                "list",
+                start_position=-len(query),
+                display_meta="List all generation models",
+            )
         for name in rank_model_suggestions(query):
             yield Completion(name, start_position=-len(query))
+
+    def _slash_arg_completions(
+        self, line: str, matches: list[tuple[str, str, str]],
+    ) -> Iterable[Completion]:
+        """Build argument-option entries for a slash command line.
+
+        Pops as soon as a slash command is followed by a space (e.g.
+        ``/resume `` shows ``--task`` / ``--limit``; ``/skills `` shows
+        the discovered skill names).  Each entry displays the bare
+        option with its help text and replaces the whole line, exactly
+        like the readline completer.
+
+        Args:
+            line: The text before the cursor.
+            matches: ``(replacement, option, help)`` triples from
+                :meth:`CliCompleter._slash_arg_matches`.
+        """
+        for full, opt, meta in matches:
+            yield Completion(
+                full,
+                start_position=-len(line),
+                display=opt,
+                display_meta=meta,
+            )
 
     def _slash_completions(self, line: str) -> Iterable[Completion]:
         """Build slash-command entries (built-in first, then custom)."""
