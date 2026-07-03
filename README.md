@@ -2,7 +2,7 @@
 
 ![KISS Framework](assets/KISS-Sorcar.png)
 
-[![Version](https://img.shields.io/badge/version-2026.7.5-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
+[![Version](https://img.shields.io/badge/version-2026.7.6-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.13-blue?style=flat-square)](https://www.python.org/)
 [![Website](https://img.shields.io/badge/website-kisssorcar.github.io-1976d2?style=flat-square)](https://kisssorcar.github.io/)
@@ -47,6 +47,10 @@ ______________________________________________________________________
 
 </details>
 
+<div align="center">
+  <img src="assets/sorcar-main.gif" alt="KISS Sorcar demo" width="100%">
+</div>
+
 ## 🆚 KISS Sorcar vs Claude Code vs Cursor
 
 | Capability | **KISS Sorcar** | **Claude Code** | **Cursor** |
@@ -57,7 +61,7 @@ ______________________________________________________________________
 | **Multiple models from multiple vendors in the same task** | ✅ Mix OpenAI, Anthropic, Gemini, Together, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, and Codex CLI | ❌ Anthropic Claude models only | ❌ One model per task |
 | **Primary focus** | ✅ **Quality** — rigorous review, end-to-end tests | Speed and developer ergonomics | Speed |
 | **Core Agents # LoC** | **~2500** | Unknown | Unknown |
-| **Models in bundled catalog** | 510 across 9 provider categories | Claude family only | Subset chosen by Cursor |
+| **Models in bundled catalog** | 516 across 9 provider categories | Claude family only | Subset chosen by Cursor |
 | **Bring your own API key / endpoint** | ✅ Yes — keys stay on your machine | ✅ Anthropic key | ⚠️ Routed through Cursor backend |
 | **Open source** | ✅ Apache-2.0 | ❌ Proprietary | ❌ Proprietary |
 | **Price** | Free framework; pay only your chosen model provider | Subscription / API usage | Subscription |
@@ -70,14 +74,6 @@ ______________________________________________________________________
 **KISS Agent Framework** is a deliberately small agent runtime organized around the [KISS principle](https://en.wikipedia.org/wiki/KISS_principle) ("Keep it Simple, Stupid").
 KISS Sorcar is named after [P. C. Sorcar, the Bengali magician](https://en.wikipedia.org/wiki/P._C._Sorcar).
 Note: **Sorcar** also means government in Bengali.
-
-## 🎬 See It in Action
-
-<div align="center">
-  <img src="assets/sorcar-main.gif" alt="KISS Sorcar demo" width="100%">
-  <br>
-  <em>▶ <a href="assets/sorcar-main.mp4">Watch the KISS Sorcar demo video</a> · Also viewable on the <a href="https://kisssorcar.github.io/">project website</a>.</em>
-</div>
 
 ## Installation
 
@@ -222,11 +218,11 @@ These agents live in `src/kiss/agents/third_party_agents/`.
 
 ## 🤖 Models Supported
 
-KISS Sorcar ships a catalog of **510 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json).
+KISS Sorcar ships a catalog of **516 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json).
 
 | Provider category | Catalog entries |
 |---|---:|
-| OpenAI | 72 |
+| OpenAI | 78 |
 | Anthropic | 14 |
 | Gemini / Google | 24 |
 | Together AI | 79 |
@@ -238,14 +234,14 @@ KISS Sorcar ships a catalog of **510 models** across **9 provider categories**, 
 
 Current catalog capability totals:
 
-- **494** generation-capable models
-- **335** function-calling-capable models
+- **500** generation-capable models
+- **341** function-calling-capable models
 - **7** embedding models
 
 Full model list:
 
 <details>
-<summary><strong>OpenAI (72)</strong></summary>
+<summary><strong>OpenAI (78)</strong></summary>
 
 - `computer-use-preview`
 - `computer-use-preview-2025-03-11`
@@ -295,6 +291,12 @@ Full model list:
 - `gpt-5.4-nano-2026-03-17`
 - `gpt-5.5`
 - `gpt-5.5-2026-04-23`
+- `gpt-audio`
+- `gpt-audio-1.5`
+- `gpt-audio-2025-08-28`
+- `gpt-audio-mini`
+- `gpt-audio-mini-2025-10-06`
+- `gpt-audio-mini-2025-12-15`
 - `gpt-image-1`
 - `gpt-image-1-mini`
 - `gpt-image-1.5`
