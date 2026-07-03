@@ -1194,13 +1194,13 @@
     "comment": "NEW"
   },
   "gpt-audio-1.5": {
-    "context_length": 0,
-    "input_price_per_1M": 0.0,
-    "output_price_per_1M": 0.0,
+    "context_length": 128000,
+    "input_price_per_1M": 2.5,
+    "output_price_per_1M": 10.0,
     "fc": true,
     "emb": false,
     "gen": true,
-    "comment": "NEW: needs pricing"
+    "comment": "NEW"
   },
   "gpt-audio-2025-08-28": {
     "context_length": 128000,

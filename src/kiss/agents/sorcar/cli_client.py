@@ -1140,7 +1140,11 @@ def _submit_task_anchored(
     _drain_queue(client.dispatcher.ask_user_q)
     queued = [0]
     pending_question = [False]
+    # Wall-clock ``start`` is only for the elapsed-time display; the task
+    # timeout must use a monotonic deadline (comparing ``time.monotonic()``
+    # against a ``time.time()`` anchor never fires).
     start = time.time()
+    deadline = time.monotonic() + timeout_seconds
     try:
         if not _start_task(
             client, prompt, new_task_id,
@@ -1201,7 +1205,7 @@ def _submit_task_anchored(
             return (
                 not client.dispatcher.task_active.is_set()
                 or client._closed.is_set()
-                or time.monotonic() - start > timeout_seconds
+                or time.monotonic() > deadline
             )
 
         repl.run_steering_loop(on_submit, on_abort, is_done, on_idle)
