@@ -6,17 +6,20 @@
 
 Provides the interactive dropdown that :mod:`readline` cannot render:
 as soon as ``@`` is typed the file/folder picker pops up under the
-input line, Up/Down (and Tab) move through the candidates, and Tab or
-Enter inserts the highlighted ``./<path>`` mention without submitting
-the line.  The same live menu serves ``/`` slash commands,
-``/model <partial>`` model names, and whole-line predictive
+input line, Up/Down move through the candidates, and Tab (or Enter,
+in the file picker only) inserts the highlighted ``./<path>`` mention
+without submitting the line.  The same live menu serves ``/`` slash
+commands, ``/model <partial>`` model names, and whole-line predictive
 completion: whenever the typed prefix matches one or more prior tasks
 the menu pops with all of them so Up/Down + Tab can pick one without
-re-typing.  On slash-command lines Tab-accepting a candidate
-immediately pops the next-level menu (command → argument options →
-flag values) — see :func:`_accept_completion_tab`.  Outside the
-``@``-mention file picker Enter never accepts a completion
-candidate — it always submits the text the user actually typed.
+re-typing.  A single Tab press on an open menu accepts the
+highlighted candidate — or the first one when none is highlighted
+yet — and, on slash-command lines, immediately pops the next-level
+menu (command → argument options → flag values) so each level of the
+chain needs exactly one Tab; see :func:`_accept_completion_tab` and
+:func:`_accept_first_completion_tab`.  Outside the ``@``-mention file
+picker Enter never accepts a completion candidate — it always submits
+the text the user actually typed.
 
 The candidate lists come from the very same
 :class:`~kiss.agents.sorcar.cli_repl.CliCompleter` backend used by the
@@ -31,7 +34,7 @@ from typing import TYPE_CHECKING
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
-from prompt_toolkit.filters import completion_is_selected
+from prompt_toolkit.filters import completion_is_selected, has_completions
 from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
@@ -56,6 +59,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
     from pathlib import Path
 
+    from prompt_toolkit.buffer import Buffer
     from prompt_toolkit.completion import CompleteEvent
     from prompt_toolkit.document import Document
     from prompt_toolkit.key_binding import KeyPressEvent
@@ -124,12 +128,8 @@ _unmap_enter_aliases()
 _KEY_BINDINGS = KeyBindings()
 
 
-@_KEY_BINDINGS.add("tab", filter=completion_is_selected)
-def _accept_completion_tab(event: KeyPressEvent) -> None:
-    """Tab on a highlighted completion confirms it.
-
-    Enter confirms only in the ``@``-mention file picker; for every
-    other menu Enter submits the typed text (see :func:`_submit_enter`).
+def _accept_and_chain(buf: Buffer) -> None:
+    """Close the completion menu, keep the completed text, and chain.
 
     Chained completion on slash-command lines: accepting a candidate
     on a ``/`` line immediately restarts completion so the next-level
@@ -144,13 +144,57 @@ def _accept_completion_tab(event: KeyPressEvent) -> None:
     the one the user would get by typing the trailing space by hand;
     when the accepted candidate has no follow-up candidates (e.g.
     ``/help ``) no menu appears.  Non-slash accepts (the ``@``-mention
-    file picker outside slash lines, predictive history) are
-    unchanged: the menu simply closes.
+    file picker outside slash lines, predictive history) simply close
+    the menu.
     """
-    buf = event.current_buffer
     buf.complete_state = None
     if buf.document.text_before_cursor.lstrip().startswith("/"):
         buf.start_completion(select_first=False)
+
+
+@_KEY_BINDINGS.add("tab", filter=completion_is_selected)
+def _accept_completion_tab(event: KeyPressEvent) -> None:
+    """Tab on a highlighted (Up/Down-navigated) completion confirms it.
+
+    The candidate's text is already in the buffer (navigation inserts
+    it), so accepting means closing the menu and chaining the
+    next-level menu on slash-command lines — see
+    :func:`_accept_and_chain`.  Enter confirms only in the
+    ``@``-mention file picker; for every other menu Enter submits the
+    typed text (see :func:`_submit_enter`).
+    """
+    _accept_and_chain(event.current_buffer)
+
+
+@_KEY_BINDINGS.add("tab", filter=has_completions & ~completion_is_selected)
+def _accept_first_completion_tab(event: KeyPressEvent) -> None:
+    """Tab on an open menu with NO highlighted candidate accepts the first.
+
+    This fixes the user-reported "chained completion does not work"
+    bug: prompt_toolkit's default Tab binding only *selected* the first
+    candidate (inserting its text into the buffer, so the command
+    looked autocompleted) while keeping the menu open — the next-level
+    argument menu popped only after a second, non-obvious Tab press.
+    One Tab must complete AND chain, so this binding inserts the first
+    candidate's text via
+    :meth:`~prompt_toolkit.buffer.Buffer.go_to_completion` (the same
+    non-``insert_text`` path candidate navigation uses, which does not
+    re-fire the ``complete_while_typing`` completer on non-slash
+    lines) and then accepts it — closing the menu and popping the
+    next-level menu on slash-command lines via
+    :func:`_accept_and_chain`.  Up/Down still navigate the menu first;
+    Tab then accepts the navigated candidate through
+    :func:`_accept_completion_tab` instead of the first one.
+
+    When the async completer has opened an (still) empty menu the
+    binding does nothing, matching the default behaviour.
+    """
+    buf = event.current_buffer
+    state = buf.complete_state
+    if state is None or not state.completions:
+        return
+    buf.go_to_completion(0)
+    _accept_and_chain(buf)
 
 
 @_KEY_BINDINGS.add("enter")
