@@ -4,6 +4,7 @@
 # ruff: noqa: N806, N812
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 import sys
@@ -13,19 +14,47 @@ import uuid
 import pytest
 
 
+@contextlib.contextmanager
+def _fresh_persistence_module(tmp_path, db_path=None):
+    """Yield a freshly re-imported persistence module bound to *tmp_path*.
+
+    On exit, the freshly-imported module is removed from ``sys.modules``
+    and the ORIGINAL module object (with its original ``_DB_PATH``) is
+    restored, so later tests in the same process that lazily import
+    ``kiss.agents.sorcar.persistence`` see the real module again instead
+    of a leftover copy bound to this test's temp database.
+    """
+    saved = {
+        name: mod
+        for name, mod in sys.modules.items()
+        if name.startswith("kiss.agents.sorcar.persistence")
+    }
+    for name in saved:
+        del sys.modules[name]
+    from kiss.agents.sorcar import persistence as P
+    P._KISS_DIR = tmp_path
+    P._DB_PATH = db_path if db_path is not None else tmp_path / "sorcar.db"
+    P._close_db()
+    try:
+        yield P
+    finally:
+        P._close_db()
+        for name in list(sys.modules):
+            if name.startswith("kiss.agents.sorcar.persistence"):
+                del sys.modules[name]
+        sys.modules.update(saved)
+        original = saved.get("kiss.agents.sorcar.persistence")
+        if original is not None:
+            import kiss.agents.sorcar as _sorcar_pkg
+            setattr(_sorcar_pkg, "persistence", original)  # noqa: B010
+
+
 @pytest.fixture
 def fresh_kiss_db(tmp_path, monkeypatch):
     """Provide a freshly-initialized persistence module bound to *tmp_path*."""
     monkeypatch.setenv("KISS_HOME", str(tmp_path))
-    for mod in list(sys.modules):
-        if mod.startswith("kiss.agents.sorcar.persistence"):
-            del sys.modules[mod]
-    from kiss.agents.sorcar import persistence as P
-    P._KISS_DIR = tmp_path
-    P._DB_PATH = tmp_path / "sorcar.db"
-    P._close_db()
-    yield P
-    P._close_db()
+    with _fresh_persistence_module(tmp_path) as P:
+        yield P
 
 
 def test_add_task_returns_uuid_string_id(fresh_kiss_db):
@@ -270,42 +299,35 @@ def test_migration_from_old_schema(tmp_path, monkeypatch):
     conn.commit()
     conn.close()
     monkeypatch.setenv("KISS_HOME", str(tmp_path))
-    for mod in list(sys.modules):
-        if mod.startswith("kiss.agents.sorcar.persistence"):
-            del sys.modules[mod]
-    from kiss.agents.sorcar import persistence as P
-    P._KISS_DIR = tmp_path
-    P._DB_PATH = db_path
-    P._close_db()
-    db = P._get_db()  # triggers migration
-    cols = {
-        r[1]: r[2].upper()
-        for r in db.execute("PRAGMA table_info(task_history)").fetchall()
-    }
-    assert cols["id"] == "TEXT"
-    assert "model" in cols
-    assert "parent_task_id" in cols
-    assert "extra" not in cols
-    rows = db.execute(
-        "SELECT * FROM task_history ORDER BY task"
-    ).fetchall()
-    assert len(rows) == 2
-    child_row = next(r for r in rows if r["task"] == "child task")
-    parent_row = next(r for r in rows if r["task"] == "parent task")
-    assert parent_row["model"] == "gpt"
-    assert parent_row["tokens"] == 10
-    assert parent_row["cost"] == 1.5
-    assert parent_row["is_favorite"] == 1
-    assert parent_row["is_parallel"] == 1
-    assert parent_row["start_ts"] == 100
-    assert parent_row["end_ts"] == 200
-    assert child_row["parent_task_id"] == parent_row["id"]
-    assert child_row["model"] == "claude"
-    ev = db.execute("SELECT * FROM events ORDER BY id").fetchall()
-    assert len(ev) == 2
-    assert ev[0]["task_id"] == parent_row["id"]
-    assert ev[1]["task_id"] == child_row["id"]
-    P._close_db()
+    with _fresh_persistence_module(tmp_path, db_path) as P:
+        db = P._get_db()  # triggers migration
+        cols = {
+            r[1]: r[2].upper()
+            for r in db.execute("PRAGMA table_info(task_history)").fetchall()
+        }
+        assert cols["id"] == "TEXT"
+        assert "model" in cols
+        assert "parent_task_id" in cols
+        assert "extra" not in cols
+        rows = db.execute(
+            "SELECT * FROM task_history ORDER BY task"
+        ).fetchall()
+        assert len(rows) == 2
+        child_row = next(r for r in rows if r["task"] == "child task")
+        parent_row = next(r for r in rows if r["task"] == "parent task")
+        assert parent_row["model"] == "gpt"
+        assert parent_row["tokens"] == 10
+        assert parent_row["cost"] == 1.5
+        assert parent_row["is_favorite"] == 1
+        assert parent_row["is_parallel"] == 1
+        assert parent_row["start_ts"] == 100
+        assert parent_row["end_ts"] == 200
+        assert child_row["parent_task_id"] == parent_row["id"]
+        assert child_row["model"] == "claude"
+        ev = db.execute("SELECT * FROM events ORDER BY id").fetchall()
+        assert len(ev) == 2
+        assert ev[0]["task_id"] == parent_row["id"]
+        assert ev[1]["task_id"] == child_row["id"]
 
 
 def test_migration_idempotent_on_new_schema(fresh_kiss_db):
@@ -321,20 +343,13 @@ def test_migration_idempotent_on_new_schema(fresh_kiss_db):
 
 def test_migration_skips_empty_db(tmp_path, monkeypatch):
     monkeypatch.setenv("KISS_HOME", str(tmp_path))
-    for mod in list(sys.modules):
-        if mod.startswith("kiss.agents.sorcar.persistence"):
-            del sys.modules[mod]
-    from kiss.agents.sorcar import persistence as P
-    P._KISS_DIR = tmp_path
-    P._DB_PATH = tmp_path / "sorcar.db"
-    P._close_db()
-    db = P._get_db()
-    cols = {
-        r[1]: r[2].upper()
-        for r in db.execute("PRAGMA table_info(task_history)").fetchall()
-    }
-    assert cols["id"] == "TEXT"
-    P._close_db()
+    with _fresh_persistence_module(tmp_path) as P:
+        db = P._get_db()
+        cols = {
+            r[1]: r[2].upper()
+            for r in db.execute("PRAGMA table_info(task_history)").fetchall()
+        }
+        assert cols["id"] == "TEXT"
 
 
 def test_resume_after_migration_uses_new_uuid_ids(tmp_path, monkeypatch):
@@ -368,18 +383,11 @@ def test_resume_after_migration_uses_new_uuid_ids(tmp_path, monkeypatch):
     conn.commit()
     conn.close()
     monkeypatch.setenv("KISS_HOME", str(tmp_path))
-    for mod in list(sys.modules):
-        if mod.startswith("kiss.agents.sorcar.persistence"):
-            del sys.modules[mod]
-    from kiss.agents.sorcar import persistence as P
-    P._KISS_DIR = tmp_path
-    P._DB_PATH = db_path
-    P._close_db()
-    entries = P._load_history()
-    assert len(entries) == 1
-    new_id = entries[0]["id"]
-    assert isinstance(new_id, str)
-    assert len(new_id) == 32
-    # _get_task_chat_id should accept the new string id
-    assert P._get_task_chat_id(new_id) == "chatX"
-    P._close_db()
+    with _fresh_persistence_module(tmp_path, db_path) as P:
+        entries = P._load_history()
+        assert len(entries) == 1
+        new_id = entries[0]["id"]
+        assert isinstance(new_id, str)
+        assert len(new_id) == 32
+        # _get_task_chat_id should accept the new string id
+        assert P._get_task_chat_id(new_id) == "chatX"
