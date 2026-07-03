@@ -21,6 +21,7 @@ from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model import Attachment
 from kiss.core.printer import Printer
+from kiss.core.utils import substitute_prompt_args
 
 logger = logging.getLogger(__name__)
 
@@ -533,7 +534,7 @@ class RelentlessAgent(Base):
         self.system_prompt = system_prompt
         self.model_config = model_config
         args = arguments or {}
-        self.task_description = prompt_template.format(**args) if args else prompt_template
+        self.task_description = substitute_prompt_args(prompt_template, args)
 
         if self.docker_image:
             from kiss.docker.docker_manager import DockerManager
