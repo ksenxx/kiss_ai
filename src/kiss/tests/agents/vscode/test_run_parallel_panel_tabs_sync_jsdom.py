@@ -37,7 +37,17 @@ Behaviours verified by the underlying JS test (see file for details):
   their tabs open when the panel is expanded;
 * the "Collapse Chats" toggle (``task-panel-collapse-btn``) that hides
   a finished task's panels also collapses the run_parallel panel and
-  closes its sub-agent tabs, and "Uncollapse Chats" reopens them.
+  closes its sub-agent tabs, and "Uncollapse Chats" reopens them;
+* once the run_parallel tool FINISHES (its ``tool_result`` arrives) the
+  automatic collapse passes collapse the panel like any other tool
+  panel — closing the fan-out's sub-agent tabs (manually expanding the
+  panel afterwards reopens them via ``resumeSession``);
+* while the fan-out is still RUNNING the automatic collapse passes
+  leave the panel uncollapsed and its live sub-agent tabs open;
+* parent-tab ``task_events`` replay/re-render adopts already-open
+  sub-agent tabs before collapsing a finished run_parallel panel;
+* parent-tab replay of a still-running fan-out keeps the replayed
+  run_parallel panel uncollapsed and the live sub-agent tabs open.
 """
 
 from __future__ import annotations
