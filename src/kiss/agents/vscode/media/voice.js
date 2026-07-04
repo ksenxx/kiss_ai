@@ -6,12 +6,13 @@
  * Voice wake-word support for KISS Sorcar.
  *
  * Always-on, fully local listener for the trigger word "Sorcar".  When
- * the wake word is heard, the "sorcar" placeholder is typed into the
- * task input textbox while the extension host records the speech that
- * follows, translates it to English with the gpt-audio model, and sends
- * it back as ``{type: 'voiceSpeech', text}``; the translated text then
- * replaces the placeholder (or is appended to an existing draft) and
- * listening continues.
+ * the wake word is heard, the mic button flashes as a visual cue (no
+ * text is ever typed into the task input — the literal word "sorcar"
+ * must never appear there) while the extension host records the speech
+ * that follows, translates it to English with the gpt-audio model, and
+ * sends it back as ``{type: 'voiceSpeech', text}``; the translated
+ * text is then typed into the task input (or appended to an existing
+ * draft) and listening continues.
  *
  * Two modes, selected by the ``window.__VOICE__`` config injected by
  * the page template:
@@ -38,7 +39,6 @@
   const inp = document.getElementById('task-input');
   if (!btn || !inp) return;
 
-  const WAKE_WORD = 'sorcar';
   // "sorcar" is not in the small English model's vocabulary, so the
   // grammar also lists in-vocabulary words/phrases that sound like
   // "Sorcar".  Any of them heard in a partial or final result counts
@@ -124,7 +124,10 @@
   }
 
   /**
-   * Type the wake word into the task input and keep listening.
+   * React to the wake word: flash the mic button and focus the task
+   * input so the user sees they were heard.  No text is inserted —
+   * the literal word "sorcar" must never appear in the input box; the
+   * translated speech arrives later as a voiceSpeech message.
    * Debounced so one long utterance (partial + final results) only
    * triggers once.
    */
@@ -132,8 +135,6 @@
     const now = Date.now();
     if (now - lastWakeAt < COOLDOWN_MS) return;
     lastWakeAt = now;
-    inp.value = WAKE_WORD;
-    inp.dispatchEvent(new Event('input', {bubbles: true}));
     try {
       inp.focus();
     } catch (_e) {
@@ -147,18 +148,15 @@
 
   /**
    * Insert the English translation of the speech that followed the
-   * wake word into the task input.  The "sorcar" wake placeholder is
-   * replaced; any other existing draft is appended to.  An empty
-   * translation (silence or a failed translation) only clears the
-   * placeholder and never touches user text.
+   * wake word into the task input.  An empty input receives the text;
+   * an existing draft is appended to with a space.  An empty
+   * translation (silence or a failed translation) is a no-op and
+   * never touches user text.
    */
   function insertSpeech(text) {
     const translated = String(typeof text === 'string' ? text : '').trim();
-    const hasPlaceholder = inp.value === WAKE_WORD;
-    if (!translated) {
-      if (!hasPlaceholder) return;
-      inp.value = '';
-    } else if (hasPlaceholder || !inp.value) {
+    if (!translated) return;
+    if (!inp.value) {
       inp.value = translated;
     } else {
       inp.value = inp.value + ' ' + translated;
