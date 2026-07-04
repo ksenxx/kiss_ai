@@ -1,41 +1,47 @@
-"""End-to-end test for Attack 4: multi-recipient domain bypass."""
+"""End-to-end test for Attack 4 (comma-separated recipient list).
+
+Post-fix expectation
+--------------------
+* The Z3 precondition encoding for ``domain_of(to) in allowed_domains``
+  now requires ``Not(Contains(to, ","))``, so a string with a comma is
+  rejected at verification time.
+* The runtime ``safe_eval._domain_of_str`` now splits multi-recipient
+  strings on ``,`` and returns a *list* of domains; ``in``/``not in``
+  over list-in-list checks all elements, so the automaton fires on the
+  attacker's external address.
+* The taint side-channel on ``subject`` is also caught (Fix 1).
+"""
 
 from __future__ import annotations
-
-from guardians import verify
 
 from attacks import attack_multi_recipient_domain
 from attacks.common import SECRET_MARKER, SECRET_MARKER_2, build_scenario
 
-from ._util import run_attack
+from ._util import run_expected_blocked
 
 
-def test_comma_separated_recipient_list_hides_external_address() -> None:
+def test_multi_recipient_domain_is_blocked() -> None:
     scenario = build_scenario()
     workflow = attack_multi_recipient_domain.build(scenario)
 
-    # The verifier accepts because both the Z3 condition encoding and the
-    # automaton's safe_eval guard treat the whole string as having the final
-    # @company.com suffix.
-    result = verify(workflow, scenario.policy, scenario.registry)
-    assert result.ok, (
-        "Verifier unexpectedly rejected: "
-        + "\n".join(f"  [{v.category}] {v.message}" for v in result.violations)
+    outcome = run_expected_blocked(scenario, workflow)
+
+    assert outcome.verifier_blocked, (
+        "Verifier must reject a to=... string containing a comma"
     )
-    assert result.warnings == []
 
-    run_attack(scenario, workflow)
+    categories = {v.category for v in outcome.result.violations}
+    # (a) Z3 precondition catches the comma.
+    assert "precondition" in categories, (
+        "Expected the strengthened Z3 precondition to reject the comma"
+    )
+    # (b) The automaton reaches error via the safe_eval list-in-list
+    # semantics: ``[evil.com, company.com] not in [company.com]`` is True.
+    assert "automaton" in categories, (
+        "Expected the domain automaton to fire on the multi-recipient list"
+    )
 
-    assert len(scenario.exfil_log) == 1
-    call = scenario.exfil_log[0]
-
-    # The sink received an address field containing an external recipient,
-    # even though the no_external_send automaton approved it.
-    assert call["to"] == attack_multi_recipient_domain.RECIPIENT_LIST
-    assert attack_multi_recipient_domain.EXTERNAL_RECIPIENT in call["to"]
-    assert attack_multi_recipient_domain.INTERNAL_COVER_RECIPIENT in call["to"]
-
-    # The stolen inbox still left through the unchecked subject field.
-    subject_repr = repr(call["subject"])
-    assert SECRET_MARKER in subject_repr
-    assert SECRET_MARKER_2 in subject_repr
+    # No exfiltration.
+    assert outcome.exfil_log_len == 0
+    assert SECRET_MARKER not in outcome.leaked_content
+    assert SECRET_MARKER_2 not in outcome.leaked_content
