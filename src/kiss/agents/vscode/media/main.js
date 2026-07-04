@@ -1060,6 +1060,11 @@
       if (i >= 0) tabs.splice(i, 1);
       vscode.postMessage({type: 'closeTab', tabId: id});
     }
+    // A sub-agent tab closed by hand (tab-bar ×, context menu, or a
+    // cascade) must not leave its run_parallel panel uncollapsed —
+    // uncollapsed panel ⇒ ALL its sub-agent tabs open.  Collapse the
+    // owning panel(s), which closes the surviving sibling tabs.
+    rpAfterTabsClosed(toClose);
     if (activeWasClosed) {
       if (tabs.length === 0) {
         // Last tab closed — create a fresh chat instead of closing
@@ -1886,6 +1891,10 @@
         // Highlight code deferred while this panel stayed collapsed.
         highlightPending(p);
         collapsePreview(p);
+        // An expand-all that uncollapsed a run_parallel panel must
+        // reopen the fan-out's sub-agent tabs (uncollapsed panel ⇒
+        // sub-agent tabs open).
+        syncRunParallelPanel(p);
       }
     }
   }
@@ -2503,11 +2512,163 @@
         highlightPending(panelEl);
       }
       collapsePreview(panelEl);
+      // Enforce the run_parallel invariant: collapsed panel ⇒ its
+      // sub-agent tabs are closed; uncollapsed panel ⇒ they are open.
+      syncRunParallelPanel(panelEl);
       setTimeout(() => {
         _noScroll = false;
       }, 0);
     });
     addCopyButton(panelEl);
+  }
+
+  // --- run_parallel panel ⇔ sub-agent tabs invariant ---
+  //
+  // Invariant: while a ``run_parallel`` tool-call panel is UNCOLLAPSED
+  // the tabs of its sub-agents MUST be open, and while it is COLLAPSED
+  // those tabs MUST be closed.
+  //
+  // Sub-agents spawned by a live ``run_parallel`` fan-out are
+  // associated with the newest ``.tc-run-parallel`` panel of the
+  // parent tab (see the ``new_tab`` handler).  The panel element keeps
+  // the group state directly (``_rpSubagents``: one entry per
+  // sub-agent with its backend ``taskId`` and current frontend
+  // ``tabId``; ``_rpParentTabId``: the parent tab the reopened tabs
+  // anchor to), and ``_rpTabPanel`` maps each open sub-agent tab id
+  // back to its owning panel so ``closeTab`` can restore consistency
+  // when the user closes a sub-agent tab by hand.
+  const _rpTabPanel = new Map();
+  const _rpClosedSubagentTabs = new Set();
+  let _rpSyncing = false;
+
+  /** Newest run_parallel panel in *parentId*'s chat DOM (or null). */
+  function runParallelPanelForParent(parentId) {
+    let root = null;
+    if (parentId === activeTabId) {
+      root = O;
+    } else {
+      const parentTab = getTab(parentId);
+      root = parentTab ? parentTab.outputFragment : null;
+    }
+    if (!root || !root.querySelectorAll) return null;
+    const panels = root.querySelectorAll('.tc-run-parallel');
+    return panels.length ? panels[panels.length - 1] : null;
+  }
+
+  /** True when *panelEl* owns at least one OPEN sub-agent tab. */
+  function rpPanelHasOpenTabs(panelEl) {
+    const entries = panelEl._rpSubagents;
+    if (!entries) return false;
+    return entries.some(en => en.tabId && getTab(en.tabId));
+  }
+
+  /**
+   * Record that sub-agent *taskId* (shown in tab *tabId*, '' while the
+   * panel is collapsed) belongs to *panelEl*'s fan-out.
+   */
+  function rpRegisterSubagent(panelEl, parentId, taskId, tabId) {
+    if (!panelEl._rpSubagents) panelEl._rpSubagents = [];
+    panelEl._rpParentTabId = parentId;
+    const taskKey = taskId === undefined || taskId === null ? '' : taskId;
+    const tabKey = tabId || '';
+    let entry = null;
+    if (tabKey) {
+      entry = panelEl._rpSubagents.find(en => en.tabId === tabKey) || null;
+    }
+    if (!entry && taskKey !== '') {
+      entry =
+        panelEl._rpSubagents.find(
+          en => String(en.taskId) === String(taskKey),
+        ) || null;
+    }
+    if (!entry) {
+      entry = {taskId: taskKey, tabId: tabKey};
+      panelEl._rpSubagents.push(entry);
+    } else {
+      if (taskKey !== '') entry.taskId = taskKey;
+      if (tabKey && entry.tabId !== tabKey) {
+        if (entry.tabId) _rpTabPanel.delete(entry.tabId);
+        entry.tabId = tabKey;
+      }
+    }
+    if (tabKey) {
+      _rpClosedSubagentTabs.delete(tabKey);
+      _rpTabPanel.set(tabKey, panelEl);
+    }
+  }
+
+  /**
+   * Enforce the invariant for *panelEl*: close every sub-agent tab of
+   * the panel when it is collapsed, (re)open every missing sub-agent
+   * tab when it is uncollapsed.  No-op for panels that are not
+   * run_parallel panels or own no sub-agents (e.g. history-rendered
+   * panels whose fan-out ran in a previous session).
+   */
+  function syncRunParallelPanel(panelEl) {
+    const entries = panelEl._rpSubagents;
+    if (!panelEl.classList.contains('tc-run-parallel') || !entries) return;
+    if (_rpSyncing) return;
+    _rpSyncing = true;
+    try {
+      const collapsed = panelEl.classList.contains('collapsed');
+      for (const en of entries) {
+        const openTab = en.tabId ? getTab(en.tabId) : null;
+        if (collapsed && openTab) {
+          const closingId = en.tabId;
+          _rpClosedSubagentTabs.add(closingId);
+          _rpTabPanel.delete(closingId);
+          closeTab(closingId);
+          en.tabId = '';
+        } else if (!collapsed && !openTab && en.taskId !== '') {
+          const subTab = createBackgroundSubagentTab(panelEl._rpParentTabId);
+          en.tabId = subTab.id;
+          _rpTabPanel.set(subTab.id, panelEl);
+          vscode.postMessage({
+            type: 'resumeSession',
+            taskId: en.taskId,
+            tabId: subTab.id,
+          });
+        }
+      }
+    } finally {
+      _rpSyncing = false;
+    }
+  }
+
+  /**
+   * Restore the invariant after sub-agent tabs in *closedIds* were
+   * closed OUTSIDE syncRunParallelPanel (tab-bar × button, context
+   * menu, cascade from closing another tab): an uncollapsed
+   * run_parallel panel must not keep the surviving sibling tabs open,
+   * so collapse the owning panel — which closes them.  Panels whose
+   * parent tab was closed in the same cascade disappeared with it and
+   * need no work.
+   */
+  function rpAfterTabsClosed(closedIds) {
+    if (_rpSyncing) return;
+    const panels = new Set();
+    for (const id of closedIds) {
+      const p = _rpTabPanel.get(id);
+      if (p) {
+        _rpClosedSubagentTabs.add(id);
+        _rpTabPanel.delete(id);
+        for (const en of p._rpSubagents || []) {
+          if (en.tabId === id) en.tabId = '';
+        }
+        panels.add(p);
+      }
+    }
+    for (const p of panels) {
+      const parentOpen =
+        p._rpParentTabId === activeTabId || getTab(p._rpParentTabId);
+      if (!parentOpen) continue;
+      if (!p.classList.contains('collapsed')) {
+        p.classList.add('collapsed');
+        p.classList.remove('user-pinned');
+        collapsePreview(p);
+      }
+      syncRunParallelPanel(p);
+    }
   }
 
   // Panel Copy button + raw-text walker live in media/panelCopy.js so
@@ -2519,7 +2680,14 @@
   function collapseAllExceptResult(container) {
     const panels = container.querySelectorAll('.collapsible');
     for (let i = 0; i < panels.length; i++) {
-      if (!panels[i].classList.contains('rc')) {
+      // run_parallel panels with open sub-agent tabs are exempt from
+      // the automatic collapse: collapsing them would violate the
+      // "collapsed panel ⇒ sub-agent tabs closed" invariant (only an
+      // explicit user collapse may close the fan-out's tabs).
+      if (
+        !panels[i].classList.contains('rc') &&
+        !rpPanelHasOpenTabs(panels[i])
+      ) {
         panels[i].classList.add('collapsed');
         collapsePreview(panels[i]);
       }
@@ -2532,7 +2700,8 @@
     for (let i = 0; i < panels.length - 1; i++) {
       if (
         !panels[i].classList.contains('rc') &&
-        !panels[i].classList.contains('user-pinned')
+        !panels[i].classList.contains('user-pinned') &&
+        !rpPanelHasOpenTabs(panels[i])
       ) {
         panels[i].classList.add('collapsed');
         collapsePreview(panels[i]);
@@ -2852,6 +3021,10 @@
           hdr.classList.add('tc-h-bash');
           c.classList.add('tc-bash');
         }
+        // Tag run_parallel tool-call panels so the panel ⇔ sub-agent
+        // tabs invariant machinery (see syncRunParallelPanel) can find
+        // the panel that owns the fan-out's sub-agent tabs.
+        if (ev.name === 'run_parallel') c.classList.add('tc-run-parallel');
         let b = '';
         if (ev.path) {
           const ep = esc(ev.path).replace(/"/g, '&quot;');
@@ -3987,8 +4160,18 @@
         }
         // Track the task_id of the currently displayed task so a later
         // 'taskDeleted' broadcast can decide whether to close this tab.
-        if (teTab && ev.task_id !== undefined && ev.task_id !== null)
+        if (teTab && ev.task_id !== undefined && ev.task_id !== null) {
           teTab.currentTaskId = ev.task_id;
+          const rpPanel = _rpTabPanel.get(teTabId);
+          if (rpPanel && teTab.isSubagentTab) {
+            rpRegisterSubagent(
+              rpPanel,
+              rpPanel._rpParentTabId || teTab.parentTabId || '',
+              ev.task_id,
+              teTabId,
+            );
+          }
+        }
         // Non-active tab: render into a document fragment without touching the DOM.
         // When teTabId targets a different tab but that tab hasn't been
         // created yet (teTab is null), silently drop the event so
@@ -4513,8 +4696,28 @@
           // for a tab that will never show a welcome screen, and (4)
           // steal keyboard focus from the parent the user is typing
           // in.  ``createBackgroundSubagentTab`` does none of that.
+          // Associate the sub-agent with the parent tab's newest
+          // run_parallel panel so collapsing/expanding that panel
+          // closes/reopens the fan-out's tabs (see
+          // syncRunParallelPanel).  If the user collapsed the panel
+          // while sub-agents are still spawning, honour the collapsed
+          // state: register the sub-agent but do NOT open a tab (nor
+          // resume its stream) — expanding the panel opens it then.
+          const rpPanel = runParallelPanelForParent(parentTabBeforeNew);
+          if (rpPanel && rpPanel.classList.contains('collapsed')) {
+            rpRegisterSubagent(rpPanel, parentTabBeforeNew, ev.task_id, '');
+            break;
+          }
           const subTab = createBackgroundSubagentTab(parentTabBeforeNew);
           subAgentTabId = subTab.id;
+          if (rpPanel) {
+            rpRegisterSubagent(
+              rpPanel,
+              parentTabBeforeNew,
+              ev.task_id,
+              subTab.id,
+            );
+          }
         } else {
           // Defensive path: a ``new_tab`` event with no
           // ``parent_tab_id`` is not produced by any current backend
@@ -4560,10 +4763,32 @@
         // ``ev.tabId`` with the subscriber's (= parent's) tab id, so we
         // fall back to that.
         const parentId = ev.parent_tab_id || ev.tabId || '';
+        const subTaskId =
+          ev.task_id === undefined || ev.task_id === null ? '' : ev.task_id;
+        let rpPanel = _rpTabPanel.get(ev.tab_id) || null;
+        if (!rpPanel && parentId) rpPanel = runParallelPanelForParent(parentId);
         // Idempotent: if a tab with the same id already exists, update
         // it in place rather than pushing a duplicate.  Defends against
         // accidental duplicate events from the backend.
         let subTab = getTab(ev.tab_id);
+        // A stale replay/convert for a tab that the user already
+        // closed by collapsing the owning run_parallel panel must not
+        // re-materialise a sub-agent tab behind a collapsed panel.
+        if (!subTab && _rpClosedSubagentTabs.has(ev.tab_id)) {
+          if (rpPanel) rpRegisterSubagent(rpPanel, parentId, subTaskId, '');
+          break;
+        }
+        if (rpPanel && rpPanel.classList.contains('collapsed')) {
+          rpRegisterSubagent(
+            rpPanel,
+            parentId,
+            subTaskId,
+            subTab ? subTab.id : '',
+          );
+          if (subTab) syncRunParallelPanel(rpPanel);
+          else _rpClosedSubagentTabs.add(ev.tab_id);
+          break;
+        }
         const needsPlacement = !subTab || !subTab.isSubagentTab;
         if (!subTab) {
           subTab = makeTab(title);
@@ -4594,6 +4819,8 @@
         subTab.isRunning = !subDone;
         subTab.taskPanelHTML = subDesc;
         subTab.taskPanelVisible = true;
+        if (rpPanel)
+          rpRegisterSubagent(rpPanel, parentId, subTaskId, subTab.id);
         renderTabBar();
         // If the backend converted the active tab into a sub-agent tab
         // (e.g. the user clicked a sub-agent row in the history panel,
