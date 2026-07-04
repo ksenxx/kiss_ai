@@ -84,6 +84,43 @@ __all__ = ["RemoteAccessServer", "WebPrinter"]
 logger = logging.getLogger(__name__)
 
 MEDIA_DIR = Path(__file__).parent / "media"
+
+# Lightweight Vosk speech model used by the in-browser "Sorcar" wake-word
+# listener (voice.js).  The ~40MB archive is not bundled; it is downloaded
+# once on first use and cached under ~/.kiss/models/.
+VOICE_MODEL_URL = (
+    "https://ccoreilly.github.io/vosk-browser/models/"
+    "vosk-model-small-en-us-0.15.tar.gz"
+)
+VOICE_MODEL_CACHE = (
+    Path.home() / ".kiss" / "models" / "vosk-model-small-en-us-0.15.tar.gz"
+)
+_voice_model_lock = threading.Lock()
+
+
+def _ensure_voice_model() -> Path | None:
+    """Return the cached wake-word model archive, downloading on first use.
+
+    Serializes concurrent downloads with a lock and writes through a
+    temporary file so a partially-downloaded archive is never served.
+
+    Returns:
+        Path to the cached ``.tar.gz`` archive, or ``None`` when the
+        download failed (e.g. no network).
+    """
+    with _voice_model_lock:
+        if VOICE_MODEL_CACHE.is_file() and VOICE_MODEL_CACHE.stat().st_size > 0:
+            return VOICE_MODEL_CACHE
+        tmp = VOICE_MODEL_CACHE.with_suffix(".tmp")
+        try:
+            VOICE_MODEL_CACHE.parent.mkdir(parents=True, exist_ok=True)
+            urllib.request.urlretrieve(VOICE_MODEL_URL, tmp)
+            tmp.replace(VOICE_MODEL_CACHE)
+            return VOICE_MODEL_CACHE
+        except Exception:
+            logger.exception("voice model download failed: %s", VOICE_MODEL_URL)
+            tmp.unlink(missing_ok=True)
+            return None
 _MEDIA_VERSION_CACHE: dict[str, str] = {}
 
 # HTML page for the agent-trajectory visualizer, served at ``/trajectories/``.
@@ -2274,6 +2311,12 @@ def _build_html() -> str:
         "DEMO_SRC": _media_url("demo.js"),
         "SHIM_SCRIPT": f"<script>{_WS_SHIM_JS}</script>\n  ",
         "TRICKS_JSON": tricks_json,
+        "VOICE_SRC": _media_url("voice.js"),
+        "VOICE_CONFIG": json.dumps({
+            "mode": "browser",
+            "voskSrc": _media_url("vosk.js"),
+            "modelUrl": "/voice-model.tar.gz",
+        }),
     }
     tpl = (MEDIA_DIR / "chat.html").read_text(encoding="utf-8")
     # Single-pass substitution: injected values (e.g. the JS shim's
@@ -3342,6 +3385,18 @@ class RemoteAccessServer:
             return _trajectory_jobs_response()
         if path.startswith("/api/jobs/") and path.endswith("/trajectories"):
             return _trajectory_job_response(path)
+        if path == "/voice-model.tar.gz":
+            # Wake-word model for the in-browser voice listener.  The
+            # download is served off-thread so a cold cache does not
+            # stall the event loop for every other client.
+            model_file = await asyncio.to_thread(_ensure_voice_model)
+            if model_file is None:
+                return _http_response(
+                    502, "text/plain", b"voice model unavailable"
+                )
+            return _http_response(
+                200, "application/gzip", model_file.read_bytes()
+            )
         if path.startswith("/media/"):
             filepath = MEDIA_DIR / path[7:]
             if (
