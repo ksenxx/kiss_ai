@@ -1,46 +1,48 @@
-"""End-to-end test for Attack 2: type-confusion on the ``to`` parameter."""
+"""End-to-end test for Attack 2 (``to=[]`` type confusion).
+
+Post-fix expectation
+--------------------
+Two independent fixes each block the attack, so we assert both fire:
+
+1. ``verify`` runs a concrete argument-type check.  ``to=[]`` violates
+   ``ParamSpec.type='str'`` and is rejected as ``type_mismatch``.
+2. ``safe_eval`` no longer treats ``[] in [...]`` as True (vacuous
+   subset), so the automaton's ``domain_of(to) not in allowed_domains``
+   guard fires; the automaton reaches its error state.
+"""
 
 from __future__ import annotations
 
-from guardians import verify
-
 from attacks import attack_type_confusion
-from attacks.common import SECRET_MARKER, build_scenario
+from attacks.common import SECRET_MARKER, SECRET_MARKER_2, build_scenario
 
-from ._util import run_attack
+from ._util import run_expected_blocked
 
 
-def test_to_equals_empty_list_bypasses_domain_automaton() -> None:
+def test_type_confusion_is_blocked() -> None:
     scenario = build_scenario()
     workflow = attack_type_confusion.build(scenario)
 
-    # First: the verifier accepts.  The Z3 backend gives up on
-    # ``domain_of(to) in allowed_domains`` (only a warning, not a
-    # violation) and the automaton guard evaluates to False under
-    # safe_eval because ``[] not in [...]`` is False.
-    result = verify(workflow, scenario.policy, scenario.registry)
-    assert result.ok, (
-        "Verifier unexpectedly rejected: "
-        + "\n".join(f"  [{v.category}] {v.message}" for v in result.violations)
+    outcome = run_expected_blocked(scenario, workflow)
+
+    # Static verification must reject.
+    assert outcome.verifier_blocked, "Verifier must reject to=[]"
+
+    categories = {v.category for v in outcome.result.violations}
+
+    # (a) Explicit type-mismatch diagnostic on the ``to`` argument.
+    assert "type_mismatch" in categories, (
+        "Expected a type_mismatch violation for the list-into-str slot"
     )
 
-    # A skipped precondition surfaces only as a warning.
-    warnings_str = "\n".join(result.warnings)
-    assert "Could not parse precondition" in warnings_str, (
-        "Expected a 'skipped precondition' warning — the verifier is "
-        "silently discarding the domain check. "
-        f"Got warnings: {result.warnings!r}"
+    # (b) The automaton's error state must also be reachable now that
+    # ``[] not in [...]`` evaluates correctly.
+    assert "automaton" in categories, (
+        "Expected the domain-allowlist automaton to reach its error state "
+        "once ``[] in [...]`` is no longer treated as vacuously true"
     )
 
-    # Runtime: executor happily calls send_email with ``to=[]`` — no
-    # automaton fires, no precondition failure, no taint recheck.
-    run_attack(scenario, workflow)
-
-    assert len(scenario.exfil_log) == 1
-    call = scenario.exfil_log[0]
-
-    # The domain-check said [] was a valid recipient set.
-    assert call["to"] == []
-
-    # And the payload still shipped in the subject.
-    assert SECRET_MARKER in repr(call["subject"])
+    # No exfiltration ever happened.
+    assert outcome.exfil_log_len == 0
+    assert SECRET_MARKER not in outcome.leaked_content
+    assert SECRET_MARKER_2 not in outcome.leaked_content

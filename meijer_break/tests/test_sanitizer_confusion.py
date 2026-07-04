@@ -1,34 +1,57 @@
-"""End-to-end test for Attack 3: sanitizer confusion."""
+"""End-to-end test for Attack 3 (sanitizer confusion).
+
+Post-fix expectation
+--------------------
+The verifier no longer accepts a name-based sanitizer listing.  A tool
+declared as a sanitizer for a taint rule is only honored when its
+``ToolSpec.redacts_labels`` covers the rule's source labels.
+
+The break-scenario's ``summarize_emails`` deliberately has no
+``redacts_labels`` claim, so:
+
+* ``verify`` emits a ``sanitizer_contract`` violation.
+* Because sanitization is not applied, taint propagates through the
+  summary and the downstream ``send_email.body`` is caught by the plain
+  taint rule as well.
+* The executor, running with ``verify_first=False`` to isolate the
+  runtime monitor, also raises ``SecurityViolation`` at the summarizer
+  step — a defense-in-depth win.
+"""
 
 from __future__ import annotations
 
 from attacks import attack_sanitizer_confusion
 from attacks.common import SECRET_MARKER, SECRET_MARKER_2, build_scenario
 
-from ._util import run_attack
+from ._util import run_expected_blocked
 
 
-def test_sanitizer_list_is_trusted_by_name_not_by_semantics() -> None:
+def test_sanitizer_confusion_is_blocked() -> None:
     scenario = build_scenario()
     workflow = attack_sanitizer_confusion.build(scenario)
 
-    # Sanity: the attack modified the policy to declare
-    # ``summarize_emails`` a sanitizer.
-    assert "summarize_emails" in scenario.policy.taint_rules[0].sanitizers
+    outcome = run_expected_blocked(scenario, workflow)
 
-    run_attack(scenario, workflow)
-
-    # Two tool calls actually mattered for the sink: only ``send_email``
-    # writes to exfil_log.
-    assert len(scenario.exfil_log) == 1
-    call = scenario.exfil_log[0]
-
-    # ``body`` here is the fake-sanitizer output.  It concatenates every
-    # raw field of the stolen inbox, so both markers appear verbatim.
-    body_str = str(call["body"])
-    assert SECRET_MARKER in body_str, (
-        f"Expected M&A secret to leak via faux-sanitized body; got:\n{body_str!r}"
+    # Static verification must reject.
+    assert outcome.verifier_blocked, (
+        "Verifier must reject an undeclared sanitizer"
     )
-    assert SECRET_MARKER_2 in body_str, (
-        f"Expected HR secret to leak via faux-sanitized body; got:\n{body_str!r}"
+    categories = {v.category for v in outcome.result.violations}
+    assert "sanitizer_contract" in categories, (
+        "Expected an explicit sanitizer_contract violation"
     )
+    # And the plain taint rule must still fire, because sanitization is
+    # not applied to a spec that made no redaction claim.
+    assert "taint" in categories, (
+        "Sanitization must not be applied when the redacts_labels contract "
+        "is not met, so the downstream body taint must still fire"
+    )
+
+    # The runtime executor also refuses at the summarizer step: a mail
+    # send never happened.
+    assert outcome.runtime_blocked, (
+        "Runtime monitor should also refuse the misdeclared sanitizer"
+    )
+    assert outcome.exfil_log_len == 0
+    assert SECRET_MARKER not in outcome.leaked_content
+    assert SECRET_MARKER_2 not in outcome.leaked_content

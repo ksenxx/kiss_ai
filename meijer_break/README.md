@@ -1,7 +1,11 @@
-# Breaking the Guardians verifier
+# Fixing the Guardians verifier — before/after
 
-Concrete counterexamples to the soundness claims of Erik Meijer's
-"generate → verify → execute" pipeline for AI-agent workflows:
+Companion to the earlier break-suite in this repo.  The four attacks
+that previously slipped past Erik Meijer's "generate → verify → execute"
+pipeline are now blocked by patches applied to the Guardians reference
+implementation.
+
+Papers targeted:
 
 * Erik Meijer, *Guardians of the Agents: Formal Verification of AI
   Workflows*, ACM Queue **23**(4), Sep 2025.
@@ -10,39 +14,88 @@ Concrete counterexamples to the soundness claims of Erik Meijer's
   **24**(2), Jun 2026.
   <https://queue.acm.org/detail.cfm?id=3806226>
 
-The reference implementation targeted here is the Universalis-style
-Python library published by Nada Amin at
-<https://github.com/metareflection/guardians> (MIT-licensed, revision
-current as of mid-2026).  The `guardians/` sub-directory of this
-project is a clean clone of that repo, kept unmodified so results can
-be reproduced against the authors' own code.
+Reference implementation patched here:
+<https://github.com/metareflection/guardians> (MIT-licensed, mid-2026).
+The `guardians/` sub-directory is a clone with the fixes applied
+directly; upstream tests still pass unmodified.
 
-## What each attack breaks
+## What the fix does
 
-All attacks start from *the paper's own canonical email-agent setup*
-(`examples/email_agent.py`; the tool specs, automaton, and base taint rule
-are reproduced in `attacks/common.py`).  Attacks 1, 2, and 4 use that
-policy unchanged; Attack 3 deliberately adds `summarize_emails` to the
-rule's sanitizer list to test the framework's sanitizer trust model.  In
-every case:
+| # | Attack                                     | Layer(s) fixed                                                                                                                     | Verifier category (new)   |
+|---|--------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------|---------------------------|
+| 1 | Subject-line exfiltration                  | `verify._check_taint_rules` sweeps every argument, not only ``rule.sink_param``.                                                    | `taint`                   |
+| 2 | ``to=[]`` type confusion                   | (a) new ``_check_arg_types`` pass in `verify`. (b) `safe_eval`'s list-in-list `in` requires non-empty LHS.                          | `type_mismatch`, `automaton` |
+| 3 | Sanitizer trusted by name                  | New ``ToolSpec.redacts_labels``.  Sanitization honored only when the sanitizer's ``redacts_labels`` cover the rule's source labels. | `sanitizer_contract`      |
+| 4 | Multi-recipient (`"a@evil.com, b@ok.com"`) | (a) Z3 encoding of ``domain_of(x) in D`` also requires ``Not(Contains(x, ","))``. (b) `safe_eval._domain_of_str` returns a list of domains when the input contains a comma. | `precondition`, `automaton` |
 
-* `verify(workflow, policy, registry).ok` is `True`.
-* The workflow executes to completion.
-* The sensitive mail contents leave via the mail sink at runtime.
+Every attack is now blocked by ``verify(...)`` and additionally refused
+by the runtime executor (which, per the paper's own posture, calls
+``verify`` before executing anything).
 
-| # | Attack file                                  | Verifier weakness                                                                                     |
-|---|----------------------------------------------|--------------------------------------------------------------------------------------------------------|
-| 1 | `attacks/attack_subject_exfil.py`            | `TaintRule.sink_param="body"` ignores `subject`; `is_taint_sink` is not set on `subject`.              |
-| 2 | `attacks/attack_type_confusion.py`           | Passing `to=[]` skips the Z3 precondition (only a warning) and lets `[] not in […]` evaluate to False. |
-| 3 | `attacks/attack_sanitizer_confusion.py`      | `TaintRule.sanitizers` is a name-based allow-list; no proof required that the tool actually sanitizes. |
-| 4 | `attacks/attack_multi_recipient_domain.py`   | `domain_of(to)` is a single suffix/last-`@` check, so `attacker@evil.com, friend@company.com` passes.  |
+## Concrete file changes
 
-Each attack is a first-class module with a `build(scenario)` entry
-point.  A test in `tests/` executes the attack end-to-end and
-asserts that (a) the verifier accepts and (b) an eye-catching secret
-marker still appears in the runtime exfiltration log.
+* `guardians/src/guardians/verify.py`
+  * `_check_taint_rules` iterates over *all* resolved args and calls
+    `_check_single_taint` per (rule, param); each violation names the
+    concrete leaking argument.
+  * New `_check_arg_types` — a concrete literal with a Python type that
+    contradicts its `ParamSpec.type` is a `type_mismatch` violation.
+    Runs before Z3, so lists no longer slip past a `str` slot silently.
+  * Sanitizer application (step 8 in `_verify_tool_call`) only stamps
+    `sanitized_for` when `spec.redacts_labels ⊇ rule.source_labels`;
+    a misdeclared sanitizer is a `sanitizer_contract` violation and
+    the taint continues to propagate.
+* `guardians/src/guardians/safe_eval.py`
+  * `_domain_of_str` splits on `,` first and returns a per-recipient
+    domain list.
+  * `Compare` `In` / `NotIn` over two lists now requires a non-empty
+    LHS with every element in the RHS — fixing the vacuous-subset bug
+    that let `[] in ["company.com"]` be True.
+* `guardians/src/guardians/conditions.py`
+  * `_single_compare` `_DomainOf` + `list` also emits
+    `Not(Contains(",", var))`, so an address containing a comma can no
+    longer be modeled as a single suffix match.
+* `guardians/src/guardians/tools.py`
+  * New `ToolSpec.redacts_labels: list[str] = []` field.
+* `guardians/src/guardians/execute.py`
+  * Runtime sanitization mirrors the verifier's contract; a
+    misdeclared sanitizer raises `SecurityViolation` at execution time.
+* `guardians/src/guardians/adapters/agent.py`
+  * `@agent.tool(redacts_labels=[...])` surface + threaded through the
+    spec builder so decorator-registered tools can declare the
+    contract.
+* `guardians/tests/adapters/test_agent.py` and
+  `guardians/tests/core/test_verify.py` updated so the pre-existing
+  sanitizer tests give their sanitizer the required `redacts_labels`.
 
-## Running
+Upstream test suite: `pytest -q` inside `guardians/` — **126/126 pass**.
+
+## Attack-suite tests (this repo)
+
+The four attack modules under `attacks/` remain unchanged — they still
+construct the paper's canonical policy and the same malicious
+workflows.  The tests in `tests/` were rewritten to assert the *fixed*
+outcome: the verifier now rejects each attack and the runtime executor
+refuses to run it.
+
+```bash
+cd guardians && source .venv/bin/activate && python -m pytest -q  # 126/126
+cd ..
+python demo.py                    # narrative walkthrough of all 4 attacks blocked
+python -m pytest tests -v         # 4 tests, all attacks blocked
+```
+
+Sample output from `demo.py`:
+
+```
+Attack 1 — subject-line exfil (verifier now sweeps all params)
+verify.ok = False   violations=1
+    ! [taint] Tainted data from 'fetch_mail' flows to 'send_email.subject' (unmarked side-channel; primary sink is 'body')
+  runtime executor refused: Workflow failed verification: [taint] ...
+  exfil_log entries: 0   secret_marker_leaked: False
+```
+
+## Reproduce end-to-end
 
 ```bash
 # From the repo root:
@@ -53,37 +106,45 @@ uv pip install -e .
 uv pip install pytest
 cd ..
 
-python demo.py                # narrative walkthrough
-pytest -v tests               # 4 tests, one per attack
+python demo.py                # all four attacks blocked
+python -m pytest tests -v     # attack-suite tests
+cd guardians && python -m pytest -q   # upstream: 126/126
 ```
 
-## Where the paper's soundness argument fails
+## Round-2 fix audit update
 
-The Amin / Meijer pipeline advertises:
+A follow-up `gpt-5.5-xhigh` audit reviewed the previous fixes adversarially.
+The audit confirmed the four primary attacks remain blocked, then found and
+patched one additional domain-policy regression: recipient lists separated by
+`;` or whitespace (for example
+`"attacker@evil.com; friend@company.com"`) were still modeled as a single
+final-suffix address.  The runtime `domain_of` helper now splits comma,
+semicolon, and whitespace-separated recipient strings, and the Z3 encoding of
+`domain_of(to) in allowed_domains` now requires that none of those separators
+appear in a single-address value.
 
-1. **Taint analysis** with may-information over-approximation.
-2. **Security automata** whose guards are evaluated statically.
-3. **Z3-checked pre/postconditions**.
+The same audit also strengthened concrete argument type checking for generic
+`ParamSpec.type` strings such as `list[str]` and `dict[str, int]`, and rejects
+`bool` values in `int`/`float` slots.
 
-The attacks target the *joints* between these layers:
+Additional regression artifacts:
 
-* Attack 1 exposes the *policy surface* joint: taint rules operate on
-  policy-declared sink params, but sinks have *implicit* side-channels
-  (subject, cc, bcc, headers) that no `is_taint_sink` flag defends
-  unless the policy author enumerates them by hand.
-* Attack 2 exposes the *abstraction joint* between Z3 (typed) and
-  `safe_eval` (untyped Python): a value that Z3 refuses to reason about
-  is downgraded to a warning, while the runtime evaluates the same
-  expression happily.
-* Attack 3 exposes the *label-vs-semantics joint*: sanitization is
-  advertised as a proven property but implemented as an unchecked
-  string-based label.
-* Attack 4 exposes the *parser-model joint*: the verifier proves a
-  property of a simplified last-`@`/suffix abstraction of an email
-  address field, while real address fields can contain recipient lists.
+* `attacks/attack_regression_semicolon_domain.py`
+* `tests/test_regression_semicolon_domain.py`
 
-Each is a fundamental gap: none can be closed by "tighten the policy
-in this one place".  They all require *the framework itself* to grow
-new invariants (mandatory `subject`/header sink coverage, an unambiguous
-runtime type discipline, proof-carrying sanitizers, and recipient-list
-parsing that checks every mailbox rather than a single suffix).
+Current validation:
+
+```bash
+cd meijer_break/guardians && source .venv/bin/activate && pytest -q
+# 126 passed
+cd ..
+python -m pytest tests -v
+# 6 passed (four original fixed attacks + two separator-regression cases)
+python demo.py
+# the four primary attacks still show verify.ok=False and exfil_log entries=0
+```
+
+Residual limitation: `ToolSpec.redacts_labels` is a trusted contract.  A tool
+implementation that lies about redaction, or deliberately encodes secrets into
+apparently low-sensitivity outputs, remains outside this verifier's current
+proof model without proof-carrying/audited tool implementations.
