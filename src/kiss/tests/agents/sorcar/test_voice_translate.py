@@ -4,13 +4,20 @@
 # add your name here
 """End-to-end tests for translating speech after the "Sorcar" wake word.
 
-Real audio, real speech models, real GPT translation — no mocks:
+Real audio, real speech models, real GPT translation — no mocks.  The
+translation is a single ``gpt-audio`` chat-completions call (audio
+content part first, dictation instruction text after, in one user
+message), so the tests also pin down the dictation semantics:
 
 - ``test_translate_speech_after_wake`` speaks "Sorcar" followed by a
   sentence with the macOS TTS engine, streams the audio through the
   actual wake-word listener (``kiss.agents.vscode.voice_wake``), and
   asserts that the listener emits a ``SPEECH`` line whose payload is
   the GPT-translated English text.
+
+- ``test_question_is_transcribed_not_answered`` guards against the
+  gpt-audio failure mode of *answering* the dictated speech instead of
+  transcribing it.
 
 - ``test_no_speech_after_wake`` checks that silence after the wake
   word produces a ``NO_SPEECH`` line and no GPT call output.
@@ -19,7 +26,9 @@ Real audio, real speech models, real GPT translation — no mocks:
   and asserts the listener reports the failure without crashing.
 
 - ``TestSpeechCapture`` drives the real endpointing logic with raw PCM
-  (loud/silent blocks) covering every capture branch.
+  (loud/silent blocks) covering every capture branch, and exercises the
+  transcript post-processing (preamble/quote stripping, wake-word
+  prefix removal) with real model-output shapes observed in probes.
 """
 
 from __future__ import annotations
@@ -39,6 +48,7 @@ from kiss.agents.vscode.voice_wake import (
     BLOCK_SIZE,
     SAMPLE_RATE,
     SpeechCapture,
+    clean_transcript,
     pcm_to_wav_bytes,
     strip_leading_wake_word,
 )
@@ -190,6 +200,27 @@ class TestVoiceTranslateFromWav(unittest.TestCase):
         self.assertIn("hello", text, msg=proc.stdout + proc.stderr[-2000:])
         self.assertNotIn("bonjour", text, msg=proc.stdout)
 
+    def test_question_is_transcribed_not_answered(self) -> None:
+        # gpt-audio's known failure mode is answering the dictated
+        # speech ("Paris.") instead of transcribing it; the dictation
+        # prompt must make it output the words verbatim.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            wake = _tts_wav(tmpdir, "wake", "Sorcar")
+            speech = _tts_wav(
+                tmpdir, "speech", "What is the capital of France?",
+            )
+            wav = _concat_wavs(
+                tmpdir / "combined.wav", [wake, speech], gap_seconds=1.5,
+            )
+            proc = _run_listener(wav)
+        payloads = _speech_payloads(proc.stdout)
+        self.assertEqual(len(payloads), 1, msg=proc.stdout + proc.stderr[-2000:])
+        text = payloads[0].lower()
+        self.assertIn("capital", text, msg=proc.stdout)
+        self.assertIn("france", text, msg=proc.stdout)
+        self.assertNotIn("paris", text, msg=proc.stdout)
+
     def test_speech_cut_off_at_end_of_file_is_still_translated(self) -> None:
         # The file ends while the capture is still waiting for trailing
         # silence; the listener must flush and translate what it heard.
@@ -335,6 +366,34 @@ class TestSpeechCapture(unittest.TestCase):
             "please fix it",
         )
         self.assertEqual(strip_leading_wake_word("fix Sorcar bug"), "fix Sorcar bug")
+        # gpt-audio has been observed transcribing "Sorcar" as "Sorger".
+        self.assertEqual(
+            strip_leading_wake_word("Sorger, fix the failing test"),
+            "fix the failing test",
+        )
+
+    def test_clean_transcript_strips_preamble_and_quotes(self) -> None:
+        # Real gpt-audio output shape observed in stress probes.
+        self.assertEqual(
+            clean_transcript(
+                'Sure. Here is the transcription of the speech:\n\n'
+                '"Fix the failing test in the parser."'
+            ),
+            "Fix the failing test in the parser.",
+        )
+        self.assertEqual(
+            clean_transcript("Here's the translation: Fix the bug."),
+            "Fix the bug.",
+        )
+        self.assertEqual(
+            clean_transcript('"Hello world."'),
+            "Hello world.",
+        )
+        self.assertEqual(
+            clean_transcript("Fix the bug in the main file."),
+            "Fix the bug in the main file.",
+        )
+        self.assertEqual(clean_transcript("  \n "), "")
 
     def test_pcm_to_wav_bytes_roundtrip(self) -> None:
         pcm = _loud_block()
