@@ -27,9 +27,12 @@ import unittest
 from importlib.util import find_spec
 from pathlib import Path
 
-_SIGNAL_CONFIG = Path.home() / ".kiss" / "third_party_agents" / "signal" / "config.json"
+from kiss.agents.third_party_agents.signal_agent import _config as _signal_config
+from kiss.agents.third_party_agents.sms_agent import _config as _sms_config
+
+_SIGNAL_CONFIG = _signal_config.path
 _SIGNAL_BACKUP = _SIGNAL_CONFIG.with_suffix(".json.bughunt2-bak")
-_SMS_CONFIG = Path.home() / ".kiss" / "third_party_agents" / "sms" / "config.json"
+_SMS_CONFIG = _sms_config.path
 _SMS_BACKUP = _SMS_CONFIG.with_suffix(".json.bughunt2-bak")
 
 # A real shell program emulating signal-cli. For "receive" it prints JSON lines
