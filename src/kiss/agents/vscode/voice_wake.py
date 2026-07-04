@@ -177,7 +177,7 @@ class SpeechCapture:
     was heard, or the captured PCM once the utterance ended.
     """
 
-    END_SILENCE_SECONDS = 1.0  # trailing silence that ends the speech
+    END_SILENCE_SECONDS = 5.0  # trailing silence that ends the speech
     NO_SPEECH_TIMEOUT_SECONDS = 5.0  # silence after wake with no speech
     MAX_CAPTURE_SECONDS = 30.0  # hard cap on the captured utterance
     RMS_THRESHOLD = 0.01  # blocks at or above this RMS count as speech
