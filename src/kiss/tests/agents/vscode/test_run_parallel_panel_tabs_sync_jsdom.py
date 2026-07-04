@@ -34,7 +34,10 @@ Behaviours verified by the underlying JS test (see file for details):
 * replayed/persisted sub-agent tabs opened by ``openSubagentTab`` alone
   are associated with the owning run_parallel panel;
 * sub-agents spawned while the panel is collapsed do not open tabs —
-  their tabs open when the panel is expanded.
+  their tabs open when the panel is expanded;
+* the "Collapse Chats" toggle (``task-panel-collapse-btn``) that hides
+  a finished task's panels also collapses the run_parallel panel and
+  closes its sub-agent tabs, and "Uncollapse Chats" reopens them.
 """
 
 from __future__ import annotations
