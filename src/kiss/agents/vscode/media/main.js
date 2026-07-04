@@ -2574,6 +2574,75 @@
     return entries.some(en => en.tabId && getTab(en.tabId));
   }
 
+  /** Return the local tab id that owns *container*'s output DOM. */
+  function rpOwnerTabIdForContainer(container, fallbackTabId) {
+    if (fallbackTabId !== undefined && fallbackTabId !== null)
+      return fallbackTabId;
+    if (container === O) return activeTabId;
+    for (const tab of tabs) {
+      if (tab.outputFragment === container) return tab.id;
+      if (
+        tab.outputFragment &&
+        tab.outputFragment.contains &&
+        tab.outputFragment.contains(container)
+      ) {
+        return tab.id;
+      }
+    }
+    return '';
+  }
+
+  /** Return the local tab id that owns *panelEl*'s output DOM. */
+  function rpOwnerTabIdForPanel(panelEl) {
+    if (panelEl._rpParentTabId) return panelEl._rpParentTabId;
+    if (panelEl.closest && panelEl.closest('.adjacent-task')) return '';
+    if (O && O.contains(panelEl)) return activeTabId;
+    const root = panelEl.getRootNode ? panelEl.getRootNode() : null;
+    return rpOwnerTabIdForContainer(root);
+  }
+
+  /** True when *panelEl* is the newest run_parallel panel in its task DOM. */
+  function rpIsNewestRunParallelPanel(panelEl) {
+    let root = null;
+    if (panelEl.parentNode === O) root = O;
+    else {
+      root = panelEl.getRootNode ? panelEl.getRootNode() : null;
+      if (!root || !root.querySelectorAll) return true;
+    }
+    const panels = root.querySelectorAll('.tc-run-parallel');
+    return !panels.length || panels[panels.length - 1] === panelEl;
+  }
+
+  /**
+   * If a parent tab was replayed/re-rendered, the freshly-created
+   * run_parallel panel element has lost the expando registry that
+   * associated it with already-open sub-agent tabs.  Before collapsing
+   * or syncing such a panel, adopt the open sub-agent tabs of the same
+   * parent so the invariant machinery can close/reopen them normally.
+   */
+  function rpAdoptOpenSubagents(panelEl, parentId) {
+    if (!panelEl.classList.contains('tc-run-parallel') || !parentId) return;
+    if (!rpIsNewestRunParallelPanel(panelEl)) return;
+    const openChildren = tabs.filter(
+      tab => tab.isSubagentTab && tab.parentTabId === parentId,
+    );
+    for (const tab of openChildren) {
+      const previousPanel = _rpTabPanel.get(tab.id);
+      const previousEntry = previousPanel
+        ? (previousPanel._rpSubagents || []).find(en => en.tabId === tab.id)
+        : null;
+      let taskId = previousEntry ? previousEntry.taskId : '';
+      if (
+        (taskId === undefined || taskId === null || taskId === '') &&
+        tab.currentTaskId !== undefined &&
+        tab.currentTaskId !== null
+      ) {
+        taskId = tab.currentTaskId;
+      }
+      rpRegisterSubagent(panelEl, parentId, taskId || '', tab.id);
+    }
+  }
+
   /**
    * Record that sub-agent *taskId* (shown in tab *tabId*, '' while the
    * panel is collapsed) belongs to *panelEl*'s fan-out.
@@ -2617,8 +2686,10 @@
    * panels whose fan-out ran in a previous session).
    */
   function syncRunParallelPanel(panelEl) {
+    if (!panelEl.classList.contains('tc-run-parallel')) return;
+    rpAdoptOpenSubagents(panelEl, rpOwnerTabIdForPanel(panelEl));
     const entries = panelEl._rpSubagents;
-    if (!panelEl.classList.contains('tc-run-parallel') || !entries) return;
+    if (!entries) return;
     if (_rpSyncing) return;
     _rpSyncing = true;
     try {
@@ -2689,20 +2760,24 @@
   const PANEL_COPY_SVG = window.PanelCopy.PANEL_COPY_SVG;
   const PANEL_CHECK_SVG = window.PanelCopy.PANEL_CHECK_SVG;
 
-  function collapseAllExceptResult(container) {
+  function collapseAllExceptResult(container, ownerTabId) {
+    const ownerId = rpOwnerTabIdForContainer(container, ownerTabId);
     const panels = container.querySelectorAll('.collapsible');
     for (let i = 0; i < panels.length; i++) {
-      // run_parallel panels with open sub-agent tabs are exempt from
-      // the automatic collapse: collapsing them would violate the
-      // "collapsed panel ⇒ sub-agent tabs closed" invariant (only an
-      // explicit user collapse may close the fan-out's tabs).
-      if (
-        !panels[i].classList.contains('rc') &&
-        !rpPanelHasOpenTabs(panels[i])
-      ) {
-        panels[i].classList.add('collapsed');
-        collapsePreview(panels[i]);
-      }
+      const p = panels[i];
+      if (p.classList.contains('rc')) continue;
+      if (p.classList.contains('tc-run-parallel'))
+        rpAdoptOpenSubagents(p, ownerId);
+      // A run_parallel panel whose fan-out is still RUNNING (its
+      // tool_result has not arrived yet) is exempt from the automatic
+      // collapse: collapsing it would kill the live sub-agent tabs.
+      // Once the run_parallel tool finished (``_rpDone``) the panel
+      // collapses like every other tool panel and syncRunParallelPanel
+      // enforces "collapsed panel ⇒ sub-agent tabs closed".
+      if (rpPanelHasOpenTabs(p) && !p._rpDone) continue;
+      p.classList.add('collapsed');
+      collapsePreview(p);
+      syncRunParallelPanel(p);
     }
   }
 
@@ -2710,14 +2785,19 @@
     if (!isRunning) return;
     const panels = O.querySelectorAll(':scope > .collapsible');
     for (let i = 0; i < panels.length - 1; i++) {
-      if (
-        !panels[i].classList.contains('rc') &&
-        !panels[i].classList.contains('user-pinned') &&
-        !rpPanelHasOpenTabs(panels[i])
-      ) {
-        panels[i].classList.add('collapsed');
-        collapsePreview(panels[i]);
-      }
+      const p = panels[i];
+      if (p.classList.contains('rc') || p.classList.contains('user-pinned'))
+        continue;
+      if (p.classList.contains('tc-run-parallel'))
+        rpAdoptOpenSubagents(p, activeTabId);
+      // Same run_parallel exemption as collapseAllExceptResult: only a
+      // panel whose fan-out is still running keeps its sub-agent tabs
+      // (and itself) open; a finished fan-out collapses with the other
+      // older panels, closing its sub-agent tabs.
+      if (rpPanelHasOpenTabs(p) && !p._rpDone) continue;
+      p.classList.add('collapsed');
+      collapsePreview(p);
+      syncRunParallelPanel(p);
     }
   }
 
@@ -3036,7 +3116,11 @@
         // Tag run_parallel tool-call panels so the panel ⇔ sub-agent
         // tabs invariant machinery (see syncRunParallelPanel) can find
         // the panel that owns the fan-out's sub-agent tabs.
-        if (ev.name === 'run_parallel') c.classList.add('tc-run-parallel');
+        if (ev.name === 'run_parallel') {
+          c.classList.add('tc-run-parallel');
+          if (ev.tabId !== undefined && ev.tabId !== null)
+            c._rpParentTabId = ev.tabId;
+        }
         let b = '';
         if (ev.path) {
           const ep = esc(ev.path).replace(/"/g, '&quot;');
@@ -3122,6 +3206,16 @@
         // ``hadBash && !is_error`` early exit — so every tool_result
         // path (bash, plain output, error) stamps the elapsed time.
         if (tState.lastToolCallEl) finalizePanelTime(tState.lastToolCallEl);
+        // The run_parallel tool finished: its fan-out is complete, so
+        // the panel is no longer exempt from the automatic collapse
+        // passes — when the agent moves on and the panel collapses,
+        // syncRunParallelPanel closes the fan-out's sub-agent tabs.
+        if (
+          tState.lastToolCallEl &&
+          tState.lastToolCallEl.classList.contains('tc-run-parallel')
+        ) {
+          tState.lastToolCallEl._rpDone = true;
+        }
         if (hadBash && !ev.is_error) break;
         const resultTarget = tState.lastToolCallEl || target;
         if (ev.is_error) {
@@ -3327,7 +3421,7 @@
       // Close out the last live Thoughts panel so its bottom-anchored
       // time footer reflects the duration up to the result event.
       if (llmPanel) finalizePanelTime(llmPanel);
-      collapseAllExceptResult(O);
+      collapseAllExceptResult(O, activeTabId);
       if (ev.success === false && !ev.is_continue) {
         const rTab = getTab(activeTabId);
         if (rTab) rTab.lastTaskFailed = true;
@@ -3449,7 +3543,7 @@
           tab.statusTokensText = 'Tokens: ' + fmtN(ev.total_tokens);
         if (ev.cost && ev.cost !== 'N/A')
           tab.statusBudgetText = 'Cost: ' + ev.cost;
-        collapseAllExceptResult(tab.outputFragment);
+        collapseAllExceptResult(tab.outputFragment, tab.id);
         if (ev.success === false && !ev.is_continue) tab.lastTaskFailed = true;
         // After a result, the next thinking/text must create a new panel.
         bgPendingPanel = true;
@@ -4239,6 +4333,7 @@
           }
           const frag = document.createDocumentFragment();
           replayEventsInto(frag, ev.events || [], {
+            ownerTabId: teTabId,
             onFollowupClick: function (text) {
               inp.value = text;
               syncClearBtn();
@@ -5422,7 +5517,7 @@
     } finally {
       _deferHighlight = prevDefer;
     }
-    collapseAllExceptResult(container);
+    collapseAllExceptResult(container, opts && opts.ownerTabId);
     // Highlight only blocks that remain visible after collapsing; blocks
     // inside a collapsed panel stay deferred and are highlighted lazily when
     // the user expands the panel (see addCollapse / highlightPending).
@@ -5469,6 +5564,7 @@
     resetOutputState();
     clearUsageMetrics();
     replayEventsInto(O, events, {
+      ownerTabId: activeTabId,
       onFollowupClick: function (text) {
         inp.value = text;
         syncClearBtn();
@@ -8369,7 +8465,7 @@
       vscode.postMessage(msg);
     },
     collapsePanels: function () {
-      collapseAllExceptResult(O);
+      collapseAllExceptResult(O, activeTabId);
     },
     setRunningState: setRunningState,
     showSpinner: showSpinner,

@@ -22,6 +22,14 @@
 //   4. The automatic collapse passes (``collapseOlderPanels`` while
 //      streaming, ``collapseAllExceptResult`` at task end) collapsed
 //      the run_parallel panel while its sub-agent tabs stayed open.
+//   5. After the run_parallel tool FINISHED (tool_result arrived) and
+//      the agent moved on, the fan-out's sub-agent tabs stayed open —
+//      the automatic collapse of the finished tool panel did not close
+//      them.  (A still-running fan-out is exempt from auto-collapse.)
+//   6. Replaying/re-rendering the parent tab replaced the run_parallel
+//      panel DOM element, losing its expando sub-agent registry; the
+//      replay collapse then collapsed the fresh panel while old
+//      sub-agent tabs remained open.
 //
 // The tests drive the real ``media/main.js`` against the real
 // ``media/chat.html`` markup in jsdom — the exact production webview
@@ -470,10 +478,13 @@ function testCollapseChatsToggleClosesSubTabs() {
   });
   send(win, {type: 'result', tabId: parentId, summary: 'done', success: true});
   send(win, {type: 'status', running: false, tabId: parentId});
+  // The task-end collapse pass collapses the finished fan-out's panel,
+  // which closes its sub-agent tabs (collapsed panel ⇒ tabs closed).
   assert.strictEqual(
     subagentTabEls(win).length,
-    2,
-    'both sub-agent tabs must still be open after the parent finishes',
+    0,
+    'the task-end collapse of the finished run_parallel panel must ' +
+      'close its sub-agent tabs',
   );
 
   const btn = win.document.getElementById('task-panel-collapse-btn');
@@ -484,7 +495,7 @@ function testCollapseChatsToggleClosesSubTabs() {
   assert.strictEqual(
     subagentTabEls(win).length,
     2,
-    'expand-all must keep the sub-agent tabs open',
+    'expand-all must reopen the finished fan-out\'s sub-agent tabs',
   );
   btn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
   assert.ok(
@@ -527,6 +538,235 @@ function testCollapseChatsToggleClosesSubTabs() {
   console.log('  ok - Collapse Chats toggle closes/reopens sub tabs');
 }
 
+// ---------------------------------------------------------------------------
+// 9. When the run_parallel tool FINISHES (its tool_result arrives) and
+//    the agent moves on (next Thoughts panel → the automatic collapse
+//    pass collapses the older run_parallel panel), the sub-agent tabs
+//    MUST close with the panel.  Reproduces the user-reported bug:
+//    "when the run_parallel tool finishes, and the agent collapses the
+//    tool panel, the sub-agent tabs remain open".
+// ---------------------------------------------------------------------------
+function testRunParallelFinishAutoCollapseClosesSubTabs() {
+  const {win, posted, panel, parentId, taskIds, subTabIds} =
+    bootParallelRun(2);
+
+  // The fan-out completes: run_parallel returns its tool_result and
+  // the agent thinks about the results (new Thoughts panel → the
+  // auto-collapse pass collapses every older panel).
+  send(win, {
+    type: 'tool_result',
+    tabId: parentId,
+    content: 'all sub-agents done',
+  });
+  send(win, {type: 'thinking_start', tabId: parentId});
+  send(win, {type: 'thinking_delta', tabId: parentId, text: 'wrapping up'});
+  send(win, {type: 'thinking_end', tabId: parentId});
+
+  assert.ok(
+    panel.classList.contains('collapsed'),
+    'BUG REPRODUCED: after the run_parallel tool finished and the ' +
+      'agent moved on, the auto-collapse pass must collapse the ' +
+      'run_parallel panel like every other tool panel',
+  );
+  assert.strictEqual(
+    subagentTabEls(win).length,
+    0,
+    'INVARIANT VIOLATED: the agent collapsed the finished ' +
+      'run_parallel panel but its sub-agent tabs remain open',
+  );
+  for (const id of subTabIds) {
+    assert.ok(
+      posted.some(m => m.type === 'closeTab' && m.tabId === id),
+      'the backend must be told to close sub-agent tab ' + id,
+    );
+  }
+
+  // Task end must keep the state consistent.
+  send(win, {
+    type: 'tool_call',
+    name: 'finish',
+    tabId: parentId,
+    extras: {summary: 'done'},
+  });
+  send(win, {type: 'result', tabId: parentId, summary: 'done', success: true});
+  send(win, {type: 'status', running: false, tabId: parentId});
+  assert.ok(
+    panel.classList.contains('collapsed'),
+    'the finished run_parallel panel must stay collapsed at task end',
+  );
+  assert.strictEqual(
+    subagentTabEls(win).length,
+    0,
+    'sub-agent tabs must stay closed at task end',
+  );
+
+  // The user can still get the fan-out back: expanding the panel by
+  // hand reopens every sub-agent tab via resumeSession.
+  const before = posted.length;
+  togglePanel(win, panel);
+  assert.ok(!panel.classList.contains('collapsed'), 'panel expanded');
+  assert.strictEqual(
+    subagentTabEls(win).length,
+    2,
+    'expanding the finished run_parallel panel must reopen its tabs',
+  );
+  for (const taskId of taskIds) {
+    assert.ok(
+      posted
+        .slice(before)
+        .some(m => m.type === 'resumeSession' && m.taskId === taskId),
+      'reopened sub-agent tab must resume backend task ' + taskId,
+    );
+  }
+  win.close();
+  console.log(
+    '  ok - finished run_parallel auto-collapse closes sub tabs',
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 10. While the fan-out is STILL RUNNING (no tool_result yet), the
+//     automatic collapse passes must NOT collapse the run_parallel
+//     panel — collapsing it would kill the live sub-agent tabs.
+// ---------------------------------------------------------------------------
+function testRunningFanOutStaysExemptFromAutoCollapse() {
+  const {win, panel, parentId} = bootParallelRun(2);
+
+  // Streamed thinking from the parent while sub-agents are running
+  // (e.g. interleaved status text) triggers collapseOlderPanels.
+  send(win, {type: 'thinking_start', tabId: parentId});
+  send(win, {type: 'thinking_delta', tabId: parentId, text: 'waiting'});
+  send(win, {type: 'thinking_end', tabId: parentId});
+
+  assert.ok(
+    !panel.classList.contains('collapsed'),
+    'a run_parallel panel whose fan-out is still running must stay ' +
+      'uncollapsed',
+  );
+  assert.strictEqual(
+    subagentTabEls(win).length,
+    2,
+    'the live sub-agent tabs must stay open while the fan-out runs',
+  );
+  win.close();
+  console.log('  ok - running fan-out stays exempt from auto-collapse');
+}
+
+// ---------------------------------------------------------------------------
+// 11. Replaying/re-rendering the parent tab replaces the DOM element
+//     for the run_parallel panel.  The new element must adopt already
+//     open sub-agent tabs before replay collapse/sync runs; otherwise
+//     the fresh panel collapses while the old tabs stay open.
+// ---------------------------------------------------------------------------
+function testParentReplayAdoptsOpenSubTabsBeforeFinishedCollapse() {
+  const {win, posted, panel, parentId, taskIds, subTabIds} =
+    bootParallelRun(2);
+
+  send(win, {
+    type: 'task_events',
+    tabId: parentId,
+    task: 'parent replay',
+    task_id: 'parent-task',
+    events: [
+      {type: 'tool_call', name: 'run_parallel', tabId: parentId},
+      {
+        type: 'tool_result',
+        tabId: parentId,
+        content: 'all sub-agents done',
+      },
+      {type: 'result', tabId: parentId, summary: 'done', success: true},
+    ],
+  });
+
+  const replayedPanel = runParallelPanel(win);
+  assert.ok(replayedPanel, 'replay must render a run_parallel panel');
+  assert.notStrictEqual(
+    replayedPanel,
+    panel,
+    'task_events replay must replace the old panel DOM element',
+  );
+  assert.ok(
+    replayedPanel.classList.contains('collapsed'),
+    'replay collapse must collapse the finished run_parallel panel',
+  );
+  assert.strictEqual(
+    subagentTabEls(win).length,
+    0,
+    'INVARIANT VIOLATED: replay collapse replaced the run_parallel ' +
+      'panel and left its already-open sub-agent tabs open',
+  );
+  for (const id of subTabIds) {
+    assert.ok(
+      posted.some(m => m.type === 'closeTab' && m.tabId === id),
+      'replay collapse must close adopted sub-agent tab ' + id,
+    );
+  }
+
+  const before = posted.length;
+  togglePanel(win, replayedPanel);
+  assert.strictEqual(
+    subagentTabEls(win).length,
+    2,
+    'expanding the replayed panel must reopen adopted sub-agent tabs',
+  );
+  for (const taskId of taskIds) {
+    assert.ok(
+      posted
+        .slice(before)
+        .some(m => m.type === 'resumeSession' && m.taskId === taskId),
+      'reopened adopted sub-agent tab must resume backend task ' + taskId,
+    );
+  }
+  win.close();
+  console.log(
+    '  ok - parent replay adopts open sub tabs before finished collapse',
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 12. A replay of a STILL-RUNNING fan-out also replaces the panel DOM.
+//     Adoption must happen before the replay's collapse pass decides
+//     whether to skip the panel; otherwise the fresh panel has no
+//     registry, looks like an ordinary panel, and collapses while live
+//     sub-agent tabs remain open.
+// ---------------------------------------------------------------------------
+function testParentReplayKeepsRunningFanOutOpen() {
+  const {win, panel, parentId} = bootParallelRun(2);
+
+  send(win, {
+    type: 'task_events',
+    tabId: parentId,
+    task: 'parent replay running',
+    task_id: 'parent-task',
+    events: [
+      {type: 'tool_call', name: 'run_parallel', tabId: parentId},
+      {type: 'thinking_start', tabId: parentId},
+      {type: 'thinking_delta', tabId: parentId, text: 'waiting'},
+      {type: 'thinking_end', tabId: parentId},
+    ],
+  });
+
+  const replayedPanel = runParallelPanel(win);
+  assert.ok(replayedPanel, 'replay must render a run_parallel panel');
+  assert.notStrictEqual(
+    replayedPanel,
+    panel,
+    'task_events replay must replace the old panel DOM element',
+  );
+  assert.ok(
+    !replayedPanel.classList.contains('collapsed'),
+    'a replayed run_parallel panel whose fan-out is still running ' +
+      'must stay uncollapsed',
+  );
+  assert.strictEqual(
+    subagentTabEls(win).length,
+    2,
+    'live sub-agent tabs must stay open after a running fan-out replay',
+  );
+  win.close();
+  console.log('  ok - parent replay keeps running fan-out open');
+}
+
 async function main() {
   const tests = [
     testCollapseClosesSubagentTabs,
@@ -537,6 +777,10 @@ async function main() {
     testOpenSubagentTabOnlyPathIsAssociated,
     testSpawnWhileCollapsedDefersTabs,
     testCollapseChatsToggleClosesSubTabs,
+    testRunParallelFinishAutoCollapseClosesSubTabs,
+    testRunningFanOutStaysExemptFromAutoCollapse,
+    testParentReplayAdoptsOpenSubTabsBeforeFinishedCollapse,
+    testParentReplayKeepsRunningFanOutOpen,
   ];
   for (const t of tests) {
     await t();
