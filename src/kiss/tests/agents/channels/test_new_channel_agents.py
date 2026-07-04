@@ -212,15 +212,29 @@ def _load(info: dict) -> tuple:
     return mod, agent_cls, backend_cls
 
 
+def _reset_config(mod) -> None:
+    """Clear any leftover persisted config so the agent starts unauthenticated.
+
+    Handles both config styles used by channel agent modules: a legacy
+    module-level ``_clear_config()`` function, and the ``ChannelConfig``
+    object exposed as module-level ``_config``.
+    """
+    clear_fn = getattr(mod, "_clear_config", None)
+    if clear_fn is not None:
+        clear_fn()
+        return
+    config = getattr(mod, "_config", None)
+    if config is not None:
+        config.clear()
+
+
 @pytest.mark.parametrize("info", _CHANNEL_AGENTS, ids=_CHANNEL_IDS)
 def test_check_auth_unauthenticated(info: dict) -> None:
     """check_*_auth() returns a helpful message when not configured."""
     if info.get("macos_only") and sys.platform != "darwin":
         pytest.skip("macOS-only agent")
     mod, agent_cls, _ = _load(info)
-    clear_fn = getattr(mod, "_clear_config", None)
-    if clear_fn:
-        clear_fn()
+    _reset_config(mod)
     agent = agent_cls()
     agent.web_use_tool = None
     tools = {t.__name__: t for t in agent._get_tools()}
@@ -238,9 +252,7 @@ def test_check_auth_unauthenticated(info: dict) -> None:
 def test_clear_auth_when_not_authenticated(info: dict) -> None:
     """clear_*_auth() works without error even when not authenticated."""
     mod, agent_cls, _ = _load(info)
-    clear_fn = getattr(mod, "_clear_config", None)
-    if clear_fn:
-        clear_fn()
+    _reset_config(mod)
     agent = agent_cls()
     agent.web_use_tool = None
     tools = {t.__name__: t for t in agent._get_tools()}
