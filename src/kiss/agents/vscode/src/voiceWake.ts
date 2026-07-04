@@ -12,12 +12,16 @@
  * lightweight offline Vosk small English model and prints one line per
  * event on stdout:
  *
- * - ``READY`` — model loaded, microphone open, listening.
- * - ``WAKE``  — the wake word "Sorcar" was heard.
+ * - ``READY``         — model loaded, microphone open, listening.
+ * - ``WAKE``          — the wake word "Sorcar" was heard.
+ * - ``SPEECH <json>`` — the speech that followed the wake word,
+ *   translated to English by GPT models (JSON string payload).
+ * - ``NO_SPEECH``     — only silence followed the wake word.
  *
  * The service forwards those events to the webview, where voice.js
- * types "sorcar" into the task input and the listener simply keeps
- * running.  Everything is fully local; no audio leaves the machine.
+ * inserts the translated text into the task input and the listener
+ * simply keeps running.  Wake-word detection is fully local; only the
+ * post-wake utterance is sent to the GPT translation API.
  */
 
 import {spawn, ChildProcess} from 'child_process';
@@ -29,12 +33,38 @@ export type WakeCallback = () => void;
 /** Callback reporting listener state changes to the UI. */
 export type StateCallback = (listening: boolean, error?: string) => void;
 
+/**
+ * Callback receiving the English translation of the speech following
+ * the wake word ('' when only silence was heard).
+ */
+export type SpeechCallback = (text: string) => void;
+
+/**
+ * Extra CLI arguments for the Python listener, JSON-encoded in the
+ * ``KISS_VOICE_WAKE_ARGS`` environment variable (e.g. ``["--wav",
+ * "f.wav"]``).  Used by the end-to-end tests to feed recorded audio.
+ */
+function extraListenerArgs(): string[] {
+  const raw = process.env.KISS_VOICE_WAKE_ARGS;
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed) && parsed.every(a => typeof a === 'string')) {
+      return parsed;
+    }
+  } catch {
+    // Malformed override — ignore it.
+  }
+  return [];
+}
+
 export class VoiceWakeService {
   private _proc: ChildProcess | undefined;
 
   constructor(
     private readonly _onWake: WakeCallback,
     private readonly _onState: StateCallback,
+    private readonly _onSpeech: SpeechCallback,
   ) {}
 
   /** Whether the listener process is currently running. */
@@ -67,7 +97,13 @@ export class VoiceWakeService {
     try {
       proc = spawn(
         uv,
-        ['run', 'python', '-m', 'kiss.agents.vscode.voice_wake'],
+        [
+          'run',
+          'python',
+          '-m',
+          'kiss.agents.vscode.voice_wake',
+          ...extraListenerArgs(),
+        ],
         {cwd: kissProject, stdio: ['ignore', 'pipe', 'pipe']},
       );
     } catch (err) {
@@ -85,6 +121,15 @@ export class VoiceWakeService {
         stdoutBuf = stdoutBuf.slice(idx + 1);
         if (line === 'WAKE') this._onWake();
         else if (line === 'READY') this._onState(true);
+        else if (line === 'NO_SPEECH') this._onSpeech('');
+        else if (line.startsWith('SPEECH ')) {
+          try {
+            const text = JSON.parse(line.slice('SPEECH '.length));
+            if (typeof text === 'string') this._onSpeech(text);
+          } catch {
+            // Malformed payload — drop the event.
+          }
+        }
         idx = stdoutBuf.indexOf('\n');
       }
     });
