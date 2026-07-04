@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 import threading
 import time as _time
@@ -18,6 +19,14 @@ from typing import Any
 import yaml
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_KISS_DIR = Path.home() / ".kiss"
+
+
+def _kiss_home() -> Path:
+    """Return the KISS data directory, respecting the ``KISS_HOME`` env var."""
+    env = os.environ.get("KISS_HOME")
+    return Path(env) if env else _DEFAULT_KISS_DIR
 
 _NON_TOOL_METHODS = frozenset(
     {
@@ -190,8 +199,25 @@ class ChannelConfig:
     """
 
     def __init__(self, channel_dir: Path, required_keys: tuple[str, ...]) -> None:
-        self.path = channel_dir / "config.json"
+        self._channel_dir = channel_dir
         self.required_keys = required_keys
+        try:
+            self._kiss_relative_dir: Path | None = channel_dir.relative_to(_DEFAULT_KISS_DIR)
+        except ValueError:
+            self._kiss_relative_dir = None
+
+    @property
+    def path(self) -> Path:
+        """Config file path, resolved lazily so ``KISS_HOME`` is honoured.
+
+        Channel dirs under the default ``~/.kiss`` are rebased onto
+        ``$KISS_HOME`` when that env var is set (the test suite points it
+        at a fresh per-process temp dir, isolating config state between
+        parallel test runs and protecting the user's real configs).
+        """
+        if self._kiss_relative_dir is not None:
+            return _kiss_home() / self._kiss_relative_dir / "config.json"
+        return self._channel_dir / "config.json"
 
     def load(self) -> dict[str, str] | None:
         """Load the config, returning ``None`` if missing or invalid.
