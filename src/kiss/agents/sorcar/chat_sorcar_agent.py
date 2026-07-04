@@ -402,6 +402,29 @@ class ChatSorcarAgent(SorcarAgent):
                     parent_tab_id = tid
                     break
         printer = self.printer
+        # NESTED run_parallel: when this agent is itself a sub-agent
+        # (``_subagent_info`` set), the registry key found above is the
+        # BACKEND synthetic id ``task-{grandparent_task_id}__sub_{idx}``
+        # — but the frontend tab that displays this sub-agent was
+        # created by ``createBackgroundSubagentTab`` with a RANDOM
+        # frontend id.  Stamping the children's ``new_tab`` broadcasts
+        # with the synthetic key makes every webview's
+        # ``case 'new_tab':`` guard (``tabs.find(t => t.id ===
+        # ev.parent_tab_id)``) drop them, so nested sub-agents never
+        # open any tabs.  Resolve the real frontend viewer tab id from
+        # the printer's subscriber map instead: the frontend posted
+        # ``resumeSession`` (→ ``subscribe_tab``) for this sub-agent's
+        # own task id when it materialised our tab.  Fall back to the
+        # registry key for the ``_open_persisted_subagent_tabs`` path,
+        # where the frontend tab id IS the deterministic ``sub_tab_id``
+        # and no subscriber may be recorded yet.
+        if self._subagent_info is not None and printer is not None:
+            fanout = getattr(printer, "_fanout_targets", None)
+            own_task_id = self._last_task_id
+            if fanout is not None and own_task_id:
+                viewer_ids = fanout(own_task_id)
+                if viewer_ids:
+                    parent_tab_id = sorted(viewer_ids)[0]
         thread_local = getattr(printer, "_thread_local", None) if printer else None
         parent_stop_event = (
             getattr(thread_local, "stop_event", None) if thread_local else None
