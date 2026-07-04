@@ -113,12 +113,12 @@ Residual caveat: actual delivery depends on the concrete mail backend's recipien
 I looked for the specific classes of bugs listed in the task. I did not find another accepted, end-to-end exfiltration beyond the new recipient-list attack.
 
 1. **Loop body binding leaks** — no concrete bypass found. Pass 1 does not let loop-local bindings escape, `_verify_loop` removes body-local bindings and computes a fixpoint over outer bindings only, and the executor snapshots the collection and deletes per-iteration locals.
-2. **Conditional single-branch binding leaks** — no concrete bypass found. Pass 1 exports only the intersection of branch bindings, the abstract join drops one-branch-only bindings, and the executor removes runtime bindings not created in both branches.
-3. **`_resolve_val` returning empty `AbstractValue` for unbound refs** — this remains a defensive-code smell, but ordinary `SymRef` uses are caught by scope checking before acceptance. I did not find a JSON/workflow-level unbound-reference exfiltration that passes verification and then executes.
-4. **Provenance/label conjunction bypass via re-labeling tools** — current abstract transfer propagates both input labels and input provenance through intermediate tools, and `_is_tainted_for_rule` requires the declared source tool to appear in provenance. That blocks simple relabel/copy bypasses. A broader policy caveat remains: source-tool-specific rules intentionally ignore same-label data from other source tools, but I did not find a canonical end-to-end exploit without changing tool semantics.
-5. **Automaton first-match / UNKNOWN-fork edge cases** — current `verify._check_automata` keeps scanning after UNKNOWN guards and explores both the taken and fall-through paths; malformed/undefined guards become `analysis_incomplete` violations. No accepted bypass found there.
-6. **Other non-string arguments (`dict`, `int`, `bool`) to sinks/guards** — there is no general type enforcement, which is a real residual weakness. For the canonical `to` guard, however, the useful concrete bypass I confirmed is `[]`; most other simple non-string values make the runtime precondition false or the automaton error transition true.
-7. **`_condition_undefined_refs` gaps in conditional guards** — `expr_names` catches ordinary variable names and excludes only helper callees correctly. Conditional guards are not statically grammar-validated, but unsupported guards fail closed at runtime rather than giving an exfiltration path.
+1. **Conditional single-branch binding leaks** — no concrete bypass found. Pass 1 exports only the intersection of branch bindings, the abstract join drops one-branch-only bindings, and the executor removes runtime bindings not created in both branches.
+1. **`_resolve_val` returning empty `AbstractValue` for unbound refs** — this remains a defensive-code smell, but ordinary `SymRef` uses are caught by scope checking before acceptance. I did not find a JSON/workflow-level unbound-reference exfiltration that passes verification and then executes.
+1. **Provenance/label conjunction bypass via re-labeling tools** — current abstract transfer propagates both input labels and input provenance through intermediate tools, and `_is_tainted_for_rule` requires the declared source tool to appear in provenance. That blocks simple relabel/copy bypasses. A broader policy caveat remains: source-tool-specific rules intentionally ignore same-label data from other source tools, but I did not find a canonical end-to-end exploit without changing tool semantics.
+1. **Automaton first-match / UNKNOWN-fork edge cases** — current `verify._check_automata` keeps scanning after UNKNOWN guards and explores both the taken and fall-through paths; malformed/undefined guards become `analysis_incomplete` violations. No accepted bypass found there.
+1. **Other non-string arguments (`dict`, `int`, `bool`) to sinks/guards** — there is no general type enforcement, which is a real residual weakness. For the canonical `to` guard, however, the useful concrete bypass I confirmed is `[]`; most other simple non-string values make the runtime precondition false or the automaton error transition true.
+1. **`_condition_undefined_refs` gaps in conditional guards** — `expr_names` catches ordinary variable names and excludes only helper callees correctly. Conditional guards are not statically grammar-validated, but unsupported guards fail closed at runtime rather than giving an exfiltration path.
 
 ## 7. Test-suite and oracle review
 
@@ -167,15 +167,15 @@ Pytest emitted one unrelated warning from the parent repository's pytest config:
 ## 9. Residual concerns
 
 1. Attack 2's `to=[]` proves a verifier/runtime policy gap, but concrete email delivery with an empty recipient list depends on the backend.
-2. Attack 3 demonstrates a framework design gap (name-based sanitizers), but it necessarily uses a deliberately leaky sanitizer implementation/configuration rather than the benign summarizer body in `examples/email_agent.py`.
-3. Attack 4 is delivery-realistic for mail systems that parse comma-separated address fields; backends that treat the whole string as one invalid address may not deliver, but the verifier is still checking the wrong abstraction.
-4. The framework still lacks general runtime type enforcement for `ParamSpec.type`; Attack 2 is one concrete symptom.
+1. Attack 3 demonstrates a framework design gap (name-based sanitizers), but it necessarily uses a deliberately leaky sanitizer implementation/configuration rather than the benign summarizer body in `examples/email_agent.py`.
+1. Attack 4 is delivery-realistic for mail systems that parse comma-separated address fields; backends that treat the whole string as one invalid address may not deliver, but the verifier is still checking the wrong abstraction.
+1. The framework still lacks general runtime type enforcement for `ParamSpec.type`; Attack 2 is one concrete symptom.
 
 ## Fix-audit — round 2 (gpt-5.5-xhigh reviewer)
 
 ### Scope and files reviewed
 
-I switched this agent to `gpt-5.5-xhigh` before starting the audit.  I
+I switched this agent to `gpt-5.5-xhigh` before starting the audit. I
 then re-read the claimed fix status in `README.md`, this `REVIEW.md`, and
 `demo.py`; inspected the full `git diff` inside `guardians/`; and reviewed
 the current implementation of:
@@ -217,51 +217,51 @@ previous patch set.
 1. **Subject-line exfiltration / taint sweep over all parameters — mostly
    sound for the stated policy.**
    `_check_taint_rules` now invokes `_check_single_taint` for every resolved
-   argument of a matching sink tool.  `sink_param='*'` still computes
+   argument of a matching sink tool. `sink_param='*'` still computes
    `is_taint_sink=True` parameters as the primary set for reporting, but the
-   enforcement is intentionally over all params.  The `is_primary` flag is
-   used only for diagnostic text; it is not a weakening.  This is a stronger
+   enforcement is intentionally over all params. The `is_primary` flag is
+   used only for diagnostic text; it is not a weakening. This is a stronger
    policy than the original `sink_param` semantics and can create false
    positives for tools where a parameter is intentionally allowed to carry
    tainted data, but it correctly closes the canonical side-channel.
 
-2. **`to=[]` type confusion — original fix works, but generic type strings
+1. **`to=[]` type confusion — original fix works, but generic type strings
    were under-covered.**
    The concrete `to=[]` attack is blocked by both `type_mismatch` and the
-   fixed list `not in` semantics.  I confirmed `[] in ['company.com']` is
+   fixed list `not in` semantics. I confirmed `[] in ['company.com']` is
    now false and `[] not in ['company.com']` is true, while scalar
-   string-in-list and non-empty list-of-domains checks still work.  However,
+   string-in-list and non-empty list-of-domains checks still work. However,
    the initial `_PYTHON_TYPES_FOR_SPEC` recognized only bare names such as
    `list`, not adapter/Python generic strings such as `list[str]` or
    `dict[str, int]`; it also allowed `bool` values through `float` slots
-   because `bool` subclasses `int`.  I patched this (details below).
+   because `bool` subclasses `int`. I patched this (details below).
 
-3. **Sanitizer contract via `redacts_labels` — internally consistent, but
+1. **Sanitizer contract via `redacts_labels` — internally consistent, but
    still relies on trusted specs.**
    The verifier and executor both compute required labels from the declared
    source tool's `ToolSpec.source_labels`, and both require
    `set(spec.redacts_labels) ⊇ source_labels` before honoring a sanitizer.
-   The two implementations match.  A source tool with no `source_labels` (or
+   The two implementations match. A source tool with no `source_labels` (or
    a wildcard-source taint rule) has no concrete label set to require and is
    therefore not usefully sanitizable under this contract; that is conservative
    but should be documented if wildcard rules are expected to have sanitizers.
-   More importantly, `redacts_labels` is itself a trusted specification.  The
+   More importantly, `redacts_labels` is itself a trusted specification. The
    existing conceptual attacks `attack_lying_sanitizer.py` and
    `attack_covert_channel.py` still verify and execute if a tool lies about
-   its redaction/label behavior.  I did not patch that, because closing it
+   its redaction/label behavior. I did not patch that, because closing it
    would require proof-carrying/audited tool implementations or disabling
    sanitizers entirely; it cannot be repaired by a local verifier tweak while
    preserving the intended sanitizer feature.
 
-4. **Comma-separated multi-recipient domain parsing — fixed for commas, but
+1. **Comma-separated multi-recipient domain parsing — fixed for commas, but
    initially missed other common separators.**
    The previous patch rejected literal commas in Z3 and split commas at
-   runtime.  I confirmed the comma attack is blocked.  I then found a working
+   runtime. I confirmed the comma attack is blocked. I then found a working
    domain-policy bypass using semicolon and whitespace/newline recipient
-   strings, for example `"attacker@evil.com; friend@company.com"`.  Before my
+   strings, for example `"attacker@evil.com; friend@company.com"`. Before my
    patch, a harmless `send_email(to=that_string, body='hi')` had
    `verify.ok=True` because both Z3 and `safe_eval.domain_of` modeled only the
-   final `@company.com` suffix.  This bypass did not need tainted content, so
+   final `@company.com` suffix. This bypass did not need tainted content, so
    it isolated the no-external-send policy from the subject-taint fix.
 
 ### Round-2 bypasses tried and outcomes
@@ -311,7 +311,7 @@ no_separator = z3.And(*[
 ```
 
 `domain_of(x) in D` now requires no comma/semicolon/ASCII-whitespace list
-separator; `domain_of(x) not in D` fires if such a separator appears.  This is
+separator; `domain_of(x) not in D` fires if such a separator appears. This is
 intentionally conservative and still not a full RFC 5322 address parser:
 quoted display names containing commas/spaces may be over-rejected, matching
 the project's current fail-closed posture.
@@ -326,8 +326,8 @@ _value_matches_spec_type(val, "str | None")
 
 The new helper normalizes `typing.` prefixes, parses top-level generics and
 unions, recursively checks fully concrete list/tuple/dict contents, and keeps
-unknown/custom type names permissive.  It also rejects `bool` values for
-`int`/`float` slots while preserving legitimate `bool` slots.  `_make_z3_symbolic`
+unknown/custom type names permissive. It also rejects `bool` values for
+`int`/`float` slots while preserving legitimate `bool` slots. `_make_z3_symbolic`
 now uses the same normalization for aliases/generic heads.
 
 3. **Regression proof-of-concept and tests**:
@@ -353,7 +353,7 @@ cd meijer_break && source guardians/.venv/bin/activate && python demo.py
 ```
 
 I also ran `uv run check --full` from the parent repo because that command is
-available there.  The Python/ruff/mypy/pyright portions passed, but the overall
+available there. The Python/ruff/mypy/pyright portions passed, but the overall
 command exited non-zero due to pre-existing VS Code extension prettier errors in
 `src/kiss/agents/vscode/media/voice.js`, outside `meijer_break/` and unrelated
 to these patches.
@@ -367,5 +367,5 @@ to these patches.
   by the existing Z3/automaton path, but `verify_first=False` users remain more
   exposed for unrelated tools.
 - Sanitizer soundness still depends on honest `ToolSpec.redacts_labels` and
-  honest `source_labels`.  A lying sanitizer or covert-channel tool remains a
+  honest `source_labels`. A lying sanitizer or covert-channel tool remains a
   policy/tool-TCB problem outside this verifier's current proof model.

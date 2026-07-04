@@ -111,6 +111,9 @@ ______________________________________________________________________
 - Each parallel sub-agent MUST get its own tab that shows that sub-agent's
   events; such tabs MUST NOT be counted as regular tabs when deciding to close
   old tabs. (1278, 1414, 1651)
+- In the chat webview, a `run_parallel` tool-call panel and the tabs of its
+  sub-agents MUST stay in sync: when the panel is uncollapsed the sub-agent
+  tabs are open, and when the panel is collapsed those tabs are closed.
 - A sub-agent task MUST be treated like a regular task in `RunningAgentState`,
   but its tab MUST NOT show/load other tasks of the same chat id and MUST use a
   different color/icon for its header. (1905, 1907)
