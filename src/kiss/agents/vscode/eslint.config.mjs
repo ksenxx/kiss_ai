@@ -17,6 +17,9 @@ export default [
       "node_modules/**",
       "media/marked.min.js",
       "media/highlight.min.js",
+      // Vendored minified vosk-browser bundle (speech recognition WASM
+      // loader) — 5.8MB of generated code; linting it aborts eslint.
+      "media/vosk.js",
     ],
   },
   // Base: ESLint recommended + Prettier compat
@@ -117,6 +120,8 @@ export default [
         Blob: "readonly",
         Image: "readonly",
         navigator: "readonly",
+        localStorage: "readonly",
+        CustomEvent: "readonly",
         location: "readonly",
         console: "readonly",
         fetch: "readonly",

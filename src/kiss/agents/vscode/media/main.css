@@ -1128,6 +1128,17 @@ body.remote-chat #welcome-config { display: none !important; }
 
 #upload-btn:disabled { opacity: 0.3; cursor: not-allowed; }
 
+/* Voice wake-word toggle (say "Sorcar") */
+#voice-btn.voice-loading { opacity: 0.5; }
+#voice-btn.voice-listening { animation: voice-pulse 1.6s ease-in-out infinite; }
+#voice-btn.voice-error { color: var(--error, #f48771); }
+#voice-btn.voice-triggered { color: var(--success, #89d185); }
+
+@keyframes voice-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+
 #model-dropdown {
   position: absolute; bottom: 100%; left: 0; min-width: min(280px, calc(100vw - 24px)); max-width: min(380px, calc(100vw - 24px));
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
