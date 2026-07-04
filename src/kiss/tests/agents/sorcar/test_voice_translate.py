@@ -156,6 +156,11 @@ class TestVoiceTranslateFromWav(unittest.TestCase):
             )
             proc = _run_listener(wav)
         self.assertIn("WAKE", proc.stdout.split(), msg=proc.stderr[-2000:])
+        # The UI shows a yellow "transcribing" flash driven by this line.
+        self.assertIn(
+            "TRANSCRIBING", proc.stdout.split(),
+            msg=proc.stdout + proc.stderr[-2000:],
+        )
         payloads = _speech_payloads(proc.stdout)
         self.assertEqual(len(payloads), 1, msg=proc.stdout + proc.stderr[-2000:])
         text = payloads[0].lower()
@@ -254,6 +259,9 @@ class TestVoiceTranslateFromWav(unittest.TestCase):
         lines = proc.stdout.split()
         self.assertIn("WAKE", lines, msg=proc.stderr[-2000:])
         self.assertIn("NO_SPEECH", lines, msg=proc.stdout + proc.stderr[-2000:])
+        # Pure silence never reaches the GPT call, so the UI must not
+        # be told a transcription started.
+        self.assertNotIn("TRANSCRIBING", lines)
         self.assertEqual(_speech_payloads(proc.stdout), [])
         self.assertEqual(proc.returncode, 0, msg=proc.stderr[-2000:])
 
@@ -271,6 +279,9 @@ class TestVoiceTranslateFromWav(unittest.TestCase):
         lines = proc.stdout.split()
         self.assertIn("WAKE", lines, msg=proc.stderr[-2000:])
         self.assertIn("NO_SPEECH", lines, msg=proc.stdout + proc.stderr[-2000:])
+        # Speech was captured, so the transcribing indicator fired even
+        # though the GPT call itself failed.
+        self.assertIn("TRANSCRIBING", lines)
         self.assertEqual(_speech_payloads(proc.stdout), [])
         self.assertEqual(proc.returncode, 0, msg=proc.stderr[-2000:])
         self.assertIn("translation failed", proc.stderr)
