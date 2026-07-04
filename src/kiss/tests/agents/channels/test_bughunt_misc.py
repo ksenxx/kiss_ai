@@ -23,10 +23,11 @@ import sys
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-_PHONE_CONFIG = Path.home() / ".kiss" / "third_party_agents" / "phone" / "config.json"
+from kiss.agents.third_party_agents.phone_control_agent import _config as _phone_config
+
+_PHONE_CONFIG = _phone_config.path
 _PHONE_CONFIG_BACKUP = _PHONE_CONFIG.with_suffix(".json.bughunt-bak")
 
 
