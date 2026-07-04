@@ -6,8 +6,12 @@
  * Voice wake-word support for KISS Sorcar.
  *
  * Always-on, fully local listener for the trigger word "Sorcar".  When
- * the wake word is heard, the string "sorcar" is typed into the task
- * input textbox and listening continues.
+ * the wake word is heard, the "sorcar" placeholder is typed into the
+ * task input textbox while the extension host records the speech that
+ * follows, translates it to English with GPT models, and sends
+ * it back as ``{type: 'voiceSpeech', text}``; the translated text then
+ * replaces the placeholder (or is appended to an existing draft) and
+ * listening continues.
  *
  * Two modes, selected by the ``window.__VOICE__`` config injected by
  * the page template:
@@ -139,6 +143,32 @@
     setTimeout(() => {
       btn.classList.remove('voice-triggered');
     }, 600);
+  }
+
+  /**
+   * Insert the English translation of the speech that followed the
+   * wake word into the task input.  The "sorcar" wake placeholder is
+   * replaced; any other existing draft is appended to.  An empty
+   * translation (silence or a failed translation) only clears the
+   * placeholder and never touches user text.
+   */
+  function insertSpeech(text) {
+    const translated = String(typeof text === 'string' ? text : '').trim();
+    const hasPlaceholder = inp.value === WAKE_WORD;
+    if (!translated) {
+      if (!hasPlaceholder) return;
+      inp.value = '';
+    } else if (hasPlaceholder || !inp.value) {
+      inp.value = translated;
+    } else {
+      inp.value = inp.value + ' ' + translated;
+    }
+    inp.dispatchEvent(new Event('input', {bubbles: true}));
+    try {
+      inp.focus();
+    } catch (_e) {
+      /* focus can fail in background documents; ignore */
+    }
   }
 
   function loadVosk() {
@@ -394,6 +424,8 @@
     if (!msg || typeof msg !== 'object') return;
     if (msg.type === 'voiceWake') {
       triggerWake();
+    } else if (msg.type === 'voiceSpeech') {
+      insertSpeech(msg.text);
     } else if (msg.type === 'voiceState') {
       // Extension host reports the real listener state.
       if (msg.error) {
