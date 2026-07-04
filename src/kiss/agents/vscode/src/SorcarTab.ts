@@ -292,6 +292,11 @@ export function buildChatHtml(
     DEMO_SRC: u('demo.js'),
     SHIM_SCRIPT: '',
     TRICKS_JSON: tricksJson,
+    // Webviews cannot capture the microphone (VS Code denies
+    // getUserMedia), so voice.js runs in "webview" mode: the extension
+    // host owns the local wake-word listener and forwards wake events.
+    VOICE_SRC: u('voice.js'),
+    VOICE_CONFIG: '{"mode": "webview"}',
   };
 
   let html = tpl;
