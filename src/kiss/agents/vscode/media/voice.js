@@ -63,7 +63,6 @@
 
   function debugLog(kind, text) {
     if (!debugEnabled()) return;
-    // eslint-disable-next-line no-console
     console.log('[voice] ' + kind + ':', JSON.stringify(text));
   }
 
@@ -242,7 +241,10 @@
             .then(devs => {
               for (let i = 0; i < devs.length; i++) {
                 if (devs[i].kind === 'audioinput') {
-                  debugLog('mic', devs[i].label + ' [' + devs[i].deviceId + ']');
+                  debugLog(
+                    'mic',
+                    devs[i].label + ' [' + devs[i].deviceId + ']',
+                  );
                 }
               }
             })
@@ -308,7 +310,8 @@
           }
           try {
             recognizer.acceptWaveform(event.inputBuffer);
-            if (freeRecognizer) freeRecognizer.acceptWaveform(event.inputBuffer);
+            if (freeRecognizer)
+              freeRecognizer.acceptWaveform(event.inputBuffer);
           } catch (_e) {
             /* recognizer torn down mid-flight; ignore */
           }
