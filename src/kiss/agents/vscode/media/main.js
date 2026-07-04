@@ -1884,6 +1884,18 @@
           continue;
         }
         p.classList.add('chv-hidden');
+        // A "Collapse Chats" pass that hides a run_parallel panel
+        // must not leave the fan-out's sub-agent tabs open: a hidden
+        // panel is (at least) collapsed, and collapsed panel ⇒
+        // sub-agent tabs closed.  Mark it collapsed so the invariant
+        // machinery closes the tabs now and the expand branch above
+        // reopens them when the panels are revealed again.
+        if (p.classList.contains('tc-run-parallel')) {
+          p.classList.add('collapsed');
+          p.classList.remove('user-pinned');
+          collapsePreview(p);
+          syncRunParallelPanel(p);
+        }
       } else {
         p.classList.remove('chv-hidden');
         if (inRunning) continue;
