@@ -114,6 +114,14 @@ ______________________________________________________________________
 - In the chat webview, a `run_parallel` tool-call panel and the tabs of its
   sub-agents MUST stay in sync: when the panel is uncollapsed the sub-agent
   tabs are open, and when the panel is collapsed those tabs are closed.
+- Once the `run_parallel` tool finishes (its tool_result arrives), the
+  automatic collapse passes MUST collapse its panel like any other tool panel
+  — closing the fan-out's sub-agent tabs; while the fan-out is still running,
+  the automatic passes MUST NOT collapse the panel (its live sub-agent tabs
+  stay open).
+- Replaying or re-rendering the parent tab MUST NOT break the `run_parallel`
+  panel ⇔ sub-agent tab association: the replayed panel must adopt already-open
+  sub-agent tabs before deciding whether to collapse or remain open.
 - A sub-agent task MUST be treated like a regular task in `RunningAgentState`,
   but its tab MUST NOT show/load other tasks of the same chat id and MUST use a
   different color/icon for its header. (1905, 1907)
