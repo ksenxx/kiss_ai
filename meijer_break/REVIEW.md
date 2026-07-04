@@ -170,3 +170,202 @@ Pytest emitted one unrelated warning from the parent repository's pytest config:
 2. Attack 3 demonstrates a framework design gap (name-based sanitizers), but it necessarily uses a deliberately leaky sanitizer implementation/configuration rather than the benign summarizer body in `examples/email_agent.py`.
 3. Attack 4 is delivery-realistic for mail systems that parse comma-separated address fields; backends that treat the whole string as one invalid address may not deliver, but the verifier is still checking the wrong abstraction.
 4. The framework still lacks general runtime type enforcement for `ParamSpec.type`; Attack 2 is one concrete symptom.
+
+## Fix-audit — round 2 (gpt-5.5-xhigh reviewer)
+
+### Scope and files reviewed
+
+I switched this agent to `gpt-5.5-xhigh` before starting the audit.  I
+then re-read the claimed fix status in `README.md`, this `REVIEW.md`, and
+`demo.py`; inspected the full `git diff` inside `guardians/`; and reviewed
+the current implementation of:
+
+- `guardians/src/guardians/verify.py`
+  (`_check_arg_types`, `_check_taint_rules`, `_check_single_taint`,
+  sanitizer application, `_rule_source_labels`, and Z3 type helpers)
+- `guardians/src/guardians/tools.py` (`ToolSpec.redacts_labels`)
+- `guardians/src/guardians/safe_eval.py` (`domain_of`, list `in`/`not in`)
+- `guardians/src/guardians/conditions.py` (`domain_of` Z3 encoding)
+- `guardians/src/guardians/execute.py` (runtime sanitizer contract mirror)
+- `guardians/src/guardians/adapters/agent.py` (`redacts_labels` decorator
+  plumbing)
+- `guardians/tests/adapters/test_agent.py` and
+  `guardians/tests/core/test_verify.py`
+- all attack modules and tests under this repo, including the two conceptual
+  probes `attack_lying_sanitizer.py` and `attack_covert_channel.py`.
+
+### Baseline validation before extra patches
+
+Commands run before applying my round-2 changes:
+
+```bash
+cd meijer_break/guardians && source .venv/bin/activate && pytest -q
+# 126 passed, 1 unrelated pytest-config warning
+
+cd meijer_break && source guardians/.venv/bin/activate && pytest -v tests/
+# 4 passed, 1 unrelated pytest-config warning
+
+cd meijer_break && source guardians/.venv/bin/activate && python demo.py
+# all four primary attacks: verify.ok=False, exfil_log entries=0
+```
+
+The four original fixes were therefore not obviously regressed by the
+previous patch set.
+
+### Verdict per original fix
+
+1. **Subject-line exfiltration / taint sweep over all parameters — mostly
+   sound for the stated policy.**
+   `_check_taint_rules` now invokes `_check_single_taint` for every resolved
+   argument of a matching sink tool.  `sink_param='*'` still computes
+   `is_taint_sink=True` parameters as the primary set for reporting, but the
+   enforcement is intentionally over all params.  The `is_primary` flag is
+   used only for diagnostic text; it is not a weakening.  This is a stronger
+   policy than the original `sink_param` semantics and can create false
+   positives for tools where a parameter is intentionally allowed to carry
+   tainted data, but it correctly closes the canonical side-channel.
+
+2. **`to=[]` type confusion — original fix works, but generic type strings
+   were under-covered.**
+   The concrete `to=[]` attack is blocked by both `type_mismatch` and the
+   fixed list `not in` semantics.  I confirmed `[] in ['company.com']` is
+   now false and `[] not in ['company.com']` is true, while scalar
+   string-in-list and non-empty list-of-domains checks still work.  However,
+   the initial `_PYTHON_TYPES_FOR_SPEC` recognized only bare names such as
+   `list`, not adapter/Python generic strings such as `list[str]` or
+   `dict[str, int]`; it also allowed `bool` values through `float` slots
+   because `bool` subclasses `int`.  I patched this (details below).
+
+3. **Sanitizer contract via `redacts_labels` — internally consistent, but
+   still relies on trusted specs.**
+   The verifier and executor both compute required labels from the declared
+   source tool's `ToolSpec.source_labels`, and both require
+   `set(spec.redacts_labels) ⊇ source_labels` before honoring a sanitizer.
+   The two implementations match.  A source tool with no `source_labels` (or
+   a wildcard-source taint rule) has no concrete label set to require and is
+   therefore not usefully sanitizable under this contract; that is conservative
+   but should be documented if wildcard rules are expected to have sanitizers.
+   More importantly, `redacts_labels` is itself a trusted specification.  The
+   existing conceptual attacks `attack_lying_sanitizer.py` and
+   `attack_covert_channel.py` still verify and execute if a tool lies about
+   its redaction/label behavior.  I did not patch that, because closing it
+   would require proof-carrying/audited tool implementations or disabling
+   sanitizers entirely; it cannot be repaired by a local verifier tweak while
+   preserving the intended sanitizer feature.
+
+4. **Comma-separated multi-recipient domain parsing — fixed for commas, but
+   initially missed other common separators.**
+   The previous patch rejected literal commas in Z3 and split commas at
+   runtime.  I confirmed the comma attack is blocked.  I then found a working
+   domain-policy bypass using semicolon and whitespace/newline recipient
+   strings, for example `"attacker@evil.com; friend@company.com"`.  Before my
+   patch, a harmless `send_email(to=that_string, body='hi')` had
+   `verify.ok=True` because both Z3 and `safe_eval.domain_of` modeled only the
+   final `@company.com` suffix.  This bypass did not need tainted content, so
+   it isolated the no-external-send policy from the subject-taint fix.
+
+### Round-2 bypasses tried and outcomes
+
+- `to='attacker@evil.com; friend@company.com'`: **worked before patch**
+  (`verify.ok=True`), now blocked by both `precondition` and `automaton`.
+- `to='attacker@evil.com friend@company.com'` and newline variants:
+  **worked before patch**, now blocked by both `precondition` and
+  `automaton`.
+- `to=['attacker@evil.com', 'friend@company.com']` with the canonical
+  `ParamSpec(type='str')`: blocked by `type_mismatch` and automaton.
+- A `list[str]`-typed recipient parameter in an isolated policy: non-empty
+  all-internal lists pass; mixed external/internal and empty lists are caught
+  by the automaton; non-list concrete values are now `type_mismatch`.
+- Concrete generic type probes: `list[str]`, `dict[str,int]`, `bool`, and
+  `float` now reject mismatched fully concrete literals, including
+  `bool`-as-`float`.
+- `SymRef` into `send_email.to`: `_check_arg_types` still skips symbolic
+  values by design, but Z3/precondition and the automaton reject the call as
+  possibly external.
+- Subject exfil through a different parameter of `send_email`: still caught
+  by the all-parameter taint sweep.
+- Sanitizer with `redacts_labels=['email_content']` but a lying/mis-specified
+  implementation: still accepted; documented as a trusted-computing-base
+  limitation rather than a locally patchable verifier bug.
+
+### Patches applied in this round
+
+1. **Recipient-list separator hardening** in `safe_eval.py` and
+   `conditions.py`:
+
+```python
+# safe_eval.py
+_ADDRESS_LIST_SEP_RE = re.compile(r"[,;\s]+")
+...
+if _ADDRESS_LIST_SEP_RE.search(val):
+    parts = [p for p in _ADDRESS_LIST_SEP_RE.split(val.strip()) if p]
+    if len(parts) > 1:
+        return [_domain_of_single(p) for p in parts]
+
+# conditions.py
+_ADDRESS_LIST_SEPARATORS = (",", ";", " ", "\t", "\r", "\n")
+no_separator = z3.And(*[
+    z3.Not(z3.Contains(left.var, z3.StringVal(sep)))
+    for sep in _ADDRESS_LIST_SEPARATORS
+])
+```
+
+`domain_of(x) in D` now requires no comma/semicolon/ASCII-whitespace list
+separator; `domain_of(x) not in D` fires if such a separator appears.  This is
+intentionally conservative and still not a full RFC 5322 address parser:
+quoted display names containing commas/spaces may be over-rejected, matching
+the project's current fail-closed posture.
+
+2. **Generic concrete argument type checking** in `verify.py`:
+
+```python
+_value_matches_spec_type(val, "list[str]")
+_value_matches_spec_type(val, "dict[str,int]")
+_value_matches_spec_type(val, "str | None")
+```
+
+The new helper normalizes `typing.` prefixes, parses top-level generics and
+unions, recursively checks fully concrete list/tuple/dict contents, and keeps
+unknown/custom type names permissive.  It also rejects `bool` values for
+`int`/`float` slots while preserving legitimate `bool` slots.  `_make_z3_symbolic`
+now uses the same normalization for aliases/generic heads.
+
+3. **Regression proof-of-concept and tests**:
+
+- `attacks/attack_regression_semicolon_domain.py`
+- `tests/test_regression_semicolon_domain.py`
+
+The new tests assert semicolon and whitespace recipient-list variants are
+blocked by the strengthened precondition and automaton, with no `send_email`
+execution.
+
+### Final validation after round-2 patches
+
+```bash
+cd meijer_break/guardians && source .venv/bin/activate && pytest -q
+# 126 passed, 1 unrelated pytest-config warning
+
+cd meijer_break && source guardians/.venv/bin/activate && pytest -v tests/
+# 6 passed, 1 unrelated pytest-config warning
+
+cd meijer_break && source guardians/.venv/bin/activate && python demo.py
+# all four primary attacks: verify.ok=False, exfil_log entries=0
+```
+
+I also ran `uv run check --full` from the parent repo because that command is
+available there.  The Python/ruff/mypy/pyright portions passed, but the overall
+command exited non-zero due to pre-existing VS Code extension prettier errors in
+`src/kiss/agents/vscode/media/voice.js`, outside `meijer_break/` and unrelated
+to these patches.
+
+### Residual concerns after round 2
+
+- The email-domain model is now fail-closed for common list separators, but it
+  is still a simplified address parser, not RFC 5322 semantics.
+- There is still no general runtime argument-type enforcement; the static
+  verifier catches concrete mismatches and symbolic domain arguments are blocked
+  by the existing Z3/automaton path, but `verify_first=False` users remain more
+  exposed for unrelated tools.
+- Sanitizer soundness still depends on honest `ToolSpec.redacts_labels` and
+  honest `source_labels`.  A lying sanitizer or covert-channel tool remains a
+  policy/tool-TCB problem outside this verifier's current proof model.
