@@ -788,7 +788,7 @@
     }
     currentTaskName = (tab.taskPanelHTML || '').trim();
     currentTaskId = tab.currentTaskId !== undefined ? tab.currentTaskId : null;
-    updateChevronIcon(!!tab.panelsExpandedMap[currentTaskName]);
+    updateCollapseButton(!!tab.panelsExpandedMap[currentTaskName]);
     if (statusText) {
       statusText.textContent = tab.statusTextContent || 'Ready';
       statusText.style.color = tab.statusTextColor || 'var(--green)';
@@ -1765,7 +1765,12 @@
   const autocommitToggleBtn = document.getElementById('cfg-auto-commit');
   const taskPanel = document.getElementById('task-panel');
   const taskPanelText = document.getElementById('task-panel-text');
-  const taskPanelChevron = document.getElementById('task-panel-chevron');
+  const taskPanelCollapseBtn = document.getElementById(
+    'task-panel-collapse-btn',
+  );
+  const taskPanelCollapseLabel = document.getElementById(
+    'task-panel-collapse-label',
+  );
   const taskPanelCopy = document.getElementById('task-panel-copy');
   const statusTokens = document.getElementById('status-tokens');
   const statusBudget = document.getElementById('status-budget');
@@ -1835,20 +1840,21 @@
   }
 
   /**
-   * Apply the chevron expand/collapse state to panels belonging to
-   * a specific task.
+   * Apply the task-panel collapse button's expand/collapse state to
+   * panels belonging to a specific task.
    * @param {boolean} expanded - true = expand, false = collapse
    * @param {string} taskName - the task whose panels to affect;
    *   panels belonging to other tasks are left untouched.
    *   If empty/falsy, affects only the current (main) task panels.
    *
-   * - expanded=false (chevron right, default): hide every .collapsible
-   *   panel that belongs to the specified task (display:none via
-   *   .chv-hidden) except result panels (.rc) and panels belonging
-   *   to the currently running task.
-   * - expanded=true (chevron down): reveal every hidden panel belonging
-   *   to the specified task and expand every .collapsible panel except
-   *   those belonging to the currently running task.
+   * - expanded=false (button offers "Uncollapse Chats", default): hide
+   *   every .collapsible panel that belongs to the specified task
+   *   (display:none via .chv-hidden) except result panels (.rc) and
+   *   panels belonging to the currently running task.
+   * - expanded=true (button offers "Collapse Chats"): reveal every
+   *   hidden panel belonging to the specified task and expand every
+   *   .collapsible panel except those belonging to the currently
+   *   running task.
    * Running task panels are direct children of #output (not inside
    *   .adjacent-task) while a task is running; adjacent-task containers
    *   hold previously-completed tasks.
@@ -1884,22 +1890,37 @@
     }
   }
 
-  /** Update the chevron icon to reflect the current expanded state. */
-  function updateChevronIcon(expanded) {
-    if (!taskPanelChevron) return;
-    if (expanded) taskPanelChevron.classList.add('expanded');
-    else taskPanelChevron.classList.remove('expanded');
+  /**
+   * Update the collapse button to reflect the current expanded state:
+   * the label always names the action a click will perform
+   * ("Collapse Chats" while expanded, "Uncollapse Chats" while
+   * collapsed) and the small chevron icon rotates to match.
+   */
+  function updateCollapseButton(expanded) {
+    if (!taskPanelCollapseBtn) return;
+    if (expanded) taskPanelCollapseBtn.classList.add('expanded');
+    else taskPanelCollapseBtn.classList.remove('expanded');
+    const label = expanded ? 'Collapse Chats' : 'Uncollapse Chats';
+    if (taskPanelCollapseLabel) taskPanelCollapseLabel.textContent = label;
+    taskPanelCollapseBtn.setAttribute(
+      'aria-expanded',
+      expanded ? 'true' : 'false',
+    );
+    taskPanelCollapseBtn.setAttribute(
+      'aria-label',
+      expanded ? 'Collapse chat panels' : 'Uncollapse chat panels',
+    );
   }
 
-  if (taskPanelChevron) {
-    taskPanelChevron.addEventListener('click', e => {
+  if (taskPanelCollapseBtn) {
+    taskPanelCollapseBtn.addEventListener('click', e => {
       e.stopPropagation();
       const tab = getTab(activeTabId);
       const visibleTask = getVisibleTaskName();
       const wasExpanded = tab ? !!tab.panelsExpandedMap[visibleTask] : false;
       const expanded = !wasExpanded;
       if (tab) tab.panelsExpandedMap[visibleTask] = expanded;
-      updateChevronIcon(expanded);
+      updateCollapseButton(expanded);
       applyChevronState(expanded, visibleTask);
     });
   }
@@ -3139,7 +3160,7 @@
         _lp.scrollTop = _lp.scrollHeight;
       });
     }
-    // Keep the chevron "right" state consistent across new panels added by streaming.
+    // Keep the collapsed state consistent across new panels added by streaming.
     // Skip during demo replay — demo mode never sets isRunning so
     // applyChevronState(false) would hide every non-result panel via chv-hidden.
     const tab = getTab(activeTabId);
@@ -3433,9 +3454,9 @@
       }
     }
     setTaskText(visibleTask);
-    // Sync chevron icon to the visible task's expanded state
+    // Sync the collapse button to the visible task's expanded state
     const vTab = getTab(activeTabId);
-    if (vTab) updateChevronIcon(!!vTab.panelsExpandedMap[visibleTask]);
+    if (vTab) updateCollapseButton(!!vTab.panelsExpandedMap[visibleTask]);
     // Update header metrics to match the visible task
     if (visibleContainer) {
       // Scrolled to an adjacent task — show its metrics
@@ -3658,8 +3679,8 @@
         // window's running state.
         if (ev.tabId === undefined || ev.tabId === activeTabId) {
           setRunningState(ev.running);
-          // Refresh chevron-driven visibility so panels of the now-running
-          // task become visible even if the chevron is collapsed.  Needed
+          // Refresh collapse-button-driven visibility so panels of the
+          // now-running task become visible even while collapsed.  Needed
           // after resuming a running task from history: the prior
           // ``task_events`` replay called applyChevronState() while
           // isRunning was still false, marking every replayed panel
@@ -4590,7 +4611,7 @@
           // ``isRunning=false``.  Sync the global state to the
           // sub-agent's actual state now so a still-running sub-agent
           // tab loaded from history shows the same "Running" status,
-          // timer and chevron-visible panels as the freshly-launched
+          // timer and uncollapsed panels as the freshly-launched
           // sub-agent tab the user originally clicked through to.
           setRunningState(subTab.isRunning);
           if (subTab.isRunning) {
