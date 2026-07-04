@@ -1,42 +1,44 @@
-"""End-to-end test for Attack 1: subject-line exfiltration."""
+"""End-to-end test for Attack 1 (subject-line exfiltration).
+
+Post-fix expectation
+--------------------
+The verifier's taint pass now enforces the taint rule over *every*
+argument of the sink tool, not only the ``sink_param`` named in the
+policy.  Data from ``fetch_mail`` reaching ``send_email.subject`` is
+therefore rejected even though the paper's canonical rule uses
+``sink_param="body"``.
+"""
 
 from __future__ import annotations
 
 from attacks import attack_subject_exfil
 from attacks.common import SECRET_MARKER, SECRET_MARKER_2, build_scenario
 
-from ._util import run_attack
+from ._util import run_expected_blocked
 
 
-def test_subject_field_exfiltrates_despite_ok_verification() -> None:
+def test_subject_field_exfiltration_is_blocked() -> None:
     scenario = build_scenario()
     workflow = attack_subject_exfil.build(scenario)
 
-    run_attack(scenario, workflow)
+    outcome = run_expected_blocked(scenario, workflow)
 
-    # Exactly one send_email call reached the sink.
-    assert len(scenario.exfil_log) == 1
-    call = scenario.exfil_log[0]
-
-    # ``to`` cleared the domain automaton, so it looks like a
-    # legitimate internal address.
-    assert call["to"] == "attacker@company.com"
-
-    # The body carried nothing sensitive — that is what fooled the rule.
-    assert call["body"] == "See subject."
-
-    # The subject carried the full stolen inbox verbatim.
-    subject_repr = repr(call["subject"])
-    assert SECRET_MARKER in subject_repr, (
-        "Expected the first mail body to leak through the subject line, "
-        f"got: {subject_repr!r}"
-    )
-    assert SECRET_MARKER_2 in subject_repr, (
-        "Expected the second mail body to leak through the subject line, "
-        f"got: {subject_repr!r}"
+    # Static verification must reject the attack.
+    assert outcome.verifier_blocked, (
+        "Expected the verifier to reject subject-field exfiltration"
     )
 
-    # Sanity: the leaked_content oracle also flags this as a leak.
-    leaked = scenario.leaked_content()
-    assert SECRET_MARKER in leaked
-    assert SECRET_MARKER_2 in leaked
+    # The taint diagnostic must name the specific side-channel that leaked
+    # (subject) rather than only the paper's declared sink (body).
+    taint = [v for v in outcome.result.violations if v.category == "taint"]
+    assert taint, "Expected a taint violation for the subject side-channel"
+    assert any("subject" in v.message for v in taint), (
+        f"Expected a taint violation naming 'subject'; got: "
+        + "; ".join(v.message for v in taint)
+    )
+
+    # The workflow never executed a `send_email`, so no secret material
+    # can have leaked to the runtime sink.
+    assert outcome.exfil_log_len == 0
+    assert SECRET_MARKER not in outcome.leaked_content
+    assert SECRET_MARKER_2 not in outcome.leaked_content
