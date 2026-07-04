@@ -87,12 +87,16 @@ export type FromWebviewMessage =
   | {type: 'sizeReport'; innerWidth: number; screenWidth: number}
   | {type: 'runUpdate'}
   | {type: 'serverReset'}
-  | {type: 'notificationAction'; id: string; action?: string};
+  | {type: 'notificationAction'; id: string; action?: string}
+  | {type: 'voiceToggle'; enabled: boolean};
 
 /** Messages from extension to webview (matches browser event protocol) */
 export type ToWebviewMessage = ToWebviewMessageBody & {tabId?: string};
 
 type ToWebviewMessageBody =
+  // Voice wake-word events (host-side listener → voice.js)
+  | {type: 'voiceWake'}
+  | {type: 'voiceState'; listening: boolean; error?: string}
   // Streaming events (same as browser JsonPrinter)
   | {type: 'thinking_start'}
   | {type: 'thinking_delta'; text: string}
