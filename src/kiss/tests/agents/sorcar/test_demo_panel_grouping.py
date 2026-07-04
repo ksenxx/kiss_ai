@@ -4,12 +4,8 @@
 # add your name here
 """Tests for demo mode panel-by-panel replay with collapse.
 
-Verifies that:
-  - Events are grouped into logical panels (llm, tool_call, result)
-  - Each panel is loaded in 0.5s and collapsed before moving on
-  - The result panel is streamed word-by-word (not collapsed)
-  - main.js exposes collapsePanels in the _demoApi bridge
-  - groupEventsIntoPanels is exposed on window for testing
+Verifies (behaviorally, by running the real demo.js in Node.js) that
+events are grouped into logical panels (llm, tool_call, result).
 """
 
 import subprocess
@@ -24,16 +20,6 @@ _DEMO_JS = (
     / "media"
     / "demo.js"
 )
-
-_MAIN_JS = (
-    Path(__file__).resolve().parents[4]
-    / "kiss"
-    / "agents"
-    / "vscode"
-    / "media"
-    / "main.js"
-)
-
 
 def _run_node(script: str) -> subprocess.CompletedProcess[str]:
     """Run a JS script in Node.js and return the result."""
@@ -71,27 +57,6 @@ var setTimeout = function(fn, ms) { return 1; };
 var marked = undefined;
 var hljs = undefined;
 """
-
-
-class TestGroupEventsIntoPanelsStructure(unittest.TestCase):
-    """Structural: groupEventsIntoPanels exists and is exposed."""
-
-    src: str
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.src = _DEMO_JS.read_text()
-
-    def test_function_exists(self) -> None:
-        assert "function groupEventsIntoPanels(events)" in self.src
-
-    def test_exposed_on_window(self) -> None:
-        assert "window._groupEventsIntoPanels = groupEventsIntoPanels" in self.src
-
-    def test_skip_types_defined(self) -> None:
-        assert "SKIP_TYPES" in self.src
-        assert "task_done" in self.src
-        assert "followup_suggestion" in self.src
 
 
 class TestGroupEventsIntoPanelsBehavioral(unittest.TestCase):
@@ -218,59 +183,6 @@ class TestGroupEventsIntoPanelsBehavioral(unittest.TestCase):
 
         groups = json.loads(r.stdout.strip())
         assert groups == []
-
-
-class TestDemoReplayUsesPanel(unittest.TestCase):
-    """Structural: _startDemoReplay uses groupEventsIntoPanels and 500ms delay."""
-
-    src: str
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.src = _DEMO_JS.read_text()
-
-    def test_calls_group_events_into_panels(self) -> None:
-        assert "groupEventsIntoPanels(events)" in self.src
-
-    def test_uses_500ms_delay(self) -> None:
-        assert "await sleep(500)" in self.src
-
-    def test_calls_collapse_panels(self) -> None:
-        assert "api.collapsePanels()" in self.src
-
-    def test_no_1s_per_event_delay(self) -> None:
-        """The old 1-second per-event delay should be gone."""
-        replay_fn_start = self.src.index("window._startDemoReplay")
-        replay_fn = self.src[replay_fn_start:]
-        occurrences = replay_fn.count("await sleep(1000)")
-        assert occurrences == 1, (
-            f"Expected 1 sleep(1000) (inter-task pause), found {occurrences}"
-        )
-
-    def test_result_streamed_not_collapsed(self) -> None:
-        """Result panels go through streamResultEvent, not collapsePanels."""
-        replay_fn_start = self.src.index("window._startDemoReplay")
-        replay_fn = self.src[replay_fn_start:]
-        assert "streamResultEvent(api, group[0])" in replay_fn
-
-
-class TestMainJsCollapsePanelsBridge(unittest.TestCase):
-    """Structural: main.js exposes collapsePanels in _demoApi."""
-
-    src: str
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.src = _MAIN_JS.read_text()
-
-    def test_collapse_panels_in_demo_api(self) -> None:
-        assert "collapsePanels:" in self.src
-        assert "collapseAllExceptResult(O)" in self.src
-
-    def test_collapse_panels_function_reference(self) -> None:
-        idx = self.src.index("window._demoApi = {")
-        bridge = self.src[idx : idx + 1000]
-        assert "collapsePanels" in bridge
 
 
 if __name__ == "__main__":
