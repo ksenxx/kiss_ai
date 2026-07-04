@@ -51,6 +51,21 @@
   ];
   const COOLDOWN_MS = 2000;
   const STORAGE_KEY = 'kissVoiceEnabled';
+  const DEBUG_KEY = 'kissVoiceDebug';
+
+  function debugEnabled() {
+    try {
+      return localStorage.getItem(DEBUG_KEY) === '1';
+    } catch (_e) {
+      return false;
+    }
+  }
+
+  function debugLog(kind, text) {
+    if (!debugEnabled()) return;
+    // eslint-disable-next-line no-console
+    console.log('[voice] ' + kind + ':', JSON.stringify(text));
+  }
 
   let enabled = false; // user intent: wake-word listening is on
   let busy = false; // async start/stop in progress (browser mode)
@@ -214,6 +229,25 @@
           return;
         }
         mediaStream = stream;
+        if (debugEnabled()) {
+          const track = stream.getAudioTracks()[0];
+          if (track) {
+            debugLog(
+              'track',
+              track.label + ' ' + JSON.stringify(track.getSettings()),
+            );
+          }
+          navigator.mediaDevices
+            .enumerateDevices()
+            .then(devs => {
+              for (let i = 0; i < devs.length; i++) {
+                if (devs[i].kind === 'audioinput') {
+                  debugLog('mic', devs[i].label + ' [' + devs[i].deviceId + ']');
+                }
+              }
+            })
+            .catch(() => {});
+        }
         const Ctx = window.AudioContext || window.webkitAudioContext;
         audioContext = new Ctx();
         if (audioContext.state === 'suspended') {
@@ -227,25 +261,54 @@
           grammar,
         );
         recognizer.on('result', message => {
-          if (message && message.result && matchesWake(message.result.text)) {
-            triggerWake();
+          if (message && message.result) {
+            debugLog('result', message.result.text);
+            if (matchesWake(message.result.text)) triggerWake();
           }
         });
         recognizer.on('partialresult', message => {
-          if (
-            message &&
-            message.result &&
-            matchesWake(message.result.partial)
-          ) {
-            triggerWake();
+          if (message && message.result) {
+            if (message.result.partial) {
+              debugLog('partial', message.result.partial);
+            }
+            if (matchesWake(message.result.partial)) triggerWake();
           }
         });
+        // Debug-only free-decode recognizer (no grammar): logs what the
+        // model hears without grammar constraints so wake aliases can
+        // be tuned against real human speech.
+        let freeRecognizer = null;
+        if (debugEnabled()) {
+          freeRecognizer = new model.KaldiRecognizer(audioContext.sampleRate);
+          freeRecognizer.on('result', message => {
+            if (message && message.result) {
+              debugLog('free-result', message.result.text);
+            }
+          });
+          freeRecognizer.on('partialresult', message => {
+            if (message && message.result && message.result.partial) {
+              debugLog('free-partial', message.result.partial);
+            }
+          });
+        }
         sourceNode = audioContext.createMediaStreamSource(mediaStream);
         processorNode = audioContext.createScriptProcessor(4096, 1, 1);
+        let lastRmsAt = 0;
         processorNode.onaudioprocess = event => {
           if (!recognizer) return;
+          if (debugEnabled()) {
+            const now = Date.now();
+            if (now - lastRmsAt > 2000) {
+              lastRmsAt = now;
+              const d = event.inputBuffer.getChannelData(0);
+              let sum = 0;
+              for (let i = 0; i < d.length; i++) sum += d[i] * d[i];
+              debugLog('rms', Math.sqrt(sum / d.length).toFixed(5));
+            }
+          }
           try {
             recognizer.acceptWaveform(event.inputBuffer);
+            if (freeRecognizer) freeRecognizer.acceptWaveform(event.inputBuffer);
           } catch (_e) {
             /* recognizer torn down mid-flight; ignore */
           }
