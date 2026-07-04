@@ -6306,6 +6306,14 @@
     window.addEventListener('message', event => {
       handleEvent(event.data);
     });
+
+    // Bridge for voice.js: it cannot call acquireVsCodeApi() itself
+    // (VS Code permits exactly one call per webview), so it raises
+    // 'kiss-voice-post' events that we forward to the extension host.
+    window.addEventListener('kiss-voice-post', event => {
+      const detail = event && event.detail;
+      if (detail && detail.type) vscode.postMessage(detail);
+    });
   }
 
   function readFileAsAttachment(file) {
