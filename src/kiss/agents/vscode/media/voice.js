@@ -8,7 +8,7 @@
  * Always-on, fully local listener for the trigger word "Sorcar".  When
  * the wake word is heard, the "sorcar" placeholder is typed into the
  * task input textbox while the extension host records the speech that
- * follows, translates it to English with GPT models, and sends
+ * follows, translates it to English with the gpt-audio model, and sends
  * it back as ``{type: 'voiceSpeech', text}``; the translated text then
  * replaces the placeholder (or is appended to an existing draft) and
  * listening continues.
