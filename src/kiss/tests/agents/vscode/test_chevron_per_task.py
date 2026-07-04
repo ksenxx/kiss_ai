@@ -103,15 +103,16 @@ class TestChevronStateIsPerTask:
         )
 
     def test_chevron_click_uses_visible_task(self) -> None:
-        """The chevron click handler must determine the currently visible
-        task and toggle only that task's state in panelsExpandedMap."""
+        """The collapse-button click handler must determine the currently
+        visible task and toggle only that task's state in
+        panelsExpandedMap."""
         src = _read_main_js()
         m = re.search(
-            r"taskPanelChevron\)\s*\{[^}]*addEventListener\s*\(\s*'click'",
+            r"taskPanelCollapseBtn\)\s*\{[^}]*addEventListener\s*\(\s*'click'",
             src,
             re.DOTALL,
         )
-        assert m, "Could not find taskPanelChevron click handler"
+        assert m, "Could not find taskPanelCollapseBtn click handler"
         handler_start = m.end()
         handler_region = src[handler_start : handler_start + 1000]
         assert "panelsExpandedMap" in handler_region, (
@@ -120,7 +121,7 @@ class TestChevronStateIsPerTask:
         )
 
     def test_update_visible_task_syncs_chevron_icon(self) -> None:
-        """updateVisibleTask must call updateChevronIcon to reflect the
+        """updateVisibleTask must call updateCollapseButton to reflect the
         visible task's expanded state from panelsExpandedMap."""
         src = _read_main_js()
         m = re.search(r"function\s+updateVisibleTask\s*\(\s*\)\s*\{", src)
@@ -135,9 +136,9 @@ class TestChevronStateIsPerTask:
                 depth -= 1
             i += 1
         body = src[start:i]
-        assert "updateChevronIcon" in body, (
-            "updateVisibleTask must call updateChevronIcon to sync the "
-            "chevron icon with the visible task's expanded state"
+        assert "updateCollapseButton" in body, (
+            "updateVisibleTask must call updateCollapseButton to sync the "
+            "collapse button with the visible task's expanded state"
         )
         assert "panelsExpandedMap" in body, (
             "updateVisibleTask must read from panelsExpandedMap to "
