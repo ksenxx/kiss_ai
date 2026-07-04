@@ -13,8 +13,8 @@
 // bridge event.  This test runs the real ``media/voice.js`` against a
 // real jsdom document (no mocks for the code under test) and locks in:
 //
-//  1. A voiceWake message types "sorcar" into #task-input, fires the
-//     'input' event (so main.js reacts), and keeps listening.
+//  1. A voiceWake message never types text into #task-input — it only
+//     flashes the mic button, focuses the input, and keeps listening.
 //  2. Clicking the toggle posts voiceToggle {enabled: true/false}
 //     through the kiss-voice-post bridge.
 //  3. voiceState messages drive the button UI (listening / error).
@@ -69,16 +69,17 @@ function makeWindow() {
     posted.push(event.detail);
   });
 
+  const inp = win.document.getElementById('task-input');
   const inputEvents = {count: 0};
-  win.document
-    .getElementById('task-input')
-    .addEventListener('input', () => inputEvents.count++);
+  inp.addEventListener('input', () => inputEvents.count++);
+  const focusCalls = {count: 0};
+  inp.addEventListener('focus', () => focusCalls.count++);
 
   const script = win.document.createElement('script');
   script.textContent = fs.readFileSync(VOICE_JS_PATH, 'utf-8');
   win.document.body.appendChild(script);
 
-  return {win, posted, inputEvents};
+  return {win, posted, inputEvents, focusCalls};
 }
 
 function sendHostMessage(win, data) {
@@ -87,21 +88,29 @@ function sendHostMessage(win, data) {
 
 // ---------------------------------------------------------------------------
 
-test('voiceWake message types "sorcar" into the task input', () => {
-  const {win, inputEvents} = makeWindow();
+test('voiceWake message never types text into the task input', () => {
+  const {win, inputEvents, focusCalls} = makeWindow();
   const inp = win.document.getElementById('task-input');
+  const btn = win.document.getElementById('voice-btn');
   assert.strictEqual(inp.value, '');
   sendHostMessage(win, {type: 'voiceWake'});
-  assert.strictEqual(inp.value, 'sorcar');
-  assert.strictEqual(inputEvents.count, 1);
+  assert.strictEqual(inp.value, '');
+  assert.strictEqual(inputEvents.count, 0);
+  assert.ok(btn.classList.contains('voice-triggered'));
+  assert.strictEqual(focusCalls.count, 1);
 });
 
 test('duplicate wake events within the cooldown fire only once', () => {
-  const {win, inputEvents} = makeWindow();
+  const {win, focusCalls} = makeWindow();
+  const inp = win.document.getElementById('task-input');
+  // Blur between wakes: a non-debounced triggerWake would refocus the
+  // input each time, so the focus counter reveals every extra firing.
   sendHostMessage(win, {type: 'voiceWake'});
+  inp.blur();
   sendHostMessage(win, {type: 'voiceWake'});
+  inp.blur();
   sendHostMessage(win, {type: 'voiceWake'});
-  assert.strictEqual(inputEvents.count, 1);
+  assert.strictEqual(focusCalls.count, 1);
 });
 
 test('clicking the toggle posts voiceToggle through the bridge', () => {
@@ -174,12 +183,13 @@ test('voiceState messages drive the toggle UI classes', () => {
   assert.strictEqual(win.localStorage.getItem('kissVoiceEnabled'), '0');
 });
 
-test('wake still works while the input already has other text', () => {
-  const {win} = makeWindow();
+test('wake preserves the input when it already has other text', () => {
+  const {win, focusCalls} = makeWindow();
   const inp = win.document.getElementById('task-input');
   inp.value = 'draft text';
   sendHostMessage(win, {type: 'voiceWake'});
-  assert.strictEqual(inp.value, 'sorcar');
+  assert.strictEqual(inp.value, 'draft text');
+  assert.strictEqual(focusCalls.count, 1);
 });
 
 // ---------------------------------------------------------------------------
