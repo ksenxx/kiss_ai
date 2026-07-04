@@ -452,6 +452,81 @@ function testSpawnWhileCollapsedDefersTabs() {
   console.log('  ok - spawns while collapsed are deferred until expand');
 }
 
+// ---------------------------------------------------------------------------
+// 8. The "Collapse Chats" toggle (task-panel-collapse-btn) hides every
+//    panel of the finished task — hiding the run_parallel panel counts
+//    as collapsing it, so its sub-agent tabs must close, and the
+//    "Uncollapse Chats" click must reopen them.
+// ---------------------------------------------------------------------------
+function testCollapseChatsToggleClosesSubTabs() {
+  const {win, posted, panel, parentId, taskIds} = bootParallelRun(2);
+
+  // Finish the parent task so applyChevronState does not skip the
+  // panel as "running" (the toggle never hides running-task panels).
+  send(win, {
+    type: 'tool_result',
+    tabId: parentId,
+    content: 'all sub-agents done',
+  });
+  send(win, {type: 'result', tabId: parentId, summary: 'done', success: true});
+  send(win, {type: 'status', running: false, tabId: parentId});
+  assert.strictEqual(
+    subagentTabEls(win).length,
+    2,
+    'both sub-agent tabs must still be open after the parent finishes',
+  );
+
+  const btn = win.document.getElementById('task-panel-collapse-btn');
+  assert.ok(btn, 'task-panel-collapse-btn must exist');
+  // First click: "Uncollapse Chats" → expand-all (bookkeeping starts
+  // in the collapsed-label state).  Second click: "Collapse Chats".
+  btn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  assert.strictEqual(
+    subagentTabEls(win).length,
+    2,
+    'expand-all must keep the sub-agent tabs open',
+  );
+  btn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  assert.ok(
+    panel.classList.contains('chv-hidden'),
+    'Collapse Chats must hide the run_parallel panel',
+  );
+  assert.ok(
+    panel.classList.contains('collapsed'),
+    'a hidden run_parallel panel must also be marked collapsed',
+  );
+  assert.strictEqual(
+    subagentTabEls(win).length,
+    0,
+    'INVARIANT VIOLATED: Collapse Chats hid the run_parallel panel ' +
+      'but its sub-agent tabs are still open',
+  );
+
+  const before = posted.length;
+  btn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  assert.ok(
+    !panel.classList.contains('chv-hidden') &&
+      !panel.classList.contains('collapsed'),
+    'Uncollapse Chats must reveal and uncollapse the panel',
+  );
+  assert.strictEqual(
+    subagentTabEls(win).length,
+    2,
+    'INVARIANT VIOLATED: Uncollapse Chats uncollapsed the ' +
+      'run_parallel panel but its sub-agent tabs did not reopen',
+  );
+  for (const taskId of taskIds) {
+    assert.ok(
+      posted
+        .slice(before)
+        .some(m => m.type === 'resumeSession' && m.taskId === taskId),
+      'reopened sub-agent tab must resume backend task ' + taskId,
+    );
+  }
+  win.close();
+  console.log('  ok - Collapse Chats toggle closes/reopens sub tabs');
+}
+
 async function main() {
   const tests = [
     testCollapseClosesSubagentTabs,
@@ -461,6 +536,7 @@ async function main() {
     testDelayedOpenSubagentTabDoesNotReopenCollapsedPanel,
     testOpenSubagentTabOnlyPathIsAssociated,
     testSpawnWhileCollapsedDefersTabs,
+    testCollapseChatsToggleClosesSubTabs,
   ];
   for (const t of tests) {
     await t();
