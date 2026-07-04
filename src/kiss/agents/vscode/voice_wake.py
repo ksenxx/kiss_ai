@@ -11,6 +11,7 @@ process (the VS Code extension host) can react:
 
 - ``READY``        — model loaded and microphone open; listening began.
 - ``WAKE``         — the wake word "Sorcar" was heard.
+- ``TRANSCRIBING`` — speech capture ended; the gpt-audio call started.
 - ``SPEECH <json>``— the speech following the wake word, translated to
   English by the ``gpt-audio`` GPT model (JSON-encoded string payload).
 - ``NO_SPEECH``    — only silence followed the wake word (or the
@@ -310,6 +311,11 @@ class VoiceSession:
 
     def _finish_capture(self, pcm: bytes) -> None:
         self._capture = None
+        if pcm:
+            # Tell the supervisor the gpt-audio call is starting so the
+            # UI can show a "transcribing" indicator; silence skips
+            # straight to NO_SPEECH without an API call.
+            print("TRANSCRIBING", flush=True)
         text = translate_pcm_to_english(pcm, self._audio_model)
         if text:
             print(f"SPEECH {json.dumps(text)}", flush=True)

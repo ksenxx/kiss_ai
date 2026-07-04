@@ -91,10 +91,12 @@ const {VoiceWakeService} = require(OUT_VOICEWAKE);
 const wakes = [];
 const speeches = [];
 const states = [];
+const transcribings = [];
 const service = new VoiceWakeService(
   () => wakes.push(Date.now()),
   (listening, error) => states.push({listening, error}),
   text => speeches.push(text),
+  () => transcribings.push(Date.now()),
 );
 service.start();
 

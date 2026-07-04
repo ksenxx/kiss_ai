@@ -6,13 +6,15 @@
  * Voice wake-word support for KISS Sorcar.
  *
  * Always-on, fully local listener for the trigger word "Sorcar".  When
- * the wake word is heard, the mic button flashes as a visual cue (no
- * text is ever typed into the task input — the literal word "sorcar"
- * must never appear there) while the extension host records the speech
- * that follows, translates it to English with the gpt-audio model, and
- * sends it back as ``{type: 'voiceSpeech', text}``; the translated
- * text is then typed into the task input (or appended to an existing
- * draft) and listening continues.
+ * the wake word is heard, the mic button flashes GREEN as a visual cue
+ * (no text is ever typed into the task input — the literal word
+ * "sorcar" must never appear there) while the extension host records
+ * the speech that follows.  When the host starts the gpt-audio
+ * transcription/translation call it sends ``{type:
+ * 'voiceTranscribing'}`` and the flash turns YELLOW; the resulting
+ * ``{type: 'voiceSpeech', text}`` clears the flash and types the
+ * translated text into the task input (or appends it to an existing
+ * draft), and listening continues.
  *
  * Two modes, selected by the ``window.__VOICE__`` config injected by
  * the page template:
@@ -123,13 +125,39 @@
     return false;
   }
 
+  let flashTimer = null;
+
   /**
-   * React to the wake word: flash the mic button and focus the task
-   * input so the user sees they were heard.  No text is inserted —
-   * the literal word "sorcar" must never appear in the input box; the
-   * translated speech arrives later as a voiceSpeech message.
+   * Show a transient color state on the mic button: 'voice-triggered'
+   * (green — wake word heard, capturing speech) or 'voice-transcribing'
+   * (yellow — gpt-audio transcription in flight).  Passing a falsy
+   * class clears both.  Only one flash (and one safety timer) is
+   * active at a time.
+   */
+  function flash(cls, timeoutMs) {
+    if (flashTimer !== null) {
+      clearTimeout(flashTimer);
+      flashTimer = null;
+    }
+    btn.classList.remove('voice-triggered', 'voice-transcribing');
+    if (!cls) return;
+    btn.classList.add(cls);
+    flashTimer = setTimeout(() => {
+      flashTimer = null;
+      btn.classList.remove(cls);
+    }, timeoutMs);
+  }
+
+  /**
+   * React to the wake word: flash the mic button green and focus the
+   * task input so the user sees they were heard.  No text is inserted
+   * — the literal word "sorcar" must never appear in the input box;
+   * the translated speech arrives later as a voiceSpeech message.
    * Debounced so one long utterance (partial + final results) only
-   * triggers once.
+   * triggers once.  In webview mode the green flash persists while
+   * the host captures the speech (the voiceTranscribing/voiceSpeech
+   * message that follows replaces or clears it; the long timeout is
+   * only a safety net beyond the listener's 30s capture cap).
    */
   function triggerWake() {
     const now = Date.now();
@@ -140,20 +168,19 @@
     } catch (_e) {
       /* focus can fail in background documents; ignore */
     }
-    btn.classList.add('voice-triggered');
-    setTimeout(() => {
-      btn.classList.remove('voice-triggered');
-    }, 600);
+    flash('voice-triggered', cfg.mode === 'webview' ? 45000 : 600);
   }
 
   /**
    * Insert the English translation of the speech that followed the
    * wake word into the task input.  An empty input receives the text;
    * an existing draft is appended to with a space.  An empty
-   * translation (silence or a failed translation) is a no-op and
-   * never touches user text.
+   * translation (silence or a failed translation) never touches user
+   * text.  Either way the mic-button flash is cleared: the voice
+   * round-trip is over.
    */
   function insertSpeech(text) {
+    flash(null);
     const translated = String(typeof text === 'string' ? text : '').trim();
     if (!translated) return;
     if (!inp.value) {
@@ -395,6 +422,10 @@
     if (enabled === next) return;
     enabled = next;
     persist();
+    // Turning listening off ends any in-flight voice round-trip; a
+    // stale green/yellow flash must not wait for a host message that
+    // may never come.
+    if (!next) flash(null);
     if (cfg.mode === 'webview') {
       setUi(next ? 'loading' : 'off');
       postToHost({type: 'voiceToggle', enabled: next});
@@ -422,18 +453,27 @@
     if (!msg || typeof msg !== 'object') return;
     if (msg.type === 'voiceWake') {
       triggerWake();
+    } else if (msg.type === 'voiceTranscribing') {
+      // Capture ended; the gpt-audio call is in flight — flash yellow
+      // until the voiceSpeech result clears it (60s safety timeout).
+      flash('voice-transcribing', 60000);
     } else if (msg.type === 'voiceSpeech') {
       insertSpeech(msg.text);
     } else if (msg.type === 'voiceState') {
-      // Extension host reports the real listener state.
+      // Extension host reports the real listener state.  A listener
+      // that stopped (error or off) can no longer deliver the
+      // voiceTranscribing/voiceSpeech that would clear an in-flight
+      // flash, so clear it here.
       if (msg.error) {
+        flash(null);
         enabled = false;
         persist();
         setUi('error', msg.error);
       } else if (msg.listening) {
         setUi('listening');
-      } else if (!enabled) {
-        setUi('off');
+      } else {
+        flash(null);
+        if (!enabled) setUi('off');
       }
     }
   });
