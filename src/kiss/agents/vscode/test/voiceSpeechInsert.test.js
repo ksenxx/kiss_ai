@@ -13,12 +13,13 @@
 // ``media/voice.js`` against a real jsdom document (no mocks for the
 // code under test) and locks in:
 //
-//  1. A voiceSpeech message replaces the "sorcar" wake placeholder in
-//     #task-input with the translated text and fires 'input'.
+//  1. A voiceSpeech message after a wake types the translated text
+//     into #task-input and fires 'input' — the word "sorcar" never
+//     appears in the input at any point.
 //  2. A voiceSpeech message into an empty input types the text.
 //  3. A voiceSpeech message appends to a user draft with a space.
-//  4. An empty/blank voiceSpeech (no speech heard) clears the "sorcar"
-//     placeholder but never touches other user text.
+//  4. An empty/blank voiceSpeech (no speech heard) is a no-op and
+//     never touches user text.
 //  5. Non-string ``text`` payloads are treated as "no speech".
 //
 // Run directly with ``node test/voiceSpeechInsert.test.js``.
@@ -82,14 +83,14 @@ function sendHostMessage(win, data) {
 
 // ---------------------------------------------------------------------------
 
-test('voiceSpeech replaces the "sorcar" wake placeholder', () => {
+test('voiceSpeech after a wake types only the translated text', () => {
   const {win, inputEvents} = makeWindow();
   const inp = win.document.getElementById('task-input');
   sendHostMessage(win, {type: 'voiceWake'});
-  assert.strictEqual(inp.value, 'sorcar');
+  assert.strictEqual(inp.value, ''); // wake never inserts "sorcar"
   sendHostMessage(win, {type: 'voiceSpeech', text: 'Hello everyone'});
   assert.strictEqual(inp.value, 'Hello everyone');
-  assert.strictEqual(inputEvents.count, 2); // wake + speech
+  assert.strictEqual(inputEvents.count, 1); // only the speech insert
 });
 
 test('voiceSpeech types into an empty input', () => {
@@ -115,14 +116,14 @@ test('voiceSpeech trims surrounding whitespace from the translation', () => {
   assert.strictEqual(inp.value, 'Bonjour to you');
 });
 
-test('empty voiceSpeech clears the "sorcar" placeholder', () => {
+test('empty voiceSpeech after a wake leaves the input empty', () => {
   const {win, inputEvents} = makeWindow();
   const inp = win.document.getElementById('task-input');
   sendHostMessage(win, {type: 'voiceWake'});
-  assert.strictEqual(inp.value, 'sorcar');
+  assert.strictEqual(inp.value, ''); // wake never inserts "sorcar"
   sendHostMessage(win, {type: 'voiceSpeech', text: ''});
   assert.strictEqual(inp.value, '');
-  assert.strictEqual(inputEvents.count, 2); // wake + clear
+  assert.strictEqual(inputEvents.count, 0); // nothing to insert or clear
 });
 
 test('blank voiceSpeech never touches other user text', () => {
@@ -142,7 +143,7 @@ test('non-string voiceSpeech payloads are treated as no speech', () => {
   assert.strictEqual(inp.value, '');
   sendHostMessage(win, {type: 'voiceSpeech'});
   assert.strictEqual(inp.value, '');
-  assert.strictEqual(inputEvents.count, 2); // wake + one clear
+  assert.strictEqual(inputEvents.count, 0); // no insert, no clear
 });
 
 test('translated text can be inserted again after a new wake', () => {
