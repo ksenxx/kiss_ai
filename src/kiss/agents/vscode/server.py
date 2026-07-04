@@ -1536,6 +1536,7 @@ class VSCodeServer(
                 "tab_id": tab_id,
                 "parent_tab_id": parent_tab_id_for_sub,
                 "description": str(result.get("task", "") or ""),
+                "task_id": result.get("task_id"),
                 "isSubagentTab": True,
                 "isDone": is_done,
             })
@@ -1747,6 +1748,7 @@ class VSCodeServer(
                 "tab_id": sub_tab_id,
                 "parent_tab_id": parent_tab_id,
                 "description": description,
+                "task_id": sub_task_id,
                 "taskIndex": idx,
                 "isSubagentTab": True,
                 "isDone": is_done,
