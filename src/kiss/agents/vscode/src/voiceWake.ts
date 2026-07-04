@@ -15,7 +15,7 @@
  * - ``READY``         — model loaded, microphone open, listening.
  * - ``WAKE``          — the wake word "Sorcar" was heard.
  * - ``SPEECH <json>`` — the speech that followed the wake word,
- *   translated to English by GPT models (JSON string payload).
+ *   translated to English by the gpt-audio model (JSON string payload).
  * - ``NO_SPEECH``     — only silence followed the wake word.
  *
  * The service forwards those events to the webview, where voice.js
