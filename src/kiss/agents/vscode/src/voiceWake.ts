@@ -14,6 +14,7 @@
  *
  * - ``READY``         — model loaded, microphone open, listening.
  * - ``WAKE``          — the wake word "Sorcar" was heard.
+ * - ``TRANSCRIBING``  — speech capture ended; the gpt-audio call started.
  * - ``SPEECH <json>`` — the speech that followed the wake word,
  *   translated to English by the gpt-audio model (JSON string payload).
  * - ``NO_SPEECH``     — only silence followed the wake word.
@@ -38,6 +39,13 @@ export type StateCallback = (listening: boolean, error?: string) => void;
  * the wake word ('' when only silence was heard).
  */
 export type SpeechCallback = (text: string) => void;
+
+/**
+ * Callback invoked when the post-wake capture ends and the gpt-audio
+ * transcription/translation call starts (the UI shows a "transcribing"
+ * indicator until the speech or silence result arrives).
+ */
+export type TranscribingCallback = () => void;
 
 /**
  * Extra CLI arguments for the Python listener, JSON-encoded in the
@@ -65,6 +73,7 @@ export class VoiceWakeService {
     private readonly _onWake: WakeCallback,
     private readonly _onState: StateCallback,
     private readonly _onSpeech: SpeechCallback,
+    private readonly _onTranscribing: TranscribingCallback,
   ) {}
 
   /** Whether the listener process is currently running. */
@@ -121,6 +130,7 @@ export class VoiceWakeService {
         stdoutBuf = stdoutBuf.slice(idx + 1);
         if (line === 'WAKE') this._onWake();
         else if (line === 'READY') this._onState(true);
+        else if (line === 'TRANSCRIBING') this._onTranscribing();
         else if (line === 'NO_SPEECH') this._onSpeech('');
         else if (line.startsWith('SPEECH ')) {
           try {

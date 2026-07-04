@@ -96,6 +96,7 @@ export type ToWebviewMessage = ToWebviewMessageBody & {tabId?: string};
 type ToWebviewMessageBody =
   // Voice wake-word events (host-side listener → voice.js)
   | {type: 'voiceWake'}
+  | {type: 'voiceTranscribing'}
   | {type: 'voiceSpeech'; text: string}
   | {type: 'voiceState'; listening: boolean; error?: string}
   // Streaming events (same as browser JsonPrinter)
