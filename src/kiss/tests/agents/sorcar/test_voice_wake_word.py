@@ -14,7 +14,9 @@ Real audio, real speech models, no mocks:
   server, opens the chat page in Chromium whose *microphone* is fed the
   spoken "Sorcar" audio (Chromium's fake capture device plays the WAV
   through the getUserMedia stack), and asserts that the in-page
-  vosk-browser listener types "sorcar" into the task input textbox.
+  vosk-browser listener fires the wake indicator (the transient
+  ``voice-triggered`` flash on the mic button) while never typing the
+  literal word "sorcar" into the task input textbox.
 """
 
 from __future__ import annotations
@@ -89,7 +91,8 @@ class TestVoiceWakeFromWav(unittest.TestCase):
 @unittest.skipUnless(HAVE_MAC_TTS, "requires macOS `say` and `afconvert`")
 class TestVoiceWakeWordMicBrowser(unittest.TestCase):
     """Speaking 'Sorcar' into the (fake-device) microphone of a real
-    Chromium visiting the real web app types 'sorcar' into the input."""
+    Chromium visiting the real web app fires the wake indicator and
+    never types the literal word 'sorcar' into the input."""
 
     def setUp(self) -> None:
         self.tmpdir = Path(tempfile.mkdtemp())
@@ -150,20 +153,33 @@ class TestVoiceWakeWordMicBrowser(unittest.TestCase):
                     wait_until="load",
                     timeout=60_000,
                 )
+                # Record every value the task input ever takes so we
+                # can prove the literal wake word is never typed there.
+                page.evaluate(
+                    "window.__seenInputValues = [];"
+                    "const inp = document.getElementById('task-input');"
+                    "if (inp) inp.addEventListener('input', () =>"
+                    " window.__seenInputValues.push(inp.value));"
+                )
                 # Generous timeout: on a cold cache the server first
                 # downloads the ~40MB Vosk model archive, then the
                 # browser fetches and unpacks it inside the WASM
-                # recognizer worker before listening starts.
+                # recognizer worker before listening starts.  The wake
+                # event flashes the transient 'voice-triggered' class
+                # on the mic button for 600ms; wait_for_function polls
+                # every animation frame, so the flash cannot be missed.
                 page.wait_for_function(
-                    "document.getElementById('task-input')"
-                    " && document.getElementById('task-input').value"
-                    " === 'sorcar'",
+                    "document.getElementById('voice-btn')"
+                    " && document.getElementById('voice-btn')"
+                    ".classList.contains('voice-triggered')",
                     timeout=300_000,
                 )
                 value = page.evaluate(
                     "document.getElementById('task-input').value"
                 )
-                self.assertEqual(value, "sorcar")
+                self.assertEqual(value, "")
+                seen = page.evaluate("window.__seenInputValues")
+                self.assertEqual(seen, [])
             finally:
                 browser.close()
 
