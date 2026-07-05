@@ -12,8 +12,13 @@ process (the VS Code extension host) can react:
 - ``READY``        — model loaded and microphone open; listening began.
 - ``WAKE``         — the wake word "Sorcar" was heard.
 - ``TRANSCRIBING`` — speech capture ended; the gpt-audio call started.
-- ``SPEECH <json>``— the speech following the wake word, translated to
-  English by the ``gpt-audio`` GPT model (JSON-encoded string payload).
+- ``SPEECH <json>``— the speech following the wake word, as a JSON
+  object ``{"text": <english translation>, "speaker": <int or null>}``.
+  The translation comes from the ``gpt-audio`` GPT model; the speaker
+  number comes from local voice recognition (Vosk x-vector speaker
+  model): each distinct voice gets a unique number starting from 1
+  and keeps it across utterances (``null`` when identification is
+  unavailable or failed).
 - ``NO_SPEECH``    — only silence followed the wake word (or the
   translation failed; details go to stderr).
 
@@ -99,6 +104,10 @@ WAKE_ALIASES = [
 
 MODEL_NAME = "vosk-model-small-en-us-0.15"
 MODEL_ZIP_URL = f"https://alphacephei.com/vosk/models/{MODEL_NAME}.zip"
+# Vosk speaker-identification model: turns an utterance into a
+# 128-dim x-vector embedding; embeddings of the same voice are close
+# in cosine distance, different voices are far apart.
+SPK_MODEL_NAME = "vosk-model-spk-0.4"
 DEFAULT_MODELS_DIR = Path.home() / ".kiss" / "models"
 SAMPLE_RATE = 16000
 BLOCK_SIZE = 4000  # frames per audio block (250ms at 16kHz)
@@ -133,6 +142,10 @@ MIN_WORD_CONF = 0.4
 # audio right after the alias: proof the utterance really ended with
 # the wake word instead of continuing ("soccer is my favorite sport").
 WAKE_PAUSE_SECONDS = 0.2
+# Two x-vectors within this cosine distance are the same voice.
+# Vosk x-vectors of the same speaker typically land 0.2-0.5 apart
+# while different speakers exceed ~0.7, so 0.6 splits the two modes.
+SPEAKER_DISTANCE_THRESHOLD = 0.6
 
 # Post-wake speech is translated into English by a single gpt-audio
 # chat-completions call that consumes the audio directly.  Prompting
@@ -421,12 +434,19 @@ class VoiceSession:
         self,
         detector: WakeDetector,
         audio_model: str = DEFAULT_AUDIO_MODEL,
+        models_dir: Path | None = None,
     ) -> None:
         self._detector = detector
         self._audio_model = audio_model
+        self._models_dir = models_dir
         self._capture: SpeechCapture | None = None
         self._pending: queue.Queue[bytes] = queue.Queue()
         self._worker: threading.Thread | None = None
+        # Speaker identification is built lazily on the worker thread
+        # (the spk model may need a one-time download); after a
+        # construction failure it stays off for the whole session.
+        self._speaker_identifier: SpeakerIdentifier | None = None
+        self._speaker_id_broken = models_dir is None
         self.wakes = 0
 
     def process(self, data: bytes) -> None:
@@ -514,12 +534,55 @@ class VoiceSession:
             finally:
                 self._pending.task_done()
 
+    def _identify_speaker(self, pcm: bytes) -> int | None:
+        """Return the utterance's speaker number, or None on failure.
+
+        Runs on the single worker thread.  Any failure (model
+        download, model load, recognition) is reported on stderr and
+        degrades to ``None`` — speech translation must keep working
+        without speaker numbers.
+        """
+        if self._speaker_id_broken:
+            return None
+        try:
+            if self._speaker_identifier is None:
+                assert self._models_dir is not None
+                self._speaker_identifier = SpeakerIdentifier(self._models_dir)
+            return self._speaker_identifier.speaker_of(pcm)
+        except Exception as err:  # noqa: BLE001 — listener must keep running
+            self._speaker_id_broken = True
+            print(
+                f"speaker identification failed: {err}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return None
+
     def _translate_and_report(self, pcm: bytes) -> None:
         text = translate_pcm_to_english(pcm, self._audio_model)
         if text:
-            emit(f"SPEECH {json.dumps(text)}")
+            speaker = self._identify_speaker(pcm)
+            emit(f"SPEECH {json.dumps({'text': text, 'speaker': speaker})}")
         else:
             emit("NO_SPEECH")
+
+
+def _ensure_downloaded_model(models_dir: Path, model_name: str) -> Path:
+    """Return the local directory of *model_name*, downloading it once."""
+    model_dir = models_dir / model_name
+    if model_dir.is_dir():
+        return model_dir
+    models_dir.mkdir(parents=True, exist_ok=True)
+    url = f"https://alphacephei.com/vosk/models/{model_name}.zip"
+    zip_path = models_dir / f"{model_name}.zip"
+    print(f"downloading {url} ...", file=sys.stderr, flush=True)
+    tmp = zip_path.with_suffix(".tmp")
+    urllib.request.urlretrieve(url, tmp)
+    tmp.replace(zip_path)
+    with zipfile.ZipFile(zip_path) as zf:
+        zf.extractall(models_dir)
+    zip_path.unlink(missing_ok=True)
+    return model_dir
 
 
 def ensure_model(models_dir: Path) -> Path:
@@ -531,19 +594,115 @@ def ensure_model(models_dir: Path) -> Path:
     Returns:
         Path to the unpacked model directory.
     """
-    model_dir = models_dir / MODEL_NAME
-    if model_dir.is_dir():
-        return model_dir
-    models_dir.mkdir(parents=True, exist_ok=True)
-    zip_path = models_dir / f"{MODEL_NAME}.zip"
-    print(f"downloading {MODEL_ZIP_URL} ...", file=sys.stderr, flush=True)
-    tmp = zip_path.with_suffix(".tmp")
-    urllib.request.urlretrieve(MODEL_ZIP_URL, tmp)
-    tmp.replace(zip_path)
-    with zipfile.ZipFile(zip_path) as zf:
-        zf.extractall(models_dir)
-    zip_path.unlink(missing_ok=True)
-    return model_dir
+    return _ensure_downloaded_model(models_dir, MODEL_NAME)
+
+
+def ensure_spk_model(models_dir: Path) -> Path:
+    """Return the local Vosk speaker model directory, downloading it once.
+
+    Args:
+        models_dir: Directory that caches downloaded models.
+
+    Returns:
+        Path to the unpacked speaker-identification model directory.
+    """
+    return _ensure_downloaded_model(models_dir, SPK_MODEL_NAME)
+
+
+def cosine_distance(a: list[float], b: list[float]) -> float:
+    """Return the cosine distance (1 - cosine similarity) of two vectors.
+
+    Degenerate inputs (mismatched lengths, empty or all-zero vectors)
+    return 2.0 — the maximum possible distance — so they can never be
+    mistaken for a matching voice.
+    """
+    if len(a) != len(b) or not a:
+        return 2.0
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(y * y for y in b))
+    if norm_a == 0.0 or norm_b == 0.0:
+        return 2.0
+    return 1.0 - dot / (norm_a * norm_b)
+
+
+class SpeakerRegistry:
+    """Assigns stable numbers to voices by x-vector cosine distance.
+
+    The first voice heard becomes speaker 1, the next distinct voice
+    speaker 2, and so on; an embedding within
+    :data:`SPEAKER_DISTANCE_THRESHOLD` of a known speaker's first
+    embedding reuses that speaker's number.
+    """
+
+    def __init__(
+        self, threshold: float = SPEAKER_DISTANCE_THRESHOLD
+    ) -> None:
+        self._threshold = threshold
+        self._embeddings: list[list[float]] = []  # index i = speaker i+1
+
+    def identify(self, embedding: list[float]) -> int:
+        """Return the speaker number for *embedding* (starting from 1).
+
+        Matches the closest known speaker within the distance
+        threshold, or registers *embedding* as a new speaker.
+        """
+        best_number = 0
+        best_distance = math.inf
+        for i, known in enumerate(self._embeddings):
+            distance = cosine_distance(embedding, known)
+            if distance < best_distance:
+                best_number = i + 1
+                best_distance = distance
+        if best_number and best_distance <= self._threshold:
+            return best_number
+        self._embeddings.append(list(embedding))
+        return len(self._embeddings)
+
+
+class SpeakerIdentifier:
+    """Extracts x-vector voice embeddings and numbers the speakers.
+
+    Wraps a Vosk recognizer with the speaker-identification model
+    attached: each utterance's PCM yields one x-vector, which a
+    :class:`SpeakerRegistry` maps to a stable per-voice number.  Not
+    thread-safe; the voice session uses it from its single worker
+    thread only.
+    """
+
+    def __init__(self, models_dir: Path) -> None:
+        from vosk import KaldiRecognizer, Model, SetLogLevel, SpkModel
+
+        SetLogLevel(-1)
+        self._recognizer = KaldiRecognizer(
+            Model(str(ensure_model(models_dir))), SAMPLE_RATE
+        )
+        self._recognizer.SetSpkModel(
+            SpkModel(str(ensure_spk_model(models_dir)))
+        )
+        self._registry = SpeakerRegistry()
+
+    def speaker_of(self, pcm: bytes) -> int | None:
+        """Return the speaker number for an utterance's PCM audio.
+
+        Args:
+            pcm: Raw 16kHz mono s16le PCM of the utterance.
+
+        Returns:
+            The stable speaker number (1, 2, ...) or ``None`` when the
+            audio yields no x-vector (e.g. empty or too short).
+        """
+        if not pcm:
+            return None
+        block_bytes = 2 * BLOCK_SIZE
+        for start in range(0, len(pcm), block_bytes):
+            self._recognizer.AcceptWaveform(pcm[start:start + block_bytes])
+        result = json.loads(self._recognizer.FinalResult())
+        self._recognizer.Reset()
+        embedding = result.get("spk")
+        if not isinstance(embedding, list) or not embedding:
+            return None
+        return self._registry.identify(embedding)
 
 
 def matches_wake(text: str) -> bool:
@@ -844,7 +1003,7 @@ def main() -> int:
     args = parser.parse_args()
 
     detector = WakeDetector(ensure_model(args.models_dir))
-    session = VoiceSession(detector, args.audio_model)
+    session = VoiceSession(detector, args.audio_model, args.models_dir)
     if args.wav is not None:
         return run_wav(session, args.wav)
     return run_mic(session, args.mic_watchdog_timeout)

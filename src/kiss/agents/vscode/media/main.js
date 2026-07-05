@@ -6670,6 +6670,15 @@
       const detail = event && event.detail;
       if (detail && detail.type) vscode.postMessage(detail);
     });
+
+    // Voice-dictated tasks: after voice.js inserts the translated
+    // (speaker-prefixed) speech into the task input it raises this
+    // event so the text is sent exactly like a click on the send
+    // button — a fresh ``submit`` for an idle tab, or an
+    // ``appendUserMessage`` steering instruction for a running agent.
+    window.addEventListener('kiss-voice-submit', () => {
+      sendMessage();
+    });
   }
 
   function readFileAsAttachment(file) {
