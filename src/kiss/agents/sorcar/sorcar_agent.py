@@ -370,6 +370,30 @@ class SorcarAgent(RelentlessAgent):
                 return str(ask_callback(question))
             return "(ask_user_question not available in this environment)"
 
+        def talk(language: str, text: str) -> str:
+            """Speak text aloud to the user through their device speakers.
+
+            Broadcasts a text-to-speech request to every client tab open
+            for the running task (across all connected devices); each
+            client plays the text on its default speaker system using
+            the given language's voice.  Use this to respond aloud when
+            the user speaks to the running task.
+
+            Args:
+                language: BCP-47 language tag for the speech voice
+                    (e.g. "en-US", "es", "fr-FR").
+                text: The text to synthesize and play aloud.
+
+            Returns:
+                A confirmation message, or a note that audio playback is
+                unavailable in this environment.
+            """
+            broadcast = getattr(self.printer, "broadcast", None)
+            if not callable(broadcast):
+                return "(talk not available in this environment)"
+            broadcast({"type": "talk", "language": language, "text": text})
+            return f"Spoke to the user in language {language!r}."
+
         if self.docker_manager:
             from kiss.docker.docker_tools import DockerTools
 
@@ -591,6 +615,7 @@ class SorcarAgent(RelentlessAgent):
         except Exception:
             logger.warning("MCP tool setup failed", exc_info=True)
         tools.append(ask_user_question)
+        tools.append(talk)
         tools.append(set_model)
         if self._is_parallel:
             tools.append(run_parallel)

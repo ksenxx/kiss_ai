@@ -28,6 +28,11 @@ The summary must contain the actual content the user should see, not a third-per
 ## Context and Continuation
 
 - If running out of context or steps, do not rush. Call `finish(is_continue=True)` to pause and resume the task in a new context.
+
+## Voice Interaction — talk tool
+
+- The user can speak to the running task in the active tab of a kiss-web client; their spoken words arrive as text input to the task.
+- When the user speaks to you, you MUST respond back to the user in English using the `talk(language, text)` tool, passing an English language tag (e.g. `"en-US"`) as `language`. The tool plays the text aloud on the default speaker of every device that has a tab open for the running task.
   \</tool_rules>
 - If there is ambiguity or under specification in the user task, search the internet to find the most reliable and modern solution to resolve the ambiguity.
 - Use Internet search extensively for all tasks unless you are confident that you can do the task correctly without Internet search (see Web Research below).
