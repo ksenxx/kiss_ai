@@ -25,7 +25,7 @@
  * post-wake utterance is sent to the GPT translation API.
  */
 
-import {spawn, ChildProcess} from 'child_process';
+import {spawn, spawnSync, ChildProcess} from 'child_process';
 import {findKissProject, findUvPath} from './kissPaths';
 
 /** Callback invoked whenever the wake word is detected. */
@@ -113,7 +113,19 @@ export class VoiceWakeService {
           'kiss.agents.vscode.voice_wake',
           ...extraListenerArgs(),
         ],
-        {cwd: kissProject, stdio: ['ignore', 'pipe', 'pipe']},
+        // On POSIX, ``detached`` puts the listener in its own process
+        // group so stop() can signal the WHOLE tree: killing only the
+        // ``uv run`` wrapper leaves the actual Python child alive as
+        // an orphan still holding the microphone (observed live).
+        // Windows has no negative-PID process-group signal; stop()
+        // uses taskkill /T there, so avoid detached's "keep running
+        // after parent exits" side effect on that platform.  stdio
+        // stays piped, so no unref() — the event loop keeps watching it.
+        {
+          cwd: kissProject,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          detached: process.platform !== 'win32',
+        },
       );
     } catch (err) {
       this._onState(false, `voice listener failed to start: ${String(err)}`);
@@ -123,11 +135,13 @@ export class VoiceWakeService {
 
     let stdoutBuf = '';
     proc.stdout?.on('data', (chunk: Buffer) => {
+      if (this._proc !== proc) return; // stale output after stop/restart
       stdoutBuf += chunk.toString('utf-8');
       let idx = stdoutBuf.indexOf('\n');
       while (idx >= 0) {
         const line = stdoutBuf.slice(0, idx).trim();
         stdoutBuf = stdoutBuf.slice(idx + 1);
+        if (this._proc !== proc) return; // callback may have stopped us
         if (line === 'WAKE') this._onWake();
         else if (line === 'READY') this._onState(true);
         else if (line === 'TRANSCRIBING') this._onTranscribing();
@@ -157,30 +171,56 @@ export class VoiceWakeService {
       }
     });
 
-    proc.on('exit', (code: number | null) => {
+    proc.on('exit', (code: number | null, signal: NodeJS.Signals | null) => {
       if (this._proc !== proc) return; // superseded or stopped on purpose
       this._proc = undefined;
-      if (code === 0 || code === null) {
+      if (code === 0 || (code === null && signal === null)) {
         this._onState(false);
       } else {
         const detail = stderrTail.trim().split('\n').pop() || '';
+        const reason = signal ? `signal ${signal}` : `code ${code}`;
         this._onState(
           false,
-          `voice listener exited (code ${code})${detail ? ': ' + detail : ''}`,
+          `voice listener exited (${reason})${detail ? ': ' + detail : ''}`,
         );
       }
     });
   }
 
-  /** Stop the listener process (idempotent). */
+  /**
+   * Stop the listener process tree (idempotent).
+   *
+   * The listener runs under a ``uv run`` wrapper; signalling only the
+   * wrapper can orphan the Python child, which keeps the microphone
+   * open (observed live).  The process was spawned detached into its
+   * own process group, so the whole tree is killed with one negative-
+   * PID signal, falling back to a plain kill of the wrapper.
+   */
   stop(): void {
     const proc = this._proc;
     this._proc = undefined;
     if (proc) {
       try {
-        proc.kill();
+        if (typeof proc.pid === 'number') {
+          if (process.platform === 'win32') {
+            const result = spawnSync(
+              'taskkill',
+              ['/PID', String(proc.pid), '/T', '/F'],
+              {stdio: 'ignore', windowsHide: true},
+            );
+            if (result.error || result.status !== 0) proc.kill();
+          } else {
+            process.kill(-proc.pid, 'SIGTERM');
+          }
+        } else {
+          proc.kill();
+        }
       } catch {
-        // Already dead — nothing to do.
+        try {
+          proc.kill();
+        } catch {
+          // Already dead — nothing to do.
+        }
       }
     }
     this._onState(false);

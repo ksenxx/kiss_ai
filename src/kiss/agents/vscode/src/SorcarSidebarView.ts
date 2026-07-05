@@ -1729,6 +1729,8 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   public dispose(): void {
     this._disposed = true;
     setWebviewNotificationPoster(undefined);
+    this._voiceWake?.dispose();
+    this._voiceWake = undefined;
     if (this._urlFileWatchTimer) {
       clearInterval(this._urlFileWatchTimer);
       this._urlFileWatchTimer = undefined;
