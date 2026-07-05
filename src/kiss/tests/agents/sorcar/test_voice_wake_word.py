@@ -10,6 +10,12 @@ Real audio, real speech models, no mocks:
   streams the audio through the actual Python wake-word listener
   (``kiss.agents.vscode.voice_wake``) used by the VS Code extension.
 
+- ``test_no_wake_from_alias_sentences`` speaks everyday sentences that
+  contain wake-alias-sounding words ("soccer", "circa", "sir ... car",
+  "so called") mid-sentence or at the start of continuous speech and
+  asserts the listener never fires: detection must not be so
+  sensitive that ordinary conversation wakes it.
+
 - ``test_wake_word_mic_browser`` boots the real remote-access web
   server, opens the chat page in Chromium whose *microphone* is fed the
   spoken "Sorcar" audio (Chromium's fake capture device plays the WAV
@@ -30,11 +36,54 @@ import threading
 import unittest
 from pathlib import Path
 
+from kiss.agents.vscode.voice_wake import matches_wake, words_confident
 from kiss.agents.vscode.web_server import RemoteAccessServer
 
 PROJECT_ROOT = Path(__file__).resolve().parents[5]
 
 HAVE_MAC_TTS = bool(shutil.which("say")) and bool(shutil.which("afconvert"))
+
+
+class TestWakeMatchingStrictness(unittest.TestCase):
+    """The wake predicates reject everything but an isolated, confident
+    alias — the over-sensitivity fix in its distilled form."""
+
+    def test_exact_alias_matches(self) -> None:
+        self.assertTrue(matches_wake("sore car"))
+        self.assertTrue(matches_wake("  Sore   Car  "))
+        self.assertTrue(matches_wake("sir car"))
+
+    def test_common_words_are_not_aliases(self) -> None:
+        # Everyday standalone words must not be detection aliases.
+        self.assertFalse(matches_wake("soccer"))
+        self.assertFalse(matches_wake("circa"))
+        self.assertFalse(matches_wake("so car"))
+        self.assertFalse(matches_wake("saw car"))
+
+    def test_alias_in_context_never_matches(self) -> None:
+        # The grammar decodes everyday speech to alias-in-[unk] context;
+        # none of these may wake (substring matching used to fire here).
+        self.assertFalse(matches_wake("[unk] sir car [unk]"))
+        self.assertFalse(matches_wake("[unk] sore car [unk]"))
+        self.assertFalse(matches_wake("sir car [unk]"))
+        self.assertFalse(matches_wake("[unk] sar car"))
+        self.assertFalse(matches_wake("sore car [unk]"))
+        self.assertFalse(matches_wake("so"))
+        self.assertFalse(matches_wake(""))
+
+    def test_word_confidence_gate(self) -> None:
+        # Real human "Sorcar" scores ~0.53 (must pass); the gate only
+        # rejects egregious low-confidence force-fits.
+        human = [{"conf": 0.53, "word": "sir"}, {"conf": 1.0, "word": "car"}]
+        garbage = [{"conf": 1.0, "word": "sore"}, {"conf": 0.2, "word": "car"}]
+        self.assertTrue(words_confident(human))
+        self.assertFalse(words_confident(garbage))
+        # Missing word lists and out-of-scale (acoustic) confidences
+        # must pass: the gate only ever tightens detection.
+        self.assertTrue(words_confident(None))
+        self.assertTrue(words_confident([]))
+        self.assertTrue(words_confident([{"word": "sore"}]))
+        self.assertTrue(words_confident([{"conf": 250.0, "word": "sore"}]))
 
 
 def _make_sorcar_wav(directory: Path) -> Path:
@@ -50,6 +99,35 @@ def _make_sorcar_wav(directory: Path) -> Path:
         ],
         check=True,
     )
+    subprocess.run(
+        ["afconvert", "-f", "WAVE", "-d", "LEI16@16000", "-c", "1",
+         str(aiff), str(wav)],
+        check=True,
+    )
+    return wav
+
+
+def _make_alias_sentences_wav(directory: Path) -> Path:
+    """Synthesize sentences with alias-sounding words that must not wake.
+
+    Covers both mid-sentence alias words (decoded by the grammar as
+    ``[unk] soccer [unk]`` etc.) and utterances that *start* with an
+    alias-sounding word followed by continuous speech.
+    """
+    aiff = directory / "sentences.aiff"
+    wav = directory / "sentences.wav"
+    text = " [[slnc 800]] ".join(
+        [
+            "I watched the soccer game yesterday with my friends",
+            "yes sir the car is ready to go",
+            "that painting is from circa nineteen twenty",
+            "soccer is my favorite sport",
+            "so called experts say otherwise",
+            "sir can you help me please",
+            "I am so careful when I drive the car",
+        ]
+    )
+    subprocess.run(["say", text, "-o", str(aiff)], check=True)
     subprocess.run(
         ["afconvert", "-f", "WAVE", "-d", "LEI16@16000", "-c", "1",
          str(aiff), str(wav)],
@@ -86,6 +164,29 @@ class TestVoiceWakeFromWav(unittest.TestCase):
         self.assertIn("READY", lines, msg=proc.stderr[-2000:])
         self.assertIn("WAKE", lines, msg=proc.stderr[-2000:])
         self.assertEqual(proc.returncode, 0, msg=proc.stderr[-2000:])
+
+
+@unittest.skipUnless(HAVE_MAC_TTS, "requires macOS `say` and `afconvert`")
+class TestNoFalseWakeFromWav(unittest.TestCase):
+    """Ordinary speech containing alias-sounding words never wakes."""
+
+    def test_no_wake_from_alias_sentences(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            wav = _make_alias_sentences_wav(Path(tmp))
+            proc = subprocess.run(
+                [
+                    "uv", "run", "python", "-m",
+                    "kiss.agents.vscode.voice_wake", "--wav", str(wav),
+                ],
+                cwd=PROJECT_ROOT,
+                capture_output=True,
+                text=True,
+                timeout=600,
+            )
+        lines = proc.stdout.split()
+        self.assertIn("READY", lines, msg=proc.stderr[-2000:])
+        self.assertNotIn("WAKE", lines, msg=proc.stdout)
+        self.assertEqual(proc.returncode, 1, msg=proc.stdout)
 
 
 @unittest.skipUnless(HAVE_MAC_TTS, "requires macOS `say` and `afconvert`")
