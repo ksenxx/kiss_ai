@@ -371,7 +371,7 @@ class SorcarAgent(RelentlessAgent):
                 return str(ask_callback(question))
             return "(ask_user_question not available in this environment)"
 
-        def talk(language: str, text: str) -> str:
+        def talk(language: str, text: str, emotion: str = "") -> str:
             """Speak text aloud to the user through their device speakers.
 
             Broadcasts a text-to-speech request to every client tab open
@@ -380,10 +380,29 @@ class SorcarAgent(RelentlessAgent):
             the given language's voice.  Use this to respond aloud when
             the user speaks to the running task.
 
+            Write *text* the way a warm, engaged human actually talks —
+            NEVER like a robot reading a report.  Use contractions
+            ("I'm", "let's", "that's"), short varied sentences, and
+            natural interjections ("Alright,", "Oh nice —", "Hmm,",
+            "Okay, so...").  Punctuation drives the delivery: questions
+            rise, exclamations add energy, an ellipsis trails off, and
+            sentence breaks become natural breathing pauses.  Pick an
+            *emotion* that matches the vibe of the moment instead of
+            leaving it flat.
+
             Args:
                 language: BCP-47 language tag for the speech voice
                     (e.g. "en-US", "es", "fr-FR").
-                text: The text to synthesize and play aloud.
+                text: The text to synthesize and play aloud, written in
+                    a natural, conversational, emotionally expressive
+                    style (contractions, interjections, punctuation).
+                emotion: Optional vibe for the delivery; the client
+                    shapes speech rate and pitch to match.  One of
+                    "cheerful", "excited", "playful", "curious", "warm",
+                    "proud", "calm", "empathetic", "reassuring",
+                    "apologetic", "serious", or "sad".  Empty means
+                    neutral (the client may still infer a vibe from the
+                    punctuation and wording of *text*).
 
             Returns:
                 A confirmation message, or a note that audio playback is
@@ -401,6 +420,7 @@ class SorcarAgent(RelentlessAgent):
                 "type": "talk",
                 "language": language,
                 "text": text,
+                "emotion": emotion,
                 "talkId": uuid.uuid4().hex,
             })
             return f"Spoke to the user in language {language!r}."
