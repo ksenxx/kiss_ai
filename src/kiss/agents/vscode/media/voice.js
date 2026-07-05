@@ -43,19 +43,30 @@
 
   // "sorcar" is not in the small English model's vocabulary, so the
   // grammar also lists in-vocabulary words/phrases that sound like
-  // "Sorcar".  Any of them heard in a partial or final result counts
-  // as the wake word.
-  const WAKE_ALIASES = [
-    'sorcar',
-    'soccer',
-    'circa',
-    'sir car',
-    'sore car',
-    'so car',
-    'saw car',
-    'sar car',
-  ];
+  // "Sorcar".  Because the grammar forces every sound into an alias
+  // or [unk], detection must be strict: the WHOLE utterance has to
+  // decode to exactly one alias (never an alias embedded in [unk]
+  // context, e.g. "[unk] sir car [unk]" from "yes sir the car is
+  // ready"), every alias word needs a high confidence, and a partial
+  // result only fires after ~200ms of quiet audio proves the speaker
+  // paused instead of talking on ("soccer is my favorite sport").
+  // Common standalone words ("soccer", "circa", "so car", "saw car")
+  // are deliberately NOT aliases, keeping the grammar to genuinely
+  // Sorcar-shaped phrases; real human "Sorcar" decodes to "sir car"/
+  // "sore car"/"sar car" (verified live).
+  const WAKE_ALIASES = ['sorcar', 'sir car', 'sore car', 'sar car'];
   const COOLDOWN_MS = 2000;
+  // Vosk grammar-mode word confidences are posteriors in [0, 1] but
+  // do not separate true wakes from sound-alikes (real human "Sorcar"
+  // scored 0.53 live; TTS "soccer" force-fit 0.55) — this is only a
+  // sanity net against egregious force-fits.  Values above 1.0 would
+  // be raw acoustic likelihoods on another scale and are not gated.
+  const MIN_WORD_CONF = 0.4;
+  // Quiet audio required after the alias before a partial result may
+  // fire the wake word.
+  const WAKE_PAUSE_MS = 200;
+  // Blocks at or above this normalized RMS count as speech.
+  const SPEECH_RMS_THRESHOLD = 0.01;
   const STORAGE_KEY = 'kissVoiceEnabled';
   const DEBUG_KEY = 'kissVoiceDebug';
 
@@ -98,7 +109,9 @@
     if (state === 'listening') btn.classList.add('active');
     let tip;
     if (state === 'listening') {
-      tip = "Voice trigger on: say 'Sorcar' (click to turn off)";
+      tip =
+        "Voice trigger on: say 'Sorcar' and pause briefly " +
+        '(click to turn off)';
     } else if (state === 'loading') {
       tip = 'Voice trigger: starting ...';
     } else if (state === 'error') {
@@ -116,13 +129,34 @@
       .trim();
   }
 
+  /**
+   * True when the whole normalized utterance is exactly one wake
+   * alias.  Substring matching is deliberately avoided; it fired on
+   * everyday sentences that merely contain an alias-sounding word.
+   */
   function matchesWake(text) {
     const t = normalize(text);
     if (!t) return false;
-    for (let i = 0; i < WAKE_ALIASES.length; i++) {
-      if (t.indexOf(WAKE_ALIASES[i]) !== -1) return true;
+    return WAKE_ALIASES.indexOf(t) !== -1;
+  }
+
+  /**
+   * True when every recognized word clears MIN_WORD_CONF.  `words` is
+   * the word list of a Vosk result (each entry has a `conf` field
+   * when setWords(true) is on).  Only confidences on the [0, 1]
+   * posterior scale are gated; larger values and missing word lists
+   * pass, so the gate can only tighten detection, never lose a clean
+   * wake.
+   */
+  function wordsConfident(words) {
+    if (!Array.isArray(words)) return true;
+    for (let i = 0; i < words.length; i++) {
+      const conf = words[i] && words[i].conf;
+      if (typeof conf === 'number' && conf <= 1.0 && conf < MIN_WORD_CONF) {
+        return false;
+      }
     }
-    return false;
+    return true;
   }
 
   let flashTimer = null;
@@ -317,10 +351,25 @@
           audioContext.sampleRate,
           grammar,
         );
+        if (typeof recognizer.setWords === 'function') {
+          // Word-level confidences in final results (partial results
+          // carry no confidences in vosk-browser).
+          recognizer.setWords(true);
+        }
+        // Milliseconds of quiet audio since the last speech block;
+        // updated by onaudioprocess, read by the partial-result gate.
+        let quietMs = 0;
         recognizer.on('result', message => {
           if (message && message.result) {
             debugLog('result', message.result.text);
-            if (matchesWake(message.result.text)) triggerWake();
+            // A final result means Vosk saw the endpoint: the whole
+            // utterance is over, so no pause gate is needed.
+            if (
+              matchesWake(message.result.text) &&
+              wordsConfident(message.result.result)
+            ) {
+              triggerWake();
+            }
           }
         });
         recognizer.on('partialresult', message => {
@@ -328,7 +377,14 @@
             if (message.result.partial) {
               debugLog('partial', message.result.partial);
             }
-            if (matchesWake(message.result.partial)) triggerWake();
+            // Fire only when the speaker paused right after the
+            // alias; continuous speech keeps quietMs at 0.
+            if (
+              quietMs >= WAKE_PAUSE_MS &&
+              matchesWake(message.result.partial)
+            ) {
+              triggerWake();
+            }
           }
         });
         // Debug-only free-decode recognizer (no grammar): logs what the
@@ -353,14 +409,20 @@
         let lastRmsAt = 0;
         processorNode.onaudioprocess = event => {
           if (!recognizer) return;
+          const samples = event.inputBuffer.getChannelData(0);
+          let sumSquares = 0;
+          for (let i = 0; i < samples.length; i++) {
+            sumSquares += samples[i] * samples[i];
+          }
+          const rms = Math.sqrt(sumSquares / samples.length);
+          const blockMs =
+            (samples.length / event.inputBuffer.sampleRate) * 1000;
+          quietMs = rms >= SPEECH_RMS_THRESHOLD ? 0 : quietMs + blockMs;
           if (debugEnabled()) {
             const now = Date.now();
             if (now - lastRmsAt > 2000) {
               lastRmsAt = now;
-              const d = event.inputBuffer.getChannelData(0);
-              let sum = 0;
-              for (let i = 0; i < d.length; i++) sum += d[i] * d[i];
-              debugLog('rms', Math.sqrt(sum / d.length).toFixed(5));
+              debugLog('rms', rms.toFixed(5));
             }
           }
           try {
