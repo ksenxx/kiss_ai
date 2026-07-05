@@ -23,6 +23,20 @@ small set of phrases that sound like "Sorcar" plus the mandatory
 out-of-grammar audio).  "sorcar" itself is not in the model vocabulary,
 so in-vocabulary phonetic aliases act as the trigger.
 
+Because the grammar forces every sound into an alias or ``[unk]``,
+naive substring matching is far too sensitive: everyday sentences such
+as "yes sir the car is ready" decode to ``[unk] sir car [unk]`` and
+used to fire the wake word.  Detection is therefore strict; it fires
+only when
+
+- the *whole* utterance decodes to exactly one alias (never an alias
+  embedded in ``[unk]`` context),
+- no alias word is an egregiously low-confidence force-fit, and
+- for low-latency partial results, the speaker has paused briefly
+  (~200ms of quiet audio) right after the alias — continuous speech
+  such as "soccer is my favorite sport" keeps talking through that
+  window and never triggers.
+
 Wake-word detection runs locally.  After a wake, the utterance that
 follows is captured (RMS endpointing) and translated into English —
 whatever language was spoken — by a single ``gpt-audio``
@@ -52,14 +66,18 @@ import wave
 import zipfile
 from pathlib import Path
 
+# In-vocabulary phrases that sound like "Sorcar" and act as the
+# detection grammar.  Common standalone English words ("soccer",
+# "circa", "so car", "saw car") are deliberately NOT aliases, keeping
+# the grammar to genuinely Sorcar-shaped phrases; real human "Sorcar"
+# decodes to "sir car"/"sore car"/"sar car" (verified live).  A
+# sound-alike word spoken in isolation with a pause can still
+# force-fit onto an alias and wake the listener — that is inherent to
+# phonetic wake words — but ordinary sentences never do.
 WAKE_ALIASES = [
     "sorcar",
-    "soccer",
-    "circa",
     "sir car",
     "sore car",
-    "so car",
-    "saw car",
     "sar car",
 ]
 
@@ -69,6 +87,24 @@ DEFAULT_MODELS_DIR = Path.home() / ".kiss" / "models"
 SAMPLE_RATE = 16000
 BLOCK_SIZE = 4000  # frames per audio block (250ms at 16kHz)
 COOLDOWN_SECONDS = 2.0
+# Blocks at or above this normalized RMS count as speech (shared by
+# wake-word pause gating and post-wake speech endpointing).
+SPEECH_RMS_THRESHOLD = 0.01
+# Minimum Vosk per-word confidence for a wake alias.  Grammar-mode
+# confidences from the small English model are posteriors in [0, 1],
+# but they do not separate true wakes from sound-alikes: TTS "Sorcar"
+# scores 1.0, yet a real human "Sorcar" scored 0.53 in live testing
+# (a stricter 0.85 gate caused false negatives) while a sound-alike
+# "soccer" force-fit scored 0.55.  The gate is therefore only a
+# sanity net that rejects egregious low-confidence force-fits; the
+# real strictness comes from exact whole-utterance matching and the
+# post-alias pause.  Values above 1.0 would be raw acoustic
+# likelihoods on a different scale and are not gated.
+MIN_WORD_CONF = 0.4
+# A partial result only fires the wake word after this much quiet
+# audio right after the alias: proof the utterance really ended with
+# the wake word instead of continuing ("soccer is my favorite sport").
+WAKE_PAUSE_SECONDS = 0.2
 
 # Post-wake speech is translated into English by a single gpt-audio
 # chat-completions call that consumes the audio directly.  Prompting
@@ -93,10 +129,21 @@ DICTATION_USER_PROMPT = (
     "English text of what was said - do not answer it, act on it, or "
     "add anything."
 )
-# Aliases stripped from the front of a transcript.  Includes GPT
-# mis-hearings of "Sorcar" (e.g. "Sorger") on top of the Vosk grammar
-# aliases above.
-_TRANSCRIPT_WAKE_ALIASES = [*WAKE_ALIASES, "sorger", "sorcerer"]
+# Aliases stripped from the front of a transcript.  Broader than the
+# detection grammar: it also covers GPT mis-hearings of "Sorcar"
+# (e.g. "Sorger") and sound-alike words that are not detection
+# aliases but can appear when gpt-audio transcribes the wake word.
+_TRANSCRIPT_WAKE_ALIASES = [
+    *WAKE_ALIASES,
+    "soccer",
+    "circa",
+    "so car",
+    "saw car",
+    "sorger",
+    "sorkar",
+    "sarkar",
+    "sorcerer",
+]
 _WAKE_PREFIX_RE = re.compile(
     r"^\s*(?:"
     + "|".join(
@@ -169,10 +216,11 @@ class SpeechCapture:
     """Captures the utterance that follows the wake word.
 
     The Vosk wake event is emitted before this object is created, so
-    blocks fed here are the audio *after* "Sorcar".  Leading silence is
-    ignored, speech is captured as soon as a loud block arrives (no
-    pause after the trigger word is required), and capture ends after
-    trailing silence, a no-speech timeout, or a hard length cap.
+    blocks fed here are the audio *after* "Sorcar" (and after the
+    brief pause that strict wake detection requires).  Leading silence
+    is ignored, speech is captured as soon as a loud block arrives,
+    and capture ends after trailing silence, a no-speech timeout, or a
+    hard length cap.
 
     ``feed`` returns ``None`` while capturing, ``b""`` when no speech
     was heard, or the captured PCM once the utterance ended.
@@ -181,7 +229,7 @@ class SpeechCapture:
     END_SILENCE_SECONDS = 2.0  # trailing silence that ends the speech
     NO_SPEECH_TIMEOUT_SECONDS = 5.0  # silence after wake with no speech
     MAX_CAPTURE_SECONDS = 30.0  # hard cap on the captured utterance
-    RMS_THRESHOLD = 0.01  # blocks at or above this RMS count as speech
+    RMS_THRESHOLD = SPEECH_RMS_THRESHOLD  # speech/silence RMS boundary
 
     def __init__(self) -> None:
         self._blocks: list[bytes] = []
@@ -348,16 +396,49 @@ def ensure_model(models_dir: Path) -> Path:
 
 
 def matches_wake(text: str) -> bool:
-    """Return True when *text* contains any wake-word alias."""
+    """Return True when *text* is exactly one wake-word alias.
+
+    The whole (normalized) utterance must be the alias alone.
+    Substring matching is deliberately avoided: the grammar decodes
+    everyday speech to alias-in-context strings such as
+    ``[unk] sir car [unk]`` ("yes sir the car is ready"), which must
+    not wake the listener.
+    """
     normalized = " ".join(text.lower().split())
-    return any(alias in normalized for alias in WAKE_ALIASES)
+    return normalized in WAKE_ALIASES
+
+
+def words_confident(words: list[dict] | None) -> bool:
+    """Return True when every recognized word clears MIN_WORD_CONF.
+
+    *words* is the ``result``/``partial_result`` word list of a Vosk
+    result (each entry has a ``conf`` field when ``SetWords`` /
+    ``SetPartialWords`` is on).  Only confidences on the [0, 1]
+    posterior scale are gated; larger values (raw acoustic likelihoods
+    seen with some models/modes) and missing word lists pass, keeping
+    the gate a pure tightener that can never lose a clean wake.
+    """
+    for word in words or []:
+        conf = word.get("conf")
+        if (
+            isinstance(conf, (int, float))
+            and conf <= 1.0
+            and conf < MIN_WORD_CONF
+        ):
+            return False
+    return True
 
 
 class WakeDetector:
     """Feeds raw 16kHz mono s16le audio into Vosk and detects the wake word.
 
-    Checks both partial results (for low latency) and final results,
-    with a cooldown so one utterance cannot fire twice.
+    Detection is strict to avoid false wakes (see the module
+    docstring): the utterance must decode to exactly one alias with
+    confident words.  Final results fire immediately (Vosk already
+    endpointed the utterance in isolation); partial results fire with
+    low latency once ~200ms of quiet audio follows the alias, so
+    continuous speech that merely starts with an alias-sounding word
+    never triggers.  A cooldown keeps one utterance from firing twice.
     """
 
     def __init__(self, model_dir: Path) -> None:
@@ -368,17 +449,29 @@ class WakeDetector:
         self._recognizer = KaldiRecognizer(
             Model(str(model_dir)), SAMPLE_RATE, grammar
         )
+        # Word-level confidences for both final and partial results.
+        self._recognizer.SetWords(True)
+        self._recognizer.SetPartialWords(True)
         self._last_wake = 0.0
+        self._quiet_seconds = 0.0
 
     def feed(self, data: bytes) -> bool:
         """Process one audio block; return True when the wake word fired."""
-        if self._recognizer.AcceptWaveform(data):
-            text = json.loads(self._recognizer.Result()).get("text", "")
+        if block_rms(data) >= SPEECH_RMS_THRESHOLD:
+            self._quiet_seconds = 0.0
         else:
-            text = json.loads(self._recognizer.PartialResult()).get(
-                "partial", ""
-            )
-        if not matches_wake(text):
+            self._quiet_seconds += len(data) / 2 / SAMPLE_RATE
+        if self._recognizer.AcceptWaveform(data):
+            result = json.loads(self._recognizer.Result())
+            text = result.get("text", "")
+            words = result.get("result", [])
+            paused = True  # a final result means Vosk saw the endpoint
+        else:
+            result = json.loads(self._recognizer.PartialResult())
+            text = result.get("partial", "")
+            words = result.get("partial_result", [])
+            paused = self._quiet_seconds >= WAKE_PAUSE_SECONDS
+        if not (paused and matches_wake(text) and words_confident(words)):
             return False
         now = time.monotonic()
         if now - self._last_wake < COOLDOWN_SECONDS:
@@ -386,6 +479,7 @@ class WakeDetector:
         self._last_wake = now
         # Reset so leftover partial text cannot re-trigger after cooldown.
         self._recognizer.Reset()
+        self._quiet_seconds = 0.0
         return True
 
 
