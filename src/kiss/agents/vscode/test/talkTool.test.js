@@ -8,7 +8,9 @@
 // device's default speaker via the Web Speech API on EVERY client
 // with a tab open for the running task — even when that tab is not
 // the active tab — and must never crash a browser without speech
-// support.
+// support.  A copy stamped for a tab this webview does not own
+// belongs to another window and must stay silent here (see
+// talkSpeaksOnce.test.js for the full per-device dedupe contract).
 //
 // Run directly with ``node``:
 //
@@ -103,19 +105,20 @@ function testTalkSpeaksTextWithLanguage() {
   console.log('PASS: talk event speaks text with the requested language');
 }
 
-function testTalkNotGatedOnActiveTab() {
+function testTalkForOtherWindowsTabStaysSilent() {
   const {win} = makeWebview();
   const spoken = installSpeech(win);
 
-  // A talk event stamped for a DIFFERENT (background/unknown) tab must
-  // still play: every device with a tab open for the task speaks.
+  // The backend stamps one copy per subscribed viewer tab and sends
+  // every copy to every connected webview.  A copy stamped for a tab
+  // this webview does NOT own belongs to another window / device —
+  // that window plays it.  Speaking it here too made every utterance
+  // play twice on the same speakers.
   send(win, {type: 'talk', language: 'de', text: 'hallo',
-             tabId: 'some-background-tab'});
+             tabId: 'some-other-windows-tab'});
 
-  assert.strictEqual(spoken.length, 1, 'background-tab talk must speak');
-  assert.strictEqual(spoken[0].text, 'hallo');
-  assert.strictEqual(spoken[0].lang, 'de');
-  console.log('PASS: talk plays even when its tab is not the active tab');
+  assert.strictEqual(spoken.length, 0, "another window's copy is silent");
+  console.log("PASS: talk copy for another window's tab stays silent");
 }
 
 function testTalkWithoutLanguageUsesDefaultVoiceLang() {
@@ -165,7 +168,7 @@ function testTalkSpeakFailureIsSwallowed() {
 }
 
 testTalkSpeaksTextWithLanguage();
-testTalkNotGatedOnActiveTab();
+testTalkForOtherWindowsTabStaysSilent();
 testTalkWithoutLanguageUsesDefaultVoiceLang();
 testTalkEmptyTextIsIgnored();
 testTalkWithoutSpeechSupportDoesNotCrash();
