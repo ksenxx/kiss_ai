@@ -3900,6 +3900,11 @@
   }
 
   // --- Main event handler ---
+  // ``talkId``s already played on this device — all backend copies of
+  // one ``talk()`` call share a talkId, so replaying a duplicate copy
+  // (one per subscribed viewer tab) is suppressed.  See case 'talk'.
+  const spokenTalkIds = new Set();
+
   function handleEvent(ev) {
     const t = ev.type;
     switch (t) {
@@ -4053,11 +4058,35 @@
       case 'talk': {
         // Agent-initiated text-to-speech (the ``talk`` tool): play the
         // text on this device's default speaker via the Web Speech API.
-        // Deliberately NOT gated on activeTabId or tab lookup — every
-        // device with a tab open for the running task must speak, even
-        // when the task's tab is in the background.
+        // Deliberately NOT gated on activeTabId — a device whose task
+        // tab is in the BACKGROUND must still speak.  Two gates keep
+        // each utterance to exactly one playback per device:
+        //
+        //  * tab ownership — the backend stamps one copy per
+        //    subscribed viewer tab and delivers every copy to every
+        //    connected webview, so a copy stamped for ANOTHER
+        //    window's tab must stay silent here (that window plays
+        //    it);
+        //  * talkId dedupe — all stamped copies of one ``talk()``
+        //    call share a ``talkId``; when several copies land on
+        //    this webview (two open tabs of the same task, a stale
+        //    subscription from before a reload, ...) only the first
+        //    speaks.  Without this the same reply was spoken twice.
         const talkText = ev.text || '';
         if (!talkText) break;
+        if (ev.tabId !== undefined && !getTab(ev.tabId)) break;
+        if (ev.talkId) {
+          if (spokenTalkIds.has(ev.talkId)) break;
+          spokenTalkIds.add(ev.talkId);
+          if (spokenTalkIds.size > 500) {
+            // Bounded memory: drop the oldest half (Sets iterate in
+            // insertion order).
+            const ids = spokenTalkIds.values();
+            for (let i = 0; i < 250; i++) {
+              spokenTalkIds.delete(ids.next().value);
+            }
+          }
+        }
         try {
           const synth = window.speechSynthesis;
           const Utterance = window.SpeechSynthesisUtterance;
