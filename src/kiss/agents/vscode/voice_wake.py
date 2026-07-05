@@ -35,16 +35,22 @@ so in-vocabulary phonetic aliases act as the trigger.
 Because the grammar forces every sound into an alias or ``[unk]``,
 naive substring matching is far too sensitive: everyday sentences such
 as "yes sir the car is ready" decode to ``[unk] sir car [unk]`` and
-used to fire the wake word.  Detection is therefore strict; it fires
-only when
+used to fire the wake word.  At the default sensitivity detection is
+therefore strict; it fires only when
 
-- the *whole* utterance decodes to exactly one alias (never an alias
-  embedded in ``[unk]`` context),
+- the *whole* utterance decodes to exactly one alias,
 - no alias word is an egregiously low-confidence force-fit, and
 - for low-latency partial results, the speaker has paused briefly
-  (~200ms of quiet audio) right after the alias — continuous speech
-  such as "soccer is my favorite sport" keeps talking through that
-  window and never triggers.
+  (~120ms at the default sensitivity) right after the alias —
+  continuous speech such as "soccer is my favorite sport" keeps
+  talking through that window and never triggers.
+
+The settings-panel sensitivity slider adjusts those gates.  Lower
+values raise the confidence floor and lengthen the required pause;
+higher values lower the floor, shorten the pause, and at the top of
+the slider also accept utterances that *end* with an alias (for
+example "hey there Sorcar", decoded as ``[unk] sore car``).  An alias
+followed by more speech/``[unk]`` still never wakes.
 
 Wake-word detection runs locally.  After a wake, the utterance that
 follows is captured (RMS endpointing) and translated into English —
@@ -127,6 +133,21 @@ MIC_REOPEN_DELAY_SECONDS = 0.5
 # Blocks at or above this normalized RMS count as speech (shared by
 # wake-word pause gating and post-wake speech endpointing).
 SPEECH_RMS_THRESHOLD = 0.01
+# Wake-word sensitivity (0..100, settings-panel slider).  The value
+# scales the two tunable detection gates linearly — the per-word
+# confidence floor and the post-alias pause — and, at or above
+# SUFFIX_MATCH_SENSITIVITY, additionally accepts utterances that END
+# with an alias ("hey there Sorcar" decodes to "[unk] sore car",
+# measured live).  Sensitivity 50 reproduces the historical gates
+# (conf 0.4, pause 0.2s); the default of 70 is deliberately more
+# sensitive (conf 0.24, pause 0.12s).  Exact whole-utterance matching
+# is never relaxed into substring matching: mid-utterance aliases
+# ("[unk] sir car [unk]") stay rejected at every sensitivity.
+DEFAULT_SENSITIVITY = 70
+SUFFIX_MATCH_SENSITIVITY = 75
+# Floor for the sensitivity-scaled pause gate: without any pause a
+# partial result would fire mid-word during continuous speech.
+MIN_WAKE_PAUSE_SECONDS = 0.1
 # Minimum Vosk per-word confidence for a wake alias.  Grammar-mode
 # confidences from the small English model are posteriors in [0, 1],
 # but they do not separate true wakes from sound-alikes: TTS "Sorcar"
@@ -138,10 +159,61 @@ SPEECH_RMS_THRESHOLD = 0.01
 # post-alias pause.  Values above 1.0 would be raw acoustic
 # likelihoods on a different scale and are not gated.
 MIN_WORD_CONF = 0.4
-# A partial result only fires the wake word after this much quiet
-# audio right after the alias: proof the utterance really ended with
-# the wake word instead of continuing ("soccer is my favorite sport").
-WAKE_PAUSE_SECONDS = 0.2
+# A partial result only fires the wake word after a short stretch of
+# quiet audio right after the alias: proof the utterance really ended
+# with the wake word instead of continuing ("soccer is my favorite
+# sport").  The required pause scales with the sensitivity slider
+# (see sensitivity_wake_pause_seconds).
+
+
+def sensitivity_min_word_conf(sensitivity: int) -> float:
+    """Return the per-word confidence floor for a sensitivity (0..100).
+
+    Linear map 0.8 -> 0.0: sensitivity 50 gives the historical 0.4
+    gate, the default 70 gives 0.24, and 10 gives 0.72 — high enough
+    to reject sound-alike force-fits such as spoken "soccer", whose
+    alias words score ~0.55-0.69 (measured live).
+    """
+    return 0.8 * (1.0 - sensitivity / 100.0)
+
+
+def sensitivity_wake_pause_seconds(sensitivity: int) -> float:
+    """Return the post-alias pause gate (seconds) for a sensitivity.
+
+    Linear map 0.4s -> MIN_WAKE_PAUSE_SECONDS: sensitivity 50 gives
+    the historical 0.2s, the default 70 gives 0.12s.  The floor keeps
+    continuous speech from firing mid-utterance at high sensitivity.
+    """
+    return max(
+        MIN_WAKE_PAUSE_SECONDS, 0.4 * (1.0 - sensitivity / 100.0)
+    )
+
+
+def sensitivity_allows_trailing_alias(sensitivity: int) -> bool:
+    """Whether an utterance merely ENDING with an alias may wake.
+
+    Enabled at or above SUFFIX_MATCH_SENSITIVITY so phrases like
+    "hey there Sorcar" (decoded ``[unk] sore car``) wake at the top of
+    the slider while the strict default keeps rejecting them.
+    """
+    return sensitivity >= SUFFIX_MATCH_SENSITIVITY
+
+
+def sensitivity_value(raw: str) -> int:
+    """Parse an argparse sensitivity that must be an int in 0..100."""
+    try:
+        value = int(raw)
+    except ValueError as err:
+        raise argparse.ArgumentTypeError(
+            "must be an integer between 0 and 100"
+        ) from err
+    if not 0 <= value <= 100:
+        raise argparse.ArgumentTypeError(
+            "must be an integer between 0 and 100"
+        )
+    return value
+
+
 # Two x-vectors within this cosine distance are the same voice.
 # Vosk x-vectors of the same speaker typically land 0.2-0.5 apart
 # while different speakers exceed ~0.7, so 0.6 splits the two modes.
@@ -705,7 +777,7 @@ class SpeakerIdentifier:
         return self._registry.identify(embedding)
 
 
-def matches_wake(text: str) -> bool:
+def matches_wake(text: str, allow_trailing: bool = False) -> bool:
     """Return True when *text* is exactly one wake-word alias.
 
     The whole (normalized) utterance must be the alias alone.
@@ -713,13 +785,26 @@ def matches_wake(text: str) -> bool:
     everyday speech to alias-in-context strings such as
     ``[unk] sir car [unk]`` ("yes sir the car is ready"), which must
     not wake the listener.
+
+    With *allow_trailing* (high wake-word sensitivity) an utterance
+    that ENDS with an alias also matches — "hey there Sorcar" decodes
+    to ``[unk] sore car`` — but a mid-utterance alias (anything after
+    it, e.g. a trailing ``[unk]``) still never matches.
     """
     normalized = " ".join(text.lower().split())
-    return normalized in WAKE_ALIASES
+    if normalized in WAKE_ALIASES:
+        return True
+    if allow_trailing:
+        return any(
+            normalized.endswith(" " + alias) for alias in WAKE_ALIASES
+        )
+    return False
 
 
-def words_confident(words: list[dict] | None) -> bool:
-    """Return True when every recognized word clears MIN_WORD_CONF.
+def words_confident(
+    words: list[dict] | None, min_conf: float = MIN_WORD_CONF
+) -> bool:
+    """Return True when every recognized word clears *min_conf*.
 
     *words* is the ``result``/``partial_result`` word list of a Vosk
     result (each entry has a ``conf`` field when ``SetWords`` /
@@ -733,7 +818,7 @@ def words_confident(words: list[dict] | None) -> bool:
         if (
             isinstance(conf, (int, float))
             and conf <= 1.0
-            and conf < MIN_WORD_CONF
+            and conf < min_conf
         ):
             return False
     return True
@@ -751,9 +836,20 @@ class WakeDetector:
     never triggers.  A cooldown keeps one utterance from firing twice.
     """
 
-    def __init__(self, model_dir: Path) -> None:
+    def __init__(
+        self, model_dir: Path, sensitivity: int = DEFAULT_SENSITIVITY
+    ) -> None:
         from vosk import KaldiRecognizer, Model, SetLogLevel
 
+        if not 0 <= sensitivity <= 100:
+            raise ValueError("sensitivity must be in 0..100")
+        self._min_word_conf = sensitivity_min_word_conf(sensitivity)
+        self._wake_pause_seconds = sensitivity_wake_pause_seconds(
+            sensitivity
+        )
+        self._allow_trailing = sensitivity_allows_trailing_alias(
+            sensitivity
+        )
         SetLogLevel(-1)
         grammar = json.dumps([*WAKE_ALIASES, "[unk]"])
         self._recognizer = KaldiRecognizer(
@@ -798,8 +894,12 @@ class WakeDetector:
             result = json.loads(self._recognizer.PartialResult())
             text = result.get("partial", "")
             words = result.get("partial_result", [])
-            paused = self._quiet_seconds >= WAKE_PAUSE_SECONDS
-        if not (paused and matches_wake(text) and words_confident(words)):
+            paused = self._quiet_seconds >= self._wake_pause_seconds
+        if not (
+            paused
+            and matches_wake(text, self._allow_trailing)
+            and words_confident(words, self._min_word_conf)
+        ):
             return False
         if self._audio_seconds - self._last_wake < COOLDOWN_SECONDS:
             return False
@@ -1000,9 +1100,16 @@ def main() -> int:
         help="Seconds without audio blocks before the microphone "
         "stream is considered dead and reopened",
     )
+    parser.add_argument(
+        "--sensitivity",
+        type=sensitivity_value,
+        default=DEFAULT_SENSITIVITY,
+        help="Wake-word sensitivity 0..100 (settings-panel slider); "
+        "higher fires more eagerly",
+    )
     args = parser.parse_args()
 
-    detector = WakeDetector(ensure_model(args.models_dir))
+    detector = WakeDetector(ensure_model(args.models_dir), args.sensitivity)
     session = VoiceSession(detector, args.audio_model, args.models_dir)
     if args.wav is not None:
         return run_wav(session, args.wav)
