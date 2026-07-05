@@ -63,6 +63,22 @@ class TestTalkTool(unittest.TestCase):
         params = list(inspect.signature(talk).parameters)
         self.assertEqual(params[:2], ["language", "text"])
 
+    def test_talk_signature_optional_emotion_third(self) -> None:
+        """Third parameter is ``emotion`` and defaults to empty (neutral).
+
+        The default keeps ``talk(language, text)`` calls — and every
+        existing caller — working unchanged while letting the agent
+        opt into an expressive delivery.
+        """
+        import inspect
+
+        agent = _make_agent(MemoryPrinter())
+        talk = _find_tool(agent._get_tools(), "talk")
+        sig = inspect.signature(talk)
+        params = list(sig.parameters)
+        self.assertEqual(params[:3], ["language", "text", "emotion"])
+        self.assertEqual(sig.parameters["emotion"].default, "")
+
     def test_talk_broadcasts_to_every_subscribed_tab(self) -> None:
         """One ``talk`` call reaches every tab subscribed to the task.
 
@@ -101,6 +117,60 @@ class TestTalkTool(unittest.TestCase):
             self.assertEqual(ev.get("text"), "hola usuario")
             self.assertEqual(ev.get("taskId"), "task-1")
         self.assertIn("es", result["msg"])
+
+    def test_talk_broadcasts_emotion_on_every_copy(self) -> None:
+        """An explicit ``emotion`` rides along on every stamped copy.
+
+        The client shapes speech rate and pitch from this field, so
+        each subscribed tab must receive it verbatim.
+        """
+        printer = MemoryPrinter()
+        printer.subscribe_tab("task-emo", "tab-a")
+        printer.subscribe_tab("task-emo", "tab-b")
+        agent = _make_agent(printer)
+        talk = _find_tool(agent._get_tools(), "talk")
+
+        def agent_thread() -> None:
+            printer._thread_local.task_id = "task-emo"
+            talk("en-US", "We did it, nice work!", "cheerful")
+
+        t = threading.Thread(target=agent_thread, daemon=True)
+        t.start()
+        t.join(timeout=5.0)
+        self.assertFalse(t.is_alive())
+
+        talk_events = [
+            ev for ev in printer.emitted if ev.get("type") == "talk"
+        ]
+        self.assertEqual(len(talk_events), 2)
+        for ev in talk_events:
+            self.assertEqual(ev.get("emotion"), "cheerful")
+
+    def test_talk_default_emotion_is_empty_neutral(self) -> None:
+        """Without an ``emotion`` argument the event carries ``""``.
+
+        An empty emotion tells the client to infer the vibe from the
+        text itself (punctuation and wording) rather than a fixed one.
+        """
+        printer = MemoryPrinter()
+        printer.subscribe_tab("task-neutral", "tab-a")
+        agent = _make_agent(printer)
+        talk = _find_tool(agent._get_tools(), "talk")
+
+        def agent_thread() -> None:
+            printer._thread_local.task_id = "task-neutral"
+            talk("en-US", "Status update ready.")
+
+        t = threading.Thread(target=agent_thread, daemon=True)
+        t.start()
+        t.join(timeout=5.0)
+        self.assertFalse(t.is_alive())
+
+        talk_events = [
+            ev for ev in printer.emitted if ev.get("type") == "talk"
+        ]
+        self.assertEqual(len(talk_events), 1)
+        self.assertEqual(talk_events[0].get("emotion"), "")
 
     def test_talk_copies_share_one_talk_id_unique_per_call(self) -> None:
         """All stamped copies of one ``talk()`` call share one ``talkId``.

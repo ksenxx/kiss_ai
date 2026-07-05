@@ -3982,6 +3982,118 @@
     return best;
   }
 
+  // Emotion → base prosody (Web Speech API rate/pitch multipliers).
+  // The agent's ``talk`` tool passes an optional ``emotion`` naming the
+  // vibe of the utterance; shaping rate and pitch around it keeps the
+  // delivery from sounding like a flat, robotic monotone.
+  const EMOTION_PROSODY = {
+    cheerful: {rate: 1.06, pitch: 1.12},
+    excited: {rate: 1.14, pitch: 1.18},
+    playful: {rate: 1.08, pitch: 1.15},
+    curious: {rate: 1.0, pitch: 1.08},
+    warm: {rate: 0.98, pitch: 1.05},
+    proud: {rate: 1.02, pitch: 1.06},
+    calm: {rate: 0.92, pitch: 0.97},
+    empathetic: {rate: 0.9, pitch: 1.02},
+    reassuring: {rate: 0.94, pitch: 1.0},
+    apologetic: {rate: 0.9, pitch: 0.95},
+    serious: {rate: 0.95, pitch: 0.9},
+    sad: {rate: 0.86, pitch: 0.9},
+    neutral: {rate: 1.0, pitch: 1.0},
+  };
+
+  /**
+   * Strip written-only artifacts from *text* so the speech engine
+   * never reads markdown punctuation ("asterisk asterisk") or emoji
+   * names ("party popper") aloud: code fences/backticks, emphasis
+   * markers, heading/bullet prefixes, and emoji/pictographs.
+   */
+  function cleanSpeechText(text) {
+    return String(text)
+      .replace(/```[a-zA-Z0-9_-]*\n?/g, ' ')
+      .replace(/`([^`]*)`/g, '$1')
+      .replace(/(\*\*|__)(.*?)\1/g, '$2')
+      .replace(/(^|\s)[*_]([^*_\n]+)[*_](?=\s|[.,!?;:]|$)/g, '$1$2')
+      .replace(/^#{1,6}\s+/gm, '')
+      .replace(/^[ \t]*[-*+][ \t]+/gm, '')
+      .replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}]/gu, '')
+      .replace(/\uFE0F|\u200D/g, '')
+      .replace(/[ \t]+/g, ' ')
+      .trim();
+  }
+
+  /**
+   * Split *text* into sentence-sized chunks at terminal punctuation
+   * and blank lines.  Speaking one utterance per sentence lets the
+   * engine breathe at sentence boundaries — natural pacing instead of
+   * one long run-on — and lets each sentence carry its own prosody
+   * (questions rise, exclamations energize, ellipses trail off).
+   */
+  function splitSpeechSentences(text) {
+    const parts = String(text)
+      .split(/(?<=[.!?\u2026])\s+|\n{2,}/)
+      .map(s => s.trim())
+      .filter(Boolean);
+    return parts.length ? parts : [String(text).trim()].filter(Boolean);
+  }
+
+  /**
+   * Infer a vibe from the wording of *text* when the agent did not
+   * pass an explicit emotion.  Cheap keyword/punctuation heuristics
+   * only — returns an EMOTION_PROSODY key.
+   */
+  function inferEmotion(text) {
+    const t = String(text).toLowerCase();
+    if (/sorry|apolog|my bad|unfortunately/.test(t)) return 'apologetic';
+    if (/error|failed|failure|broke|crash/.test(t)) return 'serious';
+    if (
+      /congrat|awesome|great news|amazing|fantastic|woohoo|yay|success/.test(t)
+    ) {
+      return 'cheerful';
+    }
+    const bangs = (t.match(/!/g) || []).length;
+    if (bangs >= 2) return 'excited';
+    if (bangs === 1) return 'cheerful';
+    if (/\?\s*$/.test(t)) return 'curious';
+    return 'neutral';
+  }
+
+  /**
+   * Compute the rate/pitch for one *sentence* given the base
+   * *emotion* prosody: questions rise in pitch, exclamations add
+   * energy, ellipses slow down and trail off, and a tiny per-sentence
+   * drift (by *index*) keeps long replies from sounding monotone.
+   * Values are clamped to the Web Speech API's safe ranges.
+   */
+  /** True if *name* is a known EMOTION_PROSODY key (own-property
+   * check so inherited names like "constructor" never match). */
+  function isKnownEmotion(name) {
+    return Object.prototype.hasOwnProperty.call(EMOTION_PROSODY, name);
+  }
+
+  function sentenceProsody(sentence, emotion, index) {
+    const base = isKnownEmotion(emotion)
+      ? EMOTION_PROSODY[emotion]
+      : EMOTION_PROSODY.neutral;
+    let rate = base.rate;
+    let pitch = base.pitch;
+    if (/\?\s*$/.test(sentence)) {
+      pitch += 0.08;
+    } else if (/!\s*$/.test(sentence)) {
+      pitch += 0.06;
+      rate += 0.06;
+    } else if (/(\.\.\.|\u2026)\s*$/.test(sentence)) {
+      rate -= 0.08;
+      pitch -= 0.03;
+    }
+    const drift = index % 3;
+    if (drift === 1) pitch += 0.03;
+    else if (drift === 2) pitch -= 0.02;
+    rate = Math.min(1.6, Math.max(0.6, rate));
+    pitch = Math.min(1.8, Math.max(0.5, pitch));
+    return {rate, pitch};
+  }
+
   // Prime asynchronous voice loading: Chrome populates getVoices()
   // only after a first call (and signals completion via the
   // 'voiceschanged' event), so warm the list at startup to make the
@@ -4186,13 +4298,32 @@
           const synth = window.speechSynthesis;
           const Utterance = window.SpeechSynthesisUtterance;
           if (!synth || typeof Utterance !== 'function') break;
-          const utter = new Utterance(talkText);
-          if (ev.language) utter.lang = ev.language;
+          // Natural, emotive delivery instead of a flat robotic read:
+          //  * strip markdown/emoji artifacts the engine would read
+          //    aloud;
+          //  * split into sentences so the engine breathes at
+          //    sentence boundaries;
+          //  * shape each sentence's rate/pitch from the agent's
+          //    emotion (or a vibe inferred from the wording) plus the
+          //    sentence's own punctuation.
+          const cleaned = cleanSpeechText(talkText);
+          if (!cleaned) break;
+          const emotion = isKnownEmotion(ev.emotion)
+            ? ev.emotion
+            : inferEmotion(cleaned);
           // Prefer a natural (neural) system voice over the often
           // robotic browser default so the agent sounds human-like.
           const voice = pickNaturalVoice(synth, ev.language);
-          if (voice) utter.voice = voice;
-          synth.speak(utter);
+          const sentences = splitSpeechSentences(cleaned);
+          for (let i = 0; i < sentences.length; i++) {
+            const utter = new Utterance(sentences[i]);
+            if (ev.language) utter.lang = ev.language;
+            if (voice) utter.voice = voice;
+            const prosody = sentenceProsody(sentences[i], emotion, i);
+            utter.rate = prosody.rate;
+            utter.pitch = prosody.pitch;
+            synth.speak(utter);
+          }
         } catch (_e) {
           // Speech synthesis unsupported or blocked — audio is
           // best-effort and must never break event handling.
