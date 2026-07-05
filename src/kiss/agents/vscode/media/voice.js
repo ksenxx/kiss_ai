@@ -86,6 +86,12 @@
   let enabled = false; // user intent: wake-word listening is on
   let busy = false; // async start/stop in progress (browser mode)
   let lastWakeAt = 0;
+  // Webview mode: voice rounds (host WAKE events) whose terminal
+  // voiceSpeech result has not arrived yet.  Translations run on a
+  // background worker in the listener, so a second round can start
+  // before the first round's text arrives; a late terminal event must
+  // then NOT clear the flash that belongs to the newer round.
+  let outstandingRounds = 0;
 
   // Browser-mode audio pipeline handles.
   let model = null;
@@ -210,11 +216,11 @@
    * wake word into the task input.  An empty input receives the text;
    * an existing draft is appended to with a space.  An empty
    * translation (silence or a failed translation) never touches user
-   * text.  Either way the mic-button flash is cleared: the voice
-   * round-trip is over.
+   * text.  The mic-button flash is cleared unless *keepFlash* is true
+   * (a newer voice round is still in flight and owns the indicator).
    */
-  function insertSpeech(text) {
-    flash(null);
+  function insertSpeech(text, keepFlash) {
+    if (!keepFlash) flash(null);
     const translated = String(typeof text === 'string' ? text : '').trim();
     if (!translated) return;
     if (!inp.value) {
@@ -487,7 +493,10 @@
     // Turning listening off ends any in-flight voice round-trip; a
     // stale green/yellow flash must not wait for a host message that
     // may never come.
-    if (!next) flash(null);
+    if (!next) {
+      outstandingRounds = 0;
+      flash(null);
+    }
     if (cfg.mode === 'webview') {
       setUi(next ? 'loading' : 'off');
       postToHost({type: 'voiceToggle', enabled: next});
@@ -514,19 +523,26 @@
     const msg = event && event.data;
     if (!msg || typeof msg !== 'object') return;
     if (msg.type === 'voiceWake') {
+      // Count every host WAKE (even one debounced visually): the
+      // listener emits exactly one terminal voiceSpeech per WAKE.
+      outstandingRounds++;
       triggerWake();
     } else if (msg.type === 'voiceTranscribing') {
       // Capture ended; the gpt-audio call is in flight — flash yellow
       // until the voiceSpeech result clears it (60s safety timeout).
       flash('voice-transcribing', 60000);
     } else if (msg.type === 'voiceSpeech') {
-      insertSpeech(msg.text);
+      // Terminal results arrive in spoken (FIFO) order; keep the
+      // flash when a newer round is still capturing or transcribing.
+      outstandingRounds = Math.max(0, outstandingRounds - 1);
+      insertSpeech(msg.text, outstandingRounds > 0);
     } else if (msg.type === 'voiceState') {
       // Extension host reports the real listener state.  A listener
       // that stopped (error or off) can no longer deliver the
       // voiceTranscribing/voiceSpeech that would clear an in-flight
       // flash, so clear it here.
       if (msg.error) {
+        outstandingRounds = 0;
         flash(null);
         enabled = false;
         persist();
@@ -534,6 +550,7 @@
       } else if (msg.listening) {
         setUi('listening');
       } else {
+        outstandingRounds = 0;
         flash(null);
         if (!enabled) setUi('off');
       }
