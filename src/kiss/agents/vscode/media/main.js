@@ -4112,6 +4112,51 @@
     // Speech synthesis unsupported — talk playback is best-effort.
   }
 
+  // --- iOS Safari speech unlock ---
+  // iOS Safari (and Chrome 71+) silently drop speechSynthesis.speak()
+  // calls that never originated from a user gesture: the FIRST
+  // speak() must execute synchronously inside a handler for one of
+  // WebKit's activation events (touchend / click / keydown), after
+  // which programmatic speaks work for the rest of the session.  The
+  // 'talk' handler below runs from a WebSocket/postMessage event —
+  // never a gesture — so on iPhone the agent's speech was silently
+  // dropped (no sound, no error).  Speaking one EMPTY utterance
+  // inside the user's first real gesture (e.g. the tap that submits
+  // their question) unlocks speech for every later talk event.
+  const SPEECH_UNLOCK_EVENTS = ['touchend', 'click', 'keydown'];
+  let speechUnlocked = false;
+
+  function unlockSpeechSynthesis() {
+    if (speechUnlocked) return;
+    try {
+      const synth = window.speechSynthesis;
+      const Utterance = window.SpeechSynthesisUtterance;
+      if (!synth || typeof Utterance !== 'function') return;
+      // The documented iOS workaround verbatim: speak one EMPTY
+      // utterance inside the gesture.  Empty text is inaudible, and
+      // deliberately nothing else is tweaked (e.g. volume) so Safari
+      // treats it as an ordinary speak that grants speaking rights.
+      synth.speak(new Utterance(''));
+      // iOS can leave the synthesizer stuck in a paused state (e.g.
+      // after the page was backgrounded mid-speech); resume() is a
+      // no-op when not paused.
+      if (typeof synth.resume === 'function') synth.resume();
+      speechUnlocked = true;
+      for (const type of SPEECH_UNLOCK_EVENTS) {
+        document.removeEventListener(type, unlockSpeechSynthesis, true);
+      }
+    } catch (_e) {
+      // Speech synthesis unsupported — talk playback is best-effort.
+    }
+  }
+
+  for (const type of SPEECH_UNLOCK_EVENTS) {
+    // Capture phase so the unlock runs on the user's very first
+    // interaction anywhere in the page, even when an inner handler
+    // stops propagation.
+    document.addEventListener(type, unlockSpeechSynthesis, true);
+  }
+
   function handleEvent(ev) {
     const t = ev.type;
     switch (t) {
@@ -4298,6 +4343,10 @@
           const synth = window.speechSynthesis;
           const Utterance = window.SpeechSynthesisUtterance;
           if (!synth || typeof Utterance !== 'function') break;
+          // iOS leaves the synthesizer stuck paused after the page is
+          // backgrounded mid-speech; a paused queue swallows every
+          // new utterance.  resume() is a no-op when not paused.
+          if (typeof synth.resume === 'function') synth.resume();
           // Natural, emotive delivery instead of a flat robotic read:
           //  * strip markdown/emoji artifacts the engine would read
           //    aloud;

@@ -153,6 +153,14 @@ test('copies stamped for two DIFFERENT owned tabs speak only once', () => {
   win.document.querySelector('.chat-tab-add').click();
   const newChat = posted.filter(m => m.type === 'newChat').pop();
   assert.ok(newChat && newChat.tabId && newChat.tabId !== tabId);
+  // The click above is this device's first user gesture: the iOS
+  // speech unlock (``unlockSpeechSynthesis`` in main.js) must speak
+  // exactly one EMPTY — inaudible — primer utterance inside it.
+  assert.deepStrictEqual(
+    spoken.map(s => s.text), [''],
+    'first user gesture must speak the empty iOS unlock primer',
+  );
+  spoken.length = 0;
   send(win, {
     type: 'talk', language: 'en-US', text: 'once across tabs',
     talkId: 't-two-tabs', taskId: 7, tabId,
@@ -186,6 +194,11 @@ test('a copy for an own BACKGROUND tab still speaks', () => {
   assert.ok(newChat && newChat.tabId, 'new tab must post newChat');
   const firstTabId = posted.find(m => m.type === 'ready').tabId;
   assert.notStrictEqual(newChat.tabId, firstTabId);
+  // Drop the empty iOS unlock primer spoken inside the click's user
+  // gesture (inaudible on a real device; asserted in the two-tabs
+  // test above) so the counts below cover talk speech only.
+  assert.deepStrictEqual(spoken.map(s => s.text), ['']);
+  spoken.length = 0;
   send(win, {
     type: 'talk', language: 'fr-FR', text: 'arri\u00e8re-plan',
     talkId: 't-3', taskId: 9, tabId: firstTabId,
