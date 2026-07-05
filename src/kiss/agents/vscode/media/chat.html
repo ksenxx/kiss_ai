@@ -189,6 +189,12 @@
             <input type="checkbox" id="cfg-demo-mode">
             Demo mode
           </label>
+          <label class="config-label">Wake word ("Sorcar") sensitivity
+            <div class="config-sensitivity-row">
+              <input type="range" id="cfg-voice-sensitivity" min="0" max="100" step="5" value="70">
+              <span id="cfg-voice-sensitivity-value" class="config-sensitivity-value">70</span>
+            </div>
+          </label>
           <div class="config-update-row">
             <button id="autocommit-btn" type="button" class="config-gitcommit-btn" data-tooltip="git commit">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><line x1="1.05" y1="12" x2="7" y2="12"/><line x1="17.01" y1="12" x2="22.96" y2="12"/><line x1="12" y1="1.05" x2="12" y2="7"/><line x1="12" y1="17.01" x2="12" y2="22.96"/></svg>

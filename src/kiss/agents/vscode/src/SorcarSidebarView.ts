@@ -231,6 +231,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   // Host-side "Sorcar" wake-word listener (webviews cannot capture the
   // microphone, so the extension host runs it and forwards wake events).
   private _voiceWake: VoiceWakeService | undefined;
+  // Wake-word sensitivity (0..100) last reported by the webview's
+  // settings-panel slider; passed to the Python listener as
+  // --sensitivity on every (re)start.
+  private _voiceSensitivity: number | undefined;
 
   /** Per-tab MergeManager instances — each tab gets its own merge review. */
   private _mergeManagers: Map<string, MergeManager> = new Map();
@@ -1398,8 +1402,25 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
             () => this._sendToWebview({type: 'voiceTranscribing'}),
           );
         }
-        if (message.enabled) this._voiceWake.start();
+        if (typeof message.sensitivity === 'number') {
+          this._voiceSensitivity = message.sensitivity;
+        }
+        if (message.enabled) this._voiceWake.start(this._voiceSensitivity);
         else this._voiceWake.stop();
+        break;
+      }
+
+      case 'voiceSensitivity': {
+        // The settings-panel slider moved: remember the value and
+        // apply it live by restarting a running listener with the new
+        // --sensitivity (a stopped listener just picks it up on the
+        // next voiceToggle start).
+        if (typeof message.value !== 'number') break;
+        this._voiceSensitivity = message.value;
+        if (this._voiceWake?.running) {
+          this._voiceWake.stop();
+          this._voiceWake.start(this._voiceSensitivity);
+        }
         break;
       }
 
