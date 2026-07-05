@@ -39,6 +39,8 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import datetime
 import errno
 import hashlib
@@ -75,6 +77,11 @@ from websockets.http11 import Request, Response
 from kiss.agents.vscode.diff_merge import _read_lines_preserved
 from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.agents.vscode.server import VSCodeServer
+from kiss.agents.vscode.voice_wake import (
+    DEFAULT_MODELS_DIR,
+    SpeakerIdentifier,
+    translate_pcm_to_english,
+)
 from kiss.agents.vscode.vscode_config import load_config, source_shell_env
 from kiss.core.config import get_jobs_root
 from kiss.viz_trajectory.server import find_job_dir, list_jobs, load_job_trajectories
@@ -346,6 +353,12 @@ _MAX_PROMPT_BYTES = 1_000_000
 # the user's task.  Bumped to 64 MiB so attachments up to a few MB
 # each (capped by ``_MAX_ATTACHMENTS``) can be delivered as one line.
 _MAX_LINE_BYTES = 64 * 1024 * 1024
+
+# Upper bound on a ``voiceTranscribe`` base64 audio payload.  The
+# browser captures at most 30s of 16kHz mono s16le PCM (960KB, ~1.3MB
+# base64); anything much larger is malformed or abusive and is
+# dropped instead of being shipped to the gpt-audio API.
+_MAX_VOICE_AUDIO_B64 = 4 * 1024 * 1024
 
 # Grace period (seconds) between a WebSocket connection dropping and
 # the deferred ``closeTab`` actually firing for every tab seen on
@@ -3102,6 +3115,16 @@ class RemoteAccessServer:
         # config provides one.
         self.work_dir: str = work_dir or ""
 
+        # Remote-web voice dictation: lazily-built speaker identifier
+        # shared by every voiceTranscribe request so each distinct
+        # voice keeps one stable speaker number across utterances.
+        # Guarded by a lock (requests come from executor threads) and
+        # latched off after a construction/recognition failure —
+        # translation must keep working without speaker numbers.
+        self._voice_speaker_identifier: SpeakerIdentifier | None = None
+        self._voice_speaker_broken = False
+        self._voice_speaker_lock = threading.Lock()
+
         self._printer = WebPrinter()
         self._printer.work_dir = self.work_dir
         self._vscode_server = VSCodeServer(printer=self._printer)
@@ -3939,6 +3962,16 @@ class RemoteAccessServer:
             # opens the file in a real editor tab.
             await self._handle_open_file(cmd, endpoint)
             return
+        if cmd_type == "voiceTranscribe":
+            # A remote-web (browser mode) client heard the "Sorcar"
+            # wake word and captured the utterance that followed in
+            # the page (VS Code webviews never send this: their
+            # speech is captured and translated by the extension
+            # host's local listener).  Translate the audio with the
+            # same gpt-audio call the local listener uses and reply
+            # with the voiceSpeech message voice.js already handles.
+            await self._handle_voice_transcribe(cmd, endpoint)
+            return
         if cmd_type in _VSCODE_ONLY_COMMANDS:
             return
         if cmd_type == "activeTasksQuery":
@@ -4254,6 +4287,85 @@ class RemoteAccessServer:
                 "type": "error",
                 "text": f"Failed to start KISS Sorcar update: {exc}",
             }, conn_id)
+
+    def _identify_voice_speaker(self, pcm: bytes) -> int | None:
+        """Return the stable speaker number for an utterance's PCM.
+
+        Runs on an executor thread.  The Vosk speaker-identification
+        model is built lazily on first use (it may need a one-time
+        download); any failure — download, model load, recognition —
+        latches speaker identification off for the daemon's lifetime
+        and degrades to ``None`` so voice dictation keeps working
+        without speaker numbers.
+
+        Args:
+            pcm: Raw 16kHz mono s16le PCM of the utterance.
+
+        Returns:
+            The speaker number (1, 2, ...) or ``None`` on failure.
+        """
+        with self._voice_speaker_lock:
+            if self._voice_speaker_broken:
+                return None
+            try:
+                if self._voice_speaker_identifier is None:
+                    self._voice_speaker_identifier = SpeakerIdentifier(
+                        DEFAULT_MODELS_DIR,
+                    )
+                return self._voice_speaker_identifier.speaker_of(pcm)
+            except Exception:
+                self._voice_speaker_broken = True
+                logger.exception("voice speaker identification failed")
+                return None
+
+    async def _handle_voice_transcribe(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None:
+        """Translate a remote-web client's post-wake speech to English.
+
+        Browser-mode voice.js cannot call gpt-audio itself (the API
+        key lives on this machine), so after the in-page wake-word
+        detector hears "Sorcar" it captures the utterance that follows
+        and ships it here as ``{type: 'voiceTranscribe', audio:
+        <base64 16kHz mono s16le PCM>}``.  The audio is translated
+        into English by the same :func:`translate_pcm_to_english` call
+        the VS Code extension's local listener uses, the speaker is
+        identified locally (best effort), and the client gets back
+        ``{type: 'voiceSpeech', text, speaker}`` — the exact message
+        voice.js already consumes in webview mode, so the page inserts
+        and submits the dictated task with no extra client logic.  An
+        empty/undecodable audio payload or a failed translation
+        replies with an empty ``text`` so the page can clear its
+        transcribing indicator.
+
+        Args:
+            cmd: The parsed ``voiceTranscribe`` command.
+            endpoint: The client connection to reply to.
+        """
+        raw = cmd.get("audio", "")
+        pcm = b""
+        if isinstance(raw, str) and 0 < len(raw) <= _MAX_VOICE_AUDIO_B64:
+            try:
+                pcm = base64.b64decode(raw, validate=True)
+            except (binascii.Error, ValueError):
+                logger.warning("voiceTranscribe with undecodable audio")
+        text = ""
+        speaker: int | None = None
+        if pcm:
+            assert self._loop is not None
+            text = await self._loop.run_in_executor(
+                None, translate_pcm_to_english, pcm,
+            )
+            if text:
+                speaker = await self._loop.run_in_executor(
+                    None, self._identify_voice_speaker, pcm,
+                )
+        await self._endpoint_send(
+            endpoint,
+            json.dumps(
+                {"type": "voiceSpeech", "text": text, "speaker": speaker},
+            ),
+        )
 
     async def _handle_open_file(
         self, cmd: dict[str, Any], endpoint: Any,
