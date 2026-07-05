@@ -3905,6 +3905,101 @@
   // (one per subscribed viewer tab) is suppressed.  See case 'talk'.
   const spokenTalkIds = new Set();
 
+  // Voice-name markers of high-quality (neural) system voices, most
+  // natural first.  Modern OS / browser voices whose names carry one
+  // of these markers use neural TTS and sound far more human than the
+  // legacy default voice the Web Speech API otherwise picks (which is
+  // often a robotic formant/"compact" voice).  Examples:
+  //   * "Microsoft Aria Online (Natural) - English (United States)"
+  //   * "Samantha (Enhanced)" / "Ava (Premium)" / "Siri Voice 4" (macOS)
+  //   * "Google US English" (Chrome's server-side neural voices)
+  const NATURAL_VOICE_MARKERS = [
+    'natural',
+    'neural',
+    'premium',
+    'enhanced',
+    'siri',
+    'google',
+    'online',
+  ];
+
+  /**
+   * Pick the most natural-sounding available system voice for
+   * *language* (a BCP-47 tag such as "en-US"; may be empty).
+   *
+   * Voices are ranked first by language match (exact tag > same base
+   * language > any) and then by how early a NATURAL_VOICE_MARKERS
+   * keyword appears in the marker list.  Returns ``null`` when the
+   * voice list is unavailable or empty, in which case the caller
+   * leaves the browser's default voice in place.
+   */
+  function pickNaturalVoice(synth, language) {
+    if (!synth || typeof synth.getVoices !== 'function') return null;
+    let voices;
+    try {
+      voices = synth.getVoices() || [];
+    } catch (_e) {
+      return null;
+    }
+    if (!voices.length) return null;
+    const wanted = String(language || '')
+      .toLowerCase()
+      .replace(/_/g, '-');
+    const wantedBase = wanted.split('-')[0];
+    let best = null;
+    let bestLang = -1;
+    let bestQuality = -1;
+    for (const voice of voices) {
+      const lang = String(voice.lang || '')
+        .toLowerCase()
+        .replace(/_/g, '-');
+      let langScore = 0;
+      if (!wanted) {
+        langScore = 1;
+      } else if (lang === wanted) {
+        langScore = 3;
+      } else if (lang.split('-')[0] === wantedBase) {
+        langScore = 2;
+      }
+      if (wanted && langScore === 0) continue;
+      const name = String(voice.name || '').toLowerCase();
+      let quality = 0;
+      for (let i = 0; i < NATURAL_VOICE_MARKERS.length; i++) {
+        if (name.includes(NATURAL_VOICE_MARKERS[i])) {
+          quality = NATURAL_VOICE_MARKERS.length - i;
+          break;
+        }
+      }
+      if (
+        langScore > bestLang ||
+        (langScore === bestLang && quality > bestQuality)
+      ) {
+        best = voice;
+        bestLang = langScore;
+        bestQuality = quality;
+      }
+    }
+    return best;
+  }
+
+  // Prime asynchronous voice loading: Chrome populates getVoices()
+  // only after a first call (and signals completion via the
+  // 'voiceschanged' event), so warm the list at startup to make the
+  // natural voice available by the time the first talk event arrives.
+  try {
+    const primeSynth = window.speechSynthesis;
+    if (primeSynth && typeof primeSynth.getVoices === 'function') {
+      primeSynth.getVoices();
+      if (typeof primeSynth.addEventListener === 'function') {
+        primeSynth.addEventListener('voiceschanged', () => {
+          primeSynth.getVoices();
+        });
+      }
+    }
+  } catch (_e) {
+    // Speech synthesis unsupported — talk playback is best-effort.
+  }
+
   function handleEvent(ev) {
     const t = ev.type;
     switch (t) {
@@ -4093,6 +4188,10 @@
           if (!synth || typeof Utterance !== 'function') break;
           const utter = new Utterance(talkText);
           if (ev.language) utter.lang = ev.language;
+          // Prefer a natural (neural) system voice over the often
+          // robotic browser default so the agent sounds human-like.
+          const voice = pickNaturalVoice(synth, ev.language);
+          if (voice) utter.voice = voice;
           synth.speak(utter);
         } catch (_e) {
           // Speech synthesis unsupported or blocked — audio is
