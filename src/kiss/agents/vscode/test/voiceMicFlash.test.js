@@ -169,7 +169,7 @@ test('turning voice off locally clears the flash immediately', () => {
   // flash waiting for a host message that may never come.
   const win = makeWindow();
   const btn = win.document.getElementById('voice-btn');
-  btn.click(); // enable listening
+  // Webview mode auto-enables listening at load (mic on at launch).
   sendHostMessage(win, {type: 'voiceWake'});
   sendHostMessage(win, {type: 'voiceTranscribing'});
   btn.click(); // disable listening
