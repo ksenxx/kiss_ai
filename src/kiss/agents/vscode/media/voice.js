@@ -20,9 +20,15 @@
  * the page template:
  *
  * - ``browser`` (remote web app): the microphone is captured in the
- *   page itself and speech is recognized with vosk-browser, a WASM
- *   build of the lightweight Kaldi/Vosk small English model running in
- *   a Web Worker.  Nothing ever leaves the machine.
+ *   page itself and the wake word is recognized with vosk-browser, a
+ *   WASM build of the lightweight Kaldi/Vosk small English model
+ *   running in a Web Worker.  After a wake, the utterance that
+ *   follows is captured right here (RMS endpointing that mirrors the
+ *   Python listener's SpeechCapture), downsampled to 16kHz s16le PCM
+ *   and posted to the server as ``{type: 'voiceTranscribe', audio:
+ *   <base64 pcm>}``; the server runs the same gpt-audio translation
+ *   as webview mode and replies with ``{type: 'voiceSpeech', text,
+ *   speaker}``.  Wake-word detection never leaves the machine.
  *
  * - ``webview`` (VS Code extension): extension webviews cannot use
  *   getUserMedia (VS Code denies microphone access to webview
@@ -67,6 +73,14 @@
   const WAKE_PAUSE_MS = 200;
   // Blocks at or above this normalized RMS count as speech.
   const SPEECH_RMS_THRESHOLD = 0.01;
+  // Browser-mode post-wake speech capture (mirrors SpeechCapture in
+  // kiss/agents/vscode/voice_wake.py): trailing silence that ends the
+  // utterance, silence-only timeout after the wake, hard length cap,
+  // and the PCM sample rate the server-side gpt-audio call expects.
+  const CAPTURE_END_SILENCE_MS = 2000;
+  const CAPTURE_NO_SPEECH_TIMEOUT_MS = 5000;
+  const CAPTURE_MAX_MS = 30000;
+  const CAPTURE_SAMPLE_RATE = 16000;
   const STORAGE_KEY = 'kissVoiceEnabled';
   const DEBUG_KEY = 'kissVoiceDebug';
 
@@ -194,21 +208,25 @@
    * — the literal word "sorcar" must never appear in the input box;
    * the translated speech arrives later as a voiceSpeech message.
    * Debounced so one long utterance (partial + final results) only
-   * triggers once.  In webview mode the green flash persists while
-   * the host captures the speech (the voiceTranscribing/voiceSpeech
-   * message that follows replaces or clears it; the long timeout is
-   * only a safety net beyond the listener's 30s capture cap).
+   * triggers once; returns true when the wake actually fired (not
+   * debounced) so browser mode knows to start a speech capture.  The
+   * green flash persists while the speech that follows is captured —
+   * by the extension host in webview mode, by this page in browser
+   * mode — until the voiceTranscribing/voiceSpeech message that
+   * follows replaces or clears it (the long timeout is only a safety
+   * net beyond the 30s capture cap).
    */
   function triggerWake() {
     const now = Date.now();
-    if (now - lastWakeAt < COOLDOWN_MS) return;
+    if (now - lastWakeAt < COOLDOWN_MS) return false;
     lastWakeAt = now;
     try {
       inp.focus();
     } catch (_e) {
       /* focus can fail in background documents; ignore */
     }
-    flash('voice-triggered', cfg.mode === 'webview' ? 45000 : 600);
+    flash('voice-triggered', 45000);
+    return true;
   }
 
   /**
@@ -257,6 +275,126 @@
     window.dispatchEvent(new CustomEvent('kiss-voice-submit'));
   }
 
+  // Browser-mode post-wake capture in progress, or null.  Owns every
+  // audio block while active (the wake recognizer does not hear
+  // capture audio, mirroring the Python listener).
+  let capture = null;
+
+  /** Start capturing the utterance that follows a browser-mode wake. */
+  function beginCapture() {
+    // Count the round at wake time (not when capture finishes), so a
+    // late voiceSpeech from an older transcription cannot clear the
+    // green flash that belongs to this newer capture.
+    outstandingRounds++;
+    capture = {
+      chunks: [], // Int16Array blocks, already at CAPTURE_SAMPLE_RATE
+      sinceWakeMs: 0,
+      elapsedMs: 0,
+      speechStarted: false,
+      trailingSilenceMs: 0,
+    };
+  }
+
+  /**
+   * Convert one Float32 audio block at *sourceRate* into 16-bit PCM
+   * at CAPTURE_SAMPLE_RATE using linear interpolation.  Mic capture
+   * rates (44.1/48kHz) are at or above the 16kHz target, so simple
+   * interpolation without a low-pass filter is adequate for speech.
+   */
+  function downsampleTo16k(samples, sourceRate) {
+    sourceRate = Number(sourceRate);
+    if (!Number.isFinite(sourceRate) || sourceRate <= 0) {
+      sourceRate = CAPTURE_SAMPLE_RATE;
+    }
+    const ratio = sourceRate / CAPTURE_SAMPLE_RATE;
+    const outLength = Math.floor(samples.length / ratio);
+    const out = new Int16Array(outLength);
+    for (let i = 0; i < outLength; i++) {
+      const pos = i * ratio;
+      const i0 = Math.floor(pos);
+      const i1 = Math.min(i0 + 1, samples.length - 1);
+      const frac = pos - i0;
+      let v = samples[i0] * (1 - frac) + samples[i1] * frac;
+      if (v > 1) v = 1;
+      else if (v < -1) v = -1;
+      out[i] = v < 0 ? v * 0x8000 : v * 0x7fff;
+    }
+    return out;
+  }
+
+  /** Base64-encode captured Int16Array blocks as little-endian PCM. */
+  function pcmBase64(chunks) {
+    let totalSamples = 0;
+    for (let i = 0; i < chunks.length; i++) totalSamples += chunks[i].length;
+    const bytes = new Uint8Array(totalSamples * 2);
+    let off = 0;
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i];
+      for (let j = 0; j < chunk.length; j++) {
+        const s = chunk[j];
+        bytes[off++] = s & 0xff;
+        bytes[off++] = (s >> 8) & 0xff;
+      }
+    }
+    let binary = '';
+    const STRIDE = 0x8000;
+    for (let i = 0; i < bytes.length; i += STRIDE) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + STRIDE));
+    }
+    return window.btoa(binary);
+  }
+
+  /**
+   * End the active capture.  With speech captured, the PCM is posted
+   * to the server for gpt-audio translation ({type: 'voiceTranscribe',
+   * audio: <base64 16kHz mono s16le>}) and the mic button turns
+   * yellow until the server's voiceSpeech reply arrives; silence just
+   * clears the green wake flash (the Python listener's NO_SPEECH).
+   */
+  function finishCapture() {
+    const done = capture;
+    capture = null;
+    if (!done.speechStarted || !done.chunks.length) {
+      outstandingRounds = Math.max(0, outstandingRounds - 1);
+      if (outstandingRounds > 0) flash('voice-transcribing', 60000);
+      else flash(null);
+      return;
+    }
+    flash('voice-transcribing', 60000);
+    postToHost({type: 'voiceTranscribe', audio: pcmBase64(done.chunks)});
+  }
+
+  /**
+   * Feed one audio block to the active capture — the browser-mode
+   * mirror of SpeechCapture.feed in voice_wake.py.  Leading silence
+   * is skipped (until CAPTURE_NO_SPEECH_TIMEOUT_MS gives up), speech
+   * starts on the first loud block, and the capture ends after
+   * CAPTURE_END_SILENCE_MS of trailing silence or CAPTURE_MAX_MS of
+   * audio.
+   */
+  function feedCapture(samples, rms, blockMs, sourceRate) {
+    const loud = rms >= SPEECH_RMS_THRESHOLD;
+    capture.sinceWakeMs += blockMs;
+    if (!capture.speechStarted) {
+      if (!loud) {
+        if (capture.sinceWakeMs >= CAPTURE_NO_SPEECH_TIMEOUT_MS) {
+          finishCapture();
+        }
+        return;
+      }
+      capture.speechStarted = true;
+    }
+    capture.chunks.push(downsampleTo16k(samples, sourceRate));
+    capture.elapsedMs += blockMs;
+    capture.trailingSilenceMs = loud ? 0 : capture.trailingSilenceMs + blockMs;
+    if (
+      capture.trailingSilenceMs >= CAPTURE_END_SILENCE_MS ||
+      capture.elapsedMs >= CAPTURE_MAX_MS
+    ) {
+      finishCapture();
+    }
+  }
+
   function loadVosk() {
     if (window.Vosk) return Promise.resolve();
     if (voskLoadPromise) return voskLoadPromise;
@@ -276,6 +414,7 @@
   }
 
   function stopBrowserPipeline() {
+    capture = null;
     if (processorNode) {
       try {
         processorNode.disconnect();
@@ -395,7 +534,7 @@
               matchesWake(message.result.text) &&
               wordsConfident(message.result.result)
             ) {
-              triggerWake();
+              if (triggerWake()) beginCapture();
             }
           }
         });
@@ -410,7 +549,7 @@
               quietMs >= WAKE_PAUSE_MS &&
               matchesWake(message.result.partial)
             ) {
-              triggerWake();
+              if (triggerWake()) beginCapture();
             }
           }
         });
@@ -451,6 +590,12 @@
               lastRmsAt = now;
               debugLog('rms', rms.toFixed(5));
             }
+          }
+          if (capture) {
+            // A post-wake capture owns the audio; the wake recognizer
+            // does not hear it (mirrors the Python listener).
+            feedCapture(samples, rms, blockMs, event.inputBuffer.sampleRate);
+            return;
           }
           try {
             recognizer.acceptWaveform(event.inputBuffer);
@@ -528,6 +673,7 @@
     // may never come.
     if (!next) {
       outstandingRounds = 0;
+      capture = null;
       flash(null);
     }
     if (cfg.mode === 'webview') {
