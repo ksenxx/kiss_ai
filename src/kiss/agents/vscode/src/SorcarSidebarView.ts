@@ -1393,7 +1393,8 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
             () => this._sendToWebview({type: 'voiceWake'}),
             (listening, error) =>
               this._sendToWebview({type: 'voiceState', listening, error}),
-            text => this._sendToWebview({type: 'voiceSpeech', text}),
+            (text, speaker) =>
+              this._sendToWebview({type: 'voiceSpeech', text, speaker}),
             () => this._sendToWebview({type: 'voiceTranscribing'}),
           );
         }
