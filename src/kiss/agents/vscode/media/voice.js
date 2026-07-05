@@ -50,27 +50,66 @@
   // "sorcar" is not in the small English model's vocabulary, so the
   // grammar also lists in-vocabulary words/phrases that sound like
   // "Sorcar".  Because the grammar forces every sound into an alias
-  // or [unk], detection must be strict: the WHOLE utterance has to
-  // decode to exactly one alias (never an alias embedded in [unk]
-  // context, e.g. "[unk] sir car [unk]" from "yes sir the car is
-  // ready"), every alias word needs a high confidence, and a partial
-  // result only fires after ~200ms of quiet audio proves the speaker
-  // paused instead of talking on ("soccer is my favorite sport").
+  // or [unk], detection is strict at the default sensitivity: the
+  // utterance has to decode to exactly one alias, every alias word
+  // needs a sufficient confidence, and a partial result only fires
+  // after a short quiet pause proves the speaker paused instead of
+  // talking on ("soccer is my favorite sport").  The settings slider
+  // adjusts those gates; high sensitivity also accepts utterances
+  // that END with an alias ("[unk] sore car" from "hey there Sorcar")
+  // but never an alias followed by more speech/unknown audio.
   // Common standalone words ("soccer", "circa", "so car", "saw car")
   // are deliberately NOT aliases, keeping the grammar to genuinely
   // Sorcar-shaped phrases; real human "Sorcar" decodes to "sir car"/
   // "sore car"/"sar car" (verified live).
   const WAKE_ALIASES = ['sorcar', 'sir car', 'sore car', 'sar car'];
   const COOLDOWN_MS = 2000;
-  // Vosk grammar-mode word confidences are posteriors in [0, 1] but
-  // do not separate true wakes from sound-alikes (real human "Sorcar"
-  // scored 0.53 live; TTS "soccer" force-fit 0.55) — this is only a
-  // sanity net against egregious force-fits.  Values above 1.0 would
-  // be raw acoustic likelihoods on another scale and are not gated.
-  const MIN_WORD_CONF = 0.4;
-  // Quiet audio required after the alias before a partial result may
-  // fire the wake word.
-  const WAKE_PAUSE_MS = 200;
+  // Wake-word sensitivity (0..100, settings-panel slider).  The value
+  // scales the per-word confidence gate and the post-alias pause
+  // linearly, and at >= TRAILING_ALIAS_SENSITIVITY also accepts
+  // utterances that merely END with an alias ("hey there Sorcar"
+  // decodes to "[unk] sore car", measured live).  Sensitivity 50
+  // reproduces the historical gates (conf 0.4, pause 200ms); the
+  // default 70 is deliberately more sensitive (conf 0.24, pause
+  // 120ms).  Mirrors kiss/agents/vscode/voice_wake.py.
+  const DEFAULT_SENSITIVITY = 70;
+  const TRAILING_ALIAS_SENSITIVITY = 75;
+  const SENSITIVITY_KEY = 'kissVoiceSensitivity';
+
+  /**
+   * Per-word confidence floor for a sensitivity: linear 0.8 -> 0.0.
+   * Vosk grammar-mode word confidences are posteriors in [0, 1] but
+   * do not separate true wakes from sound-alikes (real human "Sorcar"
+   * scored 0.53 live; TTS "soccer" force-fit 0.55) — the gate is a
+   * sanity net against egregious force-fits that a LOW slider setting
+   * raises high enough to reject sound-alikes.
+   */
+  function sensitivityMinWordConf(s) {
+    return 0.8 * (1 - s / 100);
+  }
+
+  /**
+   * Quiet audio (ms) required after the alias before a partial result
+   * may fire the wake word: linear 400ms -> 100ms floor (without any
+   * pause continuous speech would fire mid-utterance).
+   */
+  function sensitivityWakePauseMs(s) {
+    return Math.max(100, 400 * (1 - s / 100));
+  }
+
+  /** The stored slider value, or the default when absent/garbage. */
+  function storedSensitivity() {
+    try {
+      const v = parseInt(localStorage.getItem(SENSITIVITY_KEY), 10);
+      if (isFinite(v) && v >= 0 && v <= 100) return v;
+    } catch (_e) {
+      /* storage unavailable; use the default */
+    }
+    return DEFAULT_SENSITIVITY;
+  }
+
+  // Live wake-word sensitivity; updated by the settings-panel slider.
+  let sensitivity = storedSensitivity();
   // Blocks at or above this normalized RMS count as speech.
   const SPEECH_RMS_THRESHOLD = 0.01;
   // Browser-mode post-wake speech capture (mirrors SpeechCapture in
@@ -153,26 +192,37 @@
    * True when the whole normalized utterance is exactly one wake
    * alias.  Substring matching is deliberately avoided; it fired on
    * everyday sentences that merely contain an alias-sounding word.
+   * At high sensitivity an utterance that ENDS with an alias also
+   * matches ("hey there Sorcar" -> "[unk] sore car"), but a
+   * mid-utterance alias (anything after it) still never does.
    */
   function matchesWake(text) {
     const t = normalize(text);
     if (!t) return false;
-    return WAKE_ALIASES.indexOf(t) !== -1;
+    if (WAKE_ALIASES.indexOf(t) !== -1) return true;
+    if (sensitivity >= TRAILING_ALIAS_SENSITIVITY) {
+      for (let i = 0; i < WAKE_ALIASES.length; i++) {
+        const suffix = ' ' + WAKE_ALIASES[i];
+        if (t.length > suffix.length && t.endsWith(suffix)) return true;
+      }
+    }
+    return false;
   }
 
   /**
-   * True when every recognized word clears MIN_WORD_CONF.  `words` is
-   * the word list of a Vosk result (each entry has a `conf` field
-   * when setWords(true) is on).  Only confidences on the [0, 1]
-   * posterior scale are gated; larger values and missing word lists
-   * pass, so the gate can only tighten detection, never lose a clean
-   * wake.
+   * True when every recognized word clears the sensitivity-scaled
+   * confidence floor.  `words` is the word list of a Vosk result
+   * (each entry has a `conf` field when setWords(true) is on).  Only
+   * confidences on the [0, 1] posterior scale are gated; larger
+   * values and missing word lists pass, so the gate can only tighten
+   * detection, never lose a clean wake.
    */
   function wordsConfident(words) {
     if (!Array.isArray(words)) return true;
+    const minConf = sensitivityMinWordConf(sensitivity);
     for (let i = 0; i < words.length; i++) {
       const conf = words[i] && words[i].conf;
-      if (typeof conf === 'number' && conf <= 1.0 && conf < MIN_WORD_CONF) {
+      if (typeof conf === 'number' && conf <= 1.0 && conf < minConf) {
         return false;
       }
     }
@@ -546,7 +596,7 @@
             // Fire only when the speaker paused right after the
             // alias; continuous speech keeps quietMs at 0.
             if (
-              quietMs >= WAKE_PAUSE_MS &&
+              quietMs >= sensitivityWakePauseMs(sensitivity) &&
               matchesWake(message.result.partial)
             ) {
               if (triggerWake()) beginCapture();
@@ -664,6 +714,39 @@
     window.dispatchEvent(new CustomEvent('kiss-voice-post', {detail: message}));
   }
 
+  // Settings-panel sensitivity slider (#cfg-voice-sensitivity).  The
+  // slider reflects the stored value on load and applies changes
+  // LIVE: browser mode reads the `sensitivity` variable on every
+  // recognizer result, and webview mode reports the value to the
+  // extension host, which restarts the Python listener with
+  // --sensitivity.  Pages without the settings panel (no slider in
+  // the DOM) keep working with the stored/default value.
+  const sensSlider = document.getElementById('cfg-voice-sensitivity');
+  const sensValue = document.getElementById('cfg-voice-sensitivity-value');
+
+  function renderSensitivity() {
+    if (sensSlider) sensSlider.value = String(sensitivity);
+    if (sensValue) sensValue.textContent = String(sensitivity);
+  }
+
+  renderSensitivity();
+  if (sensSlider) {
+    sensSlider.addEventListener('input', () => {
+      const v = parseInt(sensSlider.value, 10);
+      if (!isFinite(v)) return;
+      sensitivity = Math.min(100, Math.max(0, v));
+      try {
+        localStorage.setItem(SENSITIVITY_KEY, String(sensitivity));
+      } catch (_e) {
+        /* storage unavailable; the live value still applies */
+      }
+      renderSensitivity();
+      if (cfg.mode === 'webview') {
+        postToHost({type: 'voiceSensitivity', value: sensitivity});
+      }
+    });
+  }
+
   function setEnabled(next) {
     if (enabled === next) return;
     enabled = next;
@@ -678,7 +761,9 @@
     }
     if (cfg.mode === 'webview') {
       setUi(next ? 'loading' : 'off');
-      postToHost({type: 'voiceToggle', enabled: next});
+      // The sensitivity rides along so the host can pass
+      // --sensitivity to the Python listener it starts.
+      postToHost({type: 'voiceToggle', enabled: next, sensitivity});
       return;
     }
     if (next) {
