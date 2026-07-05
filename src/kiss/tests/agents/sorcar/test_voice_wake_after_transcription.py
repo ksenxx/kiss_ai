@@ -342,6 +342,47 @@ class TestWakeCooldownSurvivesCapture(unittest.TestCase):
         self.assertEqual(session.wakes, 2)
 
 
+@unittest.skipUnless(HAVE_MAC_TTS, "requires macOS `say` and `afconvert`")
+class TestWatchdogSilenceAdvancesSession(unittest.TestCase):
+    """A dead mic gap is counted as silence, not a frozen session."""
+
+    def test_dead_gap_closes_capture_and_expires_cooldown(self) -> None:
+        from kiss.agents.vscode.voice_wake import (
+            DEFAULT_MODELS_DIR,
+            VoiceSession,
+            WakeDetector,
+            ensure_model,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sorcar = _tts_pcm(Path(tmp), "sorcar-dead-gap", "Sorcar")
+
+        session = VoiceSession(WakeDetector(ensure_model(DEFAULT_MODELS_DIR)))
+        block = 2 * 800  # 50ms of s16le samples
+
+        def feed(pcm: bytes) -> None:
+            for start in range(0, len(pcm), block):
+                session.process(pcm[start:start + block])
+
+        # Wake #1 starts a no-speech capture.  Then the microphone
+        # stream "dies" for longer than both the capture timeout and
+        # the wake cooldown: the watchdog must advance the session
+        # through that wall-time silence, or the next spoken wake is
+        # swallowed by the stale capture / frozen cooldown.
+        feed(sorcar + _silence(1.0))
+        self.assertEqual(session.wakes, 1)
+
+        session.process_silence(5.0)
+
+        # A second isolated Sorcar after the reopened stream should be
+        # detected immediately; it should not be treated as speech
+        # belonging to the old capture.
+        feed(sorcar + _silence(1.0))
+        session.finalize()
+
+        self.assertEqual(session.wakes, 2)
+
+
 class TestAudioTimeoutOverride(unittest.TestCase):
     """KISS_VOICE_AUDIO_TIMEOUT accepts only finite positive values."""
 
