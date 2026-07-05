@@ -72,10 +72,15 @@ import queue
 import re
 import sys
 import threading
+import time
 import urllib.request
 import wave
 import zipfile
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import sounddevice
 
 # In-vocabulary phrases that sound like "Sorcar" and act as the
 # detection grammar.  Common standalone English words ("soccer",
@@ -98,6 +103,18 @@ DEFAULT_MODELS_DIR = Path.home() / ".kiss" / "models"
 SAMPLE_RATE = 16000
 BLOCK_SIZE = 4000  # frames per audio block (250ms at 16kHz)
 COOLDOWN_SECONDS = 2.0
+# Stream-health watchdog: on macOS, PortAudio input streams can
+# silently stop delivering callbacks after an audio device/route
+# change while the stream object still looks alive (confirmed live:
+# listeners blocked forever on an empty block queue while a freshly
+# opened stream heard audio fine).  When no block arrives within this
+# many seconds, the stream is closed and reopened; after
+# MIC_MAX_REOPEN_ATTEMPTS consecutive reopens that still yield no
+# audio the listener exits nonzero so the supervisor can surface the
+# failure instead of a silently deaf microphone.
+MIC_WATCHDOG_TIMEOUT_SECONDS = 5.0
+MIC_MAX_REOPEN_ATTEMPTS = 3
+MIC_REOPEN_DELAY_SECONDS = 0.5
 # Blocks at or above this normalized RMS count as speech (shared by
 # wake-word pause gating and post-wake speech endpointing).
 SPEECH_RMS_THRESHOLD = 0.01
@@ -284,6 +301,21 @@ class SpeechCapture:
         return b"".join(self._blocks)
 
 
+def positive_finite_float(raw: str) -> float:
+    """Parse an argparse float that must be finite and strictly positive."""
+    try:
+        value = float(raw)
+    except ValueError as err:
+        raise argparse.ArgumentTypeError(
+            "must be a positive finite number"
+        ) from err
+    if not math.isfinite(value) or value <= 0:
+        raise argparse.ArgumentTypeError(
+            "must be a positive finite number"
+        )
+    return value
+
+
 def audio_timeout_seconds() -> float:
     """Return the per-attempt translation API timeout in seconds.
 
@@ -414,6 +446,26 @@ class VoiceSession:
             self.wakes += 1
             emit("WAKE")
             self._capture = SpeechCapture()
+
+    def process_silence(self, seconds: float) -> None:
+        """Advance session state through *seconds* of synthetic silence.
+
+        The microphone watchdog uses this when PortAudio stops
+        delivering callbacks.  No real samples arrived, but wall time
+        did pass: stale post-wake captures should time out, trailing
+        speech should endpoint, and the wake cooldown should expire so
+        the first wake after a reopened stream is not suppressed by a
+        frozen audio clock.  Silence is chunked like real mic blocks so
+        capture endpointing appends at most the normal trailing-silence
+        window instead of one giant artificial block.
+        """
+        if not math.isfinite(seconds) or seconds <= 0:
+            return
+        frames_remaining = math.ceil(seconds * SAMPLE_RATE)
+        while frames_remaining > 0:
+            frames = min(BLOCK_SIZE, frames_remaining)
+            self.process(b"\x00\x00" * frames)
+            frames_remaining -= frames
 
     def finalize(self) -> None:
         """Flush an in-flight capture and report all pending
@@ -632,35 +684,134 @@ def run_wav(session: VoiceSession, wav_path: Path) -> int:
     return 0 if session.wakes > 0 else 1
 
 
-def run_mic(session: VoiceSession) -> int:
+def open_mic_stream(
+    blocks: queue.Queue[bytes],
+) -> sounddevice.RawInputStream:
+    """Open and start a PortAudio input stream feeding *blocks*.
+
+    Every callback block is copied into *blocks*.  A callback
+    ``status`` flag (input overflow/abort) is logged to stderr at most
+    once per stream generation so a persistently unhappy stream cannot
+    spam the supervisor.  The ``KISS_VOICE_MIC_BLOCK_SIZE`` environment
+    variable overrides the block size (test hook: a block size worth
+    many seconds of audio makes a real, healthy stream look exactly
+    like a silently dead one to the watchdog).
+    """
+    import sounddevice
+
+    blocksize = int(os.environ.get("KISS_VOICE_MIC_BLOCK_SIZE", BLOCK_SIZE))
+    status_logged = False
+
+    def on_audio(
+        indata: bytes, _frames: int, _time_info: object, status: object
+    ) -> None:
+        nonlocal status_logged
+        if status and not status_logged:
+            status_logged = True
+            print(f"mic stream status: {status}", file=sys.stderr, flush=True)
+        # ``indata`` is a CFFI buffer; copy it before the driver reuses it.
+        blocks.put(bytes(indata))
+
+    stream = sounddevice.RawInputStream(
+        samplerate=SAMPLE_RATE,
+        blocksize=blocksize,
+        dtype="int16",
+        channels=1,
+        callback=on_audio,
+    )
+    stream.start()
+    return stream
+
+
+def close_mic_stream(stream: sounddevice.RawInputStream) -> None:
+    """Abort and close a PortAudio stream, ignoring teardown errors.
+
+    A wedged stream may refuse a clean stop; teardown failures must
+    not prevent the watchdog from opening a replacement stream.
+    """
+    try:
+        stream.abort(ignore_errors=True)
+    finally:
+        stream.close(ignore_errors=True)
+
+
+def run_mic(
+    session: VoiceSession,
+    watchdog_timeout: float = MIC_WATCHDOG_TIMEOUT_SECONDS,
+) -> int:
     """Listen on the default microphone forever.
 
     Prints WAKE on the wake word and SPEECH/NO_SPEECH once the
     utterance that follows has been captured and translated.
 
+    A stream-health watchdog guards against silently dead input
+    streams (macOS PortAudio can stop delivering callbacks after an
+    audio device/route change while the stream still looks alive): if
+    no audio block arrives within *watchdog_timeout* seconds the
+    stream is closed and reopened — the session keeps its wake state.
+    READY is emitted exactly once, for the first stream; reopens are
+    silent on stdout.  After MIC_MAX_REOPEN_ATTEMPTS consecutive
+    reopens that still produce no audio, the listener gives up.
+
     Returns:
-        Process exit code (only reached on stream failure).
+        Process exit code: nonzero when the stream died and could not
+        be revived (the supervisor shows the error instead of a
+        silently deaf microphone).
     """
-    import sounddevice
+    if not math.isfinite(watchdog_timeout) or watchdog_timeout <= 0:
+        raise ValueError("watchdog_timeout must be a positive finite number")
 
     blocks: queue.Queue[bytes] = queue.Queue()
-
-    def on_audio(
-        indata: bytes, _frames: int, _time_info: object, _status: object
-    ) -> None:
-        # ``indata`` is a CFFI buffer; copy it before the driver reuses it.
-        blocks.put(bytes(indata))
-
-    with sounddevice.RawInputStream(
-        samplerate=SAMPLE_RATE,
-        blocksize=BLOCK_SIZE,
-        dtype="int16",
-        channels=1,
-        callback=on_audio,
-    ):
-        emit("READY")
+    stream: sounddevice.RawInputStream | None = open_mic_stream(blocks)
+    emit("READY")
+    failed_reopens = 0
+    try:
         while True:
-            session.process(blocks.get())
+            try:
+                data = blocks.get(timeout=watchdog_timeout)
+            except queue.Empty:
+                # Treat the missing callback window as silence for the
+                # session's state machines.  Otherwise a route-change
+                # stall during/after a wake freezes SpeechCapture and
+                # WakeDetector's audio-clock cooldown; the first real
+                # "Sorcar" after a successful reopen can be swallowed
+                # as stale capture audio or rejected as still inside
+                # the old cooldown despite many wall seconds passing.
+                session.process_silence(watchdog_timeout)
+                if failed_reopens >= MIC_MAX_REOPEN_ATTEMPTS:
+                    print(
+                        "mic watchdog: input stream still silent after "
+                        f"{failed_reopens} reopen attempts; giving up",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    return 1
+                failed_reopens += 1
+                print(
+                    f"mic watchdog: no audio for {watchdog_timeout:g}s; "
+                    "reopening the input stream (attempt "
+                    f"{failed_reopens}/{MIC_MAX_REOPEN_ATTEMPTS})",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                if stream is not None:
+                    close_mic_stream(stream)
+                    stream = None
+                time.sleep(MIC_REOPEN_DELAY_SECONDS)
+                try:
+                    stream = open_mic_stream(blocks)
+                except Exception as err:  # noqa: BLE001 — retry next round
+                    print(
+                        f"mic watchdog: reopen failed: {err}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                continue
+            failed_reopens = 0
+            session.process(data)
+    finally:
+        if stream is not None:
+            close_mic_stream(stream)
 
 
 def main() -> int:
@@ -683,13 +834,20 @@ def main() -> int:
         default=os.environ.get("KISS_VOICE_AUDIO_MODEL", DEFAULT_AUDIO_MODEL),
         help="GPT audio-chat model that translates post-wake speech",
     )
+    parser.add_argument(
+        "--mic-watchdog-timeout",
+        type=positive_finite_float,
+        default=MIC_WATCHDOG_TIMEOUT_SECONDS,
+        help="Seconds without audio blocks before the microphone "
+        "stream is considered dead and reopened",
+    )
     args = parser.parse_args()
 
     detector = WakeDetector(ensure_model(args.models_dir))
     session = VoiceSession(detector, args.audio_model)
     if args.wav is not None:
         return run_wav(session, args.wav)
-    return run_mic(session)
+    return run_mic(session, args.mic_watchdog_timeout)
 
 
 if __name__ == "__main__":
