@@ -115,33 +115,44 @@ test('duplicate wake events within the cooldown fire only once', () => {
 
 test('clicking the toggle posts voiceToggle through the bridge', () => {
   const {win, posted} = makeWindow();
-  const btn = win.document.getElementById('voice-btn');
-  btn.click();
+  // Webview mode auto-enables the mic at load (fresh storage), so the
+  // first click turns it OFF and the second back ON.
   // Note: JSON comparison because jsdom detail objects come from
   // another realm (different Object prototype than the test's).
   assert.strictEqual(
     JSON.stringify(posted),
     JSON.stringify([{type: 'voiceToggle', enabled: true}]),
   );
+  const btn = win.document.getElementById('voice-btn');
   btn.click();
   assert.strictEqual(
     JSON.stringify(posted[1]),
     JSON.stringify({type: 'voiceToggle', enabled: false}),
   );
+  btn.click();
+  assert.strictEqual(
+    JSON.stringify(posted[2]),
+    JSON.stringify({type: 'voiceToggle', enabled: true}),
+  );
 });
 
-test('enabled state persists in localStorage and re-arms on load', () => {
+test('mic state persists in localStorage and is applied on load', () => {
+  // Webview mode auto-enables at load (mic on when VS Code launches);
+  // the first click therefore disables and persists the opt-out.
   const first = makeWindow();
   first.win.document.getElementById('voice-btn').click();
   assert.strictEqual(
     first.win.localStorage.getItem('kissVoiceEnabled'),
-    '1',
+    '0',
   );
-  // A brand-new window (fresh storage) must NOT auto-enable.
+  // A brand-new window (fresh storage) MUST auto-enable.
   const second = makeWindow();
-  assert.strictEqual(second.posted.length, 0);
-  // But a window whose storage says enabled must re-request listening
-  // on load — seed the flag BEFORE voice.js executes.
+  assert.strictEqual(
+    JSON.stringify(second.posted),
+    JSON.stringify([{type: 'voiceToggle', enabled: true}]),
+  );
+  // A window whose storage says the user opted out must stay off —
+  // seed the flag BEFORE voice.js executes.
   const dom = new JSDOM(
     '<!DOCTYPE html><html><body>' +
       '<button id="voice-btn"></button>' +
@@ -150,23 +161,20 @@ test('enabled state persists in localStorage and re-arms on load', () => {
     {runScripts: 'dangerously', url: 'https://localhost/'},
   );
   const win = dom.window;
-  win.localStorage.setItem('kissVoiceEnabled', '1');
+  win.localStorage.setItem('kissVoiceEnabled', '0');
   win.__VOICE__ = {mode: 'webview'};
   const posted = [];
   win.addEventListener('kiss-voice-post', e => posted.push(e.detail));
   const script = win.document.createElement('script');
   script.textContent = fs.readFileSync(VOICE_JS_PATH, 'utf-8');
   win.document.body.appendChild(script);
-  assert.strictEqual(
-    JSON.stringify(posted),
-    JSON.stringify([{type: 'voiceToggle', enabled: true}]),
-  );
+  assert.strictEqual(posted.length, 0);
 });
 
 test('voiceState messages drive the toggle UI classes', () => {
   const {win} = makeWindow();
   const btn = win.document.getElementById('voice-btn');
-  btn.click(); // enable → 'loading' until the host confirms
+  // Auto-enabled at load → 'loading' until the host confirms.
   assert.ok(btn.classList.contains('voice-loading'));
   sendHostMessage(win, {type: 'voiceState', listening: true});
   assert.ok(btn.classList.contains('voice-listening'));
