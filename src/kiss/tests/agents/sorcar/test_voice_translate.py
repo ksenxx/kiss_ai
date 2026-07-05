@@ -117,12 +117,19 @@ def _run_listener(wav: Path, env_overrides: dict[str, str] | None = None):
 
 
 def _speech_payloads(stdout: str) -> list[str]:
-    """Extract the JSON payloads of all SPEECH lines in *stdout*."""
-    return [
-        json.loads(line[len("SPEECH "):])
-        for line in stdout.splitlines()
-        if line.startswith("SPEECH ")
-    ]
+    """Extract the translated texts of all SPEECH lines in *stdout*.
+
+    SPEECH payloads are JSON objects ``{"text": ..., "speaker": ...}``
+    (speaker identification is covered by test_voice_speaker_id.py);
+    these tests care about the translated text only.
+    """
+    texts = []
+    for line in stdout.splitlines():
+        if not line.startswith("SPEECH "):
+            continue
+        payload = json.loads(line[len("SPEECH "):])
+        texts.append(payload["text"] if isinstance(payload, dict) else payload)
+    return texts
 
 
 def _loud_block() -> bytes:

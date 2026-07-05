@@ -15,8 +15,11 @@
  * - ``READY``         — model loaded, microphone open, listening.
  * - ``WAKE``          — the wake word "Sorcar" was heard.
  * - ``TRANSCRIBING``  — speech capture ended; the gpt-audio call started.
- * - ``SPEECH <json>`` — the speech that followed the wake word,
- *   translated to English by the gpt-audio model (JSON string payload).
+ * - ``SPEECH <json>`` — the speech that followed the wake word, as a
+ *   JSON object ``{"text": <english translation>, "speaker": <int or
+ *   null>}``; the speaker number comes from local voice recognition
+ *   (each distinct voice gets a unique number starting from 1).
+ *   Legacy plain JSON-string payloads are also accepted.
  * - ``NO_SPEECH``     — only silence followed the wake word.
  *
  * The service forwards those events to the webview, where voice.js
@@ -36,9 +39,12 @@ export type StateCallback = (listening: boolean, error?: string) => void;
 
 /**
  * Callback receiving the English translation of the speech following
- * the wake word ('' when only silence was heard).
+ * the wake word ('' when only silence was heard) plus the speaker
+ * number assigned by voice recognition — a unique integer starting
+ * from 1 per distinct voice — or undefined when identification was
+ * unavailable.
  */
-export type SpeechCallback = (text: string) => void;
+export type SpeechCallback = (text: string, speaker?: number) => void;
 
 /**
  * Callback invoked when the post-wake capture ends and the gpt-audio
@@ -148,8 +154,23 @@ export class VoiceWakeService {
         else if (line === 'NO_SPEECH') this._onSpeech('');
         else if (line.startsWith('SPEECH ')) {
           try {
-            const text = JSON.parse(line.slice('SPEECH '.length));
-            if (typeof text === 'string') this._onSpeech(text);
+            const payload = JSON.parse(line.slice('SPEECH '.length));
+            if (typeof payload === 'string') {
+              // Legacy payload shape: the bare translated text.
+              this._onSpeech(payload);
+            } else if (
+              payload &&
+              typeof payload === 'object' &&
+              typeof payload.text === 'string'
+            ) {
+              const spk = payload.speaker;
+              this._onSpeech(
+                payload.text,
+                typeof spk === 'number' && Number.isInteger(spk) && spk >= 1
+                  ? spk
+                  : undefined,
+              );
+            }
           } catch {
             // Malformed payload — drop the event.
           }

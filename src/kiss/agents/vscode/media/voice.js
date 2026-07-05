@@ -213,16 +213,33 @@
 
   /**
    * Insert the English translation of the speech that followed the
-   * wake word into the task input.  An empty input receives the text;
-   * an existing draft is appended to with a space.  An empty
-   * translation (silence or a failed translation) never touches user
-   * text.  The mic-button flash is cleared unless *keepFlash* is true
-   * (a newer voice round is still in flight and owns the indicator).
+   * wake word into the task input and submit it to the agent of the
+   * highlighted tab.  When *speaker* is a positive integer (the
+   * host's voice-recognition speaker number, unique per distinct
+   * voice, starting from 1) the text is prefixed with
+   * ``Speaker #N says that: `` so the agent knows who spoke.  An
+   * empty input receives the text; an existing draft is appended to
+   * with a space.  After a non-empty insert a ``kiss-voice-submit``
+   * window event asks main.js to send the input exactly like a click
+   * on the send button — a fresh task for an idle tab, or a steering
+   * user message injected into a running agent.  An empty translation
+   * (silence or a failed translation) never touches user text and
+   * never submits.  The mic-button flash is cleared unless
+   * *keepFlash* is true (a newer voice round is still in flight and
+   * owns the indicator).
    */
-  function insertSpeech(text, keepFlash) {
+  function insertSpeech(text, keepFlash, speaker) {
     if (!keepFlash) flash(null);
-    const translated = String(typeof text === 'string' ? text : '').trim();
+    let translated = String(typeof text === 'string' ? text : '').trim();
     if (!translated) return;
+    if (
+      typeof speaker === 'number' &&
+      isFinite(speaker) &&
+      speaker >= 1 &&
+      Math.floor(speaker) === speaker
+    ) {
+      translated = 'Speaker #' + speaker + ' says that: ' + translated;
+    }
     if (!inp.value) {
       inp.value = translated;
     } else {
@@ -234,6 +251,10 @@
     } catch (_e) {
       /* focus can fail in background documents; ignore */
     }
+    // Hand the spoken task to the agent: main.js owns sendMessage()
+    // (submit vs. steering of a running task) and listens for this
+    // event next to the 'kiss-voice-post' bridge.
+    window.dispatchEvent(new CustomEvent('kiss-voice-submit'));
   }
 
   function loadVosk() {
@@ -535,7 +556,7 @@
       // Terminal results arrive in spoken (FIFO) order; keep the
       // flash when a newer round is still capturing or transcribing.
       outstandingRounds = Math.max(0, outstandingRounds - 1);
-      insertSpeech(msg.text, outstandingRounds > 0);
+      insertSpeech(msg.text, outstandingRounds > 0, msg.speaker);
     } else if (msg.type === 'voiceState') {
       // Extension host reports the real listener state.  A listener
       // that stopped (error or off) can no longer deliver the
