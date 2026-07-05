@@ -44,11 +44,14 @@ only when
 Wake-word detection runs locally.  After a wake, the utterance that
 follows is captured (RMS endpointing) and translated into English —
 whatever language was spoken — by a single ``gpt-audio``
-chat-completions call that takes the audio directly.  The call runs
-on a background thread with a hard timeout: wake-word listening
-resumes the moment the capture ends, so a slow (or hung) translation
-API can never deafen the listener — saying "Sorcar" again works even
-while a previous transcription is still in flight.
+chat-completions call that takes the audio directly.  Translation
+calls run on one background worker thread with a hard per-attempt
+timeout: wake-word listening resumes the moment the capture ends, so
+a slow (or hung) translation API can never deafen the listener —
+saying "Sorcar" again works even while a previous transcription is
+still in flight.  The worker reports utterances strictly in spoken
+order (FIFO), so a quick second utterance can never have its text
+inserted before a slow first one.
 
 Usage::
 
@@ -293,7 +296,11 @@ def audio_timeout_seconds() -> float:
         value = float(raw)
     except ValueError:
         return DEFAULT_AUDIO_TIMEOUT_SECONDS
-    return value if value > 0 else DEFAULT_AUDIO_TIMEOUT_SECONDS
+    # NaN, +/-inf and non-positive values would defeat the hard
+    # timeout (an infinite timeout hangs the worker forever).
+    if not math.isfinite(value) or value <= 0:
+        return DEFAULT_AUDIO_TIMEOUT_SECONDS
+    return value
 
 
 def translate_pcm_to_english(
@@ -370,10 +377,12 @@ class VoiceSession:
 
     Feeds audio blocks to the wake detector until the wake word fires,
     then hands the stream to a :class:`SpeechCapture`.  Once the
-    utterance ends, its translation runs on a background thread and is
-    reported on stdout when done — the audio loop goes straight back
-    to wake detection, so "Sorcar" keeps working even while a slow
-    transcription is still in flight.
+    utterance ends, its PCM is queued for one background worker thread
+    that translates and reports on stdout — the audio loop goes
+    straight back to wake detection, so "Sorcar" keeps working even
+    while a slow transcription is still in flight.  The single FIFO
+    worker bounds API concurrency to one call and reports utterances
+    in spoken order.
     """
 
     def __init__(
@@ -384,12 +393,19 @@ class VoiceSession:
         self._detector = detector
         self._audio_model = audio_model
         self._capture: SpeechCapture | None = None
-        self._translations: list[threading.Thread] = []
+        self._pending: queue.Queue[bytes] = queue.Queue()
+        self._worker: threading.Thread | None = None
         self.wakes = 0
 
     def process(self, data: bytes) -> None:
         """Route one audio block to wake detection or speech capture."""
         if self._capture is not None:
+            # The recognizer does not hear capture audio, but the
+            # detector's cooldown/pause clocks must keep ticking:
+            # freezing them made a "Sorcar" spoken right after a
+            # capture look like it was inside the previous wake's
+            # cooldown and get suppressed.
+            self._detector.track_only(data)
             captured = self._capture.feed(data)
             if captured is not None:
                 self._finish_capture(captured)
@@ -404,9 +420,7 @@ class VoiceSession:
         translations at end of input (WAV mode)."""
         if self._capture is not None:
             self._finish_capture(self._capture.flush())
-        for thread in self._translations:
-            thread.join()
-        self._translations.clear()
+        self._pending.join()
 
     def _finish_capture(self, pcm: bytes) -> None:
         self._capture = None
@@ -415,19 +429,38 @@ class VoiceSession:
             # UI can show a "transcribing" indicator; silence skips
             # straight to NO_SPEECH without an API call.
             emit("TRANSCRIBING")
-        # Translate on a background thread: the API call may take (or
+        # Translate on a background worker: the API call may take (or
         # hang for) many seconds, and running it here used to deafen
         # the listener — no audio reached the wake detector until the
         # call returned, so the wake word "stopped working" after a
         # transcription whenever the network stalled.
-        self._translations = [
-            thread for thread in self._translations if thread.is_alive()
-        ]
-        thread = threading.Thread(
-            target=self._translate_and_report, args=(pcm,), daemon=True
-        )
-        self._translations.append(thread)
-        thread.start()
+        if self._worker is None:
+            self._worker = threading.Thread(
+                target=self._translate_loop, daemon=True
+            )
+            self._worker.start()
+        self._pending.put(pcm)
+
+    def _translate_loop(self) -> None:
+        while True:
+            pcm = self._pending.get()
+            try:
+                self._translate_and_report(pcm)
+            except Exception as err:  # noqa: BLE001 — worker must survive
+                # The API path already catches its own errors; this
+                # guards the reporting path (e.g. a broken stdout
+                # pipe).  A dead worker would strand queued utterances
+                # and hang finalize() on queue.join() forever.
+                try:
+                    print(
+                        f"translation report failed: {err}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                except Exception:  # noqa: BLE001 — stderr gone too
+                    pass
+            finally:
+                self._pending.task_done()
 
     def _translate_and_report(self, pcm: bytes) -> None:
         text = translate_pcm_to_english(pcm, self._audio_model)
@@ -526,13 +559,25 @@ class WakeDetector:
         self._last_wake = -COOLDOWN_SECONDS
         self._quiet_seconds = 0.0
 
-    def feed(self, data: bytes) -> bool:
-        """Process one audio block; return True when the wake word fired."""
-        self._audio_seconds += len(data) / 2 / SAMPLE_RATE
+    def track_only(self, data: bytes) -> None:
+        """Advance the audio clock and quiet tracking without decoding.
+
+        Called for blocks routed to a :class:`SpeechCapture` instead of
+        the recognizer.  The cooldown compares audio timestamps, so the
+        clock must cover *all* audio heard, not just the blocks this
+        detector decoded — otherwise a wake right after a multi-second
+        capture would be misjudged as inside the previous cooldown.
+        """
+        duration = len(data) / 2 / SAMPLE_RATE
+        self._audio_seconds += duration
         if block_rms(data) >= SPEECH_RMS_THRESHOLD:
             self._quiet_seconds = 0.0
         else:
-            self._quiet_seconds += len(data) / 2 / SAMPLE_RATE
+            self._quiet_seconds += duration
+
+    def feed(self, data: bytes) -> bool:
+        """Process one audio block; return True when the wake word fired."""
+        self.track_only(data)
         if self._recognizer.AcceptWaveform(data):
             result = json.loads(self._recognizer.Result())
             text = result.get("text", "")
