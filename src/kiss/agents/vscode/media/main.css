@@ -307,6 +307,24 @@ body {
 .config-label textarea:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
 .config-checkbox { display: flex; align-items: center; gap: 8px; flex-direction: row; }
 .config-checkbox input[type="checkbox"] { margin: 0; width: auto; }
+
+/* Wake-word ("Sorcar") sensitivity slider: range input plus the live
+   numeric value, applied immediately by voice.js (no Save needed). */
+.config-sensitivity-row { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+
+.config-sensitivity-row input[type="range"] {
+  flex: 1;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.config-sensitivity-value {
+  min-width: 3ch;
+  text-align: right;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+}
+
 .config-divider { border-top: 1px solid var(--border); margin: 12px 0; }
 
 .config-update-row { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }

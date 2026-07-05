@@ -121,18 +121,18 @@ test('clicking the toggle posts voiceToggle through the bridge', () => {
   // another realm (different Object prototype than the test's).
   assert.strictEqual(
     JSON.stringify(posted),
-    JSON.stringify([{type: 'voiceToggle', enabled: true}]),
+    JSON.stringify([{type: 'voiceToggle', enabled: true, sensitivity: 70}]),
   );
   const btn = win.document.getElementById('voice-btn');
   btn.click();
   assert.strictEqual(
     JSON.stringify(posted[1]),
-    JSON.stringify({type: 'voiceToggle', enabled: false}),
+    JSON.stringify({type: 'voiceToggle', enabled: false, sensitivity: 70}),
   );
   btn.click();
   assert.strictEqual(
     JSON.stringify(posted[2]),
-    JSON.stringify({type: 'voiceToggle', enabled: true}),
+    JSON.stringify({type: 'voiceToggle', enabled: true, sensitivity: 70}),
   );
 });
 
@@ -149,7 +149,7 @@ test('mic state persists in localStorage and is applied on load', () => {
   const second = makeWindow();
   assert.strictEqual(
     JSON.stringify(second.posted),
-    JSON.stringify([{type: 'voiceToggle', enabled: true}]),
+    JSON.stringify([{type: 'voiceToggle', enabled: true, sensitivity: 70}]),
   );
   // A window whose storage says the user opted out must stay off —
   // seed the flag BEFORE voice.js executes.
