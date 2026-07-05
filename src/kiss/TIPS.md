@@ -1,7 +1,8 @@
 # Tip
 
 ## For the highest quality work from KISS Sorcar
-- Add both ANTHROPIC_API_KEY and OPENAI_API_KEY in the Settings panel 
+
+- Add both ANTHROPIC_API_KEY and OPENAI_API_KEY in the Settings panel
 - Add the following text to your prompt:
 
 ```
@@ -16,26 +17,25 @@ Use claude-fable-5 model for all tasks including coding, bug fixing, and test cr
 Speak 'sorcar', your task ...
 ```
 
-Make sure that the microphone button below the chat input box is pulsing blue.  Speak 'sorcar' followed by your task, KISS Sorcar will automatically run the task and tell you the result using its own voice. You need the OPENAI_API_KEY to enable this feature.  The voice interface distinguishes among different speakers.
+Make sure that the microphone button below the chat input box is pulsing blue. Speak 'sorcar' followed by your task, KISS Sorcar will automatically run the task and tell you the result using its own voice. You need the OPENAI_API_KEY to enable this feature. The voice interface distinguishes among different speakers.
 
 # Tip
 
-## Prompt KISS Sorcar like the Developer of KISS Sorcar 
+## Prompt KISS Sorcar like the Developer of KISS Sorcar
 
-Look at the commit messages at [https://github.com/ksenxx/kiss_ai/commits/main/], find the prompt that the developer used for that commit in a commit message, and what changed in the commit.  This will help you get started with KISS Sorcar on any tasks like a pro.
+Look at the commit messages at [https://github.com/ksenxx/kiss_ai/commits/main/], find the prompt that the developer used for that commit in a commit message, and what changed in the commit. This will help you get started with KISS Sorcar on any tasks like a pro.
 
 # Tip
-
 
 ## To Use the Remote Web/Mobile App
 
-Go to the Settings panel and copy the URL at the top.  This URL contains a message showing the latest cloudfared URL where you can find the KISS Sorcar webapp.  Send the URL from the Settings page to your mobile device.  Also see/set the remote password on the Settings page.  You can possibly SMS, slack, or email the URL to the mobile device.  Open the URL in the mobile device in a browser and enter your remote password.  You will see your faminiliar KISS Sorcar chat interface from VS Code.
+Go to the Settings panel and copy the URL at the top. This URL contains a message showing the latest cloudfared URL where you can find the KISS Sorcar webapp. Send the URL from the Settings page to your mobile device. Also see/set the remote password on the Settings page. You can possibly SMS, slack, or email the URL to the mobile device. Open the URL in the mobile device in a browser and enter your remote password. You will see your faminiliar KISS Sorcar chat interface from VS Code.
 
-# Tip 
+# Tip
 
 ## If You are Implementing a Software Feature
 
-Definitely add the following sentence to the prompt of the KISS Sorcar:  Reproduce the issue by writing an end-to-end real test. Then fix the issue.
+Definitely add the following sentence to the prompt of the KISS Sorcar: Reproduce the issue by writing an end-to-end real test. Then fix the issue.
 
 # Tip
 
@@ -47,7 +47,7 @@ Add the following sentence to your prompt to make KISS Sorcar search the interne
 
 ## If You Get git Merge Conflict
 
-Then run the following task:  Can you check the following message on merge conflict and help me fix it? <<copy_paste_theConflict_message_from_the_chat>>
+Then run the following task: Can you check the following message on merge conflict and help me fix it? \<<copy_paste_theConflict_message_from_the_chat>>
 
 # Tip
 
@@ -55,7 +55,7 @@ Then run the following task:  Can you check the following message on merge confl
 
 Just type or speak your shell command in the chat input textbox.
 
-# Tip 
+# Tip
 
 ## AI Discover and Auto Research
 
@@ -74,4 +74,3 @@ All you need to do is to use a variant of the followng prompt:
 ```
 Can you run the command \<<command>> in the background and monitor its output in real time to optimize the code at \<<folder_name_or_url>> with respect to the following metrics: \<<speed,accuracy,recall,cost>>. You can add diagnostic code which will print the metrics, such as running time at a finer level of granularity. Check for opportunities to optimize the code on the basis of the metrics information. If you discover any opportunities to optimize the metric based on the code, logs, events, and the command output, optimize the code and run the command again. Note down the ideas you used to optimize the code and the metric you achieved in a file, so that you can use the file to not repeat ideas that have already been tried and failed. You can also use the file to combine ideas that have been successful in the past. Repeat the process. Do not forget to remove the diagnostic code after the optimization is complete. You MUST NOT STOP until the metrics achieve the following values:\<<give_concrete_values_for_metrics>>. Use the internet extensively to get new ideas for optimization. Create an html report with diagrams and illustrations in ./reports and open it in the user's default browser?
 ```
-
