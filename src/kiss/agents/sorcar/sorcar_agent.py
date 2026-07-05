@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -391,7 +392,17 @@ class SorcarAgent(RelentlessAgent):
             broadcast = getattr(self.printer, "broadcast", None)
             if not callable(broadcast):
                 return "(talk not available in this environment)"
-            broadcast({"type": "talk", "language": language, "text": text})
+            # ``talkId`` uniquely identifies this utterance.  The
+            # printer fans out one tab-stamped copy per subscribed
+            # viewer tab and delivers every copy to every connected
+            # client; clients dedupe by talkId so each device speaks
+            # the utterance exactly once (never twice).
+            broadcast({
+                "type": "talk",
+                "language": language,
+                "text": text,
+                "talkId": uuid.uuid4().hex,
+            })
             return f"Spoke to the user in language {language!r}."
 
         if self.docker_manager:
