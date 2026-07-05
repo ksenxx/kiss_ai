@@ -291,6 +291,8 @@ Full model list:
 - `gpt-5.4-nano-2026-03-17`
 - `gpt-5.5`
 - `gpt-5.5-2026-04-23`
+- `gpt-5.5-2026-04-23-xhigh`
+- `gpt-5.5-xhigh`
 - `gpt-audio`
 - `gpt-audio-1.5`
 - `gpt-audio-2025-08-28`
@@ -338,6 +340,7 @@ Full model list:
 - `claude-sonnet-4-5`
 - `claude-sonnet-4-5-20250929`
 - `claude-sonnet-4-6`
+- `claude-sonnet-5`
 
 </details>
 
@@ -357,6 +360,7 @@ Full model list:
 - `gemini-3-pro-preview`
 - `gemini-3.1-flash-image`
 - `gemini-3.1-flash-lite`
+- `gemini-3.1-flash-lite-image`
 - `gemini-3.1-flash-lite-preview`
 - `gemini-3.1-flash-tts-preview`
 - `gemini-3.1-pro-preview`
@@ -497,7 +501,6 @@ Full model list:
 - `openrouter/amazon/nova-pro-v1`
 - `openrouter/anthracite-org/magnum-v4-72b`
 - `openrouter/anthropic/claude-3-haiku`
-- `openrouter/anthropic/claude-3.5-haiku`
 - `openrouter/anthropic/claude-3.7-sonnet:thinking`
 - `openrouter/anthropic/claude-fable-5`
 - `openrouter/anthropic/claude-haiku-4.5`
@@ -505,7 +508,6 @@ Full model list:
 - `openrouter/anthropic/claude-opus-4.1`
 - `openrouter/anthropic/claude-opus-4.5`
 - `openrouter/anthropic/claude-opus-4.6`
-- `openrouter/anthropic/claude-opus-4.6-fast`
 - `openrouter/anthropic/claude-opus-4.7`
 - `openrouter/anthropic/claude-opus-4.7-fast`
 - `openrouter/anthropic/claude-opus-4.8`
@@ -513,6 +515,7 @@ Full model list:
 - `openrouter/anthropic/claude-sonnet-4`
 - `openrouter/anthropic/claude-sonnet-4.5`
 - `openrouter/anthropic/claude-sonnet-4.6`
+- `openrouter/anthropic/claude-sonnet-5`
 - `openrouter/arcee-ai/coder-large`
 - `openrouter/arcee-ai/trinity-large-thinking`
 - `openrouter/arcee-ai/trinity-mini`
@@ -539,7 +542,6 @@ Full model list:
 - `openrouter/deepseek/deepseek-v3.2-exp`
 - `openrouter/deepseek/deepseek-v4-flash`
 - `openrouter/deepseek/deepseek-v4-pro`
-- `openrouter/essentialai/rnj-1-instruct`
 - `openrouter/google/gemini-2.5-flash`
 - `openrouter/google/gemini-2.5-flash-image`
 - `openrouter/google/gemini-2.5-flash-lite`
@@ -553,6 +555,7 @@ Full model list:
 - `openrouter/google/gemini-3.1-flash-image`
 - `openrouter/google/gemini-3.1-flash-image-preview`
 - `openrouter/google/gemini-3.1-flash-lite`
+- `openrouter/google/gemini-3.1-flash-lite-image`
 - `openrouter/google/gemini-3.1-flash-lite-preview`
 - `openrouter/google/gemini-3.1-pro-preview`
 - `openrouter/google/gemini-3.1-pro-preview-customtools`
@@ -589,7 +592,6 @@ Full model list:
 - `openrouter/meta-llama/llama-4-scout`
 - `openrouter/meta-llama/llama-guard-4-12b`
 - `openrouter/microsoft/phi-4`
-- `openrouter/microsoft/phi-4-mini-instruct`
 - `openrouter/microsoft/wizardlm-2-8x22b`
 - `openrouter/mistralai/codestral-2508`
 - `openrouter/mistralai/devstral-2512`
@@ -618,6 +620,7 @@ Full model list:
 - `openrouter/moonshotai/kimi-k2.7-code`
 - `openrouter/morph/morph-v3-fast`
 - `openrouter/morph/morph-v3-large`
+- `openrouter/nex-agi/nex-n2-pro`
 - `openrouter/nousresearch/hermes-3-llama-3.1-405b`
 - `openrouter/nousresearch/hermes-3-llama-3.1-70b`
 - `openrouter/nousresearch/hermes-4-405b`
@@ -661,6 +664,7 @@ Full model list:
 - `openrouter/openai/gpt-5.4-mini`
 - `openrouter/openai/gpt-5.4-nano`
 - `openrouter/openai/gpt-5.5`
+- `openrouter/openai/gpt-5.5-xhigh`
 - `openrouter/openai/gpt-audio`
 - `openrouter/openai/gpt-audio-mini`
 - `openrouter/openai/gpt-chat-latest`
@@ -685,7 +689,6 @@ Full model list:
 - `openrouter/perplexity/sonar-reasoning-pro`
 - `openrouter/poolside/laguna-m.1`
 - `openrouter/poolside/laguna-xs.2`
-- `openrouter/prime-intellect/intellect-3`
 - `openrouter/qwen/qwen-2.5-72b-instruct`
 - `openrouter/qwen/qwen-2.5-7b-instruct`
 - `openrouter/qwen/qwen-2.5-coder-32b-instruct`
@@ -737,6 +740,7 @@ Full model list:
 - `openrouter/rekaai/reka-flash-3`
 - `openrouter/relace/relace-apply-3`
 - `openrouter/relace/relace-search`
+- `openrouter/sakana/fugu-ultra`
 - `openrouter/sao10k/l3-lunaris-8b`
 - `openrouter/sao10k/l3.1-70b-hanami-x1`
 - `openrouter/sao10k/l3.1-euryale-70b`
@@ -770,6 +774,7 @@ Full model list:
 - `openrouter/z-ai/glm-5-turbo`
 - `openrouter/z-ai/glm-5.1`
 - `openrouter/z-ai/glm-5.2`
+- `openrouter/z-ai/glm-5v-turbo`
 - `openrouter/~anthropic/claude-fable-latest`
 - `openrouter/~anthropic/claude-haiku-latest`
 - `openrouter/~anthropic/claude-opus-latest`
@@ -778,6 +783,7 @@ Full model list:
 - `openrouter/~google/gemini-pro-latest`
 - `openrouter/~moonshotai/kimi-latest`
 - `openrouter/~openai/gpt-latest`
+- `openrouter/~openai/gpt-latest-xhigh`
 - `openrouter/~openai/gpt-mini-latest`
 
 </details>
