@@ -4,12 +4,12 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>KISS Sorcar — Tell it what to do, in English. It picks the best LLM and ships the work.</title>
-  <meta name="description" content="Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 502 models, 62.2% on Terminal Bench 2.0. Works as a VS Code extension, a Claude-Code-style CLI, and a web app.">
+  <meta name="description" content="Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 516 models, 62.2% on Terminal Bench 2.0. Works as a VS Code extension, a Claude-Code-style CLI, and a web app.">
   <link rel="canonical" href="https://kisssorcar.github.io/">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://kisssorcar.github.io/">
   <meta property="og:title" content="KISS Sorcar — Tell it what to do, in English. It picks the best LLM and ships the work.">
-  <meta property="og:description" content="Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 502 models, 62.2% on Terminal Bench 2.0.">
+  <meta property="og:description" content="Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 516 models, 62.2% on Terminal Bench 2.0.">
   <meta property="og:image" content="https://kisssorcar.github.io/assets/og-card.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
@@ -1938,8 +1938,8 @@
     <div class="hero-trust" aria-label="At a glance">
       <span><strong>Apache 2.0</strong> · open source</span>
       <span><strong>62.2%</strong> on Terminal Bench 2.0</span>
-      <span><strong>502 models</strong> · 9 providers</span>
-      <span><strong>~2,500 lines</strong> of core agents code</span>
+      <span><strong>516 models</strong> · 9 providers</span>
+      <span><strong>~2,900 lines</strong> of core agents code</span>
     </div>
   </div>
 
@@ -1954,14 +1954,11 @@
     </p>
   </div>
 
-  <!-- Hero demo video -->
+  <!-- Hero demo animation -->
   <div class="screenshot">
-    <video src="assets/sorcar-main.mp4"
-           controls autoplay muted loop playsinline preload="auto"
-           poster="assets/KISS-Sorcar-UI.png"
-           aria-label="KISS Sorcar demo video">
-      <a href="assets/sorcar-main.mp4">Watch the KISS Sorcar demo video</a>
-    </video>
+    <img src="assets/sorcar-main.gif"
+         alt="KISS Sorcar demo animation"
+         loading="eager" decoding="async">
   </div>
 
   <!-- Preferred way to install KISS Sorcar (full stack) — directly below the demo video. -->
@@ -2064,13 +2061,13 @@
             </tr>
             <tr>
               <th class="cap">Core Agents # LoC</th>
-              <td class="kiss"><strong>~2500</strong></td>
+              <td class="kiss"><strong>~2900</strong></td>
               <td>Unknown</td>
               <td>Unknown</td>
             </tr>
             <tr>
               <th class="cap">Models in bundled catalog</th>
-              <td class="kiss">502 across 9 provider categories</td>
+              <td class="kiss">516 across 9 provider categories</td>
               <td>Claude family only</td>
               <td>Subset chosen by Cursor</td>
             </tr>
@@ -2779,21 +2776,21 @@ In each step, keep track of the best prompt which has the maximum number of succ
   <div class="section-wrap">
   <section id="models" class="section-card">
     <span class="num">§ 09 — Models Supported</span>
-    <h2>🤖 502 models. 9 provider categories.<a href="#models" class="anchor">¶</a></h2>
-    <p class="sub">KISS Sorcar ships a catalog of <strong>502 models</strong> across <strong>9 provider categories</strong>, with built-in prices, context lengths, and capability flags (<code>fc</code> function calling, <code>gen</code> generation, <code>emb</code> embedding). The source of truth is <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/core/models/MODEL_INFO.json">src/kiss/core/models/MODEL_INFO.json</a>.</p>
+    <h2>🤖 516 models. 9 provider categories.<a href="#models" class="anchor">¶</a></h2>
+    <p class="sub">KISS Sorcar ships a catalog of <strong>516 models</strong> across <strong>9 provider categories</strong>, with built-in prices, context lengths, and capability flags (<code>fc</code> function calling, <code>gen</code> generation, <code>emb</code> embedding). The source of truth is <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/core/models/MODEL_INFO.json">src/kiss/core/models/MODEL_INFO.json</a>.</p>
 
     <div class="section-body">
       <div class="grid-2">
         <div class="inner-card" style="--i:0">
           <h3>Provider categories</h3>
           <div style="margin-top:0.5rem;">
-            <div class="provider-row"><span class="label">OpenAI</span><span class="count">70</span></div>
-            <div class="provider-row"><span class="label">Anthropic</span><span class="count">13</span></div>
-            <div class="provider-row"><span class="label">Gemini / Google</span><span class="count">23</span></div>
-            <div class="provider-row"><span class="label">Together AI</span><span class="count">77</span></div>
+            <div class="provider-row"><span class="label">OpenAI</span><span class="count">78</span></div>
+            <div class="provider-row"><span class="label">Anthropic</span><span class="count">14</span></div>
+            <div class="provider-row"><span class="label">Gemini / Google</span><span class="count">24</span></div>
+            <div class="provider-row"><span class="label">Together AI</span><span class="count">79</span></div>
             <div class="provider-row"><span class="label">Z.AI</span><span class="count">8</span></div>
             <div class="provider-row"><span class="label">Moonshot AI</span><span class="count">6</span></div>
-            <div class="provider-row"><span class="label">OpenRouter</span><span class="count">295</span></div>
+            <div class="provider-row"><span class="label">OpenRouter</span><span class="count">297</span></div>
             <div class="provider-row"><span class="label">Claude Code CLI (<code>cc/*</code>)</span><span class="count">3</span></div>
             <div class="provider-row"><span class="label">Codex CLI (<code>codex/*</code>)</span><span class="count">7</span></div>
           </div>
@@ -2804,11 +2801,11 @@ In each step, keep track of the best prompt which has the maximum number of succ
           <p>Across all bundled providers, the catalog currently reports:</p>
           <div class="stat-row">
             <div class="stat-pill">
-              <div class="n">486</div>
+              <div class="n">500</div>
               <div class="l">generation-capable models</div>
             </div>
             <div class="stat-pill">
-              <div class="n">326</div>
+              <div class="n">341</div>
               <div class="l">function-calling-capable models</div>
             </div>
             <div class="stat-pill">
@@ -3588,7 +3585,7 @@ In each step, keep track of the best prompt which has the maximum number of succ
     (function () {
       if (!('IntersectionObserver' in window)) return;
       const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-      // Find hero-trust strong elements containing numeric content (e.g. "62.2%", "502 models").
+      // Find hero-trust strong elements containing numeric content (e.g. "62.2%", "516 models").
       const strongs = document.querySelectorAll('.hero-trust strong');
       const items = [];
       strongs.forEach(el => {
