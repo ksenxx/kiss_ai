@@ -4050,6 +4050,27 @@
         clearAskForMatchingChatTabs(askTab);
         break;
       }
+      case 'talk': {
+        // Agent-initiated text-to-speech (the ``talk`` tool): play the
+        // text on this device's default speaker via the Web Speech API.
+        // Deliberately NOT gated on activeTabId or tab lookup — every
+        // device with a tab open for the running task must speak, even
+        // when the task's tab is in the background.
+        const talkText = ev.text || '';
+        if (!talkText) break;
+        try {
+          const synth = window.speechSynthesis;
+          const Utterance = window.SpeechSynthesisUtterance;
+          if (!synth || typeof Utterance !== 'function') break;
+          const utter = new Utterance(talkText);
+          if (ev.language) utter.lang = ev.language;
+          synth.speak(utter);
+        } catch (_e) {
+          // Speech synthesis unsupported or blocked — audio is
+          // best-effort and must never break event handling.
+        }
+        break;
+      }
       case 'error':
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) break;
         addError(ev.text);
