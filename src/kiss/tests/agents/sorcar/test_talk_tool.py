@@ -102,6 +102,51 @@ class TestTalkTool(unittest.TestCase):
             self.assertEqual(ev.get("taskId"), "task-1")
         self.assertIn("es", result["msg"])
 
+    def test_talk_copies_share_one_talk_id_unique_per_call(self) -> None:
+        """All stamped copies of one ``talk()`` call share one ``talkId``.
+
+        Every connected client receives every stamped copy (one per
+        subscribed viewer tab) and dedupes playback by ``talkId`` so
+        each device speaks the utterance exactly once — without the id
+        a task viewed in two tabs was spoken twice on the same
+        speakers.  A SECOND ``talk()`` call must carry a DIFFERENT
+        ``talkId`` so repeating the same sentence intentionally still
+        plays again.
+        """
+        printer = MemoryPrinter()
+        printer.subscribe_tab("task-id", "tab-a")
+        printer.subscribe_tab("task-id", "tab-b")
+        agent = _make_agent(printer)
+        talk = _find_tool(agent._get_tools(), "talk")
+
+        def agent_thread() -> None:
+            printer._thread_local.task_id = "task-id"
+            talk("en-US", "same sentence")
+            talk("en-US", "same sentence")
+
+        t = threading.Thread(target=agent_thread, daemon=True)
+        t.start()
+        t.join(timeout=5.0)
+        self.assertFalse(t.is_alive())
+
+        talk_events = [
+            ev for ev in printer.emitted if ev.get("type") == "talk"
+        ]
+        self.assertEqual(len(talk_events), 4)  # 2 calls x 2 tabs
+        ids = [ev.get("talkId") for ev in talk_events]
+        for talk_id in ids:
+            self.assertIsInstance(talk_id, str)
+            self.assertTrue(talk_id)
+        # 2 distinct ids overall, and the copies of each call agree.
+        self.assertEqual(len(set(ids)), 2)
+        by_id: dict[str, list[dict[str, Any]]] = {}
+        for ev in talk_events:
+            by_id.setdefault(str(ev.get("talkId")), []).append(ev)
+        for copies in by_id.values():
+            self.assertEqual(
+                {c.get("tabId") for c in copies}, {"tab-a", "tab-b"}
+            )
+
     def test_talk_is_live_only_not_replayed_from_history(self) -> None:
         """Talk audio is live-only: excluded from the display recording.
 
