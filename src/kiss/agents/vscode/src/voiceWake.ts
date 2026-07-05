@@ -93,8 +93,12 @@ export class VoiceWakeService {
    * Reports failures through the state callback instead of throwing so
    * the webview toggle always settles into a definite on/off/error
    * state.
+   *
+   * @param sensitivity Wake-word sensitivity 0..100 (settings-panel
+   *   slider), forwarded to the Python listener as ``--sensitivity``;
+   *   omitted or non-finite values fall back to the listener default.
    */
-  start(): void {
+  start(sensitivity?: number): void {
     if (this._proc) {
       this._onState(true);
       return;
@@ -108,6 +112,13 @@ export class VoiceWakeService {
       );
       return;
     }
+    const sensitivityArgs =
+      typeof sensitivity === 'number' && Number.isFinite(sensitivity)
+        ? [
+            '--sensitivity',
+            String(Math.min(100, Math.max(0, Math.round(sensitivity)))),
+          ]
+        : [];
     let proc: ChildProcess;
     try {
       proc = spawn(
@@ -117,6 +128,7 @@ export class VoiceWakeService {
           'python',
           '-m',
           'kiss.agents.vscode.voice_wake',
+          ...sensitivityArgs,
           ...extraListenerArgs(),
         ],
         // On POSIX, ``detached`` puts the listener in its own process
