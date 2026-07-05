@@ -2811,8 +2811,8 @@
   },
   "openrouter/nvidia/nemotron-3-super-120b-a12b": {
     "context_length": 1000000,
-    "input_price_per_1M": 0.09,
-    "output_price_per_1M": 0.4,
+    "input_price_per_1M": 0.08,
+    "output_price_per_1M": 0.45,
     "fc": true,
     "emb": false,
     "gen": true
@@ -3984,8 +3984,8 @@
   },
   "openrouter/z-ai/glm-5.2": {
     "context_length": 1048576,
-    "input_price_per_1M": 0.93,
-    "output_price_per_1M": 3.0,
+    "input_price_per_1M": 0.574,
+    "output_price_per_1M": 1.804,
     "fc": true,
     "emb": false,
     "gen": true
