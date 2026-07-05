@@ -77,6 +77,7 @@ from websockets.http11 import Request, Response
 from kiss.agents.vscode.diff_merge import _read_lines_preserved
 from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.agents.vscode.server import VSCodeServer
+from kiss.agents.vscode.tips import read_tips
 from kiss.agents.vscode.voice_wake import (
     DEFAULT_MODELS_DIR,
     SpeakerIdentifier,
@@ -2248,6 +2249,13 @@ def _build_html() -> str:
     """
     version = _read_version()
     tricks_json = json.dumps(_read_tricks())
+    # ``</`` must never appear raw inside the inline <script> block —
+    # a tip body containing ``</script>`` would otherwise terminate it.
+    # ``show`` is always false here: the tips window only auto-opens in
+    # the VS Code webview after a fresh installation (SorcarTab.ts).
+    tips_json = json.dumps(
+        {"tips": read_tips(), "show": False},
+    ).replace("</", "<\\/")
     head_style = (
         "<style>\n"
         "    html, body { height: 100%; margin: 0; padding: 0; overflow: hidden; }\n"
@@ -2324,6 +2332,8 @@ def _build_html() -> str:
         "DEMO_SRC": _media_url("demo.js"),
         "SHIM_SCRIPT": f"<script>{_WS_SHIM_JS}</script>\n  ",
         "TRICKS_JSON": tricks_json,
+        "TIPS_JSON": tips_json,
+        "TIPS_SRC": _media_url("tips.js"),
         "VOICE_SRC": _media_url("voice.js"),
         "VOICE_CONFIG": json.dumps({
             "mode": "browser",
