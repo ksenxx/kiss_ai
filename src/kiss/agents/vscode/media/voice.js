@@ -575,16 +575,59 @@
         // Milliseconds of quiet audio since the last speech block;
         // updated by onaudioprocess, read by the partial-result gate.
         let quietMs = 0;
+        // True while the 'result' event carrying the flushed wake
+        // utterance (the retrieveFinalResult() call in fireWake) is
+        // still in flight; that result's text is the wake word itself
+        // and must never re-trigger.
+        let awaitingFlush = false;
+        // React to a recognized wake word: start the post-wake capture
+        // and flush/reset the recognizer.  Without the flush the
+        // decoded "sorcar" utterance stays pending inside Vosk while
+        // the capture owns the audio (the recognizer hears nothing),
+        // and the first silence endpoint AFTER the capture finalizes
+        // it as a stale wake-word result — re-arming a capture and
+        // transcribing speech nobody prefixed with "Sorcar".  Mirrors
+        // the Python listener's Reset() after a wake;
+        // retrieveFinalResult() is the only reset vosk-browser
+        // exposes, and it delivers the flushed utterance as one
+        // 'result' event that awaitingFlush consumes.
+        function fireWake() {
+          if (!triggerWake()) return;
+          quietMs = 0;
+          beginCapture();
+          if (
+            recognizer &&
+            typeof recognizer.retrieveFinalResult === 'function'
+          ) {
+            awaitingFlush = true;
+            try {
+              recognizer.retrieveFinalResult();
+            } catch (_e) {
+              awaitingFlush = false;
+            }
+          }
+        }
         recognizer.on('result', message => {
           if (message && message.result) {
             debugLog('result', message.result.text);
+            if (awaitingFlush) {
+              // The flushed final of the utterance that fired the
+              // wake; its text is the wake word and must not
+              // re-trigger.
+              awaitingFlush = false;
+              return;
+            }
+            // A capture owns the current voice round; any result
+            // arriving now decodes pre-wake audio and must not wipe
+            // the capture by re-waking.
+            if (capture) return;
             // A final result means Vosk saw the endpoint: the whole
             // utterance is over, so no pause gate is needed.
             if (
               matchesWake(message.result.text) &&
               wordsConfident(message.result.result)
             ) {
-              if (triggerWake()) beginCapture();
+              fireWake();
             }
           }
         });
@@ -593,13 +636,16 @@
             if (message.result.partial) {
               debugLog('partial', message.result.partial);
             }
+            // Stale partials decoded from pre-wake audio must not
+            // re-wake while the capture owns the round.
+            if (capture) return;
             // Fire only when the speaker paused right after the
             // alias; continuous speech keeps quietMs at 0.
             if (
               quietMs >= sensitivityWakePauseMs(sensitivity) &&
               matchesWake(message.result.partial)
             ) {
-              if (triggerWake()) beginCapture();
+              fireWake();
             }
           }
         });
