@@ -153,7 +153,10 @@
    * Sanitize an HTML string before assigning to innerHTML.
    *
    * Strips dangerous tags (script/iframe/object/embed/form/meta/link/style/
-   * base), all event-handler attributes (onclick, onerror, ...) and
+   * base), every custom element (any hyphenated tag — the webview registers
+   * ``<kiss-tips-panel>``, and agent-supplied HTML must never upgrade into a
+   * live component such as a blank full-viewport Tips overlay), all
+   * event-handler attributes (onclick, onerror, ...) and
    * javascript:/data:/vbscript: URLs in href/src/action.  Used to wrap every
    * marked.parse() result that flows into innerHTML so that agent-supplied
    * markdown can never inject script/iframe/form via the webview.
@@ -184,7 +187,7 @@
     const walk = root => {
       const elements = Array.from(root.querySelectorAll('*'));
       for (const el of elements) {
-        if (BAD_TAGS.has(el.tagName)) {
+        if (BAD_TAGS.has(el.tagName) || el.tagName.includes('-')) {
           el.remove();
           continue;
         }

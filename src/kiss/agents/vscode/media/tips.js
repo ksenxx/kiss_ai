@@ -225,6 +225,7 @@
     constructor() {
       super();
       this._tips = [];
+      this._tipsAssigned = false;
       this._index = 0;
       const root = this.attachShadow({mode: 'open'});
       const style = document.createElement('style');
@@ -302,8 +303,24 @@
 
     set tips(list) {
       this._tips = Array.isArray(list) ? list : [];
+      this._tipsAssigned = true;
       this._index = 0;
       this._update();
+    }
+
+    /**
+     * Self-remove when mounted without ``.tips`` ever assigned.
+     *
+     * Only ``showTipsPanel()`` — which assigns ``.tips`` before
+     * mounting — may show a panel.  A ``<kiss-tips-panel>`` upgraded
+     * from parsed HTML (e.g. a chat transcript mentioning the tag,
+     * injected via ``innerHTML`` through a path that bypasses the
+     * sanitizer) would otherwise cover the chat as a blank
+     * full-viewport overlay.  The bulb's empty-tips panel keeps
+     * working because ``showTipsPanel([])`` still assigns ``.tips``.
+     */
+    connectedCallback() {
+      if (!this._tipsAssigned) this.remove();
     }
 
     /** Re-render the current tip, counter, and button states. */
@@ -387,7 +404,12 @@
   wireTipsButton();
 
   const cfg = window.__TIPS__;
-  if (cfg && cfg.show && configuredTips().length > 0) {
+  if (
+    cfg &&
+    cfg.show &&
+    configuredTips().length > 0 &&
+    !document.body.querySelector('kiss-tips-panel')
+  ) {
     showTipsPanel(cfg.tips);
   }
 })();
