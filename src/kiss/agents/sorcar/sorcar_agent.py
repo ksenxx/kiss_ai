@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -370,6 +371,60 @@ class SorcarAgent(RelentlessAgent):
                 return str(ask_callback(question))
             return "(ask_user_question not available in this environment)"
 
+        def talk(language: str, text: str, emotion: str = "") -> str:
+            """Speak text aloud to the user through their device speakers.
+
+            Broadcasts a text-to-speech request to every client tab open
+            for the running task (across all connected devices); each
+            client plays the text on its default speaker system using
+            the given language's voice.  Use this to respond aloud when
+            the user speaks to the running task.
+
+            Write *text* the way a warm, engaged human actually talks —
+            NEVER like a robot reading a report.  Use contractions
+            ("I'm", "let's", "that's"), short varied sentences, and
+            natural interjections ("Alright,", "Oh nice —", "Hmm,",
+            "Okay, so...").  Punctuation drives the delivery: questions
+            rise, exclamations add energy, an ellipsis trails off, and
+            sentence breaks become natural breathing pauses.  Pick an
+            *emotion* that matches the vibe of the moment instead of
+            leaving it flat.
+
+            Args:
+                language: BCP-47 language tag for the speech voice
+                    (e.g. "en-US", "es", "fr-FR").
+                text: The text to synthesize and play aloud, written in
+                    a natural, conversational, emotionally expressive
+                    style (contractions, interjections, punctuation).
+                emotion: Optional vibe for the delivery; the client
+                    shapes speech rate and pitch to match.  One of
+                    "cheerful", "excited", "playful", "curious", "warm",
+                    "proud", "calm", "empathetic", "reassuring",
+                    "apologetic", "serious", or "sad".  Empty means
+                    neutral (the client may still infer a vibe from the
+                    punctuation and wording of *text*).
+
+            Returns:
+                A confirmation message, or a note that audio playback is
+                unavailable in this environment.
+            """
+            broadcast = getattr(self.printer, "broadcast", None)
+            if not callable(broadcast):
+                return "(talk not available in this environment)"
+            # ``talkId`` uniquely identifies this utterance.  The
+            # printer fans out one tab-stamped copy per subscribed
+            # viewer tab and delivers every copy to every connected
+            # client; clients dedupe by talkId so each device speaks
+            # the utterance exactly once (never twice).
+            broadcast({
+                "type": "talk",
+                "language": language,
+                "text": text,
+                "emotion": emotion,
+                "talkId": uuid.uuid4().hex,
+            })
+            return f"Spoke to the user in language {language!r}."
+
         if self.docker_manager:
             from kiss.docker.docker_tools import DockerTools
 
@@ -591,6 +646,7 @@ class SorcarAgent(RelentlessAgent):
         except Exception:
             logger.warning("MCP tool setup failed", exc_info=True)
         tools.append(ask_user_question)
+        tools.append(talk)
         tools.append(set_model)
         if self._is_parallel:
             tools.append(run_parallel)
@@ -641,6 +697,16 @@ class SorcarAgent(RelentlessAgent):
         verbose: bool | None = None,
     ) -> None:
         resolved_model = model_name or _load_last_model() or get_default_model()
+        # Remember the model this task was LAUNCHED with.  The
+        # ``set_model`` tool mutates ``self.model_name`` mid-task
+        # (deliberately — subsequent sub-sessions of the SAME task must
+        # stay on the switched model), so end-of-task persistence
+        # (e.g. ``ChatSorcarAgent.run``'s final task-history save) must
+        # read this attribute instead of ``self.model_name`` — the
+        # recorded model of a task, like every other global model
+        # preference, must never change because an agent switched its
+        # own model while running (see INVARIANTS.md #217).
+        self._launch_model_name = resolved_model
         super()._reset(
             model_name=resolved_model,
             max_sub_sessions=max_sub_sessions,
@@ -936,10 +1002,16 @@ def run_tasks_parallel(
         # frontend, persisting the ``subagent`` extra field).  This
         # keeps the parallel executor itself free of any task-id or
         # frontend knowledge.  The base ``SorcarAgent`` path has no
-        # parent ``task_id`` to record, so ``parent_task_id`` is
-        # ``None`` here; the chat-aware override sets the real parent
-        # id.
-        agent._subagent_info = {"parent_task_id": None}
+        # parent ``task_id`` to record, so ``parent_task_id`` is the
+        # empty string here (the same "no persisted parent" sentinel
+        # the chat-aware override uses — see r4-sorcar-H2 in
+        # ``ChatSorcarAgent._run_tasks_parallel``; a ``None`` here
+        # would persist ``subagent: {parent_task_id: null}`` while the
+        # chat path persists ``""``, split-braining downstream
+        # ``parent_task_id == ""`` checks).  ``parent_tab_id`` is
+        # likewise ``""`` so the persisted payload shape matches the
+        # chat path.
+        agent._subagent_info = {"parent_task_id": "", "parent_tab_id": ""}
         try:
             # ``is_parallel=True`` propagates the parallel capability so
             # sub-agents themselves get the ``run_parallel`` tool and
@@ -958,8 +1030,13 @@ def run_tasks_parallel(
         finally:
             sub_usage[idx] = _agent_usage(agent)
             if printer is not None and parent_key:
+                # Use the same ``task-{parent}__sub_{idx}`` tab-id
+                # format that ``ChatSorcarAgent._run_tasks_parallel``
+                # registers/broadcasts, so a frontend tab materialized
+                # under the chat-style deterministic id can always be
+                # matched and its running indicator stopped.
                 _broadcast_subagent_done(
-                    printer, [f"{parent_key}__sub_{idx}"],
+                    printer, [f"task-{parent_key}__sub_{idx}"],
                 )
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:

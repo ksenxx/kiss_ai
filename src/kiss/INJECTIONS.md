@@ -8,6 +8,10 @@ Reproduce the issue by writing an end-to-end test. Then fix the issue.
 
 ## Trick
 
+Use claude-fable-5 model for all tasks including coding, bug fixing, and test creation. Use gpt-5.5-xhigh (not codex) for thorough review and debugging of the work done by the other model. Check if the other model has missed some code or has introduced bugs. No need to check if the models exist.
+
+## Trick
+
 Create an html report with diagrams and illustrations in ./reports and open it in the user's default browser?
 
 ## Trick
@@ -20,19 +24,7 @@ Reproduce any violation of the invariant by writing end-to-end tests. Then fix t
 
 ## Trick
 
-Use claude-opus-4-7 model for all tasks including coding, bug fixing, and test creation. Use gpt-5.5-xhigh (not codex) for thorough review and debugging of the work done by the other model. Check if the other model has missed some code or has introduced bugs. No need to check if the models exist.
-
-## Trick
-
-Can you review the updates made in the last task using gpt-5.5-xhigh (non codex) and find bugs or missing code. Then write end-to-end tests reproducing the bugs reported by the review, fix them, and test them using claude-opus-4-7? Run all the tests in parallel and fix bugs after thoroughly reviewing the fixes with gpt-5.5-xhigh (non codex). Repeat the process until you fail to reproduce the bugs reported by the review done by gpt-5.5-xhigh (non codex). No need to check if the models exist.
-
-## Trick
-
-Review the updates made in the current task using gpt-5.5-xhigh (non codex) and find bugs or missing code or wirings. Then write end-to-end tests reproducing the bugs reported by the review, fix them, and test them using claude-opus-4-7? Run all the tests in parallel and fix bugs after thoroughly reviewing the fixes with gpt-5.5-xhigh (non codex). Repeat the process until you fail to reproduce the bugs reported by the review done by gpt-5.5-xhigh (non codex). No need to check if the models exist.
-
-## Trick
-
-Use openrouter/z-ai/glm-5.2 model for all tasks including coding, bug fixing, and test creation. ALWAYS use gpt-5.5-xhigh (not codex) to carefully and thoroughly review and debug the work done by openrouter/z-ai/glm-5.2 for bugs and missing code. Then use claude-opus-4-7 to do the same thing.
+Use openrouter/z-ai/glm-5.2 model for all tasks including coding, bug fixing, and test creation. ALWAYS use gpt-5.5-xhigh (not codex) to carefully and thoroughly review and debug the work done by openrouter/z-ai/glm-5.2 for bugs and missing code. Then use claude-fable-5 to do the same thing.
 
 ## Trick
 
@@ -45,14 +37,6 @@ Can you check the following message on merge conflict and help me fix it?
 ## Trick
 
 Make sure that there is no reward hacking and cheating when reviewing your implementation.
-
-## Trick
-
-git push origin
-
-## Trick
-
-Get rid of all commits after the following commit from both main and origin:
 
 ## Trick
 

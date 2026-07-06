@@ -126,6 +126,7 @@ import {getGitApi} from './gitApi';
 import {MergeManager} from './MergeManager';
 import {getDefaultModel} from './DependencyInstaller';
 import {buildChatHtml, readSampleTasks} from './SorcarTab';
+import {VoiceWakeService} from './voiceWake';
 import {findInstallScript, kissAiRoot} from './installerPath';
 import {
   FromWebviewMessage,
@@ -226,6 +227,14 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
    */
   private _ownTabs: Set<string> = new Set();
   private _webviewHasFocus: boolean = false;
+
+  // Host-side "Sorcar" wake-word listener (webviews cannot capture the
+  // microphone, so the extension host runs it and forwards wake events).
+  private _voiceWake: VoiceWakeService | undefined;
+  // Wake-word sensitivity (0..100) last reported by the webview's
+  // settings-panel slider; passed to the Python listener as
+  // --sensitivity on every (re)start.
+  private _voiceSensitivity: number | undefined;
 
   /** Per-tab MergeManager instances — each tab gets its own merge review. */
   private _mergeManagers: Map<string, MergeManager> = new Map();
@@ -732,6 +741,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         this._view = undefined;
         this._disposed = true;
         setWebviewNotificationPoster(undefined);
+        // Stop the microphone listener: with the webview gone there is
+        // nowhere to type the wake word, and holding the mic open from
+        // a closed view would be a privacy hazard.
+        this._voiceWake?.stop();
       }
       this._resolveAllWorktreeActions();
     });
@@ -1378,6 +1391,39 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         this._webviewHasFocus = message.focused;
         break;
 
+      case 'voiceToggle': {
+        if (!this._voiceWake) {
+          this._voiceWake = new VoiceWakeService(
+            () => this._sendToWebview({type: 'voiceWake'}),
+            (listening, error) =>
+              this._sendToWebview({type: 'voiceState', listening, error}),
+            (text, speaker) =>
+              this._sendToWebview({type: 'voiceSpeech', text, speaker}),
+            () => this._sendToWebview({type: 'voiceTranscribing'}),
+          );
+        }
+        if (typeof message.sensitivity === 'number') {
+          this._voiceSensitivity = message.sensitivity;
+        }
+        if (message.enabled) this._voiceWake.start(this._voiceSensitivity);
+        else this._voiceWake.stop();
+        break;
+      }
+
+      case 'voiceSensitivity': {
+        // The settings-panel slider moved: remember the value and
+        // apply it live by restarting a running listener with the new
+        // --sensitivity (a stopped listener just picks it up on the
+        // next voiceToggle start).
+        if (typeof message.value !== 'number') break;
+        this._voiceSensitivity = message.value;
+        if (this._voiceWake?.running) {
+          this._voiceWake.stop();
+          this._voiceWake.start(this._voiceSensitivity);
+        }
+        break;
+      }
+
       case 'sizeReport': {
         const cb = this._sizeReportResolver;
         this._sizeReportResolver = undefined;
@@ -1705,6 +1751,8 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   public dispose(): void {
     this._disposed = true;
     setWebviewNotificationPoster(undefined);
+    this._voiceWake?.dispose();
+    this._voiceWake = undefined;
     if (this._urlFileWatchTimer) {
       clearInterval(this._urlFileWatchTimer);
       this._urlFileWatchTimer = undefined;

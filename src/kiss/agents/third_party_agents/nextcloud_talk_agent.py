@@ -16,6 +16,7 @@ Usage::
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,8 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     ToolMethodBackend,
     channel_main,
 )
+
+logger = logging.getLogger(__name__)
 
 _NEXTCLOUD_DIR = Path.home() / ".kiss" / "third_party_agents" / "nextcloud"
 _config = ChannelConfig(
@@ -83,7 +86,7 @@ class NextcloudTalkChannelBackend(ToolMethodBackend):
         if not cfg:  # pragma: no branch
             self._connection_info = "No Nextcloud config found."
             return False
-        self._url = cfg["url"]
+        self._url = cfg["url"].rstrip("/")
         self._auth = (cfg["username"], cfg["password"])
         try:
             result = self._get("/room")
@@ -97,49 +100,73 @@ class NextcloudTalkChannelBackend(ToolMethodBackend):
             return False
 
     def join_channel(self, channel_id: str) -> None:
-        """Join a Nextcloud Talk room."""
+        """Join a Nextcloud Talk room via the self-join endpoint."""
         try:
-            self._post(f"/room/{channel_id}/participants")
+            result = self._post(f"/room/{channel_id}/participants/active")
+            statuscode = result.get("ocs", {}).get("meta", {}).get("statuscode", 0)
+            if statuscode not in (200, 201):
+                logger.warning("Nextcloud Talk join failed for %s: %s", channel_id, result)
         except Exception:
-            pass
+            logger.warning("Nextcloud Talk join failed for %s", channel_id, exc_info=True)
 
     def poll_messages(
         self, channel_id: str, oldest: str, limit: int = 10
     ) -> tuple[list[dict[str, Any]], str]:
-        """Poll a Nextcloud Talk room for new messages."""
+        """Poll a Nextcloud Talk room for new messages.
+
+        Fetches the latest messages (``lookIntoFuture=0`` without
+        ``lastKnownMessageId``, which would page backwards) and filters
+        client-side to message ids greater than the numeric ``oldest``
+        cursor (``""``/``"0"`` = no cursor).  ``ts`` carries the Talk
+        message id (used as ``replyTo`` by :meth:`send_message`); the unix
+        epoch is kept under ``timestamp``.  Returns max id as the cursor.
+        """
         if not channel_id:  # pragma: no branch
             return [], oldest
         try:
-            params: dict[str, Any] = {
-                "lookIntoFuture": 0,
-                "limit": limit,
-                "lastKnownMessageId": self._last_message_id,
-            }
+            cursor = int(oldest) if oldest not in ("", "0") else 0
+        except ValueError:
+            cursor = 0
+        try:
+            params: dict[str, Any] = {"lookIntoFuture": 0, "limit": limit}
             result = self._get(f"/chat/{channel_id}", params=params)
             msgs = result.get("ocs", {}).get("data", [])
             messages: list[dict[str, Any]] = []
+            max_id = cursor
             for msg in msgs:  # pragma: no branch
-                msg_id = msg.get("id", 0)
+                msg_id = int(msg.get("id", 0) or 0)
+                if msg_id <= cursor:
+                    continue
+                max_id = max(max_id, msg_id)
                 if msg_id > self._last_message_id:  # pragma: no branch
                     self._last_message_id = msg_id
                 messages.append(
                     {
-                        "ts": str(msg.get("timestamp", "")),
+                        "ts": str(msg_id),
                         "user": msg.get("actorId", ""),
                         "text": msg.get("message", ""),
                         "id": str(msg_id),
+                        "timestamp": str(msg.get("timestamp", "")),
                     }
                 )
-            return messages, str(self._last_message_id)
+            messages.sort(key=lambda m: int(m["ts"]))
+            return messages, str(max_id) if max_id else oldest
         except Exception:
             return [], oldest
 
     def send_message(self, channel_id: str, text: str, thread_ts: str = "") -> None:
-        """Send a Nextcloud Talk message."""
+        """Send a Nextcloud Talk message.
+
+        Raises:
+            RuntimeError: If the OCS response reports failure.
+        """
         kwargs: dict[str, Any] = {"message": text, "replyTo": 0}
         if thread_ts:  # pragma: no branch
             kwargs["replyTo"] = int(thread_ts)
-        self._post(f"/chat/{channel_id}", kwargs)
+        result = self._post(f"/chat/{channel_id}", kwargs)
+        statuscode = result.get("ocs", {}).get("meta", {}).get("statuscode", 0)
+        if statuscode not in (200, 201):
+            raise RuntimeError(f"Nextcloud Talk send failed: {result}")
 
     def wait_for_reply(
         self,
@@ -344,7 +371,7 @@ class NextcloudTalkAgent(BaseChannelAgent, SorcarAgent):
         self._backend = NextcloudTalkChannelBackend()
         cfg = _config.load()
         if cfg:  # pragma: no branch
-            self._backend._url = cfg["url"]
+            self._backend._url = cfg["url"].rstrip("/")
             self._backend._auth = (cfg["username"], cfg["password"])
 
     def _is_authenticated(self) -> bool:
@@ -400,7 +427,7 @@ class NextcloudTalkAgent(BaseChannelAgent, SorcarAgent):
                 if data.get("ok"):  # pragma: no branch
                     _config.save(
                         {
-                            "url": url.strip(),
+                            "url": url.strip().rstrip("/"),
                             "username": username.strip(),
                             "password": password.strip(),
                         }
@@ -431,7 +458,7 @@ def _make_backend() -> NextcloudTalkChannelBackend:
     if not cfg:  # pragma: no branch
         print("Not authenticated. Run: kiss-nextcloud -t 'authenticate'")
         sys.exit(1)
-    backend._url = cfg["url"]
+    backend._url = cfg["url"].rstrip("/")
     backend._auth = (cfg["username"], cfg["password"])
     return backend
 

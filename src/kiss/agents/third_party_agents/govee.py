@@ -25,17 +25,22 @@ from typing import Any
 from urllib.request import Request, urlopen
 
 API = "https://openapi.api.govee.com/router/api/v1"
-KEY: str = os.environ.get("GOVEE_API_KEY", "")
-if not KEY:
-    sys.exit("error: GOVEE_API_KEY not set")
 
 # Devices to hide from `list` and from name lookups.
 EXCLUDED_NAMES = {"permanent outdoor lights", "string lights"}
 
 
+def _api_key() -> str:
+    """Return the Govee API key from $GOVEE_API_KEY, exiting if it is not set."""
+    key = os.environ.get("GOVEE_API_KEY", "")
+    if not key:
+        sys.exit("error: GOVEE_API_KEY not set")
+    return key
+
+
 def _request(path: str, payload: dict | None = None) -> dict:
     url = f"{API}{path}"
-    headers = {"Govee-API-Key": KEY, "Content-Type": "application/json"}
+    headers = {"Govee-API-Key": _api_key(), "Content-Type": "application/json"}
     data = json.dumps(payload).encode() if payload else None
     req = Request(url, data=data, headers=headers, method="POST" if data else "GET")
     with urlopen(req, timeout=60) as resp:

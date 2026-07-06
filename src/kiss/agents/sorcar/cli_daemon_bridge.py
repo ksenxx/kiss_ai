@@ -12,8 +12,8 @@ nothing until the next page reload replays from the DB.
 
 This module gives the CLI printer a transport: a cached AF_UNIX
 connection to the local daemon's UDS endpoint (default
-``~/.kiss/sorcar.sock``; override via the ``KISS_SORCAR_SOCK`` env var
-for tests).  Each broadcast sends a newline-delimited
+``$KISS_HOME/sorcar.sock``, falling back to ``~/.kiss/sorcar.sock``;
+override via the ``KISS_SORCAR_SOCK`` env var for tests).  Each broadcast sends a newline-delimited
 ``{"type": "cliEvent", "event": <event>}`` envelope which the daemon
 dispatcher relays to every subscriber tab via
 ``RemoteAccessServer._relay_cli_event``.  Connection failures are
@@ -31,7 +31,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-_DEFAULT_SOCK_PATH = Path.home() / ".kiss" / "sorcar.sock"
+from kiss.agents.sorcar.persistence import _default_kiss_dir
 
 _LOCK = threading.Lock()
 _WRITER: socket.socket | None = None
@@ -55,9 +55,14 @@ def _sock_path() -> Path:
     """Return the UDS path the bridge should connect to.
 
     Reads the ``KISS_SORCAR_SOCK`` environment variable on every call.
+    When unset, derives the default from
+    :func:`persistence._default_kiss_dir` so the bridge targets the
+    same ``$KISS_HOME/sorcar.sock`` the daemon binds
+    (``web_server._UDS_PATH``) instead of a hard-coded
+    ``~/.kiss/sorcar.sock`` that ignores ``KISS_HOME`` (w3 C-5).
     """
     env = os.environ.get("KISS_SORCAR_SOCK")
-    return Path(env) if env else _DEFAULT_SOCK_PATH
+    return Path(env) if env else _default_kiss_dir() / "sorcar.sock"
 
 
 def _connect() -> socket.socket | None:
@@ -68,11 +73,16 @@ def _connect() -> socket.socket | None:
     must keep running normally even when no daemon is listening.
     """
     path = _sock_path()
+    s: socket.socket | None = None
     try:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.settimeout(_SEND_TIMEOUT)
         s.connect(str(path))
     except OSError:
+        # Close the already-created socket object so a daemon-less CLI
+        # run does not leak one fd per broadcast until GC (w3 C-1).
+        if s is not None:
+            s.close()
         return None
     return s
 

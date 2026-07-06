@@ -189,27 +189,30 @@ class TestPreserveForReview:
         agent = WorktreeSorcarAgent("regr-test")
         assert agent._preserve_pending_worktree_for_review() is False
 
-    def test_dirty_worktree_committed_to_branch_not_merged(
+    def test_dirty_worktree_preserved_uncommitted_no_auto_commit(
         self, tmp_path: Path
     ) -> None:
         repo = _init_repo(tmp_path)
         branch, wt_dir = _make_worktree(repo)
         agent = _make_agent(repo, branch, wt_dir)
-        # auto_commit disabled -> _auto_commit_worktree no-ops (no LLM);
-        # the late-arriver commit_all retry then captures the work.
+        # fixer3-F14: with auto-commit disabled the preserve path must
+        # honor the ``--no-auto-commit`` contract — never force-commit
+        # the user's reviewable changes via the late-arriver retry.
+        # The worktree directory is preserved intact for manual review.
         agent.auto_commit_enabled = False
         agent._pending_review = True
         (wt_dir / "partial.txt").write_text("partial work\n")
         assert agent._preserve_pending_worktree_for_review() is True
         assert agent._wt is None
         assert agent._pending_review is False
-        assert not wt_dir.exists()
-        # Work survives as a commit on the branch, NOT on the original.
-        show = _run_git(repo, "show", f"{branch}:partial.txt")
-        assert show == "partial work\n"
+        # Worktree dir survives with the change still uncommitted.
+        assert wt_dir.exists()
+        porcelain = _run_git(wt_dir, "status", "--porcelain")
+        assert "partial.txt" in porcelain
         assert "partial.txt" not in _run_git(repo, "ls-files")
+        # No forced "late-arriving" commit landed on the branch.
         log = _run_git(repo, "log", "-1", "--format=%s", branch)
-        assert "late-arriving" in log
+        assert "late-arriving" not in log
 
     def test_clean_worktree_is_just_cleaned_up(self, tmp_path: Path) -> None:
         repo = _init_repo(tmp_path)

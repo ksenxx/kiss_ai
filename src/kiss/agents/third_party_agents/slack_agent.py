@@ -7,14 +7,15 @@
 Provides authenticated access to a Slack workspace via a bot token
 with multi-turn chat-session persistence.  Handles authentication
 (reading token from disk or prompting the user via the browser),
-stores the token securely in ``~/.kiss/third_party_agents/slack/token.json``,
+stores the token securely in
+``~/.kiss/third_party_agents/slack/<workspace>/token.json``,
 and exposes a focused set of Slack Web API tools that give the agent
-full control over messaging, third_party_agents, users, reactions, and search.
+full control over messaging, channels, users, reactions, and search.
 
 Usage::
 
     agent = SlackAgent()
-    agent.run(prompt_template="List all public third_party_agents in my workspace")
+    agent.run(prompt_template="List all public channels in my workspace")
 """
 
 from __future__ import annotations
@@ -138,7 +139,8 @@ class SlackChannelBackend(ToolMethodBackend):
                 "No Slack token found. Please store a bot token first.\n"
                 "Run: uv run python -m kiss.agents.third_party_agents"
                 ".slack_agent --task 'check auth'\n"
-                "Or manually save token to ~/.kiss/third_party_agents/slack/token.json"
+                "Or manually save token to "
+                f"~/.kiss/third_party_agents/slack/{self._workspace}/token.json"
             )
             return False
         self._client = WebClient(token=token, retry_handlers=[])
@@ -169,8 +171,8 @@ class SlackChannelBackend(ToolMethodBackend):
             if cursor:  # pragma: no branch
                 kwargs["cursor"] = cursor
             resp = self._client.conversations_list(**kwargs)
-            third_party_agents: list[dict[str, Any]] = resp.get("third_party_agents", [])
-            for ch in third_party_agents:  # pragma: no branch
+            channels: list[dict[str, Any]] = resp.get("channels", [])
+            for ch in channels:  # pragma: no branch
                 if ch.get("name") == name:  # pragma: no branch
                     return str(ch["id"])
             cursor = (resp.get("response_metadata") or {}).get("next_cursor", "")
@@ -406,13 +408,13 @@ class SlackChannelBackend(ToolMethodBackend):
     def list_third_party_agents(
         self, types: str = "public_channel", limit: int = 200, cursor: str = ""
     ) -> str:
-        """List third_party_agents in the Slack workspace.
+        """List channels in the Slack workspace.
 
         Args:
             types: Comma-separated channel types. Options:
                 public_channel, private_channel, mpim, im.
                 Default: "public_channel".
-            limit: Maximum number of third_party_agents to return (1-1000).
+            limit: Maximum number of channels to return (1-1000).
                 Default: 200.
             cursor: Pagination cursor for next page of results.
                 Pass the value from the previous response's
@@ -428,7 +430,7 @@ class SlackChannelBackend(ToolMethodBackend):
             if cursor:  # pragma: no branch
                 kwargs["cursor"] = cursor
             resp = self._client.conversations_list(**kwargs)
-            raw_third_party_agents: list[dict[str, Any]] = resp.get("third_party_agents", [])
+            raw_channels: list[dict[str, Any]] = resp.get("channels", [])
             third_party_agents = [
                 {
                     "id": ch["id"],
@@ -437,7 +439,7 @@ class SlackChannelBackend(ToolMethodBackend):
                     "purpose": ch.get("purpose", {}).get("value", ""),
                     "num_members": ch.get("num_members", 0),
                 }
-                for ch in raw_third_party_agents
+                for ch in raw_channels
             ]
             result: dict[str, Any] = {"ok": True, "third_party_agents": third_party_agents}
             next_cursor = (resp.get("response_metadata") or {}).get("next_cursor", "")
@@ -785,7 +787,7 @@ class SlackChannelBackend(ToolMethodBackend):
     def upload_file(
         self, third_party_agents: str, content: str, filename: str, title: str = "",
     ) -> str:
-        """Upload text content as a file to Slack third_party_agents.
+        """Upload text content as a file to Slack channels.
 
         Args:
             third_party_agents: Comma-separated channel IDs to share the file in.
@@ -800,7 +802,7 @@ class SlackChannelBackend(ToolMethodBackend):
         try:
             channel_list = [c.strip() for c in third_party_agents.split(",") if c.strip()]
             resp = self._client.files_upload_v2(
-                third_party_agents=channel_list,
+                channels=channel_list,
                 content=content,
                 filename=filename,
                 title=title or filename,
@@ -972,7 +974,7 @@ class SlackAgent(BaseChannelAgent, SorcarAgent):
             click, type_text) to complete the following steps autonomously:
             1. Create a new app ("From scratch"), give it a name, select a workspace.
             2. Go to "OAuth & Permissions", add bot scopes
-               (third_party_agents:read, chat:write, etc.).
+               (channels:read, channels:history, chat:write, etc.).
             3. Click "Install to Workspace" and approve the installation.
             4. Copy the "Bot User OAuth Token" (starts with xoxb-).
             5. Call authenticate_slack(token=<the token>).

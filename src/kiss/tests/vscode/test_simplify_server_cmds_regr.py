@@ -13,7 +13,6 @@ test ``KISS_HOME`` (set by the session conftest).
 from __future__ import annotations
 
 import json
-import sqlite3
 import uuid
 from typing import Any
 
@@ -256,14 +255,16 @@ def test_get_history_coerces_legacy_int_row_ids() -> None:
     tid_str, _chat1 = persistence._add_task(f"task-str-{tag}", "")
     tid_int, _chat2 = persistence._add_task(f"task-int-{tag}", "")
     int_id = int(str(uuid.uuid4().int)[:12])
-    conn = sqlite3.connect(persistence._current_db_path())
-    try:
-        conn.execute(
+    # Rewrite the row id through the persistence layer's own connection.
+    # A raw ``sqlite3.connect(_current_db_path())`` can silently create a
+    # brand-new empty database file (→ "no such table: task_history")
+    # when an earlier test swapped or deleted the DB file while the
+    # thread-local connection stayed cached, so it is order-dependent.
+    db = persistence._get_db()
+    with persistence._rw_lock.write_lock():
+        db.execute(
             "UPDATE task_history SET id = ? WHERE id = ?", (int_id, tid_int)
         )
-        conn.commit()
-    finally:
-        conn.close()
 
     server, printer = _make_server()
     printer.events.clear()

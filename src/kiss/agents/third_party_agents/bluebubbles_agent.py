@@ -91,37 +91,77 @@ class BlueBubblesChannelBackend(ToolMethodBackend):
     def poll_messages(
         self, channel_id: str, oldest: str, limit: int = 10
     ) -> tuple[list[dict[str, Any]], str]:
-        """Poll BlueBubbles for new messages."""
+        """Poll BlueBubbles for new messages in a chat.
+
+        ``oldest`` is a millisecond ``dateCreated`` cursor; ``""``/``"0"``
+        means fetch the most recent messages without an after-filter.
+        Returns the messages (oldest first) filtered to ``channel_id`` and
+        the max ``dateCreated`` seen as the new cursor.
+        """
         try:
-            params = {**self._params(), "after": str(int(self._last_ts)), "limit": str(limit)}
-            resp = requests.get(self._url("/api/v1/message"), params=params, timeout=10)
+            cursor = int(float(oldest)) if oldest not in ("", "0") else 0
+            body: dict[str, Any] = {"limit": limit, "with": ["chat"], "sort": "DESC"}
+            if channel_id:  # pragma: no branch
+                body["chatGuid"] = channel_id
+            if cursor:
+                body["after"] = cursor
+            resp = requests.post(
+                self._url("/api/v1/message/query"),
+                params=self._params(),
+                json=body,
+                timeout=10,
+            )
             data = resp.json()
+            new_cursor = cursor
             messages: list[dict[str, Any]] = []
             for msg in data.get("data", []):  # pragma: no branch
-                ts = float(msg.get("dateCreated", 0))
+                ts = int(msg.get("dateCreated", 0) or 0)
+                new_cursor = max(new_cursor, ts)
                 if ts > self._last_ts:  # pragma: no branch
                     self._last_ts = ts
+                chats = msg.get("chats") or []
+                chat_guid = chats[0].get("guid", "") if chats else channel_id
                 messages.append(
                     {
                         "ts": str(ts),
-                        "user": msg.get("sender", {}).get("address", ""),
+                        "user": (msg.get("sender") or {}).get("address", ""),
                         "text": msg.get("text", "") or "",
                         "guid": msg.get("guid", ""),
-                        "chat_guid": channel_id,
+                        "chat_guid": chat_guid,
+                        "is_from_me": bool(msg.get("isFromMe")),
                     }
                 )
-            return messages, oldest
+            messages.reverse()
+            return messages, str(new_cursor) if new_cursor else oldest
         except Exception:
             return [], oldest
 
+    def is_from_bot(self, msg: dict[str, Any]) -> bool:
+        """Check whether a polled message was sent by the bot itself (isFromMe).
+
+        Args:
+            msg: Message dict from :meth:`poll_messages`.
+
+        Returns:
+            True if the message was sent from this account.
+        """
+        return bool(msg.get("is_from_me"))
+
     def send_message(self, channel_id: str, text: str, thread_ts: str = "") -> None:
-        """Send a BlueBubbles message."""
-        requests.post(
+        """Send a BlueBubbles message.
+
+        Raises:
+            RuntimeError: If the server reports a non-200 status.
+        """
+        resp = requests.post(
             self._url("/api/v1/message/text"),
             params=self._params(),
             json={"chatGuid": channel_id, "message": text, "method": "private-api"},
             timeout=30,
         )
+        data = resp.json()
+        if resp.status_code >= 400 or data.get("status") != 200:
+            raise RuntimeError(f"BlueBubbles send failed: {data}")
 
     def wait_for_reply(
         self,

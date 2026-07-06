@@ -64,36 +64,46 @@ def _read_lines_preserved(path: str | Path) -> list[str]:
         return _split_lines_keepends(f.read())
 
 
-def _load_gitignore_dirs(work_dir: str) -> set[str]:
+def _load_gitignore_dirs(work_dir: str) -> tuple[set[str], set[str]]:
     """Load directory names and paths to skip from .gitignore.
 
-    Parses .gitignore for entries without glob characters and returns
-    them as a set.  Entries may be simple names (e.g. ``node_modules``)
-    or paths (e.g. ``src/generated``).  Always includes ``.git``.
+    Parses .gitignore for entries without glob characters.  Following
+    gitignore semantics, an entry containing a slash anywhere other
+    than at its end is anchored to the repository root (``/build``,
+    ``src/generated``), while a bare name (``node_modules``,
+    ``build/``) matches at any depth.
 
     Args:
         work_dir: Repository root containing .gitignore.
 
     Returns:
-        Set of directory names/paths to skip during file scanning.
+        ``(skip_names, skip_paths)`` — *skip_names* are bare directory
+        names to skip at any depth (always includes ``.git``);
+        *skip_paths* are root-relative directory paths to skip at
+        their exact location only.
     """
-    skip = {".git"}
+    skip_names = {".git"}
+    skip_paths: set[str] = set()
     try:
         gitignore = Path(work_dir) / ".gitignore"
         for raw_line in gitignore.read_text().splitlines():
             line = raw_line.strip()
             if not line or line.startswith("#") or line.startswith("!"):
                 continue
-            # Strip the leading "/" too: a root-anchored entry like
-            # ``/node_modules`` must match the directory name
-            # ``node_modules`` during the scan.
-            name = line.strip("/")
-            if "*" in name or "?" in name:
+            if "*" in line or "?" in line:
                 continue
-            skip.add(name)
+            # A trailing "/" only marks the entry as directory-only;
+            # it does not affect anchoring.
+            entry = line.rstrip("/")
+            if "/" in entry:
+                # Anchored: match the root-relative path exactly
+                # (``/build`` must NOT skip ``src/build``).
+                skip_paths.add(entry.lstrip("/"))
+            else:
+                skip_names.add(entry)
     except OSError:
         logger.debug("Exception caught", exc_info=True)
-    return skip
+    return skip_names, skip_paths
 
 
 def _scan_files(work_dir: str) -> list[str]:
@@ -106,7 +116,7 @@ def _scan_files(work_dir: str) -> list[str]:
         List of relative file and directory paths.
     """
     paths: list[str] = []
-    skip = _load_gitignore_dirs(work_dir)
+    skip_names, skip_paths = _load_gitignore_dirs(work_dir)
     wd = Path(work_dir)
     try:
         for root, dirs, files in wd.walk():
@@ -117,9 +127,9 @@ def _scan_files(work_dir: str) -> list[str]:
             dirs[:] = sorted(
                 d
                 for d in dirs
-                if d not in skip
+                if d not in skip_names
                 and not d.startswith(".")
-                and str(rel_root / d) not in skip
+                and str(rel_root / d) not in skip_paths
             )
             for name in sorted(files):
                 paths.append(str(rel_root / name).replace(os.sep, "/"))
@@ -127,6 +137,8 @@ def _scan_files(work_dir: str) -> list[str]:
                     return paths
             for d in dirs:
                 paths.append(str(rel_root / d).replace(os.sep, "/") + "/")
+                if len(paths) >= 5000:
+                    return paths
     except OSError:  # pragma: no cover — Path.walk swallows OSErrors internally
         logger.debug("Exception caught", exc_info=True)
     return paths
@@ -673,8 +685,6 @@ def _write_base_copy(
     ub_dir: Path,
     fname: str,
     base_ref: str,
-    *,
-    binary: bool,
 ) -> Path:
     """Write the pre-task "base" copy of *fname* into *merge_dir*.
 
@@ -689,7 +699,6 @@ def _write_base_copy(
         ub_dir: Directory containing saved pre-task file copies.
         fname: File path relative to *work_dir*.
         base_ref: Git ref the base content is read from.
-        binary: Whether to treat the content as raw bytes.
 
     Returns:
         The path of the written base copy inside *merge_dir*.
@@ -796,6 +805,16 @@ def _prepare_merge_view(
         filtered = _file_as_new_hunks(fpath)
         if filtered:
             file_hunks[fname] = filtered
+        elif fpath.is_file():
+            # A new file that yields no line hunks — EMPTY
+            # (``__init__.py`` / ``.gitkeep``), oversized (>2MB), or
+            # undecodable without NUL bytes — used to appear in
+            # neither ``file_hunks`` nor ``binary_files``, making the
+            # created file INVISIBLE in the merge review.  Present it
+            # as a whole-file (binary-style) decision instead;
+            # rejecting restores the empty base, consistent with the
+            # existing new-file reject semantics.
+            binary_files.add(fname)
     if pre_file_hashes:
         for fname in pre_untracked:
             if fname in file_hunks or fname in binary_files:
@@ -873,7 +892,7 @@ def _prepare_merge_view(
             deleted_placeholder.write_text("")
             current_path = deleted_placeholder
         base_path = _write_base_copy(
-            work_dir, merge_dir, ub_dir, fname, base_ref, binary=False,
+            work_dir, merge_dir, ub_dir, fname, base_ref,
         )
         text_entry: dict[str, Any] = {
             "name": fname,
@@ -899,7 +918,7 @@ def _prepare_merge_view(
             deleted_placeholder.write_bytes(b"")
             current_path = deleted_placeholder
         base_path = _write_base_copy(
-            work_dir, merge_dir, ub_dir, fname, base_ref, binary=True,
+            work_dir, merge_dir, ub_dir, fname, base_ref,
         )
         entry: dict[str, Any] = {
             "name": fname,

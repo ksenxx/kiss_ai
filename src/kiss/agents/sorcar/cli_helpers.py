@@ -229,6 +229,34 @@ def _launch_work_dir() -> str:
     return str(Path.cwd())
 
 
+def _parse_bool_value(value: str) -> bool:
+    """Parse an explicit boolean value for ``--verbose``.
+
+    Accepts the usual spellings case-insensitively.  Anything else is
+    rejected with an argparse error instead of being silently treated
+    as ``False`` (w2 F23 — ``--verbose yes`` used to disable verbose
+    output without any hint).
+
+    Args:
+        value: The raw command-line token following the flag.
+
+    Returns:
+        The parsed boolean.
+
+    Raises:
+        argparse.ArgumentTypeError: If *value* is not a recognised
+            boolean spelling.
+    """
+    v = value.strip().lower()
+    if v in ("true", "1", "yes", "on"):
+        return True
+    if v in ("false", "0", "no", "off"):
+        return False
+    raise argparse.ArgumentTypeError(
+        f"expected a boolean (true/false), got {value!r}"
+    )
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser for all Sorcar agent entry points.
 
@@ -264,9 +292,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "-v", "--verbose",
-        type=lambda x: str(x).lower() == "true",
+        type=_parse_bool_value,
+        nargs="?",
+        const=True,
         default=True,
-        help="Print output to console",
+        help=(
+            "Print output to console (default: enabled). Works as a "
+            "bare flag (-v) or with an explicit value "
+            "(--verbose false)."
+        ),
     )
     parser.add_argument(
         "--no-web", action="store_true", default=False,
@@ -321,9 +355,19 @@ def _build_run_kwargs(args: argparse.Namespace) -> dict[str, Any]:
     if args.header:
         headers = {}
         for h in args.header:
-            if ":" in h:
-                key, value = h.split(":", 1)
-                headers[key.strip()] = value.strip()
+            # Reject malformed headers loudly instead of silently
+            # dropping them (w3 C-3): a ``--header`` without a colon
+            # (or with an empty key) used to vanish without a message,
+            # surfacing later only as an opaque downstream auth/HTTP
+            # error.  Matches the strict policy of the sibling
+            # ``sorcar mcp`` CLI (``mcp_cli._parse_kv`` raises
+            # SystemExit for a separator-less ``--header``).
+            key, found, value = h.partition(":")
+            if not found or not key.strip():
+                raise SystemExit(
+                    f"Invalid --header {h!r}: expected 'Key:Value'"
+                )
+            headers[key.strip()] = value.strip()
         if headers:
             model_config["extra_headers"] = headers
 

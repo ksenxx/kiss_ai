@@ -51,6 +51,11 @@ def _uses_adaptive_thinking(model_name: str) -> bool:
         return False
     suffix = model_name[len(prefix):]
     minor_str = suffix.split("-", 1)[0]
+    if len(minor_str) == 8 and minor_str.isdigit():
+        # Date-stamped official id (e.g. ``claude-opus-4-20250514``): the
+        # token is a release date, not a minor version — this is Opus 4.0,
+        # which only supports ``thinking.type=enabled``.
+        return False
     try:
         minor = int(minor_str)
     except ValueError:
@@ -579,7 +584,16 @@ class AnthropicModel(Model):
             if _uses_adaptive_thinking(self.model_name):
                 kwargs["thinking"] = {"type": "adaptive"}
             else:
-                kwargs["thinking"] = {"type": "enabled", "budget_tokens": 10000}
+                # The API requires ``max_tokens > budget_tokens`` and
+                # ``budget_tokens >= 1024``.  Cap the budget below the
+                # user's max_tokens and skip thinking entirely when there
+                # is no room for the minimum budget.
+                budget = min(10000, max_tokens - 1)
+                if budget >= 1024:
+                    kwargs["thinking"] = {
+                        "type": "enabled",
+                        "budget_tokens": budget,
+                    }
 
         # When extended thinking is enabled, request interleaved thinking via
         # the anthropic-beta header so the model emits between-tool-call

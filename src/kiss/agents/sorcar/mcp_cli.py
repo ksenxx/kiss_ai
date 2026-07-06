@@ -178,6 +178,10 @@ def _cmd_add(args: argparse.Namespace, work_dir: str) -> int:
         print("Error: missing command (stdio) or URL (http/sse).")
         return 1
     if args.transport == "stdio":
+        if args.header:
+            raise SystemExit(
+                "Invalid option --header: only valid with --transport http/sse"
+            )
         cfg = MCPServerConfig(
             name=args.name,
             transport="stdio",
@@ -186,6 +190,15 @@ def _cmd_add(args: argparse.Namespace, work_dir: str) -> int:
             env=_parse_kv(args.env, "="),
         )
     else:
+        if len(target) > 1:
+            raise SystemExit(
+                "Unexpected extra arguments after URL: "
+                + " ".join(target[1:])
+            )
+        if args.env:
+            raise SystemExit(
+                "Invalid option --env: only valid with --transport stdio"
+            )
         cfg = MCPServerConfig(
             name=args.name,
             transport=args.transport,
@@ -320,7 +333,15 @@ class _OAuthCallbackServer:
         return self.code, self.state
 
     def close(self) -> None:
-        """Shut the callback server down."""
+        """Shut the callback server down and unblock any pending wait().
+
+        Setting ``_done`` wakes a thread blocked in :meth:`wait` (which
+        then raises ``RuntimeError`` when no code arrived), so an
+        executor thread running the wait exits promptly instead of
+        sitting out the full timeout when the OAuth flow fails early.
+        Idempotent.
+        """
+        self._done.set()
         self._server.shutdown()
         self._server.server_close()
 
@@ -394,12 +415,21 @@ def _cmd_auth(args: argparse.Namespace, work_dir: str) -> int:
         callback_handler=callback_handler,
         redirect_port=callback.port,
     )
-    try:
-        info = asyncio.run(
-            asyncio.wait_for(
+    async def _run_flow() -> dict[str, Any]:
+        try:
+            return await asyncio.wait_for(
                 _connect_once(cfg, auth), CONNECT_TIMEOUT + AUTH_TIMEOUT,
             )
-        )
+        finally:
+            # Close (and thereby unblock) the callback server *inside*
+            # the event loop: asyncio.run's teardown joins the default
+            # executor, so a callback.wait() still blocked there would
+            # stall the CLI for up to AUTH_TIMEOUT seconds after an
+            # early connection failure.
+            callback.close()
+
+    try:
+        info = asyncio.run(_run_flow())
     except Exception as exc:
         print(f"Authentication failed: {exc}")
         return 1

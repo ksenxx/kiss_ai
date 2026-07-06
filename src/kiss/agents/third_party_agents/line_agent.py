@@ -28,6 +28,7 @@ from typing import Any
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
+    drain_queue_messages,
     stop_http_server,
     wait_for_matching_message,
 )
@@ -130,24 +131,32 @@ class LineChannelBackend(ToolMethodBackend):
     def poll_messages(
         self, channel_id: str, oldest: str, limit: int = 10
     ) -> tuple[list[dict[str, Any]], str]:
-        """Drain the webhook message queue."""
-        messages: list[dict[str, Any]] = []
-        while not self._message_queue.empty() and len(messages) < limit:  # pragma: no branch
-            messages.append(self._message_queue.get_nowait())
-        return messages, oldest
+        """Drain the webhook message queue, filtered by source when given."""
+
+        def keep(msg: dict[str, Any]) -> bool:
+            if not channel_id:
+                return True
+            return channel_id in (
+                msg.get("user", ""),
+                msg.get("group_id", ""),
+                msg.get("room_id", ""),
+            )
+
+        return drain_queue_messages(self._message_queue, limit=limit, keep=keep), oldest
 
     def send_message(self, channel_id: str, text: str, thread_ts: str = "") -> None:
-        """Send a LINE push message."""
-        if not self._api:  # pragma: no branch
-            return
-        try:
-            from linebot.v3.messaging import PushMessageRequest, TextMessage
+        """Send a LINE push message.
 
-            self._api.push_message(
-                PushMessageRequest(to=channel_id, messages=[TextMessage(text=text)])
-            )
-        except Exception:
-            pass
+        Raises:
+            RuntimeError: If the LINE API client is not configured.
+        """
+        if not self._api:
+            raise RuntimeError("Not connected to LINE")
+        from linebot.v3.messaging import PushMessageRequest, TextMessage
+
+        self._api.push_message(
+            PushMessageRequest(to=channel_id, messages=[TextMessage(text=text)])
+        )
 
     def wait_for_reply(
         self,

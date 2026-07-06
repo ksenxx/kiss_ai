@@ -13,13 +13,19 @@ line is never sent, so ``agent.run`` is never invoked.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import select
+import shutil
+import socket
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -164,9 +170,148 @@ def test_predictive_completion_from_active_file(tmp_path: Path, kiss_db) -> None
     assert matches == ["call calculate_total"]
 
 
+class _ScriptedUdsDaemon:
+    """A minimal real UDS daemon speaking the sorcar newline-JSON protocol.
+
+    The interactive CLI (``run_client`` in
+    :mod:`kiss.agents.sorcar.cli_client`) requires a connectable
+    Unix-domain socket at ``$KISS_HOME/sorcar.sock``: it probes the
+    socket (``_wait_for_socket``), connects, announces itself with
+    ``setWorkDir`` then ``ready``, and on ``/exit`` sends ``closeTab``
+    and closes the connection.  None of those commands need a reply for
+    the REPL to start or exit, so this daemon simply accepts
+    connections, records every inbound newline-delimited JSON command,
+    and answers ``ready`` with a ``configData`` event (mirroring the
+    real daemon's ``ready`` fan-out) so the client learns a model name.
+
+    Adapted from the ``_ScriptedDaemon`` peers in
+    ``kiss/tests/sorcar/test_fixer4_cli_bugs.py`` and
+    ``kiss/tests/sorcar/test_wave3_cli_bugs.py``.  No mocks: a real
+    socket server on a real UDS path that a real CLI subprocess dials.
+    """
+
+    def __init__(self, sock_path: Path) -> None:
+        self.sock_path = sock_path
+        self.received: list[dict[str, Any]] = []
+        self._cond = threading.Condition()
+        self._srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self._srv.bind(str(sock_path))
+        self._srv.listen(4)
+        threading.Thread(
+            target=self._accept_loop, daemon=True,
+            name="scripted-uds-daemon",
+        ).start()
+
+    def _accept_loop(self) -> None:
+        while True:
+            try:
+                conn, _ = self._srv.accept()
+            except OSError:
+                return
+            threading.Thread(
+                target=self._serve, args=(conn,), daemon=True,
+                name="scripted-uds-daemon-conn",
+            ).start()
+
+    def _serve(self, conn: socket.socket) -> None:
+        f = conn.makefile("rb")
+        try:
+            for raw in f:
+                try:
+                    cmd = json.loads(raw.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    continue
+                if not isinstance(cmd, dict):
+                    continue
+                with self._cond:
+                    self.received.append(cmd)
+                    self._cond.notify_all()
+                if cmd.get("type") == "ready":
+                    reply = {"type": "configData",
+                             "config": {"model": "scripted-test-model"}}
+                    try:
+                        conn.sendall(json.dumps(reply).encode() + b"\n")
+                    except OSError:
+                        return
+        except OSError:
+            pass
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+    def wait_for(
+        self, type_: str, timeout: float = 10.0,
+    ) -> dict[str, Any] | None:
+        """Block until a command of *type_* was received (or timeout)."""
+        deadline = time.monotonic() + timeout
+        with self._cond:
+            while True:
+                for cmd in self.received:
+                    if cmd.get("type") == type_:
+                        return cmd
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                self._cond.wait(remaining)
+
+    def close(self) -> None:
+        """Stop accepting connections and release the socket."""
+        try:
+            self._srv.close()
+        except OSError:
+            pass
+
+
 def test_main_no_task_enters_repl(tmp_path: Path) -> None:
-    """Running the CLI with no -t/-f enters the REPL and exits on EOF."""
-    env = dict(os.environ, KISS_HOME=str(tmp_path / ".kisshome"))
+    """Running the CLI with no -t/-f enters the REPL and exits on /exit.
+
+    Properly isolated: a scripted UDS daemon is started at the test's
+    own ``$KISS_HOME/sorcar.sock`` so the CLI subprocess never touches
+    a developer's real ``~/.kiss/sorcar.sock`` daemon.
+    """
+    # A short mkdtemp path keeps $KISS_HOME/sorcar.sock under the
+    # AF_UNIX sun_path limit (~104 bytes on macOS); pytest's deeply
+    # nested tmp_path is too long to bind a UDS on.
+    kiss_home = Path(tempfile.mkdtemp(prefix="kissh-"))
+    env = dict(os.environ, KISS_HOME=str(kiss_home))
+    env.pop("KISS_SORCAR_SOCK", None)
+    daemon = _ScriptedUdsDaemon(kiss_home / "sorcar.sock")
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "kiss.agents.sorcar.worktree_sorcar_agent",
+             "-w", str(tmp_path)],
+            input="/exit\n",
+            text=True,
+            capture_output=True,
+            cwd=str(tmp_path),
+            env=env,
+            timeout=180,
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert "interactive mode" in proc.stdout
+        # The CLI really performed its handshake against the scripted
+        # daemon at $KISS_HOME/sorcar.sock (not some ambient daemon).
+        assert daemon.wait_for("setWorkDir", timeout=1.0) is not None
+        assert daemon.wait_for("ready", timeout=1.0) is not None
+    finally:
+        daemon.close()
+        shutil.rmtree(kiss_home, ignore_errors=True)
+
+
+def test_main_no_daemon_exits_with_clear_error(tmp_path: Path) -> None:
+    """Without a daemon at $KISS_HOME/sorcar.sock the CLI exits 1.
+
+    Locks in the KISS_HOME socket-path fix (w3 C-5): the error message
+    must reference the ``$KISS_HOME/sorcar.sock`` path, proving the CLI
+    resolves the daemon socket under ``KISS_HOME`` rather than the
+    hard-coded ``~/.kiss/sorcar.sock``.
+    """
+    kiss_home = tmp_path / ".kisshome"
+    kiss_home.mkdir()
+    env = dict(os.environ, KISS_HOME=str(kiss_home))
+    env.pop("KISS_SORCAR_SOCK", None)
     proc = subprocess.run(
         [sys.executable, "-m", "kiss.agents.sorcar.worktree_sorcar_agent",
          "-w", str(tmp_path)],
@@ -177,8 +322,9 @@ def test_main_no_task_enters_repl(tmp_path: Path) -> None:
         env=env,
         timeout=180,
     )
-    assert proc.returncode == 0, proc.stderr
-    assert "interactive mode" in proc.stdout
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    assert "No sorcar daemon found at" in proc.stderr
+    assert str(kiss_home / "sorcar.sock") in proc.stderr
 
 def _read_line_over_pty(typed: str) -> tuple[str, str]:
     """Drive ``_read_line`` on a real PTY; return (before_enter, full).

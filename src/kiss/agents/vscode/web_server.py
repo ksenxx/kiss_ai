@@ -39,6 +39,8 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import datetime
 import errno
 import hashlib
@@ -75,6 +77,12 @@ from websockets.http11 import Request, Response
 from kiss.agents.vscode.diff_merge import _read_lines_preserved
 from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.agents.vscode.server import VSCodeServer
+from kiss.agents.vscode.tips import read_tips
+from kiss.agents.vscode.voice_wake import (
+    DEFAULT_MODELS_DIR,
+    SpeakerIdentifier,
+    translate_pcm_to_english,
+)
 from kiss.agents.vscode.vscode_config import load_config, source_shell_env
 from kiss.core.config import get_jobs_root
 from kiss.viz_trajectory.server import find_job_dir, list_jobs, load_job_trajectories
@@ -84,6 +92,52 @@ __all__ = ["RemoteAccessServer", "WebPrinter"]
 logger = logging.getLogger(__name__)
 
 MEDIA_DIR = Path(__file__).parent / "media"
+
+# Lightweight Vosk speech model used by the in-browser "Sorcar" wake-word
+# listener (voice.js).  The ~40MB archive is not bundled; it is downloaded
+# once on first use and cached under ~/.kiss/models/.
+VOICE_MODEL_URL = (
+    "https://ccoreilly.github.io/vosk-browser/models/"
+    "vosk-model-small-en-us-0.15.tar.gz"
+)
+VOICE_MODEL_CACHE = (
+    Path.home() / ".kiss" / "models" / "vosk-model-small-en-us-0.15.tar.gz"
+)
+_voice_model_lock = threading.Lock()
+
+
+def _ensure_voice_model() -> Path | None:
+    """Return the cached wake-word model archive, downloading on first use.
+
+    Serializes concurrent downloads with a lock and writes through a
+    pid-unique temporary file (atomically published via
+    ``Path.replace``) so a partially-downloaded archive is never
+    served.  The pid suffix matters: the in-process lock cannot
+    serialize a SIBLING process (a second kiss-web daemon, a test
+    running next to a live daemon), and a shared fixed temp name let
+    two processes interleave writes into the same file and then
+    publish the corrupted result — or race ``replace`` so the loser
+    raised ``FileNotFoundError`` and returned ``None``.
+
+    Returns:
+        Path to the cached ``.tar.gz`` archive, or ``None`` when the
+        download failed (e.g. no network).
+    """
+    with _voice_model_lock:
+        if VOICE_MODEL_CACHE.is_file() and VOICE_MODEL_CACHE.stat().st_size > 0:
+            return VOICE_MODEL_CACHE
+        tmp = VOICE_MODEL_CACHE.with_name(
+            f"{VOICE_MODEL_CACHE.name}.{os.getpid()}.tmp",
+        )
+        try:
+            VOICE_MODEL_CACHE.parent.mkdir(parents=True, exist_ok=True)
+            urllib.request.urlretrieve(VOICE_MODEL_URL, tmp)
+            tmp.replace(VOICE_MODEL_CACHE)
+            return VOICE_MODEL_CACHE
+        except Exception:
+            logger.exception("voice model download failed: %s", VOICE_MODEL_URL)
+            tmp.unlink(missing_ok=True)
+            return None
 _MEDIA_VERSION_CACHE: dict[str, str] = {}
 
 # HTML page for the agent-trajectory visualizer, served at ``/trajectories/``.
@@ -192,11 +246,12 @@ _WS_PING_TIMEOUT = 10
 _TUNNEL_UNHEALTHY_LIMIT_NAMED = 3
 
 # Quick tunnels get a new random URL on every restart, so be much more
-# conservative before force-restarting.  20 ticks × 30s = 10 minutes of
-# readyConnections=0 before the watchdog kills cloudflared.  This gives
-# cloudflared ample time to re-register a temporarily-dropped tunnel
-# without burning through dozens of distinct *.trycloudflare.com URLs.
-_TUNNEL_UNHEALTHY_LIMIT_QUICK = 20
+# conservative before force-restarting.  40 ticks × :data:`TUNNEL_CHECK_INTERVAL`
+# (15s) = 10 minutes of readyConnections=0 before the watchdog kills
+# cloudflared.  This gives cloudflared ample time to re-register a
+# temporarily-dropped tunnel without burning through dozens of distinct
+# *.trycloudflare.com URLs.
+_TUNNEL_UNHEALTHY_LIMIT_QUICK = 40
 
 _TUNNEL_STARTUP_GRACE = 120
 
@@ -308,6 +363,12 @@ _MAX_PROMPT_BYTES = 1_000_000
 # the user's task.  Bumped to 64 MiB so attachments up to a few MB
 # each (capped by ``_MAX_ATTACHMENTS``) can be delivered as one line.
 _MAX_LINE_BYTES = 64 * 1024 * 1024
+
+# Upper bound on a ``voiceTranscribe`` base64 audio payload.  The
+# browser captures at most 30s of 16kHz mono s16le PCM (960KB, ~1.3MB
+# base64); anything much larger is malformed or abusive and is
+# dropped instead of being shipped to the gpt-audio API.
+_MAX_VOICE_AUDIO_B64 = 4 * 1024 * 1024
 
 # Grace period (seconds) between a WebSocket connection dropping and
 # the deferred ``closeTab`` actually firing for every tab seen on
@@ -1389,18 +1450,33 @@ def _get_machine_topic() -> str:
     topic stays the same across process restarts on the same machine
     but is not guessable by outsiders.
 
+    The stored topic is read directly (an ``OSError`` — e.g. the file
+    vanishing between an existence check and the read — falls through
+    to recomputation instead of propagating) and persisted atomically
+    via a pid-unique temp file + ``Path.replace`` so a concurrent
+    reader in a sibling process can never observe a torn write.
+    Persistence failures are non-fatal: the topic is deterministic,
+    so the freshly computed value is returned regardless.
+
     Returns:
         A hex string suitable for use as an ntfy.sh topic name.
     """
     topic_file = _KISS_HOME / "ntfy_topic"
-    if topic_file.is_file():
+    try:
         stored = topic_file.read_text().strip()
-        if stored:
-            return stored
+    except OSError:
+        stored = ""
+    if stored:
+        return stored
     identity = f"{platform.node()}:{uuid.getnode()}"
     topic = "kiss-" + hashlib.sha256(identity.encode()).hexdigest()[:32]
-    topic_file.parent.mkdir(parents=True, exist_ok=True)
-    topic_file.write_text(topic + "\n")
+    try:
+        topic_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp = topic_file.with_name(f"ntfy_topic.tmp.{os.getpid()}")
+        tmp.write_text(topic + "\n")
+        tmp.replace(topic_file)
+    except OSError:
+        logger.debug("Failed to persist ntfy topic", exc_info=True)
     return topic
 
 
@@ -1607,7 +1683,18 @@ def _snapshot_active_tabs() -> list[str]:
         with _RunningAgentState._registry_lock:
             items = list(_RunningAgentState.running_agent_states.items())
     except Exception:
-        items = list(_RunningAgentState.running_agent_states.items())
+        # Unlocked fallback: a concurrent mutation can still raise
+        # ``RuntimeError: dictionary changed size during iteration``
+        # mid-copy — the very failure mode this function exists to
+        # prevent — so guard it and degrade to an empty snapshot
+        # rather than propagate.
+        try:
+            items = list(_RunningAgentState.running_agent_states.items())
+        except Exception:
+            logger.debug(
+                "unlocked registry snapshot failed", exc_info=True,
+            )
+            items = []
     active_tabs: list[str] = []
     for tab_id, tab in items:
         try:
@@ -1998,7 +2085,17 @@ class WebPrinter(JsonPrinter):
             lock = self._send_locks.get(endpoint)
             if lock is None:
                 lock = asyncio.Lock()
-                self._send_locks[endpoint] = lock
+                # Only store the lock for endpoints that are still
+                # registered (``_add_endpoint`` seeds ``_pending_sends``;
+                # ``_remove_endpoint`` pops both maps together).  A send
+                # coroutine that lost the race with removal would
+                # otherwise RE-INSERT a lock for the gone endpoint that
+                # nothing ever removes again, leaking one entry per
+                # lost race for the daemon's lifetime.  The unstored
+                # fresh lock is fine: the endpoint is gone, so FIFO
+                # ordering across senders no longer matters.
+                if endpoint in self._pending_sends:
+                    self._send_locks[endpoint] = lock
             return lock
 
     async def _locked_send(self, endpoint: Any, data: str) -> None:
@@ -2042,6 +2139,15 @@ class WebPrinter(JsonPrinter):
             pending = self._pending_sends.get(endpoint)
             if pending is not None:
                 pending.add(fut)
+        if pending is None:
+            # The endpoint was removed between the caller's snapshot
+            # and here (``_remove_endpoint`` won the race): the future
+            # can no longer be tracked — and therefore never cancelled
+            # by ``_remove_endpoint`` — so cancel it now instead of
+            # letting an orphaned send attempt a write on a closed
+            # connection.
+            fut.cancel()
+            return
         fut.add_done_callback(
             partial(self._discard_pending_send, endpoint),
         )
@@ -2197,6 +2303,13 @@ def _build_html() -> str:
     """
     version = _read_version()
     tricks_json = json.dumps(_read_tricks())
+    # ``</`` must never appear raw inside the inline <script> block —
+    # a tip body containing ``</script>`` would otherwise terminate it.
+    # ``show`` is always false here: the tips window only auto-opens in
+    # the VS Code webview after a fresh installation (SorcarTab.ts).
+    tips_json = json.dumps(
+        {"tips": read_tips(), "show": False},
+    ).replace("</", "<\\/")
     head_style = (
         "<style>\n"
         "    html, body { height: 100%; margin: 0; padding: 0; overflow: hidden; }\n"
@@ -2273,6 +2386,14 @@ def _build_html() -> str:
         "DEMO_SRC": _media_url("demo.js"),
         "SHIM_SCRIPT": f"<script>{_WS_SHIM_JS}</script>\n  ",
         "TRICKS_JSON": tricks_json,
+        "TIPS_JSON": tips_json,
+        "TIPS_SRC": _media_url("tips.js"),
+        "VOICE_SRC": _media_url("voice.js"),
+        "VOICE_CONFIG": json.dumps({
+            "mode": "browser",
+            "voskSrc": _media_url("vosk.js"),
+            "modelUrl": "/voice-model.tar.gz",
+        }),
     }
     tpl = (MEDIA_DIR / "chat.html").read_text(encoding="utf-8")
     # Single-pass substitution: injected values (e.g. the JS shim's
@@ -3058,6 +3179,16 @@ class RemoteAccessServer:
         # config provides one.
         self.work_dir: str = work_dir or ""
 
+        # Remote-web voice dictation: lazily-built speaker identifier
+        # shared by every voiceTranscribe request so each distinct
+        # voice keeps one stable speaker number across utterances.
+        # Guarded by a lock (requests come from executor threads) and
+        # latched off after a construction/recognition failure —
+        # translation must keep working without speaker numbers.
+        self._voice_speaker_identifier: SpeakerIdentifier | None = None
+        self._voice_speaker_broken = False
+        self._voice_speaker_lock = threading.Lock()
+
         self._printer = WebPrinter()
         self._printer.work_dir = self.work_dir
         self._vscode_server = VSCodeServer(printer=self._printer)
@@ -3341,6 +3472,18 @@ class RemoteAccessServer:
             return _trajectory_jobs_response()
         if path.startswith("/api/jobs/") and path.endswith("/trajectories"):
             return _trajectory_job_response(path)
+        if path == "/voice-model.tar.gz":
+            # Wake-word model for the in-browser voice listener.  Both
+            # the download AND the ~40 MB archive read are served
+            # off-thread so a cold cache (or a slow disk) does not
+            # stall the event loop for every other client.
+            model_file = await asyncio.to_thread(_ensure_voice_model)
+            if model_file is None:
+                return _http_response(
+                    502, "text/plain", b"voice model unavailable"
+                )
+            body = await asyncio.to_thread(model_file.read_bytes)
+            return _http_response(200, "application/gzip", body)
         if path.startswith("/media/"):
             filepath = MEDIA_DIR / path[7:]
             if (
@@ -3348,7 +3491,8 @@ class RemoteAccessServer:
                 and filepath.is_file()
             ):
                 ctype = mimetypes.guess_type(str(filepath))[0] or "application/octet-stream"
-                return _http_response(200, ctype, filepath.read_bytes())
+                body = await asyncio.to_thread(filepath.read_bytes)
+                return _http_response(200, ctype, body)
         return _http_response(404, "text/plain", b"Not Found")
 
 
@@ -3378,23 +3522,42 @@ class RemoteAccessServer:
         """
         now = time.monotonic()
         fails = self._auth_failures.get(ip, [])
-        # Drop entries outside the window.  Only write the pruned list
-        # back for IPs that already have an entry (i.e. recorded at
-        # least one real failure) — unconditionally assigning here
-        # used to create a permanent empty-list entry for EVERY source
-        # IP that ever connected (including ones that always
-        # authenticated successfully), growing ``_auth_failures``
-        # without bound over the daemon's lifetime.
+        # Drop entries outside the window.  Write the pruned list back
+        # only when it is non-empty; an IP whose failures all expired
+        # is DELETED from the dict — writing back an empty list used
+        # to keep one stale entry per failed IP forever, growing
+        # ``_auth_failures`` without bound over the daemon's lifetime
+        # (IPs that always authenticated successfully never get an
+        # entry at all).
         fails = [t for t in fails if now - t <= _AUTH_FAIL_WINDOW]
-        if fails or ip in self._auth_failures:
+        if fails:
             self._auth_failures[ip] = fails
+        else:
+            self._auth_failures.pop(ip, None)
         if len(fails) < _AUTH_FAIL_MAX:
             return False
         return (now - fails[-1]) <= _AUTH_LOCKOUT
 
     def _record_auth_failure(self, ip: str) -> None:
-        """Record a failed authentication attempt from *ip*."""
+        """Record a failed authentication attempt from *ip*.
+
+        Also sweeps fully-expired entries for EVERY tracked IP:
+        :meth:`_is_auth_locked` only prunes the entry of the IP that
+        reconnects, so on a public tunnel an attacker rotating source
+        addresses would otherwise leave one stale entry per distinct
+        IP forever.  The sweep bounds the dict to IPs that failed
+        within the last :data:`_AUTH_FAIL_WINDOW` seconds.
+        """
         now = time.monotonic()
+        for other_ip in list(self._auth_failures):
+            kept = [
+                t for t in self._auth_failures[other_ip]
+                if now - t <= _AUTH_FAIL_WINDOW
+            ]
+            if kept:
+                self._auth_failures[other_ip] = kept
+            else:
+                del self._auth_failures[other_ip]
         self._auth_failures.setdefault(ip, []).append(now)
 
     async def _authenticate_ws(self, websocket: ServerConnection) -> bool:
@@ -3883,6 +4046,16 @@ class RemoteAccessServer:
             # opens the file in a real editor tab.
             await self._handle_open_file(cmd, endpoint)
             return
+        if cmd_type == "voiceTranscribe":
+            # A remote-web (browser mode) client heard the "Sorcar"
+            # wake word and captured the utterance that followed in
+            # the page (VS Code webviews never send this: their
+            # speech is captured and translated by the extension
+            # host's local listener).  Translate the audio with the
+            # same gpt-audio call the local listener uses and reply
+            # with the voiceSpeech message voice.js already handles.
+            await self._handle_voice_transcribe(cmd, endpoint)
+            return
         if cmd_type in _VSCODE_ONLY_COMMANDS:
             return
         if cmd_type == "activeTasksQuery":
@@ -4199,6 +4372,85 @@ class RemoteAccessServer:
                 "text": f"Failed to start KISS Sorcar update: {exc}",
             }, conn_id)
 
+    def _identify_voice_speaker(self, pcm: bytes) -> int | None:
+        """Return the stable speaker number for an utterance's PCM.
+
+        Runs on an executor thread.  The Vosk speaker-identification
+        model is built lazily on first use (it may need a one-time
+        download); any failure — download, model load, recognition —
+        latches speaker identification off for the daemon's lifetime
+        and degrades to ``None`` so voice dictation keeps working
+        without speaker numbers.
+
+        Args:
+            pcm: Raw 16kHz mono s16le PCM of the utterance.
+
+        Returns:
+            The speaker number (1, 2, ...) or ``None`` on failure.
+        """
+        with self._voice_speaker_lock:
+            if self._voice_speaker_broken:
+                return None
+            try:
+                if self._voice_speaker_identifier is None:
+                    self._voice_speaker_identifier = SpeakerIdentifier(
+                        DEFAULT_MODELS_DIR,
+                    )
+                return self._voice_speaker_identifier.speaker_of(pcm)
+            except Exception:
+                self._voice_speaker_broken = True
+                logger.exception("voice speaker identification failed")
+                return None
+
+    async def _handle_voice_transcribe(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None:
+        """Translate a remote-web client's post-wake speech to English.
+
+        Browser-mode voice.js cannot call gpt-audio itself (the API
+        key lives on this machine), so after the in-page wake-word
+        detector hears "Sorcar" it captures the utterance that follows
+        and ships it here as ``{type: 'voiceTranscribe', audio:
+        <base64 16kHz mono s16le PCM>}``.  The audio is translated
+        into English by the same :func:`translate_pcm_to_english` call
+        the VS Code extension's local listener uses, the speaker is
+        identified locally (best effort), and the client gets back
+        ``{type: 'voiceSpeech', text, speaker}`` — the exact message
+        voice.js already consumes in webview mode, so the page inserts
+        and submits the dictated task with no extra client logic.  An
+        empty/undecodable audio payload or a failed translation
+        replies with an empty ``text`` so the page can clear its
+        transcribing indicator.
+
+        Args:
+            cmd: The parsed ``voiceTranscribe`` command.
+            endpoint: The client connection to reply to.
+        """
+        raw = cmd.get("audio", "")
+        pcm = b""
+        if isinstance(raw, str) and 0 < len(raw) <= _MAX_VOICE_AUDIO_B64:
+            try:
+                pcm = base64.b64decode(raw, validate=True)
+            except (binascii.Error, ValueError):
+                logger.warning("voiceTranscribe with undecodable audio")
+        text = ""
+        speaker: int | None = None
+        if pcm:
+            assert self._loop is not None
+            text = await self._loop.run_in_executor(
+                None, translate_pcm_to_english, pcm,
+            )
+            if text:
+                speaker = await self._loop.run_in_executor(
+                    None, self._identify_voice_speaker, pcm,
+                )
+        await self._endpoint_send(
+            endpoint,
+            json.dumps(
+                {"type": "voiceSpeech", "text": text, "speaker": speaker},
+            ),
+        )
+
     async def _handle_open_file(
         self, cmd: dict[str, Any], endpoint: Any,
     ) -> None:
@@ -4481,6 +4733,11 @@ class RemoteAccessServer:
             websocket: The client connection (for direct replies).
         """
         tab_id = cmd.get("tabId", "")
+        if not isinstance(tab_id, str):
+            # M7: an unhashable JSON value (list/dict) would raise
+            # ``TypeError`` inside ``_cancel_pending_tab_close``'s
+            # dict lookup and abort the whole ready handling.
+            tab_id = ""
         conn_id = cmd.get("connId", "")
         # A fresh ``ready`` is the unambiguous signal that the
         # frontend has reconnected and is re-claiming whatever tab
@@ -4553,20 +4810,32 @@ class RemoteAccessServer:
             if not isinstance(rt, dict):
                 logger.warning("ignoring non-dict restoredTabs entry: %r", rt)
                 continue
+            # M7: apply the same ``isinstance(str)`` hardening the
+            # merge-replay branch below (and the ``ready`` branch of
+            # ``_dispatch_client_command``) already uses — a non-str
+            # ``tabId`` (e.g. a list) would raise ``TypeError`` in
+            # ``_cancel_pending_tab_close``'s dict lookup, aborting
+            # the remaining restored-tab resumes and merge replays,
+            # and a non-str ``chatId`` would flow into backend
+            # handlers that assume strings.
             rt_id = rt.get("tabId", "")
+            if not isinstance(rt_id, str):
+                logger.warning("ignoring non-str restoredTabs tabId: %r", rt_id)
+                rt_id = ""
             if rt_id:
                 self._cancel_pending_tab_close(rt_id)
             chat_id = rt.get("chatId", "")
+            if not isinstance(chat_id, str):
+                logger.warning(
+                    "ignoring non-str restoredTabs chatId: %r", chat_id,
+                )
+                chat_id = ""
             if chat_id:
                 await self._run_cmd(
                     {"type": "resumeSession", "chatId": chat_id,
                      "tabId": rt_id},
                 )
-            if (
-                isinstance(rt_id, str)
-                and rt_id
-                and rt_id not in seen_merge_tabs
-            ):
+            if rt_id and rt_id not in seen_merge_tabs:
                 merge_tabs_to_replay.append(rt_id)
                 seen_merge_tabs.add(rt_id)
         for merge_tab_id in merge_tabs_to_replay:
@@ -5028,6 +5297,17 @@ class RemoteAccessServer:
                     proc.pid, self._tunnel_metrics_port, None,
                 )
                 return
+            # Reap the previous failed attempt before dropping our
+            # only reference to it: close its stderr pipe FD
+            # deterministically (instead of leaving it to GC) and
+            # wait() the already-exited process so it never lingers
+            # unreaped.  Only the LAST dead process is kept — its
+            # stderr stays open because the caller's URL-parsing
+            # path still reads it.
+            if last_proc is not None:
+                if last_proc.stderr is not None:
+                    last_proc.stderr.close()
+                last_proc.wait()
             last_proc = proc
             logger.info(
                 "cloudflared exited immediately on metrics port %d "
@@ -5199,7 +5479,12 @@ class RemoteAccessServer:
             # unset — see H1 in the security review.  The watchdog
             # mirrors the guard in _setup_server so a runtime config
             # change doesn't accidentally bring up an open tunnel.
-            if not load_config().get("remote_password", ""):
+            # ``load_config`` reads ``~/.kiss/config.json`` from disk;
+            # run it off-thread (M10 convention) so a slow/hung
+            # (e.g. NFS-homed) read cannot stall the event loop for
+            # every connected client.
+            cfg = await asyncio.to_thread(load_config)
+            if not cfg.get("remote_password", ""):
                 return
             if now >= self._tunnel_next_retry:
                 await self._restart_tunnel_url()
@@ -5470,7 +5755,10 @@ class RemoteAccessServer:
                 except Exception:
                     logger.debug("Watchdog tunnel check error", exc_info=True)
             try:
-                self._watchdog_check_url_file()
+                # Pure file I/O (stat + potential re-write) — run it
+                # off-thread so a slow disk cannot stall the loop
+                # (M10 convention).
+                await asyncio.to_thread(self._watchdog_check_url_file)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -6220,7 +6508,22 @@ class RemoteAccessServer:
         await self._setup_server()
 
     async def stop_async(self) -> None:
-        """Stop the server gracefully."""
+        """Stop the server gracefully.
+
+        Mirrors the blocking ``start()`` shutdown path for in-flight
+        agent tasks: :meth:`_stop_active_agent_tasks` cooperatively
+        stops and **joins** each worker thread (off-loop, since the
+        join blocks) so its cleanup ``finally`` persists a real
+        result instead of abandoning the row at the "Agent Failed
+        Abruptly" sentinel when an embedder shuts down.
+
+        Unlike ``start()`` — which *detaches* the spawned cloudflared
+        so the next daemon can adopt it and keep the public URL —
+        this path deliberately calls :meth:`_stop_tunnel` to kill the
+        tunnel: embedders and tests own their server's full lifecycle
+        and must not leak a background cloudflared process.
+        """
+        await asyncio.to_thread(self._stop_active_agent_tasks)
         await _cancel_task(self._watchdog_task)
         self._watchdog_task = None
         await _cancel_task(self._version_check_task)
