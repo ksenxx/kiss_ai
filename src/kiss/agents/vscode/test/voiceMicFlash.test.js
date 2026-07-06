@@ -7,7 +7,7 @@
 // flow (webview mode):
 //
 //  - After the "Sorcar" wake word is heard ({type: 'voiceWake'}), the
-//    mic button flashes GREEN: class 'voice-triggered' is added and
+//    mic button flashes RED: class 'voice-triggered' is added and
 //    stays on while the host captures the speech that follows.
 //  - When the host starts the gpt-audio transcription/translation call
 //    ({type: 'voiceTranscribing'}), the flash turns YELLOW: class
@@ -75,13 +75,13 @@ function sendHostMessage(win, data) {
 
 // ---------------------------------------------------------------------------
 
-test('wake flashes the mic button green (voice-triggered)', () => {
+test('wake flashes the mic button red (voice-triggered)', () => {
   const win = makeWindow();
   const btn = win.document.getElementById('voice-btn');
   sendHostMessage(win, {type: 'voiceWake'});
   assert.ok(
     btn.classList.contains('voice-triggered'),
-    'wake must add the green voice-triggered class',
+    'wake must add the red voice-triggered class',
   );
   assert.ok(
     !btn.classList.contains('voice-transcribing'),
@@ -100,7 +100,7 @@ test('transcribing turns the flash yellow (voice-transcribing)', () => {
   );
   assert.ok(
     !btn.classList.contains('voice-triggered'),
-    'yellow must replace the green wake flash',
+    'yellow must replace the red wake flash',
   );
 });
 
@@ -139,7 +139,7 @@ test('transcribing without a prior wake still flashes yellow', () => {
 
 test('a listener error clears the flash', () => {
   // If the Python listener dies mid-capture, the host reports the
-  // error through voiceState; the stale green/yellow flash must not
+  // error through voiceState; the stale red/yellow flash must not
   // linger until its long safety timeout.
   const win = makeWindow();
   const btn = win.document.getElementById('voice-btn');
@@ -165,7 +165,7 @@ test('the listener stopping clears the flash', () => {
 });
 
 test('turning voice off locally clears the flash immediately', () => {
-  // Clicking the mic toggle off must not leave a stale green/yellow
+  // Clicking the mic toggle off must not leave a stale red/yellow
   // flash waiting for a host message that may never come.
   const win = makeWindow();
   const btn = win.document.getElementById('voice-btn');
