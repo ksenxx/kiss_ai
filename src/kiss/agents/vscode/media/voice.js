@@ -6,7 +6,7 @@
  * Voice wake-word support for KISS Sorcar.
  *
  * Always-on, fully local listener for the trigger word "Sorcar".  When
- * the wake word is heard, the mic button flashes GREEN as a visual cue
+ * the wake word is heard, the mic button flashes RED as a visual cue
  * (no text is ever typed into the task input — the literal word
  * "sorcar" must never appear there) while the extension host records
  * the speech that follows.  When the host starts the gpt-audio
@@ -233,7 +233,7 @@
 
   /**
    * Show a transient color state on the mic button: 'voice-triggered'
-   * (green — wake word heard, capturing speech) or 'voice-transcribing'
+   * (red — wake word heard, capturing speech) or 'voice-transcribing'
    * (yellow — gpt-audio transcription in flight).  Passing a falsy
    * class clears both.  Only one flash (and one safety timer) is
    * active at a time.
@@ -253,14 +253,14 @@
   }
 
   /**
-   * React to the wake word: flash the mic button green and focus the
+   * React to the wake word: flash the mic button red and focus the
    * task input so the user sees they were heard.  No text is inserted
    * — the literal word "sorcar" must never appear in the input box;
    * the translated speech arrives later as a voiceSpeech message.
    * Debounced so one long utterance (partial + final results) only
    * triggers once; returns true when the wake actually fired (not
    * debounced) so browser mode knows to start a speech capture.  The
-   * green flash persists while the speech that follows is captured —
+   * red flash persists while the speech that follows is captured —
    * by the extension host in webview mode, by this page in browser
    * mode — until the voiceTranscribing/voiceSpeech message that
    * follows replaces or clears it (the long timeout is only a safety
@@ -334,7 +334,7 @@
   function beginCapture() {
     // Count the round at wake time (not when capture finishes), so a
     // late voiceSpeech from an older transcription cannot clear the
-    // green flash that belongs to this newer capture.
+    // red flash that belongs to this newer capture.
     outstandingRounds++;
     capture = {
       chunks: [], // Int16Array blocks, already at CAPTURE_SAMPLE_RATE
@@ -399,7 +399,7 @@
    * to the server for gpt-audio translation ({type: 'voiceTranscribe',
    * audio: <base64 16kHz mono s16le>}) and the mic button turns
    * yellow until the server's voiceSpeech reply arrives; silence just
-   * clears the green wake flash (the Python listener's NO_SPEECH).
+   * clears the red wake flash (the Python listener's NO_SPEECH).
    */
   function finishCapture() {
     const done = capture;
@@ -798,7 +798,7 @@
     enabled = next;
     persist();
     // Turning listening off ends any in-flight voice round-trip; a
-    // stale green/yellow flash must not wait for a host message that
+    // stale red/yellow flash must not wait for a host message that
     // may never come.
     if (!next) {
       outstandingRounds = 0;
