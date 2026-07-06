@@ -1198,6 +1198,46 @@ exec > >(tee -a "$LOG_FILE") 2>&1
         exit 1
     fi
 
+    # Pre-build the freshly-installed extension's Python environment BEFORE
+    # stopping the old kiss-web daemon.  ``--install-extension --force``
+    # above replaced the extension directory INCLUDING ``kiss_project/.venv``,
+    # so the program the daemon supervisor respawns —
+    # ``<extension>/kiss_project/.venv/bin/kiss-web`` — no longer exists at
+    # this point.  Killing the daemon while that binary is missing strands
+    # the user without a server: launchd's ``KeepAlive`` (and systemd's
+    # ``Restart=always``) respawn attempts fail on the missing binary, the
+    # supervisor applies failure throttling, and the daemon only comes back
+    # ~90 s later once the extension's DependencyInstaller has run
+    # ``uv sync`` after the window reload — exactly the stuck
+    # "KISS Sorcar Server is starting ..." overlay users report.
+    # Recreating ``.venv`` here (fast: uv's cache is warm) makes the
+    # post-kill respawn succeed immediately, shrinking the outage to ~1-2 s.
+    EXT_VERSION=$(grep -m1 '"version"' "$PROJECT_DIR/src/kiss/agents/vscode/package.json" 2>/dev/null \
+        | sed 's/.*"version"[^"]*"\([^"]*\)".*/\1/' || true)
+    NEW_KISS_PROJECT=""
+    if [ -n "$EXT_VERSION" ]; then
+        for ext_root in \
+            "$HOME/.vscode/extensions" \
+            "$HOME/.vscode-insiders/extensions" \
+            "$HOME/.vscode-server/extensions" \
+            "$HOME/.local/share/code-server/extensions"; do
+            if [ -d "$ext_root/ksenxx.kiss-sorcar-$EXT_VERSION/kiss_project" ]; then
+                NEW_KISS_PROJECT="$ext_root/ksenxx.kiss-sorcar-$EXT_VERSION/kiss_project"
+                break
+            fi
+        done
+    fi
+    if [ -n "$NEW_KISS_PROJECT" ] && command -v uv &>/dev/null; then
+        echo "   Pre-building the new extension's Python environment (uv sync) so"
+        echo "   the kiss-web daemon can restart immediately..."
+        if uv sync --project "$NEW_KISS_PROJECT" >/dev/null 2>&1; then
+            echo "   Python environment ready: $NEW_KISS_PROJECT/.venv"
+        else
+            echo "   WARNING: uv sync failed; the VS Code extension will rebuild the"
+            echo "   environment and restart the kiss-web daemon after the reload."
+        fi
+    fi
+
     # Stop the old kiss-web daemon BEFORE the extension auto-reloads.  The
     # ``--install-extension --force`` above replaced the extension directory
     # tree that the running daemon's bundled kiss_project (.venv/bin/kiss-web)
@@ -1231,20 +1271,66 @@ exec > >(tee -a "$LOG_FILE") 2>&1
             fi
         fi
     fi
+    # Only stop the old daemon when its supervisor (macOS LaunchAgent /
+    # Linux systemd user unit) can actually respawn kiss-web RIGHT NOW —
+    # i.e. the program its config points to exists and is executable.
+    # If it cannot (no supervisor config yet, config points into a removed
+    # extension directory, or the ``uv sync`` pre-build above was
+    # skipped/failed), killing the daemon would strand the user behind the
+    # "KISS Sorcar Server is starting ..." overlay for ~90 s (launchd
+    # failure-throttles the failing respawns) until the extension's
+    # DependencyInstaller rebuilds and restarts everything after the window
+    # reload.  Leaving the old daemon up is strictly better: it keeps
+    # serving, and the extension restarts it cleanly (fingerprint mismatch)
+    # once the new environment is ready.
+    KISS_SUPERVISOR_BIN=""
+    case "$(uname)" in
+        Darwin)
+            KISS_WEB_PLIST="$HOME/Library/LaunchAgents/com.kiss.web-server.plist"
+            if [ -f "$KISS_WEB_PLIST" ]; then
+                # First <string> after the ProgramArguments key = the daemon
+                # binary.  Plain text extraction — no PlistBuddy dependency.
+                KISS_SUPERVISOR_BIN=$(awk '/<key>ProgramArguments<\/key>/{f=1}
+                    f && /<string>/{sub(/.*<string>/,""); sub(/<\/string>.*/,""); print; exit}' \
+                    "$KISS_WEB_PLIST" 2>/dev/null || true)
+            fi
+            ;;
+        Linux)
+            KISS_WEB_UNIT="$HOME/.config/systemd/user/kiss-web.service"
+            if [ -f "$KISS_WEB_UNIT" ]; then
+                KISS_SUPERVISOR_BIN=$(grep -m1 '^ExecStart=' "$KISS_WEB_UNIT" 2>/dev/null \
+                    | sed 's/^ExecStart=//' || true)
+            fi
+            ;;
+    esac
+    if [ -z "$KISS_SUPERVISOR_BIN" ] || [ ! -x "$KISS_SUPERVISOR_BIN" ]; then
+        echo "   Skipping kiss-web daemon restart: its freshly-installed binary is"
+        echo "   not ready yet (supervisor program: ${KISS_SUPERVISOR_BIN:-<none>})."
+        echo "   The current daemon keeps serving; the VS Code extension will"
+        echo "   rebuild the environment and restart the daemon after the reload."
+    else
     if command -v lsof &>/dev/null; then
-        OLD_KISS_WEB_PIDS=$(lsof -ti :8787 2>/dev/null || true)
+        # ``-sTCP:LISTEN`` matters: a bare ``lsof -ti :8787`` also matches
+        # CLIENT sockets connected to the daemon — cloudflared, browsers,
+        # even VS Code itself — and the ``kill``/``kill -9`` below must
+        # never touch those.  ``-nP`` skips DNS/port-name lookups so each
+        # call returns in milliseconds instead of multiple seconds on a
+        # loaded machine (the old form made this loop take over a minute
+        # while the user stared at a seemingly stuck terminal).
+        OLD_KISS_WEB_PIDS=$(lsof -nP -ti tcp:8787 -sTCP:LISTEN 2>/dev/null || true)
         if [ -n "$OLD_KISS_WEB_PIDS" ]; then
             echo "   Stopping old kiss-web daemon (PIDs: $OLD_KISS_WEB_PIDS)..."
             echo "$OLD_KISS_WEB_PIDS" | xargs kill 2>/dev/null || true
             for _ in 1 2 3 4 5 6 7 8 9 10; do
                 sleep 0.3
-                if ! lsof -i :8787 -t &>/dev/null; then break; fi
+                if ! lsof -nP -ti tcp:8787 -sTCP:LISTEN &>/dev/null; then break; fi
             done
-            # Force-kill survivors.
-            KISS_WEB_STRAGGLERS=$(lsof -ti :8787 2>/dev/null || true)
+            # Force-kill survivors (listeners only — never client sockets).
+            KISS_WEB_STRAGGLERS=$(lsof -nP -ti tcp:8787 -sTCP:LISTEN 2>/dev/null || true)
             if [ -n "$KISS_WEB_STRAGGLERS" ]; then
                 echo "$KISS_WEB_STRAGGLERS" | xargs kill -9 2>/dev/null || true
             fi
+            echo "   Old kiss-web daemon stopped."
         fi
     fi
     # Remove the stale Unix-domain socket left behind by the now-dead daemon.
@@ -1286,6 +1372,26 @@ exec > >(tee -a "$LOG_FILE") 2>&1
             fi
             ;;
     esac
+
+    # Show the user the daemon actually coming back so the terminal never
+    # ends on "Stopping old kiss-web daemon..." — the line users kept
+    # reporting as a hang.  The wait is bounded and best-effort: the
+    # extension's own recovery path takes over after the window reload.
+    echo "   Waiting for the kiss-web daemon to come back up..."
+    KISS_DAEMON_WAIT_SECS="${KISS_DAEMON_WAIT_SECS:-15}"
+    _kiss_deadline=$(( $(date +%s) + KISS_DAEMON_WAIT_SECS ))
+    while [ "$(date +%s)" -lt "$_kiss_deadline" ]; do
+        if [ -S "$HOME/.kiss/sorcar.sock" ]; then break; fi
+        sleep 0.5
+    done
+    if [ -S "$HOME/.kiss/sorcar.sock" ]; then
+        echo "   kiss-web daemon is back up ($HOME/.kiss/sorcar.sock)."
+    else
+        echo "   kiss-web daemon not back within ${KISS_DAEMON_WAIT_SECS}s — the"
+        echo "   VS Code extension will finish restarting it after the reload."
+    fi
+    unset _kiss_deadline
+    fi
 
     # MODEL_INFO.json is intentionally NOT copied into the user's kiss
     # home directory.  The bundled
