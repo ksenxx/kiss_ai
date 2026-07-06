@@ -30,6 +30,7 @@ import requests
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
+    drain_queue_messages,
     stop_http_server,
     wait_for_matching_message,
 )
@@ -127,15 +128,22 @@ class ZaloChannelBackend(ToolMethodBackend):
     def poll_messages(
         self, channel_id: str, oldest: str, limit: int = 10
     ) -> tuple[list[dict[str, Any]], str]:
-        """Drain the webhook message queue."""
-        messages: list[dict[str, Any]] = []
-        while not self._message_queue.empty() and len(messages) < limit:  # pragma: no branch
-            messages.append(self._message_queue.get_nowait())
-        return messages, oldest
+        """Drain the webhook message queue, filtered by sender when given."""
+
+        def keep(msg: dict[str, Any]) -> bool:
+            return not channel_id or msg.get("user", "") == channel_id
+
+        return drain_queue_messages(self._message_queue, limit=limit, keep=keep), oldest
 
     def send_message(self, channel_id: str, text: str, thread_ts: str = "") -> None:
-        """Send a Zalo text message."""
-        self.send_text_message(channel_id, text)
+        """Send a Zalo text message.
+
+        Raises:
+            RuntimeError: If the Zalo API reports a send failure.
+        """
+        result = json.loads(self.send_text_message(channel_id, text))
+        if not result.get("ok"):
+            raise RuntimeError(result.get("error", "Zalo send failed"))
 
     def wait_for_reply(
         self,

@@ -677,8 +677,34 @@ class CliCompleter:
         return [(m, m) for m in self._predictive_matches(line)]
 
 
+def _readline_history_path(history_path: Path) -> Path:
+    """Return the readline-format sibling of *history_path*.
+
+    The anchored REPL persists plain text lines to *history_path*
+    itself, while GNU readline / libedit write their own incompatible
+    format via ``write_history_file`` (libedit even prepends a
+    ``_HiStOrY_V2_`` header and escape-encodes entries).  Sharing one
+    file meant whichever mode ran last corrupted the other mode's
+    view of the history (w2 F13), so the readline backend gets a
+    dedicated ``.readline`` sibling — mirroring the ``.ptk`` sibling
+    the prompt_toolkit reader already uses.
+
+    Args:
+        history_path: The per-working-directory base history path
+            returned by :func:`_history_path`.
+
+    Returns:
+        The sibling path used for readline-format history.
+    """
+    return history_path.with_name(history_path.name + ".readline")
+
+
 def _setup_readline(completer: CliCompleter, history_path: Path) -> None:
     """Install the completer and load per-directory history.
+
+    History is read from the ``.readline`` sibling of *history_path*
+    (see :func:`_readline_history_path`) so the readline-format file
+    never collides with the anchored REPL's plain-lines file.
 
     Binds Tab to ``menu-complete`` so pressing Tab repeatedly *cycles*
     through the completion candidates one at a time (best match first),
@@ -716,19 +742,24 @@ def _setup_readline(completer: CliCompleter, history_path: Path) -> None:
         readline.parse_and_bind('"\\e[13;2u": "\\\\\\n"')
         readline.parse_and_bind('"\\e[27;2;13~": "\\\\\\n"')
     try:
-        readline.read_history_file(str(history_path))
+        readline.read_history_file(str(_readline_history_path(history_path)))
     except (FileNotFoundError, OSError):
         pass
     readline.set_history_length(1000)
 
 
 def _save_history(history_path: Path) -> None:
-    """Persist the readline history to *history_path* (best effort)."""
+    """Persist the readline history (best effort).
+
+    Writes to the ``.readline`` sibling of *history_path* (see
+    :func:`_readline_history_path`), never to *history_path* itself,
+    which holds the anchored REPL's plain-lines history.
+    """
     if not _HAVE_READLINE:
         return
     assert readline is not None
     try:
-        readline.write_history_file(str(history_path))
+        readline.write_history_file(str(_readline_history_path(history_path)))
     except OSError:  # pragma: no cover - disk/permission error
         logger.debug("could not write history file", exc_info=True)
 
@@ -1069,7 +1100,12 @@ def _load_history_lines(path: Path) -> list[str]:
         return []
     try:
         return [
-            ln for ln in path.read_text(encoding="utf-8").splitlines() if ln
+            ln
+            for ln in path.read_text(encoding="utf-8").splitlines()
+            # Skip libedit's ``_HiStOrY_V2_`` header: before w2 F13
+            # the readline backend wrote its own format to this same
+            # file, so a legacy file may still open with the header.
+            if ln and ln != "_HiStOrY_V2_"
         ]
     except OSError:
         return []

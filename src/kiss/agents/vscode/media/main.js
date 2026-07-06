@@ -142,6 +142,9 @@
     const startMs = Number(el.dataset.startMs || 0);
     if (!startMs) return;
     _renderPanelTime(el);
+    // Mark the panel closed so ``reviveActivePanelTimes`` (tab restore)
+    // never re-registers a finalized panel with the live ticker.
+    el.dataset.timeDone = '1';
     _activePanels.delete(el);
     if (_activePanels.size === 0 && _activePanelTickIv) {
       clearInterval(_activePanelTickIv);
@@ -150,10 +153,59 @@
   }
 
   /**
+   * Re-register every still-open stamped panel under *root* with the
+   * live 1-second ticker and refresh its footer.
+   *
+   * While a tab sits in the background its DOM lives in a detached
+   * fragment, so the ticker prunes those (disconnected) panels from
+   * ``_activePanels``.  Called from ``restoreTab`` after the fragment
+   * is re-attached so a panel still waiting to close — e.g. the eager
+   * Thoughts panel opened at ``tool_result`` awaiting the model — has
+   * its time-spent footer resume live ticking instead of freezing at
+   * the value rendered before the tab switch.
+   */
+  function reviveActivePanelTimes(root) {
+    if (!root || !root.querySelectorAll) return;
+    const stamped = root.querySelectorAll(
+      '[data-start-ms]:not([data-time-done])',
+    );
+    for (let i = 0; i < stamped.length; i++) {
+      _activePanels.add(stamped[i]);
+      _renderPanelTime(stamped[i]);
+    }
+    _startActivePanelTick();
+  }
+
+  /**
+   * Remove a PROVISIONAL (still-empty) Thoughts panel from the
+   * transcript and deregister it from the live time ticker.
+   *
+   * A provisional panel is opened eagerly by ``processOutputEvent`` /
+   * ``processOutputEventForBgTab`` right after a ``tool_result`` so the
+   * user sees the time spent waiting for the model's next response.
+   * When the model's turn instead continues with ANOTHER tool call
+   * (parallel tool calls in one turn) before any thinking/text token
+   * arrives, the empty panel is discarded again so the transcript is
+   * not littered with empty Thoughts panels.
+   */
+  function discardProvisionalPanel(el) {
+    if (!el) return;
+    _activePanels.delete(el);
+    if (_activePanels.size === 0 && _activePanelTickIv) {
+      clearInterval(_activePanelTickIv);
+      _activePanelTickIv = null;
+    }
+    if (el.parentNode) el.parentNode.removeChild(el);
+  }
+
+  /**
    * Sanitize an HTML string before assigning to innerHTML.
    *
    * Strips dangerous tags (script/iframe/object/embed/form/meta/link/style/
-   * base), all event-handler attributes (onclick, onerror, ...) and
+   * base), every custom element (any hyphenated tag — the webview registers
+   * ``<kiss-tips-panel>``, and agent-supplied HTML must never upgrade into a
+   * live component such as a blank full-viewport Tips overlay), all
+   * event-handler attributes (onclick, onerror, ...) and
    * javascript:/data:/vbscript: URLs in href/src/action.  Used to wrap every
    * marked.parse() result that flows into innerHTML so that agent-supplied
    * markdown can never inject script/iframe/form via the webview.
@@ -184,7 +236,7 @@
     const walk = root => {
       const elements = Array.from(root.querySelectorAll('*'));
       for (const el of elements) {
-        if (BAD_TAGS.has(el.tagName)) {
+        if (BAD_TAGS.has(el.tagName) || el.tagName.includes('-')) {
           el.remove();
           continue;
         }
@@ -773,6 +825,11 @@
     if (tab.outputFragment) {
       O.appendChild(tab.outputFragment);
       tab.outputFragment = null;
+      // Panels that were still open when the tab went to the
+      // background were pruned from the live time ticker (their DOM
+      // was detached); re-register them so their time-spent footers
+      // resume ticking.
+      reviveActivePanelTimes(O);
     }
     if (taskPanel && taskPanelText) {
       // Trim trailing/leading whitespace so the user-visible task text
@@ -788,7 +845,7 @@
     }
     currentTaskName = (tab.taskPanelHTML || '').trim();
     currentTaskId = tab.currentTaskId !== undefined ? tab.currentTaskId : null;
-    updateChevronIcon(!!tab.panelsExpandedMap[currentTaskName]);
+    updateCollapseButton(!!tab.panelsExpandedMap[currentTaskName]);
     if (statusText) {
       statusText.textContent = tab.statusTextContent || 'Ready';
       statusText.style.color = tab.statusTextColor || 'var(--green)';
@@ -977,7 +1034,7 @@
       settingsBtn.className = 'chat-tab chat-tab-settings';
       settingsBtn.title = 'Settings';
       settingsBtn.innerHTML =
-        '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
+        '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
       settingsBtn.addEventListener('click', () => {
         openSettingsPanel();
       });
@@ -1060,6 +1117,11 @@
       if (i >= 0) tabs.splice(i, 1);
       vscode.postMessage({type: 'closeTab', tabId: id});
     }
+    // A sub-agent tab closed by hand (tab-bar ×, context menu, or a
+    // cascade) must not leave its run_parallel panel uncollapsed —
+    // uncollapsed panel ⇒ ALL its sub-agent tabs open.  Collapse the
+    // owning panel(s), which closes the surviving sibling tabs.
+    rpAfterTabsClosed(toClose);
     if (activeWasClosed) {
       if (tabs.length === 0) {
         // Last tab closed — create a fresh chat instead of closing
@@ -1119,7 +1181,9 @@
     if (tab.contentEditor && tab.contentEditor.layout) {
       try {
         tab.contentEditor.layout();
-      } catch (e) {}
+      } catch (_e) {
+        /* ignore layout failures */
+      }
     }
   }
 
@@ -1165,7 +1229,9 @@
     if (tab.contentEditor) {
       try {
         tab.contentEditor.dispose();
-      } catch (e) {}
+      } catch (_e) {
+        /* ignore dispose failures */
+      }
       tab.contentEditor = null;
     }
     if (tab.contentViewEl && tab.contentViewEl.parentNode) {
@@ -1307,7 +1373,9 @@
         holder.appendChild(pre);
         try {
           if (window.hljs) window.hljs.highlightElement(code);
-        } catch (e) {}
+        } catch (_e) {
+          /* ignore highlight failures */
+        }
       });
   }
 
@@ -1317,7 +1385,9 @@
     if (tab.contentEditor) {
       try {
         tab.contentEditor.dispose();
-      } catch (e) {}
+      } catch (_e) {
+        /* ignore dispose failures */
+      }
       tab.contentEditor = null;
     }
     if (tab.contentViewEl && tab.contentViewEl.parentNode) {
@@ -1458,6 +1528,36 @@
   document.addEventListener('click', () => {
     closeTabContextMenu();
   });
+
+  // Never leave a focus ring on a clicked toolbar/close control: blur
+  // the control right away.  Uses the capture phase so handlers that
+  // call stopPropagation() (e.g. the tab-header X) cannot bypass it,
+  // and so a handler that intentionally moves focus elsewhere (e.g.
+  // the input clear X refocusing the textarea) still wins — blur()
+  // here is a no-op once focus has moved on.
+  const BLUR_AFTER_CLICK_SELECTOR = [
+    '#menu-btn',
+    '#model-btn',
+    '#upload-btn',
+    '#tricks-btn',
+    '#voice-btn',
+    '#send-btn',
+    '#stop-btn',
+    '.chat-tab-add',
+    '.chat-tab-settings',
+    '.chat-tab-close',
+    '#input-clear-btn',
+    '.search-clear-btn',
+  ].join(', ');
+  document.addEventListener(
+    'click',
+    e => {
+      if (!e.target || typeof e.target.closest !== 'function') return;
+      const btn = e.target.closest(BLUR_AFTER_CLICK_SELECTOR);
+      if (btn && typeof btn.blur === 'function') btn.blur();
+    },
+    true,
+  );
   document.addEventListener('contextmenu', e => {
     if (
       !e.target.closest('#tab-context-menu') &&
@@ -1757,7 +1857,12 @@
   const autocommitToggleBtn = document.getElementById('cfg-auto-commit');
   const taskPanel = document.getElementById('task-panel');
   const taskPanelText = document.getElementById('task-panel-text');
-  const taskPanelChevron = document.getElementById('task-panel-chevron');
+  const taskPanelCollapseBtn = document.getElementById(
+    'task-panel-collapse-btn',
+  );
+  const taskPanelCollapseLabel = document.getElementById(
+    'task-panel-collapse-label',
+  );
   const taskPanelCopy = document.getElementById('task-panel-copy');
   const statusTokens = document.getElementById('status-tokens');
   const statusBudget = document.getElementById('status-budget');
@@ -1827,20 +1932,21 @@
   }
 
   /**
-   * Apply the chevron expand/collapse state to panels belonging to
-   * a specific task.
+   * Apply the task-panel collapse button's expand/collapse state to
+   * panels belonging to a specific task.
    * @param {boolean} expanded - true = expand, false = collapse
    * @param {string} taskName - the task whose panels to affect;
    *   panels belonging to other tasks are left untouched.
    *   If empty/falsy, affects only the current (main) task panels.
    *
-   * - expanded=false (chevron right, default): hide every .collapsible
-   *   panel that belongs to the specified task (display:none via
-   *   .chv-hidden) except result panels (.rc) and panels belonging
-   *   to the currently running task.
-   * - expanded=true (chevron down): reveal every hidden panel belonging
-   *   to the specified task and expand every .collapsible panel except
-   *   those belonging to the currently running task.
+   * - expanded=false (button offers "Uncollapse Chats", default): hide
+   *   every .collapsible panel that belongs to the specified task
+   *   (display:none via .chv-hidden) except result panels (.rc) and
+   *   panels belonging to the currently running task.
+   * - expanded=true (button offers "Collapse Chats"): reveal every
+   *   hidden panel belonging to the specified task and expand every
+   *   .collapsible panel except those belonging to the currently
+   *   running task.
    * Running task panels are direct children of #output (not inside
    *   .adjacent-task) while a task is running; adjacent-task containers
    *   hold previously-completed tasks.
@@ -1865,6 +1971,18 @@
           continue;
         }
         p.classList.add('chv-hidden');
+        // A "Collapse Chats" pass that hides a run_parallel panel
+        // must not leave the fan-out's sub-agent tabs open: a hidden
+        // panel is (at least) collapsed, and collapsed panel ⇒
+        // sub-agent tabs closed.  Mark it collapsed so the invariant
+        // machinery closes the tabs now and the expand branch above
+        // reopens them when the panels are revealed again.
+        if (p.classList.contains('tc-run-parallel')) {
+          p.classList.add('collapsed');
+          p.classList.remove('user-pinned');
+          collapsePreview(p);
+          syncRunParallelPanel(p);
+        }
       } else {
         p.classList.remove('chv-hidden');
         if (inRunning) continue;
@@ -1872,26 +1990,45 @@
         // Highlight code deferred while this panel stayed collapsed.
         highlightPending(p);
         collapsePreview(p);
+        // An expand-all that uncollapsed a run_parallel panel must
+        // reopen the fan-out's sub-agent tabs (uncollapsed panel ⇒
+        // sub-agent tabs open).
+        syncRunParallelPanel(p);
       }
     }
   }
 
-  /** Update the chevron icon to reflect the current expanded state. */
-  function updateChevronIcon(expanded) {
-    if (!taskPanelChevron) return;
-    if (expanded) taskPanelChevron.classList.add('expanded');
-    else taskPanelChevron.classList.remove('expanded');
+  /**
+   * Update the collapse button to reflect the current expanded state:
+   * the label always names the action a click will perform
+   * ("Collapse Chats" while expanded, "Uncollapse Chats" while
+   * collapsed) and the small chevron icon rotates to match.
+   */
+  function updateCollapseButton(expanded) {
+    if (!taskPanelCollapseBtn) return;
+    if (expanded) taskPanelCollapseBtn.classList.add('expanded');
+    else taskPanelCollapseBtn.classList.remove('expanded');
+    const label = expanded ? 'Collapse Chats' : 'Uncollapse Chats';
+    if (taskPanelCollapseLabel) taskPanelCollapseLabel.textContent = label;
+    taskPanelCollapseBtn.setAttribute(
+      'aria-expanded',
+      expanded ? 'true' : 'false',
+    );
+    taskPanelCollapseBtn.setAttribute(
+      'aria-label',
+      expanded ? 'Collapse chat panels' : 'Uncollapse chat panels',
+    );
   }
 
-  if (taskPanelChevron) {
-    taskPanelChevron.addEventListener('click', e => {
+  if (taskPanelCollapseBtn) {
+    taskPanelCollapseBtn.addEventListener('click', e => {
       e.stopPropagation();
       const tab = getTab(activeTabId);
       const visibleTask = getVisibleTaskName();
       const wasExpanded = tab ? !!tab.panelsExpandedMap[visibleTask] : false;
       const expanded = !wasExpanded;
       if (tab) tab.panelsExpandedMap[visibleTask] = expanded;
-      updateChevronIcon(expanded);
+      updateCollapseButton(expanded);
       applyChevronState(expanded, visibleTask);
     });
   }
@@ -2474,11 +2611,234 @@
         highlightPending(panelEl);
       }
       collapsePreview(panelEl);
+      // Enforce the run_parallel invariant: collapsed panel ⇒ its
+      // sub-agent tabs are closed; uncollapsed panel ⇒ they are open.
+      syncRunParallelPanel(panelEl);
       setTimeout(() => {
         _noScroll = false;
       }, 0);
     });
     addCopyButton(panelEl);
+  }
+
+  // --- run_parallel panel ⇔ sub-agent tabs invariant ---
+  //
+  // Invariant: while a ``run_parallel`` tool-call panel is UNCOLLAPSED
+  // the tabs of its sub-agents MUST be open, and while it is COLLAPSED
+  // those tabs MUST be closed.
+  //
+  // Sub-agents spawned by a live ``run_parallel`` fan-out are
+  // associated with the newest ``.tc-run-parallel`` panel of the
+  // parent tab (see the ``new_tab`` handler).  The panel element keeps
+  // the group state directly (``_rpSubagents``: one entry per
+  // sub-agent with its backend ``taskId`` and current frontend
+  // ``tabId``; ``_rpParentTabId``: the parent tab the reopened tabs
+  // anchor to), and ``_rpTabPanel`` maps each open sub-agent tab id
+  // back to its owning panel so ``closeTab`` can restore consistency
+  // when the user closes a sub-agent tab by hand.
+  const _rpTabPanel = new Map();
+  const _rpClosedSubagentTabs = new Set();
+  let _rpSyncing = false;
+
+  /** Newest run_parallel panel in *parentId*'s chat DOM (or null). */
+  function runParallelPanelForParent(parentId) {
+    let root = null;
+    if (parentId === activeTabId) {
+      root = O;
+    } else {
+      const parentTab = getTab(parentId);
+      root = parentTab ? parentTab.outputFragment : null;
+    }
+    if (!root || !root.querySelectorAll) return null;
+    const panels = root.querySelectorAll('.tc-run-parallel');
+    return panels.length ? panels[panels.length - 1] : null;
+  }
+
+  /** True when *panelEl* owns at least one OPEN sub-agent tab. */
+  function rpPanelHasOpenTabs(panelEl) {
+    const entries = panelEl._rpSubagents;
+    if (!entries) return false;
+    return entries.some(en => en.tabId && getTab(en.tabId));
+  }
+
+  /** Return the local tab id that owns *container*'s output DOM. */
+  function rpOwnerTabIdForContainer(container, fallbackTabId) {
+    if (fallbackTabId !== undefined && fallbackTabId !== null)
+      return fallbackTabId;
+    if (container === O) return activeTabId;
+    for (const tab of tabs) {
+      if (tab.outputFragment === container) return tab.id;
+      if (
+        tab.outputFragment &&
+        tab.outputFragment.contains &&
+        tab.outputFragment.contains(container)
+      ) {
+        return tab.id;
+      }
+    }
+    return '';
+  }
+
+  /** Return the local tab id that owns *panelEl*'s output DOM. */
+  function rpOwnerTabIdForPanel(panelEl) {
+    if (panelEl._rpParentTabId) return panelEl._rpParentTabId;
+    if (panelEl.closest && panelEl.closest('.adjacent-task')) return '';
+    if (O && O.contains(panelEl)) return activeTabId;
+    const root = panelEl.getRootNode ? panelEl.getRootNode() : null;
+    return rpOwnerTabIdForContainer(root);
+  }
+
+  /** True when *panelEl* is the newest run_parallel panel in its task DOM. */
+  function rpIsNewestRunParallelPanel(panelEl) {
+    let root = null;
+    if (panelEl.parentNode === O) root = O;
+    else {
+      root = panelEl.getRootNode ? panelEl.getRootNode() : null;
+      if (!root || !root.querySelectorAll) return true;
+    }
+    const panels = root.querySelectorAll('.tc-run-parallel');
+    return !panels.length || panels[panels.length - 1] === panelEl;
+  }
+
+  /**
+   * If a parent tab was replayed/re-rendered, the freshly-created
+   * run_parallel panel element has lost the expando registry that
+   * associated it with already-open sub-agent tabs.  Before collapsing
+   * or syncing such a panel, adopt the open sub-agent tabs of the same
+   * parent so the invariant machinery can close/reopen them normally.
+   */
+  function rpAdoptOpenSubagents(panelEl, parentId) {
+    if (!panelEl.classList.contains('tc-run-parallel') || !parentId) return;
+    if (!rpIsNewestRunParallelPanel(panelEl)) return;
+    const openChildren = tabs.filter(
+      tab => tab.isSubagentTab && tab.parentTabId === parentId,
+    );
+    for (const tab of openChildren) {
+      const previousPanel = _rpTabPanel.get(tab.id);
+      const previousEntry = previousPanel
+        ? (previousPanel._rpSubagents || []).find(en => en.tabId === tab.id)
+        : null;
+      let taskId = previousEntry ? previousEntry.taskId : '';
+      if (
+        (taskId === undefined || taskId === null || taskId === '') &&
+        tab.currentTaskId !== undefined &&
+        tab.currentTaskId !== null
+      ) {
+        taskId = tab.currentTaskId;
+      }
+      rpRegisterSubagent(panelEl, parentId, taskId || '', tab.id);
+    }
+  }
+
+  /**
+   * Record that sub-agent *taskId* (shown in tab *tabId*, '' while the
+   * panel is collapsed) belongs to *panelEl*'s fan-out.
+   */
+  function rpRegisterSubagent(panelEl, parentId, taskId, tabId) {
+    if (!panelEl._rpSubagents) panelEl._rpSubagents = [];
+    panelEl._rpParentTabId = parentId;
+    const taskKey = taskId === undefined || taskId === null ? '' : taskId;
+    const tabKey = tabId || '';
+    let entry = null;
+    if (tabKey) {
+      entry = panelEl._rpSubagents.find(en => en.tabId === tabKey) || null;
+    }
+    if (!entry && taskKey !== '') {
+      entry =
+        panelEl._rpSubagents.find(
+          en => String(en.taskId) === String(taskKey),
+        ) || null;
+    }
+    if (!entry) {
+      entry = {taskId: taskKey, tabId: tabKey};
+      panelEl._rpSubagents.push(entry);
+    } else {
+      if (taskKey !== '') entry.taskId = taskKey;
+      if (tabKey && entry.tabId !== tabKey) {
+        if (entry.tabId) _rpTabPanel.delete(entry.tabId);
+        entry.tabId = tabKey;
+      }
+    }
+    if (tabKey) {
+      _rpClosedSubagentTabs.delete(tabKey);
+      _rpTabPanel.set(tabKey, panelEl);
+    }
+  }
+
+  /**
+   * Enforce the invariant for *panelEl*: close every sub-agent tab of
+   * the panel when it is collapsed, (re)open every missing sub-agent
+   * tab when it is uncollapsed.  No-op for panels that are not
+   * run_parallel panels or own no sub-agents (e.g. history-rendered
+   * panels whose fan-out ran in a previous session).
+   */
+  function syncRunParallelPanel(panelEl) {
+    if (!panelEl.classList.contains('tc-run-parallel')) return;
+    rpAdoptOpenSubagents(panelEl, rpOwnerTabIdForPanel(panelEl));
+    const entries = panelEl._rpSubagents;
+    if (!entries) return;
+    if (_rpSyncing) return;
+    _rpSyncing = true;
+    try {
+      const collapsed = panelEl.classList.contains('collapsed');
+      for (const en of entries) {
+        const openTab = en.tabId ? getTab(en.tabId) : null;
+        if (collapsed && openTab) {
+          const closingId = en.tabId;
+          _rpClosedSubagentTabs.add(closingId);
+          _rpTabPanel.delete(closingId);
+          closeTab(closingId);
+          en.tabId = '';
+        } else if (!collapsed && !openTab && en.taskId !== '') {
+          const subTab = createBackgroundSubagentTab(panelEl._rpParentTabId);
+          en.tabId = subTab.id;
+          _rpTabPanel.set(subTab.id, panelEl);
+          vscode.postMessage({
+            type: 'resumeSession',
+            taskId: en.taskId,
+            tabId: subTab.id,
+          });
+        }
+      }
+    } finally {
+      _rpSyncing = false;
+    }
+  }
+
+  /**
+   * Restore the invariant after sub-agent tabs in *closedIds* were
+   * closed OUTSIDE syncRunParallelPanel (tab-bar × button, context
+   * menu, cascade from closing another tab): an uncollapsed
+   * run_parallel panel must not keep the surviving sibling tabs open,
+   * so collapse the owning panel — which closes them.  Panels whose
+   * parent tab was closed in the same cascade disappeared with it and
+   * need no work.
+   */
+  function rpAfterTabsClosed(closedIds) {
+    if (_rpSyncing) return;
+    const panels = new Set();
+    for (const id of closedIds) {
+      const p = _rpTabPanel.get(id);
+      if (p) {
+        _rpClosedSubagentTabs.add(id);
+        _rpTabPanel.delete(id);
+        for (const en of p._rpSubagents || []) {
+          if (en.tabId === id) en.tabId = '';
+        }
+        panels.add(p);
+      }
+    }
+    for (const p of panels) {
+      const parentOpen =
+        p._rpParentTabId === activeTabId || getTab(p._rpParentTabId);
+      if (!parentOpen) continue;
+      if (!p.classList.contains('collapsed')) {
+        p.classList.add('collapsed');
+        p.classList.remove('user-pinned');
+        collapsePreview(p);
+      }
+      syncRunParallelPanel(p);
+    }
   }
 
   // Panel Copy button + raw-text walker live in media/panelCopy.js so
@@ -2487,13 +2847,24 @@
   const PANEL_COPY_SVG = window.PanelCopy.PANEL_COPY_SVG;
   const PANEL_CHECK_SVG = window.PanelCopy.PANEL_CHECK_SVG;
 
-  function collapseAllExceptResult(container) {
+  function collapseAllExceptResult(container, ownerTabId) {
+    const ownerId = rpOwnerTabIdForContainer(container, ownerTabId);
     const panels = container.querySelectorAll('.collapsible');
     for (let i = 0; i < panels.length; i++) {
-      if (!panels[i].classList.contains('rc')) {
-        panels[i].classList.add('collapsed');
-        collapsePreview(panels[i]);
-      }
+      const p = panels[i];
+      if (p.classList.contains('rc')) continue;
+      if (p.classList.contains('tc-run-parallel'))
+        rpAdoptOpenSubagents(p, ownerId);
+      // A run_parallel panel whose fan-out is still RUNNING (its
+      // tool_result has not arrived yet) is exempt from the automatic
+      // collapse: collapsing it would kill the live sub-agent tabs.
+      // Once the run_parallel tool finished (``_rpDone``) the panel
+      // collapses like every other tool panel and syncRunParallelPanel
+      // enforces "collapsed panel ⇒ sub-agent tabs closed".
+      if (rpPanelHasOpenTabs(p) && !p._rpDone) continue;
+      p.classList.add('collapsed');
+      collapsePreview(p);
+      syncRunParallelPanel(p);
     }
   }
 
@@ -2501,13 +2872,19 @@
     if (!isRunning) return;
     const panels = O.querySelectorAll(':scope > .collapsible');
     for (let i = 0; i < panels.length - 1; i++) {
-      if (
-        !panels[i].classList.contains('rc') &&
-        !panels[i].classList.contains('user-pinned')
-      ) {
-        panels[i].classList.add('collapsed');
-        collapsePreview(panels[i]);
-      }
+      const p = panels[i];
+      if (p.classList.contains('rc') || p.classList.contains('user-pinned'))
+        continue;
+      if (p.classList.contains('tc-run-parallel'))
+        rpAdoptOpenSubagents(p, activeTabId);
+      // Same run_parallel exemption as collapseAllExceptResult: only a
+      // panel whose fan-out is still running keeps its sub-agent tabs
+      // (and itself) open; a finished fan-out collapses with the other
+      // older panels, closing its sub-agent tabs.
+      if (rpPanelHasOpenTabs(p) && !p._rpDone) continue;
+      p.classList.add('collapsed');
+      collapsePreview(p);
+      syncRunParallelPanel(p);
     }
   }
 
@@ -2823,6 +3200,14 @@
           hdr.classList.add('tc-h-bash');
           c.classList.add('tc-bash');
         }
+        // Tag run_parallel tool-call panels so the panel ⇔ sub-agent
+        // tabs invariant machinery (see syncRunParallelPanel) can find
+        // the panel that owns the fan-out's sub-agent tabs.
+        if (ev.name === 'run_parallel') {
+          c.classList.add('tc-run-parallel');
+          if (ev.tabId !== undefined && ev.tabId !== null)
+            c._rpParentTabId = ev.tabId;
+        }
         let b = '';
         if (ev.path) {
           const ep = esc(ev.path).replace(/"/g, '&quot;');
@@ -2908,6 +3293,16 @@
         // ``hadBash && !is_error`` early exit — so every tool_result
         // path (bash, plain output, error) stamps the elapsed time.
         if (tState.lastToolCallEl) finalizePanelTime(tState.lastToolCallEl);
+        // The run_parallel tool finished: its fan-out is complete, so
+        // the panel is no longer exempt from the automatic collapse
+        // passes — when the agent moves on and the panel collapses,
+        // syncRunParallelPanel closes the fan-out's sub-agent tabs.
+        if (
+          tState.lastToolCallEl &&
+          tState.lastToolCallEl.classList.contains('tc-run-parallel')
+        ) {
+          tState.lastToolCallEl._rpDone = true;
+        }
         if (hadBash && !ev.is_error) break;
         const resultTarget = tState.lastToolCallEl || target;
         if (ev.is_error) {
@@ -3064,7 +3459,11 @@
       // Close out the previous Thoughts panel — the next streaming
       // step will create a new one — so the time-spent footer covers
       // the period between this panel and the tool call that ends it.
-      if (llmPanel) finalizePanelTime(llmPanel);
+      // A still-PROVISIONAL (empty) panel means the model's turn
+      // continued with another tool call before any thinking/text
+      // token: discard the empty panel instead of finalizing it.
+      if (llmPanel && llmPanel._provisional) discardProvisionalPanel(llmPanel);
+      else if (llmPanel) finalizePanelTime(llmPanel);
       llmPanel = null;
       llmPanelState = mkS();
       // Set true (not false) so that non-core tools (screenshot,
@@ -3076,8 +3475,19 @@
     if (t === 'tool_result' && lastToolName !== 'finish') {
       pendingPanel = true;
     }
-    // First thought (stepCount === 0) also gets a panel, like every other turn.
+    // First model token landing in an EAGER (provisional) Thoughts
+    // panel — opened below when the tool result arrived — confirms the
+    // panel: count the step now, exactly once.
     if (
+      llmPanel &&
+      llmPanel._provisional &&
+      (t === 'thinking_start' || t === 'text_delta')
+    ) {
+      updateStepCount(stepCount + 1);
+      llmPanel._provisional = false;
+    }
+    // First thought (stepCount === 0) also gets a panel, like every other turn.
+    else if (
       (pendingPanel || stepCount === 0) &&
       (t === 'thinking_start' || t === 'text_delta')
     ) {
@@ -3103,6 +3513,21 @@
     }
     handleOutputEvent(ev, target, tState);
     if (target === O) collapseOlderPanels();
+    // EAGERLY open the next Thoughts panel the moment a tool result
+    // arrives — before the tool response (and any queued user message)
+    // is sent back to the model — so the user immediately sees the
+    // time spent waiting for the model's next response ticking in the
+    // panel's footer, like the other chat panels.  The panel starts
+    // PROVISIONAL: streamed thinking/text tokens confirm it (above),
+    // while another tool call discards it again.
+    if (t === 'tool_result' && lastToolName !== 'finish' && !llmPanel) {
+      llmPanel = mkThoughtsPanel();
+      llmPanel._provisional = true;
+      O.appendChild(llmPanel);
+      collapseOlderPanels();
+      llmPanelState = mkS();
+      pendingPanel = false;
+    }
     if (t === 'result' || t === 'usage_info') {
       // Snapshot current task metrics so adjacent-scroll can restore them
       currentTaskMetrics.tokens = statusTokens ? statusTokens.textContent : '';
@@ -3112,8 +3537,11 @@
     if (t === 'result') {
       // Close out the last live Thoughts panel so its bottom-anchored
       // time footer reflects the duration up to the result event.
+      // Null it out so a subsequent sub-session's thinking creates its
+      // own fresh panel instead of reusing this finalized one.
       if (llmPanel) finalizePanelTime(llmPanel);
-      collapseAllExceptResult(O);
+      llmPanel = null;
+      collapseAllExceptResult(O, activeTabId);
       if (ev.success === false && !ev.is_continue) {
         const rTab = getTab(activeTabId);
         if (rTab) rTab.lastTaskFailed = true;
@@ -3131,7 +3559,7 @@
         _lp.scrollTop = _lp.scrollHeight;
       });
     }
-    // Keep the chevron "right" state consistent across new panels added by streaming.
+    // Keep the collapsed state consistent across new panels added by streaming.
     // Skip during demo replay — demo mode never sets isRunning so
     // applyChevronState(false) would hide every non-result panel via chv-hidden.
     const tab = getTab(activeTabId);
@@ -3163,7 +3591,11 @@
       bgLastToolName = ev.name || '';
       // Mirror processOutputEvent: close out the previous Thoughts
       // panel so its time-spent footer covers up to this tool call.
-      if (bgLlmPanel) finalizePanelTime(bgLlmPanel);
+      // A still-PROVISIONAL (empty) eager panel is discarded instead —
+      // the model's turn continued with another tool call.
+      if (bgLlmPanel && bgLlmPanel._provisional)
+        discardProvisionalPanel(bgLlmPanel);
+      else if (bgLlmPanel) finalizePanelTime(bgLlmPanel);
       bgLlmPanel = null;
       bgLlmPanelState = mkS();
       bgPendingPanel = true;
@@ -3172,8 +3604,20 @@
       bgPendingPanel = true;
     }
 
-    // Create a new llm-panel when needed
+    // First model token landing in an EAGER (provisional) panel —
+    // opened below when the tool result arrived — confirms the panel:
+    // count the step now, exactly once (mirrors processOutputEvent).
     if (
+      bgLlmPanel &&
+      bgLlmPanel._provisional &&
+      (t === 'thinking_start' || t === 'text_delta')
+    ) {
+      bgStepCount++;
+      tab.statusStepsText = 'Steps: ' + bgStepCount;
+      bgLlmPanel._provisional = false;
+    }
+    // Create a new llm-panel when needed
+    else if (
       (bgPendingPanel || bgStepCount === 0) &&
       (t === 'thinking_start' || t === 'text_delta')
     ) {
@@ -3223,10 +3667,23 @@
       if (statusBudget) statusBudget.textContent = prevBudgetText;
       if (statusSteps) statusSteps.textContent = prevStepsText;
 
+      // EAGERLY open the next Thoughts panel right after a tool result
+      // (mirrors processOutputEvent) so the waiting-for-model time is
+      // visible in the panel footer when the user switches to the tab.
+      if (t === 'tool_result' && bgLastToolName !== 'finish' && !bgLlmPanel) {
+        bgLlmPanel = mkThoughtsPanel();
+        bgLlmPanel._provisional = true;
+        tab.outputFragment.appendChild(bgLlmPanel);
+        bgLlmPanelState = mkS();
+        bgPendingPanel = false;
+      }
+
       if (t === 'result') {
         // Close out the last bg-tab Thoughts panel so its footer
-        // reflects the duration up to this result event.
+        // reflects the duration up to this result event.  Null it out
+        // so a subsequent sub-session's thinking creates a fresh panel.
         if (bgLlmPanel) finalizePanelTime(bgLlmPanel);
+        bgLlmPanel = null;
         if (ev.step_count) {
           bgStepCount = ev.step_count;
           tab.statusStepsText = 'Steps: ' + ev.step_count;
@@ -3235,7 +3692,7 @@
           tab.statusTokensText = 'Tokens: ' + fmtN(ev.total_tokens);
         if (ev.cost && ev.cost !== 'N/A')
           tab.statusBudgetText = 'Cost: ' + ev.cost;
-        collapseAllExceptResult(tab.outputFragment);
+        collapseAllExceptResult(tab.outputFragment, tab.id);
         if (ev.success === false && !ev.is_continue) tab.lastTaskFailed = true;
         // After a result, the next thinking/text must create a new panel.
         bgPendingPanel = true;
@@ -3425,9 +3882,9 @@
       }
     }
     setTaskText(visibleTask);
-    // Sync chevron icon to the visible task's expanded state
+    // Sync the collapse button to the visible task's expanded state
     const vTab = getTab(activeTabId);
-    if (vTab) updateChevronIcon(!!vTab.panelsExpandedMap[visibleTask]);
+    if (vTab) updateCollapseButton(!!vTab.panelsExpandedMap[visibleTask]);
     // Update header metrics to match the visible task
     if (visibleContainer) {
       // Scrolled to an adjacent task — show its metrics
@@ -3592,6 +4049,263 @@
   }
 
   // --- Main event handler ---
+  // ``talkId``s already played on this device — all backend copies of
+  // one ``talk()`` call share a talkId, so replaying a duplicate copy
+  // (one per subscribed viewer tab) is suppressed.  See case 'talk'.
+  const spokenTalkIds = new Set();
+
+  // Voice-name markers of high-quality (neural) system voices, most
+  // natural first.  Modern OS / browser voices whose names carry one
+  // of these markers use neural TTS and sound far more human than the
+  // legacy default voice the Web Speech API otherwise picks (which is
+  // often a robotic formant/"compact" voice).  Examples:
+  //   * "Microsoft Aria Online (Natural) - English (United States)"
+  //   * "Samantha (Enhanced)" / "Ava (Premium)" / "Siri Voice 4" (macOS)
+  //   * "Google US English" (Chrome's server-side neural voices)
+  const NATURAL_VOICE_MARKERS = [
+    'natural',
+    'neural',
+    'premium',
+    'enhanced',
+    'siri',
+    'google',
+    'online',
+  ];
+
+  /**
+   * Pick the most natural-sounding available system voice for
+   * *language* (a BCP-47 tag such as "en-US"; may be empty).
+   *
+   * Voices are ranked first by language match (exact tag > same base
+   * language > any) and then by how early a NATURAL_VOICE_MARKERS
+   * keyword appears in the marker list.  Returns ``null`` when the
+   * voice list is unavailable or empty, in which case the caller
+   * leaves the browser's default voice in place.
+   */
+  function pickNaturalVoice(synth, language) {
+    if (!synth || typeof synth.getVoices !== 'function') return null;
+    let voices;
+    try {
+      voices = synth.getVoices() || [];
+    } catch (_e) {
+      return null;
+    }
+    if (!voices.length) return null;
+    const wanted = String(language || '')
+      .toLowerCase()
+      .replace(/_/g, '-');
+    const wantedBase = wanted.split('-')[0];
+    let best = null;
+    let bestLang = -1;
+    let bestQuality = -1;
+    for (const voice of voices) {
+      const lang = String(voice.lang || '')
+        .toLowerCase()
+        .replace(/_/g, '-');
+      let langScore = 0;
+      if (!wanted) {
+        langScore = 1;
+      } else if (lang === wanted) {
+        langScore = 3;
+      } else if (lang.split('-')[0] === wantedBase) {
+        langScore = 2;
+      }
+      if (wanted && langScore === 0) continue;
+      const name = String(voice.name || '').toLowerCase();
+      let quality = 0;
+      for (let i = 0; i < NATURAL_VOICE_MARKERS.length; i++) {
+        if (name.includes(NATURAL_VOICE_MARKERS[i])) {
+          quality = NATURAL_VOICE_MARKERS.length - i;
+          break;
+        }
+      }
+      if (
+        langScore > bestLang ||
+        (langScore === bestLang && quality > bestQuality)
+      ) {
+        best = voice;
+        bestLang = langScore;
+        bestQuality = quality;
+      }
+    }
+    return best;
+  }
+
+  // Emotion → base prosody (Web Speech API rate/pitch multipliers).
+  // The agent's ``talk`` tool passes an optional ``emotion`` naming the
+  // vibe of the utterance; shaping rate and pitch around it keeps the
+  // delivery from sounding like a flat, robotic monotone.
+  const EMOTION_PROSODY = {
+    cheerful: {rate: 1.06, pitch: 1.12},
+    excited: {rate: 1.14, pitch: 1.18},
+    playful: {rate: 1.08, pitch: 1.15},
+    curious: {rate: 1.0, pitch: 1.08},
+    warm: {rate: 0.98, pitch: 1.05},
+    proud: {rate: 1.02, pitch: 1.06},
+    calm: {rate: 0.92, pitch: 0.97},
+    empathetic: {rate: 0.9, pitch: 1.02},
+    reassuring: {rate: 0.94, pitch: 1.0},
+    apologetic: {rate: 0.9, pitch: 0.95},
+    serious: {rate: 0.95, pitch: 0.9},
+    sad: {rate: 0.86, pitch: 0.9},
+    neutral: {rate: 1.0, pitch: 1.0},
+  };
+
+  /**
+   * Strip written-only artifacts from *text* so the speech engine
+   * never reads markdown punctuation ("asterisk asterisk") or emoji
+   * names ("party popper") aloud: code fences/backticks, emphasis
+   * markers, heading/bullet prefixes, and emoji/pictographs.
+   */
+  function cleanSpeechText(text) {
+    return String(text)
+      .replace(/```[a-zA-Z0-9_-]*\n?/g, ' ')
+      .replace(/`([^`]*)`/g, '$1')
+      .replace(/(\*\*|__)(.*?)\1/g, '$2')
+      .replace(/(^|\s)[*_]([^*_\n]+)[*_](?=\s|[.,!?;:]|$)/g, '$1$2')
+      .replace(/^#{1,6}\s+/gm, '')
+      .replace(/^[ \t]*[-*+][ \t]+/gm, '')
+      .replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}]/gu, '')
+      .replace(/\uFE0F|\u200D/g, '')
+      .replace(/[ \t]+/g, ' ')
+      .trim();
+  }
+
+  /**
+   * Split *text* into sentence-sized chunks at terminal punctuation
+   * and blank lines.  Speaking one utterance per sentence lets the
+   * engine breathe at sentence boundaries — natural pacing instead of
+   * one long run-on — and lets each sentence carry its own prosody
+   * (questions rise, exclamations energize, ellipses trail off).
+   */
+  function splitSpeechSentences(text) {
+    const parts = String(text)
+      .split(/(?<=[.!?\u2026])\s+|\n{2,}/)
+      .map(s => s.trim())
+      .filter(Boolean);
+    return parts.length ? parts : [String(text).trim()].filter(Boolean);
+  }
+
+  /**
+   * Infer a vibe from the wording of *text* when the agent did not
+   * pass an explicit emotion.  Cheap keyword/punctuation heuristics
+   * only — returns an EMOTION_PROSODY key.
+   */
+  function inferEmotion(text) {
+    const t = String(text).toLowerCase();
+    if (/sorry|apolog|my bad|unfortunately/.test(t)) return 'apologetic';
+    if (/error|failed|failure|broke|crash/.test(t)) return 'serious';
+    if (
+      /congrat|awesome|great news|amazing|fantastic|woohoo|yay|success/.test(t)
+    ) {
+      return 'cheerful';
+    }
+    const bangs = (t.match(/!/g) || []).length;
+    if (bangs >= 2) return 'excited';
+    if (bangs === 1) return 'cheerful';
+    if (/\?\s*$/.test(t)) return 'curious';
+    return 'neutral';
+  }
+
+  /**
+   * Compute the rate/pitch for one *sentence* given the base
+   * *emotion* prosody: questions rise in pitch, exclamations add
+   * energy, ellipses slow down and trail off, and a tiny per-sentence
+   * drift (by *index*) keeps long replies from sounding monotone.
+   * Values are clamped to the Web Speech API's safe ranges.
+   */
+  /** True if *name* is a known EMOTION_PROSODY key (own-property
+   * check so inherited names like "constructor" never match). */
+  function isKnownEmotion(name) {
+    return Object.prototype.hasOwnProperty.call(EMOTION_PROSODY, name);
+  }
+
+  function sentenceProsody(sentence, emotion, index) {
+    const base = isKnownEmotion(emotion)
+      ? EMOTION_PROSODY[emotion]
+      : EMOTION_PROSODY.neutral;
+    let rate = base.rate;
+    let pitch = base.pitch;
+    if (/\?\s*$/.test(sentence)) {
+      pitch += 0.08;
+    } else if (/!\s*$/.test(sentence)) {
+      pitch += 0.06;
+      rate += 0.06;
+    } else if (/(\.\.\.|\u2026)\s*$/.test(sentence)) {
+      rate -= 0.08;
+      pitch -= 0.03;
+    }
+    const drift = index % 3;
+    if (drift === 1) pitch += 0.03;
+    else if (drift === 2) pitch -= 0.02;
+    rate = Math.min(1.6, Math.max(0.6, rate));
+    pitch = Math.min(1.8, Math.max(0.5, pitch));
+    return {rate, pitch};
+  }
+
+  // Prime asynchronous voice loading: Chrome populates getVoices()
+  // only after a first call (and signals completion via the
+  // 'voiceschanged' event), so warm the list at startup to make the
+  // natural voice available by the time the first talk event arrives.
+  try {
+    const primeSynth = window.speechSynthesis;
+    if (primeSynth && typeof primeSynth.getVoices === 'function') {
+      primeSynth.getVoices();
+      if (typeof primeSynth.addEventListener === 'function') {
+        primeSynth.addEventListener('voiceschanged', () => {
+          primeSynth.getVoices();
+        });
+      }
+    }
+  } catch (_e) {
+    // Speech synthesis unsupported — talk playback is best-effort.
+  }
+
+  // --- iOS Safari speech unlock ---
+  // iOS Safari (and Chrome 71+) silently drop speechSynthesis.speak()
+  // calls that never originated from a user gesture: the FIRST
+  // speak() must execute synchronously inside a handler for one of
+  // WebKit's activation events (touchend / click / keydown), after
+  // which programmatic speaks work for the rest of the session.  The
+  // 'talk' handler below runs from a WebSocket/postMessage event —
+  // never a gesture — so on iPhone the agent's speech was silently
+  // dropped (no sound, no error).  Speaking one EMPTY utterance
+  // inside the user's first real gesture (e.g. the tap that submits
+  // their question) unlocks speech for every later talk event.
+  const SPEECH_UNLOCK_EVENTS = ['touchend', 'click', 'keydown'];
+  let speechUnlocked = false;
+
+  function unlockSpeechSynthesis() {
+    if (speechUnlocked) return;
+    try {
+      const synth = window.speechSynthesis;
+      const Utterance = window.SpeechSynthesisUtterance;
+      if (!synth || typeof Utterance !== 'function') return;
+      // The documented iOS workaround verbatim: speak one EMPTY
+      // utterance inside the gesture.  Empty text is inaudible, and
+      // deliberately nothing else is tweaked (e.g. volume) so Safari
+      // treats it as an ordinary speak that grants speaking rights.
+      synth.speak(new Utterance(''));
+      // iOS can leave the synthesizer stuck in a paused state (e.g.
+      // after the page was backgrounded mid-speech); resume() is a
+      // no-op when not paused.
+      if (typeof synth.resume === 'function') synth.resume();
+      speechUnlocked = true;
+      for (const type of SPEECH_UNLOCK_EVENTS) {
+        document.removeEventListener(type, unlockSpeechSynthesis, true);
+      }
+    } catch (_e) {
+      // Speech synthesis unsupported — talk playback is best-effort.
+    }
+  }
+
+  for (const type of SPEECH_UNLOCK_EVENTS) {
+    // Capture phase so the unlock runs on the user's very first
+    // interaction anywhere in the page, even when an inner handler
+    // stops propagation.
+    document.addEventListener(type, unlockSpeechSynthesis, true);
+  }
+
   function handleEvent(ev) {
     const t = ev.type;
     switch (t) {
@@ -3650,8 +4364,8 @@
         // window's running state.
         if (ev.tabId === undefined || ev.tabId === activeTabId) {
           setRunningState(ev.running);
-          // Refresh chevron-driven visibility so panels of the now-running
-          // task become visible even if the chevron is collapsed.  Needed
+          // Refresh collapse-button-driven visibility so panels of the
+          // now-running task become visible even while collapsed.  Needed
           // after resuming a running task from history: the prior
           // ``task_events`` replay called applyChevronState() while
           // isRunning was still false, marking every replayed panel
@@ -3740,6 +4454,78 @@
         const askTab = getTab(askTabId);
         if (!askTab) break;
         clearAskForMatchingChatTabs(askTab);
+        break;
+      }
+      case 'talk': {
+        // Agent-initiated text-to-speech (the ``talk`` tool): play the
+        // text on this device's default speaker via the Web Speech API.
+        // Deliberately NOT gated on activeTabId — a device whose task
+        // tab is in the BACKGROUND must still speak.  Two gates keep
+        // each utterance to exactly one playback per device:
+        //
+        //  * tab ownership — the backend stamps one copy per
+        //    subscribed viewer tab and delivers every copy to every
+        //    connected webview, so a copy stamped for ANOTHER
+        //    window's tab must stay silent here (that window plays
+        //    it);
+        //  * talkId dedupe — all stamped copies of one ``talk()``
+        //    call share a ``talkId``; when several copies land on
+        //    this webview (two open tabs of the same task, a stale
+        //    subscription from before a reload, ...) only the first
+        //    speaks.  Without this the same reply was spoken twice.
+        const talkText = ev.text || '';
+        if (!talkText) break;
+        if (ev.tabId !== undefined && !getTab(ev.tabId)) break;
+        if (ev.talkId) {
+          if (spokenTalkIds.has(ev.talkId)) break;
+          spokenTalkIds.add(ev.talkId);
+          if (spokenTalkIds.size > 500) {
+            // Bounded memory: drop the oldest half (Sets iterate in
+            // insertion order).
+            const ids = spokenTalkIds.values();
+            for (let i = 0; i < 250; i++) {
+              spokenTalkIds.delete(ids.next().value);
+            }
+          }
+        }
+        try {
+          const synth = window.speechSynthesis;
+          const Utterance = window.SpeechSynthesisUtterance;
+          if (!synth || typeof Utterance !== 'function') break;
+          // iOS leaves the synthesizer stuck paused after the page is
+          // backgrounded mid-speech; a paused queue swallows every
+          // new utterance.  resume() is a no-op when not paused.
+          if (typeof synth.resume === 'function') synth.resume();
+          // Natural, emotive delivery instead of a flat robotic read:
+          //  * strip markdown/emoji artifacts the engine would read
+          //    aloud;
+          //  * split into sentences so the engine breathes at
+          //    sentence boundaries;
+          //  * shape each sentence's rate/pitch from the agent's
+          //    emotion (or a vibe inferred from the wording) plus the
+          //    sentence's own punctuation.
+          const cleaned = cleanSpeechText(talkText);
+          if (!cleaned) break;
+          const emotion = isKnownEmotion(ev.emotion)
+            ? ev.emotion
+            : inferEmotion(cleaned);
+          // Prefer a natural (neural) system voice over the often
+          // robotic browser default so the agent sounds human-like.
+          const voice = pickNaturalVoice(synth, ev.language);
+          const sentences = splitSpeechSentences(cleaned);
+          for (let i = 0; i < sentences.length; i++) {
+            const utter = new Utterance(sentences[i]);
+            if (ev.language) utter.lang = ev.language;
+            if (voice) utter.voice = voice;
+            const prosody = sentenceProsody(sentences[i], emotion, i);
+            utter.rate = prosody.rate;
+            utter.pitch = prosody.pitch;
+            synth.speak(utter);
+          }
+        } catch (_e) {
+          // Speech synthesis unsupported or blocked — audio is
+          // best-effort and must never break event handling.
+        }
         break;
       }
       case 'error':
@@ -3958,8 +4744,18 @@
         }
         // Track the task_id of the currently displayed task so a later
         // 'taskDeleted' broadcast can decide whether to close this tab.
-        if (teTab && ev.task_id !== undefined && ev.task_id !== null)
+        if (teTab && ev.task_id !== undefined && ev.task_id !== null) {
           teTab.currentTaskId = ev.task_id;
+          const rpPanel = _rpTabPanel.get(teTabId);
+          if (rpPanel && teTab.isSubagentTab) {
+            rpRegisterSubagent(
+              rpPanel,
+              rpPanel._rpParentTabId || teTab.parentTabId || '',
+              ev.task_id,
+              teTabId,
+            );
+          }
+        }
         // Non-active tab: render into a document fragment without touching the DOM.
         // When teTabId targets a different tab but that tab hasn't been
         // created yet (teTab is null), silently drop the event so
@@ -4015,6 +4811,7 @@
           }
           const frag = document.createDocumentFragment();
           replayEventsInto(frag, ev.events || [], {
+            ownerTabId: teTabId,
             onFollowupClick: function (text) {
               inp.value = text;
               syncClearBtn();
@@ -4439,6 +5236,28 @@
       case 'task_interrupted':
       case 'task_stopped': {
         markTabDone(ev.tabId, true);
+        // The task ended without a ``result`` event, so no code path
+        // will close the still-open Thoughts panel: discard a
+        // PROVISIONAL (empty) eager panel — otherwise it would keep
+        // ticking forever — and freeze the footer of a filled one.
+        // ``pendingPanel = true`` so a later resumed/reattached stream
+        // opens its own fresh panel.
+        if (ev.tabId === undefined || ev.tabId === activeTabId) {
+          if (llmPanel && llmPanel._provisional)
+            discardProvisionalPanel(llmPanel);
+          else if (llmPanel) finalizePanelTime(llmPanel);
+          llmPanel = null;
+          pendingPanel = true;
+        } else {
+          const endTab = getTab(ev.tabId);
+          if (endTab && endTab.streamLlmPanel) {
+            if (endTab.streamLlmPanel._provisional)
+              discardProvisionalPanel(endTab.streamLlmPanel);
+            else finalizePanelTime(endTab.streamLlmPanel);
+            endTab.streamLlmPanel = null;
+            endTab.streamPendingPanel = true;
+          }
+        }
         // ``task_interrupted`` is a graceful server shutdown / restart
         // (e.g. an extension update restarting the daemon), distinct
         // from the user clicking "Stop" (``task_stopped``) and from a
@@ -4484,8 +5303,28 @@
           // for a tab that will never show a welcome screen, and (4)
           // steal keyboard focus from the parent the user is typing
           // in.  ``createBackgroundSubagentTab`` does none of that.
+          // Associate the sub-agent with the parent tab's newest
+          // run_parallel panel so collapsing/expanding that panel
+          // closes/reopens the fan-out's tabs (see
+          // syncRunParallelPanel).  If the user collapsed the panel
+          // while sub-agents are still spawning, honour the collapsed
+          // state: register the sub-agent but do NOT open a tab (nor
+          // resume its stream) — expanding the panel opens it then.
+          const rpPanel = runParallelPanelForParent(parentTabBeforeNew);
+          if (rpPanel && rpPanel.classList.contains('collapsed')) {
+            rpRegisterSubagent(rpPanel, parentTabBeforeNew, ev.task_id, '');
+            break;
+          }
           const subTab = createBackgroundSubagentTab(parentTabBeforeNew);
           subAgentTabId = subTab.id;
+          if (rpPanel) {
+            rpRegisterSubagent(
+              rpPanel,
+              parentTabBeforeNew,
+              ev.task_id,
+              subTab.id,
+            );
+          }
         } else {
           // Defensive path: a ``new_tab`` event with no
           // ``parent_tab_id`` is not produced by any current backend
@@ -4531,10 +5370,32 @@
         // ``ev.tabId`` with the subscriber's (= parent's) tab id, so we
         // fall back to that.
         const parentId = ev.parent_tab_id || ev.tabId || '';
+        const subTaskId =
+          ev.task_id === undefined || ev.task_id === null ? '' : ev.task_id;
+        let rpPanel = _rpTabPanel.get(ev.tab_id) || null;
+        if (!rpPanel && parentId) rpPanel = runParallelPanelForParent(parentId);
         // Idempotent: if a tab with the same id already exists, update
         // it in place rather than pushing a duplicate.  Defends against
         // accidental duplicate events from the backend.
         let subTab = getTab(ev.tab_id);
+        // A stale replay/convert for a tab that the user already
+        // closed by collapsing the owning run_parallel panel must not
+        // re-materialise a sub-agent tab behind a collapsed panel.
+        if (!subTab && _rpClosedSubagentTabs.has(ev.tab_id)) {
+          if (rpPanel) rpRegisterSubagent(rpPanel, parentId, subTaskId, '');
+          break;
+        }
+        if (rpPanel && rpPanel.classList.contains('collapsed')) {
+          rpRegisterSubagent(
+            rpPanel,
+            parentId,
+            subTaskId,
+            subTab ? subTab.id : '',
+          );
+          if (subTab) syncRunParallelPanel(rpPanel);
+          else _rpClosedSubagentTabs.add(ev.tab_id);
+          break;
+        }
         const needsPlacement = !subTab || !subTab.isSubagentTab;
         if (!subTab) {
           subTab = makeTab(title);
@@ -4565,6 +5426,8 @@
         subTab.isRunning = !subDone;
         subTab.taskPanelHTML = subDesc;
         subTab.taskPanelVisible = true;
+        if (rpPanel)
+          rpRegisterSubagent(rpPanel, parentId, subTaskId, subTab.id);
         renderTabBar();
         // If the backend converted the active tab into a sub-agent tab
         // (e.g. the user clicked a sub-agent row in the history panel,
@@ -4582,7 +5445,7 @@
           // ``isRunning=false``.  Sync the global state to the
           // sub-agent's actual state now so a still-running sub-agent
           // tab loaded from history shows the same "Running" status,
-          // timer and chevron-visible panels as the freshly-launched
+          // timer and uncollapsed panels as the freshly-launched
           // sub-agent tab the user originally clicked through to.
           setRunningState(subTab.isRunning);
           if (subTab.isRunning) {
@@ -5154,7 +6017,7 @@
     } finally {
       _deferHighlight = prevDefer;
     }
-    collapseAllExceptResult(container);
+    collapseAllExceptResult(container, opts && opts.ownerTabId);
     // Highlight only blocks that remain visible after collapsing; blocks
     // inside a collapsed panel stay deferred and are highlighted lazily when
     // the user expands the panel (see addCollapse / highlightPending).
@@ -5201,6 +6064,7 @@
     resetOutputState();
     clearUsageMetrics();
     replayEventsInto(O, events, {
+      ownerTabId: activeTabId,
       onFollowupClick: function (text) {
         inp.value = text;
         syncClearBtn();
@@ -6276,6 +7140,23 @@
 
     window.addEventListener('message', event => {
       handleEvent(event.data);
+    });
+
+    // Bridge for voice.js: it cannot call acquireVsCodeApi() itself
+    // (VS Code permits exactly one call per webview), so it raises
+    // 'kiss-voice-post' events that we forward to the extension host.
+    window.addEventListener('kiss-voice-post', event => {
+      const detail = event && event.detail;
+      if (detail && detail.type) vscode.postMessage(detail);
+    });
+
+    // Voice-dictated tasks: after voice.js inserts the translated
+    // (speaker-prefixed) speech into the task input it raises this
+    // event so the text is sent exactly like a click on the send
+    // button — a fresh ``submit`` for an idle tab, or an
+    // ``appendUserMessage`` steering instruction for a running agent.
+    window.addEventListener('kiss-voice-submit', () => {
+      sendMessage();
     });
   }
 
@@ -8093,7 +8974,7 @@
       vscode.postMessage(msg);
     },
     collapsePanels: function () {
-      collapseAllExceptResult(O);
+      collapseAllExceptResult(O, activeTabId);
     },
     setRunningState: setRunningState,
     showSpinner: showSpinner,

@@ -49,6 +49,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from xml.sax.saxutils import escape as xml_escape
 
 import yaml
 
@@ -212,8 +213,14 @@ def _load_bundled_skills(root: Path) -> dict[str, Skill]:
     return skills
 
 
-def load_skill_permissions() -> dict[str, str]:
-    """Load the ``skill_permissions`` rules from ``~/.kiss/config.json``.
+def load_permission_rules(key: str) -> dict[str, str]:
+    """Load one wildcard permission mapping from ``~/.kiss/config.json``.
+
+    Shared loader for ``skill_permissions`` and ``mcp_permissions``,
+    which use identical shapes and normalization.
+
+    Args:
+        key: The top-level config key holding the rules.
 
     Returns:
         Mapping of wildcard pattern → ``"allow"``/``"deny"``, in file
@@ -222,13 +229,23 @@ def load_skill_permissions() -> dict[str, str]:
     try:
         from kiss.agents.vscode.vscode_config import load_config
 
-        raw = load_config().get("skill_permissions")
+        raw = load_config().get(key)
     except Exception:
-        logger.debug("could not load skill permissions", exc_info=True)
+        logger.debug("could not load %s", key, exc_info=True)
         return {}
     if not isinstance(raw, dict):
         return {}
     return {str(k): str(v).strip().lower() for k, v in raw.items()}
+
+
+def load_skill_permissions() -> dict[str, str]:
+    """Load the ``skill_permissions`` rules from ``~/.kiss/config.json``.
+
+    Returns:
+        Mapping of wildcard pattern → ``"allow"``/``"deny"``, in file
+        order.  Empty when the config or key is missing/malformed.
+    """
+    return load_permission_rules("skill_permissions")
 
 
 def skill_permission(name: str, rules: dict[str, str]) -> str:
@@ -303,8 +320,8 @@ def _catalog_xml(skills: dict[str, Skill]) -> str:
     lines = ["<available_skills>"]
     for skill in sorted(skills.values(), key=lambda s: s.name):
         lines.append("<skill>")
-        lines.append(f"<name>{skill.name}</name>")
-        lines.append(f"<description>{skill.description}</description>")
+        lines.append(f"<name>{xml_escape(skill.name)}</name>")
+        lines.append(f"<description>{xml_escape(skill.description)}</description>")
         lines.append("</skill>")
     lines.append("</available_skills>")
     return "\n".join(lines)
@@ -362,7 +379,10 @@ def load_skill_content(skill: Skill) -> str:
     match = _FRONTMATTER_RE.match(text)
     body = text[match.end():].strip() if match else text.strip()
     skill_dir = skill.directory
-    parts = [f'<skill_content name="{skill.name}">', body, ""]
+    # Escape the name exactly like the catalog does (attribute context
+    # additionally needs the double quote escaped).
+    escaped_name = xml_escape(skill.name, {'"': "&quot;"})
+    parts = [f'<skill_content name="{escaped_name}">', body, ""]
     parts.append(f"Skill directory: {skill_dir}")
     parts.append(
         "Relative paths in this skill are relative to the skill directory."
