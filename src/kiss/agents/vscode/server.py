@@ -353,6 +353,19 @@ class VSCodeServer(
         # (see the C2/C3 note in ``_replay_session``).  Guarded by
         # ``_state_lock``.
         self._tab_chat_views: dict[str, str] = {}
+        # Maps a frontend tab id to the ``task_history.id`` the tab
+        # was OPENED with (``resumeSession`` carrying ``taskId``) and
+        # that no run in the tab has consumed yet.  The FIRST task the
+        # user issues in such a tab pops this entry and seeds
+        # :meth:`ChatSorcarAgent.resume_from_task_id` so the agent's
+        # chat context is built from the opened task's
+        # ``parent_task_id`` chain rather than the whole chat (see
+        # ``_run_task_inner``).  Consuming on first run keeps every
+        # later run in the tab on the normal chat-context path.
+        # Cleared alongside ``_tab_chat_views`` when the tab is
+        # re-pointed at a chat without a task id, starts a new chat,
+        # or is disposed.  Guarded by ``_state_lock``.
+        self._tab_opened_task_ids: dict[str, str] = {}
         # Maps ``id(user_answer_queue)`` to the task id of the currently
         # pending ``ask_user_question`` that owns that queue.  ``userAnswer``
         # uses this to close exactly the subscriber set for the task that
@@ -1173,6 +1186,7 @@ class VSCodeServer(
         # events out to a tab that no longer exists.
         with self._state_lock:
             self._tab_chat_views.pop(tab_id, None)
+            self._tab_opened_task_ids.pop(tab_id, None)
         _cleanup_merge_data(str(_merge_data_dir(tab_id)))
 
     def _new_chat(self, tab_id: str) -> None:
@@ -1226,8 +1240,10 @@ class VSCodeServer(
             tab.last_task_id = None
             # A fresh chat has no chat id yet, so the tab views no
             # chat until ``_cmd_run`` mints one or ``_replay_session``
-            # associates a resumed one.
+            # associates a resumed one.  Any opened-by-task-id seed is
+            # likewise stale for a fresh chat.
             self._tab_chat_views.pop(tab_id, None)
+            self._tab_opened_task_ids.pop(tab_id, None)
             # Snapshot the model under the lock so the ``showWelcome``
             # broadcast below cannot disagree with the in-memory state
             # captured for ``tab.selected_model`` above (a concurrent
@@ -1273,6 +1289,16 @@ class VSCodeServer(
         if not tab_id:
             logger.debug("_replay_session called without tab_id; ignoring")
             return
+        # Record which task id this tab was OPENED with so the first
+        # run in the tab can seed its chat context from the task's
+        # ``parent_task_id`` chain (consumed by ``_run_task_inner``).
+        # Re-pointing the tab at a chat WITHOUT a task id discards any
+        # earlier seed — the tab no longer views that specific task.
+        with self._state_lock:
+            if task_id:
+                self._tab_opened_task_ids[tab_id] = str(task_id)
+            else:
+                self._tab_opened_task_ids.pop(tab_id, None)
         result = None
         if task_id is not None:
             result = _load_chat_events_by_task_id(task_id)
