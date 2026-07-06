@@ -158,6 +158,7 @@ class _TaskRunnerMixin:
         work_dir: str
         _state_lock: threading.RLock
         _tab_chat_views: dict[str, str]
+        _tab_opened_task_ids: dict[str, str]
         _pending_user_answer_tasks: dict[int, str]
 
         def _get_tab(self, tab_id: str) -> _RunningAgentState: ...
@@ -663,6 +664,21 @@ class _TaskRunnerMixin:
                         "The branch is preserved for manual resolution."
                     )
                     tab.agent._wt = None
+
+        # Tab opened from the history panel by a SPECIFIC task id
+        # (``_replay_session`` with ``taskId``) with no task run in it
+        # since: seed this FIRST run's chat context from the opened
+        # task's ``parent_task_id`` chain (see
+        # :meth:`ChatSorcarAgent.resume_from_task_id`).  Pop-once so
+        # every later run in the tab uses the normal chat context.
+        # Deliberately consumed only AFTER every early-return guard
+        # above (missing model, merge review in progress, worktree-
+        # merge lockout): an aborted submit runs no task, so the
+        # user's NEXT submit in the tab must still see the seed.
+        with self._state_lock:
+            opened_task_id = self._tab_opened_task_ids.pop(tab_id, "")
+        if opened_task_id:
+            tab.agent.resume_from_task_id(opened_task_id)
 
         logger.info(
             "Task started: tab_id=%s model=%s use_worktree=%s "

@@ -2469,6 +2469,51 @@ def _load_chat_context(chat_id: str) -> list[_HistoryEntry]:
         return entries
 
 
+def _load_task_chain_context(task_id: str) -> list[_HistoryEntry]:
+    """Load the tasks and results along a task's parent chain.
+
+    Starting at *task_id*, follows ``parent_task_id`` links upward
+    (task → parent → grandparent → …) and returns the collected
+    entries in chronological order (root ancestor first, the *task_id*
+    row last) — the same shape :func:`_load_chat_context` returns, so
+    :meth:`ChatSorcarAgent.build_chat_prompt` can consume either
+    interchangeably.  Used when a tab is opened by a specific task id
+    and the first task subsequently issued in that tab needs the
+    opened task's lineage — rather than its whole chat — as context.
+
+    Traversal is cycle-safe (each row id is visited at most once) and
+    stops silently at a missing row or an empty ``parent_task_id``.
+
+    Args:
+        task_id: The ``task_history.id`` to start the traversal at.
+
+    Returns:
+        List of dicts with ``task`` and ``result`` keys, ordered
+        oldest ancestor first.  Empty when *task_id* is empty or has
+        no persisted row.
+    """
+    if not task_id:
+        return []
+    with _rw_lock.read_lock():
+        db = _get_db()
+        entries: list[_HistoryEntry] = []
+        seen: set[str] = set()
+        current = task_id
+        while current and current not in seen:
+            seen.add(current)
+            row = db.execute(
+                "SELECT task, result, parent_task_id FROM task_history "
+                "WHERE id = ?",
+                (current,),
+            ).fetchone()
+            if row is None:
+                break
+            entries.append({"task": row["task"], "result": row["result"]})
+            current = _safe_str(row["parent_task_id"])
+        entries.reverse()
+        return entries
+
+
 def _load_chat_context_text(chat_id: str) -> str:
     """Return the joined task+result text for *chat_id* with caching.
 
