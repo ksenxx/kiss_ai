@@ -221,8 +221,31 @@
 
   window.__kissShowTipsPanel = showTipsPanel;
 
+  /** Tips from ``window.__TIPS__``, or ``[]`` when absent/malformed. */
+  function configuredTips() {
+    const cfg = window.__TIPS__;
+    return cfg && Array.isArray(cfg.tips) ? cfg.tips : [];
+  }
+
+  /**
+   * Wire the bulb button (``#tips-btn``) in the chat input toolbar:
+   * clicking it shows the tips window.  Only one panel instance may
+   * exist at a time — clicking while it is open is a no-op.  No-op
+   * when the button is absent (e.g. non-chat pages reusing tips.js).
+   */
+  function wireTipsButton() {
+    const btn = document.getElementById('tips-btn');
+    if (!btn) return;
+    btn.addEventListener('click', () => {
+      if (document.body.querySelector('kiss-tips-panel')) return;
+      showTipsPanel(configuredTips());
+    });
+  }
+
+  wireTipsButton();
+
   const cfg = window.__TIPS__;
-  if (cfg && cfg.show && Array.isArray(cfg.tips) && cfg.tips.length > 0) {
+  if (cfg && cfg.show && configuredTips().length > 0) {
     showTipsPanel(cfg.tips);
   }
 })();
