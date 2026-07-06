@@ -992,10 +992,16 @@ def run_tasks_parallel(
         # frontend, persisting the ``subagent`` extra field).  This
         # keeps the parallel executor itself free of any task-id or
         # frontend knowledge.  The base ``SorcarAgent`` path has no
-        # parent ``task_id`` to record, so ``parent_task_id`` is
-        # ``None`` here; the chat-aware override sets the real parent
-        # id.
-        agent._subagent_info = {"parent_task_id": None}
+        # parent ``task_id`` to record, so ``parent_task_id`` is the
+        # empty string here (the same "no persisted parent" sentinel
+        # the chat-aware override uses — see r4-sorcar-H2 in
+        # ``ChatSorcarAgent._run_tasks_parallel``; a ``None`` here
+        # would persist ``subagent: {parent_task_id: null}`` while the
+        # chat path persists ``""``, split-braining downstream
+        # ``parent_task_id == ""`` checks).  ``parent_tab_id`` is
+        # likewise ``""`` so the persisted payload shape matches the
+        # chat path.
+        agent._subagent_info = {"parent_task_id": "", "parent_tab_id": ""}
         try:
             # ``is_parallel=True`` propagates the parallel capability so
             # sub-agents themselves get the ``run_parallel`` tool and
@@ -1014,8 +1020,13 @@ def run_tasks_parallel(
         finally:
             sub_usage[idx] = _agent_usage(agent)
             if printer is not None and parent_key:
+                # Use the same ``task-{parent}__sub_{idx}`` tab-id
+                # format that ``ChatSorcarAgent._run_tasks_parallel``
+                # registers/broadcasts, so a frontend tab materialized
+                # under the chat-style deterministic id can always be
+                # matched and its running indicator stopped.
                 _broadcast_subagent_done(
-                    printer, [f"{parent_key}__sub_{idx}"],
+                    printer, [f"task-{parent_key}__sub_{idx}"],
                 )
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:

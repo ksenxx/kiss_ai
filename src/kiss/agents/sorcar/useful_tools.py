@@ -581,6 +581,8 @@ class UsefulTools:
                 f"Error: start_line must be >= 1 (got {start_line}); the "
                 f"parameter is 1-indexed."
             )
+        if max_lines < 1:
+            return f"Error: max_lines must be >= 1 (got {max_lines})."
         try:
             expanded = _absolutize(file_path, self.work_dir)
             resolved = Path(expanded).resolve()
@@ -731,7 +733,11 @@ class UsefulTools:
                     f"(directory/FIFO/device/socket); refusing to write to it."
                 )
             resolved.parent.mkdir(parents=True, exist_ok=True)
-            resolved.write_text(content)
+            # newline="" prevents os.linesep translation on write
+            # (matching Edit) so the file's bytes equal *content*
+            # exactly — LF content is not CRLF-ified on Windows and a
+            # Write-then-Read round trip is byte-identical.
+            resolved.write_text(content, newline="")
             return f"Successfully wrote {len(content)} characters to {file_path}"
         except Exception as e:
             logger.debug("Exception caught", exc_info=True)
@@ -917,7 +923,21 @@ class UsefulTools:
             timer.cancel()
             process.stdout.close()  # type: ignore[union-attr]
 
-        if timed_out:
+        # The timer's poll()->kill guard is TOCTOU: the command can
+        # finish in the instant between poll() returning None and the
+        # group kill, leaving timed_out spuriously True even though the
+        # full output streamed and the process exited on its own.  On
+        # POSIX a genuinely killed command reports the SIGKILL as a
+        # negative returncode, so a natural (>= 0) exit status means
+        # the command completed and its real result must be returned,
+        # not discarded as a timeout.  Windows exit codes cannot encode
+        # the killing signal, so the flag is trusted as-is there.
+        genuinely_killed = (
+            sys.platform == "win32"  # pragma: no cover — Windows only
+            or process.returncode is None
+            or process.returncode < 0
+        )
+        if timed_out and genuinely_killed:
             return "Error: Command execution timeout"
 
         output = "".join(chunks)
