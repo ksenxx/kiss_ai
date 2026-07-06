@@ -9,11 +9,12 @@
 Use claude-fable-5 model for all tasks including coding, bug fixing, and test creation. Use gpt-5.5-xhigh (not codex) for thorough review and debugging of the work done by the other model. Check if the other model has missed some code or has introduced bugs. No need to check if the models exist.
 ```
 
-With the __sorcar__ wake word, KISS Sorcar starts behaving like a super-intelligent Alexa.
 
 # Tip
 
 ## You Can Now Have Voice Chat with KISS Sorcar
+
+With the __sorcar__ wake word, KISS Sorcar starts behaving like a super-intelligent Alexa.
 
 ```
 Speak 'sorcar', your task ...
