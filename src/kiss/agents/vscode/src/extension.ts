@@ -16,6 +16,7 @@ import {isReloadReady} from './reloadGuard';
 
 import {ensureDependencies, ensureLocalBinInPath} from './DependencyInstaller';
 import {findKissProject} from './kissPaths';
+import {resetTipsOnExtensionUpdate} from './SorcarTab';
 import {checkForExtensionUpdate} from './UpdateChecker';
 import {
   showErrorNotification,
@@ -421,6 +422,12 @@ export function activate(context: vscode.ExtensionContext): void {
     shouldAutoOpen = true;
     void context.workspaceState.update('firstLaunchDone', undefined);
   }
+  // Re-arm the Tips window when the extension has just been rebuilt or
+  // reinstalled (install.sh / build-extension.sh / release.sh restarted
+  // kiss-web and wrote the update marker): remove ~/.kiss/TIPS_SHOWN so
+  // the next chat webview render auto-opens the Tips window once again.
+  // Must run before ensureDependencies(), which consumes the marker.
+  resetTipsOnExtensionUpdate();
 
   // On first launch in this workspace, auto-open the secondary sidebar
   // chat and focus the input so the user can start typing immediately.
