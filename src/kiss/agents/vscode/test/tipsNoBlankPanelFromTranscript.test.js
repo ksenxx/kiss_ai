@@ -30,7 +30,7 @@
 //   * Defense in depth: a ``<kiss-tips-panel>`` element upgraded from
 //     parsed HTML (bypassing the sanitizer) self-removes on connect —
 //     only ``showTipsPanel()``, which assigns ``.tips`` before
-//     mounting, may show a panel.  The bulb's empty-tips panel keeps
+//     mounting, may show a panel.  An empty-tips panel keeps
 //     working because ``showTipsPanel([])`` still assigns ``.tips``.
 //
 // This test drives the real ``media/main.js``, ``media/tips.js`` and
@@ -191,7 +191,7 @@ function testCodeSpanMentionStaysVisibleText() {
   console.log('  ok - code-span mention stays visible literal text');
 }
 
-function testParsedPanelSelfRemovesButBulbPanelSurvives() {
+function testParsedPanelSelfRemovesButProgrammaticPanelSurvives() {
   const {win} = makeWebview({show: false});
 
   // Defense in depth: HTML injected through any path that bypasses the
@@ -207,10 +207,10 @@ function testParsedPanelSelfRemovesButBulbPanelSurvives() {
       'blank overlay',
   );
 
-  // The legit programmatic path still works — including the bulb's
+  // The legit programmatic path still works — including an
   // empty-tips panel (``showTipsPanel([])`` assigns ``.tips``).
   const empty = win.__kissShowTipsPanel([]);
-  assert.strictEqual(panels(win).length, 1, 'bulb empty panel still mounts');
+  assert.strictEqual(panels(win).length, 1, 'empty panel still mounts');
   empty.shadowRoot.querySelector('.tips-close').click();
   assert.strictEqual(panels(win).length, 0, 'empty panel closes');
 
@@ -224,5 +224,5 @@ function testParsedPanelSelfRemovesButBulbPanelSurvives() {
 testResultSummaryCannotSpawnBlankPanel();
 testPromptTextCannotSpawnBlankPanel();
 testCodeSpanMentionStaysVisibleText();
-testParsedPanelSelfRemovesButBulbPanelSurvives();
+testParsedPanelSelfRemovesButProgrammaticPanelSurvives();
 console.log('tipsNoBlankPanelFromTranscript: all tests passed');
