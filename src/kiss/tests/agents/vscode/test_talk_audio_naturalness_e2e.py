@@ -30,6 +30,7 @@ the microphone — muted speakers, headphones, etc.).
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -114,6 +115,9 @@ def production_talk_prosody(
     returns the utterances the webview would hand to the Web Speech
     API: ``[{"text": ..., "rate": ..., "pitch": ...}, ...]``.
     """
+    node = shutil.which("node")
+    if node is None:
+        raise unittest.SkipTest("node binary not found on PATH")
     with tempfile.NamedTemporaryFile(
         "w", suffix=".js", delete=False
     ) as fh:
@@ -121,7 +125,7 @@ def production_talk_prosody(
         driver = fh.name
     try:
         proc = subprocess.run(
-            ["node", driver, str(VSCODE_DIR / "media"), language, text,
+            [node, driver, str(VSCODE_DIR / "media"), language, text,
              emotion],
             capture_output=True,
             text=True,
