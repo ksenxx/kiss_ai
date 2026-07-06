@@ -147,6 +147,12 @@ def _opt_str(value: Any) -> str | None:
 class _CommandsMixin:
     """Methods that implement frontend command handlers."""
 
+    # W2-F13: serialises the read-modify-write in ``_cmd_save_config``
+    # (``load_config`` → ``save_config`` → ``apply_config_to_env`` →
+    # password-change decision) across concurrent ``saveConfig``
+    # commands.  Class-level because the config file is process-global.
+    _save_config_lock = threading.Lock()
+
     if TYPE_CHECKING:
         printer: JsonPrinter
         work_dir: str
@@ -374,12 +380,33 @@ class _CommandsMixin:
         # racing the worker thread's first broadcast would not find
         # the live task process and live events would never reach the
         # newly-opened tab.
-        self.printer.broadcast({
-            "type": "clear",
-            "chat_id": chat_id,
-            "tabId": tab_id,
-        })
-        thread.start()
+        #
+        # Roll back the in-flight markers when either the ``clear``
+        # broadcast (transport subclass error) or ``thread.start()``
+        # (``RuntimeError: can't start new thread`` under thread
+        # exhaustion) raises.  ``tab.task_thread`` was assigned under
+        # ``_state_lock`` above and only ``_run_task``'s outer
+        # ``finally`` resets it — but the worker never ran, so that
+        # ``finally`` will never execute.  Without the rollback the tab
+        # is wedged forever: every subsequent ``run`` observes
+        # ``task_thread is not None`` and queues the prompt as a
+        # follow-up that no agent will ever drain.  The identity guard
+        # keeps the rollback scoped to THIS submit in case a concurrent
+        # flow already re-armed the tab.
+        try:
+            self.printer.broadcast({
+                "type": "clear",
+                "chat_id": chat_id,
+                "tabId": tab_id,
+            })
+            thread.start()
+        except BaseException:
+            with self._state_lock:
+                if tab.task_thread is thread:
+                    tab.task_thread = None
+                    tab.stop_event = None
+                    tab.user_answer_queue = None
+            raise
 
     def _cmd_stop(self, cmd: dict[str, Any]) -> None:
         """Stop a running task."""
@@ -613,7 +640,11 @@ class _CommandsMixin:
            the task-owner tab.  Without this fallback, the answer is
            silently dropped and the agent thread waits forever (or
            until the stop event eventually fires) — surfaced by users
-           as "the answer was not delivered immediately".
+           as "the answer was not delivered immediately".  A
+           co-subscriber that is actively running a DIFFERENT task
+           than the shared one is skipped: its live queue belongs to
+           that unrelated task, and returning it would hijack that
+           task's ``ask_user_question``.
 
         Args:
             ans_tab: Frontend tab id carried by the ``userAnswer``
@@ -636,20 +667,38 @@ class _CommandsMixin:
         if printer_lock is None:
             return None
         with printer_lock:
-            shared_tasks = [
-                task_id
+            candidates: list[tuple[str, str]] = [
+                (self.printer._coerce_task_id(task_id), tab_id)
                 for task_id, viewers in subs_map.items()
                 if ans_tab in viewers
+                for tab_id in viewers
             ]
-            candidate_tabs: list[str] = []
-            for task_id in shared_tasks:
-                candidate_tabs.extend(subs_map.get(task_id, ()))
-        for tab_id in candidate_tabs:
+        for task_key, tab_id in candidates:
             if tab_id == ans_tab:
                 continue
             state = _RunningAgentState.running_agent_states.get(tab_id)
-            if state is not None and state.user_answer_queue is not None:
-                return state.user_answer_queue
+            if state is None or state.user_answer_queue is None:
+                continue
+            # Task-ownership filter (mirrors
+            # ``task_runner._resolve_task_answer_queue`` / BUG-TR2-2):
+            # ``cleanup_task`` intentionally preserves subscriber sets
+            # of FINISHED tasks, so a peer that co-subscribed with
+            # ``ans_tab`` to an old, finished task may now be running a
+            # brand-new UNRELATED task — its live ``user_answer_queue``
+            # belongs to THAT task.  Delivering the stale answer there
+            # would answer the wrong question and dismiss the wrong
+            # task's askUser modal.  Skip peers whose live agent is
+            # actively running a task other than the shared one.
+            agent_task = (
+                self.printer._coerce_task_id(
+                    getattr(state.agent, "_last_task_id", None),
+                )
+                if state.agent is not None
+                else ""
+            )
+            if state.is_task_active and agent_task and agent_task != task_key:
+                continue
+            return state.user_answer_queue
         return None
 
     def _cmd_append_user_message(self, cmd: dict[str, Any]) -> None:
@@ -969,6 +1018,14 @@ class _CommandsMixin:
         daemon mid-task with no user action — the regression that
         persisted ``"Task interrupted by server restart/shutdown"`` for
         in-flight tasks (e.g. task_history row 3515).
+
+        W2-F13: the ``prev_password`` read, the ``save_config`` write,
+        and the env re-apply are held under a dedicated lock so two
+        concurrent ``saveConfig`` commands (two windows closing their
+        settings panels together) cannot both observe the OLD on-disk
+        password and both conclude "changed" (dispatching two daemon
+        restarts), nor interleave ``apply_config_to_env`` with a
+        half-merged config.
         """
         from kiss.agents.vscode.vscode_config import (
             apply_config_to_env,
@@ -978,7 +1035,6 @@ class _CommandsMixin:
             save_config,
         )
 
-        prev_password = load_config().get("remote_password", "")
         cfg = cmd.get("config", {})
         if not isinstance(cfg, dict):
             # A non-dict config (malformed payload) raises
@@ -990,24 +1046,56 @@ class _CommandsMixin:
         # a genuine password change (which restarts the kiss-web
         # daemon, killing every in-flight task).
         cfg = sanitize_config(cfg)
-        # Guard: never overwrite a non-empty remote_password with an
-        # empty one from the frontend.  An empty value typically comes
-        # from a race condition (config sidebar closed before the async
-        # getConfig response populated the form fields).
-        if not cfg.get("remote_password") and prev_password:
-            cfg.pop("remote_password", None)
-        save_config(cfg)
-        # Apply the MERGED on-disk config, not the raw payload: a
-        # partial payload (any client saving a single setting) lacks
-        # ``max_budget``, and applying the payload directly would
-        # silently reset the live budget to DEFAULTS[...] while
-        # config.json (which ``save_config`` merges) still holds the
-        # user's configured value.
-        apply_config_to_env(load_config())
+        with _CommandsMixin._save_config_lock:
+            prev_password = load_config().get("remote_password", "")
+            # Guard: never overwrite a non-empty remote_password with an
+            # empty one from the frontend.  An empty value typically comes
+            # from a race condition (config sidebar closed before the async
+            # getConfig response populated the form fields).
+            if not cfg.get("remote_password") and prev_password:
+                cfg.pop("remote_password", None)
+            save_config(cfg)
+            # Apply the MERGED on-disk config, not the raw payload: a
+            # partial payload (any client saving a single setting) lacks
+            # ``max_budget``, and applying the payload directly would
+            # silently reset the live budget to DEFAULTS[...] while
+            # config.json (which ``save_config`` merges) still holds the
+            # user's configured value.
+            apply_config_to_env(load_config())
+            # Decide the restart INSIDE the lock so exactly one of two
+            # racing saves of the same new password observes a change.
+            new_password = cfg.get("remote_password", "")
+            password_changed = bool(
+                new_password and new_password != prev_password,
+            )
 
-        new_work_dir = cfg.get("work_dir", "")
-        if new_work_dir:
-            self.work_dir = new_work_dir
+            new_work_dir = cfg.get("work_dir", "")
+            if new_work_dir:
+                # W2-F13: mirror ``_cmd_set_work_dir``'s discipline for
+                # the SAME attribute: mutate ``self.work_dir`` under
+                # ``_state_lock`` and drop the ``@``-mention file cache
+                # (stale suggestions from the previous folder), then
+                # sync the printer's ``work_dir`` so global
+                # ``configData`` events report the active folder.
+                # Previously this path wrote ``self.work_dir`` lock-free
+                # and left both the cache and the printer stale.
+                #
+                # W3: the whole propagation stays INSIDE
+                # ``_save_config_lock``.  Two racing saves with
+                # different folders are serialised on disk by the lock,
+                # but propagating outside it let the attribute writes
+                # interleave in the OPPOSITE order — leaving the live
+                # server (and the printer) pointed at a folder that
+                # does not match the persisted config.  Lock order
+                # ``_save_config_lock`` → ``_state_lock`` is nested
+                # nowhere else (this is the lock's only use site), so
+                # no inversion is possible.
+                with self._state_lock:
+                    if self.work_dir != new_work_dir:
+                        self.work_dir = new_work_dir
+                        self._file_cache = {}
+                if hasattr(self.printer, "work_dir"):
+                    setattr(self.printer, "work_dir", new_work_dir)
 
         api_keys = cmd.get("apiKeys", {})
         if not isinstance(api_keys, dict):
@@ -1029,8 +1117,7 @@ class _CommandsMixin:
         # kills every in-flight agent task, and the frontend re-posts
         # the unchanged password on passive UI events (panel close,
         # input blur), so an unconditional restart here is destructive.
-        new_password = cfg.get("remote_password", "")
-        if new_password and new_password != prev_password:
+        if password_changed:
             _restart_kiss_web_daemon()
 
     def _dispatch_mcp_listing(
