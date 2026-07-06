@@ -37,7 +37,7 @@
     '  max-width: min(560px, 90vw);' +
     '  max-height: 80vh;' +
     '  min-width: min(360px, 90vw);' +
-    '  border: 1px solid var(--vscode-editorWidget-border, #454545);' +
+    '  border: 2px solid var(--vscode-focusBorder, #007fd4);' +
     '  border-radius: 6px;' +
     '  background: var(--vscode-editorWidget-background, #252526);' +
     '  color: var(--vscode-editor-foreground, #ccc);' +
