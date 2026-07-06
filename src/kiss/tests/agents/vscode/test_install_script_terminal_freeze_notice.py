@@ -60,6 +60,7 @@ from __future__ import annotations
 import errno
 import os
 import pty
+import select
 import subprocess
 import textwrap
 import time
@@ -97,8 +98,29 @@ def _extract_step_6_6_block() -> str:
     return src[begin_eol:end_idx]
 
 
-def _build_sandbox(tmp_path: Path) -> tuple[Path, Path]:
+def _build_sandbox(
+    tmp_path: Path,
+    *,
+    supervisor_ok: bool = True,
+    with_ext_uv: bool = False,
+) -> tuple[Path, Path]:
     """Create the sandbox (stubs, fake HOME, project dir, dummy daemon).
+
+    Args:
+        tmp_path: pytest tmp dir for the whole sandbox.
+        supervisor_ok: when True the sandbox's supervisor configs (macOS
+            LaunchAgent plist + Linux systemd unit) point at an existing
+            executable daemon binary, so the step [6/6] block is allowed
+            to stop the old daemon.  When False they point at a missing
+            binary — the block must then SKIP the kill (killing without a
+            respawnable binary caused the ~90 s "Server is starting ..."
+            outage).
+        with_ext_uv: when True the sandbox simulates the real
+            post-``--install-extension --force`` state: a freshly
+            installed extension dir exists under ``$HOME/.vscode/
+            extensions`` but its ``kiss_project/.venv`` (and the daemon
+            binary the supervisor points to) does NOT exist until the
+            stub ``uv`` recreates it — verifying the pre-build ordering.
 
     Returns:
         ``(harness_path, log_path)`` — the harness script to run under
@@ -160,6 +182,69 @@ def _build_sandbox(tmp_path: Path) -> tuple[Path, Path]:
         (stubs / supervisor).write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
         (stubs / supervisor).chmod(0o755)
 
+    # Supervisor configs inside the sandbox HOME.  The step [6/6] block
+    # only stops the old daemon when the binary the supervisor points to
+    # exists and is executable — a kill without a respawnable binary
+    # left users with no server (launchd failure-throttling) for ~90 s.
+    daemon_bin = stubs / "kiss-web-daemon-stub"
+    if supervisor_ok and not with_ext_uv:
+        daemon_bin.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+        daemon_bin.chmod(0o755)
+    if with_ext_uv:
+        # Reproduce the real post-``--force``-install state: the extension
+        # dir exists but kiss_project/.venv (and thus the daemon binary
+        # the supervisor points to) is GONE until ``uv sync`` rebuilds it.
+        ext_project = (
+            home / ".vscode" / "extensions" / "ksenxx.kiss-sorcar-9.9.9" / "kiss_project"
+        )
+        ext_project.mkdir(parents=True)
+        daemon_bin = ext_project / ".venv" / "bin" / "kiss-web"
+        pkg_dir = project / "src" / "kiss" / "agents" / "vscode"
+        pkg_dir.mkdir(parents=True)
+        (pkg_dir / "package.json").write_text('{\n  "version": "9.9.9"\n}\n', encoding="utf-8")
+        uv_log = tmp_path / "uv-calls.log"
+        (stubs / "uv").write_text(
+            textwrap.dedent(
+                f"""\
+                #!/bin/bash
+                echo "$@" >> {uv_log.as_posix()!r}
+                if [ "$1" = "sync" ]; then
+                    mkdir -p {daemon_bin.parent.as_posix()!r}
+                    printf '#!/bin/bash\\nexit 0\\n' > {daemon_bin.as_posix()!r}
+                    chmod +x {daemon_bin.as_posix()!r}
+                fi
+                exit 0
+                """
+            ),
+            encoding="utf-8",
+        )
+        (stubs / "uv").chmod(0o755)
+    launch_agents = home / "Library" / "LaunchAgents"
+    launch_agents.mkdir(parents=True)
+    (launch_agents / "com.kiss.web-server.plist").write_text(
+        textwrap.dedent(
+            f"""\
+            <?xml version="1.0" encoding="UTF-8"?>
+            <plist version="1.0">
+            <dict>
+                <key>Label</key>
+                <string>com.kiss.web-server</string>
+                <key>ProgramArguments</key>
+                <array>
+                    <string>{daemon_bin.as_posix()}</string>
+                </array>
+            </dict>
+            </plist>
+            """
+        ),
+        encoding="utf-8",
+    )
+    systemd_dir = home / ".config" / "systemd" / "user"
+    systemd_dir.mkdir(parents=True)
+    (systemd_dir / "kiss-web.service").write_text(
+        f"[Service]\nExecStart={daemon_bin.as_posix()}\n", encoding="utf-8"
+    )
+
     block = _extract_step_6_6_block()
     harness = tmp_path / "harness.sh"
     harness.write_text(
@@ -169,6 +254,9 @@ def _build_sandbox(tmp_path: Path) -> tuple[Path, Path]:
             set -eo pipefail
             export HOME={home.as_posix()!r}
             export PATH={stubs.as_posix()!r}:"$PATH"
+            # Keep the bounded "waiting for the daemon to come back" poll
+            # short — the stub launchctl/systemctl never respawn anything.
+            export KISS_DAEMON_WAIT_SECS=1
             CODE_CLI={code_cli.as_posix()!r}
             VSIX={vsix.as_posix()!r}
             PROJECT_DIR={project.as_posix()!r}
@@ -215,10 +303,18 @@ def _spawn_on_pty(harness: Path) -> tuple[subprocess.Popen[bytes], int]:
 
 
 def _read_until(master: int, needle: bytes, timeout: float = 30.0) -> bytes:
-    """Read from the PTY master until *needle* appears or *timeout*."""
+    """Read from the PTY master until *needle* appears or *timeout*.
+
+    Uses ``select`` so a PTY held open by a surviving background process
+    (e.g. the dummy daemon in the skip-restart test) cannot block
+    ``os.read`` past the deadline.
+    """
     buf = b""
     deadline = time.monotonic() + timeout
     while needle not in buf and time.monotonic() < deadline:
+        ready, _, _ = select.select([master], [], [], 0.2)
+        if not ready:
+            continue
         try:
             chunk = os.read(master, 4096)
         except OSError as exc:
@@ -361,3 +457,109 @@ def test_install_completes_when_terminal_dies_mid_step_6_6(
     else:
         os.kill(dummy_pid, 9)
         raise AssertionError("dummy kiss-web daemon was never SIGTERMed")
+
+
+def test_daemon_survives_when_supervisor_cannot_respawn(tmp_path: Path) -> None:
+    """Regression for the ~90 s "KISS Sorcar Server is starting ..." outage.
+
+    ``--install-extension --force`` wipes the extension's
+    ``kiss_project/.venv``, so the supervisor's program
+    (``.venv/bin/kiss-web``) may not exist when step [6/6] reaches the
+    daemon-stop.  Killing the daemon then leaves the user with NO server:
+    launchd/systemd respawns fail on the missing binary and get
+    failure-throttled until the extension rebuilds the venv after the
+    window reload (91 s in the reported trace, kiss-web-stderr.log
+    20:28:45 SIGTERM → 20:30:16 next start).  The block must instead SKIP
+    the kill and leave the old daemon serving.
+    """
+    harness, log = _build_sandbox(tmp_path, supervisor_ok=False)
+    proc, master = _spawn_on_pty(harness)
+    dummy_pid = None
+    try:
+        # Read to the block's final line instead of EOF: the (deliberately)
+        # surviving dummy daemon keeps the PTY open, so EOF never comes.
+        out = _read_until(master, b"remote access auth, and kiss-web.")
+        rc = proc.wait(timeout=30)
+        text = out.decode("utf-8", errors="replace")
+        assert rc == 0, f"step [6/6] harness failed rc={rc}:\n{text}"
+        dummy_pid = int((tmp_path / "dummy-daemon.pid").read_text().strip())
+        assert "Skipping kiss-web daemon restart" in text, (
+            "step [6/6] must explain that the daemon restart is skipped "
+            f"when the supervisor binary is missing:\n{text}"
+        )
+        assert _STOPPING_LINE not in text, (
+            "step [6/6] killed the kiss-web daemon even though its "
+            "supervisor cannot respawn it — this is the ~90 s "
+            f"'Server is starting ...' outage regression:\n{text}"
+        )
+        # The old daemon must still be alive — it keeps serving until the
+        # extension restarts it with a working environment.
+        os.kill(dummy_pid, 0)  # raises ProcessLookupError if it was killed
+        _wait_for_line(log, _COMPLETE_LINE)
+    finally:
+        os.close(master)
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+        if dummy_pid is None:
+            dummy_pid = int((tmp_path / "dummy-daemon.pid").read_text().strip())
+        try:
+            os.kill(dummy_pid, 9)
+        except ProcessLookupError:
+            pass
+
+
+def test_venv_prebuilt_before_daemon_is_stopped(tmp_path: Path) -> None:
+    """The freshly-installed extension's venv must be rebuilt (``uv sync``)
+    BEFORE the old daemon is stopped, so the supervisor's respawn succeeds
+    immediately instead of failure-throttling for ~90 s.
+
+    The sandbox reproduces the real post-install state: the extension dir
+    exists under ``$HOME/.vscode/extensions/ksenxx.kiss-sorcar-9.9.9`` but
+    ``kiss_project/.venv/bin/kiss-web`` (which the sandbox plist/systemd
+    unit point to) only comes into existence when the stub ``uv sync``
+    runs.  The dummy daemon must be SIGTERMed only AFTER that.
+    """
+    harness, log = _build_sandbox(tmp_path, with_ext_uv=True)
+    proc, master = _spawn_on_pty(harness)
+    try:
+        out = _drain(master)
+        rc = proc.wait(timeout=30)
+    finally:
+        os.close(master)
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+
+    text = out.decode("utf-8", errors="replace")
+    assert rc == 0, f"step [6/6] harness failed rc={rc}:\n{text}"
+    # uv must have been asked to sync the freshly-installed extension's
+    # kiss_project (the one the supervisor's daemon binary lives in).
+    uv_calls = (tmp_path / "uv-calls.log").read_text(encoding="utf-8")
+    ext_project = (
+        tmp_path / "home" / ".vscode" / "extensions"
+        / "ksenxx.kiss-sorcar-9.9.9" / "kiss_project"
+    )
+    assert f"sync --project {ext_project.as_posix()}" in uv_calls, (
+        f"uv sync was not run against the new extension dir:\n{uv_calls}"
+    )
+    # Ordering: the pre-build message (and hence uv sync) must precede the
+    # daemon stop — stopping first is exactly the outage bug.
+    prebuild_idx = text.index("Pre-building the new extension's Python environment")
+    stopping_idx = text.index(_STOPPING_LINE)
+    assert prebuild_idx < stopping_idx, (
+        "uv sync must run BEFORE the old kiss-web daemon is stopped"
+    )
+    # With the binary rebuilt, the daemon stop must actually proceed.
+    dummy_pid = int((tmp_path / "dummy-daemon.pid").read_text().strip())
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        try:
+            os.kill(dummy_pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        os.kill(dummy_pid, 9)
+        raise AssertionError("dummy kiss-web daemon was never SIGTERMed")
+    _wait_for_line(log, _COMPLETE_LINE)
