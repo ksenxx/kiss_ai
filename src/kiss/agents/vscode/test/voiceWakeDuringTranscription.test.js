@@ -11,7 +11,7 @@
 // 'voiceSpeech'} arrives (translations are reported asynchronously).
 // The webview must:
 //
-//  - accept that interleaved second wake (flash green again) instead
+//  - accept that interleaved second wake (flash red again) instead
 //    of ignoring it,
 //  - still insert the first utterance's late translation, and
 //  - insert both translations in arrival order.
@@ -88,7 +88,7 @@ test('a second wake during an in-flight transcription still triggers', () => {
   sendHostMessage(win, {type: 'voiceWake'});
   assert.ok(
     btn.classList.contains('voice-triggered'),
-    'second wake must flash green even while a transcription is in flight',
+    'second wake must flash red even while a transcription is in flight',
   );
   assert.ok(
     !btn.classList.contains('voice-transcribing'),
@@ -142,14 +142,14 @@ test('a late terminal event keeps the newer round\'s indicator', () => {
   sendHostMessage(win, {type: 'voiceWake'}); // round 1
   sendHostMessage(win, {type: 'voiceTranscribing'}); // round 1 in flight
   win.Date.now = () => 1010000;
-  sendHostMessage(win, {type: 'voiceWake'}); // round 2 capturing (green)
+  sendHostMessage(win, {type: 'voiceWake'}); // round 2 capturing (red)
   // Round 1's late terminal result must insert its text but NOT
-  // clear the green flash that belongs to round 2's active capture.
+  // clear the red flash that belongs to round 2's active capture.
   sendHostMessage(win, {type: 'voiceSpeech', text: 'first'});
   assert.strictEqual(inp.value, 'first');
   assert.ok(
     btn.classList.contains('voice-triggered'),
-    'late round-1 result must not clear round 2\'s green flash',
+    'late round-1 result must not clear round 2\'s red flash',
   );
   // Round 2 finishes normally: yellow, then terminal clears all.
   sendHostMessage(win, {type: 'voiceTranscribing'});
