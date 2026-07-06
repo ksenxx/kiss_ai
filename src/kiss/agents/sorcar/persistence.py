@@ -75,8 +75,19 @@ class _RWLock:
         """Acquire exclusive write access."""
         with self._cond:
             self._pending_writers += 1
-            while self._writer or self._readers > 0:
-                self._cond.wait()
+            try:
+                while self._writer or self._readers > 0:
+                    self._cond.wait()
+            except BaseException:
+                # An exception delivered while blocked in ``wait()`` (e.g.
+                # a ``KeyboardInterrupt`` injected into a task thread to
+                # stop it) must not leak the pending-writer count —
+                # otherwise every future ``read_lock()`` blocks forever on
+                # ``self._pending_writers > 0``.  Wake blocked readers so
+                # they re-check the predicate.
+                self._pending_writers -= 1
+                self._cond.notify_all()
+                raise
             self._pending_writers -= 1
             self._writer = True
         try:
@@ -302,11 +313,12 @@ _db_generation: int = 0
 
 
 def _close_db() -> None:
-    """Close all database connections and invalidate cached handles.
+    """Close the calling thread's connection and invalidate cached handles.
 
-    Bumps the generation counter so that thread-local connections in
-    other threads are detected as stale on their next ``_get_db()``
-    call and replaced with fresh connections.
+    Only the current thread's connection is closed eagerly.  Bumping
+    the generation counter invalidates every other thread's cached
+    connection *lazily*: each is detected as stale on that thread's
+    next ``_get_db()`` call and replaced (and closed) there.
     """
     global _db_conn, _db_generation
     # Drain and stop the background writer first so it doesn't keep a
@@ -804,12 +816,21 @@ def _get_db() -> sqlite3.Connection:
     tl_conn: sqlite3.Connection | None = getattr(tl, "conn", None)
     tl_gen: int = getattr(tl, "gen", -1)
     tl_path: str | None = getattr(tl, "path", None)
+    # Snapshot the generation ONCE, before any connection work.  A
+    # concurrent ``_close_db()`` can bump ``_db_generation`` at any
+    # point while this thread is creating a connection below; stamping
+    # ``tl.gen`` from a *re-read* of the global would tag a connection
+    # created under the old generation with the new one, making it
+    # survive an invalidation it should not.  With the snapshot, a
+    # bump that lands mid-creation leaves ``tl.gen`` stale, so the
+    # next ``_get_db()`` call detects it and reconnects.
+    gen_snapshot = _db_generation
     current_path = str(_DB_PATH)
     _maybe_reset_caches(current_path)
 
     if (
         tl_conn is not None
-        and tl_gen == _db_generation
+        and tl_gen == gen_snapshot
         and tl_path == current_path
         and _db_conn is not None
     ):
@@ -848,7 +869,7 @@ def _get_db() -> sqlite3.Connection:
         _init_tables(conn)
 
     tl.conn = conn
-    tl.gen = _db_generation
+    tl.gen = gen_snapshot
     tl.path = current_path
     _db_conn = conn  # backward compat: expose last-created connection
     return conn
@@ -937,9 +958,9 @@ def _add_task(
             (
                 task_id, time.time(), task, chat_id,
                 "Agent Failed Abruptly",
-                str(payload.get("model", "") or ""),
-                str(payload.get("work_dir", "") or ""),
-                str(payload.get("version", "") or ""),
+                _safe_str(payload.get("model", "") or ""),
+                _safe_str(payload.get("work_dir", "") or ""),
+                _safe_str(payload.get("version", "") or ""),
                 _safe_int(payload.get("tokens"), 0),
                 _safe_float(payload.get("cost"), 0.0),
                 _safe_int(payload.get("steps"), 0),
@@ -1749,25 +1770,39 @@ _BATCH_WINDOW_S = 0.020
 
 def _start_event_writer() -> None:
     """Lazily spawn the background event writer thread (idempotent)."""
-    global _event_writer_thread
+    global _event_writer_thread, _event_writer_stop
     if _event_writer_thread is not None and _event_writer_thread.is_alive():
         return
     with _event_writer_lock:
         if _event_writer_thread is not None and _event_writer_thread.is_alive():
             return
-        _event_writer_stop.clear()
+        # Each writer gets its OWN stop event (passed as an argument and
+        # published in ``_event_writer_stop`` alongside the thread, both
+        # under ``_event_writer_lock``).  Re-using one shared event
+        # required a ``clear()`` here, which could un-stop a concurrent
+        # ``_stop_event_writer``'s target writer and leave two live
+        # writers draining the same FIFO queue.
+        stop = threading.Event()
         t = threading.Thread(
             target=_event_writer_loop,
+            args=(stop,),
             name="kiss-event-writer",
             daemon=True,
         )
+        _event_writer_stop = stop
         _event_writer_thread = t
         t.start()
 
 
-def _event_writer_loop() -> None:
-    """Drain the event queue in batches and persist them."""
-    while not _event_writer_stop.is_set():
+def _event_writer_loop(stop: threading.Event) -> None:
+    """Drain the event queue in batches and persist them.
+
+    Args:
+        stop: This writer's private stop event (set by
+            ``_stop_event_writer``); private so a concurrent
+            ``_start_event_writer`` can never un-stop it.
+    """
+    while not stop.is_set():
         try:
             first = _event_queue.get(timeout=0.2)
         except queue.Empty:
@@ -1775,7 +1810,7 @@ def _event_writer_loop() -> None:
         if first is None:
             # Shutdown sentinel
             _event_queue.task_done()
-            if _event_writer_stop.is_set():
+            if stop.is_set():
                 return
             continue
         batch: list[tuple[str, str, float, str]] = [first]
@@ -1791,13 +1826,17 @@ def _event_writer_loop() -> None:
                 break
             if item is None:
                 _event_queue.task_done()
-                shutdown_pending = _event_writer_stop.is_set()
+                shutdown_pending = stop.is_set()
                 break
             batch.append(item)
         try:
             _write_event_batch(batch)
         except Exception:
-            logger.debug("event writer batch failed", exc_info=True)
+            # WARNING, not DEBUG: a persistent failure (disk full, schema
+            # mismatch, corruption) silently discards up to _BATCH_MAX
+            # user-visible chat events per batch — it must be visible in
+            # default logging configurations.
+            logger.warning("event writer batch failed", exc_info=True)
         finally:
             for _ in batch:
                 _event_queue.task_done()
@@ -1822,7 +1861,14 @@ def _write_event_batch(batch: list[tuple[str, str, float, str]]) -> None:
         return
     db = _get_db()
     task_ids = {tid for (tid, _ej, _ts, _op) in batch}
-    with _rw_lock.write_lock():
+    # ``_caches_lock`` is held for the whole seed-then-consume sequence so a
+    # concurrent ``_maybe_reset_caches`` (triggered by a ``_DB_PATH`` swap in
+    # another thread's ``_get_db()``) cannot clear ``_next_seq_cache`` between
+    # seeding and consumption — which silently dropped events (``seq is
+    # None``) whose batch had already passed the origin-path filter.
+    # ``_caches_lock`` is a leaf lock: it is never held while acquiring
+    # ``_rw_lock``, so taking it inside the write lock cannot deadlock.
+    with _rw_lock.write_lock(), _caches_lock:
         # Initialise next-seq cache for any new task_ids.  All inserts for
         # a given task_id are serialised through this single writer thread,
         # so the cached counter is authoritative once seeded from the DB.
@@ -1915,39 +1961,68 @@ def _flush_chat_events() -> None:
     thread — the writer thread also takes that lock per batch, so
     calling this while holding the write lock would deadlock.
     """
-    # Snapshot the global once: a concurrent ``_stop_event_writer()`` may
-    # null it between a None-check and ``.is_alive()``.  Mirror
-    # ``_queue_chat_event``: if the writer thread hasn't started or died
-    # (e.g. it was stopped during a DB swap) while events are still queued,
-    # (re)start it so the backlog gets drained.  Otherwise
-    # ``_event_queue.join()`` would block forever waiting for a
-    # ``task_done()`` no writer will ever call.
-    t = _event_writer_thread
-    if (t is None or not t.is_alive()) and _event_queue.unfinished_tasks:
-        _start_event_writer()
-    _event_queue.join()
+    # Poll instead of a single liveness-check + ``Queue.join()``: a
+    # concurrent ``_stop_event_writer()`` can terminate the writer AFTER
+    # this thread's one-shot ``is_alive()`` check, stranding queued items
+    # with no live writer — ``join()`` would then block forever waiting
+    # for a ``task_done()`` no writer will ever call.  Re-checking writer
+    # liveness on every iteration (and restarting it while items remain)
+    # guarantees the backlog is always drained.
+    while _event_queue.unfinished_tasks:
+        t = _event_writer_thread
+        if t is None or not t.is_alive():
+            _start_event_writer()
+        time.sleep(0.002)
 
 
 def _stop_event_writer() -> None:
     """Drain and stop the writer thread.  Used by ``_close_db``/tests."""
     global _event_writer_thread, _caches_db_path
-    t = _event_writer_thread
+    # Drain first: ``_flush_chat_events`` restarts a dead writer while
+    # items remain, so this cannot block forever on a queue no writer
+    # is draining (unlike a bare ``_event_queue.join()``).
+    _flush_chat_events()
+    # Snapshot thread + its paired stop event under the lock so a
+    # concurrent ``_start_event_writer`` cannot swap in a new pair
+    # between the two reads.  The join below deliberately happens
+    # OUTSIDE the lock so a wedged writer never blocks producers'
+    # ``_start_event_writer`` calls for the 5s join timeout.
+    with _event_writer_lock:
+        t = _event_writer_thread
+        stop = _event_writer_stop
     if t is not None:
-        try:
-            _event_queue.join()
-        except Exception:
-            pass
-        _event_writer_stop.set()
+        stop.set()
         try:
             _event_queue.put_nowait(None)
         except queue.Full:  # pragma: no cover — unbounded queue
             pass
         t.join(timeout=5)
-        _event_writer_thread = None
-        _event_writer_stop.clear()
-    _next_seq_cache.clear()
-    _marked_has_events.clear()
-    _caches_db_path = None
+        if t.is_alive():
+            # The writer is wedged (e.g. a slow batch on a locked DB).
+            # Leave the stop flag set so it exits as soon as it unwedges,
+            # and keep the thread reference so ``_start_event_writer``
+            # cannot spawn a second concurrent writer draining the same
+            # FIFO queue — two writers would interleave batches and break
+            # the per-task event ordering guarantee.  Caches are left for
+            # the zombie's in-flight batch; ``_maybe_reset_caches`` resets
+            # them on the next ``_get_db()`` after any path change.
+            logger.warning(
+                "event writer thread did not stop within 5s; "
+                "deferring writer cleanup until it exits"
+            )
+            return
+        with _event_writer_lock:
+            # CAS-style: only null the reference if it still names the
+            # writer we just stopped.  A concurrent ``_start_event_writer``
+            # may have already published a fresh live writer (with its own
+            # stop event) that must not be clobbered — clobbering it would
+            # let a later start spawn a SECOND concurrent writer.
+            if _event_writer_thread is t:
+                _event_writer_thread = None
+    with _caches_lock:
+        _next_seq_cache.clear()
+        _marked_has_events.clear()
+        _caches_db_path = None
 
 
 def _append_chat_event(
@@ -2472,14 +2547,18 @@ def _save_last_model(model: str) -> None:
     Writes the ``last_model`` key to ``~/.kiss/config.json`` (atomic).
     Does **not** touch the SQLite usage counters.
 
+    Passes *only* the changed key to :func:`save_config` — whose
+    locked read-merge-write overlays every DEFAULTS key present in its
+    argument onto a fresh re-read of the file — so a stale full-config
+    snapshot taken here can never clobber a concurrent update to an
+    unrelated key (e.g. a settings toggle saved from another thread).
+
     Args:
         model: The model name to save as the last-selected model.
     """
-    from kiss.agents.vscode.vscode_config import load_config, save_config
+    from kiss.agents.vscode.vscode_config import save_config
 
-    cfg = load_config()
-    cfg["last_model"] = model
-    save_config(cfg)
+    save_config({"last_model": model})
 
 
 def _record_model_usage(model: str) -> None:

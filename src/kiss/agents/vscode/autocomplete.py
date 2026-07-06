@@ -69,11 +69,11 @@ def _ghost_suffix(query: str, completions: list[dict[str, str]]) -> str:
         prefix = query
     elif kind == "trick":
         prefix = current_sentence_partial(query)
-    elif kind == "identifier":
+    else:
+        # ``identifier`` — the only other kind ``_complete_many``
+        # produces.
         m = re.search(r"([\w][\w.]*)$", query)
         prefix = m.group(1) if m else ""
-    else:
-        prefix = query
     if not prefix or not text.startswith(prefix):
         return ""
     return text[len(prefix):]
@@ -520,6 +520,14 @@ class _AutocompleteMixin:
                 # no overwrite is needed either.
                 return
             with self._state_lock:
+                if self._file_cache.get(wd) is not cached:
+                    # A concurrent writer (explicit refresh or
+                    # ``setWorkDir``) published a fresher scan while
+                    # ours was running — keep theirs (already
+                    # broadcast) instead of clobbering it with our
+                    # potentially staler result.  Mirrors the
+                    # double-check in ``_refresh_file_cache``.
+                    return
                 self._file_cache[wd] = result
             usage = _load_file_usage()
             ranked = rank_file_suggestions(result, "", usage)

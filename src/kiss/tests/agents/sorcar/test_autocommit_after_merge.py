@@ -149,7 +149,14 @@ class TestFinishMergeEmitsAutocommitPrompt(_ServerHarness):
             shutil.rmtree(non_git, ignore_errors=True)
 
     def test_merge_ended_still_broadcast(self) -> None:
-        """The existing merge_ended event is still sent before the prompt."""
+        """merge_ended is still sent — AFTER the prompt (W3-B1).
+
+        The frontend re-enables the input on ``merge_ended``, so it
+        must be the LAST post-merge broadcast: emitting it before the
+        autocommit dirty-file scan opened a window in which a prompt
+        submitted right after the merge view closed was rejected by
+        the ``is_merging`` task-start guard and silently lost.
+        """
         tab = self.server._get_tab("t6")
         tab.use_worktree = False
         tab.is_merging = True
@@ -159,7 +166,7 @@ class TestFinishMergeEmitsAutocommitPrompt(_ServerHarness):
         types = self._types()
         assert "merge_ended" in types
         assert "autocommit_prompt" in types
-        assert types.index("merge_ended") < types.index("autocommit_prompt")
+        assert types.index("merge_ended") > types.index("autocommit_prompt")
 
 
 class TestAutocommitActionSkip(_ServerHarness):

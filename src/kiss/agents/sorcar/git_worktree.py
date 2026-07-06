@@ -382,6 +382,12 @@ class GitWorktreeOps:
             wt_dir: Worktree directory to remove.
         """
         if not wt_dir.exists():
+            # The directory may have been deleted manually or by crash
+            # cleanup while git still holds a ``.git/worktrees/<name>``
+            # registration; without a prune the branch stays "checked
+            # out in a worktree" and ``git branch -d/-D`` refuses to
+            # delete it.
+            GitWorktreeOps.prune(repo)
             return
         result = _git("worktree", "remove", str(wt_dir), "--force", cwd=repo)
         if result.returncode != 0:
@@ -542,10 +548,20 @@ class GitWorktreeOps:
             repo: Git repo root path.
 
         Returns:
-            True if a stash entry was created, False if the tree was clean.
+            True if a stash entry was created, False if the tree was
+            clean or nothing could be stashed.
         """
         if not GitWorktreeOps.has_uncommitted_changes(repo):
             return False
+        # ``git stash push`` exits 0 WITHOUT creating a stash ("No
+        # local changes to save") for dirtiness it cannot capture —
+        # e.g. a submodule with modified/untracked content, or a tree
+        # cleaned by a concurrent writer.  Returning True then makes
+        # the caller's later ``stash_pop`` consume an unrelated,
+        # pre-existing user stash.  Compare ``refs/stash`` before and
+        # after so the return value honors the "a stash entry was
+        # created" contract.
+        before = _git("rev-parse", "-q", "--verify", "refs/stash", cwd=repo)
         result = _git(
             "stash",
             "push",
@@ -554,7 +570,11 @@ class GitWorktreeOps:
             "kiss: auto-stash before merge",
             cwd=repo,
         )
-        return result.returncode == 0
+        if result.returncode != 0:
+            return False
+        after = _git("rev-parse", "-q", "--verify", "refs/stash", cwd=repo)
+        after_sha = after.stdout.strip()
+        return bool(after_sha) and after_sha != before.stdout.strip()
 
     @staticmethod
     def stash_pop(repo: Path) -> bool:
@@ -564,7 +584,14 @@ class GitWorktreeOps:
         staged before the stash stay staged after the pop.  If
         ``--index`` fails (e.g. the merge changed a file that was in
         the index), falls back to plain ``git stash pop`` which
-        restores all changes as unstaged.
+        restores all changes as unstaged — but ONLY when the failed
+        ``--index`` attempt left the working tree untouched.  A failed
+        ``--index`` pop can partially apply the stash (e.g. tracked
+        changes applied while an untracked-file restore failed, or a
+        conflicted merge) while keeping the stash entry; blindly
+        re-applying the same stash on top of that state risks a
+        double-apply, so in that case the stash is left for the caller
+        to surface to the user.
 
         Args:
             repo: Git repo root path.
@@ -572,9 +599,16 @@ class GitWorktreeOps:
         Returns:
             True if the pop succeeded, False on conflict or error.
         """
+        before = _git("status", "--porcelain", cwd=repo).stdout
         result = _git("stash", "pop", "--index", cwd=repo)
         if result.returncode == 0:
             return True
+        after = _git("status", "--porcelain", cwd=repo).stdout
+        if after != before:
+            # The failed ``--index`` attempt already modified the tree
+            # (partial application; the stash entry is retained by
+            # git).  Do not re-apply the same stash on top.
+            return False
         result = _git("stash", "pop", cwd=repo)
         return result.returncode == 0
 
@@ -779,26 +813,35 @@ class GitWorktreeOps:
             filename: File under ``info/`` (e.g. ``"exclude"``).
             entry: The exact line to ensure is present.
         """
-        result = _git("rev-parse", "--git-common-dir", cwd=repo)
-        git_common = Path(result.stdout.strip())
-        if not git_common.is_absolute():  # pragma: no branch
-            git_common = (repo / git_common).resolve()
-        info_file = git_common / "info" / filename
-        info_file.parent.mkdir(parents=True, exist_ok=True)
-        if info_file.exists():
-            # Git treats these files as raw bytes — non-UTF-8
-            # patterns/comments are legal, so a strict decode would
-            # raise UnicodeDecodeError and silently skip the entry
-            # (the caller swallows exceptions), e.g. leaving
-            # ``?? .kiss-worktrees/`` polluting the user's git status
-            # forever.  Mirror :func:`_git`'s surrogateescape policy.
-            content = info_file.read_bytes().decode(
-                "utf-8", errors="surrogateescape"
-            )
-            if entry in content.splitlines():
-                return
-        with open(info_file, "a", encoding="utf-8") as f:
-            f.write(f"\n{entry}\n")
+        # The read-check-append sequence below is not atomic; hold the
+        # per-repo lock so concurrent tabs setting up worktrees for the
+        # same repo cannot interleave and append duplicate entries.
+        with repo_lock(repo):
+            result = _git("rev-parse", "--git-common-dir", cwd=repo)
+            git_common = Path(result.stdout.strip())
+            if not git_common.is_absolute():  # pragma: no branch
+                git_common = (repo / git_common).resolve()
+            info_file = git_common / "info" / filename
+            info_file.parent.mkdir(parents=True, exist_ok=True)
+            content = ""
+            if info_file.exists():
+                # Git treats these files as raw bytes — non-UTF-8
+                # patterns/comments are legal, so a strict decode would
+                # raise UnicodeDecodeError and silently skip the entry
+                # (the caller swallows exceptions), e.g. leaving
+                # ``?? .kiss-worktrees/`` polluting the user's git status
+                # forever.  Mirror :func:`_git`'s surrogateescape policy.
+                content = info_file.read_bytes().decode(
+                    "utf-8", errors="surrogateescape"
+                )
+                if entry in content.splitlines():
+                    return
+            # Prefix a newline only when the existing content lacks a
+            # trailing one; unconditionally writing ``"\n{entry}\n"``
+            # accumulated a blank line per append.
+            prefix = "" if not content or content.endswith("\n") else "\n"
+            with open(info_file, "a", encoding="utf-8") as f:
+                f.write(f"{prefix}{entry}\n")
 
     @staticmethod
     def ensure_excluded(repo: Path) -> None:
@@ -936,6 +979,24 @@ class GitWorktreeOps:
         return GitWorktreeOps._save_branch_config(
             repo, branch, "kiss-baseline", sha, "baseline commit"
         )
+
+    @staticmethod
+    def load_baseline_commit(repo: Path, branch: str) -> str | None:
+        """Load the baseline commit SHA from git config.
+
+        Companion reader for :meth:`save_baseline_commit` — recovers
+        the persisted ``branch.<branch>.kiss-baseline`` value (e.g.
+        after a crash between worktree creation and merge, when the
+        in-memory ``GitWorktree.baseline_commit`` is lost).
+
+        Args:
+            repo: Git repo root path.
+            branch: The worktree branch name.
+
+        Returns:
+            The baseline commit SHA, or ``None`` if not stored.
+        """
+        return GitWorktreeOps._load_branch_config(repo, branch, "kiss-baseline")
 
     @staticmethod
     def _remove_path(path: Path) -> None:
