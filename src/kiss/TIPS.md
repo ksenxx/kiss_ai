@@ -42,6 +42,8 @@ Go to the Settings panel and copy the URL at the top. This URL contains a messag
 
 Open the URL in a browser on the mobile device and enter your remote password. You will see your familiar KISS Sorcar chat interface from VS Code.
 
+# Tip
+
 ## To Use the KISS Sorcar CLI REPL Interface
 
 Just run:
@@ -49,6 +51,8 @@ Just run:
 sorcar
 ```
 It has a powerful Claude Code style interface.
+
+# Tip
 
 ## To Run KISS Sorcar in a Docker Container
 
