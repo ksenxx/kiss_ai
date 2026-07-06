@@ -697,6 +697,16 @@ class SorcarAgent(RelentlessAgent):
         verbose: bool | None = None,
     ) -> None:
         resolved_model = model_name or _load_last_model() or get_default_model()
+        # Remember the model this task was LAUNCHED with.  The
+        # ``set_model`` tool mutates ``self.model_name`` mid-task
+        # (deliberately — subsequent sub-sessions of the SAME task must
+        # stay on the switched model), so end-of-task persistence
+        # (e.g. ``ChatSorcarAgent.run``'s final task-history save) must
+        # read this attribute instead of ``self.model_name`` — the
+        # recorded model of a task, like every other global model
+        # preference, must never change because an agent switched its
+        # own model while running (see INVARIANTS.md #217).
+        self._launch_model_name = resolved_model
         super()._reset(
             model_name=resolved_model,
             max_sub_sessions=max_sub_sessions,
