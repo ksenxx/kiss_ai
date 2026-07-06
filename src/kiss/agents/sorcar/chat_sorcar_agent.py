@@ -862,7 +862,18 @@ class ChatSorcarAgent(SorcarAgent):
             if not skip_persistence:
                 _save_task_result(task_id=task_id, result=result_summary)
                 extra_payload = self._build_extra_payload(
-                    model=self.model_name,
+                    # The LAUNCH model, not ``self.model_name``: the
+                    # ``set_model`` tool mutates the latter mid-task,
+                    # and a task's recorded model (surfaced in the chat
+                    # webview's History sidebar and other global
+                    # consumers) must always be the model the task was
+                    # started with — an agent switching its own model
+                    # must never change any globally-visible model
+                    # preference (INVARIANTS.md #217).
+                    model=(
+                        getattr(self, "_launch_model_name", "")
+                        or self.model_name
+                    ),
                     work_dir=self.work_dir,
                     is_parallel=self._is_parallel,
                     # Reuse the value resolved at task start so the
