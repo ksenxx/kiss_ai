@@ -11,7 +11,7 @@
 // speech handling for webview mode (the VS Code extension host runs a
 // local listener that captures + translates and posts voiceSpeech
 // back).  In browser mode ``triggerWake()`` merely flashed the mic
-// button green for 600ms — no audio was captured after the wake word,
+// button red for 600ms — no audio was captured after the wake word,
 // nothing was sent to the server, and no text ever appeared in the
 // task input.
 //
@@ -33,11 +33,11 @@
 //  2. The wake recognizer does not hear capture audio (blocks are
 //     routed to the capture, mirroring the Python listener).
 //  3. Wake followed by only silence times out without posting
-//     anything and clears the green wake flash (NO_SPEECH).
+//     anything and clears the red wake flash (NO_SPEECH).
 //  4. The server's voiceSpeech reply inserts the (speaker-prefixed)
 //     text into the task input and submits it via kiss-voice-submit.
 //  5. A late voiceSpeech from an older round does not clear a newer
-//     browser capture's green flash.
+//     browser capture's red flash.
 //  6. Audio at a 48kHz mic rate is downsampled to 16kHz PCM.
 //  7. ACTUAL VOICE (macOS only): real spoken audio synthesized with
 //     `say` flows through the real capture path and the posted PCM
@@ -222,7 +222,7 @@ async function main() {
       v.wake();
       assert.ok(
         v.btn.classList.contains('voice-triggered'),
-        'wake must flash the mic button green',
+        'wake must flash the mic button red',
       );
       // Two loud speech blocks, then 2s (8 x 256ms) of silence.
       v.feed(loudBlock(v.win));
@@ -329,7 +329,7 @@ async function main() {
 
       // Start a second round while the first transcription is still
       // pending.  The first voiceSpeech reply is now stale relative to
-      // the second round's green capture flash and must not clear it.
+      // the second round's red capture flash and must not clear it.
       v.advance(2500);
       v.wake();
       assert.ok(v.btn.classList.contains('voice-triggered'));
@@ -340,7 +340,7 @@ async function main() {
       );
       assert.ok(
         v.btn.classList.contains('voice-triggered'),
-        'late reply from an older round must preserve the newer green flash',
+        'late reply from an older round must preserve the newer red flash',
       );
 
       v.feed(loudBlock(v.win));

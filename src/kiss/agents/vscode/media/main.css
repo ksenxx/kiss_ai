@@ -1150,7 +1150,7 @@ body.remote-chat #welcome-config { display: none !important; }
 #voice-btn.voice-loading { opacity: 0.5; }
 #voice-btn.voice-listening { animation: voice-pulse 1.6s ease-in-out infinite; }
 #voice-btn.voice-error { color: var(--error, #f48771); }
-#voice-btn.voice-triggered { color: var(--success, #89d185); animation: voice-flash 0.8s ease-in-out infinite; }
+#voice-btn.voice-triggered { color: var(--red, #f48771); animation: voice-flash 0.8s ease-in-out infinite; }
 #voice-btn.voice-transcribing { color: var(--warning, #e5c07b); animation: voice-flash 0.8s ease-in-out infinite; }
 
 @keyframes voice-pulse {
