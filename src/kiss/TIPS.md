@@ -1,6 +1,6 @@
 # Tip
 
-## For the Highest Quality Work from KISS Sorcar
+## To get the Highest Quality Work from KISS Sorcar
 
 - Add both ANTHROPIC_API_KEY and OPENAI_API_KEY in the Settings panel
 - Add the following text to your prompt:
