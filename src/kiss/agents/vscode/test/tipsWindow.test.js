@@ -29,6 +29,17 @@
 //     disabled on the first tip, Next disabled on the last, Close
 //     removes the panel).  It auto-mounts only when
 //     ``window.__TIPS__.show`` is true and at least one tip exists.
+//   * The panel has a fixed size (``min(560px, 90vw)`` wide by
+//     ``min(520px, 82vh)`` tall), is centered both horizontally and
+//     vertically, and the tip body scrolls when content overflows.
+//   * Tip markdown is rendered with the Rosé Pine Moon palette
+//     (#232136 background, #e0def4 text, #c4a7e7 headings, #9ccfd8
+//     links, #f6c177 inline code, #ea9a97 accents, #3e8fb0 buttons).
+//   * Every fenced ``` code block rendered from a tip gets a Copy
+//     button that copies the code to the clipboard —
+//     ``navigator.clipboard.writeText`` with a hidden-textarea
+//     ``document.execCommand('copy')`` fallback — and flashes
+//     "Copied!" / "Failed" feedback before resetting to "Copy".
 //
 // Runs against the compiled extension under ``out/`` and the real
 // ``media/tips.js`` + ``media/marked.min.js`` in a jsdom DOM:
@@ -52,7 +63,7 @@ const projectRoot = path.resolve(__dirname, '..');
 const stubPath = path.join(__dirname, '_vscode-stub.js');
 fs.writeFileSync(
   stubPath,
-  `'use strict';\nmodule.exports = global.__kissVscodeStub || {};\n`,
+  "'use strict';\nmodule.exports = global.__kissVscodeStub || {};\n",
 );
 global.__kissVscodeStub = {
   Uri: {
@@ -464,9 +475,322 @@ test('tips fall back to plain text when marked is unavailable', () => {
 });
 
 // ---------------------------------------------------------------------------
+// <kiss-tips-panel> — fixed size, palette, and code-block copy buttons
+// ---------------------------------------------------------------------------
 
-if (failures.length > 0) {
-  console.error(`\n${failures.length} test(s) failed, ${passed} passed`);
-  process.exit(1);
+const CODE_TIP =
+  'Run this:\n\n```\nnpm install\nnpm test\n```\n\nAnd `inline` code.';
+const TWO_CODE_TIP =
+  'First:\n\n```\necho one\n```\n\nSecond:\n\n```\necho two\n```\n';
+
+function copyButtons(body) {
+  return Array.from(body.querySelectorAll('button.tips-copy'));
 }
-console.log(`\nAll ${passed} tipsWindow tests passed`);
+
+test('tips panel has a fixed, viewport-capped width and height', () => {
+  const win = loadTipsDom({tips: THREE_TIPS, show: true});
+  const {root} = panelParts(win);
+  const css = root.querySelector('style').textContent;
+  assert.ok(css.includes('width: min(560px, 90vw)'), 'fixed panel width');
+  assert.ok(css.includes('height: min(520px, 82vh)'), 'fixed panel height');
+  const panelDecls = css.split('.tips-panel {')[1].split('}')[0];
+  assert.ok(
+    panelDecls.includes('box-sizing: border-box'),
+    'fixed size must include the panel border',
+  );
+  assert.ok(!css.includes('max-width'), 'no max-width — the size is fixed');
+  assert.ok(!css.includes('min-width'), 'no min-width — the size is fixed');
+  assert.ok(!css.includes('max-height'), 'no max-height — the size is fixed');
+});
+
+test('tips body scrolls when the content overflows the fixed panel', () => {
+  const win = loadTipsDom({tips: THREE_TIPS, show: true});
+  const {root, body} = panelParts(win);
+  const css = root.querySelector('style').textContent;
+  const bodyRule = css.split('.tips-body {')[1];
+  assert.ok(bodyRule, '.tips-body rule must exist');
+  const decls = bodyRule.split('}')[0];
+  assert.ok(decls.includes('overflow: auto'), 'body must scroll on overflow');
+  assert.ok(decls.includes('flex: 1 1 auto'), 'body fills the fixed panel');
+  assert.ok(
+    decls.includes('min-height: 0'),
+    'body must be allowed to shrink so overflow: auto can engage',
+  );
+  assert.strictEqual(body.className, 'tips-body');
+});
+
+test('tips panel uses the Rosé Pine Moon palette', () => {
+  const win = loadTipsDom({tips: THREE_TIPS, show: true});
+  const {root} = panelParts(win);
+  const css = root.querySelector('style').textContent;
+  const palette = [
+    '#232136', // panel background
+    '#e0def4', // body text
+    '#c4a7e7', // headings / title
+    '#9ccfd8', // links / button hover
+    '#f6c177', // inline code
+    '#ea9a97', // strong / blockquote accent
+    '#3e8fb0', // buttons
+  ];
+  for (const color of palette) {
+    assert.ok(css.includes(color), `palette color ${color} must be used`);
+  }
+});
+
+test('each fenced code block gets a copy button', () => {
+  const win = loadTipsDom({tips: [CODE_TIP], show: true});
+  const {body} = panelParts(win);
+  const buttons = copyButtons(body);
+  assert.strictEqual(buttons.length, 1, 'one fenced block → one copy button');
+  const btn = buttons[0];
+  assert.strictEqual(btn.textContent, 'Copy');
+  assert.strictEqual(btn.type, 'button');
+  assert.strictEqual(btn.getAttribute('aria-label'), 'Copy code to clipboard');
+  const wrapper = btn.parentElement;
+  assert.ok(
+    wrapper.classList.contains('tips-code'),
+    'button must live in a .tips-code wrapper',
+  );
+  assert.ok(
+    wrapper.querySelector('pre > code'),
+    'wrapper must contain the fenced code block',
+  );
+});
+
+test('a tip with two fenced blocks gets two copy buttons', () => {
+  const win = loadTipsDom({tips: [TWO_CODE_TIP], show: true});
+  const {body} = panelParts(win);
+  assert.strictEqual(copyButtons(body).length, 2);
+});
+
+test('inline code does not get a copy button', () => {
+  const win = loadTipsDom({tips: ['Only `inline` code here.'], show: true});
+  const {body} = panelParts(win);
+  assert.strictEqual(copyButtons(body).length, 0);
+});
+
+test('plain-text fallback (no marked) has no copy buttons', () => {
+  const win = loadTipsDom({tips: [CODE_TIP], show: true}, {withMarked: false});
+  const {body} = panelParts(win);
+  assert.strictEqual(copyButtons(body).length, 0);
+});
+
+test('navigation re-creates copy buttons for each tip', () => {
+  const win = loadTipsDom({
+    tips: [CODE_TIP, 'No code at all.', TWO_CODE_TIP],
+    show: true,
+  });
+  const {body, next, prev} = panelParts(win);
+  assert.strictEqual(copyButtons(body).length, 1);
+  next.click();
+  assert.strictEqual(copyButtons(body).length, 0);
+  next.click();
+  assert.strictEqual(copyButtons(body).length, 2);
+  prev.click();
+  assert.strictEqual(copyButtons(body).length, 0);
+  prev.click();
+  assert.strictEqual(copyButtons(body).length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// Copy-to-clipboard behavior (async)
+// ---------------------------------------------------------------------------
+
+const asyncTests = [];
+
+function asyncTest(name, fn) {
+  asyncTests.push({name, fn});
+}
+
+/** Flush pending microtasks and 0ms macrotasks. */
+function tickAsync() {
+  return new Promise(resolve => setTimeout(resolve, 0));
+}
+
+/** Replace win.setTimeout with a capture queue; returns the queue. */
+function captureTimers(win) {
+  const timers = [];
+  win.setTimeout = fn => {
+    timers.push(fn);
+    return 0;
+  };
+  return timers;
+}
+
+asyncTest(
+  'copy button uses navigator.clipboard and shows Copied!',
+  async () => {
+    const win = loadTipsDom({tips: [CODE_TIP], show: true});
+    const {body} = panelParts(win);
+    const copied = [];
+    Object.defineProperty(win.navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        writeText: text => {
+          copied.push(text);
+          return Promise.resolve();
+        },
+      },
+    });
+    const timers = captureTimers(win);
+    const btn = copyButtons(body)[0];
+    btn.click();
+    await tickAsync();
+    assert.strictEqual(copied.length, 1, 'clipboard.writeText called once');
+    assert.strictEqual(copied[0], body.querySelector('pre code').textContent);
+    assert.ok(
+      copied[0].includes('npm install') && copied[0].includes('npm test'),
+      'the full fenced block text must be copied',
+    );
+    assert.strictEqual(btn.textContent, 'Copied!');
+    assert.strictEqual(timers.length, 1, 'a label-reset timer is scheduled');
+    timers[0]();
+    assert.strictEqual(btn.textContent, 'Copy', 'label resets after the timer');
+  },
+);
+
+asyncTest('copy falls back to execCommand when writeText rejects', async () => {
+  const win = loadTipsDom({tips: [CODE_TIP], show: true});
+  const {body} = panelParts(win);
+  Object.defineProperty(win.navigator, 'clipboard', {
+    configurable: true,
+    value: {writeText: () => Promise.reject(new Error('denied'))},
+  });
+  const execCalls = [];
+  win.document.execCommand = command => {
+    const area = win.document.querySelector('textarea');
+    execCalls.push({command, value: area ? area.value : null});
+    return true;
+  };
+  captureTimers(win);
+  const btn = copyButtons(body)[0];
+  btn.click();
+  await tickAsync();
+  assert.strictEqual(execCalls.length, 1, 'execCommand fallback used once');
+  assert.strictEqual(execCalls[0].command, 'copy');
+  assert.strictEqual(
+    execCalls[0].value,
+    body.querySelector('pre code').textContent,
+  );
+  assert.strictEqual(
+    win.document.querySelector('textarea'),
+    null,
+    'helper textarea must be removed',
+  );
+  assert.strictEqual(btn.textContent, 'Copied!');
+});
+
+asyncTest(
+  'copy uses execCommand when the clipboard API is missing',
+  async () => {
+    const win = loadTipsDom({tips: [CODE_TIP], show: true});
+    const {body} = panelParts(win);
+    Object.defineProperty(win.navigator, 'clipboard', {
+      configurable: true,
+      value: undefined,
+    });
+    win.document.execCommand = () => true;
+    captureTimers(win);
+    const btn = copyButtons(body)[0];
+    btn.click();
+    await tickAsync();
+    assert.strictEqual(btn.textContent, 'Copied!');
+  },
+);
+
+asyncTest(
+  'copy falls back when clipboard has no writeText function',
+  async () => {
+    const win = loadTipsDom({tips: [CODE_TIP], show: true});
+    const {body} = panelParts(win);
+    Object.defineProperty(win.navigator, 'clipboard', {
+      configurable: true,
+      value: {},
+    });
+    win.document.execCommand = () => true;
+    captureTimers(win);
+    const btn = copyButtons(body)[0];
+    btn.click();
+    await tickAsync();
+    assert.strictEqual(btn.textContent, 'Copied!');
+  },
+);
+
+asyncTest('copy falls back when writeText throws synchronously', async () => {
+  const win = loadTipsDom({tips: [CODE_TIP], show: true});
+  const {body} = panelParts(win);
+  Object.defineProperty(win.navigator, 'clipboard', {
+    configurable: true,
+    value: {
+      writeText: () => {
+        throw new Error('not allowed');
+      },
+    },
+  });
+  win.document.execCommand = () => true;
+  captureTimers(win);
+  const btn = copyButtons(body)[0];
+  btn.click();
+  await tickAsync();
+  assert.strictEqual(btn.textContent, 'Copied!');
+});
+
+asyncTest('copy shows Failed when execCommand returns false', async () => {
+  const win = loadTipsDom({tips: [CODE_TIP], show: true});
+  const {body} = panelParts(win);
+  Object.defineProperty(win.navigator, 'clipboard', {
+    configurable: true,
+    value: undefined,
+  });
+  win.document.execCommand = () => false;
+  const timers = captureTimers(win);
+  const btn = copyButtons(body)[0];
+  btn.click();
+  await tickAsync();
+  assert.strictEqual(btn.textContent, 'Failed');
+  assert.strictEqual(timers.length, 1, 'a label-reset timer is scheduled');
+  timers[0]();
+  assert.strictEqual(btn.textContent, 'Copy', 'label resets after Failed');
+});
+
+asyncTest('copy shows Failed when execCommand throws', async () => {
+  const win = loadTipsDom({tips: [CODE_TIP], show: true});
+  const {body} = panelParts(win);
+  Object.defineProperty(win.navigator, 'clipboard', {
+    configurable: true,
+    value: undefined,
+  });
+  win.document.execCommand = () => {
+    throw new Error('unsupported');
+  };
+  captureTimers(win);
+  const btn = copyButtons(body)[0];
+  btn.click();
+  await tickAsync();
+  assert.strictEqual(btn.textContent, 'Failed');
+  assert.strictEqual(
+    win.document.querySelector('textarea'),
+    null,
+    'helper textarea must be removed even when execCommand throws',
+  );
+});
+
+// ---------------------------------------------------------------------------
+
+(async () => {
+  for (const t of asyncTests) {
+    try {
+      await t.fn();
+      passed += 1;
+      console.log(`  ok - ${t.name}`);
+    } catch (err) {
+      failures.push({name: t.name, err});
+      console.log(`  FAIL - ${t.name}: ${err && err.message}`);
+    }
+  }
+  if (failures.length > 0) {
+    console.error(`\n${failures.length} test(s) failed, ${passed} passed`);
+    process.exit(1);
+  }
+  console.log(`\nAll ${passed} tipsWindow tests passed`);
+})();

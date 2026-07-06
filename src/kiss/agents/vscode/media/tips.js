@@ -5,10 +5,14 @@
 //
 // Fresh-install Tips window for the chat webview.
 //
-// Defines the ``<kiss-tips-panel>`` web component: a centered modal
-// panel that renders one tip at a time as formatted HTML (markdown via
-// window.marked, loaded by chat.html before this script) with
-// Previous / Next / Close controls.
+// Defines the ``<kiss-tips-panel>`` web component: a fixed-size modal
+// panel (min(560px, 90vw) x min(520px, 82vh)) centered horizontally
+// and vertically that renders one tip at a time as formatted HTML
+// (markdown via window.marked, loaded by chat.html before this
+// script) with Previous / Next / Close controls.  The tip body
+// scrolls when content overflows, every fenced code block gets a
+// Copy-to-clipboard button, and the markdown is styled with the
+// Rosé Pine Moon palette.
 //
 // The tip list and the show-on-startup flag arrive via
 // ``window.__TIPS__ = {tips: [...], show: bool}`` injected by the HTML
@@ -21,6 +25,10 @@
 (function () {
   'use strict';
 
+  // Rosé Pine Moon palette: #232136 background, #2a273f surfaces,
+  // #44415a borders, #e0def4 text, #908caa muted, #c4a7e7 headings,
+  // #9ccfd8 links/hover, #f6c177 inline code, #ea9a97 accents,
+  // #3e8fb0 buttons.
   const PANEL_CSS =
     '.tips-overlay {' +
     '  position: fixed;' +
@@ -29,18 +37,18 @@
     '  display: flex;' +
     '  justify-content: center;' +
     '  align-items: center;' +
-    '  background: rgba(0, 0, 0, 0.45);' +
+    '  background: rgba(35, 33, 54, 0.6);' +
     '}' +
     '.tips-panel {' +
     '  display: flex;' +
     '  flex-direction: column;' +
-    '  max-width: min(560px, 90vw);' +
-    '  max-height: 80vh;' +
-    '  min-width: min(360px, 90vw);' +
-    '  border: 2px solid var(--vscode-focusBorder, #007fd4);' +
-    '  border-radius: 6px;' +
-    '  background: var(--vscode-editorWidget-background, #252526);' +
-    '  color: var(--vscode-editor-foreground, #ccc);' +
+    '  box-sizing: border-box;' +
+    '  width: min(560px, 90vw);' +
+    '  height: min(520px, 82vh);' +
+    '  border: 1px solid #44415a;' +
+    '  border-radius: 8px;' +
+    '  background: #232136;' +
+    '  color: #e0def4;' +
     '  font-family: var(--vscode-font-family, sans-serif);' +
     '  font-size: var(--vscode-font-size, 13px);' +
     '  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);' +
@@ -50,48 +58,160 @@
     '  align-items: center;' +
     '  gap: 8px;' +
     '  padding: 10px 12px;' +
-    '  border-bottom: 1px solid var(--vscode-panel-border, #80808059);' +
+    '  border-bottom: 1px solid #44415a;' +
     '}' +
-    '.tips-title { font-weight: 600; flex: 1; }' +
+    '.tips-title { font-weight: 600; flex: 1; color: #c4a7e7; }' +
     '.tips-counter {' +
-    '  color: var(--vscode-descriptionForeground, #8b8b8b);' +
+    '  color: #908caa;' +
     '  font-size: 0.9em;' +
     '}' +
     '.tips-close {' +
     '  border: none;' +
     '  background: transparent;' +
-    '  color: inherit;' +
+    '  color: #908caa;' +
     '  font-size: 16px;' +
     '  line-height: 1;' +
     '  cursor: pointer;' +
     '  padding: 2px 6px;' +
     '}' +
-    '.tips-body { padding: 12px; overflow-y: auto; }' +
-    '.tips-body pre { white-space: pre-wrap; margin: 0; }' +
+    '.tips-close:hover { color: #e0def4; }' +
+    '.tips-body {' +
+    '  flex: 1 1 auto;' +
+    '  min-height: 0;' +
+    '  padding: 14px 16px;' +
+    '  overflow: auto;' +
+    '}' +
+    '.tips-body h1, .tips-body h2, .tips-body h3, .tips-body h4 {' +
+    '  color: #c4a7e7;' +
+    '}' +
+    '.tips-body a { color: #9ccfd8; }' +
+    '.tips-body strong { color: #ea9a97; }' +
+    '.tips-body blockquote {' +
+    '  margin: 8px 0;' +
+    '  padding-left: 10px;' +
+    '  border-left: 3px solid #ea9a97;' +
+    '  color: #908caa;' +
+    '}' +
+    '.tips-body pre {' +
+    '  background: #2a273f;' +
+    '  border: 1px solid #44415a;' +
+    '  border-radius: 6px;' +
+    '  padding: 10px 12px;' +
+    '  margin: 8px 0;' +
+    '  overflow-x: auto;' +
+    '  white-space: pre-wrap;' +
+    '}' +
     '.tips-body code {' +
-    '  background: var(--vscode-input-background, #3c3c3c);' +
+    '  background: #2a273f;' +
+    '  color: #f6c177;' +
     '  padding: 1px 4px;' +
     '  border-radius: 3px;' +
     '}' +
+    '.tips-body pre code { background: transparent; padding: 0; }' +
+    '.tips-code { position: relative; }' +
+    '.tips-copy {' +
+    '  position: absolute;' +
+    '  top: 6px;' +
+    '  right: 6px;' +
+    '  border: none;' +
+    '  border-radius: 3px;' +
+    '  padding: 2px 8px;' +
+    '  font-size: 0.85em;' +
+    '  cursor: pointer;' +
+    '  background: #3e8fb0;' +
+    '  color: #232136;' +
+    '}' +
+    '.tips-copy:hover { background: #9ccfd8; }' +
     '.tips-footer {' +
     '  display: flex;' +
     '  justify-content: space-between;' +
     '  gap: 8px;' +
     '  padding: 10px 12px;' +
-    '  border-top: 1px solid var(--vscode-panel-border, #80808059);' +
+    '  border-top: 1px solid #44415a;' +
     '}' +
     '.tips-prev, .tips-next {' +
     '  border: none;' +
     '  border-radius: 3px;' +
     '  padding: 4px 12px;' +
     '  cursor: pointer;' +
-    '  background: var(--vscode-button-background, #0e639c);' +
-    '  color: var(--vscode-button-foreground, #fff);' +
+    '  background: #3e8fb0;' +
+    '  color: #232136;' +
+    '}' +
+    '.tips-prev:hover:enabled, .tips-next:hover:enabled {' +
+    '  background: #9ccfd8;' +
     '}' +
     '.tips-prev:disabled, .tips-next:disabled {' +
     '  opacity: 0.4;' +
     '  cursor: default;' +
     '}';
+
+  /**
+   * Copy ``text`` via a hidden textarea + ``document.execCommand('copy')``.
+   * Returns true when the copy command reports success.
+   */
+  function copyViaExecCommand(text) {
+    const area = document.createElement('textarea');
+    area.value = text;
+    area.setAttribute('readonly', '');
+    area.style.position = 'fixed';
+    area.style.left = '-9999px';
+    document.body.appendChild(area);
+    area.select();
+    let ok = false;
+    try {
+      ok = document.execCommand('copy');
+    } catch (_err) {
+      ok = false;
+    }
+    area.remove();
+    return ok;
+  }
+
+  /**
+   * Copy ``text`` to the clipboard, preferring the async clipboard API
+   * and falling back to ``execCommand('copy')``.  Resolves to true on
+   * success and false on failure.
+   */
+  function copyTextToClipboard(text) {
+    const clip = navigator.clipboard;
+    if (clip && typeof clip.writeText === 'function') {
+      let written;
+      try {
+        written = clip.writeText(text);
+      } catch (_err) {
+        return Promise.resolve(copyViaExecCommand(text));
+      }
+      return written.then(
+        () => true,
+        () => copyViaExecCommand(text),
+      );
+    }
+    return Promise.resolve(copyViaExecCommand(text));
+  }
+
+  /**
+   * Flash "Copied!" / "Failed" feedback on a copy button, then restore
+   * the "Copy" label after 1.5 seconds.
+   */
+  function flashCopyResult(btn, ok) {
+    btn.textContent = ok ? 'Copied!' : 'Failed';
+    setTimeout(() => {
+      btn.textContent = 'Copy';
+    }, 1500);
+  }
+
+  /**
+   * Click handler for copy buttons: copy the text of the code block
+   * sharing the button's ``.tips-code`` wrapper and flash feedback.
+   */
+  function onCopyClick(event) {
+    const btn = event.currentTarget;
+    const code = btn.parentElement.querySelector('pre code');
+    const text = code ? code.textContent : '';
+    copyTextToClipboard(text).then(ok => {
+      flashCopyResult(btn, ok);
+    });
+  }
 
   /**
    * Centered modal panel showing one markdown tip at a time.
@@ -198,10 +318,32 @@
         pre.textContent = text;
         this._body.replaceChildren(pre);
       }
+      this._addCopyButtons();
       this._counter.textContent =
         total > 0 ? this._index + 1 + ' / ' + total : '';
       this._prev.disabled = this._index <= 0;
       this._next.disabled = this._index >= total - 1;
+    }
+
+    /**
+     * Wrap every fenced code block (``pre > code``) in the rendered
+     * tip with a ``.tips-code`` container and attach a Copy button.
+     */
+    _addCopyButtons() {
+      for (const pre of this._body.querySelectorAll('pre')) {
+        if (!pre.querySelector('code')) continue;
+        const wrapper = document.createElement('div');
+        wrapper.className = 'tips-code';
+        pre.parentNode.insertBefore(wrapper, pre);
+        wrapper.appendChild(pre);
+        const btn = document.createElement('button');
+        btn.className = 'tips-copy';
+        btn.type = 'button';
+        btn.textContent = 'Copy';
+        btn.setAttribute('aria-label', 'Copy code to clipboard');
+        btn.addEventListener('click', onCopyClick);
+        wrapper.appendChild(btn);
+      }
     }
   }
 
