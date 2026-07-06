@@ -25,7 +25,9 @@ Click the **mic** button below the chat input box if it is grey and wait for it 
 
 ## Novel Features: set_model and Steering-on-the-Fly
 
-You can **instantaneously inject a user message** into a running agent and make the agent take the message into account in the rest of its execution. Moreover, while an agent is running, you can ask it to **dynamically change its model** for the rest of the execution of the agent. This is a unique feature of KISS Sorcar. These two **IPs (intellectual properties) make KISS Sorcar super powerful for multi-model reasoning and dynamic steering of tasks running for hours to days**. Model routing intelligence can be expressed in a few sentences.
+You can **instantaneously inject a user message** into a running agent and make the agent take the message into account in the rest of its execution. Moreover, while an agent is running, you can ask it to **dynamically change its model** for the rest of the execution of the agent. 
+
+These are unique features of KISS Sorcar. These two **IPs (intellectual properties) make KISS Sorcar super powerful for multi-model reasoning and dynamic steering of tasks running for hours to days**. Model routing intelligence can be expressed in a few sentences.
 
 # Tip
 
