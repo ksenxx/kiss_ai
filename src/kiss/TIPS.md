@@ -9,7 +9,6 @@
 Use claude-fable-5 model for all tasks including coding, bug fixing, and test creation. Use gpt-5.5-xhigh (not codex) for thorough review and debugging of the work done by the other model. Check if the other model has missed some code or has introduced bugs. No need to check if the models exist.
 ```
 
-
 # Tip
 
 ## You Can Now Have Voice Chat with KISS Sorcar
@@ -47,9 +46,11 @@ Open the URL in a browser on the mobile device and enter your remote password. Y
 ## To Use the KISS Sorcar CLI REPL Interface
 
 Just run:
+
 ```bash
 sorcar
 ```
+
 It has a powerful Claude Code style interface.
 
 # Tip
@@ -57,11 +58,12 @@ It has a powerful Claude Code style interface.
 ## To Run KISS Sorcar in a Docker Container
 
 Just run:
+
 ```bash
 ~/kiss_ai/sorcar-docker
 ```
-It runs KISS Sorcar in a Docker container and exposes a VS Code interface in the browser of the host machine.
 
+It runs KISS Sorcar in a Docker container and exposes a VS Code interface in the browser of the host machine.
 
 # Tip
 
