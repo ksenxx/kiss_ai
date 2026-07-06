@@ -236,9 +236,9 @@ ______________________________________________________________________
 - **stash_if_dirty** — Stash uncommitted changes if the working tree or index is dirty. Uses `git stash push --include-untracked` so both staged and unstaged changes (including new files) are saved.<br/>`stash_if_dirty(repo: Path) -> bool`
 
   - `repo`: Git repo root path.
-  - **Returns:** True if a stash entry was created, False if the tree was clean.
+  - **Returns:** True if a stash entry was created, False if the tree was clean or nothing could be stashed.
 
-- **stash_pop** — Pop the latest stash entry, preserving the staging state. Tries `git stash pop --index` first so that files that were staged before the stash stay staged after the pop. If `--index` fails (e.g. the merge changed a file that was in the index), falls back to plain `git stash pop` which restores all changes as unstaged.<br/>`stash_pop(repo: Path) -> bool`
+- **stash_pop** — Pop the latest stash entry, preserving the staging state. Tries `git stash pop --index` first so that files that were staged before the stash stay staged after the pop. If `--index` fails (e.g. the merge changed a file that was in the index), falls back to plain `git stash pop` which restores all changes as unstaged — but ONLY when the failed `--index` attempt left the working tree untouched. A failed `--index` pop can partially apply the stash (e.g. tracked changes applied while an untracked-file restore failed, or a conflicted merge) while keeping the stash entry; blindly re-applying the same stash on top of that state risks a double-apply, so in that case the stash is left for the caller to surface to the user.<br/>`stash_pop(repo: Path) -> bool`
 
   - `repo`: Git repo root path.
   - **Returns:** True if the pop succeeded, False on conflict or error.
@@ -299,6 +299,12 @@ ______________________________________________________________________
   - `sha`: The baseline commit SHA to store.
   - **Returns:** True if config was saved successfully, False otherwise.
 
+- **load_baseline_commit** — Load the baseline commit SHA from git config. Companion reader for :meth:`save_baseline_commit` — recovers the persisted `branch.<branch>.kiss-baseline` value (e.g. after a crash between worktree creation and merge, when the in-memory `GitWorktree.baseline_commit` is lost).<br/>`load_baseline_commit(repo: Path, branch: str) -> str | None`
+
+  - `repo`: Git repo root path.
+  - `branch`: The worktree branch name.
+  - **Returns:** The baseline commit SHA, or `None` if not stored.
+
 - **copy_dirty_state** — Copy uncommitted/staged/untracked files from main worktree. Reads `git status --porcelain` in *repo* and mirrors every dirty file into *wt_dir*. Files that exist in the main worktree are copied; files that were deleted are removed from *wt_dir*. The caller is expected to stage and commit the result as a baseline commit.<br/>`copy_dirty_state(repo: Path, wt_dir: Path) -> bool`
 
   - `repo`: Git repo root (main worktree).
@@ -341,7 +347,7 @@ ______________________________________________________________________
 
 **Constructor:** `WorktreeSorcarAgent(name: str) -> None`
 
-- **new_chat** — Reset to a new chat session, auto-merging any pending worktree. If a worktree task is pending from the previous session, it is auto-committed with a detailed LLM message and squash-merged into the original branch before the chat state is reset.<br/>`new_chat() -> None`
+- **new_chat** — Reset to a new chat session, auto-merging any pending worktree. If a worktree task is pending from the previous session, it is auto-committed with a detailed LLM message and squash-merged into the original branch before the chat state is reset. When the release fails (merge conflict, checkout failure, stash failure, --no-auto-commit with uncommitted changes), `_release_worktree` sets a warning describing the manual recovery steps. Flush it to the attached printer NOW: if the user opens a new chat and never runs another task on this agent instance, no later `run()` will ever call `_flush_warnings` and the warning would be silently lost. When no printer is attached the warning is retained for the next `run()`'s flush (`_flush_warnings` no-ops without a `broadcast`-capable printer).<br/>`new_chat() -> None`
 
 - **run** — Run a task on an isolated git worktree branch. Creates a new worktree and branch, redirects `work_dir` into the worktree, and delegates to `ChatSorcarAgent.run()`. Each call starts a fresh worktree; any previously pending branch from an earlier run is auto-committed and squash-merged into its original branch first (kept in git for manual resolution only when that auto-merge fails or conflicts). Falls back to direct execution (no worktree) when: - `use_worktree` kwarg is explicitly `False` - `work_dir` is not inside a git repo - The repo has no commits - HEAD is detached (no merge target) - Any git command fails during setup<br/>`run(prompt_template: str = '', **kwargs: Any) -> str`
 

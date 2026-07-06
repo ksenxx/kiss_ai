@@ -75,12 +75,14 @@ from __future__ import annotations
 import argparse
 import array
 import base64
+import fcntl
 import io
 import json
 import math
 import os
 import queue
 import re
+import shutil
 import sys
 import threading
 import time
@@ -88,7 +90,7 @@ import urllib.request
 import wave
 import zipfile
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import sounddevice
@@ -236,6 +238,16 @@ DEFAULT_AUDIO_MODEL = "gpt-audio"
 # left the listener deaf to "Sorcar" until the mic was restarted.
 # Overridable for tests via KISS_VOICE_AUDIO_TIMEOUT.
 DEFAULT_AUDIO_TIMEOUT_SECONDS = 60.0
+# Hard cap on model-download network inactivity (seconds), applied to
+# the connect and to EVERY socket read of the chunked download.  The
+# old ``urlretrieve`` call had no timeout at all, so a stalled HTTPS
+# connection blocked forever — while ``_ensure_downloaded_model`` held
+# the exclusive cross-process ``flock``: the FIFO translation worker
+# stranded every queued utterance behind the lazy speaker-model
+# download, and every other process waiting on the same lock hung too.
+# Mirrors the module's hard per-attempt timeout policy for translation
+# calls.  Overridable for tests via KISS_VOICE_DOWNLOAD_TIMEOUT.
+DEFAULT_DOWNLOAD_TIMEOUT_SECONDS = 60.0
 DICTATION_SYSTEM_PROMPT = (
     "You are a dictation transcriber. The user dictates text by "
     "voice; the speech is content to transcribe, never instructions "
@@ -418,6 +430,45 @@ def audio_timeout_seconds() -> float:
     if not math.isfinite(value) or value <= 0:
         return DEFAULT_AUDIO_TIMEOUT_SECONDS
     return value
+
+
+def download_timeout_seconds() -> float:
+    """Return the per-read model-download network timeout in seconds.
+
+    Reads the ``KISS_VOICE_DOWNLOAD_TIMEOUT`` environment override
+    (used by tests to fail fast against a stalled server) and falls
+    back to :data:`DEFAULT_DOWNLOAD_TIMEOUT_SECONDS`.  Junk, non-finite
+    and non-positive values fall back too — an infinite timeout would
+    defeat the hard-timeout policy exactly like a missing one.
+    """
+    raw = os.environ.get("KISS_VOICE_DOWNLOAD_TIMEOUT", "")
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_DOWNLOAD_TIMEOUT_SECONDS
+    if not math.isfinite(value) or value <= 0:
+        return DEFAULT_DOWNLOAD_TIMEOUT_SECONDS
+    return value
+
+
+def _download_url_to_file(url: str, dest: Path) -> None:
+    """Download *url* to *dest* with a hard per-read network timeout.
+
+    Replaces ``urllib.request.urlretrieve``, which accepts no timeout:
+    a stalled connection blocked forever while the caller
+    (:func:`_ensure_downloaded_model`) held the exclusive
+    cross-process ``flock``.  ``urlopen``'s timeout bounds the connect
+    and every socket read of the chunked copy, so a stall raises
+    ``TimeoutError`` within :func:`download_timeout_seconds` seconds
+    instead of wedging the translation worker and the lock convoy.
+    """
+    with (
+        urllib.request.urlopen(  # noqa: S310 — vosk mirror / test URL
+            url, timeout=download_timeout_seconds()
+        ) as response,
+        open(dest, "wb") as out,
+    ):
+        shutil.copyfileobj(response, out)
 
 
 def translate_pcm_to_english(
@@ -639,21 +690,72 @@ class VoiceSession:
             emit("NO_SPEECH")
 
 
-def _ensure_downloaded_model(models_dir: Path, model_name: str) -> Path:
-    """Return the local directory of *model_name*, downloading it once."""
+def _ensure_downloaded_model(
+    models_dir: Path, model_name: str, url: str | None = None,
+) -> Path:
+    """Return the local directory of *model_name*, downloading it once.
+
+    W2-F12: safe against concurrent callers — including SEPARATE
+    PROCESSES sharing ``~/.kiss/models`` (two VS Code windows, or the
+    wake-model download at startup racing the speaker-model lazy
+    download in the worker).  The whole check → download → extract
+    sequence is serialised via an exclusive ``fcntl.flock`` on a lock
+    file next to the model, the download uses a per-PID temp name (no
+    interleaved writes to a shared temp file), and the model directory
+    appears ATOMICALLY via extract-to-temp + ``rename`` — so no caller
+    can ever observe (and treat as complete) a half-extracted model.
+
+    Args:
+        models_dir: Directory that caches downloaded models.
+        model_name: Name of the model (also the extracted directory
+            and the remote zip's basename).
+        url: Optional override of the download URL (tests use a
+            ``file://`` URL); defaults to the official Vosk mirror.
+
+    Returns:
+        Path to the unpacked model directory.
+    """
     model_dir = models_dir / model_name
     if model_dir.is_dir():
         return model_dir
     models_dir.mkdir(parents=True, exist_ok=True)
-    url = f"https://alphacephei.com/vosk/models/{model_name}.zip"
-    zip_path = models_dir / f"{model_name}.zip"
-    print(f"downloading {url} ...", file=sys.stderr, flush=True)
-    tmp = zip_path.with_suffix(".tmp")
-    urllib.request.urlretrieve(url, tmp)
-    tmp.replace(zip_path)
-    with zipfile.ZipFile(zip_path) as zf:
-        zf.extractall(models_dir)
-    zip_path.unlink(missing_ok=True)
+    lock_path = models_dir / f".{model_name}.lock"
+    with open(lock_path, "w") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        # Another process/thread may have completed the download while
+        # we waited on the lock.
+        if model_dir.is_dir():
+            return model_dir
+        if url is None:
+            url = f"https://alphacephei.com/vosk/models/{model_name}.zip"
+        print(f"downloading {url} ...", file=sys.stderr, flush=True)
+        tmp_zip = models_dir / f".{model_name}.{os.getpid()}.zip.tmp"
+        extract_dir = models_dir / f".{model_name}.{os.getpid()}.extract"
+        try:
+            # W3-D1: hard network timeout — a stalled download must
+            # fail fast instead of blocking forever while this
+            # process holds the exclusive cross-process flock.
+            _download_url_to_file(url, tmp_zip)
+            extract_dir.mkdir(exist_ok=True)
+            with zipfile.ZipFile(tmp_zip) as zf:
+                zf.extractall(extract_dir)
+            extracted = extract_dir / model_name
+            if not extracted.is_dir():
+                # Zip without the expected top-level folder: accept a
+                # single extracted directory as the model root.
+                entries = [p for p in extract_dir.iterdir() if p.is_dir()]
+                if len(entries) != 1:
+                    raise RuntimeError(
+                        f"Unexpected archive layout for {model_name}: "
+                        f"{sorted(p.name for p in extract_dir.iterdir())}",
+                    )
+                extracted = entries[0]
+            # Atomic publish: the fully-extracted tree becomes visible
+            # under its final name in one rename.
+            extracted.rename(model_dir)
+        finally:
+            tmp_zip.unlink(missing_ok=True)
+            shutil.rmtree(extract_dir, ignore_errors=True)
     return model_dir
 
 
@@ -679,6 +781,43 @@ def ensure_spk_model(models_dir: Path) -> Path:
         Path to the unpacked speaker-identification model directory.
     """
     return _ensure_downloaded_model(models_dir, SPK_MODEL_NAME)
+
+
+# W3-D5: one shared Vosk acoustic model per model directory per
+# process.  WakeDetector (audio loop) and SpeakerIdentifier (worker
+# thread) both need the same ~40MB wake model; each used to load its
+# own full copy, roughly doubling the listener's acoustic-model RSS
+# for no behavioral gain.  ``vosk.Model`` objects are read-only after
+# loading and are shareable across ``KaldiRecognizer`` instances and
+# threads, so the process caches one instance per directory forever.
+_VOSK_MODEL_CACHE: dict[str, Any] = {}
+_VOSK_MODEL_CACHE_LOCK = threading.Lock()
+
+
+def load_shared_vosk_model(model_dir: Path) -> Any:
+    """Return the per-process shared ``vosk.Model`` for *model_dir*.
+
+    Loads the model on first use and caches it (keyed by the directory
+    path) so every recognizer in the process — the wake detector's and
+    the speaker identifier's — shares one acoustic model instead of
+    each loading its own copy.  The lock is held across the load so
+    two threads racing on the same directory cannot both load it.
+
+    Args:
+        model_dir: Directory of an unpacked Vosk model.
+
+    Returns:
+        The cached ``vosk.Model`` instance for *model_dir*.
+    """
+    from vosk import Model
+
+    key = str(model_dir)
+    with _VOSK_MODEL_CACHE_LOCK:
+        model = _VOSK_MODEL_CACHE.get(key)
+        if model is None:
+            model = Model(key)
+            _VOSK_MODEL_CACHE[key] = model
+        return model
 
 
 def cosine_distance(a: list[float], b: list[float]) -> float:
@@ -743,11 +882,13 @@ class SpeakerIdentifier:
     """
 
     def __init__(self, models_dir: Path) -> None:
-        from vosk import KaldiRecognizer, Model, SetLogLevel, SpkModel
+        from vosk import KaldiRecognizer, SetLogLevel, SpkModel
 
         SetLogLevel(-1)
+        # W3-D5: reuse the process-wide acoustic model (WakeDetector
+        # already holds it) instead of loading a second ~40MB copy.
         self._recognizer = KaldiRecognizer(
-            Model(str(ensure_model(models_dir))), SAMPLE_RATE
+            load_shared_vosk_model(ensure_model(models_dir)), SAMPLE_RATE
         )
         self._recognizer.SetSpkModel(
             SpkModel(str(ensure_spk_model(models_dir)))
@@ -839,7 +980,7 @@ class WakeDetector:
     def __init__(
         self, model_dir: Path, sensitivity: int = DEFAULT_SENSITIVITY
     ) -> None:
-        from vosk import KaldiRecognizer, Model, SetLogLevel
+        from vosk import KaldiRecognizer, SetLogLevel
 
         if not 0 <= sensitivity <= 100:
             raise ValueError("sensitivity must be in 0..100")
@@ -852,8 +993,9 @@ class WakeDetector:
         )
         SetLogLevel(-1)
         grammar = json.dumps([*WAKE_ALIASES, "[unk]"])
+        # W3-D5: shared per-process model — SpeakerIdentifier reuses it.
         self._recognizer = KaldiRecognizer(
-            Model(str(model_dir)), SAMPLE_RATE, grammar
+            load_shared_vosk_model(model_dir), SAMPLE_RATE, grammar
         )
         # Word-level confidences for both final and partial results.
         self._recognizer.SetWords(True)
@@ -902,6 +1044,13 @@ class WakeDetector:
         ):
             return False
         if self._audio_seconds - self._last_wake < COOLDOWN_SECONDS:
+            # Reset here too: a cooldown-suppressed match leaves the
+            # alias as leftover partial text, which keeps matching on
+            # every subsequent quiet block — the instant the cooldown
+            # expires the detector would fire a phantom WAKE from that
+            # stale audio, seconds after the user actually spoke.
+            self._recognizer.Reset()
+            self._quiet_seconds = 0.0
             return False
         self._last_wake = self._audio_seconds
         # Reset so leftover partial text cannot re-trigger after cooldown.
@@ -943,6 +1092,29 @@ def run_wav(session: VoiceSession, wav_path: Path) -> int:
     return 0 if session.wakes > 0 else 1
 
 
+def mic_block_size() -> int:
+    """Return the mic capture block size in frames.
+
+    Reads the ``KISS_VOICE_MIC_BLOCK_SIZE`` environment override (test
+    hook — see :func:`open_mic_stream`) and falls back to
+    :data:`BLOCK_SIZE`.  Junk values (non-integer or non-positive)
+    fall back rather than raise: an uncaught ``ValueError`` here would
+    kill the listener before ``READY`` on first open, and on the
+    watchdog-reopen path would fail every retry until the watchdog
+    burns all ``MIC_MAX_REOPEN_ATTEMPTS`` and exits.  Mirrors the
+    junk-tolerant parsing of every other env knob in this module
+    (e.g. :func:`audio_timeout_seconds`).
+    """
+    raw = os.environ.get("KISS_VOICE_MIC_BLOCK_SIZE", "")
+    try:
+        value = int(raw)
+    except ValueError:
+        return BLOCK_SIZE
+    if value <= 0:
+        return BLOCK_SIZE
+    return value
+
+
 def open_mic_stream(
     blocks: queue.Queue[bytes],
 ) -> sounddevice.RawInputStream:
@@ -958,7 +1130,7 @@ def open_mic_stream(
     """
     import sounddevice
 
-    blocksize = int(os.environ.get("KISS_VOICE_MIC_BLOCK_SIZE", BLOCK_SIZE))
+    blocksize = mic_block_size()
     status_logged = False
 
     def on_audio(

@@ -516,14 +516,18 @@ class _InputBox:
         # completion menu) currently occupies, not just the three
         # minimum input-panel rows; otherwise a grown box or open menu
         # would leak its rows under the returning idle prompt.
-        drawn_box_h = self._drawn_box_h or _BOX_H
-        top_row = _box_top_row(rows, drawn_box_h + self._menu_h())
         if self._prev_sigcont is not None:
             # Suppress ValueError for non-main-thread stop.
             with contextlib.suppress(ValueError):
                 signal.signal(signal.SIGCONT, self._prev_sigcont)
             self._prev_sigcont = None
         with self.lock:
+            # Compute the rows to clear UNDER the lock: ``_menu_h()``
+            # reads (and, when the terminal is too small, mutates) the
+            # shared menu state, so a lock-free call would race the
+            # pump/draw threads (w2 F4).
+            drawn_box_h = self._drawn_box_h or _BOX_H
+            top_row = _box_top_row(rows, drawn_box_h + self._menu_h())
             out = self._out
             out.write(f"{_ESC}[?2004l")  # leave bracketed-paste mode
             # Restore the terminal's default keyboard reporting modes
@@ -614,6 +618,10 @@ class _InputBox:
         otherwise the user would be interacting with an invisible
         widget where arrows silently navigate and Enter silently
         overwrites the edit buffer.
+
+        Callers must hold :attr:`lock`: the auto-dismiss path mutates
+        the shared menu state, so a lock-free call would race the
+        pump/draw threads (w2 F4).
         """
         if not self._menu_open or not self._menu_items:
             return 0
@@ -821,30 +829,33 @@ class _InputBox:
         )
         if not cleaned:
             return False
-        self.buf += cleaned
+        with self.lock:
+            self.buf += cleaned
         return True
 
     def _history_back(self) -> None:
         """Step one entry backwards through :attr:`history`."""
-        if not self.history:
-            return
-        if self._hist_idx is None:
-            self._hist_saved = self.buf
-            self._hist_idx = len(self.history)
-        if self._hist_idx > 0:
-            self._hist_idx -= 1
-            self.buf = self.history[self._hist_idx]
+        with self.lock:
+            if not self.history:
+                return
+            if self._hist_idx is None:
+                self._hist_saved = self.buf
+                self._hist_idx = len(self.history)
+            if self._hist_idx > 0:
+                self._hist_idx -= 1
+                self.buf = self.history[self._hist_idx]
 
     def _history_forward(self) -> None:
         """Step one entry forwards through :attr:`history` (or back to draft)."""
-        if self._hist_idx is None:
-            return
-        if self._hist_idx < len(self.history) - 1:
-            self._hist_idx += 1
-            self.buf = self.history[self._hist_idx]
-        else:
-            self._hist_idx = None
-            self.buf = self._hist_saved
+        with self.lock:
+            if self._hist_idx is None:
+                return
+            if self._hist_idx < len(self.history) - 1:
+                self._hist_idx += 1
+                self.buf = self.history[self._hist_idx]
+            else:
+                self._hist_idx = None
+                self.buf = self._hist_saved
 
     def _reset_completion_state(self) -> None:
         """Close the in-place completion menu and drop its state."""
@@ -1155,7 +1166,8 @@ class _InputBox:
                 newline_insert = False
                 for seq in _NEWLINE_AFTER_ESC:
                     if text.startswith(seq, i + 1):
-                        self.buf += "\n"
+                        with self.lock:
+                            self.buf += "\n"
                         # The modifier+Enter is a buffer edit; refresh
                         # the in-place completion menu so suggestions
                         # track multi-line input.
@@ -1264,8 +1276,9 @@ class _InputBox:
                 # :func:`~kiss.agents.sorcar.cli_line_continuation.ends_with_line_continuation`.
                 cont, keep = ends_with_line_continuation(self.buf)
                 if cont:
-                    self.buf = self.buf[:keep] + "\n"
-                    self._hist_idx = None
+                    with self.lock:
+                        self.buf = self.buf[:keep] + "\n"
+                        self._hist_idx = None
                     # A buffer edit — refresh the in-place
                     # completion menu so suggestions track the
                     # newly-added newline the same way the
@@ -1273,10 +1286,11 @@ class _InputBox:
                     self._refresh_typing_menu()
                     changed = True
                 else:
-                    line = self.buf
-                    self.buf = ""
-                    self._hist_idx = None
-                    self._hist_saved = ""
+                    with self.lock:
+                        line = self.buf
+                        self.buf = ""
+                        self._hist_idx = None
+                        self._hist_saved = ""
                     self._reset_completion_state()
                     changed = True
                     on_submit(line)
@@ -1288,8 +1302,9 @@ class _InputBox:
                 # ICRNL disabled in start() a real Enter arrives as
                 # ``\r`` and follows the branch above, so the two
                 # are reliably distinguishable.
-                self.buf += "\n"
-                self._hist_idx = None
+                with self.lock:
+                    self.buf += "\n"
+                    self._hist_idx = None
                 # Like the Shift+Enter newline-insert paths above,
                 # refresh the in-place completion menu so suggestions
                 # track multi-line input ("complete while typing").
@@ -1297,8 +1312,9 @@ class _InputBox:
                 changed = True
             elif ch in ("\x7f", "\x08"):
                 if self.buf:
-                    self.buf = self.buf[:-1]
-                    self._hist_idx = None
+                    with self.lock:
+                        self.buf = self.buf[:-1]
+                        self._hist_idx = None
                     # Backspace is an edit; refresh the in-place menu
                     # so suggestions track the shrinking buffer ("fast
                     # complete" while typing).  When the buffer becomes
@@ -1314,8 +1330,9 @@ class _InputBox:
                     changed = True
             elif ch == "\x15":  # Ctrl+U clears the line
                 if self.buf:
-                    self.buf = ""
-                    self._hist_idx = None
+                    with self.lock:
+                        self.buf = ""
+                        self._hist_idx = None
                     self._reset_completion_state()
                     changed = True
                 elif self._menu_open:
@@ -1378,8 +1395,9 @@ class _InputBox:
                 # the buffer: U+009B is a one-character CSI introducer
                 # and would corrupt the terminal when redrawn.  DEL
                 # (\x7f) is already consumed by the backspace branch.
-                self.buf += ch
-                self._hist_idx = None
+                with self.lock:
+                    self.buf += ch
+                    self._hist_idx = None
                 # "Fast complete" while typing: every printable
                 # keystroke refreshes the in-place menu with current
                 # candidates, mirroring the old prompt_toolkit
@@ -1424,15 +1442,24 @@ def _pump_stdin(
         on_eof: Forwarded to :meth:`_InputBox.feed` (Ctrl+D on empty
             buffer) when given.
         on_stdin_close: Invoked when ``os.read`` returns EOF (stdin
-            closed); when ``None`` the EOF read is ignored.
+            closed).  EOF always removes the fd from the select set
+            (it is permanent) so the pump idles instead of spinning;
+            when ``None`` no callback is invoked.
         on_idle: Invoked once per select timeout while waiting;
             exceptions are logged and swallowed.
     """
     fd = sys.stdin.fileno()
+    # ``read_fds`` is emptied once stdin hits EOF: a closed stdin stays
+    # readable forever with ``os.read`` returning ``b""``, so keeping
+    # the fd in the select set would degrade the pump into a 100 %-CPU
+    # select→read→continue spin until ``is_done`` flips.  With the
+    # empty set, ``select`` simply sleeps its 0.1 s timeout and the
+    # idle branch (on_idle / resize polling) keeps running as before.
+    read_fds = [fd]
     last_size = _term_size()
     while not is_done():
         try:
-            ready, _, _ = select.select([fd], [], [], 0.1)
+            ready, _, _ = select.select(read_fds, [], [], 0.1)
         except (InterruptedError, OSError):
             continue
         except KeyboardInterrupt:
@@ -1460,6 +1487,10 @@ def _pump_stdin(
         except (InterruptedError, OSError):
             continue
         if not data:
+            # EOF on stdin is permanent — stop selecting on the fd so
+            # the pump idles at the select timeout instead of
+            # busy-spinning at 100 % CPU until ``is_done`` flips.
+            read_fds = []
             if on_stdin_close is not None:
                 on_stdin_close()
             continue
@@ -1531,19 +1562,24 @@ class SteeringSession:
         with self.lock:
             sys.stdout.write(f"\n\x1b[33m? {question}\x1b[0m\n")
             sys.stdout.flush()
-        prev_title = self.box.title
         # Dismiss any open in-place completion menu so the next Enter
         # in the question loop submits the user's answer instead of
         # silently picking a stale candidate from the previous edit.
         self.box._reset_completion_state()
-        self.box.title = " answer the question above, then Enter "
+        # The pump thread reads ``title`` under the shared lock inside
+        # ``_draw_locked``; mutate (and later restore) it under the
+        # same lock so a redraw can never render a torn title (w2 F5).
+        with self.lock:
+            prev_title = self.box.title
+            self.box.title = " answer the question above, then Enter "
         self.box.redraw()
         self._question_pending.set()
         try:
             return self._answer_q.get()
         finally:
             self._question_pending.clear()
-            self.box.title = prev_title
+            with self.lock:
+                self.box.title = prev_title
             self.box.redraw()
 
     def _on_submit(self, line: str) -> None:
@@ -1559,8 +1595,10 @@ class SteeringSession:
         with _RunningAgentState._registry_lock:
             self.state.pending_user_messages.append(text)
         self._queued_count += 1
-        self.box.status = f" queued: {self._queued_count} "
         with self.lock:
+            # ``status`` is read by locked redraws; mutate it under
+            # the same lock (w2 F5).
+            self.box.status = f" queued: {self._queued_count} "
             sys.stdout.write(f"\x1b[2m▸ queued: {text}\x1b[0m\n")
             sys.stdout.flush()
 
@@ -1591,11 +1629,47 @@ class SteeringSession:
             except queue.Full:  # pragma: no cover - waiter already fed
                 pass
         if worker.is_alive() and worker.ident is not None:
-            ctypes.pythonapi.PyThreadState_SetAsyncExc(
+            modified = ctypes.pythonapi.PyThreadState_SetAsyncExc(
                 ctypes.c_ulong(worker.ident),
                 ctypes.py_object(KeyboardInterrupt),
             )
+            if modified > 1:  # pragma: no cover - CPython invariant
+                # Per the CPython docs, a return value greater than
+                # one is catastrophic: more than one thread state was
+                # modified and the injection must be revoked
+                # immediately with ``exc=NULL`` to undo the damage.
+                ctypes.pythonapi.PyThreadState_SetAsyncExc(
+                    ctypes.c_ulong(worker.ident), None
+                )
+                logger.warning(
+                    "PyThreadState_SetAsyncExc modified %d thread"
+                    " states for ident %s; injection revoked",
+                    modified,
+                    worker.ident,
+                )
+                return
+            if modified == 0:
+                # Stale ident: the worker exited between the
+                # ``is_alive`` check and the injection — nothing to
+                # interrupt any more.
+                logger.debug(
+                    "worker thread %s already gone; no interrupt sent",
+                    worker.ident,
+                )
+                return
             worker.join(timeout=5.0)
+            if worker.is_alive():
+                # The async exception is only delivered when the
+                # thread next executes Python bytecode; a worker
+                # parked in C code (e.g. a blocking socket read) can
+                # outlive the grace period.  Surface it instead of
+                # silently leaking a still-running task the user was
+                # told had been interrupted.
+                logger.warning(
+                    "worker thread did not stop within 5s after"
+                    " KeyboardInterrupt injection; it may still be"
+                    " running in the background"
+                )
 
     def _worker(self, run_kwargs: dict[str, Any]) -> None:
         try:
@@ -1732,6 +1806,16 @@ class AnchoredRepl:
         self.box.history = list(history or [])
         self._prev_stdout: Any = None
         self._prev_stderr: Any = None
+        # Lines submitted but not yet returned by
+        # :meth:`read_idle_line`.  A single ``os.read`` chunk can
+        # contain several Enter-terminated lines (fast typing,
+        # non-bracketed paste, piped stdin); ``feed`` invokes
+        # ``on_submit`` once per line but the pump's ``is_done`` is
+        # only polled between chunks, so all lines of the chunk land
+        # in one pump run.  The surplus is buffered here and served by
+        # subsequent :meth:`read_idle_line` calls instead of being
+        # silently discarded.
+        self._pending_lines: list[str] = []
 
     def __enter__(self) -> AnchoredRepl:
         """Install stdout/stderr proxies and start the bottom box."""
@@ -1777,6 +1861,11 @@ class AnchoredRepl:
         Raises:
             KeyboardInterrupt: When the user presses Ctrl+C.
         """
+        # Serve a line buffered from an earlier multi-line input chunk
+        # first — those lines were already submitted by the user and
+        # must not be dropped.
+        if self._pending_lines:
+            return self._finish_idle_line(self._pending_lines.pop(0))
         with self.lock:
             self.box.title = IDLE_TITLE
             self.box.status = ""
@@ -1803,10 +1892,42 @@ class AnchoredRepl:
             on_eof=on_eof, on_stdin_close=on_eof,
         )
         if abort_flag:
+            # Lines submitted in the SAME input chunk as the Ctrl+C
+            # were already Enter-terminated by the user and must not
+            # be dropped: buffer them so the next read serves them,
+            # exactly like buffered lines from an EARLIER chunk (which
+            # always survived a Ctrl+C via ``_pending_lines``).  The
+            # old code raised before looking at ``result``, silently
+            # discarding e.g. the "deploy" of a "deploy\n" + Ctrl+C
+            # chunk while the two-chunk variant kept it (w3 F6).
+            self._pending_lines.extend(result)
             raise KeyboardInterrupt
-        if eof_flag:
+        if eof_flag and not result:
             return None
+        # A single input chunk can submit several lines (fast typing,
+        # non-bracketed paste, piped stdin).  Return the first and
+        # buffer the rest for subsequent calls — the old code silently
+        # discarded everything after ``result[0]``.  When a line and
+        # Ctrl+D/EOF arrive in the same chunk the line wins; the EOF
+        # is permanent and resurfaces on the next call via
+        # ``on_stdin_close``.
         line = result[0]
+        self._pending_lines.extend(result[1:])
+        return self._finish_idle_line(line)
+
+    def _finish_idle_line(self, line: str) -> str:
+        """Record *line* in history, echo it above the box, return it.
+
+        Common tail of :meth:`read_idle_line` shared by the fresh-pump
+        path and the buffered-surplus path so both record history and
+        echo identically.
+
+        Args:
+            line: The submitted line to hand back to the REPL.
+
+        Returns:
+            *line*, unchanged.
+        """
         if line.strip() and (
             not self.box.history or self.box.history[-1] != line
         ):
