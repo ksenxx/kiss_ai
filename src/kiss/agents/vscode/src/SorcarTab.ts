@@ -211,6 +211,34 @@ export function consumeTipsFirstRun(): boolean {
 }
 
 /**
+ * Re-arm the Tips window after an extension rebuild/reinstall.
+ *
+ * ``install.sh``, ``scripts/build-extension.sh`` and
+ * ``scripts/release.sh`` all write ``~/.kiss/.extension-updated`` as
+ * their final step (right after restarting the kiss-web daemon), which
+ * makes every VS Code window reload.  When that marker is present at
+ * activation time the extension has just been (re)installed, so the
+ * ``TIPS_SHOWN`` marker is removed here; the next chat webview render
+ * then auto-opens the Tips window exactly once again (via
+ * ``consumeTipsFirstRun()``).  Without this reset the Tips window
+ * would only ever auto-open once per machine — never after a rebuild.
+ *
+ * Called from ``activate()`` before the chat webview is created.
+ * Errors are swallowed: a read-only filesystem must never break
+ * activation.
+ */
+export function resetTipsOnExtensionUpdate(): void {
+  const home = kissHomeDir();
+  try {
+    if (fs.existsSync(path.join(home, '.extension-updated'))) {
+      fs.rmSync(path.join(home, 'TIPS_SHOWN'), {force: true});
+    }
+  } catch {
+    // ignore — never break activation over the tips marker
+  }
+}
+
+/**
  * Build the welcome-screen chip list from two Markdown files.
  *
  * Order matters — user-curated chips come first, bundled chips
