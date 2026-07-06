@@ -117,12 +117,17 @@ def _unmap_enter_aliases() -> None:
     modifyOtherKeys sequence to :data:`Keys.ControlM` so that our tuple
     key-bindings below see the raw escape sequence and can insert a
     newline.  Other ANSI sequences are left untouched.
+
+    ``ANSI_SEQUENCES`` is a process-global table shared by every
+    prompt_toolkit consumer, so this is deliberately NOT executed at
+    import time (w2 F19): merely importing this module (which the
+    daemon code paths do transitively) must not strip behaviour from
+    unrelated ``PromptSession`` instances in the same process.  The
+    call is made from :meth:`PtkLineReader.__init__` instead — the
+    moment sorcar actually owns the prompt.
     """
     for seq in _MODIFY_OTHER_KEYS_ENTER:
         ANSI_SEQUENCES.pop(seq, None)
-
-
-_unmap_enter_aliases()
 
 
 _KEY_BINDINGS = KeyBindings()
@@ -327,7 +332,8 @@ def _newline_ctrl_j(event: KeyPressEvent) -> None:
 # 3 (Alt), 4 (Alt+Shift), 5 (Ctrl), 6 (Ctrl+Shift), 7 (Ctrl+Alt),
 # 8 (Ctrl+Alt+Shift).  prompt_toolkit pre-maps the modifyOtherKeys
 # forms for 2/5/6 to :data:`Keys.ControlM` (plain Enter); the
-# :func:`_unmap_enter_aliases` call above removes them so the parser
+# :func:`_unmap_enter_aliases` call in ``PtkLineReader.__init__``
+# removes them before any key is parsed so the parser
 # falls back to per-character delivery and the tuple bindings below
 # match the raw escape sequence, inserting a real ``\n`` into the
 # buffer.  Every modifier+Enter combination would otherwise be
@@ -644,6 +650,15 @@ class PtkLineReader:
     """
 
     def __init__(self, completer: CliCompleter, history_path: Path) -> None:
+        # Strip prompt_toolkit's pre-mapped modifier+Enter aliases
+        # only now — when sorcar actually builds its own prompt — so
+        # merely importing this module can no longer mutate the
+        # process-global ``ANSI_SEQUENCES`` table out from under other
+        # prompt_toolkit consumers (w2 F19).  The input parser looks
+        # the table up at key-parse time, so unmapping here (before
+        # the first ``read``) is exactly as effective as the old
+        # import-time call.
+        _unmap_enter_aliases()
         ptk_path = history_path.with_name(history_path.name + ".ptk")
         _migrate_readline_history(history_path, ptk_path)
         self.session: PromptSession[str] = PromptSession(

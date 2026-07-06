@@ -236,7 +236,7 @@ class _TaskRunnerMixin:
                 status_start["taskId"] = client_task_id
             self.printer.broadcast(status_start)
             self._run_task_inner(cmd)
-        except Exception as exc:
+        except BaseException as exc:
             # ``_run_task_inner`` handles failures of the agent run
             # itself, but an exception raised BEFORE its big ``try``
             # block (malformed command fields, a git failure re-raised
@@ -245,15 +245,30 @@ class _TaskRunnerMixin:
             # ``finally`` below broadcasts ``running=False``) but no
             # ``result``/``task_error`` event was ever emitted — the
             # task silently vanished from the user's point of view.
+            #
+            # ``BaseException`` (not ``Exception``): a Stop click
+            # during setup makes ``_force_stop_thread`` inject a
+            # ``KeyboardInterrupt`` into this thread while it is still
+            # inside e.g. ``_capture_pre_snapshot`` (whose guard
+            # re-raises it before ``_run_task_inner``'s big ``try``).
+            # ``except Exception`` alone let that unwind silently —
+            # the exact silent-death mode this handler exists to
+            # eliminate.  Swallowing is safe: this is the top of a
+            # dedicated worker thread, and the ``finally`` below
+            # performs the full per-tab cleanup either way.
             logger.warning(
                 "Task setup failed: tab_id=%s error=%s",
                 tab_id,
                 exc,
                 exc_info=True,
             )
+            if isinstance(exc, KeyboardInterrupt):
+                setup_fail_text = "Task stopped by user"
+            else:
+                setup_fail_text = f"Task failed: {type(exc).__name__}: {exc}"
             self.printer.broadcast({
                 "type": "result",
-                "text": f"Task failed: {type(exc).__name__}: {exc}",
+                "text": setup_fail_text,
                 "success": False,
                 "total_tokens": 0,
                 "cost": "$0.0000",
@@ -660,6 +675,28 @@ class _TaskRunnerMixin:
         )
         result_summary = "Agent Failed Abruptly"
         task_end_event: dict[str, Any] | None = None
+        # Per-subtask attribution (W2-F2): each ``<task>`` block in the
+        # prompt gets its OWN ``task_history`` row (allocated by
+        # ``tab.agent.run``), so its result / extra payload must be
+        # persisted per row with per-subtask metric DELTAS — not once,
+        # cumulatively, under the last row.  These track the metric
+        # baselines captured just before each subtask's ``run`` so the
+        # cleanup ``finally`` (which persists the FINAL subtask's row)
+        # and the in-loop ``_persist_subtask_row`` calls (which persist
+        # the earlier rows) attribute tokens/cost/steps and start/end
+        # timestamps to the subtask that actually consumed them.
+        # Initialise the baselines from the agent's LIVE counters (not
+        # 0): ``tab.agent`` is reused across runs on the same tab for
+        # chat continuity, so its counters are cumulative across tasks.
+        # A failure between here and the first loop iteration's own
+        # baseline capture lands in the cleanup ``finally`` with THESE
+        # values — zero baselines would attribute the reused agent's
+        # entire lifetime tokens/cost/steps to a failed task that
+        # consumed nothing.
+        sub_start_ms = start_ms
+        sub_tokens_base = int(getattr(tab.agent, "total_tokens_used", 0) or 0)
+        sub_cost_base = float(getattr(tab.agent, "budget_used", 0.0) or 0.0)
+        sub_steps_base = int(getattr(tab.agent, "total_steps", 0) or 0)
         # ``agent_returned`` captures the YAML string returned by
         # ``tab.agent.run``.  ``WorktreeSorcarAgent.run`` catches
         # ``Exception`` raised by the inner agent and converts it into
@@ -707,12 +744,27 @@ class _TaskRunnerMixin:
                 ),
             )
 
-            for task_prompt in subtasks:
+            for subtask_index, task_prompt in enumerate(subtasks):
                 # Record the raw user prompt so the post-task
                 # auto-commit hooks can incorporate the user's intent
                 # in the generated commit message (see
                 # :meth:`_MergeFlowMixin._handle_autocommit_action`).
                 tab.last_user_prompt = task_prompt
+                # Metric baselines for THIS subtask's attribution
+                # (see the W2-F2 note above).  The first subtask keeps
+                # ``start_ms`` (the true task start, including setup)
+                # as its start anchor.
+                if subtask_index > 0:
+                    sub_start_ms = int(time.time() * 1000)
+                sub_tokens_base = int(
+                    getattr(tab.agent, "total_tokens_used", 0) or 0,
+                )
+                sub_cost_base = float(
+                    getattr(tab.agent, "budget_used", 0.0) or 0.0,
+                )
+                sub_steps_base = int(
+                    getattr(tab.agent, "total_steps", 0) or 0,
+                )
                 subtask_failed = False
                 try:
                     agent_returned = tab.agent.run(
@@ -804,6 +856,29 @@ class _TaskRunnerMixin:
                         "tabId": tab_id,
                     })
                     break
+                if subtask_index < len(subtasks) - 1:
+                    # W2-F2: persist THIS subtask's result / end event /
+                    # extra payload under its OWN ``task_history`` row
+                    # now — the cleanup ``finally`` below runs once and
+                    # only covers the LAST subtask's row.  Without this,
+                    # the first N-1 rows of a multi-``<task>`` prompt
+                    # never received a result or ``extra`` payload
+                    # (no ``startTs``/``endTs``/tokens/cost), so the
+                    # history sidebar showed them as empty /
+                    # still-running and ``build_chat_prompt``'s
+                    # prior-task-result preamble saw nothing for them.
+                    self._persist_subtask_row(
+                        tab,
+                        task_prompt=task_prompt,
+                        result_summary=result_summary,
+                        model=model,
+                        work_dir=work_dir,
+                        use_worktree=use_worktree,
+                        sub_start_ms=sub_start_ms,
+                        sub_tokens_base=sub_tokens_base,
+                        sub_cost_base=sub_cost_base,
+                        sub_steps_base=sub_steps_base,
+                    )
         except BaseException as _outer_exc:
             # Catches every flow that the inner per-subtask handlers
             # do NOT cover:
@@ -986,24 +1061,64 @@ class _TaskRunnerMixin:
                 # already fired (and been missed) before the tab was
                 # opened.
                 end_ms = int(time.time() * 1000)
+                # W2-F2: this save covers the LAST executed subtask's
+                # row (earlier rows of a multi-``<task>`` prompt were
+                # persisted in-loop by ``_persist_subtask_row``), so
+                # attribute only the metrics consumed SINCE that
+                # subtask's baseline — the agent's counters are
+                # cumulative across the whole run.  For single-task
+                # prompts the baselines capture the agent's counters
+                # before its only ``run``, so the arithmetic is a
+                # no-op for freshly created agents.
                 _save_task_extra(
                     build_task_extra_payload(
                         model=model,
                         work_dir=work_dir,
                         version=__version__,
-                        tokens=tab.agent.total_tokens_used,
-                        cost=round(tab.agent.budget_used, 6),
-                        steps=int(getattr(tab.agent, "total_steps", 0) or 0),
+                        tokens=max(
+                            0,
+                            int(
+                                getattr(tab.agent, "total_tokens_used", 0)
+                                or 0,
+                            )
+                            - sub_tokens_base,
+                        ),
+                        cost=round(
+                            max(
+                                0.0,
+                                float(
+                                    getattr(tab.agent, "budget_used", 0.0)
+                                    or 0.0,
+                                )
+                                - sub_cost_base,
+                            ),
+                            6,
+                        ),
+                        steps=max(
+                            0,
+                            int(getattr(tab.agent, "total_steps", 0) or 0)
+                            - sub_steps_base,
+                        ),
                         is_parallel=tab.use_parallel,
                         is_worktree=use_worktree,
                         auto_commit_mode=tab.auto_commit_mode,
-                        start_ms=start_ms,
+                        start_ms=sub_start_ms,
                         end_ms=end_ms,
                     ),
                     task_id=tab.task_history_id,
                 )
                 self.printer.broadcast({"type": "tasks_updated"})
-                self.printer.reset()
+                # W2-F6: the ``self.printer.reset()`` call that used to
+                # live here was a no-op for its intended target and
+                # actively harmful: ``ChatSorcarAgent.run``'s finally
+                # clears this worker thread's ``_thread_local.task_id``
+                # to ``""`` before control returns here, so ``reset()``
+                # resolved the SHARED ``""`` fallback ``_BashState``
+                # used by every task-less thread — bumping ITS
+                # generation and discarding ITS buffered bash output —
+                # while the finished task's own bash state was left
+                # untouched (it is freed by ``cleanup_task`` below,
+                # which also cancels its flush timer).
                 if use_worktree and tab.agent._wt_pending:
                     # "Lost slides" bug fix: a task that ended in
                     # failure / user-Stop leaves partial, unverified
@@ -1142,12 +1257,23 @@ class _TaskRunnerMixin:
                     self.printer.cleanup_task(tab.task_history_id)
                 # Clear the thread-local task id so a subsequent
                 # task on the same worker thread (rare; tests) does
-                # not see a stale id.
+                # not see a stale id.  W2-F7: the previous guard
+                # (``tl.task_id == str(tab.task_history_id)``) was
+                # dead code in the normal server flow —
+                # ``ChatSorcarAgent.run``'s finally has already set
+                # ``tl.task_id = ""`` by this point, so the equality
+                # against a non-empty digit string never held — and
+                # it wrote ``None`` while the chat agent writes
+                # ``""``, two different "unset" sentinels for the
+                # same field.  Clear unconditionally with the same
+                # ``""`` sentinel the chat agent uses: correct for
+                # the normal flow (already ``""``) and for
+                # hypothetical agents that skip the chat agent's
+                # cleanup (any leftover id here is stale by
+                # definition — the task is over).
                 tl = getattr(self.printer, "_thread_local", None)
-                if tl is not None and getattr(tl, "task_id", None) == str(
-                    tab.task_history_id,
-                ):
-                    tl.task_id = None
+                if tl is not None:
+                    tl.task_id = ""
                 tab.task_history_id = None
             except BaseException:  # pragma: no cover — cleanup interrupted
                 with self._state_lock:
@@ -1162,6 +1288,108 @@ class _TaskRunnerMixin:
                         "startTs": start_ms,
                         "endTs": int(time.time() * 1000),
                     })
+
+    def _persist_subtask_row(
+        self,
+        tab: _RunningAgentState,
+        *,
+        task_prompt: str,
+        result_summary: str,
+        model: str,
+        work_dir: str,
+        use_worktree: bool,
+        sub_start_ms: int,
+        sub_tokens_base: int,
+        sub_cost_base: float,
+        sub_steps_base: int,
+    ) -> None:
+        """Persist a completed (non-final) subtask's own history row.
+
+        W2-F2: a multi-``<task>`` prompt runs ``tab.agent.run`` once
+        per subtask and each run allocates its OWN ``task_history``
+        row (with ``_skip_persistence=True`` suppressing the agent's
+        internal result save).  The task-level cleanup ``finally`` in
+        :meth:`_run_task_inner` persists only the LAST subtask's row,
+        so every earlier row must be completed here, right after its
+        subtask succeeds: end event, result summary, and the ``extra``
+        payload with per-subtask metric deltas and timestamps.
+
+        Failures are logged and swallowed — a persistence hiccup for
+        one subtask must not abort the remaining subtasks.
+
+        Args:
+            tab: The owning tab state (``tab.task_history_id`` is the
+                just-finished subtask's row id).
+            task_prompt: The subtask's own prompt text.
+            result_summary: The subtask's result summary.
+            model: Model name used for the task.
+            work_dir: Working directory the task ran from.
+            use_worktree: Whether the task ran inside a worktree.
+            sub_start_ms: The subtask's start timestamp (ms epoch).
+            sub_tokens_base: Agent token counter before the subtask.
+            sub_cost_base: Agent budget counter before the subtask.
+            sub_steps_base: Agent step counter before the subtask.
+        """
+        try:
+            from kiss._version import __version__
+
+            _append_chat_event(
+                {"type": "task_done"},
+                task_id=tab.task_history_id,
+                task=task_prompt,
+            )
+            _save_task_result(
+                result=result_summary,
+                task_id=tab.task_history_id,
+                task=task_prompt,
+            )
+            _save_task_extra(
+                build_task_extra_payload(
+                    model=model,
+                    work_dir=work_dir,
+                    version=__version__,
+                    tokens=max(
+                        0,
+                        int(getattr(tab.agent, "total_tokens_used", 0) or 0)
+                        - sub_tokens_base,
+                    ),
+                    cost=round(
+                        max(
+                            0.0,
+                            float(getattr(tab.agent, "budget_used", 0.0) or 0.0)
+                            - sub_cost_base,
+                        ),
+                        6,
+                    ),
+                    steps=max(
+                        0,
+                        int(getattr(tab.agent, "total_steps", 0) or 0)
+                        - sub_steps_base,
+                    ),
+                    is_parallel=tab.use_parallel,
+                    is_worktree=use_worktree,
+                    auto_commit_mode=tab.auto_commit_mode,
+                    start_ms=sub_start_ms,
+                    end_ms=int(time.time() * 1000),
+                ),
+                task_id=tab.task_history_id,
+            )
+            self.printer.broadcast({"type": "tasks_updated"})
+            # Free the finished subtask's per-task printer state now —
+            # the end-of-task cleanup only frees the LAST subtask's.
+            if tab.task_history_id is not None:
+                self.printer.cleanup_task(tab.task_history_id)
+            logger.info(
+                "Subtask result persisted: task_id=%s result=%r",
+                tab.task_history_id,
+                result_summary[:200],
+            )
+        except Exception:
+            logger.warning(
+                "Failed to persist subtask row: task_id=%s",
+                tab.task_history_id,
+                exc_info=True,
+            )
 
     @staticmethod
     def _cancel_outcome(
@@ -1438,8 +1666,23 @@ class _TaskRunnerMixin:
                     )
             task_thread.join(timeout=5)
 
-    def _await_user_response(self) -> str:
+    def _await_user_response(
+        self, q: queue.Queue[str] | None = None,
+    ) -> str:
         """Block until the user sends a response, checking stop_event periodically.
+
+        Args:
+            q: The answer queue to wait on.  When ``None`` it is
+                resolved via :meth:`_resolve_task_answer_queue`.
+                W2-F9: :meth:`_ask_user_question` passes the queue it
+                already resolved (and drained / registered in the
+                pending-answer registry) so both steps operate on the
+                SAME queue object — re-resolving here opened a TOCTOU
+                window in which the owner tab could be disposed and
+                re-created (closeTab + reopen), making the agent drain
+                and register queue #1 but block on a DIFFERENT queue
+                #2 that no ``userAnswer`` routed to the registry entry
+                would ever fill.
 
         Returns:
             The user's answer string.
@@ -1450,7 +1693,8 @@ class _TaskRunnerMixin:
         stop = getattr(self.printer._thread_local, "stop_event", None)
         if stop is None:
             raise KeyboardInterrupt("No stop event set")
-        q = self._resolve_task_answer_queue()
+        if q is None:
+            q = self._resolve_task_answer_queue()
         # M4 — when the tab has no answer queue (e.g. the tab was closed
         # mid-question) there is no path that can ever return a response.
         # Refuse to busy-loop forever; raise immediately so the agent
@@ -1573,8 +1817,24 @@ class _TaskRunnerMixin:
                 "type": "askUser",
                 "question": question,
             })
-            return self._await_user_response()
+            # W2-F9: pass the queue resolved (and drained/registered)
+            # above so the wait blocks on the SAME queue object — see
+            # :meth:`_await_user_response`.
+            return self._await_user_response(q)
         finally:
-            if q is not None:
+            if q is not None and task_key:
                 with self._state_lock:
-                    self._pending_user_answer_tasks.pop(id(q), None)
+                    # W2-F9: pop only OUR registration.  Two concurrent
+                    # ``ask_user_question`` frames can resolve the SAME
+                    # queue object (multi-viewer routing), in which case
+                    # the later registration overwrote ours — an
+                    # unconditional ``pop(id(q))`` here would then
+                    # delete the OTHER task's live entry, degrading its
+                    # ``askUserDone`` fan-out to the single-tab
+                    # fallback.  Note ``id(q)`` keying is otherwise
+                    # sound: the local ``q`` strong reference keeps the
+                    # queue alive for as long as our entry exists, so
+                    # a recycled object address can never collide with
+                    # a live registration.
+                    if self._pending_user_answer_tasks.get(id(q)) == task_key:
+                        del self._pending_user_answer_tasks[id(q)]

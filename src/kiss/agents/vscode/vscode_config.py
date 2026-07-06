@@ -117,7 +117,9 @@ def sanitize_config(data: dict[str, Any]) -> dict[str, Any]:
     numeric strings — non-finite values (``NaN``/``Infinity`` literals
     survive ``json.load`` and would silently disable every
     ``cost > max_budget`` check) fall back to the default, as does
-    anything non-numeric; strings keep only
+    anything non-numeric — including booleans, which are ``int``
+    subclasses that ``float()`` would otherwise coerce to
+    ``1.0``/``0.0``; strings keep only
     genuine ``str`` values (falling back to the default otherwise).
     Non-DEFAULTS keys (e.g. ``tunnel_token``, ``email``) pass through
     untouched.
@@ -137,7 +139,17 @@ def sanitize_config(data: dict[str, Any]) -> dict[str, Any]:
             if not isinstance(value, bool):
                 result[key] = bool(value)
         elif isinstance(default, int | float):
-            if isinstance(value, bool) or not isinstance(value, int | float):
+            if isinstance(value, bool):
+                # ``bool`` is an ``int`` subclass and ``float(True)``
+                # succeeds — without this rejection a boolean
+                # ``max_budget`` would silently become ``1.0``/``0.0``
+                # instead of falling back to the default.
+                logger.debug(
+                    "Ignoring boolean config value %s=%r", key, value,
+                )
+                result[key] = default
+                continue
+            if not isinstance(value, int | float):
                 try:
                     value = float(value)
                 except (TypeError, ValueError):
@@ -230,11 +242,19 @@ def save_config(data: dict[str, Any]) -> None:
             fd, tmp = tempfile.mkstemp(
                 prefix=".kiss-config-", dir=str(CONFIG_DIR),
             )
+            # W3-D3: unlink the staged temp file when the write or the
+            # replace fails (ENOSPC, EACCES, …) — otherwise every
+            # failure leaks one ``.kiss-config-*`` file into
+            # ``~/.kiss/`` forever.
             try:
-                os.write(fd, serialized.encode("utf-8"))
-            finally:
-                os.close(fd)
-            os.replace(tmp, CONFIG_PATH)
+                try:
+                    os.write(fd, serialized.encode("utf-8"))
+                finally:
+                    os.close(fd)
+                os.replace(tmp, CONFIG_PATH)
+            except BaseException:
+                Path(tmp).unlink(missing_ok=True)
+                raise
         finally:
             fcntl.flock(lock_file, fcntl.LOCK_UN)
 
@@ -371,15 +391,22 @@ def _atomic_write_text_secure(target: Path, content: str) -> None:
     parent = target.parent
     parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=".kiss-rc-", dir=str(parent))
+    # W3-D3: unlink the staged temp file when the write or the replace
+    # fails — otherwise every failure leaks one ``.kiss-rc-*`` file
+    # into the user's HOME directory (visible litter next to the RC).
     try:
-        os.write(fd, content.encode("utf-8"))
-    finally:
-        os.close(fd)
-    try:
-        os.chmod(tmp, 0o600)
-    except OSError:
-        logger.debug("chmod 0600 failed on temp RC", exc_info=True)
-    os.replace(tmp, target)
+        try:
+            os.write(fd, content.encode("utf-8"))
+        finally:
+            os.close(fd)
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            logger.debug("chmod 0600 failed on temp RC", exc_info=True)
+        os.replace(tmp, target)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
     # Defensive: ensure the destination is 0600 even if it pre-existed
     # with looser permissions (replace preserves the source mode but
     # some filesystems don't honour that contract).
@@ -545,12 +572,29 @@ def source_shell_env() -> None:
         # spaces, or other metacharacters cannot inject extra shell
         # commands when the RC is sourced.
         rc_q = shlex.quote(str(rc))
+        # ``env -0`` separates records with NUL so a value that
+        # CONTAINS newlines can neither forge nor truncate a key:
+        # with line-based ``env`` output, an unrelated exported
+        # variable whose value embeds ``"\nOPENAI_API_KEY=forged"``
+        # produced a line the parser below imported, silently
+        # overwriting the real key (and a legitimate multi-line key
+        # was cut at its first line).  The plain-``env`` fallback only
+        # runs on systems whose ``env`` lacks ``-0``.
+        # W3-D2: the env dump is unconditional (``;``, not ``&&``) in
+        # BOTH branches.  ``source`` returns the exit status of the
+        # RC's *last command* — a completely normal RC whose final
+        # line is e.g. a failing ``which foo`` or a false
+        # ``[ -f x ] && …`` test made ``source rc && { env…; }``
+        # silently skip the dump, importing ZERO keys with no error,
+        # while the fish branch already dumped unconditionally.  The
+        # RC's exit status is irrelevant: the dump is the whole point
+        # of the subprocess.
         if shell == "fish":
             # fish does not honour shlex.quote's POSIX rules verbatim,
             # but the safe subset (no single-quote, no $) round-trips.
-            cmd = f"source {rc_q} 2>/dev/null; env"
+            cmd = f"source {rc_q} 2>/dev/null; env -0 2>/dev/null; or env"
         else:
-            cmd = f"source {rc_q} 2>/dev/null && env"
+            cmd = f"source {rc_q} 2>/dev/null; {{ env -0 2>/dev/null || env; }}"
         # Use ``Popen`` as a context manager (rather than the higher
         # level ``subprocess.run``) so the stdout/stderr pipe fds are
         # *always* closed via ``__exit__`` — even on the rare paths
@@ -586,9 +630,15 @@ def source_shell_env() -> None:
                 # the surrounding ``except`` logs the timeout.
                 proc.communicate()
                 raise
-        for line in stdout.splitlines():
-            if "=" in line:
-                k, _, v = line.partition("=")
+        # NUL-separated ``env -0`` records when available (exact —
+        # values may contain newlines); newline-split fallback for an
+        # ``env`` without ``-0`` support.
+        records = (
+            stdout.split("\0") if "\0" in stdout else stdout.splitlines()
+        )
+        for record in records:
+            if "=" in record:
+                k, _, v = record.partition("=")
                 if k in API_KEY_ENV_VARS:
                     os.environ[k] = v
     except (subprocess.TimeoutExpired, OSError):

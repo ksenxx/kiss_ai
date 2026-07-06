@@ -33,6 +33,39 @@ from kiss.agents.sorcar.persistence import is_task_history_id
 from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.core.print_to_console import ConsolePrinter
 
+# Task ids that have announced ``cliTaskStart`` to the daemon but not
+# yet ``cliTaskEnd``.  A module-level STRONG registry (w3 F4): the
+# previous WeakSet-of-printers safety net (w2 F21) kept printers
+# garbage-collectable, but a printer GC'd mid-task (agent abandoned
+# the task, exception path dropped the last reference) took its
+# pending ``cliTaskEnd`` obligation to the grave — the daemon's
+# ``_cli_running_tasks`` entry and the webview's blinking-green
+# "running" indicator then leaked until daemon restart.  The
+# end-obligation therefore lives here, keyed by task id only, so the
+# single atexit handler below can flush it without holding (or
+# needing) any printer reference.  Printers stay GC-able.
+_pending_lock = threading.Lock()
+_pending_task_ids: set[str] = set()
+
+
+def _atexit_end_all_printers() -> None:
+    """Announce ``cliTaskEnd`` for every task id still marked running.
+
+    Process-exit safety net for a CLI that dies (Ctrl+C, crash,
+    uncaught exception) without broadcasting the terminal ``result``
+    event; registered exactly once at module load.  Flushes the
+    module-level pending registry directly so the guarantee holds
+    even for printers already garbage-collected mid-task (w3 F4).
+    """
+    with _pending_lock:
+        pending = list(_pending_task_ids)
+        _pending_task_ids.clear()
+    for task_id in pending:
+        cli_daemon_bridge.send_cli_task_end(task_id)
+
+
+atexit.register(_atexit_end_all_printers)
+
 
 class RecordingConsolePrinter(JsonPrinter):
     """A console printer that ALSO records events into the chat DB.
@@ -60,13 +93,12 @@ class RecordingConsolePrinter(JsonPrinter):
         # may be invoked from the agent loop AND the agent's
         # background worker threads concurrently.
         self._cli_task_lock = threading.Lock()
-        self._cli_running_task_ids: set[str] = set()
-        # Process-exit safety net: if the CLI dies (Ctrl+C, crash,
-        # uncaught exception) without broadcasting a ``result``
-        # event, we still need to tell the daemon the task is no
-        # longer running so subscribed webviews stop showing the
-        # blinking-green-circle indicator.
-        atexit.register(self._cli_atexit_end_all)
+        # Maps each running task id to an Event set once its
+        # ``cliTaskStart`` envelope has actually been SENT to the
+        # daemon.  Concurrent broadcasters of the same fresh task wait
+        # on the event so no task event (or ``cliTaskEnd``) can reach
+        # the daemon before its ``cliTaskStart`` (w2 F22).
+        self._cli_task_started: dict[str, threading.Event] = {}
 
     def broadcast(self, event: dict[str, Any]) -> None:
         """Record + persist the event AND forward it to the daemon.
@@ -148,39 +180,48 @@ class RecordingConsolePrinter(JsonPrinter):
         )
         if task_id is not None and injected.get("taskId") != task_id:
             injected = {**injected, "taskId": task_id}
-        # r3-sorcar-C2: mutate the running-set under the lock but
-        # release the lock BEFORE invoking the daemon bridge.
+        # r3-sorcar-C2: mutate the running-map under the lock but
+        # release the lock BEFORE invoking the daemon bridge.  The
+        # thread that registers a fresh task id sends the
+        # ``cliTaskStart`` envelope and then sets the per-task
+        # ``started`` event; every other broadcaster of the same task
+        # waits on that event first, so the daemon can never observe
+        # a task event (or ``cliTaskEnd``) before the matching
+        # ``cliTaskStart`` (w2 F22).
         if task_id is not None:
             with self._cli_task_lock:
-                is_new = task_id not in self._cli_running_task_ids
-                if is_new:
-                    self._cli_running_task_ids.add(task_id)
+                started = self._cli_task_started.get(task_id)
+                is_new = started is None
+                if started is None:
+                    started = threading.Event()
+                    self._cli_task_started[task_id] = started
             if is_new:
-                cli_daemon_bridge.send_cli_task_start(task_id)
+                # Register the end-obligation in the module-level
+                # strong registry BEFORE announcing the start, so the
+                # atexit safety net can never observe a started task
+                # missing from the registry (w3 F4).
+                with _pending_lock:
+                    _pending_task_ids.add(task_id)
+                try:
+                    cli_daemon_bridge.send_cli_task_start(task_id)
+                finally:
+                    # Unblock waiters even if the (best-effort) bridge
+                    # send failed — ordering, not delivery, is the
+                    # guarantee here.
+                    started.set()
+            else:
+                started.wait(timeout=5.0)
         cli_daemon_bridge.send_event(injected)
         if task_id is not None and injected.get("type") == "result":
             with self._cli_task_lock:
-                still_running = task_id in self._cli_running_task_ids
-                self._cli_running_task_ids.discard(task_id)
-            if still_running:
+                entry = self._cli_task_started.pop(task_id, None)
+            if entry is not None:
+                # Clear the end-obligation before sending the real
+                # ``cliTaskEnd`` so the atexit safety net cannot send
+                # a duplicate for an already-ended task.
+                with _pending_lock:
+                    _pending_task_ids.discard(task_id)
                 cli_daemon_bridge.send_cli_task_end(task_id)
-
-    def _cli_atexit_end_all(self) -> None:
-        """Announce ``cliTaskEnd`` for any task id still marked running.
-
-        Safety net for the case where the CLI process exits before
-        broadcasting a terminal ``result`` event (Ctrl+C, crash,
-        uncaught exception): without this, the daemon would keep the
-        task id in its ``_cli_running_tasks`` set forever, and any
-        webview later resuming the task would mis-display the
-        blinking-green-circle "running" indicator for a task that
-        is no longer actually running anywhere.
-        """
-        with self._cli_task_lock:
-            pending = list(self._cli_running_task_ids)
-            self._cli_running_task_ids.clear()
-        for task_id in pending:
-            cli_daemon_bridge.send_cli_task_end(task_id)
 
     @property
     def tokens_offset(self) -> int:
