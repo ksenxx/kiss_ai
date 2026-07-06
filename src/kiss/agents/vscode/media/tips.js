@@ -69,10 +69,10 @@
     '  border: none;' +
     '  background: transparent;' +
     '  color: #908caa;' +
-    '  font-size: 20px;' +
+    '  font-size: 28px;' +
     '  line-height: 1;' +
     '  cursor: pointer;' +
-    '  padding: 2px 6px;' +
+    '  padding: 4px 8px;' +
     '}' +
     '.tips-close:hover { color: #e0def4; }' +
     '.tips-body {' +
@@ -292,6 +292,9 @@
         }
       });
       this._close.addEventListener('click', () => {
+        // Drop focus before removing the panel so no focus ring (or
+        // stale activeElement) survives the click.
+        self._close.blur();
         self.remove();
       });
     }
