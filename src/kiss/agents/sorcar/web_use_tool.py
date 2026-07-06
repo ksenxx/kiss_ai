@@ -226,6 +226,17 @@ class WebUseTool:
             logger.debug("Exception caught", exc_info=True)
             return False
 
+    def _adopt_page(self, page: Any) -> None:
+        """Make *page* the active page and arm the renderer-crash handler.
+
+        Every path that points ``self._page`` at a page must register
+        ``_on_page_crash`` too: a renderer crash on an unwatched page
+        leaves ``_page`` referencing a crashed-but-not-closed page that
+        ``_is_alive`` still reports live, wedging every later call.
+        """
+        self._page = page
+        self._page.on("crash", self._on_page_crash)
+
     def _on_page_crash(self, _page: Any = None) -> None:
         """Handle a renderer (page) crash without dropping the browser reference.
 
@@ -234,7 +245,16 @@ class WebUseTool:
         keep ``_context`` and ``_browser`` so that
         :meth:`_close_browser_only` can shut down the main process cleanly
         instead of leaking it.
+
+        Crash handlers stay armed on every page ever adopted (they are
+        never removed), so this also fires when a BACKGROUND tab
+        crashes; only a crash of the CURRENT page may clear the active
+        page state — guard by identity, otherwise a background-tab
+        crash would trigger a full teardown + relaunch of a healthy
+        session.
         """
+        if _page is not None and _page is not self._page:
+            return
         self._page = None
         self._elements = []
 
@@ -285,8 +305,7 @@ class WebUseTool:
                 logger.debug("Exception caught", exc_info=True)
                 pages = []
             if pages:
-                self._page = pages[-1]
-                self._page.on("crash", self._on_page_crash)
+                self._adopt_page(pages[-1])
                 self._elements = []
                 return
         # Re-arm the atexit safety net (close() unregisters it).  The
@@ -385,17 +404,19 @@ class WebUseTool:
             self._context = launcher.launch_persistent_context(
                 effective_dir, **kwargs, **self._context_args()
             )
-            self._context.route(_ACCOUNTS_GOOGLE_URL_RE, _abort_route)
-            self._page = (
+            page = (
                 self._context.pages[0] if self._context.pages
                 else self._context.new_page()
             )
         else:
             self._browser = launcher.launch(**kwargs)
             self._context = self._browser.new_context(**self._context_args())
-            self._page = self._context.new_page()
+            page = self._context.new_page()
+        # The accounts.google.com block applies to the tool as a whole,
+        # not just persistent profiles: install it on every context.
+        self._context.route(_ACCOUNTS_GOOGLE_URL_RE, _abort_route)
         self._context.on("close", self._on_browser_lost)
-        self._page.on("crash", self._on_page_crash)
+        self._adopt_page(page)
 
     def _get_ax_tree(self, max_chars: int = 50000) -> str:
         self._ensure_browser()
@@ -424,7 +445,7 @@ class WebUseTool:
             return
         pages = self._context.pages
         if len(pages) > 1 and pages[-1] != self._page:  # pragma: no branch
-            self._page = pages[-1]
+            self._adopt_page(pages[-1])
 
     def _resolve_locator(self, element_id: int) -> Any:
         element_id = int(element_id)
@@ -477,7 +498,7 @@ class WebUseTool:
             if url.startswith("tab:"):
                 idx = int(url[4:])
                 if 0 <= idx < len(pages):
-                    self._page = pages[idx]
+                    self._adopt_page(pages[idx])
                     return self._get_ax_tree()
                 return f"Error: Tab index {idx} out of range (0-{len(pages) - 1})."
 

@@ -86,7 +86,10 @@ class _BashState:
     avoid overwhelming the frontend with tiny events.
     """
 
-    __slots__ = ("buffer", "timer", "generation", "last_flush", "streamed")
+    __slots__ = (
+        "buffer", "timer", "generation", "last_flush", "streamed",
+        "flush_lock",
+    )
 
     def __init__(self) -> None:
         self.buffer: list[str] = []
@@ -94,6 +97,17 @@ class _BashState:
         self.generation: int = 0
         self.last_flush: float = 0.0
         self.streamed: bool = False
+        # W2-F5: per-task lock held across the generation re-check +
+        # ``broadcast`` of a flush, and across ``reset()``'s
+        # generation bump.  It closes the reset-vs-flush TOCTOU
+        # WITHOUT holding the printer-global ``_bash_lock`` during
+        # ``broadcast`` (network I/O in transport subclasses) — which
+        # used to block every concurrent ``print(type="bash_stream")``
+        # from ANY task behind one slow client socket, and would
+        # deadlock any future subclass whose broadcast path touches
+        # ``_bash_lock``.  Lock order: ``flush_lock`` is always
+        # acquired BEFORE ``_bash_lock``, never while holding it.
+        self.flush_lock = threading.Lock()
 
 
 class JsonPrinter(Printer):
@@ -357,15 +371,25 @@ class JsonPrinter(Printer):
             self._persist_agents.pop(key, None)
 
     def reset(self) -> None:
-        """Reset internal streaming state for a new turn."""
+        """Reset internal streaming state for a new turn.
+
+        Holds the per-task ``flush_lock`` across the generation bump so
+        an in-flight flush that already passed its generation re-check
+        (and is broadcasting under ``flush_lock``) finishes before the
+        new turn starts — after ``reset()`` returns, no stale bash text
+        from the previous turn can be broadcast.
+        """
         self._current_block_type = ""
         with self._bash_lock:
-            self._bash_state.generation += 1
-            self._bash_state.buffer.clear()
-            self._bash_state.streamed = False
-            if self._bash_state.timer is not None:
-                self._bash_state.timer.cancel()
-                self._bash_state.timer = None
+            bs = self._bash_state
+        with bs.flush_lock:
+            with self._bash_lock:
+                bs.generation += 1
+                bs.buffer.clear()
+                bs.streamed = False
+                if bs.timer is not None:
+                    bs.timer.cancel()
+                    bs.timer = None
 
     def _timer_flush_for_task(self, task_id: str | None) -> None:
         """Timer callback that sets the thread-local task_id and flushes bash.
@@ -387,13 +411,16 @@ class JsonPrinter(Printer):
 
         Captures the generation counter inside ``_bash_lock`` along with
         the buffered text.  After releasing the lock, re-checks the
-        generation inside a second ``_bash_lock`` acquisition: if
-        ``reset()`` ran in between (incrementing the generation), the
-        captured text is stale and is discarded.  The ``broadcast()``
-        call is made while still holding the second lock to close the
-        TOCTOU window that would otherwise allow ``reset()`` +
-        ``start_recording()`` to slip in between the generation check
-        and the broadcast.
+        generation (inside a second ``_bash_lock`` acquisition) while
+        holding the state's per-task ``flush_lock``: if ``reset()`` ran
+        in between (incrementing the generation), the captured text is
+        stale and is discarded.  W2-F5: the ``broadcast()`` itself
+        happens under ``flush_lock`` but NOT under the printer-global
+        ``_bash_lock`` — ``reset()`` also takes ``flush_lock`` before
+        bumping the generation, so the reset-vs-flush TOCTOU stays
+        closed while a slow transport ``broadcast`` (socket sends in
+        ``WebPrinter``) no longer blocks every other task's
+        ``print(type="bash_stream")`` behind ``_bash_lock``.
         """
         with self._bash_lock:
             bs = self._bash_state
@@ -405,9 +432,10 @@ class JsonPrinter(Printer):
             bs.buffer.clear()
             bs.last_flush = time.monotonic()
         if text:
-            with self._bash_lock:
-                if self._bash_state.generation != gen:
-                    return
+            with bs.flush_lock:
+                with self._bash_lock:
+                    if bs.generation != gen:
+                        return
                 self.broadcast({"type": "system_output", "text": text})
 
     def start_recording(self) -> None:
@@ -590,9 +618,11 @@ class JsonPrinter(Printer):
             return ""
         if type == "bash_stream":
             text = ""
+            gen = 0
             with self._bash_lock:
                 bs = self._bash_state
                 bs.buffer.append(str(content))
+                gen = bs.generation
                 if time.monotonic() - bs.last_flush >= 0.1:
                     if bs.timer is not None:
                         bs.timer.cancel()
@@ -608,7 +638,26 @@ class JsonPrinter(Printer):
                     bs.timer.daemon = True
                     bs.timer.start()
             if text:
-                self.broadcast({"type": "system_output", "text": text})
+                # Mirror ``_flush_bash``'s two-phase protocol: re-check
+                # the generation under ``_bash_lock`` and broadcast
+                # under the per-task ``flush_lock`` (W2-F5), so a
+                # concurrent ``reset()`` (start of a new turn, which
+                # bumps the generation to invalidate stale output)
+                # cannot slip in between the drain above and this
+                # broadcast — otherwise stale bash output from the
+                # previous turn would be broadcast (and recorded/
+                # persisted) into the new turn.  Holding ``flush_lock``
+                # instead of ``_bash_lock`` across the (potentially
+                # slow, socket-bound) broadcast keeps other tasks'
+                # bash streaming unblocked.
+                with bs.flush_lock:
+                    stale = False
+                    with self._bash_lock:
+                        stale = bs.generation != gen
+                    if not stale:
+                        self.broadcast(
+                            {"type": "system_output", "text": text},
+                        )
             with self._bash_lock:
                 self._bash_state.streamed = True
             return ""
@@ -620,42 +669,12 @@ class JsonPrinter(Printer):
             self._format_tool_call(str(content), kwargs.get("tool_input", {}))
             return ""
         if type == "tool_result":
-            self._flush_bash()
-            tool_name = kwargs.get("tool_name", "")
-            # Show every tool's return value (so the user sees the output
-            # of run_parallel, ask_user_question, update_settings, the
-            # WebUseTool methods, etc.) EXCEPT ``finish`` -- the agentic
-            # loop renders that one as a dedicated "result" panel right
-            # after, so a tool_result here would just be a duplicate.
-            show_result = tool_name != "finish"
-            with self._bash_lock:
-                streamed = self._bash_state.streamed
-                self._bash_state.streamed = False
-            result_content = "" if streamed else truncate_result(str(content))
-            if show_result:
-                # Carry ``tool_name`` and (for Read calls) the
-                # originating ``path`` / ``start_line`` over the wire
-                # so a daemon-attached sorcar CLI client can
-                # reconstruct the ``tool_input`` slice its local
-                # ``ConsolePrinter`` needs to syntax-highlight a Read
-                # result body.  Without this the daemon→CLI replay
-                # would always plain-write the file contents, even
-                # though the in-process CLI does highlight them.
-                event: dict[str, Any] = {
-                    "type": "tool_result",
-                    "content": result_content,
-                    "is_error": kwargs.get("is_error", False),
-                    "tool_name": tool_name,
-                }
-                tool_input = kwargs.get("tool_input") or {}
-                if isinstance(tool_input, dict):
-                    path = tool_input.get("file_path") or tool_input.get("path")
-                    if path:
-                        event["path"] = str(path)
-                    start_line = tool_input.get("start_line")
-                    if isinstance(start_line, int) and start_line >= 1:
-                        event["start_line"] = start_line
-                self.broadcast(event)
+            self._emit_tool_result(
+                content,
+                tool_name=kwargs.get("tool_name", ""),
+                is_error=kwargs.get("is_error", False),
+                tool_input=kwargs.get("tool_input"),
+            )
             return ""
         if type == "usage_info":
             raw_tokens = kwargs.get("total_tokens", 0)
@@ -682,6 +701,66 @@ class JsonPrinter(Printer):
             )
             return ""
         return ""
+
+    def _emit_tool_result(
+        self,
+        content: Any,
+        *,
+        tool_name: str,
+        is_error: Any,
+        tool_input: Any,
+    ) -> None:
+        """Broadcast a ``tool_result`` event with the shared treatment.
+
+        Single emission path for both ``print(type="tool_result")`` and
+        the message-object route of :meth:`_handle_message`, so the two
+        cannot drift apart (W3-D4): every ``tool_result`` event carries
+        ``tool_name`` (downstream consumers key panel labels and
+        highlighting on it), ``finish`` results are suppressed, and
+        already-streamed bash output is deduplicated.
+
+        Args:
+            content: The tool's return value.
+            tool_name: Name of the tool that produced the result.
+            is_error: Whether the result represents an error.
+            tool_input: The originating tool input dict when available
+                (used to stamp ``path`` / ``start_line`` for Read
+                results).
+        """
+        self._flush_bash()
+        # Show every tool's return value (so the user sees the output
+        # of run_parallel, ask_user_question, update_settings, the
+        # WebUseTool methods, etc.) EXCEPT ``finish`` -- the agentic
+        # loop renders that one as a dedicated "result" panel right
+        # after, so a tool_result here would just be a duplicate.
+        show_result = tool_name != "finish"
+        with self._bash_lock:
+            streamed = self._bash_state.streamed
+            self._bash_state.streamed = False
+        result_content = "" if streamed else truncate_result(str(content))
+        if show_result:
+            # Carry ``tool_name`` and (for Read calls) the
+            # originating ``path`` / ``start_line`` over the wire
+            # so a daemon-attached sorcar CLI client can
+            # reconstruct the ``tool_input`` slice its local
+            # ``ConsolePrinter`` needs to syntax-highlight a Read
+            # result body.  Without this the daemon→CLI replay
+            # would always plain-write the file contents, even
+            # though the in-process CLI does highlight them.
+            event: dict[str, Any] = {
+                "type": "tool_result",
+                "content": result_content,
+                "is_error": is_error,
+                "tool_name": tool_name,
+            }
+            if isinstance(tool_input, dict):
+                path = tool_input.get("file_path") or tool_input.get("path")
+                if path:
+                    event["path"] = str(path)
+                start_line = tool_input.get("start_line")
+                if isinstance(start_line, int) and start_line >= 1:
+                    event["start_line"] = start_line
+            self.broadcast(event)
 
     def token_callback(self, token: str) -> None:
         """Broadcast a streamed token as a delta event.
@@ -750,12 +829,32 @@ class JsonPrinter(Printer):
                 f"${budget_used:.4f}" if budget_used else "N/A",
             )
         elif hasattr(message, "content"):
-            for block in message.content:
-                if hasattr(block, "is_error") and hasattr(block, "content"):
-                    self.broadcast(
-                        {
-                            "type": "tool_result",
-                            "content": truncate_result(str(block.content)),
-                            "is_error": bool(block.is_error),
-                        }
-                    )
+            # W3-D4: route message-object tool results (third-party /
+            # claude-style agents whose messages carry ``.content``
+            # blocks) through the SAME emission helper as the primary
+            # ``print(type="tool_result")`` path, so the event carries
+            # ``tool_name`` and gets the identical finish-suppression /
+            # streamed-dedup treatment.
+            blocks = [
+                block
+                for block in message.content
+                if hasattr(block, "is_error") and hasattr(block, "content")
+            ]
+            # The kwargs-level ``tool_input`` describes the whole
+            # message; stamping it onto every block of a multi-block
+            # message would mislabel unrelated results (e.g. a Read
+            # ``path``/``start_line`` on a Bash block), so it is only
+            # trusted when it unambiguously maps to a single block.
+            shared_input = (
+                kwargs.get("tool_input") if len(blocks) == 1 else None
+            )
+            for block in blocks:
+                self._emit_tool_result(
+                    block.content,
+                    tool_name=(
+                        getattr(block, "tool_name", "")
+                        or kwargs.get("tool_name", "")
+                    ),
+                    is_error=bool(block.is_error),
+                    tool_input=shared_input,
+                )

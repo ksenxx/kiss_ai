@@ -24,6 +24,7 @@ from kiss._version import __version__
 from kiss.agents.sorcar.git_worktree import strip_worktree_suffix
 from kiss.agents.sorcar.persistence import (
     _add_task,
+    _allocate_chat_id,
     _append_chat_event,
     _load_chat_context,
     _record_frequent_task,
@@ -574,9 +575,13 @@ class ChatSorcarAgent(SorcarAgent):
         # Mint a fresh chat id only if no caller (or prior ``run()``)
         # already established one.  Resetting unconditionally here would
         # discard the ``chat_id`` that ``_run_tasks_parallel`` propagates
-        # from the parent via ``resume_chat_by_id``.
+        # from the parent via ``resume_chat_by_id``.  Mint through the
+        # SAME :func:`_allocate_chat_id` helper that
+        # :meth:`WorktreeSorcarAgent.run` uses so the two paths can
+        # never drift (e.g. if the helper ever gains reservation /
+        # collision-check side effects).
         if self._chat_id == "":
-            self._chat_id = uuid.uuid4().hex
+            self._chat_id = _allocate_chat_id()
         # Self-register in the per-tab state registry so the
         # *registered-with-the-server* invariant holds for CLI /
         # third-party / remote-webapp invocations that never go through

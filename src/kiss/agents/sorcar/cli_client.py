@@ -46,6 +46,7 @@ expansion.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import os
@@ -55,6 +56,7 @@ import sys
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -88,19 +90,29 @@ from kiss.agents.sorcar.cli_steering import (
     AnchoredRepl,
     supports_steering,
 )
-from kiss.agents.sorcar.persistence import _load_chat_events_by_task_id
+from kiss.agents.sorcar.persistence import (
+    _default_kiss_dir,
+    _load_chat_events_by_task_id,
+)
 from kiss.core.print_to_console import ConsolePrinter
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_SOCK_PATH = Path.home() / ".kiss" / "sorcar.sock"
 _PROMPT = f"{CYAN}{PROMPT_MARKER}{RESET}"
 
 
 def _sock_path() -> Path:
-    """Return the daemon UDS socket path the client should connect to."""
+    """Return the daemon UDS socket path the client should connect to.
+
+    Honours ``KISS_SORCAR_SOCK`` first (test override), then derives
+    the default from :func:`persistence._default_kiss_dir` so the CLI
+    connects to the same ``$KISS_HOME/sorcar.sock`` the daemon binds
+    (``web_server._UDS_PATH``) instead of a hard-coded
+    ``~/.kiss/sorcar.sock`` that ignores ``KISS_HOME`` (w3 C-5).
+    Re-evaluated per call, matching the daemon bridge's contract.
+    """
     env = os.environ.get("KISS_SORCAR_SOCK")
-    return Path(env) if env else _DEFAULT_SOCK_PATH
+    return Path(env) if env else _default_kiss_dir() / "sorcar.sock"
 
 
 def _clear_terminal() -> None:
@@ -207,11 +219,27 @@ class _EventDispatcher:
         self.chat_id: str = ""
         self.current_model: str = ""
         self.task_active = threading.Event()
+        # Latched (never cleared by the loop thread) companion to
+        # ``task_active``: set as soon as ANY ``status`` event for the
+        # armed task is observed.  ``task_active`` is level-triggered —
+        # a task that starts AND finishes between two of the
+        # submitter's 50 ms polls flips it set→clear invisibly, which
+        # used to wedge :func:`_start_task` until its full
+        # ``timeout_seconds`` (an hour by default).  Submitters clear
+        # this latch before sending ``run`` and wait on it instead.
+        self.task_started = threading.Event()
         # Per-submission task id used to filter ``status`` events.
         # Stale ``status:false`` events from a prior task (or from a
         # peer subscriber on the same tab) carry a different
         # ``taskId`` and are ignored here — review #3 / #4.
         self.current_task_id: str = ""
+        # Guards the ``current_task_id`` handoff between the REPL
+        # thread (which arms/resets it around each submission) and
+        # the loop thread (which reads it in the ``status`` filter).
+        # CPython's GIL makes the bare str swap atomic today, but the
+        # invariant was fragile and undocumented without an explicit
+        # lock (w2 F17).
+        self.task_id_lock = threading.Lock()
         # Queue of pending askUser questions forwarded from the loop
         # thread to the REPL thread.  Bouncing the prompt off the loop
         # thread is mandatory: ``input()`` on the asyncio loop thread
@@ -271,14 +299,44 @@ class _EventDispatcher:
             # dispatcher is not armed (``current_task_id`` empty) we
             # accept every status — preserves the existing behaviour
             # for non-task-driven status broadcasts.
-            current = self.current_task_id
-            if current and task_id and task_id != current:
+            with self.task_id_lock:
+                current = self.current_task_id
+            if current and task_id != current:
+                # Armed: only status events tagged with the EXACT
+                # armed task id may touch ``task_active`` or the
+                # ``task_started`` latch.  The daemon symmetrically
+                # echoes the CLI-supplied ``taskId`` on both the
+                # ``status:true`` and ``status:false`` broadcasts of a
+                # CLI-run task (task_runner.py ``status_start`` /
+                # ``status_end``), so an exact match is always observed
+                # for our own submission.  UNTAGGED status events do
+                # exist (webview-launched tasks on the same chat
+                # ending, viewer-fanout ``status`` broadcasts) and must
+                # be dropped while armed: a stray untagged
+                # ``running:false`` landing between the submitter's
+                # ``task_started.clear()`` and the daemon's first
+                # echoed status would otherwise set the latch with
+                # ``task_active`` clear — ``_start_task`` would report
+                # the task acknowledged, ``_submit_task`` would skip
+                # its wait loop, and the freshly submitted task would
+                # keep running in the daemon silently orphaned (w3 F1).
                 return
             running = bool(event.get("running", False))
             if running:
                 self.task_active.set()
             else:
                 self.task_active.clear()
+            if current:
+                # Latch that a status for the (possibly already
+                # finished) armed task was observed, AFTER the level
+                # toggle above so a waiter woken by the latch sees the
+                # final level.  This closes the race where a
+                # fast-finishing task's ``status:true`` →
+                # ``status:false`` pair lands entirely inside one of
+                # the submitter's 50 ms poll gaps.  Only exact-match
+                # events reach this point while armed (see above), so
+                # a stray untagged status can never satisfy the latch.
+                self.task_started.set()
             return
         if et == "askUser":
             # Forward the question to the REPL thread; the loop
@@ -687,9 +745,16 @@ def _start_task(
         "autoCommit": auto_commit,
         "taskId": task_id,
     })
+    # Wait on the LATCHED ``task_started`` event, not the
+    # level-triggered ``task_active``: a task that starts and finishes
+    # between two polls flips ``task_active`` set→clear invisibly and
+    # would wedge this loop until ``armed_deadline`` (an hour by
+    # default) even though the task ran to completion.  The latch is
+    # set by the dispatcher on every status event for this task, so a
+    # fast set→clear transition is never missed.
     armed_deadline = time.monotonic() + timeout_seconds
     while (
-        not client.dispatcher.task_active.is_set()
+        not client.dispatcher.task_started.is_set()
         and time.monotonic() < armed_deadline
         and not client._closed.is_set()
     ):
@@ -697,7 +762,7 @@ def _start_task(
     if client._closed.is_set():
         _print_daemon_lost(client.dispatcher.printer)
         return False
-    if not client.dispatcher.task_active.is_set():
+    if not client.dispatcher.task_started.is_set():
         # The daemon never acknowledged the task within the user's
         # timeout budget; surface a clear error instead of pretending
         # the task ran.
@@ -1047,12 +1112,14 @@ def _submit_task(
     # so any inbound status event observed mid-transition matches
     # the new task id (review B1 round 2 ordering fix).
     new_task_id = uuid.uuid4().hex
-    client.dispatcher.current_task_id = new_task_id
+    with client.dispatcher.task_id_lock:
+        client.dispatcher.current_task_id = new_task_id
     # Drain any stale status / askUser queue entries left over from a
     # prior task; this closes issue #46 from the review (a stale
     # ``status:false`` between two tasks would otherwise clear
     # ``task_active`` immediately and silently drop the new task).
     client.dispatcher.task_active.clear()
+    client.dispatcher.task_started.clear()
     _drain_queue(client.dispatcher.ask_user_q)
     start = time.time()
     try:
@@ -1086,8 +1153,22 @@ def _submit_task(
             )
             try:
                 ans = input("> ")
-            except (EOFError, KeyboardInterrupt):
+            except EOFError:
                 ans = "done"
+            except KeyboardInterrupt:
+                # Ctrl+C at the question prompt is a cancellation
+                # gesture, not an answer.  The old code fabricated the
+                # literal reply "done", which the agent treated as a
+                # genuine user answer — inconsistent with the anchored
+                # path and with the surrounding loop's Ctrl+C
+                # semantics.  Forward ``stop`` to the daemon instead
+                # and keep waiting for the task to wind down.
+                client.send({"type": "stop"})
+                client.dispatcher.printer.print(
+                    "[yellow]⏹  Sent stop to daemon.[/yellow]",
+                    type="text",
+                )
+                continue
             client.send({"type": "userAnswer", "answer": ans})
     finally:
         # Always reset the per-task dispatcher state, regardless of
@@ -1095,8 +1176,10 @@ def _submit_task(
         # exceptions) — review B1 round 2.  Without this, a stale
         # ``current_task_id`` survives the call and the next task's
         # status events get filtered out under the OLD id.
-        client.dispatcher.current_task_id = ""
+        with client.dispatcher.task_id_lock:
+            client.dispatcher.current_task_id = ""
         client.dispatcher.task_active.clear()
+        client.dispatcher.task_started.clear()
         _print_elapsed(client, start)
 
 
@@ -1135,8 +1218,10 @@ def _submit_task_anchored(
             daemon never pins the REPL forever.
     """
     new_task_id = uuid.uuid4().hex
-    client.dispatcher.current_task_id = new_task_id
+    with client.dispatcher.task_id_lock:
+        client.dispatcher.current_task_id = new_task_id
     client.dispatcher.task_active.clear()
+    client.dispatcher.task_started.clear()
     _drain_queue(client.dispatcher.ask_user_q)
     queued = [0]
     pending_question = [False]
@@ -1212,9 +1297,77 @@ def _submit_task_anchored(
         if client._closed.is_set():
             _print_daemon_lost(client.dispatcher.printer)
     finally:
-        client.dispatcher.current_task_id = ""
+        with client.dispatcher.task_id_lock:
+            client.dispatcher.current_task_id = ""
         client.dispatcher.task_active.clear()
+        client.dispatcher.task_started.clear()
         _print_elapsed(client, start)
+
+
+def _run_repl_loop(
+    client: CliClient,
+    read_line: Callable[[], str | None],
+    submit: Callable[[str], None],
+) -> None:
+    """Drive the shared interactive client loop until the user exits.
+
+    Both interactive client modes — the anchored bottom-box REPL and
+    the inline readline / prompt_toolkit fallback — share the exact
+    same loop semantics: double-Ctrl+C arming (the first Ctrl+C stops
+    a running task or warns, the second exits), EOF / Ctrl+D exits,
+    blank lines are skipped, exit words break, ``/`` lines dispatch
+    to :func:`_handle_client_slash` resiliently, and any other line
+    is submitted as a task with Ctrl+C during the wait forwarding a
+    ``stop`` to the daemon.  The loop used to be copy-pasted in both
+    modes, so a behavioural fix applied to one could silently miss
+    the other (w2 F10/F20) — it now lives here once.
+
+    Args:
+        client: The connected :class:`CliClient`.
+        read_line: Blocking reader returning the next input line, or
+            ``None`` on EOF; may raise :class:`KeyboardInterrupt`.
+        submit: Runs one task for the given line; may raise
+            :class:`KeyboardInterrupt` when the user aborts the wait.
+    """
+    interrupt_armed = False
+    while True:
+        try:
+            line = read_line()
+        except KeyboardInterrupt:
+            if interrupt_armed:
+                print("\nGoodbye.")
+                break
+            interrupt_armed = True
+            # If a task is running, stop it; otherwise just arm the
+            # second Ctrl-C to exit (matches REPL behaviour).
+            if client.dispatcher.task_active.is_set():
+                client.send({"type": "stop"})
+                print("\n⏹  Sent stop to daemon.")
+            else:
+                print("\n(Press Ctrl+C again or type /exit to quit)")
+            continue
+        if line is None:  # EOF / Ctrl+D
+            print("\nGoodbye.")
+            break
+        interrupt_armed = False
+        text = line.strip()
+        if not text:
+            continue
+        if text in _EXIT_WORDS:
+            break
+        if text.startswith("/"):
+            try:
+                if _handle_client_slash(client, line):
+                    break
+            except Exception as exc:  # noqa: BLE001 - resilient REPL
+                logger.debug("slash command failed", exc_info=True)
+                print(f"\n✗ Command failed: {exc}\n")
+            continue
+        try:
+            submit(line)
+        except KeyboardInterrupt:
+            client.send({"type": "stop"})
+            print("\n⏹  Task interrupted.\n")
 
 
 def _run_anchored_client(
@@ -1265,48 +1418,18 @@ def _run_anchored_client(
 
     with AnchoredRepl(completer_fn=completer_fn, history=history) as repl:
         _print_welcome(work_dir, model_name or "(daemon)")
-        interrupt_armed = False
-        while True:
-            try:
-                line = repl.read_idle_line()
-            except KeyboardInterrupt:
-                if interrupt_armed:
-                    print("\nGoodbye.")
-                    break
-                interrupt_armed = True
-                if client.dispatcher.task_active.is_set():
-                    client.send({"type": "stop"})
-                    print("\n⏹  Sent stop to daemon.")
-                else:
-                    print("\n(Press Ctrl+C again or type /exit to quit)")
-                continue
-            if line is None:  # EOF / Ctrl+D
-                print("\nGoodbye.")
-                break
-            interrupt_armed = False
-            text = line.strip()
-            if not text:
-                continue
-            if text in _EXIT_WORDS:
-                break
-            if text.startswith("/"):
-                try:
-                    if _handle_client_slash(client, line):
-                        break
-                except Exception as exc:  # noqa: BLE001 - resilient REPL
-                    logger.debug("slash command failed", exc_info=True)
-                    print(f"\n✗ Command failed: {exc}\n")
-                continue
-            try:
-                _submit_task_anchored(
-                    client, line, repl,
-                    use_worktree=use_worktree,
-                    use_parallel=use_parallel,
-                    auto_commit=auto_commit,
-                )
-            except KeyboardInterrupt:
-                client.send({"type": "stop"})
-                print("\n⏹  Task interrupted.\n")
+        _run_repl_loop(
+            client,
+            repl.read_idle_line,
+            functools.partial(
+                _submit_task_anchored,
+                client,
+                repl=repl,
+                use_worktree=use_worktree,
+                use_parallel=use_parallel,
+                auto_commit=auto_commit,
+            ),
+        )
         _save_history_lines(history_path, repl.box.history)
     return 0
 
@@ -1427,51 +1550,18 @@ def run_client(
 
     _print_welcome(work_dir, model_name or "(daemon)")
 
-    interrupt_armed = False
     try:
-        while True:
-            try:
-                line = _read_line(_PROMPT, reader)
-            except KeyboardInterrupt:
-                if interrupt_armed:
-                    print("\nGoodbye.")
-                    break
-                interrupt_armed = True
-                # If a task is running, stop it; otherwise just arm
-                # the second Ctrl-C to exit (matches REPL behaviour).
-                if client.dispatcher.task_active.is_set():
-                    client.send({"type": "stop"})
-                    print("\n⏹  Sent stop to daemon.")
-                else:
-                    print("\n(Press Ctrl+C again or type /exit to quit)")
-                continue
-            if line is None:  # EOF / Ctrl+D
-                print("\nGoodbye.")
-                break
-            interrupt_armed = False
-            text = line.strip()
-            if not text:
-                continue
-            if text in _EXIT_WORDS:
-                break
-            if text.startswith("/"):
-                try:
-                    if _handle_client_slash(client, line):
-                        break
-                except Exception as exc:
-                    logger.debug("slash command failed", exc_info=True)
-                    print(f"\n✗ Command failed: {exc}\n")
-                continue
-            try:
-                _submit_task(
-                    client, line,
-                    use_worktree=use_worktree,
-                    use_parallel=use_parallel,
-                    auto_commit=auto_commit,
-                )
-            except KeyboardInterrupt:
-                client.send({"type": "stop"})
-                print("\n⏹  Task interrupted.\n")
+        _run_repl_loop(
+            client,
+            functools.partial(_read_line, _PROMPT, reader),
+            functools.partial(
+                _submit_task,
+                client,
+                use_worktree=use_worktree,
+                use_parallel=use_parallel,
+                auto_commit=auto_commit,
+            ),
+        )
     finally:
         if using_readline:
             _save_history(history_path)

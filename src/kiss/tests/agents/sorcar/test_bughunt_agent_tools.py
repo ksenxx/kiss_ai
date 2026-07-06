@@ -248,9 +248,12 @@ class TestRunTasksParallelSubagentDone:
             e for e in printer.captured if e.get("type") == "subagentDone"
         ]
         tab_ids = {e.get("tab_id") for e in done_events}
-        assert "parent-bughunt__sub_0" in tab_ids, (
+        # fixer3-F2: the base executor broadcasts the same
+        # ``task-{parent}__sub_{idx}`` tab-id format that the chat
+        # executor registers, so chat-style deterministic tabs match.
+        assert "task-parent-bughunt__sub_0" in tab_ids, (
             f"missing subagentDone for sub 0; captured={printer.captured}"
         )
-        assert "parent-bughunt__sub_1" in tab_ids, (
+        assert "task-parent-bughunt__sub_1" in tab_ids, (
             f"missing subagentDone for sub 1; captured={printer.captured}"
         )
