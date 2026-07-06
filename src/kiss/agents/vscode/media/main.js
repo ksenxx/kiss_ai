@@ -980,7 +980,7 @@
       settingsBtn.className = 'chat-tab chat-tab-settings';
       settingsBtn.title = 'Settings';
       settingsBtn.innerHTML =
-        '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
+        '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
       settingsBtn.addEventListener('click', () => {
         openSettingsPanel();
       });
@@ -1474,6 +1474,36 @@
   document.addEventListener('click', () => {
     closeTabContextMenu();
   });
+
+  // Never leave a focus ring on a clicked toolbar/close control: blur
+  // the control right away.  Uses the capture phase so handlers that
+  // call stopPropagation() (e.g. the tab-header X) cannot bypass it,
+  // and so a handler that intentionally moves focus elsewhere (e.g.
+  // the input clear X refocusing the textarea) still wins — blur()
+  // here is a no-op once focus has moved on.
+  const BLUR_AFTER_CLICK_SELECTOR = [
+    '#menu-btn',
+    '#model-btn',
+    '#upload-btn',
+    '#tricks-btn',
+    '#voice-btn',
+    '#send-btn',
+    '#stop-btn',
+    '.chat-tab-add',
+    '.chat-tab-settings',
+    '.chat-tab-close',
+    '#input-clear-btn',
+    '.search-clear-btn',
+  ].join(', ');
+  document.addEventListener(
+    'click',
+    e => {
+      if (!e.target || typeof e.target.closest !== 'function') return;
+      const btn = e.target.closest(BLUR_AFTER_CLICK_SELECTOR);
+      if (btn && typeof btn.blur === 'function') btn.blur();
+    },
+    true,
+  );
   document.addEventListener('contextmenu', e => {
     if (
       !e.target.closest('#tab-context-menu') &&
