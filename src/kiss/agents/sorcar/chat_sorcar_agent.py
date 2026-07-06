@@ -24,8 +24,10 @@ from kiss._version import __version__
 from kiss.agents.sorcar.git_worktree import strip_worktree_suffix
 from kiss.agents.sorcar.persistence import (
     _add_task,
+    _allocate_chat_id,
     _append_chat_event,
     _load_chat_context,
+    _load_task_chain_context,
     _record_frequent_task,
     _save_task_extra,
     _save_task_result,
@@ -96,6 +98,12 @@ class ChatSorcarAgent(SorcarAgent):
     def __init__(self, name: str) -> None:
         super().__init__(name)
         self._chat_id: str = ""
+        # When non-empty, the NEXT ``build_chat_prompt`` call builds
+        # its "previous tasks" context by traversing this task's
+        # ``parent_task_id`` chain instead of loading the whole chat
+        # (see :meth:`resume_from_task_id`).  One-shot: consumed (and
+        # cleared) by the first ``build_chat_prompt`` after it is set.
+        self._context_task_id: str = ""
         self._subagent_info: dict[str, object] | None = None
         self._last_task_id: str | None = None
         self._last_user_prompt: str = ""
@@ -122,6 +130,25 @@ class ChatSorcarAgent(SorcarAgent):
         """
         if chat_id:
             self._chat_id = chat_id
+
+    def resume_from_task_id(self, task_id: str) -> None:
+        """Seed the next prompt's context from a task's parent chain.
+
+        Called when the tab that owns this agent was opened by a
+        specific task id (history click / ``resumeSession`` with
+        ``taskId``) and no task has been run in the tab since: the
+        first :meth:`build_chat_prompt` after this call traverses the
+        ``parent_task_id`` links starting at *task_id* (via
+        :func:`_load_task_chain_context`) instead of loading the whole
+        chat.  The seed is one-shot — subsequent prompts fall back to
+        the normal chat-context path.
+
+        Args:
+            task_id: The ``task_history.id`` the tab was opened with.
+                Empty strings are ignored.
+        """
+        if task_id:
+            self._context_task_id = task_id
 
     def _register_running_state(self) -> bool:
         """Publish ``self`` in :attr:`_RunningAgentState.running_agent_states` for this chat.
@@ -236,7 +263,16 @@ class ChatSorcarAgent(SorcarAgent):
             The augmented prompt with chat history prepended, or the
             original prompt if no prior context exists.
         """
-        chat_context = _load_chat_context(self._chat_id)
+        chat_context: list[dict[str, object]] = []
+        if self._context_task_id:
+            # Tab opened by a task id and no task run since: build the
+            # context from the opened task's parent chain (oldest
+            # ancestor first).  One-shot — clear the seed so follow-up
+            # tasks in the same chat use the normal chat context.
+            chat_context = _load_task_chain_context(self._context_task_id)
+            self._context_task_id = ""
+        if not chat_context:
+            chat_context = _load_chat_context(self._chat_id)
         if not chat_context:
             return "# Task\n" + prompt
         parts = ["## Previous tasks and results from the chat session for reference\n"]
@@ -402,6 +438,29 @@ class ChatSorcarAgent(SorcarAgent):
                     parent_tab_id = tid
                     break
         printer = self.printer
+        # NESTED run_parallel: when this agent is itself a sub-agent
+        # (``_subagent_info`` set), the registry key found above is the
+        # BACKEND synthetic id ``task-{grandparent_task_id}__sub_{idx}``
+        # — but the frontend tab that displays this sub-agent was
+        # created by ``createBackgroundSubagentTab`` with a RANDOM
+        # frontend id.  Stamping the children's ``new_tab`` broadcasts
+        # with the synthetic key makes every webview's
+        # ``case 'new_tab':`` guard (``tabs.find(t => t.id ===
+        # ev.parent_tab_id)``) drop them, so nested sub-agents never
+        # open any tabs.  Resolve the real frontend viewer tab id from
+        # the printer's subscriber map instead: the frontend posted
+        # ``resumeSession`` (→ ``subscribe_tab``) for this sub-agent's
+        # own task id when it materialised our tab.  Fall back to the
+        # registry key for the ``_open_persisted_subagent_tabs`` path,
+        # where the frontend tab id IS the deterministic ``sub_tab_id``
+        # and no subscriber may be recorded yet.
+        if self._subagent_info is not None and printer is not None:
+            fanout = getattr(printer, "_fanout_targets", None)
+            own_task_id = self._last_task_id
+            if fanout is not None and own_task_id:
+                viewer_ids = fanout(own_task_id)
+                if viewer_ids:
+                    parent_tab_id = sorted(viewer_ids)[0]
         thread_local = getattr(printer, "_thread_local", None) if printer else None
         parent_stop_event = (
             getattr(thread_local, "stop_event", None) if thread_local else None
@@ -551,9 +610,13 @@ class ChatSorcarAgent(SorcarAgent):
         # Mint a fresh chat id only if no caller (or prior ``run()``)
         # already established one.  Resetting unconditionally here would
         # discard the ``chat_id`` that ``_run_tasks_parallel`` propagates
-        # from the parent via ``resume_chat_by_id``.
+        # from the parent via ``resume_chat_by_id``.  Mint through the
+        # SAME :func:`_allocate_chat_id` helper that
+        # :meth:`WorktreeSorcarAgent.run` uses so the two paths can
+        # never drift (e.g. if the helper ever gains reservation /
+        # collision-check side effects).
         if self._chat_id == "":
-            self._chat_id = uuid.uuid4().hex
+            self._chat_id = _allocate_chat_id()
         # Self-register in the per-tab state registry so the
         # *registered-with-the-server* invariant holds for CLI /
         # third-party / remote-webapp invocations that never go through
@@ -834,7 +897,18 @@ class ChatSorcarAgent(SorcarAgent):
             if not skip_persistence:
                 _save_task_result(task_id=task_id, result=result_summary)
                 extra_payload = self._build_extra_payload(
-                    model=self.model_name,
+                    # The LAUNCH model, not ``self.model_name``: the
+                    # ``set_model`` tool mutates the latter mid-task,
+                    # and a task's recorded model (surfaced in the chat
+                    # webview's History sidebar and other global
+                    # consumers) must always be the model the task was
+                    # started with — an agent switching its own model
+                    # must never change any globally-visible model
+                    # preference (INVARIANTS.md #217).
+                    model=(
+                        getattr(self, "_launch_model_name", "")
+                        or self.model_name
+                    ),
                     work_dir=self.work_dir,
                     is_parallel=self._is_parallel,
                     # Reuse the value resolved at task start so the

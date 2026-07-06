@@ -32,6 +32,7 @@ import requests
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
+    drain_queue_messages,
     stop_http_server,
     wait_for_matching_message,
 )
@@ -98,10 +99,18 @@ class WhatsAppChannelBackend(ToolMethodBackend):
     them; ``poll_messages()`` drains this buffer.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, graph_api_base: str = _GRAPH_API_BASE) -> None:
+        """Initialize the backend.
+
+        Args:
+            graph_api_base: Base URL of the Meta Graph API. Overridable for
+                testing against a local server.
+        """
+        self._graph_api_base = graph_api_base
         self._access_token: str = ""
         self._phone_number_id: str = ""
         self._waba_id: str = ""
+        self._verify_token: str = ""
         self._connection_info: str = ""
         self._message_queue: queue.Queue[dict[str, Any]] = queue.Queue()
         self._webhook_server: ThreadedHTTPServer | None = None
@@ -120,8 +129,12 @@ class WhatsAppChannelBackend(ToolMethodBackend):
         self._access_token = cfg["access_token"]
         self._phone_number_id = cfg["phone_number_id"]
         self._waba_id = cfg.get("waba_id", "")
+        self._verify_token = cfg.get("verify_token", "")
 
-        url = f"{_GRAPH_API_BASE}/{self._phone_number_id}?fields=verified_name,display_phone_number"
+        url = (
+            f"{self._graph_api_base}/{self._phone_number_id}"
+            "?fields=verified_name,display_phone_number"
+        )
         result = _api_request("GET", url, self._access_token)
         if "error" in result:  # pragma: no branch
             self._connection_info = f"WhatsApp auth failed: {result['error']}"
@@ -152,7 +165,16 @@ class WhatsAppChannelBackend(ToolMethodBackend):
 
                 parsed = urlparse(self.path)
                 params = parse_qs(parsed.query)
+                mode = params.get("hub.mode", [""])[0]
+                token = params.get("hub.verify_token", [""])[0]
                 challenge = params.get("hub.challenge", [""])[0]
+                if backend._verify_token and not (
+                    mode == "subscribe" and token == backend._verify_token
+                ):
+                    self.send_response(403)
+                    self.end_headers()
+                    self.wfile.write(b"Forbidden")
+                    return
                 self.send_response(200)
                 self.end_headers()
                 self.wfile.write(challenge.encode())
@@ -197,17 +219,23 @@ class WhatsAppChannelBackend(ToolMethodBackend):
         """Drain the webhook message queue and return new messages.
 
         Args:
-            channel_id: Recipient phone number (unused — all messages returned).
-            oldest: Unused for push-mode third_party_agents.
+            channel_id: Sender phone number to filter on. When non-empty,
+                messages from other senders are dropped; when empty, all
+                messages are returned.
+            oldest: Unused for push-mode channels.
             limit: Maximum messages to return.
 
         Returns:
             Tuple of (messages, oldest). Each message dict has at minimum:
             ts, user (from), text.
         """
+        raw_messages = drain_queue_messages(
+            self._message_queue,
+            limit=limit,
+            keep=lambda raw: not channel_id or raw.get("from", "") == channel_id,
+        )
         messages: list[dict[str, Any]] = []
-        while not self._message_queue.empty() and len(messages) < limit:  # pragma: no branch
-            raw = self._message_queue.get_nowait()
+        for raw in raw_messages:
             msg_type = raw.get("type", "")
             if msg_type == "text":  # pragma: no branch
                 text = raw.get("text", {}).get("body", "")
@@ -230,9 +258,12 @@ class WhatsAppChannelBackend(ToolMethodBackend):
             channel_id: Recipient phone number in E.164 format.
             text: Message text.
             thread_ts: Unused for WhatsApp.
+
+        Raises:
+            RuntimeError: If the Graph API returns an error response.
         """
-        url = f"{_GRAPH_API_BASE}/{self._phone_number_id}/messages"
-        _api_request(
+        url = f"{self._graph_api_base}/{self._phone_number_id}/messages"
+        result = _api_request(
             "POST",
             url,
             self._access_token,
@@ -243,6 +274,8 @@ class WhatsAppChannelBackend(ToolMethodBackend):
                 "text": {"body": text},
             },
         )
+        if "error" in result:
+            raise RuntimeError(f"WhatsApp send failed: {result['error']}")
 
     def wait_for_reply(
         self,
@@ -260,20 +293,17 @@ class WhatsAppChannelBackend(ToolMethodBackend):
 
         Returns:
             The text of the user's reply.
+
+        Note:
+            Messages from other senders drained while waiting are discarded.
         """
 
         def poll() -> list[dict[str, Any]]:
-            matches: list[dict[str, Any]] = []
-            others: list[dict[str, Any]] = []
-            while not self._message_queue.empty():  # pragma: no branch
-                raw = self._message_queue.get_nowait()
-                if raw.get("from") == user_id:  # pragma: no branch
-                    matches.append(raw)
-                else:
-                    others.append(raw)
-            for item in others:  # pragma: no branch
-                self._message_queue.put(item)
-            return matches
+            return drain_queue_messages(
+                self._message_queue,
+                limit=50,
+                keep=lambda raw: raw.get("from") == user_id,
+            )
 
         return wait_for_matching_message(
             poll=poll,
@@ -869,6 +899,7 @@ class WhatsAppAgent(BaseChannelAgent, SorcarAgent):
             access_token: str,
             phone_number_id: str,
             waba_id: str = "",
+            verify_token: str = "",
         ) -> str:
             """Store and validate WhatsApp Business API credentials.
 
@@ -879,6 +910,9 @@ class WhatsAppAgent(BaseChannelAgent, SorcarAgent):
                 access_token: Meta Graph API access token.
                 phone_number_id: WhatsApp Business phone number ID.
                 waba_id: WhatsApp Business Account ID (optional).
+                verify_token: Shared secret for Meta webhook GET verification
+                    (optional). When set, the webhook only answers subscribe
+                    challenges carrying this token.
 
             Returns:
                 Validation result with phone number info, or error.
@@ -901,11 +935,13 @@ class WhatsAppAgent(BaseChannelAgent, SorcarAgent):
                     "access_token": access_token.strip(),
                     "phone_number_id": phone_number_id.strip(),
                     "waba_id": waba_id.strip(),
+                    "verify_token": verify_token.strip(),
                 }
             )  # pragma: no cover
             agent._backend._access_token = access_token  # pragma: no cover
             agent._backend._phone_number_id = phone_number_id  # pragma: no cover
             agent._backend._waba_id = waba_id.strip()  # pragma: no cover
+            agent._backend._verify_token = verify_token.strip()  # pragma: no cover
             return json.dumps(
                 {  # pragma: no cover
                     "ok": True,
@@ -925,6 +961,7 @@ class WhatsAppAgent(BaseChannelAgent, SorcarAgent):
             agent._backend._access_token = ""
             agent._backend._phone_number_id = ""
             agent._backend._waba_id = ""
+            agent._backend._verify_token = ""
             return "WhatsApp authentication cleared."
 
         return [check_whatsapp_auth, authenticate_whatsapp, clear_whatsapp_auth]

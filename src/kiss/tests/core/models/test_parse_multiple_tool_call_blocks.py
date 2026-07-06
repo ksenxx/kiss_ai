@@ -39,6 +39,19 @@ class TestParseMultipleToolCallBlocks(unittest.TestCase):
         self.assertEqual(calls[1]["name"], "go_to_url")
         self.assertEqual(calls[1]["arguments"], {"url": "https://x.com"})
 
+    def test_stray_open_brace_in_prose_before_valid_block(self) -> None:
+        """A stray unbalanced ``{`` in prose must not abort the whole scan."""
+        content = (
+            "Note: use { to start a block in this language.\n"
+            '{"tool_calls": [{"name": "Bash", "arguments": {"command": "ls"}}]}'
+        )
+
+        calls = _parse_text_based_tool_calls(content)
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["name"], "Bash")
+        self.assertEqual(calls[0]["arguments"], {"command": "ls"})
+
     def test_two_calls_in_one_block(self) -> None:
         """A single ``tool_calls`` array with two entries → both extracted."""
         content = (

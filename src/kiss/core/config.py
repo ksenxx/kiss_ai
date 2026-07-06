@@ -37,8 +37,9 @@ def set_artifact_base_dir(base_dir: str | Path | None) -> str:
         The resolved artifact job directory.
     """
     global _artifact_dir
-    _artifact_dir = _generate_artifact_dir(base_dir)
-    return _artifact_dir
+    with _artifact_dir_lock:
+        _artifact_dir = _generate_artifact_dir(base_dir)
+        return _artifact_dir
 
 
 def _generate_artifact_dir(base_dir: str | Path | None = None) -> str:

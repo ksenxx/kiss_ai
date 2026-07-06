@@ -101,9 +101,9 @@ def _load_service(sa_path: str = "") -> Any:
 def _run_oauth_flow() -> Any:
     """Run OAuth2 flow for Google Chat.
 
-    In headless/Docker environments, falls back to ``run_console()`` which
-    prints a URL and reads the auth code from stdin instead of opening a
-    browser window.
+    In headless/Docker environments, runs a local server without opening a
+    browser window; the user must visit the printed URL manually to complete
+    the flow.
 
     Returns:
         Google Chat API service resource, or None on failure.
@@ -119,7 +119,7 @@ def _run_oauth_flow() -> Any:
         return None
     flow = InstalledAppFlow.from_client_secrets_file(str(creds_path), _SCOPES)
     if is_headless_environment():  # pragma: no branch
-        creds = cast(Credentials, flow.run_console())
+        creds = cast(Credentials, flow.run_local_server(port=0, open_browser=False))
     else:
         creds = cast(Credentials, flow.run_local_server(port=0))
     token_file = _token_path()
@@ -179,7 +179,7 @@ class GoogleChatChannelBackend(ToolMethodBackend):
                 "pageSize": limit,
                 "orderBy": "createTime asc",
             }
-            if oldest:  # pragma: no branch
+            if oldest and oldest != "0":
                 kwargs["filter"] = f'createTime > "{oldest}"'
             resp = self._service.spaces().messages().list(**kwargs).execute()
             raw_msgs = resp.get("messages", [])
@@ -195,6 +195,7 @@ class GoogleChatChannelBackend(ToolMethodBackend):
                         "text": msg.get("text", ""),
                         "name": msg.get("name", ""),
                         "thread": msg.get("thread", {}).get("name", ""),
+                        "thread_ts": msg.get("thread", {}).get("name", ""),
                     }
                 )
             return messages, new_oldest

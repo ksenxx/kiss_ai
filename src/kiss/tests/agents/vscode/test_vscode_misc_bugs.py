@@ -117,7 +117,6 @@ class TestWriteBaseCopyPreservesCrlf(unittest.TestCase):
 
         base_path = _write_base_copy(
             str(self._tmp), merge_dir, ub_dir, "crlf.txt", "HEAD",
-            binary=False,
         )
 
         produced = base_path.read_bytes()

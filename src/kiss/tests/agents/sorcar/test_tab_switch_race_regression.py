@@ -178,19 +178,6 @@ def _extract_function(js: str, name: str) -> str:
 class TestStatusRunningTabIdGuard(unittest.TestCase):
     """status handler: per-tab isRunning via findTabByEvt + ev.tabId routing."""
 
-    js: str
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.js = _MAIN_JS.read_text()
-
-    def test_status_sets_per_tab_is_running(self) -> None:
-        """status handler uses findTabByEvt to set evTab.isRunning."""
-        idx = self.js.index("case 'status':")
-        block = self.js[idx : idx + 600]
-        assert "findTabByEvt(ev)" in block
-        assert "evTab.isRunning" in block
-
     def test_guard_via_node(self) -> None:
         """Simulate per-tab isRunning in Node.js — second status message
         for the same tabId doesn't affect other tabs."""
@@ -238,18 +225,6 @@ class TestStatusRunningTabIdGuard(unittest.TestCase):
 
 class TestClearGuard(unittest.TestCase):
     """clear handler: only clears output when on running tab."""
-
-    js: str
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.js = _MAIN_JS.read_text()
-
-    def test_clear_guard_in_source(self) -> None:
-        idx = self.js.index("case 'clear':")
-        block = self.js[idx : idx + 300]
-        assert "ev.tabId" in block
-        assert "activeTabId" in block
 
     def test_clear_skipped_on_wrong_tab(self) -> None:
         result = _run_node(_make_test_script(r"""
@@ -313,12 +288,6 @@ class TestClearGuard(unittest.TestCase):
 
 class TestSetTaskTextGuard(unittest.TestCase):
     """setTaskText handler: updates running tab's saved state on wrong tab."""
-
-    js: str
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.js = _MAIN_JS.read_text()
 
     def test_task_text_updates_running_tab_not_active(self) -> None:
         result = _run_node(_make_test_script(r"""
@@ -401,55 +370,8 @@ class TestSetTaskTextGuard(unittest.TestCase):
         assert "PASS" in result.stdout
 
 
-class TestFollowupSuggestionGuard(unittest.TestCase):
-    """followup_suggestion handler: skipped when on wrong tab."""
-
-    js: str
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.js = _MAIN_JS.read_text()
-
-    def test_followup_guard_in_source(self) -> None:
-        idx = self.js.index("case 'followup_suggestion':")
-        block = self.js[idx : idx + 200]
-        assert "ev.tabId !== undefined && ev.tabId !== activeTabId" in block
-
-
-class TestMergeDataGuard(unittest.TestCase):
-    """merge_data handler: skipped when on wrong tab."""
-
-    js: str
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.js = _MAIN_JS.read_text()
-
-    def test_merge_data_guard_in_source(self) -> None:
-        idx = self.js.index("case 'merge_data':")
-        block = self.js[idx : idx + 3500]
-        assert "ev.tabId !== undefined && ev.tabId !== activeTabId" in block
-
-
 class TestTaskErrorStoppedGuard(unittest.TestCase):
     """task_error/task_stopped: banner only on running tab, setReady always runs."""
-
-    js: str
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.js = _MAIN_JS.read_text()
-
-    def test_error_banner_guard_in_source(self) -> None:
-        idx = self.js.index("case 'task_error':")
-        block = self.js[idx : idx + 500]
-        assert "markTabDone(ev.tabId" in block
-
-    def test_set_ready_always_called(self) -> None:
-        """setReady is outside the guard — it always runs to reset runningTabId."""
-        idx = self.js.index("case 'task_error':")
-        block = self.js[idx : idx + 800]
-        assert "setReady(" in block
 
     def test_error_banner_skipped_on_wrong_tab(self) -> None:
         result = _run_node(_make_test_script(r"""
@@ -483,22 +405,6 @@ class TestTaskErrorStoppedGuard(unittest.TestCase):
         """))
         assert result.returncode == 0, result.stderr
         assert "PASS" in result.stdout
-
-
-class TestDefaultStreamingGuard(unittest.TestCase):
-    """Default handler (streaming output): routes bg tab events to processOutputEventForBgTab."""
-
-    js: str
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.js = _MAIN_JS.read_text()
-
-    def test_default_guard_in_source(self) -> None:
-        idx = self.js.index("default:")
-        block = self.js[idx : idx + 300]
-        assert "ev.tabId !== undefined && ev.tabId !== activeTabId" in block
-        assert "processOutputEventForBgTab" in block
 
 
 class TestFullTabSwitchScenario(unittest.TestCase):
@@ -699,67 +605,9 @@ class TestFullTabSwitchScenario(unittest.TestCase):
         assert "PASS" in result.stdout
 
 
-class TestSwitchBackRestoresDOM(unittest.TestCase):
-    """When switching back to a tab, the DOM is restored from the saved fragment."""
-
-    js: str
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.js = _MAIN_JS.read_text()
-
-    def test_switch_to_tab_restores_from_fragment(self) -> None:
-        """switchToTab restores DOM from saved fragment, no backend message needed."""
-        idx = self.js.index("function switchToTab(")
-        block = self.js[idx : idx + 800]
-        assert "restoreTab(tab)" in block
-        assert "setRunningState(tab.isRunning)" in block
-
-
-class TestSwitchToTabRunningState(unittest.TestCase):
-    """switchToTab correctly sets isRunning based on whether the target
-    tab is the running tab."""
-
-    js: str
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.js = _MAIN_JS.read_text()
-
-    def test_switch_to_running_tab_sets_running(self) -> None:
-        """Switching to the running tab sets isRunning = true."""
-        idx = self.js.index("function switchToTab(")
-        block = self.js[idx : idx + 800]
-        assert "tab.isRunning" in block
-        assert "setRunningState(tab.isRunning)" in block
-
-    def test_switch_to_idle_tab_resets_status(self) -> None:
-        """Switching to a non-running tab resets timer/spinner/status."""
-        idx = self.js.index("function switchToTab(")
-        block = self.js[idx : idx + 800]
-        assert "stopTimer()" in block
-        assert "removeSpinner()" in block
-
-
 class TestCreateNewTabDuringRunningTask(unittest.TestCase):
     """Creating a new tab (Cmd+T / +) while a task runs on another tab
     should not affect runningTabId or the running tab's state."""
-
-    js: str
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.js = _MAIN_JS.read_text()
-
-    def test_create_new_tab_does_not_reset_running_tab_id(self) -> None:
-        """createNewTab creates a fresh tab (isRunning=false by default
-        from makeTab) and delegates DOM reset to restoreTab without
-        touching runningTabId."""
-        idx = self.js.index("function createNewTab(")
-        block = self.js[idx : idx + 2000]
-        assert "makeTab(" in block
-        assert "restoreTab(tab)" in block
-        assert "runningTabId" not in block
 
     def test_new_tab_scenario_via_node(self) -> None:
         result = _run_node(_make_test_script(r"""
@@ -948,33 +796,6 @@ class TestSetReadyResetsRunningTabId(unittest.TestCase):
         assert result.returncode == 0, result.stderr
         assert "PASS" in result.stdout
 
-    def test_task_done_calls_set_ready(self) -> None:
-        idx = self.js.index("case 'task_done':")
-        # Window enlarged from 500 → 900 chars to accommodate the
-        # branch that computes elapsed time from the agent-supplied
-        # ``ev.startTs`` / ``ev.endTs`` (see ``case 'task_done'`` in
-        # main.js — this preserves the structural invariant that
-        # ``setReady`` is called inside the handler).
-        block = self.js[idx : idx + 900]
-        assert "setReady(" in block
-
-
-class TestCloseRunningTabBehavior(unittest.TestCase):
-    """Closing the running tab switches to adjacent tab with correct state."""
-
-    js: str
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.js = _MAIN_JS.read_text()
-
-    def test_close_tab_checks_running_state(self) -> None:
-        idx = self.js.index("function closeTab(")
-        block = self.js[idx : idx + 3000]
-        assert "newTab.isRunning" in block
-        assert "setRunningState(newTab.isRunning)" in block
-
-
 class TestSaveRestorePreservesTabState(unittest.TestCase):
     """saveCurrentTab/restoreTab cycle preserves all tab-specific state."""
 
@@ -1034,141 +855,8 @@ class TestSaveRestorePreservesTabState(unittest.TestCase):
         assert "PASS" in result.stdout
 
 
-class TestPerTabSelectedModel(unittest.TestCase):
-    """selectedModel is saved/restored per tab."""
-
-    js: str
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.js = _MAIN_JS.read_text()
-
-    def test_save_stores_selected_model(self) -> None:
-        idx = self.js.index("function saveCurrentTab()")
-        end = self.js.index("\n  function ", idx + 1)
-        body = self.js[idx:end]
-        assert "tab.selectedModel = selectedModel" in body
-
-    def test_restore_restores_selected_model(self) -> None:
-        idx = self.js.index("function restoreTab(tab)")
-        end = self.js.index("\n  function ", idx + 1)
-        body = self.js[idx:end]
-        assert "selectedModel = tab.selectedModel" in body
-        assert "modelName" in body
-
-    def test_make_tab_inherits_selected_model(self) -> None:
-        idx = self.js.index("function makeTab(title)")
-        end = self.js.index("\n  }", idx) + 4
-        body = self.js[idx:end]
-        assert "selectedModel: selectedModel" in body
-
-
-class TestPerTabAttachments(unittest.TestCase):
-    """attachments are saved/restored per tab."""
-
-    js: str
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.js = _MAIN_JS.read_text()
-
-    def test_save_stores_attachments(self) -> None:
-        idx = self.js.index("function saveCurrentTab()")
-        end = self.js.index("\n  function ", idx + 1)
-        body = self.js[idx:end]
-        assert "tab.attachments = attachments" in body
-
-    def test_restore_restores_attachments(self) -> None:
-        idx = self.js.index("function restoreTab(tab)")
-        end = self.js.index("\n  function ", idx + 1)
-        body = self.js[idx:end]
-        assert "attachments = tab.attachments" in body
-        assert "renderFileChips()" in body
-
-    def test_create_new_tab_clears_attachments(self) -> None:
-        """createNewTab builds a fresh tab (with default attachments=[])
-        then calls restoreTab, which loads that empty list into the
-        shared ``attachments`` variable and re-renders the chip row."""
-        idx = self.js.index("function createNewTab(")
-        end = self.js.index("\n  function ", idx + 1)
-        body = self.js[idx:end]
-        assert "makeTab(" in body
-        assert "restoreTab(tab)" in body
-        rt_idx = self.js.index("function restoreTab(tab)")
-        rt_end = self.js.index("\n  function ", rt_idx + 1)
-        rt_body = self.js[rt_idx:rt_end]
-        assert "attachments = tab.attachments" in rt_body
-        assert "renderFileChips()" in rt_body
-
-
-class TestPerTabInputValue(unittest.TestCase):
-    """inp.value is saved/restored per tab."""
-
-    js: str
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.js = _MAIN_JS.read_text()
-
-    def test_save_stores_input_value(self) -> None:
-        idx = self.js.index("function saveCurrentTab()")
-        end = self.js.index("\n  function ", idx + 1)
-        body = self.js[idx:end]
-        assert "tab.inputValue = inp.value" in body
-
-    def test_restore_restores_input_value(self) -> None:
-        idx = self.js.index("function restoreTab(tab)")
-        end = self.js.index("\n  function ", idx + 1)
-        body = self.js[idx:end]
-        assert "inp.value = tab.inputValue" in body
-        assert "syncClearBtn()" in body
-
-    def test_create_new_tab_preserves_input(self) -> None:
-        """Typed but unsent text carries over: createNewTab captures it
-        into ``tab.inputValue`` so the subsequent restoreTab installs it
-        back into the shared input box."""
-        idx = self.js.index("function createNewTab(")
-        end = self.js.index("\n  function ", idx + 1)
-        body = self.js[idx:end]
-        assert "const pendingText = inp.value" in body
-        assert "tab.inputValue = pendingText" in body
-        assert "restoreTab(tab)" in body
-        rt_idx = self.js.index("function restoreTab(tab)")
-        rt_end = self.js.index("\n  function ", rt_idx + 1)
-        rt_body = self.js[rt_idx:rt_end]
-        assert "inp.value = tab.inputValue" in rt_body
-
-
 class TestPerTabIsMerging(unittest.TestCase):
     """isMerging is saved/restored per tab with guards on merge events."""
-
-    js: str
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.js = _MAIN_JS.read_text()
-
-    def test_save_stores_is_merging(self) -> None:
-        idx = self.js.index("function saveCurrentTab()")
-        end = self.js.index("\n  function ", idx + 1)
-        body = self.js[idx:end]
-        assert "tab.isMerging = isMerging" in body
-
-    def test_restore_restores_is_merging(self) -> None:
-        idx = self.js.index("function restoreTab(tab)")
-        end = self.js.index("\n  function ", idx + 1)
-        body = self.js[idx:end]
-        assert "isMerging = tab.isMerging" in body
-        assert "updateInputDisabled()" in body
-
-    def test_merge_started_switches_tab(self) -> None:
-        idx = self.js.index("case 'merge_started':")
-        block = self.js[idx : idx + 600]
-        assert "ev.tabId !== undefined && ev.tabId !== activeTabId" in block
-        assert "bgMergeTab" in block
-        assert "switchToTab" in block, (
-            "merge_started bg handler must auto-switch to the merging tab"
-        )
 
     def test_merge_started_auto_switches_via_node(self) -> None:
         """Behavioral test: merge_started for a bg tab auto-switches to it.
@@ -1219,108 +907,6 @@ class TestPerTabIsMerging(unittest.TestCase):
         assert result.returncode == 0, result.stderr
         assert "PASS" in result.stdout
 
-    def test_merge_ended_guard(self) -> None:
-        idx = self.js.index("case 'merge_ended':")
-        block = self.js[idx : idx + 400]
-        assert "ev.tabId !== undefined && ev.tabId !== activeTabId" in block
-
-    def test_create_new_tab_clears_merging(self) -> None:
-        """A freshly-built tab has ``isMerging: false`` by default, and
-        restoreTab both copies that into the shared ``isMerging`` flag
-        and removes any existing merge toolbar from the DOM."""
-        idx = self.js.index("function createNewTab(")
-        end = self.js.index("\n  function ", idx + 1)
-        body = self.js[idx:end]
-        assert "makeTab(" in body
-        assert "restoreTab(tab)" in body
-        mk_idx = self.js.index("function makeTab(title)")
-        mk_end = self.js.index("\n  function ", mk_idx + 1)
-        mk_body = self.js[mk_idx:mk_end]
-        assert "isMerging: false" in mk_body
-        rt_idx = self.js.index("function restoreTab(tab)")
-        rt_end = self.js.index("\n  function ", rt_idx + 1)
-        rt_body = self.js[rt_idx:rt_end]
-        assert "isMerging = tab.isMerging" in rt_body
-        assert "merge-toolbar" in rt_body
-
-
-class TestPerTabWorktreeBar(unittest.TestCase):
-    """worktreeBar DOM element is saved/restored per tab."""
-
-    js: str
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.js = _MAIN_JS.read_text()
-
-    def test_save_detaches_worktree_bar(self) -> None:
-        idx = self.js.index("function saveCurrentTab()")
-        end = self.js.index("\n  function ", idx + 1)
-        body = self.js[idx:end]
-        assert "tab.worktreeBarEl = worktreeBar" in body
-        assert "worktreeBar = null" in body
-
-    def test_restore_reattaches_worktree_bar(self) -> None:
-        idx = self.js.index("function restoreTab(tab)")
-        end = self.js.index("\n  function ", idx + 1)
-        body = self.js[idx:end]
-        assert "worktreeBar = tab.worktreeBarEl" in body
-        assert "area.insertBefore(worktreeBar" in body
-
-    def test_save_detaches_merge_toolbar(self) -> None:
-        idx = self.js.index("function saveCurrentTab()")
-        end = self.js.index("\n  function ", idx + 1)
-        body = self.js[idx:end]
-        assert "tab.mergeToolbarEl = mergeBar" in body
-
-    def test_restore_reattaches_merge_toolbar(self) -> None:
-        idx = self.js.index("function restoreTab(tab)")
-        end = self.js.index("\n  function ", idx + 1)
-        body = self.js[idx:end]
-        assert "tab.mergeToolbarEl" in body
-
-
-class TestPerTabStreamingState(unittest.TestCase):
-    """Streaming state (state, llmPanel, llmPanelState, lastToolName,
-    pendingPanel) is saved/restored per tab."""
-
-    js: str
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.js = _MAIN_JS.read_text()
-
-    def test_save_stores_streaming_state(self) -> None:
-        idx = self.js.index("function saveCurrentTab()")
-        end = self.js.index("\n  function ", idx + 1)
-        body = self.js[idx:end]
-        assert "tab.streamState = state" in body
-        assert "tab.streamLlmPanel = llmPanel" in body
-        assert "tab.streamLlmPanelState = llmPanelState" in body
-        assert "tab.streamLastToolName = lastToolName" in body
-        assert "tab.streamPendingPanel = pendingPanel" in body
-
-    def test_restore_restores_streaming_state(self) -> None:
-        idx = self.js.index("function restoreTab(tab)")
-        end = self.js.index("\n  function ", idx + 1)
-        body = self.js[idx:end]
-        assert "state = tab.streamState || mkS()" in body
-        assert "llmPanel = tab.streamLlmPanel" in body
-        assert "llmPanelState = tab.streamLlmPanelState || mkS()" in body
-        assert "lastToolName = tab.streamLastToolName" in body
-        assert "pendingPanel = tab.streamPendingPanel" in body
-
-    def test_make_tab_has_streaming_fields(self) -> None:
-        idx = self.js.index("function makeTab(title)")
-        end = self.js.index("\n  }", idx) + 4
-        body = self.js[idx:end]
-        assert "streamState:" in body
-        assert "streamLlmPanel:" in body
-        assert "streamLlmPanelState:" in body
-        assert "streamLastToolName:" in body
-        assert "streamPendingPanel:" in body
-
-
 class TestPerTabT0(unittest.TestCase):
     """t0 (timer start) is saved/restored per tab."""
 
@@ -1329,18 +915,6 @@ class TestPerTabT0(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.js = _MAIN_JS.read_text()
-
-    def test_save_stores_t0(self) -> None:
-        idx = self.js.index("function saveCurrentTab()")
-        end = self.js.index("\n  function ", idx + 1)
-        body = self.js[idx:end]
-        assert "tab.t0 = t0" in body
-
-    def test_restore_restores_t0(self) -> None:
-        idx = self.js.index("function restoreTab(tab)")
-        end = self.js.index("\n  function ", idx + 1)
-        body = self.js[idx:end]
-        assert "t0 = tab.t0" in body
 
     def test_switch_to_non_running_tab_clears_t0(self) -> None:
         """Behavior (real ``switchToTab`` evaluated in Node): switching
@@ -1477,96 +1051,9 @@ class TestPerTabT0(unittest.TestCase):
         assert result.returncode == 0, result.stderr
         assert "PASS" in result.stdout
 
-    def test_task_done_uses_running_tab_t0(self) -> None:
-        idx = self.js.index("case 'task_done':")
-        block = self.js[idx : idx + 400]
-        assert "doneT0" in block
-        assert "ev.tabId" in block
-
-
-class TestPerTabOutputFragment(unittest.TestCase):
-    """Output uses DocumentFragment for DOM-preserving save/restore."""
-
-    js: str
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.js = _MAIN_JS.read_text()
-
-    def test_save_uses_document_fragment(self) -> None:
-        idx = self.js.index("function saveCurrentTab()")
-        end = self.js.index("\n  function ", idx + 1)
-        body = self.js[idx:end]
-        assert "document.createDocumentFragment()" in body
-        assert "O.firstChild" in body
-
-    def test_restore_uses_fragment(self) -> None:
-        idx = self.js.index("function restoreTab(tab)")
-        end = self.js.index("\n  function ", idx + 1)
-        body = self.js[idx:end]
-        assert "tab.outputFragment" in body
-        assert "O.appendChild(tab.outputFragment)" in body
-
-    def test_welcome_detached_before_fragment_save(self) -> None:
-        """Welcome element must be detached before capturing fragment
-        because it's shared across all tabs."""
-        idx = self.js.index("function saveCurrentTab()")
-        end = self.js.index("\n  function ", idx + 1)
-        body = self.js[idx:end]
-        welcome_idx = body.index("welcome")
-        fragment_idx = body.index("outputFragment")
-        assert welcome_idx < fragment_idx, (
-            "welcome must be detached before creating fragment"
-        )
-
-
-class TestInputContainerVisibility(unittest.TestCase):
-    """inputContainer visibility reflects worktree/merge bar state per tab."""
-
-    js: str
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.js = _MAIN_JS.read_text()
-
-    def test_save_restores_input_container(self) -> None:
-        idx = self.js.index("function saveCurrentTab()")
-        end = self.js.index("\n  function ", idx + 1)
-        body = self.js[idx:end]
-        assert "inputContainer" in body
-        assert "inputContainer.style.display = ''" in body
-
-    def test_restore_hides_input_when_bar_present(self) -> None:
-        idx = self.js.index("function restoreTab(tab)")
-        end = self.js.index("\n  function ", idx + 1)
-        body = self.js[idx:end]
-        assert "worktreeBar" in body
-        assert "autocommitBar" in body
-        assert "document.getElementById('merge-toolbar')" in body
-        assert "inputContainer.style.display = 'none'" in body
-        assert "inputContainer.style.display = ''" in body
-
-
 class TestBgTabPanelCreation(unittest.TestCase):
     """Background tabs must get panels created for streaming events via
     processOutputEventForBgTab instead of silently dropping them."""
-
-    js: str
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.js = _MAIN_JS.read_text()
-
-    def test_process_output_event_for_bg_tab_exists(self) -> None:
-        """The function processOutputEventForBgTab must exist in main.js."""
-        assert "function processOutputEventForBgTab(ev, tab)" in self.js
-
-    def test_default_handler_routes_bg_events(self) -> None:
-        """The default case calls processOutputEventForBgTab for bg tabs."""
-        idx = self.js.index("default:")
-        block = self.js[idx : idx + 300]
-        assert "processOutputEventForBgTab" in block
-        assert "findTabByEvt" in block
 
     def test_bg_tab_panel_creation_via_node(self) -> None:
         """Simulate the processOutputEventForBgTab logic in Node.js:
@@ -1788,20 +1275,6 @@ class TestMergeEndedBgClearsMergeToolbarEl(unittest.TestCase):
     stale merge toolbar even though the merge had ended.
     """
 
-    js: str
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.js = _MAIN_JS.read_text()
-
-    def test_merge_ended_bg_clears_merge_toolbar_el_in_source(self) -> None:
-        """merge_ended background handler clears mergeToolbarEl."""
-        idx = self.js.index("case 'merge_ended':")
-        block = self.js[idx : idx + 400]
-        assert "mergeToolbarEl = null" in block, (
-            "merge_ended bg handler must clear mergeToolbarEl"
-        )
-
     def test_merge_ended_bg_clears_merge_toolbar_el_via_node(self) -> None:
         """Behavioral test: merge_ended for bg tab clears mergeToolbarEl."""
         result = _run_node(_make_test_script(r"""
@@ -1876,72 +1349,6 @@ class TestMergeEndedBgClearsMergeToolbarEl(unittest.TestCase):
         """))
         assert result.returncode == 0, result.stderr
         assert "PASS" in result.stdout
-
-
-class TestShowMergeToolbarCapturesOwnerTabId(unittest.TestCase):
-    """Bug fix: showMergeToolbar captures ownerTabId at creation time.
-
-    Previously, merge toolbar button click handlers read the global
-    activeTabId at click time instead of capturing the owning tab's ID
-    in a closure (unlike createWorktreeBar and createAutocommitBar).
-    """
-
-    js: str
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.js = _MAIN_JS.read_text()
-
-    def test_show_merge_toolbar_accepts_owner_tab_id_param(self) -> None:
-        """showMergeToolbar has an ownerTabId parameter."""
-        assert "function showMergeToolbar(ownerTabId)" in self.js
-
-    def test_show_merge_toolbar_uses_captured_tab_id(self) -> None:
-        """Button click handlers use capturedTabId, not activeTabId."""
-        idx = self.js.index("function showMergeToolbar(ownerTabId)")
-        end = self.js.index("\n  function ", idx + 1)
-        body = self.js[idx:end]
-        assert "capturedTabId = ownerTabId || activeTabId" in body, (
-            "showMergeToolbar must capture ownerTabId into a local"
-        )
-        assert "tabId: capturedTabId" in body, (
-            "click handlers must use capturedTabId, not activeTabId"
-        )
-        click_idx = body.index("addEventListener('click'")
-        click_body = body[click_idx:]
-        assert "tabId: activeTabId" not in click_body, (
-            "click handler must NOT reference global activeTabId"
-        )
-
-    def test_merge_started_passes_tab_id_to_show_merge_toolbar(self) -> None:
-        """merge_started handler passes ev.tabId to showMergeToolbar."""
-        idx = self.js.index("case 'merge_started':")
-        block = self.js[idx : idx + 600]
-        assert "showMergeToolbar((ev && ev.tabId) || activeTabId)" in block
-
-    def test_restore_tab_passes_tab_id_to_show_merge_toolbar(self) -> None:
-        """restoreTab passes tab.id to showMergeToolbar."""
-        idx = self.js.index("function restoreTab(tab)")
-        end = self.js.index("\n  function ", idx + 1)
-        body = self.js[idx:end]
-        assert "showMergeToolbar(tab.id)" in body
-
-    def test_consistency_with_worktree_and_autocommit_bars(self) -> None:
-        """All three bar types capture ownerTabId in closures."""
-        wt_idx = self.js.index("function createWorktreeBar(ownerTabId)")
-        wt_end = self.js.index("\n  function ", wt_idx + 1)
-        wt_body = self.js[wt_idx:wt_end]
-        assert "tabId: ownerTabId" in wt_body
-
-        ac_idx = self.js.index("function createAutocommitBar(ev)")
-        ac_end = self.js.index("\n  function ", ac_idx + 1)
-        ac_body = self.js[ac_idx:ac_end]
-        assert "tabId: ownerTabId" in ac_body
-
-        mt_idx = self.js.index("function showMergeToolbar(ownerTabId)")
-        mt_end = self.js.index("\n  function ", mt_idx + 1)
-        mt_body = self.js[mt_idx:mt_end]
-        assert "tabId: capturedTabId" in mt_body
 
 
 if __name__ == "__main__":

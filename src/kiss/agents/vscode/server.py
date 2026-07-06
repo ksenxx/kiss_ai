@@ -164,10 +164,14 @@ def _coerce_id(value: object) -> str | None:
 
     Returns:
         The non-empty string id, or ``None`` when *value* is missing,
-        empty, zero, or of any other type.
+        empty, zero, a bool, or of any other type.
     """
     if isinstance(value, str) and value:
         return value
+    if isinstance(value, bool):
+        # bool is a subclass of int; without this check ``True`` would be
+        # stringified to "True" and defeat the tamper guard.
+        return None
     if isinstance(value, int) and value:
         return str(value)
     return None
@@ -291,17 +295,45 @@ class VSCodeServer(
         # (read-then-modify, scan-then-modify) and the lifecycle
         # transitions that span both the dict and individual
         # ``_RunningAgentState`` fields.
-        _RunningAgentState.running_agent_states.clear()
+        # A registry entry whose worker thread is STILL ALIVE in this
+        # very process (a second ``VSCodeServer`` constructed next to
+        # a live one — test fixtures, embedders) must not have its
+        # in-flight task row swept below: the worker's own cleanup
+        # ``finally`` will persist the real result.  Snapshot those
+        # task ids under the registry lock BEFORE clearing.
+        still_running: set[str] = set()
+        with _RunningAgentState._registry_lock:
+            for tab in _RunningAgentState.running_agent_states.values():
+                thread = tab.task_thread
+                if not (
+                    tab.is_task_active
+                    and thread is not None
+                    and thread.is_alive()
+                ):
+                    continue
+                th_id = tab.task_history_id
+                if th_id is None and tab.agent is not None:
+                    th_id = getattr(tab.agent, "_last_task_id", None)
+                if th_id:
+                    still_running.add(str(th_id))
+            if still_running:
+                logger.warning(
+                    "New VSCodeServer clearing a registry with %d live "
+                    "task(s); their rows are exempt from the orphan "
+                    "sweep: %s",
+                    len(still_running),
+                    ", ".join(sorted(still_running)),
+                )
+            _RunningAgentState.running_agent_states.clear()
         # Sweep up "Agent Failed Abruptly" rows left behind by a prior
         # process that was killed mid-task (SIGKILL / VS Code reload /
         # OOM) — the Python ``finally`` in ``_TaskRunnerMixin`` cannot
         # run when the host process dies, so the only way to clear
         # the sentinel from those rows is here, on every fresh
-        # server boot.  At this point ``running_agent_states`` has
-        # just been cleared so no task in THIS process is active, and
-        # we pass an empty active set.
+        # server boot.  Rows owned by worker threads that are still
+        # alive in THIS process (collected above) are excluded.
         try:
-            _recover_orphaned_tasks(set())
+            _recover_orphaned_tasks(still_running)
         except Exception:  # pragma: no cover — best-effort sweep
             logger.exception(
                 "orphan-task recovery sweep failed; continuing startup",
@@ -321,6 +353,19 @@ class VSCodeServer(
         # (see the C2/C3 note in ``_replay_session``).  Guarded by
         # ``_state_lock``.
         self._tab_chat_views: dict[str, str] = {}
+        # Maps a frontend tab id to the ``task_history.id`` the tab
+        # was OPENED with (``resumeSession`` carrying ``taskId``) and
+        # that no run in the tab has consumed yet.  The FIRST task the
+        # user issues in such a tab pops this entry and seeds
+        # :meth:`ChatSorcarAgent.resume_from_task_id` so the agent's
+        # chat context is built from the opened task's
+        # ``parent_task_id`` chain rather than the whole chat (see
+        # ``_run_task_inner``).  Consuming on first run keeps every
+        # later run in the tab on the normal chat-context path.
+        # Cleared alongside ``_tab_chat_views`` when the tab is
+        # re-pointed at a chat without a task id, starts a new chat,
+        # or is disposed.  Guarded by ``_state_lock``.
+        self._tab_opened_task_ids: dict[str, str] = {}
         # Maps ``id(user_answer_queue)`` to the task id of the currently
         # pending ``ask_user_question`` that owns that queue.  ``userAnswer``
         # uses this to close exactly the subscriber set for the task that
@@ -939,7 +984,7 @@ class VSCodeServer(
 
             {
                 "type": "taskDeleted",
-                "taskId": <int>,
+                "taskId": <str>,
                 "chatId": <str>,
                 "chatHasMoreTasks": <bool>,
             }
@@ -1132,13 +1177,16 @@ class VSCodeServer(
         # set so a stale viewer never receives events.  Per-task state
         # (recordings, persist_agents, offsets) is owned by the agent
         # thread and cleaned up by :meth:`_TaskRunnerMixin` /
-        # :meth:`ChatSorcarAgent.run`.
-        self.printer.cleanup_tab(tab_id)
+        # :meth:`ChatSorcarAgent.run`.  Use the getattr-guarded helper
+        # (like every sibling cleanup path) so duck-typed printers
+        # without ``cleanup_tab`` survive tab close too.
+        self._printer_cleanup_tab(tab_id)
         # A disposed tab no longer views any chat: drop it from the
         # chat-viewer map so future tasks on that chat do not fan
         # events out to a tab that no longer exists.
         with self._state_lock:
             self._tab_chat_views.pop(tab_id, None)
+            self._tab_opened_task_ids.pop(tab_id, None)
         _cleanup_merge_data(str(_merge_data_dir(tab_id)))
 
     def _new_chat(self, tab_id: str) -> None:
@@ -1192,8 +1240,10 @@ class VSCodeServer(
             tab.last_task_id = None
             # A fresh chat has no chat id yet, so the tab views no
             # chat until ``_cmd_run`` mints one or ``_replay_session``
-            # associates a resumed one.
+            # associates a resumed one.  Any opened-by-task-id seed is
+            # likewise stale for a fresh chat.
             self._tab_chat_views.pop(tab_id, None)
+            self._tab_opened_task_ids.pop(tab_id, None)
             # Snapshot the model under the lock so the ``showWelcome``
             # broadcast below cannot disagree with the in-memory state
             # captured for ``tab.selected_model`` above (a concurrent
@@ -1239,6 +1289,16 @@ class VSCodeServer(
         if not tab_id:
             logger.debug("_replay_session called without tab_id; ignoring")
             return
+        # Record which task id this tab was OPENED with so the first
+        # run in the tab can seed its chat context from the task's
+        # ``parent_task_id`` chain (consumed by ``_run_task_inner``).
+        # Re-pointing the tab at a chat WITHOUT a task id discards any
+        # earlier seed — the tab no longer views that specific task.
+        with self._state_lock:
+            if task_id:
+                self._tab_opened_task_ids[tab_id] = str(task_id)
+            else:
+                self._tab_opened_task_ids.pop(tab_id, None)
         result = None
         if task_id is not None:
             result = _load_chat_events_by_task_id(task_id)
@@ -1532,6 +1592,7 @@ class VSCodeServer(
                 "tab_id": tab_id,
                 "parent_tab_id": parent_tab_id_for_sub,
                 "description": str(result.get("task", "") or ""),
+                "task_id": result.get("task_id"),
                 "isSubagentTab": True,
                 "isDone": is_done,
             })
@@ -1743,6 +1804,7 @@ class VSCodeServer(
                 "tab_id": sub_tab_id,
                 "parent_tab_id": parent_tab_id,
                 "description": description,
+                "task_id": sub_task_id,
                 "taskIndex": idx,
                 "isSubagentTab": True,
                 "isDone": is_done,

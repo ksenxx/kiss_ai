@@ -5,6 +5,7 @@
 
 """Utility functions for the KISS core module."""
 
+import re
 from pathlib import Path
 from string import Formatter as StringFormatter
 from typing import Any, cast
@@ -12,6 +13,37 @@ from typing import Any, cast
 import yaml
 
 from kiss.core import config as config_module
+
+
+def substitute_prompt_args(
+    template: str, arguments: dict[str, str] | None
+) -> str:
+    """Substitute ``{key}`` placeholders in *template* in a single pass.
+
+    Unlike ``str.format()``, literal braces in the template (JSON, code,
+    ``${VAR}``) are left untouched instead of raising ``KeyError`` /
+    ``ValueError``.  All keys are substituted in ONE pass over the
+    template: sequential per-key ``str.replace`` calls would rescan
+    previously substituted values, so an argument value that literally
+    contains another key's placeholder (e.g. a task string quoting
+    ``{result}``) would be re-expanded — leaking the other argument into
+    it, dependent on dict insertion order.
+
+    Args:
+        template: The prompt template containing ``{key}`` placeholders.
+        arguments: Mapping of placeholder names to replacement values.
+
+    Returns:
+        The template with every ``{key}`` placeholder replaced.
+    """
+    if not arguments:
+        return template
+    pattern = re.compile(
+        "|".join(re.escape("{" + key + "}") for key in arguments)
+    )
+    return pattern.sub(
+        lambda m: str(arguments[m.group(0)[1:-1]]), template
+    )
 
 
 def get_template_field_names(text: str) -> list[str]:

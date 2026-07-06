@@ -254,6 +254,25 @@ def _tool_result_block_text(block: dict[str, Any]) -> str:
     return "" if content is None else str(content)
 
 
+def _merge_tools_prompt_into_content(content: Any, tools_prompt: str) -> Any:
+    """Append *tools_prompt* to a user message content of either shape.
+
+    The first user message's ``content`` is a plain string in the common
+    case, but a list of content parts when the prompt was initialized with
+    attachments (images/PDFs/audio).
+
+    Args:
+        content: The existing message content (str or list of parts).
+        tools_prompt: The text-based tools prompt to append.
+
+    Returns:
+        The merged content in the same shape as the input.
+    """
+    if isinstance(content, list):
+        return [*content, {"type": "text", "text": tools_prompt}]
+    return str(content) + "\n" + tools_prompt
+
+
 class OpenAICompatibleModel(Model):
     """A model that uses an OpenAI-compatible API with a custom base URL.
 
@@ -1332,7 +1351,9 @@ class OpenAICompatibleModel(Model):
         if modified_conversation[0]["role"] == "user":
             modified_conversation[0] = {
                 "role": "user",
-                "content": modified_conversation[0]["content"] + "\n" + tools_prompt,
+                "content": _merge_tools_prompt_into_content(
+                    modified_conversation[0]["content"], tools_prompt
+                ),
             }
         else:
             modified_conversation.insert(0, {"role": "system", "content": tools_prompt})

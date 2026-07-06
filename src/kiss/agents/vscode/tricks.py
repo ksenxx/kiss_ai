@@ -239,25 +239,3 @@ def prefix_match_tricks(query: str, min_partial_len: int = 2) -> list[str]:
             seen.add(trick)
             out.append(trick)
     return out
-
-
-def prefix_match_trick(query: str, min_partial_len: int = 2) -> str:
-    """Return the first trick whose prefix matches *query*'s current-sentence start.
-
-    Singular convenience wrapper over :func:`prefix_match_tricks`,
-    returning only the first match in file order.  The VS Code
-    ghost-text pipeline (which can only display one ghost suffix at a
-    time) uses this; the CLI dropdown — which can show every
-    alternative — uses :func:`prefix_match_tricks`.
-
-    Args:
-        query: The full input string from the chat textarea.
-        min_partial_len: Minimum length the sentence partial must
-            have before a match is attempted (default 2).
-
-    Returns:
-        The first matching trick string, or ``""`` when no trick
-        matches.
-    """
-    matches = prefix_match_tricks(query, min_partial_len)
-    return matches[0] if matches else ""
