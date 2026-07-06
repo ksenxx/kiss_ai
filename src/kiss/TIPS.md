@@ -14,7 +14,7 @@ Use claude-fable-5 model for all tasks including coding, bug fixing, and test cr
 
 ## You Can Now Have Voice Chat with KISS Sorcar
 
-With the __sorcar__ wake word, KISS Sorcar starts behaving like a super-intelligent Alexa.
+With the __sorcar__ wake word, KISS Sorcar starts behaving like a super-intelligent **Alexa**.
 
 ```
 Speak 'sorcar', your task ...
