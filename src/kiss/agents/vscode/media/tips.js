@@ -316,8 +316,8 @@
      * from parsed HTML (e.g. a chat transcript mentioning the tag,
      * injected via ``innerHTML`` through a path that bypasses the
      * sanitizer) would otherwise cover the chat as a blank
-     * full-viewport overlay.  The bulb's empty-tips panel keeps
-     * working because ``showTipsPanel([])`` still assigns ``.tips``.
+     * full-viewport overlay.  An empty-tips panel keeps working
+     * because ``showTipsPanel([])`` still assigns ``.tips``.
      */
     connectedCallback() {
       if (!this._tipsAssigned) this.remove();
@@ -385,23 +385,6 @@
     const cfg = window.__TIPS__;
     return cfg && Array.isArray(cfg.tips) ? cfg.tips : [];
   }
-
-  /**
-   * Wire the bulb button (``#tips-btn``) in the chat input toolbar:
-   * clicking it shows the tips window.  Only one panel instance may
-   * exist at a time — clicking while it is open is a no-op.  No-op
-   * when the button is absent (e.g. non-chat pages reusing tips.js).
-   */
-  function wireTipsButton() {
-    const btn = document.getElementById('tips-btn');
-    if (!btn) return;
-    btn.addEventListener('click', () => {
-      if (document.body.querySelector('kiss-tips-panel')) return;
-      showTipsPanel(configuredTips());
-    });
-  }
-
-  wireTipsButton();
 
   const cfg = window.__TIPS__;
   if (
