@@ -1152,7 +1152,29 @@ exec > >(tee -a "$LOG_FILE") 2>&1
     echo "   Built $VSIX"
     echo ""
 
+    # BEGIN: kiss-step-6-6-terminal-freeze  (tests extract this block verbatim)
     echo ">>> [6/6] Installing VS Code extension..."
+    # Heads-up BEFORE the disruptive part of this step.  When install.sh
+    # runs inside a VS Code integrated terminal (the Update button, or a
+    # user-opened terminal), ``--install-extension --force`` below makes
+    # VS Code detect the on-disk extension update and reload — and that
+    # reload can dispose (or simply stop rendering) the very terminal this
+    # script is printing to.  Users then see the output freeze — typically
+    # right at the "Stopping old kiss-web daemon (PIDs: ...)" line — with
+    # no prompt ever returning, and conclude the install hung.  It did not:
+    # the new-session (setsid) detachment at the top of this script keeps
+    # the install running, and the log (see ``$LOG_FILE``) shows it
+    # completing a few seconds later.  ``handle_hup`` cannot announce this
+    # either — the detached session has no controlling TTY, so no SIGHUP is
+    # ever delivered.  The only reliable channel to tell the user is this
+    # terminal, BEFORE it can die — hence the notice below must stay ahead
+    # of the ``--install-extension`` call.
+    echo "   NOTE: VS Code may reload to pick up the update while this step runs."
+    echo "         If this terminal stops updating (or never shows a prompt again),"
+    echo "         the install is NOT stuck — it keeps running detached and"
+    echo "         finishes on its own.  Follow progress with:"
+    echo "             tail -f \"$LOG_FILE\""
+    echo "         Completion is marked by the line: === Source bootstrap complete ==="
     if ! "$CODE_CLI" --install-extension "$VSIX" --force 2>&1; then
         echo "   ERROR: '$CODE_CLI --install-extension' failed; the update was not applied."
         exit 1
@@ -1315,6 +1337,7 @@ exec > >(tee -a "$LOG_FILE") 2>&1
     echo "KISS Sorcar runtime setup will finish inside VS Code."
     echo "The extension will install/check uv, Python dependencies, Playwright,"
     echo "cloudflared, shell PATH entries, API keys, remote access auth, and kiss-web."
+    # END: kiss-step-6-6-terminal-freeze
 }
 
 echo ""
