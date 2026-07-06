@@ -51,7 +51,7 @@ Just run:
 sorcar
 ```
 
-It has a powerful Claude Code style interface.  It supports skills, mcp, commands, etc.  The trajecories gets streamed and the output scrolls while being syntax highlighted. 
+It has a powerful Claude Code style interface. It supports skills, mcp, commands, etc. The trajecories gets streamed and the output scrolls while being syntax highlighted.
 
 # Tip
 
