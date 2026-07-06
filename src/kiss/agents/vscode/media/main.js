@@ -142,11 +142,60 @@
     const startMs = Number(el.dataset.startMs || 0);
     if (!startMs) return;
     _renderPanelTime(el);
+    // Mark the panel closed so ``reviveActivePanelTimes`` (tab restore)
+    // never re-registers a finalized panel with the live ticker.
+    el.dataset.timeDone = '1';
     _activePanels.delete(el);
     if (_activePanels.size === 0 && _activePanelTickIv) {
       clearInterval(_activePanelTickIv);
       _activePanelTickIv = null;
     }
+  }
+
+  /**
+   * Re-register every still-open stamped panel under *root* with the
+   * live 1-second ticker and refresh its footer.
+   *
+   * While a tab sits in the background its DOM lives in a detached
+   * fragment, so the ticker prunes those (disconnected) panels from
+   * ``_activePanels``.  Called from ``restoreTab`` after the fragment
+   * is re-attached so a panel still waiting to close — e.g. the eager
+   * Thoughts panel opened at ``tool_result`` awaiting the model — has
+   * its time-spent footer resume live ticking instead of freezing at
+   * the value rendered before the tab switch.
+   */
+  function reviveActivePanelTimes(root) {
+    if (!root || !root.querySelectorAll) return;
+    const stamped = root.querySelectorAll(
+      '[data-start-ms]:not([data-time-done])',
+    );
+    for (let i = 0; i < stamped.length; i++) {
+      _activePanels.add(stamped[i]);
+      _renderPanelTime(stamped[i]);
+    }
+    _startActivePanelTick();
+  }
+
+  /**
+   * Remove a PROVISIONAL (still-empty) Thoughts panel from the
+   * transcript and deregister it from the live time ticker.
+   *
+   * A provisional panel is opened eagerly by ``processOutputEvent`` /
+   * ``processOutputEventForBgTab`` right after a ``tool_result`` so the
+   * user sees the time spent waiting for the model's next response.
+   * When the model's turn instead continues with ANOTHER tool call
+   * (parallel tool calls in one turn) before any thinking/text token
+   * arrives, the empty panel is discarded again so the transcript is
+   * not littered with empty Thoughts panels.
+   */
+  function discardProvisionalPanel(el) {
+    if (!el) return;
+    _activePanels.delete(el);
+    if (_activePanels.size === 0 && _activePanelTickIv) {
+      clearInterval(_activePanelTickIv);
+      _activePanelTickIv = null;
+    }
+    if (el.parentNode) el.parentNode.removeChild(el);
   }
 
   /**
@@ -776,6 +825,11 @@
     if (tab.outputFragment) {
       O.appendChild(tab.outputFragment);
       tab.outputFragment = null;
+      // Panels that were still open when the tab went to the
+      // background were pruned from the live time ticker (their DOM
+      // was detached); re-register them so their time-spent footers
+      // resume ticking.
+      reviveActivePanelTimes(O);
     }
     if (taskPanel && taskPanelText) {
       // Trim trailing/leading whitespace so the user-visible task text
@@ -3405,7 +3459,11 @@
       // Close out the previous Thoughts panel — the next streaming
       // step will create a new one — so the time-spent footer covers
       // the period between this panel and the tool call that ends it.
-      if (llmPanel) finalizePanelTime(llmPanel);
+      // A still-PROVISIONAL (empty) panel means the model's turn
+      // continued with another tool call before any thinking/text
+      // token: discard the empty panel instead of finalizing it.
+      if (llmPanel && llmPanel._provisional) discardProvisionalPanel(llmPanel);
+      else if (llmPanel) finalizePanelTime(llmPanel);
       llmPanel = null;
       llmPanelState = mkS();
       // Set true (not false) so that non-core tools (screenshot,
@@ -3417,8 +3475,19 @@
     if (t === 'tool_result' && lastToolName !== 'finish') {
       pendingPanel = true;
     }
-    // First thought (stepCount === 0) also gets a panel, like every other turn.
+    // First model token landing in an EAGER (provisional) Thoughts
+    // panel — opened below when the tool result arrived — confirms the
+    // panel: count the step now, exactly once.
     if (
+      llmPanel &&
+      llmPanel._provisional &&
+      (t === 'thinking_start' || t === 'text_delta')
+    ) {
+      updateStepCount(stepCount + 1);
+      llmPanel._provisional = false;
+    }
+    // First thought (stepCount === 0) also gets a panel, like every other turn.
+    else if (
       (pendingPanel || stepCount === 0) &&
       (t === 'thinking_start' || t === 'text_delta')
     ) {
@@ -3444,6 +3513,21 @@
     }
     handleOutputEvent(ev, target, tState);
     if (target === O) collapseOlderPanels();
+    // EAGERLY open the next Thoughts panel the moment a tool result
+    // arrives — before the tool response (and any queued user message)
+    // is sent back to the model — so the user immediately sees the
+    // time spent waiting for the model's next response ticking in the
+    // panel's footer, like the other chat panels.  The panel starts
+    // PROVISIONAL: streamed thinking/text tokens confirm it (above),
+    // while another tool call discards it again.
+    if (t === 'tool_result' && lastToolName !== 'finish' && !llmPanel) {
+      llmPanel = mkThoughtsPanel();
+      llmPanel._provisional = true;
+      O.appendChild(llmPanel);
+      collapseOlderPanels();
+      llmPanelState = mkS();
+      pendingPanel = false;
+    }
     if (t === 'result' || t === 'usage_info') {
       // Snapshot current task metrics so adjacent-scroll can restore them
       currentTaskMetrics.tokens = statusTokens ? statusTokens.textContent : '';
@@ -3453,7 +3537,10 @@
     if (t === 'result') {
       // Close out the last live Thoughts panel so its bottom-anchored
       // time footer reflects the duration up to the result event.
+      // Null it out so a subsequent sub-session's thinking creates its
+      // own fresh panel instead of reusing this finalized one.
       if (llmPanel) finalizePanelTime(llmPanel);
+      llmPanel = null;
       collapseAllExceptResult(O, activeTabId);
       if (ev.success === false && !ev.is_continue) {
         const rTab = getTab(activeTabId);
@@ -3504,7 +3591,11 @@
       bgLastToolName = ev.name || '';
       // Mirror processOutputEvent: close out the previous Thoughts
       // panel so its time-spent footer covers up to this tool call.
-      if (bgLlmPanel) finalizePanelTime(bgLlmPanel);
+      // A still-PROVISIONAL (empty) eager panel is discarded instead —
+      // the model's turn continued with another tool call.
+      if (bgLlmPanel && bgLlmPanel._provisional)
+        discardProvisionalPanel(bgLlmPanel);
+      else if (bgLlmPanel) finalizePanelTime(bgLlmPanel);
       bgLlmPanel = null;
       bgLlmPanelState = mkS();
       bgPendingPanel = true;
@@ -3513,8 +3604,20 @@
       bgPendingPanel = true;
     }
 
-    // Create a new llm-panel when needed
+    // First model token landing in an EAGER (provisional) panel —
+    // opened below when the tool result arrived — confirms the panel:
+    // count the step now, exactly once (mirrors processOutputEvent).
     if (
+      bgLlmPanel &&
+      bgLlmPanel._provisional &&
+      (t === 'thinking_start' || t === 'text_delta')
+    ) {
+      bgStepCount++;
+      tab.statusStepsText = 'Steps: ' + bgStepCount;
+      bgLlmPanel._provisional = false;
+    }
+    // Create a new llm-panel when needed
+    else if (
       (bgPendingPanel || bgStepCount === 0) &&
       (t === 'thinking_start' || t === 'text_delta')
     ) {
@@ -3564,10 +3667,23 @@
       if (statusBudget) statusBudget.textContent = prevBudgetText;
       if (statusSteps) statusSteps.textContent = prevStepsText;
 
+      // EAGERLY open the next Thoughts panel right after a tool result
+      // (mirrors processOutputEvent) so the waiting-for-model time is
+      // visible in the panel footer when the user switches to the tab.
+      if (t === 'tool_result' && bgLastToolName !== 'finish' && !bgLlmPanel) {
+        bgLlmPanel = mkThoughtsPanel();
+        bgLlmPanel._provisional = true;
+        tab.outputFragment.appendChild(bgLlmPanel);
+        bgLlmPanelState = mkS();
+        bgPendingPanel = false;
+      }
+
       if (t === 'result') {
         // Close out the last bg-tab Thoughts panel so its footer
-        // reflects the duration up to this result event.
+        // reflects the duration up to this result event.  Null it out
+        // so a subsequent sub-session's thinking creates a fresh panel.
         if (bgLlmPanel) finalizePanelTime(bgLlmPanel);
+        bgLlmPanel = null;
         if (ev.step_count) {
           bgStepCount = ev.step_count;
           tab.statusStepsText = 'Steps: ' + ev.step_count;
@@ -5120,6 +5236,28 @@
       case 'task_interrupted':
       case 'task_stopped': {
         markTabDone(ev.tabId, true);
+        // The task ended without a ``result`` event, so no code path
+        // will close the still-open Thoughts panel: discard a
+        // PROVISIONAL (empty) eager panel — otherwise it would keep
+        // ticking forever — and freeze the footer of a filled one.
+        // ``pendingPanel = true`` so a later resumed/reattached stream
+        // opens its own fresh panel.
+        if (ev.tabId === undefined || ev.tabId === activeTabId) {
+          if (llmPanel && llmPanel._provisional)
+            discardProvisionalPanel(llmPanel);
+          else if (llmPanel) finalizePanelTime(llmPanel);
+          llmPanel = null;
+          pendingPanel = true;
+        } else {
+          const endTab = getTab(ev.tabId);
+          if (endTab && endTab.streamLlmPanel) {
+            if (endTab.streamLlmPanel._provisional)
+              discardProvisionalPanel(endTab.streamLlmPanel);
+            else finalizePanelTime(endTab.streamLlmPanel);
+            endTab.streamLlmPanel = null;
+            endTab.streamPendingPanel = true;
+          }
+        }
         // ``task_interrupted`` is a graceful server shutdown / restart
         // (e.g. an extension update restarting the daemon), distinct
         // from the user clicking "Stop" (``task_stopped``) and from a
