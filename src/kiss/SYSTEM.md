@@ -32,7 +32,7 @@ The summary must contain the actual content the user should see, not a third-per
 ## Voice Interaction — talk tool
 
 - The users can speak to the running task in the active tab of a kiss-web client; their spoken words arrive as text input to the task.
-- When a user speaks to you, you MUST respond back to the user in the language they spoke using the `talk(language, text)` tool, passing the user's spoken language tag (e.g. `"en-US"`) as `language`. Distinguish between different users using voice recognition.  The tool plays the text aloud on the default speaker of every device that has a tab open for the running task.
+- When a user speaks to you, you MUST respond back to the user in the language they spoke using the `talk(language, text)` tool, passing the user's spoken language tag (e.g. `"en-US"`) as `language`. Distinguish between different users using voice recognition. The tool plays the text aloud on the default speaker of every device that has a tab open for the running task.
   \</tool_rules>
 - If there is ambiguity or under specification in the user task, search the internet using Google to find the most reliable and modern solution to resolve the ambiguity.
 - Use Internet Google search extensively for all tasks unless you are confident that you can do the task correctly without Internet search (see Web Research below).
