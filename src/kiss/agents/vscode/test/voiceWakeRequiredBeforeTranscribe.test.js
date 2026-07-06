@@ -445,7 +445,7 @@ async function main() {
       rec.hear('sorcar');
       assert.ok(
         v.btn.classList.contains('voice-triggered'),
-        'the real wake must flash the mic button green',
+        'the real wake must flash the mic button red',
       );
       // The dictated task: speech, then 2s of trailing silence ends
       // the capture and posts it for transcription.
