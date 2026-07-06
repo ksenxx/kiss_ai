@@ -19,13 +19,13 @@ With the __sorcar__ wake word, KISS Sorcar starts behaving like a supper intelli
 Speak 'sorcar', your task ...
 ```
 
-Make sure that the microphone button below the chat input box is pulsing blue. Speak 'sorcar' followed by your task, KISS Sorcar will automatically run the task and tell you the result using its own voice. You need the OPENAI_API_KEY to enable this feature. The voice interface distinguishes among different speakers.
+Make sure that the microphone button below the chat input box is pulsing blue. Speak 'sorcar' followed by your task, KISS Sorcar will automatically run the task and tell you the result using its own voice. You need the **OPENAI_API_KEY** to enable this feature. The voice interface distinguishes among different speakers.
 
 # Tip
 
 ## Novel Features: set_model and Steering-on-the-Fly
 
-You can instantaneuously inject a user message to a running agent and make the agent to take the message into account in the rest of its execution.  Moreover, while an agent is running you can ask it to change its model for the rest of the execution of the agent.  This is an unique feature of KISS Sorcar.  These two IPs (intellectual properties) make KISS Sorcar super powerful for multi-model reasoning and dynamic steering of tasks running for hours to days.
+You can **instantaneuously inject a user message** to a running agent and make the agent to take the message into account in the rest of its execution.  Moreover, while an agent is running you can ask it to **dynamically change its model** for the rest of the execution of the agent.  This is an unique feature of KISS Sorcar.  These two **IPs (intellectual properties) make KISS Sorcar super powerful for multi-model reasoning and dynamic steering of tasks running for hours to days**.
 
 # Tip
 
@@ -37,25 +37,39 @@ Look at the commit messages at [https://github.com/ksenxx/kiss_ai/commits/main/]
 
 ## To Use the KISS Sorcar Remote Web/Mobile App
 
-Go to the Settings panel and copy the URL at the top. This URL contains a message showing the latest cloudfared URL where you can find the KISS Sorcar webapp. Send the URL from the Settings page to your mobile device. Also see/set the remote password on the Settings page. You can possibly SMS, slack, or email the URL to the mobile device. Open the URL in the mobile device in a browser and enter your remote password. You will see your faminiliar KISS Sorcar chat interface from VS Code.
+Go to the Settings panel and copy the URL at the top. This URL contains a message showing the latest cloudfared URL where you can find the KISS Sorcar webapp. Send the URL from the Settings page to your mobile device. Also see/set the remote password on the Settings page. You can possibly SMS, slack, or email the URL to the mobile device. 
+
+Open the URL in the mobile device in a browser and enter your remote password. You will see your faminiliar KISS Sorcar chat interface from VS Code.
 
 # Tip
 
 ## If You are Implementing a Software Feature
 
-Definitely add the following sentence to the prompt of the KISS Sorcar: Reproduce the issue by writing an end-to-end real test. Then fix the issue.
+Definitely add the following sentence to the prompt of the KISS Sorcar: 
+
+```
+Reproduce the issue by writing an end-to-end real test. Then fix the issue.
+```
 
 # Tip
 
 ## Internet has Fresher Knowledge than a Frontier Model
 
-Add the following sentence to your prompt to make KISS Sorcar search the internet extensively for information: Search the internet extensively.
+Add the following sentence to your prompt to make KISS Sorcar search the internet extensively for information: 
+
+```
+Search the internet extensively.
+```
 
 # Tip
 
 ## If You Get git Merge Conflict
 
-Then run the following task: Can you check the following message on merge conflict and help me fix it? \<copy_paste_theConflict_message_from_the_chat>
+Then run the following task: 
+
+```
+Can you check the following message on merge conflict and help me fix it? <<copy_paste_theConflict_message_from_the_chat>>
+```
 
 # Tip
 
