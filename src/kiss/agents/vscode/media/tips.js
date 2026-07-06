@@ -50,7 +50,7 @@
     '  background: #232136;' +
     '  color: #e0def4;' +
     '  font-family: var(--vscode-font-family, sans-serif);' +
-    '  font-size: var(--vscode-font-size, 13px);' +
+    '  font-size: calc(var(--vscode-font-size, 13px) * 1.25);' +
     '  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);' +
     '}' +
     '.tips-header {' +
@@ -69,7 +69,7 @@
     '  border: none;' +
     '  background: transparent;' +
     '  color: #908caa;' +
-    '  font-size: 16px;' +
+    '  font-size: 20px;' +
     '  line-height: 1;' +
     '  cursor: pointer;' +
     '  padding: 2px 6px;' +
