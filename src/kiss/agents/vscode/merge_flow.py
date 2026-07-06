@@ -73,6 +73,57 @@ def _unquoted_name_lines(output: str) -> list[str]:
     ]
 
 
+def _porcelain_paths(
+    output: str, *, rename_both_sides: bool = False,
+) -> list[str]:
+    """Parse ``git status --porcelain`` output into unquoted file paths.
+
+    Shared by :meth:`_MergeFlowMixin._main_dirty_files` and the
+    porcelain fallback of
+    :meth:`_MergeFlowMixin._get_worktree_changed_files` so the two
+    parsers cannot drift apart.  Like :func:`_unquoted_name_lines`,
+    the path tail (``line[3:]``) is NOT ``strip()``-ed and the output
+    is split on ``\\n`` only: space-adjacent filenames are legal, and
+    stripping would mangle any that git leaves unquoted.
+
+    Rename/copy entries (``R  old -> new``) are split on the `` -> ``
+    boundary (respecting quoting) instead of being emitted as one
+    bogus ``"old -> new"`` path.
+
+    Args:
+        output: Raw stdout from a ``git status --porcelain`` command.
+        rename_both_sides: When True, emit BOTH the old and the new
+            side of a rename/copy entry (mirroring a
+            ``diff --no-renames`` listing); when False, emit only the
+            new side.
+
+    Returns:
+        De-duplicated list of relative file paths in output order.
+    """
+    files: list[str] = []
+
+    def _add(path: str) -> None:
+        if path and path not in files:
+            files.append(path)
+
+    for line in output.split("\n"):
+        if len(line) < 4:
+            continue
+        code = line[:2]
+        tail = line[3:]
+        if ("R" in code or "C" in code) and " -> " in tail:
+            # Rename/copy entry: split the RAW tail on the `` -> ``
+            # boundary (respecting quoting) first, then unquote each
+            # side exactly once.
+            old_raw, new_raw = _split_rename_tail(tail)
+            if rename_both_sides:
+                _add(_unquote_git_path(old_raw))
+            _add(_unquote_git_path(new_raw))
+        else:
+            _add(_unquote_git_path(tail))
+    return files
+
+
 def _is_valid_baseline(git_dir: str, sha: str) -> bool:
     """Check if *sha* refers to a valid commit object in *git_dir*.
 
@@ -248,17 +299,58 @@ class _MergeFlowMixin:
             logger.debug("_finish_merge called without tab_id; ignoring")
             return
         tab = self._get_tab(tab_id)
+        # Keep ``is_merging`` claimed until the pending-worktree
+        # presentation (whose empty-worktree auto-discard runs a
+        # main-repo ``git checkout``) and the autocommit dirty-file
+        # scan are both done.  Clearing the flag first opened a window
+        # in which a task could start on this tab (the task-start
+        # guard consults ``is_merging``) — racing the discard's
+        # checkout, and letting the dirty scan report the NEW task's
+        # in-flight files as this merge's ``changedFiles``.
+        # ``try_merge_review=False`` guarantees no NEW merge session
+        # (which would re-claim the flag via ``_start_merge_session``)
+        # is started inside, so the unconditional clear in ``finally``
+        # cannot clobber one.
+        #
+        # ``merge_ended`` is broadcast in the ``finally``, AFTER the
+        # flag clears: the frontend closes the merge view and
+        # re-enables the input on ``merge_ended``, so broadcasting it
+        # first (while the claim spans real git work — the discard's
+        # checkout plus the full-tree dirty scan, up to seconds on
+        # large repos) opened a window in which a ``run`` submitted
+        # right after the view closed was rejected by
+        # ``_run_task_inner``'s ``is_merging`` guard and the prompt
+        # text was silently lost.  Broadcasting from the ``finally``
+        # also guarantees the view is closed even when the cleanup
+        # body raises.
         with self._state_lock:
-            tab.is_merging = False
-        self.printer.broadcast({"type": "merge_ended", "tabId": tab_id})
-        _cleanup_merge_data(str(_merge_data_dir(tab_id)))
+            tab.is_merging = True
+        try:
+            _cleanup_merge_data(str(_merge_data_dir(tab_id)))
 
-        self._present_pending_worktree(tab_id, try_merge_review=False)
+            self._present_pending_worktree(tab_id, try_merge_review=False)
 
-        if not tab.use_worktree:
-            self._broadcast_autocommit_prompt(tab_id, work_dir)
+            if not tab.use_worktree:
+                self._broadcast_autocommit_prompt(tab_id, work_dir)
+        finally:
+            with self._state_lock:
+                tab.is_merging = False
+            try:
+                self.printer.broadcast(
+                    {"type": "merge_ended", "tabId": tab_id}
+                )
+            except Exception:
+                # A transport failure here must not mask an exception
+                # already propagating from the cleanup body above.
+                logger.debug(
+                    "merge_ended broadcast failed for tab %s",
+                    tab_id,
+                    exc_info=True,
+                )
         # If the user closed the tab while the merge view was open,
         # dispose the now-idle _RunningAgentState.  No-op otherwise.
+        # Runs AFTER the clear above: the dispose guard refuses to pop
+        # a state whose ``is_merging`` is still raised.
         self._dispose_if_closed(tab_id)
 
     def _main_dirty_files(self, work_dir: str = "") -> list[str]:
@@ -286,23 +378,7 @@ class _MergeFlowMixin:
         result = _git(work_dir, "status", "--porcelain", "-uall")
         if result.returncode != 0:
             return []
-        files: list[str] = []
-        for line in result.stdout.splitlines():
-            if len(line) < 4:
-                continue
-            tail = line[3:]
-            code = line[:2]
-            if ("R" in code or "C" in code) and " -> " in tail:
-                # Rename/copy entry: split the RAW tail on the
-                # `` -> `` boundary (respecting quoting) first, then
-                # unquote the new side exactly once.
-                _, new_raw = _split_rename_tail(tail)
-                path = _unquote_git_path(new_raw)
-            else:
-                path = _unquote_git_path(tail.strip())
-            if path and path not in files:
-                files.append(path)
-        return files
+        return _porcelain_paths(result.stdout)
 
     def _broadcast_autocommit_prompt(
         self, tab_id: str, work_dir: str = "",
@@ -602,10 +678,27 @@ class _MergeFlowMixin:
                 except BaseException:
                     logger.debug("Worktree merge review error", exc_info=True)
         if not changed and discard_if_empty:
+            # Atomically (a) verify no non-worktree task is mutating
+            # the main tree and (b) CLAIM the main tree by raising
+            # ``tab.is_merging`` — mirroring ``_handle_worktree_action``
+            # (RACE-1/RACE-2).  ``discard()`` runs ``git checkout`` in
+            # the MAIN repository; without the claim, a non-wt task
+            # could start on another tab in the check→discard TOCTOU
+            # window and have HEAD flipped under it mid-write.  The
+            # prior flag value is restored (not blindly cleared) so a
+            # caller that already owns the claim — ``_finish_merge``
+            # holds ``is_merging`` across this call — keeps it.
             with self._state_lock:
                 non_wt_busy = self._any_non_wt_running()
+                prev_merging = tab.is_merging
+                if not non_wt_busy:
+                    tab.is_merging = True
             if not non_wt_busy:
-                wt_agent.discard()
+                try:
+                    wt_agent.discard()
+                finally:
+                    with self._state_lock:
+                        tab.is_merging = prev_merging
                 return
         if not changed:
             # Branch is preserved (discard_if_empty=False) but the
@@ -791,11 +884,12 @@ class _MergeFlowMixin:
                 files = _unquoted_name_lines(tracked.stdout)
             else:
                 status = _git(str(wt_dir), "status", "--porcelain")
-                files = [
-                    _unquote_git_path(line[3:].strip())
-                    for line in status.stdout.splitlines()
-                    if len(line) >= 4 and line[3:].strip()
-                ]
+                # ``rename_both_sides``: the primary path above uses
+                # ``--no-renames`` so a rename lists BOTH sides; the
+                # fallback must match.
+                files = _porcelain_paths(
+                    status.stdout, rename_both_sides=True,
+                )
             files.extend(_capture_untracked(str(wt_dir)))
             return sorted(set(files))
         if not wt._wt_branch:

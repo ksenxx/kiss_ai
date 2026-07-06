@@ -62,7 +62,7 @@ from pathlib import Path
 from typing import Any
 
 from kiss.agents.sorcar.persistence import _default_kiss_dir
-from kiss.agents.sorcar.skills import skill_permission
+from kiss.agents.sorcar.skills import load_permission_rules, skill_permission
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +95,10 @@ class MCPServerConfig:
         url: Endpoint URL for http/sse servers (empty otherwise).
         headers: Extra HTTP headers for http/sse servers.
         source: Where the server was configured — ``"user"``,
-            ``"claude-project"``, or ``"project"``.
+            ``"claude-project"``, or ``"project"``.  Pure bookkeeping:
+            excluded from equality so the same server re-discovered
+            from a different file compares equal and its healthy
+            connection is reused instead of torn down and re-opened.
     """
 
     name: str
@@ -105,7 +108,7 @@ class MCPServerConfig:
     env: tuple[tuple[str, str], ...] = ()
     url: str = ""
     headers: tuple[tuple[str, str], ...] = ()
-    source: str = "user"
+    source: str = field(default="user", compare=False)
 
     def to_json(self) -> dict[str, Any]:
         """Return the Claude-Code-compatible JSON dict for this server."""
@@ -296,16 +299,7 @@ def load_mcp_permissions() -> dict[str, str]:
         Mapping of wildcard pattern → ``"allow"``/``"deny"``, in file
         order.  Empty when the config or key is missing/malformed.
     """
-    try:
-        from kiss.agents.vscode.vscode_config import load_config
-
-        raw = load_config().get("mcp_permissions")
-    except Exception:
-        logger.debug("could not load mcp permissions", exc_info=True)
-        return {}
-    if not isinstance(raw, dict):
-        return {}
-    return {str(k): str(v).strip().lower() for k, v in raw.items()}
+    return load_permission_rules("mcp_permissions")
 
 
 def mcp_tool_permission(tool_name: str, rules: dict[str, str]) -> str:
@@ -471,7 +465,11 @@ class _Connection:
 
     config: MCPServerConfig
     ready: threading.Event = field(default_factory=threading.Event)
-    stop: asyncio.Event | None = None
+    # Created eagerly (asyncio.Event is loop-agnostic until awaited) so
+    # a stop request arriving before the connection task's first line
+    # runs is never lost — it is only ever set on the manager loop via
+    # call_soon_threadsafe, and the task sees it when it parks.
+    stop: asyncio.Event = field(default_factory=asyncio.Event)
     session: Any = None
     tools: list[Any] = field(default_factory=list)
     error: str = ""
@@ -520,7 +518,6 @@ async def _maintain_connection(conn: _Connection, auth: Any) -> None:
 
     from mcp import ClientSession
 
-    conn.stop = asyncio.Event()
     try:
         async with AsyncExitStack() as stack:
             read, write = await _enter_transport(stack, conn.config, auth)
@@ -559,6 +556,7 @@ class MCPManager:
         self._thread.start()
         self._connections: dict[str, _Connection] = {}
         self._lock = threading.Lock()
+        self._shut_down = False
         atexit.register(self.shutdown)
 
     @classmethod
@@ -584,6 +582,14 @@ class MCPManager:
             The connection record; ``error`` is non-empty on failure.
         """
         with self._lock:
+            if self._shut_down:
+                # Fail fast: the manager loop is stopped, so a scheduled
+                # coroutine would never run and ready.wait() would burn
+                # the full CONNECT_TIMEOUT on a stale manager reference.
+                conn = _Connection(config=config)
+                conn.error = "manager shut down"
+                conn.ready.set()
+                return conn
             existing = self._connections.get(config.name)
             if (
                 existing is not None
@@ -592,7 +598,7 @@ class MCPManager:
             ):
                 conn = existing
             else:
-                if existing is not None and existing.stop is not None:
+                if existing is not None:
                     # Stop the stale connection's task so its server
                     # subprocess/stream is closed, not leaked.
                     self._loop.call_soon_threadsafe(existing.stop.set)
@@ -604,7 +610,24 @@ class MCPManager:
                     _maintain_connection(conn, auth), self._loop,
                 )
         if not conn.ready.wait(CONNECT_TIMEOUT):
-            conn.error = conn.error or "connection timed out"
+            # Tear the straggler down instead of leaving a poisoned
+            # record: if the server finished connecting just after the
+            # deadline, the record would be live (session set) yet
+            # marked failed — contradictory state that a later
+            # connect() would needlessly tear down and that
+            # format_mcp_listing would report inconsistently.  Removing
+            # it and setting stop makes the task unwind whenever it
+            # does finish, so the server subprocess/stream is never
+            # leaked either.
+            with self._lock:
+                if self._connections.get(config.name) is conn:
+                    del self._connections[config.name]
+                # Stamp the error under the lock: the connection task may
+                # be finishing concurrently (setting conn.error in its
+                # except clause) and other threads read conn.error through
+                # lock-guarded paths.
+                conn.error = conn.error or "connection timed out"
+            self._loop.call_soon_threadsafe(conn.stop.set)
         return conn
 
     def call_tool(self, server: str, tool: str, arguments: dict[str, Any]) -> str:
@@ -618,12 +641,26 @@ class MCPManager:
         Returns:
             The flattened result text (``Error: ...`` on tool errors).
         """
-        conn = self._connections.get(server)
-        if conn is None or conn.session is None:
+        with self._lock:
+            if self._shut_down:
+                # The manager loop is stopped: no connection can be live
+                # and a scheduled coroutine would never run.
+                return (
+                    f"Error: MCP server {server!r} is not connected "
+                    f"(manager shut down)"
+                )
+            conn = self._connections.get(server)
+        # Snapshot the session exactly once: the manager-loop thread
+        # nulls conn.session whenever the connection dies or is stopped
+        # (_maintain_connection's finally), so re-reading the attribute
+        # after the check would race an AttributeError out of the tool
+        # wrapper instead of returning the friendly error string.
+        session = conn.session if conn is not None else None
+        if conn is None or session is None:
             why = conn.error if conn else "never connected"
             return f"Error: MCP server {server!r} is not connected ({why})"
         future = asyncio.run_coroutine_threadsafe(
-            conn.session.call_tool(
+            session.call_tool(
                 tool, arguments,
                 read_timeout_seconds=timedelta(seconds=CALL_TIMEOUT),
             ),
@@ -642,8 +679,7 @@ class MCPManager:
             conns = list(self._connections.values())
             self._connections.clear()
         for conn in conns:
-            if conn.stop is not None:
-                self._loop.call_soon_threadsafe(conn.stop.set)
+            self._loop.call_soon_threadsafe(conn.stop.set)
         for conn in conns:
             if conn.task is not None:
                 try:
@@ -652,7 +688,21 @@ class MCPManager:
                     logger.debug("MCP disconnect error", exc_info=True)
 
     def shutdown(self) -> None:
-        """Disconnect everything and stop the manager loop thread."""
+        """Disconnect everything and stop the manager loop thread.
+
+        Also resets the process-wide singleton when it points at this
+        manager, so a later :meth:`instance` call builds a fresh manager
+        with a live loop instead of scheduling work on a stopped one
+        (which would silently never run and time out every connect).
+        Idempotent: concurrent or repeated calls after the first are
+        no-ops.
+        """
+        with MCPManager._instance_lock:
+            if MCPManager._instance is self:
+                MCPManager._instance = None
+            if self._shut_down:
+                return
+            self._shut_down = True
         if not self._loop.is_running():
             return
         self.disconnect_all()

@@ -295,17 +295,45 @@ class VSCodeServer(
         # (read-then-modify, scan-then-modify) and the lifecycle
         # transitions that span both the dict and individual
         # ``_RunningAgentState`` fields.
-        _RunningAgentState.running_agent_states.clear()
+        # A registry entry whose worker thread is STILL ALIVE in this
+        # very process (a second ``VSCodeServer`` constructed next to
+        # a live one — test fixtures, embedders) must not have its
+        # in-flight task row swept below: the worker's own cleanup
+        # ``finally`` will persist the real result.  Snapshot those
+        # task ids under the registry lock BEFORE clearing.
+        still_running: set[str] = set()
+        with _RunningAgentState._registry_lock:
+            for tab in _RunningAgentState.running_agent_states.values():
+                thread = tab.task_thread
+                if not (
+                    tab.is_task_active
+                    and thread is not None
+                    and thread.is_alive()
+                ):
+                    continue
+                th_id = tab.task_history_id
+                if th_id is None and tab.agent is not None:
+                    th_id = getattr(tab.agent, "_last_task_id", None)
+                if th_id:
+                    still_running.add(str(th_id))
+            if still_running:
+                logger.warning(
+                    "New VSCodeServer clearing a registry with %d live "
+                    "task(s); their rows are exempt from the orphan "
+                    "sweep: %s",
+                    len(still_running),
+                    ", ".join(sorted(still_running)),
+                )
+            _RunningAgentState.running_agent_states.clear()
         # Sweep up "Agent Failed Abruptly" rows left behind by a prior
         # process that was killed mid-task (SIGKILL / VS Code reload /
         # OOM) — the Python ``finally`` in ``_TaskRunnerMixin`` cannot
         # run when the host process dies, so the only way to clear
         # the sentinel from those rows is here, on every fresh
-        # server boot.  At this point ``running_agent_states`` has
-        # just been cleared so no task in THIS process is active, and
-        # we pass an empty active set.
+        # server boot.  Rows owned by worker threads that are still
+        # alive in THIS process (collected above) are excluded.
         try:
-            _recover_orphaned_tasks(set())
+            _recover_orphaned_tasks(still_running)
         except Exception:  # pragma: no cover — best-effort sweep
             logger.exception(
                 "orphan-task recovery sweep failed; continuing startup",
@@ -943,7 +971,7 @@ class VSCodeServer(
 
             {
                 "type": "taskDeleted",
-                "taskId": <int>,
+                "taskId": <str>,
                 "chatId": <str>,
                 "chatHasMoreTasks": <bool>,
             }
@@ -1136,8 +1164,10 @@ class VSCodeServer(
         # set so a stale viewer never receives events.  Per-task state
         # (recordings, persist_agents, offsets) is owned by the agent
         # thread and cleaned up by :meth:`_TaskRunnerMixin` /
-        # :meth:`ChatSorcarAgent.run`.
-        self.printer.cleanup_tab(tab_id)
+        # :meth:`ChatSorcarAgent.run`.  Use the getattr-guarded helper
+        # (like every sibling cleanup path) so duck-typed printers
+        # without ``cleanup_tab`` survive tab close too.
+        self._printer_cleanup_tab(tab_id)
         # A disposed tab no longer views any chat: drop it from the
         # chat-viewer map so future tasks on that chat do not fan
         # events out to a tab that no longer exists.

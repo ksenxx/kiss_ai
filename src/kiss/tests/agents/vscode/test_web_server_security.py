@@ -466,8 +466,9 @@ class TestH4AuthRateLimit(IsolatedAsyncioTestCase):
         ancient = time.monotonic() - (ws_mod._AUTH_FAIL_WINDOW + 10)
         self.server._auth_failures[ip] = [ancient] * (ws_mod._AUTH_FAIL_MAX + 5)
         self.assertFalse(self.server._is_auth_locked(ip))
-        # The pruning side-effect drops them.
-        self.assertEqual(self.server._auth_failures[ip], [])
+        # The pruning side-effect removes the whole entry (a leftover
+        # empty list would leak one dict entry per attacker IP forever).
+        self.assertNotIn(ip, self.server._auth_failures)
 
 
 # ---------------------------------------------------------------------------
