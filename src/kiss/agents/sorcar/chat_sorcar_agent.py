@@ -27,6 +27,7 @@ from kiss.agents.sorcar.persistence import (
     _allocate_chat_id,
     _append_chat_event,
     _load_chat_context,
+    _load_task_chain_context,
     _record_frequent_task,
     _save_task_extra,
     _save_task_result,
@@ -97,6 +98,12 @@ class ChatSorcarAgent(SorcarAgent):
     def __init__(self, name: str) -> None:
         super().__init__(name)
         self._chat_id: str = ""
+        # When non-empty, the NEXT ``build_chat_prompt`` call builds
+        # its "previous tasks" context by traversing this task's
+        # ``parent_task_id`` chain instead of loading the whole chat
+        # (see :meth:`resume_from_task_id`).  One-shot: consumed (and
+        # cleared) by the first ``build_chat_prompt`` after it is set.
+        self._context_task_id: str = ""
         self._subagent_info: dict[str, object] | None = None
         self._last_task_id: str | None = None
         self._last_user_prompt: str = ""
@@ -123,6 +130,25 @@ class ChatSorcarAgent(SorcarAgent):
         """
         if chat_id:
             self._chat_id = chat_id
+
+    def resume_from_task_id(self, task_id: str) -> None:
+        """Seed the next prompt's context from a task's parent chain.
+
+        Called when the tab that owns this agent was opened by a
+        specific task id (history click / ``resumeSession`` with
+        ``taskId``) and no task has been run in the tab since: the
+        first :meth:`build_chat_prompt` after this call traverses the
+        ``parent_task_id`` links starting at *task_id* (via
+        :func:`_load_task_chain_context`) instead of loading the whole
+        chat.  The seed is one-shot — subsequent prompts fall back to
+        the normal chat-context path.
+
+        Args:
+            task_id: The ``task_history.id`` the tab was opened with.
+                Empty strings are ignored.
+        """
+        if task_id:
+            self._context_task_id = task_id
 
     def _register_running_state(self) -> bool:
         """Publish ``self`` in :attr:`_RunningAgentState.running_agent_states` for this chat.
@@ -237,7 +263,16 @@ class ChatSorcarAgent(SorcarAgent):
             The augmented prompt with chat history prepended, or the
             original prompt if no prior context exists.
         """
-        chat_context = _load_chat_context(self._chat_id)
+        chat_context: list[dict[str, object]] = []
+        if self._context_task_id:
+            # Tab opened by a task id and no task run since: build the
+            # context from the opened task's parent chain (oldest
+            # ancestor first).  One-shot — clear the seed so follow-up
+            # tasks in the same chat use the normal chat context.
+            chat_context = _load_task_chain_context(self._context_task_id)
+            self._context_task_id = ""
+        if not chat_context:
+            chat_context = _load_chat_context(self._chat_id)
         if not chat_context:
             return "# Task\n" + prompt
         parts = ["## Previous tasks and results from the chat session for reference\n"]

@@ -148,6 +148,10 @@ ______________________________________________________________________
 
   - `chat_id`: String chat session identifier to resume.
 
+- **resume_from_task_id** — Seed the next prompt's context from a task's parent chain. Called when the tab that owns this agent was opened by a specific task id (history click / `resumeSession` with `taskId`) and no task has been run in the tab since: the first :meth:`build_chat_prompt` after this call traverses the `parent_task_id` links starting at *task_id* (via :func:`_load_task_chain_context`) instead of loading the whole chat. The seed is one-shot — subsequent prompts fall back to the normal chat-context path.<br/>`resume_from_task_id(task_id: str) -> None`
+
+  - `task_id`: The `task_history.id` the tab was opened with. Empty strings are ignored.
+
 - **build_chat_prompt** — Load chat context and augment prompt with previous tasks/results.<br/>`build_chat_prompt(prompt: str) -> str`
 
   - `prompt`: The original task prompt.
