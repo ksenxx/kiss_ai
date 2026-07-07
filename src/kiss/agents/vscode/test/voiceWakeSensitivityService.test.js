@@ -13,13 +13,11 @@
 // The spoken phrase "hey there Sorcar" decodes to "[unk] sore car"
 // (alias at the END of the utterance, measured live):
 //
-//   1. start(85): high sensitivity accepts a trailing alias -> the
-//      service must report a WAKE (fails before the feature: start()
-//      takes no sensitivity and never passes --sensitivity, so the
-//      strict default rejects the audio).
-//   2. start() with no sensitivity: the default (70) keeps strict
-//      whole-utterance matching -> the same audio must NOT wake; the
-//      listener drains the WAV and exits.
+//   1. start(50): low sensitivity keeps strict whole-utterance
+//      matching -> the audio must NOT wake (fails if start() never
+//      passes --sensitivity, because the eager default would wake).
+//   2. start() with no sensitivity: the default (85) accepts a
+//      trailing alias -> the same audio must WAKE the listener.
 //
 // Run directly with ``node test/voiceWakeSensitivityService.test.js``
 // after ``npm run compile``.
@@ -136,35 +134,38 @@ function runService(sensitivity) {
 async function main() {
   let failed = 0;
 
-  // 1. High sensitivity: the service passes --sensitivity 85 and the
-  //    trailing-alias audio wakes the listener.
-  const eager = await runService(85);
-  try {
-    assert.ok(
-      eager.wakes.length >= 1,
-      'start(85) must pass --sensitivity 85 so "hey there Sorcar" ' +
-        `wakes; states=${JSON.stringify(eager.states)}`,
-    );
-    console.log('  \u2713 start(85) wakes on a trailing alias (real voice)');
-  } catch (e) {
-    failed++;
-    console.log(`  \u2717 ${e.message}`);
-  }
-
-  // 2. Default sensitivity: the same audio must not wake.
-  const strict = await runService(undefined);
+  // 1. Low sensitivity: the service passes --sensitivity 50 and the
+  //    trailing-alias audio stays rejected (the eager default of 85
+  //    would wake, so this proves --sensitivity forwarding).
+  const strict = await runService(50);
   try {
     assert.strictEqual(
       strict.wakes.length,
       0,
-      'the default sensitivity must reject a trailing alias; ' +
-        `states=${JSON.stringify(strict.states)}`,
+      'start(50) must pass --sensitivity 50 so a trailing alias is ' +
+        `rejected; states=${JSON.stringify(strict.states)}`,
     );
     assert.ok(
       strict.states.some(s => s.listening === true),
       'READY must surface as onState(true)',
     );
-    console.log('  \u2713 default start() stays strict (real voice)');
+    console.log('  \u2713 start(50) stays strict (real voice)');
+  } catch (e) {
+    failed++;
+    console.log(`  \u2717 ${e.message}`);
+  }
+
+  // 2. Default sensitivity (85): the same audio must wake.
+  const eager = await runService(undefined);
+  try {
+    assert.ok(
+      eager.wakes.length >= 1,
+      'the default sensitivity (85) must accept "hey there Sorcar"; ' +
+        `states=${JSON.stringify(eager.states)}`,
+    );
+    console.log(
+      '  \u2713 default start() wakes on a trailing alias (real voice)',
+    );
   } catch (e) {
     failed++;
     console.log(`  \u2717 ${e.message}`);
