@@ -198,9 +198,8 @@ ______________________________________________________________________
   update is being installed. (3035)
 - `install.sh` MUST ask for the `remote_password` if it is not set, before
   running `kiss_web`. (1034, 1035)
-- `install.sh` MUST install the Claude skills before building the VS Code
-  extension and MUST delete `src/kiss/agents/claude_skills` once the extension
-  has been built. (676)
+- `install.sh` MUST NOT refer to the Claude skills; downloading and bundling
+  the skills is owned by `release.sh` and `scripts/build-extension.sh`. (676)
 - `release.sh` MUST update the version number in `src/kiss/SYSTEM.md`,
   `README.md`, and every other file that uses the version number; the version
   number MUST have the format `yyyy.mm.minor`. (90, 91, 1176)
