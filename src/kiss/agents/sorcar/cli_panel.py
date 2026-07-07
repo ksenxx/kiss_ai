@@ -35,13 +35,13 @@ PROMPT_MARKER = "› "
 # chords (Alt+Enter / Shift+Enter insert a newline instead of
 # submitting).
 IDLE_TITLE = (
-    " sorcar · type a task, Enter to submit · "
-    "TAB for autocomplete · Alt+Enter/Shift+Enter for newline · "
+    "KISS Sorcar · type a task, Enter to submit · "
+    "Tab to autocomplete · Alt+Enter/Shift+Enter for newline · "
     "Ctrl+D to exit "
 )
 STEER_TITLE = (
-    " steer · Enter to queue · "
-    "TAB for autocomplete · Alt+Enter/Shift+Enter for newline · "
+    " Dynamic steer, type a text, Enter to steer . "
+    "Tab to autocomplete · Alt+Enter/Shift+Enter for newline · "
     "Ctrl+C to abort "
 )
 # Dim placeholder shown in the panel body when the edit buffer is empty.
