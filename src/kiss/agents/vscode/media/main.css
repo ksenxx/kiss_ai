@@ -1008,6 +1008,25 @@ body.remote-chat #welcome-config { display: none !important; }
   color: color-mix(in srgb, var(--fg) 50%, transparent);
 }
 
+/* "Listening ..." overlay: blinks in large type over the task input
+   while the mic button flashes red (wake word heard, speech being
+   captured).  voice.js toggles the 'listening' class on
+   #input-text-wrap; the overlay never intercepts clicks/typing. */
+#listening-overlay {
+  display: none; position: absolute; inset: 0; z-index: 5;
+  pointer-events: none; align-items: center; justify-content: flex-start;
+  font-family: inherit; font-size: calc(var(--fs-base) * 1.8);
+  font-weight: 700; color: var(--accent);
+  padding: 2px 18px 2px 2px;
+  animation: kiss-listening-blink 1s step-start infinite;
+}
+
+#input-text-wrap.listening #listening-overlay { display: flex; }
+
+@keyframes kiss-listening-blink {
+  50% { opacity: 0; }
+}
+
 
 
 /* Disabled state for textarea while agent is running or merge is active */

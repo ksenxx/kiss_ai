@@ -372,8 +372,10 @@ export function buildChatHtml(
     // media-src data: lets the webview play the GPT-synthesized talk
     // audio (a base64 MP3 data: URI shipped inside the 'talk' event by
     // speech_synthesis.py); without it the webview silently fell back
-    // to the robotic Web Speech API voice.
-    ` media-src data:;` +
+    // to the robotic Web Speech API voice.  The webview resource
+    // origin is also allowed so voice.js can play the bundled
+    // "Working on it" ack clip (media/working-on-it.mp3).
+    ` media-src data: ${webview.cspSource};` +
     ` form-action 'none'; frame-src 'none'; object-src 'none'; base-uri 'none';">`;
 
   const placeholder =
@@ -409,7 +411,12 @@ export function buildChatHtml(
     // getUserMedia), so voice.js runs in "webview" mode: the extension
     // host owns the local wake-word listener and forwards wake events.
     VOICE_SRC: u('voice.js'),
-    VOICE_CONFIG: '{"mode": "webview"}',
+    // ackAudioUrl: GPT-synthesized "Working on it." clip voice.js
+    // plays after submitting a voice-dictated task.
+    VOICE_CONFIG: JSON.stringify({
+      mode: 'webview',
+      ackAudioUrl: u('working-on-it.mp3'),
+    }),
   };
 
   let html = tpl;
