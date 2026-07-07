@@ -4054,6 +4054,81 @@
   // (one per subscribed viewer tab) is suppressed.  See case 'talk'.
   const spokenTalkIds = new Set();
 
+  /**
+   * Read *talkText* aloud with the browser's Web Speech API using the
+   * most natural available system voice — the fallback path of the
+   * agent ``talk`` tool, used when the event carries no
+   * GPT-synthesized audio or its playback is unavailable/blocked.
+   */
+  function speakWithSystemVoice(ev, talkText) {
+    try {
+      const synth = window.speechSynthesis;
+      const Utterance = window.SpeechSynthesisUtterance;
+      if (!synth || typeof Utterance !== 'function') return;
+      // iOS leaves the synthesizer stuck paused after the page is
+      // backgrounded mid-speech; a paused queue swallows every
+      // new utterance.  resume() is a no-op when not paused.
+      if (typeof synth.resume === 'function') synth.resume();
+      // Natural, emotive delivery instead of a flat robotic read:
+      //  * strip markdown/emoji artifacts the engine would read
+      //    aloud;
+      //  * split into sentences so the engine breathes at
+      //    sentence boundaries;
+      //  * shape each sentence's rate/pitch from the agent's
+      //    emotion (or a vibe inferred from the wording) plus the
+      //    sentence's own punctuation.
+      const cleaned = cleanSpeechText(talkText);
+      if (!cleaned) return;
+      const emotion = isKnownEmotion(ev.emotion)
+        ? ev.emotion
+        : inferEmotion(cleaned);
+      // Prefer a natural (neural) system voice over the often
+      // robotic browser default so the agent sounds human-like.
+      const voice = pickNaturalVoice(synth, ev.language);
+      const sentences = splitSpeechSentences(cleaned);
+      for (let i = 0; i < sentences.length; i++) {
+        const utter = new Utterance(sentences[i]);
+        if (ev.language) utter.lang = ev.language;
+        if (voice) utter.voice = voice;
+        const prosody = sentenceProsody(sentences[i], emotion, i);
+        utter.rate = prosody.rate;
+        utter.pitch = prosody.pitch;
+        synth.speak(utter);
+      }
+    } catch (_e) {
+      // Speech synthesis unsupported or blocked — audio is
+      // best-effort and must never break event handling.
+    }
+  }
+
+  /**
+   * Play GPT-synthesized ``talk`` audio (base64 MP3 in ``ev.audioB64``,
+   * produced server-side by speech_synthesis.py) on this device's
+   * default speaker.  Returns true when playback was handed to an
+   * Audio element — a rejected ``play()`` (e.g. an autoplay policy
+   * block) falls back to the Web Speech API asynchronously — and
+   * false when the Audio API is unavailable so the caller falls back
+   * immediately.
+   */
+  function playTalkAudio(ev) {
+    try {
+      if (typeof window.Audio !== 'function') return false;
+      const mime = ev.audioMime || 'audio/mpeg';
+      const player = new window.Audio(
+        'data:' + mime + ';base64,' + ev.audioB64,
+      );
+      const played = player.play();
+      if (played && typeof played.catch === 'function') {
+        played.catch(() => {
+          speakWithSystemVoice(ev, ev.text || '');
+        });
+      }
+      return true;
+    } catch (_e) {
+      return false;
+    }
+  }
+
   // Voice-name markers of high-quality (neural) system voices, most
   // natural first.  Modern OS / browser voices whose names carry one
   // of these markers use neural TTS and sound far more human than the
@@ -4488,44 +4563,11 @@
             }
           }
         }
-        try {
-          const synth = window.speechSynthesis;
-          const Utterance = window.SpeechSynthesisUtterance;
-          if (!synth || typeof Utterance !== 'function') break;
-          // iOS leaves the synthesizer stuck paused after the page is
-          // backgrounded mid-speech; a paused queue swallows every
-          // new utterance.  resume() is a no-op when not paused.
-          if (typeof synth.resume === 'function') synth.resume();
-          // Natural, emotive delivery instead of a flat robotic read:
-          //  * strip markdown/emoji artifacts the engine would read
-          //    aloud;
-          //  * split into sentences so the engine breathes at
-          //    sentence boundaries;
-          //  * shape each sentence's rate/pitch from the agent's
-          //    emotion (or a vibe inferred from the wording) plus the
-          //    sentence's own punctuation.
-          const cleaned = cleanSpeechText(talkText);
-          if (!cleaned) break;
-          const emotion = isKnownEmotion(ev.emotion)
-            ? ev.emotion
-            : inferEmotion(cleaned);
-          // Prefer a natural (neural) system voice over the often
-          // robotic browser default so the agent sounds human-like.
-          const voice = pickNaturalVoice(synth, ev.language);
-          const sentences = splitSpeechSentences(cleaned);
-          for (let i = 0; i < sentences.length; i++) {
-            const utter = new Utterance(sentences[i]);
-            if (ev.language) utter.lang = ev.language;
-            if (voice) utter.voice = voice;
-            const prosody = sentenceProsody(sentences[i], emotion, i);
-            utter.rate = prosody.rate;
-            utter.pitch = prosody.pitch;
-            synth.speak(utter);
-          }
-        } catch (_e) {
-          // Speech synthesis unsupported or blocked — audio is
-          // best-effort and must never break event handling.
-        }
+        // Prefer the agent-synthesized natural voice (a GPT audio
+        // model — see speech_synthesis.py) when the event carries
+        // audio; otherwise read the text with the Web Speech API.
+        if (ev.audioB64 && playTalkAudio(ev)) break;
+        speakWithSystemVoice(ev, talkText);
         break;
       }
       case 'error':
