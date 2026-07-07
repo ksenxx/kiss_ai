@@ -416,13 +416,27 @@ class SorcarAgent(RelentlessAgent):
             # viewer tab and delivers every copy to every connected
             # client; clients dedupe by talkId so each device speaks
             # the utterance exactly once (never twice).
-            broadcast({
+            payload: dict[str, Any] = {
                 "type": "talk",
                 "language": language,
                 "text": text,
                 "emotion": emotion,
                 "talkId": uuid.uuid4().hex,
-            })
+            }
+            # Synthesize a far more natural voice server-side with a
+            # GPT audio model (gpt-audio-mini) and ship the MP3 inside
+            # the event; clients play it directly and only fall back
+            # to the robotic Web Speech API when synthesis failed or
+            # audio playback is unavailable/blocked on the device.
+            try:
+                from kiss.agents.vscode.speech_synthesis import synthesize_talk_audio
+
+                synthesized = synthesize_talk_audio(text, language, emotion)
+            except Exception:
+                synthesized = None
+            if synthesized:
+                payload["audioB64"], payload["audioMime"] = synthesized
+            broadcast(payload)
             return f"Spoke to the user in language {language!r}."
 
         if self.docker_manager:
