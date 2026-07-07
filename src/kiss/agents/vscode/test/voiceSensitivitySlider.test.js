@@ -6,7 +6,7 @@
 // End-to-end tests for the wake-word sensitivity slider.
 //
 // The settings panel gains a range input (#cfg-voice-sensitivity,
-// 0..100, default 70) that must ACTUALLY change how eagerly the
+// 0..100, default 85) that must ACTUALLY change how eagerly the
 // "Sorcar" wake word fires:
 //
 // - Browser mode (remote webapp): media/voice.js applies the value
@@ -65,8 +65,8 @@ const PAGE_HTML =
   '<div id="settings-panel"><label class="config-label">' +
   'Wake word sensitivity' +
   '<input type="range" id="cfg-voice-sensitivity" min="0" max="100"' +
-  ' step="5" value="70">' +
-  '<span id="cfg-voice-sensitivity-value">70</span>' +
+  ' step="5" value="85">' +
+  '<span id="cfg-voice-sensitivity-value">85</span>' +
   '</label></div>' +
   '</body></html>';
 
@@ -194,10 +194,10 @@ function words(...pairs) {
 }
 
 async function main() {
-  await test('slider defaults to 70 and reflects a stored value', async () => {
+  await test('slider defaults to 85 and reflects a stored value', async () => {
     const fresh = await makeVoice({mode: 'browser'});
-    assert.strictEqual(fresh.slider.value, '70');
-    assert.strictEqual(fresh.label.textContent, '70');
+    assert.strictEqual(fresh.slider.value, '85');
+    assert.strictEqual(fresh.label.textContent, '85');
     const stored = await makeVoice({mode: 'browser', storedSensitivity: '30'});
     assert.strictEqual(stored.slider.value, '30');
     assert.strictEqual(stored.label.textContent, '30');
@@ -205,17 +205,17 @@ async function main() {
       mode: 'browser',
       storedSensitivity: 'garbage',
     });
-    assert.strictEqual(garbage.slider.value, '70');
+    assert.strictEqual(garbage.slider.value, '85');
   });
 
   await test('moving the slider persists and updates the label', async () => {
     const v = await makeVoice({mode: 'browser'});
-    v.setSlider(85);
+    v.setSlider(60);
     assert.strictEqual(
       v.win.localStorage.getItem('kissVoiceSensitivity'),
-      '85',
+      '60',
     );
-    assert.strictEqual(v.label.textContent, '85');
+    assert.strictEqual(v.label.textContent, '60');
   });
 
   await test(
@@ -223,7 +223,7 @@ async function main() {
       'default accepts',
     async () => {
       // "soccer" force-fits onto "sar car" at conf ~0.55 (measured
-      // live).  Default (70): gate 0.24 -> wakes.  Slider 10: gate
+      // live).  Default (85): gate 0.12 -> wakes.  Slider 10: gate
       // 0.72 -> rejected.
       const v = await makeVoice({mode: 'browser'});
       v.recognizer.handlers.result({
@@ -252,7 +252,7 @@ async function main() {
   );
 
   await test(
-    'high sensitivity accepts a trailing alias that the default rejects',
+    'trailing alias: the default accepts what low sensitivity rejects',
     async () => {
       // "hey there Sorcar" decodes to "[unk] sore car" (measured).
       const finalResult = {
@@ -261,11 +261,11 @@ async function main() {
           result: words(['[unk]', 1.0], ['sore', 0.5], ['car', 0.5]),
         },
       };
-      const v = await makeVoice({mode: 'browser'});
+      const v = await makeVoice({mode: 'browser', storedSensitivity: '50'});
       v.recognizer.handlers.result(finalResult);
       assert.ok(
         !v.btn.classList.contains('voice-triggered'),
-        'default sensitivity must reject an alias in [unk] context',
+        'sensitivity 50 must reject an alias in [unk] context',
       );
       // Move the slider live: the SAME result must now wake.
       v.setSlider(85);
@@ -273,6 +273,13 @@ async function main() {
       assert.ok(
         v.btn.classList.contains('voice-triggered'),
         'sensitivity 85 must accept a trailing alias',
+      );
+      // A fresh default (85) accepts trailing aliases out of the box.
+      const fresh = await makeVoice({mode: 'browser'});
+      fresh.recognizer.handlers.result(finalResult);
+      assert.ok(
+        fresh.btn.classList.contains('voice-triggered'),
+        'the default sensitivity (85) must accept a trailing alias',
       );
     },
   );
