@@ -162,17 +162,58 @@
   let processorNode = null;
   let voskLoadPromise = null;
 
-  function setUi(state, message) {
-    // state: 'off' | 'loading' | 'listening' | 'error'
-    btn.classList.remove(
+  // The ask-user modal (main.js) carries its own mic button
+  // (.ask-user-mic, one per tab, mounted into the modal slot).  Every
+  // UI state and flash applied to the main #voice-btn is mirrored onto
+  // those buttons; the last applied values are remembered so a mic
+  // mounted later (the 'kiss-ask-mic-mounted' event) starts in sync.
+  let lastUiState = 'off';
+  let lastUiTip = "Voice trigger: listen for the word 'Sorcar'";
+  let lastFlashCls = null;
+
+  /** Every ask-user mic button currently in the document. */
+  function askMicButtons() {
+    return document.querySelectorAll('.ask-user-mic');
+  }
+
+  /** Apply the remembered UI state classes/tooltip to one mic button. */
+  function applyUiClasses(el) {
+    el.classList.remove(
       'voice-off',
       'voice-loading',
       'voice-listening',
       'voice-error',
       'active',
     );
-    btn.classList.add('voice-' + state);
-    if (state === 'listening') btn.classList.add('active');
+    el.classList.add('voice-' + lastUiState);
+    if (lastUiState === 'listening') el.classList.add('active');
+    el.setAttribute('data-tooltip', lastUiTip);
+  }
+
+  /** Apply the remembered flash class (or clear both) on one button. */
+  function applyFlashClasses(el) {
+    el.classList.remove('voice-triggered', 'voice-transcribing');
+    if (lastFlashCls) el.classList.add(lastFlashCls);
+  }
+
+  /** Apply the remembered flash to the main mic and every ask mic. */
+  function applyFlashToAll() {
+    applyFlashClasses(btn);
+    const mics = askMicButtons();
+    for (let i = 0; i < mics.length; i++) applyFlashClasses(mics[i]);
+  }
+
+  /** Bring every ask-user mic in sync with the main mic's live state. */
+  function syncAskMics() {
+    const mics = askMicButtons();
+    for (let i = 0; i < mics.length; i++) {
+      applyUiClasses(mics[i]);
+      applyFlashClasses(mics[i]);
+    }
+  }
+
+  function setUi(state, message) {
+    // state: 'off' | 'loading' | 'listening' | 'error'
     let tip;
     if (state === 'listening') {
       tip =
@@ -185,7 +226,10 @@
     } else {
       tip = "Voice trigger: listen for the word 'Sorcar'";
     }
-    btn.setAttribute('data-tooltip', tip);
+    lastUiState = state;
+    lastUiTip = tip;
+    applyUiClasses(btn);
+    syncAskMics();
   }
 
   function normalize(text) {
@@ -308,13 +352,14 @@
       clearTimeout(flashTimer);
       flashTimer = null;
     }
-    btn.classList.remove('voice-triggered', 'voice-transcribing');
+    lastFlashCls = cls || null;
+    applyFlashToAll();
     showListening(cls === 'voice-triggered');
     if (!cls) return;
-    btn.classList.add(cls);
     flashTimer = setTimeout(() => {
       flashTimer = null;
-      btn.classList.remove(cls);
+      lastFlashCls = null;
+      applyFlashToAll();
       showListening(false);
       // The safety timer firing means the voice state machine stalled:
       // no terminal voiceSpeech arrived for the whole timeout (VS Code
@@ -345,12 +390,28 @@
     if (now - lastWakeAt < COOLDOWN_MS) return false;
     lastWakeAt = now;
     try {
-      inp.focus();
+      // While the agent's ask-user question is pending the speech
+      // will answer it, so show the user the answer box instead.
+      (askAnswerInput() || inp).focus();
     } catch (_e) {
       /* focus can fail in background documents; ignore */
     }
     flash('voice-triggered', 45000);
     return true;
+  }
+
+  /**
+   * The ask-user modal's answer textarea when the modal is visible
+   * (the agent is waiting for the user's answer), else null.  main.js
+   * shows the modal with an inline ``display: flex`` and hides it
+   * with ``display: none``.
+   */
+  function askAnswerInput() {
+    const modal = document.getElementById('ask-user-modal');
+    if (!modal || !modal.style.display || modal.style.display === 'none') {
+      return null;
+    }
+    return modal.querySelector('.ask-user-input');
   }
 
   /**
@@ -373,6 +434,11 @@
    * never submits.  The mic-button flash is cleared unless
    * *keepFlash* is true (a newer voice round is still in flight and
    * owns the indicator).
+   *
+   * When the ask-user modal is visible (the agent is waiting for the
+   * user's answer) the speech is instead routed into the modal's
+   * answer box and a ``kiss-voice-answer`` event asks main.js to
+   * submit it as the ``userAnswer`` — never as a new task.
    */
   function insertSpeech(text, keepFlash, speaker, language) {
     if (!keepFlash) flash(null);
@@ -393,6 +459,26 @@
           ' that: ' +
           translated
         : 'Speaker #' + speaker + ' says that: ' + translated;
+    }
+    // A visible ask-user question routes the speech into the modal's
+    // answer box instead of the task input: the spoken text is the
+    // user's ANSWER to the agent's question.  'kiss-voice-answer'
+    // asks main.js to submit it exactly like a click on the modal's
+    // Submit button (a ``userAnswer`` message, never a new task).
+    const askInp = askAnswerInput();
+    if (askInp) {
+      askInp.value = askInp.value
+        ? askInp.value + ' ' + translated
+        : translated;
+      askInp.dispatchEvent(new Event('input', {bubbles: true}));
+      try {
+        askInp.focus();
+      } catch (_e) {
+        /* focus can fail in background documents; ignore */
+      }
+      window.dispatchEvent(new CustomEvent('kiss-voice-answer'));
+      speakWorkingOnIt();
+      return;
     }
     if (!inp.value) {
       inp.value = translated;
@@ -960,6 +1046,21 @@
 
   btn.addEventListener('click', () => {
     setEnabled(!enabled);
+  });
+
+  // The ask-user modal's mic buttons (one per tab, created by main.js)
+  // toggle the same wake-word listener as the main mic.  Delegated:
+  // the buttons are (re)created and (re)mounted per question/tab.
+  document.addEventListener('click', event => {
+    const t = event.target;
+    const mic = t && t.closest ? t.closest('.ask-user-mic') : null;
+    if (mic) setEnabled(!enabled);
+  });
+
+  // main.js announces every freshly mounted ask-user mic so it starts
+  // with the main mic's live state/flash classes.
+  window.addEventListener('kiss-ask-mic-mounted', () => {
+    syncAskMics();
   });
 
   window.addEventListener('message', event => {
