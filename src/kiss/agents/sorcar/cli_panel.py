@@ -208,6 +208,61 @@ def clip_buf(buf: str, cols: int) -> str:
     return shown[idx:]
 
 
+def visible_line_window(
+    line: str, cols: int, cursor: int,
+) -> tuple[str, int]:
+    """Return the visible slice of one buffer line keeping *cursor* shown.
+
+    Like :func:`clip_buf` this fits a single buffer line into the room
+    left after the chevron, but instead of always showing the tail it
+    horizontally scrolls the window so the character position *cursor*
+    (an index into *line*, ``0..len(line)``) stays visible: the text
+    before the cursor is tail-clipped so the caret can never fall off
+    the left edge, then the leftover width is filled with the
+    characters after the cursor.  With the cursor at the end of the
+    line this reduces exactly to :func:`clip_buf`'s tail behaviour.
+
+    Args:
+        line: One buffer line (no embedded newlines).
+        cols: Total panel width in columns.
+        cursor: Character index of the caret within *line*; clamped to
+            ``0..len(line)``.
+
+    Returns:
+        A ``(shown, caret_width)`` tuple where *shown* is the visible
+        slice (control characters already sanitised the same way
+        :func:`clip_buf` does) and *caret_width* is the display width
+        of the visible text before the caret — i.e. the caret's column
+        offset from the start of the body text.
+    """
+    # Tabs render as a space; the mapping is 1:1 per character so
+    # cursor offsets into *line* stay aligned with *shown*.
+    shown = line.replace("\n", "⏎").replace("\t", " ")
+    inner_w = cols - 4  # room between "│ " and " │"
+    avail = inner_w - display_width(PROMPT_MARKER)
+    cursor = max(0, min(cursor, len(shown)))
+    if display_width(shown) <= avail:
+        return shown, display_width(shown[:cursor])
+    # Tail-clip the text before the cursor so the caret is always in
+    # view, then fill the remaining width with the text after it.
+    w = 0
+    start = cursor
+    for k in range(cursor - 1, -1, -1):
+        cw = char_width(shown[k])
+        if w + cw > avail:
+            break
+        w += cw
+        start = k
+    end = cursor
+    while end < len(shown):
+        cw = char_width(shown[end])
+        if w + cw > avail:
+            break
+        w += cw
+        end += 1
+    return shown[start:end], display_width(shown[start:cursor])
+
+
 # Continuation indent shown on every body row past the first when the
 # edit buffer contains embedded newlines (Shift+Enter inserts a real
 # ``\n``).  Two spaces aligns continuation text under the ``› `` chevron
@@ -225,7 +280,11 @@ MIN_BODY_ROWS = 3
 
 
 def panel_body(
-    buf: str, cols: int, *, min_rows: int = MIN_BODY_ROWS,
+    buf: str,
+    cols: int,
+    *,
+    min_rows: int = MIN_BODY_ROWS,
+    cursor: int | None = None,
 ) -> tuple[list[str], bool]:
     """Return the body row(s) for *buf*, one entry per buffer line.
 
@@ -255,6 +314,12 @@ def panel_body(
         min_rows: Minimum number of body rows to return.  Defaults to
             :data:`MIN_BODY_ROWS`; callers that want the legacy
             single-row behaviour can pass ``min_rows=1``.
+        cursor: Optional caret index into *buf* (``0..len(buf)``).
+            The row containing the cursor is clipped with
+            :func:`visible_line_window` so the caret stays visible
+            even when the cursor sits in the scrolled-off head of a
+            long line; ``None`` keeps the legacy tail-clip on every
+            row (caret at the end of the buffer).
 
     Returns:
         A ``(rows, is_placeholder)`` tuple where *rows* is a list of
@@ -271,14 +336,25 @@ def panel_body(
         is_placeholder = True
     else:
         lines = buf.split("\n")
+        cur_line = -1
+        cur_off = 0
+        if cursor is not None:
+            cursor = max(0, min(cursor, len(buf)))
+            cur_line = buf.count("\n", 0, cursor)
+            cur_off = cursor - (buf.rfind("\n", 0, cursor) + 1)
         rows = []
         for i, line in enumerate(lines):
             prefix = PROMPT_MARKER if i == 0 else _CONT_INDENT
-            # ``clip_buf`` tail-clips a single buffer line so a long
-            # line always shows the caret end.  After splitting on
+            # The cursor's row scrolls horizontally to keep the caret
+            # in view; every other row tail-clips via ``clip_buf`` so
+            # a long line always shows its end.  After splitting on
             # ``\n`` the ``\n`` → ``⏎`` substitution in ``clip_buf``
             # never fires.
-            rows.append(_clip_pad(prefix + clip_buf(line, cols), inner_w))
+            if i == cur_line:
+                shown, _ = visible_line_window(line, cols, cur_off)
+            else:
+                shown = clip_buf(line, cols)
+            rows.append(_clip_pad(prefix + shown, inner_w))
     blank = " " * inner_w
     while len(rows) < max(min_rows, 1):
         rows.append(blank)
@@ -327,7 +403,9 @@ def menu_row(text: str, selected: bool, cols: int) -> str:
     return f"{CYAN}│{RESET} {inner} {CYAN}│{RESET}"
 
 
-def body_cursor_col(buf: str, cols: int) -> tuple[int, int]:
+def body_cursor_col(
+    buf: str, cols: int, cursor: int | None = None,
+) -> tuple[int, int]:
     """Return the ``(row, col)`` body-grid position for the blinking caret.
 
     The caret sits right after the chevron (or the continuation indent
@@ -343,21 +421,29 @@ def body_cursor_col(buf: str, cols: int) -> tuple[int, int]:
     Args:
         buf: The current edit buffer.
         cols: Total panel width in columns.
+        cursor: Optional caret index into *buf* (``0..len(buf)``,
+            clamped).  ``None`` — the legacy behaviour — places the
+            caret after the end of the buffer's last line.
 
     Returns:
         A ``(row, col)`` tuple where *row* is the 0-based body-row
         index of the caret (``0`` for a single-line buffer or an
-        empty buffer showing the placeholder, ``buf.count('\\n')`` for
-        a multi-line buffer) and *col* is the 1-based terminal column
-        at which to park the blinking cursor.
+        empty buffer showing the placeholder) and *col* is the
+        1-based terminal column at which to park the blinking cursor.
     """
     if not buf:
         return 0, 3 + display_width(PROMPT_MARKER)
-    lines = buf.split("\n")
-    last = lines[-1]
+    cursor = len(buf) if cursor is None else max(0, min(cursor, len(buf)))
+    row = buf.count("\n", 0, cursor)
+    line_start = buf.rfind("\n", 0, cursor) + 1
+    line_end = buf.find("\n", cursor)
+    if line_end < 0:
+        line_end = len(buf)
     # The continuation indent is exactly as wide as the chevron, so
-    # ``clip_buf`` (which subtracts the chevron's width from the
-    # available room) reports the right visible-tail width for both
+    # ``visible_line_window`` (which subtracts the chevron's width
+    # from the available room) reports the right caret offset for both
     # the first row and any continuation row.
-    shown = clip_buf(last, cols)
-    return len(lines) - 1, 3 + display_width(PROMPT_MARKER) + display_width(shown)
+    _, caret_w = visible_line_window(
+        buf[line_start:line_end], cols, cursor - line_start,
+    )
+    return row, 3 + display_width(PROMPT_MARKER) + caret_w
