@@ -75,7 +75,8 @@ git ls-files src/kiss/ | while IFS= read -r f; do
     cp "$f" "$DEST/$f"
 done
 
-# Copy Claude Code skills if present (downloaded by install.sh before build)
+# Copy Claude Code skills if present (downloaded by release.sh /
+# scripts/build-extension.sh before build)
 CLAUDE_SKILLS_SRC="$PROJECT_ROOT/src/kiss/agents/claude_skills"
 if [ -d "$CLAUDE_SKILLS_SRC" ]; then
     cp -R "$CLAUDE_SKILLS_SRC" "$DEST/src/kiss/agents/claude_skills"
