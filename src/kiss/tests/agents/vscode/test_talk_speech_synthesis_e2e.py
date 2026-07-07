@@ -4,7 +4,8 @@
 # add your name here
 """End-to-end tests for GPT-audio speech synthesis of the ``talk`` tool.
 
-Calls the real OpenAI ``gpt-audio-mini`` model (no mocks) and checks
+Calls the real OpenAI default GPT audio model (``gpt-audio-1.5``, no
+mocks) and checks
 that :func:`kiss.agents.vscode.speech_synthesis.synthesize_talk_audio`
 returns base64 MP3 audio whose decoded bytes carry a valid MP3 stream
 header, plus the degradation contract (empty text / bad model → None).
