@@ -17,9 +17,11 @@
  * - ``TRANSCRIBING``  — speech capture ended; the gpt-audio call started.
  * - ``SPEECH <json>`` — the speech that followed the wake word, as a
  *   JSON object ``{"text": <english translation>, "speaker": <int or
- *   null>}``; the speaker number comes from local voice recognition
- *   (each distinct voice gets a unique number starting from 1).
- *   Legacy plain JSON-string payloads are also accepted.
+ *   null>, "language": <language tag or null>}``; the text and the
+ *   spoken language come from a KISS transcription agent, and the
+ *   speaker number comes from local voice recognition (each distinct
+ *   voice gets a unique number starting from 1).  Legacy plain
+ *   JSON-string payloads are also accepted.
  * - ``NO_SPEECH``     — only silence followed the wake word.
  *
  * The service forwards those events to the webview, where voice.js
@@ -42,9 +44,15 @@ export type StateCallback = (listening: boolean, error?: string) => void;
  * the wake word ('' when only silence was heard) plus the speaker
  * number assigned by voice recognition — a unique integer starting
  * from 1 per distinct voice — or undefined when identification was
- * unavailable.
+ * unavailable, plus the language tag of the spoken speech (e.g.
+ * "en", "fr") reported by the transcription agent, or undefined when
+ * the language is unknown.
  */
-export type SpeechCallback = (text: string, speaker?: number) => void;
+export type SpeechCallback = (
+  text: string,
+  speaker?: number,
+  language?: string,
+) => void;
 
 /**
  * Callback invoked when the post-wake capture ends and the gpt-audio
@@ -176,11 +184,13 @@ export class VoiceWakeService {
               typeof payload.text === 'string'
             ) {
               const spk = payload.speaker;
+              const lang = payload.language;
               this._onSpeech(
                 payload.text,
                 typeof spk === 'number' && Number.isInteger(spk) && spk >= 1
                   ? spk
                   : undefined,
+                typeof lang === 'string' && lang ? lang : undefined,
               );
             }
           } catch {
