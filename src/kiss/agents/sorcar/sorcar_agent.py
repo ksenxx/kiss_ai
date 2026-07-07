@@ -424,10 +424,11 @@ class SorcarAgent(RelentlessAgent):
                 "talkId": uuid.uuid4().hex,
             }
             # Synthesize a far more natural voice server-side with a
-            # GPT audio model (gpt-audio-mini) and ship the MP3 inside
-            # the event; clients play it directly and only fall back
-            # to the robotic Web Speech API when synthesis failed or
-            # audio playback is unavailable/blocked on the device.
+            # GPT audio model (gpt-audio-1.5) and ship the MP3 inside
+            # the event; every interface (VS Code webview, browser tab,
+            # iOS webapp) plays it directly and only falls back to the
+            # robotic Web Speech API when synthesis failed or audio
+            # playback is unavailable/blocked on the device.
             try:
                 from kiss.agents.vscode.speech_synthesis import synthesize_talk_audio
 

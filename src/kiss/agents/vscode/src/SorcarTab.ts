@@ -369,6 +369,11 @@ export function buildChatHtml(
     ` script-src 'nonce-${nonce}';` +
     ` img-src ${webview.cspSource} data: https:;` +
     ` font-src ${webview.cspSource};` +
+    // media-src data: lets the webview play the GPT-synthesized talk
+    // audio (a base64 MP3 data: URI shipped inside the 'talk' event by
+    // speech_synthesis.py); without it the webview silently fell back
+    // to the robotic Web Speech API voice.
+    ` media-src data:;` +
     ` form-action 'none'; frame-src 'none'; object-src 'none'; base-uri 'none';">`;
 
   const placeholder =
