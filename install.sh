@@ -23,10 +23,10 @@
 # ``runUpdate()`` in ``SorcarSidebarView.ts``.  That method opens a VS Code
 # integrated terminal and ``terminal.sendText``s a compound command ending in
 # ``bash '/Users/ksen/kiss_ai/install.sh'``.  The install ran through Xcode
-# CLT, Homebrew, git, node, VS Code CLI and Claude-skill download, then died
+# CLT, Homebrew, git, node and VS Code CLI, then died
 # right in the middle of the TypeScript compile::
 #
-#     >>> [5/6] Building VS Code extension...
+#     >>> [4/5] Building VS Code extension...
 #        Compiling extension TypeScript...
 #
 #     > kiss-sorcar@2026.6.38 compile
@@ -55,8 +55,7 @@
 #    and may not respect inherited SIG_IGN — so ``tsc`` (which runs on Node)
 #    can still die on a stray SIGINT, npm returns non-zero, and ``set -e``
 #    aborts install.sh.
-# 3. Many child processes (``bash scripts/fetch-claude-skills.sh``,
-#    ``python3 scripts/check-kiss-web-active-tasks.py``,
+# 3. Many child processes (``python3 scripts/check-kiss-web-active-tasks.py``,
 #    ``"$CODE_CLI" --install-extension``, ``xargs kill``) are NOT wrapped in
 #    ``run_with_heartbeat`` and therefore are NOT protected by the SIG_IGN
 #    subshell at all.
@@ -225,7 +224,7 @@ export PATH="$BIN_DIR:$PATH"
 #
 # A previous regression looked like::
 #
-#     >>> [5/6] Building VS Code extension...
+#     >>> [4/5] Building VS Code extension...
 #     npm warn deprecated prebuild-install@7.1.3: No longer maintained. ...
 #     ^C
 #
@@ -286,7 +285,7 @@ handle_interrupt() {
 # closes (SIGHUP).  This matters when the VS Code "Update" button runs
 # ``install.sh`` in an integrated terminal: VS Code disposes that
 # terminal when the extension is deactivated, which is exactly what
-# ``code --install-extension --force`` triggers inside step [6/6] —
+# ``code --install-extension --force`` triggers inside step [5/5] —
 # VS Code's extension manager detects the on-disk update, deactivates
 # the running extension, and the documented behavior is to "dispose the
 # terminal and exit the underlying process".  Terminal disposal first
@@ -1011,7 +1010,7 @@ exec > >(tee -a "$LOG_FILE") 2>&1
         echo ""
     fi
 
-    echo ">>> [1/6] Checking git..."
+    echo ">>> [1/5] Checking git..."
     if ! command -v git &>/dev/null; then
         install_git
         hash -r
@@ -1052,7 +1051,7 @@ exec > >(tee -a "$LOG_FILE") 2>&1
     fi
     echo ""
 
-    echo ">>> [2/6] Checking Node.js..."
+    echo ">>> [2/5] Checking Node.js..."
     if ! command -v node &>/dev/null || ! command -v npm &>/dev/null || ! command -v npx &>/dev/null; then
         install_node || true
     fi
@@ -1072,7 +1071,7 @@ exec > >(tee -a "$LOG_FILE") 2>&1
     fi
     echo ""
 
-    echo ">>> [3/6] Checking VS Code CLI..."
+    echo ">>> [3/5] Checking VS Code CLI..."
     if ! find_code_cli; then
         install_code_cli || true
         find_code_cli || true
@@ -1092,13 +1091,7 @@ exec > >(tee -a "$LOG_FILE") 2>&1
     fi
     echo ""
 
-    echo ">>> [4/6] Downloading official Claude Code skills..."
-    # Skills are optional content — a network hiccup must not abort the update.
-    bash "$PROJECT_DIR/scripts/fetch-claude-skills.sh" \
-        || echo "   WARNING: Claude skills download failed; continuing."
-    echo ""
-
-    echo ">>> [5/6] Building VS Code extension..."
+    echo ">>> [4/5] Building VS Code extension..."
     VSCODE_EXT_DIR="$PROJECT_DIR/src/kiss/agents/vscode"
     VSIX="$VSCODE_EXT_DIR/kiss-sorcar.vsix"
     cd "$VSCODE_EXT_DIR"
@@ -1111,7 +1104,7 @@ exec > >(tee -a "$LOG_FILE") 2>&1
     #   `prebuild-install || node-gyp rebuild`, which downloads from the
     #   archived atom/node-keytar GitHub releases (or compiles natively) and
     #   can block forever with no output — hanging the Update button's
-    #   install at "[5/6] Building VS Code extension..." right after npm's
+    #   install at "[4/5] Building VS Code extension..." right after npm's
     #   deprecation warnings.  Neither script is needed to compile and
     #   package the VSIX.
     #
@@ -1152,8 +1145,8 @@ exec > >(tee -a "$LOG_FILE") 2>&1
     echo "   Built $VSIX"
     echo ""
 
-    # BEGIN: kiss-step-6-6-terminal-freeze  (tests extract this block verbatim)
-    echo ">>> [6/6] Installing VS Code extension..."
+    # BEGIN: kiss-step-5-5-terminal-freeze  (tests extract this block verbatim)
+    echo ">>> [5/5] Installing VS Code extension..."
     # Heads-up BEFORE the disruptive part of this step.  When install.sh
     # runs inside a VS Code integrated terminal (the Update button, or a
     # user-opened terminal), ``--install-extension --force`` below makes
@@ -1443,14 +1436,14 @@ exec > >(tee -a "$LOG_FILE") 2>&1
     echo "KISS Sorcar runtime setup will finish inside VS Code."
     echo "The extension will install/check uv, Python dependencies, Playwright,"
     echo "cloudflared, shell PATH entries, API keys, remote access auth, and kiss-web."
-    # END: kiss-step-6-6-terminal-freeze
+    # END: kiss-step-5-5-terminal-freeze
 }
 
 echo ""
 echo "Log saved to $LOG_FILE"
 # Only explicitly launch VS Code when it is not already running.  If a window
 # is already open, the extension's watchers on ``out/extension.js`` and
-# ``~/.kiss/.extension-updated`` (both touched in step [6/6]) trigger
+# ``~/.kiss/.extension-updated`` (both touched in step [5/5]) trigger
 # ``workbench.action.reloadWindow`` to pick up the update — launching here too
 # would open a redundant second window.
 if [ -n "${KISS_SKIP_LAUNCH:-}" ]; then

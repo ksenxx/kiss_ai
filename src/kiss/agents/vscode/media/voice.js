@@ -316,6 +316,13 @@
       flashTimer = null;
       btn.classList.remove(cls);
       showListening(false);
+      // The safety timer firing means the voice state machine stalled:
+      // no terminal voiceSpeech arrived for the whole timeout (VS Code
+      // drops postMessage to a hidden webview, a listener can die
+      // mid-round, ...).  Reset the round counter, or the leaked round
+      // would make EVERY later utterance keep the yellow transcribing
+      // flash blinking long after its text was already delivered.
+      outstandingRounds = 0;
     }, timeoutMs);
   }
 
