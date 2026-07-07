@@ -98,7 +98,7 @@ type ToWebviewMessageBody =
   // Voice wake-word events (host-side listener → voice.js)
   | {type: 'voiceWake'}
   | {type: 'voiceTranscribing'}
-  | {type: 'voiceSpeech'; text: string; speaker?: number}
+  | {type: 'voiceSpeech'; text: string; speaker?: number; language?: string}
   | {type: 'voiceState'; listening: boolean; error?: string}
   // Streaming events (same as browser JsonPrinter)
   | {type: 'thinking_start'}

@@ -81,7 +81,7 @@ from kiss.agents.vscode.tips import read_tips
 from kiss.agents.vscode.voice_wake import (
     DEFAULT_MODELS_DIR,
     SpeakerIdentifier,
-    translate_pcm_to_english,
+    transcribe_pcm,
 )
 from kiss.agents.vscode.vscode_config import load_config, source_shell_env
 from kiss.core.config import get_jobs_root
@@ -4412,15 +4412,16 @@ class RemoteAccessServer:
         detector hears "Sorcar" it captures the utterance that follows
         and ships it here as ``{type: 'voiceTranscribe', audio:
         <base64 16kHz mono s16le PCM>}``.  The audio is translated
-        into English by the same :func:`translate_pcm_to_english` call
-        the VS Code extension's local listener uses, the speaker is
-        identified locally (best effort), and the client gets back
-        ``{type: 'voiceSpeech', text, speaker}`` — the exact message
-        voice.js already consumes in webview mode, so the page inserts
-        and submits the dictated task with no extra client logic.  An
-        empty/undecodable audio payload or a failed translation
-        replies with an empty ``text`` so the page can clear its
-        transcribing indicator.
+        into English by the same KISS transcription agent
+        (:func:`transcribe_pcm`) the VS Code extension's local
+        listener uses — which also reports the language that was
+        spoken — the speaker is identified locally (best effort), and
+        the client gets back ``{type: 'voiceSpeech', text, speaker,
+        language}`` — the exact message voice.js already consumes in
+        webview mode, so the page inserts and submits the dictated
+        task with no extra client logic.  An empty/undecodable audio
+        payload or a failed translation replies with an empty ``text``
+        so the page can clear its transcribing indicator.
 
         Args:
             cmd: The parsed ``voiceTranscribe`` command.
@@ -4434,12 +4435,15 @@ class RemoteAccessServer:
             except (binascii.Error, ValueError):
                 logger.warning("voiceTranscribe with undecodable audio")
         text = ""
+        language: str | None = None
         speaker: int | None = None
         if pcm:
             assert self._loop is not None
-            text = await self._loop.run_in_executor(
-                None, translate_pcm_to_english, pcm,
+            result = await self._loop.run_in_executor(
+                None, transcribe_pcm, pcm,
             )
+            text = result["text"]
+            language = result["language"]
             if text:
                 speaker = await self._loop.run_in_executor(
                     None, self._identify_voice_speaker, pcm,
@@ -4447,7 +4451,12 @@ class RemoteAccessServer:
         await self._endpoint_send(
             endpoint,
             json.dumps(
-                {"type": "voiceSpeech", "text": text, "speaker": speaker},
+                {
+                    "type": "voiceSpeech",
+                    "text": text,
+                    "speaker": speaker,
+                    "language": language,
+                },
             ),
         )
 
