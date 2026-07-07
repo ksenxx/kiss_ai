@@ -74,8 +74,25 @@ assert.ok(
   /media-src[^;]*\bdata:/.test(csp),
   `CSP must allow media-src data: for GPT talk audio, got: ${csp}`,
 );
+// The webview resource origin must also be allowed so voice.js can
+// play the bundled "Working on it" ack clip (media/working-on-it.mp3).
+assert.ok(
+  new RegExp(`media-src[^;]*${webview.cspSource}`).test(csp),
+  `CSP must allow media-src ${webview.cspSource} for the ack clip, got: ${csp}`,
+);
 // The lockdown of everything else must remain intact.
 assert.ok(csp.includes("default-src 'none'"), 'default-src stays none');
 assert.ok(csp.includes("object-src 'none'"), 'object-src stays none');
+
+// The voice config must hand voice.js the URL of the ack clip.
+const voiceCfgMatch = html.match(/window\.__VOICE__ = (\{[^\n]*\});/);
+assert.ok(voiceCfgMatch, 'webview HTML must inject window.__VOICE__');
+const voiceCfg = JSON.parse(voiceCfgMatch[1]);
+assert.strictEqual(voiceCfg.mode, 'webview');
+assert.ok(
+  typeof voiceCfg.ackAudioUrl === 'string' &&
+    voiceCfg.ackAudioUrl.includes('working-on-it.mp3'),
+  `voice config must carry the working-on-it.mp3 ack URL, got: ${voiceCfgMatch[1]}`,
+);
 
 console.log('webviewTalkAudioCsp.test.js: all assertions passed');
