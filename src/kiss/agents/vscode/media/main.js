@@ -7200,6 +7200,15 @@
     window.addEventListener('kiss-voice-submit', () => {
       sendMessage();
     });
+
+    // Voice-dictated answers: while the agent's ask-user question is
+    // pending, voice.js inserts the translated speech into the modal's
+    // answer box and raises this event so the answer is submitted to
+    // the agent exactly like a click on the modal's Submit button.
+    window.addEventListener('kiss-voice-answer', () => {
+      const tab = getTab(activeTabId);
+      if (tab && tab.askPendingQuestion !== null) submitAskForTab(tab);
+    });
   }
 
   function readFileAsAttachment(file) {
@@ -7304,9 +7313,34 @@
         submitAskForTab(tab);
       }
     });
+    // Mic button: speech after the "Sorcar" wake word answers the
+    // pending question (voice.js routes it into the answer box and
+    // raises 'kiss-voice-answer').  voice.js also owns this button's
+    // click (toggle listening) and mirrors the main mic's state
+    // classes onto it, so no click handler is wired here.
+    const m = document.createElement('button');
+    m.className = 'ask-user-mic';
+    m.setAttribute(
+      'data-tooltip',
+      "Voice trigger: listen for the word 'Sorcar'",
+    );
+    m.innerHTML =
+      '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" ' +
+      'stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
+      'stroke-linejoin="round">' +
+      '<path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>' +
+      '<path d="M19 10v2a7 7 0 0 1-14 0v-2"/>' +
+      '<line x1="12" y1="19" x2="12" y2="23"/>' +
+      '<line x1="8" y1="23" x2="16" y2="23"/></svg>';
+    const row = document.createElement('div');
+    row.className = 'ask-user-actions';
+    row.appendChild(s);
+    row.appendChild(m);
     tab.askQuestionEl = q;
     tab.askInputEl = i;
     tab.askSubmitEl = s;
+    tab.askMicEl = m;
+    tab.askActionsEl = row;
   }
 
   /** Render the given question text into the tab's question element. */
@@ -7336,8 +7370,11 @@
       askUserSlot.removeChild(askUserSlot.firstChild);
     askUserSlot.appendChild(tab.askQuestionEl);
     askUserSlot.appendChild(tab.askInputEl);
-    askUserSlot.appendChild(tab.askSubmitEl);
+    askUserSlot.appendChild(tab.askActionsEl);
     askUserModal.style.display = 'flex';
+    // Tell voice.js a fresh ask-user mic is in the DOM so it can sync
+    // the button's state classes with the main mic's live state.
+    window.dispatchEvent(new CustomEvent('kiss-ask-mic-mounted'));
     setTimeout(() => {
       if (tab.id === activeTabId && tab.askInputEl) tab.askInputEl.focus();
     }, 0);
