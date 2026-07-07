@@ -291,7 +291,7 @@ class TestVoiceTranslateFromWav(unittest.TestCase):
         self.assertIn("TRANSCRIBING", lines)
         self.assertEqual(_speech_payloads(proc.stdout), [])
         self.assertEqual(proc.returncode, 0, msg=proc.stderr[-2000:])
-        self.assertIn("translation failed", proc.stderr)
+        self.assertIn("transcription failed", proc.stderr)
 
 
 class TestSpeechCapture(unittest.TestCase):
