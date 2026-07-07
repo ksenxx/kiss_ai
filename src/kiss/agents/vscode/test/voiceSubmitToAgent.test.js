@@ -7,9 +7,11 @@
 // of the highlighted tab.
 //
 // After the "Sorcar" wake word the extension host translates the
-// speech and identifies the speaker; the webview receives
-// ``{type: 'voiceSpeech', text, speaker}``.  voice.js inserts
-// ``Speaker #N says that: <text>`` into the task input and raises a
+// speech, identifies the speaker, and detects the language; the
+// webview receives ``{type: 'voiceSpeech', text, speaker, language}``.
+// voice.js inserts ``Speaker #N says in the language X that: <text>``
+// (or ``Speaker #N says that: <text>`` when no language was
+// detected) into the task input and raises a
 // ``kiss-voice-submit`` event; main.js must then behave exactly like a
 // click on the send button:
 //
@@ -129,6 +131,45 @@ test('spoken task steers a running agent as a user message', () => {
   assert.strictEqual(
     steers[0].prompt,
     'Speaker #2 says that: Also update the docs',
+  );
+  assert.strictEqual(posted.filter(m => m.type === 'submit').length, 0);
+  assert.strictEqual(input(win).value, ''); // steering cleared the input
+});
+
+test('spoken task with a language submits the language-aware prompt', () => {
+  const {win, posted} = makeWebview();
+  posted.length = 0;
+  send(win, {type: 'voiceWake'});
+  send(win, {
+    type: 'voiceSpeech',
+    text: 'Fix the parser bug',
+    speaker: 1,
+    language: 'fr',
+  });
+  const submits = posted.filter(m => m.type === 'submit');
+  assert.strictEqual(submits.length, 1, JSON.stringify(posted));
+  assert.strictEqual(
+    submits[0].prompt,
+    'Speaker #1 says in the language fr that: Fix the parser bug',
+  );
+  assert.strictEqual(input(win).value, ''); // submit cleared the input
+});
+
+test('spoken task with a language steers a running agent', () => {
+  const {win, posted} = makeWebview();
+  send(win, {type: 'status', running: true});
+  posted.length = 0;
+  send(win, {
+    type: 'voiceSpeech',
+    text: 'Also update the docs',
+    speaker: 2,
+    language: 'es',
+  });
+  const steers = posted.filter(m => m.type === 'appendUserMessage');
+  assert.strictEqual(steers.length, 1, JSON.stringify(posted));
+  assert.strictEqual(
+    steers[0].prompt,
+    'Speaker #2 says in the language es that: Also update the docs',
   );
   assert.strictEqual(posted.filter(m => m.type === 'submit').length, 0);
   assert.strictEqual(input(win).value, ''); // steering cleared the input
