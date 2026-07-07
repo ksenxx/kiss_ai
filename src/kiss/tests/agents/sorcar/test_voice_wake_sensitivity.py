@@ -5,7 +5,7 @@
 """End-to-end real-voice tests for the wake-word sensitivity setting.
 
 Real audio (macOS TTS), real speech models, no mocks.  The sensitivity
-slider (0..100, default 70) must ACTUALLY change how eagerly the
+slider (0..100, default 85) must ACTUALLY change how eagerly the
 "Sorcar" wake word fires, in both listener implementations:
 
 - The Python listener (``kiss.agents.vscode.voice_wake``) used by the
@@ -18,17 +18,18 @@ slider (0..100, default 70) must ACTUALLY change how eagerly the
     the force-fit scores and rejects it.
   * Spoken "hey there Sorcar" decodes to ``[unk] sore car`` — the
     alias at the END of the utterance.  Strict whole-utterance
-    matching rejects it at the default sensitivity, while a HIGH
-    sensitivity (>= 75) accepts a trailing alias and wakes.
+    matching rejects it at a LOW sensitivity (< 75), while the
+    default (85) accepts a trailing alias and wakes.
   * Ordinary sentences containing alias-sounding words never wake at
     the default sensitivity.
 
 - The browser (remote webapp) listener in ``media/voice.js``: a real
   Chromium visits the real web app with its microphone fed the spoken
-  "hey there Sorcar" audio.  At the default sensitivity the wake
-  indicator never fires; dragging the settings-panel sensitivity
+  "hey there Sorcar" audio.  At a stored strict sensitivity (50) the
+  wake indicator never fires; dragging the settings-panel sensitivity
   slider to 85 makes the very same audio wake the listener and
-  persists the value in localStorage.
+  persists the value in localStorage.  A fresh profile defaults the
+  slider to 85.
 """
 
 from __future__ import annotations
@@ -129,7 +130,7 @@ class TestSensitivityCliRealVoice(unittest.TestCase):
     def test_sorcar_wakes_at_default_sensitivity(self) -> None:
         # Explicit default: fails before the feature exists because
         # --sensitivity is an unknown argument (argparse exits 2).
-        proc = _run_listener(self.sorcar_wav, "--sensitivity", "70")
+        proc = _run_listener(self.sorcar_wav, "--sensitivity", "85")
         lines = proc.stdout.split()
         self.assertIn("READY", lines, msg=proc.stderr[-2000:])
         self.assertIn("WAKE", lines, msg=proc.stderr[-2000:])
@@ -140,7 +141,7 @@ class TestSensitivityCliRealVoice(unittest.TestCase):
         # confidences ~0.55-0.69 (measured): it wakes at the default
         # sensitivity but not at sensitivity 10, whose confidence gate
         # (0.72) exceeds every force-fit score.
-        wakes = _run_listener(self.soccer_wav, "--sensitivity", "70")
+        wakes = _run_listener(self.soccer_wav, "--sensitivity", "85")
         self.assertIn("WAKE", wakes.stdout.split(),
                       msg=wakes.stderr[-2000:])
         self.assertEqual(wakes.returncode, 0, msg=wakes.stderr[-2000:])
@@ -154,9 +155,9 @@ class TestSensitivityCliRealVoice(unittest.TestCase):
 
     def test_high_sensitivity_wakes_on_trailing_alias(self) -> None:
         # "hey there Sorcar" decodes to "[unk] sore car" (measured):
-        # strict whole-utterance matching rejects it at the default
-        # sensitivity; at 85 a trailing alias is accepted and wakes.
-        strict = _run_listener(self.hey_wav, "--sensitivity", "70")
+        # strict whole-utterance matching rejects it below 75; at 85
+        # (the default) a trailing alias is accepted and wakes.
+        strict = _run_listener(self.hey_wav, "--sensitivity", "50")
         self.assertIn("READY", strict.stdout.split(),
                       msg=strict.stderr[-2000:])
         self.assertNotIn("WAKE", strict.stdout.split(), msg=strict.stdout)
@@ -168,7 +169,7 @@ class TestSensitivityCliRealVoice(unittest.TestCase):
         self.assertEqual(eager.returncode, 0, msg=eager.stderr[-2000:])
 
     def test_sentences_never_wake_at_default_sensitivity(self) -> None:
-        proc = _run_listener(self.sentences_wav, "--sensitivity", "70")
+        proc = _run_listener(self.sentences_wav, "--sensitivity", "85")
         lines = proc.stdout.split()
         self.assertIn("READY", lines, msg=proc.stderr[-2000:])
         self.assertNotIn("WAKE", lines, msg=proc.stdout)
@@ -249,8 +250,11 @@ class TestSensitivitySliderBrowser(unittest.TestCase):
             )
             try:
                 context = browser.new_context(ignore_https_errors=True)
+                # Seed a strict sensitivity (50): the default (85)
+                # accepts a trailing alias and would wake immediately.
                 context.add_init_script(
                     "localStorage.setItem('kissVoiceEnabled', '1');"
+                    "localStorage.setItem('kissVoiceSensitivity', '50');"
                 )
                 page = context.new_page()
                 page.goto(
@@ -259,14 +263,14 @@ class TestSensitivitySliderBrowser(unittest.TestCase):
                     timeout=60_000,
                 )
                 # The settings panel must contain the sensitivity
-                # slider, defaulted to 70 (fails before the feature).
+                # slider, reflecting the stored value.
                 slider = page.evaluate(
                     "(() => { const s = document.getElementById("
                     "'cfg-voice-sensitivity'); return s &&"
                     " {value: s.value, min: s.min, max: s.max}; })()"
                 )
                 self.assertIsNotNone(slider, "sensitivity slider missing")
-                self.assertEqual(slider["value"], "70")
+                self.assertEqual(slider["value"], "50")
                 self.assertEqual(slider["min"], "0")
                 self.assertEqual(slider["max"], "100")
                 # Record every wake flash on the mic button.
@@ -286,12 +290,12 @@ class TestSensitivitySliderBrowser(unittest.TestCase):
                     ".classList.contains('voice-listening')",
                     timeout=300_000,
                 )
-                # At the default sensitivity the looping "hey there
-                # Sorcar" audio must NOT wake the listener.
+                # At the strict stored sensitivity (50) the looping
+                # "hey there Sorcar" audio must NOT wake the listener.
                 page.wait_for_timeout(10_000)
                 self.assertFalse(
                     page.evaluate("window.__sawWake"),
-                    "audio must not wake at the default sensitivity",
+                    "audio must not wake at sensitivity 50",
                 )
                 # Drag the slider to 85: the SAME audio must now wake.
                 page.evaluate(
@@ -310,6 +314,24 @@ class TestSensitivitySliderBrowser(unittest.TestCase):
                 page.wait_for_function(
                     "window.__sawWake === true", timeout=120_000
                 )
+                # A fresh profile (no stored value) must default the
+                # slider to 85.
+                fresh = browser.new_context(ignore_https_errors=True)
+                fresh_page = fresh.new_page()
+                fresh_page.goto(
+                    f"https://127.0.0.1:{self.port}/",
+                    wait_until="load",
+                    timeout=60_000,
+                )
+                self.assertEqual(
+                    fresh_page.evaluate(
+                        "document.getElementById("
+                        "'cfg-voice-sensitivity').value"
+                    ),
+                    "85",
+                    "a fresh profile must default the slider to 85",
+                )
+                fresh.close()
             finally:
                 browser.close()
 
