@@ -20,8 +20,8 @@
 // SpeechCapture), downsample it to 16kHz s16le PCM and post
 // ``{type: 'voiceTranscribe', audio: <base64 pcm>}`` to the server
 // (via the 'kiss-voice-post' bridge -> WS shim), which replies with
-// the ``{type: 'voiceSpeech', text, speaker}`` message voice.js
-// already consumes.
+// the ``{type: 'voiceSpeech', text, speaker, language}`` message
+// voice.js already consumes.
 //
 // These tests run the REAL production ``media/voice.js`` in jsdom
 // with a browser-mode config, a stub audio pipeline (jsdom has no
@@ -311,6 +311,31 @@ async function main() {
         !v.btn.classList.contains('voice-transcribing'),
         'the transcribing flash must be cleared by the reply',
       );
+    },
+  );
+
+  await test(
+    'a voiceSpeech reply with a language inserts the language prefix',
+    async () => {
+      const v = await makeBrowserVoice();
+      v.wake();
+      v.feed(loudBlock(v.win));
+      for (let i = 0; i < 8; i++) v.feed(new v.win.Float32Array(BLOCK));
+      v.win.dispatchEvent(
+        new v.win.MessageEvent('message', {
+          data: {
+            type: 'voiceSpeech',
+            text: 'open the readme',
+            speaker: 1,
+            language: 'fr',
+          },
+        }),
+      );
+      assert.strictEqual(
+        v.inp.value,
+        'Speaker #1 says in the language fr that: open the readme',
+      );
+      assert.strictEqual(v.submits.count, 1, 'the text must be submitted');
     },
   );
 

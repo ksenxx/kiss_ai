@@ -13,9 +13,11 @@ and the server had no handler to transcribe it.  The fix makes the
 page capture the utterance and ship it as ``{"type":
 "voiceTranscribe", "audio": <base64 16kHz mono s16le PCM>}`` over the
 WebSocket, and adds a server-side handler that translates the audio
-with the same ``gpt-audio`` call the local listener uses
-(:func:`kiss.agents.vscode.voice_wake.translate_pcm_to_english`) and
-replies with ``{"type": "voiceSpeech", "text": ..., "speaker": ...}``.
+with the same KISS transcription agent the local listener uses
+(:func:`kiss.agents.vscode.voice_wake.transcribe_pcm`) and replies
+with ``{"type": "voiceSpeech", "text": ..., "speaker": ...,
+"language": ...}`` — ``language`` being the agent-reported tag of the
+spoken language (``null`` when unknown).
 
 These tests spin up the real :class:`RemoteAccessServer` on a free
 port and talk to it over a real ``wss://`` connection — no mocks.
@@ -94,10 +96,10 @@ def _tts_pcm_base64(directory: Path, text: str) -> str:
     This is the exact payload the browser-mode voice.js posts after
     capturing the utterance that follows the wake word: the capture
     endpoints on ~2s of trailing silence and INCLUDES those silent
-    blocks, so the same trailing silence is appended here (gpt-audio
-    reliably transcribes speech followed by silence; bare TTS audio
-    that ends mid-waveform is sometimes answered with "please provide
-    the audio").
+    blocks, so the same trailing silence is appended here (the server
+    now trims trailing silence before the transcription-agent call —
+    long silent padding empirically makes gpt-audio deny hearing any
+    audio — so the padded payload also exercises that trimming).
     """
     aiff = directory / "speech.aiff"
     wav = directory / "speech.wav"
@@ -202,6 +204,7 @@ class WebVoiceTranscribeTest(IsolatedAsyncioTestCase):
         msg = await self._voice_speech_reply(ws, "", timeout=15)
         self.assertEqual(msg["text"], "")
         self.assertIsNone(msg["speaker"])
+        self.assertIsNone(msg["language"])
 
     async def test_undecodable_audio_replies_empty_voice_speech(self) -> None:
         """Malformed base64 must degrade to an empty transcription."""
@@ -211,6 +214,7 @@ class WebVoiceTranscribeTest(IsolatedAsyncioTestCase):
         )
         self.assertEqual(msg["text"], "")
         self.assertIsNone(msg["speaker"])
+        self.assertIsNone(msg["language"])
 
     async def test_oversized_audio_replies_empty_voice_speech(self) -> None:
         """An absurdly large payload is dropped, not transcribed."""
@@ -219,6 +223,7 @@ class WebVoiceTranscribeTest(IsolatedAsyncioTestCase):
         msg = await self._voice_speech_reply(ws, oversized, timeout=15)
         self.assertEqual(msg["text"], "")
         self.assertIsNone(msg["speaker"])
+        self.assertIsNone(msg["language"])
 
     @unittest.skipUnless(
         HAVE_MAC_TTS, "requires macOS `say` and `afconvert`",
@@ -242,6 +247,7 @@ class WebVoiceTranscribeTest(IsolatedAsyncioTestCase):
         text = msg["text"].lower()
         self.assertIn("readme", text)
         self.assertIn("open", text)
+        self.assertEqual(msg["language"], "en")
         speaker = msg["speaker"]
         self.assertTrue(
             speaker is None or (isinstance(speaker, int) and speaker >= 1),

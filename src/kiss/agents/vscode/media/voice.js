@@ -6,15 +6,18 @@
  * Voice wake-word support for KISS Sorcar.
  *
  * Always-on, fully local listener for the trigger word "Sorcar".  When
- * the wake word is heard, the mic button flashes RED as a visual cue
- * (no text is ever typed into the task input — the literal word
- * "sorcar" must never appear there) while the extension host records
- * the speech that follows.  When the host starts the gpt-audio
- * transcription/translation call it sends ``{type:
- * 'voiceTranscribing'}`` and the flash turns YELLOW; the resulting
- * ``{type: 'voiceSpeech', text}`` clears the flash and types the
- * translated text into the task input (or appends it to an existing
- * draft), and listening continues.
+ * the wake word is heard, the mic button flashes RED and a large
+ * blinking "Listening ..." overlay appears over the task input as
+ * visual cues (no text is ever typed into the task input — the
+ * literal word "sorcar" must never appear there) while the extension
+ * host records the speech that follows.  When the host starts the
+ * gpt-audio transcription/translation call it sends ``{type:
+ * 'voiceTranscribing'}`` and the flash turns YELLOW (the overlay
+ * hides); the resulting ``{type: 'voiceSpeech', text, speaker,
+ * language}`` clears the flash, types the translated text into the
+ * task input (or appends it to an existing draft) and submits it,
+ * a spoken "Working on it." acknowledges the dictated task, and
+ * listening continues.
  *
  * Two modes, selected by the ``window.__VOICE__`` config injected by
  * the page template:
@@ -28,7 +31,8 @@
  *   and posted to the server as ``{type: 'voiceTranscribe', audio:
  *   <base64 pcm>}``; the server runs the same gpt-audio translation
  *   as webview mode and replies with ``{type: 'voiceSpeech', text,
- *   speaker}``.  Wake-word detection never leaves the machine.
+ *   speaker, language}``.  Wake-word detection never leaves the
+ *   machine.
  *
  * - ``webview`` (VS Code extension): extension webviews cannot use
  *   getUserMedia (VS Code denies microphone access to webview
@@ -51,7 +55,9 @@
   // grammar also lists in-vocabulary words/phrases that sound like
   // "Sorcar".  Because the grammar forces every sound into an alias
   // or [unk], detection is strict at the default sensitivity: the
-  // utterance has to decode to exactly one alias, every alias word
+  // utterance has to decode to exactly one alias (allowing only a
+  // brief leading [unk] — the breathy onset of softly spoken speech,
+  // see wakeWithLeadingNoise), every alias word
   // needs a sufficient confidence, and a partial result only fires
   // after a short quiet pause proves the speaker paused instead of
   // talking on ("soccer is my favorite sport").  The settings slider
@@ -70,9 +76,10 @@
   // utterances that merely END with an alias ("hey there Sorcar"
   // decodes to "[unk] sore car", measured live).  Sensitivity 50
   // reproduces the historical gates (conf 0.4, pause 200ms); the
-  // default 70 is deliberately more sensitive (conf 0.24, pause
-  // 120ms).  Mirrors kiss/agents/vscode/voice_wake.py.
-  const DEFAULT_SENSITIVITY = 70;
+  // default 85 is deliberately more sensitive (conf 0.12, pause at
+  // the 100ms floor, trailing-alias matching enabled).  Mirrors
+  // kiss/agents/vscode/voice_wake.py.
+  const DEFAULT_SENSITIVITY = 85;
   const TRAILING_ALIAS_SENSITIVITY = 75;
   const SENSITIVITY_KEY = 'kissVoiceSensitivity';
 
@@ -209,6 +216,47 @@
     return false;
   }
 
+  // Softly spoken "Sorcar" carries a breathy onset that the grammar
+  // decodes as a brief leading [unk] before the alias ("[unk] sore
+  // car" with a ~60ms [unk], measured with whispered speech); exact
+  // whole-utterance matching rejected those wakes, so the wake word
+  // seemed to need a loud voice.  Spoken-word prefixes decode to
+  // [unk] spans of ~0.5s and up ("hey there" 0.61s, "he wrecked his"
+  // 0.60s, measured), so this budget keeps sentences and "hey there
+  // Sorcar" rejected.  Mirrors kiss/agents/vscode/voice_wake.py.
+  const MAX_LEADING_NOISE_SECONDS = 0.35;
+
+  /**
+   * True when `words` (the word list of a Vosk FINAL result, entries
+   * carrying word/start/end) is exactly one wake alias preceded only
+   * by [unk] noise totaling at most MAX_LEADING_NOISE_SECONDS —
+   * softly spoken "Sorcar" whose breathy onset decoded as a short
+   * [unk].  Word entries without numeric timings reject; anything
+   * after the alias rejects.  Companion to matchesWake; vosk-browser
+   * partial results carry no word list, so this gate only sees
+   * finals.
+   */
+  function wakeWithLeadingNoise(words) {
+    if (!Array.isArray(words) || words.length === 0) return false;
+    let i = 0;
+    let noiseSeconds = 0;
+    while (i < words.length && words[i] && words[i].word === '[unk]') {
+      const start = words[i].start;
+      const end = words[i].end;
+      if (typeof start !== 'number' || typeof end !== 'number') {
+        return false;
+      }
+      noiseSeconds += Math.max(0, end - start);
+      i++;
+    }
+    if (i === 0 || noiseSeconds > MAX_LEADING_NOISE_SECONDS) return false;
+    const tail = [];
+    for (; i < words.length; i++) {
+      tail.push(words[i] && words[i].word);
+    }
+    return WAKE_ALIASES.indexOf(tail.join(' ')) !== -1;
+  }
+
   /**
    * True when every recognized word clears the sensitivity-scaled
    * confidence floor.  `words` is the word list of a Vosk result
@@ -232,11 +280,28 @@
   let flashTimer = null;
 
   /**
+   * Show or hide the blinking "Listening ..." overlay over the task
+   * input.  Visible exactly while the mic button flashes red (wake
+   * word heard, speech being captured); the CSS 'listening' class on
+   * #input-text-wrap drives the large blinking type.  A missing
+   * overlay element (older page fixtures) is a no-op.
+   */
+  function showListening(on) {
+    const overlay = document.getElementById('listening-overlay');
+    const wrap = overlay && overlay.parentElement;
+    if (!wrap) return;
+    if (on) wrap.classList.add('listening');
+    else wrap.classList.remove('listening');
+  }
+
+  /**
    * Show a transient color state on the mic button: 'voice-triggered'
    * (red — wake word heard, capturing speech) or 'voice-transcribing'
    * (yellow — gpt-audio transcription in flight).  Passing a falsy
    * class clears both.  Only one flash (and one safety timer) is
-   * active at a time.
+   * active at a time.  The blinking "Listening ..." input overlay
+   * tracks the red state exactly: shown with 'voice-triggered',
+   * hidden on any other transition (yellow, clear, safety timeout).
    */
   function flash(cls, timeoutMs) {
     if (flashTimer !== null) {
@@ -244,11 +309,13 @@
       flashTimer = null;
     }
     btn.classList.remove('voice-triggered', 'voice-transcribing');
+    showListening(cls === 'voice-triggered');
     if (!cls) return;
     btn.classList.add(cls);
     flashTimer = setTimeout(() => {
       flashTimer = null;
       btn.classList.remove(cls);
+      showListening(false);
     }, timeoutMs);
   }
 
@@ -285,7 +352,11 @@
    * highlighted tab.  When *speaker* is a positive integer (the
    * host's voice-recognition speaker number, unique per distinct
    * voice, starting from 1) the text is prefixed with
-   * ``Speaker #N says that: `` so the agent knows who spoke.  An
+   * ``Speaker #N says in the language X that: `` — X being the
+   * language tag the transcription agent detected (e.g. ``fr``) —
+   * so the agent knows who spoke and in what language.  When no
+   * language was detected (or an older host sent none) the prefix
+   * falls back to ``Speaker #N says that: ``.  An
    * empty input receives the text; an existing draft is appended to
    * with a space.  After a non-empty insert a ``kiss-voice-submit``
    * window event asks main.js to send the input exactly like a click
@@ -296,7 +367,7 @@
    * *keepFlash* is true (a newer voice round is still in flight and
    * owns the indicator).
    */
-  function insertSpeech(text, keepFlash, speaker) {
+  function insertSpeech(text, keepFlash, speaker, language) {
     if (!keepFlash) flash(null);
     let translated = String(typeof text === 'string' ? text : '').trim();
     if (!translated) return;
@@ -306,7 +377,15 @@
       speaker >= 1 &&
       Math.floor(speaker) === speaker
     ) {
-      translated = 'Speaker #' + speaker + ' says that: ' + translated;
+      const lang = typeof language === 'string' ? language.trim() : '';
+      translated = lang
+        ? 'Speaker #' +
+          speaker +
+          ' says in the language ' +
+          lang +
+          ' that: ' +
+          translated
+        : 'Speaker #' + speaker + ' says that: ' + translated;
     }
     if (!inp.value) {
       inp.value = translated;
@@ -323,6 +402,50 @@
     // (submit vs. steering of a running task) and listens for this
     // event next to the 'kiss-voice-post' bridge.
     window.dispatchEvent(new CustomEvent('kiss-voice-submit'));
+    speakWorkingOnIt();
+  }
+
+  /**
+   * Speak a short "Working on it." acknowledgement right after a
+   * voice-dictated task is submitted, so the user hears that Sorcar
+   * accepted the command.  Prefers the GPT-synthesized natural clip
+   * (media/working-on-it.mp3, gpt-audio "marin" voice) whose URL the
+   * page template injects as ``cfg.ackAudioUrl``; when the clip is
+   * missing or playback is rejected (autoplay policy, no Audio API)
+   * it falls back to the Web Speech API so the ack is never silent
+   * where any speech output exists.
+   */
+  function speakWorkingOnIt() {
+    try {
+      if (cfg.ackAudioUrl && typeof window.Audio === 'function') {
+        const audio = new window.Audio(cfg.ackAudioUrl);
+        const p = audio.play();
+        if (p && typeof p.catch === 'function') {
+          p.catch(() => {
+            speakAckWithSystemVoice();
+          });
+        }
+        return;
+      }
+    } catch (_e) {
+      /* fall through to the system voice */
+    }
+    speakAckWithSystemVoice();
+  }
+
+  /** Web Speech API fallback for the "Working on it." ack. */
+  function speakAckWithSystemVoice() {
+    try {
+      const synth = window.speechSynthesis;
+      if (!synth || typeof window.SpeechSynthesisUtterance !== 'function') {
+        return;
+      }
+      const utter = new window.SpeechSynthesisUtterance('Working on it.');
+      utter.lang = 'en-US';
+      synth.speak(utter);
+    } catch (_e) {
+      /* no speech output available; stay silent */
+    }
   }
 
   // Browser-mode post-wake capture in progress, or null.  Owns every
@@ -622,9 +745,12 @@
             // the capture by re-waking.
             if (capture) return;
             // A final result means Vosk saw the endpoint: the whole
-            // utterance is over, so no pause gate is needed.
+            // utterance is over, so no pause gate is needed.  Softly
+            // spoken "Sorcar" decodes with a brief leading [unk]
+            // (breathy onset), which wakeWithLeadingNoise accepts.
             if (
-              matchesWake(message.result.text) &&
+              (matchesWake(message.result.text) ||
+                wakeWithLeadingNoise(message.result.result)) &&
               wordsConfident(message.result.result)
             ) {
               fireWake();
@@ -845,7 +971,7 @@
       // Terminal results arrive in spoken (FIFO) order; keep the
       // flash when a newer round is still capturing or transcribing.
       outstandingRounds = Math.max(0, outstandingRounds - 1);
-      insertSpeech(msg.text, outstandingRounds > 0, msg.speaker);
+      insertSpeech(msg.text, outstandingRounds > 0, msg.speaker, msg.language);
     } else if (msg.type === 'voiceState') {
       // Extension host reports the real listener state.  A listener
       // that stopped (error or off) can no longer deliver the
