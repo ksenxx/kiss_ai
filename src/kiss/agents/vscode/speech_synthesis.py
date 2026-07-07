@@ -8,7 +8,7 @@ The agent-side ``talk`` tool historically only broadcast plain text and
 each client read it aloud with the browser's Web Speech API — often a
 robotic system voice.  This module synthesizes the utterance server-side
 with an OpenAI GPT audio-chat model from MODEL_INFO.json (default
-``gpt-audio-mini``: audio-capable, cheapest of the ``gpt-audio*``
+``gpt-audio-1.5``: the newest, most natural of the ``gpt-audio*``
 family) so every client can play one identical, far more natural and
 emotionally expressive voice.  The synthesized MP3 travels inside the
 ``talk`` broadcast event as base64; clients without audio support (or
@@ -25,9 +25,10 @@ import sys
 
 from kiss.agents.vscode.voice_wake import audio_timeout_seconds
 
-# Cheapest audio-capable GPT model in MODEL_INFO.json; ``gpt-audio``
-# also works and sounds marginally richer at ~4x the price.
-DEFAULT_TTS_MODEL = "gpt-audio-mini"
+# Newest, most natural GPT audio model in MODEL_INFO.json (validated
+# live: valid MP3 with the "marin" voice).  ``gpt-audio-mini`` also
+# works at ~1/4 the price but sounds noticeably flatter.
+DEFAULT_TTS_MODEL = "gpt-audio-1.5"
 
 # "marin" is one of the newest, most natural OpenAI voices and is
 # supported by both gpt-audio and gpt-audio-mini (validated live).
