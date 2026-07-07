@@ -173,29 +173,38 @@ export class VoiceWakeService {
         else if (line === 'TRANSCRIBING') this._onTranscribing();
         else if (line === 'NO_SPEECH') this._onSpeech('');
         else if (line.startsWith('SPEECH ')) {
+          // Parse first, deliver once: a SPEECH line is the terminal
+          // event of a voice round, and dropping it (as the old code
+          // did for malformed payloads) leaked the webview's round
+          // counter, leaving the mic button blinking yellow after
+          // every later utterance.  A malformed or unusable payload
+          // therefore degrades to an empty terminal instead of no
+          // terminal, and the callback runs outside the try so its
+          // own exceptions are never mistaken for a parse failure.
+          let text = '';
+          let speaker: number | undefined;
+          let language: string | undefined;
           try {
             const payload = JSON.parse(line.slice('SPEECH '.length));
             if (typeof payload === 'string') {
               // Legacy payload shape: the bare translated text.
-              this._onSpeech(payload);
+              text = payload;
             } else if (
               payload &&
               typeof payload === 'object' &&
               typeof payload.text === 'string'
             ) {
+              text = payload.text;
               const spk = payload.speaker;
               const lang = payload.language;
-              this._onSpeech(
-                payload.text,
-                typeof spk === 'number' && Number.isInteger(spk) && spk >= 1
-                  ? spk
-                  : undefined,
-                typeof lang === 'string' && lang ? lang : undefined,
-              );
+              if (typeof spk === 'number' && Number.isInteger(spk) && spk >= 1)
+                speaker = spk;
+              if (typeof lang === 'string' && lang) language = lang;
             }
           } catch {
-            // Malformed payload — drop the event.
+            // Malformed JSON — fall through to the empty terminal.
           }
+          this._onSpeech(text, speaker, language);
         }
         idx = stdoutBuf.indexOf('\n');
       }
