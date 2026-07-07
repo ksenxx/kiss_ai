@@ -2393,6 +2393,9 @@ def _build_html() -> str:
             "mode": "browser",
             "voskSrc": _media_url("vosk.js"),
             "modelUrl": "/voice-model.tar.gz",
+            # GPT-synthesized "Working on it." clip voice.js plays
+            # after submitting a voice-dictated task.
+            "ackAudioUrl": _media_url("working-on-it.mp3"),
         }),
     }
     tpl = (MEDIA_DIR / "chat.html").read_text(encoding="utf-8")
