@@ -1165,12 +1165,13 @@ body.remote-chat #welcome-config { display: none !important; }
 
 #upload-btn:disabled { opacity: 0.3; cursor: not-allowed; }
 
-/* Voice wake-word toggle (say "Sorcar") */
-#voice-btn.voice-loading { opacity: 0.5; }
-#voice-btn.voice-listening { animation: voice-pulse 1.6s ease-in-out infinite; }
-#voice-btn.voice-error { color: var(--error, #f48771); }
-#voice-btn.voice-triggered { color: var(--red, #f48771); animation: voice-flash 0.8s ease-in-out infinite; }
-#voice-btn.voice-transcribing { color: var(--warning, #e5c07b); animation: voice-flash 0.8s ease-in-out infinite; }
+/* Voice wake-word toggle (say "Sorcar"); the ask-user modal's mic
+   button mirrors every state of the main mic (see voice.js). */
+#voice-btn.voice-loading, .ask-user-mic.voice-loading { opacity: 0.5; }
+#voice-btn.voice-listening, .ask-user-mic.voice-listening { animation: voice-pulse 1.6s ease-in-out infinite; }
+#voice-btn.voice-error, .ask-user-mic.voice-error { color: var(--error, #f48771); }
+#voice-btn.voice-triggered, .ask-user-mic.voice-triggered { color: var(--red, #f48771); animation: voice-flash 0.8s ease-in-out infinite; }
+#voice-btn.voice-transcribing, .ask-user-mic.voice-transcribing { color: var(--warning, #e5c07b); animation: voice-flash 0.8s ease-in-out infinite; }
 
 @keyframes voice-pulse {
   0%, 100% { opacity: 1; }
@@ -1998,6 +1999,20 @@ body.remote-chat #welcome-config { display: none !important; }
   flex: 0 0 auto; align-self: flex-start;
 }
 .ask-user-submit:hover { opacity: 0.9; }
+
+/* Submit button + mic button row inside the ask-user modal */
+.ask-user-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+
+/* Mic button in the ask-user modal: say "Sorcar" then speak the answer */
+.ask-user-mic {
+  background: none; border: none;
+  color: color-mix(in srgb, var(--fg) 50%, transparent); cursor: pointer;
+  padding: 4px; transition: color 0.15s, opacity 0.15s;
+  display: flex; align-items: center; position: relative;
+}
+.ask-user-mic:hover { color: color-mix(in srgb, var(--fg) 66%, transparent); }
+.ask-user-mic.active { color: var(--accent); }
+.ask-user-mic svg { width: 16px; height: 16px; }
 
 /* ── Remote-Access Password (Auth) Modal ──────────────
    Replaces the browser-native prompt(), which renders elongated with
