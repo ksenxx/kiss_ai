@@ -37,24 +37,27 @@ so in-vocabulary phonetic aliases act as the trigger.
 Because the grammar forces every sound into an alias or ``[unk]``,
 naive substring matching is far too sensitive: everyday sentences such
 as "yes sir the car is ready" decode to ``[unk] sir car [unk]`` and
-used to fire the wake word.  At the default sensitivity detection is
-therefore strict; it fires only when
+used to fire the wake word.  Detection therefore never uses substring
+matching; it fires only when
 
-- the *whole* utterance decodes to exactly one alias (or to one alias
+- the utterance decodes to exactly one alias (or to one alias
   preceded only by a brief burst of ``[unk]`` noise — the breathy
-  onset of softly spoken speech; see ``wake_with_leading_noise``),
+  onset of softly spoken speech; see ``wake_with_leading_noise`` —
+  or, at or above ``SUFFIX_MATCH_SENSITIVITY``, which includes the
+  default, to an utterance that merely *ends* with an alias),
 - no alias word is an egregiously low-confidence force-fit, and
 - for low-latency partial results, the speaker has paused briefly
-  (~120ms at the default sensitivity) right after the alias —
+  (~100ms at the default sensitivity) right after the alias —
   continuous speech such as "soccer is my favorite sport" keeps
   talking through that window and never triggers.
 
 The settings-panel sensitivity slider adjusts those gates.  Lower
-values raise the confidence floor and lengthen the required pause;
-higher values lower the floor, shorten the pause, and at the top of
-the slider also accept utterances that *end* with an alias (for
-example "hey there Sorcar", decoded as ``[unk] sore car``).  An alias
-followed by more speech/``[unk]`` still never wakes.
+values raise the confidence floor and lengthen the required pause and
+(below ``SUFFIX_MATCH_SENSITIVITY``) drop trailing-alias acceptance;
+higher values lower the floor, shorten the pause, and accept
+utterances that *end* with an alias (for example "hey there Sorcar",
+decoded as ``[unk] sore car``).  An alias followed by more
+speech/``[unk]`` still never wakes.
 
 Wake-word detection runs locally.  After a wake, the utterance that
 follows is captured (RMS endpointing) and handed to a KISS (Sorcar)
@@ -146,11 +149,12 @@ SPEECH_RMS_THRESHOLD = 0.01
 # SUFFIX_MATCH_SENSITIVITY, additionally accepts utterances that END
 # with an alias ("hey there Sorcar" decodes to "[unk] sore car",
 # measured live).  Sensitivity 50 reproduces the historical gates
-# (conf 0.4, pause 0.2s); the default of 70 is deliberately more
-# sensitive (conf 0.24, pause 0.12s).  Exact whole-utterance matching
-# is never relaxed into substring matching: mid-utterance aliases
+# (conf 0.4, pause 0.2s); the default of 85 is deliberately more
+# sensitive (conf 0.12, pause at the 0.1s floor, trailing-alias
+# matching enabled).  Exact whole-utterance matching is never relaxed
+# into substring matching: mid-utterance aliases
 # ("[unk] sir car [unk]") stay rejected at every sensitivity.
-DEFAULT_SENSITIVITY = 70
+DEFAULT_SENSITIVITY = 85
 SUFFIX_MATCH_SENSITIVITY = 75
 # Floor for the sensitivity-scaled pause gate: without any pause a
 # partial result would fire mid-word during continuous speech.
