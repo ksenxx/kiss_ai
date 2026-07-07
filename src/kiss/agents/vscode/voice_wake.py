@@ -38,7 +38,9 @@ as "yes sir the car is ready" decode to ``[unk] sir car [unk]`` and
 used to fire the wake word.  At the default sensitivity detection is
 therefore strict; it fires only when
 
-- the *whole* utterance decodes to exactly one alias,
+- the *whole* utterance decodes to exactly one alias (or to one alias
+  preceded only by a brief burst of ``[unk]`` noise — the breathy
+  onset of softly spoken speech; see ``wake_with_leading_noise``),
 - no alias word is an egregiously low-confidence force-fit, and
 - for low-latency partial results, the speaker has paused briefly
   (~120ms at the default sensitivity) right after the alias —
@@ -166,6 +168,20 @@ MIN_WORD_CONF = 0.4
 # with the wake word instead of continuing ("soccer is my favorite
 # sport").  The required pause scales with the sensitivity slider
 # (see sensitivity_wake_pause_seconds).
+#
+# Softly spoken "Sorcar" decodes with a brief leading ``[unk]``: the
+# breathy onset of quiet speech is not silence, so the grammar emits
+# a short noise token before the alias ("[unk] sore car", [unk] span
+# ~60ms, measured live with whispered speech) and exact
+# whole-utterance matching rejected it — users had to speak loudly to
+# get a clean "sore car" decode.  Utterances whose only prefix is
+# [unk] noise totaling at most this many seconds therefore also wake
+# (see wake_with_leading_noise).  Spoken-word prefixes are unaffected:
+# real words decode to [unk] spans of ~0.5s and up ("hey there" 0.61s,
+# "he wrecked his" 0.60s, "she sells a" 0.51s, measured), so
+# "hey there Sorcar" still needs the high-sensitivity trailing-alias
+# mode, and an alias followed by more speech still never wakes.
+MAX_LEADING_NOISE_SECONDS = 0.35
 
 
 def sensitivity_min_word_conf(sensitivity: int) -> float:
@@ -942,6 +958,52 @@ def matches_wake(text: str, allow_trailing: bool = False) -> bool:
     return False
 
 
+def wake_with_leading_noise(words: list[dict] | None) -> bool:
+    """Return True when *words* is one wake alias preceded only by
+    brief ``[unk]`` noise.
+
+    Quietly spoken "Sorcar" carries a breathy onset that the grammar
+    decodes as a short leading ``[unk]`` before the alias
+    ("[unk] sore car" with a ~60ms [unk], measured with whispered
+    speech); exact whole-utterance matching rejected those wakes, so
+    the wake word seemed to need a loud voice.  This companion to
+    :func:`matches_wake` accepts them: every word before the alias
+    must be ``[unk]``, their spans must total at most
+    :data:`MAX_LEADING_NOISE_SECONDS`, and the alias must end the
+    utterance.  Spoken-word prefixes decode to [unk] spans of ~0.5s
+    and up, so sentences and "hey there Sorcar" stay rejected, as
+    does anything after the alias.  Word entries without numeric
+    start/end timings reject — the gate only ever opens on evidence.
+
+    Args:
+        words: The ``result``/``partial_result`` word list of a Vosk
+            result (entries carry ``word``/``start``/``end`` when
+            ``SetWords``/``SetPartialWords`` is on).
+
+    Returns:
+        True when the utterance is brief leading noise plus exactly
+        one wake alias.
+    """
+    if not words:
+        return False
+    index = 0
+    noise_seconds = 0.0
+    while index < len(words) and words[index].get("word") == "[unk]":
+        start = words[index].get("start")
+        end = words[index].get("end")
+        if not (
+            isinstance(start, (int, float))
+            and isinstance(end, (int, float))
+        ):
+            return False
+        noise_seconds += max(0.0, float(end) - float(start))
+        index += 1
+    if index == 0 or noise_seconds > MAX_LEADING_NOISE_SECONDS:
+        return False
+    tail = " ".join(str(w.get("word", "")) for w in words[index:])
+    return tail in WAKE_ALIASES
+
+
 def words_confident(
     words: list[dict] | None, min_conf: float = MIN_WORD_CONF
 ) -> bool:
@@ -969,7 +1031,9 @@ class WakeDetector:
     """Feeds raw 16kHz mono s16le audio into Vosk and detects the wake word.
 
     Detection is strict to avoid false wakes (see the module
-    docstring): the utterance must decode to exactly one alias with
+    docstring): the utterance must decode to exactly one alias — or
+    one alias preceded only by brief ``[unk]`` noise, the breathy
+    onset of soft speech (see :func:`wake_with_leading_noise`) — with
     confident words.  Final results fire immediately (Vosk already
     endpointed the utterance in isolation); partial results fire with
     low latency once ~200ms of quiet audio follows the alias, so
@@ -1039,7 +1103,10 @@ class WakeDetector:
             paused = self._quiet_seconds >= self._wake_pause_seconds
         if not (
             paused
-            and matches_wake(text, self._allow_trailing)
+            and (
+                matches_wake(text, self._allow_trailing)
+                or wake_with_leading_noise(words)
+            )
             and words_confident(words, self._min_word_conf)
         ):
             return False

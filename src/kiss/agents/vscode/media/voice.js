@@ -51,7 +51,9 @@
   // grammar also lists in-vocabulary words/phrases that sound like
   // "Sorcar".  Because the grammar forces every sound into an alias
   // or [unk], detection is strict at the default sensitivity: the
-  // utterance has to decode to exactly one alias, every alias word
+  // utterance has to decode to exactly one alias (allowing only a
+  // brief leading [unk] — the breathy onset of softly spoken speech,
+  // see wakeWithLeadingNoise), every alias word
   // needs a sufficient confidence, and a partial result only fires
   // after a short quiet pause proves the speaker paused instead of
   // talking on ("soccer is my favorite sport").  The settings slider
@@ -207,6 +209,47 @@
       }
     }
     return false;
+  }
+
+  // Softly spoken "Sorcar" carries a breathy onset that the grammar
+  // decodes as a brief leading [unk] before the alias ("[unk] sore
+  // car" with a ~60ms [unk], measured with whispered speech); exact
+  // whole-utterance matching rejected those wakes, so the wake word
+  // seemed to need a loud voice.  Spoken-word prefixes decode to
+  // [unk] spans of ~0.5s and up ("hey there" 0.61s, "he wrecked his"
+  // 0.60s, measured), so this budget keeps sentences and "hey there
+  // Sorcar" rejected.  Mirrors kiss/agents/vscode/voice_wake.py.
+  const MAX_LEADING_NOISE_SECONDS = 0.35;
+
+  /**
+   * True when `words` (the word list of a Vosk FINAL result, entries
+   * carrying word/start/end) is exactly one wake alias preceded only
+   * by [unk] noise totaling at most MAX_LEADING_NOISE_SECONDS —
+   * softly spoken "Sorcar" whose breathy onset decoded as a short
+   * [unk].  Word entries without numeric timings reject; anything
+   * after the alias rejects.  Companion to matchesWake; vosk-browser
+   * partial results carry no word list, so this gate only sees
+   * finals.
+   */
+  function wakeWithLeadingNoise(words) {
+    if (!Array.isArray(words) || words.length === 0) return false;
+    let i = 0;
+    let noiseSeconds = 0;
+    while (i < words.length && words[i] && words[i].word === '[unk]') {
+      const start = words[i].start;
+      const end = words[i].end;
+      if (typeof start !== 'number' || typeof end !== 'number') {
+        return false;
+      }
+      noiseSeconds += Math.max(0, end - start);
+      i++;
+    }
+    if (i === 0 || noiseSeconds > MAX_LEADING_NOISE_SECONDS) return false;
+    const tail = [];
+    for (; i < words.length; i++) {
+      tail.push(words[i] && words[i].word);
+    }
+    return WAKE_ALIASES.indexOf(tail.join(' ')) !== -1;
   }
 
   /**
@@ -622,9 +665,12 @@
             // the capture by re-waking.
             if (capture) return;
             // A final result means Vosk saw the endpoint: the whole
-            // utterance is over, so no pause gate is needed.
+            // utterance is over, so no pause gate is needed.  Softly
+            // spoken "Sorcar" decodes with a brief leading [unk]
+            // (breathy onset), which wakeWithLeadingNoise accepts.
             if (
-              matchesWake(message.result.text) &&
+              (matchesWake(message.result.text) ||
+                wakeWithLeadingNoise(message.result.result)) &&
               wordsConfident(message.result.result)
             ) {
               fireWake();
