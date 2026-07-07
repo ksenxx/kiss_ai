@@ -47,6 +47,28 @@ def test_synthesize_returns_playable_mp3() -> None:
     assert _is_mp3(data)
 
 
+@requires_openai
+def test_default_narrator_voice_synthesizes_multi_sentence_take() -> None:
+    """The default voice reads a multi-sentence script as one MP3 clip.
+
+    Guards the natural-narrator delivery path end to end: the default
+    voice/prompt pair must be accepted by the real GPT audio model and
+    yield a single substantial MP3 stream for a multi-sentence script
+    (the case where breaks/stutter artifacts used to appear).
+    """
+    result = synthesize_talk_audio(
+        "I finished refactoring the parser module. All twelve tests "
+        "pass. Let me know if you would like a deeper cleanup next.",
+        language="en-US",
+    )
+    assert result is not None
+    audio_b64, mime = result
+    assert mime == "audio/mpeg"
+    data = base64.b64decode(audio_b64)
+    assert len(data) > 10000
+    assert _is_mp3(data)
+
+
 def test_empty_text_returns_none() -> None:
     """Blank text must not hit the API and must return None."""
     assert synthesize_talk_audio("") is None
