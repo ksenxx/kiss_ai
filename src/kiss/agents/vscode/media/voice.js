@@ -12,9 +12,9 @@
  * the speech that follows.  When the host starts the gpt-audio
  * transcription/translation call it sends ``{type:
  * 'voiceTranscribing'}`` and the flash turns YELLOW; the resulting
- * ``{type: 'voiceSpeech', text}`` clears the flash and types the
- * translated text into the task input (or appends it to an existing
- * draft), and listening continues.
+ * ``{type: 'voiceSpeech', text, speaker, language}`` clears the flash
+ * and types the translated text into the task input (or appends it to
+ * an existing draft), and listening continues.
  *
  * Two modes, selected by the ``window.__VOICE__`` config injected by
  * the page template:
@@ -28,7 +28,8 @@
  *   and posted to the server as ``{type: 'voiceTranscribe', audio:
  *   <base64 pcm>}``; the server runs the same gpt-audio translation
  *   as webview mode and replies with ``{type: 'voiceSpeech', text,
- *   speaker}``.  Wake-word detection never leaves the machine.
+ *   speaker, language}``.  Wake-word detection never leaves the
+ *   machine.
  *
  * - ``webview`` (VS Code extension): extension webviews cannot use
  *   getUserMedia (VS Code denies microphone access to webview
@@ -328,7 +329,11 @@
    * highlighted tab.  When *speaker* is a positive integer (the
    * host's voice-recognition speaker number, unique per distinct
    * voice, starting from 1) the text is prefixed with
-   * ``Speaker #N says that: `` so the agent knows who spoke.  An
+   * ``Speaker #N says in the language X that: `` — X being the
+   * language tag the transcription agent detected (e.g. ``fr``) —
+   * so the agent knows who spoke and in what language.  When no
+   * language was detected (or an older host sent none) the prefix
+   * falls back to ``Speaker #N says that: ``.  An
    * empty input receives the text; an existing draft is appended to
    * with a space.  After a non-empty insert a ``kiss-voice-submit``
    * window event asks main.js to send the input exactly like a click
@@ -339,7 +344,7 @@
    * *keepFlash* is true (a newer voice round is still in flight and
    * owns the indicator).
    */
-  function insertSpeech(text, keepFlash, speaker) {
+  function insertSpeech(text, keepFlash, speaker, language) {
     if (!keepFlash) flash(null);
     let translated = String(typeof text === 'string' ? text : '').trim();
     if (!translated) return;
@@ -349,7 +354,15 @@
       speaker >= 1 &&
       Math.floor(speaker) === speaker
     ) {
-      translated = 'Speaker #' + speaker + ' says that: ' + translated;
+      const lang = typeof language === 'string' ? language.trim() : '';
+      translated = lang
+        ? 'Speaker #' +
+          speaker +
+          ' says in the language ' +
+          lang +
+          ' that: ' +
+          translated
+        : 'Speaker #' + speaker + ' says that: ' + translated;
     }
     if (!inp.value) {
       inp.value = translated;
@@ -891,7 +904,7 @@
       // Terminal results arrive in spoken (FIFO) order; keep the
       // flash when a newer round is still capturing or transcribing.
       outstandingRounds = Math.max(0, outstandingRounds - 1);
-      insertSpeech(msg.text, outstandingRounds > 0, msg.speaker);
+      insertSpeech(msg.text, outstandingRounds > 0, msg.speaker, msg.language);
     } else if (msg.type === 'voiceState') {
       // Extension host reports the real listener state.  A listener
       // that stopped (error or off) can no longer deliver the
