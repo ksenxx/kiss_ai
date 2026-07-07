@@ -6,15 +6,18 @@
  * Voice wake-word support for KISS Sorcar.
  *
  * Always-on, fully local listener for the trigger word "Sorcar".  When
- * the wake word is heard, the mic button flashes RED as a visual cue
- * (no text is ever typed into the task input — the literal word
- * "sorcar" must never appear there) while the extension host records
- * the speech that follows.  When the host starts the gpt-audio
- * transcription/translation call it sends ``{type:
- * 'voiceTranscribing'}`` and the flash turns YELLOW; the resulting
- * ``{type: 'voiceSpeech', text, speaker, language}`` clears the flash
- * and types the translated text into the task input (or appends it to
- * an existing draft), and listening continues.
+ * the wake word is heard, the mic button flashes RED and a large
+ * blinking "Listening ..." overlay appears over the task input as
+ * visual cues (no text is ever typed into the task input — the
+ * literal word "sorcar" must never appear there) while the extension
+ * host records the speech that follows.  When the host starts the
+ * gpt-audio transcription/translation call it sends ``{type:
+ * 'voiceTranscribing'}`` and the flash turns YELLOW (the overlay
+ * hides); the resulting ``{type: 'voiceSpeech', text, speaker,
+ * language}`` clears the flash, types the translated text into the
+ * task input (or appends it to an existing draft) and submits it,
+ * a spoken "Working on it." acknowledges the dictated task, and
+ * listening continues.
  *
  * Two modes, selected by the ``window.__VOICE__`` config injected by
  * the page template:
@@ -277,11 +280,28 @@
   let flashTimer = null;
 
   /**
+   * Show or hide the blinking "Listening ..." overlay over the task
+   * input.  Visible exactly while the mic button flashes red (wake
+   * word heard, speech being captured); the CSS 'listening' class on
+   * #input-text-wrap drives the large blinking type.  A missing
+   * overlay element (older page fixtures) is a no-op.
+   */
+  function showListening(on) {
+    const overlay = document.getElementById('listening-overlay');
+    const wrap = overlay && overlay.parentElement;
+    if (!wrap) return;
+    if (on) wrap.classList.add('listening');
+    else wrap.classList.remove('listening');
+  }
+
+  /**
    * Show a transient color state on the mic button: 'voice-triggered'
    * (red — wake word heard, capturing speech) or 'voice-transcribing'
    * (yellow — gpt-audio transcription in flight).  Passing a falsy
    * class clears both.  Only one flash (and one safety timer) is
-   * active at a time.
+   * active at a time.  The blinking "Listening ..." input overlay
+   * tracks the red state exactly: shown with 'voice-triggered',
+   * hidden on any other transition (yellow, clear, safety timeout).
    */
   function flash(cls, timeoutMs) {
     if (flashTimer !== null) {
@@ -289,11 +309,13 @@
       flashTimer = null;
     }
     btn.classList.remove('voice-triggered', 'voice-transcribing');
+    showListening(cls === 'voice-triggered');
     if (!cls) return;
     btn.classList.add(cls);
     flashTimer = setTimeout(() => {
       flashTimer = null;
       btn.classList.remove(cls);
+      showListening(false);
     }, timeoutMs);
   }
 
@@ -380,6 +402,50 @@
     // (submit vs. steering of a running task) and listens for this
     // event next to the 'kiss-voice-post' bridge.
     window.dispatchEvent(new CustomEvent('kiss-voice-submit'));
+    speakWorkingOnIt();
+  }
+
+  /**
+   * Speak a short "Working on it." acknowledgement right after a
+   * voice-dictated task is submitted, so the user hears that Sorcar
+   * accepted the command.  Prefers the GPT-synthesized natural clip
+   * (media/working-on-it.mp3, gpt-audio "marin" voice) whose URL the
+   * page template injects as ``cfg.ackAudioUrl``; when the clip is
+   * missing or playback is rejected (autoplay policy, no Audio API)
+   * it falls back to the Web Speech API so the ack is never silent
+   * where any speech output exists.
+   */
+  function speakWorkingOnIt() {
+    try {
+      if (cfg.ackAudioUrl && typeof window.Audio === 'function') {
+        const audio = new window.Audio(cfg.ackAudioUrl);
+        const p = audio.play();
+        if (p && typeof p.catch === 'function') {
+          p.catch(() => {
+            speakAckWithSystemVoice();
+          });
+        }
+        return;
+      }
+    } catch (_e) {
+      /* fall through to the system voice */
+    }
+    speakAckWithSystemVoice();
+  }
+
+  /** Web Speech API fallback for the "Working on it." ack. */
+  function speakAckWithSystemVoice() {
+    try {
+      const synth = window.speechSynthesis;
+      if (!synth || typeof window.SpeechSynthesisUtterance !== 'function') {
+        return;
+      }
+      const utter = new window.SpeechSynthesisUtterance('Working on it.');
+      utter.lang = 'en-US';
+      synth.speak(utter);
+    } catch (_e) {
+      /* no speech output available; stay silent */
+    }
   }
 
   // Browser-mode post-wake capture in progress, or null.  Owns every
