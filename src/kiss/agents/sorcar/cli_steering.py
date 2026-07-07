@@ -332,6 +332,13 @@ class _InputBox:
     Attributes:
         lock: Shared lock (also used by :class:`_StdoutProxy`).
         buf: The current edit buffer.
+        cursor: Caret index into :attr:`buf` (``0..len(buf)``).
+            Left/Right (and Home/End) move it; every buffer edit
+            inserts/deletes at this position so previously-typed text
+            can be corrected.  Assigning :attr:`buf` moves the cursor
+            to the end of the new text; editing code that inserts or
+            deletes mid-buffer re-places the cursor right after the
+            assignment.
         title: Text shown in the top border.
         status: Right-aligned text shown in the bottom border.
     """
@@ -418,6 +425,24 @@ class _InputBox:
         # displays)`` lists.
         self._last_completed_buf: str | None = None
         self._last_completed_cands: tuple[list[str], list[str]] = ([], [])
+
+    @property
+    def buf(self) -> str:
+        """The current edit buffer."""
+        return self._buf
+
+    @buf.setter
+    def buf(self, value: str) -> None:
+        """Replace the edit buffer and move the caret to its end.
+
+        Whole-buffer replacement (history recall, completion accept,
+        Ctrl+U clear, submit reset, direct assignment by owners) puts
+        the insertion point after the new text — the only sensible
+        spot for a fresh buffer.  Mid-buffer edits in :meth:`feed`
+        re-assign :attr:`cursor` right after setting :attr:`buf`.
+        """
+        self._buf = value
+        self.cursor = len(value)
 
     def start(self) -> None:
         """Enter raw mode, reserve the scroll region and draw the box."""
@@ -647,7 +672,9 @@ class _InputBox:
         rows, _ = _term_size()
         cols = panel_cols()
         menu_h = self._menu_h()
-        body_rows, is_placeholder = panel_body(self.buf, cols)
+        body_rows, is_placeholder = panel_body(
+            self.buf, cols, cursor=self.cursor,
+        )
         box_body_h = len(body_rows)
         box_h = 2 + box_body_h
         eff_box_h = box_h + menu_h
@@ -800,7 +827,7 @@ class _InputBox:
         # menu above it).  ``body_cursor_col`` returns the body-row
         # index of the caret (0 for the first body row, growing with
         # each embedded newline).
-        caret_row, col = body_cursor_col(self.buf, cols)
+        caret_row, col = body_cursor_col(self.buf, cols, self.cursor)
         self._out.write(
             f"{_ESC}[{top_row + menu_h + 1 + caret_row};{col}H"
         )
@@ -830,7 +857,9 @@ class _InputBox:
         if not cleaned:
             return False
         with self.lock:
-            self.buf += cleaned
+            cur = self.cursor
+            self.buf = self.buf[:cur] + cleaned + self.buf[cur:]
+            self.cursor = cur + len(cleaned)
         return True
 
     def _history_back(self) -> None:
@@ -1167,7 +1196,11 @@ class _InputBox:
                 for seq in _NEWLINE_AFTER_ESC:
                     if text.startswith(seq, i + 1):
                         with self.lock:
-                            self.buf += "\n"
+                            cur = self.cursor
+                            self.buf = (
+                                self.buf[:cur] + "\n" + self.buf[cur:]
+                            )
+                            self.cursor = cur + 1
                         # The modifier+Enter is a buffer edit; refresh
                         # the in-place completion menu so suggestions
                         # track multi-line input.
@@ -1186,9 +1219,11 @@ class _InputBox:
                     break
                 # Parse other CSI escape sequences: Up/Down arrows
                 # navigate the in-place completion menu when it's
-                # open, or browse the input history otherwise; the
-                # rest (Left/Right/F-keys, etc.) are swallowed so
-                # their printable bytes do not type into the buffer.
+                # open, or browse the input history otherwise;
+                # Left/Right move the edit cursor and Home/End jump
+                # to the buffer's ends; the rest (F-keys, etc.) are
+                # swallowed so their printable bytes do not type into
+                # the buffer.
                 if text[i + 1] == "[":
                     j = i + 2
                     while j < len(text) and not ("@" <= text[j] <= "~"):
@@ -1219,15 +1254,58 @@ class _InputBox:
                         if self._menu_open:
                             self._menu_move(-1)
                             changed = True
+                    elif final == "D" and seq == "":  # Left arrow
+                        with self.lock:
+                            if self.cursor > 0:
+                                self.cursor -= 1
+                        changed = True
+                    elif final == "C" and seq == "":  # Right arrow
+                        with self.lock:
+                            if self.cursor < len(self.buf):
+                                self.cursor += 1
+                        changed = True
+                    elif (final == "H" and seq == "") or (
+                        final == "~" and seq in ("1", "7")
+                    ):  # Home (``ESC[H`` / ``ESC[1~`` / ``ESC[7~``)
+                        with self.lock:
+                            self.cursor = 0
+                        changed = True
+                    elif (final == "F" and seq == "") or (
+                        final == "~" and seq in ("4", "8")
+                    ):  # End (``ESC[F`` / ``ESC[4~`` / ``ESC[8~``)
+                        with self.lock:
+                            self.cursor = len(self.buf)
+                        changed = True
                     i = j + 1
                     continue
-                # Swallow SS3 sequences (``ESC O <final>``): arrow keys
-                # in application cursor mode (DECCKM) and F1–F4, whose
-                # printable bytes must not be typed into the buffer.
+                # SS3 sequences (``ESC O <final>``): arrow keys in
+                # application cursor mode (DECCKM) and F1–F4.
+                # Left/Right/Home/End move the edit cursor; the rest
+                # are swallowed so their printable bytes must not be
+                # typed into the buffer.
                 if text[i + 1] == "O":
                     if i + 2 >= len(text):  # split mid-sequence
                         self._pending_esc = text[i:]
                         break
+                    ss3 = text[i + 2]
+                    if ss3 == "D":  # Left arrow (application cursor mode)
+                        with self.lock:
+                            if self.cursor > 0:
+                                self.cursor -= 1
+                        changed = True
+                    elif ss3 == "C":  # Right arrow
+                        with self.lock:
+                            if self.cursor < len(self.buf):
+                                self.cursor += 1
+                        changed = True
+                    elif ss3 == "H":  # Home
+                        with self.lock:
+                            self.cursor = 0
+                        changed = True
+                    elif ss3 == "F":  # End
+                        with self.lock:
+                            self.cursor = len(self.buf)
+                        changed = True
                     i += 3
                     continue
                 # A bare ESC followed by an unrecognized byte (Alt+key,
@@ -1303,7 +1381,9 @@ class _InputBox:
                 # ``\r`` and follows the branch above, so the two
                 # are reliably distinguishable.
                 with self.lock:
-                    self.buf += "\n"
+                    cur = self.cursor
+                    self.buf = self.buf[:cur] + "\n" + self.buf[cur:]
+                    self.cursor = cur + 1
                     self._hist_idx = None
                 # Like the Shift+Enter newline-insert paths above,
                 # refresh the in-place completion menu so suggestions
@@ -1311,9 +1391,11 @@ class _InputBox:
                 self._refresh_typing_menu()
                 changed = True
             elif ch in ("\x7f", "\x08"):
-                if self.buf:
+                if self.cursor > 0:
                     with self.lock:
-                        self.buf = self.buf[:-1]
+                        cur = self.cursor
+                        self.buf = self.buf[: cur - 1] + self.buf[cur:]
+                        self.cursor = cur - 1
                         self._hist_idx = None
                     # Backspace is an edit; refresh the in-place menu
                     # so suggestions track the shrinking buffer ("fast
@@ -1396,7 +1478,9 @@ class _InputBox:
                 # and would corrupt the terminal when redrawn.  DEL
                 # (\x7f) is already consumed by the backspace branch.
                 with self.lock:
-                    self.buf += ch
+                    cur = self.cursor
+                    self.buf = self.buf[:cur] + ch + self.buf[cur:]
+                    self.cursor = cur + 1
                     self._hist_idx = None
                 # "Fast complete" while typing: every printable
                 # keystroke refreshes the in-place menu with current
