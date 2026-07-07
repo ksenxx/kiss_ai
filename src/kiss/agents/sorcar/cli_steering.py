@@ -372,7 +372,9 @@ class _InputBox:
         # by the SIGCONT handler after a suspend/resume cycle.
         self._raw_term: Any = None
         self._prev_sigcont: Any = None
-        # Persistent input history (oldest -> newest); Up/Down browse it.
+        # Persistent input history (oldest -> newest); Up/Down browse
+        # it when the buffer is empty or a browse is in progress
+        # (otherwise they move the caret between buffer lines).
         # ``_hist_idx`` is ``None`` when not browsing; otherwise an index
         # into ``history`` (or ``len(history)`` when at the saved draft).
         self.history: list[str] = []
@@ -886,6 +888,76 @@ class _InputBox:
                 self._hist_idx = None
                 self.buf = self._hist_saved
 
+    def _cursor_up_line(self) -> None:
+        """Move the caret up one buffer line (textarea-style).
+
+        Mirrors the chat webview textbox: the caret keeps its column
+        (clamped to the target line's length) when the buffer has a
+        line above, and jumps to the very start of the text when it is
+        already on the first line.
+        """
+        with self.lock:
+            line_start = self.buf.rfind("\n", 0, self.cursor) + 1
+            if line_start == 0:
+                self.cursor = 0
+                return
+            col = self.cursor - line_start
+            prev_start = self.buf.rfind("\n", 0, line_start - 1) + 1
+            prev_len = line_start - 1 - prev_start
+            self.cursor = prev_start + min(col, prev_len)
+
+    def _cursor_down_line(self) -> None:
+        """Move the caret down one buffer line (textarea-style).
+
+        Mirrors the chat webview textbox: the caret keeps its column
+        (clamped to the target line's length) when the buffer has a
+        line below, and jumps to the very end of the text when it is
+        already on the last line.
+        """
+        with self.lock:
+            line_end = self.buf.find("\n", self.cursor)
+            if line_end < 0:
+                self.cursor = len(self.buf)
+                return
+            line_start = self.buf.rfind("\n", 0, self.cursor) + 1
+            col = self.cursor - line_start
+            next_start = line_end + 1
+            next_end = self.buf.find("\n", next_start)
+            if next_end < 0:
+                next_end = len(self.buf)
+            self.cursor = next_start + min(col, next_end - next_start)
+
+    def _arrow_up(self) -> None:
+        """Handle the Up arrow (menu closed) with webview semantics.
+
+        History cycling happens only when a browse is already in
+        progress or the buffer is empty — exactly the condition the
+        chat webview's ``cycleHistoryUp`` uses (``histIdx >= 0 ||
+        !inp.value``).  Otherwise the caret moves up one line inside
+        the buffer like a plain textarea.
+        """
+        if self._hist_idx is not None or not self.buf:
+            self._history_back()
+            # Refresh the menu against the recalled buffer so "fast
+            # complete" tracks history navigation too.
+            self._refresh_typing_menu()
+        else:
+            self._cursor_up_line()
+
+    def _arrow_down(self) -> None:
+        """Handle the Down arrow (menu closed) with webview semantics.
+
+        History cycling happens only while a browse is in progress —
+        the chat webview's ``cycleHistoryDown`` guard (``histIdx >=
+        0``).  Otherwise the caret moves down one line inside the
+        buffer like a plain textarea.
+        """
+        if self._hist_idx is not None:
+            self._history_forward()
+            self._refresh_typing_menu()
+        else:
+            self._cursor_down_line()
+
     def _reset_completion_state(self) -> None:
         """Close the in-place completion menu and drop its state."""
         with self.lock:
@@ -1219,7 +1291,10 @@ class _InputBox:
                     break
                 # Parse other CSI escape sequences: Up/Down arrows
                 # navigate the in-place completion menu when it's
-                # open, or browse the input history otherwise;
+                # open; otherwise they browse the input history when
+                # the buffer is empty (or a browse is in progress)
+                # and move the caret between buffer lines otherwise
+                # — the same split the chat webview textbox makes;
                 # Left/Right move the edit cursor and Home/End jump
                 # to the buffer's ends; the rest (F-keys, etc.) are
                 # swallowed so their printable bytes do not type into
@@ -1237,18 +1312,13 @@ class _InputBox:
                         if self._menu_open:
                             self._menu_move(-1)
                         else:
-                            self._history_back()
-                            # Refresh the menu against the recalled
-                            # buffer so "fast complete" tracks history
-                            # navigation too.
-                            self._refresh_typing_menu()
+                            self._arrow_up()
                         changed = True
                     elif final == "B" and seq == "":  # Down arrow
                         if self._menu_open:
                             self._menu_move(1)
                         else:
-                            self._history_forward()
-                            self._refresh_typing_menu()
+                            self._arrow_down()
                         changed = True
                     elif final == "Z" and seq == "":  # Shift+Tab
                         if self._menu_open:
@@ -1280,6 +1350,8 @@ class _InputBox:
                     continue
                 # SS3 sequences (``ESC O <final>``): arrow keys in
                 # application cursor mode (DECCKM) and F1–F4.
+                # Up/Down behave exactly like their CSI twins above
+                # (menu navigation / history browse / line movement),
                 # Left/Right/Home/End move the edit cursor; the rest
                 # are swallowed so their printable bytes must not be
                 # typed into the buffer.
@@ -1288,7 +1360,19 @@ class _InputBox:
                         self._pending_esc = text[i:]
                         break
                     ss3 = text[i + 2]
-                    if ss3 == "D":  # Left arrow (application cursor mode)
+                    if ss3 == "A":  # Up arrow (application cursor mode)
+                        if self._menu_open:
+                            self._menu_move(-1)
+                        else:
+                            self._arrow_up()
+                        changed = True
+                    elif ss3 == "B":  # Down arrow
+                        if self._menu_open:
+                            self._menu_move(1)
+                        else:
+                            self._arrow_down()
+                        changed = True
+                    elif ss3 == "D":  # Left arrow
                         with self.lock:
                             if self.cursor > 0:
                                 self.cursor -= 1
@@ -1933,7 +2017,9 @@ class AnchoredRepl:
     def read_idle_line(self) -> str | None:
         """Read one line in idle mode through the anchored box.
 
-        Up/Down arrows browse :attr:`_InputBox.history`, Tab cycles
+        Up/Down arrows browse :attr:`_InputBox.history` when the
+        buffer is empty (and move the caret between buffer lines
+        otherwise, like the chat webview textbox), Tab cycles
         through the registered ``completer_fn`` candidates, and the
         line is echoed above the box (in the scroll region) after
         Enter so the user can see what they typed.

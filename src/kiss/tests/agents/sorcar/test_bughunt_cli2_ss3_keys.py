@@ -55,14 +55,19 @@ def test_ss3_function_keys_do_not_corrupt_buffer() -> None:
 
 
 def test_ss3_swallow_keeps_following_text() -> None:
-    """Only the 3-byte SS3 sequence is consumed; later keys still type."""
+    """Only the 3-byte SS3 sequence is consumed; later keys still type.
+
+    SS3 Up on a non-empty single-line buffer now moves the caret to the
+    start of the text (webview-textbox parity), so the following ``cd``
+    is inserted at the front — but never the literal ``OA`` bytes.
+    """
     box = _box()
     box.feed(b"ab\x1bOAcd", lambda _line: None, lambda: None)
-    assert box.buf == "abcd"
+    assert box.buf == "cdab"
 
 
 def test_csi_arrow_keys_still_swallowed() -> None:
-    """Regression guard: normal-mode CSI arrows stay swallowed."""
+    """Regression guard: normal-mode CSI arrows never type literal text."""
     box = _box()
     box.feed(b"hi\x1b[A\x1b[D", lambda _line: None, lambda: None)
     assert box.buf == "hi"
