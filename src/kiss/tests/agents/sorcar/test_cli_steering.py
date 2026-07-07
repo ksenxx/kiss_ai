@@ -291,26 +291,40 @@ class TestInputBoxHistory:
         box.feed(b"\x1b[A\x1b[A", lambda _s: None, lambda: None)
         assert box.buf == "first"
 
-    def test_down_returns_to_draft(self) -> None:
+    def test_up_with_typed_text_moves_caret_not_history(self) -> None:
+        # Webview parity: with non-empty typed text (and no browse in
+        # progress) Up moves the caret to the start of the line and
+        # never replaces the draft with a history entry.
         box = _make_box()
         box.history = ["first", "second"]
         box.feed(b"draft", lambda _s: None, lambda: None)
         box.feed(b"\x1b[A", lambda _s: None, lambda: None)
+        assert box.buf == "draft"
+        assert box.cursor == 0
+
+    def test_down_returns_to_draft(self) -> None:
+        # A browse starts from an empty buffer (webview parity), so
+        # Down past the newest entry restores the empty draft.
+        box = _make_box()
+        box.history = ["first", "second"]
+        box.feed(b"\x1b[A", lambda _s: None, lambda: None)
         assert box.buf == "second"
         box.feed(b"\x1b[B", lambda _s: None, lambda: None)
-        assert box.buf == "draft"
+        assert box.buf == ""
 
-    def test_typing_resets_history_pointer(self) -> None:
+    def test_typing_stops_history_browse(self) -> None:
         box = _make_box()
         box.history = ["first"]
         box.feed(b"\x1b[A", lambda _s: None, lambda: None)
         assert box.buf == "first"
         box.feed(b"x", lambda _s: None, lambda: None)
-        # After editing, Up should restart at the latest history entry,
-        # not advance further back from the old pointer.
+        # After editing, the browse is over: Up moves the caret to the
+        # start of the (single-line) text instead of cycling history —
+        # matching the chat webview textbox.
         assert box.buf == "firstx"
         box.feed(b"\x1b[A", lambda _s: None, lambda: None)
-        assert box.buf == "first"
+        assert box.buf == "firstx"
+        assert box.cursor == 0
 
 
 class TestInputBoxCompletionMenu:
