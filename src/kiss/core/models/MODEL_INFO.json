@@ -1702,22 +1702,6 @@
     "emb": false,
     "gen": true
   },
-  "openrouter/aion-labs/aion-1.0": {
-    "context_length": 131072,
-    "input_price_per_1M": 4.0,
-    "output_price_per_1M": 8.0,
-    "fc": false,
-    "emb": false,
-    "gen": true
-  },
-  "openrouter/aion-labs/aion-1.0-mini": {
-    "context_length": 131072,
-    "input_price_per_1M": 0.7,
-    "output_price_per_1M": 1.4,
-    "fc": false,
-    "emb": false,
-    "gen": true
-  },
   "openrouter/aion-labs/aion-2.0": {
     "context_length": 131072,
     "input_price_per_1M": 0.8,
@@ -2483,7 +2467,7 @@
   "openrouter/meta-llama/llama-3.2-3b-instruct": {
     "context_length": 131072,
     "input_price_per_1M": 0.051,
-    "output_price_per_1M": 0.335,
+    "output_price_per_1M": 0.33,
     "fc": false,
     "emb": false,
     "gen": true
@@ -3807,7 +3791,7 @@
     "gen": true
   },
   "openrouter/thedrummer/rocinante-12b": {
-    "context_length": 32768,
+    "context_length": 65536,
     "input_price_per_1M": 0.25,
     "output_price_per_1M": 0.5,
     "fc": true,
@@ -3984,8 +3968,8 @@
   },
   "openrouter/z-ai/glm-5.2": {
     "context_length": 1048576,
-    "input_price_per_1M": 0.574,
-    "output_price_per_1M": 1.804,
+    "input_price_per_1M": 0.93,
+    "output_price_per_1M": 3.0,
     "fc": true,
     "emb": false,
     "gen": true
