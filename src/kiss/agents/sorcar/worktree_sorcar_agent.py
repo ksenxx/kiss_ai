@@ -88,6 +88,14 @@ def _merge_fix_steps(wt: GitWorktree, fix_lines: str) -> str:
         fix_lines: Result-specific middle lines (conflict resolution or
             pre-commit fix steps), each ending in a newline.
 
+    The final step uses ``git branch -D`` (force): a squash-merge /
+    cherry-pick resolution never records the task branch as an
+    ancestor of the original branch, so ``git branch -d`` would
+    ALWAYS refuse with "the branch ... is not fully merged" after the
+    user faithfully completed the steps above it.  (The automatic
+    path, :meth:`GitWorktreeOps.delete_branch`, falls back to ``-D``
+    for the same reason.)
+
     Returns:
         The indented multi-line command block (no trailing newline).
     """
@@ -96,7 +104,7 @@ def _merge_fix_steps(wt: GitWorktree, fix_lines: str) -> str:
         f"    git checkout {wt.original_branch}\n"
         f"    {_manual_merge_cmd(wt)}\n"
         + fix_lines
-        + f"    git branch -d {wt.branch}"
+        + f"    git branch -D {wt.branch}"
     )
 
 
@@ -163,8 +171,9 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         # squash-merged into the user's original branch — closing
         # the chat tab can no longer overwrite the main branch
         # with an incomplete, unverified deck.  Cleared whenever
-        # the user explicitly merges or discards via
-        # :meth:`_MergeFlowMixin._handle_worktree_action`, or when
+        # the user explicitly merges or discards — both via
+        # :meth:`_MergeFlowMixin._handle_worktree_action` and
+        # directly in :meth:`merge` / :meth:`discard` — or when
         # the agent boots a fresh worktree via
         # :meth:`_try_setup_worktree` / :meth:`new_chat`.
         self._pending_review: bool = False
@@ -1079,6 +1088,12 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             raise RuntimeError("No pending worktree task to merge")
 
         wt = self._wt
+        # The user has explicitly chosen to merge, so the stopped-task
+        # ``_pending_review`` state no longer applies (mirrors
+        # ``_MergeFlowMixin._handle_worktree_action``, which clears the
+        # flag before dispatching; direct API callers must get the
+        # same contract).
+        self._pending_review = False
 
         if wt.original_branch is None:
             merge_cmd = _manual_merge_cmd(wt)
@@ -1191,6 +1206,9 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             raise RuntimeError("No pending worktree task to discard")
 
         wt = self._wt
+        # Explicit discard clears the stopped-task review state, same
+        # contract as ``merge()`` above.
+        self._pending_review = False
         checkout_warning = ""
         delete_warning = ""
         with repo_lock(wt.repo_root):

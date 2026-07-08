@@ -15,6 +15,7 @@ import json
 import logging
 import math
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -24,6 +25,14 @@ from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# Valid POSIX environment-variable identifier.  ``save_api_key_to_shell``
+# interpolates the key *name* into the RC ``export`` line verbatim (only
+# the value is shell-quoted), and ``_cmd_save_config`` forwards any
+# string name from an untrusted client payload — so the name must be
+# validated or a newline/metacharacter name writes arbitrary commands
+# into the user's shell RC file.
+_ENV_VAR_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 # Serializes the read-modify-write of ``config.json`` in ``save_config``.
 # The on-disk write is already atomic (staged temp file + ``os.replace``),
@@ -335,8 +344,19 @@ def save_api_key_to_shell(key_name: str, key_value: str) -> None:
 
     Args:
         key_name: Environment variable name (e.g. ``"GEMINI_API_KEY"``).
+            Must be a valid POSIX identifier — anything else (the name
+            arrives from an untrusted client payload) is refused: the
+            name is interpolated into the RC line verbatim, so a
+            newline or shell metacharacter in it would write arbitrary
+            commands into the RC, and ``os.environ`` raises
+            ``ValueError`` on names containing ``=``.
         key_value: The API key string.
     """
+    if not _ENV_VAR_NAME_RE.fullmatch(key_name):
+        logger.warning(
+            "Refusing to save API key with invalid name %r", key_name,
+        )
+        return
     shell = _get_user_shell()
     rc = _shell_rc_path(shell)
     rc.parent.mkdir(parents=True, exist_ok=True)
@@ -440,11 +460,19 @@ def apply_config_to_env(cfg: dict[str, Any]) -> None:
     from kiss.core import config as config_module
 
     budget = cfg.get("max_budget", DEFAULTS["max_budget"])
-    try:
-        budget_value = float(budget)
-    except (TypeError, ValueError):
-        logger.debug("Ignoring non-numeric max_budget %r", budget)
+    if isinstance(budget, bool):
+        # ``bool`` is an ``int`` subclass, so ``float(True)`` succeeds
+        # and would silently shrink the live budget to $1.00 / $0.00.
+        # ``sanitize_config`` rejects booleans for numeric keys; mirror
+        # that here so a raw (unsanitized) payload behaves identically.
+        logger.debug("Ignoring boolean max_budget %r", budget)
         budget_value = float(DEFAULTS["max_budget"])
+    else:
+        try:
+            budget_value = float(budget)
+        except (TypeError, ValueError):
+            logger.debug("Ignoring non-numeric max_budget %r", budget)
+            budget_value = float(DEFAULTS["max_budget"])
     # ``float("nan")`` / ``float("inf")`` raise nothing above, and a
     # genuine non-finite float passes ``float()`` unchanged — but a
     # nan/inf budget makes every ``cost > max_budget`` check False,

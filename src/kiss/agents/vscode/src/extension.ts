@@ -132,13 +132,17 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
   );
 
-  // Commit message generation — sets the Git SCM input box
-  const setScmMessage = async (message: string) => {
+  // Commit message generation — sets the Git SCM input box.  ``reveal``
+  // opens the SCM view; it must be requested only on user-visible
+  // transitions (generation start, final message), NOT on every
+  // countdown tick — a per-second ``workbench.view.scm`` steals the
+  // sidebar focus once per second for the whole generation.
+  const setScmMessage = async (message: string, reveal = false) => {
     try {
       const api = await getGitApi();
       if (api && api.repositories.length > 0) {
         api.repositories[0].inputBox.value = message;
-        vscode.commands.executeCommand('workbench.view.scm');
+        if (reveal) vscode.commands.executeCommand('workbench.view.scm');
       }
     } catch (err) {
       console.error('[kissSorcar] Failed to set SCM message:', err);
@@ -154,7 +158,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const startCommitCountdown = () => {
     stopCommitCountdown?.();
     let seconds = commitCountdownSeconds;
-    void setScmMessage(`Generating in ${seconds}s ...`);
+    void setScmMessage(`Generating in ${seconds}s ...`, true);
     const interval = setInterval(() => {
       seconds = Math.max(seconds - 1, 0);
       void setScmMessage(`Generating in ${seconds}s ...`);
@@ -173,7 +177,7 @@ export function activate(context: vscode.ExtensionContext): void {
         showWarningNotification(`Commit message: ${ev.error}`);
         if (countdownWasRunning) void setScmMessage('');
       } else if (ev.message) {
-        void setScmMessage(ev.message);
+        void setScmMessage(ev.message, true);
       } else if (countdownWasRunning) {
         void setScmMessage('');
       }
@@ -199,12 +203,27 @@ export function activate(context: vscode.ExtensionContext): void {
     token?: vscode.CancellationToken,
   ): Promise<void> => {
     if (!(await hasStagedChanges())) {
-      await setScmMessage('Error: nothing staged');
+      await setScmMessage('Error: nothing staged', true);
       return;
     }
     startCommitCountdown();
-    token?.onCancellationRequested(() => stopCommitCountdown?.());
-    return sidebarView!.generateCommitMessage(token);
+    // Teardown for the no-reply paths: if the generation ends without
+    // ever firing ``onCommitMessage`` (daemon never replies and the
+    // 30 s promise timeout resolves, or the user cancels), the
+    // countdown interval must be cleared — otherwise it overwrites the
+    // SCM input box with "Generating in 0s ..." every second FOREVER —
+    // and the stale countdown text must be wiped.  When a real result
+    // arrived, the ``onCommitMessage`` handler above already stopped
+    // the countdown (``stopCommitCountdown`` is undefined), so this
+    // teardown is a no-op and never clobbers the generated message.
+    const teardown = () => {
+      if (stopCommitCountdown) {
+        stopCommitCountdown();
+        void setScmMessage('');
+      }
+    };
+    token?.onCancellationRequested(teardown);
+    return sidebarView!.generateCommitMessage(token).finally(teardown);
   };
 
   context.subscriptions.push(

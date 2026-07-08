@@ -543,7 +543,8 @@ class _MergeFlowMixin:
                 })
                 ok = GitWorktreeOps.commit_staged(repo, msg)
             if ok:
-                subject = msg.splitlines()[0] if msg.splitlines() else msg
+                msg_lines = msg.splitlines()
+                subject = msg_lines[0] if msg_lines else msg
                 done_event = self._broadcast_autocommit_done(
                     tab_id, success=True, committed=True,
                     message=f"Committed: {subject}",
