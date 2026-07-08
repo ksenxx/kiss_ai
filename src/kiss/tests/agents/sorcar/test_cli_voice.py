@@ -36,7 +36,7 @@ from typing import Any
 import pytest
 
 from kiss.agents.sorcar.cli_client import CliClient, _run_repl_loop
-from kiss.agents.sorcar.cli_panel import PROMPT_MARKER, display_width
+from kiss.agents.sorcar.cli_panel import body_cursor_col, panel_cols
 from kiss.agents.sorcar.cli_repl import SLASH_COMMANDS, CliCompleter
 from kiss.agents.sorcar.cli_steering import _InputBox
 from kiss.agents.sorcar.cli_voice import (
@@ -49,6 +49,9 @@ from kiss.agents.sorcar.cli_voice import (
 from kiss.core.print_to_console import ConsolePrinter
 
 BLINK_RED = "\x1b[5m\x1b[31m"
+# Steady (pre-wake) header indicator style: a reset then red, with no
+# blink attribute (matches ``voice_panel_top``'s non-blinking render).
+RED_ONLY = "\x1b[0m\x1b[31m"
 
 # ---------------------------------------------------------------------------
 # Fake listener child processes (real subprocesses, no mocks)
@@ -385,8 +388,13 @@ class TestAnchoredReader:
             listener.stop()
         assert line == "menu-free"
         assert not box._menu_open
-        overlay_col = 3 + display_width(PROMPT_MARKER + "Listening ...")
-        assert f";{overlay_col}H" in box._out.getvalue()
+        # The indicator lives in the header (top border), steady red
+        # pre-wake, and the caret parks on the still-visible buffer.
+        rendered = box._out.getvalue()
+        assert "\x1b[36m╭─\x1b[0m\x1b[31mListening ..." in rendered
+        cols = panel_cols()
+        _row, col = body_cursor_col(box.buf, cols, box.cursor)
+        assert f";{col}H" in rendered
 
     def test_no_speech_keeps_listening(
         self,
@@ -427,7 +435,10 @@ class TestAnchoredReader:
             listener.stop()
         assert line == "good one"
         rendered = box._out.getvalue()
-        assert rendered.count(BLINK_RED + "Listening ...") >= 2
+        # No wake word in this protocol stream: the header indicator is
+        # re-shown steady red (never blinking) after each bad payload.
+        assert rendered.count(RED_ONLY + "Listening ...") >= 2
+        assert BLINK_RED + "Listening ..." not in rendered
 
     def test_legacy_json_string_speech_payload(
         self,
@@ -605,7 +616,7 @@ class TestPlainReader:
     ) -> None:
         listener = _start_listener(
             monkeypatch, tmp_path,
-            ["READY", "WAKE", _speech("fallback speech")],
+            ["READY", "WAKE", "TRANSCRIBING", _speech("fallback speech")],
         )
         try:
             line = read_voice_line_plain(listener)
@@ -613,7 +624,12 @@ class TestPlainReader:
             listener.stop()
         assert line == "fallback speech"
         out = capsys.readouterr().out
-        assert BLINK_RED + "Listening ..." in out
+        # Steady red before the wake word, blinking after WAKE.
+        plain = out.find("\x1b[31mListening ...")
+        blink = out.find(BLINK_RED + "Listening ...")
+        assert plain != -1
+        assert blink != -1
+        assert plain < blink
         assert BLINK_RED + "Transcribing ..." in out
 
     def test_plain_reader_processes_speech_without_selectable_stdin(
@@ -704,6 +720,7 @@ class TestReplLoopIntegration:
         tmp_path: Path,
         box: _InputBox,
         stdin_pipe: int,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         """A spoken /voice while voice is active is ignored, not nested."""
         counter_file = tmp_path / "listener-count.txt"
@@ -726,6 +743,10 @@ class TestReplLoopIntegration:
         assert submitted == ["real task"]
         assert counter_file.read_text() == "1"
         assert len(pid_file.read_text().splitlines()) == 1
+        # The already-active voice notification is yellow too.
+        out = capsys.readouterr().out
+        active = [ln for ln in out.splitlines() if "already active" in ln]
+        assert active and active[0].startswith("\x1b[33m")
 
     def test_voice_cancel_restores_prompt_and_kills_listener(
         self,
@@ -818,7 +839,10 @@ class TestReplLoopIntegration:
             submitted.append,
         )
         assert submitted == ["plain hello"]
-        assert BLINK_RED + "Listening ..." in capsys.readouterr().out
+        # No wake word spoken: the inline indicator stays steady red.
+        out = capsys.readouterr().out
+        assert "\x1b[31mListening ..." in out
+        assert BLINK_RED + "Listening ..." not in out
 
     def test_voice_spawn_failure_keeps_repl_alive(
         self,
