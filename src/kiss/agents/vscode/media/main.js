@@ -2624,17 +2624,21 @@
   // --- run_parallel panel ⇔ sub-agent tabs invariant ---
   //
   // Invariant: while a ``run_parallel`` tool-call panel is UNCOLLAPSED
-  // the tabs of its sub-agents MUST be open, and while it is COLLAPSED
-  // those tabs MUST be closed.
+  // the tabs of its sub-agents MUST be open — except tabs the user
+  // closed individually by hand (closing one sub-agent tab MUST NOT
+  // close or reopen its siblings); while the panel is COLLAPSED those
+  // tabs MUST be closed.  Collapsing clears the by-hand close marks,
+  // so a subsequent expand reopens the whole fan-out.
   //
   // Sub-agents spawned by a live ``run_parallel`` fan-out are
   // associated with the newest ``.tc-run-parallel`` panel of the
   // parent tab (see the ``new_tab`` handler).  The panel element keeps
   // the group state directly (``_rpSubagents``: one entry per
-  // sub-agent with its backend ``taskId`` and current frontend
-  // ``tabId``; ``_rpParentTabId``: the parent tab the reopened tabs
-  // anchor to), and ``_rpTabPanel`` maps each open sub-agent tab id
-  // back to its owning panel so ``closeTab`` can restore consistency
+  // sub-agent with its backend ``taskId``, current frontend ``tabId``,
+  // and a ``userClosed`` mark for tabs closed individually by hand;
+  // ``_rpParentTabId``: the parent tab the reopened tabs anchor to),
+  // and ``_rpTabPanel`` maps each open sub-agent tab id back to its
+  // owning panel so ``closeTab`` can keep the bookkeeping consistent
   // when the user closes a sub-agent tab by hand.
   const _rpTabPanel = new Map();
   const _rpClosedSubagentTabs = new Set();
@@ -2760,6 +2764,9 @@
       }
     }
     if (tabKey) {
+      // A live tab is (re)associated with the fan-out: it is open, so
+      // any stale by-hand close mark no longer applies.
+      entry.userClosed = false;
       _rpClosedSubagentTabs.delete(tabKey);
       _rpTabPanel.set(tabKey, panelEl);
     }
@@ -2789,7 +2796,13 @@
           _rpTabPanel.delete(closingId);
           closeTab(closingId);
           en.tabId = '';
-        } else if (!collapsed && !openTab && en.taskId !== '') {
+          // Collapsing wipes the by-hand close marks: the next expand
+          // reopens EVERY sub-agent, including tabs the user closed
+          // individually before the collapse.
+          en.userClosed = false;
+        } else if (collapsed) {
+          en.userClosed = false;
+        } else if (!openTab && en.taskId !== '' && !en.userClosed) {
           const subTab = createBackgroundSubagentTab(panelEl._rpParentTabId);
           en.tabId = subTab.id;
           _rpTabPanel.set(subTab.id, panelEl);
@@ -2806,13 +2819,15 @@
   }
 
   /**
-   * Restore the invariant after sub-agent tabs in *closedIds* were
-   * closed OUTSIDE syncRunParallelPanel (tab-bar × button, context
-   * menu, cascade from closing another tab): an uncollapsed
-   * run_parallel panel must not keep the surviving sibling tabs open,
-   * so collapse the owning panel — which closes them.  Panels whose
-   * parent tab was closed in the same cascade disappeared with it and
-   * need no work.
+   * Bookkeeping after sub-agent tabs in *closedIds* were closed
+   * OUTSIDE syncRunParallelPanel (tab-bar × button, context menu,
+   * cascade from closing another tab).  Closing one sub-agent tab by
+   * hand must NOT close its sibling sub-agent tabs: the entry is only
+   * marked ``userClosed`` so no later sync of the still-uncollapsed
+   * panel resurrects it.  Only when NO open sub-agent tab remains does
+   * the owning panel collapse (nothing is left to close), so the next
+   * expand reopens the whole fan-out.  Panels whose parent tab was
+   * closed in the same cascade disappeared with it and need no work.
    */
   function rpAfterTabsClosed(closedIds) {
     if (_rpSyncing) return;
@@ -2823,7 +2838,10 @@
         _rpClosedSubagentTabs.add(id);
         _rpTabPanel.delete(id);
         for (const en of p._rpSubagents || []) {
-          if (en.tabId === id) en.tabId = '';
+          if (en.tabId === id) {
+            en.tabId = '';
+            en.userClosed = true;
+          }
         }
         panels.add(p);
       }
@@ -2832,6 +2850,9 @@
       const parentOpen =
         p._rpParentTabId === activeTabId || getTab(p._rpParentTabId);
       if (!parentOpen) continue;
+      // Sibling sub-agent tabs are still open: keep the panel
+      // uncollapsed and leave them alone.
+      if (rpPanelHasOpenTabs(p)) continue;
       if (!p.classList.contains('collapsed')) {
         p.classList.add('collapsed');
         p.classList.remove('user-pinned');
