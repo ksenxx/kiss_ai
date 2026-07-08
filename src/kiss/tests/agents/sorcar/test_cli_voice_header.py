@@ -28,6 +28,7 @@ import os
 import shlex
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -36,9 +37,9 @@ import pytest
 from kiss.agents.sorcar.cli_steering import _InputBox
 from kiss.agents.sorcar.cli_voice import (
     VoiceListener,
-    read_voice_line_anchored,
     read_voice_line_plain,
     start_voice,
+    start_voice_anchored,
 )
 from kiss.core.print_to_console import ConsolePrinter
 
@@ -130,13 +131,29 @@ def _capture(
     box: _InputBox,
     lines: list[str],
 ) -> tuple[str | None, str]:
-    """Run one anchored voice capture and return (speech, rendered)."""
-    listener = _start_listener(monkeypatch, tmp_path, lines)
+    """Run one anchored background voice capture, return (speech, rendered).
+
+    Starts the background pump session (the anchored REPL's voice
+    mode), polls the box's injected-line queue the way ``_pump_stdin``
+    does until the first utterance arrives (or the listener dies),
+    then closes the session — so all header rendering happens exactly
+    as in the live REPL.
+    """
+    _set_voice_cmd(monkeypatch, _write_listener(tmp_path, lines))
+    session = start_voice_anchored(box)
+    assert session is not None
     try:
-        text = read_voice_line_anchored(box, listener)
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            injected = box.drain_injected()
+            if injected:
+                return injected[0], box._out.getvalue()
+            if not session.active:
+                break
+            time.sleep(0.02)
+        return None, box._out.getvalue()
     finally:
-        listener.stop()
-    return text, box._out.getvalue()
+        session.close()
 
 
 class TestHeaderIndicator:
@@ -155,8 +172,10 @@ class TestHeaderIndicator:
         # Indicator opens the top border, steady red (no blink pre-wake).
         assert HDR_PLAIN + "Listening ..." in rendered
         assert BLINK + RED + "Listening ..." not in rendered
-        # The voice title follows the indicator on the same top border.
-        assert f"{RED}Listening ...{RESET}{CYAN} voice ·" in rendered
+        # The box's normal title follows the indicator on the same top
+        # border (voice no longer swaps in a modal title — the box
+        # stays fully typeable).
+        assert f"{RED}Listening ...{RESET}{CYAN} Dynamic steer" in rendered
         # The body never shows the indicator (chevron row is buffer/placeholder).
         assert "› Listening" not in rendered
 
@@ -304,16 +323,25 @@ class TestYellowVoiceMessages:
         stdin_pipe: int,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        listener = _start_listener(
-            monkeypatch, tmp_path, ["READY"], exit_code=3,
+        _set_voice_cmd(
+            monkeypatch,
+            _write_listener(tmp_path, ["READY"], exit_code=3),
         )
+        session = start_voice_anchored(box)
+        assert session is not None
         try:
-            text = read_voice_line_anchored(box, listener)
+            deadline = time.monotonic() + 10.0
+            while session.active and time.monotonic() < deadline:
+                time.sleep(0.02)
         finally:
-            listener.stop()
-        assert text is None
+            session.close()
+        assert not session.active
         out = capsys.readouterr().out
-        err = [ln for ln in out.splitlines() if "listener" in ln.lower()]
+        err = [
+            ln
+            for ln in out.splitlines()
+            if "listener" in ln.lower() and "exited" in ln.lower()
+        ]
         assert err and err[0].startswith(YELLOW)
 
 

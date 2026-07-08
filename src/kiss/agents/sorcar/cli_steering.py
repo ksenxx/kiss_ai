@@ -382,6 +382,11 @@ class _InputBox:
         # protocol lines).
         self.overlay = ""
         self.overlay_blink = False
+        # Lines injected programmatically (by the ``/voice`` wake-word
+        # pump) that the stdin pump treats exactly like Enter-submitted
+        # typed lines.  Guarded by :attr:`lock`; drained at the top of
+        # every :func:`_pump_stdin` iteration.
+        self._injected: list[str] = []
         # Persistent input history (oldest -> newest); Up/Down browse
         # it when the buffer is empty or a browse is in progress
         # (otherwise they move the caret between buffer lines).
@@ -600,6 +605,8 @@ class _InputBox:
         # ``_drawn_menu_h`` from this run).
         self.overlay = ""
         self.overlay_blink = False
+        with self.lock:
+            self._injected.clear()
         self._reset_completion_state()
         self._drawn_menu_h = 0
         # Reset the drawn box height so a later ``start()`` does not
@@ -643,6 +650,34 @@ class _InputBox:
         with self.lock:
             if self._active:
                 self._draw_locked()
+
+    def inject_line(self, text: str) -> None:
+        """Queue *text* to be submitted exactly like a typed Enter line.
+
+        Called from background threads (the ``/voice`` wake-word pump)
+        to hand a programmatically produced line to whichever
+        :func:`_pump_stdin` loop currently owns the box; the pump
+        drains the queue and forwards each line to its ``on_submit``
+        callback, so injected lines flow through the same idle-read /
+        steering paths as keyboard input while the in-progress typed
+        draft (:attr:`buf`) stays untouched.
+
+        Args:
+            text: The line to submit.
+        """
+        with self.lock:
+            self._injected.append(text)
+
+    def drain_injected(self) -> list[str]:
+        """Return and clear all pending injected lines.
+
+        Returns:
+            The injected lines in FIFO order (possibly empty).
+        """
+        with self.lock:
+            lines = self._injected
+            self._injected = []
+            return lines
 
     def _menu_h(self) -> int:
         """Return the current rendered height of the completion menu.
@@ -1653,6 +1688,15 @@ def _pump_stdin(
     read_fds = [fd]
     last_size = _term_size()
     while not is_done():
+        # Programmatically injected lines (the ``/voice`` wake-word
+        # pump) submit exactly like Enter-terminated typed lines, then
+        # the loop condition is re-polled so a completed read returns
+        # promptly instead of waiting out one more select timeout.
+        injected = box.drain_injected()
+        if injected:
+            for line in injected:
+                on_submit(line)
+            continue
         try:
             ready, _, _ = select.select(read_fds, [], [], 0.1)
         except (InterruptedError, OSError):

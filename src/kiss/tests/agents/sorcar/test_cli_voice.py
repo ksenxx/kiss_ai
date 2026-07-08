@@ -26,7 +26,6 @@ import io
 import json
 import os
 import shlex
-import signal
 import sys
 import threading
 import time
@@ -42,9 +41,9 @@ from kiss.agents.sorcar.cli_steering import _InputBox
 from kiss.agents.sorcar.cli_voice import (
     VoiceListener,
     listener_command,
-    read_voice_line_anchored,
     read_voice_line_plain,
     start_voice,
+    start_voice_anchored,
 )
 from kiss.core.print_to_console import ConsolePrinter
 
@@ -220,6 +219,37 @@ def box() -> _InputBox:
     return b
 
 
+def _capture_anchored(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    box: _InputBox,
+    lines: list[str],
+    **kw: Any,
+) -> tuple[str | None, str]:
+    """Run one anchored background voice capture, return (speech, rendered).
+
+    Starts the background pump session (the anchored REPL's voice
+    mode), polls the box's injected-line queue the way ``_pump_stdin``
+    does until the first utterance arrives (or the listener dies),
+    then closes the session.
+    """
+    _set_voice_cmd(monkeypatch, _write_listener(tmp_path, lines, **kw))
+    session = start_voice_anchored(box)
+    assert session is not None
+    try:
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            injected = box.drain_injected()
+            if injected:
+                return injected[0], box._out.getvalue()
+            if not session.active:
+                break
+            time.sleep(0.02)
+        return None, box._out.getvalue()
+    finally:
+        session.close()
+
+
 def _wait_dead(proc_or_pid: Any, timeout: float = 5.0) -> bool:
     """Return True once the child process is really gone."""
     deadline = time.monotonic() + timeout
@@ -246,9 +276,9 @@ class TestVoiceCommandRegistration:
         assert "/voice" in SLASH_COMMANDS
         help_text = SLASH_COMMANDS["/voice"].lower()
         assert "wake word" in help_text
-        assert "esc" in help_text
-        assert "ctrl+d" in help_text
-        assert "enter" in help_text
+        # Voice mode is a toggle and typing keeps working while it is on.
+        assert "toggle" in help_text
+        assert "typing" in help_text
 
     def test_voice_in_autocomplete_candidates(self, tmp_path: Path) -> None:
         completer = CliCompleter(str(tmp_path), "")
@@ -349,48 +379,41 @@ class TestAnchoredReader:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """(a)(b)(c): blinking red indicator, Transcribing, SPEECH text."""
-        listener = _start_listener(
-            monkeypatch, tmp_path,
+        del capsys
+        line, rendered = _capture_anchored(
+            monkeypatch, tmp_path, box,
             ["READY", "WAKE", "TRANSCRIBING", _speech("hello world")],
         )
-        try:
-            line = read_voice_line_anchored(box, listener)
-        finally:
-            listener.stop()
         assert line == "hello world"
-        rendered = box._out.getvalue()
         assert BLINK_RED + "Listening ..." in rendered
         assert BLINK_RED + "Transcribing ..." in rendered
-        # The recognised utterance is echoed like typed input.
-        assert "hello world" in capsys.readouterr().out
-        # The overlay is cleared once voice capture ends.
+        # The overlay is cleared once voice mode is closed.
         assert box.overlay == ""
 
-    def test_overlay_closes_completion_menu_and_parks_cursor_on_status(
+    def test_completion_menu_and_buffer_stay_editable_during_voice(
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
         box: _InputBox,
         stdin_pipe: int,
     ) -> None:
-        """Voice overlay owns the panel body, even over stale menu/buffer state."""
+        """Voice never hijacks the box: menu, draft and caret keep working."""
         box.buf = "draft\nsecond"
         box.completer_fn = lambda _buf: ["/voice ", "/help "]
         box.feed(b"/\t", lambda _line: None, lambda: None)
         assert box._menu_open
-        listener = _start_listener(
-            monkeypatch, tmp_path,
+        line, rendered = _capture_anchored(
+            monkeypatch, tmp_path, box,
             ["READY", _speech("menu-free")],
         )
-        try:
-            line = read_voice_line_anchored(box, listener)
-        finally:
-            listener.stop()
         assert line == "menu-free"
-        assert not box._menu_open
+        # Typing stays fully usable while voice is on: the open
+        # completion menu survives, still previewing the highlighted
+        # candidate exactly as it did before voice started.
+        assert box._menu_open
+        assert box.buf == "/voice "
         # The indicator lives in the header (top border), steady red
         # pre-wake, and the caret parks on the still-visible buffer.
-        rendered = box._out.getvalue()
         assert "\x1b[36m╭─\x1b[0m\x1b[31mListening ..." in rendered
         cols = panel_cols()
         _row, col = body_cursor_col(box.buf, cols, box.cursor)
@@ -404,16 +427,10 @@ class TestAnchoredReader:
         stdin_pipe: int,
     ) -> None:
         """(f): NO_SPEECH goes back to listening until real speech."""
-        listener = _start_listener(
-            monkeypatch, tmp_path,
+        line, _rendered = _capture_anchored(
+            monkeypatch, tmp_path, box,
             ["READY", "WAKE", "TRANSCRIBING", "NO_SPEECH", _speech("after")],
         )
-        # Ordinary keys are ignored while listening (only cancel keys act).
-        os.write(stdin_pipe, b"x")
-        try:
-            line = read_voice_line_anchored(box, listener)
-        finally:
-            listener.stop()
         assert line == "after"
 
     def test_malformed_speech_json_is_ignored(
@@ -424,17 +441,12 @@ class TestAnchoredReader:
         stdin_pipe: int,
     ) -> None:
         """(l): a bad SPEECH payload keeps listening for the next one."""
-        listener = _start_listener(
-            monkeypatch, tmp_path,
+        line, rendered = _capture_anchored(
+            monkeypatch, tmp_path, box,
             ["SPEECH {not json", "SPEECH 42", 'SPEECH {"text": 5}',
              _speech("good one")],
         )
-        try:
-            line = read_voice_line_anchored(box, listener)
-        finally:
-            listener.stop()
         assert line == "good one"
-        rendered = box._out.getvalue()
         # No wake word in this protocol stream: the header indicator is
         # re-shown steady red (never blinking) after each bad payload.
         assert rendered.count(RED_ONLY + "Listening ...") >= 2
@@ -448,56 +460,11 @@ class TestAnchoredReader:
         stdin_pipe: int,
     ) -> None:
         """The CLI accepts the legacy payload shape the wake service accepts."""
-        listener = _start_listener(
-            monkeypatch, tmp_path,
+        line, _rendered = _capture_anchored(
+            monkeypatch, tmp_path, box,
             ["SPEECH " + json.dumps("legacy text")],
         )
-        try:
-            line = read_voice_line_anchored(box, listener)
-        finally:
-            listener.stop()
         assert line == "legacy text"
-
-    @pytest.mark.parametrize(
-        "key", [b"\x1b", b"\x03", b"\x04", b"\r", b"\n"],
-        ids=["esc", "ctrl-c", "ctrl-d", "enter", "newline"],
-    )
-    def test_cancel_keys_return_none(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        tmp_path: Path,
-        box: _InputBox,
-        stdin_pipe: int,
-        key: bytes,
-    ) -> None:
-        """(e): Esc / Ctrl+C / Ctrl+D / Enter cancel voice capture."""
-        listener = _start_listener(monkeypatch, tmp_path, ["READY"])
-        os.write(stdin_pipe, key)
-        try:
-            line = read_voice_line_anchored(box, listener)
-        finally:
-            listener.stop()
-        assert line is None
-        assert _wait_dead(listener.proc)
-
-    def test_keyboard_interrupt_cancels(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        tmp_path: Path,
-        box: _InputBox,
-        stdin_pipe: int,
-    ) -> None:
-        """(e): an out-of-band SIGINT (real Ctrl+C) also cancels."""
-        listener = _start_listener(monkeypatch, tmp_path, ["READY"])
-        pid = os.getpid()
-        timer = threading.Timer(0.4, os.kill, args=(pid, signal.SIGINT))
-        timer.start()
-        try:
-            line = read_voice_line_anchored(box, listener)
-        finally:
-            timer.cancel()
-            listener.stop()
-        assert line is None
 
     def test_listener_unexpected_exit_prints_error(
         self,
@@ -508,15 +475,13 @@ class TestAnchoredReader:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """(j): a dying listener surfaces an error and leaves voice mode."""
-        listener = _start_listener(
-            monkeypatch, tmp_path, ["READY"], exit_code=3,
+        line, _rendered = _capture_anchored(
+            monkeypatch, tmp_path, box, ["READY"], exit_code=3,
         )
-        try:
-            line = read_voice_line_anchored(box, listener)
-        finally:
-            listener.stop()
         assert line is None
         assert "listener" in capsys.readouterr().out.lower()
+        # The header indicator never outlives the dead listener.
+        assert box.overlay == ""
 
     def test_listener_terminated_after_stop(
         self,
@@ -688,6 +653,7 @@ class TestReplLoopIntegration:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """(c)(d)(j): speech lines submit as typed tasks, continuously."""
+        del box
         script = _write_listener(
             tmp_path,
             ["READY", _speech("task one"), _speech("   "),
@@ -705,24 +671,20 @@ class TestReplLoopIntegration:
             _make_client(tmp_path),
             read_line,
             submitted.append,
-            voice_reader=lambda listener: read_voice_line_anchored(
-                box, listener,
-            ),
         )
         # Blank speech is skipped; both real utterances are submitted;
         # after the listener exits the REPL falls back to typed input.
         assert submitted == ["task one", "task two"]
         assert "listener" in capsys.readouterr().out.lower()
 
-    def test_spoken_voice_command_does_not_start_nested_listener(
+    def test_spoken_voice_command_toggles_voice_off(
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
-        box: _InputBox,
         stdin_pipe: int,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        """A spoken /voice while voice is active is ignored, not nested."""
+        """A spoken /voice while voice is active toggles voice OFF."""
         counter_file = tmp_path / "listener-count.txt"
         pid_file = tmp_path / "listener-pids.txt"
         _set_voice_cmd(
@@ -736,17 +698,18 @@ class TestReplLoopIntegration:
             _make_client(tmp_path),
             lambda: next(lines, None),
             submitted.append,
-            voice_reader=lambda listener: read_voice_line_anchored(
-                box, listener,
-            ),
         )
-        assert submitted == ["real task"]
+        # The spoken "/voice" ends voice mode: nothing is submitted, no
+        # nested listener is ever spawned, and the child is reaped.
+        assert submitted == []
         assert counter_file.read_text() == "1"
-        assert len(pid_file.read_text().splitlines()) == 1
-        # The already-active voice notification is yellow too.
+        pids = pid_file.read_text().splitlines()
+        assert len(pids) == 1
+        assert _wait_dead(int(pids[0]))
+        # The toggle-off notification is yellow too.
         out = capsys.readouterr().out
-        active = [ln for ln in out.splitlines() if "already active" in ln]
-        assert active and active[0].startswith("\x1b[33m")
+        off = [ln for ln in out.splitlines() if "Voice mode off" in ln]
+        assert off and off[0].startswith("\x1b[33m")
 
     def test_voice_cancel_restores_prompt_and_kills_listener(
         self,
@@ -782,9 +745,6 @@ class TestReplLoopIntegration:
                 _make_client(tmp_path),
                 read_line,
                 submitted.append,
-                voice_reader=lambda listener: read_voice_line_anchored(
-                    box, listener,
-                ),
             )
         finally:
             presser.join()
@@ -811,9 +771,6 @@ class TestReplLoopIntegration:
             _make_client(tmp_path),
             lambda: "/voice",
             submitted.append,
-            voice_reader=lambda listener: read_voice_line_anchored(
-                box, listener,
-            ),
         )
         assert submitted == []
         assert _wait_dead(int(pid_file.read_text()))

@@ -1310,9 +1310,7 @@ def _run_repl_loop(
     client: CliClient,
     read_line: Callable[[], str | None],
     submit: Callable[[str], None],
-    voice_reader: (
-        Callable[[cli_voice.VoiceListener], str | None] | None
-    ) = None,
+    voice_start: Callable[[], cli_voice.VoiceSession | None] | None = None,
 ) -> None:
     """Drive the shared interactive client loop until the user exits.
 
@@ -1329,14 +1327,20 @@ def _run_repl_loop(
 
     ``/voice`` is handled here rather than in
     :func:`_handle_client_slash` because captured speech must flow
-    through this very loop: while a voice session is active the next
-    line comes from the wake-word listener instead of *read_line* and
-    is then treated exactly like a typed line (blank → skip, exit
-    words, slash commands, otherwise submitted as a task).  Voice
-    chat is continuous — after a submitted task completes the loop
-    resumes listening — until the capture reports ``None`` (cancel
-    key or listener failure).  The listener child is always
-    terminated on exit, including exceptions.
+    through this very loop and be treated exactly like a typed line
+    (blank → skip, exit words, slash commands, otherwise submitted as
+    a task).  In the anchored REPL voice runs in the *background*
+    (:func:`~kiss.agents.sorcar.cli_voice.start_voice_anchored`):
+    *read_line* keeps reading the keyboard as usual — typing stays
+    fully usable — while the session's pump injects recognised speech
+    into the box so it arrives through *read_line* like typed input,
+    both at the idle prompt and (as queued steering follow-ups) while
+    a task runs.  The plain fallback keeps the modal per-utterance
+    capture, where the next line comes from the wake-word listener
+    instead of *read_line*.  Voice chat is continuous until ``/voice``
+    toggles it off (typed or spoken), the modal capture reports
+    ``None`` (cancel key), or the listener fails.  The listener child
+    is always terminated on exit, including exceptions.
 
     Args:
         client: The connected :class:`CliClient`.
@@ -1344,17 +1348,23 @@ def _run_repl_loop(
             ``None`` on EOF; may raise :class:`KeyboardInterrupt`.
         submit: Runs one task for the given line; may raise
             :class:`KeyboardInterrupt` when the user aborts the wait.
-        voice_reader: Per-utterance voice capture used by ``/voice``
-            (the anchored REPL binds
-            :func:`~kiss.agents.sorcar.cli_voice.read_voice_line_anchored`
-            to its box); ``None`` falls back to
-            :func:`~kiss.agents.sorcar.cli_voice.read_voice_line_plain`.
+        voice_start: Zero-arg factory starting a voice session for
+            ``/voice`` (the anchored REPL binds
+            :func:`~kiss.agents.sorcar.cli_voice.start_voice_anchored`
+            to its box); ``None`` falls back to the modal
+            :func:`~kiss.agents.sorcar.cli_voice.read_voice_line_plain`
+            capture.
     """
     interrupt_armed = False
     voice: cli_voice.VoiceSession | None = None
     try:
         while True:
-            if voice is not None:
+            if voice is not None and voice.background and not voice.active:
+                # The background listener died; its pump already told
+                # the user.  Drop the session so /voice can restart it.
+                voice.close()
+                voice = None
+            if voice is not None and not voice.background:
                 line = voice.read()
                 if line is None:  # cancelled or listener failed
                     voice.close()
@@ -1387,11 +1397,18 @@ def _run_repl_loop(
                 break
             if text == "/voice":
                 if voice is not None:
-                    print(f"{YELLOW}🎤 Voice mode is already active.{RESET}")
+                    # /voice toggles: typed or spoken while voice is on,
+                    # it turns voice mode off and reaps the listener.
+                    voice.close()
+                    voice = None
+                    print(f"{YELLOW}🎤 Voice mode off.{RESET}")
                     continue
-                voice = cli_voice.start_voice(
-                    voice_reader or cli_voice.read_voice_line_plain
-                )
+                if voice_start is not None:
+                    voice = voice_start()
+                else:
+                    voice = cli_voice.start_voice(
+                        cli_voice.read_voice_line_plain
+                    )
                 continue
             if text.startswith("/"):
                 try:
@@ -1472,8 +1489,8 @@ def _run_anchored_client(
                 use_parallel=use_parallel,
                 auto_commit=auto_commit,
             ),
-            voice_reader=functools.partial(
-                cli_voice.read_voice_line_anchored, repl.box,
+            voice_start=functools.partial(
+                cli_voice.start_voice_anchored, repl.box,
             ),
         )
         _save_history_lines(history_path, repl.box.history)
