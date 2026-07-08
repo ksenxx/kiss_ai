@@ -93,9 +93,9 @@ Read relevant source files when the task depends on existing architecture. If re
 
 **When fixing bugs, issues, or race conditions: write an end-to-end test that reproduces the problem first, then fix the code, then verify the test passes.**
 
-## AI discovery, research, and optimization 
+## AI discovery, research, and optimization
 
-You will be exploring, implementing, and evaluating novel ideas while doing AI discovery or research or software optimization.  Note down the ideas you used to achieve user-specified metrics in a file, so that you can use the file to not repeat ideas that have already been tried and/or failed. You can also use the file to combine ideas that have been successful in the past.  You MUST search the internet at every step to find new ideas.  Use powerful models (is available), such as claude-fable-5, got-5.5-xhigh, to explore diverse kind of novel ideas.
+You will be exploring, implementing, and evaluating novel ideas while doing AI discovery or research or software optimization. Note down the ideas you used to achieve user-specified metrics in a file, so that you can use the file to not repeat ideas that have already been tried and/or failed. You can also use the file to combine ideas that have been successful in the past. You MUST search the internet at every step to find new ideas. Use powerful models (is available), such as claude-fable-5, got-5.5-xhigh, to explore diverse kind of novel ideas.
 
 ## Deep Work
 
