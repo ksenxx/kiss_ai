@@ -577,6 +577,16 @@ class _WebMergeState:
             return None
         if self._pos >= len(self._all_hunks):
             self._pos = len(self._all_hunks) - 1
+        if self.is_resolved(*self._all_hunks[self._pos]):
+            # A partial ``reject-all``/``reject-file`` failure resolves
+            # whole files without ever calling ``advance()``, so
+            # ``_pos`` can be left on a RESOLVED hunk.  Returning it
+            # would highlight a resolved hunk as current and let a
+            # follow-up accept/reject re-act on it (flipping its
+            # recorded status while the disk content disagrees).  Seek
+            # to the next unresolved hunk instead — one is guaranteed
+            # to exist because ``remaining > 0`` here.
+            self._seek(1)
         return self._all_hunks[self._pos]
 
     def mark_resolved(self, fi: int, hi: int, status: str = "accepted") -> None:
@@ -854,6 +864,15 @@ def _reject_all_hunks_in_file(
         )
         pending.discard(hi)
         delta = hunk["bc"] - hunk["cc"]
+        # The splice just replaced this hunk's ``cc`` current lines
+        # with its ``bc`` base lines; record that in the hunk itself so
+        # a RETRY re-applies it idempotently.  Without this, a
+        # mid-file write failure on a LATER hunk (ENOSPC/EFBIG/EIO —
+        # the caller then marks NO hunks of the file resolved) followed
+        # by the user clicking reject-all/reject-file again re-spliced
+        # this hunk with its stale ``cc``, duplicating ``bc - cc``
+        # lines whenever ``bc != cc``.
+        hunk["cc"] = hunk["bc"]
         for later_hi in range(hi + 1, len(hunks)):
             if later_hi in pending:
                 hunks[later_hi]["cs"] += delta
@@ -1078,6 +1097,81 @@ def _unlink_cloudflared_pidfile() -> None:
         pass
 
 
+def _looks_like_cloudflared(pid: int) -> bool:
+    """Return True iff the process behind *pid* appears to be cloudflared.
+
+    The pidfile records only a bare integer PID, so after an unclean
+    kiss-web shutdown the OS may have recycled that PID for an
+    UNRELATED process.  Any code about to *signal* the recorded PID
+    must therefore confirm the process identity first.  Uses
+    ``ps -o comm=`` (portable across macOS and Linux) and matches the
+    executable basename against ``cloudflared`` — the name of the
+    binary both the spawn path and the adoption path launch.
+
+    Returns:
+        True when the command basename is exactly ``cloudflared`` (or
+        ``cloudflared.exe``); False for any other process, a dead PID,
+        or a ``ps`` failure (fail-safe: an unverifiable process is
+        never signalled).  The match is exact — a prefix match would
+        also kill an unrelated ``cloudflared-helper``-style process
+        that inherited a recycled PID.
+    """
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "comm="],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=5,
+        )
+    except Exception:
+        return False
+    comm = result.stdout.strip()
+    if not comm:
+        return False
+    return Path(comm).name.lower() in ("cloudflared", "cloudflared.exe")
+
+
+def _terminate_declined_cloudflared(pid: int) -> None:
+    """Terminate a pidfile-recorded cloudflared we declined to adopt.
+
+    A declined-but-alive cloudflared would otherwise be orphaned
+    forever (the caller spawns a fresh one next), leaking a process
+    and a metrics port and confusing the next adoption attempt.  Only
+    pids recorded in our own pidfile are ever passed here — but the
+    pidfile can be STALE: after an unclean shutdown the OS may have
+    recycled the recorded PID for an unrelated process, so the
+    process identity is verified (:func:`_looks_like_cloudflared`)
+    before every signal; a mismatch only unlinks the stale pidfile.
+    Sends SIGTERM, waits up to ~2s, re-verifies identity (the PID can
+    be recycled inside the wait window too), escalates to SIGKILL if
+    still alive, then unlinks the pidfile.
+    """
+    if not _looks_like_cloudflared(pid):
+        logger.info(
+            "pidfile pid %d is not a cloudflared process (stale pidfile, "
+            "pid recycled); not signalling it",
+            pid,
+        )
+        _unlink_cloudflared_pidfile()
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, OSError):
+        _unlink_cloudflared_pidfile()
+        return
+    for _ in range(20):
+        if not _is_pid_alive(pid):
+            break
+        time.sleep(0.1)
+    if _is_pid_alive(pid) and _looks_like_cloudflared(pid):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    _unlink_cloudflared_pidfile()
+
+
 def _try_adopt_existing_cloudflared() -> tuple[int, int, str] | None:
     """Look for a healthy cloudflared started by a previous kiss-web.
 
@@ -1110,12 +1204,24 @@ def _try_adopt_existing_cloudflared() -> tuple[int, int, str] | None:
             "cloudflared pidfile points to dead pid %d; ignoring", pid,
         )
         return None
-    if not _probe_tunnel_ready(metrics_port):
+    ready = _probe_tunnel_ready(metrics_port)
+    if ready is None:
+        # "No information" (endpoint unreachable / malformed reply)
+        # is not the same as confirmed-unhealthy: briefly re-probe
+        # before declining so a just-woken or slow-to-bind cloudflared
+        # is not needlessly replaced (rotating the public URL).
+        for _ in range(4):
+            time.sleep(0.5)
+            ready = _probe_tunnel_ready(metrics_port)
+            if ready is not None:
+                break
+    if not ready:
         logger.info(
             "cloudflared pid %d alive but metrics port %d reports "
             "no ready connections; not adopting",
             pid, metrics_port,
         )
+        _terminate_declined_cloudflared(pid)
         return None
     # Prefer a freshly-probed URL so we recover from URL rotation
     # between adoption attempts; fall back to the saved one.
@@ -1125,6 +1231,7 @@ def _try_adopt_existing_cloudflared() -> tuple[int, int, str] | None:
         if isinstance(saved, str) and saved.startswith("https://"):
             url = saved
     if url is None:
+        _terminate_declined_cloudflared(pid)
         return None
     logger.info(
         "Adopted existing cloudflared pid=%d metrics_port=%d url=%s",
@@ -1340,10 +1447,21 @@ def _parse_quick_tunnel_url(line: str) -> str | None:
     return match.group(1) if match else None
 
 
+_NON_TUNNEL_LOG_HOSTS = frozenset({
+    "developers.cloudflare.com",
+    "github.com",
+    "www.cloudflare.com",
+    "cloudflare.com",
+})
+
+
 def _parse_named_tunnel_url(line: str, configured_url: str | None) -> str | None:
     """Return the public URL of a named tunnel from a log *line*.
 
-    Returns any non-local ``https?://…`` hostname directly.  When a
+    Returns any non-local ``https?://…`` hostname directly, except
+    known documentation/banner hosts (:data:`_NON_TUNNEL_LOG_HOSTS`)
+    that cloudflared prints in update notices and doc links — those
+    must never be published as the tunnel URL.  When a
     "Registered tunnel connection"/"Connection registered" line
     appears, returns *configured_url* (or a sentinel string when no
     URL was pre-configured).  Returns ``None`` on lines that do not
@@ -1352,7 +1470,11 @@ def _parse_named_tunnel_url(line: str, configured_url: str | None) -> str | None
     match = re.search(r"https?://([^\s/]+)", line)
     if match:
         host = match.group(1)
-        if "localhost" not in host and "127.0.0.1" not in host:
+        if (
+            "localhost" not in host
+            and "127.0.0.1" not in host
+            and host not in _NON_TUNNEL_LOG_HOSTS
+        ):
             return f"https://{host}"
     if (
         "Registered tunnel connection" in line
@@ -1892,6 +2014,23 @@ class WebPrinter(JsonPrinter):
         # VS Code extension viewer of the same chat tab observe an
         # identical event stream.
         self._uds_writers: set[asyncio.StreamWriter] = set()
+        # Tab ids currently connected over the local UDS transport.
+        # UDS peers (VS Code extension webviews and CLI REPL clients)
+        # share the daemon machine's speakers; WSS peers are treated as
+        # remote devices.  Counts (rather than sets) make reconnects
+        # safe: if a tab reclaims the same id before the old connection
+        # fully unwinds, the old connection's unregister only decrements
+        # its own registration instead of erasing the fresh one.
+        # Guarded by ``_ws_lock``.
+        self._local_uds_tab_counts: dict[str, int] = {}
+        # CLI terminal-player tab ids announced via ``cliTabHello``
+        # (also connection-counted, for the same reconnect safety).
+        # Talk-playback arbitration (:meth:`_fanout_talk`) needs to
+        # tell CLI REPL tabs apart from local webview tabs: both send
+        # ``ready``, but a CLI tab plays on THIS machine's speakers and
+        # must stay silent whenever a local webview tab is also
+        # subscribed to the task.  Guarded by ``_ws_lock``.
+        self._cli_tab_counts: dict[str, int] = {}
         # Per-connection endpoint registry, keyed by the ``conn_id``
         # that the handlers stamp (as ``connId``) on every client
         # command.  Request/reply events (``models``, ``history``,
@@ -2026,11 +2165,169 @@ class WebPrinter(JsonPrinter):
         targets = self._fanout_targets(event.get("taskId"))
         if not targets:
             return
+        if event.get("type") == "talk":
+            # Talk events need per-tab playback arbitration so one
+            # utterance is heard exactly once per device.
+            self._fanout_talk(event, targets)
+            return
         base = json.dumps(event)[:-1]
         for tab_id in targets:
             self._send_to_ws_clients(
                 f'{base}, "tabId": {json.dumps(tab_id)}}}'
             )
+
+    @staticmethod
+    def _increment_count(counts: dict[str, int], key: str) -> None:
+        """Increment *key* in a small connection-count map."""
+        counts[key] = counts.get(key, 0) + 1
+
+    @staticmethod
+    def _decrement_count(counts: dict[str, int], key: str) -> None:
+        """Decrement *key* in a small connection-count map."""
+        count = counts.get(key)
+        if count is None:
+            return
+        if count <= 1:
+            del counts[key]
+        else:
+            counts[key] = count - 1
+
+    def register_local_uds_tab(self, tab_id: str) -> None:
+        """Mark *tab_id* as currently connected over local UDS.
+
+        Args:
+            tab_id: The frontend tab id seen on a UDS command.
+        """
+        with self._ws_lock:
+            self._increment_count(self._local_uds_tab_counts, tab_id)
+
+    def unregister_local_uds_tabs(self, tab_ids: set[str]) -> None:
+        """Drop this connection's local-UDS tab registrations."""
+        with self._ws_lock:
+            for tab_id in tab_ids:
+                self._decrement_count(self._local_uds_tab_counts, tab_id)
+
+    def register_cli_tab(self, tab_id: str) -> None:
+        """Mark *tab_id* as a CLI terminal player for talk arbitration.
+
+        Called when a sorcar CLI REPL announces itself with the
+        ``cliTabHello`` command.  :meth:`_fanout_talk` mutes talk
+        copies stamped for CLI tabs whenever a LOCAL webview tab is
+        also subscribed to the task, so the utterance is not played by
+        the terminal AND a webview on the same machine at once.  A WSS
+        browser tab is a different device and does not suppress the
+        local CLI.
+
+        Args:
+            tab_id: The CLI client's frontend tab id.
+        """
+        with self._ws_lock:
+            self._increment_count(self._cli_tab_counts, tab_id)
+
+    def unregister_cli_tabs(self, tab_ids: set[str]) -> None:
+        """Drop this connection's CLI-terminal tab registrations."""
+        with self._ws_lock:
+            for tab_id in tab_ids:
+                self._decrement_count(self._cli_tab_counts, tab_id)
+
+    def _fanout_talk(self, event: dict[str, Any], targets: list[str]) -> None:
+        """Fan out one ``talk`` event with per-device playback arbitration.
+
+        Webview subscriber tabs always receive the playable copy: each
+        webview plays on its own device and its ``talkId`` dedupe and
+        talk queue keep intra-webview duplicates silent.  CLI REPL
+        tabs (see :meth:`register_cli_tab`) play on THIS machine's
+        speakers, which a local UDS webview shares — so every CLI
+        tab's copy is stamped ``muted`` when at least one local webview
+        tab is subscribed (the local webview plays).  WSS web tabs are
+        treated as remote devices and do not suppress the local CLI;
+        when only CLI tabs (and/or remote web tabs) are subscribed,
+        exactly one CLI tab (the lexicographically first) plays.
+        Without this, a REPL user with the same task open in a local
+        chat webview heard every utterance twice, slightly offset —
+        distorted, overlapping speech.
+
+        Args:
+            event: The ``talk`` event (no ``tabId`` stamp yet).
+            targets: Subscriber tab ids for the event's task.
+        """
+        with self._ws_lock:
+            cli_tabs = set(self._cli_tab_counts)
+            local_uds_tabs = set(self._local_uds_tab_counts)
+        cli_targets = sorted(t for t in targets if t in cli_tabs)
+        web_targets = [t for t in targets if t not in cli_tabs]
+        local_web_targets = [t for t in web_targets if t in local_uds_tabs]
+        playing_cli_tab = (
+            cli_targets[0] if cli_targets and not local_web_targets else None
+        )
+        base = json.dumps(event)[:-1]
+        muted_base = json.dumps({**event, "muted": True})[:-1]
+        for tab_id in web_targets:
+            self._send_to_ws_clients(
+                f'{base}, "tabId": {json.dumps(tab_id)}}}'
+            )
+        for tab_id in cli_targets:
+            prefix = base if tab_id == playing_cli_tab else muted_base
+            self._send_to_ws_clients(
+                f'{prefix}, "tabId": {json.dumps(tab_id)}}}'
+            )
+
+    def _fanout_talk_cli_origin(self, event: dict[str, Any]) -> None:
+        """Fan out a CLI-forwarded ``talk`` event already played locally.
+
+        The sorcar CLI's :class:`RecordingConsolePrinter` plays every
+        talk event on the terminal machine's speakers BEFORE
+        forwarding it here, and every UDS peer of this daemon (VS Code
+        webviews, CLI REPL clients) lives on that same machine — so
+        their copies are stamped ``muted`` and only WSS peers (remote
+        browsers, i.e. other devices) receive the playable copy.
+        Without this, launching a task with ``sorcar`` while the same
+        task was open in a local chat webview played every clip twice,
+        slightly offset — the distorted, overlapping speech this
+        arbitration exists to prevent.
+
+        Args:
+            event: The CLI-originated ``talk`` event.
+        """
+        targets = self._fanout_targets(event.get("taskId"))
+        if not targets:
+            return
+        base = json.dumps(event)[:-1]
+        muted_base = json.dumps({**event, "muted": True})[:-1]
+        for tab_id in targets:
+            stamp = f', "tabId": {json.dumps(tab_id)}}}'
+            self._send_to_wss_clients(base + stamp)
+            self._send_to_uds_writers(muted_base + stamp)
+
+    def _send_to_wss_clients(self, data: str) -> None:
+        """Send a pre-serialised JSON payload to WSS clients only.
+
+        WSS peers are remote browsers — separate devices from the
+        daemon machine — so talk arbitration sends them the playable
+        copy while the same-machine UDS peers get the muted one.
+
+        Args:
+            data: The JSON payload (already encoded with ``json.dumps``).
+        """
+        with self._ws_lock:
+            endpoints = list(self._ws_clients)
+        for endpoint in endpoints:
+            self._schedule_send(endpoint, data)
+
+    def _send_to_uds_writers(self, data: str) -> None:
+        """Send a pre-serialised JSON payload to local UDS peers only.
+
+        UDS peers (VS Code extension webviews, CLI REPL clients) are
+        always on the daemon's machine; talk arbitration sends them
+        muted copies when a local player already owns the utterance.
+
+        Args:
+            data: The JSON payload (already encoded with ``json.dumps``).
+        """
+        with self._ws_lock:
+            endpoints = list(self._uds_writers)
+        for endpoint in endpoints:
+            self._schedule_send(endpoint, data)
 
     def _send_to_ws_clients(self, data: str) -> None:
         """Send a pre-serialised JSON payload to every connected client.
@@ -2302,9 +2599,10 @@ def _build_html() -> str:
         The complete HTML string.
     """
     version = _read_version()
-    tricks_json = json.dumps(_read_tricks())
     # ``</`` must never appear raw inside the inline <script> block —
-    # a tip body containing ``</script>`` would otherwise terminate it.
+    # a trick or tip body containing ``</script>`` would otherwise
+    # terminate it (tricks come from the user-editable INJECTIONS.md).
+    tricks_json = json.dumps(_read_tricks()).replace("</", "<\\/")
     # ``show`` is always false here: the tips window only auto-opens in
     # the VS Code webview after a fresh installation (SorcarTab.ts).
     tips_json = json.dumps(
@@ -2989,7 +3287,10 @@ def _trajectory_job_response(path: str) -> Response:
         response for an invalid job name, or a 404 response when the job
         directory does not exist.
     """
-    job_name = unquote(path[len("/api/jobs/") : -len("/trajectories")])
+    # ``_process_request`` already URL-decoded the whole path once; do
+    # NOT unquote again or job names containing literal percent-escapes
+    # (e.g. ``job%20a``) would be double-decoded and spuriously 404.
+    job_name = path[len("/api/jobs/") : -len("/trajectories")]
     if "/" in job_name or "\\" in job_name or ".." in job_name:
         return _http_response(
             400, "application/json", b'{"error": "Invalid job name"}'
@@ -3000,6 +3301,33 @@ def _trajectory_job_response(path: str) -> Response:
         return _http_response(404, "application/json", body)
     body = json.dumps(load_job_trajectories(jobs_root, job_name)).encode("utf-8")
     return _http_response(200, "application/json", body)
+
+
+def _read_media_file(filepath: Path) -> bytes | None:
+    """Return the bytes of *filepath* if it is a real file inside MEDIA_DIR.
+
+    Performs the symlink-safe containment check, the ``is_file`` stat and
+    the read together so callers can run the whole lot in one worker
+    thread.  Any :class:`OSError` (e.g. ``ELOOP`` from a symlink cycle
+    hit by ``resolve()``) is treated as "not found".
+
+    Args:
+        filepath: Candidate path beneath :data:`MEDIA_DIR`.
+
+    Returns:
+        The file contents, or ``None`` when the path escapes
+        :data:`MEDIA_DIR`, is not a regular file, or cannot be resolved
+        or read.
+    """
+    try:
+        if (
+            filepath.resolve().is_relative_to(MEDIA_DIR.resolve())
+            and filepath.is_file()
+        ):
+            return filepath.read_bytes()
+    except OSError:
+        return None
+    return None
 
 
 def _augment_merge_data(event: dict[str, Any]) -> dict[str, Any]:
@@ -3466,15 +3794,19 @@ class RemoteAccessServer:
         if path == "/ws":
             return None
         if path in ("/trajectories", "/trajectories/"):
+            # Disk reads and trajectory-JSON parsing run off-thread so a
+            # large jobs root (or a slow disk) does not stall the event
+            # loop for every other client — same rationale as the
+            # /voice-model.tar.gz and /media/ branches below.
             return _http_response(
                 200,
                 "text/html; charset=utf-8",
-                TRAJECTORY_TEMPLATE.read_bytes(),
+                await asyncio.to_thread(TRAJECTORY_TEMPLATE.read_bytes),
             )
         if path == "/api/jobs":
-            return _trajectory_jobs_response()
+            return await asyncio.to_thread(_trajectory_jobs_response)
         if path.startswith("/api/jobs/") and path.endswith("/trajectories"):
-            return _trajectory_job_response(path)
+            return await asyncio.to_thread(_trajectory_job_response, path)
         if path == "/voice-model.tar.gz":
             # Wake-word model for the in-browser voice listener.  Both
             # the download AND the ~40 MB archive read are served
@@ -3489,13 +3821,13 @@ class RemoteAccessServer:
             return _http_response(200, "application/gzip", body)
         if path.startswith("/media/"):
             filepath = MEDIA_DIR / path[7:]
-            if (
-                filepath.resolve().is_relative_to(MEDIA_DIR.resolve())
-                and filepath.is_file()
-            ):
+            # Containment check, stat and read all run off-thread; a
+            # filesystem error (e.g. ELOOP from a symlink cycle) is a
+            # 404, not an unhandled 500.
+            media_body = await asyncio.to_thread(_read_media_file, filepath)
+            if media_body is not None:
                 ctype = mimetypes.guess_type(str(filepath))[0] or "application/octet-stream"
-                body = await asyncio.to_thread(filepath.read_bytes)
-                return _http_response(200, ctype, body)
+                return _http_response(200, ctype, media_body)
         return _http_response(404, "text/plain", b"Not Found")
 
 
@@ -3716,9 +4048,14 @@ class RemoteAccessServer:
         """
         with self._pending_tab_closes_lock:
             self._pending_tab_closes.pop(tab_id, None)
-        merge_state = self._pop_merge_state(tab_id)
+        # Check the loop BEFORE popping the merge state: bailing out on
+        # a torn-down loop must be side-effect free.  Popping first
+        # discarded the _WebMergeState — the only handle that could
+        # still drive the review to ``all-done`` — leaving the backend
+        # tab ``is_merging`` forever.
         if self._loop is None or not self._loop.is_running():
             return
+        merge_state = self._pop_merge_state(tab_id)
         task = asyncio.ensure_future(
             self._finish_merge_and_close_tab(tab_id, merge_state),
             loop=self._loop,
@@ -3777,7 +4114,7 @@ class RemoteAccessServer:
         tabs_seen: set[str] = set()
         # Per-connection work_dir + unique connection id (see
         # _dispatch_client_command).
-        conn_state: dict[str, str] = {
+        conn_state: dict[str, Any] = {
             "work_dir": "", "conn_id": uuid.uuid4().hex,
         }
         self._printer.bind_conn(conn_state["conn_id"], websocket)
@@ -3864,7 +4201,7 @@ class RemoteAccessServer:
         # ``conn_id`` is stamped (as ``connId``) on every command so
         # ``VSCodeServer`` can key its per-connection autocomplete
         # state (active-file snapshot, request staleness) by window.
-        conn_state: dict[str, str] = {
+        conn_state: dict[str, Any] = {
             "work_dir": "", "conn_id": uuid.uuid4().hex,
         }
         self._printer.bind_conn(conn_state["conn_id"], writer)
@@ -3899,6 +4236,12 @@ class RemoteAccessServer:
         finally:
             for tab in tabs_seen:
                 self._schedule_tab_close(tab)
+            local_tabs = conn_state.get("local_tabs")
+            if isinstance(local_tabs, set):
+                self._printer.unregister_local_uds_tabs(local_tabs)
+            cli_tabs = conn_state.get("cli_tabs")
+            if isinstance(cli_tabs, set):
+                self._printer.unregister_cli_tabs(cli_tabs)
             # Clean up any CLI task ids announced on this connection
             # but never closed (CLI crash, Ctrl+C, abrupt SIGKILL):
             # without this the daemon would keep them in
@@ -3940,6 +4283,12 @@ class RemoteAccessServer:
             ev: The event dictionary the CLI emitted; expected to
                 carry at least ``type`` and ``taskId``.
         """
+        if ev.get("type") == "talk":
+            # The CLI process already played this utterance on the
+            # daemon machine's speakers; mute the copies delivered to
+            # same-machine (UDS) peers so it is heard once per device.
+            self._printer._fanout_talk_cli_origin(ev)
+            return
         self._printer._fanout_stamped(ev)
 
     async def _dispatch_client_command(
@@ -3947,7 +4296,7 @@ class RemoteAccessServer:
         cmd: dict[str, Any],
         endpoint: Any,
         tabs_seen: set[str],
-        conn_state: dict[str, str],
+        conn_state: dict[str, Any],
     ) -> None:
         """Dispatch one parsed client command from a WSS or UDS peer.
 
@@ -3990,8 +4339,15 @@ class RemoteAccessServer:
                 ghost-text completions as for its work_dir.
         """
         tab_id = cmd.get("tabId", "")
+        is_uds = isinstance(endpoint, asyncio.StreamWriter)
         if isinstance(tab_id, str) and tab_id:
-            tabs_seen.add(tab_id)
+            if tab_id not in tabs_seen:
+                tabs_seen.add(tab_id)
+            if is_uds:
+                local_tabs = conn_state.setdefault("local_tabs", set())
+                if tab_id not in local_tabs:
+                    local_tabs.add(tab_id)
+                    self._printer.register_local_uds_tab(tab_id)
         cmd["connId"] = conn_state["conn_id"]
         cmd_type = cmd.get("type", "")
         if cmd_type == "cliEvent":
@@ -4003,6 +4359,19 @@ class RemoteAccessServer:
             ev = cmd.get("event")
             if isinstance(ev, dict):
                 self._relay_cli_event(ev)
+            return
+        if cmd_type == "cliTabHello":
+            # A sorcar CLI REPL announces its tab id so talk-playback
+            # arbitration can tell CLI terminal players apart from
+            # webview tabs (see ``WebPrinter._fanout_talk``).  Only
+            # local UDS peers are terminal players; a WSS/browser peer
+            # cannot suppress playback on the daemon machine.
+            raw_tab = cmd.get("tabId")
+            if is_uds and isinstance(raw_tab, str) and raw_tab:
+                cli_tabs = conn_state.setdefault("cli_tabs", set())
+                if raw_tab not in cli_tabs:
+                    cli_tabs.add(raw_tab)
+                    self._printer.register_cli_tab(raw_tab)
             return
         if cmd_type == "cliTaskStart":
             # CLI announces a fresh running task so a webview tab that
@@ -4079,7 +4448,15 @@ class RemoteAccessServer:
                     if isinstance(rt, dict):
                         rt_id = rt.get("tabId", "")
                         if isinstance(rt_id, str) and rt_id:
-                            tabs_seen.add(rt_id)
+                            if rt_id not in tabs_seen:
+                                tabs_seen.add(rt_id)
+                            if is_uds:
+                                local_tabs = conn_state.setdefault(
+                                    "local_tabs", set()
+                                )
+                                if rt_id not in local_tabs:
+                                    local_tabs.add(rt_id)
+                                    self._printer.register_local_uds_tab(rt_id)
             await self._handle_ready(cmd, endpoint)
             return
         if cmd_type == "submit":
@@ -4482,7 +4859,7 @@ class RemoteAccessServer:
              "tabId": ..., "error": <message>}  # on failure
 
         Relative paths are resolved against the command's ``workDir``
-        (stamped per-connection by :meth:`_dispatch_client_cmd`) and
+        (stamped per-connection by :meth:`_dispatch_client_command`) and
         fall back to the daemon work dir.  Missing files, unreadable
         files, files larger than :data:`_OPEN_FILE_MAX_BYTES`, and
         binary files (NUL byte in the first 8 KiB) produce an ``error``
@@ -4596,16 +4973,17 @@ class RemoteAccessServer:
             msg["ntfyUrl"] = ntfy_url
         self._printer.broadcast(msg)
 
-    def _broadcast_update_available(self) -> None:
+    async def _broadcast_update_available(self) -> None:
         """Broadcast the cached PyPI ``update_available`` state.
 
         No-op until :meth:`_check_for_update` has cached a latest
-        version on :attr:`_latest_version`.
+        version on :attr:`_latest_version`.  ``_read_version`` scans a
+        directory on disk, so it runs off-thread (M10).
         """
         latest = self._latest_version
         if not latest:
             return
-        current = _read_version()
+        current = await asyncio.to_thread(_read_version)
         available = bool(current) and _compare_versions(latest, current) > 0
         self._printer.broadcast({
             "type": "update_available",
@@ -4689,7 +5067,7 @@ class RemoteAccessServer:
         # that just (re)connected sees the green download badge on
         # the Update button without having to wait for the next
         # hourly poll.
-        self._broadcast_update_available()
+        await self._broadcast_update_available()
 
     async def _endpoint_send(self, endpoint: Any, data: str) -> None:
         """Send ``data`` to either a WSS or a UDS endpoint.
@@ -4797,7 +5175,7 @@ class RemoteAccessServer:
         # panel.
         merge_tabs_to_replay: list[str] = []
         seen_merge_tabs: set[str] = set()
-        if isinstance(tab_id, str) and tab_id:
+        if tab_id:
             merge_tabs_to_replay.append(tab_id)
             seen_merge_tabs.add(tab_id)
         # M7: cap the number of restored tabs a single client can ask
@@ -4875,9 +5253,6 @@ class RemoteAccessServer:
         """
         if not tab_id:
             return
-        with self._merge_states_lock:
-            if tab_id not in self._merge_states:
-                return
         # Serialise with in-flight merge actions: the reject branches
         # of ``_apply_web_merge_action`` rewrite the reviewed files on
         # disk (truncate + write) and mutate the shared hunk ``cs``
@@ -4886,47 +5261,63 @@ class RemoteAccessServer:
         # hand the reconnecting client a torn ``current_text`` and
         # mid-mutation offsets that no later ``merge_nav`` broadcast
         # can repair (``merge_nav`` carries no file text).
-        async with self._merge_action_lock(tab_id):
-            # Re-check under the lock: the action we waited for may
-            # have resolved the final hunk and finished the review.
+        while True:
             with self._merge_states_lock:
-                state = self._merge_states.get(tab_id)
-            if state is None or not state.remaining:
-                return
-            assert self._loop is not None
-            # ``_augment_merge_data`` reads every reviewed file from
-            # disk; do it off the event loop like the broadcast path's
-            # callers.
-            event = await self._loop.run_in_executor(
-                None,
-                _augment_merge_data,
-                {
-                    "type": "merge_data",
-                    "tabId": tab_id,
-                    "data": state.data,
-                    "hunk_count": state.total_hunks,
-                },
-            )
-            cur = state.current()
-            nav = {
-                "type": "merge_nav",
-                "tabId": tab_id,
-                "remaining": state.remaining,
-                "total": state.total_hunks,
-                "cur": (
-                    {"fi": cur[0], "hi": cur[1]} if cur is not None else None
-                ),
-                "resolved": state.resolutions(),
-            }
-            try:
-                await self._endpoint_send(websocket, json.dumps(event))
-                await self._endpoint_send(
-                    websocket,
-                    json.dumps({"type": "merge_started", "tabId": tab_id}),
+                if tab_id not in self._merge_states:
+                    return
+            lock = self._merge_action_lock(tab_id)
+            async with lock:
+                # Re-check under the lock: the action we waited for
+                # may have resolved the final hunk and finished the
+                # review — and the lock itself may have ROTATED (the
+                # completing holder pops both entries while a new
+                # review for the same tab mints a fresh lock; see
+                # ``_handle_web_merge_action``).  Acting under the
+                # stale object would race the new review's lock, so
+                # retry with the current one.
+                with self._merge_states_lock:
+                    if self._merge_action_locks.get(tab_id) is not lock:
+                        continue
+                    state = self._merge_states.get(tab_id)
+                if state is None or not state.remaining:
+                    return
+                assert self._loop is not None
+                # ``_augment_merge_data`` reads every reviewed file
+                # from disk; do it off the event loop like the
+                # broadcast path's callers.
+                event = await self._loop.run_in_executor(
+                    None,
+                    _augment_merge_data,
+                    {
+                        "type": "merge_data",
+                        "tabId": tab_id,
+                        "data": state.data,
+                        "hunk_count": state.total_hunks,
+                    },
                 )
-                await self._endpoint_send(websocket, json.dumps(nav))
-            except Exception:
-                logger.debug("Merge review replay failed", exc_info=True)
+                cur = state.current()
+                nav = {
+                    "type": "merge_nav",
+                    "tabId": tab_id,
+                    "remaining": state.remaining,
+                    "total": state.total_hunks,
+                    "cur": (
+                        {"fi": cur[0], "hi": cur[1]}
+                        if cur is not None
+                        else None
+                    ),
+                    "resolved": state.resolutions(),
+                }
+                try:
+                    await self._endpoint_send(websocket, json.dumps(event))
+                    await self._endpoint_send(
+                        websocket,
+                        json.dumps({"type": "merge_started", "tabId": tab_id}),
+                    )
+                    await self._endpoint_send(websocket, json.dumps(nav))
+                except Exception:
+                    logger.debug("Merge review replay failed", exc_info=True)
+                return
 
     async def _handle_submit(self, cmd: dict[str, Any]) -> None:
         """Translate the webview ``submit`` command into a backend ``run``.
@@ -5088,11 +5479,26 @@ class RemoteAccessServer:
                 ``action`` and ``tabId`` fields.
         """
         tab_id = cmd.get("tabId", "")
-        with self._merge_states_lock:
-            if tab_id not in self._merge_states:
+        while True:
+            with self._merge_states_lock:
+                if tab_id not in self._merge_states:
+                    return
+            lock = self._merge_action_lock(tab_id)
+            async with lock:
+                # Re-verify the lock is still the tab's CURRENT one: a
+                # holder completing the review pops both the state and
+                # the lock entry (``_pop_merge_state``) and then awaits
+                # the ``all-done`` dispatch while still holding this
+                # object.  If a NEW review for the same tab was
+                # registered in that window, acting under the stale
+                # object would let this coroutine mutate the new
+                # ``_WebMergeState`` concurrently with actions holding
+                # the freshly-minted lock.  Retry with the current one.
+                with self._merge_states_lock:
+                    if self._merge_action_locks.get(tab_id) is not lock:
+                        continue
+                await self._apply_web_merge_action(cmd)
                 return
-        async with self._merge_action_lock(tab_id):
-            await self._apply_web_merge_action(cmd)
 
     async def _apply_web_merge_action(self, cmd: dict[str, Any]) -> None:
         """Apply a single merge action while holding the per-tab lock.
@@ -5160,6 +5566,11 @@ class RemoteAccessServer:
                     self._broadcast_reject_failure(tab_id, fd, exc)
                 else:
                     delta = hunk["bc"] - hunk["cc"]
+                    # Mirror ``_reject_all_hunks_in_file``: the region
+                    # now holds ``bc`` base lines, so record it in the
+                    # hunk itself to keep any re-application (and the
+                    # replayed ``merge_data``) consistent with disk.
+                    hunk["cc"] = hunk["bc"]
                     for later_hi in range(hi + 1, len(fd["hunks"])):
                         if not state.is_resolved(fi, later_hi):
                             fd["hunks"][later_hi]["cs"] += delta
@@ -5234,8 +5645,13 @@ class RemoteAccessServer:
 
         if not state.remaining:
             # A waiter already queued on the popped lock object is
-            # harmless: it re-fetches the merge state and takes the
-            # ``state is None`` early return above.
+            # harmless: when it finally acquires, it either re-fetches
+            # a ``None`` state and takes the early return above, or —
+            # when a NEW review for this tab was registered in the
+            # meantime — detects that the lock ROTATED (the entry it
+            # holds is no longer ``_merge_action_locks[tab_id]``) and
+            # retries with the current lock (see
+            # ``_handle_web_merge_action`` / ``_replay_merge_review``).
             self._pop_merge_state(tab_id)
             await self._run_cmd(
                 {
@@ -5382,7 +5798,16 @@ class RemoteAccessServer:
             for _ in range(20):
                 if self._tunnel_proc.poll() is not None:
                     break
-                url = _discover_tunnel_url_from_metrics()
+                # Prefer OUR just-spawned cloudflared's metrics port.
+                # ``_discover_tunnel_url_from_metrics`` scans ALL
+                # cloudflared processes plus hardcoded ports and could
+                # adopt a FOREIGN tunnel's URL.
+                if self._tunnel_metrics_port is not None:
+                    url = _query_quicktunnel_hostname(
+                        self._tunnel_metrics_port,
+                    )
+                if not url:
+                    url = _discover_tunnel_url_from_metrics()
                 if url:
                     break
                 time.sleep(1)
@@ -5468,7 +5893,9 @@ class RemoteAccessServer:
                 "cloudflared tunnel process died (rc=%s), restarting…",
                 proc.returncode,
             )
-            self._terminate_tunnel_proc()
+            # ``proc.wait`` inside can block up to ~5s — keep it off
+            # the event loop (M10).
+            await asyncio.to_thread(self._terminate_tunnel_proc)
             proc = None
 
         # When we adopted an externally-owned cloudflared, treat a
@@ -5578,8 +6005,9 @@ class RemoteAccessServer:
         )
         # Kill the adopted cloudflared too — it is the unhealthy one
         # we are replacing; leaving it running would leak metrics
-        # ports and confuse the next adoption attempt.
-        self._terminate_tunnel_proc(kill_adopted=True)
+        # ports and confuse the next adoption attempt.  Runs
+        # off-thread (M10): it can block ~5s in ``proc.wait``.
+        await asyncio.to_thread(self._terminate_tunnel_proc, True)
         self._tunnel_force_restart_count += 1
         cooldown = min(
             _TUNNEL_FORCE_RESTART_COOLDOWN_INITIAL
@@ -5634,7 +6062,9 @@ class RemoteAccessServer:
                     delay,
                 )
             self._tunnel_next_retry = time.monotonic() + delay
-        _save_url_file(self._url_file, self._local_url, tunnel_url)
+        await asyncio.to_thread(
+            _save_url_file, self._url_file, self._local_url, tunnel_url,
+        )
         self._active_url = tunnel_url or self._local_url
         self._broadcast_remote_url(self._active_url, bool(tunnel_url))
         await self._post_url_if_changed()
@@ -5720,7 +6150,7 @@ class RemoteAccessServer:
             # a stale ``False`` would mask a genuine update.
             return
         self._latest_version = latest
-        self._broadcast_update_available()
+        await self._broadcast_update_available()
 
     async def _version_check_loop(self) -> None:
         """Run :meth:`_check_for_update` every hour.
@@ -5776,7 +6206,11 @@ class RemoteAccessServer:
             except Exception:
                 logger.debug("Watchdog URL-file check error", exc_info=True)
             try:
-                if self._watchdog_check_ip_change():
+                # ``_get_local_ips`` hits the network stack — fetch it
+                # off-thread (M10) so only the pure comparison runs on
+                # the event loop.
+                ips = await asyncio.to_thread(_get_local_ips)
+                if self._watchdog_check_ip_change(ips):
                     return
             except asyncio.CancelledError:
                 raise
@@ -5809,8 +6243,15 @@ class RemoteAccessServer:
                 self._url_file, tunnel_url,
             )
 
-    def _watchdog_check_ip_change(self) -> bool:
+    def _watchdog_check_ip_change(
+        self, current_ips: frozenset[str] | None = None,
+    ) -> bool:
         """Detect a debounced local-IP change and initiate a restart.
+
+        Args:
+            current_ips: Pre-fetched :func:`_get_local_ips` result
+                (the watchdog fetches it off-thread, M10); when
+                ``None``, fetched synchronously here.
 
         Compares the current :func:`_get_local_ips` result against the
         established baseline in :attr:`_last_ips`, requiring
@@ -5823,7 +6264,8 @@ class RemoteAccessServer:
             been closed and the watchdog loop must exit); False
             otherwise.
         """
-        current_ips = _get_local_ips()
+        if current_ips is None:
+            current_ips = _get_local_ips()
         if not current_ips:
             # IP discovery failed (transient WiFi roam, DHCP
             # renewal, VPN flap, slow resolver, post-sleep DNS
@@ -6227,11 +6669,13 @@ class RemoteAccessServer:
                     None, self._start_tunnel,
                 )
 
-        _save_url_file(self._url_file, self._local_url, tunnel_url)
+        await asyncio.to_thread(
+            _save_url_file, self._url_file, self._local_url, tunnel_url,
+        )
         self._active_url = tunnel_url or self._local_url
         await self._post_url_if_changed()
 
-        self._last_ips = _get_local_ips()
+        self._last_ips = await asyncio.to_thread(_get_local_ips)
         self._watchdog_task = asyncio.create_task(self._watchdog())
         self._version_check_task = asyncio.create_task(
             self._version_check_loop(),
@@ -6495,6 +6939,13 @@ class RemoteAccessServer:
         except KeyboardInterrupt:
             logger.info("Server shutting down: pid=%d (KeyboardInterrupt)", pid)
         finally:
+            # A shutdown that began via SIGINT/KeyboardInterrupt or
+            # ``stop()`` never set ``_shutdown_initiated`` — so a first
+            # SIGTERM arriving DURING this cleanup (which can block for
+            # ~12s in ``_stop_active_agent_tasks``) would raise
+            # ``KeyboardInterrupt`` here, skipping ``_detach_tunnel``.
+            # Mark shutdown as in progress so later signals only log.
+            self._shutdown_initiated = True
             # Gracefully stop any in-flight agent worker thread BEFORE
             # the process exits.  Without this the daemon worker thread
             # is killed abruptly when ``start()`` returns, its cleanup

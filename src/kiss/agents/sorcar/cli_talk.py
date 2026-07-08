@@ -62,9 +62,9 @@ _FALLBACK_PLAYERS: tuple[tuple[str, ...], ...] = (
     ("ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet"),
     ("mpv", "--no-video", "--really-quiet"),
 )
-# Linux TTS commands (the text is appended as the last argument).
+# Non-macOS TTS commands (the text is appended as the last argument);
+# macOS always uses ``say`` directly.
 _FALLBACK_SAY: tuple[tuple[str, ...], ...] = (
-    ("say",),  # macOS
     ("espeak-ng",),
     ("espeak",),
     ("spd-say", "--wait"),
@@ -121,7 +121,7 @@ def say_command() -> list[str] | None:
         return parts or None
     if sys.platform == "darwin":
         return ["say"]
-    for candidate in _FALLBACK_SAY[1:]:
+    for candidate in _FALLBACK_SAY:
         if shutil.which(candidate[0]):
             return list(candidate)
     return None
@@ -172,10 +172,17 @@ class TalkPlayer:
 
         Blank events (no clip and no text) and already-spoken
         ``talkId`` values are dropped, matching the webview client.
+        Copies stamped ``muted`` by the daemon are dropped too: the
+        daemon mutes a talk copy when another player on THIS machine
+        (a local webview, or the CLI process that originated the
+        event) already owns the playback, so honouring the flag is
+        what keeps each utterance to one playback per device.
 
         Args:
             event: The broadcast ``talk`` event dictionary.
         """
+        if event.get("muted"):
+            return
         text = str(event.get("text") or "").strip()
         if not text and not event.get("audioB64"):
             return

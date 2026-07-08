@@ -105,11 +105,10 @@ Module._resolveFilename = function (request, parent, ...rest) {
   if (request === 'vscode') return require.resolve('./_vscode-stub.js');
   return origResolve.call(this, request, parent, ...rest);
 };
-const stubPath = path.join(__dirname, '_vscode-stub.js');
-fs.writeFileSync(
-  stubPath,
-  `'use strict';\nmodule.exports = global.__kissVscodeStub;\n`,
-);
+// ``_vscode-stub.js`` is a git-tracked fixture shared by several tests
+// that run in parallel; it already contains
+// ``module.exports = global.__kissVscodeStub;`` — never write or delete
+// it here or concurrent tests lose their ``vscode`` module mid-run.
 global.__kissVscodeStub = vscodeStub;
 
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-e2e-'));
@@ -362,9 +361,6 @@ function cleanup() {
   } catch {}
   try {
     fs.unlinkSync(sockPath);
-  } catch {}
-  try {
-    fs.unlinkSync(stubPath);
   } catch {}
   fs.rmSync(tmpHome, {recursive: true, force: true});
 }

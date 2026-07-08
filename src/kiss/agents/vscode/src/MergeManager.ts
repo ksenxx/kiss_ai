@@ -12,6 +12,7 @@
 
 import * as vscode from 'vscode';
 import * as fs from 'fs';
+import * as path from 'path';
 import {EventEmitter} from 'events';
 import {
   showInformationNotification,
@@ -38,6 +39,19 @@ interface MergeFileState {
   isNewFile: boolean;
   /** True for binary files that cannot be diffed at the line level. */
   isBinary: boolean;
+  /**
+   * Real workspace path of the reviewed file.  Differs from the map
+   * key (the ``current`` path) only when the agent DELETED a tracked
+   * file: ``current`` is then a ``~/.kiss/.../.deleted/...``
+   * placeholder the UI can render, while rejecting the deletion must
+   * restore the file HERE (mirrors the manifest ``target`` field and
+   * ``web_server._reject_hunk_in_file``).
+   */
+  targetPath: string;
+  /** Symlink target when the base blob is a symlink (manifest field). */
+  linkTarget?: string;
+  /** True when the base file mode had the exec bit set. */
+  exec: boolean;
 }
 
 export interface MergeFileData {
@@ -47,6 +61,12 @@ export interface MergeFileData {
   hunks: Array<{bs: number; bc: number; cs: number; cc: number}>;
   /** Set to true for binary files with no text hunks. */
   binary?: boolean;
+  /** Real workspace path (differs from ``current`` for deletions). */
+  target?: string;
+  /** Base blob is a symlink pointing here (see diff_merge.py). */
+  link_target?: string;
+  /** Base file mode had the exec bit set. */
+  exec?: boolean;
 }
 
 export interface MergeData {
@@ -139,12 +159,29 @@ export class MergeManager extends EventEmitter {
     let offset = 0;
     for (const h of s.hunks) {
       const old = h.baseLines;
-      if (old.length > 0) {
+      // Skip hunks whose base lines are still present (oc > 0): a
+      // merge session refresh can land between the willSave strip and
+      // this re-insertion, and re-inserting into an un-stripped hunk
+      // would duplicate the base lines and desync every coordinate.
+      if (old.length > 0 && h.oc === 0) {
         const insertLine = h.os + offset;
         const txt = old.join('\n') + '\n';
-        await ed.edit(eb => {
+        let ok = await ed.edit(eb => {
           eb.insert(new vscode.Position(insertLine, 0), txt);
         });
+        if (!ok) {
+          // One retry (mirrors _delLinesWithRetry); on failure leave
+          // oc = 0 so the state still matches the document.
+          ok = await ed.edit(eb => {
+            eb.insert(new vscode.Position(insertLine, 0), txt);
+          });
+        }
+        if (!ok) {
+          console.error(
+            `[MergeManager] ed.edit failed re-inserting base lines in ${fp}`,
+          );
+          continue;
+        }
         h.os = insertLine;
         h.oc = old.length;
         h.ns = insertLine + old.length;
@@ -263,7 +300,12 @@ export class MergeManager extends EventEmitter {
     // Binary files: no text editing — just accept or reject the whole file
     if (s.isBinary) {
       const wasNew = s.isNewFile;
-      const basePath = s.basePath;
+      const restore = {
+        targetPath: s.targetPath,
+        basePath: s.basePath,
+        linkTarget: s.linkTarget,
+        exec: s.exec,
+      };
       s.hunks.splice(idx, 1);
       if (!s.hunks.length) {
         delete this._ms[fp];
@@ -272,7 +314,7 @@ export class MergeManager extends EventEmitter {
           if (wasNew) {
             await this._deleteNewFile(fp);
           } else {
-            this._restoreBinaryBase(fp, basePath);
+            this._restoreBase(restore);
           }
         }
       }
@@ -300,6 +342,11 @@ export class MergeManager extends EventEmitter {
       delete this._ms[fp];
       if (wasNew && countProp === 'nc') {
         await this._deleteNewFile(fp);
+      } else if (countProp === 'nc' && s.targetPath !== fp) {
+        // The agent DELETED this tracked file; the reviewed ``fp`` is
+        // only the ``.deleted`` placeholder.  Rejecting the deletion
+        // must restore the base content at the real workspace path.
+        this._restoreBase(s);
       }
     }
     this._afterHunkAction(fp);
@@ -447,16 +494,51 @@ export class MergeManager extends EventEmitter {
   }
 
   /**
-   * Restore the pre-task base content of a binary file on reject.
+   * Restore the pre-task base content of a file on reject, at the REAL
+   * workspace path (``targetPath``, which differs from the reviewed
+   * ``current`` path when the agent deleted the file).
    *
-   * Copies the saved base file back to the current path so the
-   * agent's binary changes are reverted.
+   * Mirrors the server-side ``_restore_base_bytes`` hazards:
+   *
+   *   * never write THROUGH an existing symlink — its destination may
+   *     be a precious file (possibly outside the repo) whose silent
+   *     truncation would be data loss; replace the link instead;
+   *   * a ``linkTarget`` entry must recreate the symlink itself, not
+   *     write the blob's target string as regular-file content;
+   *   * re-apply the exec bit so a rejected deletion of a ``100755``
+   *     script comes back executable.
    */
-  private _restoreBinaryBase(fp: string, basePath: string): void {
+  private _restoreBase(s: {
+    targetPath: string;
+    basePath: string;
+    linkTarget?: string;
+    exec: boolean;
+  }): void {
+    const {targetPath, basePath, linkTarget, exec} = s;
     try {
-      fs.copyFileSync(basePath, fp);
+      try {
+        if (fs.lstatSync(targetPath).isSymbolicLink()) {
+          fs.unlinkSync(targetPath);
+        }
+      } catch {
+        /* target missing — fine, it was deleted */
+      }
+      fs.mkdirSync(path.dirname(targetPath), {recursive: true});
+      if (linkTarget !== undefined) {
+        try {
+          fs.unlinkSync(targetPath);
+        } catch {
+          /* missing */
+        }
+        fs.symlinkSync(linkTarget, targetPath);
+        return;
+      }
+      fs.copyFileSync(basePath, targetPath);
+      if (exec) {
+        fs.chmodSync(targetPath, fs.statSync(targetPath).mode | 0o111);
+      }
     } catch {
-      console.error(`[MergeManager] failed to restore binary base for ${fp}`);
+      console.error(`[MergeManager] failed to restore base for ${targetPath}`);
     }
   }
 
@@ -490,12 +572,23 @@ export class MergeManager extends EventEmitter {
     const fps = Object.keys(this._ms);
     const newFilesToDelete =
       countProp === 'nc' ? fps.filter(fp => this._ms[fp]?.isNewFile) : [];
-    // Collect binary files that need base restoration on reject
-    const binaryToRestore =
+    // Collect files that need base restoration on reject: binary files,
+    // plus agent-DELETED text files (reviewed via a ``.deleted``
+    // placeholder, i.e. targetPath !== current path).
+    const toRestore =
       countProp === 'nc'
         ? fps
-            .filter(fp => this._ms[fp]?.isBinary && !this._ms[fp]?.isNewFile)
-            .map(fp => ({fp, basePath: this._ms[fp].basePath}))
+            .filter(fp => {
+              const s = this._ms[fp];
+              if (!s || s.isNewFile) return false;
+              return s.isBinary || s.targetPath !== fp;
+            })
+            .map(fp => ({
+              targetPath: this._ms[fp].targetPath,
+              basePath: this._ms[fp].basePath,
+              linkTarget: this._ms[fp].linkTarget,
+              exec: this._ms[fp].exec,
+            }))
         : [];
     try {
       for (const fp of fps) {
@@ -512,8 +605,8 @@ export class MergeManager extends EventEmitter {
       for (const fp of newFilesToDelete) {
         await this._deleteNewFile(fp);
       }
-      for (const {fp, basePath} of binaryToRestore) {
-        this._restoreBinaryBase(fp, basePath);
+      for (const r of toRestore) {
+        this._restoreBase(r);
       }
       await vscode.workspace.saveAll(false);
       showInformationNotification(label);
@@ -529,7 +622,14 @@ export class MergeManager extends EventEmitter {
     const s = this._ms[fp];
     const wasNew = s?.isNewFile ?? false;
     const wasBinary = s?.isBinary ?? false;
-    const basePath = s?.basePath ?? '';
+    const restore = s
+      ? {
+          targetPath: s.targetPath,
+          basePath: s.basePath,
+          linkTarget: s.linkTarget,
+          exec: s.exec,
+        }
+      : null;
     if (!wasBinary) {
       await this._deleteFileHunks(fp, countProp, startProp);
     }
@@ -538,8 +638,10 @@ export class MergeManager extends EventEmitter {
       // Rejecting
       if (wasNew) {
         await this._deleteNewFile(fp);
-      } else if (wasBinary) {
-        this._restoreBinaryBase(fp, basePath);
+      } else if (restore && (wasBinary || restore.targetPath !== fp)) {
+        // Binary file, or an agent-DELETED text file reviewed via a
+        // ``.deleted`` placeholder: restore the base at the real path.
+        this._restoreBase(restore);
       }
     }
     this._curHunk = null;
@@ -625,6 +727,11 @@ export class MergeManager extends EventEmitter {
       }
     }
     this._ms = {};
+    // A pending ``_onDidSave`` re-insertion for a file from the
+    // PREVIOUS merge session must not fire against the fresh state —
+    // its hunk coordinates belong to the old session and would
+    // duplicate base lines / corrupt the new session's coordinates.
+    this._reinsertingFiles.clear();
 
     let firstFileFp: string | null = null;
 
@@ -654,6 +761,9 @@ export class MergeManager extends EventEmitter {
           hunks: [dummyHunk],
           isNewFile: !hasBase,
           isBinary: true,
+          targetPath: f.target || f.current,
+          linkTarget: f.link_target,
+          exec: !!f.exec,
         };
         continue;
       }
@@ -746,6 +856,9 @@ export class MergeManager extends EventEmitter {
         hunks: processed,
         isNewFile,
         isBinary: false,
+        targetPath: f.target || f.current,
+        linkTarget: f.link_target,
+        exec: !!f.exec,
       };
     }
 

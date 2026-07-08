@@ -113,7 +113,11 @@ ______________________________________________________________________
   old tabs. (1278, 1414, 1651)
 - In the chat webview, a `run_parallel` tool-call panel and the tabs of its
   sub-agents MUST stay in sync: when the panel is uncollapsed the sub-agent
-  tabs are open, and when the panel is collapsed those tabs are closed.
+  tabs are open — except tabs the user closed individually by hand — and when
+  the panel is collapsed those tabs are closed. Closing one sub-agent tab by
+  hand MUST NOT close the sibling sub-agent tabs of the same task; the panel
+  collapses only when no open sub-agent tab remains, and collapsing clears the
+  by-hand close marks so the next expand reopens the whole fan-out.
 - Once the `run_parallel` tool finishes (its tool_result arrives), the
   automatic collapse passes MUST collapse its panel like any other tool panel
   — closing the fan-out's sub-agent tabs; while the fan-out is still running,

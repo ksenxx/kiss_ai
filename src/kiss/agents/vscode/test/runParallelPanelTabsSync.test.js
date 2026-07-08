@@ -17,8 +17,11 @@
 //      every sub-agent tab open.
 //   2. Re-expanding the panel did not reopen the sub-agent tabs that
 //      the collapse should have closed.
-//   3. Closing a sub-agent tab by hand left the panel uncollapsed
-//      while some of its sub-agent tabs were closed.
+//   3. Closing a sub-agent tab by hand also closed every sibling
+//      sub-agent tab of the same fan-out (the owning panel was
+//      force-collapsed, which closed the surviving tabs).  Closing
+//      one sub-agent tab must close ONLY that tab; the panel
+//      collapses only when no open sub-agent tab remains.
 //   4. The automatic collapse passes (``collapseOlderPanels`` while
 //      streaming, ``collapseAllExceptResult`` at task end) collapsed
 //      the run_parallel panel while its sub-agent tabs stayed open.
@@ -136,11 +139,13 @@ function bootParallelRun(n) {
     tabId: parentId,
     startTs: Date.now(),
   });
+  const taskNames = [];
+  for (let i = 0; i < n; i++) taskNames.push('sub ' + (i + 1));
   send(win, {
     type: 'tool_call',
     name: 'run_parallel',
     tabId: parentId,
-    extras: {tasks: JSON.stringify(['sub one', 'sub two'])},
+    extras: {tasks: JSON.stringify(taskNames)},
   });
   const panel = runParallelPanel(win);
   assert.ok(panel, 'run_parallel tool_call must render a .ev.tc panel');
@@ -243,10 +248,10 @@ function testExpandReopensSubagentTabs() {
 }
 
 // ---------------------------------------------------------------------------
-// 3. Manually closing a sub-agent tab must restore consistency: the
-//    panel collapses (and the remaining sibling sub tabs close).
+// 3. Manually closing a sub-agent tab closes ONLY that tab: the
+//    sibling sub tab stays open and the panel stays uncollapsed.
 // ---------------------------------------------------------------------------
-function testManualSubTabCloseCollapsesPanel() {
+function testManualSubTabCloseClosesOnlyThatTab() {
   const {win, panel, subTabIds} = bootParallelRun(2);
 
   const firstEl = win.document.querySelector(
@@ -258,9 +263,9 @@ function testManualSubTabCloseCollapsesPanel() {
   const collapsed = panel.classList.contains('collapsed');
   const openSubTabs = subagentTabEls(win).length;
   assert.ok(
-    (collapsed && openSubTabs === 0) || (!collapsed && openSubTabs === 2),
-    'INVARIANT VIOLATED: after closing a sub-agent tab by hand the ' +
-      'panel state and tab state diverge (collapsed=' +
+    !collapsed && openSubTabs === 1,
+    'closing one sub-agent tab by hand must leave the sibling tab ' +
+      'open and the panel uncollapsed (collapsed=' +
       collapsed +
       ', open sub tabs=' +
       openSubTabs +
@@ -268,6 +273,131 @@ function testManualSubTabCloseCollapsesPanel() {
   );
   win.close();
   console.log('  ok - manual sub-tab close keeps panel/tabs consistent');
+}
+
+// ---------------------------------------------------------------------------
+// 3b. Manually closing ONE sub-agent tab must NOT close the sibling
+//     sub-agent tabs of the same run_parallel fan-out — and must not
+//     collapse the owning panel while siblings remain open.  The tab
+//     the user closed must stay closed: no later pass may reopen it.
+// ---------------------------------------------------------------------------
+function testManualSubTabCloseKeepsSiblingsOpen() {
+  const {win, posted, panel, parentId, subTabIds} = bootParallelRun(3);
+
+  const firstEl = win.document.querySelector(
+    `#tab-list .chat-tab[data-tab-id="${subTabIds[0]}"] .chat-tab-close`,
+  );
+  assert.ok(firstEl, 'sub-agent tab must render a close button');
+  firstEl.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+
+  const openIds = subagentTabEls(win).map(el => el.dataset.tabId);
+  assert.deepStrictEqual(
+    openIds.sort(),
+    [subTabIds[1], subTabIds[2]].sort(),
+    'BUG: closing one sub-agent tab closed its sibling sub-agent ' +
+      'tabs too (open sub tabs after close: ' +
+      JSON.stringify(openIds) +
+      ')',
+  );
+  for (const id of [subTabIds[1], subTabIds[2]]) {
+    assert.ok(
+      !posted.some(m => m.type === 'closeTab' && m.tabId === id),
+      'the backend must NOT be told to close sibling sub-agent tab ' + id,
+    );
+  }
+  assert.ok(
+    !panel.classList.contains('collapsed'),
+    'the run_parallel panel must stay uncollapsed while sibling ' +
+      'sub-agent tabs are open',
+  );
+
+  // Later passes over the still-uncollapsed panel must neither
+  // resurrect the tab the user closed nor close the surviving
+  // siblings: (1) parent keeps streaming → collapseOlderPanels runs;
+  // (2) a duplicate ``openSubagentTab`` replay for a surviving
+  // sibling → the handler re-registers the open tab with the panel
+  // (idempotent — no new tab, no state change); (3) a stale
+  // ``openSubagentTab`` replay for the tab the user closed → the
+  // ``_rpClosedSubagentTabs`` guard must drop it.
+  send(win, {type: 'thinking_start', tabId: parentId});
+  send(win, {type: 'thinking_delta', tabId: parentId, text: 'waiting'});
+  send(win, {type: 'thinking_end', tabId: parentId});
+  send(win, {
+    type: 'openSubagentTab',
+    tab_id: subTabIds[1],
+    parent_tab_id: parentId,
+    description: 'sub 2',
+    task_id: 'sub-task-2',
+    taskIndex: 1,
+  });
+  send(win, {
+    type: 'openSubagentTab',
+    tab_id: subTabIds[0],
+    parent_tab_id: parentId,
+    description: 'sub 1',
+    task_id: 'sub-task-1',
+    taskIndex: 0,
+  });
+  const openAfter = subagentTabEls(win).map(el => el.dataset.tabId);
+  assert.deepStrictEqual(
+    openAfter.sort(),
+    [subTabIds[1], subTabIds[2]].sort(),
+    'a later sync must not reopen the user-closed sub-agent tab or ' +
+      'close the surviving siblings (open sub tabs: ' +
+      JSON.stringify(openAfter) +
+      ')',
+  );
+  win.close();
+  console.log('  ok - manual sub-tab close keeps sibling sub tabs open');
+}
+
+// ---------------------------------------------------------------------------
+// 3c. Manually closing the LAST remaining sub-agent tab leaves no open
+//     fan-out tabs; expanding the panel afterwards must reopen ALL the
+//     sub-agents (including the ones closed by hand earlier).
+// ---------------------------------------------------------------------------
+function testManualCloseOfAllSubTabsThenExpandReopensAll() {
+  const {win, posted, panel, taskIds, subTabIds} = bootParallelRun(2);
+
+  for (const id of subTabIds) {
+    const btn = win.document.querySelector(
+      `#tab-list .chat-tab[data-tab-id="${id}"] .chat-tab-close`,
+    );
+    assert.ok(btn, 'sub-agent tab ' + id + ' must render a close button');
+    btn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  }
+  assert.strictEqual(
+    subagentTabEls(win).length,
+    0,
+    'closing every sub-agent tab by hand must leave none open',
+  );
+  assert.ok(
+    panel.classList.contains('collapsed'),
+    'with no open sub-agent tabs left the panel must be collapsed',
+  );
+
+  const before = posted.length;
+  togglePanel(win, panel); // expand → all sub tabs must reopen
+  assert.ok(
+    !panel.classList.contains('collapsed'),
+    'clicking the header must uncollapse the run_parallel panel',
+  );
+  assert.strictEqual(
+    subagentTabEls(win).length,
+    2,
+    'expanding the panel must reopen every sub-agent tab, including ' +
+      'those previously closed by hand',
+  );
+  for (const taskId of taskIds) {
+    assert.ok(
+      posted
+        .slice(before)
+        .some(m => m.type === 'resumeSession' && m.taskId === taskId),
+      'reopened sub-agent tab must resume backend task ' + taskId,
+    );
+  }
+  win.close();
+  console.log('  ok - closing all sub tabs by hand, expand reopens all');
 }
 
 // ---------------------------------------------------------------------------
@@ -771,7 +901,9 @@ async function main() {
   const tests = [
     testCollapseClosesSubagentTabs,
     testExpandReopensSubagentTabs,
-    testManualSubTabCloseCollapsesPanel,
+    testManualSubTabCloseClosesOnlyThatTab,
+    testManualSubTabCloseKeepsSiblingsOpen,
+    testManualCloseOfAllSubTabsThenExpandReopensAll,
     testAutoCollapseKeepsInvariant,
     testDelayedOpenSubagentTabDoesNotReopenCollapsedPanel,
     testOpenSubagentTabOnlyPathIsAssociated,

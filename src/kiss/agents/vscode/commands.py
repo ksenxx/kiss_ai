@@ -1090,12 +1090,19 @@ class _CommandsMixin:
                 # ``_save_config_lock`` → ``_state_lock`` is nested
                 # nowhere else (this is the lock's only use site), so
                 # no inversion is possible.
+                # The printer sync also stays INSIDE ``_state_lock``:
+                # ``_cmd_set_work_dir`` does not take
+                # ``_save_config_lock``, so a racing ``setWorkDir``
+                # could otherwise interleave its printer write with
+                # this one in the opposite order of the ``work_dir``
+                # writes, desyncing ``printer.work_dir`` from
+                # ``self.work_dir``.
                 with self._state_lock:
                     if self.work_dir != new_work_dir:
                         self.work_dir = new_work_dir
                         self._file_cache = {}
-                if hasattr(self.printer, "work_dir"):
-                    setattr(self.printer, "work_dir", new_work_dir)
+                    if hasattr(self.printer, "work_dir"):
+                        setattr(self.printer, "work_dir", new_work_dir)
 
         api_keys = cmd.get("apiKeys", {})
         if not isinstance(api_keys, dict):
@@ -1427,13 +1434,20 @@ class _CommandsMixin:
             # while the daemon was pointed elsewhere), so wipe them
             # all and let subsequent ``getFiles`` rebuild lazily.
             self._file_cache = {}
-        # Keep the printer's work_dir in sync so global ``configData``
-        # events report the active folder (the ``WebPrinter`` used by
-        # the remote server fills ``cfg["work_dir"]`` from its own
-        # ``work_dir`` attribute; without this it would keep reporting
-        # the folder the daemon was launched with).
-        if hasattr(self.printer, "work_dir"):
-            setattr(self.printer, "work_dir", new_dir)
+            # Keep the printer's work_dir in sync so global
+            # ``configData`` events report the active folder (the
+            # ``WebPrinter`` used by the remote server fills
+            # ``cfg["work_dir"]`` from its own ``work_dir`` attribute;
+            # without this it would keep reporting the folder the
+            # daemon was launched with).  The sync stays INSIDE
+            # ``_state_lock`` together with the ``self.work_dir``
+            # write: propagating outside the lock let two racing
+            # ``setWorkDir`` commands (or ``setWorkDir`` vs
+            # ``saveConfig``) interleave the printer writes in the
+            # OPPOSITE order of the server writes, leaving
+            # ``printer.work_dir != self.work_dir`` permanently.
+            if hasattr(self.printer, "work_dir"):
+                setattr(self.printer, "work_dir", new_dir)
 
     _HANDLERS: dict[str, Any] = {
         "run": _cmd_run,

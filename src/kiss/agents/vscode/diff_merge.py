@@ -407,13 +407,48 @@ def _snapshot_files(work_dir: str, fnames: set[str]) -> dict[str, str]:
     return result
 
 
+def _safe_tab_component(tab_id: str) -> str:
+    """Sanitise a frontend tab id into a single safe directory name.
+
+    The tab id arrives straight off the wire (``cmd.get("tabId")``) and
+    is only coerced to ``str`` upstream.  Used verbatim as a path
+    component, a hostile or malformed id such as ``"../victim"`` would
+    escape the merge_dir root — and ``_cleanup_merge_data`` (run on
+    every ``mergeAction all-done`` and tab close) would ``rmtree`` a
+    directory OUTSIDE it.  Real tab ids are UUID-style strings and pass
+    through unchanged; anything else is mapped to a collision-free safe
+    name inside the parent directory.
+
+    Args:
+        tab_id: Raw frontend tab identifier (non-empty).
+
+    Returns:
+        A safe single path component, stable for a given input.
+    """
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", tab_id)
+    if not safe.strip("."):
+        # Entirely dots ("." / "..") — never a legal directory name
+        # for us; neutralise before the uniqueness suffix below.
+        safe = safe.replace(".", "_") or "_"
+    if safe != tab_id:
+        # Keep distinct hostile ids distinct ("../x" vs ".._x").
+        digest = hashlib.md5(
+            tab_id.encode("utf-8", "surrogatepass"),
+        ).hexdigest()[:8]
+        safe = f"{safe}-{digest}"
+    return safe
+
+
 def _merge_data_dir(tab_id: str = "") -> Path:
     """Return the per-tab directory for merge state files.
 
     Uses ``{artifact_root}/merge_dir/{tab_id}/`` so merge-temp,
     untracked-base, and pending-merge.json live in the KISS artifacts
     directory, isolated per tab to prevent concurrent merge sessions
-    from destroying each other's data.
+    from destroying each other's data.  The tab id is sanitised via
+    :func:`_safe_tab_component` so a traversal-style id from a
+    malformed client can never address a directory outside
+    ``merge_dir``.
 
     Args:
         tab_id: Frontend tab identifier.  When non-empty, the returned
@@ -424,7 +459,7 @@ def _merge_data_dir(tab_id: str = "") -> Path:
     """
     base = config_module._artifact_root() / "merge_dir"
     if tab_id:
-        return base / tab_id
+        return base / _safe_tab_component(tab_id)
     return base
 
 

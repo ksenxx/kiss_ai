@@ -176,10 +176,13 @@ def _parse_command_file(path: Path, root: Path, source: str) -> CustomCommand | 
         return None
     rel = path.relative_to(root)
     name = ":".join((*rel.parts[:-1], rel.stem))
+    # Collapse all whitespace (a YAML block scalar may span lines) so
+    # the one-line ``/commands`` and ``/help`` listings never break —
+    # same normalization as skills.py applies to skill descriptions.
     return CustomCommand(
         name=name,
-        description=str(meta.get("description", "") or ""),
-        argument_hint=str(meta.get("argument-hint", "") or ""),
+        description=" ".join(str(meta.get("description", "") or "").split()),
+        argument_hint=" ".join(str(meta.get("argument-hint", "") or "").split()),
         template=body,
         source=source,
         path=str(path),
@@ -360,5 +363,8 @@ def format_command_listing(commands: dict[str, CustomCommand]) -> str:
     for cmd in entries:
         invocation = f"/{cmd.name} {cmd.argument_hint}".rstrip()
         desc = cmd.description or Path(cmd.path).name
+        if len(desc) > 100:
+            # format_skill_listing parity: keep the listing aligned.
+            desc = desc[:97] + "..."
         lines.append(f"  {invocation:<{width}}  ({cmd.source}) {desc}")
     return "\n".join(lines)
