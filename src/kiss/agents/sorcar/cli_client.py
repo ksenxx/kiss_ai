@@ -60,7 +60,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar import cli_voice
+from kiss.agents.sorcar import cli_talk, cli_voice
 from kiss.agents.sorcar.cli_helpers import (
     _parse_resume_arg,
     _print_recent_chats,
@@ -473,6 +473,18 @@ class _EventDispatcher:
                 severity=event.get("severity") or "info",
                 progress_message=event.get("progressMessage") or "",
             )
+            return
+        if et == "talk":
+            # Agent-initiated text-to-speech (the ``talk`` tool).  In
+            # the interactive REPL the agent runs in the ``sorcar web``
+            # daemon, so the ``talk`` event arrives here over the UDS
+            # connection like any other display event; the terminal
+            # machine plays it on its default speakers exactly as a
+            # chat webview would (``media/main.js`` case 'talk').
+            # Foreign-tab copies were already dropped by ``dispatch``'s
+            # tab filter, and the shared player's talkId dedupe keeps
+            # any duplicate fan-out copies to one playback per device.
+            cli_talk.shared_player().play(event)
             return
         # Silently ignore frontend-only / merge / setTaskText / focus
         # events that have no useful CLI rendering.
