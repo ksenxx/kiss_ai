@@ -108,9 +108,15 @@ class TestA1WriteLockInterruptLeak:
             assert lock._pending_writers == 1
             time.sleep(0.1)  # let it enter cond.wait()
             assert tw.ident is not None
-            res = ctypes.pythonapi.PyThreadState_SetAsyncExc(
-                ctypes.c_long(tw.ident), ctypes.py_object(KeyboardInterrupt)
-            )
+            # Pass the raw int thread id with an explicit C signature.
+            # Thread ids are unsigned longs; wrapping in ctypes.c_long
+            # breaks on Python 3.14 (and whenever another module has
+            # already set argtypes=[c_ulong, py_object] on this cached
+            # function object, as task_runner.py does at import time).
+            set_async_exc = ctypes.pythonapi.PyThreadState_SetAsyncExc
+            set_async_exc.argtypes = [ctypes.c_ulong, ctypes.py_object]
+            set_async_exc.restype = ctypes.c_int
+            res = set_async_exc(tw.ident, ctypes.py_object(KeyboardInterrupt))
             assert res == 1
             release_reader.set()
             tw.join(15)
