@@ -2014,6 +2014,23 @@ class WebPrinter(JsonPrinter):
         # VS Code extension viewer of the same chat tab observe an
         # identical event stream.
         self._uds_writers: set[asyncio.StreamWriter] = set()
+        # Tab ids currently connected over the local UDS transport.
+        # UDS peers (VS Code extension webviews and CLI REPL clients)
+        # share the daemon machine's speakers; WSS peers are treated as
+        # remote devices.  Counts (rather than sets) make reconnects
+        # safe: if a tab reclaims the same id before the old connection
+        # fully unwinds, the old connection's unregister only decrements
+        # its own registration instead of erasing the fresh one.
+        # Guarded by ``_ws_lock``.
+        self._local_uds_tab_counts: dict[str, int] = {}
+        # CLI terminal-player tab ids announced via ``cliTabHello``
+        # (also connection-counted, for the same reconnect safety).
+        # Talk-playback arbitration (:meth:`_fanout_talk`) needs to
+        # tell CLI REPL tabs apart from local webview tabs: both send
+        # ``ready``, but a CLI tab plays on THIS machine's speakers and
+        # must stay silent whenever a local webview tab is also
+        # subscribed to the task.  Guarded by ``_ws_lock``.
+        self._cli_tab_counts: dict[str, int] = {}
         # Per-connection endpoint registry, keyed by the ``conn_id``
         # that the handlers stamp (as ``connId``) on every client
         # command.  Request/reply events (``models``, ``history``,
@@ -2148,11 +2165,169 @@ class WebPrinter(JsonPrinter):
         targets = self._fanout_targets(event.get("taskId"))
         if not targets:
             return
+        if event.get("type") == "talk":
+            # Talk events need per-tab playback arbitration so one
+            # utterance is heard exactly once per device.
+            self._fanout_talk(event, targets)
+            return
         base = json.dumps(event)[:-1]
         for tab_id in targets:
             self._send_to_ws_clients(
                 f'{base}, "tabId": {json.dumps(tab_id)}}}'
             )
+
+    @staticmethod
+    def _increment_count(counts: dict[str, int], key: str) -> None:
+        """Increment *key* in a small connection-count map."""
+        counts[key] = counts.get(key, 0) + 1
+
+    @staticmethod
+    def _decrement_count(counts: dict[str, int], key: str) -> None:
+        """Decrement *key* in a small connection-count map."""
+        count = counts.get(key)
+        if count is None:
+            return
+        if count <= 1:
+            del counts[key]
+        else:
+            counts[key] = count - 1
+
+    def register_local_uds_tab(self, tab_id: str) -> None:
+        """Mark *tab_id* as currently connected over local UDS.
+
+        Args:
+            tab_id: The frontend tab id seen on a UDS command.
+        """
+        with self._ws_lock:
+            self._increment_count(self._local_uds_tab_counts, tab_id)
+
+    def unregister_local_uds_tabs(self, tab_ids: set[str]) -> None:
+        """Drop this connection's local-UDS tab registrations."""
+        with self._ws_lock:
+            for tab_id in tab_ids:
+                self._decrement_count(self._local_uds_tab_counts, tab_id)
+
+    def register_cli_tab(self, tab_id: str) -> None:
+        """Mark *tab_id* as a CLI terminal player for talk arbitration.
+
+        Called when a sorcar CLI REPL announces itself with the
+        ``cliTabHello`` command.  :meth:`_fanout_talk` mutes talk
+        copies stamped for CLI tabs whenever a LOCAL webview tab is
+        also subscribed to the task, so the utterance is not played by
+        the terminal AND a webview on the same machine at once.  A WSS
+        browser tab is a different device and does not suppress the
+        local CLI.
+
+        Args:
+            tab_id: The CLI client's frontend tab id.
+        """
+        with self._ws_lock:
+            self._increment_count(self._cli_tab_counts, tab_id)
+
+    def unregister_cli_tabs(self, tab_ids: set[str]) -> None:
+        """Drop this connection's CLI-terminal tab registrations."""
+        with self._ws_lock:
+            for tab_id in tab_ids:
+                self._decrement_count(self._cli_tab_counts, tab_id)
+
+    def _fanout_talk(self, event: dict[str, Any], targets: list[str]) -> None:
+        """Fan out one ``talk`` event with per-device playback arbitration.
+
+        Webview subscriber tabs always receive the playable copy: each
+        webview plays on its own device and its ``talkId`` dedupe and
+        talk queue keep intra-webview duplicates silent.  CLI REPL
+        tabs (see :meth:`register_cli_tab`) play on THIS machine's
+        speakers, which a local UDS webview shares — so every CLI
+        tab's copy is stamped ``muted`` when at least one local webview
+        tab is subscribed (the local webview plays).  WSS web tabs are
+        treated as remote devices and do not suppress the local CLI;
+        when only CLI tabs (and/or remote web tabs) are subscribed,
+        exactly one CLI tab (the lexicographically first) plays.
+        Without this, a REPL user with the same task open in a local
+        chat webview heard every utterance twice, slightly offset —
+        distorted, overlapping speech.
+
+        Args:
+            event: The ``talk`` event (no ``tabId`` stamp yet).
+            targets: Subscriber tab ids for the event's task.
+        """
+        with self._ws_lock:
+            cli_tabs = set(self._cli_tab_counts)
+            local_uds_tabs = set(self._local_uds_tab_counts)
+        cli_targets = sorted(t for t in targets if t in cli_tabs)
+        web_targets = [t for t in targets if t not in cli_tabs]
+        local_web_targets = [t for t in web_targets if t in local_uds_tabs]
+        playing_cli_tab = (
+            cli_targets[0] if cli_targets and not local_web_targets else None
+        )
+        base = json.dumps(event)[:-1]
+        muted_base = json.dumps({**event, "muted": True})[:-1]
+        for tab_id in web_targets:
+            self._send_to_ws_clients(
+                f'{base}, "tabId": {json.dumps(tab_id)}}}'
+            )
+        for tab_id in cli_targets:
+            prefix = base if tab_id == playing_cli_tab else muted_base
+            self._send_to_ws_clients(
+                f'{prefix}, "tabId": {json.dumps(tab_id)}}}'
+            )
+
+    def _fanout_talk_cli_origin(self, event: dict[str, Any]) -> None:
+        """Fan out a CLI-forwarded ``talk`` event already played locally.
+
+        The sorcar CLI's :class:`RecordingConsolePrinter` plays every
+        talk event on the terminal machine's speakers BEFORE
+        forwarding it here, and every UDS peer of this daemon (VS Code
+        webviews, CLI REPL clients) lives on that same machine — so
+        their copies are stamped ``muted`` and only WSS peers (remote
+        browsers, i.e. other devices) receive the playable copy.
+        Without this, launching a task with ``sorcar`` while the same
+        task was open in a local chat webview played every clip twice,
+        slightly offset — the distorted, overlapping speech this
+        arbitration exists to prevent.
+
+        Args:
+            event: The CLI-originated ``talk`` event.
+        """
+        targets = self._fanout_targets(event.get("taskId"))
+        if not targets:
+            return
+        base = json.dumps(event)[:-1]
+        muted_base = json.dumps({**event, "muted": True})[:-1]
+        for tab_id in targets:
+            stamp = f', "tabId": {json.dumps(tab_id)}}}'
+            self._send_to_wss_clients(base + stamp)
+            self._send_to_uds_writers(muted_base + stamp)
+
+    def _send_to_wss_clients(self, data: str) -> None:
+        """Send a pre-serialised JSON payload to WSS clients only.
+
+        WSS peers are remote browsers — separate devices from the
+        daemon machine — so talk arbitration sends them the playable
+        copy while the same-machine UDS peers get the muted one.
+
+        Args:
+            data: The JSON payload (already encoded with ``json.dumps``).
+        """
+        with self._ws_lock:
+            endpoints = list(self._ws_clients)
+        for endpoint in endpoints:
+            self._schedule_send(endpoint, data)
+
+    def _send_to_uds_writers(self, data: str) -> None:
+        """Send a pre-serialised JSON payload to local UDS peers only.
+
+        UDS peers (VS Code extension webviews, CLI REPL clients) are
+        always on the daemon's machine; talk arbitration sends them
+        muted copies when a local player already owns the utterance.
+
+        Args:
+            data: The JSON payload (already encoded with ``json.dumps``).
+        """
+        with self._ws_lock:
+            endpoints = list(self._uds_writers)
+        for endpoint in endpoints:
+            self._schedule_send(endpoint, data)
 
     def _send_to_ws_clients(self, data: str) -> None:
         """Send a pre-serialised JSON payload to every connected client.
@@ -3939,7 +4114,7 @@ class RemoteAccessServer:
         tabs_seen: set[str] = set()
         # Per-connection work_dir + unique connection id (see
         # _dispatch_client_command).
-        conn_state: dict[str, str] = {
+        conn_state: dict[str, Any] = {
             "work_dir": "", "conn_id": uuid.uuid4().hex,
         }
         self._printer.bind_conn(conn_state["conn_id"], websocket)
@@ -4026,7 +4201,7 @@ class RemoteAccessServer:
         # ``conn_id`` is stamped (as ``connId``) on every command so
         # ``VSCodeServer`` can key its per-connection autocomplete
         # state (active-file snapshot, request staleness) by window.
-        conn_state: dict[str, str] = {
+        conn_state: dict[str, Any] = {
             "work_dir": "", "conn_id": uuid.uuid4().hex,
         }
         self._printer.bind_conn(conn_state["conn_id"], writer)
@@ -4061,6 +4236,12 @@ class RemoteAccessServer:
         finally:
             for tab in tabs_seen:
                 self._schedule_tab_close(tab)
+            local_tabs = conn_state.get("local_tabs")
+            if isinstance(local_tabs, set):
+                self._printer.unregister_local_uds_tabs(local_tabs)
+            cli_tabs = conn_state.get("cli_tabs")
+            if isinstance(cli_tabs, set):
+                self._printer.unregister_cli_tabs(cli_tabs)
             # Clean up any CLI task ids announced on this connection
             # but never closed (CLI crash, Ctrl+C, abrupt SIGKILL):
             # without this the daemon would keep them in
@@ -4102,6 +4283,12 @@ class RemoteAccessServer:
             ev: The event dictionary the CLI emitted; expected to
                 carry at least ``type`` and ``taskId``.
         """
+        if ev.get("type") == "talk":
+            # The CLI process already played this utterance on the
+            # daemon machine's speakers; mute the copies delivered to
+            # same-machine (UDS) peers so it is heard once per device.
+            self._printer._fanout_talk_cli_origin(ev)
+            return
         self._printer._fanout_stamped(ev)
 
     async def _dispatch_client_command(
@@ -4109,7 +4296,7 @@ class RemoteAccessServer:
         cmd: dict[str, Any],
         endpoint: Any,
         tabs_seen: set[str],
-        conn_state: dict[str, str],
+        conn_state: dict[str, Any],
     ) -> None:
         """Dispatch one parsed client command from a WSS or UDS peer.
 
@@ -4152,8 +4339,15 @@ class RemoteAccessServer:
                 ghost-text completions as for its work_dir.
         """
         tab_id = cmd.get("tabId", "")
+        is_uds = isinstance(endpoint, asyncio.StreamWriter)
         if isinstance(tab_id, str) and tab_id:
-            tabs_seen.add(tab_id)
+            if tab_id not in tabs_seen:
+                tabs_seen.add(tab_id)
+            if is_uds:
+                local_tabs = conn_state.setdefault("local_tabs", set())
+                if tab_id not in local_tabs:
+                    local_tabs.add(tab_id)
+                    self._printer.register_local_uds_tab(tab_id)
         cmd["connId"] = conn_state["conn_id"]
         cmd_type = cmd.get("type", "")
         if cmd_type == "cliEvent":
@@ -4165,6 +4359,19 @@ class RemoteAccessServer:
             ev = cmd.get("event")
             if isinstance(ev, dict):
                 self._relay_cli_event(ev)
+            return
+        if cmd_type == "cliTabHello":
+            # A sorcar CLI REPL announces its tab id so talk-playback
+            # arbitration can tell CLI terminal players apart from
+            # webview tabs (see ``WebPrinter._fanout_talk``).  Only
+            # local UDS peers are terminal players; a WSS/browser peer
+            # cannot suppress playback on the daemon machine.
+            raw_tab = cmd.get("tabId")
+            if is_uds and isinstance(raw_tab, str) and raw_tab:
+                cli_tabs = conn_state.setdefault("cli_tabs", set())
+                if raw_tab not in cli_tabs:
+                    cli_tabs.add(raw_tab)
+                    self._printer.register_cli_tab(raw_tab)
             return
         if cmd_type == "cliTaskStart":
             # CLI announces a fresh running task so a webview tab that
@@ -4241,7 +4448,15 @@ class RemoteAccessServer:
                     if isinstance(rt, dict):
                         rt_id = rt.get("tabId", "")
                         if isinstance(rt_id, str) and rt_id:
-                            tabs_seen.add(rt_id)
+                            if rt_id not in tabs_seen:
+                                tabs_seen.add(rt_id)
+                            if is_uds:
+                                local_tabs = conn_state.setdefault(
+                                    "local_tabs", set()
+                                )
+                                if rt_id not in local_tabs:
+                                    local_tabs.add(rt_id)
+                                    self._printer.register_local_uds_tab(rt_id)
             await self._handle_ready(cmd, endpoint)
             return
         if cmd_type == "submit":
