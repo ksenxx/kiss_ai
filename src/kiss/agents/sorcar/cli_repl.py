@@ -164,8 +164,8 @@ SLASH_COMMANDS: dict[str, str] = {
             "`sorcar mcp add/list/auth/debug`",
     "/autocommit": "Stage all changes, auto-generate a commit message, "
                    "and commit (same as the extension's Auto-commit)",
-    "/voice": "Voice chat: listen for the sorcar wake word and speak "
-              "your task (Esc/Ctrl+C/Ctrl+D/Enter to stop)",
+    "/voice": "Toggle voice chat: listen for the sorcar wake word and "
+              "speak your task; typing keeps working while voice is on",
     "/exit": "Exit the sorcar CLI",
     "/quit": "Alias for /exit",
 }
