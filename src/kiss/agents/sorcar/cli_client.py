@@ -60,6 +60,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from kiss.agents.sorcar import cli_voice
 from kiss.agents.sorcar.cli_helpers import (
     _parse_resume_arg,
     _print_recent_chats,
@@ -1308,6 +1309,9 @@ def _run_repl_loop(
     client: CliClient,
     read_line: Callable[[], str | None],
     submit: Callable[[str], None],
+    voice_reader: (
+        Callable[[cli_voice.VoiceListener], str | None] | None
+    ) = None,
 ) -> None:
     """Drive the shared interactive client loop until the user exits.
 
@@ -1322,52 +1326,90 @@ def _run_repl_loop(
     modes, so a behavioural fix applied to one could silently miss
     the other (w2 F10/F20) — it now lives here once.
 
+    ``/voice`` is handled here rather than in
+    :func:`_handle_client_slash` because captured speech must flow
+    through this very loop: while a voice session is active the next
+    line comes from the wake-word listener instead of *read_line* and
+    is then treated exactly like a typed line (blank → skip, exit
+    words, slash commands, otherwise submitted as a task).  Voice
+    chat is continuous — after a submitted task completes the loop
+    resumes listening — until the capture reports ``None`` (cancel
+    key or listener failure).  The listener child is always
+    terminated on exit, including exceptions.
+
     Args:
         client: The connected :class:`CliClient`.
         read_line: Blocking reader returning the next input line, or
             ``None`` on EOF; may raise :class:`KeyboardInterrupt`.
         submit: Runs one task for the given line; may raise
             :class:`KeyboardInterrupt` when the user aborts the wait.
+        voice_reader: Per-utterance voice capture used by ``/voice``
+            (the anchored REPL binds
+            :func:`~kiss.agents.sorcar.cli_voice.read_voice_line_anchored`
+            to its box); ``None`` falls back to
+            :func:`~kiss.agents.sorcar.cli_voice.read_voice_line_plain`.
     """
     interrupt_armed = False
-    while True:
-        try:
-            line = read_line()
-        except KeyboardInterrupt:
-            if interrupt_armed:
-                print("\nGoodbye.")
-                break
-            interrupt_armed = True
-            # If a task is running, stop it; otherwise just arm the
-            # second Ctrl-C to exit (matches REPL behaviour).
-            if client.dispatcher.task_active.is_set():
-                client.send({"type": "stop"})
-                print("\n⏹  Sent stop to daemon.")
+    voice: cli_voice.VoiceSession | None = None
+    try:
+        while True:
+            if voice is not None:
+                line = voice.read()
+                if line is None:  # cancelled or listener failed
+                    voice.close()
+                    voice = None
+                    continue
             else:
-                print("\n(Press Ctrl+C again or type /exit to quit)")
-            continue
-        if line is None:  # EOF / Ctrl+D
-            print("\nGoodbye.")
-            break
-        interrupt_armed = False
-        text = line.strip()
-        if not text:
-            continue
-        if text in _EXIT_WORDS:
-            break
-        if text.startswith("/"):
-            try:
-                if _handle_client_slash(client, line):
+                try:
+                    line = read_line()
+                except KeyboardInterrupt:
+                    if interrupt_armed:
+                        print("\nGoodbye.")
+                        break
+                    interrupt_armed = True
+                    # If a task is running, stop it; otherwise just arm
+                    # the second Ctrl-C to exit (matches REPL behaviour).
+                    if client.dispatcher.task_active.is_set():
+                        client.send({"type": "stop"})
+                        print("\n⏹  Sent stop to daemon.")
+                    else:
+                        print("\n(Press Ctrl+C again or type /exit to quit)")
+                    continue
+                if line is None:  # EOF / Ctrl+D
+                    print("\nGoodbye.")
                     break
-            except Exception as exc:  # noqa: BLE001 - resilient REPL
-                logger.debug("slash command failed", exc_info=True)
-                print(f"\n✗ Command failed: {exc}\n")
-            continue
-        try:
-            submit(line)
-        except KeyboardInterrupt:
-            client.send({"type": "stop"})
-            print("\n⏹  Task interrupted.\n")
+            interrupt_armed = False
+            text = line.strip()
+            if not text:
+                continue
+            if text in _EXIT_WORDS:
+                break
+            if text == "/voice":
+                if voice is not None:
+                    print("🎤 Voice mode is already active.")
+                    continue
+                voice = cli_voice.start_voice(
+                    voice_reader or cli_voice.read_voice_line_plain
+                )
+                continue
+            if text.startswith("/"):
+                try:
+                    if _handle_client_slash(client, line):
+                        break
+                except Exception as exc:  # noqa: BLE001 - resilient REPL
+                    logger.debug("slash command failed", exc_info=True)
+                    print(f"\n✗ Command failed: {exc}\n")
+                continue
+            try:
+                submit(line)
+            except KeyboardInterrupt:
+                client.send({"type": "stop"})
+                print("\n⏹  Task interrupted.\n")
+    finally:
+        # Never leak the listener child — REPL exit, exit words and
+        # exceptions all land here while a voice session is active.
+        if voice is not None:
+            voice.close()
 
 
 def _run_anchored_client(
@@ -1428,6 +1470,9 @@ def _run_anchored_client(
                 use_worktree=use_worktree,
                 use_parallel=use_parallel,
                 auto_commit=auto_commit,
+            ),
+            voice_reader=functools.partial(
+                cli_voice.read_voice_line_anchored, repl.box,
             ),
         )
         _save_history_lines(history_path, repl.box.history)
