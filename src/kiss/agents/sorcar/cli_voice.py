@@ -8,11 +8,13 @@ Typing ``/voice`` at the idle prompt spawns the wake-word listener
 process (``python -m kiss.agents.vscode.voice_wake``) and turns each
 recognised utterance into a submitted REPL line, exactly as if the user
 had typed it and pressed Enter.  While waiting for speech the anchored
-input panel shows a blinking red ``Listening ...`` indicator (or
-``Transcribing ...`` once the wake word fires); the plain fallback REPL
-prints the same indicator inline.  Voice chat is continuous — after a
-submitted task completes the REPL resumes listening — until the user
-cancels with Esc, Ctrl+C, Ctrl+D or Enter.
+input panel shows a red ``Listening ...`` indicator at the beginning of
+its header (the top border); the indicator starts *blinking* only once
+the sorcar wake word is detected (``WAKE``) and switches to a blinking
+``Transcribing ...`` while the utterance is transcribed.  The plain
+fallback REPL prints the same indicator inline.  Voice chat is
+continuous — after a submitted task completes the REPL resumes
+listening — until the user cancels with Esc, Ctrl+C, Ctrl+D or Enter.
 
 The listener's stdout speaks a line protocol: ``READY``, ``WAKE``,
 ``TRANSCRIBING``, ``SPEECH <json {"text","speaker","language"}>`` and
@@ -37,14 +39,15 @@ import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from kiss.agents.sorcar.cli_panel import BLINK, CYAN, RED, RESET
+from kiss.agents.sorcar.cli_panel import BLINK, CYAN, RED, RESET, YELLOW
 
 if TYPE_CHECKING:
     from kiss.agents.sorcar.cli_steering import _InputBox
 
 logger = logging.getLogger(__name__)
 
-# Indicator texts shown (blinking red) while voice capture runs.
+# Indicator texts shown (red; blinking once the wake word fires) while
+# voice capture runs.
 LISTENING_TEXT = "Listening ..."
 TRANSCRIBING_TEXT = "Transcribing ..."
 # Panel title shown while the anchored box is in voice mode.
@@ -262,11 +265,14 @@ def start_voice(
         listener = VoiceListener()
         listener.start()
     except (OSError, ValueError) as exc:
-        print(f"✗ voice: could not start the wake-word listener: {exc}")
+        print(
+            f"{YELLOW}✗ voice: could not start the wake-word listener: "
+            f"{exc}{RESET}"
+        )
         return None
     print(
-        "🎤 Voice mode: say the wake word, then speak your task "
-        "(Esc, Ctrl+C, Ctrl+D or Enter to stop)."
+        f"{YELLOW}🎤 Voice mode: say the wake word, then speak your task "
+        f"(Esc, Ctrl+C, Ctrl+D or Enter to stop).{RESET}"
     )
     return VoiceSession(listener, reader)
 
@@ -277,14 +283,22 @@ _NO_LINE_RESULT = object()
 def _handle_protocol_line(
     line: str,
     show_listening: Callable[[], None],
+    show_wake: Callable[[], None],
     show_transcribing: Callable[[], None],
 ) -> str | object:
     """Handle one listener protocol line.
 
+    ``WAKE`` (the sorcar wake word was detected) calls *show_wake* so
+    the indicator starts blinking; ``TRANSCRIBING`` calls
+    *show_transcribing*; ``NO_SPEECH`` and unusable ``SPEECH`` payloads
+    call *show_listening* (steady, pre-wake display).
+
     Returns recognised speech text, or ``_NO_LINE_RESULT`` when the
     capture should keep listening.
     """
-    if line in ("WAKE", "TRANSCRIBING"):
+    if line == "WAKE":
+        show_wake()
+    elif line == "TRANSCRIBING":
         show_transcribing()
     elif line == "NO_SPEECH":
         show_listening()
@@ -315,22 +329,28 @@ def _handle_protocol_line(
 def _capture_utterance(
     listener: VoiceListener,
     show_listening: Callable[[], None],
+    show_wake: Callable[[], None],
     show_transcribing: Callable[[], None],
 ) -> str | None:
     """Poll the listener and stdin until speech is captured or cancelled.
 
     Watches stdin (raw bytes) for cancel keys and the listener's line
-    queue for protocol events: ``WAKE`` / ``TRANSCRIBING`` flip the
-    indicator to *show_transcribing*, ``NO_SPEECH`` flips it back to
-    *show_listening*, and a valid ``SPEECH`` returns its text.  Malformed
-    ``SPEECH`` payloads also flip back to listening so the display never
-    stays stuck in transcribing state.  A dead listener (unexpected exit)
-    prints an error and returns ``None``.
+    queue for protocol events: ``WAKE`` (the sorcar wake word was
+    detected) flips the indicator to *show_wake* — the display starts
+    blinking — ``TRANSCRIBING`` flips it to *show_transcribing*,
+    ``NO_SPEECH`` flips it back to the steady *show_listening*, and a
+    valid ``SPEECH`` returns its text.  Malformed ``SPEECH`` payloads
+    also flip back to listening so the display never stays stuck in
+    transcribing state.  A dead listener (unexpected exit) prints an
+    error and returns ``None``.
 
     Args:
         listener: The running listener child.
-        show_listening: Draws the ``Listening ...`` indicator.
-        show_transcribing: Draws the ``Transcribing ...`` indicator.
+        show_listening: Draws the steady ``Listening ...`` indicator.
+        show_wake: Draws the blinking ``Listening ...`` indicator
+            (wake word detected, speech capture in progress).
+        show_transcribing: Draws the blinking ``Transcribing ...``
+            indicator.
 
     Returns:
         The recognised text, or ``None`` on cancel / listener failure.
@@ -346,7 +366,7 @@ def _capture_utterance(
             if line is None:
                 break
             result = _handle_protocol_line(
-                line, show_listening, show_transcribing,
+                line, show_listening, show_wake, show_transcribing,
             )
             if result is not _NO_LINE_RESULT:
                 return str(result)
@@ -359,14 +379,14 @@ def _capture_utterance(
             line = listener.poll_line()
             if line is not None:
                 result = _handle_protocol_line(
-                    line, show_listening, show_transcribing,
+                    line, show_listening, show_wake, show_transcribing,
                 )
                 if result is not _NO_LINE_RESULT:
                     return str(result)
                 continue
             print(
-                "✗ voice: the wake-word listener exited unexpectedly "
-                "— leaving voice mode."
+                f"{YELLOW}✗ voice: the wake-word listener exited "
+                f"unexpectedly — leaving voice mode.{RESET}"
             )
             return None
         if fd is None:
@@ -408,10 +428,12 @@ def read_voice_line_anchored(
     """Capture one utterance showing the indicator inside the panel.
 
     Flips the anchored input box into voice mode — title swapped to
-    :data:`VOICE_TITLE` and the body overlaid with a blinking red
-    ``Listening ...`` / ``Transcribing ...`` — until speech arrives or
-    the user cancels, then restores the box and echoes the recognised
-    text above it like a typed line.
+    :data:`VOICE_TITLE` and a red ``Listening ...`` /
+    ``Transcribing ...`` indicator shown at the beginning of the
+    panel's header (top border), blinking only once the sorcar wake
+    word is detected — until speech arrives or the user cancels, then
+    restores the box and echoes the recognised text above it like a
+    typed line.
 
     Args:
         box: The anchored ``_InputBox`` owned by the REPL.
@@ -421,9 +443,10 @@ def read_voice_line_anchored(
         The recognised speech text, or ``None`` on cancel / listener
         failure (leave voice mode).
     """
-    def show(text: str) -> None:
+    def show(text: str, blink: bool) -> None:
         with box.lock:
             box.overlay = text
+            box.overlay_blink = blink
             box.redraw()
 
     with box.lock:
@@ -433,13 +456,15 @@ def read_voice_line_anchored(
     try:
         text = _capture_utterance(
             listener,
-            lambda: show(LISTENING_TEXT),
-            lambda: show(TRANSCRIBING_TEXT),
+            lambda: show(LISTENING_TEXT, False),
+            lambda: show(LISTENING_TEXT, True),
+            lambda: show(TRANSCRIBING_TEXT, True),
         )
     finally:
         with box.lock:
             box.title = prev_title
             box.overlay = ""
+            box.overlay_blink = False
             box.redraw()
     if text is not None:
         # Echo the utterance above the box the way typed lines echo.
@@ -450,8 +475,9 @@ def read_voice_line_anchored(
 def read_voice_line_plain(listener: VoiceListener) -> str | None:
     """Capture one utterance in the plain (non-anchored) fallback REPL.
 
-    Prints the blinking red ``Listening ...`` / ``Transcribing ...``
-    indicator inline instead of overlaying the anchored panel.
+    Prints the red ``Listening ...`` / ``Transcribing ...`` indicator
+    inline instead of styling the anchored panel's header; the
+    indicator blinks only once the sorcar wake word is detected.
 
     Args:
         listener: The running wake-word listener child.
@@ -460,13 +486,15 @@ def read_voice_line_plain(listener: VoiceListener) -> str | None:
         The recognised speech text, or ``None`` on cancel / listener
         failure (leave voice mode).
     """
-    def show(text: str) -> None:
-        print(f"{BLINK}{RED}{text}{RESET}", flush=True)
+    def show(text: str, blink: bool) -> None:
+        style = (BLINK + RED) if blink else RED
+        print(f"{style}{text}{RESET}", flush=True)
 
     text = _capture_utterance(
         listener,
-        lambda: show(LISTENING_TEXT),
-        lambda: show(TRANSCRIBING_TEXT),
+        lambda: show(LISTENING_TEXT, False),
+        lambda: show(LISTENING_TEXT, True),
+        lambda: show(TRANSCRIBING_TEXT, True),
     )
     if text is not None:
         print(f"{CYAN}🎤 {text}{RESET}")

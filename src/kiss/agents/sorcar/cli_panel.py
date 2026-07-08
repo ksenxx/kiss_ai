@@ -28,10 +28,14 @@ BOLD = f"{_ESC}[1m"
 # for its completion / prompt-bar highlight.
 ORANGE = f"{_ESC}[38;5;208m"
 RESET = f"{_ESC}[0m"
-# Blinking red — used by the ``/voice`` overlay's ``Listening ...`` /
-# ``Transcribing ...`` indicator inside the panel body.
+# Red (optionally blinking) — used by the ``/voice`` ``Listening ...``
+# / ``Transcribing ...`` indicator at the beginning of the panel's top
+# border; it blinks only after the sorcar wake word is detected.
 BLINK = f"{_ESC}[5m"
 RED = f"{_ESC}[31m"
+# Yellow — used for CLI notification-style messages (all notifications
+# render yellow).
+YELLOW = f"{_ESC}[33m"
 # Cursor marker shown before the editable text inside the panel body.
 PROMPT_MARKER = "› "
 # Titles shown in the panel's top border for each input mode.  A
@@ -159,6 +163,40 @@ def panel_top(title: str, cols: int) -> str:
     title = _clip_to_width(title, max(cols - 4, 0))
     fill = "─" * max(cols - 3 - display_width(title), 0)
     return _clip_to_width("╭─" + title + fill + "╮", cols)
+
+
+def voice_panel_top(
+    indicator: str, title: str, cols: int, *, blink: bool = False,
+) -> str:
+    """Return the fully styled top border opened by a red voice indicator.
+
+    Used by ``/voice``: while the wake-word listener runs, the panel's
+    header (top border) starts with the transient *indicator* text
+    (``Listening ...`` / ``Transcribing ...``) rendered red, followed by
+    the normal *title* and border fill in cyan.  The indicator blinks
+    only when *blink* is true — i.e. once the sorcar wake word has been
+    detected — and is steady red before that.
+
+    Args:
+        indicator: Plain (ANSI-free) indicator text placed at the
+            beginning of the header, right after the ``╭─`` corner.
+        title: The panel title that follows the indicator.
+        cols: Total panel width in columns.
+        blink: ``True`` to render the indicator blinking (wake word
+            detected / transcription in progress).
+
+    Returns:
+        The complete top border line with ANSI styling, occupying
+        exactly *cols* terminal columns when printed.
+    """
+    top = panel_top(indicator + title, cols)
+    ind = _clip_to_width(indicator, max(cols - 4, 0))
+    # ``top`` is "╭─" + clipped(indicator + title) + fill + "╮"; the
+    # first ``len(ind)`` characters after the corner are exactly the
+    # (possibly clipped) indicator, so slicing splits it from the rest.
+    rest = top[2 + len(ind):]
+    style = (BLINK + RED) if blink else RED
+    return f"{CYAN}╭─{RESET}{style}{ind}{RESET}{CYAN}{rest}{RESET}"
 
 
 def panel_bottom(status: str, cols: int) -> str:
@@ -363,36 +401,6 @@ def panel_body(
     while len(rows) < max(min_rows, 1):
         rows.append(blank)
     return rows, is_placeholder
-
-
-def overlay_body_rows(
-    text: str, cols: int, min_rows: int = MIN_BODY_ROWS,
-) -> list[str]:
-    """Return body rows showing a status *text* instead of the edit buffer.
-
-    Used by the ``/voice`` mode of the anchored input box: while the
-    wake-word listener runs, the panel body shows a transient indicator
-    (``Listening ...`` / ``Transcribing ...``) after the chevron in
-    place of the typed text.  The caller styles the text (e.g. blinking
-    red) when drawing; *text* itself must be plain (no ANSI) so the
-    padding math stays correct.
-
-    Args:
-        text: Plain indicator text shown after the chevron on row 0.
-        cols: Total panel width in columns.
-        min_rows: Minimum number of body rows (default
-            :data:`MIN_BODY_ROWS`), padded with blank rows like
-            :func:`panel_body`.
-
-    Returns:
-        A list of body strings, each padded to ``cols - 4``.
-    """
-    inner_w = cols - 4  # room between "│ " and " │"
-    rows = [_clip_pad(PROMPT_MARKER + text, inner_w)]
-    blank = " " * inner_w
-    while len(rows) < max(min_rows, 1):
-        rows.append(blank)
-    return rows
 
 
 def menu_row(text: str, selected: bool, cols: int) -> str:

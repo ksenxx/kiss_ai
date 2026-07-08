@@ -54,23 +54,20 @@ from kiss.agents.sorcar.cli_line_continuation import (
 )
 from kiss.agents.sorcar.cli_panel import (
     _ESC,
-    BLINK,
     CYAN,
     DIM,
     IDLE_TITLE,
     PROMPT_MARKER,
-    RED,
     RESET,
     STEER_TITLE,
     _term_size,
     body_cursor_col,
-    display_width,
     menu_row,
-    overlay_body_rows,
     panel_body,
     panel_bottom,
     panel_cols,
     panel_top,
+    voice_panel_top,
 )
 from kiss.agents.sorcar.cli_panel import (
     MIN_BODY_ROWS as _MIN_BODY_ROWS,
@@ -376,11 +373,15 @@ class _InputBox:
         # by the SIGCONT handler after a suspend/resume cycle.
         self._raw_term: Any = None
         self._prev_sigcont: Any = None
-        # Transient status overlay: when non-empty, the panel body
-        # shows this plain text (rendered blinking red) after the
-        # chevron instead of the edit buffer — used by ``/voice`` for
-        # its ``Listening ...`` / ``Transcribing ...`` indicator.
+        # Transient status overlay: when non-empty, this plain text is
+        # shown in red at the *beginning of the panel's top border*
+        # (the header) — used by ``/voice`` for its ``Listening ...``
+        # / ``Transcribing ...`` indicator.  ``overlay_blink`` makes it
+        # blink; ``/voice`` sets it only once the sorcar wake word has
+        # been detected (the listener's ``WAKE``/``TRANSCRIBING``
+        # protocol lines).
         self.overlay = ""
+        self.overlay_blink = False
         # Persistent input history (oldest -> newest); Up/Down browse
         # it when the buffer is empty or a browse is in progress
         # (otherwise they move the caret between buffer lines).
@@ -593,11 +594,12 @@ class _InputBox:
             termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old_term)
             self._old_term = None
         # Drop transient overlay/completion state so a later ``start()``
-        # does not paint phantom voice/menu rows or wrongly trip the
-        # "menu shrank" clear path in :meth:`_draw_locked` (which
-        # compares the next ``_menu_h()`` against ``_drawn_menu_h`` from
-        # this run).
+        # does not paint a phantom voice header/menu rows or wrongly
+        # trip the "menu shrank" clear path in :meth:`_draw_locked`
+        # (which compares the next ``_menu_h()`` against
+        # ``_drawn_menu_h`` from this run).
         self.overlay = ""
+        self.overlay_blink = False
         self._reset_completion_state()
         self._drawn_menu_h = 0
         # Reset the drawn box height so a later ``start()`` does not
@@ -685,15 +687,9 @@ class _InputBox:
         rows, _ = _term_size()
         cols = panel_cols()
         menu_h = self._menu_h()
-        if self.overlay:
-            # Voice-mode indicator: the body shows the transient
-            # overlay text (blinking red) instead of the edit buffer.
-            body_rows = overlay_body_rows(self.overlay, cols)
-            is_placeholder = False
-        else:
-            body_rows, is_placeholder = panel_body(
-                self.buf, cols, cursor=self.cursor,
-            )
+        body_rows, is_placeholder = panel_body(
+            self.buf, cols, cursor=self.cursor,
+        )
         box_body_h = len(body_rows)
         box_h = 2 + box_body_h
         eff_box_h = box_h + menu_h
@@ -748,10 +744,19 @@ class _InputBox:
             self._draw_menu_locked(top_row, cols, menu_h)
 
         box_top = top_row + menu_h
-        top = panel_top(self.title, cols)
         bottom = panel_bottom(self.status, cols)
 
-        out.write(f"{_ESC}[{box_top};1H{_ESC}[2K{CYAN}{top}{RESET}")
+        # In voice mode the transient indicator (``Listening ...`` /
+        # ``Transcribing ...``) opens the header: it is rendered red
+        # at the beginning of the top border, blinking only once the
+        # sorcar wake word has been detected (``overlay_blink``).
+        if self.overlay:
+            top_line = voice_panel_top(
+                self.overlay, self.title, cols, blink=self.overlay_blink,
+            )
+        else:
+            top_line = f"{CYAN}{panel_top(self.title, cols)}{RESET}"
+        out.write(f"{_ESC}[{box_top};1H{_ESC}[2K{top_line}")
         # Each body row is drawn at ``box_top + 1 + i`` (the first body
         # row sits immediately under the top border).  Every body row
         # opens with a two-column prefix — the cyan ``PROMPT_MARKER``
@@ -762,9 +767,7 @@ class _InputBox:
         for i, body in enumerate(body_rows):
             prefix = body[: len(PROMPT_MARKER)]
             rest = body[len(PROMPT_MARKER) :]
-            if self.overlay and i == 0:
-                rest_color = BLINK + RED
-            elif is_placeholder and i == 0:
+            if is_placeholder and i == 0:
                 rest_color = DIM
             else:
                 rest_color = ""
@@ -848,21 +851,12 @@ class _InputBox:
         top_row = _box_top_row(rows, drawn_box_h + menu_h)
         # The first body row sits ``menu_h + 1`` rows below the panel's
         # top row (1 row for the top border, ``menu_h`` rows for the
-        # menu above it).  In voice overlay mode the edit buffer is not
-        # visible, so park the cursor after the status text rather than
-        # on the hidden buffer's caret (which could otherwise blink on
-        # top of the "Listening ..." text or even below the overlay).
-        if self.overlay:
-            caret_row = 0
-            col = min(
-                3 + display_width(PROMPT_MARKER + self.overlay),
-                max(cols - 2, 1),
-            )
-        else:
-            # ``body_cursor_col`` returns the body-row index of the
-            # caret (0 for the first body row, growing with each
-            # embedded newline).
-            caret_row, col = body_cursor_col(self.buf, cols, self.cursor)
+        # menu above it).  The voice indicator lives in the header, so
+        # the caret parks on the (still visible) edit buffer as usual.
+        # ``body_cursor_col`` returns the body-row index of the caret
+        # (0 for the first body row, growing with each embedded
+        # newline).
+        caret_row, col = body_cursor_col(self.buf, cols, self.cursor)
         self._out.write(
             f"{_ESC}[{top_row + menu_h + 1 + caret_row};{col}H"
         )
