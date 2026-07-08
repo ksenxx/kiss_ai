@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import functools
 import inspect
 import json
 import keyword
@@ -68,6 +69,10 @@ logger = logging.getLogger(__name__)
 
 # Seconds to wait for a server to connect / a tool call to return.
 CONNECT_TIMEOUT = 60.0
+# After a connect() timeout, how long a straggler task stuck
+# mid-handshake is given to unwind gracefully (via its ``stop`` event)
+# before it is cancelled outright so the transport child is reaped.
+_CONNECT_STRAGGLER_GRACE_S = 5.0
 CALL_TIMEOUT = 300.0
 
 # JSON-schema type → Python annotation used when synthesizing wrapper
@@ -474,6 +479,13 @@ class _Connection:
     tools: list[Any] = field(default_factory=list)
     error: str = ""
     task: Any = None
+    # Set as the LAST act of ``_maintain_connection`` — i.e. only after
+    # the transport contexts have fully unwound (child process reaped).
+    # ``task`` (a ``concurrent.futures.Future``) is marked done the
+    # instant it is *cancelled*, while the wrapped asyncio task is
+    # still unwinding on the loop, so waiting on ``task`` alone lets
+    # ``shutdown`` stop the loop mid-unwind and leak the child.
+    finished: threading.Event = field(default_factory=threading.Event)
 
 
 async def _enter_transport(stack: Any, config: MCPServerConfig, auth: Any) -> tuple:
@@ -507,6 +519,18 @@ async def _enter_transport(stack: Any, config: MCPServerConfig, auth: Any) -> tu
     return read, write
 
 
+def _cancel_if_not_done(task: Any) -> None:
+    """Cancel *task* (a ``concurrent.futures.Future``) if still pending.
+
+    Runs on the manager loop via ``call_later`` once the straggler
+    grace period elapses; cancelling the future propagates to the
+    wrapped asyncio task, raising ``CancelledError`` at its stuck
+    ``await`` so the transport context unwinds and its child dies.
+    """
+    if not task.done():
+        task.cancel()
+
+
 async def _maintain_connection(conn: _Connection, auth: Any) -> None:
     """Own one server connection for its whole lifetime in a single task.
 
@@ -534,6 +558,10 @@ async def _maintain_connection(conn: _Connection, auth: Any) -> None:
     finally:
         conn.session = None
         conn.ready.set()
+        # Signal full unwind (transports closed, child reaped) LAST —
+        # ``disconnect_all`` waits on this after a cancel so it never
+        # stops the loop while this task is still tearing down.
+        conn.finished.set()
 
 
 class MCPManager:
@@ -555,6 +583,12 @@ class MCPManager:
         )
         self._thread.start()
         self._connections: dict[str, _Connection] = {}
+        # Connections evicted from ``_connections`` by a connect()
+        # timeout whose task has not finished yet.  ``disconnect_all``
+        # tears these down too — without this list a task stuck
+        # mid-handshake (which ``stop.set()`` cannot unwind) would keep
+        # its transport child alive forever, invisible to shutdown.
+        self._orphans: list[_Connection] = []
         self._lock = threading.Lock()
         self._shut_down = False
         atexit.register(self.shutdown)
@@ -615,10 +649,15 @@ class MCPManager:
             # deadline, the record would be live (session set) yet
             # marked failed — contradictory state that a later
             # connect() would needlessly tear down and that
-            # format_mcp_listing would report inconsistently.  Removing
-            # it and setting stop makes the task unwind whenever it
-            # does finish, so the server subprocess/stream is never
-            # leaked either.
+            # format_mcp_listing would report inconsistently.
+            #
+            # Setting ``stop`` only unwinds a task that reached its
+            # ``stop.wait()`` park; one still stuck mid-handshake (a
+            # stdio child that never speaks MCP) ignores it and holds
+            # the transport child alive forever.  So the straggler is
+            # (a) kept visible to ``disconnect_all`` via ``_orphans``
+            # and (b) cancelled after a grace period even without an
+            # explicit shutdown.
             with self._lock:
                 if self._connections.get(config.name) is conn:
                     del self._connections[config.name]
@@ -627,8 +666,48 @@ class MCPManager:
                 # except clause) and other threads read conn.error through
                 # lock-guarded paths.
                 conn.error = conn.error or "connection timed out"
+                if conn.task is not None and not conn.task.done():
+                    self._orphans.append(conn)
             self._loop.call_soon_threadsafe(conn.stop.set)
+            self._reap_straggler(conn)
         return conn
+
+    def _reap_straggler(self, conn: _Connection) -> None:
+        """Arrange teardown of a connection evicted by a connect() timeout.
+
+        Registers a done callback that drops *conn* from ``_orphans``
+        once its task finishes (however it finishes), and schedules a
+        cancellation on the manager loop after
+        :data:`_CONNECT_STRAGGLER_GRACE_S` so a task stuck
+        mid-handshake — which the already-set ``stop`` event cannot
+        unwind — is cancelled and its transport child reaped.
+
+        Args:
+            conn: The timed-out connection whose task may be stuck.
+        """
+        task = conn.task
+        if task is None:
+            return
+        task.add_done_callback(functools.partial(self._forget_orphan, conn))
+        try:
+            self._loop.call_soon_threadsafe(
+                self._loop.call_later,
+                _CONNECT_STRAGGLER_GRACE_S,
+                _cancel_if_not_done,
+                task,
+            )
+        except RuntimeError:
+            # Loop already closed (shutdown raced us) — disconnect_all
+            # has taken (or will take) care of the orphan list.
+            pass
+
+    def _forget_orphan(self, conn: _Connection, _future: Any) -> None:
+        """Drop a finished straggler from ``_orphans`` (done callback)."""
+        with self._lock:
+            try:
+                self._orphans.remove(conn)
+            except ValueError:
+                pass
 
     def call_tool(self, server: str, tool: str, arguments: dict[str, Any]) -> str:
         """Call *tool* on *server* and return the textual result.
@@ -689,15 +768,32 @@ class MCPManager:
         with self._lock:
             conns = list(self._connections.values())
             self._connections.clear()
+            # Include stragglers evicted by connect() timeouts: their
+            # tasks may still be stuck mid-handshake holding a live
+            # transport child that only a cancel can reap.
+            conns.extend(self._orphans)
+            self._orphans.clear()
         for conn in conns:
             self._loop.call_soon_threadsafe(conn.stop.set)
         for conn in conns:
             if conn.task is not None:
                 try:
                     conn.task.result(timeout=10)
-                except Exception:
+                except BaseException:  # noqa: BLE001 — CancelledError is BaseException
+                    # ``CancelledError`` (raised when the straggler
+                    # grace timer cancelled the future) does NOT
+                    # inherit ``Exception`` — a plain ``except
+                    # Exception`` would let it blow up the whole
+                    # teardown loop.
                     conn.task.cancel()
                     logger.debug("MCP disconnect error", exc_info=True)
+                    # The future is marked done the moment it is
+                    # cancelled, but the wrapped asyncio task is still
+                    # unwinding on the loop.  Wait for the unwind to
+                    # actually finish (transport closed, child reaped)
+                    # so ``shutdown`` cannot stop the loop mid-teardown
+                    # and orphan the server subprocess.
+                    conn.finished.wait(timeout=10)
             conn.session = None
             conn.error = conn.error or "disconnected"
             conn.ready.set()
