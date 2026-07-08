@@ -159,6 +159,18 @@ SUFFIX_MATCH_SENSITIVITY = 75
 # Floor for the sensitivity-scaled pause gate: without any pause a
 # partial result would fire mid-word during continuous speech.
 MIN_WAKE_PAUSE_SECONDS = 0.1
+# The low-latency partial path FORCES a final result once the pause
+# gate opens (Vosk's own endpoint needs ~0.8s of silence).  Word
+# confidences on such flushed finals are uninformative: a sound-alike
+# "soccer" force-fit that scores 0.6-0.84 on a naturally endpointed
+# final scores a perfect 1.0 when the final is forced mid-silence
+# (measured live), so NO confidence floor can reject it there.  A
+# sensitivity strict enough that its floor exceeds this ceiling is
+# relying on confidences to reject force-fits and therefore must not
+# consume forced finals at all — it waits for Vosk's natural
+# endpoint, whose posteriors are informative.  The price is latency:
+# at low sensitivity the wake fires only after a real ~0.8s pause.
+FORCED_FINAL_MAX_CONF_FLOOR = 0.5
 # Minimum Vosk per-word confidence for a wake alias.  Grammar-mode
 # confidences from the small English model are posteriors in [0, 1],
 # but they do not separate true wakes from sound-alikes: TTS "Sorcar"
@@ -194,11 +206,19 @@ MAX_LEADING_NOISE_SECONDS = 0.35
 def sensitivity_min_word_conf(sensitivity: int) -> float:
     """Return the per-word confidence floor for a sensitivity (0..100).
 
-    Linear map 0.8 -> 0.0: sensitivity 50 gives the historical 0.4
-    gate, the default 70 gives 0.24, and 10 gives 0.72 — high enough
-    to reject sound-alike force-fits such as spoken "soccer", whose
-    alias words score ~0.55-0.69 (measured live).
+    Piecewise linear through (0, 1.0), (50, 0.4) and (100, 0.0):
+    sensitivity 50 keeps the historical 0.4 gate and the upper half
+    keeps the historical map (85 gives 0.12), while the lower half
+    climbs steeply enough to actually reject sound-alike force-fits.
+    Grammar force-fits are not bounded by the ~0.55-0.69 scores once
+    measured live: spoken "soccer" decoded to ``sar car`` with word
+    confidences up to 0.838/1.0 (measured, 250ms blocks), sailing
+    over the old sensitivity-10 gate of 0.72.  The steeper map gives
+    sensitivity 10 a 0.88 floor, above every observed force-fit,
+    while a genuine crisp "Sorcar" (conf 1.0) still wakes.
     """
+    if sensitivity <= 50:
+        return 1.0 - 0.012 * sensitivity
     return 0.8 * (1.0 - sensitivity / 100.0)
 
 
@@ -354,6 +374,49 @@ def clean_transcript(text: str) -> str:
     ):
         cleaned = cleaned[1:-1].strip()
     return cleaned
+
+
+# Hallucinated gpt-audio replies that ANSWER instead of transcribing.
+# Despite the dictation prompts, the backend occasionally (observed
+# nondeterministically, even at temperature 0) claims the audio is
+# missing and offers to transcribe once provided — e.g. "Please
+# provide the audio, and I will transcribe and translate it
+# accordingly."  Such replies also drop the two-line format, so they
+# carry no language tag; the tag's absence keeps this detector from
+# ever flagging genuine dictation that merely talks about audio.
+_STT_REFUSAL_RE = re.compile(
+    r"(?:provide|upload|share|attach|send)\b.{0,60}\baudio\b"
+    r".{0,80}\b(?:transcribe|translate)\b"
+    r"|\bdidn'?t\s+(?:hear|receive|get)\b.{0,40}\baudio\b"
+    r"|\bno audio\b.{0,40}\b(?:provided|attached|received|heard)\b"
+    r"|\bi\s+(?:will|can|'ll)\s+(?:transcribe|translate)\b",
+    re.IGNORECASE,
+)
+
+
+def looks_like_stt_refusal(text: str, language: str | None) -> bool:
+    """Return True when a transcription reply is a hallucinated refusal.
+
+    A refusal is a reply where gpt-audio ANSWERED the dictation prompt
+    instead of transcribing the speech ("Please provide the audio, and
+    I will transcribe and translate it accordingly.").  Forwarding it
+    would submit the hallucination as the user's dictated command, so
+    :func:`transcribe_pcm` retries and, failing that, reports no
+    speech.  Only replies WITHOUT a language tag are ever flagged:
+    genuine transcriptions follow the two-line format and carry one,
+    so real dictation about audio ("please provide the audio files to
+    the team") is never swallowed.
+
+    Args:
+        text: The cleaned transcript text.
+        language: The language tag parsed from the reply, or ``None``.
+
+    Returns:
+        True when the reply looks like a refusal hallucination.
+    """
+    if language is not None:
+        return False
+    return bool(_STT_REFUSAL_RE.search(text))
 
 
 def block_rms(data: bytes) -> float:
@@ -697,25 +760,58 @@ def transcribe_pcm(
         from kiss.core.kiss_agent import KISSAgent
         from kiss.core.models.model import Attachment
 
-        agent = KISSAgent("voice-transcriber")
-        reply = agent.run(
-            model_name=audio_model,
-            prompt_template=TRANSCRIPTION_USER_PROMPT,
-            system_prompt=DICTATION_SYSTEM_PROMPT,
-            is_agentic=False,
-            verbose=False,
-            model_config={
-                "temperature": 0,
-                "modalities": ["text"],
-                "timeout": audio_timeout_seconds(),
-            },
-            attachments=[
-                Attachment(pcm_to_wav_bytes(pcm), "audio/wav")
-            ],
-        )
-        raw_text, language = parse_transcription_reply(reply)
-        text = strip_leading_wake_word(clean_transcript(raw_text))
-        return {"text": text, "language": language}
+        model_config: dict[str, Any] = {
+            "temperature": 0,
+            "modalities": ["text"],
+            "timeout": audio_timeout_seconds(),
+        }
+        # Honor the standard OpenAI SDK environment override: the raw
+        # OpenAI client reads OPENAI_BASE_URL, and the listener used to
+        # inherit that behavior before the transcription moved onto a
+        # KISS agent — whose model routing pins the vendor's hardcoded
+        # base URL and silently ignored the override, sending audio to
+        # api.openai.com no matter what the environment said (tests
+        # point it at a local stalled/refusing server; users at a
+        # proxy).  Passing base_url via model_config bypasses routing.
+        base_url = os.environ.get("OPENAI_BASE_URL", "").strip()
+        if base_url and audio_model.startswith("gpt-"):
+            from kiss.core.config import DEFAULT_CONFIG
+
+            model_config["base_url"] = base_url
+            model_config["api_key"] = (
+                os.environ.get("OPENAI_API_KEY", "")
+                or DEFAULT_CONFIG.OPENAI_API_KEY
+            )
+        # The backend occasionally hallucinates a refusal instead of
+        # transcribing (see looks_like_stt_refusal) — nondeterministic
+        # even at temperature 0, so one retry usually recovers the
+        # real transcription; a persistent refusal degrades to
+        # NO_SPEECH rather than submitting the hallucination as the
+        # user's dictated command.
+        for attempt in range(2):
+            agent = KISSAgent("voice-transcriber")
+            reply = agent.run(
+                model_name=audio_model,
+                prompt_template=TRANSCRIPTION_USER_PROMPT,
+                system_prompt=DICTATION_SYSTEM_PROMPT,
+                is_agentic=False,
+                verbose=False,
+                model_config=model_config,
+                attachments=[
+                    Attachment(pcm_to_wav_bytes(pcm), "audio/wav")
+                ],
+            )
+            raw_text, language = parse_transcription_reply(reply)
+            text = strip_leading_wake_word(clean_transcript(raw_text))
+            if not looks_like_stt_refusal(text, language):
+                return {"text": text, "language": language}
+            print(
+                f"transcription attempt {attempt + 1} returned a "
+                f"refusal-shaped hallucination: {text!r}",
+                file=sys.stderr,
+                flush=True,
+            )
+        return {"text": "", "language": None}
     except Exception as err:  # noqa: BLE001 — listener must keep running
         print(f"transcription failed: {err}", file=sys.stderr, flush=True)
         return {"text": "", "language": None}
@@ -1161,6 +1257,38 @@ def matches_wake(text: str, allow_trailing: bool = False) -> bool:
     return False
 
 
+def partial_alias_shaped(text: str, allow_trailing: bool) -> bool:
+    """Return True when partial *text* could be a wake utterance.
+
+    Vosk 0.3.44 in grammar mode emits partial results WITHOUT word
+    entries (``SetPartialWords`` suppresses partial emission almost
+    entirely — measured: first partial after seconds of audio — so it
+    must stay off; see :class:`WakeDetector`).  Partial text therefore
+    cannot be gated on word confidences or ``[unk]`` timings; this
+    cheap shape test only decides whether it is worth FORCING a final
+    result (which does carry confidences and timings) to run the full
+    strict gates.  It accepts exactly the shapes those gates could
+    accept: the whole utterance is an alias, the utterance ends with
+    an alias (only meaningful when *allow_trailing*), or an alias
+    preceded only by ``[unk]`` noise tokens (the final's
+    :func:`wake_with_leading_noise` then enforces the duration bound).
+
+    Args:
+        text: The ``partial`` text of a Vosk partial result.
+        allow_trailing: Whether an utterance merely ending with an
+            alias may wake (high sensitivity).
+
+    Returns:
+        True when a forced final result should be evaluated.
+    """
+    if matches_wake(text, allow_trailing):
+        return True
+    tokens = text.lower().split()
+    while tokens and tokens[0] == "[unk]":
+        tokens = tokens[1:]
+    return " ".join(tokens) in WAKE_ALIASES
+
+
 def wake_with_leading_noise(words: list[dict] | None) -> bool:
     """Return True when *words* is one wake alias preceded only by
     brief ``[unk]`` noise.
@@ -1264,9 +1392,15 @@ class WakeDetector:
         self._recognizer = KaldiRecognizer(
             load_shared_vosk_model(model_dir), SAMPLE_RATE, grammar
         )
-        # Word-level confidences for both final and partial results.
+        # Word-level confidences for final results.  SetPartialWords
+        # must stay OFF: with vosk 0.3.44 in grammar mode it all but
+        # suppresses partial emission (measured: 14 mostly-late
+        # partials vs 68 timely ones on identical audio), which killed
+        # the low-latency partial wake path — a "Sorcar" followed by
+        # continued speech within ~0.8s was lost entirely.  Partials
+        # are matched on text only; word confidences and timings come
+        # from a forced final result (see feed).
         self._recognizer.SetWords(True)
-        self._recognizer.SetPartialWords(True)
         # Cooldown runs on the audio clock (seconds of audio fed), not
         # wall time: WAV-mode processing is faster than real time, so a
         # wall clock would suppress genuine wakes that are many audio
@@ -1295,27 +1429,63 @@ class WakeDetector:
         """Process one audio block; return True when the wake word fired."""
         self.track_only(data)
         if self._recognizer.AcceptWaveform(data):
+            # Vosk endpointed the utterance itself (it needs ~0.8s of
+            # trailing silence): gate the final result directly.
             result = json.loads(self._recognizer.Result())
-            text = result.get("text", "")
-            words = result.get("result", [])
-            paused = True  # a final result means Vosk saw the endpoint
-        else:
-            result = json.loads(self._recognizer.PartialResult())
-            text = result.get("partial", "")
-            words = result.get("partial_result", [])
-            paused = self._quiet_seconds >= self._wake_pause_seconds
+            return self._gate_result(result, forced=False)
+        # Low-latency partial path: Vosk's own endpointing is far
+        # slower than the sensitivity pause gate, so a wake followed
+        # quickly by more speech ("Sorcar <dictated command>") never
+        # yields an alias-only final.  When the speaker has paused
+        # long enough right after alias-shaped partial text, FORCE a
+        # final result — grammar-mode partials carry no word entries
+        # (see partial_alias_shaped), while the forced final brings
+        # the confidences and [unk] timings the strict gates need.
+        if self._quiet_seconds < self._wake_pause_seconds:
+            return False
+        # Strict sensitivities rely on the confidence floor to reject
+        # sound-alike force-fits, and forced finals score force-fits
+        # at a perfect 1.0 (see FORCED_FINAL_MAX_CONF_FLOOR): only
+        # naturally endpointed finals may wake there.
+        if self._min_word_conf > FORCED_FINAL_MAX_CONF_FLOOR:
+            return False
+        partial = json.loads(
+            self._recognizer.PartialResult()
+        ).get("partial", "")
+        if not partial_alias_shaped(partial, self._allow_trailing):
+            return False
+        result = json.loads(self._recognizer.FinalResult())
+        return self._gate_result(result, forced=True)
+
+    def _gate_result(self, result: dict, forced: bool) -> bool:
+        """Apply the strict wake gates to a final Vosk *result*.
+
+        Args:
+            result: A decoded final result (``text`` + ``result``
+                word entries with confidences and timings).
+            forced: Whether the final was forced by the partial path
+                (the recognizer must then be reset on every outcome:
+                ``FinalResult`` flushed the utterance).
+
+        Returns:
+            True when the wake word fired.
+        """
+        text = result.get("text", "")
+        words = result.get("result", [])
         if not (
-            paused
-            and (
+            (
                 matches_wake(text, self._allow_trailing)
                 or wake_with_leading_noise(words)
             )
             and words_confident(words, self._min_word_conf)
         ):
+            if forced:
+                self._recognizer.Reset()
+                self._quiet_seconds = 0.0
             return False
         if self._audio_seconds - self._last_wake < COOLDOWN_SECONDS:
             # Reset here too: a cooldown-suppressed match leaves the
-            # alias as leftover partial text, which keeps matching on
+            # alias as leftover decoder state, which keeps matching on
             # every subsequent quiet block — the instant the cooldown
             # expires the detector would fire a phantom WAKE from that
             # stale audio, seconds after the user actually spoke.
@@ -1323,7 +1493,7 @@ class WakeDetector:
             self._quiet_seconds = 0.0
             return False
         self._last_wake = self._audio_seconds
-        # Reset so leftover partial text cannot re-trigger after cooldown.
+        # Reset so leftover decoder state cannot re-trigger after cooldown.
         self._recognizer.Reset()
         self._quiet_seconds = 0.0
         return True
