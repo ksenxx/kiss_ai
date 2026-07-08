@@ -24,8 +24,12 @@ Behaviours verified by the underlying JS test (see file for details):
   notifies the backend with ``closeTab`` per tab);
 * re-expanding the panel reopens each sub-agent tab and resumes its
   backend task via ``resumeSession``;
-* manually closing a sub-agent tab restores consistency (the owning
-  panel collapses, closing the sibling sub-agent tabs);
+* manually closing a sub-agent tab closes ONLY that tab — the sibling
+  sub-agent tabs of the same fan-out stay open and the owning panel
+  stays uncollapsed; the closed tab is not resurrected by later sync
+  passes; only when the last open sub-agent tab is closed by hand does
+  the owning panel collapse (and expanding it reopens the whole
+  fan-out);
 * the automatic collapse passes (``collapseOlderPanels`` while
   streaming, ``collapseAllExceptResult`` at task end) never leave the
   panel collapsed while its sub-agent tabs are open;

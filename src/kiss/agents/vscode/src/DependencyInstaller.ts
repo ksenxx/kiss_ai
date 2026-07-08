@@ -64,8 +64,17 @@ function unitEscape(s: string): string {
  * Download a URL into ``destPath`` using the Node ``https`` module.
  * Follows up to 5 redirects.  Resolves only after the response has been
  * fully written to disk.  Never spawns a shell.
+ *
+ * A mid-body failure (connection reset, server truncation) MUST settle
+ * the promise: ``pipe`` does not propagate source errors to the write
+ * stream, and once the socket is destroyed the inactivity timeout can
+ * never fire — without explicit ``error``/``aborted`` handlers on the
+ * response the promise hung forever, wedging the "Setting up" progress
+ * notification and leaving a partial file behind.  Exported for the
+ * e2e test, which serves a truncated body from a real TLS server and
+ * asserts the promise rejects promptly.
  */
-function downloadFile(
+export function downloadFile(
   url: string,
   destPath: string,
   maxRedirects = 5,
@@ -91,11 +100,24 @@ function downloadFile(
           return;
         }
         const out = fs.createWriteStream(destPath);
+        const fail = (err: Error): void => {
+          out.destroy();
+          fs.unlink(destPath, () => {
+            reject(err);
+          });
+        };
+        res.on('error', fail);
+        // Legacy 'aborted' fires (without 'error' on some Node
+        // versions) when the server closes the connection before the
+        // advertised Content-Length was delivered.
+        res.on('aborted', () =>
+          fail(new Error(`Connection aborted downloading ${u}`)),
+        );
         res.pipe(out);
         out.on('finish', () =>
           out.close(err => (err ? reject(err) : resolve())),
         );
-        out.on('error', reject);
+        out.on('error', fail);
       });
       req.on('error', reject);
       req.on('timeout', () => {
@@ -173,6 +195,10 @@ function fetchUvStyleSha256(assetUrl: string): Promise<string | null> {
         const m = /^([0-9a-fA-F]{64})/.exec(text);
         resolve(m ? m[1] : null);
       });
+      // A mid-body reset would otherwise leave the promise pending
+      // forever (no 'end', and the destroyed socket never times out).
+      res.on('error', () => resolve(null));
+      res.on('aborted', () => resolve(null));
     });
     req.on('error', () => resolve(null));
     req.on('timeout', () => {
@@ -208,6 +234,10 @@ function fetchNodeSha256(assetName: string): Promise<string | null> {
         }
         resolve(null);
       });
+      // A mid-body reset would otherwise leave the promise pending
+      // forever (no 'end', and the destroyed socket never times out).
+      res.on('error', () => resolve(null));
+      res.on('aborted', () => resolve(null));
     });
     req.on('error', () => resolve(null));
     req.on('timeout', () => {
@@ -792,7 +822,12 @@ async function ensureDependenciesImpl(): Promise<void> {
       },
     );
 
-    showRestartNotification = showRestartNotification || !!result.success;
+    // A FAILED slow-path install must never announce "Installation
+    // complete" — even when the ``.extension-updated`` marker had armed
+    // the notification above.  The user just saw the specific error
+    // notification (e.g. "Failed to install uv"); following it with a
+    // completion message is contradictory and hides the failure.
+    showRestartNotification = !!result.success;
     apiKeysReady = result.apiKeysReady;
   }
 
@@ -847,10 +882,20 @@ async function ensureDependenciesImpl(): Promise<void> {
  *
  * @param port - TCP port whose listening processes should be killed.
  */
-/** PIDs of processes listening on *port* (empty when none / lsof fails). */
-function pidsOnPort(port: number): string[] {
+/**
+ * PIDs of processes LISTENING on *port* (empty when none / lsof fails).
+ *
+ * The ``-sTCP:LISTEN`` filter is load-bearing: a bare ``lsof -ti :port``
+ * also returns TCP *clients* of the port — cloudflared proxying the
+ * remote-access tunnel, or a browser holding a WebSocket to
+ * localhost:8787 — and ``killProcessOnPort`` would SIGTERM/SIGKILL them
+ * along with the daemon (burning the tunnel URL mid-request).  Exported
+ * for the e2e test, which spawns a real listener plus a real client and
+ * asserts only the listener PID is returned.
+ */
+export function pidsOnPort(port: number): string[] {
   try {
-    return execFileSync('lsof', ['-ti', `:${port}`], {
+    return execFileSync('lsof', ['-ti', `tcp:${port}`, '-sTCP:LISTEN'], {
       encoding: 'utf-8',
       timeout: 3000,
       stdio: ['ignore', 'pipe', 'ignore'],

@@ -918,7 +918,7 @@ def _get_db() -> sqlite3.Connection:
 def _most_recent_task_id(db: sqlite3.Connection, task: str | None) -> str | None:
     """Return the row id of the most recent run of *task*, or the latest row.
 
-    Uses the total order ``(timestamp, id)`` — the ``id`` tiebreak keeps
+    Uses the total order ``(timestamp, rowid)`` — the ``rowid`` tiebreak keeps
     rows with equal timestamps (coarse clock ticks, imported databases)
     resolving to the genuinely latest insert, consistent with
     :func:`_load_latest_chat_events_by_chat_id`.
@@ -1811,6 +1811,12 @@ def _maybe_reset_caches(
         _next_seq_cache.clear()
         _marked_has_events.clear()
         _caches_db_key = key
+    # The chat-context text cache was seeded from the previous database
+    # too — and ``_load_chat_context_text`` consults it BEFORE any
+    # ``_get_db()`` reconnect, so without this it would keep serving the
+    # old database's task/result text forever after a swap or removal.
+    # ``_chat_context_cache_lock`` is a leaf lock, safe to take here.
+    _invalidate_chat_context_cache("")
 
 # Per-batch tuning.  256 events at 50 µs JSON encoding ≈ 13 ms of producer
 # work bundled into one SQL transaction.  20 ms collection window keeps
@@ -2300,7 +2306,7 @@ def _load_latest_chat_events_by_chat_id(
         chat_id: The string chat session identifier.
 
     Returns:
-        A dict with ``task`` (str), ``task_id`` (int), ``events``
+        A dict with ``task`` (str), ``task_id`` (str), ``events``
         (list of event dicts), ``chat_id`` (str), and ``extra`` (str,
         JSON metadata), or ``None`` if chat_id is ``""`` or has no
         non-sub-agent tasks.
@@ -2337,7 +2343,7 @@ def _load_chat_events_by_task_id(
         task_id: The primary key of the ``task_history`` row.
 
     Returns:
-        A dict with ``task`` (str), ``task_id`` (int), ``events``
+        A dict with ``task`` (str), ``task_id`` (str), ``events``
         (list of event dicts), ``chat_id`` (str), and ``extra`` (str,
         JSON metadata), or ``None`` if no such row exists.
     """
@@ -2420,7 +2426,7 @@ def _get_adjacent_task_by_chat_id(
             later task in the same chat session.
 
     Returns:
-        A dict with ``task`` (str), ``task_id`` (int) and ``events``
+        A dict with ``task`` (str), ``task_id`` (str) and ``events``
         (list of event dicts), or ``None`` if no adjacent task exists.
     """
     if not chat_id or current_task_id is None:
@@ -2445,8 +2451,8 @@ def _get_adjacent_task_by_chat_id(
         # out at the SQL level so the LIMIT 1 lands on the next *parent*
         # row rather than a sub-agent that happens to sit between two
         # parent tasks chronologically.
-        # Adjacency uses the total order ``(timestamp, id)`` — the same
-        # id tiebreak as ``_load_latest_chat_events_by_chat_id``'s
+        # Adjacency uses the total order ``(timestamp, rowid)`` — the same
+        # rowid tiebreak as ``_load_latest_chat_events_by_chat_id``'s
         # ``ORDER BY timestamp DESC, rowid DESC`` — so rows that share a
         # timestamp value (concurrent inserts, imported databases)
         # remain mutually reachable instead of strict ``<`` / ``>``
@@ -2587,6 +2593,13 @@ def _load_chat_context_text(chat_id: str) -> str:
     """
     if not chat_id:
         return ""
+    # Detect an on-disk swap/removal of the database BEFORE consulting
+    # the cache: the cache-hit path performs no ``_get_db()`` call, so
+    # without this probe a chat_id cached against a deleted or replaced
+    # database file would be served forever (``_maybe_reset_caches``
+    # clears the cache when the path or file identity changes).
+    current_path = _current_db_path()
+    _maybe_reset_caches(current_path, _db_file_identity(current_path))
     # Capture the per-chat generation BEFORE the SQL read so that any
     # concurrent ``_invalidate_chat_context_cache(chat_id)`` (driven by
     # a writer that committed during our read) bumps the counter and

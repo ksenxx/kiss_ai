@@ -115,13 +115,10 @@ Module._resolveFilename = function (request, parent, ...rest) {
 // is a git-tracked file shared with other tests — the content written
 // here is byte-identical to the committed copy, and cleanup must NOT
 // delete it.
-const stubPath = path.join(__dirname, '_vscode-stub.js');
-fs.writeFileSync(
-  stubPath,
-  // Re-export the in-memory object so the resolver-redirected require
-  // returns the same instance the test inspects.
-  `'use strict';\nmodule.exports = global.__kissVscodeStub;\n`,
-);
+// ``_vscode-stub.js`` is a git-tracked fixture shared by tests running
+// in parallel; it already re-exports ``global.__kissVscodeStub`` — never
+// rewrite or delete it here (writeFileSync truncates first, racing a
+// concurrent ``require('vscode')`` in sibling test processes).
 global.__kissVscodeStub = vscodeStub;
 
 // ---------------------------------------------------------------------------
