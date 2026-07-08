@@ -8,12 +8,14 @@ import difflib
 import logging
 import mimetypes
 import os
+import queue
 import re
 import shutil
 import signal
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -925,51 +927,90 @@ class UsefulTools:
             logger.debug("Exception caught", exc_info=True)
             return f"Error: {e}"
 
+    def _consume_stream(
+        self,
+        out_queue: "queue.Queue[str | None]",
+        chunks: list[str],
+        deadline: float,
+    ) -> bool:
+        """Consume streamed lines from *out_queue* until EOF or *deadline*.
+
+        Runs on the thread that called :meth:`Bash` so that
+        ``stream_callback`` executes with the caller's thread-local
+        context intact — printers route every event (task attribution,
+        per-task bash buffers, recordings, stop events) by thread-local
+        ``task_id``, so invoking the callback from an internal reader
+        thread would silently detach the output from the task (bash
+        output vanishing from the tool panel and unattributed
+        "garbage" events reaching every webview client).
+
+        Args:
+            out_queue: Queue fed by the reader thread; ``None`` marks EOF.
+            chunks: Accumulator that received lines are appended to.
+            deadline: ``time.monotonic()`` timestamp to stop waiting at.
+
+        Returns:
+            True when the EOF sentinel was received, False on deadline.
+        """
+        assert self.stream_callback is not None
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            try:
+                line = out_queue.get(timeout=remaining)
+            except queue.Empty:
+                return False
+            if line is None:
+                return True
+            chunks.append(line)
+            self.stream_callback(line)
+
     def _bash_streaming(self, command: str, timeout_seconds: float, max_output_chars: int) -> str:
-        # Output is drained by a daemon reader thread while this thread
-        # waits on an EOF event with a deadline.  A blocking
-        # ``readline()`` loop in this thread would have no deadline:
-        # when the shell exits but backgrounded children inherit the
-        # stdout pipe (``(cmd) & echo done``), the pipe only reaches
-        # EOF once *every* inheritor exits, which once froze an agent
-        # for 94 minutes.  The old timer-callback guard made this
-        # worse: it skipped the group kill whenever ``poll()`` showed
-        # the shell had exited, turning the timeout into a no-op
-        # exactly when the hang happens.
+        # Output is drained by a daemon reader thread that feeds a
+        # queue, while THIS thread consumes the queue with a deadline
+        # and invokes ``stream_callback`` itself.  Two constraints meet
+        # here:
+        #
+        # * A blocking ``readline()`` loop in this thread would have no
+        #   deadline: when the shell exits but backgrounded children
+        #   inherit the stdout pipe (``(cmd) & echo done``), the pipe
+        #   only reaches EOF once *every* inheritor exits, which once
+        #   froze an agent for 94 minutes.  Hence the reader thread.
+        # * ``stream_callback`` must run on the thread that called
+        #   ``Bash``: printers key task attribution, bash buffers,
+        #   recordings, and stop events on thread-local ``task_id``.
+        #   Invoking the callback from the reader thread stripped the
+        #   ``taskId`` from every ``system_output`` event — the bash
+        #   sub panel of the tool panel stayed empty and the
+        #   unattributed events were broadcast to every client as
+        #   garbage in the chat webview.  Hence the queue hand-off.
         assert self.stream_callback is not None
         process = self._spawn(command)
         done = threading.Event()
-        eof = threading.Event()
-        chunks: list[str] = []
-        chunks_lock = threading.Lock()
-        callback_error: list[BaseException] = []
-        stream_callback = self.stream_callback
+        out_queue: queue.Queue[str | None] = queue.Queue()
 
         def _drain_stdout() -> None:
             try:
                 assert process.stdout is not None
                 for line in iter(process.stdout.readline, ""):
-                    with chunks_lock:
-                        chunks.append(line)
-                    try:
-                        stream_callback(line)
-                    except BaseException as e:
-                        # Preserve pre-thread semantics: a raising
-                        # stream callback aborts the command (group
-                        # kill) and the exception propagates out of
-                        # Bash from the main thread below.
-                        callback_error.append(e)
-                        _kill_process_group(process)
-                        return
+                    out_queue.put(line)
             finally:
-                eof.set()
+                # EOF sentinel — also emitted when readline raises so
+                # the consumer can never wait for a dead reader.
+                out_queue.put(None)
 
         reader = threading.Thread(target=_drain_stdout, daemon=True)
         self._start_stop_monitor(process, done)
         reader.start()
         timed_out = False
+        eof = False
+        chunks: list[str] = []
         try:
-            if not eof.wait(timeout=timeout_seconds):
+            eof = self._consume_stream(
+                out_queue, chunks, time.monotonic() + timeout_seconds,
+            )
+            if not eof:
                 # Deadline hit.  Either the command is still running
                 # (genuine timeout) or its shell already exited and
                 # background children are keeping the pipe open.  Kill
@@ -980,7 +1021,10 @@ class UsefulTools:
                 # never misreported as timed out.
                 timed_out = process.poll() is None
                 _kill_process_group(process)
-                if not eof.wait(timeout=5):
+                eof = self._consume_stream(
+                    out_queue, chunks, time.monotonic() + 5,
+                )
+                if not eof:
                     # Descendants outside the process group (e.g.
                     # ``setsid``) survived the kill and still hold the
                     # pipe.  Abandon the daemon reader rather than
@@ -995,22 +1039,21 @@ class UsefulTools:
                     process.wait(timeout=5)
                 except subprocess.TimeoutExpired:  # pragma: no cover
                     _kill_process_group(process)
-        except BaseException:  # pragma: no cover — KeyboardInterrupt timing-dependent
+        except BaseException:
+            # A raising stream callback (or KeyboardInterrupt) aborts
+            # the command: kill the group and propagate.
             _kill_process_group(process)
             raise
         finally:
             done.set()
-            if eof.is_set():
+            if eof:
                 # Only close once the reader is done with the pipe;
                 # closing under a blocked ``readline()`` is unsafe.
                 # An abandoned daemon reader keeps the fd until EOF.
                 process.stdout.close()  # type: ignore[union-attr]
 
-        if callback_error:
-            raise callback_error[0]
         if timed_out:
             return "Error: Command execution timeout"
 
-        with chunks_lock:
-            output = "".join(chunks)
+        output = "".join(chunks)
         return _format_bash_result(process.returncode, output, max_output_chars)
