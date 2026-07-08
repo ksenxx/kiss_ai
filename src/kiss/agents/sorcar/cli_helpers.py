@@ -413,7 +413,10 @@ def _print_result(result: str) -> None:
     except Exception:
         parsed = None
     if isinstance(parsed, dict) and "summary" in parsed:
-        print(str(parsed.get("summary", "")))
+        # ``summary:`` with no value parses to ``None`` — print an
+        # empty summary rather than the literal string ``"None"``.
+        summary = parsed.get("summary")
+        print("" if summary is None else str(summary))
     else:
         print(result)
 

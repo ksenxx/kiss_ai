@@ -334,7 +334,12 @@ export function buildChatHtml(
 ): string {
   const nonce = getNonce();
   const version = getVersion();
-  const tricksJson = JSON.stringify(getTricks());
+  // ``</`` must never appear raw inside an inline <script> block — a
+  // user trick body containing ``</script>`` would otherwise terminate
+  // the ``window.__TRICKS__`` script per the HTML spec and break the
+  // whole chat webview.  Same escape as ``tipsJson`` below; ``<\/`` is
+  // a valid JSON string escape so the payload round-trips unchanged.
+  const tricksJson = JSON.stringify(getTricks()).replace(/<\//g, '<\\/');
   const tips = getTips();
   // ``</`` must never appear raw inside the inline <script> block —
   // a tip body containing ``</script>`` would otherwise terminate it.
@@ -419,9 +424,12 @@ export function buildChatHtml(
     }),
   };
 
-  let html = tpl;
-  for (const [key, value] of Object.entries(subs)) {
-    html = html.split(`{{${key}}}`).join(value);
-  }
-  return html;
+  // Single-pass substitution: each ``{{KEY}}`` in the TEMPLATE is
+  // replaced exactly once, so a placeholder-looking string inside a
+  // substituted VALUE (e.g. a user trick containing ``{{TIPS_JSON}}``)
+  // is never rewritten by a later key's pass.  Unknown placeholders
+  // are left untouched.
+  return tpl.replace(/\{\{([A-Z_]+)\}\}/g, (match, key: string) =>
+    Object.prototype.hasOwnProperty.call(subs, key) ? subs[key] : match,
+  );
 }
