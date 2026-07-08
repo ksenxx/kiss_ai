@@ -53,7 +53,7 @@ STEER_TITLE = (
     "Ctrl+C to abort "
 )
 # Dim placeholder shown in the panel body when the edit buffer is empty.
-PLACEHOLDER = "Add an instruction for the agent while it works…"
+PLACEHOLDER = "Add an instruction for the agent while it works to steer…"
 
 
 def _term_size() -> tuple[int, int]:
