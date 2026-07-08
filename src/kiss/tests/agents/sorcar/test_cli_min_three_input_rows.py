@@ -217,8 +217,18 @@ def test_panel_body_returns_minimum_three_rows() -> None:
     rows, is_placeholder = panel_body("", 60)
     assert is_placeholder
     assert len(rows) == _MIN_BODY_ROWS
+    # At cols=60 the inner width is 60 - 4 = 56 columns; the chevron
+    # prefix "› " (2 cols) plus the 57-char placeholder exceeds it, so
+    # panel_body clips row 0 to the widest fitting prefix.
+    inner_w = 60 - 4
+    assert rows[0] == "› " + PLACEHOLDER[: inner_w - 2]
+    assert rows[0] == "› Add an instruction for the agent while it works to ste"
+    # At a width where chevron + placeholder fits (default 80-col
+    # terminals), the full placeholder is shown untruncated.
+    wide_rows, wide_is_placeholder = panel_body("", 80)
+    assert wide_is_placeholder
+    assert PLACEHOLDER in wide_rows[0]
     # Padding rows are blank (no chevron, no placeholder leak).
-    assert PLACEHOLDER in rows[0]
     for blank in rows[1:]:
         assert blank.strip() == ""
     # Override: a caller can drop the floor to 1 (legacy single-row
