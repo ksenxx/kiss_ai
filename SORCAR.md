@@ -1,1 +1,1 @@
-- Use kiss/agents/third_party_agents/govee.py to take action on home lights.
+- Use ./src/kiss/agents/third_party_agents/govee.py to take action on home lights.
