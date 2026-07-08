@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from kiss.agents.sorcar.persistence import _default_kiss_dir
+from kiss.agents.sorcar.useful_tools import _absolutize, _active_worktree_remap
 
 logger = logging.getLogger(__name__)
 
@@ -631,15 +632,17 @@ class WebUseTool:
             # ``~`` to the user's home (never a literal ``./~/`` dir),
             # then resolve relative paths against the agent work_dir
             # (NOT the daemon process cwd — in worktree mode that
-            # would silently escape the worktree).
-            try:
-                path = Path(file_path).expanduser()
-            except RuntimeError:
-                # ``~unknownuser/...`` — fall through to the literal path.
-                path = Path(file_path)
-            if not path.is_absolute() and self.work_dir:
-                path = Path(self.work_dir) / path
-            path = path.resolve()
+            # would silently escape the worktree).  Reuses the exact
+            # helper the Read/Write/Edit tools use so the two path
+            # policies can never drift.
+            path = Path(_absolutize(file_path, self.work_dir)).resolve()
+            # Active-worktree remap, mirroring Write/Edit: an absolute
+            # parent-repo path (model ignored the ``Work dir:`` hint)
+            # must land inside the live ``.kiss-worktrees/kiss_wt-*``
+            # worktree — never dirty the user's main checkout.
+            remapped = _active_worktree_remap(path, self.work_dir)
+            if remapped is not None:
+                path = remapped
             path.parent.mkdir(parents=True, exist_ok=True)
             self._page.screenshot(path=str(path), full_page=False)
             return f"Screenshot saved to {path}"

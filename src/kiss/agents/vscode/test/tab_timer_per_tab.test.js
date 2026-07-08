@@ -178,15 +178,17 @@ async function testBackgroundTaskDoneShowsDurationAfterSwitch() {
     tab_id: 'bg-tab',
     description: 'background work',
   });
-  // (openSubagentTab may switch focus; make sure the original tab is
-  // active again before the background run completes.)
+  // The user keeps working in the original (still active) tab.
   send(win, {
     type: 'status',
     running: true,
     tabId: activeId,
     startTs: Date.now() - 3_000,
   });
-  // The background tab's agent runs and finishes: 3m 21s of agent time.
+  assert.match(statusOf(win), /^Running [2-6]s$/);
+
+  // The background tab's agent runs: its status event must NOT
+  // clobber the foreground tab's header.
   const bgEnd = Date.now();
   send(win, {
     type: 'status',
@@ -194,6 +196,9 @@ async function testBackgroundTaskDoneShowsDurationAfterSwitch() {
     tabId: 'bg-tab',
     startTs: bgEnd - 201_000,
   });
+  assert.match(statusOf(win), /^Running [2-6]s$/);
+
+  // The background tab finishes: 3m 21s of agent time.
   send(win, {
     type: 'task_done',
     tabId: 'bg-tab',
@@ -202,20 +207,42 @@ async function testBackgroundTaskDoneShowsDurationAfterSwitch() {
   });
   send(win, {type: 'status', running: false, tabId: 'bg-tab'});
 
-  // Active tab must be untouched.
-  assert.match(statusOf(win), /^Running [2-6]s$/);
-
-  // Switch to the background tab: its header MUST show the done
-  // duration computed from the agent's own timestamps.
-  clickTab(win, 'bg-tab');
+  // ``task_done`` for a LOCAL tab auto-switches focus to it (product
+  // contract since ``focusFinishedTab``: the result panel must be
+  // immediately visible) and the header MUST show the done duration
+  // computed from the agent's own timestamps.
+  const activeEl = win.document.querySelector('.chat-tab.active');
+  assert.strictEqual(
+    activeEl && activeEl.getAttribute('data-tab-id'),
+    'bg-tab',
+    'task_done in a local background tab must auto-focus that tab',
+  );
   assert.strictEqual(
     statusOf(win),
     'Done (3m 21s)',
     'a tab whose task finished in the background must show ' +
-      'endTs - startTs after switching to it',
+      'endTs - startTs once focused',
+  );
+
+  // Switching back to the original tab restores its own running
+  // timer untouched…
+  clickTab(win, activeId);
+  assert.match(
+    statusOf(win),
+    /^Running [2-6]s$/,
+    "the original tab's running timer must survive the auto-switch",
+  );
+  // …and returning to the finished tab re-renders its done duration.
+  clickTab(win, 'bg-tab');
+  assert.strictEqual(
+    statusOf(win),
+    'Done (3m 21s)',
+    'the done duration must re-render when switching back',
   );
   win.close();
-  console.log('  ok - background task_done shows duration after tab switch');
+  console.log(
+    '  ok - background task_done auto-focuses its tab and shows duration',
+  );
 }
 
 async function testDoneLabelSurvivesTabSwitches() {

@@ -230,8 +230,18 @@ def main() -> int:
         checks.append((["uv", "run", "pyright", "src/"], "Type check (pyright)"))
         vscode_dir = project_root / "src" / "kiss" / "agents" / "vscode"
         if (vscode_dir / "node_modules").is_dir() and shutil.which("npm"):
-            cmd = ["npm", "--prefix", str(vscode_dir), "run", "check"]
-            checks.append((cmd, "VS Code extension check (typecheck + lint)"))
+            checks.append(
+                (
+                    ["npm", "--prefix", str(vscode_dir), "run", "typecheck"],
+                    "VS Code extension typecheck",
+                )
+            )
+            checks.append(
+                (
+                    ["npm", "--prefix", str(vscode_dir), "run", "lint"],
+                    "VS Code extension lint",
+                )
+            )
 
     if md_files:
         checks.append((["uv", "run", "mdformat", "--check", *md_files], "Lint markdown (mdformat)"))

@@ -2624,17 +2624,21 @@
   // --- run_parallel panel ⇔ sub-agent tabs invariant ---
   //
   // Invariant: while a ``run_parallel`` tool-call panel is UNCOLLAPSED
-  // the tabs of its sub-agents MUST be open, and while it is COLLAPSED
-  // those tabs MUST be closed.
+  // the tabs of its sub-agents MUST be open — except tabs the user
+  // closed individually by hand (closing one sub-agent tab MUST NOT
+  // close or reopen its siblings); while the panel is COLLAPSED those
+  // tabs MUST be closed.  Collapsing clears the by-hand close marks,
+  // so a subsequent expand reopens the whole fan-out.
   //
   // Sub-agents spawned by a live ``run_parallel`` fan-out are
   // associated with the newest ``.tc-run-parallel`` panel of the
   // parent tab (see the ``new_tab`` handler).  The panel element keeps
   // the group state directly (``_rpSubagents``: one entry per
-  // sub-agent with its backend ``taskId`` and current frontend
-  // ``tabId``; ``_rpParentTabId``: the parent tab the reopened tabs
-  // anchor to), and ``_rpTabPanel`` maps each open sub-agent tab id
-  // back to its owning panel so ``closeTab`` can restore consistency
+  // sub-agent with its backend ``taskId``, current frontend ``tabId``,
+  // and a ``userClosed`` mark for tabs closed individually by hand;
+  // ``_rpParentTabId``: the parent tab the reopened tabs anchor to),
+  // and ``_rpTabPanel`` maps each open sub-agent tab id back to its
+  // owning panel so ``closeTab`` can keep the bookkeeping consistent
   // when the user closes a sub-agent tab by hand.
   const _rpTabPanel = new Map();
   const _rpClosedSubagentTabs = new Set();
@@ -2760,6 +2764,9 @@
       }
     }
     if (tabKey) {
+      // A live tab is (re)associated with the fan-out: it is open, so
+      // any stale by-hand close mark no longer applies.
+      entry.userClosed = false;
       _rpClosedSubagentTabs.delete(tabKey);
       _rpTabPanel.set(tabKey, panelEl);
     }
@@ -2789,7 +2796,13 @@
           _rpTabPanel.delete(closingId);
           closeTab(closingId);
           en.tabId = '';
-        } else if (!collapsed && !openTab && en.taskId !== '') {
+          // Collapsing wipes the by-hand close marks: the next expand
+          // reopens EVERY sub-agent, including tabs the user closed
+          // individually before the collapse.
+          en.userClosed = false;
+        } else if (collapsed) {
+          en.userClosed = false;
+        } else if (!openTab && en.taskId !== '' && !en.userClosed) {
           const subTab = createBackgroundSubagentTab(panelEl._rpParentTabId);
           en.tabId = subTab.id;
           _rpTabPanel.set(subTab.id, panelEl);
@@ -2806,13 +2819,15 @@
   }
 
   /**
-   * Restore the invariant after sub-agent tabs in *closedIds* were
-   * closed OUTSIDE syncRunParallelPanel (tab-bar × button, context
-   * menu, cascade from closing another tab): an uncollapsed
-   * run_parallel panel must not keep the surviving sibling tabs open,
-   * so collapse the owning panel — which closes them.  Panels whose
-   * parent tab was closed in the same cascade disappeared with it and
-   * need no work.
+   * Bookkeeping after sub-agent tabs in *closedIds* were closed
+   * OUTSIDE syncRunParallelPanel (tab-bar × button, context menu,
+   * cascade from closing another tab).  Closing one sub-agent tab by
+   * hand must NOT close its sibling sub-agent tabs: the entry is only
+   * marked ``userClosed`` so no later sync of the still-uncollapsed
+   * panel resurrects it.  Only when NO open sub-agent tab remains does
+   * the owning panel collapse (nothing is left to close), so the next
+   * expand reopens the whole fan-out.  Panels whose parent tab was
+   * closed in the same cascade disappeared with it and need no work.
    */
   function rpAfterTabsClosed(closedIds) {
     if (_rpSyncing) return;
@@ -2823,7 +2838,10 @@
         _rpClosedSubagentTabs.add(id);
         _rpTabPanel.delete(id);
         for (const en of p._rpSubagents || []) {
-          if (en.tabId === id) en.tabId = '';
+          if (en.tabId === id) {
+            en.tabId = '';
+            en.userClosed = true;
+          }
         }
         panels.add(p);
       }
@@ -2832,6 +2850,9 @@
       const parentOpen =
         p._rpParentTabId === activeTabId || getTab(p._rpParentTabId);
       if (!parentOpen) continue;
+      // Sibling sub-agent tabs are still open: keep the panel
+      // uncollapsed and leave them alone.
+      if (rpPanelHasOpenTabs(p)) continue;
       if (!p.classList.contains('collapsed')) {
         p.classList.add('collapsed');
         p.classList.remove('user-pinned');
@@ -4221,15 +4242,110 @@
     'online',
   ];
 
+  // First names of well-known MALE system voices (macOS `say -v ?`,
+  // Windows/Edge neural voices, eSpeak/Google presets).  The agent's
+  // one voice everywhere else is male: the server-synthesized clip is
+  // "cedar" (speech_synthesis.py DEFAULT_TTS_VOICE, a deep male
+  // narrator) and the sorcar CLI REPL plays that clip on its
+  // speakers — so the webview's Web-Speech fallback must keep the
+  // same male character instead of switching to a female voice.
+  // Matched as whole words of the voice name (never substrings, so
+  // "Alex" cannot match "Alexa").
+  const MALE_VOICE_NAMES = [
+    // macOS
+    'alex',
+    'daniel',
+    'fred',
+    'thomas',
+    'oliver',
+    'arthur',
+    'aaron',
+    'albert',
+    'bruce',
+    'ralph',
+    'lee',
+    'gordon',
+    'diego',
+    'jorge',
+    'juan',
+    'carlos',
+    'luca',
+    'xander',
+    'rishi',
+    'majed',
+    'maged',
+    'tarik',
+    'yuri',
+    'eddy',
+    'reed',
+    'rocko',
+    'grandpa',
+    // Windows / Edge neural
+    'david',
+    'mark',
+    'guy',
+    'davis',
+    'andrew',
+    'brian',
+    'christopher',
+    'eric',
+    'jacob',
+    'george',
+    'ryan',
+    'steffan',
+    'tony',
+    'william',
+    'james',
+    'liam',
+    'sonny',
+    'jason',
+    'remy',
+    'florian',
+    'giuseppe',
+    'hyunsu',
+    // Other engines
+    'paul',
+    'henri',
+    'conrad',
+    'stefan',
+    'pavel',
+    'antonio',
+    'cedar',
+  ];
+  const MALE_VOICE_NAME_SET = new Set(MALE_VOICE_NAMES);
+
+  /**
+   * True when the (lower-cased) voice *name* clearly names a male
+   * voice: the standalone word "male" ("Google UK English Male" —
+   * "female" has no word boundary before "male", so it never
+   * matches), or a known male first name as a whole word.  Edge's
+   * multilingual neural voices concatenate the suffix onto the name
+   * ("Microsoft AndrewMultilingual Online (Natural)"), so a trailing
+   * "multilingual" is stripped from each word before the lookup.
+   */
+  function isMaleVoiceName(name) {
+    if (/\bmale\b/.test(name)) return true;
+    for (let token of name.split(/[^a-z]+/)) {
+      if (token.endsWith('multilingual')) {
+        token = token.slice(0, -'multilingual'.length);
+      }
+      if (MALE_VOICE_NAME_SET.has(token)) return true;
+    }
+    return false;
+  }
+
   /**
    * Pick the most natural-sounding available system voice for
    * *language* (a BCP-47 tag such as "en-US"; may be empty).
    *
    * Voices are ranked first by language match (exact tag > same base
-   * language > any) and then by how early a NATURAL_VOICE_MARKERS
-   * keyword appears in the marker list.  Returns ``null`` when the
-   * voice list is unavailable or empty, in which case the caller
-   * leaves the browser's default voice in place.
+   * language > any), then male voices over others (parity with the
+   * male "cedar" narrator the CLI REPL and the synthesized-clip path
+   * play — see MALE_VOICE_NAMES), and finally by how early a
+   * NATURAL_VOICE_MARKERS keyword appears in the marker list.
+   * Returns ``null`` when the voice list is unavailable or empty, in
+   * which case the caller leaves the browser's default voice in
+   * place.
    */
   function pickNaturalVoice(synth, language) {
     if (!synth || typeof synth.getVoices !== 'function') return null;
@@ -4246,6 +4362,7 @@
     const wantedBase = wanted.split('-')[0];
     let best = null;
     let bestLang = -1;
+    let bestMale = -1;
     let bestQuality = -1;
     for (const voice of voices) {
       const lang = String(voice.lang || '')
@@ -4261,6 +4378,7 @@
       }
       if (wanted && langScore === 0) continue;
       const name = String(voice.name || '').toLowerCase();
+      const male = isMaleVoiceName(name) ? 1 : 0;
       let quality = 0;
       for (let i = 0; i < NATURAL_VOICE_MARKERS.length; i++) {
         if (name.includes(NATURAL_VOICE_MARKERS[i])) {
@@ -4270,10 +4388,12 @@
       }
       if (
         langScore > bestLang ||
-        (langScore === bestLang && quality > bestQuality)
+        (langScore === bestLang &&
+          (male > bestMale || (male === bestMale && quality > bestQuality)))
       ) {
         best = voice;
         bestLang = langScore;
+        bestMale = male;
         bestQuality = quality;
       }
     }
@@ -4622,6 +4742,15 @@
         //    this webview (two open tabs of the same task, a stale
         //    subscription from before a reload, ...) only the first
         //    speaks.  Without this the same reply was spoken twice.
+        // muted copies: the daemon stamps ``muted: true`` on the
+        // copies it relays to peers on the SAME machine as a player
+        // that already owns this utterance (e.g. a sorcar CLI that
+        // played the clip on the terminal speakers forwards the
+        // event, and this webview runs on that very machine over the
+        // local UDS).  Skip playback entirely — and skip the talkId
+        // dedupe bookkeeping, so an unmuted copy that legitimately
+        // reaches this webview later is still allowed to speak.
+        if (ev.muted) break;
         const talkText = ev.text || '';
         if (!talkText) break;
         if (ev.tabId !== undefined && !getTab(ev.tabId)) break;
