@@ -884,13 +884,33 @@ class UsefulTools:
             self._start_stop_monitor(process, done)
             try:
                 stdout, _ = process.communicate(timeout=timeout_seconds)
-            except subprocess.TimeoutExpired:
+            except subprocess.TimeoutExpired as timeout_exc:
+                # Deadline hit: either the shell is still running
+                # (genuine timeout) or it already exited and background
+                # children inherited the output pipe, keeping
+                # ``communicate()`` blocked past the deadline.  Kill
+                # the group in both cases; only the former is a
+                # timeout — the latter returns the command's real
+                # output, matching the streaming path.
+                shell_running = process.poll() is None
                 _kill_process_group(process)
+                stdout = ""
                 try:
-                    process.communicate(timeout=5)
-                except Exception:  # pragma: no cover — unreachable after SIGKILL
-                    pass
-                return "Error: Command execution timeout"
+                    stdout, _ = process.communicate(timeout=5)
+                except Exception:
+                    # Descendants outside the process group still hold
+                    # the pipe; fall back to the output captured before
+                    # the deadline (bytes on some platforms even in
+                    # text mode).
+                    raw = timeout_exc.output
+                    if isinstance(raw, bytes):  # pragma: no cover — platform-dependent
+                        raw = raw.decode("utf-8", errors="replace")
+                    stdout = raw or ""
+                if shell_running:
+                    return "Error: Command execution timeout"
+                return _format_bash_result(
+                    process.returncode, stdout, max_output_chars,
+                )
             except BaseException:  # pragma: no cover — KeyboardInterrupt timing-dependent
                 _kill_process_group(process)
                 try:
@@ -906,58 +926,91 @@ class UsefulTools:
             return f"Error: {e}"
 
     def _bash_streaming(self, command: str, timeout_seconds: float, max_output_chars: int) -> str:
+        # Output is drained by a daemon reader thread while this thread
+        # waits on an EOF event with a deadline.  A blocking
+        # ``readline()`` loop in this thread would have no deadline:
+        # when the shell exits but backgrounded children inherit the
+        # stdout pipe (``(cmd) & echo done``), the pipe only reaches
+        # EOF once *every* inheritor exits, which once froze an agent
+        # for 94 minutes.  The old timer-callback guard made this
+        # worse: it skipped the group kill whenever ``poll()`` showed
+        # the shell had exited, turning the timeout into a no-op
+        # exactly when the hang happens.
         assert self.stream_callback is not None
         process = self._spawn(command)
-        timed_out = False
         done = threading.Event()
+        eof = threading.Event()
+        chunks: list[str] = []
+        chunks_lock = threading.Lock()
+        callback_error: list[BaseException] = []
+        stream_callback = self.stream_callback
 
-        def _kill() -> None:
-            nonlocal timed_out
-            if process.poll() is not None:
-                # Command already finished — the timer fired in the gap
-                # between completion and ``timer.cancel()``; do not clobber
-                # a successful result with a timeout error.
-                return
-            timed_out = True
-            _kill_process_group(process)
-
-        timer = threading.Timer(timeout_seconds, _kill)
-        timer.start()
-        self._start_stop_monitor(process, done)
-        try:
-            chunks: list[str] = []
-            assert process.stdout is not None
-            for line in iter(process.stdout.readline, ""):
-                chunks.append(line)
-                self.stream_callback(line)
+        def _drain_stdout() -> None:
             try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:  # pragma: no cover
+                assert process.stdout is not None
+                for line in iter(process.stdout.readline, ""):
+                    with chunks_lock:
+                        chunks.append(line)
+                    try:
+                        stream_callback(line)
+                    except BaseException as e:
+                        # Preserve pre-thread semantics: a raising
+                        # stream callback aborts the command (group
+                        # kill) and the exception propagates out of
+                        # Bash from the main thread below.
+                        callback_error.append(e)
+                        _kill_process_group(process)
+                        return
+            finally:
+                eof.set()
+
+        reader = threading.Thread(target=_drain_stdout, daemon=True)
+        self._start_stop_monitor(process, done)
+        reader.start()
+        timed_out = False
+        try:
+            if not eof.wait(timeout=timeout_seconds):
+                # Deadline hit.  Either the command is still running
+                # (genuine timeout) or its shell already exited and
+                # background children are keeping the pipe open.  Kill
+                # the whole process group in both cases; only the
+                # former is reported as a timeout.  Checking ``poll()``
+                # here — after the wait, not in a racing timer — means
+                # a command that finished naturally an instant ago is
+                # never misreported as timed out.
+                timed_out = process.poll() is None
                 _kill_process_group(process)
+                if not eof.wait(timeout=5):
+                    # Descendants outside the process group (e.g.
+                    # ``setsid``) survived the kill and still hold the
+                    # pipe.  Abandon the daemon reader rather than
+                    # blocking the agent; the output collected so far
+                    # is returned.
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:  # pragma: no cover
+                        pass
+            else:
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:  # pragma: no cover
+                    _kill_process_group(process)
         except BaseException:  # pragma: no cover — KeyboardInterrupt timing-dependent
             _kill_process_group(process)
             raise
         finally:
             done.set()
-            timer.cancel()
-            process.stdout.close()  # type: ignore[union-attr]
+            if eof.is_set():
+                # Only close once the reader is done with the pipe;
+                # closing under a blocked ``readline()`` is unsafe.
+                # An abandoned daemon reader keeps the fd until EOF.
+                process.stdout.close()  # type: ignore[union-attr]
 
-        # The timer's poll()->kill guard is TOCTOU: the command can
-        # finish in the instant between poll() returning None and the
-        # group kill, leaving timed_out spuriously True even though the
-        # full output streamed and the process exited on its own.  On
-        # POSIX a genuinely killed command reports the SIGKILL as a
-        # negative returncode, so a natural (>= 0) exit status means
-        # the command completed and its real result must be returned,
-        # not discarded as a timeout.  Windows exit codes cannot encode
-        # the killing signal, so the flag is trusted as-is there.
-        genuinely_killed = (
-            sys.platform == "win32"  # pragma: no cover — Windows only
-            or process.returncode is None
-            or process.returncode < 0
-        )
-        if timed_out and genuinely_killed:
+        if callback_error:
+            raise callback_error[0]
+        if timed_out:
             return "Error: Command execution timeout"
 
-        output = "".join(chunks)
+        with chunks_lock:
+            output = "".join(chunks)
         return _format_bash_result(process.returncode, output, max_output_chars)
