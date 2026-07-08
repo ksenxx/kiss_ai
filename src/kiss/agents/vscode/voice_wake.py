@@ -620,6 +620,48 @@ def parse_transcription_reply(reply: str) -> tuple[str, str | None]:
     return stripped, None
 
 
+def speaker_prefixed_text(
+    text: object, speaker: object, language: object
+) -> str:
+    """Format recognised speech with the chat webview's speaker prefix.
+
+    This is the canonical Python twin of ``insertSpeech`` in
+    ``media/voice.js`` and MUST stay in exact behavioural parity with
+    it; the sorcar CLI voice mode shares it so spoken tasks look the
+    same everywhere.  The contract, mirroring the JavaScript:
+
+    - *text* is trimmed; blank or non-string text yields ``""`` (the
+      caller never submits it, like the webview).
+    - The prefix applies only when *speaker* is a finite integral
+      number >= 1 (JS ``typeof speaker === 'number'`` excludes
+      booleans and strings; ``Math.floor(2.0) === 2.0`` lets integral
+      floats qualify).
+    - A trimmed non-empty string *language* selects the long form
+      ``"Speaker #N says in the language <lang> that: <text>"``;
+      otherwise the short form ``"Speaker #N says that: <text>"``.
+
+    Args:
+        text: The recognised utterance (usually a string).
+        speaker: The listener's speaker id (int, ``None``, or junk).
+        language: The BCP-47 language tag (string or ``None``).
+
+    Returns:
+        The line to submit, or ``""`` when the speech is blank.
+    """
+    translated = text.strip() if isinstance(text, str) else ""
+    if not translated:
+        return ""
+    if not isinstance(speaker, (int, float)) or isinstance(speaker, bool):
+        return translated
+    if not (math.isfinite(speaker) and speaker >= 1 and float(speaker).is_integer()):
+        return translated
+    number = int(speaker)
+    lang = language.strip() if isinstance(language, str) else ""
+    if lang:
+        return f"Speaker #{number} says in the language {lang} that: {translated}"
+    return f"Speaker #{number} says that: {translated}"
+
+
 def transcribe_pcm(
     pcm: bytes,
     audio_model: str = DEFAULT_AUDIO_MODEL,
