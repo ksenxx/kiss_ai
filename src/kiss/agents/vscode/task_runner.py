@@ -124,6 +124,27 @@ def build_task_extra_payload(
     }
 
 
+def _client_task_id_of(cmd: dict[str, Any]) -> str:
+    """Return the client-stamped ``taskId`` of a ``run`` command, or ``""``.
+
+    The CLI client stamps every ``run`` with a per-submission ``taskId``
+    (a UUID it minted just before sending) so its dispatcher can filter
+    stale ``status`` events from a prior task.  r3-vscode-H1: non-string
+    payloads (list, dict, bool, int) are rejected so they never flow
+    into the ``status`` envelope echo where they would be compared by
+    ``str ==`` against UUID strings on the client.
+
+    Args:
+        cmd: The ``run`` command dict.
+
+    Returns:
+        The non-empty string ``taskId``, or ``""`` when absent, empty,
+        or not a string.
+    """
+    raw = cmd.get("taskId", "")
+    return raw if isinstance(raw, str) else ""
+
+
 def parse_task_tags(text: str) -> list[str]:
     """Parse ``<task>...</task>`` tags from *text* and return individual tasks.
 
@@ -220,12 +241,7 @@ class _TaskRunnerMixin:
         # (review #3 / #4 round 2 — A2 critical).  Echo the id verbatim
         # on every ``status`` broadcast for this run so the client's
         # ``current_task_id`` filter actually works in production.
-        # r3-vscode-H1: reject non-string ``taskId`` payloads (list,
-        # dict, bool, int) so they do not silently flow into the
-        # ``status`` envelope echo where they would later be compared
-        # by ``str ==`` against UUID strings on the client.
-        _raw_ctid = cmd.get("taskId", "")
-        client_task_id = _raw_ctid if isinstance(_raw_ctid, str) and _raw_ctid else ""
+        client_task_id = _client_task_id_of(cmd)
         try:
             status_start: dict[str, Any] = {
                 "type": "status",
@@ -753,11 +769,7 @@ class _TaskRunnerMixin:
                 self._subscribe_chat_viewers,
                 source_tab_id=tab_id,
                 start_ms=start_ms,
-                client_task_id=(
-                    cmd["taskId"]
-                    if isinstance(cmd.get("taskId"), str) and cmd["taskId"]
-                    else ""
-                ),
+                client_task_id=_client_task_id_of(cmd),
             )
 
             for subtask_index, task_prompt in enumerate(subtasks):
@@ -853,22 +865,34 @@ class _TaskRunnerMixin:
                 finally:
                     tab.task_history_id = tab.agent._last_task_id
                 if subtask_failed:
+                    # W2-F2 symmetry: report per-subtask DELTAS against
+                    # the baselines captured just before this subtask's
+                    # ``run`` — the same arithmetic the persisted
+                    # ``extra`` payload uses.  ``tab.agent`` is reused
+                    # across tasks on the same tab when a worktree is
+                    # left pending, so its counters are CUMULATIVE:
+                    # broadcasting them raw leaked the previous task's
+                    # tokens / cost / steps into this failure banner,
+                    # disagreeing with the row's persisted metrics.
+                    # RelentlessAgent-derived agents accumulate
+                    # completed steps into ``total_steps`` and leave
+                    # ``step_count`` at 0 — fall back to ``step_count``
+                    # for plain agents whose ``total_steps`` is 0.
+                    tokens_delta, cost_delta, steps_delta = (
+                        self._subtask_metric_deltas(
+                            tab.agent,
+                            sub_tokens_base,
+                            sub_cost_base,
+                            sub_steps_base,
+                        )
+                    )
                     self.printer.broadcast({
                         "type": "result",
                         "text": result_summary,
                         "success": False,
-                        "total_tokens": tab.agent.total_tokens_used,
-                        "cost": f"${tab.agent.budget_used:.4f}",
-                        # RelentlessAgent-derived agents accumulate
-                        # completed steps into ``total_steps`` and leave
-                        # ``step_count`` at 0 — mirror the persisted
-                        # ``extra`` metrics below.  Fall back to
-                        # ``step_count`` for plain agents whose
-                        # ``total_steps`` is 0.
-                        "step_count": (
-                            int(getattr(tab.agent, "total_steps", 0) or 0)
-                            or int(getattr(tab.agent, "step_count", 0) or 0)
-                        ),
+                        "total_tokens": tokens_delta,
+                        "cost": f"${cost_delta:.4f}",
+                        "step_count": steps_delta,
                         "tabId": tab_id,
                     })
                     break
@@ -946,21 +970,26 @@ class _TaskRunnerMixin:
             # ``None`` when the outer exception fired before agent
             # assignment, so all metric reads are defensive.
             _agent_for_metrics = getattr(tab, "agent", None)
+            # W2-F2 symmetry (same rationale as the in-loop failure
+            # broadcast): report per-subtask DELTAS against the
+            # baselines, not the reused agent's cumulative counters.
+            # ``max(0, ...)`` inside the helper also covers a nulled
+            # agent (reads default to 0, minus a positive baseline).
+            tokens_delta, cost_delta, steps_delta = (
+                self._subtask_metric_deltas(
+                    _agent_for_metrics,
+                    sub_tokens_base,
+                    sub_cost_base,
+                    sub_steps_base,
+                )
+            )
             self.printer.broadcast({
                 "type": "result",
                 "text": result_summary,
                 "success": False,
-                "total_tokens": int(
-                    getattr(_agent_for_metrics, "total_tokens_used", 0) or 0
-                ),
-                "cost": (
-                    "$"
-                    f"{float(getattr(_agent_for_metrics, 'budget_used', 0.0) or 0.0):.4f}"
-                ),
-                "step_count": (
-                    int(getattr(_agent_for_metrics, "total_steps", 0) or 0)
-                    or int(getattr(_agent_for_metrics, "step_count", 0) or 0)
-                ),
+                "total_tokens": tokens_delta,
+                "cost": f"${cost_delta:.4f}",
+                "step_count": steps_delta,
                 "tabId": tab_id,
             })
         finally:
@@ -1406,6 +1435,53 @@ class _TaskRunnerMixin:
                 tab.task_history_id,
                 exc_info=True,
             )
+
+    @staticmethod
+    def _subtask_metric_deltas(
+        agent: object,
+        tokens_base: int,
+        cost_base: float,
+        steps_base: int,
+    ) -> tuple[int, float, int]:
+        """Return a subtask's ``(tokens, cost, steps)`` consumption deltas.
+
+        The agent's ``total_tokens_used`` / ``budget_used`` /
+        ``total_steps`` counters are CUMULATIVE — the agent object is
+        reused across tasks on the same tab when a worktree is left
+        pending — so per-subtask figures (used by the failure ``result``
+        broadcasts, mirroring the W2-F2 delta arithmetic of the
+        persisted ``extra`` payload) must subtract the baselines
+        captured just before the subtask's ``run``.  All reads are
+        defensive (``getattr`` with a zero default) so a nulled agent
+        yields zero deltas via the ``max`` clamps.
+
+        RelentlessAgent-derived agents accumulate completed steps into
+        ``total_steps`` and leave ``step_count`` at 0; plain agents do
+        the opposite.  The steps delta therefore falls back to
+        ``step_count`` when the ``total_steps`` delta is 0.
+
+        Args:
+            agent: The (possibly ``None``) agent to read counters from.
+            tokens_base: ``total_tokens_used`` before the subtask ran.
+            cost_base: ``budget_used`` before the subtask ran.
+            steps_base: ``total_steps`` before the subtask ran.
+
+        Returns:
+            ``(tokens_delta, cost_delta, steps_delta)`` clamped at 0.
+        """
+        tokens = max(
+            0,
+            int(getattr(agent, "total_tokens_used", 0) or 0) - tokens_base,
+        )
+        cost = max(
+            0.0,
+            float(getattr(agent, "budget_used", 0.0) or 0.0) - cost_base,
+        )
+        steps = max(
+            0,
+            int(getattr(agent, "total_steps", 0) or 0) - steps_base,
+        ) or int(getattr(agent, "step_count", 0) or 0)
+        return tokens, cost, steps
 
     @staticmethod
     def _cancel_outcome(

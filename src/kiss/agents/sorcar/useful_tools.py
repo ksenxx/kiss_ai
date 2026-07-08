@@ -25,6 +25,16 @@ from kiss.core.models.model import (
 
 logger = logging.getLogger(__name__)
 
+# Largest supported binary the Read tool will embed inline as a base64
+# attachment.  The text path is bounded by ``max_lines``; without this
+# cap the binary path would ``read_bytes()`` an arbitrarily large file
+# (e.g. a multi-GB video) and base64-encode it (+33%) into the
+# tool-result string — blowing up process memory and producing a
+# payload no model provider accepts anyway (inline-attachment limits
+# are ~20MB across OpenAI / Anthropic / Gemini).  Checked via ``stat``
+# BEFORE the content is read.
+_MAX_BINARY_READ_BYTES = 20 * 1024 * 1024
+
 
 def _stale_worktree_fallback(resolved: Path) -> Path | None:
     """If *resolved* lives under a now-deleted ``.kiss-worktrees/kiss_wt-*``
@@ -679,6 +689,15 @@ class UsefulTools:
         """Encode a binary file as a sentinel attachment or return error."""
         mime_type, _ = mimetypes.guess_type(str(resolved))
         if mime_type in READ_TOOL_BINARY_MIME_TYPES:
+            size = resolved.stat().st_size
+            if size > _MAX_BINARY_READ_BYTES:
+                return (
+                    f"Error: Binary file {file_path} is too large to embed "
+                    f"inline ({size} bytes > {_MAX_BINARY_READ_BYTES} byte "
+                    f"limit, mime={mime_type}). Use Bash tools (e.g. "
+                    f"ffmpeg/ImageMagick to downscale, or split the file) "
+                    f"to produce a smaller artifact first."
+                )
             data = resolved.read_bytes()
             header = (
                 f"Read binary file {file_path} as {mime_type} "
