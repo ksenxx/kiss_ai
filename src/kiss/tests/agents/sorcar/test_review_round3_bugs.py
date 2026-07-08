@@ -399,17 +399,18 @@ def test_cli_printer_running_task_ids_docstring_updated() -> None:
 
 
 def test_task_runner_rejects_non_string_task_id() -> None:
-    src = Path(
-        "src/kiss/agents/vscode/task_runner.py"
-    ).read_text()
-    # The naive ``cmd.get("taskId", "") or ""`` pattern is gone at the
-    # two known sites (and replaced by an ``isinstance`` guard).
-    assert 'isinstance(_raw_ctid, str)' in src
-    # The partial call site uses an isinstance check too.
-    assert (
-        'isinstance(cmd.get("taskId"), str)' in src
-        or 'isinstance(cmd["taskId"], str)' in src
-    )
+    """Non-string ``taskId`` payloads are rejected by the shared guard.
+
+    The guard was centralised into :func:`_client_task_id_of` (bughunt
+    round 9); exercise its behaviour directly instead of asserting on
+    source-code text.
+    """
+    from kiss.agents.vscode.task_runner import _client_task_id_of
+
+    assert _client_task_id_of({"taskId": "abc123"}) == "abc123"
+    assert _client_task_id_of({}) == ""
+    for bad in ([1], {"x": 1}, True, 7, 3.5, None):
+        assert _client_task_id_of({"taskId": bad}) == ""
 
 
 # ---------------------------------------------------------------------------

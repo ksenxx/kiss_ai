@@ -49,7 +49,6 @@ import asyncio
 import functools
 import json
 import logging
-import os
 import queue
 import socket
 import sys
@@ -61,6 +60,7 @@ from pathlib import Path
 from typing import Any
 
 from kiss.agents.sorcar import cli_talk, cli_voice
+from kiss.agents.sorcar.cli_daemon_bridge import _sock_path
 from kiss.agents.sorcar.cli_helpers import (
     _parse_resume_arg,
     _print_recent_chats,
@@ -92,29 +92,12 @@ from kiss.agents.sorcar.cli_steering import (
     AnchoredRepl,
     supports_steering,
 )
-from kiss.agents.sorcar.persistence import (
-    _default_kiss_dir,
-    _load_chat_events_by_task_id,
-)
+from kiss.agents.sorcar.persistence import _load_chat_events_by_task_id
 from kiss.core.print_to_console import ConsolePrinter
 
 logger = logging.getLogger(__name__)
 
 _PROMPT = f"{CYAN}{PROMPT_MARKER}{RESET}"
-
-
-def _sock_path() -> Path:
-    """Return the daemon UDS socket path the client should connect to.
-
-    Honours ``KISS_SORCAR_SOCK`` first (test override), then derives
-    the default from :func:`persistence._default_kiss_dir` so the CLI
-    connects to the same ``$KISS_HOME/sorcar.sock`` the daemon binds
-    (``web_server._UDS_PATH``) instead of a hard-coded
-    ``~/.kiss/sorcar.sock`` that ignores ``KISS_HOME`` (w3 C-5).
-    Re-evaluated per call, matching the daemon bridge's contract.
-    """
-    env = os.environ.get("KISS_SORCAR_SOCK")
-    return Path(env) if env else _default_kiss_dir() / "sorcar.sock"
 
 
 def _clear_terminal() -> None:
@@ -280,6 +263,17 @@ class _EventDispatcher:
             self.cli_info_q.put(event)
             return
         if et == "models":
+            # The daemon stamps every ``models`` reply with
+            # ``selected`` — its canonical current model (see
+            # ``server._get_models``).  Mirror it into
+            # ``current_model`` so ``/model list`` (and any other
+            # ``getModels`` round-trip) refreshes the client's view of
+            # the model that will be sent with the next ``run``; the
+            # old code dropped the field and the comment in
+            # ``/model list`` claimed a refresh that never happened.
+            selected = event.get("selected")
+            if isinstance(selected, str) and selected:
+                self.current_model = selected
             self.models_q.put(event)
             return
         if et == "commitMessage":
@@ -348,8 +342,13 @@ class _EventDispatcher:
             self.ask_user_q.put(str(event.get("question", "")))
             return
         if et == "error":
+            # ``event.get("text", "")`` only falls back when the key
+            # is absent — ``text: null`` still yields ``None`` and the
+            # terminal printed the literal "None" (the ``_render``
+            # branches were hardened by review #36; this branch was
+            # missed).  Coerce explicitly.
             self.printer.print(
-                f"[red]✗ {event.get('text', '')}[/red]", type="text",
+                f"[red]✗ {event.get('text') or ''}[/red]", type="text",
             )
             return
         # Streamed display events: route to ConsolePrinter.
@@ -894,7 +893,9 @@ def _request_models(client: CliClient) -> list[dict[str, Any]]:
 
 
 def _handle_client_slash(  # noqa: PLR0911,PLR0912 - branchy by design
-    client: CliClient, line: str,
+    client: CliClient,
+    line: str,
+    submit: Callable[[str], None] | None = None,
 ) -> bool:
     """Handle a ``/`` slash command in client mode.
 
@@ -912,6 +913,15 @@ def _handle_client_slash(  # noqa: PLR0911,PLR0912 - branchy by design
     Args:
         client: The live :class:`CliClient`.
         line: The raw input line beginning with ``/``.
+        submit: Callable used to run the expansion of a custom slash
+            command — the SAME one the REPL loop uses for plain task
+            lines, so it carries the operator's ``--no-worktree`` /
+            ``--no-parallel`` / ``--auto-commit`` flags and, in
+            anchored mode, drives the anchored steering box.  The old
+            code hard-coded ``_submit_task(client, prompt)`` here,
+            silently dropping those flags and bypassing the anchored
+            path.  ``None`` falls back to a default
+            :func:`_submit_task` for direct callers.
     """
     parts = line.strip().split(maxsplit=1)
     cmd = parts[0]
@@ -1082,7 +1092,10 @@ def _handle_client_slash(  # noqa: PLR0911,PLR0912 - branchy by design
         src = reply.get("source", "")
         path = reply.get("path", "")
         print(f"⚡ Running custom command {cmd} ({src}:{path})")
-        _submit_task(client, prompt)
+        if submit is not None:
+            submit(prompt)
+        else:
+            _submit_task(client, prompt)
         return False
     # ``errorMessage`` (string) carries the human text; ``error``
     # is a bool flag.  Old code conflated them and printed the
@@ -1424,7 +1437,7 @@ def _run_repl_loop(
                 continue
             if text.startswith("/"):
                 try:
-                    if _handle_client_slash(client, line):
+                    if _handle_client_slash(client, line, submit):
                         break
                 except Exception as exc:  # noqa: BLE001 - resilient REPL
                     logger.debug("slash command failed", exc_info=True)

@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 def clean_llm_output(text: str) -> str:
-    """Strip whitespace and surrounding quotes from LLM output.
+    """Strip whitespace and *paired* surrounding quotes from LLM output.
 
     LLM responses routinely carry surrounding whitespace (a trailing
     newline is near-universal) *and* wrap the answer in quotes, e.g.
@@ -25,8 +25,19 @@ def clean_llm_output(text: str) -> str:
     all, leaving a dangling quote in the result).  Whitespace is
     therefore stripped first, then surrounding quotes, then any
     whitespace the quotes were hiding.
+
+    Only **paired** quotes (the same quote character at both ends) are
+    stripped.  ``str.strip('"')`` removes leading and trailing quote
+    characters *independently*, so a message that legitimately ends
+    (or starts) with a quoted word — e.g. ``feat: rename "foo"`` — was
+    corrupted to ``feat: rename "foo`` with a dangling opening quote.
+    An unpaired boundary quote is real content, not LLM decoration,
+    and is preserved.
     """
-    return text.strip().strip('"').strip("'").strip()
+    s = text.strip()
+    while len(s) >= 2 and s[0] == s[-1] and s[0] in ('"', "'"):
+        s = s[1:-1].strip()
+    return s
 
 
 def _run_oneshot_llm(
