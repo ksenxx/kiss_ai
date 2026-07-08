@@ -32,11 +32,10 @@ const Module = require('module');
 
 // DependencyInstaller requires 'vscode' at load time; redirect to the
 // shared on-disk stub (none of the code under test touches vscode).
-const stubPath = path.join(__dirname, '_vscode-stub.js');
-fs.writeFileSync(
-  stubPath,
-  `'use strict';\nmodule.exports = global.__kissVscodeStub || {};\n`,
-);
+// ``_vscode-stub.js`` is a git-tracked fixture shared by tests running
+// in parallel; it already re-exports ``global.__kissVscodeStub || {}`` —
+// never rewrite or delete it here (writeFileSync truncates first, racing
+// a concurrent ``require('vscode')`` in sibling test processes).
 global.__kissVscodeStub = {
   workspace: {isTrusted: false, getConfiguration: () => ({get: () => undefined})},
   Uri: {joinPath: () => ({fsPath: ''})},
