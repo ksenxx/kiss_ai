@@ -28,7 +28,7 @@ import atexit
 import threading
 from typing import Any
 
-from kiss.agents.sorcar import cli_daemon_bridge
+from kiss.agents.sorcar import cli_daemon_bridge, cli_talk
 from kiss.agents.sorcar.persistence import is_task_history_id
 from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.core.print_to_console import ConsolePrinter
@@ -155,6 +155,14 @@ class RecordingConsolePrinter(JsonPrinter):
                 severity=event.get("severity") or "info",
                 progress_message=event.get("progressMessage") or "",
             )
+        # Agent-initiated text-to-speech (the ``talk`` tool): a pure
+        # CLI session has no webview client, so the terminal machine
+        # itself must play the utterance on its default speakers —
+        # the process-wide player mirrors the webview's playback
+        # (talkId dedupe + one serialising queue per device) and
+        # never blocks the agent loop.
+        if event.get("type") == "talk":
+            cli_talk.shared_player().play(event)
         injected = self._inject_task_id(event)
         forwarded_id = injected.get("taskId")
         # r4-sorcar-H5 / r5-sorcar-H7: forward ONLY explicit global
