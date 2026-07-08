@@ -23,7 +23,11 @@ cancelling on Esc, Ctrl+C, Ctrl+D or Enter.
 
 The listener's stdout speaks a line protocol: ``READY``, ``WAKE``,
 ``TRANSCRIBING``, ``SPEECH <json {"text","speaker","language"}>`` and
-``NO_SPEECH``.  The listener command is overridable through the
+``NO_SPEECH``.  Recognised speech is decorated with the same
+``Speaker #N says [in the language <lang>] that: ...`` prefix as the
+chat webview via the shared :func:`speaker_prefixed_text` helper
+(behavioural parity with ``media/voice.js`` ``insertSpeech``); blank
+speech is never submitted.  The listener command is overridable through the
 ``KISS_SORCAR_VOICE_CMD`` environment variable (parsed with
 :func:`shlex.split`) so tests can substitute a scripted child process.
 """
@@ -45,6 +49,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from kiss.agents.sorcar.cli_panel import BLINK, CYAN, RED, RESET, YELLOW
+from kiss.agents.vscode.voice_wake import speaker_prefixed_text
 
 if TYPE_CHECKING:
     from kiss.agents.sorcar.cli_steering import _InputBox
@@ -415,12 +420,27 @@ def _handle_protocol_line(
             return _NO_LINE_RESULT
         if isinstance(payload, str):
             # Legacy payload shape accepted by the VS Code wake-word
-            # service: the JSON value itself is the translated text.
-            return payload
-        if isinstance(payload, dict):
-            text = payload.get("text")
-            if isinstance(text, str):
+            # service: the JSON value itself is the translated text
+            # (no speaker information, so no prefix).
+            text = speaker_prefixed_text(payload, None, None)
+            if text:
                 return text
+            show_listening()
+            return _NO_LINE_RESULT
+        if isinstance(payload, dict) and isinstance(payload.get("text"), str):
+            # Shared with the chat webview (media/voice.js
+            # insertSpeech): the submitted line carries the
+            # "Speaker #N" prefix when the listener identified the
+            # speaker, and blank speech is never submitted.
+            text = speaker_prefixed_text(
+                payload.get("text"),
+                payload.get("speaker"),
+                payload.get("language"),
+            )
+            if text:
+                return text
+            show_listening()
+            return _NO_LINE_RESULT
         logger.debug("malformed SPEECH payload: %r", line)
         # A SPEECH line is terminal for a wake round.  Treat unusable
         # payloads like NO_SPEECH so the indicator cannot stay stuck in
