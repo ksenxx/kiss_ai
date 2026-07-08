@@ -226,7 +226,8 @@ def sensitivity_wake_pause_seconds(sensitivity: int) -> float:
     """Return the post-alias pause gate (seconds) for a sensitivity.
 
     Linear map 0.4s -> MIN_WAKE_PAUSE_SECONDS: sensitivity 50 gives
-    the historical 0.2s, the default 70 gives 0.12s.  The floor keeps
+    the historical 0.2s, and the default 85 maps to 0.06s but is
+    floored at MIN_WAKE_PAUSE_SECONDS (0.1s).  The floor keeps
     continuous speech from firing mid-utterance at high sensitivity.
     """
     return max(
@@ -389,7 +390,7 @@ _STT_REFUSAL_RE = re.compile(
     r".{0,80}\b(?:transcribe|translate)\b"
     r"|\bdidn'?t\s+(?:hear|receive|get)\b.{0,40}\baudio\b"
     r"|\bno audio\b.{0,40}\b(?:provided|attached|received|heard)\b"
-    r"|\bi\s+(?:will|can|'ll)\s+(?:transcribe|translate)\b",
+    r"|\bi(?:\s+will|\s+can|'ll)\s+(?:transcribe|translate)\b",
     re.IGNORECASE,
 )
 

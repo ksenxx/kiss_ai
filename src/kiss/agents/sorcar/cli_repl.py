@@ -194,7 +194,12 @@ _SLASH_ARG_RE = re.compile(r"^\s*(/\S+)\s")
 # command line: the flag's *value* is completed by
 # :meth:`CliCompleter._flag_value_matches` — recent task ids for
 # ``--task``, model names (in model-picker order) for ``--model``.
-_FLAG_VALUE_RE = re.compile(r"(--task|--model)\s+(\S*)$")
+# The flag must be a whole whitespace-delimited token: without the
+# ``(?:^|\s)`` anchor a token merely *ending* in the flag name
+# (``x--task``, ``----task``) would hijack the completer into the
+# terminal flag-value branch, suppressing the option / predictive
+# menus that should have been offered instead.
+_FLAG_VALUE_RE = re.compile(r"(?:^|\s)(--task|--model)\s+(\S*)$")
 
 # Longest one-line task description shown next to a task-id candidate.
 _TASK_DESC_WIDTH = 48

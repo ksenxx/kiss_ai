@@ -421,9 +421,19 @@ class JsonPrinter(Printer):
         closed while a slow transport ``broadcast`` (socket sends in
         ``WebPrinter``) no longer blocks every other task's
         ``print(type="bash_stream")`` behind ``_bash_lock``.
+
+        Uses a NON-creating state lookup: a straggler flush (e.g. a
+        timer callback that fired before ``cleanup_task`` could cancel
+        it) must not resurrect the just-freed ``_BashState`` — the
+        ``_bash_state`` property would re-insert it into
+        ``_bash_states`` keyed by a dead task id, leaking it forever
+        and allowing a stale ``system_output`` broadcast attributed to
+        the finished task.  A missing state has nothing to flush.
         """
         with self._bash_lock:
-            bs = self._bash_state
+            bs = self._bash_states.get(self._task_key())
+            if bs is None:
+                return
             gen = bs.generation
             if bs.timer is not None:
                 bs.timer.cancel()

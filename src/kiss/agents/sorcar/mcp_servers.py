@@ -674,7 +674,18 @@ class MCPManager:
         return _result_text(result)
 
     def disconnect_all(self) -> None:
-        """Close every connection (their tasks unwind their contexts)."""
+        """Close every connection (their tasks unwind their contexts).
+
+        A task still stuck mid-handshake (e.g. a stdio child that
+        never speaks MCP) is not parked on its ``stop`` event, so
+        setting the event cannot unwind it; such stragglers are
+        cancelled after the grace period.  Either way ``conn.error``
+        is stamped and ``conn.ready`` set here: a frozen task's
+        ``finally`` may never run once the loop stops, and a thread
+        blocked in :meth:`connect` must not burn the whole
+        CONNECT_TIMEOUT waiting for a connection the manager already
+        tore down.
+        """
         with self._lock:
             conns = list(self._connections.values())
             self._connections.clear()
@@ -685,7 +696,11 @@ class MCPManager:
                 try:
                     conn.task.result(timeout=10)
                 except Exception:
+                    conn.task.cancel()
                     logger.debug("MCP disconnect error", exc_info=True)
+            conn.session = None
+            conn.error = conn.error or "disconnected"
+            conn.ready.set()
 
     def shutdown(self) -> None:
         """Disconnect everything and stop the manager loop thread.
