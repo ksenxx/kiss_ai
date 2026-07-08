@@ -70,6 +70,7 @@ from kiss.agents.sorcar.cli_panel import (
     PROMPT_MARKER,
     RESET,
     STEER_TITLE,
+    YELLOW,
     _term_size,
 )
 from kiss.agents.sorcar.cli_repl import (
@@ -1386,7 +1387,7 @@ def _run_repl_loop(
                 break
             if text == "/voice":
                 if voice is not None:
-                    print("🎤 Voice mode is already active.")
+                    print(f"{YELLOW}🎤 Voice mode is already active.{RESET}")
                     continue
                 voice = cli_voice.start_voice(
                     voice_reader or cli_voice.read_voice_line_plain
