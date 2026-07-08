@@ -237,6 +237,11 @@ def f0_track(audio: np.ndarray) -> np.ndarray:
     frames whose energy is below a third of the loud-speech level or
     whose best autocorrelation peak in the 70–400Hz lag range is weak
     (< 0.35 of the zero-lag energy, i.e. unvoiced/noise) are skipped.
+    Frames whose best peak lands exactly on the minimum-lag boundary
+    are also skipped: a boundary argmax means the true periodicity
+    lies at or above F0_MAX (out of the search range) — typical of
+    broadband/ambient noise, not trackable voiced speech, whose peak
+    is an interior maximum.
     """
     frame = int(0.04 * SAMPLE_RATE)
     hop = int(0.02 * SAMPLE_RATE)
@@ -254,6 +259,8 @@ def f0_track(audio: np.ndarray) -> np.ndarray:
         if auto[0] <= 0:
             continue
         lag = lag_lo + int(np.argmax(auto[lag_lo:lag_hi]))
+        if lag == lag_lo:
+            continue
         if auto[lag] / auto[0] < 0.35:
             continue
         f0s.append(SAMPLE_RATE / lag)

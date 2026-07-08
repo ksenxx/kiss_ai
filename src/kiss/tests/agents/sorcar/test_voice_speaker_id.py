@@ -176,6 +176,33 @@ class TestSpeakerRegistry(unittest.TestCase):
 class TestSpeakerIdFromWav(unittest.TestCase):
     """Distinct voices get distinct numbers; repeats keep theirs."""
 
+    # Keyword expected in each utterance's transcript, in spoken order.
+    _EXPECTED_KEYWORDS = ("parser", "test", "documentation")
+
+    @classmethod
+    def _stt_flaked(cls, payloads: list[Any]) -> str | None:
+        """Return why *payloads* shows an STT-backend flake, else None.
+
+        The gpt-audio backend occasionally hallucinates a reply
+        instead of transcribing an utterance (observed
+        nondeterministically, even at temperature 0: "Please provide
+        the audio, and I will transcribe and translate it
+        accordingly.").  A hallucinated transcript loses its keyword,
+        and a persistent refusal degrades to NO_SPEECH (a missing
+        payload); both warrant a retry of the whole end-to-end run.
+        Everything else (wake counts, payload shapes, speaker
+        numbers) is asserted strictly on every run.
+        """
+        if len(payloads) != len(cls._EXPECTED_KEYWORDS):
+            return f"expected 3 SPEECH payloads, got {len(payloads)}"
+        for keyword, payload in zip(cls._EXPECTED_KEYWORDS, payloads):
+            if not isinstance(payload, dict):
+                return None
+            text = payload.get("text")
+            if not isinstance(text, str) or keyword not in text.lower():
+                return f"{keyword!r} not found in transcript {text!r}"
+        return None
+
     def test_two_voices_numbered_in_order_and_repeat_matches(self) -> None:
         pair = _two_english_voices()
         if not pair:
@@ -199,24 +226,38 @@ class TestSpeakerIdFromWav(unittest.TestCase):
             wav = _concat_wavs(
                 tmpdir / "combined.wav", parts, gap_seconds=3.0,
             )
-            proc = _run_listener(wav)
-        detail = proc.stdout + proc.stderr[-2000:]
-        self.assertEqual(proc.stdout.split().count("WAKE"), 3, msg=detail)
-        payloads = _speech_payloads(proc.stdout)
-        self.assertEqual(len(payloads), 3, msg=detail)
-        for payload in payloads:
-            self.assertIsInstance(payload, dict, msg=detail)
-            self.assertIsInstance(payload["text"], str, msg=detail)
-            self.assertIsInstance(payload["speaker"], int, msg=detail)
-        texts = [p["text"].lower() for p in payloads]
-        self.assertIn("parser", texts[0], msg=detail)
-        self.assertIn("test", texts[1], msg=detail)
-        self.assertIn("documentation", texts[2], msg=detail)
-        speakers = [p["speaker"] for p in payloads]
-        self.assertEqual(speakers[0], 1, msg=detail)
-        self.assertEqual(speakers[1], 2, msg=detail)
-        self.assertEqual(speakers[2], 1, msg=detail)
-        self.assertEqual(proc.returncode, 0, msg=proc.stderr[-2000:])
+            # Retry-tolerant against STT hallucinations only (see
+            # _stt_flaked): wake detection and speaker identification
+            # run locally and are asserted strictly on EVERY attempt;
+            # a genuine regression therefore fails all three runs.
+            flake_details: list[str] = []
+            for _attempt in range(3):
+                proc = _run_listener(wav)
+                detail = proc.stdout + proc.stderr[-2000:]
+                self.assertEqual(
+                    proc.stdout.split().count("WAKE"), 3, msg=detail
+                )
+                self.assertEqual(
+                    proc.returncode, 0, msg=proc.stderr[-2000:]
+                )
+                payloads = _speech_payloads(proc.stdout)
+                flake = self._stt_flaked(payloads)
+                if flake is not None:
+                    flake_details.append(f"{flake}\n{detail}")
+                    continue
+                for payload in payloads:
+                    self.assertIsInstance(payload, dict, msg=detail)
+                    self.assertIsInstance(payload["text"], str, msg=detail)
+                    self.assertIsInstance(
+                        payload["speaker"], int, msg=detail
+                    )
+                speakers = [p["speaker"] for p in payloads]
+                self.assertEqual(speakers, [1, 2, 1], msg=detail)
+                return
+        self.fail(
+            "STT backend flaked on all 3 runs:\n"
+            + "\n---\n".join(flake_details)
+        )
 
     def test_single_utterance_payload_shape(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
