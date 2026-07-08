@@ -67,6 +67,7 @@ from kiss.agents.sorcar.cli_panel import (
     panel_bottom,
     panel_cols,
     panel_top,
+    voice_panel_top,
 )
 from kiss.agents.sorcar.cli_panel import (
     MIN_BODY_ROWS as _MIN_BODY_ROWS,
@@ -332,6 +333,13 @@ class _InputBox:
     Attributes:
         lock: Shared lock (also used by :class:`_StdoutProxy`).
         buf: The current edit buffer.
+        cursor: Caret index into :attr:`buf` (``0..len(buf)``).
+            Left/Right (and Home/End) move it; every buffer edit
+            inserts/deletes at this position so previously-typed text
+            can be corrected.  Assigning :attr:`buf` moves the cursor
+            to the end of the new text; editing code that inserts or
+            deletes mid-buffer re-places the cursor right after the
+            assignment.
         title: Text shown in the top border.
         status: Right-aligned text shown in the bottom border.
     """
@@ -365,7 +373,23 @@ class _InputBox:
         # by the SIGCONT handler after a suspend/resume cycle.
         self._raw_term: Any = None
         self._prev_sigcont: Any = None
-        # Persistent input history (oldest -> newest); Up/Down browse it.
+        # Transient status overlay: when non-empty, this plain text is
+        # shown in red at the *beginning of the panel's top border*
+        # (the header) — used by ``/voice`` for its ``Listening ...``
+        # / ``Transcribing ...`` indicator.  ``overlay_blink`` makes it
+        # blink; ``/voice`` sets it only once the sorcar wake word has
+        # been detected (the listener's ``WAKE``/``TRANSCRIBING``
+        # protocol lines).
+        self.overlay = ""
+        self.overlay_blink = False
+        # Lines injected programmatically (by the ``/voice`` wake-word
+        # pump) that the stdin pump treats exactly like Enter-submitted
+        # typed lines.  Guarded by :attr:`lock`; drained at the top of
+        # every :func:`_pump_stdin` iteration.
+        self._injected: list[str] = []
+        # Persistent input history (oldest -> newest); Up/Down browse
+        # it when the buffer is empty or a browse is in progress
+        # (otherwise they move the caret between buffer lines).
         # ``_hist_idx`` is ``None`` when not browsing; otherwise an index
         # into ``history`` (or ``len(history)`` when at the saved draft).
         self.history: list[str] = []
@@ -418,6 +442,24 @@ class _InputBox:
         # displays)`` lists.
         self._last_completed_buf: str | None = None
         self._last_completed_cands: tuple[list[str], list[str]] = ([], [])
+
+    @property
+    def buf(self) -> str:
+        """The current edit buffer."""
+        return self._buf
+
+    @buf.setter
+    def buf(self, value: str) -> None:
+        """Replace the edit buffer and move the caret to its end.
+
+        Whole-buffer replacement (history recall, completion accept,
+        Ctrl+U clear, submit reset, direct assignment by owners) puts
+        the insertion point after the new text — the only sensible
+        spot for a fresh buffer.  Mid-buffer edits in :meth:`feed`
+        re-assign :attr:`cursor` right after setting :attr:`buf`.
+        """
+        self._buf = value
+        self.cursor = len(value)
 
     def start(self) -> None:
         """Enter raw mode, reserve the scroll region and draw the box."""
@@ -556,10 +598,15 @@ class _InputBox:
         if self._old_term is not None:
             termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old_term)
             self._old_term = None
-        # Drop completion-menu state so a later ``start()`` does not
-        # paint phantom menu rows or wrongly trip the "menu shrank"
-        # clear path in :meth:`_draw_locked` (which compares the next
-        # ``_menu_h()`` against ``_drawn_menu_h`` from this run).
+        # Drop transient overlay/completion state so a later ``start()``
+        # does not paint a phantom voice header/menu rows or wrongly
+        # trip the "menu shrank" clear path in :meth:`_draw_locked`
+        # (which compares the next ``_menu_h()`` against
+        # ``_drawn_menu_h`` from this run).
+        self.overlay = ""
+        self.overlay_blink = False
+        with self.lock:
+            self._injected.clear()
         self._reset_completion_state()
         self._drawn_menu_h = 0
         # Reset the drawn box height so a later ``start()`` does not
@@ -604,6 +651,34 @@ class _InputBox:
             if self._active:
                 self._draw_locked()
 
+    def inject_line(self, text: str) -> None:
+        """Queue *text* to be submitted exactly like a typed Enter line.
+
+        Called from background threads (the ``/voice`` wake-word pump)
+        to hand a programmatically produced line to whichever
+        :func:`_pump_stdin` loop currently owns the box; the pump
+        drains the queue and forwards each line to its ``on_submit``
+        callback, so injected lines flow through the same idle-read /
+        steering paths as keyboard input while the in-progress typed
+        draft (:attr:`buf`) stays untouched.
+
+        Args:
+            text: The line to submit.
+        """
+        with self.lock:
+            self._injected.append(text)
+
+    def drain_injected(self) -> list[str]:
+        """Return and clear all pending injected lines.
+
+        Returns:
+            The injected lines in FIFO order (possibly empty).
+        """
+        with self.lock:
+            lines = self._injected
+            self._injected = []
+            return lines
+
     def _menu_h(self) -> int:
         """Return the current rendered height of the completion menu.
 
@@ -647,7 +722,9 @@ class _InputBox:
         rows, _ = _term_size()
         cols = panel_cols()
         menu_h = self._menu_h()
-        body_rows, is_placeholder = panel_body(self.buf, cols)
+        body_rows, is_placeholder = panel_body(
+            self.buf, cols, cursor=self.cursor,
+        )
         box_body_h = len(body_rows)
         box_h = 2 + box_body_h
         eff_box_h = box_h + menu_h
@@ -702,10 +779,19 @@ class _InputBox:
             self._draw_menu_locked(top_row, cols, menu_h)
 
         box_top = top_row + menu_h
-        top = panel_top(self.title, cols)
         bottom = panel_bottom(self.status, cols)
 
-        out.write(f"{_ESC}[{box_top};1H{_ESC}[2K{CYAN}{top}{RESET}")
+        # In voice mode the transient indicator (``Listening ...`` /
+        # ``Transcribing ...``) opens the header: it is rendered red
+        # at the beginning of the top border, blinking only once the
+        # sorcar wake word has been detected (``overlay_blink``).
+        if self.overlay:
+            top_line = voice_panel_top(
+                self.overlay, self.title, cols, blink=self.overlay_blink,
+            )
+        else:
+            top_line = f"{CYAN}{panel_top(self.title, cols)}{RESET}"
+        out.write(f"{_ESC}[{box_top};1H{_ESC}[2K{top_line}")
         # Each body row is drawn at ``box_top + 1 + i`` (the first body
         # row sits immediately under the top border).  Every body row
         # opens with a two-column prefix — the cyan ``PROMPT_MARKER``
@@ -716,7 +802,10 @@ class _InputBox:
         for i, body in enumerate(body_rows):
             prefix = body[: len(PROMPT_MARKER)]
             rest = body[len(PROMPT_MARKER) :]
-            rest_color = DIM if (is_placeholder and i == 0) else ""
+            if is_placeholder and i == 0:
+                rest_color = DIM
+            else:
+                rest_color = ""
             mid_inner = (
                 f" {CYAN}{prefix}{RESET}{rest_color}{rest}{RESET} "
             )
@@ -797,10 +886,12 @@ class _InputBox:
         top_row = _box_top_row(rows, drawn_box_h + menu_h)
         # The first body row sits ``menu_h + 1`` rows below the panel's
         # top row (1 row for the top border, ``menu_h`` rows for the
-        # menu above it).  ``body_cursor_col`` returns the body-row
-        # index of the caret (0 for the first body row, growing with
-        # each embedded newline).
-        caret_row, col = body_cursor_col(self.buf, cols)
+        # menu above it).  The voice indicator lives in the header, so
+        # the caret parks on the (still visible) edit buffer as usual.
+        # ``body_cursor_col`` returns the body-row index of the caret
+        # (0 for the first body row, growing with each embedded
+        # newline).
+        caret_row, col = body_cursor_col(self.buf, cols, self.cursor)
         self._out.write(
             f"{_ESC}[{top_row + menu_h + 1 + caret_row};{col}H"
         )
@@ -830,7 +921,9 @@ class _InputBox:
         if not cleaned:
             return False
         with self.lock:
-            self.buf += cleaned
+            cur = self.cursor
+            self.buf = self.buf[:cur] + cleaned + self.buf[cur:]
+            self.cursor = cur + len(cleaned)
         return True
 
     def _history_back(self) -> None:
@@ -856,6 +949,76 @@ class _InputBox:
             else:
                 self._hist_idx = None
                 self.buf = self._hist_saved
+
+    def _cursor_up_line(self) -> None:
+        """Move the caret up one buffer line (textarea-style).
+
+        Mirrors the chat webview textbox: the caret keeps its column
+        (clamped to the target line's length) when the buffer has a
+        line above, and jumps to the very start of the text when it is
+        already on the first line.
+        """
+        with self.lock:
+            line_start = self.buf.rfind("\n", 0, self.cursor) + 1
+            if line_start == 0:
+                self.cursor = 0
+                return
+            col = self.cursor - line_start
+            prev_start = self.buf.rfind("\n", 0, line_start - 1) + 1
+            prev_len = line_start - 1 - prev_start
+            self.cursor = prev_start + min(col, prev_len)
+
+    def _cursor_down_line(self) -> None:
+        """Move the caret down one buffer line (textarea-style).
+
+        Mirrors the chat webview textbox: the caret keeps its column
+        (clamped to the target line's length) when the buffer has a
+        line below, and jumps to the very end of the text when it is
+        already on the last line.
+        """
+        with self.lock:
+            line_end = self.buf.find("\n", self.cursor)
+            if line_end < 0:
+                self.cursor = len(self.buf)
+                return
+            line_start = self.buf.rfind("\n", 0, self.cursor) + 1
+            col = self.cursor - line_start
+            next_start = line_end + 1
+            next_end = self.buf.find("\n", next_start)
+            if next_end < 0:
+                next_end = len(self.buf)
+            self.cursor = next_start + min(col, next_end - next_start)
+
+    def _arrow_up(self) -> None:
+        """Handle the Up arrow (menu closed) with webview semantics.
+
+        History cycling happens only when a browse is already in
+        progress or the buffer is empty — exactly the condition the
+        chat webview's ``cycleHistoryUp`` uses (``histIdx >= 0 ||
+        !inp.value``).  Otherwise the caret moves up one line inside
+        the buffer like a plain textarea.
+        """
+        if self._hist_idx is not None or not self.buf:
+            self._history_back()
+            # Refresh the menu against the recalled buffer so "fast
+            # complete" tracks history navigation too.
+            self._refresh_typing_menu()
+        else:
+            self._cursor_up_line()
+
+    def _arrow_down(self) -> None:
+        """Handle the Down arrow (menu closed) with webview semantics.
+
+        History cycling happens only while a browse is in progress —
+        the chat webview's ``cycleHistoryDown`` guard (``histIdx >=
+        0``).  Otherwise the caret moves down one line inside the
+        buffer like a plain textarea.
+        """
+        if self._hist_idx is not None:
+            self._history_forward()
+            self._refresh_typing_menu()
+        else:
+            self._cursor_down_line()
 
     def _reset_completion_state(self) -> None:
         """Close the in-place completion menu and drop its state."""
@@ -1167,7 +1330,11 @@ class _InputBox:
                 for seq in _NEWLINE_AFTER_ESC:
                     if text.startswith(seq, i + 1):
                         with self.lock:
-                            self.buf += "\n"
+                            cur = self.cursor
+                            self.buf = (
+                                self.buf[:cur] + "\n" + self.buf[cur:]
+                            )
+                            self.cursor = cur + 1
                         # The modifier+Enter is a buffer edit; refresh
                         # the in-place completion menu so suggestions
                         # track multi-line input.
@@ -1186,9 +1353,14 @@ class _InputBox:
                     break
                 # Parse other CSI escape sequences: Up/Down arrows
                 # navigate the in-place completion menu when it's
-                # open, or browse the input history otherwise; the
-                # rest (Left/Right/F-keys, etc.) are swallowed so
-                # their printable bytes do not type into the buffer.
+                # open; otherwise they browse the input history when
+                # the buffer is empty (or a browse is in progress)
+                # and move the caret between buffer lines otherwise
+                # — the same split the chat webview textbox makes;
+                # Left/Right move the edit cursor and Home/End jump
+                # to the buffer's ends; the rest (F-keys, etc.) are
+                # swallowed so their printable bytes do not type into
+                # the buffer.
                 if text[i + 1] == "[":
                     j = i + 2
                     while j < len(text) and not ("@" <= text[j] <= "~"):
@@ -1202,32 +1374,84 @@ class _InputBox:
                         if self._menu_open:
                             self._menu_move(-1)
                         else:
-                            self._history_back()
-                            # Refresh the menu against the recalled
-                            # buffer so "fast complete" tracks history
-                            # navigation too.
-                            self._refresh_typing_menu()
+                            self._arrow_up()
                         changed = True
                     elif final == "B" and seq == "":  # Down arrow
                         if self._menu_open:
                             self._menu_move(1)
                         else:
-                            self._history_forward()
-                            self._refresh_typing_menu()
+                            self._arrow_down()
                         changed = True
                     elif final == "Z" and seq == "":  # Shift+Tab
                         if self._menu_open:
                             self._menu_move(-1)
                             changed = True
+                    elif final == "D" and seq == "":  # Left arrow
+                        with self.lock:
+                            if self.cursor > 0:
+                                self.cursor -= 1
+                        changed = True
+                    elif final == "C" and seq == "":  # Right arrow
+                        with self.lock:
+                            if self.cursor < len(self.buf):
+                                self.cursor += 1
+                        changed = True
+                    elif (final == "H" and seq == "") or (
+                        final == "~" and seq in ("1", "7")
+                    ):  # Home (``ESC[H`` / ``ESC[1~`` / ``ESC[7~``)
+                        with self.lock:
+                            self.cursor = 0
+                        changed = True
+                    elif (final == "F" and seq == "") or (
+                        final == "~" and seq in ("4", "8")
+                    ):  # End (``ESC[F`` / ``ESC[4~`` / ``ESC[8~``)
+                        with self.lock:
+                            self.cursor = len(self.buf)
+                        changed = True
                     i = j + 1
                     continue
-                # Swallow SS3 sequences (``ESC O <final>``): arrow keys
-                # in application cursor mode (DECCKM) and F1–F4, whose
-                # printable bytes must not be typed into the buffer.
+                # SS3 sequences (``ESC O <final>``): arrow keys in
+                # application cursor mode (DECCKM) and F1–F4.
+                # Up/Down behave exactly like their CSI twins above
+                # (menu navigation / history browse / line movement),
+                # Left/Right/Home/End move the edit cursor; the rest
+                # are swallowed so their printable bytes must not be
+                # typed into the buffer.
                 if text[i + 1] == "O":
                     if i + 2 >= len(text):  # split mid-sequence
                         self._pending_esc = text[i:]
                         break
+                    ss3 = text[i + 2]
+                    if ss3 == "A":  # Up arrow (application cursor mode)
+                        if self._menu_open:
+                            self._menu_move(-1)
+                        else:
+                            self._arrow_up()
+                        changed = True
+                    elif ss3 == "B":  # Down arrow
+                        if self._menu_open:
+                            self._menu_move(1)
+                        else:
+                            self._arrow_down()
+                        changed = True
+                    elif ss3 == "D":  # Left arrow
+                        with self.lock:
+                            if self.cursor > 0:
+                                self.cursor -= 1
+                        changed = True
+                    elif ss3 == "C":  # Right arrow
+                        with self.lock:
+                            if self.cursor < len(self.buf):
+                                self.cursor += 1
+                        changed = True
+                    elif ss3 == "H":  # Home
+                        with self.lock:
+                            self.cursor = 0
+                        changed = True
+                    elif ss3 == "F":  # End
+                        with self.lock:
+                            self.cursor = len(self.buf)
+                        changed = True
                     i += 3
                     continue
                 # A bare ESC followed by an unrecognized byte (Alt+key,
@@ -1303,7 +1527,9 @@ class _InputBox:
                 # ``\r`` and follows the branch above, so the two
                 # are reliably distinguishable.
                 with self.lock:
-                    self.buf += "\n"
+                    cur = self.cursor
+                    self.buf = self.buf[:cur] + "\n" + self.buf[cur:]
+                    self.cursor = cur + 1
                     self._hist_idx = None
                 # Like the Shift+Enter newline-insert paths above,
                 # refresh the in-place completion menu so suggestions
@@ -1311,9 +1537,11 @@ class _InputBox:
                 self._refresh_typing_menu()
                 changed = True
             elif ch in ("\x7f", "\x08"):
-                if self.buf:
+                if self.cursor > 0:
                     with self.lock:
-                        self.buf = self.buf[:-1]
+                        cur = self.cursor
+                        self.buf = self.buf[: cur - 1] + self.buf[cur:]
+                        self.cursor = cur - 1
                         self._hist_idx = None
                     # Backspace is an edit; refresh the in-place menu
                     # so suggestions track the shrinking buffer ("fast
@@ -1396,7 +1624,9 @@ class _InputBox:
                 # and would corrupt the terminal when redrawn.  DEL
                 # (\x7f) is already consumed by the backspace branch.
                 with self.lock:
-                    self.buf += ch
+                    cur = self.cursor
+                    self.buf = self.buf[:cur] + ch + self.buf[cur:]
+                    self.cursor = cur + 1
                     self._hist_idx = None
                 # "Fast complete" while typing: every printable
                 # keystroke refreshes the in-place menu with current
@@ -1458,6 +1688,15 @@ def _pump_stdin(
     read_fds = [fd]
     last_size = _term_size()
     while not is_done():
+        # Programmatically injected lines (the ``/voice`` wake-word
+        # pump) submit exactly like Enter-terminated typed lines, then
+        # the loop condition is re-polled so a completed read returns
+        # promptly instead of waiting out one more select timeout.
+        injected = box.drain_injected()
+        if injected:
+            for line in injected:
+                on_submit(line)
+            continue
         try:
             ready, _, _ = select.select(read_fds, [], [], 0.1)
         except (InterruptedError, OSError):
@@ -1849,7 +2088,9 @@ class AnchoredRepl:
     def read_idle_line(self) -> str | None:
         """Read one line in idle mode through the anchored box.
 
-        Up/Down arrows browse :attr:`_InputBox.history`, Tab cycles
+        Up/Down arrows browse :attr:`_InputBox.history` when the
+        buffer is empty (and move the caret between buffer lines
+        otherwise, like the chat webview textbox), Tab cycles
         through the registered ``completer_fn`` candidates, and the
         line is echoed above the box (in the scroll region) after
         Enter so the user can see what they typed.

@@ -4054,17 +4054,64 @@
   // (one per subscribed viewer tab) is suppressed.  See case 'talk'.
   const spokenTalkIds = new Set();
 
+  // FIFO queue serializing ALL talk playback on this device — GPT
+  // audio clips and Web-Speech fallbacks alike.  Without it every
+  // talk event played its own Audio element immediately, so two
+  // talk() calls in quick succession spoke on top of each other
+  // (and a Web-Speech fallback could talk over a playing clip).
+  const talkQueue = [];
+  let talkQueueBusy = false;
+
+  /**
+   * Start the next queued talk job unless one is already playing.
+   * Each job receives a ``finish`` callback (idempotent) that it MUST
+   * invoke when its sound completes — clip 'ended'/'error', rejected
+   * play() fallback finishing, or the speech engine going quiet —
+   * which releases the queue for the next job.
+   */
+  function pumpTalkQueue() {
+    if (talkQueueBusy) return;
+    const job = talkQueue.shift();
+    if (!job) return;
+    talkQueueBusy = true;
+    let finished = false;
+    job(() => {
+      if (finished) return;
+      finished = true;
+      talkQueueBusy = false;
+      pumpTalkQueue();
+    });
+  }
+
+  /**
+   * Append a talk playback *job* — ``job(finish)`` starts the sound
+   * and calls ``finish()`` when it completes — and pump the queue.
+   */
+  function enqueueTalkPlayback(job) {
+    talkQueue.push(job);
+    pumpTalkQueue();
+  }
+
   /**
    * Read *talkText* aloud with the browser's Web Speech API using the
    * most natural available system voice — the fallback path of the
    * agent ``talk`` tool, used when the event carries no
    * GPT-synthesized audio or its playback is unavailable/blocked.
+   *
+   * *onDone* (optional) is invoked exactly when the engine finishes —
+   * last utterance ``onend``, any utterance ``onerror``, or
+   * immediately when nothing speakable remains / speech is
+   * unsupported — so the talk queue can advance without overlap.
    */
-  function speakWithSystemVoice(ev, talkText) {
+  function speakWithSystemVoice(ev, talkText, onDone) {
+    const done = typeof onDone === 'function' ? onDone : function () {};
     try {
       const synth = window.speechSynthesis;
       const Utterance = window.SpeechSynthesisUtterance;
-      if (!synth || typeof Utterance !== 'function') return;
+      if (!synth || typeof Utterance !== 'function') {
+        done();
+        return;
+      }
       // iOS leaves the synthesizer stuck paused after the page is
       // backgrounded mid-speech; a paused queue swallows every
       // new utterance.  resume() is a no-op when not paused.
@@ -4078,7 +4125,10 @@
       //    emotion (or a vibe inferred from the wording) plus the
       //    sentence's own punctuation.
       const cleaned = cleanSpeechText(talkText);
-      if (!cleaned) return;
+      if (!cleaned) {
+        done();
+        return;
+      }
       const emotion = isKnownEmotion(ev.emotion)
         ? ev.emotion
         : inferEmotion(cleaned);
@@ -4093,11 +4143,17 @@
         const prosody = sentenceProsody(sentences[i], emotion, i);
         utter.rate = prosody.rate;
         utter.pitch = prosody.pitch;
+        // Completion for the talk queue: the engine speaks the
+        // utterances in order, so the LAST one's end marks the end of
+        // this talk; any utterance error also releases the queue.
+        utter.onerror = done;
+        if (i === sentences.length - 1) utter.onend = done;
         synth.speak(utter);
       }
     } catch (_e) {
       // Speech synthesis unsupported or blocked — audio is
       // best-effort and must never break event handling.
+      done();
     }
   }
 
@@ -4109,18 +4165,36 @@
    * block) falls back to the Web Speech API asynchronously — and
    * false when the Audio API is unavailable so the caller falls back
    * immediately.
+   *
+   * *onDone* (optional) is invoked exactly when this talk's sound is
+   * over — the clip's ``ended`` or ``error`` event, or the
+   * rejected-play() speech fallback finishing — so the talk queue can
+   * start the next talk without overlapping this one.
    */
-  function playTalkAudio(ev) {
+  function playTalkAudio(ev, onDone) {
+    const done = typeof onDone === 'function' ? onDone : function () {};
     try {
       if (typeof window.Audio !== 'function') return false;
       const mime = ev.audioMime || 'audio/mpeg';
       const player = new window.Audio(
         'data:' + mime + ';base64,' + ev.audioB64,
       );
+      player.onended = done;
+      player.onerror = done;
+      // 'abort' is terminal too (fetch/decode aborted) — without it
+      // an aborted clip would hold the talk queue forever.
+      player.onabort = done;
       const played = player.play();
       if (played && typeof played.catch === 'function') {
         played.catch(() => {
-          speakWithSystemVoice(ev, ev.text || '');
+          // An undecodable clip fires BOTH this rejection and a late
+          // 'error' event; the fallback speech owns completion now,
+          // so detach the element's handlers or the late event would
+          // start the next talk over the still-speaking fallback.
+          player.onended = null;
+          player.onerror = null;
+          player.onabort = null;
+          speakWithSystemVoice(ev, ev.text || '', done);
         });
       }
       return true;
@@ -4566,8 +4640,12 @@
         // Prefer the agent-synthesized natural voice (a GPT audio
         // model — see speech_synthesis.py) when the event carries
         // audio; otherwise read the text with the Web Speech API.
-        if (ev.audioB64 && playTalkAudio(ev)) break;
-        speakWithSystemVoice(ev, talkText);
+        // Playback goes through the talk queue so back-to-back
+        // talk() calls never speak over each other.
+        enqueueTalkPlayback(finish => {
+          if (ev.audioB64 && playTalkAudio(ev, finish)) return;
+          speakWithSystemVoice(ev, talkText, finish);
+        });
         break;
       }
       case 'error':
@@ -7200,6 +7278,15 @@
     window.addEventListener('kiss-voice-submit', () => {
       sendMessage();
     });
+
+    // Voice-dictated answers: while the agent's ask-user question is
+    // pending, voice.js inserts the translated speech into the modal's
+    // answer box and raises this event so the answer is submitted to
+    // the agent exactly like a click on the modal's Submit button.
+    window.addEventListener('kiss-voice-answer', () => {
+      const tab = getTab(activeTabId);
+      if (tab && tab.askPendingQuestion !== null) submitAskForTab(tab);
+    });
   }
 
   function readFileAsAttachment(file) {
@@ -7304,9 +7391,34 @@
         submitAskForTab(tab);
       }
     });
+    // Mic button: speech after the "Sorcar" wake word answers the
+    // pending question (voice.js routes it into the answer box and
+    // raises 'kiss-voice-answer').  voice.js also owns this button's
+    // click (toggle listening) and mirrors the main mic's state
+    // classes onto it, so no click handler is wired here.
+    const m = document.createElement('button');
+    m.className = 'ask-user-mic';
+    m.setAttribute(
+      'data-tooltip',
+      "Voice trigger: listen for the word 'Sorcar'",
+    );
+    m.innerHTML =
+      '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" ' +
+      'stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
+      'stroke-linejoin="round">' +
+      '<path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>' +
+      '<path d="M19 10v2a7 7 0 0 1-14 0v-2"/>' +
+      '<line x1="12" y1="19" x2="12" y2="23"/>' +
+      '<line x1="8" y1="23" x2="16" y2="23"/></svg>';
+    const row = document.createElement('div');
+    row.className = 'ask-user-actions';
+    row.appendChild(s);
+    row.appendChild(m);
     tab.askQuestionEl = q;
     tab.askInputEl = i;
     tab.askSubmitEl = s;
+    tab.askMicEl = m;
+    tab.askActionsEl = row;
   }
 
   /** Render the given question text into the tab's question element. */
@@ -7336,8 +7448,11 @@
       askUserSlot.removeChild(askUserSlot.firstChild);
     askUserSlot.appendChild(tab.askQuestionEl);
     askUserSlot.appendChild(tab.askInputEl);
-    askUserSlot.appendChild(tab.askSubmitEl);
+    askUserSlot.appendChild(tab.askActionsEl);
     askUserModal.style.display = 'flex';
+    // Tell voice.js a fresh ask-user mic is in the DOM so it can sync
+    // the button's state classes with the main mic's live state.
+    window.dispatchEvent(new CustomEvent('kiss-ask-mic-mounted'));
     setTimeout(() => {
       if (tab.id === activeTabId && tab.askInputEl) tab.askInputEl.focus();
     }, 0);

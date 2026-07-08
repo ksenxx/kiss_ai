@@ -335,6 +335,7 @@ def _close_db() -> None:
     _thread_local.conn = None
     _thread_local.gen = -1
     _thread_local.path = None
+    _thread_local.file_id = None
     _db_conn = None
 
 
@@ -800,6 +801,21 @@ def _migrate_old_schema_if_needed(conn: sqlite3.Connection) -> bool:
     return True
 
 
+def _db_file_identity(path: str) -> tuple[int, int] | None:
+    """Return the ``(st_dev, st_ino)`` identity of *path*, or ``None``.
+
+    ``None`` means the file does not currently exist (or cannot be
+    stat'ed).  The identity distinguishes a file that was deleted and
+    recreated at the same pathname from the original file — a plain
+    existence check cannot.
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino)
+
+
 def _get_db() -> sqlite3.Connection:
     """Return a per-thread database connection, creating one if needed.
 
@@ -808,8 +824,11 @@ def _get_db() -> sqlite3.Connection:
     cached in ``threading.local()`` and invalidated when:
 
     * ``_db_generation`` is bumped (via ``_close_db()``),
-    * ``_DB_PATH`` changes (test redirects), or
-    * ``_db_conn`` is set to ``None`` (legacy test pattern).
+    * ``_DB_PATH`` changes (test redirects),
+    * ``_db_conn`` is set to ``None`` (legacy test pattern), or
+    * the file at ``_DB_PATH`` is deleted or replaced on disk (its
+      ``(st_dev, st_ino)`` identity no longer matches the one the
+      cached connection was opened against).
     """
     global _db_conn
     tl = _thread_local
@@ -826,13 +845,30 @@ def _get_db() -> sqlite3.Connection:
     # next ``_get_db()`` call detects it and reconnects.
     gen_snapshot = _db_generation
     current_path = str(_DB_PATH)
-    _maybe_reset_caches(current_path)
+    current_id = _db_file_identity(current_path)
+    _maybe_reset_caches(current_path, current_id)
 
     if (
         tl_conn is not None
         and tl_gen == gen_snapshot
         and tl_path == current_path
         and _db_conn is not None
+        # The file on disk must be the SAME file the cached connection
+        # was opened against.  A cached connection whose backing file
+        # was deleted — and possibly recreated at the same pathname by
+        # an independent ``sqlite3.connect`` (log rotation, a test
+        # cleaning up ``$KISS_HOME``, a user removing
+        # ``~/.kiss/sorcar.db`` while the daemon runs) — keeps writing
+        # into the orphaned inode: every subsequent INSERT silently
+        # disappears, while any NEW reader of ``_DB_PATH`` sees an
+        # empty database with no ``task_history`` table.  A bare
+        # existence check is not enough (the recreated file exists),
+        # so the ``(st_dev, st_ino)`` identity recorded when the
+        # connection was opened is compared instead; a mismatch falls
+        # through to the reconnect path, which (re)creates the file
+        # and its schema.
+        and current_id is not None
+        and getattr(tl, "file_id", None) == current_id
     ):
         return tl_conn
 
@@ -871,6 +907,10 @@ def _get_db() -> sqlite3.Connection:
     tl.conn = conn
     tl.gen = gen_snapshot
     tl.path = current_path
+    # Record the identity of the file this connection is bound to.
+    # ``_init_tables`` above has materialised the main DB file even
+    # for a brand-new database, so the stat cannot miss.
+    tl.file_id = _db_file_identity(current_path)
     _db_conn = conn  # backward compat: expose last-created connection
     return conn
 
@@ -1742,24 +1782,35 @@ _event_writer_lock = threading.Lock()
 _event_writer_stop = threading.Event()
 _next_seq_cache: dict[str, int] = {}
 _marked_has_events: set[str] = set()
-# Path the seq/has_events caches were last populated against.  When
-# ``_DB_PATH`` is reassigned (test fixtures), the caches are stale and
-# must be cleared on the next ``_get_db()`` reconnect.
-_caches_db_path: str | None = None
+# (path, file identity) key the seq/has_events caches were last
+# populated against.  When ``_DB_PATH`` is reassigned (test fixtures)
+# OR the file at the same pathname is replaced on disk, the caches are
+# stale and must be cleared on the next ``_get_db()`` reconnect.
+_caches_db_key: tuple[str, tuple[int, int] | None] | None = None
 _caches_lock = threading.Lock()
 
 
-def _maybe_reset_caches(current_path: str) -> None:
-    """Clear seq/has_events caches when ``_DB_PATH`` changes (test fixtures)."""
-    global _caches_db_path
-    if _caches_db_path == current_path:
+def _maybe_reset_caches(
+    current_path: str, file_id: tuple[int, int] | None = None,
+) -> None:
+    """Clear seq/has_events caches when the database is swapped out.
+
+    Triggered both by a ``_DB_PATH`` reassignment (test fixtures) and
+    by an on-disk replacement of the SAME pathname (*file_id* — the
+    file's ``(st_dev, st_ino)`` — changes): the cached sequence
+    counters and has-events marks were seeded from the previous
+    database and are meaningless for the new one.
+    """
+    global _caches_db_key
+    key = (current_path, file_id)
+    if _caches_db_key == key:
         return
     with _caches_lock:
-        if _caches_db_path == current_path:
+        if _caches_db_key == key:
             return
         _next_seq_cache.clear()
         _marked_has_events.clear()
-        _caches_db_path = current_path
+        _caches_db_key = key
 
 # Per-batch tuning.  256 events at 50 µs JSON encoding ≈ 13 ms of producer
 # work bundled into one SQL transaction.  20 ms collection window keeps
@@ -1977,7 +2028,7 @@ def _flush_chat_events() -> None:
 
 def _stop_event_writer() -> None:
     """Drain and stop the writer thread.  Used by ``_close_db``/tests."""
-    global _event_writer_thread, _caches_db_path
+    global _event_writer_thread, _caches_db_key
     # Drain first: ``_flush_chat_events`` restarts a dead writer while
     # items remain, so this cannot block forever on a queue no writer
     # is draining (unlike a bare ``_event_queue.join()``).
@@ -2022,7 +2073,7 @@ def _stop_event_writer() -> None:
     with _caches_lock:
         _next_seq_cache.clear()
         _marked_has_events.clear()
-        _caches_db_path = None
+        _caches_db_key = None
 
 
 def _append_chat_event(

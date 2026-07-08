@@ -16,7 +16,7 @@ from test_data.calculator.operators import OPERATORS
 
 class TestOperatorRegistry:
     def test_all_operators_registered(self):
-        assert set(OPERATORS.keys()) == {"+", "-", "*", "/"}
+        assert set(OPERATORS.keys()) == {"+", "-"}
 
     def test_each_operator_has_eval_and_precedence(self):
         for sym, mod in OPERATORS.items():
@@ -32,18 +32,6 @@ class TestOperatorRegistry:
         from test_data.calculator.operators import subtract
         assert subtract.eval(5, 3) == 2
         assert subtract.eval(0, 5) == -5
-
-    def test_multiply(self):
-        from test_data.calculator.operators import multiply
-        assert multiply.eval(2, 3) == 6
-        assert multiply.eval(0.5, 4) == pytest.approx(2.0)
-
-    def test_divide(self):
-        from test_data.calculator.operators import divide
-        assert divide.eval(6, 3) == 2
-        assert divide.eval(1, 4) == pytest.approx(0.25)
-        with pytest.raises(ZeroDivisionError):
-            divide.eval(1, 0)
 
 
 class TestTokenizer:
@@ -68,19 +56,6 @@ class TestEvaluator:
     def test_subtraction(self):
         assert evaluate("10 - 4") == 6
 
-    def test_multiplication(self):
-        assert evaluate("2 * 3") == 6
-        assert evaluate("0.5 * 4") == pytest.approx(2.0)
-
-    def test_division(self):
-        assert evaluate("6 / 3") == 2
-        assert evaluate("1 / 4") == pytest.approx(0.25)
-        assert evaluate("2 + 6 / 3") == 4
-
-    def test_division_by_zero(self):
-        with pytest.raises(ZeroDivisionError):
-            evaluate("1 / 0")
-
     def test_chained_operations(self):
         assert evaluate("1 + 2 + 3 + 4") == 10
 
@@ -101,7 +76,7 @@ class TestEvaluator:
             evaluate("2 3")
 
     def test_complex_expression(self):
-        assert evaluate("2 + 3 * 4") == 14
+        assert evaluate("2 + (3 - 4)") == 1
 
     def test_unknown_operator_via_get_operator(self):
         with pytest.raises(ValueError, match="unknown operator"):

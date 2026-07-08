@@ -277,6 +277,17 @@ class VSCodeServer(
 ):
     """Backend server for VS Code extension."""
 
+    # Class-level fallbacks so these attributes exist on every
+    # instance regardless of construction path — some tests build a
+    # minimal server via ``object.__new__(VSCodeServer)`` and never
+    # run ``__init__``, then call methods (``_replay_session``,
+    # ``_teardown_tab_resources``, ``_new_chat``) that read them.
+    # ``__init__`` shadows both with fresh per-instance values, so
+    # production servers never touch these class-level objects; only
+    # non-``__init__`` instances see (and, for the dict, share) them.
+    _tab_opened_task_ids: dict[str, str] = {}
+    _cli_running_lookup: Callable[[str], bool] | None = None
+
     def __init__(self, printer: JsonPrinter | None = None) -> None:
         # The transport-specific printer is owned by the caller
         # (typically :class:`RemoteAccessServer`, which passes a
