@@ -4643,6 +4643,15 @@
         //    this webview (two open tabs of the same task, a stale
         //    subscription from before a reload, ...) only the first
         //    speaks.  Without this the same reply was spoken twice.
+        // muted copies: the daemon stamps ``muted: true`` on the
+        // copies it relays to peers on the SAME machine as a player
+        // that already owns this utterance (e.g. a sorcar CLI that
+        // played the clip on the terminal speakers forwards the
+        // event, and this webview runs on that very machine over the
+        // local UDS).  Skip playback entirely — and skip the talkId
+        // dedupe bookkeeping, so an unmuted copy that legitimately
+        // reaches this webview later is still allowed to speak.
+        if (ev.muted) break;
         const talkText = ev.text || '';
         if (!talkText) break;
         if (ev.tabId !== undefined && !getTab(ev.tabId)) break;
