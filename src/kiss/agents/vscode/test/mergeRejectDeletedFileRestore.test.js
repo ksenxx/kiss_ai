@@ -200,10 +200,10 @@ Module._resolveFilename = function (request, parent, ...rest) {
   if (request === 'vscode') return require.resolve('./_vscode-stub.js');
   return origResolve.call(this, request, parent, ...rest);
 };
-fs.writeFileSync(
-  path.join(__dirname, '_vscode-stub.js'),
-  `'use strict';\nmodule.exports = global.__kissVscodeStub;\n`,
-);
+// ``_vscode-stub.js`` is a git-tracked fixture shared by tests running
+// in parallel; it already re-exports ``global.__kissVscodeStub`` — never
+// rewrite or delete it here (writeFileSync truncates first, racing a
+// concurrent ``require('vscode')`` in sibling test processes).
 global.__kissVscodeStub = vscodeStub;
 
 const sourcePath = path.join(__dirname, '..', 'out', 'MergeManager.js');
