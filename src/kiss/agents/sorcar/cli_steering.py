@@ -54,15 +54,19 @@ from kiss.agents.sorcar.cli_line_continuation import (
 )
 from kiss.agents.sorcar.cli_panel import (
     _ESC,
+    BLINK,
     CYAN,
     DIM,
     IDLE_TITLE,
     PROMPT_MARKER,
+    RED,
     RESET,
     STEER_TITLE,
     _term_size,
     body_cursor_col,
+    display_width,
     menu_row,
+    overlay_body_rows,
     panel_body,
     panel_bottom,
     panel_cols,
@@ -372,6 +376,11 @@ class _InputBox:
         # by the SIGCONT handler after a suspend/resume cycle.
         self._raw_term: Any = None
         self._prev_sigcont: Any = None
+        # Transient status overlay: when non-empty, the panel body
+        # shows this plain text (rendered blinking red) after the
+        # chevron instead of the edit buffer — used by ``/voice`` for
+        # its ``Listening ...`` / ``Transcribing ...`` indicator.
+        self.overlay = ""
         # Persistent input history (oldest -> newest); Up/Down browse
         # it when the buffer is empty or a browse is in progress
         # (otherwise they move the caret between buffer lines).
@@ -583,10 +592,12 @@ class _InputBox:
         if self._old_term is not None:
             termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old_term)
             self._old_term = None
-        # Drop completion-menu state so a later ``start()`` does not
-        # paint phantom menu rows or wrongly trip the "menu shrank"
-        # clear path in :meth:`_draw_locked` (which compares the next
-        # ``_menu_h()`` against ``_drawn_menu_h`` from this run).
+        # Drop transient overlay/completion state so a later ``start()``
+        # does not paint phantom voice/menu rows or wrongly trip the
+        # "menu shrank" clear path in :meth:`_draw_locked` (which
+        # compares the next ``_menu_h()`` against ``_drawn_menu_h`` from
+        # this run).
+        self.overlay = ""
         self._reset_completion_state()
         self._drawn_menu_h = 0
         # Reset the drawn box height so a later ``start()`` does not
@@ -674,9 +685,15 @@ class _InputBox:
         rows, _ = _term_size()
         cols = panel_cols()
         menu_h = self._menu_h()
-        body_rows, is_placeholder = panel_body(
-            self.buf, cols, cursor=self.cursor,
-        )
+        if self.overlay:
+            # Voice-mode indicator: the body shows the transient
+            # overlay text (blinking red) instead of the edit buffer.
+            body_rows = overlay_body_rows(self.overlay, cols)
+            is_placeholder = False
+        else:
+            body_rows, is_placeholder = panel_body(
+                self.buf, cols, cursor=self.cursor,
+            )
         box_body_h = len(body_rows)
         box_h = 2 + box_body_h
         eff_box_h = box_h + menu_h
@@ -745,7 +762,12 @@ class _InputBox:
         for i, body in enumerate(body_rows):
             prefix = body[: len(PROMPT_MARKER)]
             rest = body[len(PROMPT_MARKER) :]
-            rest_color = DIM if (is_placeholder and i == 0) else ""
+            if self.overlay and i == 0:
+                rest_color = BLINK + RED
+            elif is_placeholder and i == 0:
+                rest_color = DIM
+            else:
+                rest_color = ""
             mid_inner = (
                 f" {CYAN}{prefix}{RESET}{rest_color}{rest}{RESET} "
             )
@@ -826,10 +848,21 @@ class _InputBox:
         top_row = _box_top_row(rows, drawn_box_h + menu_h)
         # The first body row sits ``menu_h + 1`` rows below the panel's
         # top row (1 row for the top border, ``menu_h`` rows for the
-        # menu above it).  ``body_cursor_col`` returns the body-row
-        # index of the caret (0 for the first body row, growing with
-        # each embedded newline).
-        caret_row, col = body_cursor_col(self.buf, cols, self.cursor)
+        # menu above it).  In voice overlay mode the edit buffer is not
+        # visible, so park the cursor after the status text rather than
+        # on the hidden buffer's caret (which could otherwise blink on
+        # top of the "Listening ..." text or even below the overlay).
+        if self.overlay:
+            caret_row = 0
+            col = min(
+                3 + display_width(PROMPT_MARKER + self.overlay),
+                max(cols - 2, 1),
+            )
+        else:
+            # ``body_cursor_col`` returns the body-row index of the
+            # caret (0 for the first body row, growing with each
+            # embedded newline).
+            caret_row, col = body_cursor_col(self.buf, cols, self.cursor)
         self._out.write(
             f"{_ESC}[{top_row + menu_h + 1 + caret_row};{col}H"
         )
