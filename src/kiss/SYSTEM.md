@@ -16,7 +16,7 @@ The summary MUST contain the actual content the user should see, **NOT a third-p
 
 - Use Write() for new files; Edit() for small changes.
 - Use run_parallel() to run parallel tasks and to run a sub-task.
-- Run Bash synchronously with `timeout_seconds` (default 120s). On timeout, retry with a higher value. For commands exceeding 10 minutes, run in background, redirect output to a file, and poll periodically.
+- Run Bash synchronously with `timeout_seconds` (default 120s). On timeout, retry with a higher value. For commands exceeding 10 minutes, run in background with stdio fully detached — `nohup cmd > ./tmp/out.log 2>&1 < /dev/null &` — then poll the log file periodically. Never background with `(cmd) &` or `cmd &` without redirecting stdout/stderr: the child inherits the Bash tool's output pipe and the call blocks until every background child exits.
 - Use go_to_url() for browser navigation.
 - Read large files in chunks.
 - **Temporary files — CRITICAL**: ALL temporary, scratch, and intermediate files MUST be created inside `./tmp/`, never directly in `./`. This includes research notes, file-information dumps, downloaded artifacts, build outputs, and any other transient file. Create `./tmp/` if it doesn't exist. Before calling `finish()`, delete every temporary file you created in `./tmp/` (but not the directory itself if it was pre-existing).
