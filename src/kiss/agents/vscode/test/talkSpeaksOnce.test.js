@@ -83,7 +83,9 @@ function makeWebview() {
     this.text = text;
   };
   win.speechSynthesis = {
-    speak: utter => spoken.push({text: utter.text, lang: utter.lang}),
+    // Record the utterance object itself so tests can fire its
+    // ``onend`` to complete the (serialized) talk playback queue.
+    speak: utter => spoken.push(utter),
   };
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
@@ -218,6 +220,11 @@ test('two DIFFERENT talk() calls both speak', () => {
     type: 'talk', language: 'en-US', text: 'second thing',
     talkId: 't-b', taskId: 7, tabId,
   });
+  // Talk playback is serialized: the second talk waits in the queue
+  // until the speech engine finishes the first (its utterance's
+  // ``onend``) so the two never speak over each other.
+  assert.deepStrictEqual(spoken.map(s => s.text), ['first thing']);
+  spoken[0].onend();
   assert.deepStrictEqual(
     spoken.map(s => s.text),
     ['first thing', 'second thing'],
@@ -256,6 +263,8 @@ test('dedupe memory is bounded (many talk calls keep working)', () => {
       type: 'talk', language: 'en-US', text: `utterance ${i}`,
       talkId: `t-many-${i}`, taskId: 7, tabId,
     });
+    // Finish each talk (serialized playback) so the next one starts.
+    spoken[spoken.length - 1].onend();
   }
   assert.strictEqual(spoken.length, 600);
   // A duplicate of the LATEST utterance is still suppressed after

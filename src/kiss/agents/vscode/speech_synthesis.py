@@ -26,22 +26,43 @@ import sys
 from kiss.agents.vscode.voice_wake import audio_timeout_seconds
 
 # Newest, most natural GPT audio model in MODEL_INFO.json (validated
-# live: valid MP3 with the "marin" voice).  ``gpt-audio-mini`` also
+# live: valid MP3 with the default voice).  ``gpt-audio-mini`` also
 # works at ~1/4 the price but sounds noticeably flatter.
 DEFAULT_TTS_MODEL = "gpt-audio-1.5"
 
-# "marin" is one of the newest, most natural OpenAI voices and is
-# supported by both gpt-audio and gpt-audio-mini (validated live).
-DEFAULT_TTS_VOICE = "marin"
+# "cedar" and "marin" are OpenAI's two newest voices "with the most
+# significant improvements to natural-sounding speech" and the two the
+# TTS docs recommend "for best quality".  "cedar" is the deeper,
+# warmer of the pair — it reads like a charismatic film narrator,
+# the closest preset to the requested celebrity-like delivery
+# (voice cloning of real celebrities is prohibited by OpenAI's usage
+# policies, so delivery style is steered by prompt instead).
+DEFAULT_TTS_VOICE = "cedar"
 
 # The "Script:" framing below is load-bearing: a plain "repeat the
 # user's text" system prompt made gpt-audio-mini reply conversationally
 # ("Hi! It's great to hear your new voice...") instead of reading the
 # text verbatim.
+#
+# The labeled delivery block mirrors OpenAI's own openai.fm instruction
+# format (Voice Affect / Pacing / Pauses / Pronunciation) — the proven
+# way to steer the gpt-audio family's delivery.  It exists to kill the
+# model's known artifacts (community-reported: random mid-script
+# pauses, stutters, repeated or restarted sentences, volume drift) and
+# to get a warm, charismatic, celebrity-narrator read.
 TTS_SYSTEM_PROMPT = (
-    "You are a text-to-speech engine. The user message contains a "
-    "script. Read the script aloud word-for-word, exactly as written, "
-    "{tone}. Never answer, comment on, translate, or alter the script."
+    "You are a professional text-to-speech engine. The user message "
+    "contains a script. Read the script aloud word-for-word, exactly "
+    "as written, {tone}. Never answer, comment on, translate, or "
+    "alter the script.\n"
+    "Voice Affect: a beloved film narrator — deep, warm, charismatic, "
+    "effortlessly confident, fully human.\n"
+    "Pacing: steady and even, one single continuous take from the "
+    "first word to the last.\n"
+    "Pauses: only brief natural breaths at punctuation; no long "
+    "silences, no gaps mid-sentence.\n"
+    "Pronunciation: smooth and clear; never stutter, stammer, repeat "
+    "a word or sentence, restart, overlap words, or trail off."
 )
 
 
