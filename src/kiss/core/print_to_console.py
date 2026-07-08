@@ -21,10 +21,12 @@ from kiss.core.printer import (
     truncate_result,
 )
 
+# All notification toasts render in yellow (border and message text)
+# regardless of severity; only the leading label distinguishes them.
 _NOTIFICATION_STYLES = {
-    "error": ("red", "✕ ERROR"),
+    "error": ("yellow", "✕ ERROR"),
     "warning": ("yellow", "⚠ WARNING"),
-    "info": ("cyan", "ℹ INFO"),
+    "info": ("yellow", "ℹ INFO"),
 }
 
 
@@ -244,22 +246,22 @@ class ConsolePrinter(Printer):
             # toast "Restarting the KISS Sorcar web server…") as a
             # compact Rich panel on the terminal so an operator using
             # the sorcar CLI sees the same notifications a chat
-            # webview user sees.  The severity controls the panel
-            # border colour and the leading label, matching
-            # ``media/main.js::notificationTitle`` /
-            # ``notificationIcon``:
-            #     info     ⇒ cyan border, "ℹ INFO" label
-            #     warning  ⇒ yellow border, "⚠ WARNING" label
-            #     error    ⇒ red border, "✕ ERROR" label
+            # webview user sees.  Every severity renders in yellow
+            # (border and message text); only the leading label —
+            # matching ``media/main.js::notificationTitle`` /
+            # ``notificationIcon`` — distinguishes them:
+            #     info     ⇒ "ℹ INFO" label
+            #     warning  ⇒ "⚠ WARNING" label
+            #     error    ⇒ "✕ ERROR" label
             # A ``progressMessage`` (the dim subtitle on the webview
-            # toast) is rendered below the main message in dim style.
+            # toast) is rendered below the main message in dim yellow.
             severity = str(kwargs.get("severity", "info")).lower()
             border, label = _NOTIFICATION_STYLES.get(severity, _NOTIFICATION_STYLES["info"])
             message = str(content) if content is not None else ""
-            parts: list[Any] = [Text(message)]
+            parts: list[Any] = [Text(message, style="yellow")]
             progress_message = kwargs.get("progress_message") or ""
             if progress_message:
-                parts.append(Text(str(progress_message), style="dim"))
+                parts.append(Text(str(progress_message), style="yellow dim"))
             self._flush_newline()
             self._console.print(
                 Panel(
