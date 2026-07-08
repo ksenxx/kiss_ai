@@ -44,11 +44,10 @@ const Module = require('module');
 // tiny generated stub on disk — same pattern as the other bughunt
 // tests in this directory.  ``readSampleTasks`` itself never touches
 // any vscode API, so an empty object suffices.
-const stubPath = path.join(__dirname, '_vscode-stub.js');
-fs.writeFileSync(
-  stubPath,
-  `'use strict';\nmodule.exports = global.__kissVscodeStub || {};\n`,
-);
+// ``_vscode-stub.js`` is a git-tracked fixture shared by tests running
+// in parallel; it already re-exports ``global.__kissVscodeStub || {}`` —
+// never rewrite or delete it here (writeFileSync truncates first, racing
+// a concurrent ``require('vscode')`` in sibling test processes).
 global.__kissVscodeStub = {};
 const origResolve = Module._resolveFilename;
 Module._resolveFilename = function (request, parent, ...rest) {
