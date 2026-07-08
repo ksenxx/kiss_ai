@@ -62,9 +62,9 @@ _FALLBACK_PLAYERS: tuple[tuple[str, ...], ...] = (
     ("ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet"),
     ("mpv", "--no-video", "--really-quiet"),
 )
-# Linux TTS commands (the text is appended as the last argument).
+# Non-macOS TTS commands (the text is appended as the last argument);
+# macOS always uses ``say`` directly.
 _FALLBACK_SAY: tuple[tuple[str, ...], ...] = (
-    ("say",),  # macOS
     ("espeak-ng",),
     ("espeak",),
     ("spd-say", "--wait"),
@@ -121,7 +121,7 @@ def say_command() -> list[str] | None:
         return parts or None
     if sys.platform == "darwin":
         return ["say"]
-    for candidate in _FALLBACK_SAY[1:]:
+    for candidate in _FALLBACK_SAY:
         if shutil.which(candidate[0]):
             return list(candidate)
     return None

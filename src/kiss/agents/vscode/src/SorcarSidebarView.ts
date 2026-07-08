@@ -665,7 +665,15 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           }
         } else {
           if (statusTabId !== undefined) this._runningTabs.delete(statusTabId);
-          if (this._isOwnTab(statusTabId) && this._commitPendingTabs.size > 0) {
+          // Abort a pending commit-message generation only when the tab
+          // that STOPPED is the tab that requested it (the SCM flow uses
+          // tabId '').  Checking ``.size > 0`` here fired a spurious
+          // "Commit message: Process stopped" whenever any unrelated own
+          // chat tab finished while a generation was pending.
+          if (
+            this._isOwnTab(statusTabId) &&
+            this._commitPendingTabs.has(statusTabId ?? '')
+          ) {
             this._onCommitMessage.fire({message: '', error: 'Process stopped'});
           }
         }
@@ -693,6 +701,11 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     // never learn the task is still running, leave isRunning=false, and
     // ignore the user's next message (sent as a dropped ``submit``).
     this._disposed = false;
+    // The remote-URL dedup key survives webview disposal but the
+    // webview DOM does not: without a reset here, the fresh webview's
+    // ``ready`` → ``_sendRemoteUrl`` early-returns on the dedup and the
+    // welcome-page remote-URL/password/ntfy panel stays blank forever.
+    this._lastSentUrl = '';
 
     webviewView.webview.options = {
       enableScripts: true,
@@ -1030,7 +1043,13 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
    * trigger native UI side effects here.
    */
   private _isOwnTab(tabId: string | undefined): boolean {
-    return tabId === undefined || this._ownTabs.has(tabId);
+    // '' is treated like ``undefined``: the SCM commit-message flow
+    // sends its ``generateCommitMessage`` command with tabId '' and the
+    // daemon stamps the reply with the requester's tabId, so a reply
+    // stamped '' must not be dropped (it can never be registered in
+    // ``_ownTabs`` because webview messages with a falsy tabId are
+    // never added there).
+    return !tabId || this._ownTabs.has(tabId);
   }
 
   private async _handleMessage(message: FromWebviewMessage): Promise<void> {

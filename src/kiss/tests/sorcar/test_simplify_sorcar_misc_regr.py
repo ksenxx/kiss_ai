@@ -345,13 +345,16 @@ class TestPureHelpers:
         )
 
     def test_merge_fix_steps(self) -> None:
+        # ``-D`` (force): after a squash merge the branch is never an
+        # ancestor of the original branch, so ``-d`` would always
+        # refuse — see test_worktree_manual_fix_steps.py.
         steps = _merge_fix_steps(self._wt(None), "    git commit\n")
         assert steps == (
             "    cd /repo\n"
             "    git checkout main\n"
             "    git merge --squash kiss/wt-x\n"
             "    git commit\n"
-            "    git branch -d kiss/wt-x"
+            "    git branch -D kiss/wt-x"
         )
 
     def test_reject_interactive_only_flags_ok(self) -> None:

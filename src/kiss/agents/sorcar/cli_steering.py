@@ -224,8 +224,13 @@ def _normalize_candidates(
     ``(replacement, display)`` pairs — e.g. a ``--task`` value whose
     row displays ``<id>: <one-line task description>`` while accepting
     inserts only the bare id.  Trailing newlines are stripped from
-    both parts so a candidate can never break the single-row menu
-    rendering.
+    both parts, and any line break EMBEDDED in the display text is
+    flattened to a single space, so a candidate can never break the
+    single-row menu rendering (a raw ``\\n`` written mid-row would
+    push the rest of the row onto the next screen line, corrupting
+    the absolutely-positioned menu/box layout).  Replacements keep
+    embedded newlines: accept inserts them into the edit buffer,
+    which renders multi-line buffers correctly.
 
     Args:
         raw: Candidates as returned by ``completer_fn``.
@@ -242,7 +247,7 @@ def _normalize_candidates(
         else:
             repl = disp = cand
         repls.append(repl.rstrip("\n"))
-        displays.append(disp.rstrip("\n"))
+        displays.append(" ".join(disp.rstrip("\n").splitlines()))
     return repls, displays
 
 
@@ -714,6 +719,7 @@ class _InputBox:
             # invisible menu.
             self._menu_open = False
             self._menu_items = []
+            self._menu_repls = []
             self._menu_sel = 0
             self._menu_scroll = 0
         return h
@@ -1812,6 +1818,19 @@ class SteeringSession:
             prev_title = self.box.title
             self.box.title = " answer the question above, then Enter "
         self.box.redraw()
+        # Drop any stale answer left in the queue by the previous
+        # question's submit/clear race: ``_on_submit`` can observe
+        # ``_question_pending`` still set in the window after the
+        # previous ``get()`` returned but before its ``finally``
+        # cleared the flag, parking a line in ``_answer_q`` that no
+        # waiter ever consumes.  Without this drain the leftover
+        # would be returned as THIS question's answer immediately,
+        # before the user even sees the question.
+        while True:
+            try:
+                self._answer_q.get_nowait()
+            except queue.Empty:
+                break
         self._question_pending.set()
         try:
             return self._answer_q.get()
