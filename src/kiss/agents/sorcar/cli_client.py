@@ -582,6 +582,14 @@ class CliClient:
         await self._send_async({"type": "setWorkDir", "workDir": self.work_dir})
         await self._send_async({"type": "ready", "tabId": self.tab_id,
                                 "workDir": self.work_dir})
+        # Identify this tab as a CLI terminal player.  The daemon
+        # arbitrates ``talk`` playback per device: CLI REPL tabs share
+        # the daemon machine's speakers with any local webview, so the
+        # daemon mutes this tab's talk copies whenever a local webview
+        # tab is also subscribed (the webview plays), and lets exactly
+        # one CLI tab play otherwise.  Without this hello the daemon cannot
+        # tell a CLI tab from a webview tab (both send ``ready``).
+        await self._send_async({"type": "cliTabHello", "tabId": self.tab_id})
         self._connected.set()
         try:
             while True:
