@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import http.server
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -91,9 +92,18 @@ class TestAdoptDecline(unittest.TestCase):
         self._tmp.cleanup()
 
     def _spawn_fake_cloudflared(self) -> subprocess.Popen[bytes]:
-        """Spawn a real long-lived subprocess standing in for cloudflared."""
+        """Spawn a real long-lived subprocess standing in for cloudflared.
+
+        Exec'd through a symlink named ``cloudflared`` so the process
+        presents the same ``ps -o comm=`` identity a real cloudflared
+        binary does — the decline path verifies identity before
+        signalling (stale-pidfile PID-reuse protection).
+        """
+        link = Path(self._tmp.name) / "cloudflared"
+        if not link.exists():
+            os.symlink(sys.executable, link)
         proc = subprocess.Popen(
-            [sys.executable, "-c", "import time; time.sleep(60)"],
+            [str(link), "-c", "import time; time.sleep(60)"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
