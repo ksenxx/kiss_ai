@@ -8,10 +8,12 @@
 // webview must speak with the most natural-sounding (neural) voice
 // matching the requested language instead of the often robotic
 // browser default.  Ranking: exact BCP-47 tag > same base language,
-// then quality markers in the voice name ("natural" > "neural" >
-// "premium" > "enhanced" > "siri" > "google" > "online").  Playback
-// must still work (with the default voice) when the voice list is
-// empty, missing, or throws.
+// then male voices (parity with the male "cedar" narrator of the
+// synthesized-clip path and the sorcar CLI REPL — see
+// talkMaleVoice.test.js), then quality markers in the voice name
+// ("natural" > "neural" > "premium" > "enhanced" > "siri" >
+// "google" > "online").  Playback must still work (with the default
+// voice) when the voice list is empty, missing, or throws.
 //
 // Runs the REAL production ``media/main.js`` in jsdom (only the
 // vscode host API and the Web Speech API are recording stubs, as in
@@ -132,10 +134,22 @@ function test(name, fn) {
 
 // ---------------------------------------------------------------------------
 
-test('picks the highest-quality natural voice for an exact language match',
+test('picks the male voice for an exact language match (CLI parity)',
      () => {
   const {win} = makeWebview();
   const spoken = installSpeech(win, VOICES);
+  talk(win, 'en-US', 'hello there');
+  assert.strictEqual(spoken.length, 1);
+  assert.ok(spoken[0].voice, 'a voice must be selected');
+  assert.strictEqual(
+      spoken[0].voice.name, 'Fred',
+      'the male voice outranks "Natural"/"Enhanced" female voices');
+});
+
+test('picks the highest-quality natural voice when no male voice exists',
+     () => {
+  const {win} = makeWebview();
+  const spoken = installSpeech(win, VOICES.filter(v => v.name !== 'Fred'));
   talk(win, 'en-US', 'hello there');
   assert.strictEqual(spoken.length, 1);
   assert.ok(spoken[0].voice, 'a voice must be selected');
@@ -167,10 +181,19 @@ test('exact plain voice beats a natural voice of another region', () => {
                      'exact language tag outranks quality markers');
 });
 
-test('picks the best-quality voice overall when no language is given',
-     () => {
+test('picks the male voice overall when no language is given', () => {
   const {win} = makeWebview();
   const spoken = installSpeech(win, VOICES);
+  talk(win, '', 'hello');
+  assert.strictEqual(spoken.length, 1);
+  assert.ok(spoken[0].voice, 'a voice must be selected');
+  assert.strictEqual(spoken[0].voice.name, 'Fred');
+});
+
+test('picks the best-quality voice overall when no language is given ' +
+     'and no male voice exists', () => {
+  const {win} = makeWebview();
+  const spoken = installSpeech(win, VOICES.filter(v => v.name !== 'Fred'));
   talk(win, '', 'hello');
   assert.strictEqual(spoken.length, 1);
   assert.ok(spoken[0].voice, 'a voice must be selected');
