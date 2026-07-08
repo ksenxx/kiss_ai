@@ -7,14 +7,19 @@
 Typing ``/voice`` at the idle prompt spawns the wake-word listener
 process (``python -m kiss.agents.vscode.voice_wake``) and turns each
 recognised utterance into a submitted REPL line, exactly as if the user
-had typed it and pressed Enter.  While waiting for speech the anchored
-input panel shows a red ``Listening ...`` indicator at the beginning of
-its header (the top border); the indicator starts *blinking* only once
-the sorcar wake word is detected (``WAKE``) and switches to a blinking
-``Transcribing ...`` while the utterance is transcribed.  The plain
-fallback REPL prints the same indicator inline.  Voice chat is
-continuous — after a submitted task completes the REPL resumes
-listening — until the user cancels with Esc, Ctrl+C, Ctrl+D or Enter.
+had typed it and pressed Enter.  In the anchored REPL voice runs in the
+*background* (:class:`VoicePump`): the keyboard stays fully usable —
+typing, editing and Enter-to-submit keep working — while the input
+panel shows a red ``Listening ...`` indicator at the beginning of its
+header (the top border) for both the idle prompt and the mid-task
+steering box; the indicator starts *blinking* only once the sorcar wake
+word is detected (``WAKE``) and switches to a blinking
+``Transcribing ...`` while the utterance is transcribed.  Voice chat is
+continuous — speech spoken while a task runs queues as a steering
+follow-up — until the user toggles it off with ``/voice`` (typed or
+spoken) or exits the REPL.  The plain fallback REPL keeps the modal
+per-utterance capture instead, printing the indicator inline and
+cancelling on Esc, Ctrl+C, Ctrl+D or Enter.
 
 The listener's stdout speaks a line protocol: ``READY``, ``WAKE``,
 ``TRANSCRIBING``, ``SPEECH <json {"text","speaker","language"}>`` and
@@ -50,13 +55,10 @@ logger = logging.getLogger(__name__)
 # voice capture runs.
 LISTENING_TEXT = "Listening ..."
 TRANSCRIBING_TEXT = "Transcribing ..."
-# Panel title shown while the anchored box is in voice mode.
-VOICE_TITLE = (
-    " voice · say the wake word, then speak your task · "
-    "Esc/Ctrl+C/Ctrl+D/Enter to stop "
-)
-# Raw bytes that cancel voice capture: Esc, Ctrl+C, Ctrl+D, Enter (CR
-# or LF).  Any of them anywhere in an input chunk exits voice mode.
+# Raw bytes that cancel PLAIN (fallback) voice capture: Esc, Ctrl+C,
+# Ctrl+D, Enter (CR or LF).  Any of them anywhere in an input chunk
+# exits voice mode.  The anchored REPL keeps the keyboard fully usable
+# instead — ``/voice`` toggles voice mode off there.
 _CANCEL_BYTES = b"\x1b\x03\x04\r\n"
 # Environment variable overriding the listener command (shlex-parsed).
 _CMD_ENV = "KISS_SORCAR_VOICE_CMD"
@@ -217,44 +219,146 @@ class VoiceListener:
             pass
 
 
-class VoiceSession:
-    """Continuous voice-chat state owned by the REPL loop.
+class VoicePump(threading.Thread):
+    """Background thread turning listener protocol lines into UI events.
 
-    Attributes:
-        listener: The running :class:`VoiceListener` child.
+    Runs for the whole lifetime of an anchored voice session so the
+    keyboard stays fully usable while voice is on: the pump keeps the
+    input-panel header indicator up to date (steady red
+    ``Listening ...`` before the wake word, blinking after ``WAKE``,
+    blinking ``Transcribing ...`` during transcription) and hands each
+    recognised utterance to *on_speech* — which injects it into the
+    anchored box so it submits exactly like a typed line — then goes
+    back to listening (continuous voice chat).
+
+    A listener child that exits unexpectedly triggers *on_dead* once
+    (never when :meth:`stop` already asked the pump to end).
     """
 
     def __init__(
         self,
         listener: VoiceListener,
-        reader: Callable[[VoiceListener], str | None],
+        show: Callable[[str, bool], None],
+        on_speech: Callable[[str], None],
+        on_dead: Callable[[], None],
+    ) -> None:
+        super().__init__(daemon=True, name="sorcar-voice-pump")
+        self._listener = listener
+        self._show = show
+        self._on_speech = on_speech
+        self._on_dead = on_dead
+        self._stop_evt = threading.Event()
+
+    def run(self) -> None:
+        """Pump protocol lines until stopped or the listener dies."""
+        show = self._show
+        self._show(LISTENING_TEXT, False)
+        while not self._stop_evt.is_set():
+            line = self._listener.poll_line()
+            if line is None:
+                if self._listener.alive():
+                    self._stop_evt.wait(0.05)
+                    continue
+                # The child can exit a few milliseconds before the
+                # daemon reader thread queues its final SPEECH line;
+                # give the reader one short chance to flush.
+                if self._listener._thread is not None:
+                    self._listener._thread.join(timeout=0.2)
+                line = self._listener.poll_line()
+                if line is None:
+                    if not self._stop_evt.is_set():
+                        self._on_dead()
+                    return
+            result = _handle_protocol_line(
+                line,
+                lambda: show(LISTENING_TEXT, False),
+                lambda: show(LISTENING_TEXT, True),
+                lambda: show(TRANSCRIBING_TEXT, True),
+            )
+            if result is not _NO_LINE_RESULT:
+                self._on_speech(str(result))
+                # The listener resumes waiting for the next wake word;
+                # reflect that with the steady pre-wake indicator.
+                self._show(LISTENING_TEXT, False)
+
+    def stop(self) -> None:
+        """Ask the pump to end and wait briefly for it; idempotent."""
+        self._stop_evt.set()
+        if self is not threading.current_thread():
+            self.join(timeout=1.0)
+
+
+class VoiceSession:
+    """Continuous voice-chat state owned by the REPL loop.
+
+    Two flavours exist: the anchored REPL runs a *background* session
+    (:func:`start_voice_anchored`) whose :class:`VoicePump` thread
+    updates the input-panel header and injects recognised speech into
+    the box while the keyboard stays fully usable; the plain fallback
+    REPL runs a *modal* session (:func:`start_voice`) whose
+    :meth:`read` blocks per utterance.
+
+    Attributes:
+        listener: The running :class:`VoiceListener` child.
+        pump: The background :class:`VoicePump` thread, or ``None``
+            for a modal session.
+        active: ``False`` once the listener died unexpectedly — the
+            REPL loop closes and drops the session on its next pass.
+    """
+
+    def __init__(
+        self,
+        listener: VoiceListener,
+        reader: Callable[[VoiceListener], str | None] | None = None,
+        pump: VoicePump | None = None,
     ) -> None:
         self.listener = listener
         self._reader = reader
+        self.pump = pump
+        self.active = True
+        # Optional teardown hook run by :meth:`close` after the pump
+        # stopped — the anchored session uses it to clear the header
+        # indicator so ``Listening ...`` never outlives voice mode.
+        self.on_close: Callable[[], None] | None = None
+
+    @property
+    def background(self) -> bool:
+        """``True`` for a pump-driven session (keyboard stays usable)."""
+        return self._reader is None
 
     def read(self) -> str | None:
-        """Capture the next utterance through the configured reader.
+        """Capture the next utterance through the configured modal reader.
+
+        Only valid for modal (non-background) sessions.
 
         Returns:
             The recognised speech text, or ``None`` when the user
             cancelled or the listener failed (leave voice mode).
         """
+        assert self._reader is not None
         return self._reader(self.listener)
 
     def close(self) -> None:
-        """Terminate the listener child process."""
+        """Stop the pump (if any) and terminate the listener child."""
+        if self.pump is not None:
+            self.pump.stop()
         self.listener.stop()
+        if self.on_close is not None:
+            self.on_close()
 
 
 def start_voice(
     reader: Callable[[VoiceListener], str | None],
 ) -> VoiceSession | None:
-    """Spawn the wake-word listener and enter voice mode.
+    """Spawn the wake-word listener and enter MODAL voice mode.
+
+    Used by the plain (non-anchored) fallback REPL; the anchored REPL
+    uses :func:`start_voice_anchored` instead so the keyboard stays
+    usable.
 
     Args:
         reader: Per-utterance capture function
-            (:func:`read_voice_line_anchored` bound to the box, or
-            :func:`read_voice_line_plain`).
+            (:func:`read_voice_line_plain`).
 
     Returns:
         A live :class:`VoiceSession`, or ``None`` when the listener
@@ -422,54 +526,71 @@ def _capture_utterance(
             return None
 
 
-def read_voice_line_anchored(
-    box: _InputBox, listener: VoiceListener,
-) -> str | None:
-    """Capture one utterance showing the indicator inside the panel.
+def start_voice_anchored(box: _InputBox) -> VoiceSession | None:
+    """Start background voice mode on the anchored input box.
 
-    Flips the anchored input box into voice mode — title swapped to
-    :data:`VOICE_TITLE` and a red ``Listening ...`` /
-    ``Transcribing ...`` indicator shown at the beginning of the
-    panel's header (top border), blinking only once the sorcar wake
-    word is detected — until speech arrives or the user cancels, then
-    restores the box and echoes the recognised text above it like a
-    typed line.
+    Spawns the wake-word listener and a :class:`VoicePump` thread, then
+    returns immediately so the REPL keeps reading the keyboard — typing,
+    editing, completion and Enter-to-submit all keep working while
+    voice is on.  The pump shows the red ``Listening ...`` /
+    ``Transcribing ...`` indicator at the beginning of the panel's
+    header (blinking only once the sorcar wake word is detected) for
+    both the idle prompt and the steering box, and injects each
+    recognised utterance into *box* so it submits exactly like a typed
+    line.  Voice mode stays on — across submitted tasks — until the
+    session is closed (``/voice`` again or REPL exit).
 
     Args:
         box: The anchored ``_InputBox`` owned by the REPL.
-        listener: The running wake-word listener child.
 
     Returns:
-        The recognised speech text, or ``None`` on cancel / listener
-        failure (leave voice mode).
+        A live background :class:`VoiceSession`, or ``None`` when the
+        listener process could not be spawned (an error is printed and
+        the REPL stays usable).
     """
+    try:
+        listener = VoiceListener()
+        listener.start()
+    except (OSError, ValueError) as exc:
+        print(
+            f"{YELLOW}✗ voice: could not start the wake-word listener: "
+            f"{exc}{RESET}"
+        )
+        return None
+
     def show(text: str, blink: bool) -> None:
         with box.lock:
             box.overlay = text
             box.overlay_blink = blink
             box.redraw()
 
-    with box.lock:
-        prev_title = box.title
-        box._reset_completion_state()
-        box.title = VOICE_TITLE
-    try:
-        text = _capture_utterance(
-            listener,
-            lambda: show(LISTENING_TEXT, False),
-            lambda: show(LISTENING_TEXT, True),
-            lambda: show(TRANSCRIBING_TEXT, True),
+    session = VoiceSession(listener)
+
+    def on_dead() -> None:
+        print(
+            f"{YELLOW}✗ voice: the wake-word listener exited "
+            f"unexpectedly — leaving voice mode.{RESET}"
         )
-    finally:
-        with box.lock:
-            box.title = prev_title
-            box.overlay = ""
-            box.overlay_blink = False
-            box.redraw()
-    if text is not None:
-        # Echo the utterance above the box the way typed lines echo.
-        print(f"{CYAN}🎤 {text}{RESET}")
-    return text
+        show("", False)
+        session.active = False
+
+    def on_close() -> None:
+        # Discard any utterance the pump injected while voice mode was
+        # shutting down — a stale spoken line must never submit as a
+        # task after the user turned voice off — then clear the header
+        # indicator.  Runs after the pump thread has been joined.
+        box.drain_injected()
+        show("", False)
+
+    pump = VoicePump(listener, show, box.inject_line, on_dead)
+    session.pump = pump
+    session.on_close = on_close
+    pump.start()
+    print(
+        f"{YELLOW}🎤 Voice mode: say the wake word, then speak your task "
+        f"— you can keep typing too; /voice again to stop.{RESET}"
+    )
+    return session
 
 
 def read_voice_line_plain(listener: VoiceListener) -> str | None:
@@ -504,11 +625,11 @@ def read_voice_line_plain(listener: VoiceListener) -> str | None:
 __all__ = [
     "LISTENING_TEXT",
     "TRANSCRIBING_TEXT",
-    "VOICE_TITLE",
     "VoiceListener",
+    "VoicePump",
     "VoiceSession",
     "listener_command",
-    "read_voice_line_anchored",
     "read_voice_line_plain",
     "start_voice",
+    "start_voice_anchored",
 ]
