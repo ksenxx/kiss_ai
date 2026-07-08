@@ -37,7 +37,7 @@ class TestPanelBorders:
         top = panel_top(IDLE_TITLE, 80)
         assert top.startswith("╭")
         assert top.endswith("╮")
-        assert "sorcar · type a task" in top
+        assert "Sorcar · type a task" in top
         assert len(top) == 80
 
     def test_bottom_border_is_rounded_and_carries_status(self) -> None:
