@@ -4242,15 +4242,110 @@
     'online',
   ];
 
+  // First names of well-known MALE system voices (macOS `say -v ?`,
+  // Windows/Edge neural voices, eSpeak/Google presets).  The agent's
+  // one voice everywhere else is male: the server-synthesized clip is
+  // "cedar" (speech_synthesis.py DEFAULT_TTS_VOICE, a deep male
+  // narrator) and the sorcar CLI REPL plays that clip on its
+  // speakers — so the webview's Web-Speech fallback must keep the
+  // same male character instead of switching to a female voice.
+  // Matched as whole words of the voice name (never substrings, so
+  // "Alex" cannot match "Alexa").
+  const MALE_VOICE_NAMES = [
+    // macOS
+    'alex',
+    'daniel',
+    'fred',
+    'thomas',
+    'oliver',
+    'arthur',
+    'aaron',
+    'albert',
+    'bruce',
+    'ralph',
+    'lee',
+    'gordon',
+    'diego',
+    'jorge',
+    'juan',
+    'carlos',
+    'luca',
+    'xander',
+    'rishi',
+    'majed',
+    'maged',
+    'tarik',
+    'yuri',
+    'eddy',
+    'reed',
+    'rocko',
+    'grandpa',
+    // Windows / Edge neural
+    'david',
+    'mark',
+    'guy',
+    'davis',
+    'andrew',
+    'brian',
+    'christopher',
+    'eric',
+    'jacob',
+    'george',
+    'ryan',
+    'steffan',
+    'tony',
+    'william',
+    'james',
+    'liam',
+    'sonny',
+    'jason',
+    'remy',
+    'florian',
+    'giuseppe',
+    'hyunsu',
+    // Other engines
+    'paul',
+    'henri',
+    'conrad',
+    'stefan',
+    'pavel',
+    'antonio',
+    'cedar',
+  ];
+  const MALE_VOICE_NAME_SET = new Set(MALE_VOICE_NAMES);
+
+  /**
+   * True when the (lower-cased) voice *name* clearly names a male
+   * voice: the standalone word "male" ("Google UK English Male" —
+   * "female" has no word boundary before "male", so it never
+   * matches), or a known male first name as a whole word.  Edge's
+   * multilingual neural voices concatenate the suffix onto the name
+   * ("Microsoft AndrewMultilingual Online (Natural)"), so a trailing
+   * "multilingual" is stripped from each word before the lookup.
+   */
+  function isMaleVoiceName(name) {
+    if (/\bmale\b/.test(name)) return true;
+    for (let token of name.split(/[^a-z]+/)) {
+      if (token.endsWith('multilingual')) {
+        token = token.slice(0, -'multilingual'.length);
+      }
+      if (MALE_VOICE_NAME_SET.has(token)) return true;
+    }
+    return false;
+  }
+
   /**
    * Pick the most natural-sounding available system voice for
    * *language* (a BCP-47 tag such as "en-US"; may be empty).
    *
    * Voices are ranked first by language match (exact tag > same base
-   * language > any) and then by how early a NATURAL_VOICE_MARKERS
-   * keyword appears in the marker list.  Returns ``null`` when the
-   * voice list is unavailable or empty, in which case the caller
-   * leaves the browser's default voice in place.
+   * language > any), then male voices over others (parity with the
+   * male "cedar" narrator the CLI REPL and the synthesized-clip path
+   * play — see MALE_VOICE_NAMES), and finally by how early a
+   * NATURAL_VOICE_MARKERS keyword appears in the marker list.
+   * Returns ``null`` when the voice list is unavailable or empty, in
+   * which case the caller leaves the browser's default voice in
+   * place.
    */
   function pickNaturalVoice(synth, language) {
     if (!synth || typeof synth.getVoices !== 'function') return null;
@@ -4267,6 +4362,7 @@
     const wantedBase = wanted.split('-')[0];
     let best = null;
     let bestLang = -1;
+    let bestMale = -1;
     let bestQuality = -1;
     for (const voice of voices) {
       const lang = String(voice.lang || '')
@@ -4282,6 +4378,7 @@
       }
       if (wanted && langScore === 0) continue;
       const name = String(voice.name || '').toLowerCase();
+      const male = isMaleVoiceName(name) ? 1 : 0;
       let quality = 0;
       for (let i = 0; i < NATURAL_VOICE_MARKERS.length; i++) {
         if (name.includes(NATURAL_VOICE_MARKERS[i])) {
@@ -4291,10 +4388,12 @@
       }
       if (
         langScore > bestLang ||
-        (langScore === bestLang && quality > bestQuality)
+        (langScore === bestLang &&
+          (male > bestMale || (male === bestMale && quality > bestQuality)))
       ) {
         best = voice;
         bestLang = langScore;
+        bestMale = male;
         bestQuality = quality;
       }
     }
