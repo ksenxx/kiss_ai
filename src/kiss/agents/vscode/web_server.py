@@ -1097,16 +1097,64 @@ def _unlink_cloudflared_pidfile() -> None:
         pass
 
 
+def _looks_like_cloudflared(pid: int) -> bool:
+    """Return True iff the process behind *pid* appears to be cloudflared.
+
+    The pidfile records only a bare integer PID, so after an unclean
+    kiss-web shutdown the OS may have recycled that PID for an
+    UNRELATED process.  Any code about to *signal* the recorded PID
+    must therefore confirm the process identity first.  Uses
+    ``ps -o comm=`` (portable across macOS and Linux) and matches the
+    executable basename against ``cloudflared`` — the name of the
+    binary both the spawn path and the adoption path launch.
+
+    Returns:
+        True when the command basename is exactly ``cloudflared`` (or
+        ``cloudflared.exe``); False for any other process, a dead PID,
+        or a ``ps`` failure (fail-safe: an unverifiable process is
+        never signalled).  The match is exact — a prefix match would
+        also kill an unrelated ``cloudflared-helper``-style process
+        that inherited a recycled PID.
+    """
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "comm="],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=5,
+        )
+    except Exception:
+        return False
+    comm = result.stdout.strip()
+    if not comm:
+        return False
+    return Path(comm).name.lower() in ("cloudflared", "cloudflared.exe")
+
+
 def _terminate_declined_cloudflared(pid: int) -> None:
     """Terminate a pidfile-recorded cloudflared we declined to adopt.
 
     A declined-but-alive cloudflared would otherwise be orphaned
     forever (the caller spawns a fresh one next), leaking a process
     and a metrics port and confusing the next adoption attempt.  Only
-    pids recorded in our own pidfile are ever passed here.  Sends
-    SIGTERM, waits up to ~2s, escalates to SIGKILL if still alive,
-    then unlinks the pidfile.
+    pids recorded in our own pidfile are ever passed here — but the
+    pidfile can be STALE: after an unclean shutdown the OS may have
+    recycled the recorded PID for an unrelated process, so the
+    process identity is verified (:func:`_looks_like_cloudflared`)
+    before every signal; a mismatch only unlinks the stale pidfile.
+    Sends SIGTERM, waits up to ~2s, re-verifies identity (the PID can
+    be recycled inside the wait window too), escalates to SIGKILL if
+    still alive, then unlinks the pidfile.
     """
+    if not _looks_like_cloudflared(pid):
+        logger.info(
+            "pidfile pid %d is not a cloudflared process (stale pidfile, "
+            "pid recycled); not signalling it",
+            pid,
+        )
+        _unlink_cloudflared_pidfile()
+        return
     try:
         os.kill(pid, signal.SIGTERM)
     except (ProcessLookupError, PermissionError, OSError):
@@ -1116,7 +1164,7 @@ def _terminate_declined_cloudflared(pid: int) -> None:
         if not _is_pid_alive(pid):
             break
         time.sleep(0.1)
-    if _is_pid_alive(pid):
+    if _is_pid_alive(pid) and _looks_like_cloudflared(pid):
         try:
             os.kill(pid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError, OSError):
