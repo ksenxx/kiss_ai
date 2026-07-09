@@ -3,35 +3,24 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 //
-// End-to-end regression tests for demo mode replaying the WRONG tasks
-// (real chat.html + main.js + demo.js in jsdom, a recording
-// acquireVsCodeApi stub standing in for the extension host / daemon).
-// Reproduces the field report "demo mode keeps opening and replaying
-// tabs of random tasks; I cannot hear any voice":
+// End-to-end regression tests for demo mode replaying the WHOLE chat
+// chain instead of just the clicked task (real chat.html + main.js +
+// demo.js in jsdom, a recording acquireVsCodeApi stub standing in for
+// the extension host / daemon).  Reproduces the report "when I click
+// a task in the task history in demo mode, it replays the entire
+// chain of tasks of that chat from oldest to newest — it must demo
+// ONLY the task that was clicked":
 //
-//   * Clicking a history row in demo mode replayed EVERY session in
-//     the history (other chats, other workspaces, sub-agent rows)
-//     instead of ONLY the CLICKED task — the demo-mode spec is "when
-//     I click a task in the task history, it will replay only that
-//     task" (see demoClickedTaskOnly.test.js for the follow-up spec
-//     tightening from "the clicked chat's tasks" to "only the
-//     clicked task").
+//   * Clicking a history row of a multi-task chat replayed EVERY
+//     top-level task of that chat, oldest first, instead of only the
+//     clicked task.
 //
-//   * The replayed task issued ``resumeSession`` WITHOUT a
-//     ``taskId``, so clicking an older task of a multi-task chat
-//     replayed the latest task's events instead of its own events.
-//
-//   * Clicking another history row while a demo replay was already
-//     active opened ANOTHER chat tab on every click ("keeps opening
-//     tabs").
-//
-//   * Narrating a huge recorded prompt verbatim made the GPT-audio
-//     synthesis slow/failing (silence) — narration must be capped to
-//     a short lead-in so the demo voice stays fast and reliable.
+//   * Clicking a sub-agent row must (still) replay just that
+//     sub-agent task.
 //
 // Run directly with ``node``:
 //
-//     node src/kiss/agents/vscode/test/demoClickedChatOnly.test.js
+//     node src/kiss/agents/vscode/test/demoClickedTaskOnly.test.js
 
 'use strict';
 
@@ -138,16 +127,6 @@ function dispatch(win, data) {
 
 /** Answer every posted 'demoSpeak' with a synthesized clip after 10ms. */
 function autoAnswerDemoSpeak(win) {
-  autoAnswerDemoSpeakWith(win, () => 'QUJD');
-}
-
-/**
- * Answer posted 'demoSpeak' requests with audio selected by *choose*.
- * Returning '' simulates GPT-audio synthesis failure/timeout; in the
- * VS Code webview that degrades to SILENCE, reproducing the reported
- * "I cannot hear any voice" behavior for huge uncapped prompts.
- */
-function autoAnswerDemoSpeakWith(win, choose) {
   const prev = win._onPosted;
   win._onPosted = msg => {
     if (prev) prev(msg);
@@ -156,7 +135,7 @@ function autoAnswerDemoSpeakWith(win, choose) {
       dispatch(win, {
         type: 'demoSpeakAudio',
         reqId: msg.reqId,
-        audioB64: choose(msg),
+        audioB64: 'QUJD',
         audioMime: 'audio/mpeg',
         tabId: msg.tabId,
       });
@@ -170,26 +149,17 @@ function sleep(ms) {
   });
 }
 
-// A huge recorded prompt (like the multi-KB bug-hunt prompts that fill
-// a real history) — narrating this verbatim is exactly what made the
-// demo voice time out into silence.
-const HUGE_PROMPT =
-  'You are a bug-hunting agent working in a giant repository. ' +
-  'Audit every file and reproduce every inconsistency you find. '.repeat(
-    120,
-  );
-
-// Server sends history newest-first.  chat-A (the clicked chat) has
-// two tasks; chat-B is a DIFFERENT chat (the "random tasks") with a
-// top-level task and a sub-agent row.
+// Server sends history newest-first.  chat-A has THREE top-level
+// tasks (a1 oldest, a2, a3 newest); chat-B has a top-level task with
+// a sub-agent row.
 const SESSIONS = [
   {
     id: 'chat-A',
-    task_id: 'a2',
-    preview: 'Task A2 follow-up',
-    title: 'Task A2 follow-up',
+    task_id: 'a3',
+    preview: 'Task A3 newest',
+    title: 'Task A3 newest',
     has_events: true,
-    ts: 4000,
+    ts: 6000,
   },
   {
     id: 'chat-B',
@@ -198,21 +168,29 @@ const SESSIONS = [
     preview: 'sub-agent task of chat B',
     title: 'sub-agent task of chat B',
     has_events: true,
-    ts: 3000,
+    ts: 5000,
   },
   {
     id: 'chat-B',
     task_id: 'b1',
-    preview: 'Completely unrelated bug-hunt task',
-    title: 'Completely unrelated bug-hunt task',
+    preview: 'Chat B top-level task',
+    title: 'Chat B top-level task',
     has_events: true,
-    ts: 2000,
+    ts: 4000,
+  },
+  {
+    id: 'chat-A',
+    task_id: 'a2',
+    preview: 'Task A2 middle',
+    title: 'Task A2 middle',
+    has_events: true,
+    ts: 3000,
   },
   {
     id: 'chat-A',
     task_id: 'a1',
-    preview: HUGE_PROMPT,
-    title: 'Task A1 original',
+    preview: 'Task A1 oldest',
+    title: 'Task A1 oldest',
     has_events: true,
     ts: 1000,
   },
@@ -271,108 +249,74 @@ function startDemoFlow(win, rowTitle) {
   return {resumes, done};
 }
 
-async function testReplaysOnlyClickedTask() {
+async function testClickingMiddleTaskReplaysOnlyThatTask() {
   const {win} = makeWebview();
   installAudio(win);
   installSpeech(win);
   autoAnswerDemoSpeak(win);
 
-  const {resumes, done} = startDemoFlow(win, 'Task A1 original');
+  const {resumes, done} = startDemoFlow(win, 'Task A2 middle');
   await done;
 
-  const chats = resumes.map(m => String(m.id));
   assert.deepStrictEqual(
-    chats,
-    ['chat-A'],
-    'demo must replay ONLY the clicked task — never other chats, ' +
-      'sub-agent rows, or the clicked chat\'s other tasks (got ' +
-      JSON.stringify(chats) +
+    resumes.map(m => [String(m.id), String(m.taskId)]),
+    [['chat-A', 'a2']],
+    'demo must replay ONLY the clicked task — not the whole chain ' +
+      'of tasks of the chat from oldest to newest (got ' +
+      JSON.stringify(resumes.map(m => String(m.taskId))) +
       ')',
   );
-  assert.deepStrictEqual(
-    resumes.map(m => String(m.taskId)),
-    ['a1'],
-    'the replayed task must load its OWN events via its taskId',
-  );
-  console.log('PASS: demo replays only the clicked task');
+  win.close();
+  console.log('PASS: clicking a middle task replays only that task');
 }
 
-async function testNarrationIsCappedAndAudible() {
-  const {win, posted} = makeWebview();
-  const players = installAudio(win);
-  installSpeech(win);
-  // Simulate the real failure mode: huge demoSpeak scripts fail (or
-  // time out) and the VS Code webview intentionally degrades to
-  // silence.  After the fix, the narration is capped before synthesis
-  // and therefore gets an Audio clip.
-  autoAnswerDemoSpeakWith(win, msg => (msg.text.length <= 320 ? 'QUJD' : ''));
-
-  const {done} = startDemoFlow(win, 'Task A1 original');
-  await done;
-
-  const speaks = posted.filter(m => m.type === 'demoSpeak');
-  assert.ok(speaks.length > 0, 'demo narration requested synthesis');
-  for (const msg of speaks) {
-    assert.ok(
-      msg.text.length <= 320,
-      'narration must be capped to a short lead-in so GPT-audio ' +
-        'synthesis stays fast and audible (got ' +
-        msg.text.length +
-        ' chars)',
-    );
-  }
-  assert.strictEqual(
-    players.length,
-    speaks.length,
-    'every demo narration request should be short enough to get and ' +
-      'play a natural Audio clip instead of becoming silent',
-  );
-  console.log('PASS: demo narration of huge prompts is capped and audible');
-}
-
-async function testClickWhileActiveOpensNoNewTab() {
+async function testClickingNewestTaskReplaysOnlyThatTask() {
   const {win} = makeWebview();
   installAudio(win);
   installSpeech(win);
   autoAnswerDemoSpeak(win);
 
-  const {done} = startDemoFlow(win, 'Task A1 original');
-  await sleep(300); // replay is now active, in the first narration
-  assert.ok(win._demoApi.active, 'demo replay is running');
-  const tabsBefore = win.document.querySelectorAll(
-    '#tab-list .chat-tab',
-  ).length;
-
-  // Re-open the sidebar and click other history rows mid-replay.
-  const rows = Array.from(
-    win.document.querySelectorAll('#history-list > div'),
-  );
-  const other = rows.find(
-    r => r.textContent.indexOf('Completely unrelated bug-hunt task') !== -1,
-  );
-  assert.ok(other, 'other history row rendered');
-  other.click();
-  other.click();
-  await sleep(100);
-
-  const tabsAfter = win.document.querySelectorAll(
-    '#tab-list .chat-tab',
-  ).length;
-  assert.strictEqual(
-    tabsAfter,
-    tabsBefore,
-    'clicking history rows while a demo replay is active must NOT ' +
-      'keep opening new chat tabs',
-  );
+  const {resumes, done} = startDemoFlow(win, 'Task A3 newest');
   await done;
-  console.log('PASS: no new tabs open while a demo replay is active');
+
+  assert.deepStrictEqual(
+    resumes.map(m => [String(m.id), String(m.taskId)]),
+    [['chat-A', 'a3']],
+    'demo must replay ONLY the clicked (newest) task, never its ' +
+      'older siblings (got ' +
+      JSON.stringify(resumes.map(m => String(m.taskId))) +
+      ')',
+  );
+  win.close();
+  console.log('PASS: clicking the newest task replays only that task');
+}
+
+async function testClickingSubagentRowReplaysOnlyThatSubagentTask() {
+  const {win} = makeWebview();
+  installAudio(win);
+  installSpeech(win);
+  autoAnswerDemoSpeak(win);
+
+  const {resumes, done} = startDemoFlow(win, 'sub-agent task of chat B');
+  await done;
+
+  assert.deepStrictEqual(
+    resumes.map(m => [String(m.id), String(m.taskId)]),
+    [['chat-B', 'b-sub']],
+    'clicking a sub-agent row must replay just that sub-agent task ' +
+      '(got ' +
+      JSON.stringify(resumes.map(m => String(m.taskId))) +
+      ')',
+  );
+  win.close();
+  console.log('PASS: clicking a sub-agent row replays only that task');
 }
 
 (async () => {
-  await testReplaysOnlyClickedTask();
-  await testNarrationIsCappedAndAudible();
-  await testClickWhileActiveOpensNoNewTab();
-  console.log('demoClickedChatOnly.test.js: all tests passed');
+  await testClickingMiddleTaskReplaysOnlyThatTask();
+  await testClickingNewestTaskReplaysOnlyThatTask();
+  await testClickingSubagentRowReplaysOnlyThatSubagentTask();
+  console.log('demoClickedTaskOnly.test.js: all tests passed');
   // Demo/webview timers can keep the node event loop alive; match the
   // other jsdom e2e demo tests and exit explicitly once assertions pass.
   process.exit(0);
