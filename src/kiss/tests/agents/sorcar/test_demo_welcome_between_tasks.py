@@ -12,7 +12,10 @@ page is shown during the transition because:
 
 The fix: demo replay must be a continuation of the same chat:
   - No createNewTab() calls for subsequent tasks.
-  - hideWelcome() must be called BEFORE the 2-second sleep.
+  - The task header must be set (setTaskText) before any replay pause —
+    main.js hides the welcome page when the task text is set, so
+    demo.js no longer calls hideWelcome (the old input-typing +
+    2-second display pause design was removed).
   - Output must NOT be cleared for subsequent tasks (only reset state).
 """
 
@@ -78,7 +81,7 @@ var hljs = undefined;
 
 class TestDemoWelcomeBetweenTasksStructural(unittest.TestCase):
     """Structural: the replay loop must not create new tabs and must
-    hide welcome before the input display sleep."""
+    render the task header before pausing for the event fetch."""
 
     src: str
 
@@ -86,9 +89,9 @@ class TestDemoWelcomeBetweenTasksStructural(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.src = _DEMO_JS.read_text()
 
-    def _get_replay_fn(self) -> str:
-        """Extract the _startDemoReplay function body."""
-        start = self.src.index("window._startDemoReplay")
+    def _extract_fn(self, name: str) -> str:
+        """Extract a named function/assignment body from demo.js."""
+        start = self.src.index(name)
         depth = 0
         for i in range(start, len(self.src)):
             if self.src[i] == "{":
@@ -97,7 +100,16 @@ class TestDemoWelcomeBetweenTasksStructural(unittest.TestCase):
                 depth -= 1
                 if depth == 0:
                     return self.src[start : i + 1]
-        raise AssertionError("Could not find end of _startDemoReplay")
+        raise AssertionError(f"Could not find end of {name}")
+
+    def _get_replay_fn(self) -> str:
+        """Extract the demo replay implementation: the
+        ``_startDemoReplay`` entry point plus the ``replaySessions``
+        helper it awaits (the per-session loop was extracted there so
+        the entry point can guard it with try/catch)."""
+        return self._extract_fn(
+            "window._startDemoReplay"
+        ) + self._extract_fn("async function replaySessions")
 
     def test_no_create_new_tab_in_replay_loop(self) -> None:
         """The replay loop must NOT call createNewTab — tasks continue
@@ -108,16 +120,22 @@ class TestDemoWelcomeBetweenTasksStructural(unittest.TestCase):
             "should be a continuation of the same chat"
         )
 
-    def test_hide_welcome_before_sleep(self) -> None:
-        """hideWelcome must be called BEFORE the 2-second input display
-        sleep so the welcome page is never visible during transitions."""
+    def test_task_text_set_before_event_fetch(self) -> None:
+        """The task header must be set BEFORE the event fetch of each
+        task so the welcome page is never visible during transitions.
+
+        demo.js no longer types the task into the input box (the old
+        hideWelcome + 2s display pause design): welcome hiding is
+        delegated to main.js, which hides it when the task text is set
+        (setTaskText / task_events path).  The replay loop therefore
+        has to render the task header before any await."""
         fn = self._get_replay_fn()
-        hide_idx = fn.index("hideWelcome()")
-        sleep_idx = fn.index("await sleep(2000)")
-        assert hide_idx < sleep_idx, (
-            "hideWelcome() must appear before await sleep(2000) in "
-            "the replay function so the welcome page is hidden "
-            "before the input display pause"
+        text_idx = fn.index("setTaskText(")
+        fetch_idx = fn.index("await requestEvents(")
+        assert text_idx < fetch_idx, (
+            "setTaskText() must appear before await requestEvents() in "
+            "the replay loop so the task header replaces the welcome "
+            "page before the replay pauses for the event fetch"
         )
 
     def test_output_not_cleared_for_continuation(self) -> None:
@@ -133,7 +151,7 @@ class TestDemoWelcomeBetweenTasksStructural(unittest.TestCase):
 class TestDemoWelcomeBetweenTasksBehavioral(unittest.TestCase):
     """Behavioral: simulate a multi-task demo replay and verify that:
     - createNewTab is never called
-    - hideWelcome is called before the sleep on every iteration
+    - the task header is set for every task before its events render
     - clearForReplay is only called for the first task
     - resetOutputState is called for subsequent tasks
 
@@ -230,21 +248,24 @@ window._startDemoReplay(sessions).then(function() {
             f"createNewTab was called during replay: {calls}"
         )
 
-        hide_indices = [i for i, c in enumerate(calls) if c == "hideWelcome"]
-        sleep_indices = [i for i, c in enumerate(calls) if c == "sleep:2000"]
-        assert len(hide_indices) >= 2, (
-            f"hideWelcome should be called for each task, "
-            f"found {len(hide_indices)}: {calls}"
+        # The task header must be rendered for EVERY replayed task
+        # before that task's events are processed — the header is what
+        # replaces the welcome page (main.js hides it on setTaskText /
+        # task_events; demo.js no longer calls hideWelcome).
+        text_indices = [
+            i for i, c in enumerate(calls) if c.startswith("setTaskText:")
+        ]
+        assert len(text_indices) >= 2, (
+            f"setTaskText should be called for each task, "
+            f"found {len(text_indices)}: {calls}"
         )
-        assert len(sleep_indices) >= 2, (
-            f"sleep:2000 should be called for each task, "
-            f"found {len(sleep_indices)}: {calls}"
+        first_process = next(
+            i for i, c in enumerate(calls) if c.startswith("processEvent:")
         )
-        for k in range(min(len(hide_indices), len(sleep_indices))):
-            assert hide_indices[k] < sleep_indices[k], (
-                f"hideWelcome (idx {hide_indices[k]}) must come before "
-                f"sleep:2000 (idx {sleep_indices[k]}): {calls}"
-            )
+        assert text_indices[0] < first_process, (
+            f"setTaskText (idx {text_indices[0]}) must come before the "
+            f"first processEvent (idx {first_process}): {calls}"
+        )
 
         clear_count = calls.count("clearForReplay")
         assert clear_count == 1, (
