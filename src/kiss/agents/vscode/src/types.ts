@@ -89,7 +89,8 @@ export type FromWebviewMessage =
   | {type: 'serverReset'}
   | {type: 'notificationAction'; id: string; action?: string}
   | {type: 'voiceToggle'; enabled: boolean; sensitivity?: number}
-  | {type: 'voiceSensitivity'; value: number};
+  | {type: 'voiceSensitivity'; value: number}
+  | {type: 'voiceAck'};
 
 /** Messages from extension to webview (matches browser event protocol) */
 export type ToWebviewMessage = ToWebviewMessageBody & {tabId?: string};
