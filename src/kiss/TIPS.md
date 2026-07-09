@@ -6,20 +6,24 @@
 - Add the following text to your prompt:
 
 ```
-Use claude-fable-5 model for all tasks including coding, bug fixing, and test creation. Use gpt-5.5-xhigh (not codex) for thorough review and debugging of the work done by the other model. Check if the other model has missed some code or has introduced bugs. No need to check if the models exist.
+Use claude-fable-5 model for all tasks including software development. Use gpt-5.5-xhigh (not codex) for thorough review and debugging of the work done by the other model. Thoroughly check if the other model has missed some code or has introduced bugs. No need to check if the models exist.
 ```
 
 # Tip
 
 ## You Can Now Have Voice Chat with KISS Sorcar
 
-With the __sorcar__ wake word, KISS Sorcar starts behaving like a super-intelligent **Alexa**.
+If you have an **OPENAI_API_KEY**, with the __sorcar__ wake word, KISS Sorcar starts behaving like a super-intelligent **Alexa**.
 
 ```
 Speak 'sorcar', your task ...
 ```
 
-Click the **mic** button below the chat input box if it is grey and wait for it to start pulsing blue. Speak 'sorcar' followed by your task, and KISS Sorcar will automatically run the task and tell you the result using its own voice. You need the **OPENAI_API_KEY** to enable this feature. The voice interface distinguishes among different speakers.
+<<<<<<< Updated upstream
+Click the **mic** button below the chat input box if it is grey and wait for it to start pulsing blue. For Sorcar CLI, type /voice and enter to activate voice interaction. Speak 'sorcar' followed by your task, and KISS Sorcar will automatically run the task and tell you the results using its own voice. The voice interface distinguishes among different speakers.
+=======
+Click the **mic** button below the chat input box if it is grey and wait for it to start pulsing blue. For Sorcar CLI, type /voice and enter to activate voice interaction.  Speak 'sorcar' followed by your task, and KISS Sorcar will automatically run the task and tell you the results using its own voice. The voice interface distinguishes among different speakers.
+>>>>>>> Stashed changes
 
 # Tip
 
@@ -27,7 +31,7 @@ Click the **mic** button below the chat input box if it is grey and wait for it 
 
 You can **instantaneously inject a user message** into a running agent and make the agent take the message into account in the rest of its execution. Moreover, while an agent is running, you can ask it to **dynamically change its model** for the rest of the execution of the agent.
 
-These are unique features of KISS Sorcar. These two **IPs (intellectual properties) make KISS Sorcar super powerful for multi-model reasoning and dynamic steering of tasks running for hours to days**. Model routing intelligence can be expressed in a few sentences.
+These are unique features of KISS Sorcar. These two **IPs (intellectual properties)** make KISS Sorcar super powerful for multi-model reasoning and dynamic steering of tasks running for hours to days. Model routing intelligence can be expressed in a few sentences.
 
 # Tip
 
@@ -35,7 +39,11 @@ These are unique features of KISS Sorcar. These two **IPs (intellectual properti
 
 Look at the commit messages at [https://github.com/ksenxx/kiss_ai/commits/main/], find the prompt that the developer used for that commit in a commit message, and see what changed in the commit. This will help you get started with KISS Sorcar on any task like a pro.
 
-**Always write precise 1-6 sentence prompts.** Long prompts confuse models. **Do not plan ahead of time.** Let KISS Sorcar plan dynamically, which is always better than AI-written static plans.
+<<<<<<< Updated upstream
+**Always write precise 1-6 sentence prompts.** Long prompts confuse models. **Do not plan ahead of time.** Let KISS Sorcar plan dynamically, which is always better than AI-written static plans. Waterfall model does not work that well in the contemporary time.
+=======
+**Always write precise 1-6 sentence prompts.** Long prompts confuse models. **Do not plan ahead of time.** Let KISS Sorcar plan dynamically, which is always better than AI-written static plans.  Waterfall model does not work that well in the contemporary time.
+>>>>>>> Stashed changes
 
 # Tip
 
