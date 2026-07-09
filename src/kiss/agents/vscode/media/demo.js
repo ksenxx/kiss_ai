@@ -91,11 +91,15 @@
   }
 
   /**
-   * Request task events for a session from the backend.
-   * Returns a promise that resolves with the events array when the
-   * task_events message arrives (main.js routes it here in demo mode).
+   * Request task events for a history session from the backend.
+   * ``taskId`` pins the request to the session row's OWN task —
+   * without it the backend loads the LATEST task of the chat, so a
+   * multi-task chat would replay the same (newest) events for every
+   * task.  Returns a promise that resolves with the events array when
+   * the task_events message arrives (main.js routes it here in demo
+   * mode).
    */
-  function requestEvents(api, sessionId) {
+  function requestEvents(api, session) {
     return new Promise(resolve => {
       api.resolveEvents = function (events) {
         api.resolveEvents = null;
@@ -103,7 +107,8 @@
       };
       api.sendMessage({
         type: 'resumeSession',
-        id: sessionId,
+        id: session.id,
+        taskId: session.task_id,
         tabId: api.getActiveTabId(),
       });
     });
@@ -309,6 +314,69 @@
   // Expose for testing
   window._parseDemoTasks = parseDemoTasks;
 
+  // Narrating a multi-KB recorded prompt verbatim makes the GPT-audio
+  // synthesis slow or failing (the webview then degrades to SILENCE),
+  // so the "User said ..." narration reads only a short lead-in.
+  const NARRATION_MAX_CHARS = 280;
+
+  /**
+   * Collapse whitespace in *taskText* and cap it to a short lead-in
+   * (word-boundary cut + ellipsis) suitable for spoken narration.
+   *
+   * @param {string} taskText - The recorded task prompt.
+   * @returns {string} - The capped narration script.
+   */
+  function narrationText(taskText) {
+    const text = String(taskText || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (text.length <= NARRATION_MAX_CHARS) return text;
+    let cut = text.slice(0, NARRATION_MAX_CHARS);
+    const lastSpace = cut.lastIndexOf(' ');
+    if (lastSpace > 40) cut = cut.slice(0, lastSpace);
+    return cut + '\u2026';
+  }
+
+  // Expose for testing
+  window._demoNarrationText = narrationText;
+
+  /**
+   * Select which history sessions the demo replays, oldest first.
+   *
+   * The demo-mode spec: clicking a task in the history replays the
+   * tasks of THAT chat session, starting from the first task.  So
+   * only rows sharing the clicked row's chat id are kept — never
+   * other chats' tasks ("random tasks") — and sub-agent rows are
+   * skipped (their fan-outs are already replayed inside the parent
+   * task via ``executeDemoToolCall``).  Clicking a sub-agent row
+   * itself replays just that row.  Without *clicked* (tests, legacy
+   * callers) every session with stored events is replayed.
+   *
+   * @param {Array} sessions - All history sessions (newest first).
+   * @param {?Object} clicked - The history row the user clicked.
+   * @returns {Array} - The sessions to replay, oldest first.
+   */
+  function selectReplaySessions(sessions, clicked) {
+    let items = sessions.filter(s => {
+      return s.has_events && s.id;
+    });
+    if (clicked && clicked.id) {
+      if (clicked.parent_task_id) {
+        items = items.filter(s => {
+          return String(s.task_id) === String(clicked.task_id);
+        });
+      } else {
+        items = items.filter(s => {
+          return String(s.id) === String(clicked.id) && !s.parent_task_id;
+        });
+      }
+    }
+    return items.slice().reverse();
+  }
+
+  // Expose for testing
+  window._selectReplaySessions = selectReplaySessions;
+
   /**
    * True when a panel group contains a ``run_parallel`` tool call —
    * its replay opened sub-agent tabs that stay visible only until the
@@ -379,12 +447,15 @@
   }
 
   /**
-   * Start the demo replay for all sessions in the history.
+   * Start the demo replay for the clicked chat session's tasks.
    * Called from main.js when a history item is clicked in demo mode.
    *
    * @param {Array} sessions - All history sessions (newest first from server).
+   * @param {?Object} clicked - The history session row the user
+   *     clicked; only its chat's tasks are replayed (oldest first).
+   *     Omitted by legacy callers/tests to replay every session.
    */
-  window._startDemoReplay = async function (sessions) {
+  window._startDemoReplay = async function (sessions, clicked) {
     const api = getApi();
     if (!api || api.active) return;
     api.active = true;
@@ -394,13 +465,7 @@
     api.setRunningState(true);
     api.showSpinner();
 
-    // Filter sessions that have stored events, reverse to oldest-first
-    const items = sessions
-      .filter(s => {
-        return s.has_events && s.id;
-      })
-      .slice()
-      .reverse();
+    const items = selectReplaySessions(sessions, clicked);
 
     for (let i = 0; i < items.length; i++) {
       if (cancelRequested) break;
@@ -417,7 +482,7 @@
       api.setInput(taskText);
       const narration =
         typeof api.speakText === 'function'
-          ? api.speakText('User said ' + taskText)
+          ? api.speakText('User said ' + narrationText(taskText))
           : null;
       await sleep(2000);
       if (narration && typeof narration.then === 'function') {
@@ -437,7 +502,7 @@
       api.updateTabTitle(taskText);
 
       // Step 3: Request events from backend
-      const events = await requestEvents(api, session.id);
+      const events = await requestEvents(api, session);
       if (cancelRequested) break;
 
       // Step 4: Group events into panels and replay panel-by-panel
