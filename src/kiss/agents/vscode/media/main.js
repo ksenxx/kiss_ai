@@ -5407,7 +5407,11 @@
           }
         }
         if (_demoActive && window._demoApi && window._demoApi.resolveEvents) {
-          window._demoApi.resolveEvents(ev.events || []);
+          // The full message is passed alongside the events so the
+          // demo's pending fetch can verify the reply's tab/task
+          // identity — a stopped demo's late reply must never settle
+          // the NEXT demo's fetch with the wrong task's events.
+          window._demoApi.resolveEvents(ev.events || [], ev);
         } else {
           replayTaskEvents(ev.events || []);
         }

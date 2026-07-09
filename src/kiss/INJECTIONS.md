@@ -12,7 +12,7 @@ Use claude-fable-5 model for all tasks including software development. Use gpt-5
 
 ## Trick
 
-Can you use the instructions in the following file to perform the following task? 
+Can you use the instructions in the following file to perform the following task?
 
 ## Trick
 
