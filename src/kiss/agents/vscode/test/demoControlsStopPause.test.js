@@ -190,9 +190,20 @@ const SESSIONS = [
   },
 ];
 
-/** Replayed event stream: a thought panel then a long result. */
+/**
+ * Replayed event stream: a ``talk`` tool call (the speech clip the
+ * pause/stop tests exercise — replayed talks are synthesized through
+ * the same demoSpeak path the removed prompt narration used), a
+ * thought panel, then a long result.
+ */
 function eventsFor(label) {
   return [
+    {
+      type: 'tool_call',
+      name: 'talk',
+      extras: {text: 'Starting the investigation now.', language: 'en-US'},
+    },
+    {type: 'tool_result', content: 'Playing audio', tool_name: 'talk'},
     {type: 'thinking_start'},
     {type: 'thinking_delta', text: 'working on ' + label},
     {type: 'result', summary: LONG_RESULT, total_tokens: 1, cost: '$0'},
@@ -386,7 +397,7 @@ async function testPauseBeforeClipArrivesDefersSpeechUntilResume() {
   await waitUntil(
     () => players.length === 1,
     1000,
-    'deferred narration clip to start after final resume',
+    'deferred talk clip to start after final resume',
   );
   await done;
   console.log('PASS: pause before clip arrival defers speech until resume');
@@ -402,9 +413,9 @@ async function testPauseFreezesSpeechAndStreamingThenResumes() {
   const btn = win.document.getElementById('demo-pause-btn');
   assert.ok(btn, '#demo-pause-btn exists');
 
-  // Pause while the narration clip is playing.
+  // Pause while the talk clip is playing.
   await sleep(150);
-  assert.ok(players.length > 0, 'narration clip started');
+  assert.ok(players.length > 0, 'talk clip started');
   btn.click();
   assert.strictEqual(
     typeof win._isDemoPaused,
@@ -556,9 +567,9 @@ async function testStopButtonCancelsDemoAndRestoresControls() {
   autoAnswerDemoSpeak(win);
 
   const done = startDemoFlow(win);
-  await sleep(150); // narration clip is playing now
+  await sleep(150); // talk clip is playing now
   assert.ok(win._demoApi.active, 'demo replay is running');
-  assert.ok(players.length > 0, 'narration clip started');
+  assert.ok(players.length > 0, 'talk clip started');
 
   win.document.getElementById('stop-btn').click();
   assert.ok(
