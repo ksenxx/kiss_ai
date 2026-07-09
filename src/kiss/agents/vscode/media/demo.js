@@ -13,6 +13,12 @@
  *      in 0.5s then collapsed before moving to the next
  *   3. The result panel streams word-by-word
  *
+ * The replay PAUSES while speech is playing: prompt narration
+ * ("User said ...") and replayed ``talk`` tool calls are awaited
+ * before the demo advances, so the visuals never run ahead of the
+ * audio.  Cancelling the demo resolves any pending speech promise
+ * (via ``api.stopSpeech``) so the paused replay exits immediately.
+ *
  * Communicates with main.js via window._demoApi (set by main.js).
  */
 (function () {
@@ -317,20 +323,23 @@
    *
    * @param {Object} api - The demo API from main.js.
    * @param {Object} ev - A replayed task event.
+   * @returns {?Promise} - A promise that resolves when the replayed
+   *     ``talk`` speech finishes (so the caller can PAUSE the demo
+   *     until the talking ends), or null when nothing awaitable ran.
    */
   function executeDemoToolCall(api, ev) {
-    if (!ev || ev.type !== 'tool_call') return;
+    if (!ev || ev.type !== 'tool_call') return null;
     const extras = ev.extras || {};
     if (ev.name === 'talk' && typeof api.playTalkEvent === 'function') {
       const talkText = extras.text || '';
       if (talkText) {
-        api.playTalkEvent({
+        return api.playTalkEvent({
           text: talkText,
           language: extras.language,
           emotion: extras.emotion,
         });
       }
-      return;
+      return null;
     }
     if (
       ev.name === 'run_parallel' &&
@@ -349,6 +358,7 @@
         });
       }
     }
+    return null;
   }
 
   /**
@@ -384,12 +394,18 @@
       api.hideWelcome();
 
       // Step 1: Show task text in the input box and read it aloud as
-      // "User said ..." (speech overlaps the 2-second display pause).
+      // "User said ..." (speech overlaps the 2-second display pause,
+      // and the demo PAUSES until the narration finishes — longer
+      // prompts keep the replay waiting past the 2 seconds).
       api.setInput(taskText);
-      if (typeof api.speakText === 'function') {
-        api.speakText('User said ' + taskText);
-      }
+      const narration =
+        typeof api.speakText === 'function'
+          ? api.speakText('User said ' + taskText)
+          : null;
       await sleep(2000);
+      if (narration && typeof narration.then === 'function') {
+        await narration;
+      }
       if (cancelRequested) break;
 
       // Step 2: Clear input and prepare output area
@@ -423,11 +439,19 @@
         // Process all events in this panel group at once.  Replayed
         // ``talk`` / ``run_parallel`` tool calls are ACTUALLY executed
         // (speech playback / sub-agent tab creation) right after their
-        // panel is rendered.
+        // panel is rendered.  When a ``talk`` is played the replay
+        // PAUSES until the speech ends (cancel resolves the promise
+        // via api.stopSpeech, so this can never hang forever).
         for (let k = 0; k < group.length; k++) {
           api.processEvent(group[k]);
-          executeDemoToolCall(api, group[k]);
+          const speech = executeDemoToolCall(api, group[k]);
+          if (speech && typeof speech.then === 'function') {
+            api.scrollToBottom();
+            await speech;
+            if (cancelRequested) break;
+          }
         }
+        if (cancelRequested) break;
         api.scrollToBottom();
 
         // Brief pause to show the panel, then collapse it
