@@ -354,14 +354,6 @@
     "emb": false,
     "gen": true
   },
-  "codex/gpt-5.3-codex": {
-    "context_length": 400000,
-    "input_price_per_1M": 0.0,
-    "output_price_per_1M": 0.0,
-    "fc": true,
-    "emb": false,
-    "gen": true
-  },
   "codex/gpt-5.4": {
     "context_length": 1050000,
     "input_price_per_1M": 0.0,
@@ -2706,7 +2698,7 @@
   },
   "openrouter/moonshotai/kimi-k2.6": {
     "context_length": 262144,
-    "input_price_per_1M": 0.66,
+    "input_price_per_1M": 0.65,
     "output_price_per_1M": 3.41,
     "fc": true,
     "emb": false,
@@ -3758,14 +3750,6 @@
     "emb": false,
     "gen": true
   },
-  "openrouter/switchpoint/router": {
-    "context_length": 131072,
-    "input_price_per_1M": 0.85,
-    "output_price_per_1M": 3.4,
-    "fc": false,
-    "emb": false,
-    "gen": true
-  },
   "openrouter/tencent/hunyuan-a13b-instruct": {
     "context_length": 131072,
     "input_price_per_1M": 0.14,
@@ -3968,8 +3952,8 @@
   },
   "openrouter/z-ai/glm-5.2": {
     "context_length": 1048576,
-    "input_price_per_1M": 0.93,
-    "output_price_per_1M": 3.0,
+    "input_price_per_1M": 0.9,
+    "output_price_per_1M": 3.08,
     "fc": true,
     "emb": false,
     "gen": true
@@ -4033,7 +4017,7 @@
   },
   "openrouter/~moonshotai/kimi-latest": {
     "context_length": 262144,
-    "input_price_per_1M": 0.66,
+    "input_price_per_1M": 0.65,
     "output_price_per_1M": 3.41,
     "fc": true,
     "emb": false,
