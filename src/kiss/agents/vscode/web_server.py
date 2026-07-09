@@ -1846,6 +1846,42 @@ def _rss_mb() -> float:
         return -1.0
 
 
+def _raise_open_file_limit() -> None:
+    """Raise the soft ``RLIMIT_NOFILE`` toward the hard limit.
+
+    macOS defaults the soft limit to 256 open files, which a
+    long-running kiss-web daemon (websocket connections, agent
+    subprocesses, log and trajectory files) exhausts under load,
+    surfacing as ``OSError: [Errno 24] Too many open files`` when e.g.
+    saving a trajectory YAML.  Raising the soft limit up to the hard
+    limit needs no privileges.  macOS rejects soft values above
+    ``kern.maxfilesperproc`` (and ``RLIM_INFINITY``) with
+    ``ValueError``, so descending candidates are tried until one
+    sticks.  Child agent subprocesses inherit the raised limit.
+    """
+    try:
+        import resource
+    except ImportError:  # pragma: no cover — non-POSIX platform
+        return
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    except (ValueError, OSError):  # pragma: no cover
+        return
+    for target in (1048576, 262144, 65536, 10240, 4096, 1024):
+        if target <= soft:
+            break
+        if hard != resource.RLIM_INFINITY and target > hard:
+            continue
+        try:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+            logger.info(
+                "Raised RLIMIT_NOFILE soft limit from %d to %d", soft, target
+            )
+            break
+        except (ValueError, OSError):
+            continue
+
+
 def _generate_self_signed_cert(
     cert_path: Path,
     key_path: Path,
@@ -6969,6 +7005,7 @@ class RemoteAccessServer:
 
         Call this from the main thread.  Press Ctrl-C to stop.
         """
+        _raise_open_file_limit()
         logging.basicConfig(
             level=logging.INFO,
             format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -7022,6 +7059,7 @@ class RemoteAccessServer:
         Returns after the server is listening.  The caller must keep
         the event loop running.
         """
+        _raise_open_file_limit()
         await self._setup_server()
 
     async def stop_async(self) -> None:
