@@ -4082,6 +4082,24 @@
   // (and a Web-Speech fallback could talk over a playing clip).
   const talkQueue = [];
   let talkQueueBusy = false;
+  // Discard hook of the IN-FLIGHT talk job (set by pumpTalkQueue,
+  // cleared when the job finishes).  Demo-mode jobs attach an
+  // ``_onDiscard`` resolver so ``_demoApi.stopSpeech`` can resolve the
+  // promise a paused demo replay is awaiting — without it, cancelling
+  // the demo mid-speech would leave the replay coroutine awaiting a
+  // ``finish`` that never fires (some engines fire neither ``onend``
+  // nor ``onerror`` for utterances killed by ``cancel()``).
+  let talkQueueCurrentDiscard = null;
+  // Generation counter bumped by ``_demoApi.stopSpeech``: a job's
+  // ``finish`` callback captures the generation it started under and
+  // becomes a no-op once stopSpeech invalidated it.  Without this, a
+  // LATE ``finish`` from a cancelled utterance/clip (late ``onend``,
+  // ``ended``, ``abort`` — stopSpeech force-released the queue but
+  // the job's own ``finished`` flag is still false) would reset
+  // ``talkQueueBusy`` and clobber ``talkQueueCurrentDiscard`` while a
+  // NEW post-cancel job is already playing — overlapping speech and a
+  // dead discard hook for the new job.
+  let talkQueueGeneration = 0;
 
   /**
    * Start the next queued talk job unless one is already playing.
@@ -4095,11 +4113,18 @@
     const job = talkQueue.shift();
     if (!job) return;
     talkQueueBusy = true;
+    talkQueueCurrentDiscard = job._onDiscard || null;
+    const generation = talkQueueGeneration;
     let finished = false;
     job(() => {
       if (finished) return;
       finished = true;
+      // A stopSpeech() call after this job started owns the queue
+      // state now — a late completion of the cancelled sound must
+      // not release the queue under a newer job.
+      if (generation !== talkQueueGeneration) return;
       talkQueueBusy = false;
+      talkQueueCurrentDiscard = null;
       pumpTalkQueue();
     });
   }
@@ -9267,19 +9292,39 @@
     removeSpinner: removeSpinner,
     // Demo-mode speech: read *text* aloud through the same serialized
     // talk queue the live ``talk`` tool uses, so demo narration never
-    // overlaps agent talk playback.
+    // overlaps agent talk playback.  Returns a promise that resolves
+    // when the speech has finished (or was discarded by stopSpeech) so
+    // the demo replay can PAUSE until the talking ends.
     speakText: function (text, language) {
-      enqueueTalkPlayback(finish => {
-        speakWithSystemVoice({language: language || ''}, text, finish);
+      return new Promise(resolve => {
+        const job = function (finish) {
+          speakWithSystemVoice({language: language || ''}, text, () => {
+            finish();
+            resolve();
+          });
+        };
+        job._onDiscard = resolve;
+        enqueueTalkPlayback(job);
       });
     },
     // Demo-mode replay of a recorded ``talk`` tool call: actually play
     // it (GPT audio when present, Web-Speech fallback otherwise) via
     // the shared talk queue — mirrors handleEvent's case 'talk'.
+    // Returns a promise that resolves when the playback has finished
+    // (or was discarded by stopSpeech) so the demo replay can PAUSE
+    // until the talking ends.
     playTalkEvent: function (ev) {
-      enqueueTalkPlayback(finish => {
-        if (ev.audioB64 && playTalkAudio(ev, finish)) return;
-        speakWithSystemVoice(ev, ev.text || '', finish);
+      return new Promise(resolve => {
+        const job = function (finish) {
+          const done = function () {
+            finish();
+            resolve();
+          };
+          if (ev.audioB64 && playTalkAudio(ev, done)) return;
+          speakWithSystemVoice(ev, ev.text || '', done);
+        };
+        job._onDiscard = resolve;
+        enqueueTalkPlayback(job);
       });
     },
     // Demo-mode replay of a ``run_parallel`` fan-out: materialise the
@@ -9290,13 +9335,28 @@
     },
     // Cancel any queued/in-flight demo speech (demo replay stopped).
     stopSpeech: function () {
+      // Resolve every pending demo-speech promise BEFORE dropping the
+      // jobs: the demo replay awaits these promises (it pauses while
+      // talking), and a discarded job's ``finish`` never fires — so
+      // without this the cancelled replay coroutine would await
+      // forever and the demo could never be restarted.
+      for (const queued of talkQueue) {
+        if (typeof queued._onDiscard === 'function') queued._onDiscard();
+      }
       talkQueue.length = 0;
+      if (typeof talkQueueCurrentDiscard === 'function') {
+        talkQueueCurrentDiscard();
+      }
+      talkQueueCurrentDiscard = null;
       // Release the queue explicitly: some engines fire neither
       // ``onend`` nor ``onerror`` for utterances killed by
       // ``cancel()``, which would leave ``talkQueueBusy`` stuck true
-      // and silence every future talk playback.  The in-flight job's
-      // late ``finish`` (if it ever fires) is idempotent, so this
-      // cannot double-pump.
+      // and silence every future talk playback.  Bumping the
+      // generation first invalidates the in-flight job's ``finish``:
+      // if the cancelled sound DOES complete late, its callback must
+      // not release/pump the queue under a job started after this
+      // cancel (overlapping speech, clobbered discard hook).
+      talkQueueGeneration++;
       talkQueueBusy = false;
       try {
         if (window.speechSynthesis) window.speechSynthesis.cancel();
