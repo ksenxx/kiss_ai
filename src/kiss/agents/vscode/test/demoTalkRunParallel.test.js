@@ -6,7 +6,8 @@
 // Integration test for demo-mode speech + tool-call execution in
 // ``media/demo.js``:
 //
-//   1. Every replayed user prompt is read aloud as "User said ...".
+//   1. Replayed user prompts are NOT narrated (no "User said ..."
+//      ``speakText`` call — the prompt display step was removed).
 //   2. A replayed ``talk`` tool call is ACTUALLY played (routed to the
 //      host's ``playTalkEvent`` with the recorded text/language/emotion).
 //   3. A replayed ``run_parallel`` tool call ACTUALLY materialises one
@@ -143,14 +144,13 @@ function sampleEvents() {
   ];
 }
 
-async function testSpeaksUserPromptAndExecutesToolCalls() {
+async function testNoPromptNarrationAndExecutesToolCalls() {
   const {win, api, calls} = makeDemoWindow(sampleEvents());
   await runReplay(win, api, 'plan my trip');
 
-  // 1. The user prompt is read aloud as "User said ...".
+  // 1. The user prompt must NOT be narrated (prompt display removed).
   const speaks = calls.filter(c => c.fn === 'speakText');
-  assert.strictEqual(speaks.length, 1, 'exactly one prompt narration');
-  assert.strictEqual(speaks[0].text, 'User said plan my trip');
+  assert.strictEqual(speaks.length, 0, 'no prompt narration');
 
   // 2. The recorded talk tool call is actually played.
   const talks = calls.filter(c => c.fn === 'playTalkEvent');
@@ -204,7 +204,7 @@ async function testSpeaksUserPromptAndExecutesToolCalls() {
   );
 
   win.close();
-  console.log('  ok - prompt narrated, talk played, sub-agent tabs created');
+  console.log('  ok - no prompt narration, talk played, sub-agent tabs created');
 }
 
 async function testBadTasksJsonDegradesGracefully() {
@@ -248,7 +248,7 @@ async function testCancelStopsSpeech() {
   const replay = win._startDemoReplay([
     {id: 1, has_events: true, preview: 'cancel me', timestamp: 1},
   ]);
-  // Cancel while the replay is showing the task text.
+  // Cancel while the replay is showing the first panel.
   await new Promise(r => setTimeout(r, 50));
   win._cancelDemoReplay();
   await replay;
@@ -283,7 +283,7 @@ function testParseDemoTasks() {
 
 async function runTests() {
   testParseDemoTasks();
-  await testSpeaksUserPromptAndExecutesToolCalls();
+  await testNoPromptNarrationAndExecutesToolCalls();
   await testBadTasksJsonDegradesGracefully();
   await testOldHostApiWithoutHooksStillReplays();
   await testCancelStopsSpeech();

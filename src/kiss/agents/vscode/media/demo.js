@@ -7,17 +7,17 @@
  *
  * Replays task history in a streaming fashion for demonstrations.
  * When demo mode is on and a user clicks a task in the history sidebar,
- * that clicked chat's recorded top-level tasks are replayed sequentially:
- *   1. Task text appears in the input box (2-second pause)
- *   2. Events are grouped into logical panels and each panel is loaded
+ * the clicked task's recorded events are replayed (legacy callers may
+ * replay multiple sessions sequentially):
+ *   1. Events are grouped into logical panels and each panel is loaded
  *      in 0.5s then collapsed before moving to the next
- *   3. The result panel streams word-by-word
+ *   2. The result panel streams word-by-word
  *
- * The replay PAUSES while speech is playing: prompt narration
- * ("User said ...") and replayed ``talk`` tool calls are awaited
- * before the demo advances, so the visuals never run ahead of the
- * audio.  Cancelling the demo resolves any pending speech promise
- * (via ``api.stopSpeech``) so the paused replay exits immediately.
+ * The replay PAUSES while speech is playing: replayed ``talk`` tool
+ * calls are awaited before the demo advances, so the visuals never
+ * run ahead of the audio.  Cancelling the demo resolves any pending
+ * speech promise (via ``api.stopSpeech``) so the paused replay exits
+ * immediately.
  *
  * Communicates with main.js via window._demoApi (set by main.js).
  */
@@ -388,32 +388,6 @@
   // Expose for testing
   window._parseDemoTasks = parseDemoTasks;
 
-  // Narrating a multi-KB recorded prompt verbatim makes the GPT-audio
-  // synthesis slow or failing (the webview then degrades to SILENCE),
-  // so the "User said ..." narration reads only a short lead-in.
-  const NARRATION_MAX_CHARS = 280;
-
-  /**
-   * Collapse whitespace in *taskText* and cap it to a short lead-in
-   * (word-boundary cut + ellipsis) suitable for spoken narration.
-   *
-   * @param {string} taskText - The recorded task prompt.
-   * @returns {string} - The capped narration script.
-   */
-  function narrationText(taskText) {
-    const text = String(taskText || '')
-      .replace(/\s+/g, ' ')
-      .trim();
-    if (text.length <= NARRATION_MAX_CHARS) return text;
-    let cut = text.slice(0, NARRATION_MAX_CHARS);
-    const lastSpace = cut.lastIndexOf(' ');
-    if (lastSpace > 40) cut = cut.slice(0, lastSpace);
-    return cut + '\u2026';
-  }
-
-  // Expose for testing
-  window._demoNarrationText = narrationText;
-
   /**
    * Select which history sessions the demo replays.
    *
@@ -564,28 +538,7 @@
       const session = items[i];
       const taskText = session.preview || session.title || 'Untitled';
 
-      // Hide welcome immediately so it's never visible between tasks
-      api.hideWelcome();
-
-      // Step 1: Show task text in the input box and read it aloud as
-      // "User said ..." (speech overlaps the 2-second display pause,
-      // and the demo PAUSES until the narration finishes — longer
-      // prompts keep the replay waiting past the 2 seconds).
-      api.setInput(taskText);
-      const narration =
-        typeof api.speakText === 'function'
-          ? api.speakText('User said ' + narrationText(taskText))
-          : null;
-      await sleep(2000);
-      await pauseGate();
-      if (narration && typeof narration.then === 'function') {
-        await narration;
-      }
-      await pauseGate();
-      if (cancelRequested) break;
-
-      // Step 2: Clear input and prepare output area
-      api.clearInput();
+      // Step 1: Prepare output area
       if (i === 0) {
         api.clearForReplay();
       } else {
@@ -595,12 +548,12 @@
       api.setTaskText(taskText);
       api.updateTabTitle(taskText);
 
-      // Step 3: Request events from backend
+      // Step 2: Request events from backend
       const events = await requestEvents(api, session);
       await pauseGate();
       if (cancelRequested) break;
 
-      // Step 4: Group events into panels and replay panel-by-panel
+      // Step 3: Group events into panels and replay panel-by-panel
       const panelGroups = groupEventsIntoPanels(events);
 
       for (let j = 0; j < panelGroups.length; j++) {

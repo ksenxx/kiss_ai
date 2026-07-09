@@ -25,10 +25,6 @@
 //     active opened ANOTHER chat tab on every click ("keeps opening
 //     tabs").
 //
-//   * Narrating a huge recorded prompt verbatim made the GPT-audio
-//     synthesis slow/failing (silence) — narration must be capped to
-//     a short lead-in so the demo voice stays fast and reliable.
-//
 // Run directly with ``node``:
 //
 //     node src/kiss/agents/vscode/test/demoClickedChatOnly.test.js
@@ -171,8 +167,7 @@ function sleep(ms) {
 }
 
 // A huge recorded prompt (like the multi-KB bug-hunt prompts that fill
-// a real history) — narrating this verbatim is exactly what made the
-// demo voice time out into silence.
+// a real history) — the replay must handle such rows without choking.
 const HUGE_PROMPT =
   'You are a bug-hunting agent working in a giant repository. ' +
   'Audit every file and reproduce every inconsistency you find. '.repeat(
@@ -297,37 +292,27 @@ async function testReplaysOnlyClickedTask() {
   console.log('PASS: demo replays only the clicked task');
 }
 
-async function testNarrationIsCappedAndAudible() {
+async function testNoPromptNarrationRequested() {
   const {win, posted} = makeWebview();
-  const players = installAudio(win);
+  installAudio(win);
   installSpeech(win);
-  // Simulate the real failure mode: huge demoSpeak scripts fail (or
-  // time out) and the VS Code webview intentionally degrades to
-  // silence.  After the fix, the narration is capped before synthesis
-  // and therefore gets an Audio clip.
-  autoAnswerDemoSpeakWith(win, msg => (msg.text.length <= 320 ? 'QUJD' : ''));
+  autoAnswerDemoSpeak(win);
 
   const {done} = startDemoFlow(win, 'Task A1 original');
   await done;
 
+  // The prompt display + "User said ..." narration step was removed:
+  // a replay with no ``talk`` tool calls must request NO speech
+  // synthesis at all — even for a huge recorded prompt.
   const speaks = posted.filter(m => m.type === 'demoSpeak');
-  assert.ok(speaks.length > 0, 'demo narration requested synthesis');
-  for (const msg of speaks) {
-    assert.ok(
-      msg.text.length <= 320,
-      'narration must be capped to a short lead-in so GPT-audio ' +
-        'synthesis stays fast and audible (got ' +
-        msg.text.length +
-        ' chars)',
-    );
-  }
   assert.strictEqual(
-    players.length,
     speaks.length,
-    'every demo narration request should be short enough to get and ' +
-      'play a natural Audio clip instead of becoming silent',
+    0,
+    'demo replay must not narrate the recorded prompt (got ' +
+      speaks.length +
+      ' demoSpeak requests)',
   );
-  console.log('PASS: demo narration of huge prompts is capped and audible');
+  console.log('PASS: demo replay requests no prompt narration');
 }
 
 async function testClickWhileActiveOpensNoNewTab() {
@@ -337,7 +322,7 @@ async function testClickWhileActiveOpensNoNewTab() {
   autoAnswerDemoSpeak(win);
 
   const {done} = startDemoFlow(win, 'Task A1 original');
-  await sleep(300); // replay is now active, in the first narration
+  await sleep(300); // replay is now active, showing the first panel
   assert.ok(win._demoApi.active, 'demo replay is running');
   const tabsBefore = win.document.querySelectorAll(
     '#tab-list .chat-tab',
@@ -370,7 +355,7 @@ async function testClickWhileActiveOpensNoNewTab() {
 
 (async () => {
   await testReplaysOnlyClickedTask();
-  await testNarrationIsCappedAndAudible();
+  await testNoPromptNarrationRequested();
   await testClickWhileActiveOpensNoNewTab();
   console.log('demoClickedChatOnly.test.js: all tests passed');
   // Demo/webview timers can keep the node event loop alive; match the
