@@ -35,11 +35,7 @@ These are unique features of KISS Sorcar. These two **IPs (intellectual properti
 
 Look at the commit messages at [https://github.com/ksenxx/kiss_ai/commits/main/], find the prompt that the developer used for that commit in a commit message, and see what changed in the commit. This will help you get started with KISS Sorcar on any task like a pro.
 
-<<<<<<< Updated upstream
 **Always write precise 1-6 sentence prompts.** Long prompts confuse models. **Do not plan ahead of time.** Let KISS Sorcar plan dynamically, which is always better than AI-written static plans. Waterfall model does not work that well in the contemporary time.
-=======
-**Always write precise 1-6 sentence prompts.** Long prompts confuse models. **Do not plan ahead of time.** Let KISS Sorcar plan dynamically, which is always better than AI-written static plans.  Waterfall model does not work that well in the contemporary time.
->>>>>>> Stashed changes
 
 # Tip
 
