@@ -20,6 +20,10 @@
 
   let cancelRequested = false;
 
+  // Monotonic sequence for demo sub-agent tab ids — guarantees unique
+  // ids even when two fan-outs replay within the same millisecond.
+  let demoSubTabSeq = 0;
+
   /** Sanitize markdown HTML before innerHTML — see kissSanitize in main.js. */
   function kissSanitize(html) {
     const t = document.createElement('template');
@@ -277,6 +281,77 @@
   window._groupEventsIntoPanels = groupEventsIntoPanels;
 
   /**
+   * Parse the ``tasks`` argument of a recorded ``run_parallel`` tool
+   * call.  The agent passes a JSON-encoded list of task description
+   * strings; anything unparseable (truncated history, non-list JSON)
+   * yields an empty list so the replay degrades gracefully.
+   *
+   * @param {*} raw - Raw ``extras.tasks`` value from the event.
+   * @returns {Array<string>} - Task description strings.
+   */
+  function parseDemoTasks(raw) {
+    if (Array.isArray(raw)) return raw.map(String);
+    if (typeof raw !== 'string' || !raw) return [];
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed.map(String) : [];
+    } catch (_e) {
+      return [];
+    }
+  }
+
+  // Expose for testing
+  window._parseDemoTasks = parseDemoTasks;
+
+  /**
+   * Actually execute a replayed ``talk`` or ``run_parallel`` tool call
+   * so the demo behaves like a live run:
+   *   - ``talk``: speak the recorded text aloud through the talk queue;
+   *   - ``run_parallel``: materialise one sub-agent tab per task via
+   *     the real ``openSubagentTab`` path (the tabs close again when
+   *     the fan-out's panel collapses, exactly like a live fan-out).
+   *
+   * Must run AFTER ``api.processEvent(ev)`` rendered the tool-call
+   * panel: the sub-agent tab machinery locates the fan-out's
+   * ``.tc-run-parallel`` panel in the chat DOM.
+   *
+   * @param {Object} api - The demo API from main.js.
+   * @param {Object} ev - A replayed task event.
+   */
+  function executeDemoToolCall(api, ev) {
+    if (!ev || ev.type !== 'tool_call') return;
+    const extras = ev.extras || {};
+    if (ev.name === 'talk' && typeof api.playTalkEvent === 'function') {
+      const talkText = extras.text || '';
+      if (talkText) {
+        api.playTalkEvent({
+          text: talkText,
+          language: extras.language,
+          emotion: extras.emotion,
+        });
+      }
+      return;
+    }
+    if (
+      ev.name === 'run_parallel' &&
+      typeof api.openSubagentTab === 'function'
+    ) {
+      const tasks = parseDemoTasks(extras.tasks);
+      const parentId = api.getActiveTabId();
+      for (let i = 0; i < tasks.length; i++) {
+        api.openSubagentTab({
+          type: 'openSubagentTab',
+          tab_id: 'demo-sub-' + ++demoSubTabSeq + '-' + i,
+          parent_tab_id: parentId,
+          description: tasks[i],
+          taskIndex: i,
+          isDone: false,
+        });
+      }
+    }
+  }
+
+  /**
    * Start the demo replay for all sessions in the history.
    * Called from main.js when a history item is clicked in demo mode.
    *
@@ -308,8 +383,12 @@
       // Hide welcome immediately so it's never visible between tasks
       api.hideWelcome();
 
-      // Step 1: Show task text in the input box
+      // Step 1: Show task text in the input box and read it aloud as
+      // "User said ..." (speech overlaps the 2-second display pause).
       api.setInput(taskText);
+      if (typeof api.speakText === 'function') {
+        api.speakText('User said ' + taskText);
+      }
       await sleep(2000);
       if (cancelRequested) break;
 
@@ -341,9 +420,13 @@
           continue;
         }
 
-        // Process all events in this panel group at once
+        // Process all events in this panel group at once.  Replayed
+        // ``talk`` / ``run_parallel`` tool calls are ACTUALLY executed
+        // (speech playback / sub-agent tab creation) right after their
+        // panel is rendered.
         for (let k = 0; k < group.length; k++) {
           api.processEvent(group[k]);
+          executeDemoToolCall(api, group[k]);
         }
         api.scrollToBottom();
 
@@ -376,6 +459,8 @@
       api.active = false;
       api.setRunningState(false);
       api.removeSpinner();
+      // Stop any queued/in-flight demo speech immediately.
+      if (typeof api.stopSpeech === 'function') api.stopSpeech();
     }
   };
 
