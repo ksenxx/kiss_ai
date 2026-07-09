@@ -2233,13 +2233,26 @@ class WebPrinter(JsonPrinter):
     def _fanout_talk(self, event: dict[str, Any], targets: list[str]) -> None:
         """Fan out one ``talk`` event with per-device playback arbitration.
 
-        Webview subscriber tabs always receive the playable copy: each
-        webview plays on its own device and its ``talkId`` dedupe and
-        talk queue keep intra-webview duplicates silent.  CLI REPL
-        tabs (see :meth:`register_cli_tab`) play on THIS machine's
-        speakers, which a local UDS webview shares — so every CLI
-        tab's copy is stamped ``muted`` when at least one local webview
-        tab is subscribed (the local webview plays).  WSS web tabs are
+        Local UDS webview tabs (VS Code chat webviews on the daemon's
+        machine) CANNOT reliably play the synthesized clip themselves:
+        Chromium's autoplay policy rejects ``Audio.play()`` in a
+        webview unless the user interacted with it seconds earlier
+        (microsoft/vscode#197937 / #178642, closed as not actionable),
+        so the webview silently fell back to the robotic Web Speech
+        system voice — the "alien" talk voice.  When the event carries
+        a synthesized clip and a local webview tab is subscribed, the
+        DAEMON therefore plays the clip natively on this machine's
+        speakers (:mod:`kiss.agents.sorcar.cli_talk`, ``afplay`` on
+        macOS) and stamps every same-machine copy (local UDS webviews
+        AND CLI tabs) ``muted``.
+
+        Otherwise the previous arbitration applies: webview subscriber
+        tabs receive the playable copy (each webview plays on its own
+        device; ``talkId`` dedupe and the talk queue keep intra-webview
+        duplicates silent); CLI REPL tabs (:meth:`register_cli_tab`)
+        play on THIS machine's speakers, which a local UDS webview
+        shares — so every CLI tab's copy is stamped ``muted`` when at
+        least one local webview tab is subscribed.  WSS web tabs are
         treated as remote devices and do not suppress the local CLI;
         when only CLI tabs (and/or remote web tabs) are subscribed,
         exactly one CLI tab (the lexicographically first) plays.
@@ -2257,20 +2270,61 @@ class WebPrinter(JsonPrinter):
         cli_targets = sorted(t for t in targets if t in cli_tabs)
         web_targets = [t for t in targets if t not in cli_tabs]
         local_web_targets = [t for t in web_targets if t in local_uds_tabs]
+        daemon_plays = bool(local_web_targets) and self._play_talk_clip_locally(
+            event
+        )
         playing_cli_tab = (
-            cli_targets[0] if cli_targets and not local_web_targets else None
+            cli_targets[0]
+            if cli_targets and not local_web_targets and not daemon_plays
+            else None
         )
         base = json.dumps(event)[:-1]
         muted_base = json.dumps({**event, "muted": True})[:-1]
         for tab_id in web_targets:
+            local_copy_muted = daemon_plays and tab_id in local_uds_tabs
+            prefix = muted_base if local_copy_muted else base
             self._send_to_ws_clients(
-                f'{base}, "tabId": {json.dumps(tab_id)}}}'
+                f'{prefix}, "tabId": {json.dumps(tab_id)}}}'
             )
         for tab_id in cli_targets:
             prefix = base if tab_id == playing_cli_tab else muted_base
             self._send_to_ws_clients(
                 f'{prefix}, "tabId": {json.dumps(tab_id)}}}'
             )
+
+    @staticmethod
+    def _play_talk_clip_locally(event: dict[str, Any]) -> bool:
+        """Play a talk event's synthesized clip on this machine's speakers.
+
+        Uses the sorcar CLI's :class:`~kiss.agents.sorcar.cli_talk.
+        TalkPlayer` singleton — a real audio-player child process
+        (``afplay`` / ``mpg123`` / ``ffplay`` / ``mpv``, overridable
+        via ``KISS_SORCAR_PLAY_CMD``) fed from a serialising queue
+        with ``talkId`` dedupe, so playback never blocks the event
+        loop and never overlaps a CLI-origin playback of the same
+        utterance.
+
+        Args:
+            event: The unmuted ``talk`` broadcast event.
+
+        Returns:
+            ``True`` when the daemon machine has an audio player and
+            the event carries a clip so local playback was enqueued;
+            ``False`` otherwise (callers then leave the client copies
+            playable so devices can fall back on their own).
+        """
+        if not event.get("audioB64"):
+            return False
+        try:
+            from kiss.agents.sorcar import cli_talk
+
+            if cli_talk.player_command() is None:
+                return False
+            cli_talk.shared_player().play(dict(event))
+            return True
+        except Exception:
+            logger.exception("daemon-side talk clip playback failed")
+            return False
 
     def _fanout_talk_cli_origin(self, event: dict[str, Any]) -> None:
         """Fan out a CLI-forwarded ``talk`` event already played locally.

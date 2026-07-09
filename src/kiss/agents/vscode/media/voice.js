@@ -501,43 +501,42 @@
   /**
    * Speak a short "Working on it." acknowledgement right after a
    * voice-dictated task is submitted, so the user hears that Sorcar
-   * accepted the command.  Prefers the GPT-synthesized natural clip
-   * (media/working-on-it.mp3, gpt-audio "marin" voice) whose URL the
-   * page template injects as ``cfg.ackAudioUrl``; when the clip is
-   * missing or playback is rejected (autoplay policy, no Audio API)
-   * it falls back to the Web Speech API so the ack is never silent
-   * where any speech output exists.
+   * accepted the command — always with the GPT-synthesized natural
+   * clip (media/working-on-it.mp3, gpt-audio "marin" voice), never
+   * with the robotic Web Speech system voice (the "alien voice").
+   *
+   * In VS Code webview mode Chromium's autoplay policy rejects
+   * ``Audio.play()`` unless the user clicked the webview moments
+   * earlier (microsoft/vscode#197937) — and a voice-dictated task
+   * involves no click — so the clip is delegated to the extension
+   * HOST, which plays it natively on this machine's speakers (see the
+   * 'voiceAck' handler in SorcarSidebarView.ts), exactly like agent
+   * ``talk`` clips play natively on the daemon.
+   *
+   * In browser mode (remote chat page / webapp) the tab plays the
+   * clip itself via the ``cfg.ackAudioUrl`` the page template
+   * injects; a rejected play() or missing Audio API degrades to
+   * SILENCE.  The old Web Speech fallback is gone for good: a quiet
+   * ack is a far better failure than the loud robotic voice it was
+   * meant to avoid.
    */
   function speakWorkingOnIt() {
+    if (cfg.mode === 'webview') {
+      postToHost({type: 'voiceAck'});
+      return;
+    }
     try {
       if (cfg.ackAudioUrl && typeof window.Audio === 'function') {
         const audio = new window.Audio(cfg.ackAudioUrl);
         const p = audio.play();
         if (p && typeof p.catch === 'function') {
           p.catch(() => {
-            speakAckWithSystemVoice();
+            /* autoplay blocked — stay silent, never robotic */
           });
         }
-        return;
       }
     } catch (_e) {
-      /* fall through to the system voice */
-    }
-    speakAckWithSystemVoice();
-  }
-
-  /** Web Speech API fallback for the "Working on it." ack. */
-  function speakAckWithSystemVoice() {
-    try {
-      const synth = window.speechSynthesis;
-      if (!synth || typeof window.SpeechSynthesisUtterance !== 'function') {
-        return;
-      }
-      const utter = new window.SpeechSynthesisUtterance('Working on it.');
-      utter.lang = 'en-US';
-      synth.speak(utter);
-    } catch (_e) {
-      /* no speech output available; stay silent */
+      /* no audio output available; stay silent */
     }
   }
 
