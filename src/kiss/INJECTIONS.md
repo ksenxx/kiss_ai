@@ -8,7 +8,7 @@ Reproduce the issue by writing end-to-end tests. Then fix the issue.
 
 ## Trick
 
-Use claude-fable-5 model for all tasks including software development. Use gpt-5.5-xhigh (not codex) for thorough review and debugging of the work done by the other model. You MUST thoroughly check if the other model has missed code or wirings or has introduced bugs. No need to check if the models exist.
+Use claude-fable-5 model for all tasks including software development. Use gpt-5.6-sol-xhigh (not codex) for thorough review and debugging of the work done by the other model. You MUST thoroughly check if the other model has missed code or wirings or has introduced bugs. No need to check if the models exist.
 
 ## Trick
 
@@ -24,7 +24,7 @@ Reproduce any violation of the invariant by writing end-to-end tests. Then fix t
 
 ## Trick
 
-Use openrouter/z-ai/glm-5.2 model for all tasks including coding, bug fixing, and test creation. ALWAYS use gpt-5.5-xhigh (not codex) to carefully and thoroughly review and debug the work done by openrouter/z-ai/glm-5.2 for bugs and missing code. Then use claude-fable-5 to do the same thing.
+Use openrouter/z-ai/glm-5.2 model for all tasks including coding, bug fixing, and test creation. ALWAYS use gpt-5.6-sol-xhigh (not codex) to carefully and thoroughly review and debug the work done by openrouter/z-ai/glm-5.2 for bugs and missing code. Then use claude-fable-5 to do the same thing.
 
 ## Trick
 

@@ -96,7 +96,7 @@ When fixing bugs, issues, or race conditions: write an end-to-end test that repr
 
 AI discovery, auto research, and optimization
 
-Mandatory Instructions (MUST FOLLOW): You will be exploring, implementing, and evaluating novel ideas while doing AI discovery or auto research or software optimization. Note down the ideas you used to achieve user-specified metrics in a file along with the values of metrics, so that you can use the file to avoid repeating ideas that have already been tried and/or failed. You can also use the file to combine ideas that have been successful in the past. You MUST search the internet at every step to find new ideas. Use powerful models (if available), such as claude-fable-5, gpt-5.5-xhigh, to explore diverse kinds of novel ideas.
+Mandatory Instructions (MUST FOLLOW): You will be exploring, implementing, and evaluating novel ideas while doing AI discovery or auto research or software optimization. Note down the ideas you used to achieve user-specified metrics in a file along with the values of metrics, so that you can use the file to avoid repeating ideas that have already been tried and/or failed. You can also use the file to combine ideas that have been successful in the past. You MUST search the internet at every step to find new ideas. Use powerful models (if available), such as claude-fable-5, gpt-5.6-sol-xhigh, to explore diverse kinds of novel ideas.
 
 Deep Work
 
