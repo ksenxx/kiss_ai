@@ -127,6 +127,7 @@ import {MergeManager} from './MergeManager';
 import {getDefaultModel} from './DependencyInstaller';
 import {buildChatHtml, readSampleTasks} from './SorcarTab';
 import {VoiceWakeService} from './voiceWake';
+import {playVoiceAckClip} from './voiceAckPlayer';
 import {findInstallScript, kissAiRoot} from './installerPath';
 import {
   FromWebviewMessage,
@@ -1431,6 +1432,21 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         }
         if (message.enabled) this._voiceWake.start(this._voiceSensitivity);
         else this._voiceWake.stop();
+        break;
+      }
+
+      case 'voiceAck': {
+        // "Working on it." after a voice-dictated task.  The webview
+        // cannot play the clip itself (Chromium's autoplay policy
+        // rejects Audio.play() without a recent click —
+        // microsoft/vscode#197937 — and dictation involves no click),
+        // and its old Web Speech fallback was the loud robotic "alien
+        // voice".  Play the GPT-synthesized clip natively on this
+        // machine's speakers instead; no player means silence, never
+        // the robotic voice.
+        playVoiceAckClip(
+          path.join(this._extensionUri.fsPath, 'media', 'working-on-it.mp3'),
+        );
         break;
       }
 
