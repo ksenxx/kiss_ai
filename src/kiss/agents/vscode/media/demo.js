@@ -14,10 +14,11 @@
  *   2. The result panel streams word-by-word
  *
  * The replay PAUSES while speech is playing: replayed ``talk`` tool
- * calls are awaited before the demo advances, so the visuals never
- * run ahead of the audio.  Cancelling the demo resolves any pending
- * speech promise (via ``api.stopSpeech``) so the paused replay exits
- * immediately.
+ * calls — and ``prompt`` events (user messages), which are narrated
+ * with a "User says " prefix — are awaited before the demo advances,
+ * so the visuals never run ahead of the audio.  Cancelling the demo
+ * resolves any pending speech promise (via ``api.stopSpeech``) so the
+ * paused replay exits immediately.
  *
  * Communicates with main.js via window._demoApi (set by main.js).
  */
@@ -306,6 +307,8 @@
    *     tool_call or result.
    *   - Tool call panel: starts at tool_call, includes system_output and
    *     tool_result events.
+   *   - Prompt panel: a single prompt event (a mid-task user message);
+   *     it is narrated aloud during replay with a "User says " prefix.
    *   - Result panel: a single result event.
    *
    * @param {Array} events - Flat list of task events.
@@ -344,6 +347,16 @@
         panels.push([ev]);
         current = [];
         afterToolResult = false;
+        continue;
+      }
+
+      // prompt (a mid-task user message) is always its own group so it
+      // can be shown and narrated as one panel; the following
+      // thinking/text starts a fresh LLM panel.
+      if (t === 'prompt') {
+        if (current.length > 0) panels.push(current);
+        current = [ev];
+        afterToolResult = true;
         continue;
       }
 
@@ -457,8 +470,11 @@
 
   /**
    * Actually execute a replayed ``talk`` or ``run_parallel`` tool call
-   * so the demo behaves like a live run:
+   * (or narrate a mid-task user ``prompt``) so the demo behaves like a
+   * live run:
    *   - ``talk``: speak the recorded text aloud through the talk queue;
+   *   - ``prompt``: read the user's mid-task message aloud through the
+   *     same talk queue, prefixed with "User says ";
    *   - ``run_parallel``: materialise one sub-agent tab per task via
    *     the real ``openSubagentTab`` path (the tabs close again when
    *     the fan-out's panel collapses, exactly like a live fan-out).
@@ -470,11 +486,20 @@
    * @param {Object} api - The demo API from main.js.
    * @param {Object} ev - A replayed task event.
    * @returns {?Promise} - A promise that resolves when the replayed
-   *     ``talk`` speech finishes (so the caller can PAUSE the demo
-   *     until the talking ends), or null when nothing awaitable ran.
+   *     ``talk`` speech or ``prompt`` narration finishes (so the caller
+   *     can PAUSE the demo until the talking ends), or null when
+   *     nothing awaitable ran.
    */
   function executeDemoToolCall(api, ev) {
-    if (!ev || ev.type !== 'tool_call') return null;
+    if (!ev) return null;
+    if (ev.type === 'prompt' && typeof api.playTalkEvent === 'function') {
+      const promptText = ev.text || '';
+      if (promptText) {
+        return api.playTalkEvent({text: 'User says ' + promptText});
+      }
+      return null;
+    }
+    if (ev.type !== 'tool_call') return null;
     const extras = ev.extras || {};
     if (ev.name === 'talk' && typeof api.playTalkEvent === 'function') {
       const talkText = extras.text || '';
