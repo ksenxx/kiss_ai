@@ -7,7 +7,7 @@
  *
  * Replays task history in a streaming fashion for demonstrations.
  * When demo mode is on and a user clicks a task in the history sidebar,
- * all tasks in the history are replayed sequentially:
+ * that clicked chat's recorded top-level tasks are replayed sequentially:
  *   1. Task text appears in the input box (2-second pause)
  *   2. Events are grouped into logical panels and each panel is loaded
  *      in 0.5s then collapsed before moving to the next
@@ -25,6 +25,79 @@
   'use strict';
 
   let cancelRequested = false;
+
+  // Pause/play state for the demo pause button: while paused, every
+  // replay checkpoint awaits in pauseGate until resume (or cancel)
+  // flushes the stored resolvers.
+  let pauseRequested = false;
+  let pauseResolvers = [];
+
+  /**
+   * Notify main.js helpers waiting to start/resume demo speech that the
+   * pause state changed.  A tiny DOM event keeps the demo.js-owned pause
+   * state decoupled from the talk-queue implementation in main.js.
+   */
+  function notifyPauseChanged() {
+    try {
+      let ev;
+      if (typeof window.CustomEvent === 'function') {
+        ev = new window.CustomEvent('kiss-demo-pause-change', {
+          detail: {paused: pauseRequested, cancelled: cancelRequested},
+        });
+      } else {
+        ev = new window.Event('kiss-demo-pause-change');
+        ev.detail = {paused: pauseRequested, cancelled: cancelRequested};
+      }
+      window.dispatchEvent(ev);
+    } catch (_e) {
+      // Pause/resume still works through pauseResolvers; this event only
+      // gates speech clips that have not started yet.
+    }
+  }
+
+  /**
+   * Pause or resume the demo replay (wired to the pause/play button
+   * in main.js).  Pausing also pauses the currently playing speech;
+   * resuming flushes every checkpoint waiting in ``pauseGate`` and
+   * resumes the speech.
+   *
+   * @param {boolean} paused - True to pause, false to resume.
+   */
+  window._setDemoPaused = function (paused) {
+    pauseRequested = !!paused;
+    const api = getApi();
+    if (pauseRequested) {
+      if (api && typeof api.pauseSpeech === 'function') api.pauseSpeech();
+    } else {
+      const resolvers = pauseResolvers;
+      pauseResolvers = [];
+      for (let i = 0; i < resolvers.length; i++) resolvers[i]();
+      if (api && typeof api.resumeSpeech === 'function') api.resumeSpeech();
+    }
+    notifyPauseChanged();
+  };
+
+  /**
+   * Check whether the demo replay is currently paused.
+   *
+   * @returns {boolean} - True while the pause button is engaged.
+   */
+  window._isDemoPaused = function () {
+    return pauseRequested;
+  };
+
+  /**
+   * Replay checkpoint: block while the demo is paused.  Resuming (or
+   * cancelling, which flushes the resolvers too) releases the wait,
+   * so a paused replay can never hang forever.
+   */
+  async function pauseGate() {
+    while (pauseRequested && !cancelRequested) {
+      await new Promise(resolve => {
+        pauseResolvers.push(resolve);
+      });
+    }
+  }
 
   // Monotonic sequence for demo sub-agent tab ids — guarantees unique
   // ids even when two fan-outs replay within the same millisecond.
@@ -194,6 +267,7 @@
         }
         api.scrollToBottom();
         await sleep(TICK_MS);
+        await pauseGate();
       }
     }
 
@@ -461,9 +535,13 @@
     api.active = true;
     cancelRequested = false;
 
-    // Show stop button and spinner for the duration of the replay
+    // Show stop button and spinner for the duration of the replay,
+    // hide the input controls, and show the pause/play button reset
+    // to its "pause" state.
     api.setRunningState(true);
     api.showSpinner();
+    pauseRequested = false;
+    if (typeof api.setDemoUi === 'function') api.setDemoUi(true);
 
     const items = selectReplaySessions(sessions, clicked);
 
@@ -485,9 +563,11 @@
           ? api.speakText('User said ' + narrationText(taskText))
           : null;
       await sleep(2000);
+      await pauseGate();
       if (narration && typeof narration.then === 'function') {
         await narration;
       }
+      await pauseGate();
       if (cancelRequested) break;
 
       // Step 2: Clear input and prepare output area
@@ -503,6 +583,7 @@
 
       // Step 3: Request events from backend
       const events = await requestEvents(api, session);
+      await pauseGate();
       if (cancelRequested) break;
 
       // Step 4: Group events into panels and replay panel-by-panel
@@ -510,6 +591,7 @@
 
       for (let j = 0; j < panelGroups.length; j++) {
         if (cancelRequested) break;
+        await pauseGate();
         const group = panelGroups[j];
 
         // Check if this group is a result panel
@@ -530,6 +612,7 @@
           if (speech && typeof speech.then === 'function') {
             api.scrollToBottom();
             await speech;
+            await pauseGate();
             if (cancelRequested) break;
           }
         }
@@ -542,6 +625,7 @@
         // so this pause is the only window in which the viewer can
         // actually SEE the tabs materialise.
         await sleep(groupHasFanOut(group) ? 2500 : 500);
+        await pauseGate();
         if (!cancelRequested) {
           api.collapsePanels();
           api.scrollToBottom();
@@ -551,11 +635,14 @@
       // Brief pause between tasks
       if (i < items.length - 1) {
         await sleep(1000);
+        await pauseGate();
       }
     }
 
     api.setRunningState(false);
     api.removeSpinner();
+    pauseRequested = false;
+    if (typeof api.setDemoUi === 'function') api.setDemoUi(false);
     api.active = false;
   };
 
@@ -564,11 +651,19 @@
    */
   window._cancelDemoReplay = function () {
     cancelRequested = true;
+    // Release a PAUSED replay so it observes the cancel and exits
+    // instead of hanging in pauseGate forever.
+    pauseRequested = false;
+    const resolvers = pauseResolvers;
+    pauseResolvers = [];
+    for (let i = 0; i < resolvers.length; i++) resolvers[i]();
+    notifyPauseChanged();
     const api = getApi();
     if (api) {
       api.active = false;
       api.setRunningState(false);
       api.removeSpinner();
+      if (typeof api.setDemoUi === 'function') api.setDemoUi(false);
       // Stop any queued/in-flight demo speech immediately.
       if (typeof api.stopSpeech === 'function') api.stopSpeech();
     }
