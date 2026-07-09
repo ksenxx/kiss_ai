@@ -328,6 +328,14 @@ class OpenAICompatibleModel(Model):
         if thinking_level is not None and "reasoning_effort" not in self.model_config:
             self.model_config = dict(self.model_config)
             self.model_config["reasoning_effort"] = thinking_level
+        # Base64-encoded audio payload of the most recent ``generate()``
+        # response, populated when the request asked for audio output
+        # (``model_config={"modalities": ["text", "audio"], "audio":
+        # {...}}`` with a GPT audio-chat model).  ``None`` otherwise.
+        # Lets callers (e.g. the ``talk`` tool's speech synthesis via
+        # ``KISSAgent``) retrieve model-generated audio through the core
+        # model layer instead of calling the OpenAI SDK directly.
+        self.last_audio_data: str | None = None
 
     def __str__(self) -> str:
         """Return a string representation of the model.
@@ -766,6 +774,26 @@ class OpenAICompatibleModel(Model):
             return last_chunk
         raise KISSError("Streaming response was empty.")
 
+    @staticmethod
+    def _extract_output_audio(response: Any) -> Any | None:
+        """Return the output-audio object of a chat completion, if any.
+
+        Args:
+            response: A chat-completions response (or final stream chunk).
+
+        Returns:
+            The ``message.audio`` object of the first choice — carrying
+            ``data`` (base64 audio) and ``transcript`` — or ``None`` when
+            the response has no audio output (the common text-only case,
+            and always for streamed chunks, which carry deltas instead of
+            a full message).
+        """
+        choices = getattr(response, "choices", None)
+        if not choices:
+            return None
+        message = getattr(choices[0], "message", None)
+        return getattr(message, "audio", None)
+
     def _stream_text(  # pragma: no cover – API streaming
         self, kwargs: dict[str, Any],
     ) -> tuple[str, Any]:
@@ -860,7 +888,15 @@ class OpenAICompatibleModel(Model):
         """
         kwargs = self._build_chat_kwargs(self._normalized_conversation_checked())
 
+        self.last_audio_data = None
         content, response = self._stream_text(kwargs)
+        audio = self._extract_output_audio(response)
+        if audio is not None:
+            self.last_audio_data = getattr(audio, "data", None)
+            if not content:
+                # Audio-output models leave ``message.content`` empty and
+                # put the spoken text in ``message.audio.transcript``.
+                content = getattr(audio, "transcript", None) or ""
 
         if self._is_deepseek_reasoning_model():
             _, content = _extract_deepseek_reasoning(content)
