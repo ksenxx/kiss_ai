@@ -32,6 +32,13 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Demo-mode speech clips keyed by (text, language, emotion): demo mode
+# replays the same history sessions over and over, so each utterance is
+# synthesized at most once per daemon lifetime (bounded FIFO eviction).
+_DEMO_SPEAK_CACHE: dict[tuple[str, str, str], tuple[str, str]] = {}
+_DEMO_SPEAK_CACHE_MAX = 64
+_DEMO_SPEAK_CACHE_LOCK = threading.Lock()
+
 
 def _kiss_home_is_default() -> bool:
     """Return True when this process operates on the default ``~/.kiss``.
@@ -1174,6 +1181,74 @@ class _CommandsMixin:
             target=_worker, daemon=True, name="sorcar-mcp-listing",
         ).start()
 
+    def _cmd_demo_speak(self, cmd: dict[str, Any]) -> None:
+        """Synthesize a demo-mode utterance as a natural-voice clip.
+
+        Demo replay in the chat webview narrates prompts and replays
+        recorded ``talk`` tool calls, but the persisted events carry no
+        audio and the Web Speech fallback is the robotic "alien voice".
+        This handler synthesizes the utterance with the same GPT audio
+        model the live ``talk`` tool uses
+        (:func:`kiss.agents.vscode.speech_synthesis.synthesize_talk_audio`)
+        and broadcasts the clip back as a ``demoSpeakAudio`` event keyed
+        by the request's ``reqId`` (only the requesting webview has a
+        matching waiter).  Synthesis runs on a daemon thread so a
+        multi-second API call never blocks the command loop, and
+        results are cached per (text, language, emotion) because demo
+        mode replays the same history over and over.  A failed
+        synthesis still broadcasts a reply with an empty ``audioB64``
+        so the webview applies its fallback rules instead of waiting
+        for its timeout.
+
+        Args:
+            cmd: The parsed ``demoSpeak`` command carrying ``reqId``,
+                ``text``, ``language``, ``emotion`` and ``tabId``.
+        """
+        req_id = str(cmd.get("reqId", "") or "")
+        text = str(cmd.get("text", "") or "")
+        language = str(cmd.get("language", "") or "")
+        emotion = str(cmd.get("emotion", "") or "")
+        tab_id = cmd.get("tabId", "")
+
+        def synthesize_and_reply() -> None:
+            audio_b64, mime = "", ""
+            key = (text, language, emotion)
+            with _DEMO_SPEAK_CACHE_LOCK:
+                cached = _DEMO_SPEAK_CACHE.get(key)
+            if cached is not None:
+                audio_b64, mime = cached
+            elif text.strip():
+                from kiss.agents.vscode.speech_synthesis import (
+                    synthesize_talk_audio,
+                )
+
+                try:
+                    synthesized = synthesize_talk_audio(
+                        text, language, emotion,
+                    )
+                except Exception:
+                    logger.exception("demoSpeak synthesis failed")
+                    synthesized = None
+                if synthesized:
+                    audio_b64, mime = synthesized
+                    with _DEMO_SPEAK_CACHE_LOCK:
+                        if len(_DEMO_SPEAK_CACHE) >= _DEMO_SPEAK_CACHE_MAX:
+                            _DEMO_SPEAK_CACHE.pop(
+                                next(iter(_DEMO_SPEAK_CACHE)),
+                            )
+                        _DEMO_SPEAK_CACHE[key] = (audio_b64, mime)
+            self.printer.broadcast({
+                "type": "demoSpeakAudio",
+                "reqId": req_id,
+                "audioB64": audio_b64,
+                "audioMime": mime or "audio/mpeg",
+                "tabId": tab_id,
+            })
+
+        threading.Thread(
+            target=synthesize_and_reply, daemon=True, name="demo-speak",
+        ).start()
+
     def _cmd_cli_info(self, cmd: dict[str, Any]) -> None:
         """Reply to a ``cliInfo`` request from the sorcar CLI client.
 
@@ -1477,4 +1552,5 @@ class _CommandsMixin:
         "getConfig": _cmd_get_config,
         "saveConfig": _cmd_save_config,
         "cliInfo": _cmd_cli_info,
+        "demoSpeak": _cmd_demo_speak,
     }
