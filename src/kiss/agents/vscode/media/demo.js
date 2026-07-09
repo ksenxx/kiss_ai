@@ -415,29 +415,42 @@
   window._demoNarrationText = narrationText;
 
   /**
-   * Select which history sessions the demo replays, oldest first.
+   * Select which history sessions the demo replays.
    *
-   * The demo-mode spec: clicking a task in the history replays the
-   * tasks of THAT chat session, starting from the first task.  So
-   * only rows sharing the clicked row's chat id are kept — never
-   * other chats' tasks ("random tasks") — and sub-agent rows are
-   * skipped (their fan-outs are already replayed inside the parent
-   * task via ``executeDemoToolCall``).  Clicking a sub-agent row
-   * itself replays just that row.  Without *clicked* (tests, legacy
-   * callers) every session with stored events is replayed.
+   * The demo-mode spec: clicking a task in the history replays ONLY
+   * that task — never the chat's other tasks (the old behavior of
+   * replaying the whole chain oldest-to-newest) and never other
+   * chats' tasks ("random tasks").  This holds for regular rows and
+   * sub-agent rows alike (a sub-agent task's own fan-outs are still
+   * replayed inside it via ``executeDemoToolCall``).  Rows without a
+   * usable ``task_id`` (legacy histories: undefined/null/'') fall
+   * back to the clicked chat's top-level tasks, oldest first.
+   * Without *clicked* (tests, legacy callers) every session with
+   * stored events is replayed, oldest first.
    *
    * @param {Array} sessions - All history sessions (newest first).
    * @param {?Object} clicked - The history row the user clicked.
-   * @returns {Array} - The sessions to replay, oldest first.
+   * @returns {Array} - The sessions to replay.
    */
   function selectReplaySessions(sessions, clicked) {
     let items = sessions.filter(s => {
       return s.has_events && s.id;
     });
     if (clicked && clicked.id) {
-      if (clicked.parent_task_id) {
+      const clickedTaskId = clicked.task_id;
+      if (
+        clickedTaskId !== undefined &&
+        clickedTaskId !== null &&
+        clickedTaskId !== ''
+      ) {
+        // The clicked chat id is matched too so a legacy row of
+        // ANOTHER chat whose task_id happens to coincide can never
+        // sneak into the replay.
         items = items.filter(s => {
-          return String(s.task_id) === String(clicked.task_id);
+          return (
+            String(s.id) === String(clicked.id) &&
+            String(s.task_id) === String(clickedTaskId)
+          );
         });
       } else {
         items = items.filter(s => {
@@ -521,13 +534,14 @@
   }
 
   /**
-   * Start the demo replay for the clicked chat session's tasks.
+   * Start the demo replay for the clicked history task.
    * Called from main.js when a history item is clicked in demo mode.
    *
    * @param {Array} sessions - All history sessions (newest first from server).
    * @param {?Object} clicked - The history session row the user
-   *     clicked; only its chat's tasks are replayed (oldest first).
-   *     Omitted by legacy callers/tests to replay every session.
+   *     clicked; only that task is replayed — never the chat's other
+   *     tasks.  Omitted by legacy callers/tests to replay every
+   *     session.
    */
   window._startDemoReplay = async function (sessions, clicked) {
     const api = getApi();
