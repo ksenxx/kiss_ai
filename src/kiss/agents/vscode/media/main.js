@@ -9265,6 +9265,45 @@
     setRunningState: setRunningState,
     showSpinner: showSpinner,
     removeSpinner: removeSpinner,
+    // Demo-mode speech: read *text* aloud through the same serialized
+    // talk queue the live ``talk`` tool uses, so demo narration never
+    // overlaps agent talk playback.
+    speakText: function (text, language) {
+      enqueueTalkPlayback(finish => {
+        speakWithSystemVoice({language: language || ''}, text, finish);
+      });
+    },
+    // Demo-mode replay of a recorded ``talk`` tool call: actually play
+    // it (GPT audio when present, Web-Speech fallback otherwise) via
+    // the shared talk queue — mirrors handleEvent's case 'talk'.
+    playTalkEvent: function (ev) {
+      enqueueTalkPlayback(finish => {
+        if (ev.audioB64 && playTalkAudio(ev, finish)) return;
+        speakWithSystemVoice(ev, ev.text || '', finish);
+      });
+    },
+    // Demo-mode replay of a ``run_parallel`` fan-out: materialise the
+    // sub-agent tabs through the real ``openSubagentTab`` handler so
+    // the demo shows the same tab creation as a live run.
+    openSubagentTab: function (ev) {
+      handleEvent(ev);
+    },
+    // Cancel any queued/in-flight demo speech (demo replay stopped).
+    stopSpeech: function () {
+      talkQueue.length = 0;
+      // Release the queue explicitly: some engines fire neither
+      // ``onend`` nor ``onerror`` for utterances killed by
+      // ``cancel()``, which would leave ``talkQueueBusy`` stuck true
+      // and silence every future talk playback.  The in-flight job's
+      // late ``finish`` (if it ever fires) is idempotent, so this
+      // cannot double-pump.
+      talkQueueBusy = false;
+      try {
+        if (window.speechSynthesis) window.speechSynthesis.cancel();
+      } catch (_e) {
+        // Speech synthesis unsupported — nothing to cancel.
+      }
+    },
   };
 
   // Start
