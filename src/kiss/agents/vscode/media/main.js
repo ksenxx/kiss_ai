@@ -8350,9 +8350,17 @@
 
       div.addEventListener('click', () => {
         if (demoMode && typeof window._startDemoReplay === 'function') {
+          // A replay is already running: ignore further history
+          // clicks.  Restarting here would leak one fresh chat tab
+          // per click ("keeps opening tabs") — the user stops the
+          // running demo with the stop button first.
+          if (_demoActive) return;
           closeSidebar();
           createNewTab();
-          window._startDemoReplay(allHistSessions);
+          // Replay the CLICKED chat session's tasks (oldest first) —
+          // never the whole history: replaying every session made the
+          // demo play "random tasks" from other chats/workspaces.
+          window._startDemoReplay(allHistSessions, s);
           return;
         }
         // A client must never display the same backend chat id in two
