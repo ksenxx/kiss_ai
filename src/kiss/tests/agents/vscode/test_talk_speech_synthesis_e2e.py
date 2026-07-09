@@ -69,6 +69,46 @@ def test_default_narrator_voice_synthesizes_multi_sentence_take() -> None:
     assert _is_mp3(data)
 
 
+@requires_openai
+def test_synthesis_persists_no_trajectory_files() -> None:
+    """A TTS run must not write a trajectory YAML to the artifact dir.
+
+    Speech synthesis is an infrastructure call made once per spoken
+    utterance; ``TalkSynthesisAgent`` overrides ``_save`` so no
+    trajectory files pile up in the artifact directory.
+    """
+    from pathlib import Path
+
+    from kiss.core import config as config_module
+
+    traj_dir = Path(config_module.artifact_dir) / "trajectories"
+    pattern = "trajectory_talk-speech-synthesis_*.yaml"
+    before = set(traj_dir.glob(pattern)) if traj_dir.exists() else set()
+    assert synthesize_talk_audio("Quick trajectory check.") is not None
+    after = set(traj_dir.glob(pattern)) if traj_dir.exists() else set()
+    assert after == before
+
+
+@requires_openai
+def test_text_with_literal_braces_synthesizes() -> None:
+    """Text containing literal ``{...}`` braces synthesizes to MP3.
+
+    Synthesis now feeds the script through KISSAgent's prompt-template
+    substitution; literal braces in the spoken text (JSON, code) must
+    survive untouched and still yield valid audio.
+    """
+    result = synthesize_talk_audio(
+        "The config is {\"retries\": 3} and the template stays {script}.",
+        language="en-US",
+    )
+    assert result is not None
+    audio_b64, mime = result
+    assert mime == "audio/mpeg"
+    data = base64.b64decode(audio_b64)
+    assert len(data) > 1000
+    assert _is_mp3(data)
+
+
 def test_empty_text_returns_none() -> None:
     """Blank text must not hit the API and must return None."""
     assert synthesize_talk_audio("") is None
