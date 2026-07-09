@@ -27,6 +27,23 @@
 
   let cancelRequested = false;
 
+  // Generation counter for replay runs.  Each _startDemoReplay call and
+  // each _cancelDemoReplay bumps it; a replay captures its generation
+  // at start and treats any mismatch as a cancel.  This is what keeps a
+  // cancelled replay suspended at an ``await`` from resuming as a
+  // ZOMBIE after a newer replay reset the shared ``cancelRequested``
+  // flag — the stale generation stops it at its next checkpoint, so a
+  // finished/stopped demo can never interleave its panels into (or
+  // tear the running-demo UI down under) the next demo.
+  let replayGen = 0;
+
+  // Resolver of the currently pending requestEvents promise, kept so a
+  // cancel can resolve it: otherwise a replay cancelled while its
+  // task_events request is in flight would stay suspended forever and
+  // leave a stale ``api.resolveEvents`` behind to swallow the NEXT
+  // demo's events.
+  let pendingEventsResolve = null;
+
   // Pause/play state for the demo pause button: while paused, every
   // replay checkpoint awaits in pauseGate until resume (or cancel)
   // flushes the stored resolvers.
@@ -88,12 +105,27 @@
   };
 
   /**
+   * True when the replay run that captured *gen* must stop: either the
+   * user cancelled, or a newer replay run superseded it (generation
+   * mismatch).
+   *
+   * @param {number} gen - Generation captured by the replay run.
+   * @returns {boolean} - Whether the run is cancelled or stale.
+   */
+  function replayStopped(gen) {
+    return cancelRequested || gen !== replayGen;
+  }
+
+  /**
    * Replay checkpoint: block while the demo is paused.  Resuming (or
    * cancelling, which flushes the resolvers too) releases the wait,
    * so a paused replay can never hang forever.
+   *
+   * @param {number} gen - Generation of the calling replay run; a
+   *     stale run passes straight through so it can exit.
    */
-  async function pauseGate() {
-    while (pauseRequested && !cancelRequested) {
+  async function pauseGate(gen) {
+    while (pauseRequested && !replayStopped(gen)) {
       await new Promise(resolve => {
         pauseResolvers.push(resolve);
       });
@@ -174,18 +206,88 @@
    * mode).
    */
   function requestEvents(api, session) {
+    const reqTabId = api.getActiveTabId();
+    const reqTaskId = session.task_id;
     return new Promise(resolve => {
-      api.resolveEvents = function (events) {
-        api.resolveEvents = null;
+      const deliver = function (events, envelope) {
+        // Identity check: main.js passes the full task_events message
+        // as *envelope* — a reply addressed to a DIFFERENT tab or task
+        // (a stopped demo's late reply arriving on the same tab, a
+        // legacy same-tab restart) must not settle this fetch with the
+        // wrong task's events.  Keep waiting for the right reply; a
+        // cancel still frees the fetch via discardPendingEvents.
+        // Legacy callers pass no envelope — always accepted.
+        if (envelope && !eventsReplyMatches(envelope, reqTabId, reqTaskId)) {
+          return;
+        }
+        // Ownership check: a STALE deliver hook (captured by a caller
+        // before this fetch was discarded) may fire late — it must
+        // only settle its own abandoned promise, never clear the hooks
+        // now owned by a NEWER fetch.
+        if (api.resolveEvents === deliver) api.resolveEvents = null;
+        if (pendingEventsResolve === resolve) pendingEventsResolve = null;
         resolve(events);
       };
+      pendingEventsResolve = resolve;
+      api.resolveEvents = deliver;
       api.sendMessage({
         type: 'resumeSession',
         id: session.id,
-        taskId: session.task_id,
-        tabId: api.getActiveTabId(),
+        taskId: reqTaskId,
+        tabId: reqTabId,
       });
     });
+  }
+
+  /**
+   * True when a ``task_events`` reply *envelope* answers the fetch
+   * that requested *reqTabId* / *reqTaskId*.  Fields absent from the
+   * envelope or from the request (legacy histories, older backends)
+   * are not compared — only a POSITIVE mismatch rejects the reply.
+   *
+   * @param {Object} envelope - The task_events message from main.js.
+   * @param {string} reqTabId - Tab id the fetch was requested for.
+   * @param {*} reqTaskId - task_id of the requested history session.
+   * @returns {boolean} - Whether the reply belongs to this fetch.
+   */
+  function eventsReplyMatches(envelope, reqTabId, reqTaskId) {
+    const evTab = envelope.tabId;
+    if (
+      evTab !== undefined &&
+      evTab !== null &&
+      reqTabId &&
+      String(evTab) !== String(reqTabId)
+    ) {
+      return false;
+    }
+    const evTask = envelope.task_id;
+    if (
+      evTask !== undefined &&
+      evTask !== null &&
+      reqTaskId !== undefined &&
+      reqTaskId !== null &&
+      reqTaskId !== '' &&
+      String(evTask) !== String(reqTaskId)
+    ) {
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Discard a pending requestEvents fetch: clear the ``resolveEvents``
+   * hook (so a late task_events reply can never be mistaken for the
+   * NEXT demo's events) and resolve the suspended promise with no
+   * events so the cancelled replay run wakes up, observes its stale
+   * generation, and exits instead of leaking forever.
+   *
+   * @param {?Object} api - The demo API from main.js (may be absent).
+   */
+  function discardPendingEvents(api) {
+    if (api) api.resolveEvents = null;
+    const resolve = pendingEventsResolve;
+    pendingEventsResolve = null;
+    if (resolve) resolve([]);
   }
 
   /**
@@ -197,8 +299,13 @@
 
   /**
    * Stream the result panel content word-by-word.
+   *
+   * @param {Object} api - The demo API from main.js.
+   * @param {Object} ev - The recorded ``result`` event.
+   * @param {number} gen - Generation of the calling replay run;
+   *     streaming stops as soon as the run is cancelled or stale.
    */
-  async function streamResultEvent(api, ev) {
+  async function streamResultEvent(api, ev, gen) {
     const O = document.getElementById('output');
     if (!O) return;
 
@@ -258,7 +365,7 @@
     const TICK_MS = 50;
 
     for (let i = 0; i < words.length; i++) {
-      if (cancelRequested) break;
+      if (replayStopped(gen)) break;
       accumulated += words[i];
       if (i % WORDS_PER_TICK === WORDS_PER_TICK - 1 || i === words.length - 1) {
         if (typeof marked !== 'undefined') {
@@ -268,7 +375,7 @@
         }
         api.scrollToBottom();
         await sleep(TICK_MS);
-        await pauseGate();
+        await pauseGate(gen);
       }
     }
 
@@ -533,33 +640,19 @@
   }
 
   /**
-   * Start the demo replay for the clicked history task.
-   * Called from main.js when a history item is clicked in demo mode.
+   * Replay *items* (history sessions, oldest first) panel-by-panel:
+   * fetch each session's recorded events, group them into panels, and
+   * render them on the demo cadence.  Extracted from
+   * ``_startDemoReplay`` so the caller can guard it with try/catch —
+   * even a throwing host hook must not leave the demo marked active.
    *
-   * @param {Array} sessions - All history sessions (newest first from server).
-   * @param {?Object} clicked - The history session row the user
-   *     clicked; only that task is replayed — never the chat's other
-   *     tasks.  Omitted by legacy callers/tests to replay every
-   *     session.
+   * @param {Object} api - The demo API from main.js.
+   * @param {Array} items - The sessions to replay, oldest first.
+   * @param {number} myGen - Generation captured by the calling run.
    */
-  window._startDemoReplay = async function (sessions, clicked) {
-    const api = getApi();
-    if (!api || api.active) return;
-    api.active = true;
-    cancelRequested = false;
-
-    // Show stop button and spinner for the duration of the replay,
-    // hide the input controls, and show the pause/play button reset
-    // to its "pause" state.
-    api.setRunningState(true);
-    api.showSpinner();
-    pauseRequested = false;
-    if (typeof api.setDemoUi === 'function') api.setDemoUi(true);
-
-    const items = selectReplaySessions(sessions, clicked);
-
+  async function replaySessions(api, items, myGen) {
     for (let i = 0; i < items.length; i++) {
-      if (cancelRequested) break;
+      if (replayStopped(myGen)) break;
       const session = items[i];
       const taskText = session.preview || session.title || 'Untitled';
 
@@ -575,20 +668,21 @@
 
       // Step 2: Request events from backend
       const events = await requestEvents(api, session);
-      await pauseGate();
-      if (cancelRequested) break;
+      await pauseGate(myGen);
+      if (replayStopped(myGen)) break;
 
       // Step 3: Group events into panels and replay panel-by-panel
       const panelGroups = groupEventsIntoPanels(events);
 
       for (let j = 0; j < panelGroups.length; j++) {
-        if (cancelRequested) break;
-        await pauseGate();
+        if (replayStopped(myGen)) break;
+        await pauseGate(myGen);
+        if (replayStopped(myGen)) break;
         const group = panelGroups[j];
 
         // Check if this group is a result panel
         if (group.length === 1 && group[0].type === 'result') {
-          await streamResultEvent(api, group[0]);
+          await streamResultEvent(api, group[0], myGen);
           continue;
         }
 
@@ -604,11 +698,11 @@
           if (speech && typeof speech.then === 'function') {
             api.scrollToBottom();
             await speech;
-            await pauseGate();
-            if (cancelRequested) break;
+            await pauseGate(myGen);
+            if (replayStopped(myGen)) break;
           }
         }
-        if (cancelRequested) break;
+        if (replayStopped(myGen)) break;
         api.scrollToBottom();
 
         // Brief pause to show the panel, then collapse it.  A fan-out
@@ -617,8 +711,8 @@
         // so this pause is the only window in which the viewer can
         // actually SEE the tabs materialise.
         await sleep(groupHasFanOut(group) ? 2500 : 500);
-        await pauseGate();
-        if (!cancelRequested) {
+        await pauseGate(myGen);
+        if (!replayStopped(myGen)) {
           api.collapsePanels();
           api.scrollToBottom();
         }
@@ -627,10 +721,66 @@
       // Brief pause between tasks
       if (i < items.length - 1) {
         await sleep(1000);
-        await pauseGate();
+        await pauseGate(myGen);
       }
     }
+  }
 
+  /**
+   * Start the demo replay for the clicked history task.
+   * Called from main.js when a history item is clicked in demo mode.
+   *
+   * @param {Array} sessions - All history sessions (newest first from server).
+   * @param {?Object} clicked - The history session row the user
+   *     clicked; only that task is replayed — never the chat's other
+   *     tasks.  Omitted by legacy callers/tests to replay every
+   *     session.
+   */
+  window._startDemoReplay = async function (sessions, clicked) {
+    const api = getApi();
+    if (!api || api.active) return;
+    api.active = true;
+    cancelRequested = false;
+    const myGen = ++replayGen;
+    // A replay stopped while its event fetch was in flight may have
+    // left a stale resolver behind; discard it so this run's fetch can
+    // never be resolved by the PREVIOUS run's late task_events reply.
+    discardPendingEvents(api);
+
+    try {
+      // Show stop button and spinner for the duration of the replay,
+      // hide the input controls, and show the pause/play button reset
+      // to its "pause" state.  Inside the try so even a throwing
+      // setup hook cannot leave the demo stuck active.
+      api.setRunningState(true);
+      api.showSpinner();
+      pauseRequested = false;
+      if (typeof api.setDemoUi === 'function') api.setDemoUi(true);
+
+      const items = selectReplaySessions(sessions, clicked);
+      await replaySessions(api, items, myGen);
+    } catch (_e) {
+      // A throwing host hook (processEvent / sendMessage / a rejected
+      // speech promise) must not leave the demo stuck "active": that
+      // would block every later demo (_startDemoReplay early-returns
+      // while api.active) with the spinner and demo UI up forever.
+      // Swallow and fall through to the teardown below — the replay
+      // is started fire-and-forget from the history-row click handler,
+      // so rethrowing would only surface as an unhandled rejection.
+    }
+
+    // A newer replay owns the demo UI now: this run was cancelled (the
+    // cancel already restored the controls) and superseded while it
+    // was suspended at an await.  Leave every flag and control alone —
+    // resetting them here would tear the running-demo state down under
+    // the CURRENT replay (spinner gone, _demoActive off, its
+    // task_events falling into the instant-replay path).
+    if (myGen !== replayGen) return;
+
+    // An error may have escaped between installing the event resolver
+    // and its resolution — never leave a dangling fetch behind on the
+    // way out.
+    discardPendingEvents(api);
     api.setRunningState(false);
     api.removeSpinner();
     pauseRequested = false;
@@ -643,6 +793,11 @@
    */
   window._cancelDemoReplay = function () {
     cancelRequested = true;
+    // Invalidate the running replay's generation: even if a NEW replay
+    // resets ``cancelRequested`` before the cancelled run reaches its
+    // next checkpoint, the stale generation still stops it — no zombie
+    // replay can interleave its panels into the next demo's output.
+    replayGen++;
     // Release a PAUSED replay so it observes the cancel and exits
     // instead of hanging in pauseGate forever.
     pauseRequested = false;
@@ -651,6 +806,9 @@
     for (let i = 0; i < resolvers.length; i++) resolvers[i]();
     notifyPauseChanged();
     const api = getApi();
+    // Wake a replay suspended on an in-flight event fetch and clear
+    // the stale resolveEvents hook it would otherwise leave behind.
+    discardPendingEvents(api);
     if (api) {
       api.active = false;
       api.setRunningState(false);
