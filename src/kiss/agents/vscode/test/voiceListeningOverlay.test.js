@@ -12,9 +12,13 @@
 //  - The overlay disappears on every non-red transition: yellow
 //    voiceTranscribing, terminal voiceSpeech, and silence.
 //  - After a voice-dictated task is inserted and submitted, voice.js
-//    says "Working on it." — preferring the GPT-synthesized clip at
-//    cfg.ackAudioUrl (window.Audio), and falling back to the Web
-//    Speech API when the clip is missing or playback is rejected.
+//    says "Working on it.".  In webview mode it delegates the
+//    GPT-synthesized clip to the extension host ({type: 'voiceAck'}
+//    bridge post — the webview's own Audio.play() is rejected by the
+//    autoplay policy without a recent click); in browser mode it
+//    plays cfg.ackAudioUrl itself.  The robotic Web Speech fallback
+//    is gone: a missing clip or a rejected playback degrades to
+//    silence, never to the "alien" system voice.
 //  - An empty translation (silence) never speaks the ack.
 //  - A page without the overlay element still works (no throw).
 //
@@ -69,8 +73,15 @@ function makeWindow(opts) {
     {runScripts: 'dangerously', url: 'https://localhost/'},
   );
   const win = dom.window;
-  win.__VOICE__ = {mode: 'webview'};
+  win.__VOICE__ = {mode: opts.mode || 'webview'};
   if (opts.ackAudioUrl) win.__VOICE__.ackAudioUrl = opts.ackAudioUrl;
+
+  // Recorder for 'kiss-voice-post' bridge posts (webview mode
+  // delegates the ack to the extension host with {type: 'voiceAck'}).
+  win.__posts = [];
+  win.addEventListener('kiss-voice-post', event => {
+    win.__posts.push(event.detail);
+  });
 
   // Audio stub: records constructed URLs and play() calls.
   win.__audioPlays = [];
@@ -160,27 +171,46 @@ test('silence hides the overlay and never speaks the ack', () => {
   assert.strictEqual(wrapListening(win), false);
   assert.strictEqual(win.__audioPlays.length, 0, 'no ack clip on silence');
   assert.deepStrictEqual(win.__spoken, [], 'no fallback speech on silence');
-});
-
-test('submitted speech plays the GPT "Working on it." clip', () => {
-  const win = makeWindow({ackAudioUrl: 'https://localhost/ack.mp3'});
-  sendHostMessage(win, {type: 'voiceWake'});
-  sendHostMessage(win, {type: 'voiceSpeech', text: 'Fix the parser bug'});
-  assert.strictEqual(win.__audioPlays.length, 1, 'ack clip must play once');
-  assert.strictEqual(win.__audioPlays[0].url, 'https://localhost/ack.mp3');
   assert.deepStrictEqual(
-    win.__spoken,
+    win.__posts.filter(m => m && m.type === 'voiceAck'),
     [],
-    'system voice must not double-speak when the clip plays',
+    'no host-side ack on silence',
   );
 });
 
-test('missing ackAudioUrl speaks the ack with the system voice', () => {
+test('submitted speech delegates the ack clip to the extension host', () => {
+  const win = makeWindow({ackAudioUrl: 'https://localhost/ack.mp3'});
+  sendHostMessage(win, {type: 'voiceWake'});
+  sendHostMessage(win, {type: 'voiceSpeech', text: 'Fix the parser bug'});
+  // JSON round-trip: the posts were created in the jsdom realm, whose
+  // Object prototype differs from the test realm's.
+  assert.deepStrictEqual(
+    JSON.parse(JSON.stringify(win.__posts.filter(m => m && m.type === 'voiceAck'))),
+    [{type: 'voiceAck'}],
+    'exactly one voiceAck post to the host',
+  );
+  assert.strictEqual(
+    win.__audioPlays.length,
+    0,
+    'the webview must not play the clip itself (autoplay policy)',
+  );
+  assert.deepStrictEqual(
+    win.__spoken,
+    [],
+    'system voice must never speak the ack',
+  );
+});
+
+test('missing ackAudioUrl still delegates to the host, never robotic', () => {
   const win = makeWindow();
   sendHostMessage(win, {type: 'voiceWake'});
   sendHostMessage(win, {type: 'voiceSpeech', text: 'Fix the parser bug'});
   assert.strictEqual(win.__audioPlays.length, 0);
-  assert.deepStrictEqual(win.__spoken, ['Working on it.']);
+  assert.deepStrictEqual(
+    JSON.parse(JSON.stringify(win.__posts.filter(m => m && m.type === 'voiceAck'))),
+    [{type: 'voiceAck'}],
+  );
+  assert.deepStrictEqual(win.__spoken, [], 'never the robotic system voice');
 });
 
 test('no speech output at all stays silent without throwing', () => {
@@ -205,9 +235,13 @@ test('a page without the overlay element still handles the wake', () => {
 
 // ---------------------------------------------------------------------------
 
-/** Async case: a rejected clip playback falls back to the system voice. */
+/**
+ * Async case: a rejected browser-mode clip playback degrades to
+ * silence — never to the robotic Web Speech system voice.
+ */
 async function rejectedPlaybackFallsBack() {
   const win = makeWindow({
+    mode: 'browser',
     ackAudioUrl: 'https://localhost/ack.mp3',
     audio: 'reject',
   });
@@ -215,11 +249,11 @@ async function rejectedPlaybackFallsBack() {
   sendHostMessage(win, {type: 'voiceSpeech', text: 'Fix the parser bug'});
   await new Promise(resolve => setTimeout(resolve, 0));
   assert.strictEqual(win.__audioPlays.length, 1, 'clip playback attempted');
-  assert.deepStrictEqual(win.__spoken, ['Working on it.']);
+  assert.deepStrictEqual(win.__spoken, [], 'silence, never the robotic voice');
 }
 
 (async () => {
-  const name = 'rejected clip playback falls back to the system voice';
+  const name = 'rejected browser-mode clip playback stays silent';
   try {
     await rejectedPlaybackFallsBack();
     passed++;
