@@ -10,8 +10,13 @@
 //     API,
 //   * actually play a replayed ``talk`` tool call (``playTalkEvent``),
 //   * actually materialise sub-agent tabs for a replayed
-//     ``run_parallel`` fan-out (``openSubagentTab``), and
-//   * cancel queued speech (``stopSpeech``) when the demo is stopped.
+//     ``run_parallel`` fan-out (``openSubagentTab``),
+//   * cancel queued speech (``stopSpeech``) when the demo is stopped,
+//     and
+//   * PAUSE the replay while talking: ``speakText`` / ``playTalkEvent``
+//     return promises that resolve when the speech ends, and
+//     ``stopSpeech`` resolves the promises of both queued and
+//     in-flight jobs so a paused replay can never hang after cancel.
 //
 // Drives the real ``chat.html`` + ``main.js`` inside jsdom, exactly
 // like talkTool.test.js (no mocks of project code).
@@ -252,17 +257,143 @@ function testOpenSubagentTabUnknownParentIgnored() {
   console.log('PASS: openSubagentTab ignores unknown parent tabs');
 }
 
-function runTests() {
+/** Await *promise* but fail fast after *ms* — a hung promise means the
+ * paused demo replay would hang too. */
+function withTimeout(promise, ms, what) {
+  return Promise.race([
+    promise,
+    new Promise((_resolve, reject) => {
+      setTimeout(() => reject(new Error('timed out: ' + what)), ms);
+    }),
+  ]);
+}
+
+async function testSpeakTextPromiseResolvesOnSpeechEnd() {
+  const {win} = makeWebview();
+  // Speech that does NOT auto-complete — the test ends it by hand.
+  const {spoken} = installSpeech(win, {complete: false});
+
+  const p = win._demoApi.speakText('User said pause until I finish', 'en-US');
+  assert.ok(p && typeof p.then === 'function', 'speakText returns a promise');
+
+  let resolved = false;
+  p.then(() => {
+    resolved = true;
+  });
+  await new Promise(r => setTimeout(r, 30));
+  assert.strictEqual(
+    resolved,
+    false,
+    'the narration promise must stay pending while speech is playing',
+  );
+
+  spoken[spoken.length - 1].onend();
+  await withTimeout(p, 1000, 'speakText promise after onend');
+  console.log('PASS: speakText promise resolves when the speech ends');
+}
+
+async function testPlayTalkEventPromiseResolvesOnSpeechEnd() {
+  const {win} = makeWebview();
+  const {spoken} = installSpeech(win, {complete: false});
+
+  const p = win._demoApi.playTalkEvent({
+    text: 'Replayed talk playback.',
+    language: 'en-GB',
+  });
+  assert.ok(
+    p && typeof p.then === 'function',
+    'playTalkEvent returns a promise',
+  );
+
+  let resolved = false;
+  p.then(() => {
+    resolved = true;
+  });
+  await new Promise(r => setTimeout(r, 30));
+  assert.strictEqual(
+    resolved,
+    false,
+    'the talk promise must stay pending while the playback runs',
+  );
+
+  spoken[spoken.length - 1].onend();
+  await withTimeout(p, 1000, 'playTalkEvent promise after onend');
+  console.log('PASS: playTalkEvent promise resolves when the playback ends');
+}
+
+async function testStopSpeechResolvesQueuedAndInFlightPromises() {
+  const {win} = makeWebview();
+  // Nothing ever completes on its own AND cancel() fires no onend —
+  // the worst-case engine the discard path exists for.
+  installSpeech(win, {complete: false});
+
+  const inFlight = win._demoApi.speakText('User said in-flight narration');
+  const queued = win._demoApi.playTalkEvent({text: 'Still queued talk.'});
+
+  win._demoApi.stopSpeech();
+
+  // Both promises must resolve — the paused demo replay awaits them,
+  // and a dangling promise would hang the cancelled replay forever.
+  await withTimeout(inFlight, 1000, 'in-flight promise after stopSpeech');
+  await withTimeout(queued, 1000, 'queued promise after stopSpeech');
+  console.log('PASS: stopSpeech resolves queued and in-flight promises');
+}
+
+async function testLateFinishAfterStopSpeechDoesNotBreakQueue() {
+  const {win} = makeWebview();
+  // Nothing completes on its own and cancel() fires no onend — the
+  // cancelled utterance's onend arrives LATE, after a new job started.
+  const {spoken} = installSpeech(win, {complete: false});
+
+  const a = win._demoApi.speakText('User said job A');
+  assert.strictEqual(spoken.length, 1, 'job A speaking');
+  const utteranceA = spoken[0];
+
+  win._demoApi.stopSpeech();
+  await withTimeout(a, 1000, 'job A promise after stopSpeech');
+
+  const b = win._demoApi.speakText('User said job B');
+  assert.strictEqual(spoken.length, 2, 'job B starts after the cancel');
+
+  // The cancelled sound completes LATE — its stale finish must be a
+  // no-op: it must NOT release the queue under job B.
+  utteranceA.onend();
+
+  const c = win._demoApi.speakText('User said job C');
+  assert.strictEqual(
+    spoken.length,
+    2,
+    'job C must stay queued behind B — a late finish of the ' +
+      'cancelled job must not pump the queue (overlapping speech)',
+  );
+
+  // The late finish must not clobber B's discard hook either: a
+  // second stopSpeech must still resolve BOTH the in-flight B and
+  // the queued C, or a cancelled paused replay would hang forever.
+  win._demoApi.stopSpeech();
+  await withTimeout(b, 1000, 'in-flight job B promise after 2nd stopSpeech');
+  await withTimeout(c, 1000, 'queued job C promise after 2nd stopSpeech');
+  console.log('PASS: late finish after stopSpeech cannot break the queue');
+}
+
+async function runTests() {
   testSpeakTextReadsUserPrompt();
   testPlayTalkEventSpeaksRecordedTalk();
   testQueuedSpeechIsSerialized();
   testStopSpeechCancelsQueue();
   testOpenSubagentTabMaterialisesTab();
   testOpenSubagentTabUnknownParentIgnored();
+  await testSpeakTextPromiseResolvesOnSpeechEnd();
+  await testPlayTalkEventPromiseResolvesOnSpeechEnd();
+  await testStopSpeechResolvesQueuedAndInFlightPromises();
+  await testLateFinishAfterStopSpeechDoesNotBreakQueue();
   console.log('All demoApiHooks tests passed.');
   // setRunningState(true) starts webview timers that keep the node
   // event loop alive — exit explicitly once every assertion passed.
   process.exit(0);
 }
 
-runTests();
+runTests().catch(err => {
+  console.error('FAIL:', err && err.message ? err.message : err);
+  process.exit(1);
+});
