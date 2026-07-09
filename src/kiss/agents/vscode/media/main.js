@@ -8496,9 +8496,9 @@
           if (_demoActive) return;
           closeSidebar();
           createNewTab();
-          // Replay the CLICKED chat session's tasks (oldest first) —
-          // never the whole history: replaying every session made the
-          // demo play "random tasks" from other chats/workspaces.
+          // Replay ONLY the CLICKED task — never the chat's other
+          // tasks or the whole history: replaying every session made
+          // the demo play "random tasks" from other chats/workspaces.
           window._startDemoReplay(allHistSessions, s);
           return;
         }
