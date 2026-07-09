@@ -1110,6 +1110,30 @@ body.remote-chat #welcome-config { display: none !important; }
 #stop-btn svg { width: 15px; height: 15px; }
 #stop-btn:hover { background: color-mix(in srgb, var(--red) 20%, transparent); box-shadow: 0 0 12px color-mix(in srgb, var(--red) 15%, transparent); }
 
+/* Demo pause/play button — shown to the left of the stop button
+   while a demo replay is playing (see body.demo-playing below). */
+#demo-pause-btn {
+  background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); border: none;
+  border-radius: 50%; width: 34px; height: 34px; cursor: pointer; transition: all 0.2s; display: none;
+  align-items: center; justify-content: center; flex-shrink: 0;
+}
+#demo-pause-btn svg { width: 15px; height: 15px; }
+#demo-pause-btn:hover { background: color-mix(in srgb, var(--accent) 35%, transparent); color: var(--fg); box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 20%, transparent); }
+
+/* Demo replay chrome: while a demo is playing hide the input textbox
+   and its controls and show stop + pause/play instead.  !important is
+   required because setRunningState writes inline display styles on
+   the send/stop buttons. */
+body.demo-playing #input-text-wrap,
+body.demo-playing #menu-btn,
+body.demo-playing #model-btn,
+body.demo-playing #upload-btn,
+body.demo-playing #tricks-btn,
+body.demo-playing #voice-btn,
+body.demo-playing #send-btn { display: none !important; }
+body.demo-playing #stop-btn { display: flex !important; }
+body.demo-playing #demo-pause-btn { display: flex !important; }
+
 /* Input Footer */
 #input-footer {
   display: flex; justify-content: space-between; align-items: center;

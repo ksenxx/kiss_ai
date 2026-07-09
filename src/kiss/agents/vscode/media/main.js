@@ -1792,6 +1792,7 @@
   const inp = document.getElementById('task-input');
   const sendBtn = document.getElementById('send-btn');
   const stopBtn = document.getElementById('stop-btn');
+  const demoPauseBtn = document.getElementById('demo-pause-btn');
   const uploadBtn = document.getElementById('upload-btn');
 
   const modelBtn = document.getElementById('model-btn');
@@ -4221,6 +4222,50 @@
     demoSpeakPending.clear();
   }
 
+  /** Return true while demo.js has the replay pause button engaged. */
+  function isDemoPlaybackPaused() {
+    try {
+      return (
+        typeof window._isDemoPaused === 'function' && window._isDemoPaused()
+      );
+    } catch (_e) {
+      return false;
+    }
+  }
+
+  /**
+   * Wait until a paused demo is resumed or the current speech job is
+   * discarded.  This gates clips whose synthesis reply arrives AFTER the
+   * user pressed pause: they must not start sounding while the demo is
+   * frozen.  Returns a release function through *setRelease* so
+   * stopSpeech() can unblock the waiter even if no pause-change event is
+   * dispatched.
+   */
+  function waitForDemoPlaybackResume(isDiscarded, setRelease) {
+    if (!isDemoPlaybackPaused() || (isDiscarded && isDiscarded())) {
+      return Promise.resolve();
+    }
+    return new Promise(resolve => {
+      let done = false;
+      const finish = function () {
+        if (done) return;
+        done = true;
+        window.removeEventListener('kiss-demo-pause-change', onChange);
+        resolve();
+      };
+      const onChange = function () {
+        if (!isDemoPlaybackPaused() || (isDiscarded && isDiscarded())) {
+          finish();
+        }
+      };
+      window.addEventListener('kiss-demo-pause-change', onChange);
+      if (typeof setRelease === 'function') setRelease(finish);
+      // Close the race where the user resumed between the initial check
+      // and listener installation.
+      onChange();
+    });
+  }
+
   /**
    * Enqueue one demo-mode utterance on the serialized talk queue and
    * play it with the natural synthesized voice.  *ev* carries ``text``
@@ -4235,16 +4280,15 @@
    * webview stays SILENT.
    */
   function enqueueDemoSpeech(ev, resolve) {
+    let discarded = false;
+    let releasePausedWait = null;
     const job = function (finish) {
       const done = function () {
         finish();
         resolve();
       };
-      const playClip = function (clip) {
-        if (clip === 'cancelled') {
-          done();
-          return;
-        }
+      const startPlayback = function (clip) {
+        if (discarded) return;
         if (clip && clip.audioB64) {
           const clipEv = {
             text: ev.text || '',
@@ -4262,6 +4306,31 @@
         }
         done();
       };
+      const playClip = function (clip) {
+        if (discarded) return;
+        if (clip === 'cancelled') {
+          done();
+          return;
+        }
+        waitForDemoPlaybackResume(
+          () => discarded,
+          release => {
+            releasePausedWait = release;
+          },
+        ).then(() => {
+          releasePausedWait = null;
+          if (discarded) return;
+          // A rapid pause/resume/pause click sequence can re-pause the
+          // demo after the resume event resolved our waiter but before
+          // this microtask runs.  Re-check here so no clip starts while
+          // the pause button is engaged.
+          if (isDemoPlaybackPaused()) {
+            playClip(clip);
+            return;
+          }
+          startPlayback(clip);
+        });
+      };
       if (ev.audioB64) {
         playClip({audioB64: ev.audioB64, audioMime: ev.audioMime});
         return;
@@ -4270,7 +4339,12 @@
         playClip,
       );
     };
-    job._onDiscard = resolve;
+    job._onDiscard = function () {
+      discarded = true;
+      if (typeof releasePausedWait === 'function') releasePausedWait();
+      releasePausedWait = null;
+      resolve();
+    };
     enqueueTalkPlayback(job);
   }
 
@@ -4339,6 +4413,11 @@
     }
   }
 
+  // The Audio element of the currently playing talk/demo clip, or
+  // null when no clip is playing — lets the demo pause/play button
+  // pause and resume the speech alongside the demo animations.
+  let currentTalkAudio = null;
+
   /**
    * Play GPT-synthesized ``talk`` audio (base64 MP3 in ``ev.audioB64``,
    * produced server-side by speech_synthesis.py) on this device's
@@ -4354,13 +4433,19 @@
    * start the next talk without overlapping this one.
    */
   function playTalkAudio(ev, onDone) {
-    const done = typeof onDone === 'function' ? onDone : function () {};
+    const rawDone = typeof onDone === 'function' ? onDone : function () {};
+    let player = null;
     try {
       if (typeof window.Audio !== 'function') return false;
       const mime = ev.audioMime || 'audio/mpeg';
-      const player = new window.Audio(
-        'data:' + mime + ';base64,' + ev.audioB64,
-      );
+      player = new window.Audio('data:' + mime + ';base64,' + ev.audioB64);
+      // Track the playing clip so the demo pause/play button can
+      // pause and resume it (see _demoApi.pauseSpeech/resumeSpeech).
+      currentTalkAudio = player;
+      const done = function () {
+        if (currentTalkAudio === player) currentTalkAudio = null;
+        rawDone();
+      };
       player.onended = done;
       player.onerror = done;
       // 'abort' is terminal too (fetch/decode aborted) — without it
@@ -4376,18 +4461,28 @@
           player.onended = null;
           player.onerror = null;
           player.onabort = null;
+          // The Audio element is not playing and is no longer the sound
+          // source; do not let demo pause/resume act on this stale clip
+          // while the Web-Speech fallback (or silence) owns completion.
+          if (currentTalkAudio === player) currentTalkAudio = null;
           // Demo-mode clips in the VS Code webview must degrade to
           // SILENCE on a blocked play(), never to the robotic Web
           // Speech voice (the "alien voice" — see enqueueDemoSpeech).
           if (ev.noSpeechFallback) {
-            done();
+            rawDone();
             return;
           }
-          speakWithSystemVoice(ev, ev.text || '', done);
+          speakWithSystemVoice(ev, ev.text || '', rawDone);
         });
       }
       return true;
     } catch (_e) {
+      if (player) {
+        player.onended = null;
+        player.onerror = null;
+        player.onabort = null;
+      }
+      if (player && currentTalkAudio === player) currentTalkAudio = null;
       return false;
     }
   }
@@ -6004,6 +6099,31 @@
     }
   }
 
+  /**
+   * Toggle the demo-replay UI chrome.  While a demo replay is playing
+   * the ``demo-playing`` body class hides the input textbox, burger
+   * menu, model picker, attach, inject-promptlet, mic, and send
+   * controls and shows the stop button (CSS rules in main.css); the
+   * pause/play button is shown next to the stop button, reset to its
+   * initial "pause" state.
+   *
+   * @param {boolean} playing - Whether a demo replay is active.
+   */
+  function setDemoUiState(playing) {
+    document.body.classList.toggle('demo-playing', !!playing);
+    if (!demoPauseBtn) return;
+    if (playing) {
+      const pauseIcon = demoPauseBtn.querySelector('.icon-pause');
+      const playIcon = demoPauseBtn.querySelector('.icon-play');
+      if (pauseIcon) pauseIcon.style.display = '';
+      if (playIcon) playIcon.style.display = 'none';
+      demoPauseBtn.setAttribute('data-tooltip', 'Pause demo');
+      demoPauseBtn.style.display = 'flex';
+    } else {
+      demoPauseBtn.style.display = 'none';
+    }
+  }
+
   function setRunningState(running) {
     isRunning = running;
     sendBtn.style.display = 'flex';
@@ -7076,6 +7196,25 @@
       }
       vscode.postMessage({type: 'stop', tabId: activeTabId});
     });
+    if (demoPauseBtn) {
+      demoPauseBtn.addEventListener('click', () => {
+        if (!_demoActive) return;
+        const paused = !(
+          typeof window._isDemoPaused === 'function' && window._isDemoPaused()
+        );
+        if (typeof window._setDemoPaused === 'function') {
+          window._setDemoPaused(paused);
+        }
+        const pauseIcon = demoPauseBtn.querySelector('.icon-pause');
+        const playIcon = demoPauseBtn.querySelector('.icon-play');
+        if (pauseIcon) pauseIcon.style.display = paused ? 'none' : '';
+        if (playIcon) playIcon.style.display = paused ? '' : 'none';
+        demoPauseBtn.setAttribute(
+          'data-tooltip',
+          paused ? 'Resume demo' : 'Pause demo',
+        );
+      });
+    }
     uploadBtn.addEventListener('click', () => {
       const input = document.createElement('input');
       input.type = 'file';
@@ -9453,6 +9592,45 @@
     setRunningState: setRunningState,
     showSpinner: showSpinner,
     removeSpinner: removeSpinner,
+    // Demo-replay UI chrome: hide the input controls and show the
+    // stop + pause/play buttons while a demo is playing.
+    setDemoUi: setDemoUiState,
+    // Pause the currently playing demo speech (clip and/or Web
+    // Speech) — the demo pause button freezes animations AND sound.
+    pauseSpeech: function () {
+      try {
+        if (currentTalkAudio) currentTalkAudio.pause();
+      } catch (_e) {
+        // Audio pause unsupported — best-effort.
+      }
+      try {
+        if (window.speechSynthesis && window.speechSynthesis.pause) {
+          window.speechSynthesis.pause();
+        }
+      } catch (_e) {
+        // Speech synthesis unsupported — nothing to pause.
+      }
+    },
+    // Resume speech paused by pauseSpeech.
+    resumeSpeech: function () {
+      try {
+        if (currentTalkAudio) {
+          const p = currentTalkAudio.play();
+          if (p && typeof p.catch === 'function') {
+            p.catch(() => {});
+          }
+        }
+      } catch (_e) {
+        // Audio resume unsupported — best-effort.
+      }
+      try {
+        if (window.speechSynthesis && window.speechSynthesis.resume) {
+          window.speechSynthesis.resume();
+        }
+      } catch (_e) {
+        // Speech synthesis unsupported — nothing to resume.
+      }
+    },
     // Demo-mode speech: read *text* aloud with the NATURAL synthesized
     // voice through the same serialized talk queue the live ``talk``
     // tool uses (see enqueueDemoSpeech for the synthesis round-trip
@@ -9511,6 +9689,17 @@
       // cancel (overlapping speech, clobbered discard hook).
       talkQueueGeneration++;
       talkQueueBusy = false;
+      // Silence the in-flight Audio clip too: resolving its promise
+      // releases the queue but the element would keep SOUNDING to its
+      // natural end (and a clip paused by the demo pause button could
+      // even be resumed by a later replay) — stopping the demo must
+      // stop the speech.
+      try {
+        if (currentTalkAudio) currentTalkAudio.pause();
+      } catch (_e) {
+        // Audio pause unsupported — best-effort.
+      }
+      currentTalkAudio = null;
       try {
         if (window.speechSynthesis) window.speechSynthesis.cancel();
       } catch (_e) {
