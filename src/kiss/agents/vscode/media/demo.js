@@ -310,6 +310,23 @@
   window._parseDemoTasks = parseDemoTasks;
 
   /**
+   * True when a panel group contains a ``run_parallel`` tool call —
+   * its replay opened sub-agent tabs that stay visible only until the
+   * panel collapses, so the group earns a longer show pause.
+   *
+   * @param {Array} group - One panel group of task events.
+   * @returns {boolean} - Whether the group is a fan-out panel.
+   */
+  function groupHasFanOut(group) {
+    for (let i = 0; i < group.length; i++) {
+      if (group[i].type === 'tool_call' && group[i].name === 'run_parallel') {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
    * Actually execute a replayed ``talk`` or ``run_parallel`` tool call
    * so the demo behaves like a live run:
    *   - ``talk``: speak the recorded text aloud through the talk queue;
@@ -454,8 +471,12 @@
         if (cancelRequested) break;
         api.scrollToBottom();
 
-        // Brief pause to show the panel, then collapse it
-        await sleep(500);
+        // Brief pause to show the panel, then collapse it.  A fan-out
+        // group pauses much longer: its sub-agent tabs (opened by
+        // executeDemoToolCall) close again when the panel collapses,
+        // so this pause is the only window in which the viewer can
+        // actually SEE the tabs materialise.
+        await sleep(groupHasFanOut(group) ? 2500 : 500);
         if (!cancelRequested) {
           api.collapsePanels();
           api.scrollToBottom();
