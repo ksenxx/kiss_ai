@@ -2891,6 +2891,14 @@
 
   function collapseOlderPanels() {
     if (!isRunning) return;
+    // Demo replay owns panel collapsing: demo.js shows each replayed
+    // panel expanded for a beat and only then collapses it via
+    // api.collapsePanels().  This automatic pass fires the moment the
+    // NEXT event arrives — milliseconds later in a replay — which
+    // collapsed every demo panel instantly and closed a replayed
+    // fan-out's sub-agent tabs right after they opened, so the demo
+    // never visibly showed a panel or a sub-agent tab.
+    if (_demoActive) return;
     const panels = O.querySelectorAll(':scope > .collapsible');
     for (let i = 0; i < panels.length - 1; i++) {
       const p = panels[i];
@@ -4138,6 +4146,134 @@
     pumpTalkQueue();
   }
 
+  // ---- Demo-mode speech synthesis (natural voice, never robotic) ----
+  //
+  // Demo replay used to read narration and replayed ``talk`` calls with
+  // the Web Speech API — the robotic system voice, since recorded
+  // events carry no GPT audio.  Instead, the webview now asks the
+  // daemon to synthesize each utterance with the same GPT audio model
+  // the live ``talk`` tool uses (speech_synthesis.py) and plays the
+  // returned clip in-page: the user's history-row click that starts
+  // the demo provides the sticky user activation Chromium's autoplay
+  // policy requires.  Pending requests are keyed by ``reqId`` so the
+  // ``demoSpeakAudio`` broadcast (it reaches every connected webview)
+  // only resolves in the tab that asked.
+  const demoSpeakPending = new Map();
+  let demoSpeakSeq = 0;
+  // Generous ceiling: GPT audio synthesis of a long prompt can take
+  // several seconds; on timeout the demo degrades per the fallback
+  // rules below instead of hanging.
+  const DEMO_SPEAK_TIMEOUT_MS = 15000;
+
+  /** True when this page is the remote browser chat (kiss-web), not a
+   * VS Code webview.  The remote page may fall back to the Web Speech
+   * API; the VS Code webview must degrade to SILENCE instead — the
+   * robotic system voice is exactly the "alien voice" bug the native
+   * clip playback exists to avoid (see voiceAckPlayer.ts). */
+  function isRemoteChatPage() {
+    return document.body.classList.contains('remote-chat');
+  }
+
+  /**
+   * Ask the daemon to synthesize *text* as a natural-voice clip.
+   * Resolves with ``{audioB64, audioMime}``, ``null`` when synthesis
+   * failed or timed out, or the string ``'cancelled'`` when
+   * ``_demoApi.stopSpeech`` dropped the request (demo cancelled).
+   */
+  function requestDemoSpeechClip(text, language, emotion) {
+    return new Promise(resolve => {
+      const reqId = 'ds-' + Date.now() + '-' + ++demoSpeakSeq;
+      const timer = setTimeout(() => {
+        demoSpeakPending.delete(reqId);
+        resolve(null);
+      }, DEMO_SPEAK_TIMEOUT_MS);
+      demoSpeakPending.set(reqId, {resolve: resolve, timer: timer});
+      vscode.postMessage({
+        type: 'demoSpeak',
+        reqId: reqId,
+        text: text,
+        language: language || '',
+        emotion: emotion || '',
+        tabId: activeTabId,
+      });
+    });
+  }
+
+  /** Resolve the pending demo-speech request *reqId* with *clip*
+   * (``{audioB64, audioMime}`` or ``null``).  Late or foreign replies
+   * (timed out, another window's request) are ignored. */
+  function resolveDemoSpeak(reqId, clip) {
+    const pending = demoSpeakPending.get(reqId);
+    if (!pending) return;
+    demoSpeakPending.delete(reqId);
+    clearTimeout(pending.timer);
+    pending.resolve(clip);
+  }
+
+  /** Cancel every pending demo-speech synthesis request (demo replay
+   * stopped): each waiter resolves with ``'cancelled'`` so its queue
+   * job finishes without playing anything. */
+  function cancelPendingDemoSpeaks() {
+    for (const pending of demoSpeakPending.values()) {
+      clearTimeout(pending.timer);
+      pending.resolve('cancelled');
+    }
+    demoSpeakPending.clear();
+  }
+
+  /**
+   * Enqueue one demo-mode utterance on the serialized talk queue and
+   * play it with the natural synthesized voice.  *ev* carries ``text``
+   * (+ optional ``language`` / ``emotion`` / pre-recorded ``audioB64``);
+   * *resolve* settles the promise the paused demo replay is awaiting —
+   * it fires when the playback ends, was discarded by ``stopSpeech``,
+   * or degraded to the fallback below.
+   *
+   * Fallback rules (mirrors the voice-ack precedent — silence beats
+   * the robotic voice): no clip or rejected playback falls back to the
+   * Web Speech API only on the remote browser chat page; the VS Code
+   * webview stays SILENT.
+   */
+  function enqueueDemoSpeech(ev, resolve) {
+    const job = function (finish) {
+      const done = function () {
+        finish();
+        resolve();
+      };
+      const playClip = function (clip) {
+        if (clip === 'cancelled') {
+          done();
+          return;
+        }
+        if (clip && clip.audioB64) {
+          const clipEv = {
+            text: ev.text || '',
+            language: ev.language,
+            emotion: ev.emotion,
+            audioB64: clip.audioB64,
+            audioMime: clip.audioMime,
+            noSpeechFallback: !isRemoteChatPage(),
+          };
+          if (playTalkAudio(clipEv, done)) return;
+        }
+        if (isRemoteChatPage()) {
+          speakWithSystemVoice(ev, ev.text || '', done);
+          return;
+        }
+        done();
+      };
+      if (ev.audioB64) {
+        playClip({audioB64: ev.audioB64, audioMime: ev.audioMime});
+        return;
+      }
+      requestDemoSpeechClip(ev.text || '', ev.language, ev.emotion).then(
+        playClip,
+      );
+    };
+    job._onDiscard = resolve;
+    enqueueTalkPlayback(job);
+  }
+
   /**
    * Read *talkText* aloud with the browser's Web Speech API using the
    * most natural available system voice — the fallback path of the
@@ -4240,6 +4376,13 @@
           player.onended = null;
           player.onerror = null;
           player.onabort = null;
+          // Demo-mode clips in the VS Code webview must degrade to
+          // SILENCE on a blocked play(), never to the robotic Web
+          // Speech voice (the "alien voice" — see enqueueDemoSpeech).
+          if (ev.noSpeechFallback) {
+            done();
+            return;
+          }
           speakWithSystemVoice(ev, ev.text || '', done);
         });
       }
@@ -4802,6 +4945,18 @@
         });
         break;
       }
+      case 'demoSpeakAudio':
+        // Daemon reply to a demo-mode 'demoSpeak' synthesis request
+        // (see enqueueDemoSpeech).  An empty audioB64 means synthesis
+        // failed — the waiter then applies the silence/Web-Speech
+        // fallback rules.
+        resolveDemoSpeak(
+          ev.reqId,
+          ev.audioB64
+            ? {audioB64: ev.audioB64, audioMime: ev.audioMime || 'audio/mpeg'}
+            : null,
+        );
+        break;
       case 'error':
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) break;
         addError(ev.text);
@@ -9290,41 +9445,26 @@
     setRunningState: setRunningState,
     showSpinner: showSpinner,
     removeSpinner: removeSpinner,
-    // Demo-mode speech: read *text* aloud through the same serialized
-    // talk queue the live ``talk`` tool uses, so demo narration never
-    // overlaps agent talk playback.  Returns a promise that resolves
-    // when the speech has finished (or was discarded by stopSpeech) so
-    // the demo replay can PAUSE until the talking ends.
+    // Demo-mode speech: read *text* aloud with the NATURAL synthesized
+    // voice through the same serialized talk queue the live ``talk``
+    // tool uses (see enqueueDemoSpeech for the synthesis round-trip
+    // and fallback rules).  Returns a promise that resolves when the
+    // speech has finished (or was discarded by stopSpeech) so the demo
+    // replay can PAUSE until the talking ends.
     speakText: function (text, language) {
       return new Promise(resolve => {
-        const job = function (finish) {
-          speakWithSystemVoice({language: language || ''}, text, () => {
-            finish();
-            resolve();
-          });
-        };
-        job._onDiscard = resolve;
-        enqueueTalkPlayback(job);
+        enqueueDemoSpeech({text: text, language: language || ''}, resolve);
       });
     },
     // Demo-mode replay of a recorded ``talk`` tool call: actually play
-    // it (GPT audio when present, Web-Speech fallback otherwise) via
-    // the shared talk queue — mirrors handleEvent's case 'talk'.
-    // Returns a promise that resolves when the playback has finished
-    // (or was discarded by stopSpeech) so the demo replay can PAUSE
-    // until the talking ends.
+    // it (recorded GPT audio when present, freshly synthesized natural
+    // voice otherwise) via the shared talk queue.  Returns a promise
+    // that resolves when the playback has finished (or was discarded
+    // by stopSpeech) so the demo replay can PAUSE until the talking
+    // ends.
     playTalkEvent: function (ev) {
       return new Promise(resolve => {
-        const job = function (finish) {
-          const done = function () {
-            finish();
-            resolve();
-          };
-          if (ev.audioB64 && playTalkAudio(ev, done)) return;
-          speakWithSystemVoice(ev, ev.text || '', done);
-        };
-        job._onDiscard = resolve;
-        enqueueTalkPlayback(job);
+        enqueueDemoSpeech(ev, resolve);
       });
     },
     // Demo-mode replay of a ``run_parallel`` fan-out: materialise the
@@ -9335,6 +9475,11 @@
     },
     // Cancel any queued/in-flight demo speech (demo replay stopped).
     stopSpeech: function () {
+      // Unblock the in-flight job first: if it is still waiting for a
+      // 'demoSpeakAudio' synthesis reply, resolve that wait with
+      // 'cancelled' so the job finishes WITHOUT playing the clip (a
+      // late reply must not speak over a restarted demo).
+      cancelPendingDemoSpeaks();
       // Resolve every pending demo-speech promise BEFORE dropping the
       // jobs: the demo replay awaits these promises (it pauses while
       // talking), and a discarded job's ``finish`` never fires — so
