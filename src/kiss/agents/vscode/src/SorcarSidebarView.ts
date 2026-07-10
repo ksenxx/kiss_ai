@@ -29,6 +29,20 @@ function isPathInside(target: string, root: string): boolean {
 }
 
 /**
+ * True for the trivial "Discarded branch '<name>'." confirmation of a
+ * successful worktree discard.  Discarding a worktree branch needs no
+ * notification — its visible effect (the merge/discard bar going away)
+ * is confirmation enough.  Mirrors ``isSilentDiscardMessage`` in
+ * ``media/main.js`` which suppresses the same message in the chat
+ * transcript.  Discard results that carry a warning (checkout failure,
+ * undeletable branch → "Partially discarded …"), merge results, and
+ * failures do NOT match and are still surfaced to the user.
+ */
+function isSilentDiscardMessage(message: string | undefined): boolean {
+  return /^Discarded branch '[^']+'\.$/.test(message || '');
+}
+
+/**
  * File extensions that VS Code's text editor can open without
  * corrupting the buffer.  Anything outside this set is routed to the
  * native viewer (``vscode.open``) by the ``openFile`` message handler
@@ -597,9 +611,11 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           this._resolveAllWorktreeActions();
         }
         if (msg.success) {
-          showInformationNotification(
-            msg.message || 'Worktree action completed.',
-          );
+          if (!isSilentDiscardMessage(msg.message)) {
+            showInformationNotification(
+              msg.message || 'Worktree action completed.',
+            );
+          }
         } else {
           showErrorNotification(msg.message || 'Worktree action failed.');
         }
@@ -1343,18 +1359,25 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       case 'worktreeAction': {
         const wtAction = message.action;
         const wtTabId = message.tabId;
-        const progressTitle =
-          wtAction === 'merge'
-            ? 'Committing and merging worktree…'
-            : wtAction === 'discard'
-              ? 'Discarding worktree…'
+        // Discard is silent: no progress toast and (below) no result
+        // notification.  The webview's action bar disables its buttons
+        // on click and disappears when ``worktree_result`` arrives, so
+        // the user already gets feedback, and the backend emits no
+        // ``worktree_progress`` updates for discard anyway.  Merge
+        // keeps the toast — its "Generating commit message…" LLM phase
+        // can take a while.
+        if (wtAction !== 'discard') {
+          const progressTitle =
+            wtAction === 'merge'
+              ? 'Committing and merging worktree…'
               : 'Processing worktree action…';
-        this._showActionProgress(
-          progressTitle,
-          wtTabId,
-          this._worktreeProgresses,
-          this._worktreeActionResolves,
-        );
+          this._showActionProgress(
+            progressTitle,
+            wtTabId,
+            this._worktreeProgresses,
+            this._worktreeActionResolves,
+          );
+        }
         this._getClient().sendCommand({
           type: 'worktreeAction',
           action: wtAction,
