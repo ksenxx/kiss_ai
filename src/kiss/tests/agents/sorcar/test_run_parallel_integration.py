@@ -13,6 +13,7 @@ No mocks, patches, fakes, or test doubles.
 from __future__ import annotations
 
 import os
+import re
 import threading
 from pathlib import Path
 from typing import Any
@@ -309,13 +310,13 @@ class TestNestedParallelReal:
     def test_nested_parallel_subagent_tab_events(
         self, tmp_path: Path,
     ) -> None:
-        """Nested parallel emits ``openSubagentTab`` events for every level.
+        """Nested parallel emits sub-agent tab events for every level.
 
         With one outer parent call (2 middles) and one nested call per
         middle (2 leaves each), the printer must observe **6** distinct
-        ``openSubagentTab`` events: 2 from the outer invocation plus 2
-        from each of the 2 inner invocations.  Each leaf event's
-        ``parent_tab_id`` must point at the corresponding middle's tab
+        ``new_tab`` events: 2 from the outer invocation plus 2 from
+        each of the 2 inner invocations.  Each leaf's ``subagentDone``
+        routing id must embed the corresponding middle's persisted task
         id, confirming that the printer thread-local routing chains
         correctly across nesting levels.
         """
@@ -344,55 +345,60 @@ class TestNestedParallelReal:
         )
         assert len(results) == 2
 
+        # Task-centric contract: every spawned sub-agent (2 middles +
+        # 2 leaves each = 6) broadcasts one ``new_tab`` event with its
+        # own unique persisted task id.
         open_events = [
-            e for e in printer.captured if e.get("type") == "openSubagentTab"
+            e for e in printer.captured if e.get("type") == "new_tab"
         ]
-
-        # The two outer (middle) tabs must be direct children of the
-        # root tab.  Their ids are deterministic because the outer
-        # ``run_tasks_parallel`` synthesises them from the root tab id.
-        outer_events = [
-            e for e in open_events
-            if e.get("parent_tab_id") == "nested-events-root"
-        ]
-        assert len(outer_events) == 2, (
-            f"Expected exactly 2 outer (middle) openSubagentTab events "
-            f"as direct children of the root, got {len(outer_events)}: "
-            f"{[e.get('tab_id') for e in outer_events]}"
+        assert len(open_events) >= 6, (
+            f"Expected at least 6 new_tab events (2 middles + 4 leaves), "
+            f"got {len(open_events)}: "
+            f"{[e.get('task_id') for e in open_events]}"
         )
-        middle_ids = {ev["tab_id"] for ev in outer_events}
-
-        # The leaves must each have a middle tab as their parent.  We
-        # accept either exact parent==middle_id, or a nested-id prefix
-        # (defensive against any extra LLM-driven invocations under a
-        # middle tab) — what matters is that the printer's thread-local
-        # routing chained the leaves under the correct middle.
-        leaf_events = [
-            e for e in open_events if e["tab_id"] not in middle_ids
-        ]
-        assert len(leaf_events) >= 4, (
-            f"Expected at least 4 leaf openSubagentTab events under the "
-            f"middle tabs, got {len(leaf_events)}: "
-            f"{[e.get('tab_id') for e in leaf_events]}"
+        sub_task_ids = {str(e.get("task_id") or "") for e in open_events}
+        assert all(sub_task_ids)
+        assert len(sub_task_ids) == len(open_events), (
+            "Sub-agent task ids must be unique"
         )
-        for ev in leaf_events:
-            parent_id = ev.get("parent_tab_id", "")
-            assert parent_id in middle_ids or any(
-                parent_id.startswith(mid) for mid in middle_ids
-            ), (
-                f"Leaf tab {ev['tab_id']!r} has parent {parent_id!r}, "
-                f"expected one of {middle_ids} (or a descendant thereof)"
-            )
 
-        # Every opened sub-agent tab must also emit a subagentDone event.
+        # ``subagentDone`` carries the deterministic routing id
+        # ``task-{parent_key}__sub_{idx}``.  The two middles are direct
+        # children of the root key; every leaf's routing id embeds its
+        # middle's PERSISTED task id, confirming that routing chained
+        # correctly across nesting levels.
         done_events = [
             e for e in printer.captured if e.get("type") == "subagentDone"
         ]
-        opened_tab_ids = {e["tab_id"] for e in open_events}
         done_tab_ids = {e["tab_id"] for e in done_events}
-        assert opened_tab_ids == done_tab_ids, (
-            f"openSubagentTab / subagentDone tab ids diverged.  "
-            f"opened={opened_tab_ids}  done={done_tab_ids}"
+        outer_done = {
+            t for t in done_tab_ids
+            if t.startswith("task-nested-events-root__sub_")
+        }
+        assert outer_done == {
+            "task-nested-events-root__sub_0",
+            "task-nested-events-root__sub_1",
+        }, (
+            f"Expected exactly 2 outer (middle) subagentDone events as "
+            f"direct children of the root, got {sorted(outer_done)}"
+        )
+        leaf_done = done_tab_ids - outer_done
+        assert len(leaf_done) >= 4, (
+            f"Expected at least 4 leaf subagentDone events under the "
+            f"middles, got {sorted(leaf_done)}"
+        )
+        leaf_parents = set()
+        for tab_id in leaf_done:
+            match = re.fullmatch(r"task-(.+)__sub_\d+", tab_id)
+            assert match, f"Unexpected leaf subagentDone tab_id: {tab_id!r}"
+            leaf_parents.add(match.group(1))
+        assert leaf_parents <= sub_task_ids, (
+            f"Leaf routing ids must embed a middle's persisted task id: "
+            f"parents={sorted(leaf_parents)} "
+            f"task_ids={sorted(sub_task_ids)}"
+        )
+        assert len(leaf_parents) >= 2, (
+            f"Leaves must be spread across both middles: {leaf_parents}"
         )
 
 
@@ -547,7 +553,7 @@ class TestSubagentTabEventsE2E:
 
     @pytest.mark.slow
     def test_subagent_tab_events_broadcast(self) -> None:
-        """run_tasks_parallel with a printer broadcasts open/done tab events."""
+        """run_tasks_parallel with a printer broadcasts new_tab/subagentDone."""
         printer = _CapturePrinter()
         printer._thread_local.task_id = "parent-e2e"
 
@@ -562,18 +568,24 @@ class TestSubagentTabEventsE2E:
         )
         assert len(results) == 2
 
+        # Task-centric contract: each sub-agent broadcasts one
+        # ``new_tab`` event carrying its own persisted ``task_id``; the
+        # frontend materialises the sub-agent tab from that.
         open_events = [
-            e for e in printer.captured if e.get("type") == "openSubagentTab"
+            e for e in printer.captured if e.get("type") == "new_tab"
         ]
         assert len(open_events) == 2, (
-            f"Expected 2 openSubagentTab events, got {len(open_events)}"
+            f"Expected 2 new_tab events, got {len(open_events)}"
         )
-        for i, ev in enumerate(open_events):
-            assert ev["tab_id"] == f"parent-e2e__sub_{i}"
-            assert ev["parent_tab_id"] == "parent-e2e"
-            assert ev["isSubagentTab"] is True
-            assert ev.get("description"), "description should be non-empty"
+        sub_task_ids = {e.get("task_id") for e in open_events}
+        assert len(sub_task_ids) == 2
+        assert all(sub_task_ids), f"Empty task_id in new_tab: {open_events}"
+        for ev in open_events:
+            assert "parent_tab_id" in ev
 
+        # ``subagentDone`` carries the deterministic backend routing id
+        # ``task-{parent_key}__sub_{idx}`` derived from the caller's
+        # thread-local task id.
         done_events = [
             e for e in printer.captured if e.get("type") == "subagentDone"
         ]
@@ -582,7 +594,7 @@ class TestSubagentTabEventsE2E:
         )
         done_tab_ids = {e["tab_id"] for e in done_events}
         assert done_tab_ids == {
-            "parent-e2e__sub_0", "parent-e2e__sub_1",
+            "task-parent-e2e__sub_0", "task-parent-e2e__sub_1",
         }
 
     @pytest.mark.slow
@@ -598,20 +610,32 @@ class TestSubagentTabEventsE2E:
             printer=printer,
         )
 
-        sub_tab_id = "parent-stream__sub_0"
+        # The sub-agent's streaming events are stamped with its own
+        # persisted task id (announced by its ``new_tab`` event).
+        open_events = [
+            e for e in printer.captured if e.get("type") == "new_tab"
+        ]
+        assert len(open_events) == 1
+        sub_task_id = open_events[0]["task_id"]
         routed = [
             e for e in printer.captured
-            if e.get("tabId") == sub_tab_id
-            and e.get("type") not in ("openSubagentTab", "subagentDone")
+            if e.get("taskId") == sub_task_id
+            and e.get("type") not in ("new_tab", "subagentDone")
         ]
         assert len(routed) > 0, (
-            "Expected streaming events routed to subagent tab"
+            "Expected streaming events stamped with the sub-agent task id"
         )
 
 
     @pytest.mark.slow
-    def test_description_field_in_open_event(self) -> None:
-        """openSubagentTab event carries 'description' field for JS frontend."""
+    def test_description_reaches_subagent_stream(self) -> None:
+        """The sub-agent's task description reaches the frontend stream.
+
+        The ``new_tab`` event only announces the sub-agent's task id;
+        the human-readable description is delivered by the sub-agent's
+        own ``prompt`` event stamped with that task id (and by the
+        persisted ``task_history`` row the frontend loads from).
+        """
         printer = _CapturePrinter()
         printer._thread_local.task_id = "parent-desc"
 
@@ -623,10 +647,13 @@ class TestSubagentTabEventsE2E:
         )
 
         open_ev = [
-            e for e in printer.captured if e.get("type") == "openSubagentTab"
+            e for e in printer.captured if e.get("type") == "new_tab"
         ]
         assert len(open_ev) == 1
-        assert "description" in open_ev[0], (
-            "openSubagentTab must have 'description' field"
-        )
-        assert "DELTA" in open_ev[0]["description"]
+        sub_task_id = open_ev[0]["task_id"]
+        prompt_events = [
+            e for e in printer.captured
+            if e.get("type") == "prompt" and e.get("taskId") == sub_task_id
+        ]
+        assert prompt_events, "sub-agent must broadcast its prompt"
+        assert any("DELTA" in str(e.get("text", "")) for e in prompt_events)

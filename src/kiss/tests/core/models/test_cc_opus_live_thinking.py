@@ -25,6 +25,7 @@ from kiss.core.models.claude_code_model import ClaudeCodeModel
     shutil.which("claude") is None,
     reason="claude CLI not installed",
 )
+@pytest.mark.live_cli
 class TestCCOpusLiveThinking:
     """Live test against the real claude CLI to verify thinking block behaviour."""
 
@@ -38,6 +39,9 @@ class TestCCOpusLiveThinking:
         an empty collapsible "Thinking" bar in the UI.
         """
         printer = JsonPrinter()
+        # Recording is keyed by the thread-local task id (``_task_key``);
+        # ``start_recording`` is a no-op without one.
+        printer._thread_local.task_id = "cc-opus-live-thinking"
         printer.start_recording()
 
         model = ClaudeCodeModel(
