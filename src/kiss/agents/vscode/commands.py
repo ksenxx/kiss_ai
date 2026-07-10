@@ -1200,15 +1200,25 @@ class _CommandsMixin:
         so the webview applies its fallback rules instead of waiting
         for its timeout.
 
+        The reply is stamped with the request's ``connId`` (when the
+        daemon dispatch stamped one) so ``WebPrinter.broadcast``
+        delivers the large base64 clip ONLY to the requesting
+        connection — the same request/reply routing ``models`` /
+        ``files`` / ``history`` / ``cliInfo`` replies use — instead of
+        broadcasting it to every connected window and risking a
+        cross-webview ``reqId`` collision resolving the wrong waiter.
+
         Args:
             cmd: The parsed ``demoSpeak`` command carrying ``reqId``,
-                ``text``, ``language``, ``emotion`` and ``tabId``.
+                ``text``, ``language``, ``emotion``, ``tabId`` and the
+                dispatch-stamped ``connId``.
         """
         req_id = str(cmd.get("reqId", "") or "")
         text = str(cmd.get("text", "") or "")
         language = str(cmd.get("language", "") or "")
         emotion = str(cmd.get("emotion", "") or "")
         tab_id = cmd.get("tabId", "")
+        conn_id = str(cmd.get("connId", "") or "")
 
         def synthesize_and_reply() -> None:
             audio_b64, mime = "", ""
@@ -1237,13 +1247,16 @@ class _CommandsMixin:
                                 next(iter(_DEMO_SPEAK_CACHE)),
                             )
                         _DEMO_SPEAK_CACHE[key] = (audio_b64, mime)
-            self.printer.broadcast({
+            reply: dict[str, Any] = {
                 "type": "demoSpeakAudio",
                 "reqId": req_id,
                 "audioB64": audio_b64,
                 "audioMime": mime or "audio/mpeg",
                 "tabId": tab_id,
-            })
+            }
+            if conn_id:
+                reply["connId"] = conn_id
+            self.printer.broadcast(reply)
 
         threading.Thread(
             target=synthesize_and_reply, daemon=True, name="demo-speak",
