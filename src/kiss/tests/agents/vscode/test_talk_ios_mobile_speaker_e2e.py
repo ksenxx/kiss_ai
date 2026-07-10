@@ -173,12 +173,15 @@ def ios_talk_pipeline(text: str, tap: bool) -> dict:
     "suppressed": [text, ...]}`` — the utterances the engine played
     versus silently dropped.
     """
+    node = shutil.which("node")
+    if node is None:
+        raise unittest.SkipTest("node binary not found on PATH")
     with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as fh:
         fh.write(NODE_IOS_DRIVER)
         driver = fh.name
     try:
         proc = subprocess.run(
-            ["node", driver, str(VSCODE_DIR / "media"), "en-US", text,
+            [node, driver, str(VSCODE_DIR / "media"), "en-US", text,
              "tap" if tap else "notap"],
             capture_output=True,
             text=True,

@@ -29,6 +29,7 @@ mechanism as a live ``talk`` event dispatched in the same page.
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -224,12 +225,15 @@ def run_demo_driver(mode: str) -> dict:
         "clips": [...]}`` — Web-Speech utterances and Audio clips of
         the live baseline talk versus the demo replay.
     """
+    node = shutil.which("node")
+    if node is None:
+        raise unittest.SkipTest("node binary not found on PATH")
     with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as fh:
         fh.write(NODE_DEMO_DRIVER)
         driver = fh.name
     try:
         proc = subprocess.run(
-            ["node", driver, str(VSCODE_DIR / "media"), mode,
+            [node, driver, str(VSCODE_DIR / "media"), mode,
              LIVE_TALK_TEXT],
             capture_output=True,
             text=True,
