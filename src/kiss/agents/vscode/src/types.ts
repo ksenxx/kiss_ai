@@ -90,7 +90,19 @@ export type FromWebviewMessage =
   | {type: 'notificationAction'; id: string; action?: string}
   | {type: 'voiceToggle'; enabled: boolean; sensitivity?: number}
   | {type: 'voiceSensitivity'; value: number}
-  | {type: 'voiceAck'};
+  | {type: 'voiceAck'}
+  // Demo-mode speech synthesis request: the webview asks the daemon
+  // for a natural GPT-voice clip of a replayed utterance, synthesized
+  // by the same function the live ``talk`` tool uses (the daemon
+  // answers with a 'demoSpeakAudio' reply keyed by reqId).
+  | {
+      type: 'demoSpeak';
+      reqId: string;
+      text: string;
+      language?: string;
+      emotion?: string;
+      tabId?: string;
+    };
 
 /** Messages from extension to webview (matches browser event protocol) */
 export type ToWebviewMessage = ToWebviewMessageBody & {tabId?: string};
@@ -143,6 +155,29 @@ type ToWebviewMessageBody =
     }
   | {type: 'system_prompt'; text: string}
   | {type: 'prompt'; text: string}
+  // Agent-initiated text-to-speech (the ``talk`` tool): the webview
+  // plays the GPT-synthesized clip (audioB64) or falls back to the
+  // Web Speech API; talkId dedupes fan-out copies, muted marks copies
+  // already played on this machine by another local player.
+  | {
+      type: 'talk';
+      text: string;
+      language?: string;
+      emotion?: string;
+      talkId?: string;
+      audioB64?: string;
+      audioMime?: string;
+      muted?: boolean;
+    }
+  // Daemon reply to a demo-mode 'demoSpeak' synthesis request; an
+  // empty audioB64 means synthesis failed and the webview applies the
+  // same Web-Speech fallback as a live audio-less ``talk`` event.
+  | {
+      type: 'demoSpeakAudio';
+      reqId: string;
+      audioB64: string;
+      audioMime?: string;
+    }
   // Lifecycle events
   | {type: 'clear'; chat_id?: number}
   | {type: 'showWelcome'}
@@ -290,7 +325,8 @@ export interface AgentCommand {
     | 'setWorkDir'
     | 'getConfig'
     | 'saveConfig'
-    | 'serverReset';
+    | 'serverReset'
+    | 'demoSpeak';
   prompt?: string;
   model?: string;
   workDir?: string;
@@ -316,4 +352,8 @@ export interface AgentCommand {
   config?: Record<string, unknown>;
   apiKeys?: Record<string, string>;
   isFavorite?: boolean;
+  reqId?: string;
+  text?: string;
+  language?: string;
+  emotion?: string;
 }
