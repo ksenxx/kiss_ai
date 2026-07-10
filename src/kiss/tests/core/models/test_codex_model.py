@@ -363,26 +363,27 @@ class TestModelRouting:
         assert m._cli_model == "gpt-5-codex"
 
 
+#: Codex models currently shipped in the bundled MODEL_INFO.json catalog.
+_CODEX_MODEL_NAMES = (
+    "codex/codex-auto-review",
+    "codex/default",
+    "codex/gpt-5.2",
+    "codex/gpt-5.4",
+    "codex/gpt-5.4-mini",
+    "codex/gpt-5.5",
+    "codex/gpt-5.6-luna",
+    "codex/gpt-5.6-sol",
+    "codex/gpt-5.6-terra",
+)
+
+
 class TestModelInfoEntries:
     def test_codex_models_in_model_info(self) -> None:
-        assert "codex/codex-auto-review" in MODEL_INFO
-        assert "codex/default" in MODEL_INFO
-        assert "codex/gpt-5.2" in MODEL_INFO
-        assert "codex/gpt-5.3-codex" in MODEL_INFO
-        assert "codex/gpt-5.4" in MODEL_INFO
-        assert "codex/gpt-5.4-mini" in MODEL_INFO
-        assert "codex/gpt-5.5" in MODEL_INFO
+        for name in _CODEX_MODEL_NAMES:
+            assert name in MODEL_INFO
 
     def test_codex_models_support_function_calling(self) -> None:
-        for name in (
-            "codex/codex-auto-review",
-            "codex/default",
-            "codex/gpt-5.2",
-            "codex/gpt-5.3-codex",
-            "codex/gpt-5.4",
-            "codex/gpt-5.4-mini",
-            "codex/gpt-5.5",
-        ):
+        for name in _CODEX_MODEL_NAMES:
             assert MODEL_INFO[name].is_function_calling_supported
 
 

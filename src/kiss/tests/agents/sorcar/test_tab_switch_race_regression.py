@@ -947,6 +947,7 @@ class TestPerTabT0(unittest.TestCase):
                 t0 = tab.t0;
                 endTs = tab.endTs;
             }
+            function showContentTab() {}
             function renderTabBar() {}
             function persistTabState() {}
             function setRunningState(r) {
@@ -957,6 +958,7 @@ class TestPerTabT0(unittest.TestCase):
             function removeSpinner() {}
             function applyChevronState() {}
             function focusInputWithRetry() {}
+            function clearDemoEndedUi() {}
             """
             + switch_src
             + r"""

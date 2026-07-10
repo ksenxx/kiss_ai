@@ -139,6 +139,7 @@ class TestHistoryClickAlwaysCreatesNewTab(unittest.TestCase):
             function syncClearBtn() {}
             function updateChevronIcon() {}
             function applyChevronState() {}
+            function clearDemoEndedUi() {}
             function setTaskText(text) { _lastTaskText = text; }
             var _lastTaskText = '';
 
