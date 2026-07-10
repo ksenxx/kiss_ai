@@ -4166,13 +4166,19 @@
   // rules below instead of hanging.
   const DEMO_SPEAK_TIMEOUT_MS = 15000;
 
-  /** True when this page is the remote browser chat (kiss-web), not a
-   * VS Code webview.  The remote page may fall back to the Web Speech
-   * API; the VS Code webview must degrade to SILENCE instead — the
-   * robotic system voice is exactly the "alien voice" bug the native
-   * clip playback exists to avoid (see voiceAckPlayer.ts). */
-  function isRemoteChatPage() {
-    return document.body.classList.contains('remote-chat');
+  /**
+   * Start the sound of one ``talk`` utterance — THE playback mechanism
+   * of the agent ``talk`` tool: play the GPT-synthesized clip when the
+   * event carries audio (``ev.audioB64``), otherwise — or when clip
+   * playback is unavailable — read the text aloud with the Web Speech
+   * API.  Shared by live ``talk`` events (``case 'talk'``) and
+   * demo-mode replay (``enqueueDemoSpeech``) so a replayed talk or
+   * prompt narration sounds exactly like a live one.  *finish* fires
+   * exactly once when the sound is over so the talk queue can advance.
+   */
+  function playTalkEventSound(ev, finish) {
+    if (ev.audioB64 && playTalkAudio(ev, finish)) return;
+    speakWithSystemVoice(ev, ev.text || '', finish);
   }
 
   /**
@@ -4274,10 +4280,10 @@
    * it fires when the playback ends, was discarded by ``stopSpeech``,
    * or degraded to the fallback below.
    *
-   * Fallback rules (mirrors the voice-ack precedent — silence beats
-   * the robotic voice): no clip or rejected playback falls back to the
-   * Web Speech API only on the remote browser chat page; the VS Code
-   * webview stays SILENT.
+   * Playback uses the exact same mechanism as a live ``talk`` event
+   * (``playTalkEventSound``): the synthesized clip when one arrived,
+   * the Web Speech API otherwise or when clip playback is
+   * unavailable/blocked.
    */
   function enqueueDemoSpeech(ev, resolve) {
     let discarded = false;
@@ -4289,22 +4295,16 @@
       };
       const startPlayback = function (clip) {
         if (discarded) return;
+        const clipEv = {
+          text: ev.text || '',
+          language: ev.language,
+          emotion: ev.emotion,
+        };
         if (clip && clip.audioB64) {
-          const clipEv = {
-            text: ev.text || '',
-            language: ev.language,
-            emotion: ev.emotion,
-            audioB64: clip.audioB64,
-            audioMime: clip.audioMime,
-            noSpeechFallback: !isRemoteChatPage(),
-          };
-          if (playTalkAudio(clipEv, done)) return;
+          clipEv.audioB64 = clip.audioB64;
+          clipEv.audioMime = clip.audioMime;
         }
-        if (isRemoteChatPage()) {
-          speakWithSystemVoice(ev, ev.text || '', done);
-          return;
-        }
-        done();
+        playTalkEventSound(clipEv, done);
       };
       const playClip = function (clip) {
         if (discarded) return;
@@ -4463,15 +4463,8 @@
           player.onabort = null;
           // The Audio element is not playing and is no longer the sound
           // source; do not let demo pause/resume act on this stale clip
-          // while the Web-Speech fallback (or silence) owns completion.
+          // while the Web-Speech fallback owns completion.
           if (currentTalkAudio === player) currentTalkAudio = null;
-          // Demo-mode clips in the VS Code webview must degrade to
-          // SILENCE on a blocked play(), never to the robotic Web
-          // Speech voice (the "alien voice" — see enqueueDemoSpeech).
-          if (ev.noSpeechFallback) {
-            rawDone();
-            return;
-          }
           speakWithSystemVoice(ev, ev.text || '', rawDone);
         });
       }
@@ -5035,8 +5028,7 @@
         // Playback goes through the talk queue so back-to-back
         // talk() calls never speak over each other.
         enqueueTalkPlayback(finish => {
-          if (ev.audioB64 && playTalkAudio(ev, finish)) return;
-          speakWithSystemVoice(ev, talkText, finish);
+          playTalkEventSound(ev, finish);
         });
         break;
       }
