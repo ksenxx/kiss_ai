@@ -1134,6 +1134,20 @@ body.demo-playing #send-btn { display: none !important; }
 body.demo-playing #stop-btn { display: flex !important; }
 body.demo-playing #demo-pause-btn { display: flex !important; }
 
+/* Demo replay ENDED (finished naturally or stopped): keep the input
+   controls hidden and show ONLY the play button, which restarts the
+   demo from the beginning (see setDemoUiState in main.js and
+   window._restartDemoReplay in demo.js). */
+body.demo-ended #input-text-wrap,
+body.demo-ended #menu-btn,
+body.demo-ended #model-btn,
+body.demo-ended #upload-btn,
+body.demo-ended #tricks-btn,
+body.demo-ended #voice-btn,
+body.demo-ended #send-btn,
+body.demo-ended #stop-btn { display: none !important; }
+body.demo-ended #demo-pause-btn { display: flex !important; }
+
 /* Input Footer */
 #input-footer {
   display: flex; justify-content: space-between; align-items: center;
