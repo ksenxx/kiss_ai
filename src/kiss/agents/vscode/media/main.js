@@ -4176,9 +4176,15 @@
    * prompt narration sounds exactly like a live one.  *finish* fires
    * exactly once when the sound is over so the talk queue can advance.
    */
-  function playTalkEventSound(ev, finish) {
-    if (ev.audioB64 && playTalkAudio(ev, finish)) return;
-    speakWithSystemVoice(ev, ev.text || '', finish);
+  function playTalkEventSound(ev, finish, fallback) {
+    const useFallback =
+      typeof fallback === 'function'
+        ? fallback
+        : function () {
+            speakWithSystemVoice(ev, ev.text || '', finish);
+          };
+    if (ev.audioB64 && playTalkAudio(ev, finish, useFallback)) return;
+    useFallback();
   }
 
   /**
@@ -4304,7 +4310,28 @@
           clipEv.audioB64 = clip.audioB64;
           clipEv.audioMime = clip.audioMime;
         }
-        playTalkEventSound(clipEv, done);
+        const fallback = function () {
+          if (discarded) return;
+          waitForDemoPlaybackResume(
+            () => discarded,
+            release => {
+              releasePausedWait = release;
+            },
+          ).then(() => {
+            releasePausedWait = null;
+            if (discarded) return;
+            // Audio.play() can reject after the pause button was
+            // pressed.  Gate the Web-Speech fallback too, otherwise
+            // speakWithSystemVoice() would resume the synthesizer and
+            // make a stopped/paused demo start talking unexpectedly.
+            if (isDemoPlaybackPaused()) {
+              fallback();
+              return;
+            }
+            speakWithSystemVoice(clipEv, clipEv.text, done);
+          });
+        };
+        playTalkEventSound(clipEv, done, fallback);
       };
       const playClip = function (clip) {
         if (discarded) return;
@@ -4430,10 +4457,18 @@
    * *onDone* (optional) is invoked exactly when this talk's sound is
    * over — the clip's ``ended`` or ``error`` event, or the
    * rejected-play() speech fallback finishing — so the talk queue can
-   * start the next talk without overlapping this one.
+   * start the next talk without overlapping this one.  *onFallback*
+   * optionally owns rejected-play handling; demo replay supplies one
+   * that observes pause/cancel state before starting Web Speech.
    */
-  function playTalkAudio(ev, onDone) {
+  function playTalkAudio(ev, onDone, onFallback) {
     const rawDone = typeof onDone === 'function' ? onDone : function () {};
+    const fallback =
+      typeof onFallback === 'function'
+        ? onFallback
+        : function () {
+            speakWithSystemVoice(ev, ev.text || '', rawDone);
+          };
     let player = null;
     try {
       if (typeof window.Audio !== 'function') return false;
@@ -4465,7 +4500,7 @@
           // source; do not let demo pause/resume act on this stale clip
           // while the Web-Speech fallback owns completion.
           if (currentTalkAudio === player) currentTalkAudio = null;
-          speakWithSystemVoice(ev, ev.text || '', rawDone);
+          fallback();
         });
       }
       return true;
@@ -5035,8 +5070,8 @@
       case 'demoSpeakAudio':
         // Daemon reply to a demo-mode 'demoSpeak' synthesis request
         // (see enqueueDemoSpeech).  An empty audioB64 means synthesis
-        // failed — the waiter then applies the silence/Web-Speech
-        // fallback rules.
+        // failed — the waiter then uses the same Web-Speech fallback
+        // as a live audio-less ``talk`` event.
         resolveDemoSpeak(
           ev.reqId,
           ev.audioB64
