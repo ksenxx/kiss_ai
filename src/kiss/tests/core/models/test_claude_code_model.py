@@ -144,6 +144,7 @@ class TestModelInfoEntries:
 
 @requires_claude_cli
 @pytest.mark.slow
+@pytest.mark.live_cli
 class TestGenerateIntegration:
     """Integration tests that actually call the claude CLI."""
 

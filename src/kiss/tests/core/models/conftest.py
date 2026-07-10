@@ -26,8 +26,20 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def _stub_cli_locators(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Stub Claude Code / Codex binary lookups for offline test runs."""
+def _stub_cli_locators(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stub Claude Code / Codex binary lookups for offline test runs.
+
+    Tests marked ``@pytest.mark.live_cli`` opt out: they actually spawn
+    the real CLI (guarded by ``@requires_claude_cli`` /
+    ``@requires_codex_cli`` skipifs), so replacing a working locator
+    with a fake ``/usr/bin/...`` path would break them with
+    ``FileNotFoundError``.  Every other test in this directory gets the
+    deterministic fake path regardless of what is installed locally.
+    """
+    if request.node.get_closest_marker("live_cli") is not None:
+        return
     cc_mod: ModuleType | None
     try:
         import kiss.core.models.claude_code_model as cc_mod
@@ -35,7 +47,8 @@ def _stub_cli_locators(monkeypatch: pytest.MonkeyPatch) -> None:
         pass
     else:
         monkeypatch.setattr(
-            cc_mod, "_find_claude_cli", lambda: "/usr/bin/claude", raising=False,
+            cc_mod, "_find_claude_cli", lambda: "/usr/bin/claude",
+            raising=False,
         )
 
     cx_mod: ModuleType | None
@@ -45,5 +58,6 @@ def _stub_cli_locators(monkeypatch: pytest.MonkeyPatch) -> None:
         pass
     else:
         monkeypatch.setattr(
-            cx_mod, "_find_codex_cli", lambda: "/usr/bin/codex", raising=False,
+            cx_mod, "_find_codex_cli", lambda: "/usr/bin/codex",
+            raising=False,
         )
