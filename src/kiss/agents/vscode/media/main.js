@@ -1051,6 +1051,9 @@
     if (tabId === activeTabId) return;
     const tab = getTab(tabId);
     if (!tab) return;
+    // Navigating away from a finished demo dismisses its ended
+    // play-button UI so the target tab gets its normal controls back.
+    clearDemoEndedUi();
     saveCurrentTab();
     if (tab.isContentTab) {
       // File-viewer tab: swap the visible surface only.  No backend
@@ -1198,6 +1201,9 @@
    * swapped in; chat tabs go through the regular restore pipeline.
    */
   function activateAdjacentTab(newTab) {
+    // Closing a finished demo's tab dismisses its ended play-button
+    // UI — a restart on the adjacent tab would clear THAT tab's chat.
+    clearDemoEndedUi();
     if (newTab.isContentTab) {
       activeTabId = newTab.id;
       showContentTab(newTab);
@@ -1621,6 +1627,10 @@
   }
 
   function createNewTab() {
+    // Leaving a finished demo for a fresh tab dismisses the demo's
+    // ended play-button UI (a demo restarted from the history panel
+    // re-enables the demo UI itself via setDemoUiState).
+    clearDemoEndedUi();
     // Preserve any typed text so it carries over to the new tab
     const pendingText = inp.value || '';
     saveCurrentTab();
@@ -5535,6 +5545,9 @@
         } else if (sKey === 'demo_mode' && demoToggleBtn) {
           demoMode = !!sVal;
           demoToggleBtn.checked = demoMode;
+          // Demo mode turned off (possibly from another window):
+          // dismiss a finished demo's ended play-button UI.
+          if (!demoMode) clearDemoEndedUi();
         } else if (sKey === 'auto_commit') {
           // Auto-commit triggered server-side
         } else if (sKey === 'auto_commit_mode' && autocommitToggleBtn) {
@@ -6138,20 +6151,49 @@
    * pause/play button is shown next to the stop button, reset to its
    * initial "pause" state.
    *
-   * @param {boolean} playing - Whether a demo replay is active.
+   * When the replay ENDS (finishes naturally or is stopped) demo.js
+   * passes ``'ended'``: the ``demo-ended`` body class keeps the input
+   * controls AND the stop button hidden, and ONLY the play button
+   * remains — pressing it restarts the demo (see the demoPauseBtn
+   * click handler and window._restartDemoReplay in demo.js).
+   *
+   * @param {boolean|string} state - ``true`` while a demo replay is
+   *     active, ``'ended'`` after it finished/stopped (play-button-only
+   *     UI), ``false`` to restore the normal input controls.
    */
-  function setDemoUiState(playing) {
-    document.body.classList.toggle('demo-playing', !!playing);
+  function setDemoUiState(state) {
+    const playing = state === true;
+    const ended = state === 'ended';
+    document.body.classList.toggle('demo-playing', playing);
+    document.body.classList.toggle('demo-ended', ended);
     if (!demoPauseBtn) return;
-    if (playing) {
+    if (playing || ended) {
       const pauseIcon = demoPauseBtn.querySelector('.icon-pause');
       const playIcon = demoPauseBtn.querySelector('.icon-play');
-      if (pauseIcon) pauseIcon.style.display = '';
-      if (playIcon) playIcon.style.display = 'none';
-      demoPauseBtn.setAttribute('data-tooltip', 'Pause demo');
+      if (pauseIcon) pauseIcon.style.display = playing ? '' : 'none';
+      if (playIcon) playIcon.style.display = playing ? 'none' : '';
+      demoPauseBtn.setAttribute(
+        'data-tooltip',
+        playing ? 'Pause demo' : 'Restart demo',
+      );
       demoPauseBtn.style.display = 'flex';
     } else {
       demoPauseBtn.style.display = 'none';
+    }
+  }
+
+  /**
+   * Dismiss the demo ENDED play-button UI when the user navigates
+   * away from the finished demo (tab switch, new tab, demo mode off).
+   * A no-op unless the ended state is showing, so it can never touch
+   * a RUNNING demo's UI or a normal tab's controls.
+   */
+  function clearDemoEndedUi() {
+    if (!document.body.classList.contains('demo-ended')) return;
+    if (typeof window._clearDemoReplay === 'function') {
+      window._clearDemoReplay();
+    } else {
+      setDemoUiState(false);
     }
   }
 
@@ -7229,7 +7271,18 @@
     });
     if (demoPauseBtn) {
       demoPauseBtn.addEventListener('click', () => {
-        if (!_demoActive) return;
+        if (!_demoActive) {
+          // The demo ended (or was stopped): the button shows the
+          // play icon and RESTARTS the finished demo from the
+          // beginning in the same tab.
+          if (
+            document.body.classList.contains('demo-ended') &&
+            typeof window._restartDemoReplay === 'function'
+          ) {
+            window._restartDemoReplay();
+          }
+          return;
+        }
         const paused = !(
           typeof window._isDemoPaused === 'function' && window._isDemoPaused()
         );
@@ -7319,12 +7372,19 @@
     if (demoToggleBtn) {
       demoToggleBtn.addEventListener('change', () => {
         if (_demoActive && !demoToggleBtn.checked) {
-          // Cancel running demo when unchecked mid-replay
+          // Cancel running demo when unchecked mid-replay.  Turning
+          // demo mode OFF restores the normal input controls instead
+          // of the ended play-button UI.
           if (typeof window._cancelDemoReplay === 'function')
-            window._cancelDemoReplay();
+            window._cancelDemoReplay({restoreUi: true});
           demoMode = false;
           _demoActive = false;
           return;
+        }
+        if (!demoToggleBtn.checked) {
+          // Demo mode turned off while the ended play-button UI is
+          // showing: dismiss it and restore the input controls.
+          clearDemoEndedUi();
         }
         demoMode = demoToggleBtn.checked;
       });

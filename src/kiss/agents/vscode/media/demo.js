@@ -50,6 +50,12 @@
   let pauseRequested = false;
   let pauseResolvers = [];
 
+  // Arguments of the most recent replay, kept so the ENDED-state play
+  // button can restart the finished/stopped demo from the beginning
+  // (see window._restartDemoReplay).  Cleared when the ended UI is
+  // dismissed (demo mode off, tab switch) via window._clearDemoReplay.
+  let lastReplayArgs = null;
+
   /**
    * Notify main.js helpers waiting to start/resume demo speech that the
    * pause state changed.  A tiny DOM event keeps the demo.js-owned pause
@@ -741,6 +747,9 @@
     if (!api || api.active) return;
     api.active = true;
     cancelRequested = false;
+    // Remember what is being replayed so the ended-state play button
+    // can restart this exact demo (window._restartDemoReplay).
+    lastReplayArgs = {sessions: sessions, clicked: clicked};
     const myGen = ++replayGen;
     // A replay stopped while its event fetch was in flight may have
     // left a stale resolver behind; discard it so this run's fetch can
@@ -784,14 +793,51 @@
     api.setRunningState(false);
     api.removeSpinner();
     pauseRequested = false;
-    if (typeof api.setDemoUi === 'function') api.setDemoUi(false);
+    // The demo ENDED: keep the input controls hidden and show ONLY
+    // the play button, which restarts this demo from the beginning.
+    if (typeof api.setDemoUi === 'function') api.setDemoUi('ended');
     api.active = false;
   };
 
   /**
-   * Cancel an in-progress demo replay.
+   * Restart the most recently replayed demo from the beginning (the
+   * ended-state play button in main.js).  Replays in the CURRENT tab
+   * — the finished demo's own tab — re-fetching the recorded events.
+   *
+   * @returns {boolean} - True when a restart was started.
    */
-  window._cancelDemoReplay = function () {
+  window._restartDemoReplay = function () {
+    const args = lastReplayArgs;
+    const api = getApi();
+    if (!args || !api || api.active) return false;
+    // Fire-and-forget like the history-row click handler.
+    window._startDemoReplay(args.sessions, args.clicked);
+    return true;
+  };
+
+  /**
+   * Dismiss the ended-state play button and forget the replayed demo
+   * (demo mode turned off, or the user navigated to another tab).
+   * Never touches a RUNNING replay's UI.
+   */
+  window._clearDemoReplay = function () {
+    lastReplayArgs = null;
+    const api = getApi();
+    if (api && !api.active && typeof api.setDemoUi === 'function') {
+      api.setDemoUi(false);
+    }
+  };
+
+  /**
+   * Cancel an in-progress demo replay.
+   *
+   * @param {?Object} opts - ``{restoreUi: true}`` restores the normal
+   *     input controls (demo mode turned off mid-replay) instead of
+   *     the default ENDED state, which shows only the play button
+   *     that restarts the stopped demo.
+   */
+  window._cancelDemoReplay = function (opts) {
+    const restoreUi = !!(opts && opts.restoreUi);
     cancelRequested = true;
     // Invalidate the running replay's generation: even if a NEW replay
     // resets ``cancelRequested`` before the cancelled run reaches its
@@ -809,11 +855,17 @@
     // Wake a replay suspended on an in-flight event fetch and clear
     // the stale resolveEvents hook it would otherwise leave behind.
     discardPendingEvents(api);
+    if (restoreUi) lastReplayArgs = null;
     if (api) {
       api.active = false;
       api.setRunningState(false);
       api.removeSpinner();
-      if (typeof api.setDemoUi === 'function') api.setDemoUi(false);
+      // A stop leaves the ENDED play-button UI up (press play to
+      // restart the stopped demo); restoreUi brings the normal input
+      // controls back instead.
+      if (typeof api.setDemoUi === 'function') {
+        api.setDemoUi(restoreUi || !lastReplayArgs ? false : 'ended');
+      }
       // Stop any queued/in-flight demo speech immediately.
       if (typeof api.stopSpeech === 'function') api.stopSpeech();
     }

@@ -346,11 +346,22 @@ async function testControlsHiddenWhileDemoPlays() {
     !win.document.body.classList.contains('demo-playing'),
     'demo-playing class removed after the replay finishes naturally',
   );
-  assert.strictEqual(
+  // After the replay finishes, the ENDED state keeps the controls
+  // hidden and leaves ONLY the play button up (it restarts the demo
+  // — see demoEndedRestart.test.js for the full ended-state suite).
+  assert.ok(
+    win.document.body.classList.contains('demo-ended'),
+    'body carries demo-ended after the replay finishes naturally',
+  );
+  assert.notStrictEqual(
     win.document.getElementById('demo-pause-btn').style.display,
     'none',
-    '#demo-pause-btn hidden again after the replay finishes',
+    '#demo-pause-btn stays visible (as the restart/play button) after ' +
+      'the replay finishes',
   );
+  const endedIcons = iconState(win.document.getElementById('demo-pause-btn'));
+  assert.ok(endedIcons.playVisible, 'play icon shown after the replay ends');
+  assert.ok(!endedIcons.pauseVisible, 'pause icon hidden after the replay ends');
   console.log('PASS: controls hidden and pause/stop shown while demo plays');
 }
 
@@ -583,15 +594,26 @@ async function testStopButtonCancelsDemoAndRestoresControls() {
   );
   assert.ok(
     !win.document.body.classList.contains('demo-playing'),
-    'demo-playing class removed on stop — hidden controls restored',
+    'demo-playing class removed on stop',
   );
-  assert.strictEqual(
+  // A stop leaves the ENDED play-button-only UI up: the play button
+  // restarts the stopped demo (see demoEndedRestart.test.js).
+  assert.ok(
+    win.document.body.classList.contains('demo-ended'),
+    'body carries demo-ended after stop — only the play button shows',
+  );
+  assert.notStrictEqual(
     win.document.getElementById('demo-pause-btn').style.display,
     'none',
-    '#demo-pause-btn hidden after stop',
+    '#demo-pause-btn stays visible (as the restart/play button) after stop',
   );
+  const stoppedIcons = iconState(
+    win.document.getElementById('demo-pause-btn'),
+  );
+  assert.ok(stoppedIcons.playVisible, 'play icon shown after stop');
+  assert.ok(!stoppedIcons.pauseVisible, 'pause icon hidden after stop');
   await done;
-  console.log('PASS: stop button cancels demo and restores the controls');
+  console.log('PASS: stop button cancels demo and shows the play button');
 }
 
 (async () => {
