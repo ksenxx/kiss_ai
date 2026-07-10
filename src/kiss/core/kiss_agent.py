@@ -84,8 +84,15 @@ class KISSAgent(Base):
         model_config: dict[str, Any] | None,
         printer: Printer | None = None,
         verbose: bool | None = None,
+        print_prompts: bool = True,
     ) -> None:
         self.model_name = model_name
+        # When False, the system prompt and task prompt are NOT printed
+        # to the printer.  Internal helper agents (e.g. the summarizer in
+        # ``RelentlessAgent``) share the parent task's printer; printing
+        # their internal prompts would surface confusing
+        # ``type="prompt"`` events in the user-visible event stream.
+        self.print_prompts = print_prompts
         self.verbose = verbose if verbose is not None else True
         self.set_printer(printer, verbose=self.verbose)
         token_callback = self.printer.token_callback if self.printer else None
@@ -140,7 +147,7 @@ class KISSAgent(Base):
 
         self._add_message("user", full_prompt)
         self.model.initialize(full_prompt, attachments=attachments)
-        if self.printer:
+        if self.printer and self.print_prompts:
             self.printer.print(full_prompt, type="prompt")
 
     def run(
@@ -157,6 +164,7 @@ class KISSAgent(Base):
         printer: Printer | None = None,
         verbose: bool | None = None,
         attachments: list[Attachment] | None = None,
+        print_prompts: bool = True,
     ) -> str:
         """
         Runs the agent's main ReAct loop to solve the task.
@@ -183,6 +191,11 @@ class KISSAgent(Base):
                 Default is None (verbose enabled).
             attachments (list[Attachment] | None): Optional file attachments (images, PDFs)
                 to include in the initial prompt. Default is None.
+            print_prompts (bool): Whether to print the system prompt and task
+                prompt to the printer. Internal helper agents (e.g. the
+                summarizer in RelentlessAgent) pass False so their internal
+                prompts never surface as user-visible "prompt" events in a
+                shared printer's event stream. Default is True.
 
         Returns:
             str: The result of the agent's task.
@@ -199,6 +212,7 @@ class KISSAgent(Base):
                 model_config,
                 printer,
                 verbose,
+                print_prompts=print_prompts,
             )
 
             if not self.is_agentic and tools is not None:
@@ -207,7 +221,7 @@ class KISSAgent(Base):
                     f"{self.name} with id {self.id}."
                 )
             self._setup_tools(tools)
-            if system_prompt and self.printer:
+            if system_prompt and self.printer and self.print_prompts:
                 self.printer.print(system_prompt, type="system_prompt")
             self._set_prompt(prompt_template, arguments, attachments=attachments)
 
