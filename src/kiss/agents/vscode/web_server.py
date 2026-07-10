@@ -5804,8 +5804,17 @@ class RemoteAccessServer:
             )
             # Give cloudflared a brief moment to fail-fast on a bind
             # collision.  Healthy cloudflared takes seconds to start
-            # so it will not have exited within 250ms.
-            time.sleep(0.25)
+            # so it will not have exited within 1s.  ``wait`` (rather
+            # than a fixed ``sleep`` + ``poll``) returns as soon as a
+            # fail-fast child exits — typically a few ms — and also
+            # reaps it, while tolerating up to 1s of scheduling delay
+            # under heavy machine load (a loaded box can take >250ms
+            # just to exec and exit the child, which used to
+            # misclassify a doomed spawn as healthy).
+            try:
+                proc.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                pass
             if proc.poll() is None:
                 self._tunnel_proc = proc
                 self._tunnel_started_at = time.monotonic()

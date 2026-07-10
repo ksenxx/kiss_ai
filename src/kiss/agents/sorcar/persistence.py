@@ -890,7 +890,12 @@ def _get_db() -> sqlite3.Connection:
         timeout=10,
         isolation_level=None,  # true autocommit — no implicit BEGIN
     )
-    conn.execute("PRAGMA journal_mode=WAL")
+    # Arm the busy handler BEFORE the journal-mode switch: a fresh
+    # connection whose very first statement is ``PRAGMA
+    # journal_mode=WAL`` would otherwise race a concurrent writer with
+    # only the ``connect(timeout=...)`` handler, and the WAL switch is
+    # exactly the statement most likely to collide on a brand-new
+    # database (see below).
     conn.execute("PRAGMA busy_timeout=30000")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.row_factory = sqlite3.Row
@@ -900,7 +905,41 @@ def _get_db() -> sqlite3.Connection:
     # NOTE: must use a dedicated lock (not ``_rw_lock``) — many callers
     # already hold ``_rw_lock.read_lock()`` when invoking ``_get_db()``,
     # so reusing the RW lock for DDL would self-deadlock.
+    #
+    # The ``PRAGMA journal_mode=WAL`` switch must sit INSIDE the same
+    # critical section: entering WAL mode takes an exclusive lock on
+    # the database file, and SQLite returns SQLITE_BUSY *immediately*
+    # (without consulting the busy handler) when another connection
+    # holds a conflicting lock during the mode change.  Two parallel
+    # sub-agent threads opening their first connections against a
+    # fresh ``sorcar.db`` deterministically hit this: one thread is
+    # mid-DDL while the other executes the WAL pragma and dies with
+    # ``sqlite3.OperationalError: database is locked``.  The lock
+    # serialises in-process racers; the retry loop absorbs the same
+    # collision from OTHER processes sharing the database file (e.g.
+    # the kiss-web daemon starting while a CLI task initialises).
     with _init_tables_lock:
+        wal_deadline = time.monotonic() + 30.0
+        while True:
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+                break
+            except sqlite3.OperationalError as exc:
+                # Retry ONLY lock contention (SQLITE_BUSY /
+                # SQLITE_LOCKED) — other operational errors (readonly
+                # database, disk I/O, corrupt header) are permanent and
+                # must surface immediately.  The deadline mirrors the
+                # 30s ``busy_timeout`` configured above.
+                code = getattr(exc, "sqlite_errorcode", None)
+                busy = (
+                    code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+                    if code is not None
+                    else "locked" in str(exc).lower()
+                    or "busy" in str(exc).lower()
+                )
+                if not busy or time.monotonic() >= wal_deadline:
+                    raise
+                time.sleep(0.05)
         _migrate_old_schema_if_needed(conn)
         _init_tables(conn)
 

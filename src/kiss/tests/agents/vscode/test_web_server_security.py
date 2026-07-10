@@ -684,11 +684,15 @@ class TestH6StderrReaderCleanup(unittest.TestCase):
                 "sys.stderr.flush()\n"
                 # Write enough data to fill a 64 KiB pipe buffer if
                 # nobody is reading.  Each line is ~80 bytes; 2000
-                # lines ≈ 160 KiB, well over the buffer limit.
+                # lines ≈ 160 KiB, well over the buffer limit.  No
+                # per-line sleep: on macOS ``time.sleep(0.001)`` often
+                # overshoots to 5–10ms, ballooning 2000 iterations past
+                # the 10s wait below and failing the test spuriously.
+                # If the reader stops draining, write() blocks on the
+                # full pipe buffer by itself — no pacing needed.
                 "for i in range(2000):\n"
                 "    sys.stderr.write(f'log line {i} padding' + 'x' * 50 + '\\n')\n"
                 "    sys.stderr.flush()\n"
-                "    time.sleep(0.001)\n"
                 "sys.stderr.write('DONE\\n')\n"
                 "sys.stderr.flush()\n",
             ],

@@ -42,6 +42,7 @@ import numpy as np
 
 PROJECT_ROOT = Path(__file__).resolve().parents[5]
 VSCODE_DIR = PROJECT_ROOT / "src" / "kiss" / "agents" / "vscode"
+JSDOM_PKG = VSCODE_DIR / "node_modules" / "jsdom" / "package.json"
 
 SAMPLE_RATE = 44100
 F0_MIN_HZ = 70.0
@@ -305,6 +306,13 @@ class TestTalkAudioNaturalnessE2E(unittest.TestCase):
         """Calibrate the speaker→microphone loop or skip the suite."""
         if sys.platform != "darwin":
             raise unittest.SkipTest("macOS `say` engine required")
+        if shutil.which("node") is None:
+            raise unittest.SkipTest("node is not available on PATH")
+        if not JSDOM_PKG.is_file():
+            raise unittest.SkipTest(
+                f"jsdom is not installed under {VSCODE_DIR / 'node_modules'}"
+                " — run `npm install` there"
+            )
         try:
             import sounddevice as sd
 

@@ -294,7 +294,18 @@ type ToWebviewMessageBody =
       isDone?: boolean;
     }
   | {type: 'subagentDone'; tab_id?: string; success?: boolean}
-  | {type: 'new_tab'; task_id: number};
+  | {
+      // Sub-agent tab announcement: ``task_id`` is the sub-agent's
+      // persisted ``task_history.id`` (a UUID hex string) and
+      // ``parent_tab_id`` is the frontend tab id of the parent
+      // run_parallel tab (empty when the parent has no tab).  The
+      // broadcast is stamped ``taskId: ''`` so it stays a global
+      // system event (see ``ChatSorcarAgent.run``).
+      type: 'new_tab';
+      task_id: string | number;
+      parent_tab_id?: string;
+      taskId?: string;
+    };
 
 /** Command sent to Python backend */
 export interface AgentCommand {
