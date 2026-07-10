@@ -347,6 +347,13 @@ class RelentlessAgent(Base):
                             # asked for ``verbose=False``).
                             printer=self.printer,
                             verbose=self.verbose,
+                            # The summarizer is an INTERNAL helper: its
+                            # "# Summarizer" prompt must never surface
+                            # as a user-visible ``type="prompt"`` event
+                            # in the shared printer's event stream
+                            # (users reported it as an unexpected
+                            # prompt message in the task events).
+                            print_prompts=False,
                         )
                     finally:
                         # The summarizer's spend MUST be folded into
