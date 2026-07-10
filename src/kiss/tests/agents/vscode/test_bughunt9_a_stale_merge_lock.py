@@ -71,6 +71,11 @@ class _GateExecutor(ThreadPoolExecutor):
     * ``all_done_gate``: every backend ``all-done`` dispatch waits for
       this event, keeping the completing holder suspended (lock held,
       state already popped) while the test registers the next review.
+    * ``first_reject_gate``: consumed on the FIRST hunk-reject
+      dispatch — H's reject blocks here until the test proves W has
+      queued on the per-tab lock, so H cannot race ahead, pop the
+      state and finish before W ever enqueues.  Subsequent rejects do
+      not wait (the attribute is cleared on consumption).
     * ``reject_barrier``: when set, hunk-reject work rendezvouses here
       so two racing rejects provably overlap; a lone reject times out
       after 2 s and proceeds (the barrier then stays broken and all
@@ -80,6 +85,7 @@ class _GateExecutor(ThreadPoolExecutor):
     def __init__(self) -> None:
         super().__init__(max_workers=8)
         self.all_done_gate = threading.Event()
+        self.first_reject_gate: threading.Event | None = None
         self.reject_barrier: threading.Barrier | None = None
 
     def submit(self, fn: Any, /, *args: Any, **kwargs: Any) -> Any:
@@ -93,11 +99,17 @@ class _GateExecutor(ThreadPoolExecutor):
         inner = fn.func if isinstance(fn, partial) else fn
         is_reject = getattr(inner, "__name__", "").startswith("_reject_")
         gate = self.all_done_gate if is_all_done else None
+        first_gate: threading.Event | None = None
+        if is_reject and self.first_reject_gate is not None:
+            first_gate = self.first_reject_gate
+            self.first_reject_gate = None
         barrier = self.reject_barrier if is_reject else None
 
         def _wrapped() -> object:
             if gate is not None:
                 gate.wait(timeout=10)
+            if first_gate is not None:
+                first_gate.wait(timeout=10)
             if barrier is not None:
                 try:
                     barrier.wait(timeout=2.0)
@@ -173,6 +185,8 @@ class TestStaleMergeLock(IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self) -> None:
         self.executor.all_done_gate.set()
+        if self.executor.first_reject_gate is not None:
+            self.executor.first_reject_gate.set()
         if th._db_conn is not None:
             th._db_conn.close()
         _restore_persistence(self.saved)
@@ -189,6 +203,15 @@ class TestStaleMergeLock(IsolatedAsyncioTestCase):
         lock1 = server._merge_action_lock(tab_id)
 
         cmd = {"type": "mergeAction", "action": "reject", "tabId": tab_id}
+        # Install a gate that blocks H's reject-executor work until we
+        # can prove W has queued on ``lock1``.  Without it, H's single
+        # ungated reject can complete, pop the state and dispatch
+        # all-done before W ever runs its membership check — W would
+        # then legitimately return early and never enter the race we
+        # want to exercise.  The gate is consumed on H's dispatch so
+        # W's later reject (in the second phase) is not blocked.
+        first_reject_gate = threading.Event()
+        self.executor.first_reject_gate = first_reject_gate
         # H completes review 1 (single hunk): pops state+lock entry,
         # then suspends in the gated all-done dispatch, HOLDING lock1.
         h_task = asyncio.ensure_future(
@@ -199,6 +222,25 @@ class TestStaleMergeLock(IsolatedAsyncioTestCase):
         w_task = asyncio.ensure_future(
             server._handle_web_merge_action(dict(cmd)),
         )
+
+        def _has_pending_waiter() -> bool:
+            waiters = getattr(lock1, "_waiters", None) or ()
+            return any(not w.done() for w in waiters)
+
+        # Wait until W has queued on lock1 (H is parked in reject).
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if lock1.locked() and _has_pending_waiter():
+                break
+            await asyncio.sleep(0.01)
+        self.assertTrue(
+            _has_pending_waiter(),
+            "W must have queued on lock1 before H proceeds",
+        )
+        # Release H's reject; H now finishes review 1's on-disk work,
+        # pops the state and parks in the gated all-done dispatch
+        # while still holding lock1.
+        first_reject_gate.set()
 
         # Wait until H popped the state (it is now parked in all-done).
         deadline = time.monotonic() + 5.0
