@@ -96,6 +96,7 @@ class TestCreateNewTabDoesNotBlockInput(unittest.TestCase):
             var modelBtn = { disabled: false };
             var tabs = [];
             var activeTabId = '';
+            var t0 = null;
             var _idCounter = 0;
             var _postedMessages = [];
             var vscode = { postMessage: function(m) { _postedMessages.push(m); } };
@@ -121,6 +122,7 @@ class TestCreateNewTabDoesNotBlockInput(unittest.TestCase):
             function syncClearBtn() {}
             function updateChevronIcon() {}
             function applyChevronState() {}
+            function clearDemoEndedUi() {}
 
             // Mirror main.js exactly:
             function updateInputDisabled() {
