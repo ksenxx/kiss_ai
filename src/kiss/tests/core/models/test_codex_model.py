@@ -389,6 +389,7 @@ class TestModelInfoEntries:
 
 @requires_codex_cli
 @pytest.mark.slow
+@pytest.mark.live_cli
 class TestGenerateIntegration:
     """Integration tests that actually call the codex CLI."""
 
