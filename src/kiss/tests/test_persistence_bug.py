@@ -12,10 +12,16 @@ from kiss.agents.sorcar import persistence
 class TestPersistence(unittest.TestCase):
 
     def setUp(self):
+        self._orig_db_path = persistence._DB_PATH
+        # ``addCleanup`` runs even when setUp itself raises, unlike tearDown.
+        # Register it before mutating the module-global path so no failure in
+        # ``_close_db`` can leak the in-memory redirect into later tests.
+        self.addCleanup(self._restore_db_path)
         persistence._DB_PATH = Path(":memory:")
         persistence._close_db()
 
-    def tearDown(self):
+    def _restore_db_path(self):
+        persistence._DB_PATH = self._orig_db_path
         persistence._close_db()
 
     def test_append_chat_event_no_task(self):
