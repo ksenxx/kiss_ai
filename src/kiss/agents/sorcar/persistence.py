@@ -339,6 +339,33 @@ def _close_db() -> None:
     _db_conn = None
 
 
+def _close_thread_db() -> None:
+    """Close and forget the CALLING thread's cached connection only.
+
+    Unlike :func:`_close_db`, the global generation counter is left
+    untouched so every other thread's cached connection stays valid.
+    Used by short-lived background threads (e.g. the startup
+    orphan-task sweep in ``VSCodeServer.__init__``) to release their
+    per-thread SQLite connection when they finish, instead of leaking
+    an open connection for the life of the process.
+    """
+    global _db_conn
+    tl_conn: sqlite3.Connection | None = getattr(_thread_local, "conn", None)
+    if tl_conn is not None:
+        try:
+            tl_conn.close()
+        except Exception:
+            pass
+        # ``_db_conn`` is a backward-compat alias for the last-created
+        # connection; never leave it pointing at a closed handle.
+        if _db_conn is tl_conn:
+            _db_conn = None
+    _thread_local.conn = None
+    _thread_local.gen = -1
+    _thread_local.path = None
+    _thread_local.file_id = None
+
+
 _HISTORY_SELECT = (
     "SELECT id, timestamp, task, has_events, result, chat_id, "
     "model, work_dir, version, tokens, cost, steps, "
