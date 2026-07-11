@@ -39,7 +39,22 @@ SKILLS_TMP="$(mktemp -d)"
 trap 'rm -rf "$SKILLS_TMP"' EXIT
 
 echo "   Cloning anthropics/claude-code plugins into $CLAUDE_SKILLS_DIR ..."
-if git clone --depth 1 --filter=blob:none --sparse \
+# Wrap ``git clone`` with a timeout so a slow or blocked network cannot
+# hang the whole ``build-extension.sh`` / ``install.sh`` invocation
+# indefinitely — the historical failure mode with no timeout on this
+# clone.  Prefer ``timeout`` (GNU coreutils) then ``gtimeout``
+# (Homebrew's ``brew install coreutils``); fall back to no wrapper on
+# systems that have neither so behaviour is unchanged for users who
+# never had the hang.  On timeout the outer ``if`` reaches the else
+# branch, we warn, and callers continue with whatever is on disk.
+if command -v timeout >/dev/null 2>&1; then
+    GIT_CLONE_TIMEOUT="timeout 60"
+elif command -v gtimeout >/dev/null 2>&1; then
+    GIT_CLONE_TIMEOUT="gtimeout 60"
+else
+    GIT_CLONE_TIMEOUT=""
+fi
+if $GIT_CLONE_TIMEOUT git clone --depth 1 --filter=blob:none --sparse \
         https://github.com/anthropics/claude-code.git "$SKILLS_TMP/claude-code" 2>&1; then
     (
         cd "$SKILLS_TMP/claude-code"
