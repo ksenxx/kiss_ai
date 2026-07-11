@@ -1,0 +1,45 @@
+=================================================================
+==67374==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x602000000170 at pc 0x000102df4b54 bp 0x00016d00aed0 sp 0x00016d00aec8
+WRITE of size 4 at 0x602000000170 thread T0
+    #0 0x000102df4b50 in main decodenum_bug.c:24
+    #1 0x00018e5dbdfc in start+0x1b4c (dyld:arm64e+0x1fdfc)
+
+0x602000000170 is located 144 bytes after 16-byte region [0x6020000000d0,0x6020000000e0)
+allocated by thread T0 here:
+    #0 0x000103671164 in malloc+0x78 (libclang_rt.asan_osx_dynamic.dylib:arm64e+0x41164)
+    #1 0x000102df4a8c in main decodenum_bug.c:22
+    #2 0x00018e5dbdfc in start+0x1b4c (dyld:arm64e+0x1fdfc)
+
+SUMMARY: AddressSanitizer: heap-buffer-overflow decodenum_bug.c:24 in main
+Shadow bytes around the buggy address:
+  0x601ffffffe80: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x601fffffff00: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x601fffffff80: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x602000000000: fa fa fd fa fa fa fd fd fa fa fd fd fa fa 00 04
+  0x602000000080: fa fa 00 06 fa fa 00 00 fa fa 00 00 fa fa fa fa
+=>0x602000000100: fa fa fa fa fa fa fa fa fa fa fa fa fa fa[fa]fa
+  0x602000000180: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x602000000200: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x602000000280: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x602000000300: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x602000000380: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+Shadow byte legend (one shadow byte represents 8 application bytes):
+  Addressable:           00
+  Partially addressable: 01 02 03 04 05 06 07 
+  Heap left redzone:       fa
+  Freed heap region:       fd
+  Stack left redzone:      f1
+  Stack mid redzone:       f2
+  Stack right redzone:     f3
+  Stack after return:      f5
+  Stack use after scope:   f8
+  Global redzone:          f9
+  Global init order:       f6
+  Poisoned by user:        f7
+  Container overflow:      fc
+  Array cookie:            ac
+  Intra object redzone:    bb
+  ASan internal:           fe
+  Left alloca redzone:     ca
+  Right alloca redzone:    cb
+==67374==ABORTING
