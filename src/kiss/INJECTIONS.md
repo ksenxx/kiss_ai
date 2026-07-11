@@ -24,11 +24,11 @@ Reproduce any violation of the invariant by writing end-to-end tests. Then fix t
 
 ## Trick
 
-Use openrouter/z-ai/glm-5.2 model for all tasks including coding, bug fixing, and test creation. ALWAYS use gpt-5.6-sol-xhigh (not codex) to carefully and thoroughly review and debug the work done by openrouter/z-ai/glm-5.2 for bugs and missing code. Then use claude-fable-5 to do the same thing.
+Use openrouter/z-ai/glm-5.2 model for all tasks including coding, bug fixing, and test creation. ALWAYS use gpt-5.6-sol (not codex) to carefully and thoroughly review and debug the work done by openrouter/z-ai/glm-5.2 for bugs and missing code. Then use claude-fable-5 to do the same thing.
 
 ## Trick
 
-Can you run all tests and report the cause of failing tests? Do not modify any code. Running all tests, collecting information, and fixing them is time consuming. So split the set of tests by the number of test methods into number of cores - 2, and run all splits in parallel using `run_parallel` tool.
+Can you run all tests and report the cause of failing tests? Do not modify any code. Running all tests, collecting information, and fixing them is time consuming. So split the set of tests by the number of test methods into number of cores - 2, and run all splits in parallel using `run_parallel` tool.  Determine which test failures are due to a bug in the project or a bug in the test.  Fix them accordingly.   
 
 ## Trick
 
