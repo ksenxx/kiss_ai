@@ -4,44 +4,50 @@
 # add your name here
 """Real speaker→microphone e2e test: ``talk`` audio on an iPhone webapp.
 
-Reproduces (and guards the fix for) the bug where the agent's ``talk``
-tool was silent on the remote mobile webapp on iOS: the webview called
-``speechSynthesis.speak()`` from a WebSocket ``message`` event, and iOS
-Safari **silently drops** any ``speak()`` unless speech synthesis was
-first unlocked by a ``speak()`` call made synchronously inside a
-user-gesture handler (``touchend``/``click``/``keydown`` — WebKit's
-activation events).  See e.g.
-https://stackoverflow.com/questions/67655133 and
-https://webkit.org/blog/6784/new-video-policies-for-ios/.
+Guards the CURRENT ``talk``-tool sound contract on iOS: the robotic
+Web Speech (``speechSynthesis``) fallback has been removed from the
+webview for good.  A ``talk`` event now sounds in exactly one way —
+the GPT-synthesized clip it carries (``ev.audioB64``) is played
+through an ``Audio`` element (``new window.Audio(dataURL).play()``)
+on the mobile page.  When the event carries no playable audio, or the
+browser blocks playback (iOS autoplay policy rejecting ``play()``
+outside user activation), the utterance degrades to SILENCE and the
+talk queue advances — ``speechSynthesis.speak()`` must NEVER be
+called, with or without a user gesture.  The old gesture-unlock
+primer for Web Speech (the empty utterance spoken on the first tap)
+is gone because nothing uses the speech engine anymore.
 
 The test exercises the WHOLE pipeline with real audio hardware — no
-mocks, no synthetic buffers:
+mocks of production code, no synthetic buffers:
 
-1. The REAL production webview (``media/main.js`` — the exact same file
-   the remote mobile webapp serves via ``chat.html``) runs in jsdom
-   under a ``speechSynthesis`` environment faithful to iOS Safari's
-   documented gating: a ``speak()`` outside a user gesture is silently
-   suppressed (no sound, no events, no error) until a ``speak()`` has
-   executed inside a gesture handler, which unlocks the session.
-2. The driver simulates the user's tap on the mobile webapp (the tap
-   that submits their question) and then delivers the agent's ``talk``
-   broadcast — which, as in production, arrives OUTSIDE any gesture.
-3. Whatever utterances actually reach the (unlocked) speech engine are
-   rendered aloud through the device SPEAKERS with macOS ``say``.
-4. The device MICROPHONE records the playback and the recording is
+1. A REAL speech clip is synthesized with macOS ``say -o`` and
+   base64-encoded exactly like speech_synthesis.py's GPT clip.
+2. The REAL production webview (``media/main.js`` — the exact same
+   file the remote mobile webapp serves via ``chat.html``) runs in
+   jsdom under a simplified model of iOS Safari's two media states:
+   an ``Audio`` element whose ``play()`` either succeeds (autoplay
+   allowed) or rejects with ``NotAllowedError`` (autoplay blocked),
+   plus a spy ``speechSynthesis`` that records every call — the
+   webview must make none.  Production neither detects gestures nor
+   retries a blocked ``play()`` — it attempts playback exactly once
+   and degrades to silence — so the driver's tap flag only toggles
+   which environment state the stub simulates.
+3. The driver optionally simulates the user's tap on the mobile
+   webapp and then delivers agent ``talk`` broadcasts — which, as in
+   production, arrive over the WebSocket OUTSIDE any gesture.
+4. The exact clip the Audio element played (its data URL payload) is
+   rendered aloud through the device SPEAKERS with ``afplay``.
+5. The device MICROPHONE records the playback and the recording is
    checked to contain audible speech well above the noise floor.
 
-Before the fix, main.js never spoke inside a user gesture, so the talk
-utterances were suppressed, nothing was played, and the microphone
-heard silence — exactly the reported iPhone symptom.
-
-The suite skips itself when the acoustic loop is unavailable (no input
-device, not macOS, jsdom missing, or the calibration playback is
-inaudible to the microphone — muted speakers, headphones, etc.).
+The suite skips itself when the acoustic loop is unavailable (no
+input device, not macOS, jsdom missing, or the calibration playback
+is inaudible to the microphone — muted speakers, headphones, etc.).
 """
 
 from __future__ import annotations
 
+import base64
 import json
 import shutil
 import subprocess
@@ -67,10 +73,13 @@ TALK_TEXT = (
 )
 
 # Node driver: runs the REAL production ``media/main.js`` in jsdom
-# under an iOS-Safari-faithful speechSynthesis gate, optionally
-# simulates the user's tap, dispatches one ``talk`` event exactly like
-# the remote webapp's WebSocket layer does, and prints JSON:
-# ``{"spoken": [{text, rate, pitch}...], "suppressed": [text...]}``.
+# under an iOS-Safari-faithful Audio autoplay gate and a
+# speechSynthesis spy, optionally simulates the user's tap, delivers
+# the scenario's ``talk`` events exactly like the remote webapp's
+# WebSocket layer does, and prints JSON:
+# ``{"constructed": [src...], "played": [src...],
+#    "rejected": [src...], "speechSynthesisCalls": [label...],
+#    "utterancesConstructed": N}``.
 NODE_IOS_DRIVER = r"""
 'use strict';
 const fs = require('fs');
@@ -78,9 +87,7 @@ const path = require('path');
 const {JSDOM} = require('jsdom');
 
 const MEDIA = process.argv[2];
-const language = process.argv[3];
-const text = process.argv[4];
-const simulateTap = process.argv[5] === 'tap';
+const scenario = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
 
 let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
 html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
@@ -103,86 +110,141 @@ win.acquireVsCodeApi = function () {
           setState: s => { state = s; }};
 };
 
-// --- iOS Safari speechSynthesis gating emulation ---
-// Documented behavior (webkit.org/blog/6784, stackoverflow 67655133):
-//  * the first speak() must execute synchronously inside a handler for
-//    a user-gesture event (touchend / click / keydown) — that unlocks
-//    speech for the rest of the session;
-//  * until unlocked, speak() calls made outside a gesture (timers,
-//    network/message events) are suppressed with NO sound, NO events
-//    and NO error.
-let inUserGesture = 0;
-let unlocked = false;
-const spoken = [];
-const suppressed = [];
-win.SpeechSynthesisUtterance = function (t) { this.text = t; this.lang = ''; };
+// --- speechSynthesis spy: the webview must NEVER call it ---
+// The robotic Web Speech fallback was removed from main.js; every
+// method invocation and every SpeechSynthesisUtterance construction
+// is recorded and must stay at zero, tap or no tap.
+const speechSynthesisCalls = [];
+let utterancesConstructed = 0;
+win.SpeechSynthesisUtterance = function (t) {
+  utterancesConstructed++;
+  this.text = t;
+  this.lang = '';
+};
 win.speechSynthesis = {
   speaking: false,
   paused: false,
-  getVoices: () => [],
-  addEventListener: () => {},
-  cancel: () => {},
-  resume() { this.paused = false; },
+  getVoices: () => { speechSynthesisCalls.push('getVoices'); return []; },
+  addEventListener: () => { speechSynthesisCalls.push('addEventListener'); },
+  cancel: () => { speechSynthesisCalls.push('cancel'); },
+  resume: () => { speechSynthesisCalls.push('resume'); },
+  pause: () => { speechSynthesisCalls.push('pause'); },
   speak: u => {
-    if (inUserGesture > 0) unlocked = true;
-    if (!unlocked) { suppressed.push(u.text); return; }
-    spoken.push(u);
+    speechSynthesisCalls.push('speak:' + (u && u.text));
   },
 };
+
+// --- iOS Safari Audio autoplay gate (simplified environment model) ---
+// Models the two states of Apple's media policy
+// (webkit.org/blog/6784): audio playback is either allowed or
+// blocked — a blocked ``play()`` rejects with NotAllowedError.  The
+// ``userGestureSeen`` flag only selects which state this stub
+// simulates; the production webview neither detects gestures nor
+// retries — it attempts ``play()`` exactly once and degrades to
+// silence when rejected.  Successful playback fires ``ended``
+// asynchronously like a real clip so the talk queue advances.
+let userGestureSeen = false;
+const constructed = [];
+const played = [];
+const rejected = [];
+function IOSAudio(src) {
+  constructed.push(src);
+  this.src = src;
+  this.onended = null;
+  this.onerror = null;
+  this.onabort = null;
+  const self = this;
+  this.play = function () {
+    if (!userGestureSeen) {
+      rejected.push(src);
+      return Promise.reject(new Error('NotAllowedError'));
+    }
+    played.push(src);
+    return new Promise(resolve => {
+      resolve();
+      setTimeout(() => { if (self.onended) self.onended(); }, 0);
+    });
+  };
+  this.pause = function () {};
+}
+win.Audio = IOSAudio;
 
 win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
 win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
 
-// The user taps the mobile webapp (focusing the box / submitting their
-// question).  jsdom dispatches synchronously, so every listener runs
-// while ``inUserGesture`` is raised — exactly like a real gesture.
+// The user taps the mobile webapp (focusing the box / submitting
+// their question) — the stub then simulates the autoplay-allowed
+// state that user activation grants on iOS.
 function gesture(type) {
-  inUserGesture++;
-  try {
-    win.document.body.dispatchEvent(
-        new win.Event(type, {bubbles: true, cancelable: true}));
-  } finally {
-    inUserGesture--;
-  }
+  userGestureSeen = true;
+  win.document.body.dispatchEvent(
+      new win.Event(type, {bubbles: true, cancelable: true}));
 }
-if (simulateTap) {
+if (scenario.tap) {
   gesture('touchend');
   gesture('click');
 }
 
-// The agent's ``talk`` broadcast arrives over the WebSocket long after
-// the tap — NOT inside any user-gesture handler.
-win.dispatchEvent(new win.MessageEvent('message', {data: {
-  type: 'talk', language, text, emotion: '', talkId: 'ios-e2e-talk-1',
-  tabId: win._demoApi.getActiveTabId(),
-}}));
+// The agent's ``talk`` broadcasts arrive over the WebSocket long
+// after any tap — NOT inside any user-gesture handler.
+const tabId = win._demoApi.getActiveTabId();
+for (const ev of scenario.events) {
+  win.dispatchEvent(new win.MessageEvent('message', {data: Object.assign(
+      {type: 'talk', emotion: '', tabId: tabId}, ev)}));
+}
 
-console.log(JSON.stringify({
-  spoken: spoken.map(u => ({text: u.text, rate: u.rate, pitch: u.pitch})),
-  suppressed,
-}));
+// Let the serialized talk queue drain (play() resolutions and the
+// async 'ended' events are timer/microtask hops), then report.
+setTimeout(() => {
+  console.log(JSON.stringify({
+    constructed: constructed,
+    played: played,
+    rejected: rejected,
+    speechSynthesisCalls: speechSynthesisCalls,
+    utterancesConstructed: utterancesConstructed,
+  }));
+}, 300);
 """
 
 
-def ios_talk_pipeline(text: str, tap: bool) -> dict:
-    """Run *text* through the real webview talk pipeline on "iOS".
+def synthesize_clip(text: str) -> str:
+    """Synthesize *text* as a real speech clip and return its base64.
+
+    Uses macOS ``say -o`` to produce an AIFF file — a stand-in with
+    identical plumbing to the GPT clip speech_synthesis.py attaches to
+    live ``talk`` events as ``audioB64``.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        clip = Path(tmpdir) / "clip.aiff"
+        subprocess.run(
+            ["say", "-o", str(clip), text], check=True, timeout=120
+        )
+        return base64.b64encode(clip.read_bytes()).decode("ascii")
+
+
+def ios_talk_pipeline(events: list[dict], tap: bool) -> dict:
+    """Deliver *events* through the real webview talk pipeline on "iOS".
 
     Executes the production ``media/main.js`` in jsdom via node under
-    the iOS speech gate, optionally simulating the user's tap first.
-    Returns ``{"spoken": [{"text", "rate", "pitch"}...],
-    "suppressed": [text, ...]}`` — the utterances the engine played
-    versus silently dropped.
+    the iOS Audio autoplay gate and speechSynthesis spy, optionally
+    simulating the user's tap first.  Each event dict is merged into a
+    ``{"type": "talk"}`` broadcast (supply ``text``, ``talkId`` and
+    optionally ``audioB64``/``audioMime``).  Returns
+    ``{"constructed": [src...], "played": [src...],
+    "rejected": [src...], "speechSynthesisCalls": [...],
+    "utterancesConstructed": N}`` — which clips the Audio element
+    played or had blocked, and whether Web Speech was ever touched.
     """
     node = shutil.which("node")
     if node is None:
         raise unittest.SkipTest("node binary not found on PATH")
-    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as fh:
-        fh.write(NODE_IOS_DRIVER)
-        driver = fh.name
-    try:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        driver = Path(tmpdir) / "driver.js"
+        driver.write_text(NODE_IOS_DRIVER)
+        scenario = Path(tmpdir) / "scenario.json"
+        scenario.write_text(json.dumps({"tap": tap, "events": events}))
         proc = subprocess.run(
-            [node, driver, str(VSCODE_DIR / "media"), "en-US", text,
-             "tap" if tap else "notap"],
+            [node, str(driver), str(VSCODE_DIR / "media"), str(scenario)],
             capture_output=True,
             text=True,
             timeout=120,
@@ -190,8 +252,6 @@ def ios_talk_pipeline(text: str, tap: bool) -> dict:
             env={"PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
                  "NODE_PATH": str(VSCODE_DIR / "node_modules")},
         )
-    finally:
-        Path(driver).unlink(missing_ok=True)
     if proc.returncode != 0:
         raise AssertionError(
             f"iOS talk driver failed: {proc.stderr}\n{proc.stdout}"
@@ -201,17 +261,18 @@ def ios_talk_pipeline(text: str, tap: bool) -> dict:
     return result
 
 
-def say_aloud(utterances: list[dict]) -> None:
-    """Play *utterances* in order through the speakers via macOS `say`.
+def play_data_url_aloud(data_url: str) -> None:
+    """Play the audio *data_url* through the speakers via ``afplay``.
 
-    Empty texts (e.g. the gesture-unlock priming utterance) make no
-    sound on a real device and are skipped here too.
+    Decodes the base64 payload — the exact bytes the webview's Audio
+    element was given — and renders it on the default output device,
+    reproducing what the iPhone's speaker plays.
     """
-    for utt in utterances:
-        text = str(utt.get("text", "")).strip()
-        if not text:
-            continue
-        subprocess.run(["say", text], check=True, timeout=120)
+    b64 = data_url.split(";base64,", 1)[1]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        clip = Path(tmpdir) / "clip.aiff"
+        clip.write_bytes(base64.b64decode(b64))
+        subprocess.run(["afplay", str(clip)], check=True, timeout=120)
 
 
 def record_while(action) -> np.ndarray:
@@ -249,15 +310,16 @@ def frame_rms(audio: np.ndarray) -> np.ndarray:
 
 
 class TestTalkIosMobileSpeakerE2E(unittest.TestCase):
-    """The agent's ``talk`` reply must be audible on an iOS device."""
+    """The agent's ``talk`` clip must be audible on an iOS device."""
 
     noise_floor: float
+    clip_b64: str
 
     @classmethod
     def setUpClass(cls) -> None:
         """Calibrate the speaker→microphone loop or skip the suite."""
         if sys.platform != "darwin":
-            raise unittest.SkipTest("macOS `say` engine required")
+            raise unittest.SkipTest("macOS `say`/`afplay` required")
         if shutil.which("node") is None:
             raise unittest.SkipTest("node is not available on PATH")
         if not JSDOM_PKG.is_file():
@@ -288,64 +350,91 @@ class TestTalkIosMobileSpeakerE2E(unittest.TestCase):
                 f"noise floor {cls.noise_floor:.6f}) — speakers muted "
                 "or headphones in use"
             )
+        cls.clip_b64 = synthesize_clip(TALK_TEXT)
 
     def test_talk_after_user_tap_is_spoken_and_audible(self) -> None:
-        """A talk reply on a tapped iPhone webapp must make real sound.
+        """A talk clip on a tapped iPhone webapp must make real sound.
 
         The user taps the mobile webapp to ask their question; the
-        agent's ``talk`` broadcast then arrives over the WebSocket.
-        Under iOS gating the webview must have unlocked speech during
-        that tap so the reply's utterances actually reach the engine —
-        and the speaker→microphone loop must record audible speech.
-        Before the fix the utterances were silently suppressed and the
-        microphone heard only silence.
+        agent's ``talk`` broadcasts then arrive over the WebSocket
+        carrying the GPT-synthesized clip (``audioB64``).  The webview
+        must play exactly that clip through an Audio element — the
+        speaker→microphone loop must record audible speech — while a
+        talk event WITHOUT audio in between degrades to silence and
+        the queue still advances to the next clip.  ``speechSynthesis``
+        must never be touched: the robotic fallback is gone.
         """
-        result = ios_talk_pipeline(TALK_TEXT, tap=True)
-        audible = [u for u in result["spoken"] if str(u["text"]).strip()]
+        clip_url = "data:audio/aiff;base64," + self.clip_b64
+        result = ios_talk_pipeline(
+            [
+                {"text": TALK_TEXT, "talkId": "ios-e2e-talk-1",
+                 "audioB64": self.clip_b64, "audioMime": "audio/aiff"},
+                # No audioB64: must be silent (no Audio element, no
+                # Web Speech) and must NOT stall the talk queue.
+                {"text": "this event carries no audio",
+                 "talkId": "ios-e2e-talk-2"},
+                {"text": TALK_TEXT, "talkId": "ios-e2e-talk-3",
+                 "audioB64": self.clip_b64, "audioMime": "audio/aiff"},
+            ],
+            tap=True,
+        )
 
-        # The acoustic reproduction FIRST: play exactly what the iOS
-        # device would play and listen with the microphone.  Before
-        # the fix ``audible`` was empty (everything suppressed), so
-        # nothing was played and this recorded pure silence — the
-        # reported iPhone symptom, failing right here.
-        recording = record_while(lambda: say_aloud(audible))
+        # The robotic Web Speech engine must never be touched.
+        self.assertEqual(result["speechSynthesisCalls"], [])
+        self.assertEqual(result["utterancesConstructed"], 0)
+
+        # Only the two audio-carrying events reach an Audio element,
+        # both play the exact GPT clip, and none is autoplay-blocked
+        # (the user's tap provided the activation).  The middle
+        # audio-less event was silent AND the queue advanced past it —
+        # otherwise the second clip would never have played.
+        self.assertEqual(result["constructed"], [clip_url, clip_url])
+        self.assertEqual(result["played"], [clip_url, clip_url])
+        self.assertEqual(result["rejected"], [])
+
+        # The acoustic proof: render the exact clip the Audio element
+        # played through the speakers and listen with the microphone.
+        # A silent regression (empty/garbled clip) records only noise
+        # and fails right here.
+        recording = record_while(
+            lambda: play_data_url_aloud(result["played"][0])
+        )
         speech_rms = float(np.percentile(frame_rms(recording), 95))
         self.assertGreater(
             speech_rms,
             3.0 * self.noise_floor,
             f"the microphone heard no talk audio (speech RMS "
-            f"{speech_rms:.6f} vs noise floor {self.noise_floor:.6f}) "
-            f"— iOS suppressed: {result['suppressed']!r}",
+            f"{speech_rms:.6f} vs noise floor {self.noise_floor:.6f})",
         )
-
-        # And the pipeline details: nothing suppressed, both reply
-        # sentences reached the speech engine.
-        self.assertEqual(
-            result["suppressed"],
-            [],
-            "iOS silently dropped talk utterances — speech synthesis "
-            "was never unlocked during the user's tap",
-        )
-        self.assertGreaterEqual(
-            len(audible),
-            2,
-            f"expected the talk reply's sentences to reach the speech "
-            f"engine, got {result['spoken']!r}",
-        )
-        spoken_text = " ".join(str(u["text"]) for u in audible)
-        self.assertIn("tests are green", spoken_text)
 
     def test_talk_without_any_user_gesture_stays_silent_on_ios(self) -> None:
-        """Without ANY user gesture iOS suppresses speech — by design.
+        """Without ANY user gesture iOS blocks the clip — silence only.
 
-        This guards the fidelity of the iOS gate itself: the unlock
-        must happen only inside a real user gesture, so a page the
-        user never touched cannot start talking (Apple's autoplay
-        policy).  The talk event must be suppressed, not played.
+        Apple's autoplay policy rejects ``Audio.play()`` on a page the
+        user never touched.  The webview must accept that rejection
+        and degrade to SILENCE: no retry through ``speechSynthesis``
+        (the robotic fallback is gone for good), no hang — the talk is
+        simply skipped.
         """
-        result = ios_talk_pipeline(TALK_TEXT, tap=False)
-        self.assertEqual(result["spoken"], [])
-        self.assertGreaterEqual(len(result["suppressed"]), 1)
+        clip_url = "data:audio/aiff;base64," + self.clip_b64
+        result = ios_talk_pipeline(
+            [
+                {"text": TALK_TEXT, "talkId": "ios-e2e-talk-nogesture-1",
+                 "audioB64": self.clip_b64, "audioMime": "audio/aiff"},
+            ],
+            tap=False,
+        )
+
+        # The clip was handed to an Audio element, iOS blocked it, and
+        # nothing was played.
+        self.assertEqual(result["constructed"], [clip_url])
+        self.assertEqual(result["rejected"], [clip_url])
+        self.assertEqual(result["played"], [])
+
+        # And crucially: the blocked clip must NOT fall back to the
+        # robotic Web Speech voice — no speechSynthesis call ever.
+        self.assertEqual(result["speechSynthesisCalls"], [])
+        self.assertEqual(result["utterancesConstructed"], 0)
 
 
 if __name__ == "__main__":

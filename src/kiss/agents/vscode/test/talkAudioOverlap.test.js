@@ -6,11 +6,13 @@
 // End-to-end test reproducing the "talk voice overlaps and breaks"
 // bug: successive ``{type: 'talk'}`` events each created and played
 // their own Audio element IMMEDIATELY, so two talk() calls spoke on
-// top of each other, and the Web-Speech fallback could talk over a
-// playing Audio clip.  The webview must serialize ALL talk playback
-// through one FIFO queue: clip N+1 (audio or speech) starts only after
-// clip N finishes ('ended'), fails ('error' / rejected play()), or its
-// speech fallback finishes speaking.
+// top of each other.  The webview must serialize ALL talk playback
+// through one FIFO queue: clip N+1 starts only after clip N finishes
+// ('ended'), fails ('error' / 'abort' / rejected play()), or was
+// skipped.  The robotic Web Speech fallback is GONE: a talk without a
+// playable GPT-synthesized clip (no audioB64, Audio unavailable, or
+// play() rejected) degrades to SILENCE and completes immediately so
+// the queue advances — window.speechSynthesis is NEVER touched.
 //
 // Run directly with ``node``:
 //
@@ -66,8 +68,10 @@ function makeWebview() {
 
 /**
  * Install a recording Audio constructor whose instances track play()
- * calls and can fire their 'ended'/'error' completion events the way
- * a real HTMLAudioElement does (onended/onerror properties).
+ * calls and can fire their 'ended'/'error'/'abort' completion events
+ * the way a real HTMLAudioElement does (onended/onerror properties).
+ * *playResult* is the promise play() returns (resolved when omitted);
+ * pass a function to choose the result per player instance.
  */
 function installAudio(win, playResult) {
   const players = [];
@@ -76,7 +80,9 @@ function installAudio(win, playResult) {
     this.playCalls = 0;
     this.play = () => {
       this.playCalls++;
-      return playResult === undefined ? Promise.resolve() : playResult;
+      const result =
+        typeof playResult === 'function' ? playResult(this) : playResult;
+      return result === undefined ? Promise.resolve() : result;
     };
     this.fire = type => {
       const handler = this['on' + type];
@@ -88,9 +94,9 @@ function installAudio(win, playResult) {
 }
 
 /**
- * Install a recording Web Speech API on *win* (jsdom has none).
- * Utterances are recorded so tests can fire their onend/onerror the
- * way a real speech engine does when it finishes speaking.
+ * Install a CANARY Web Speech API on *win* (jsdom has none).  The
+ * production webview must NEVER use it — every recorded utterance or
+ * speak() call is a regression back to the robotic system voice.
  */
 function installSpeech(win) {
   const spoken = [];
@@ -100,15 +106,20 @@ function installSpeech(win) {
     spoken.push(this);
   };
   win.speechSynthesis = {
-    speak: () => {},
+    speak: u => spoken.push(u),
+    cancel: () => {},
+    resume: () => {},
+    getVoices: () => [],
   };
   return spoken;
 }
 
-/** Finish a speech-fallback job by ending its last queued utterance. */
-function endSpeech(spoken) {
-  const last = spoken[spoken.length - 1];
-  if (last && typeof last.onend === 'function') last.onend({type: 'end'});
+/** Assert the robotic Web Speech engine was never touched. */
+function assertNoSpeech(spoken) {
+  assert.strictEqual(
+    spoken.length, 0,
+    'the robotic Web Speech voice must NEVER be used: ' +
+      JSON.stringify(spoken.map(u => u.text)));
 }
 
 /** Dispatch a backend→webview event exactly like the extension does. */
@@ -129,7 +140,7 @@ function talkEv(id, text, extra) {
 
 function testSecondAudioWaitsForFirstEnded() {
   const {win} = makeWebview();
-  installSpeech(win);
+  const spoken = installSpeech(win);
   const players = installAudio(win, Promise.resolve());
 
   send(win, talkEv('q1', 'first clip', {audioB64: B64}));
@@ -147,12 +158,13 @@ function testSecondAudioWaitsForFirstEnded() {
   assert.strictEqual(players[1].playCalls, 1,
     'second clip plays after the first ends');
   assert.strictEqual(players[1].src, 'data:audio/mpeg;base64,' + B64);
+  assertNoSpeech(spoken);
   console.log('PASS: second audio clip waits for the first to end');
 }
 
 function testThreeAudioClipsPlayInFifoOrder() {
   const {win} = makeWebview();
-  installSpeech(win);
+  const spoken = installSpeech(win);
   const players = installAudio(win, Promise.resolve());
 
   send(win, talkEv('f1', 'one', {audioB64: B64}));
@@ -165,6 +177,7 @@ function testThreeAudioClipsPlayInFifoOrder() {
   players[1].fire('ended');
   assert.strictEqual(players.length, 3, 'then the third');
   assert.strictEqual(players[2].playCalls, 1);
+  assertNoSpeech(spoken);
   console.log('PASS: three audio clips play strictly one after another');
 }
 
@@ -172,7 +185,7 @@ function testThreeAudioClipsPlayInFifoOrder() {
 
 function testAudioErrorAdvancesQueue() {
   const {win} = makeWebview();
-  installSpeech(win);
+  const spoken = installSpeech(win);
   const players = installAudio(win, Promise.resolve());
 
   send(win, talkEv('e1', 'broken clip', {audioB64: B64}));
@@ -182,119 +195,111 @@ function testAudioErrorAdvancesQueue() {
   assert.strictEqual(players.length, 2,
     'a decode/playback error must advance to the next clip');
   assert.strictEqual(players[1].playCalls, 1);
+  assertNoSpeech(spoken);
   console.log('PASS: audio error event advances the talk queue');
 }
 
-// --- Speech fallback must not talk over a playing audio clip ---
+// --- A talk without audio is SILENT and never blocks the queue ---
 
-function testSpeechTalkWaitsForPlayingAudio() {
+function testClipLessTalkIsSilentAndAdvancesQueue() {
   const {win} = makeWebview();
   const spoken = installSpeech(win);
   const players = installAudio(win, Promise.resolve());
 
   send(win, talkEv('m1', 'audio first', {audioB64: B64}));
-  send(win, talkEv('m2', 'spoken second'));
+  send(win, talkEv('m2', 'no clip — must be skipped silently'));
+  send(win, talkEv('m3', 'audio third', {audioB64: B64}));
 
-  assert.strictEqual(spoken.length, 0,
-    'speech must NOT start while the audio clip is still playing');
-
+  assert.strictEqual(players.length, 1,
+    'the queued clips wait for the first to end');
   players[0].fire('ended');
-  assert.ok(spoken.length >= 1, 'speech starts after the audio ends');
-  assert.strictEqual(spoken[0].text, 'spoken second');
-  console.log('PASS: web-speech talk waits for the playing audio clip');
+  // The clip-less talk completes immediately (silence), so the third
+  // talk's clip starts in the same pump.
+  assert.strictEqual(players.length, 2,
+    'a clip-less talk must complete at once and advance the queue');
+  assert.strictEqual(players[1].src, 'data:audio/mpeg;base64,' + B64);
+  assertNoSpeech(spoken);
+  console.log('PASS: clip-less talk stays silent and advances the queue');
 }
 
-function testAudioWaitsForSpeechCompletion() {
+function testLeadingClipLessTalkDoesNotDelayAudio() {
   const {win} = makeWebview();
   const spoken = installSpeech(win);
   const players = installAudio(win, Promise.resolve());
 
-  send(win, talkEv('s1', 'spoken first'));
+  send(win, talkEv('s1', 'no clip here'));
   send(win, talkEv('s2', 'audio second', {audioB64: B64}));
 
-  assert.ok(spoken.length >= 1, 'speech job starts immediately');
-  assert.strictEqual(players.length, 0,
-    'audio must NOT start while the speech engine is still speaking');
-
-  endSpeech(spoken);
-  assert.strictEqual(players.length, 1, 'audio starts after speech ends');
-  assert.strictEqual(players[0].playCalls, 1);
-  console.log('PASS: audio clip waits for the speech job to finish');
-}
-
-function testSpeechUtteranceErrorAdvancesQueue() {
-  const {win} = makeWebview();
-  const spoken = installSpeech(win);
-  const players = installAudio(win, Promise.resolve());
-
-  send(win, talkEv('u1', 'spoken first'));
-  send(win, talkEv('u2', 'audio second', {audioB64: B64}));
-
-  const last = spoken[spoken.length - 1];
-  assert.strictEqual(typeof last.onerror, 'function',
-    'speech job must complete on engine error too');
-  last.onerror({type: 'error'});
+  // The clip-less talk finished instantly (silently), so the audio
+  // clip is already playing.
   assert.strictEqual(players.length, 1,
-    'a speech engine error must advance the talk queue');
-  console.log('PASS: speech utterance error advances the talk queue');
+    'audio must start immediately after the silent clip-less talk');
+  assert.strictEqual(players[0].playCalls, 1);
+  assertNoSpeech(spoken);
+  console.log('PASS: a leading clip-less talk never delays the next clip');
 }
 
-// --- Rejected play() (autoplay policy): fallback then advance ---
+// --- Rejected play() (autoplay policy): degrade to silence, advance ---
 
-async function testRejectedPlayFallsBackThenAdvances() {
+async function testRejectedPlayDegradesSilentlyThenAdvances() {
   const {win} = makeWebview();
   const spoken = installSpeech(win);
   const players = installAudio(
-    win, Promise.reject(new Error('autoplay blocked')));
+    win, () => Promise.reject(new Error('autoplay blocked')));
 
   send(win, talkEv('r1', 'blocked clip', {audioB64: B64}));
   send(win, talkEv('r2', 'queued clip', {audioB64: B64}));
 
-  await new Promise(resolve => setTimeout(resolve, 0));
-  assert.ok(spoken.length >= 1, 'rejected play() falls back to speech');
-  assert.strictEqual(spoken[0].text, 'blocked clip');
   assert.strictEqual(players.length, 1,
-    'the queued clip must wait for the fallback speech to finish');
+    'the queued clip must wait for the blocked clip to settle');
 
-  endSpeech(spoken);
   await new Promise(resolve => setTimeout(resolve, 0));
   assert.strictEqual(players.length, 2,
-    'queue advances after the fallback speech finishes');
-  console.log('PASS: rejected play() falls back, then queue advances');
+    'a rejected play() must complete silently and advance the queue');
+  assert.strictEqual(players[1].playCalls, 1);
+  assertNoSpeech(spoken);
+  console.log('PASS: rejected play() degrades to silence, queue advances');
 }
 
-async function testLateErrorAfterRejectedPlayDoesNotCutFallback() {
+async function testLateErrorAfterRejectedPlayDoesNotDoubleAdvance() {
   // Browsers fire BOTH a play() rejection and an 'error' event when a
-  // clip cannot be decoded.  Once the fallback speech owns the talk,
-  // the element's late 'error' must not advance the queue early and
-  // start the next talk over the still-speaking fallback.
+  // clip cannot be decoded.  The rejection already completed the talk
+  // (silently); the element's late 'error' must not complete it AGAIN
+  // and start the next-next talk over the one now playing.
   const {win} = makeWebview();
   const spoken = installSpeech(win);
   const players = installAudio(
-    win, Promise.reject(new Error('decode failed')));
+    win,
+    player => players.indexOf(player) === 0
+      ? Promise.reject(new Error('decode failed'))
+      : Promise.resolve(),
+  );
 
   send(win, talkEv('L1', 'undecodable clip', {audioB64: B64}));
   send(win, talkEv('L2', 'queued clip', {audioB64: B64}));
+  send(win, talkEv('L3', 'third clip', {audioB64: B64}));
 
   await new Promise(resolve => setTimeout(resolve, 0));
-  assert.ok(spoken.length >= 1, 'fallback speech started');
+  assert.strictEqual(players.length, 2,
+    'the rejection advanced the queue to the second clip');
 
   players[0].fire('error'); // late media error after the rejection
-  assert.strictEqual(players.length, 1,
-    "the element's late error must not start the next talk while " +
-    'the fallback speech is still speaking');
-
-  endSpeech(spoken);
   assert.strictEqual(players.length, 2,
-    'queue advances once the fallback speech actually finishes');
-  console.log('PASS: late media error never cuts off the fallback speech');
+    "the element's late error must not advance the queue again while " +
+    'the second clip is still playing');
+
+  players[1].fire('ended');
+  assert.strictEqual(players.length, 3,
+    'queue advances once the playing clip actually finishes');
+  assertNoSpeech(spoken);
+  console.log('PASS: late media error never double-advances the queue');
 }
 
 function testAudioAbortAdvancesQueue() {
   // 'abort' is a terminal media event (fetch/decode aborted); it must
   // release the queue exactly like 'ended' and 'error'.
   const {win} = makeWebview();
-  installSpeech(win);
+  const spoken = installSpeech(win);
   const players = installAudio(win, Promise.resolve());
 
   send(win, talkEv('A1', 'aborted clip', {audioB64: B64}));
@@ -304,6 +309,7 @@ function testAudioAbortAdvancesQueue() {
   assert.strictEqual(players.length, 2,
     'an aborted clip must advance to the next talk');
   assert.strictEqual(players[1].playCalls, 1);
+  assertNoSpeech(spoken);
   console.log('PASS: audio abort event advances the talk queue');
 }
 
@@ -311,10 +317,10 @@ function testAudioAbortAdvancesQueue() {
 
 function testUnspeakableTextDoesNotDeadlockQueue() {
   const {win} = makeWebview();
-  installSpeech(win);
+  const spoken = installSpeech(win);
   const players = installAudio(win, Promise.resolve());
 
-  // An emoji-only text cleans to nothing speakable → the job must
+  // An emoji-only text without audio produces no sound → the job must
   // finish at once instead of holding the queue forever.
   send(win, talkEv('z1', '\u{1F642}'));
   send(win, talkEv('z2', 'real clip', {audioB64: B64}));
@@ -322,20 +328,29 @@ function testUnspeakableTextDoesNotDeadlockQueue() {
   assert.strictEqual(players.length, 1,
     'an unspeakable talk must not block the queue');
   assert.strictEqual(players[0].playCalls, 1);
+  assertNoSpeech(spoken);
   console.log('PASS: unspeakable talk text does not deadlock the queue');
 }
 
-function testMissingSpeechApiDoesNotDeadlockQueue() {
+function testMissingAudioApiDegradesToSilence() {
+  // A device without the Audio API cannot play the clip; the talk
+  // must degrade to SILENCE (never the robotic Web Speech voice) and
+  // release the queue immediately.
   const {win} = makeWebview();
+  const spoken = installSpeech(win);
+  win.Audio = undefined;
+
+  send(win, talkEv('n1', 'cannot play me', {audioB64: B64}));
+  send(win, talkEv('n2', 'me neither', {audioB64: B64}));
+
+  assertNoSpeech(spoken);
+  // The queue is not stuck: a later playable clip still plays.
   const players = installAudio(win, Promise.resolve());
-  win.speechSynthesis = undefined; // device without Web Speech
-
-  send(win, talkEv('n1', 'cannot speak me'));
-  send(win, talkEv('n2', 'real clip', {audioB64: B64}));
-
+  send(win, talkEv('n3', 'now playable', {audioB64: B64}));
   assert.strictEqual(players.length, 1,
-    'a talk with no speech engine must not block the queue');
-  console.log('PASS: missing Web Speech API does not deadlock the queue');
+    'the queue must stay usable after silent degradation');
+  assert.strictEqual(players[0].playCalls, 1);
+  console.log('PASS: missing Audio API degrades to silence, no deadlock');
 }
 
 // --- Regression: single-talk behavior is unchanged ---
@@ -349,7 +364,7 @@ function testSingleAudioTalkStillPlaysImmediately() {
 
   assert.strictEqual(players.length, 1);
   assert.strictEqual(players[0].playCalls, 1);
-  assert.strictEqual(spoken.length, 0);
+  assertNoSpeech(spoken);
   console.log('PASS: a single audio talk still plays immediately');
 }
 
@@ -357,14 +372,13 @@ async function main() {
   testSecondAudioWaitsForFirstEnded();
   testThreeAudioClipsPlayInFifoOrder();
   testAudioErrorAdvancesQueue();
-  testSpeechTalkWaitsForPlayingAudio();
-  testAudioWaitsForSpeechCompletion();
-  testSpeechUtteranceErrorAdvancesQueue();
-  await testRejectedPlayFallsBackThenAdvances();
-  await testLateErrorAfterRejectedPlayDoesNotCutFallback();
+  testClipLessTalkIsSilentAndAdvancesQueue();
+  testLeadingClipLessTalkDoesNotDelayAudio();
+  await testRejectedPlayDegradesSilentlyThenAdvances();
+  await testLateErrorAfterRejectedPlayDoesNotDoubleAdvance();
   testAudioAbortAdvancesQueue();
   testUnspeakableTextDoesNotDeadlockQueue();
-  testMissingSpeechApiDoesNotDeadlockQueue();
+  testMissingAudioApiDegradesToSilence();
   testSingleAudioTalkStillPlaysImmediately();
   console.log('All talkAudioOverlap tests passed.');
 }

@@ -156,8 +156,8 @@ type ToWebviewMessageBody =
   | {type: 'system_prompt'; text: string}
   | {type: 'prompt'; text: string}
   // Agent-initiated text-to-speech (the ``talk`` tool): the webview
-  // plays the GPT-synthesized clip (audioB64) or falls back to the
-  // Web Speech API; talkId dedupes fan-out copies, muted marks copies
+  // plays the GPT-synthesized clip (audioB64), staying silent when no
+  // clip can play; talkId dedupes fan-out copies, muted marks copies
   // already played on this machine by another local player.
   | {
       type: 'talk';
@@ -170,8 +170,8 @@ type ToWebviewMessageBody =
       muted?: boolean;
     }
   // Daemon reply to a demo-mode 'demoSpeak' synthesis request; an
-  // empty audioB64 means synthesis failed and the webview applies the
-  // same Web-Speech fallback as a live audio-less ``talk`` event.
+  // empty audioB64 means synthesis failed and the webview skips the
+  // utterance silently, like a live audio-less ``talk`` event.
   | {
       type: 'demoSpeakAudio';
       reqId: string;

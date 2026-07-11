@@ -27,9 +27,9 @@ a synthesized clip only after a realistic long-synthesis delay:
 * reply after 150 virtual seconds (a first 60s attempt timing out and
   the SDK's retry succeeding — inside the daemon's legitimate
   3-attempt operation ceiling) — the demo MUST wait for and play the
-  natural clip, never the Web Speech fallback;
-* no reply at all — the demo must eventually degrade to the Web
-  Speech fallback (never hang, never go silent).
+  natural clip, never a robotic system voice;
+* no reply at all — the demo must eventually degrade to SILENCE
+  (never hang, never the robotic Web Speech system voice).
 """
 
 from __future__ import annotations
@@ -367,21 +367,18 @@ class TestDemoTalkSlowSynthesis(unittest.TestCase):
             f"was never played: {result}"
         )
 
-    def test_synthesis_reply_never_arrives_falls_back_to_web_speech(
-        self,
-    ) -> None:
+    def test_synthesis_reply_never_arrives_stays_silent(self) -> None:
         """No synthesis reply at all (daemon died mid-request): the demo
-        must eventually degrade to the Web Speech fallback — never hang
-        the replay and never go silent."""
+        must eventually degrade to SILENCE — never hang the replay and
+        never use the robotic Web Speech system voice."""
         result = run_slow_synth_driver(-1)
         assert not result["timerErrors"], (
             f"page timer callbacks threw: {result['timerErrors']}"
         )
         assert result["replayDone"], f"demo replay never finished: {result}"
-        demo = " ".join(result["spoken"])
-        assert TALK_TEXT.split()[0] in demo, (
-            "replayed talk with no synthesis reply was NOT spoken via "
-            f"the Web Speech fallback: {result}"
+        assert not result["spoken"], (
+            "replayed talk with no synthesis reply used the robotic Web "
+            f"Speech system voice instead of staying silent: {result}"
         )
         assert not result["clips"], (
             f"no clip reply was ever sent, yet a clip played: {result}"
