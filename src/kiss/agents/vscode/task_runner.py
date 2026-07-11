@@ -794,6 +794,7 @@ class _TaskRunnerMixin:
                     getattr(tab.agent, "total_steps", 0) or 0,
                 )
                 subtask_failed = False
+                subtask_exc: BaseException | None = None
                 try:
                     agent_returned = tab.agent.run(
                         prompt_template=task_prompt,
@@ -842,9 +843,10 @@ class _TaskRunnerMixin:
                         tab.task_history_id,
                         result_summary[:200],
                     )
-                except KeyboardInterrupt:
+                except KeyboardInterrupt as ki:
                     result_summary, task_end_event = self._cancel_outcome(tab)
                     subtask_failed = True
+                    subtask_exc = ki
                     logger.info(
                         "%s: tab_id=%s task_id=%s",
                         result_summary,
@@ -855,6 +857,7 @@ class _TaskRunnerMixin:
                     result_summary = f"Task failed: {e}"
                     task_end_event = {"type": "task_error", "text": str(e)}
                     subtask_failed = True
+                    subtask_exc = e
                     logger.warning(
                         "Task failed: tab_id=%s task_id=%s error=%s",
                         tab_id,
@@ -886,15 +889,28 @@ class _TaskRunnerMixin:
                             sub_steps_base,
                         )
                     )
-                    self.printer.broadcast({
-                        "type": "result",
-                        "text": result_summary,
-                        "success": False,
-                        "total_tokens": tokens_delta,
-                        "cost": f"${cost_delta:.4f}",
-                        "step_count": steps_delta,
-                        "tabId": tab_id,
-                    })
+                    # Skip this generic Result broadcast when the
+                    # failing agent (e.g. ``RelentlessAgent`` on
+                    # sub-session exhaustion) has ALREADY broadcast a
+                    # richer merged terminal Result with the aggregated
+                    # multi-session summary.  The exception is tagged
+                    # with ``terminal_result_broadcast=True`` in that
+                    # case; a second generic Result would otherwise
+                    # render as a duplicate FAILED panel in the
+                    # front-end.
+                    already_broadcast = bool(
+                        getattr(subtask_exc, "terminal_result_broadcast", False)
+                    )
+                    if not already_broadcast:
+                        self.printer.broadcast({
+                            "type": "result",
+                            "text": result_summary,
+                            "success": False,
+                            "total_tokens": tokens_delta,
+                            "cost": f"${cost_delta:.4f}",
+                            "step_count": steps_delta,
+                            "tabId": tab_id,
+                        })
                     break
                 if subtask_index < len(subtasks) - 1:
                     # W2-F2: persist THIS subtask's result / end event /

@@ -130,6 +130,33 @@ def _prior_sessions_section(summaries: list[str]) -> str:
     )
 
 
+def _build_exhaustion_summary(summaries: list[str], banner: str) -> str:
+    """Compose the merged failure summary emitted on sub-session exhaustion.
+
+    The exhaustion banner (``"Task failed after N sub-sessions"``) is
+    appended AFTER a "### Previous Session N" section when any prior
+    session summaries exist. This layout matches the front-end
+    (``splitMultiSessionSummary`` in ``main.js``): it splits on the
+    trailing ``\\n\\n---\\n\\n`` separator so the banner renders as the
+    terminal ``Result`` panel while the prior sessions become the
+    ``Previous Sessions`` panel.
+
+    Args:
+        summaries: Prior session summaries (from ``is_continue=True``
+            returns), in chronological order. May be empty when the
+            very first session was already exhausted (single-session
+            exhaustion → banner-only).
+        banner: The short exhaustion message.
+
+    Returns:
+        The full summary string suitable for the ``summary`` field of a
+        ``type="result"`` event.
+    """
+    if not summaries:
+        return banner
+    return f"{_prior_sessions_section(summaries)}\n\n---\n\n{banner}"
+
+
 def finish(success: bool, is_continue: bool = False, summary: str = "") -> str:
     """Finish execution with status and summary.
 
@@ -413,8 +440,27 @@ class RelentlessAgent(Base):
                             f"{final_summary}"
                         )
                     else:
-                        payload["summary"] = prior_section
+                        # An empty terminal summary must still be
+                        # split-able by the front-end
+                        # (``splitMultiSessionSummary`` requires the
+                        # ``\n\n---\n\n`` separator).  Use a placeholder
+                        # so the merged Result panel isn't collapsed
+                        # into a single "Previous Sessions" block.
+                        payload["summary"] = (
+                            f"{prior_section}\n\n---\n\n### Final Session\n"
+                            "(no summary)"
+                        )
                     result = yaml.dump(payload, sort_keys=False)
+                    # The inner ``KISSAgent`` already emitted a per-session
+                    # ``type="result"`` event carrying ONLY the last session's
+                    # summary and status. When prior sessions exist, the
+                    # front-end Result panel would otherwise miss the merged
+                    # context (and, for a terminal failure, still show a stale
+                    # "Continue" banner from an earlier session).  Broadcast
+                    # the merged payload so the front-end can supersede the
+                    # per-session panel with a "Previous Sessions" + "Result"
+                    # pair via ``splitMultiSessionSummary`` in ``main.js``.
+                    self._emit_merged_result_event(payload)
                 return result
 
             summary = payload.get("summary", "")
@@ -429,7 +475,86 @@ class RelentlessAgent(Base):
                     progress_text=all_summaries,
                     continuation_number=session + 1,
                 )
-        raise KISSError(f"Task failed after {self.max_sub_sessions} sub-sessions")
+        # Sub-session budget exhausted without a terminal ``is_continue=False``
+        # (or successful) return.  The last inner session's ``type="result"``
+        # event carries ``is_continue=True``, so without this broadcast the
+        # front-end Result panel would render a stale "Status: Continue" for
+        # what is actually a terminal failure.
+        banner = f"Task failed after {self.max_sub_sessions} sub-sessions"
+        self._emit_merged_result_event(
+            {
+                "success": False,
+                "is_continue": False,
+                "summary": _build_exhaustion_summary(summaries, banner),
+            }
+        )
+        # Tag the exception so downstream error handlers
+        # (e.g. ``TaskRunner``'s ``except Exception`` block) know a
+        # terminal ``type="result"`` event has ALREADY been broadcast
+        # for this failure and skip their own generic broadcast —
+        # otherwise the front-end would render a duplicate FAILED
+        # Result panel with no summary.
+        err = KISSError(banner)
+        err.terminal_result_broadcast = True  # type: ignore[attr-defined]
+        raise err
+
+    def _emit_merged_result_event(self, payload: dict[str, Any]) -> None:
+        """Emit a ``type="result"`` event with merged multi-session totals.
+
+        Complements — never replaces — the per-session Result events emitted
+        by the inner :class:`KISSAgent`.  Called from :meth:`perform_task`
+        only when the terminal outcome depends on information the inner
+        emit could not carry:
+
+        * prior session summaries must be preserved (multi-session merge), or
+        * all sub-sessions were exhausted (no inner session ever returned a
+          terminal ``is_continue=False``).
+
+        For single-session terminations, the inner Result event is already
+        authoritative and this helper is not called.
+
+        Args:
+            payload: Dict with ``success``, ``is_continue`` and ``summary``
+                keys.  Serialized to YAML as the event ``content``.
+        """
+        if self.printer is None:
+            return
+        # ``self.total_steps`` / ``total_tokens_used`` / ``budget_used``
+        # are the CUMULATIVE aggregates across every sub-session.  The
+        # printer's per-task offset attributes (set at the start of
+        # each sub-session in :meth:`perform_task` to the aggregate
+        # BEFORE that session) would be added on top of these totals
+        # by ``JsonPrinter._broadcast_result`` — double-counting the
+        # prior sessions.  Zero them for the duration of the print and
+        # restore afterwards so subsequent inner-session emits (if any)
+        # still get the correct offset applied.
+        offset_attrs = (
+            ("tokens_offset", 0),
+            ("budget_offset", 0.0),
+            ("steps_offset", 0),
+        )
+        saved: dict[str, Any] = {}
+        for attr, zero in offset_attrs:
+            if hasattr(self.printer, attr):
+                saved[attr] = getattr(self.printer, attr)
+                try:
+                    setattr(self.printer, attr, zero)
+                except AttributeError:  # pragma: no cover
+                    saved.pop(attr, None)
+        try:
+            self.printer.print(
+                yaml.dump(payload, sort_keys=False),
+                type="result",
+                step_count=self.total_steps,
+                total_tokens=self.total_tokens_used,
+                cost=f"${self.budget_used:.4f}",
+            )
+        finally:
+            for attr, value in saved.items():
+                try:
+                    setattr(self.printer, attr, value)
+                except AttributeError:  # pragma: no cover
+                    pass
 
     def run(
         self,
