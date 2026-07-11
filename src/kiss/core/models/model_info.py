@@ -36,6 +36,7 @@ class ModelInfo:
         cache_write_price_per_million: float | None = None,
         cache_write_1h_price_per_million: float | None = None,
         thinking: str | None = None,
+        fallback: str | None = None,
     ):
         self.context_length = context_length
         self.input_price_per_1M = input_price_per_million
@@ -47,6 +48,12 @@ class ModelInfo:
         self.cache_write_price_per_1M = cache_write_price_per_million
         self.cache_write_1h_price_per_1M = cache_write_1h_price_per_million
         self.thinking = thinking
+        #: Optional name of a fallback model to switch to when the primary
+        #: model returns a non-retryable error (e.g. Anthropic responding
+        #: with ``"Claude Fable 5 is not available. Please use Opus 4.8"``
+        #: or ``"credit balance is too low"``).  ``None`` disables the
+        #: fallback behavior for this model.
+        self.fallback = fallback
 
 
 PACKAGE_MODEL_INFO_PATH = Path(__file__).parent / "MODEL_INFO.json"
@@ -180,6 +187,7 @@ def _build_model_info_entry(entry: dict[str, Any]) -> ModelInfo:
         cache_write_price_per_million=entry.get("cache_write_price_per_1M"),
         cache_write_1h_price_per_million=entry.get("cache_write_1h_price_per_1M"),
         thinking=entry.get("thinking"),
+        fallback=entry.get("fallback"),
     )
 
 
@@ -1093,6 +1101,26 @@ def calculate_cost(
         + num_cache_write_tokens * cw_price
         + num_cache_write_1h_tokens * cw1h_price
     ) / 1_000_000
+
+
+def get_fallback_model(model_name: str) -> str | None:
+    """Return the registered fallback model for *model_name*, or ``None``.
+
+    Consulted by :meth:`kiss.core.kiss_agent.KISSAgent._try_switch_to_fallback`
+    when a non-retryable provider error (model not available, credit
+    balance too low, etc.) is raised.  Looks up the model both under its
+    raw name and under its harbor-stripped form so callers may pass either.
+
+    Args:
+        model_name: The model name reported by the agent.
+
+    Returns:
+        The fallback model name declared in ``MODEL_INFO.json`` (or
+        ``MY_MODELS.json``) via the ``"fallback"`` key, or ``None`` when
+        no fallback is registered or the model is unknown.
+    """
+    info = MODEL_INFO.get(model_name) or MODEL_INFO.get(_strip_provider_prefix(model_name))
+    return info.fallback if info is not None else None
 
 
 def get_max_context_length(model_name: str) -> int:

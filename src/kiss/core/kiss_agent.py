@@ -35,6 +35,16 @@ _NON_RETRYABLE_PHRASES = (
     "unauthorized",
     "permission denied",
     "could not resolve authentication",
+    # Fable-5 production failures: the model has been deprecated / gated
+    # by Anthropic ("Claude Fable 5 is not available. Please use Opus
+    # 4.8"), and account-level credit-balance-too-low errors surface as
+    # 400s.  Both keep 3× retries burning quota with identical failures;
+    # marking them non-retryable lets the fallback path (registered in
+    # MODEL_INFO.json via the ``fallback`` field, resolved via
+    # ``get_fallback_model``) take over immediately.
+    "is not available",
+    "not_found_error",
+    "credit balance is too low",
 )
 MAX_CONSECUTIVE_ERRORS = 3
 MAX_CONSECUTIVE_NO_TOOL_CALLS = 2
@@ -126,6 +136,14 @@ class KISSAgent(Base):
         self.budget_used = 0.0
         self.run_start_timestamp = int(time.time())
         self._consecutive_no_tool_calls = 0
+        # Saved so ``_try_switch_to_fallback`` can rebuild the model
+        # (preserving ``base_url``/``api_key`` overrides) when a
+        # non-retryable model error triggers a fallback swap.
+        self._model_config: dict[str, Any] | None = model_config
+        # One-shot guard: only allow one fallback swap per run, so that
+        # a misconfigured ``fallback: A`` chain (A→B→A, or A→A) cannot
+        # spin infinitely.
+        self._fallback_used = False
 
     def _set_prompt(
         self,
@@ -279,6 +297,71 @@ class KISSAgent(Base):
             )
         return str(response_text)
 
+    def _try_switch_to_fallback(self) -> str | None:
+        """Swap ``self.model`` to the registered fallback model, if any.
+
+        Consulted by :meth:`_run_agentic_loop` after a non-retryable
+        provider error (model gated / deprecated, credit balance too low,
+        etc.).  If ``MODEL_INFO`` registers a ``fallback`` for the
+        current model name, this method:
+
+        1. Guards against repeated swaps within a single run (only one
+           fallback is allowed per :meth:`run` invocation).
+        1. Rebuilds the model via :func:`kiss.core.models.model_info.model`
+           using the same ``model_config`` originally passed to
+           :meth:`run` (preserving ``base_url``/``api_key`` overrides
+           used by end-to-end tests) and the printer's streaming
+           callbacks.
+        1. Copies the primary model's conversation history onto the
+           new model so no context is lost.
+        1. Rebuilds :attr:`_cached_tools_schema` so
+           :meth:`_execute_step` calls the fallback provider's schema
+           (Anthropic-vs-OpenAI-vs-Gemini all differ).
+        1. Emits a visible ``system_prompt`` event announcing the swap.
+
+        Returns:
+            The new model name on a successful swap, or ``None`` when no
+            fallback is registered, the fallback equals the current
+            model, or the one-shot guard has already been consumed.
+        """
+        from kiss.core.models.model_info import get_fallback_model
+        if self._fallback_used:
+            return None
+        new_name = get_fallback_model(self.model_name)
+        if not new_name or new_name == self.model_name:
+            return None
+        old_conversation = list(self.model.conversation)
+        token_cb = self.printer.token_callback if self.printer else None
+        thinking_cb = self.printer.thinking_callback if self.printer else None
+        new_model = model(
+            new_name,
+            model_config=self._model_config,
+            token_callback=token_cb,
+            thinking_callback=thinking_cb,
+        )
+        # ``initialize`` performs the SDK client construction (an
+        # OpenAI/Anthropic/... constructor call) — without it,
+        # ``generate_and_process_with_tools`` would dereference
+        # ``self.client`` which is ``None`` after ``__init__``.  We pass
+        # an empty prompt because we immediately overwrite the
+        # conversation with the primary model's history below, so the
+        # value ``initialize`` seeds is irrelevant.
+        new_model.initialize("")
+        new_model.conversation = old_conversation
+        new_model.usage_info_for_messages = self.model.usage_info_for_messages
+        self.model = new_model
+        old_name = self.model_name
+        self.model_name = new_name
+        self._cached_tools_schema = self.model._build_openai_tools_schema(self.function_map)
+        self._fallback_used = True
+        if self.printer:
+            self.printer.print(
+                f"Model {old_name} returned a non-retryable error; "
+                f"switching to fallback model: {new_name}",
+                type="system_prompt",
+            )
+        return new_name
+
     def _run_agentic_loop(self) -> str:
         consecutive_errors = 0
         for _ in range(self.max_steps):
@@ -301,10 +384,15 @@ class KISSAgent(Base):
             except KISSError:  # pragma: no cover – requires model to raise KISSError mid-step
                 logger.debug("Exception caught", exc_info=True)
                 raise
-            except Exception as e:  # pragma: no cover – requires live API error
+            except Exception as e:
                 logger.debug("Exception caught", exc_info=True)
                 if not _is_retryable_error(e):
-                    raise KISSError(f"Non-retryable error from model: {e}") from e
+                    new_name = self._try_switch_to_fallback()
+                    if new_name is None:
+                        raise KISSError(f"Non-retryable error from model: {e}") from e
+                    consecutive_errors = 0
+                    self._consecutive_no_tool_calls = 0
+                    continue
                 consecutive_errors += 1
                 if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
                     raise KISSError(
