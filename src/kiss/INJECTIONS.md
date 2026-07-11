@@ -28,7 +28,7 @@ Use openrouter/z-ai/glm-5.2 model for all tasks including coding, bug fixing, an
 
 ## Trick
 
-Can you run all tests and report the cause of failing tests? Do not modify any code. Running all tests, collecting information, and fixing them is time consuming. So split the set of tests by the number of test methods into number of cores - 2, and run all splits in parallel using `run_parallel` tool.  Determine which test failures are due to a bug in the project or a bug in the test.  Fix them accordingly.   
+Can you run all tests and report the cause of failing tests? Do not modify any code. Running all tests, collecting information, and fixing them is time consuming. So split the set of tests by the number of test methods into number of cores - 2, and run all splits in parallel using `run_parallel` tool. Determine which test failures are due to a bug in the project or a bug in the test. Fix them accordingly.
 
 ## Trick
 
