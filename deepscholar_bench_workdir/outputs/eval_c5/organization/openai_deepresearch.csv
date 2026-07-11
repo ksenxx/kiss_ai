@@ -1,0 +1,558 @@
+folder_path,paper_title,paper_abstract,related_work_a,related_work_b,organization_v1,organization_v2,organization
+/Users/ksen/work/kiss/.kiss-worktrees/kiss_wt-1783742102-28c05696/deepscholar_bench_workdir/outputs/results/55,"Search-Based Interaction For Conversation Recommendation via Generative
+  Reward Model Based Simulated User","Conversational recommendation systems (CRSs) use multi-turn interaction to
+capture user preferences and provide personalized recommendations. A
+fundamental challenge in CRSs lies in effectively understanding user
+preferences from conversations. User preferences can be multifaceted and
+complex, posing significant challenges for accurate recommendations even with
+access to abundant external knowledge. While interaction with users can clarify
+their true preferences, frequent user involvement can lead to a degraded user
+experience.
+  To address this problem, we propose a generative reward model based simulated
+user, named GRSU, for automatic interaction with CRSs. The simulated user
+provides feedback to the items recommended by CRSs, enabling them to better
+capture intricate user preferences through multi-turn interaction. Inspired by
+generative reward models, we design two types of feedback actions for the
+simulated user: i.e., generative item scoring, which offers coarse-grained
+feedback, and attribute-based item critique, which provides fine-grained
+feedback. To ensure seamless integration, these feedback actions are unified
+into an instruction-based format, allowing the development of a unified
+simulated user via instruction tuning on synthesized data. With this simulated
+user, automatic multi-turn interaction with CRSs can be effectively conducted.
+Furthermore, to strike a balance between effectiveness and efficiency, we draw
+inspiration from the paradigm of reward-guided search in complex reasoning
+tasks and employ beam search for the interaction process. On top of this, we
+propose an efficient candidate ranking method to improve the recommendation
+results derived from interaction. Extensive experiments on public datasets
+demonstrate the effectiveness, efficiency, and transferability of our approach.","# Related Work
+
+## Conversational Recommender Systems
+
+Conversational recommender systems (CRSs) aim to elicit user preferences through multi-turn interaction and provide personalized recommendations. Early ""attribute-centric"" CRSs cast preference elicitation as an interactive decision problem in which the system alternates between asking about attributes and recommending items. Representative approaches such as the Estimation–Action–Reflection (EAR) framework [1] and the Simple Conversational Path Reasoning (SCPR) model over knowledge graphs [2] coordinate a question-recommendation policy with a factorization-based recommender. In parallel, ""generation-oriented"" CRSs, seeded by the ReDial dataset and dialogue system [3], focus on producing natural conversational responses that also mention appropriate items. Follow-up work has introduced external knowledge to strengthen preference modeling and response generation: KBRD injects a knowledge graph into both the recommender and the dialogue module [4]; KGSF fuses word-oriented and entity-oriented knowledge graphs via mutual information maximization [5]; and CR-Walker performs tree-structured reasoning over a knowledge graph coupled with explicit dialog acts [6]. UniCRS further unifies the recommendation and generation subtasks through knowledge-enhanced prompt learning on a frozen language model [7].
+
+## LLMs as Conversational Recommenders
+
+The rise of large language models (LLMs) has reshaped CRS research. Chat-REC augments a classical recommender with ChatGPT to enable interactive and explainable recommendations [8], while a comprehensive study shows that LLMs can act as strong zero-shot conversational recommenders even without domain-specific fine-tuning 9. Agent-style frameworks like InteRecAgent 10 and RecMind 11 equip LLMs with tools, memory, and planning to orchestrate multi-step interactive recommendation. Complementary studies explore refining LLM-based recommendations via feedback-driven reprompting 12. To make LLMs recommendation-aware, instruction-tuning methods such as InstructRec cast recommendation as instruction following 13, and TALLRec efficiently aligns LLMs with recommendation objectives 14. Our simulated user follows a similar instruction-tuning paradigm but targets the *user side* of the conversation rather than the system side.
+
+## User Simulators for CRS Evaluation and Training
+
+Because collecting real conversational interactions is costly, simulated users have become an important tool for both evaluating and training CRSs. iEvaLM highlights that interactive evaluation with LLM-based user simulators reveals capabilities of CRSs that static, turn-level metrics miss, and calls for more faithful simulators 15. Broader efforts model user behavior with LLM-based agents to reproduce plausible interaction trajectories in recommendation environments 16. Our generative reward model based simulated user (GRSU) extends this line by explicitly designing coarse- and fine-grained feedback actions that mirror how a reward model scores and critiques candidate items.
+
+## Generative Reward Models and Reward-Guided Search
+
+Our design is inspired by advances in reward modeling and reward-guided reasoning. RLHF-style training aligns LLMs with human preferences via a scalar reward model learned from comparisons 17, and Direct Preference Optimization reformulates preference learning without an explicit reward model 18. Recent work reformulates reward models themselves as *generative* verifiers that produce natural-language judgments or scores via next-token prediction, improving verification quality and transferability 19. Process- and step-level reward models have proven effective for guiding multi-step reasoning: ""Let's Verify Step by Step"" shows that process supervision beats outcome supervision on math reasoning 20, and Math-Shepherd trains such verifiers without human annotations to reinforce LLM reasoning 21. These verifiers are typically deployed with search-based inference procedures such as Tree of Thoughts [9] or, more generally, test-time compute scaling with best-of-N and beam search 23. Analogously, we treat the simulated user's generative scores and attribute-based critiques as a reward signal and adopt beam search over CRS-generated candidates, balancing effectiveness and efficiency, and further introducing an efficient candidate ranking step to consolidate the recommendations derived from the interaction.","Our work is related to the following two research directions.
+
+\paratitle{Conversational recommendation.}
+Conversational recommender systems~(CRSs) aim to provide item recommendations through multi-turn interaction.
+One line of work~\cite{lei2020estimation,lei2020interactive,li2021seamlessly} focuses on the optimization of interaction policy.
+They simplify the interaction to pre-defined actions (\eg asking questions or making recommendations) and handcrafted templates.
+Based on this, they optimize CRSs to give accurate recommendations within as few turns as possible.
+Another line of work~\cite{wang2022towards,wang2023improving,zhao2023alleviating} focuses on the elicitation and understanding of user preference in more free-form natural language conversations.
+Since conversations usually lack sufficient contextual information, existing work introduces knowledge from external resources, such as knowledge graphs~\cite{dao2024broadening}, large language models~(LLMs)~\cite{he2023large,yang2024unleashing}, and conversational recommendation corpora~\cite{dao2024broadening,xie2024neighborhood}.
+% Based on this, they design specific alignment strategies~(\eg prompt learning~\cite{dao2024broadening} and instruction tuning~\cite{yang2024unleashing}) to incorporate the introduced knowledge for user preference understanding and item recommendation.
+% However, the user preference can be multifaceted and complex, making accurate recommendations challenging even with enriched knowledge.
+Our work follows the second category and proposes a simulated user, which can automatically interact with CRSs to help them discern the true user preference from a complex conversation.
+% However, user preference can be complex, making it hard to give accurate recommendations even if sufficient knowledge is provided.
+% In this paper, we aim to address this issue by developing a simulated user to provide feedback for CRSs in an automatic interaction process.
+
+\paratitle{Generative reward models.}
+Reward models~\cite{cobbe2021training,lightmanlet} have become an emerging topic for solving complex reasoning tasks.
+For example, in the commonly used ``Best-of-N'' strategy~\cite{cobbe2021training}, a task model first generates several candidate solutions, then a reward model ranks these candidates and selects the best one as the final prediction.
+Recently, generative reward models~\cite{mahan2024generative,zhang24generative} have been proposed, which unify generation and reward modeling by representing reward as the probability of a specific token.
+Based on this, critiques can be introduced in generation for better reward modeling~\cite{mahan2024generative,zhang24generative}.
+In this work, we take inspiration from generative reward models to design the actions of our simulated user.",0,0,0.0
+/Users/ksen/work/kiss/.kiss-worktrees/kiss_wt-1783742102-28c05696/deepscholar_bench_workdir/outputs/results/56,"Bridge the Domains: Large Language Models Enhanced Cross-domain
+  Sequential Recommendation","Cross-domain Sequential Recommendation (CDSR) aims to extract the preference
+from the user's historical interactions across various domains. Despite some
+progress in CDSR, two problems set the barrier for further advancements, i.e.,
+overlap dilemma and transition complexity. The former means existing CDSR
+methods severely rely on users who own interactions on all domains to learn
+cross-domain item relationships, compromising the practicability. The latter
+refers to the difficulties in learning the complex transition patterns from the
+mixed behavior sequences. With powerful representation and reasoning abilities,
+Large Language Models (LLMs) are promising to address these two problems by
+bridging the items and capturing the user's preferences from a semantic view.
+Therefore, we propose an LLMs Enhanced Cross-domain Sequential Recommendation
+model (LLM4CDSR). To obtain the semantic item relationships, we first propose
+an LLM-based unified representation module to represent items. Then, a
+trainable adapter with contrastive regularization is designed to adapt the CDSR
+task. Besides, a hierarchical LLMs profiling module is designed to summarize
+user cross-domain preferences. Finally, these two modules are integrated into
+the proposed tri-thread framework to derive recommendations. We have conducted
+extensive experiments on three public cross-domain datasets, validating the
+effectiveness of LLM4CDSR. We have released the code online.","# Related Work
+
+## Sequential Recommendation
+
+Sequential recommendation aims to predict a user's next item by modeling the temporal dependencies embedded in their historical behavior. Early work relied on recurrent networks to encode session-level dynamics, exemplified by GRU4Rec 1, and later shifted toward self-attentive architectures such as SASRec 2 and the bidirectional BERT4Rec 3, which better captured long-range item transitions. Graph neural networks were also introduced to enrich sequential signals with high-order collaborative structure, as in MA-GNN 4. To alleviate data sparsity and representation degeneration, a line of self-supervised and contrastive objectives has been proposed, including S³-Rec 5, CL4SRec 6, and DuoRec 7. More recently, transferable text-based sequence encoders such as UniSRec 8 and Recformer 9 have shown that semantic item descriptions can serve as a bridge across datasets and domains, motivating our LLM-based unified item representation.
+
+## Cross-Domain (Sequential) Recommendation
+
+Cross-domain recommendation transfers knowledge across item catalogs to mitigate sparsity in the target domain. Classical dual-network approaches, such as CoNet 10, share hidden states across domains via cross connections, while unified graph-attention frameworks generalize dual-target and multi-target transfer 11. Contrastive cross-domain matching, as in CCDR 12, improves alignment with intra- and inter-domain contrastive tasks. In the sequential setting, cross-domain sequential recommendation (CDSR) additionally requires modeling mixed item transitions. MIFN augments transfer with mixed information flow and knowledge graphs 13, DASL introduces dual attention for cross-domain CTR 14, and DDGHM couples dual dynamic graphs with hybrid metric training 15. C²DSR further exploits contrastive infomax across single- and cross-domain user views 16, and triple sequence learning models auxiliary sequences to distill transferable preferences 17. Nevertheless, most of these methods depend heavily on *overlapping* users who interact across all domains, and struggle with the complex transition patterns of mixed sequences—two limitations that motivate our work. A very recent effort, MACD, targets open-world CDSR via model-agnostic contrastive denoising, but still operates on ID-based sequences without semantic bridging 18.
+
+## Large Language Models for Recommendation
+
+The strong representation and reasoning abilities of LLMs have inspired a rapidly growing body of LLM-based recommenders. Generative paradigms cast recommendation as a language task: P5 unifies multiple recommendation objectives via personalized prompting 19, GPT4Rec generates hypothetical items to retrieve candidates 20, and Chat-Rec turns interaction history into conversational prompts [1]. Instruction-tuned recommenders, notably TALLRec 22, PALR 23, and bi-step grounding of LLMs to item spaces 24, adapt open-source LLMs to recommendation with lightweight tuning. To couple LLM semantics with collaborative signals, LLaRA hybridizes ID embeddings with textual prompts 25, E4SRec injects ID embeddings into an LLM for sequential prediction 26, CoLLM integrates collaborative embeddings into frozen LLM backbones 27, and LatentReasoner interprets the latent space of sequential recommenders through LLMs 28. Another line uses LLMs as auxiliary knowledge or profile generators rather than end-to-end predictors: KAR augments recommenders with open-world knowledge from LLMs 29, ONCE combines open- and closed-source LLMs for content-based recommendation 30, LLMRec applies LLM-driven graph augmentation 31, and RLMRec aligns LLM-based user/item profiles with collaborative representations [2]. Empirical studies have also probed whether LLMs genuinely understand user preferences 33 and revisited ID- versus modality-based recommenders in the LLM era 34, while surveys consolidate this fast-moving field 35. Closest to our setting, LLMSeqSim-style approaches show that LLM item embeddings can directly power sequential recommendation 36. However, none of these works explicitly tackles CDSR's *overlap dilemma* and *transition complexity*; our LLM4CDSR fills this gap by combining an LLM-based unified item representation with a contrastively regularized adapter and a hierarchical LLM profiling module inside a tri-thread cross-domain framework.","% In this section, we will conclude the literature relevant to this paper from two aspects, \ie cross-domain sequential recommendation and LLMs for the sequential recommendation.
+
+% \subsection{Cross-domain Sequential Recommendation}
+\noindent \textbf{Cross-domain Sequential Recommendation}.
+% Sequential Recommender Systems (SRS)~\cite{pan2024survey} has attracted wide attention because it can capture dynamic preferences from the user's historical interactions. However, most SRS studies focus on addressing the sparsity problem by contrastive learning~\cite{qiu2022contrastive,xie2022contrastive}, while still trapped in the limited single-domain data.
+Recommender systems~\cite{zhao2018deep,zhao2018recommendations,liu2023multi,wang2023multi,wang2023single,liu2024multimodal} become important in life since they can alleviate the problem of information overload.
+Recently, CDSR~\cite{chen2024survey} has emerged, absorbing both merits from cross-domain recommendation~\cite{li2022gromov,wang2023plate,li2023hamur,gao2023autotransfer,zhang2024m3oe,jia2024d3,liu2024multifs} and sequential recommendation~\cite{liu2025sigma,liu2023diffuasr,li2023strec,liu2023dirac}.
+The key to CDSR lies in filling the distribution gap between various domains. 
+% Existing CDSR works often address it from item or user perspectives.
+From the item aspect, most current studies adopt Graph Neural Networks (GNN)~\cite{wu2022graph} to establish the item connections across domains. As one of the pioneers, C2DSR~\cite{cao2022contrastive} proposes to build an interaction graph based on the co-occurrences of the items across two domains. 
+% Then, the GNN is imposed on this graph and the relationships between items in different domains are learned. 
+Following C2DSR, EA-GCL~\cite{wang2023unbiased} and MGCL~\cite{xu2023multi} further design contrastive objectives for graph learning to alleviate density bias and transition difficulty. 
+% Specifically, EA-GCL~\cite{wang2023unbiased} perturb the global interaction graph and impose contrastive learning to enhance the node embeddings. 
+% In terms of MGCL~\cite{xu2023multi}, it devises contrastive tasks to distinguish local and global graphs so that the intra- and inter-domain transitions are acquired.
+From the user perspective, CDSR works often design more sophisticated architectures to capture global preferences from the mixed behavior sequences. $\pi$-Net~\cite{ma2019pi}, an early work in this line, proposes a cross-domain transfer module to derive hybrid preferences. Recently, TriCDR~\cite{ma2024triple} has focused on modeling mixed sequences, designing triple contrastive tasks to dig into fine-grained global interests. Though existing CDSR works have explored various methods to bridge the domains, they are trapped in a collaborative view. 
+% This leads to the overlap dilemma and collaborative complexity intrinsically. 
+In contrast, we propose a semantic view to enhance CDSR by LLMs.
+
+\vspace{1mm}
+% \subsection{LLMs for Sequential Recommendation}
+\noindent \textbf{LLMs for Sequential Recommendation}.
+LLMs have been applied to several fields~\cite{xu2024multi,liu2024moelora}, including recommender systems~\cite{wu2024survey,lin2023can,bao2024large,wang2024towards,liu2025llmemb,sun2025llmser,liu2024leader,wang2024llm4msr,fu2023unified}. Relying on powerful abilities in reasoning and understanding~\cite{zhao2023survey}, LLMs can benefit SRS by analyzing users' behaviors and items' attributes. Existing LLMs for SRS works can be categorized into two main lines, \ie LLMs as SRS and LLMs enhancing SRS. 
+The first category refers to utilizing LLMs to generate recommendations directly. For example, GOT4Rec~\cite{long2024got4rec} designs chain-of-thoughts to prompt LLMs giving out recommendations. To fill the gap between natural language and recommendation tasks, some propose to fine-tune open-sourced LLMs, \eg TALLRec~\cite{bao2023tallrec} and S-DPO~\cite{chen2024softmax}. 
+% However, these methods do not take the collaborative signals into account. To face this challenge, E4SRec~\cite{li2023e4srec} and LLaRA~\cite{liao2024llara} propose to integrate pre-trained item embeddings of SRS into LLMs. 
+The other line, \ie LLMs enhancing SRS, often adopts LLMs as item or user encoders~\cite{liu2024llmers}. Since the LLMs embeddings can be cached in advance, they are more practical due to no need for LLMs while serving. SAID~\cite{hu2024enhancing} and TSLRec~\cite{liu2024practice} are two representatives, which use the LLMs embeddings to initialize the embedding layer of SRS. To better combine collaborative and semantic information, LLM-ESR~\cite{liu2024llm} designs a dual-view modeling framework. 
+% URLLM~\cite{shen2024exploring} belongs to the first thread, facing the high latency issue when applied to real-world applications. 
+It is worth noting that we are the first to explore how to utilize LLMs to enhance CDSR.",0,0,0.0
+/Users/ksen/work/kiss/.kiss-worktrees/kiss_wt-1783742102-28c05696/deepscholar_bench_workdir/outputs/results/57,Replication and Exploration of Generative Retrieval over Dynamic Corpora,"Generative retrieval (GR) has emerged as a promising paradigm in information
+retrieval (IR). However, most existing GR models are developed and evaluated
+using a static document collection, and their performance in dynamic corpora
+where document collections evolve continuously is rarely studied. In this
+paper, we first reproduce and systematically evaluate various representative GR
+approaches over dynamic corpora. Through extensive experiments, we reveal that
+existing GR models with \textit{text-based} docids show superior generalization
+to unseen documents. We observe that the more fine-grained the docid design in
+the GR model, the better its performance over dynamic corpora, surpassing BM25
+and even being comparable to dense retrieval methods. While GR models with
+\textit{numeric-based} docids show high efficiency, their performance drops
+significantly over dynamic corpora. Furthermore, our experiments find that the
+underperformance of numeric-based docids is partly due to their excessive
+tendency toward the initial document set, which likely results from overfitting
+on the training set. We then conduct an in-depth analysis of the
+best-performing GR methods. We identify three critical advantages of text-based
+docids in dynamic corpora: (i) Semantic alignment with language models'
+pretrained knowledge, (ii) Fine-grained docid design, and (iii) High lexical
+diversity. Building on these insights, we finally propose a novel multi-docid
+design that leverages both the efficiency of numeric-based docids and the
+effectiveness of text-based docids, achieving improved performance in dynamic
+corpus without requiring additional retraining. Our work offers empirical
+evidence for advancing GR methods over dynamic corpora and paves the way for
+developing more generalized yet efficient GR models in real-world search
+engines.","# Related Works
+
+## Dense retrieval as the standard neural baseline
+
+Before generative retrieval emerged, dense retrieval had become the dominant neural paradigm in information retrieval. Dense Passage Retrieval 1 learns dual-encoder representations for questions and passages and retrieves via approximate nearest-neighbor search over pre-computed embeddings. ColBERT [1] refines this approach with a late-interaction mechanism that preserves token-level matching, while ANCE 3 improves training by mining hard negatives from an asynchronously updated approximate nearest-neighbor index. These dense retrievers still serve as the strongest non-generative baselines against which generative retrieval (GR) methods, including our study over dynamic corpora, are compared.
+
+## Foundations of generative retrieval
+
+The generative retrieval paradigm was popularized by GENRE 4, which autoregressively generates entity names as identifiers using constrained beam search, and by the Differentiable Search Index (DSI) 5, which trains a single transformer to map queries directly to document identifiers (docids). DynamicRetriever 6 similarly stores the corpus in model parameters and generates docids at inference time. These works established GR as a promising alternative to sparse and dense retrieval, but they all evaluate on static corpora and largely overlook the dynamics of real-world search engines that we investigate.
+
+## Numeric-based docid designs
+
+A prominent line of GR research assigns each document a compact numeric identifier and trains the model to generate it. NCI 7 uses a hierarchical k-means tree over document embeddings to produce semantically structured integer docids, and introduces a prefix-aware decoder. GenRet 8 learns discrete document codes end-to-end through a differentiable tokenizer, while RIPOR 9 constructs relevance-aware quantized codes and introduces prefix-oriented ranking optimization to scale GR to MS MARCO-sized collections. Ultron 10 further combines URL-derived and clustered numeric ids in a model-based indexer. Our reproduction over evolving corpora shows that, despite their efficiency, all such numeric-based docids struggle to generalize to newly added documents — a limitation we trace back to overfitting on the initial training corpus.
+
+## Text-based and multi-view docid designs
+
+Another family of GR methods uses natural-language strings as docids. SEAL 11 autoregressively generates arbitrary substrings of documents grounded via an FM-index. MINDER 12 enhances GR with multi-view identifiers such as titles, substrings, and pseudo-queries. TSGen 13 represents documents as unordered term sets and decodes them permutation-invariantly, and LLM-URL 14 shows that large language models can generate URLs as docids in a zero-shot fashion. Our analysis complements these works by identifying three properties of text-based docids — semantic alignment with pretrained knowledge, fine-grained design, and high lexical diversity — that are decisive for generalization to unseen documents.
+
+## Scaling, training, and ranking-oriented GR
+
+Several works address indexing–retrieval mismatches and scaling. DSI-QG 15 augments indexing with generated pseudo-queries so that documents are indexed under query-like text. SE-DSI 16 leverages elaborative descriptions and rehearsal contents inspired by human learning strategies. Pradeep et al. 17 systematically study how GR scales to millions of passages, revealing the difficulty of matching dense retrievers at scale. LTRGR 18 casts GR as a ranking problem and directly optimizes passage-level ranking objectives, PAG 19 plans docid generation via simultaneous set- and sequence-based decoding, and DGR 20 distills knowledge from cross-encoder rerankers into the generative retriever. These techniques are orthogonal to our focus on dynamic corpora but share our interest in making GR practically deployable.
+
+## Generative retrieval over dynamic and continual corpora
+
+Most directly related to our work are GR methods designed for evolving document collections. CorpusBrain 21 pre-trains a generative retrieval backbone for knowledge-intensive tasks, and its extension CorpusBrain++ 22 proposes a continual generative pre-training framework together with the KILT++ benchmark for continually arriving documents. CLEVER 23 tackles the same continual setting with incremental product quantization and memory-augmented learning to encode new documents without forgetting. Whereas these approaches propose new training procedures for continual GR, we instead systematically reproduce and dissect representative GR methods over dynamic corpora, analyze *why* text-based docids generalize better than numeric ones, and, informed by these insights, design a training-free multi-docid scheme that combines the efficiency of numeric docids with the effectiveness of text-based docids.","\subsection{Generative retrieval} 
+Generative retrieval is an emerging paradigm in information retrieval that reformulates the retrieval process as a text generation task. Instead of relying on dense or sparse index structures, GR methods leverage autoregressive language models (e.g., T5) to produce a document identifies (docid)~\cite{de2020autoregressive, tay2022transformer, zhou2022dynamicretriever}.
+Early work in this direction includes autoregressive entity retrieval models that generate entity titles~\cite{de2020autoregressive}.
+Beyond simple string identifiers, recent studies have explored generating more semantically meaningful docids.
+Existing GR methods can be categorized into two main types according to the nature of the docids: \textit{numeric-based} and \textit{text-based}.
+
+\textit{numeric-based} docids typically involve a quantizer that converts document content into a numeric sequence, followed by training a model to learn the mapping between the document and the numeric sequence.
+There are various types of quantization strategies, such as hierarchical k-means, product quantization (PQ), residual quantization (RQ), etc.
+\citet{tay2022transformer} use hierarchical k-means clustering on document embeddings to generate docids and then trains the model to generate the corresponding numeric sequences.
+\citet{wang2022neural} adopt a similar docids design to DSI~\cite{tay2022transformer} but applies distinct word embeddings for the same numeric value based on different positions and prefixes.
+\citet{zhou2022ultron} employ PQ to convert document embeddings into numeric sequences and designs a three-stage training task to enable the model to memorize the documents.
+\citet{zeng2024scalable} use RQ to quantize document embeddings, while incorporating interaction information between the query and the document when obtaining the document embeddings.
+\citet{sun2024learning} adopt a variant of the RQ strategy, replacing the word embedding matrix with a codebook from the RQ method. The authors use constrained cluster centers as docids and trains the docids representations through document tokenization, retrieval, and reconstruction tasks.
+
+\textit{Text-based} docids use meta-information from the document, such as URLs, titles, or queries, as docids, effectively utilizing the powerful capabilities of pre-trained language models. 
+\citet{de2020autoregressive, chen2022gere, chen2022corpusbrain} treat the document title as the docids, as the title is the most intuitive and commonly used form of abstract textual information.
+\citet{zhou2022ultron, tang2024generative} use URLs and queries as docids in web search scenarios.
+Single docids type may not fully represent the information contained in a document. \citet{li2023multiview} treat various textual elements as docids and retrieves results for multiple docids simultaneously during the retrieval stage.
+N-grams are also an effective way to represent document content, but directly storing n-grams for constrained decoding requires significant computational and storage costs. \citet{bevilacqua2022autoregressive} introduce the use of FM-index to store n-gram information and control generation, significantly improving both efficiency and retrieval performance.
+
+In this paper, we reproduce representative methods from both \textit{numeric-based} and \textit{text-based} paradigms to comprehensively evaluate their adaptability in dynamic corpora.
+
+
+\subsection{GR over dynamic corpora}
+Previous GR methods primarily focus on fixed document collections, whereas practical tasks often involve corpora that continuously evolve over time.
+To address this challenge, researchers have developed a series of methods to optimize GR models for handling dynamic corpora.
+\citet{mehta2022dsi++} employ an incremental training method by optimizing flat loss basins through the Sharpness-Aware Minimization (SAM) optimizer, enabling the model to remember new documents while maintaining stable retrieval performance for the initial documents.
+\citet{guo2024corpusbrain++} design an adapter structure that shares a backbone model while introducing task-specific adapters for training on specific documents. This method effectively learns representations for new documents.
+\citet{chen2023continual} build upon the PQ strategy and proposes Incremental Product Quantization (IPQ), using the generated PQ codes as docids. It achieves flexible document addition by updating the PQ centroids.
+\citet{kim2023exploring} evaluate the performance of GR methods on dynamic corpora, demonstrating the superiority of GR in terms of efficiency and memory compared to traditional retrieval strategies.
+
+These methods have, to some extent, addressed or alleviated the challenges faced by GR methods in dynamic corpora tasks. However, they either require additional training or involve complex docids designs, making them unsuitable for the demands of dynamic corpora in practical scenarios. Therefore, it is crucial to explore the ability of models to generalize to new documents without complex modifications or additional training.",0,0,0.0
+/Users/ksen/work/kiss/.kiss-worktrees/kiss_wt-1783742102-28c05696/deepscholar_bench_workdir/outputs/results/58,"NLCTables: A Dataset for Marrying Natural Language Conditions with Table
+  Discovery","With the growing abundance of repositories containing tabular data,
+discovering relevant tables for in-depth analysis remains a challenging task.
+Existing table discovery methods primarily retrieve desired tables based on a
+query table or several vague keywords, leaving users to manually filter large
+result sets. To address this limitation, we propose a new task: NL-conditional
+table discovery (nlcTD), where users combine a query table with natural
+language (NL) requirements to refine search results. To advance research in
+this area, we present nlcTables, a comprehensive benchmark dataset comprising
+627 diverse queries spanning NL-only, union, join, and fuzzy conditions, 22,080
+candidate tables, and 21,200 relevance annotations. Our evaluation of six
+state-of-the-art table discovery methods on nlcTables reveals substantial
+performance gaps, highlighting the need for advanced techniques to tackle this
+challenging nlcTD scenario. The dataset, construction framework, and baseline
+implementations are publicly available at
+https://github.com/SuDIS-ZJU/nlcTables to foster future research.","# Related Work
+
+**Keyword-based and semantic table retrieval.** Early ad hoc table search treats a table as a bag of text and ranks candidates against a small set of user keywords. Zhang and Balog introduced a semantic-similarity framework that combines lexical and embedding-based signals for table retrieval [1](https://arxiv.org/abs/1802.06159), and later unified keyword and table queries into a single retrieval model [2](https://arxiv.org/abs/2105.06365). Table2Vec learns joint word and entity embeddings tailored for table population and retrieval [3](https://arxiv.org/abs/1906.00041). Neural rankers subsequently replaced sparse retrieval: Chen et al. proposed a deep contextualized language model for table search [4](https://arxiv.org/abs/2005.09207), StruBERT injects table structure into a BERT-style encoder for search and matching [5](https://arxiv.org/abs/2203.14278), and Wang et al. cast table retrieval as multi-granular graph representation learning to handle heterogeneous structures [6](https://arxiv.org/abs/2105.01736). While these methods enrich the query with semantics, they still assume unstructured keywords or short natural-language questions rather than the mixed table-plus-NL input that nlcTD targets.
+
+**Query-table-based discovery: union and join search.** A second line of work retrieves tables that are unionable or joinable with a user-supplied query table. Bogatu et al. formalized dataset discovery in data lakes with attribute-level relatedness measures [7](https://arxiv.org/abs/2011.10427). SANTOS exploits column relationships and semantic types for table union search [8](https://arxiv.org/abs/2209.13589), while Starmie learns contextualized column representations to unify union and related-table discovery [9](https://arxiv.org/abs/2210.01922). For joinable-table discovery, Dong et al. proposed a high-dimensional similarity-based method to scale joinability search in data lakes [10](https://arxiv.org/abs/2010.13273), and their follow-up DeepJoin leverages pre-trained language models to represent columns for joinable retrieval [11](https://arxiv.org/abs/2212.07588). TURL provides a foundational pre-training paradigm for table understanding that supports many downstream discovery tasks [12](https://arxiv.org/abs/2006.14806). These systems rank candidate tables purely from a query table and cannot incorporate the user's textual intent, which is central to our nlcTD formulation.
+
+**Corpora and benchmarks for table tasks.** Progress in this area is enabled by large, structured table corpora. GitTables provides a million-scale corpus of relational tables mined from GitHub and is widely used to stress-test discovery pipelines [13](https://arxiv.org/abs/2106.07258). SANTOS also releases benchmark queries for semantic union search [8](https://arxiv.org/abs/2209.13589). None of these resources, however, pair a query table with a natural-language condition to jointly test relevance across a query table, an NL requirement, and a candidate table, which motivates the 627 queries, 22,080 candidate tables, and 21,200 relevance labels released with nlcTables.
+
+**LLMs, RAG, and natural-language interfaces over tables.** With the rise of LLMs, natural-language querying of tabular data has moved beyond retrieval into generation. Solo pursues data discovery driven by natural-language questions through a self-supervised approach [14](https://arxiv.org/abs/2301.03560), and TableRAG couples retrieval with LLM reasoning to enable million-token table understanding [15](https://arxiv.org/abs/2410.04739). The BIRD benchmark evaluates LLMs as database interfaces for large-scale text-to-SQL [16](https://arxiv.org/abs/2305.03111), and a recent survey positions generative AI as a key enabler for tabular data augmentation [17](https://arxiv.org/abs/2407.21523). These works underline the demand for expressive NL-driven access to tabular data, but they focus on question answering or SQL synthesis over given tables, not on ranking candidate tables that satisfy a joint table-plus-NL request.
+
+**Foundational building blocks.** Our baselines rely on standard components including distilled Transformer encoders such as DistilBERT [18](https://arxiv.org/abs/1910.01108), permuted-masked pre-training objectives such as MPNet [19](https://arxiv.org/abs/2004.09297), and HNSW graphs for approximate nearest-neighbor search over dense embeddings [20](https://arxiv.org/abs/1603.09320).
+","Section~\ref{ssec:existing_table_discovery} goes through current table discovery methods, highlighting the need and opportunities for developing \task{} techniques. Section~\ref{ssec:existing_data_collection} examines existing test data collections, identifying gaps that must be addressed to facilitate \task{}.
+
+\subsection{Table Discovery Approaches}
+
+\noindent\textbf{Keyword-based Table Search}~\cite{wang_retrieving_2021,trabelsi_strubert_2022,wang_solo_2023} retrieves a ranked list of table instances from the repository, ordered by their relevance scores in relation to one or more user-provided keywords. 
+These approaches allow users to locate data with minimal prior knowledge of the structure or relationships within the table repository. However, they typically accept sorely keywords as input and treat tables as plain text (e.g., \textsc{Strubert}~\cite{trabelsi_strubert_2022} serializes tables to a sequence of tokens). 
+While keyword-based approaches are highly valuable, there remains significant room for improvement. \task{} defined in Section~\ref{ssec:definition} aims to extend this paradigm by supporting inputs that go beyond simple keywords, allowing for more complex natural language queries, such as full sentences. Nonetheless, taking only NL as input is only a special case in our \task{} scenarios. In practice, users often already have a table at hand and would use it as query context to refine their table retrieval results.
+
+
+\smallskip
+\noindent\textbf{Query-table-based Table Search} identifies additional tables relevant to a given query table, leveraging its header and/or body content.
+The literature has mainly seen 
+two categories of work. %
+
+
+\underline{\textit{Table Union Search}}~\cite{nargesian_table_2018,bogatu_dataset_2020,khatiwada_santos_2023,fan_semantics-aware_2023,hu_automatic_2023} retrieves tables that are union-compatible with the query table, meaning these two tables having multiple pairs of columns that can be merged. This involves assessing similarity between query table and candidate tables. Early approach \TUS{}~\cite{nargesian_table_2018} defines three probabilistic models to measure the similarity between column values, column domains, and word embeddings of column content. \Santos{}~\cite{khatiwada_santos_2023} utilizes knowledge graph to measure the possibility that columns originate from the same domain.
+Recently, methods like \Starmie{}~\cite{fan_semantics-aware_2023} have adopted table representation learning~\cite{deng_turl_2020,hu_automatic_2023} to generate column embeddings for similarity measure, allowing a more nuanced understanding of table contexts.
+
+\underline{\textit{Table Join Search}}~\cite{yakout_infogather_2012,zhu_josie_2019,dong_efficient_2021,dong_deepjoin_2023,liu_feature_2022,chepurko_arda_2020,Table2022dong} retrieves tables that are joinable with the query table at a specified column $C_q$, meaning the two tables sharing overlapping or semantically related values in that column.
+\Josie{}~\cite{zhu_josie_2019} considers only exact value overlap using set similarity search.
+Here, $C_q$ is treated as a set, and the top-$k$ columns with the highest value overlap are returned.
+Recent embedding-based approaches such as \DeepJoin{}~\cite{dong_deepjoin_2023} consider semantic overlap (e.g., ``\texttt{Incorporation}'' and ``\texttt{Inc.}'') through representation learning. Typically, they first encode the columns, then index these columns, and finally search joinable pairs based on the index.
+
+Query-table-based search is commonly used to identify table components that can augment or complement an existing query table. 
+While \task{} encompasses this functionality --- allowing users to specify conditions like retrieving unionable or joinable tables ---\task{} goes beyond these by supporting more flexible and customizable NL conditions.
+Not limited to predefined operations (e.g., set similarity or semantic encoding), \task{} allows users to specify nuanced requests in natural language. Existing approaches struggle with \task{} as they fail to capture and utilize the rich semantics of these conditions (see our empirical study in Section~\ref{ssec:overall_comparison}).
+
+
+
+
+
+
+
+
+\subsection{Existing Test Data Collections}
+
+To the best of our knowledge, no prior work has specifically constructed a dataset for NL-conditional table discovery, despite its significant application potential.
+Existing tabular data collections primarily focus on table retrieval (or table discovery) in either keyword-based or query-table-based paradigms.
+Table~\ref{related_work_statistic} summarizes representative datasets, highlighting their focus, dataset scales, and the availability of ground truth annotations for benchmarking.
+For example, \textsc{WikiTables}~\cite{zhang_ad_2018,wang_retrieving_2021,trabelsi_strubert_2022} is centered on keyword-based search, accepting only keywords in queries. 
+\TUS{}~\cite{nargesian_table_2018} and \Santos{}~\cite{khatiwada_santos_2023} focus on table union search scenarios, where query tables are provided as input and ground truth is generated via table splitting (see Section~\ref{ssec:construction}).
+\textsc{LakeBench}\cite{deng2024lakebench} generates table union and join search datasets by applying table splitting to \textsc{Opendata}\cite{opendata} and \textsc{WebTable}~\cite{venetis_recovering_2011,cafarella2009data}. It provides large-scale datasets aligned with data lake usage, emphasizing algorithm efficiency and scalability.
+
+Despite these advancements, all of the aforementioned table discovery datasets only label keyword-table or table-table relatedness, making them unsuitable for tasks requiring a ``triangular'' relationship among the NL condition, the query table, and the candidate table.
+This ternary relationship is inherently more complex than binary relationships, and thus necessitates the creation of a substantial and diverse experimental dataset.
+While the last four datasets from \textsc{LakeBench}~\cite{deng2024lakebench} are designed to progressively increase in scale, %
+the other datasets remain relatively small and are derived from single data sources. This lack of diversity makes them less suitable for scenarios involving highly varied NL conditions.
+Our dataset, \dataset{}, addresses these gaps by aligning with prior works' input data levels while introducing a comprehensive table discovery framework driven by NL conditions. By supporting diverse NL inputs alongside query tables, \dataset{} enables robust and scalable evaluations for real-world applications.
+
+\begin{table}[]
+\centering
+\caption{Characteristics of existing test collections. Types \texttt{K}, \texttt{U}, and \texttt{J} denote keyword-based, table union search, and table join search, respectively. The scale of each dataset is represented by the number of queries $|\{T^q\}|$, number of candidate tables $|\mathcal{T}|$, total number of ground truth \#(GT), and the row counts per table Avg \#(Rows). Numbers in \textit{italics} indicate statistics not directly reported in the original papers but derived from our evaluations of the dataset.}
+\footnotesize
+
+\begin{tabular}{lrrrrr}
+\toprule
+{Dataset}        & {Type} & {$|\{T^q\}|$} & {$|\mathcal{T}|$} & {\#(GT)} & {Avg \#(Rows)} \\ \midrule
+\textsc{WikiTables}     & \texttt{K}    & 60      & 3K     & 3K      & 10.9     \\ 
+\TUS{}      & \texttt{U}    & \textit{92}     & 5K     & \textit{5K}     & 1.9K     \\ 
+\Santos{}  & \texttt{U}    & 80      & 11K    & \textit{1.6K}   & 7.7K     \\ 
+\textsc{OpenData}-$\textsf{U}$       & \texttt{U} & 4.6K    & 65K   & \textit{49.5K}    & 112.4K    \\ 
+\textsc{OpenData}-$\textsf{J}$ & \texttt{J} & 4.8K    & 65K    & \textit{42.6K}      & 112.4K   \\ 
+\textsc{WebTable}-$\textsf{U}$       & \texttt{U} & 6.8K   & 2.8M   & \textit{54.9K}  & 23.5       \\ 
+\textsc{WebTable}-$\textsf{J}$ & \texttt{J} & 7.5K   & 16.6M  & \textit{54.8K}   & 23.5     \\ \bottomrule
+\end{tabular}
+\end{table}",0,0,0.0
+/Users/ksen/work/kiss/.kiss-worktrees/kiss_wt-1783742102-28c05696/deepscholar_bench_workdir/outputs/results/59,"Understanding Accuracy-Fairness Trade-offs in Re-ranking through
+  Elasticity in Economics","Fairness is an increasingly important factor in re-ranking tasks. Prior work
+has identified a trade-off between ranking accuracy and item fairness. However,
+the underlying mechanisms are still not fully understood. An analogy can be
+drawn between re-ranking and the dynamics of economic transactions. The
+accuracy-fairness trade-off parallels the coupling of the commodity tax
+transfer process. Fairness considerations in re-ranking, similar to a commodity
+tax on suppliers, ultimately translate into a cost passed on to consumers.
+Analogously, item-side fairness constraints result in a decline in user-side
+accuracy. In economics, the extent to which commodity tax on the supplier (item
+fairness) transfers to commodity tax on users (accuracy loss) is formalized
+using the notion of elasticity. The re-ranking fairness-accuracy trade-off is
+similarly governed by the elasticity of utility between item groups. This
+insight underscores the limitations of current fair re-ranking evaluations,
+which often rely solely on a single fairness metric, hindering comprehensive
+assessment of fair re-ranking algorithms. Centered around the concept of
+elasticity, this work presents two significant contributions. We introduce the
+Elastic Fairness Curve (EF-Curve) as an evaluation framework. This framework
+enables a comparative analysis of algorithm performance across different
+elasticity levels, facilitating the selection of the most suitable approach.
+Furthermore, we propose ElasticRank, a fair re-ranking algorithm that employs
+elasticity calculations to adjust inter-item distances within a curved space.
+Experiments on three widely used ranking datasets demonstrate its effectiveness
+and efficiency.","# Related Work
+
+## Fairness Notions and Metrics in Ranking
+
+The study of fairness in ranking has produced a variety of criteria, including group parity in top-*k* results, exposure-based fairness, and individual fairness. FA*IR introduced a statistically grounded post-processing scheme that guarantees a minimum proportion of protected items in every prefix of a ranking 1. Building on this, exposure-based formulations argue that attention decays with position and that fairness should be measured with respect to allocated exposure rather than raw slot counts [1]. Individual fairness has been formalized as *equity of attention*, which amortizes attention across queries so that items of comparable relevance accumulate comparable exposure over time 3, and as optimal-transport-based individual fairness for learning-to-rank 4. Two comprehensive surveys catalogue the resulting landscape of metrics and algorithms and highlight the fragmentation of evaluation practice 5, 6. Standardized evaluation efforts such as the TREC Fair Ranking track 7 and studies of author-gender exposure in book recommendation 8 further illustrate that a single fairness statistic rarely captures the full behavior of a system—an observation that directly motivates our Elastic Fairness Curve.
+
+## Algorithms for Fair Re-ranking
+
+A large body of work re-ranks candidate lists to satisfy fairness constraints while retaining as much accuracy as possible. Score transformation and re-ranking pipelines such as those deployed at LinkedIn provide attribute-aware constraints at production scale 9, and the FairSearch toolkit packages FA*IR and DELTR for practitioners 10. Optimization-based approaches formulate fair exposure as a linear program over doubly-stochastic ranking policies [1], while policy-gradient methods extend this to end-to-end learning-to-rank with fairness regularizers 11, pairwise fairness constraints 12, disparate-exposure penalties (DELTR) 13, and differentiable ranking layers 14. Feedback-loop settings introduce proportional controllers (FairCo) that dynamically enforce amortized merit-based exposure 15, while diversity-oriented graph algorithms such as FairMatch improve aggregate coverage without heavy accuracy losses 16. Personalized re-ranking transformers illustrate how contextual list-wise models can be adapted for fairness objectives 17. More recent work computes Pareto-optimal amortizations of exposure under DBN click models 18, and probabilistic frameworks address protected-attribute uncertainty during fair ranking 19.
+
+## Two-sided and Multi-stakeholder Fairness
+
+Recommendation platforms serve both consumers and producers, so re-ranking must balance user utility against item- or provider-side exposure. Beyond-parity objectives were among the first to formalize this tension for collaborative filtering 20. Popularity-bias analyses show that head items systematically dominate exposure and marginalize long-tail providers 21. Two-sided formulations such as FairRec guarantee envy-free exposure for producers while respecting consumer preferences 22, TFROM jointly re-ranks for customer and provider fairness 23, and CPFair unifies consumer and producer fairness in a single re-ranking objective 24. Max-min provider fairness has been tackled with online mirror-descent re-ranking (P-MMF) 25, and Lorenz-dominance criteria characterize the whole family of two-sided welfare trade-offs 26. User-oriented perspectives quantify how re-ranking disparately affects different consumer groups 27, and knowledge-graph explanations have been leveraged to inject fairness signals into path-based recommenders 28.
+
+## Accuracy–Fairness Trade-off and Positioning of This Work
+
+Almost every method above reports an accuracy–fairness trade-off, yet comparisons typically rely on a single point estimate of one fairness metric, obscuring how algorithms behave when the strength of the fairness constraint varies. Surveys explicitly identify this as a limitation of current evaluation methodology 5, 6, and two-sided welfare studies motivate curve-based reporting via dominance relations 26. Our economic analogy—treating item-side fairness as a tax whose incidence depends on the *elasticity* of utility between item groups—unifies these observations, and the proposed EF-Curve and ElasticRank complement prior algorithms 1, [1], 22, 24, 25 by exposing the full trade-off frontier rather than a single operating point.","\noindent%
+\textbf{Fair re-ranking.}
+Over the past decade, work on fair ranking tasks has rapidly grown in volume, driven by the need for a responsible and trustworthy ecosystem~\cite{lifairness, lipani2016fairness, deldjoo2022survey, xu2025fairdiversecomprehensivetoolkitfair}. 
+Previous research often categorizes fair-aware methods into three categories based on ranking phases: pre-processing~\cite{Calmon17, xiong2024fairwasp}, in-processing~\cite{Tang23FairBias}, and post-processing (\ie re-ranking tasks)~\cite{xu2023p, fairrec}. The re-ranking phase is regarded as the most easily adaptable and practical stage in optimizing ranking systems~\cite{fairrec}.
+During the re-ranking phase, the concept of fairness in re-ranking depends on the stakeholders involved~\cite{abdollahpouri2020multistakeholder, abdollahpouri2019multi}. 
+Prior work has examined user-oriented fairness~\cite{abdollahpouri2019unfairness, li2021user} and item-oriented fairness~\cite{fairrec, xu2023p, TaxRank, singh2019policy, jaenich2024fairness, TaoSIGIRAP}. 
+In this paper, we focus on item group fairness in re-ranking tasks. 
+
+\smallskip\noindent%
+\textbf{Metrics and algorithms in fair re-ranking.}
+Fairness metrics vary widely across works, with different studies optimizing distinct metrics. For instance, some work~\cite{fairrec, TaoSIGIRAP} employs proportional fairness, \citet{do2022optimizing} focuses on the Gini Index, other work~\cite{xu2023p} prioritizes MMF, and TaxRank~\cite{TaxRank} optimizes $\alpha$-fairness. However, these approaches rely on single fairness metrics, which limits their ability to provide a comprehensive evaluation.
+
+Previous work on re-ranking methods to improve item fairness can be divided into 
+\begin{enumerate*}[label=(\roman*)]
+\item regularized methods, which use a multi-task optimization approach with a linear combination of accuracy and fairness loss functions, incorporating a trade-off coefficient $\lambda$~\cite{xu2023p, do2022optimizing, cpfair}, and
+\item constraint-based methods, which formulate the task as a constrained optimization problem to ensure that fairness metrics do not exceed a specified threshold~\cite{wu2021tfrom, fairrecplus, zafar2019fairness, fairrec}. 
+\end{enumerate*}
+Despite achieving notable performance improvements, existing fairness intervention methods are often designed to optimize specific fairness metrics and typically involve high computational costs, making them challenging to adapt to real-world industrial systems.
+
+
+% I don't understand this: show poor continuity and systematic controllability under a taxation perspective for fair re-ranking.
+% A: sorry, I don't write the related, current version is from previous work, I just re-write them
+
+%\mdr{What we add on top of prior work on the accuracy-fairness trade-off in re-ranking is \ldots}
+
+\smallskip\noindent%
+\textbf{An economic perspective on fair re-ranking.}
+In economics, resource allocation typically occurs through processes of distribution and re-distribution~\cite{lambert1992distribution}.  Previous work~\cite{saito2022fair} regards fair ranking as a resource allocation problem and formulated the problem related to Nash Social Welfare in economics, see also~\citet{fairrec, fairrecplus}. TaxRank~\cite{TaxRank} regards fair re-ranking as a taxation process, which often serves as a key mechanism in the re-distribution process, enabling wealth reallocation and addressing income inequality~\cite{hanlon2010review, nerre2001concept}. However, they merely use economic objectives to define different fairness metrics, without understanding how fairness-accuracy trade-offs occur under different metrics. 
+
+%In contrast, we leverage elasticity theory from economics to reinterpret how fairness-accuracy trade-offs operate, providing a unified fairness metric and an efficient optimization algorithm.
+
+
+
+
+
+
+%saito2022fair
+% In the process of re-distribution, taxation is frequently employed as a mechanism to re-distribute wealth and tackle income inequality~\cite{hanlon2010review, nerre2001concept}. 
+% \mdr{Do we need to know about these taxation methods?}
+% There are usually two types of taxation method: 
+% \begin{enumerate*}[label=(\roman*)]
+% \item flat tax rates, such as property tax~\cite{oates1969effects}, which are designed with different fixed rates based on the varying amounts of property;
+% \item progressive tax, such as income taxes~\cite{poulson2008state} and payroll taxes~\cite{brittain1971incidence}, typically involve progressive tax rates that increase as a taxpayer's earnings increase. Process tax often is regarded as a more useful but complex taxation method.
+% \end{enumerate*}
+% \mdr{It's probably more important to explain what prior work on an economic perspective on fairness and the accuracy-fairness trade-off has done, and what the gap is that that work has left.}
+
+% \mdr{What we add on top of prior work that contributed to an economic perspective on fair re-ranking is \ldots}
+
+%Previous tax policies resemble a flat tax, whereas Tax-rank adopts a closer resemblance to a progressive tax. Finally, the Tax-rank policy is more closely related to $\alpha$-fair optimization in cooperative games~\cite{bertsimas2011price, bertsimas2012efficiency}. However, these approaches are not suitable for fair re-ranking tasks.",0,0,0.0
+/Users/ksen/work/kiss/.kiss-worktrees/kiss_wt-1783742102-28c05696/deepscholar_bench_workdir/outputs/results/60,"Unconstrained Monotonic Calibration of Predictions in Deep Ranking
+  Systems","Ranking models primarily focus on modeling the relative order of predictions
+while often neglecting the significance of the accuracy of their absolute
+values. However, accurate absolute values are essential for certain downstream
+tasks, necessitating the calibration of the original predictions. To address
+this, existing calibration approaches typically employ predefined
+transformation functions with order-preserving properties to adjust the
+original predictions. Unfortunately, these functions often adhere to fixed
+forms, such as piece-wise linear functions, which exhibit limited
+expressiveness and flexibility, thereby constraining their effectiveness in
+complex calibration scenarios. To mitigate this issue, we propose implementing
+a calibrator using an Unconstrained Monotonic Neural Network (UMNN), which can
+learn arbitrary monotonic functions with great modeling power. This approach
+significantly relaxes the constraints on the calibrator, improving its
+flexibility and expressiveness while avoiding excessively distorting the
+original predictions by requiring monotonicity. Furthermore, to optimize this
+highly flexible network for calibration, we introduce a novel additional loss
+function termed Smooth Calibration Loss (SCLoss), which aims to fulfill a
+necessary condition for achieving the ideal calibration state. Extensive
+offline experiments confirm the effectiveness of our method in achieving
+superior calibration performance. Moreover, deployment in Kuaishou's
+large-scale online video ranking system demonstrates that the method's
+calibration improvements translate into enhanced business metrics. The source
+code is available at https://github.com/baiyimeng/UMC.","# Related Work
+
+## Ranking Models for Recommendation and Advertising
+
+Modern large-scale recommender and online advertising systems rely on deep ranking models to score huge candidate pools according to user-item relevance, typically formulated as click-through rate (CTR) or conversion rate (CVR) prediction. Foundational architectures such as Neural Collaborative Filtering 1 and DeepFM 2 demonstrated that neural networks can effectively model high-order feature interactions between users and items. Subsequent industrial designs, including the Entire-Space Multi-Task Model (ESMM) for post-click conversion estimation 3, the Search-based Interest Model (SIM) for lifelong sequential behavior 4, and the TWo-stage Interest Network (TWIN) deployed at Kuaishou 5, push ranking accuracy further by leveraging richer user interaction signals. While these models excel at ordering candidates, their raw predicted scores are typically trained with proxy losses such as pointwise cross-entropy or pairwise ranking objectives and therefore do not necessarily reflect the true absolute click or watch probability required by downstream tasks such as bidding, ad auctions, or watch-time estimation.
+
+## Post-hoc Calibration for Prediction Scores
+
+The mismatch between predicted and empirical event rates has motivated a rich line of research on prediction calibration. Classical post-hoc calibrators fit an order-preserving mapping between raw scores and observed frequencies. Guo et al. showed that even highly accurate deep networks tend to be miscalibrated, and that temperature scaling can effectively rectify their probabilities [1]. In the context of CTR prediction, Field-aware Calibration extends isotonic-style binning to be conditional on side features, yielding stronger reliability in industrial deployments 7. Doubly-Adaptive Calibration further refines this direction by matching posterior probabilities with an adaptive parametric family suited to skewed advertising data 8. More recent efforts push expressiveness by ensembling piecewise-linear shape functions across fields 9 and by injecting confidence signals to reweight bin-level statistics 10. A comprehensive survey by Kweon reviews the broader landscape of confidence calibration for recommender systems and highlights the recurring tension between calibration granularity and monotonicity constraints 11.
+
+## Joint Optimization of Ranking and Calibration
+
+A parallel line of work argues that calibration should not be treated purely post-hoc and instead should be jointly optimized with the ranking objective. The Joint Ranking–Calibration hybrid model of Sheng et al. contextualizes the calibrator per-request while sharing representations with the base ranker 12. Regression-Compatible Listwise Objectives develop loss functions that preserve calibration under listwise learning-to-rank formulations 13. Lin et al. analyze how commonly-used ranking losses degrade calibration under sparse user feedback and propose remedies to reconcile the two goals 14. The Self-boosted Framework for Calibrated Ranking couples an inner ranker with a distilled calibration head that mutually reinforce each other during training 15. Calibration-compatible listwise distillation further transfers privileged-feature knowledge without compromising probability calibration 16. These approaches share the assumption that the calibrator adheres to a predefined, often piecewise-linear or logistic, order-preserving form, which limits expressiveness in complex industrial scenarios and motivates a more flexible parameterization such as the one proposed in our work.
+
+## Monotonic Neural Networks and Normalizing Flows
+
+Because the calibrator must be strictly monotonic to preserve the ranking order, our approach draws on advances in expressive monotone function approximators. Wehenkel and Louppe introduced Unconstrained Monotonic Neural Networks (UMNN), which parameterize an arbitrary monotonic mapping as the integral of a strictly positive free-form network, avoiding the restrictive weight constraints of earlier monotone architectures 17. UMNNs are closely related to autoregressive normalizing flows, whose theoretical foundations and modern variants have been thoroughly reviewed by Papamakarios et al. 18 and by Kobyzev et al. 19. Compared with piecewise-linear or beta-family calibrators employed in the aforementioned recommendation systems, UMNN-based calibrators offer universal approximation of monotonic transformations while retaining differentiability, making them an ideal backbone for a highly expressive calibrator. Our work builds on these ingredients and complements them with a Smooth Calibration Loss that enforces a necessary condition for perfect calibration, thereby providing an effective learning signal for the highly flexible monotonic network in large-scale video ranking systems.","In this section, we examine existing research on the calibration of ranking systems in recommendation and search. The research can be classified into two categories based on the primary focus: calibrator modeling and loss reconciling.
+
+\subsection{Calibrator Modeling}
+
+The primary research focus lies in calibrator modeling, with the objective of developing powerful calibrators to refine original predictions. Early methods predominantly leverage the statistical characteristics of original predictions to perform univariate transformations that ensure global order preservation. Specifically, binning methods~\cite{HB,MBCT} involve partitioning samples into bins and adjusting each sample by assigning a statistical quantity, such as the average predicted probability of its bin, as the calibrated value. Isotonic regression methods~\cite{IR,SIR} optimize squared errors under a non-decreasing constraint to fit a univariate isotonic calibration function. Scaling methods~\cite{PlattScaling,TemperatureScaling,BetaCalib,GammaGauss,ConfCalib} directly fit predefined transformations, like the logistic function, for calibration purposes. In general, the global order preservation of these methods theoretically prevents the calibration process from affecting the ranking performance. However, the constrained parameter space of these transformations limits their effectiveness, particularly in the context of industrial deep ranking models~\cite{LiRank}.
+
+Later works delve into the exploration of utilizing neural networks for calibration, using them to adaptively learn parameters of transformation functions for samples with varying features. For instance, FAC~\cite{NeuralCalib} combines a univariate piece-wise linear model with a field-aware auxiliary neural network. AdaCalib~\cite{AdaCalib} learns isotonic function families to calibrate predictions, guided by posterior statistics. SBCR~\cite{SBCR} introduces a neural piece-wise linear model that integrates sample features directly into the learning of linear weights. However, due to the inadequate fitting performance of piece-wise linear interpolation~\cite{error}, these methods struggle to thoroughly handle multi-field calibration that involves nuanced patterns. DESC~\cite{DESC}, developed concurrently with our approach, replaces piece-wise linear functions with combinations of multiple nonlinear basis functions. Nevertheless, the calibrator expressiveness remains partially constrained, as it lacks guarantees for fitting arbitrary monotonic functions.
+
+\subsection{Loss Reconciling}
+Apart from the calibrator modeling aspect, there is also research focused on designing joint optimization strategies to handle point-wise calibration loss and pairwise or list-wise ranking loss, aiming to enhance compatibility between ranking and calibration.
+
+Specifically, CalSoftmax~\cite{ScaleCalib} addresses training divergence issues of the ranking loss and achieves calibrated outputs through the use of virtual candidates. JRC~\cite{JRC} utilizes two logits for click and non-click states to decouple the optimization of ranking and calibration. RCR~\cite{RCR} proposes a regression-compatible ranking approach to balance calibration and ranking accuracy. CLID~\cite{CLID} employs a calibration-compatible list-wise distillation loss to distill the teacher model's ranking ability without destroying the model's calibration ability. 
+SBCR~\cite{SBCR} introduces a self-boosted ranking loss that utilizes dumped ranking scores obtained from the online deployed model, facilitating comparisons between samples associated with the same query and allowing for extensive shuffling of sample-level data.
+\bym{BBP~\cite{BBP} tackles the issue of insufficient samples for ranking loss by estimating beta distributions for users and items, generating continuously comparable ranking score labels.} However, they primarily focus on reconciling the optimization of ranking and calibration, instead of developing calibrator architectures.",0,0,0.0
+/Users/ksen/work/kiss/.kiss-worktrees/kiss_wt-1783742102-28c05696/deepscholar_bench_workdir/outputs/results/61,"FashionDPO:Fine-tune Fashion Outfit Generation Model using Direct
+  Preference Optimization","Personalized outfit generation aims to construct a set of compatible and
+personalized fashion items as an outfit. Recently, generative AI models have
+received widespread attention, as they can generate fashion items for users to
+complete an incomplete outfit or create a complete outfit. However, they have
+limitations in terms of lacking diversity and relying on the supervised
+learning paradigm. Recognizing this gap, we propose a novel framework
+FashionDPO, which fine-tunes the fashion outfit generation model using direct
+preference optimization. This framework aims to provide a general fine-tuning
+approach to fashion generative models, refining a pre-trained fashion outfit
+generation model using automatically generated feedback, without the need to
+design a task-specific reward function. To make sure that the feedback is
+comprehensive and objective, we design a multi-expert feedback generation
+module which covers three evaluation perspectives, \ie quality, compatibility
+and personalization. Experiments on two established datasets, \ie iFashion and
+Polyvore-U, demonstrate the effectiveness of our framework in enhancing the
+model's ability to align with users' personalized preferences while adhering to
+fashion compatibility principles. Our code and model checkpoints are available
+at https://github.com/Yzcreator/FashionDPO.","# Related Works
+
+**Fashion Compatibility Learning.** Early approaches to outfit recommendation focused on learning compatibility relationships among fashion items. 5 modeled outfits as sequences and trained a bidirectional LSTM to sequentially predict items while jointly learning a visual-semantic embedding space. 4 introduced the Polyvore Outfits dataset and proposed type-aware embeddings that capture both item similarity within categories and cross-type compatibility, achieving improvements on outfit compatibility prediction and fill-in-the-blank tasks. 7 represented outfits as subgraphs of a Fashion Graph and proposed Node-wise Graph Neural Networks to model higher-order item interactions through attention mechanisms. More recent work by 6 applied Transformers with task-specific tokens and set-wise ranking loss to learn outfit-level representations, demonstrating superior performance on compatibility prediction and complementary item retrieval. 10 extended compatibility modeling to scene-based recommendation, proposing the ""Complete the Look"" task that recommends products compatible with real-world scene images using CNNs and attention mechanisms.
+
+**Generative Models for Fashion.** Recent advances in generative AI have enabled the synthesis of fashion items for outfit generation. 3 introduced the Generative Outfit Recommendation task and proposed DiFashion, a diffusion-based model that generates multiple fashion images in parallel conditioned on category, compatibility, and personalization constraints using Classifier-Free Guidance. This work demonstrated the potential of diffusion models to generate complete personalized outfits on the iFashion and Polyvore-U datasets. However, these generative approaches often lack diversity and rely on supervised learning paradigms without explicit alignment to human preferences.
+
+**Direct Preference Optimization and Human Feedback.** The alignment of generative models to human preferences has been extensively studied in language and vision domains. 1 introduced Direct Preference Optimization (DPO), a simpler alternative to reinforcement learning from human feedback (RLHF) that directly optimizes a policy satisfying human preferences under a classification objective, eliminating the need for a separate reward model. [1] adapted DPO to text-to-image diffusion models by reformulating the objective using the evidence lower bound, achieving significant improvements over Stable Diffusion XL on visual appeal and prompt alignment using 851K pairwise preferences. Alternative approaches include [2], which cast denoising as a multi-step decision-making problem and applied policy gradient RL to optimize diffusion models for objectives like aesthetic quality and prompt alignment, and [3], which trained ImageReward as a general-purpose human preference reward model on 137K expert comparisons for evaluating and fine-tuning text-to-image models. These methods have shown promise in aligning generative models with human preferences but have not been applied to the fashion domain, where personalization and compatibility constraints present unique challenges.","% 先介绍个性化的时尚穿搭推荐作品，然后再进入生成作品。
+% From Introduction: However, some people may lack professional fashion knowledge, leading to confusion when confronted with rapidly changing fashion trends, making it difficult for them to put together compatible outfits that suit their style ~\cite{OGR}. Consequently, Outfit Recommendation (OR) has gained widespread application in the fashion domain ~\cite{PORGraph, PORAnchors, A-FKG}. Meanwhile, the rapid development of generative models ~\cite{DDIM, SD, controlNet, lora} has made it possible to directly recommend high-quality generated fashion products to users. 
+
+
+\noindent \textbf{Fashion Outfit Recommendation.}
+In the fashion domain, Outfit Recommendation (OR)~\cite{PORGraph, PORAnchors, A-FKG} has gained widespread application. There are two requirements in fashion outfit recommendation: compatibility and personalization. Furthermore, it is also a popular task in the domain of computational fashion ~\cite{FashionRecSurvey-23}. 
+Early works ~\cite{personalCom, PORAnchors, A-FKG} primarily focused on compatibility, aiming to retrieve already well-matched outfits for users.
+Some works ~\cite{PFOG, POG} attempt to introduce personalization in the recommendation process, combining a set of personalized and compatible items into an outfit that aligns with fashion styling principles. 
+Moreover, bundle recommendation, a more generalized recommendation paradigm, subsume personalized fashion outfit recommendation as one of its applications. Multiple works~\cite{MultiCBR,EBRec,BundleMLLM} have been proposed by using graph learning, contrastive learning, as well as multimodal large language models. 
+Despite various progress, the above works follow the retrieval paradigm and are constrained by the variety and quantity of fashion products in the dataset, making it difficult to meet users' personalized needs, especially in terms of texture and other details. However, with the rapid development of generative models ~\cite{SD, controlNet, lora}, the quality and diversity of image generation have significantly improved, making it possible to directly recommend generated custom fashion products to users. Recent work ~\cite{DiFashion} has introduced the PFITB task, which combines the user's interaction history with fashion products to generate a personalized matching outfit.
+
+
+%However, the limited quantity and variety of clothing in the dataset prevent it from meeting users' personalized needs ~\cite{PFOG}. 
+
+\noindent \textbf{Fashion Image Generation.} It refers to the task of generating fashion-related images using deep learning models. This task is widely applied in the fashion domain, covering areas such as clothing design, virtual try-on, and personalized recommendation, among others~\cite{yang2018recommendation, Compatibility,FashionReGen24}. Previous works, such as CRAFT~\cite{CRAFT}, generate feature representations for clothes pairings and retrieve the most suitable individual clothes items from the dataset. In the virtual try-on domain, previous works ~\cite{VITON, GP-VTON} based on GANs involve generating warped clothes aligned with character, and then generating images of the character wearing the warped clothes. The diffusion models ~\cite{DCI-VTON} enhance image quality by replacing the generator in the second stage. Current work ~\cite{stableVTON} learns the semantic correspondence between the clothing and the human body within the latent space of the pre-trained diffusion model in an end-to-end manner.
+In the personalized recommendation domain, HMaVTON ~\cite{HMaVTON} generates diverse and well-matched fashion items to the given person. Existing personalized image generation models ~\cite{Jedi, ELITE, PathchDPO, BDPO} aim to generate images aligned with reference styles or elements, yet recommending images consistent with a user's interaction history is meaningless.
+% And DVBPR ~\cite{DVBPR} generates clothes images based on user preferences but is limited to generating images that are identical in shape to those in the dataset. 
+
+
+
+
+
+% 补充：
+% sd,controlnet应用于clothing design
+% try-on, 两阶段gan+dm，一阶段dm
+
+
+
+\noindent \textbf{Direct Preference Optimization.}
+In the field of natural language processing, Direct Preference Optimization (DPO) has been proposed to reduce
+training costs ~\cite{DPO}, which uses preferences rather than explicit rewards to fine-tune LLMs. This approach is also applied to the post-training of text-to-image diffusion models. Diffusion-DPO ~\cite{Diffusion-DPO} fine-tunes the generative model in a single step after receiving feedback from the Preference Evaluator. D3PO ~\cite{D3PO} assumes that the preferred outcome holds true for all time steps in the diffusion model and fine-tunes each of the time steps in the generative model based on the feedback results. It demonstrates that in diffusion models, directly updating the policy based on human preferences within an MDP is equivalent to first learning the optimal reward model and then using it to guide policy updates. SPO ~\cite{SPO} assesses preferences at each time step during the sampling process and adds noise to the preferred image to generate the noise image for the next time step. We introduce DPO into generative fashion recommendation, where learning based on preference feedback eliminates the constraints of ground truth, showcasing richer possibilities in clothing textures and details.",0,0,0.0
+/Users/ksen/work/kiss/.kiss-worktrees/kiss_wt-1783742102-28c05696/deepscholar_bench_workdir/outputs/results/62,Constrained Auto-Regressive Decoding Constrains Generative Retrieval,"Generative retrieval seeks to replace traditional search index data
+structures with a single large-scale neural network, offering the potential for
+improved efficiency and seamless integration with generative large language
+models. As an end-to-end paradigm, generative retrieval adopts a learned
+differentiable search index to conduct retrieval by directly generating
+document identifiers through corpus-specific constrained decoding. The
+generalization capabilities of generative retrieval on out-of-distribution
+corpora have gathered significant attention.
+  In this paper, we examine the inherent limitations of constrained
+auto-regressive generation from two essential perspectives: constraints and
+beam search. We begin with the Bayes-optimal setting where the generative
+retrieval model exactly captures the underlying relevance distribution of all
+possible documents. Then we apply the model to specific corpora by simply
+adding corpus-specific constraints. Our main findings are two-fold: (i) For the
+effect of constraints, we derive a lower bound of the error, in terms of the KL
+divergence between the ground-truth and the model-predicted step-wise marginal
+distributions. (ii) For the beam search algorithm used during generation, we
+reveal that the usage of marginal distributions may not be an ideal approach.
+This paper aims to improve our theoretical understanding of the generalization
+capabilities of the auto-regressive decoding retrieval paradigm, laying a
+foundation for its limitations and inspiring future advancements toward more
+robust and generalizable generative retrieval.","# Related Work
+
+**Neural and Dense Retrieval.** Modern information retrieval has been dominated by dual-encoder and late-interaction architectures that embed queries and documents into a shared vector space and retrieve via approximate nearest neighbor search. Representative approaches such as DPR 1, ColBERT [1], and ANCE 3 established strong baselines on open-domain question answering and passage retrieval. Benchmarks such as BEIR 4 later revealed that these models often struggle when transferred to out-of-distribution corpora, motivating work on more corpus-adaptive paradigms.
+
+**Generative Retrieval.** Generative retrieval reformulates search as an autoregressive sequence generation problem, in which a Transformer [2] trained with sequence-to-sequence objectives (T5 6, BART 7) directly emits document identifiers. GENRE first applied this idea to entity retrieval by generating entity names under a prefix-trie constraint 8. The Differentiable Search Index (DSI) generalized the paradigm by mapping documents to structured integer IDs learned end-to-end 9, and the Neural Corpus Indexer (NCI) refined the identifier structure with hierarchical clustering and query generation 10. SEAL extends the identifier space to arbitrary n-gram substrings using an FM-index for constrained decoding 11, while Ultron 12 and CorpusBrain 13 introduce model-based indexers and knowledge-intensive pre-training. Subsequent work has explored richer identifiers and training signals: GenRet learns discrete document tokens 14, TSGen uses unordered term sets as identifiers 15, TIGER applies semantic IDs to generative recommendation 16, a unified prompt-based generative retriever tackles multiple knowledge-intensive tasks 17, and listwise sequential learning further improves ranking quality 18. DSI-QG bridges indexing and retrieval with synthetic queries 19, and recent analysis has shown that generative retrieval can be interpreted as a form of multi-vector dense retrieval 20.
+
+**Scaling and Out-of-Distribution Generalization.** As generative retrieval matured, several empirical studies probed its limits. Pradeep et al. examined scaling behavior to millions of passages and reported that many DSI-style design choices fail to transfer to large corpora 21. Liu et al. benchmarked generative retrievers under distribution shift and observed pronounced robustness gaps against dense baselines 22. Nonparametric decoding partially mitigates these issues by grounding generation in contextualized document embeddings 23. Yet a principled theoretical account of why constrained autoregressive decoding generalizes poorly to new corpora has remained missing—precisely the gap our analysis targets.
+
+**Constrained Decoding and Beam Search.** Because generative retrieval relies on corpus-specific constraints and beam search, its behavior is intimately tied to well-known pathologies of autoregressive generation. NeuroLogic decoding 24 and constrained NLG methods 25 show that hard lexical constraints can distort the underlying distribution. In machine translation, beam search has been shown to expose severe model errors: exact inference frequently prefers empty outputs 26, length bias and the ""beam-search curse"" degrade quality as beams widen 27, and larger beams can even hurt performance 28. Meister et al. connect beam search to a regularized decoding objective, arguing that the algorithm succeeds despite—not because of—its approximation quality 29, while Holtzman et al. document how likelihood-maximizing decoding produces degenerate text 30. Our work extends these insights to the retrieval setting, formally characterizing how corpus-specific constraints and marginal-based beam scoring introduce irreducible error in the Bayes-optimal generative retriever.","\headernodot{\Acf{gr}} is an emerging direction in neural information retrieval, exploring the possibility of replacing traditional index structures in retrieval systems with a single large-scale neural networks~\citep{liSurveyGenerativeIR2024,white2025surveyinformationaccess}.
+It leverages generative models to directly generate the relevant \acp{docid} given a query.
+This paradigm originated with~\citet{metzlerRethinkingSearch2021,decaoAutoregressiveEntityRetrieval2020} and has garnered considerable attention~\cite{sunLearningTokenizeGenerative2023,wangNeuralCorpusIndexer2023,liLearningRankGenerative2023,Zhuang2022BridgingTG,Zhang2023TermSetsCB,yangAutoSearchIndexer2023,tang2023semantic,tang2024generative,wuGenerativeRetrievalMultiVector2024,seal2022,tayTransformerMemoryDifferentiable2022a,dynamic-retriever2023,nguyen-2023-generative,zengScalableEffectiveGenerative2023b} in the information retrieval community.
+
+%\header{Generalization in \acl{gr}}
+%Although it was initially proposed for building domain experts~\citep{metzlerRethinkingSearch2021}, \ac{gr}, as a retrieval system itself, is much concerned with its generalization ability to out-of-distribution corpora~\citep{sunLearningTokenizeGenerative2023,askariFewshotIndexing2024,cont-learning-gr2023cikm,liu2024robustnessgenerative,liuRobustnessGenerativeRetrieval2023,liSurveyGenerativeIR2024,leeNonparametricDecodingGenerative2023}.
+Generalization remains a challenge for \ac{gr}, especially when applied to out-of-distribution corpora~\citep{sunLearningTokenizeGenerative2023,askariFewshotIndexing2024,cont-learning-gr2023cikm,liu2024robustnessgenerative,liuRobustnessGenerativeRetrieval2023,liSurveyGenerativeIR2024,leeNonparametricDecodingGenerative2023}. 
+Previous research attributes this challenges to limited model capacity~\citep{leeNonparametricDecodingGenerative2023,yuan2024generative-memory-burden}, lack of learning in the docID construction~\citep{sunLearningTokenizeGenerative2023,yangAutoSearchIndexer2023,Zhang2023TermSetsCB}, and difficulties in learning semantic representations~\citep{tang2023semantic,wangNOVOLearnableInterpretable2023}.
+In contrast, our work focuses on the constrained auto-regressive decoding strategy widely applied in \ac{gr}, which is crucial for adapting \ac{gr} models to new corpora dynamically.
+Our setting aligns closely to the few-shot indexing approach~\citep{askariFewshotIndexing2024}, where a pre-trained \ac{llm} generates \acp{docid} solely based on its pre-trained knowledge and generalization capabilities, without additional training.
+We treat their method as a conceptual blueprint for a fully generalizable \ac{gr} system and aim to investigate the inference stage under this setting.
+% askariFewshotIndexing2024
+% A highly related topic is the updatable \ac{gr}~\citep{kishoreIncDSI2023,mehtaDSIpp2023,cont-learning-gr2023cikm,guoContinualGenerative2024}
+% large scale gr
+% unified gr and nlp generation models
+
+Updatable \acl{gr} is another critical task on dynamic corpora.
+The primary challenges indicate the cost of updating the model with new documents and the catastrophic forgetting problem~\citep{kishoreIncDSI2023,mehtaDSIpp2023,cont-learning-gr2023cikm,guoContinualGenerative2024}.
+Previous efforts have concentrated on developing efficient continual learning strategies by fixing the indexing construction procedure. 
+We consider an idealized scenario where the model has full knowledge of all possible documents and focuses solely on generating relevant \acp{docid} on dynamic corpus.
+
+\header{Constrained decoding}
+Constrained decoding has been widely studied for guiding machine learning models to produce outputs that satisfy specific conditions~\citep{ahmedNeuroSymbolicLearning2023,mustafaStrcutredOutputPrediction2021}.
+Instead of learning to satisfy through training, constraints are more often preferable only in the inference time due to the flexibility and efficiency.
+\citet{nishinoGeneralizationAnalysisLearning2022a,nishinoUnderstandingCV2025} demonstrate the preservation of relative errors of certain loss functions in realizable setting.
+We instead provide a failure case via establishing the existence of a lower-bound error for auto-regressive models operating under step-wise inference-time constraints.
+Recent work on \ac{ctg} in \acp{llm}~\citep[see, e.g.,][]{zhangSurveyControllableText2023} also explores imposing constraints during inference without updating the underlying model~\citep{mireshghallahControllableTextGeneration2022,mudgalControlledDecoding2025,kimCriticGuidedDecoding2023,chakrabortyPrincipledDecodingLLM2024}.
+However, many of these approaches do not focus on strictly enforcing constraint satisfaction. A few studies~\citep{kimGuaranteedGenerationLarge2024,honghuaLogicalControl2024,zhangTractableControlAutoregressive2023} propose methods to produce outputs that strictly adhere to constraints, mainly hard keywords inclusion constraints, using tractable probabilistic models or policy gradient techniques. 
+Our work differs by focusing on a specific corpus-level constraint, i.e., the set of valid \acp{docid} is sampled from the complete corpus, a problem unique to retrieval tasks.
+
+\headernodot{Beam search} is a widely used heuristic algorithm for decoding structured predictors and has been applied as a non-\ac{mips} setup for large-scale retrieval systems with explicit tree structures~\citep{liTreeIndexDenseRetrieval2023,zhuTreeRecsys2018,zhuoOptimalTreeModels2020,zhuJointTreeIndexRecsys2019}.
+Beam search is known to have a performance deterioration, and only few works provided theoretical insights into this issue.
+As far as we know, only \citet{zhuoOptimalTreeModels2020} demonstrate a training-test discrepancy in tree-structured models using binary cross-entropy loss. They showed that pseudo-labeling during training does not guarantee that beam search will get the most relevant targets.
+In our work, we analyze the marginal distribution of an auto-regressive distribution and provide a theoretical result on the top-$1$ and top-$k$ performance under sparse relevance situations.
+\citet{zhuoOptimalTreeModels2020} also provide a Bayes-optimal tree structure, which is often called max-heap assumption~\citep{liTreeIndexDenseRetrieval2023}, and we will discuss the difficulty of enforcing this assumption in our setting in Section~\ref{sub:solution}.
+In \ac{gr}, some work have reached the same conclusion that beam search is not sufficient for retrieval as it is likely to prune the relevant \acp{docid} and the model is not able to recover from this~\citep{zengPlanningAheadGenerative2024,liCorpusLM2024,liUnigen2024}.
+They propose to use a hybrid retrieval strategy to help bypassing this problem.
+We instead focus on understanding the root cause of this problem, i.e., the usage of marginal distribution.
+
+% max heap assumption",0,0,0.0

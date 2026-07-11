@@ -1,0 +1,550 @@
+folder_path,paper_title,paper_abstract,related_work_a,related_work_b,organization_v1,organization_v2,organization
+/Users/ksen/work/kiss/.kiss-worktrees/kiss_wt-1783742102-28c05696/deepscholar_bench_workdir/outputs/results/45,"What About Emotions? Guiding Fine-Grained Emotion Extraction from Mobile
+  App Reviews","Opinion mining plays a vital role in analysing user feedback and extracting
+insights from textual data. While most research focuses on sentiment polarity
+(e.g., positive, negative, neutral), fine-grained emotion classification in app
+reviews remains underexplored. This paper addresses this gap by identifying and
+addressing the challenges and limitations in fine-grained emotion analysis in
+the context of app reviews. Our study adapts Plutchik's emotion taxonomy to app
+reviews by developing a structured annotation framework and dataset. Through an
+iterative human annotation process, we define clear annotation guidelines and
+document key challenges in emotion classification. Additionally, we evaluate
+the feasibility of automating emotion annotation using large language models,
+assessing their cost-effectiveness and agreement with human-labelled data. Our
+findings reveal that while large language models significantly reduce manual
+effort and maintain substantial agreement with human annotators, full
+automation remains challenging due to the complexity of emotional
+interpretation. This work contributes to opinion mining by providing structured
+guidelines, an annotated dataset, and insights for developing automated
+pipelines to capture the complexity of emotions in app reviews.","# Related Work
+
+## Mining User Feedback and App Reviews
+
+Mobile app reviews have long been recognised as a rich source of user opinions,
+bug reports, and feature requests, and a substantial body of work in opinion
+mining and requirements engineering has focused on extracting structured signal
+from this noisy textual data. Recent surveys and tool papers consolidate the
+pipeline of collecting, filtering, and analysing user feedback at scale,
+highlighting sentiment and topic extraction as core tasks but also noting the
+scarcity of fine-grained emotional signal beyond polarity
+[1]. Dedicated tooling such as AppSent
+demonstrates how review corpora can be automatically processed to surface
+sentiment-laden opinions about specific app aspects
+[2], while transformer-based extractors such
+as T-FREX target the complementary problem of identifying app features
+mentioned by users, providing the structural backbone on top of which emotional
+annotations can be attached [3]. Our work
+extends this line by moving beyond feature and polarity extraction toward a
+structured taxonomy of emotions expressed in app reviews.
+
+## Sentiment and Emotion Classification
+
+Most prior opinion-mining research on reviews frames the task as coarse
+polarity classification (positive/negative/neutral) or, at best, as
+aspect-based sentiment analysis. In software engineering specifically, Zhang
+et al. revisit sentiment analysis in the era of large language models and show
+that even modern LLMs struggle with the domain-specific and often ambiguous
+affect present in developer- and user-generated text
+[4]. Beyond polarity, fine-grained emotion
+recognition has been pushed forward by resources such as GoEmotions, which
+provides 58k Reddit comments labelled with 27 emotion categories derived from
+psychological taxonomies [5], and by
+distant-supervision approaches like DeepMoji that leverage emoji occurrences
+to learn representations useful for emotion, sentiment, and sarcasm detection
+[6]. These datasets and models mostly target
+social media and do not adopt Plutchik's wheel of emotions or account for the
+pragmatic peculiarities of app reviews (mixed praise/complaint, feature
+requests, star-rating bias), a gap our annotation framework addresses.
+
+## Pretrained Language Models and Transformers
+
+The technical foundation for both classification baselines and modern
+annotation assistants rests on pretrained transformer encoders. BERT
+established the pretrain-then-fine-tune paradigm that underpins most
+state-of-the-art text classifiers, including the models routinely fine-tuned
+on GoEmotions and app-review sentiment datasets
+[7]. More recently, systematic literature
+reviews of large language models in software engineering document a rapid
+adoption of instruction-tuned LLMs for tasks ranging from code understanding
+to review triage, motivating their exploration for emotion annotation as well
+[8].
+
+## LLMs as Annotators and Human–LLM Collaboration
+
+A key question tackled in this paper is whether LLMs can replace or assist
+human annotators for fine-grained emotion labels. Gilardi et al. report that
+ChatGPT can outperform crowd workers on several text-annotation tasks in terms
+of agreement and cost, sparking a wave of follow-up studies on the reliability
+of LLM labels 9. However, Ashwin et al.
+caution that using LLMs for qualitative coding can introduce systematic bias,
+particularly for subjective or culturally loaded constructs such as emotions
+10. To mitigate these risks, hybrid
+human–LLM annotation systems such as MEGAnno+ have been proposed, coupling
+model suggestions with human verification and adjudication workflows
+11. Our evaluation of LLM-based emotion
+annotation for app reviews builds directly on this literature, quantifying
+inter-annotator agreement between LLMs and humans on a Plutchik-based scheme
+and characterising where automation is trustworthy and where human judgement
+remains indispensable.","\subsection{Emotion Annotation of App Reviews}
+
+The use of multi-class, fine-grained emotion taxonomies in app reviews remains limited, though some related work exists. Riccosan published an Indonesian dataset of app reviews annotated with Parrott's taxonomy~\cite{Riccosan2023}. While relatively large (20K reviews), it is not available in English. Moreover, their annotation relied on two annotators, reporting a Cohen’s Kappa of $0.61$. They lack details on disagreement resolution and insights into how specific emotions were adapted to the app review domain. Moreover, emotions like \anticipation and \trustA, relevant to app reviews, are not considered.
+
+Several studies have explored methods for inferring emotions from app reviews using proprietary datasets. Malgaonkar et al. developed a tool integrating a WordNet-based lexicon method to identify Ekman’s emotions from a dataset of 53K reviews~\cite{Malgaonkar2019}. Similarly, Keertipati et al. applied a lexicon-based method using the LIWC dictionary for three negative emotions to analyse their correlation with app features~\cite{Keertipati2016}. Singh et al. manually annotated 2K mobile learning app reviews using also a lexicon-based approach aligned with Plutchik’s taxonomy~\cite{Singh2022101929}, linking emotions to review descriptors like ratings, technical quality and usefulness. Beyond lexicon-based methods, Savarimuthu et al. employed IBM Watson’s Tone Analyzer %\footnote{\href{https://cloud.ibm.com/docs/natural-language-understanding}{https://cloud.ibm.com/docs/natural-language-understanding}} 
+to extract emotions as descriptors for assessing data waste in mobile app reviews~\cite{Savarimuthu2023}. Lastly, Cabellos et al.~\cite{Cabellos2022} manually analysed video game reviews using Liew \& Turtle’s taxonomy to align emotions with moral aspects. However, these datasets are unavailable, lack emotion annotations, and do not evaluate extraction methods empirically. This underscores the relevance of emotion analysis but highlights the scarcity of annotated datasets.
+
+\subsection{LLM-based Annotation}
+
+The potential of LLMs for human-like reasoning tasks, combined with the need for large domain-specific datasets to reduce hallucinations and errors, has driven research into their use as data annotators~\cite{Hou2024}. Heseltine et al. analysed the performance of multiple annotation runs using OpenAI's GPT-4 for political text annotation~\cite{Heseltine2024}. Their findings suggest that while LLM-assisted tagging achieves high accuracy for simple tasks in cost-efficient settings, it struggles with complex and subjective analyses, such as sentiment annotation, where interpretation often varies between annotators~\cite{Zhang2025}. Similarly, Sayeed et al. evaluated Gemini for text classification in materials science, reaching comparable conclusions~\cite{Sayeed2024}. Research has further explored LLM annotation across various fields, including mathematics~\cite{Shan2024}, finance~\cite{Aguda2024}, and linguistics~\cite{Yu2024}. 
+
+To address these limitations, Kim et al. proposed MEGAnno+~\cite{kim-etal-2024-meganno}, a \textit{human-LLM} collaborative framework designed to enhance the reliability and robustness of LLM-generated labels. Their approach integrates a human-in-the-loop mechanism to verify LLM annotations, concluding that fully autonomous annotation remains prone to errors, requiring human oversight for reliability. Similar studies investigate additional dimensions, such as the explainability~\cite{Wang2024} and cost-effectiveness~\cite{Rouzegar2024} of human-LLM collaboration in annotation tasks. While several domain-specific studies have been conducted, further research is needed to assess the reliability of these agents and explore improvements through alternative annotation mechanisms. To this end, and in line with our findings, hybrid approaches that combine expert validation with automated annotations may provide a balanced solution for generating datasets to support supervised extraction methods.",0,0,0.0
+/Users/ksen/work/kiss/.kiss-worktrees/kiss_wt-1783742102-28c05696/deepscholar_bench_workdir/outputs/results/46,Revisiting Self-attention for Cross-domain Sequential Recommendation,"Sequential recommendation is a popular paradigm in modern recommender
+systems. In particular, one challenging problem in this space is cross-domain
+sequential recommendation (CDSR), which aims to predict future behaviors given
+user interactions across multiple domains. Existing CDSR frameworks are mostly
+built on the self-attention transformer and seek to improve by explicitly
+injecting additional domain-specific components (e.g. domain-aware module
+blocks). While these additional components help, we argue they overlook the
+core self-attention module already present in the transformer, a naturally
+powerful tool to learn correlations among behaviors. In this work, we aim to
+improve the CDSR performance for simple models from a novel perspective of
+enhancing the self-attention. Specifically, we introduce a Pareto-optimal
+self-attention and formulate the cross-domain learning as a multi-objective
+problem, where we optimize the recommendation task while dynamically minimizing
+the cross-domain attention scores. Our approach automates knowledge transfer in
+CDSR (dubbed as AutoCDSR) -- it not only mitigates negative transfer but also
+encourages complementary knowledge exchange among auxiliary domains. Based on
+the idea, we further introduce AutoCDSR+, a more performant variant with slight
+additional cost. Our proposal is easy to implement and works as a plug-and-play
+module that can be incorporated into existing transformer-based recommenders.
+Besides flexibility, it is practical to deploy because it brings little extra
+computational overheads without heavy hyper-parameter tuning. AutoCDSR on
+average improves Recall@10 for SASRec and Bert4Rec by 9.8% and 16.0% and
+NDCG@10 by 12.0% and 16.7%, respectively. Code is available at
+https://github.com/snap-research/AutoCDSR.","# Related Work
+
+## Sequential Recommendation
+
+Sequential recommendation models a user's historical interactions as an ordered sequence and predicts the next item. Early neural approaches used recurrent networks such as GRU4Rec 1 to summarize session behavior, and convolutional architectures such as Caser 2 that treat recent items as an ""image"" to capture point-, union-, and skip-level patterns. The Transformer [1] later became the dominant backbone: SASRec 4 uses a causal self-attention encoder to weigh past items adaptively, while BERT4Rec 5 extends this idea with bidirectional masked-item modeling. Follow-up work has enriched the input side of self-attention (e.g., S³-Rec, which pre-trains with mutual-information maximization over items, attributes, and segments 6), or improved its objective via contrastive learning, as in CL4SRec 7 and DuoRec 8. Efficiency-oriented variants such as LinRec 9 explore linear-attention alternatives for long sequences. Like our work, these methods build on the self-attention transformer; unlike ours, they focus on a single domain and do not address cross-domain knowledge transfer inside the attention module itself.
+
+## Cross-Domain (Sequential) Recommendation
+
+Cross-domain recommendation (CDR) transfers signals from data-rich source domains to alleviate sparsity in a target domain. CoNet couples two feed-forward networks through learned cross connections 10; MiNet blends long- and short-term user interests across domains for CTR prediction 11; DDTCDR performs deep dual transfer with orthogonal mappings 12; PTUPCDR learns personalized preference bridges to combat the well-documented negative-transfer problem 13; and CDRIB uses a variational information bottleneck to disentangle transferable and domain-specific signals for cold-start users 14. Contrastive and adversarial CDR variants — CCDR 15 and RecGURU 16 — align user representations across domains through auxiliary self-supervised objectives.
+
+Cross-domain sequential recommendation (CDSR) combines these two threads. MIFN routes mixed information flows across knowledge-graph–enhanced parallel sequences 17. DASL introduces dual attentive sequential learning to share user history across domains for CTR prediction 18. C2DSR augments a cross-domain sequential encoder with contrastive infomax objectives on single- and joint-domain representations 19. More recently, CGRec frames CDSR as a cooperative game and computes Shapley-style contributions to identify and down-weight domains that induce negative transfer 20. While effective, most of these designs *bolt on* extra domain-aware components (parallel sub-networks, dual attention blocks, contrastive heads, or game-theoretic weightings) around a vanilla transformer. Our work is complementary: rather than adding new modules, we directly reshape the self-attention weights inside the backbone so that cross-domain interactions are learned in a Pareto-optimal fashion.
+
+## Multi-Objective and Pareto Optimization for Learning
+
+Because CDSR must simultaneously fit the target-domain task and control cross-domain influence, we cast it as a multi-objective problem. Kendall et al. show that uncertainty-based loss weighting can adaptively trade off related objectives 21; GradNorm rebalances tasks by normalizing gradient magnitudes 22; PCGrad removes destructive gradient interference by projecting conflicting gradients 23; and CAGrad searches directions that minimize a worst-case objective for conflict-averse updates 24. More formally, Sener and Koltun view multi-task learning as multi-objective optimization and use the multiple-gradient descent algorithm to converge to Pareto-stationary solutions 25, while Lin et al. propose Pareto Multi-Task Learning to explore an entire front of task trade-offs 26. AutoCDSR draws inspiration from this line of work, but instead of balancing task losses it applies Pareto-style optimization *inside* the attention mechanism, dynamically minimizing cross-domain attention scores while preserving in-domain recommendation quality. This positions our method as a lightweight, plug-and-play enhancement of the self-attention transformer that unifies ideas from sequential recommendation 45, cross-domain transfer 1320, and multi-objective optimization 2526.","\subsection{Sequential Recommendation}
+Sequential recommendation aims at predicting user's future behaviors given an ordered list of user's historical interactions. 
+Prior to the popularity of transformer models, researchers explored models based on recurrent architectures ~\citep{wu2017recurrent, chung2014empirical} to encode the sequential patterns in user behavior histories, such as GRU4Rec~\citep{hidasi2015session}, STAMP~\citep{liu2018stamp}, NARM~\citep{li2017neural}, etc. 
+These works demonstrate that models consuming sequence of user behaviors significantly outperforms pair-wise models such as matrix factorization~\citep{rendle2009bpr}.
+After the invention of the transformer~\citep{vaswani2017attention}, sequential recommendation frameworks by default explore backbone model architectures based on this architecture~\citep{kang2018self,sun2019bert4rec}, owing to its strong capabilities of modeling long sequential data that have been well demonstrated in other fields~\citep{vaswani2017attention,beltagy2020longformer}.
+For instance, approaches such as SASRec~\citep{kang2018self}, BERT4Rec~\cite{sun2019bert4rec}, SINE~\citep{tan2021sparse}, and LightSANs~\citep{fan2021lighter} train a transformer-based model with supervision signals like causal language modeling or masked language modeling on the user behavior sequence. 
+Another branch of research explores textual attributes of behaviors (e.g., reviews and descriptions) and utilizes large language models to conduct sequential recommendation~\citep{zhu2024collaborative,zhao2023survey,wu2024survey,zhang2023recommendation,hou2024large,cui2022m6,geng2022recommendation}.
+
+
+\subsection{Cross-domain Sequential Recommendation} 
+Cross-domain recommendation aims at improving recommendation performance by leveraging information from multiple domains simultaneously.
+A branch of early studies explore matrix factorization approaches to model user-item interactions across different domains without considering their sequential nature~\citep{gao2013cross,singh2008relational,liu2020cross,zhu2019dtcdr,li2023one}.
+Follow-up research proposes cross-domain sequential recommendation (CDSR) to further improve performance by explicitly injecting additional domain-specific components, such as adding additional supervision signals~\citep{cao2022contrastive}, reweighing different domains~\citep{park2024pacer} and deriving domain-aware module blocks~\citep{hwang2024multi,zhang2024mdmtrec}.
+Specifically, $\pi$-net proposes a domain-aware gating mechanism to facilitate knowledge transfer between domains~\citep{ma2019pi}. 
+C$^2$DSR leverages graph neural networks that models cross-domain graphs to improve the performance~\citep{cao2022contrastive}.
+Similarly, MIFN uses a knowledge graph to enhance CDSR~\citep{ma2022mixed}.
+MAN~\citep{lin2024mixed} harnesses additional supervision signals and domain-aware blocks to disentangle information from different domains~\citep{lin2024mixed}.
+SyNCRec proposes a cooperative learning framework and utilizes additional domain-specific blocks to advance CDSR~\citep{park2024pacer}.
+Although incorporating additional components can be effective, such approaches often overlook the self-attention module in the backbone transformer, which is inherently a powerful tool for capturing fine-grained correlations among heterogeneous behaviors on its own~\citep{nagrani2021attention,tsai2019multimodal,xu2023multimodal}.",0,0,0.0
+/Users/ksen/work/kiss/.kiss-worktrees/kiss_wt-1783742102-28c05696/deepscholar_bench_workdir/outputs/results/47,"Measure Domain's Gap: A Similar Domain Selection Principle for
+  Multi-Domain Recommendation","Multi-Domain Recommendation (MDR) achieves the desirable recommendation
+performance by effectively utilizing the transfer information across different
+domains. Despite the great success, most existing MDR methods adopt a single
+structure to transfer complex domain-shared knowledge. However, the beneficial
+transferring information should vary across different domains. When there is
+knowledge conflict between domains or a domain is of poor quality,
+unselectively leveraging information from all domains will lead to a serious
+Negative Transfer Problem (NTP). Therefore, how to effectively model the
+complex transfer relationships between domains to avoid NTP is still a
+direction worth exploring. To address these issues, we propose a simple and
+dynamic Similar Domain Selection Principle (SDSP) for multi-domain
+recommendation in this paper. SDSP presents the initial exploration of
+selecting suitable domain knowledge for each domain to alleviate NTP.
+Specifically, we propose a novel prototype-based domain distance measure to
+effectively model the complexity relationship between domains. Thereafter, the
+proposed SDSP can dynamically find similar domains for each domain based on the
+supervised signals of the domain metrics and the unsupervised distance measure
+from the learned domain prototype. We emphasize that SDSP is a lightweight
+method that can be incorporated with existing MDR methods for better
+performance while not introducing excessive time overheads. To the best of our
+knowledge, it is the first solution that can explicitly measure domain-level
+gaps and dynamically select appropriate domains in the MDR field. Extensive
+experiments on three datasets demonstrate the effectiveness of our proposed
+method.","# Related Work
+
+## Single-Domain Recommendation
+
+Traditional recommenders learn a single model tailored to a single business scenario. Factorization-based deep models such as DeepFM [1](https://arxiv.org/abs/1703.04247) combine low- and high-order feature interactions for click-through rate (CTR) prediction, while user-behavior models like Deep Interest Network (DIN) [2](https://arxiv.org/abs/1706.06978) adaptively activate historical interests with respect to the candidate item. Sequential recommenders such as SASRec [3](https://arxiv.org/abs/1808.09781) further exploit self-attention over user histories. Although these architectures achieve strong accuracy within a domain, they neither share knowledge with related domains nor address the distribution shift that arises when serving heterogeneous scenarios, motivating multi-domain extensions.
+
+## Multi-Domain Recommendation
+
+Multi-Domain Recommendation (MDR) trains one model to jointly serve multiple business domains by disentangling domain-shared from domain-specific signals. STAR [4](https://arxiv.org/abs/2101.11427) pioneers this line with a star-topology in which a shared centered network is element-wise combined with per-domain sub-networks, together with partitioned normalization. Subsequent works refine the shared/specific decomposition through hierarchical or gated structures: HiNet [5](https://arxiv.org/abs/2303.06095) organizes scenario and task information into a hierarchical extraction module, SAR-Net [6](https://arxiv.org/abs/2110.06475) introduces scenario-aware attention over cross-scenario behaviors, and PEPNet [7](https://arxiv.org/abs/2302.01115) infuses personalized prior information through embedding and parameter personalization for multi-domain multi-task ranking. ADI [8](https://arxiv.org/abs/2206.09672) learns adaptive domain interest representations that route information across domains, while AdaSparse [9](https://arxiv.org/abs/2206.13108) learns adaptively sparse sub-networks per domain to reduce interference. Meta-learning based schemes such as M2M [10](https://arxiv.org/abs/2201.06814) and the model-agnostic MAMDR framework [11](https://arxiv.org/abs/2202.12524) treat each domain as a task, generating domain-specific parameters from a shared meta-learner. HAMUR [12](https://arxiv.org/abs/2309.06217) further plugs a domain-conditioned hyper-adapter into arbitrary backbones. Despite their empirical success, these approaches share a common assumption: the transferable knowledge is uniformly beneficial across every domain, and the transfer structure is fixed once trained. When domains conflict or are of uneven quality, indiscriminate sharing induces the Negative Transfer Problem (NTP) that our work aims to alleviate.
+
+## Cross-Domain Recommendation and Negative Transfer
+
+Cross-Domain Recommendation (CDR) is closely related but generally focuses on transferring from a source to a target domain to overcome cold start or data sparsity, as summarized in the CDR survey [13](https://arxiv.org/abs/2103.01696). CoNet [14](https://arxiv.org/abs/1804.06769) transfers knowledge through cross-connected feed-forward networks, and DDTCDR [15](https://arxiv.org/abs/1910.05189) enforces bi-directional dual transfer between paired domains. Beyond pairwise setups, MetaHeac [16](https://arxiv.org/abs/2105.14688) uses meta hybrid experts to expand audiences across advertising scenarios, and continual transfer learning has been deployed on Taobao to sequentially propagate CTR knowledge across domains [17](https://arxiv.org/abs/2208.05728). Most of these methods presume that the source domain is a priori helpful and rely on hand-picked domain pairs; they do not explicitly quantify how similar two domains are, nor do they dynamically decide, at training time, which domains should be transferred from. Consequently, negative transfer remains a well-documented risk whenever the source distribution diverges from the target.
+
+## Prototype-Based Representation Learning
+
+Our similar-domain selection principle draws on prototype learning, popularized by Prototypical Networks for few-shot classification [18](https://arxiv.org/abs/1703.05175), where each class is summarized by the mean of its embeddings and queries are classified by distance to prototypes. We instead learn a prototype per domain and use prototype distances, together with supervised domain-metric signals, to measure inter-domain gaps and dynamically pick similar domains for each target. To our knowledge, this is the first attempt to explicitly measure domain-level distances and perform dynamic domain selection in MDR, providing a lightweight complement to the shared/specific architectures reviewed above.
+","% \subsection{Single-Domain Recommendation}
+
+
+
+% Despite the great success achieved, most of the above approaches are unable to process the multi-domain data,  which are often encountered in real-world applications due to diverse user behavior patterns and complex business platform structures.
+
+\subsection{Multi-Domain Recommendation}
+Recommendation systems (RS) \cite{gu2021self,lqd1,lqd2, hyp1, hyp2, liuyue_Rec1,liuyue_rec2,wang2019ngcf-graph-rec} aims to analyze user interactions to uncover interests, becoming a key research focus in recent years. However, classical single-domain approaches are unable to process the multi-domain data, which are often encountered in real-world applications.
+As a result, abundant Multi-Domain Recommendation (MDR) methods have been proposed \cite{luo2023mamdr-multi-domain-rec, chen2021user-cross-domain-rec,chang2023pepnet-multi-domain-multi-task-rec, fu2023unified-llm-multi-domain-rec, li2022gromov-cross-domain-rec,  fan2023adversarial-cross-domain-rec,gao2023autotransfer-cross-domain-rec}, leveraging shared knowledge across domains  to address challenges such as cold-start issues \cite{wang2017item,zhu2024m,jin2022multi}. These methods can be broadly categorized into Shared-Specific (SS) based methods and Dynamic Weight (DW) based methods, depending on how they model inter-domain relationships. SS-based methods\cite{tang2020ple-multi-task-rec,tong2024mdap,ning2023multi-multi-domain-graph-rec}, such as  STAR \cite{sheng2021star-multi-domain-rec} employ a shared-bottom architecture with domain-specific towers to model features. While DW-based methods \cite{yan2022apg-rec,bian2020can-rec, zhang2022m2m-multi-domain-multi-task-rec} often use scenario-sensitive features to generate  weighted parameters for the network. 
+
+However, DW-based methods rely on manually selected features and hence are less generalizable when new scenarios are encountered. Furthermore, most SS-based approaches \cite{wang2023plate-multi-domain-rec,wang2024diff-cold-multi-domain-rec} employ a single domain-shared module, making it difficult to transfer complex multi-domain knowledge. To tackle these issues, SDSP proposes a novel domain selection module that can decouple the current single domain-shared  without additional feature engineering.
+
+\subsection{Selection Problem}
+Discrete selection problems are generally more challenging than continuous optimization problems. This is because discrete choices involve combinatorial complexity, where the solution space is not smooth or continuous. Thus, traditional optimization techniques like gradient-based methods cannot be directly applied, requiring specialized algorithms to explore the solution space efficiently.
+
+In some fields, several attempts \cite{zhu2022user,zhou2022filter} have been proposed to solve different selection problems. Standley et al. \cite{standley2020tasks-multi-task} propose a group framework for choosing the suitable tasks to train together in the multi-task field.  In the multi-modal field, He et al. \cite{he2024efficient-multi-modal} proposes a greedy modality selection algorithm via submodular maximization.  In the cross-domain field,  Park et al. \cite{park2024pacer-cross-domain-rec} devise a weight factor to control the negative transfer of the multi-domain part. 
+
+However, the greedy-based search algorithm incurs additional overhead and is not applicable in the time-sensitive field. Besides, a single gating mechanism doesn't apply to the complex multi-domain field. To address these issues, SDSP proposes a dynamic selection method to tackle the selection problem efficiently.",0,0,0.0
+/Users/ksen/work/kiss/.kiss-worktrees/kiss_wt-1783742102-28c05696/deepscholar_bench_workdir/outputs/results/49,"Aligning Web Query Generation with Ranking Objectives via Direct
+  Preference Optimization","Neural retrieval models excel in Web search, but their training requires
+substantial amounts of labeled query-document pairs, which are costly to
+obtain. With the widespread availability of Web document collections like
+ClueWeb22, synthetic queries generated by large language models offer a
+scalable alternative. Still, synthetic training queries often vary in quality,
+which leads to suboptimal downstream retrieval performance. Existing methods
+typically filter out noisy query-document pairs based on signals from an
+external re-ranker. In contrast, we propose a framework that leverages Direct
+Preference Optimization (DPO) to integrate ranking signals into the query
+generation process, aiming to directly optimize the model towards generating
+high-quality queries that maximize downstream retrieval effectiveness.
+Experiments show higher ranker-assessed relevance between query-document pairs
+after DPO, leading to stronger downstream performance on the MS~MARCO benchmark
+when compared to baseline models trained with synthetic data.","# Related Work
+
+## Neural Retrieval Models and Benchmarks
+
+Neural retrieval has become the dominant paradigm for Web and passage search. Dense bi-encoder architectures such as DPR 1 established that dual-encoder Transformers fine-tuned with in-batch contrastive objectives can outperform sparse baselines on open-domain QA. Follow-up work has pushed retrieval quality further with harder negatives and better training procedures, including ANCE, which mines negatives from an approximate nearest-neighbor index of the corpus 2, and RocketQA, which combines cross-batch negatives, denoised hard negatives, and data augmentation 3. Sparse neural rankers such as SPLADE learn contextualized lexical expansions for first-stage retrieval 4. Evaluation of these systems is standardized on MS~MARCO 5 and, for out-of-domain generalization, on BEIR 6. The size and richness of modern Web collections such as ClueWeb22 7, together with public retrieval baselines built on top of it 8, motivate scalable, label-free training pipelines like the one we study.
+
+## Synthetic Query Generation for Retriever Training
+
+A long line of work exploits query generation as a source of weak supervision. Doc2Query trains a seq2seq model to predict queries a document could answer and expands the document with them 9, while domain-targeted synthetic question generation was shown to enable zero-shot neural passage retrieval 10. More recently, large language models have been used to synthesize training queries directly. InPars few-shot-prompts a large LM to generate query–document pairs and trains rerankers on them 11; InPars-v2 refines this pipeline with open-source LLMs and reaches state-of-the-art results on BEIR 12; InPars-Light demonstrates that cost-effective unsupervised training with smaller open models is feasible 13. Promptagator shows that just eight in-domain examples suffice to prompt an LM to generate task-specific queries for dense retrieval 14. GPL couples query generation with cross-encoder pseudo-labeling for unsupervised domain adaptation of dense retrievers 15, UDAPDR distills LLM-prompted rerankers into efficient retrievers under distribution shift 16, and AugTriever scales unsupervised dense retrieval through extractive and generative query augmentation 17. Contriever also shows that contrastive pretraining alone yields strong unsupervised dense retrievers, providing a natural backbone for synthetic-data fine-tuning 18.
+
+## Quality Control via Rerankers and Zero-Shot LLM Scoring
+
+Because synthetic queries vary greatly in quality, most of the pipelines above filter or reweight query–document pairs using an external re-ranker. Sequence-to-sequence rerankers such as monoT5 provide relevance scores by asking a T5 model whether a passage is relevant 19, and are widely used as filters in InPars-style pipelines. Zero-shot LLM re-rankers, including UPR, which scores passages by the likelihood of regenerating the query 20, listwise LLM re-rankers such as RankGPT 21, and pairwise ranking prompting methods 22, further extend the tools available for judging synthetic pairs. Query-side augmentation techniques such as HyDE 23 and Query2Doc 24 show that LLM-generated pseudo-documents can also carry useful ranking signal. In contrast to post-hoc filtering, our approach uses ranker judgments as a training signal so that the generator itself learns to produce retrieval-friendly queries.
+
+## Preference Optimization for Language Models
+
+Aligning generative models with downstream objectives has been extensively studied under RLHF, where InstructGPT combines supervised fine-tuning with PPO-based reward maximization 25 [1]. Direct Preference Optimization (DPO) 27 removes the explicit reward model and shows that preference data can be used to fine-tune LMs via a simple classification-style loss, making preference optimization practical outside of pure RLHF settings. Closest to our work, RetPO fine-tunes an LM to rewrite conversational queries using preference pairs derived from retriever feedback 28. We build on this line of work by applying DPO to synthetic query generation for Web-scale retriever training, aligning the generator with re-ranker preferences over ClueWeb22 passages and evaluating downstream effectiveness on MS~MARCO.","Transformer-based bi-encoders are the standard architecture for dense retrieval~\citep{DBLP:conf/iclr/XiongXLTLBAO21,DBLP:conf/emnlp/KarpukhinOMLWEC20}, typically trained with contrastive objectives and hard negative mining strategies such as ANCE~\citep{DBLP:conf/iclr/XiongXLTLBAO21}. Retrieval-aligned pre-training on in-domain corpora is also commonly adopted to improve retrieval effectiveness~\citep{DBLP:conf/acl/GaoC22, lu-etal-2021-less, DBLP:conf/emnlp/XiaoLSC22, DBLP:conf/acl/LeeCT19, DBLP:conf/sigir/MaGZFC22, DBLP:journals/corr/abs-2401-11248}.
+
+% Unsupervised dense retrieval methods still leverage contrastive training methodologies, but without relying on human-annotated labels. Multiple approaches have been explored to obtain positive samples, for instance, based on anchor text~\citep{DBLP:conf/sigir/XieLX23}, sampling positive spans from a single document~\citep{DBLP:conf/acl/LeeCT19, DBLP:journals/tmlr/IzacardCHRBJG22}, or heuristically mining pairs from structured documents (e.g., title-paragraph)~\citep{DBLP:journals/corr/abs-2212-03533}.
+
+The community has explored generating synthetic queries from documents for model training. Approaches such as Doc2Query~\citep{DBLP:journals/corr/abs-1904-08375} and DocT5Query~\citep{nogueira2019doc2query} train a lightweight Transformer~\citep{DBLP:conf/nips/VaswaniSPUJGKP17} on labeled query–document pairs to expand document representations. Subsequent work~\citep{DBLP:conf/ecir/GospodinovMM23} demonstrates that filtering out hallucinated queries can further enhance downstream performance. More recent methods leverage LLMs. For instance, InPars~\citep{DBLP:journals/corr/abs-2202-05144} employs few-shot prompting with filtering based on generation probability, while InPars-v2~\citep{DBLP:journals/corr/abs-2301-01820} leverages a supervised ranker for query filtering. Similarly, Promptagator~\citep{DBLP:conf/iclr/DaiZMLNLBGHC23} uses task-specific prompts to perform few-shot query generation. Building on these approaches, the Gecko model~\citep{DBLP:journals/corr/abs-2403-20327} iteratively refines synthetic queries through a process involving retrieval, re-ranking, positive relabeling, and hard negative sampling, thereby improving the quality of the training data.
+
+%\cx{not very relevant?}
+% Other lines of work explore synthesizing documents instead of queries. Methods such as Syntriever~\citep{kim2025syntriever} generate synthetic documents (both positive and negative) conditioned on input queries, framing this as knowledge distillation from LLMs. Other approaches generate fully synthetic query-document pairs at scale, enabling retrieval-oriented pre-training~\citep{DBLP:conf/acl/WangYHYMW24}.
+
+Recent work has explored reinforcement learning to improve synthetic query generation. Token-level Proximal Policy Optimization (TPPO)~\citep{DBLP:journals/corr/abs-2411-00722, DBLP:journals/corr/SchulmanWDRK17} has been applied to query suggestion tasks, optimizing generation based on token-level rewards derived from user interaction histories. While this setting targets interactive scenarios rather than offline generation from documents, it highlights the promise of reinforcement learning for enhancing query quality.
+
+
+% todo: add token-level PPO paper",0,0,0.0
+/Users/ksen/work/kiss/.kiss-worktrees/kiss_wt-1783742102-28c05696/deepscholar_bench_workdir/outputs/results/50,"Benchmarking Recommendation, Classification, and Tracing Based on
+  Hugging Face Knowledge Graph","The rapid growth of open source machine learning (ML) resources, such as
+models and datasets, has accelerated IR research. However, existing platforms
+like Hugging Face do not explicitly utilize structured representations,
+limiting advanced queries and analyses such as tracing model evolution and
+recommending relevant datasets. To fill the gap, we construct HuggingKG, the
+first large-scale knowledge graph built from the Hugging Face community for ML
+resource management. With 2.6 million nodes and 6.2 million edges, HuggingKG
+captures domain-specific relations and rich textual attributes. It enables us
+to further present HuggingBench, a multi-task benchmark with three novel test
+collections for IR tasks including resource recommendation, classification, and
+tracing. Our experiments reveal unique characteristics of HuggingKG and the
+derived tasks. Both resources are publicly available, expected to advance
+research in open source resource sharing and management.","# Related Work
+
+## Knowledge Graphs for Open-Source and ML Resource Management
+
+Knowledge graphs (KGs) have been widely used to structure heterogeneous open-source artifacts so that they can be searched, linked, and recommended.  Early efforts in this direction target academic and code repositories: paper2repo 1 links research papers to their GitHub implementations through a distant-supervised recommender, but its schema covers only a narrow set of entity types and cannot express the fine-grained interdependencies observed on modern hubs such as Hugging Face.  In contrast, HuggingKG explicitly models model–model relations (adapter, finetune, merge, quantize) together with user interaction signals (publish, like, follow), yielding a KG that is both larger and semantically richer than prior ML-resource graphs.  Broader dataset and model observability efforts, such as the large-scale dataset licensing and attribution audit of the Data Provenance Initiative [1] and the community library that curates NLP datasets for the Hugging Face Hub 3, reinforce the need for structured, queryable representations of open-source ML assets — a gap our work directly addresses.  HuggingGPT 4 further motivates such representations by demonstrating that a language-model controller can orchestrate hundreds of Hugging Face models when given structured metadata, showing why higher-quality relational data over the hub is valuable.
+
+## Knowledge-Graph and Academic Benchmarks
+
+A parallel line of work has produced benchmarks for graph-structured data.  The Open Graph Benchmark (OGB) 5 established standardized node-, link-, and graph-level tasks for large graphs, and OAG-Bench 6 provides a human-curated benchmark for academic graph mining over the Open Academic Graph.  HuggingBench complements these resources by targeting a distinct domain — open-source ML resource management — and introducing three IR-oriented tasks (resource recommendation, task classification, and model tracing) that require reasoning over both structural relations and rich textual attributes of Hugging Face artifacts.  Library-level infrastructures such as CogDL 7 further help operationalize such benchmarks with reproducible graph-learning pipelines.
+
+## Knowledge Graph Embeddings
+
+Our benchmark exercises a broad spectrum of KG embedding methods.  Tensor-factorization approaches such as DistMult 8 and ComplEx 9 model entities and relations as low-rank interactions, while RotatE 10 formulates each relation as a rotation in complex space to capture symmetry, inversion, and composition patterns.  Convolutional and transformer variants such as ConvE 11 and HittER 12 score triples with parameterized deep encoders.  More recently, ULTRA 13 proposes a foundation-model-style approach that transfers across KGs with unseen entities and relations, which is particularly attractive for a growing, community-driven graph like HuggingKG.
+
+## Graph Neural Networks and Node Classification
+
+For the classification task, HuggingBench benchmarks the dominant families of graph neural networks.  GCN 14 established spectral–spatial message passing for semi-supervised node classification, GraphSAGE 15 introduced inductive neighbor sampling, and GAT 16 introduced attention-weighted aggregation.  Deeper and better-propagating variants such as APPNP 17, GRAND 18, and GCNII 19 address oversmoothing and enable training of substantially deeper models, all of which are relevant when propagating information over HuggingKG's millions of nodes and heterogeneous edge types.
+
+## Recommendation over Interaction and Knowledge Graphs
+
+The resource-recommendation task in HuggingBench is closely related to graph-based collaborative filtering and knowledge-aware recommendation.  LightGCN 20 simplifies GCN for collaborative filtering and remains a strong baseline; LightGCL 21, SimGCL 22, HCCF 23, MHCN 24, AutoCF 25, DCCF 26, and the unified SSLRec framework 27 explore self-supervised, contrastive, and hypergraph learning objectives.  Knowledge-aware recommenders such as KGIN 28, KGCL 29, and KGRec 30 explicitly inject KG structure into user–item modeling, and RLMRec [2] integrates large language models for representation-augmented recommendation.  These methods motivate HuggingBench's recommendation split, which — unlike prior developer-oriented repository recommenders such as paper2repo 1 — benefits from the dense inter-model and user-interaction relations captured by HuggingKG.
+
+Together, these threads show that while both KG construction and KG-based IR methods are mature, existing resources do not cover the Hugging Face ecosystem at scale.  HuggingKG and HuggingBench aim to fill this gap by providing a large, richly typed graph and a multi-task IR benchmark tailored to open-source ML resource sharing and management.","% In this section, we review existing works on KGs (Section~\ref{sec:related-work-kg}) and KG-based benchmarks~(Section~\ref{sec:related-work-dataset}) in the domain of open source resource management.
+
+\textbf{KGs for Resource Management.}
+%KGs have been extensively used to represent and analyze complex relationships in various domains, including open source resource management. Previous works such as DEKR~\cite{DEKR} and MLTaskKG~\cite{tse23} have constructed KGs to support recommendation tasks by capturing relationships among ML resources. DEKR~\cite{DEKR} primarily relies on description enhancement for ML method recommendation. MLTaskKG~\cite{tse23} constructs an AI task-model KG by integrating static data to support task-oriented ML/DL library recommendation. However, both approaches focus on static attributes and a narrow set of relations, failing to capture dynamic user interactions and inter-\texttt{Model} relations. In contrast, as shown in Table~\ref{tab:kg-bench-comparison}, our proposed $\mathsf{HuggingKG}$ is built on the rich metadata provided by Hugging Face, offering a large-scale KG with a more extensive set of relations. In addition to generic relations (e.g.,~\texttt{Defined For}, \texttt{Cite}), $\mathsf{HuggingKG}$ incorporates multiple inter-\texttt{Model} relations (i.e.,~\texttt{Adapter}, \texttt{Finetune}, \texttt{Merge}, and \texttt{Quantize}) and captures user interaction signals (i.e.,~\texttt{Publish}, \texttt{Like}, and \texttt{Follow}). \emph{This enriched structure facilitates a deeper analysis of ML resources and supports more effective recommendation strategies.}
+
+\textbf{KG-based Benchmarks.}
+%Various benchmark datasets have been proposed to evaluate KG-based tasks. For example, OAG-Bench~\cite{OAGBench} provides a human-curated benchmark for academic graph mining, focusing on citation and collaboration networks. In the domain of open source resource management, our $\mathsf{HuggingBench}$ benchmark distinguishes itself by providing datasets for three IR tasks: resource recommendation, task classification, and model tracing.
+
+For \textbf{resource recommendation}, paper2repo~\cite{paper2repo} introduces a distant-supervised recommender system that matches papers with related code repositories. However, it incorporates a limited range of entity types that are insufficient to build fine-grained interdependencies. Xu et al.~\cite{RepoRecommendation} leverages multi-modal features from developers’ sequential behaviors and repository text to generate relevant and tailored suggestions for developers, yet it does not explicitly construct or exploit a structured KG. In contrast, as shown in Table~\ref{tab:kg-bench-comparison}, \emph{$\mathsf{HuggingBench}$ benefits from the inherent structure of $\mathsf{HuggingKG}$ that captures rich relational data for recommendation}.
+
+Furthermore, GRETA~\cite{GRETA} and recent efforts in automated categorization~\cite{EASE24, ESEM24} address specific \textbf{tagging/classification} tasks. GRETA~\cite{GRETA} constructs an Entity Tag Graph (ETG) using the cross-community knowledge from GitHub and Stack Overflow, and uses an iterative random walk with restart algorithm to automatically assign tags to repositories. \emph{$\mathsf{HuggingKG}$ integrates richer textual descriptions and metadata to construct a graph that encapsulates fine-grained relationships among models and datasets, thereby facilitating multi-label task classification for ML resources.}
+
+\begin{table*}[t]
+\centering
+\caption{Comparison between KGs and benchmarks on open source resource management.}
+%\footnotesize
+\resizebox{\textwidth}{!}{
+\begin{tabular}{@{}lcrrrrcccc@{}}
+\toprule
+ & \textbf{Source} & \textbf{\#Nodes} & \textbf{\#Types} & \textbf{\#Relations} & \textbf{\#Edges} & \textbf{Key Entities \& (Attributes)} & \textbf{Model Evolution} & \textbf{User Interaction} & \textbf{Tasks} \\
+\midrule
+DEKR~\cite{DEKR} & \begin{tabular}{@{}c@{}}Open academic platforms\\(e.g.,~PapersWithCode, GitHub)\end{tabular} & 17,483 & 5 & 23 & 117,245 & \begin{tabular}{@{}c@{}}\texttt{Dataset}, \texttt{Method}\\(Description)\end{tabular} & No & No & Recommendation \\
+\specialrule{0em}{1.5pt}{1.5pt}
+MLTaskKG~\cite{tse23} & \begin{tabular}{@{}c@{}}PapersWithCode,\\ ML/DL Papers,\\ ML/DL Framework Docs\end{tabular} & 159,310 & 16 & 39 & 628,045 & \begin{tabular}{@{}c@{}}\texttt{Task}, \texttt{Model},\\ \texttt{Model Implementation}\end{tabular} & No & No & Recommendation \\
+\specialrule{0em}{1.5pt}{1.5pt}
+paper2repo~\cite{paper2repo} & \begin{tabular}{@{}c@{}}GitHub,\\ Microsoft Academic\end{tabular} & 39,600 & 2 & - & - & \texttt{Paper}, \texttt{Repository} & No & \begin{tabular}{@{}c@{}}Yes\\(\texttt{Star})\end{tabular} & Recommendation \\
+\specialrule{0em}{1.5pt}{1.5pt}
+GRETA~\cite{GRETA} & \begin{tabular}{@{}c@{}}GitHub,\\ Stack Overflow\end{tabular} & 707,891 & 4 & - & - & \texttt{Repository}, \texttt{Tag} & No & \begin{tabular}{@{}c@{}}Yes\\(\texttt{Search}, \texttt{Raise}, \texttt{Answer})\end{tabular} & Tag Assignment \\
+\specialrule{0em}{1.5pt}{1.5pt}
+AIPL(Facebook/React)~\cite{issue-PR-link-prediction} & GitHub & 97,556 & 4 & 9 & 196,834 & \begin{tabular}{@{}c@{}}\texttt{Issue}, \texttt{PR},\\ \texttt{Repository}, \texttt{User}\end{tabular} & No & Yes & Issue-PR Link Prediction \\
+\specialrule{0em}{1.5pt}{1.5pt}
+AIPL(vuejs/vue)~\cite{issue-PR-link-prediction} & GitHub & 49,200 & 4 & 9 & 95,160 & \begin{tabular}{@{}c@{}}\texttt{Issue}, \texttt{PR},\\ \texttt{Repository}, \texttt{User}\end{tabular} & No & Yes & Issue-PR Link Prediction \\
+\midrule
+$\mathsf{HuggingKG}$ \& $\mathsf{HuggingBench}$ & \textbf{Hugging Face} & \textbf{2,614,270} & \textbf{8} & \textbf{30} & \textbf{6,246,353} & \textbf{\begin{tabular}{@{}c@{}}\texttt{Model}, \texttt{Dataset},\\ \texttt{User}, \texttt{Task}\\(Description)\end{tabular}} & \textbf{\begin{tabular}{@{}c@{}}Yes\\(\texttt{Finetune}, \texttt{Adapter},\\ \texttt{Merge}, \texttt{Quantize})\end{tabular}} & \textbf{\begin{tabular}{@{}c@{}}Yes\\(\texttt{Publish}, \texttt{Like}, \texttt{Follow})\end{tabular}} & \textbf{\begin{tabular}{@{}c@{}}Recommendation,\\ Classification, Tracing\end{tabular}} \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
+
+Recent work by Bai et al. ~\cite{issue-PR-link-prediction} uses a knowledge-aware heterogeneous graph learning approach to \textbf{predict links} between issues and pull requests on GitHub, effectively capturing complex relational information through metapath aggregation. However,
+% while this method demonstrates that metapath aggregation can capture relational complexity in software development,
+it remains confined to linking \texttt{Issue}–\texttt{PR} pairs and does not address the broader challenge of tracking model evolution across ML resources. \emph{The novel model tracing task in $\mathsf{HuggingBench}$ not only pioneers the exploration of inter-\texttt{Model} relations, but also provides practical insights into the evolution, reuse, and optimization of ML models}, thereby supporting more informed decision-making in real-world open source resource management.",0,0,0.0
+/Users/ksen/work/kiss/.kiss-worktrees/kiss_wt-1783742102-28c05696/deepscholar_bench_workdir/outputs/results/51,"Unlearning for Federated Online Learning to Rank: A Reproducibility
+  Study","This paper reports on findings from a comparative study on the effectiveness
+and efficiency of federated unlearning strategies within Federated Online
+Learning to Rank (FOLTR), with specific attention to systematically analysing
+the unlearning capabilities of methods in a verifiable manner.
+  Federated approaches to ranking of search results have recently garnered
+attention to address users privacy concerns. In FOLTR, privacy is safeguarded
+by collaboratively training ranking models across decentralized data sources,
+preserving individual user data while optimizing search results based on
+implicit feedback, such as clicks.
+  Recent legislation introduced across numerous countries is establishing the
+so called ""the right to be forgotten"", according to which services based on
+machine learning models like those in FOLTR should provide capabilities that
+allow users to remove their own data from those used to train models. This has
+sparked the development of unlearning methods, along with evaluation practices
+to measure whether unlearning of a user data successfully occurred. Current
+evaluation practices are however often controversial, necessitating the use of
+multiple metrics for a more comprehensive assessment -- but previous proposals
+of unlearning methods only used single evaluation metrics.
+  This paper addresses this limitation: our study rigorously assesses the
+effectiveness of unlearning strategies in managing both under-unlearning and
+over-unlearning scenarios using adapted, and newly proposed evaluation metrics.
+Thanks to our detailed analysis, we uncover the strengths and limitations of
+five unlearning strategies, offering valuable insights into optimizing
+federated unlearning to balance data privacy and system performance within
+FOLTR. We publicly release our code and complete results at
+https://github.com/Iris1026/Unlearning-for-FOLTR.git.","# Related Work
+
+## Federated Learning and Online Learning to Rank
+
+Federated learning (FL) enables collaborative model training across decentralized clients without sharing raw data, and was introduced by the seminal FedAvg algorithm [1](https://arxiv.org/abs/1602.05629). The paradigm has since expanded rapidly, with a comprehensive survey outlining open problems around privacy, robustness, personalization, and system heterogeneity [2](https://arxiv.org/abs/1912.04977). Within information retrieval, Online Learning to Rank (OLTR) traditionally optimizes rankers directly from user interaction signals such as clicks, with counterfactual and unbiased LTR methods providing propensity-weighted objectives to combat position and selection bias [3](https://arxiv.org/abs/1608.04468). Standard OLTR benchmarks such as LETOR 4.0 [4](https://arxiv.org/abs/1306.2597) are commonly used to evaluate ranking effectiveness in this setting.
+
+Federated Online Learning to Rank (FOLTR) marries these two lines of work: search rankers are trained collaboratively across users while implicit feedback and queries remain on-device. Recent work systematically studies FOLTR effectiveness and privacy, including a thesis-length treatment of secure and effective federated ranking with algorithms such as FPDGD and its variants [5](https://arxiv.org/abs/2412.19069), and dedicated analyses of how non-IID click behavior across clients affects ranking convergence and generalization [6](https://arxiv.org/abs/2204.09272). Our study builds directly on these FOLTR foundations by evaluating what happens when clients want to *leave* the federation and have their contributions erased.
+
+## Machine Unlearning
+
+The right to be forgotten, codified by regulations such as GDPR, has motivated a rich literature on *machine unlearning*: the removal of the influence of specific training data from a trained model. Early work formalized data deletion for simple models and clustering [7](https://arxiv.org/abs/1907.05012) and provided certified data removal guarantees for convex learners via influence-function corrections [8](https://arxiv.org/abs/1911.03030). The SISA framework achieves exact unlearning by sharding and slicing training data so that only affected shards need retraining [9](https://arxiv.org/abs/1912.03817). Broader surveys categorize these approaches, contrasting exact vs. approximate unlearning, and highlight the difficulty of both defining and verifying successful forgetting [10](https://arxiv.org/abs/2209.02299) [11](https://arxiv.org/abs/2306.03558).
+
+## Federated Unlearning
+
+Federated unlearning inherits the challenges of centralized unlearning while adding constraints specific to FL: the server has no direct access to raw data, historical updates may be stale, and coordination across clients is expensive. FedEraser reconstructs an unlearned global model by calibrating cached historical client updates, avoiding full retraining [12](https://arxiv.org/abs/2012.13891). Halimi et al. propose an efficient client-level erasure procedure based on projected gradient ascent within a bounded reference ball, followed by a short federated fine-tuning phase [13](https://arxiv.org/abs/2207.05521). Liu et al. cast the right to be forgotten as a rapid-retraining problem using diagonal empirical Fisher information for accelerated recovery [14](https://arxiv.org/abs/2203.07320), and knowledge-distillation-based federated unlearning erases class- or client-specific knowledge while preserving overall model utility [15](https://arxiv.org/abs/2201.09441). Two recent surveys consolidate this fast-moving landscape, examining unlearning granularities, design guidelines, and evaluation metrics [16](https://arxiv.org/abs/2401.05146) [17](https://arxiv.org/abs/2310.20448), and comparative reviews further contrast method families along efficiency, effectiveness, and threat-model dimensions [18](https://arxiv.org/abs/2310.19218). To our knowledge, none of these methods have been rigorously benchmarked in the specifically online, ranking-oriented FOLTR setting that we investigate.
+
+## Verification and Evaluation of Unlearning
+
+A central challenge in the unlearning literature is *verifying* that data has actually been forgotten. Membership inference attacks (MIAs), pioneered by Shokri et al., train shadow models to distinguish training members from non-members and are a natural probe for residual data influence [19](https://arxiv.org/abs/1610.05820). Modern likelihood-ratio attacks such as LiRA sharpen these tests and expose the fragility of privacy claims [20](https://arxiv.org/abs/2112.03570). Chen et al. show that unlearning can paradoxically *increase* leakage by exposing differences between the original and unlearned models [21](https://arxiv.org/abs/2005.02205). SCRUB and related work introduce approximate unlearners that explicitly balance forgetting and retention, and evaluate them jointly with MIAs [22](https://arxiv.org/abs/2302.09880), while Hayes et al. warn that inexact unlearning procedures can create a false sense of privacy when only single, weak metrics are reported [23](https://arxiv.org/abs/2403.01218). Backdoor-based verification embeds triggers into a subset of a client's data so that the disappearance of the trigger-induced behavior serves as evidence of erasure [24](https://arxiv.org/abs/2003.04247); VeriFi extends this idea to the federated setting by giving departing clients cryptographic and behavioral tools to audit the server's compliance [25](https://arxiv.org/abs/2205.12709). Nonetheless, recent analysis demonstrates that both reproducing-based and backdoor-based verification pipelines can be circumvented by adversarial unlearners, arguing for multi-metric evaluation regimes [26](https://arxiv.org/abs/2408.00929). Our paper responds to this call by systematically combining backdoor-verification, MIA-based tests, and ranking-utility metrics to jointly diagnose under-unlearning and over-unlearning in FOLTR.
+","\subsection{Federated Online Learning to Rank}
+As a specialized distributed machine learning paradigm, FL enables collaborative training while preserving user privacy. To satisfy privacy-preserving requirements in OLTR, FL has also been introduced to this field termed federated online learning to rank (FOLTR). The FOLtR-ES method does this by incorporating evolution strategies to optimize the ranking model and \(\epsilon\)-local differential privacy for enhanced data protection~\cite{kharitonov2019federated}, but this methods is found to have reduced effectiveness and adaptability on large-scale datasets~\cite{wang2021federated}. A more effective approach, FPDGD~\cite{wang2021effective}, has been proposed by integrating the advanced Pairwise Differentiable Gradient Descent (PDGD)~\cite{oosterhuis2018differentiable} into the FL framework. Thanks to the superiority of locally-deployed PDGD ranker in handling noise and biases from user interactions, FPDGD has demonstrated strong ranking performance which is comparable to that of the state-of-the-art centralised OLTR methods. Following this, Wang and Zuccon~\cite{wang2022non} investigate the robustness of FPDGD to non-independent and identically distributed client data. The vulnerability of FPDGD to poisoning attacks in the federated system is also simulated and verified~\cite{wang2023analysis}, which extends the landscape of study on FOLTR.
+
+\iffalse
+FOLTR introduces a distributed OLTR~\cite{jia2022learning, wang2018efficient} scenario where users coordinate under a central server to collaboratively train a global ranker. In a FOLTR system, clients train local rankers using interactions generated on their local devices and then upload model parameters to the central server without sharing data with other clients or the central server. This scenario protects user data privacy while also allowing clients to benefit from a global ranking model that learns from the contributions of each client in the federation. Although research on FOLTR is still in its early stages, some foundational studies have been established. For instance, Federated OLTR with Evolutionary Strategies(FOLtR-ES) ~\cite{kharitonov2019federated} is the first work to extend the OLTR to a FL setting, using evolution strategies to optimize the ranking model and incorporating \(\epsilon\)-local differential privacy for enhanced data protection. However, recent study by Wang et al.~\cite{wang2021federated} has shown that FOLtR-ES is less effective and adaptable on large-scale datasets. To address this, Wang~\etal~\cite{wang2021effective} proposed an improved method named FPDGD, which adapts the advanced Pairwise Differentiable Gradient Descent (PDGD) method to the federated learning framework. Compared to FOLtR-ES, FPDGD shows significant improvements in performance and generalization across datasets. Thus, in this paper, we employ FPDGD as the base FOLTR method and investigate unlearning strategies on top of it.
+\fi
+
+
+\subsection{Federated Unlearning}
+
+%Although machine unlearning in centralized settings dominated the existing research efforts, FU has attracted a lot of attention recently. 
+Federated Unlearning extends the principles of machine unlearning to FL settings, allowing individual clients' data to be removed from a global model. 
+% Several approaches to Federated Unlearning have been recently proposed. 
+A naive approach in FU is to retrain the global model from scratch without involving clients who requested deletion, ensuing complete removal but at a high computational cost.
+In order to accelerate the FU process, FedEraser adjusts historical updates from clients to reconstruct unlearned models~\cite{liu2021federaser}; other computation-efficient approaches have followed~\cite{wu2022federated,liu2022right,halimi2022federated}. 
+%Beyond its application in computer vision tasks, FU has also been applied in other fields, such as recommendation systems~\cite{yuan2023federated}, Graph Neural Networks (GNN)~\cite{zhu2023heterogeneous}.
+While FU has been studied across natural language processing and recommendation systems~\cite{yuan2023federated,zhu2023heterogeneous}, its application to FOLTR tasks remains unexplored, with Wang et al.~\cite{wang2024forget} presenting the only approach to date. This study implemented an existing FU approach and evaluated its unlearning performance under a user simulation inspired by poisoning attacks~\cite{wang2023analysis, shejwalkar2021manipulating}. While Wang et al.~\cite{wang2024forget} pointed out that the uniqueness of FOLTR including optimising ranking tasks with implicit user feedback in an online manner, the challenge of adapting existing FU methods to FOLTR and evaluating the unlearning performance are largely unexplored. In this paper, we close this gap by evaluating within the context of FOLTR the performance of a broad range of unlearning methods across a diverse set of evaluation metrics.
+
+\iffalse
+Unlike machine unlearning in centralized settings, unlearning receives less attention in federated settings. The most naive way of implementing FU is to retrain the model from scratch after the clients request to be removed (the target clients). However, this method requires substantial computational resources. Recent research has sought to accelerate this process. In the field of Computer Vision(CV), Liu et al.~\cite{liu2021federaser} introduced FedEraser, which adjusts historical updates from clients to reconstruct unlearned models. Subsequently, Wu et al.~\cite{wu2022federated} developed a method that erases these updates from a target client and uses knowledge distillation to restore performance. Both methods necessitate the server's retention of all clients' update histories. Additionally, Liu et al. ~\cite{liu2022right} proposed a time and energy-efficient retraining approach using Newton's methods. To efficiently erase client data, Halimi et al. ~\cite{halimi2022federated} suggested maximizing loss through gradient ascent and addressing the constrained optimization problem using Projected Gradient Descent (PGD).
+In terms of on-device recommendation system, Yuan et al.~\cite{yuan2023federated} proposed a Federated Recommendation Unlearning (FRU) method by rolling back and calibrating historical parameter updates. In the Knowledge Graph (KG) domain, Zhu et al. ~\cite{zhu2023heterogeneous} introduced FedLU, employing a neuroscientific approach to unlearning by leveraging retroactive interference and passive decay to selectively remove specific knowledge from local clients and update the global model through knowledge distillation. However, the aforementioned work does not cover the OLTR domain, highlighting that FU research in OLTR remains extensively unexplored.~\shuyi{The work by Wang et al.~\cite{wang2024forget} is by far the only unlearning method in FOLTR...}
+\fi",0,0,0.0
+/Users/ksen/work/kiss/.kiss-worktrees/kiss_wt-1783742102-28c05696/deepscholar_bench_workdir/outputs/results/52,"Pre-training vs. Fine-tuning: A Reproducibility Study on Dense Retrieval
+  Knowledge Acquisition","Dense retrievers utilize pre-trained backbone language models (e.g., BERT,
+LLaMA) that are fine-tuned via contrastive learning to perform the task of
+encoding text into sense representations that can be then compared via a
+shallow similarity operation, e.g. inner product. Recent research has
+questioned the role of fine-tuning vs. that of pre-training within dense
+retrievers, specifically arguing that retrieval knowledge is primarily gained
+during pre-training, meaning knowledge not acquired during pre-training cannot
+be sub-sequentially acquired via fine-tuning. We revisit this idea here as the
+claim was only studied in the context of a BERT-based encoder using DPR as
+representative dense retriever. We extend the previous analysis by testing
+other representation approaches (comparing the use of CLS tokens with that of
+mean pooling), backbone architectures (encoder-only BERT vs. decoder-only
+LLaMA), and additional datasets (MSMARCO in addition to Natural Questions). Our
+study confirms that in DPR tuning, pre-trained knowledge underpins retrieval
+performance, with fine-tuning primarily adjusting neuron activation rather than
+reorganizing knowledge. However, this pattern does not hold universally, such
+as in mean-pooled (Contriever) and decoder-based (LLaMA) models. We ensure full
+reproducibility and make our implementation publicly available at
+https://github.com/ielab/DenseRetriever-Knowledge-Acquisition.","# Related Work
+
+## Dense Retrievers and Contrastive Fine-tuning
+
+Dense retrieval reformulates first-stage retrieval as encoding queries and passages into low-dimensional vectors whose similarity is computed with a shallow operator such as inner product. Dense Passage Retrieval (DPR) 1 established this paradigm by fine-tuning a BERT [1] dual-encoder with in-batch contrastive learning on question–passage pairs, using the [CLS] token as the sequence representation. Follow-up efforts have focused on improving the fine-tuning signal, particularly through harder negatives: ANCE 3 periodically refreshes an ANN index to mine globally hard negatives, and RocketQA 4 combines cross-batch negatives with denoised hard negatives from a cross-encoder. ColBERT [2] offers an alternative to single-vector encoding by preserving contextualized token embeddings and applying late interaction. Sentence-BERT 6 introduced siamese fine-tuning with mean-pooled sentence embeddings, and SimCSE 7 showed that simple contrastive objectives yield strong sentence encoders, motivating the mean-pooling variant that we study alongside DPR-style [CLS] encoders.
+
+## Pre-training Objectives Tailored to Retrieval
+
+A second line of work argues that generic masked language modeling is not ideal for retrieval and proposes retrieval-oriented pre-training. Condenser 8 restructures BERT so that the [CLS] token must aggregate information sufficient to reconstruct masked tokens, yielding a representation better suited to dot-product matching. Contriever 9 uses unsupervised contrastive pre-training with mean-pooled representations, and cpt-text 10 and E5 11 scale weakly supervised contrastive pre-training over large web pairs. Larger dual encoders such as GTR 12 and instruction-tuned INSTRUCTOR 13 demonstrate that scaling the backbone and diversifying supervision improve generalization on the BEIR benchmark 14. These results emphasize that the pre-training recipe—not only the fine-tuning data—shapes downstream retrieval effectiveness, motivating our comparison across CLS/mean-pooled encoders and different backbones.
+
+## Decoder-only Backbones for Dense Retrieval
+
+More recently, decoder-only large language models have been adapted for dense retrieval. RepLLaMA 15 fine-tunes LLaMA [3] as a bi-encoder using the end-of-sequence hidden state, while LLaRA/Llama2Vec 17 proposes unsupervised objectives that adapt causal LLMs into retrieval-friendly encoders. These models routinely outperform BERT-based DPR baselines but also reopen the question of whether their gains stem from pre-training scale or from fine-tuning, which is precisely the question we probe by contrasting encoder-only and decoder-only dense retrievers.
+
+## The Role of Pre-training vs. Fine-tuning in Retrieval
+
+Understanding where retrieval ""knowledge"" resides in these models has been the subject of active study. Petroni et al. 18 showed that pre-trained language models already encode substantial factual knowledge that can be surfaced without fine-tuning, and a broader BERTology synthesis 19 documents how pre-training shapes linguistic and world knowledge in encoders. Zero-shot studies of dense retrieval 20 find that DPR-style models often fail to transfer to out-of-domain corpora, while few-shot approaches such as Promptagator 21 suggest that limited task-specific supervision suffices when a strong pre-trained backbone is available. Most directly relevant to our work, Reichman and Heck 22 mechanistically analyze DPR and argue that fine-tuning primarily redistributes activations over knowledge already stored during pre-training, rather than instilling new retrieval-relevant knowledge. Their conclusion, however, is drawn from a BERT-based DPR trained on Natural Questions with [CLS] pooling. We extend this analysis to mean-pooled Contriever-style 9 encoders, decoder-only LLaMA-based retrievers 15, and MS MARCO 23 supervision, situating our findings within the broader retrieval-augmented generation literature 24 that depends on such dense retrievers for grounding.","Dense retrieval relies on deep neural networks to encode textual data into dense vector representations, enabling efficient approximate nearest neighbor search. These models are broadly categorized into encoder-based and decoder-based retrievers, each employing different representation and retrieval strategies.
+
+\textbf{Encoder-based dense retrievers}, such as DPR~\cite{karpukhin2020dense}, utilize transformer encoders to map queries and documents into fixed-size vectors. The retrieval process is then performed by computing the dot product between query and document representations. One common approach is the use of the \textbf{[CLS] token representation}, where the final hidden state of the special [CLS] token is extracted as a compact representation of the entire input sequence. While effective, this method has been observed to focus more on the beginning of the input, potentially missing finer-grained information distributed throughout the text.
+
+An alternative strategy is \textbf{mean pooling}, as adopted by Contriever~\cite{izacard2021contriever}, where the final embeddings of all tokens are averaged to form a unified document representation. This pooling mechanism captures a more distributed representation of the input and is often preferred in cases where information is spread across longer passages. Furthermore, some models, such as Sentence-BERT~\cite{reimers2019sentence} and SimCSE~\cite{gao2021simcse}, extend dense retrieval capabilities to zero-shot settings, leveraging contrastive learning and pre-trained embeddings to provide robust document representations without requiring task-specific fine-tuning.
+
+\textbf{Decoder-based dense retrievers} are in contrast to encoder-based models, incorporating autoregressive decoding mechanisms for retrieval. RePLAMA~\cite{replama2021} exemplifies this approach by reframing the retrieval task as a sequence generation problem, where the model generates candidate passages based on query context rather than performing direct similarity matching. This method enhances retrieval flexibility by capturing long-range dependencies and richer query-document relationships. Similarly, PromptReps~\cite{promptreps2021} integrates prompt-based learning with dense retrieval, employing carefully designed prompts to guide the model in generating more discriminative representations. These approaches illustrate the growing shift toward generative retrieval frameworks that combine aspects of traditional retrieval with neural sequence modeling.
+
+\textbf{Benchmarks} such as \textbf{MS MARCO Passage Ranking}~\cite{msmarco} and \textbf{Natural Questions (NQ)}~\cite{naturalquestions} are commonly used to evaluate Dense retrievers.
+ MS MARCO consists of web search queries with passage relevance annotations, while NQ features real-world questions paired with relevant Wikipedia passages. These datasets provide diverse and realistic challenges, making them essential for assessing retrieval effectiveness and advancing research in dense retrieval.",0,0,0.0
+/Users/ksen/work/kiss/.kiss-worktrees/kiss_wt-1783742102-28c05696/deepscholar_bench_workdir/outputs/results/53,"STAR-Rec: Making Peace with Length Variance and Pattern Diversity in
+  Sequential Recommendation","Recent deep sequential recommendation models often struggle to effectively
+model key characteristics of user behaviors, particularly in handling sequence
+length variations and capturing diverse interaction patterns. We propose
+STAR-Rec, a novel architecture that synergistically combines preference-aware
+attention and state-space modeling through a sequence-level mixture-of-experts
+framework. STAR-Rec addresses these challenges by: (1) employing
+preference-aware attention to capture both inherently similar item
+relationships and diverse preferences, (2) utilizing state-space modeling to
+efficiently process variable-length sequences with linear complexity, and (3)
+incorporating a mixture-of-experts component that adaptively routes different
+behavioral patterns to specialized experts, handling both focused
+category-specific browsing and diverse category exploration patterns. We
+theoretically demonstrate how the state space model and attention mechanisms
+can be naturally unified in recommendation scenarios, where SSM captures
+temporal dynamics through state compression while attention models both similar
+and diverse item relationships. Extensive experiments on four real-world
+datasets demonstrate that STAR-Rec consistently outperforms state-of-the-art
+sequential recommendation methods, particularly in scenarios involving diverse
+user behaviors and varying sequence lengths.","# Related Work
+
+## Sequential Recommendation with Recurrent and Attentive Architectures
+
+Deep sequential recommendation has evolved rapidly from recurrent models to attention-based architectures. GRU4Rec 1 pioneered the use of gated recurrent units for session-based recommendation, encoding user histories left-to-right into hidden states. With the rise of the Transformer [1], self-attention was quickly adapted to next-item prediction: SASRec 3 demonstrated that a causal self-attentive encoder can outperform RNN and CNN baselines while remaining efficient, and BERT4Rec 4 further improved representation quality by adopting a bidirectional masked language modeling (""Cloze"") objective. More recently, Transformer-based approaches have been pushed to industrial scale by RecFormer 5, which treats items as textual descriptions to learn language-model-style sequence representations, and by HSTU 6, which reformulates recommendation as generative sequential transduction with trillion-parameter transducers. Despite their strong performance, these attention-based models suffer from quadratic complexity in the sequence length and often struggle with users whose behavior spans highly diverse item categories.
+
+## Attention Alternatives and Frequency-Domain Models
+
+To mitigate the shortcomings of vanilla self-attention, several works redesign the token-mixing layer for recommendation. FMLP-Rec 7 shows that an all-MLP filter operating in the frequency domain can match or surpass Transformer baselines while denoising sparse behavior signals. FEARec 8 hybridizes time- and frequency-domain attention with a frequency-based contrastive objective to capture both low- and high-frequency user preferences. LRURec 9 revisits recurrence through linear recurrent units, providing parallel training and linear-time inference. Our preference-aware attention builds on this line of work, but explicitly disentangles similar-item and diverse-preference signals rather than uniformly mixing tokens.
+
+## State-Space Models for Sequential Recommendation
+
+The recent success of structured state-space models (S4 [2]) and the selective state-space Mamba architecture [3] has motivated a wave of SSM-based sequential recommenders that process variable-length histories in linear time. Mamba4Rec 12 was the first to import selective SSMs into sequential recommendation, demonstrating a favorable effectiveness–efficiency tradeoff over RNN and attention baselines. RecMamba 13 further exploits Mamba's selective mechanism for lifelong sequential recommendation with very long histories, and SIGMA 14 introduces selective gating on top of Mamba to strengthen partial-order modeling for user behavior. A broader survey of SSMs as Transformer alternatives is given in Mamba-360 15. While these methods excel at compressing temporal dynamics, they do not natively model similarity- and diversity-aware item relations, which motivates our synergistic combination of SSM and preference-aware attention.
+
+## Self-Supervised and Contrastive Sequential Recommenders
+
+A complementary line of work injects self-supervision to alleviate sparsity. CL4SRec 16 augments interaction sequences (crop/mask/reorder) under a contrastive objective, while DuoRec 17 directly addresses representation degeneration by contrasting semantically equivalent sequences. MAERec 18 leverages a graph-based masked autoencoder to distill global item-transition signals into sequential encoders. STAR-Rec is orthogonal to these objectives and can be combined with them.
+
+## Mixture-of-Experts for Adaptive Modeling
+
+Mixture-of-Experts (MoE) architectures enable models to route inputs to specialized sub-modules. The Sparsely-Gated MoE layer 19 established conditional computation over thousands of experts, and Switch Transformer [4] scaled this idea to trillion-parameter language models with a simplified top-1 routing scheme. Inspired by these designs, STAR-Rec introduces a *sequence-level* MoE that adaptively dispatches heterogeneous behavioral patterns—focused category-specific browsing versus wide-ranging exploration—to experts that specialize in preference-aware attention and state-space modeling, respectively, unifying the strengths of both families under a single architecture.","\noindent\textbf{Transformers and RNNs for Sequential Recommendation}
+Sequential recommendation has evolved significantly from traditional methods to deep learning-based solutions~\cite{Frequency23,DL4,Xavier,sse-pt,zhao2023embedding,FMLP,strec,MLM4Rec,PEPNet,mb-str,lightsan,autoseqrec,HRNN,zhao2023user}. Early approaches like TransRec~\cite{DMAN} and matrix factorization methods~\cite{koren2009matrix} focused on modeling user-item interactions through conventional data mining techniques, but they struggled with capturing multiple user behaviors and faced efficiency challenges with longer sequences. This led to the emergence of deep learning methods, particularly Transformers and RNNs. Transformer-based models like SASRec~\cite{Kang01} leveraged multi-head attention mechanisms for sequence modeling, while BERT4Rec~\cite{bert4rec} employed bidirectional transformers to capture contextual information. LinRec~\cite{Linrec} further improved efficiency by introducing linear complexity attention mechanisms. Despite their effectiveness, these transformer-based models suffer from quadratic computational complexity when modeling long sequences. RNN-based approaches like GRU4Rec~\cite{GRU4Rec} provided linear computational complexity but showed limited effectiveness in sequential recommendations. To address this, STAR-Rec combines preference-aware attention and state-space modeling to handle variable-length sequences while maintaining efficiency.
+
+\noindent\textbf{State Space Models for Sequential Recommendation}
+Recently, state-space-models (SSMs) have demonstrated remarkable effectiveness in sequence modeling tasks due to their superior capability in capturing temporal dynamics and hidden patterns~\cite{GLINTours25,HiPPOs21,16Dual,gu2023mamba,qu2024survey,dao2024transformers,MambaRec,wang2024echomamba4rec,cao2024mamba4kt,liu2024bidirectional,yang2024uncovering,Visionzhu}. Mamba4Rec~\cite{mamba4rec} pioneered this direction by demonstrating improved efficiency while maintaining competitive performance through its selective state space modeling. Following this, ECHO-Mamba4Rec~\cite{wang2024echomamba4rec} advanced the field by combining bidirectional Mamba with frequency-domain filtering for more accurate pattern capture. RecMamba~\cite{yang2024uncovering} demonstrated Mamba's capability in handling lifelong scenarios, while Mamba4KT~\cite{cao2024mamba4kt} adapted the architecture for knowledge tracing applications. Most recently, SIGMA~\cite{liu2024bidirectional} attempted to address Mamba's limitations in context modeling and short sequence handling through a bi-directional structure with selective gating mechanisms. These approaches face challenges in balancing long/short-term sequence modeling and pattern diversity in recommendation scenarios. STAR-Rec addresses this through preference-aware attention and state-space modeling via sequence-level mixture-of-experts, effectively handling diverse item relationships and varying sequence patterns.",0,0,0.0
+/Users/ksen/work/kiss/.kiss-worktrees/kiss_wt-1783742102-28c05696/deepscholar_bench_workdir/outputs/results/54,Graph Spectral Filtering with Chebyshev Interpolation for Recommendation,"Graph convolutional networks have recently gained prominence in collaborative
+filtering (CF) for recommendations. However, we identify potential bottlenecks
+in two foundational components. First, the embedding layer leads to a latent
+space with limited capacity, overlooking locally observed but potentially
+valuable preference patterns. Also, the widely-used neighborhood aggregation is
+limited in its ability to leverage diverse preference patterns in a
+fine-grained manner. Building on spectral graph theory, we reveal that these
+limitations stem from graph filtering with a cut-off in the frequency spectrum
+and a restricted linear form. To address these issues, we introduce ChebyCF, a
+CF framework based on graph spectral filtering. Instead of a learned embedding,
+it takes a user's raw interaction history to utilize the full spectrum of
+signals contained in it. Also, it adopts Chebyshev interpolation to effectively
+approximate a flexible non-linear graph filter, and further enhances it by
+using an additional ideal pass filter and degree-based normalization. Through
+extensive experiments, we verify that ChebyCF overcomes the aforementioned
+bottlenecks and achieves state-of-the-art performance across multiple
+benchmarks and reasonably fast inference. Our code is available at
+https://github.com/chanwoo0806/ChebyCF.","# Related Work
+
+## Classical and Neural Collaborative Filtering
+Collaborative filtering (CF) has traditionally relied on latent-factor models that learn low-dimensional embeddings from user–item interactions. Bayesian Personalized Ranking [1](https://arxiv.org/abs/1205.2618) introduced the pairwise ranking objective that has become a standard training signal for implicit-feedback CF, while Neural Collaborative Filtering [2](https://arxiv.org/abs/1708.05031) generalized inner-product matrix factorization by replacing it with multi-layer perceptrons over user and item embeddings. Despite their success, these approaches treat interactions as isolated points and cannot directly exploit the higher-order connectivity that emerges in the user–item bipartite graph.
+
+## Graph-based Collaborative Filtering
+To capture such connectivity, graph convolutional networks (GCNs) have been widely adopted. GC-MC [3](https://arxiv.org/abs/1706.02263) frames CF as link prediction on a bipartite graph via a graph auto-encoder, and PinSage [4](https://arxiv.org/abs/1806.01973) scales this idea to web-scale item graphs using neighborhood sampling. NGCF [5](https://arxiv.org/abs/1905.08108) explicitly propagates embeddings through multiple hops to inject high-order collaborative signals, and LightGCN [6](https://arxiv.org/abs/2002.02126) simplifies NGCF by discarding feature transformation and non-linearities, showing that linear neighborhood aggregation alone yields the largest gains. Follow-up works pursue further simplification and robustness: LR-GCCF [7](https://arxiv.org/abs/2001.10167) adds residual linear propagation, and UltraGCN [8](https://arxiv.org/abs/2110.15114) approximates infinite-layer propagation with a constraint-based loss. Self-supervised extensions such as SGL [9](https://arxiv.org/abs/2010.10783) and SimGCL [10](https://arxiv.org/abs/2112.08679) improve representation quality through graph or embedding-level contrastive augmentations. Nevertheless, all of these methods depend on a learned embedding layer whose latent dimension inherently bounds the spectral capacity of the model, and their neighborhood aggregation is restricted to a low-order linear polynomial of the adjacency matrix.
+
+## Spectral Graph Neural Networks
+Our work is grounded in spectral graph theory, following a line of research that formulates graph convolutions as filtering in the graph Fourier domain. ChebNet [11](https://arxiv.org/abs/1606.09375) approximates spectral filters with Chebyshev polynomials of the Laplacian to obtain fast, localized convolutions, and the widely-used GCN [12](https://arxiv.org/abs/1609.02907) reduces this to a first-order low-pass filter. SGC [13](https://arxiv.org/abs/1902.07153) further removes non-linearities, showing that repeated smoothing already captures much of the signal. More expressive spectral designs have since been proposed: GPR-GNN [14](https://arxiv.org/abs/2006.07988) learns generalized PageRank coefficients that adapt across the frequency spectrum, BernNet [15](https://arxiv.org/abs/2106.10994) parameterizes arbitrary filters via Bernstein basis, and ChebNetII [16](https://arxiv.org/abs/2202.03580) revisits Chebyshev approximation with interpolation at Chebyshev nodes to overcome the Runge phenomenon and negative-response issues of the original ChebNet. Related analyses [17](https://arxiv.org/abs/1906.02174) argue that flexible multi-scale filters mitigate over-smoothing that plagues stacked low-pass GCNs. Our ChebyCF adopts Chebyshev interpolation in the CF setting to realize a non-linear, spectrum-wide filter rather than a truncated low-pass one.
+
+## Spectral and Filter-based Recommendation
+A parallel thread applies spectral filtering directly to the user–item interaction matrix. SpectralCF [18](https://arxiv.org/abs/1808.10523) performs convolution in the graph spectral domain to alleviate cold start. GF-CF [19](https://arxiv.org/abs/2108.07567) shows analytically that many GCN-based recommenders — including LightGCN — reduce to low-pass graph filters, and proposes a closed-form filter that is competitive with deep models. BSPM [20](https://arxiv.org/abs/2211.09324) extends this view by casting recommendation as a blurring–sharpening process governed by differential equations over the interaction signal. These training-free, embedding-free filters demonstrate that raw interaction histories carry rich signal, motivating our design of ChebyCF, which retains the raw interaction input, approximates a flexible non-linear filter via Chebyshev interpolation, and augments it with an ideal-pass component and degree-based normalization to overcome the frequency cut-off and linear-form limitations identified in prior GCN-based CF.
+","\textbf{Graph Neural Networks.}
+Beside random-walk based approaches \cite{perozziDeepwalk2014, groverNode2vecScalableFeature2016, huangGraphRecurrentNetworks2019, nikolentzosRandomwalkgraphneuralnetworks2020, jinRawgnn2022, wangNonConvGNN2024}, there are two primary approaches in Graph Neural Networks (GNNs): spatial and spectral
+graph convolutions.
+Spatial graph convolution defines convolution in the vertex domain.
+GCN \cite{kipfSemiSupervisedClassificationGraph2017} simplifies graph spectral convolutions using only the first-order linear filters, equivalent to the spatial convolution of 1-hop neighbor aggregation.
+SGC \cite{wuSimplifyingGraphConvolutional2019} reduces its computational complexity by removing its redundant feature transformations.
+More recent works have expanded GCNs to a broader range of applications \cite{hamiltonInductiveRepresentationLearning2017, gilmerNeuralMessagePassing2017, velickovicDeepGraphInfomax2018, xuHowPowerfulAre2019}.
+
+Spectral graph convolution relies on costly Laplacian eigendecomposition to perform convolution in the spectral domain, triggering the development of numerous polynomial approximations to circumvent this issue.
+ChebNet \cite{defferrardConvolutionalNeuralNetworks2016}, for example, adopts a Chebyshev basis.
+GPR-GNN \cite{chienAdaptiveUniversalGeneralized2021} and BernNet \cite{heBernNetLearningArbitrary2021} utilize the monomial and Bernstein basis, respectively.
+ChebNetII \cite{chenRevisitingGraphBased2020} presents an improved model using Chebyshev interpolation, which reduces the Runge phenomenon.
+Inspired by the strong performance of graph filtering using polynomial approximations in the node classification task, we design ChebyCF—a graph filter utilizing Chebyshev interpolation, specifically adapted to the context of collaborative filtering, including the elimination of heavy node-wise feature transformations.
+
+
+\vspace{0.1cm} \noindent
+\textbf{Graph-based Recommendations.}
+Interpreting the user-item interaction as a graph, GNNs have been extensively explored in collaborative filtering.
+After GCNs are applied to CF for the first time \cite{wangNeuralGraphCollaborative2019}, several following studies \cite{chenRevisitingGraphBased2020, heLightGCNSimplifyingPowering2020} have shown that the inherent complexity of GCNs is less suitable for CF.
+This is because CF relies only on the user-item interaction data without any feature information.
+To address this, several attempts to simplify the model structure have been made \cite{maoUltraGCNUltraSimplification2021, heSGCF2023}.
+There are also various approaches \cite{sunNeighborInteractionAware2020, wangDisentangledGraphCollaborative2020, liuInterestawareMessagePassingGCN2021, kongLinearNonLinearThat2022, fanGraphTrendFiltering2022, guoJGCF2023, wangCollaborationAwareGraphConvolutional2023, zhuGiffCF2024,jinri2024content,eungi2025reducedgcn} to capture important information from the user-item interaction graph.
+Additionally, there have been attempts \cite{wuSelfsupervisedGraphLearning2021, xiaHypergraphContrastiveCollaborative2022, linImprovingGraphCollaborative2022, jiangAdaptiveGraphContrastive2023} to overcome the sparsity of interaction data by leveraging graph contrastive learning.
+
+While many of the aforementioned studies have proposed GCN-based models with spatial convolution, there are also GSF-based approaches utilizing spectral convolution \cite{zhengSpectralCollaborativeFiltering2018, shenHowPowerfulGraph2021, fuRevisitingNeighborhoodbasedLink2022, liuPersonalizedGraphSignal2023, pengSGFCF2024, park2024turbo}.
+LinkProp \cite{fuRevisitingNeighborhoodbasedLink2022} interprets CF from the perspective of the graph link prediction task.
+GF-CF \cite{shenHowPowerfulGraph2021} highlights that the power of existing spatial convolution approaches lies in their low-pass filtering capabilities from the spectral filtering perspective.
+PGSP \cite{liuPersonalizedGraphSignal2023} builds on GF-CF by augmenting both the input signal and graph.
+SGFCF \cite{pengSGFCF2024} further enhances GF-CF through the introduction of a new graph normalization technique and individualized filtering.
+Nevertheless, the form of graph filters has largely remained linear, with limited attention given to enabling more flexible formulations. Our method addresses this by leveraging Chebyshev interpolation with a graph filter that is both flexible and computationally efficient.",0,0,0.0
