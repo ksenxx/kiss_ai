@@ -3596,7 +3596,19 @@ class RemoteAccessServer:
         self.use_tunnel = use_tunnel
         self.tunnel_token = tunnel_token
         self.tunnel_url = tunnel_url
-        self._ssl_context: ssl.SSLContext = _create_ssl_context(certfile, keyfile)
+        # SSL context is deliberately NOT built in ``__init__`` — it
+        # costs ~0.5-2 s (cert load / RSA keygen on first boot or on
+        # near-expiry renewal) and would delay every listener bind by
+        # that much on the startup critical path.  Instead the cert /
+        # key paths are stashed here and the context is built inside
+        # :meth:`_setup_server` on a worker thread while the UDS
+        # listener (which does not need TLS) binds in parallel.  This
+        # is what makes ``install.sh`` see ``~/.kiss/sorcar.sock``
+        # within ~100 ms after ``launchctl kickstart`` even when the
+        # WSS listener is still waiting on ``load_cert_chain``.
+        self._ssl_certfile: str | None = certfile
+        self._ssl_keyfile: str | None = keyfile
+        self._ssl_context: ssl.SSLContext | None = None
         # Path to the JSON file used to publish the active URL.  Tests
         # override this to a per-test temporary path to avoid racing
         # the live ``~/.kiss/remote-url.json`` watched by the VS Code
@@ -6637,6 +6649,51 @@ class RemoteAccessServer:
         self._loop = asyncio.get_running_loop()
         self._printer._loop = self._loop
 
+        # Bind the local Unix-domain socket FIRST — before the WSS
+        # listener, before the SSL context, before anything that could
+        # take non-trivial time.  ``install.sh`` /
+        # ``build-extension.sh`` poll for ``~/.kiss/sorcar.sock`` to
+        # decide whether the freshly-launched daemon is back; giving
+        # them a bound UDS within ~100 ms of ``launchctl kickstart``
+        # is what makes the "KISS Sorcar Server is starting …"
+        # overlay disappear promptly.  UDS bind does not depend on
+        # ``self._ssl_context`` (local peers authenticate via
+        # filesystem permissions), so it can run on the fast path.
+        try:
+            self._uds_path.parent.mkdir(parents=True, exist_ok=True)
+            if self._uds_path.exists() or self._uds_path.is_symlink():
+                try:
+                    self._uds_path.unlink()
+                except OSError:
+                    logger.debug(
+                        "Could not unlink stale UDS socket at %s",
+                        self._uds_path, exc_info=True,
+                    )
+            self._uds_server = await asyncio.start_unix_server(
+                self._uds_handler, path=str(self._uds_path),
+                limit=_MAX_LINE_BYTES,
+            )
+            os.chmod(self._uds_path, 0o600)
+        except Exception:
+            logger.warning(
+                "Failed to bind UDS at %s; local extension clients "
+                "will fall back to WSS",
+                self._uds_path, exc_info=True,
+            )
+            self._uds_server = None
+
+        # Build the SSL context on a worker thread while the WSS
+        # bind retry loop below awaits it.  ``load_cert_chain`` (and
+        # RSA keygen on a near-expiry auto-generated cert) is CPU-
+        # heavy synchronous work that would otherwise block the
+        # event loop and the UDS accept-path we just bound.
+        if self._ssl_context is None:
+            self._ssl_context = await asyncio.to_thread(
+                _create_ssl_context,
+                self._ssl_certfile,
+                self._ssl_keyfile,
+            )
+
         # Bind the WSS listener with bounded retry on transient
         # ``OSError`` (most often ``EADDRINUSE`` lingering from a
         # previous instance still in ``TIME_WAIT`` during a fast
@@ -6709,31 +6766,9 @@ class RemoteAccessServer:
             )
             raise SystemExit(2)
 
-        # Bind the local Unix-domain socket for the VS Code extension.
-        # File permissions (mode 0o600) restrict access to the owning
-        # user, replacing the WSS password challenge for local peers.
-        try:
-            self._uds_path.parent.mkdir(parents=True, exist_ok=True)
-            if self._uds_path.exists() or self._uds_path.is_symlink():
-                try:
-                    self._uds_path.unlink()
-                except OSError:
-                    logger.debug(
-                        "Could not unlink stale UDS socket at %s",
-                        self._uds_path, exc_info=True,
-                    )
-            self._uds_server = await asyncio.start_unix_server(
-                self._uds_handler, path=str(self._uds_path),
-                limit=_MAX_LINE_BYTES,
-            )
-            os.chmod(self._uds_path, 0o600)
-        except Exception:
-            logger.warning(
-                "Failed to bind UDS at %s; local extension clients "
-                "will fall back to WSS",
-                self._uds_path, exc_info=True,
-            )
-            self._uds_server = None
+        # NOTE: UDS bind moved to the very top of ``_setup_server``
+        # so ``install.sh`` sees ``~/.kiss/sorcar.sock`` within
+        # ~100 ms even when WSS bind / SSL cert build are slow.
 
         tunnel_url: str | None = None
         if self.use_tunnel:

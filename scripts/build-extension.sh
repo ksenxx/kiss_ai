@@ -60,8 +60,24 @@ npm run package
 # ``ELECTRON_RUN_AS_NODE=1`` re-execs Electron).  Stripping just the two
 # noise lines via stderr ``grep -v`` keeps real errors visible and
 # preserves ``$CODE``'s exit code.
+# Historically this used process substitution
+# (``2> >(grep -v ... >&2)``) to filter the stderr noise inline.  That
+# variant made ``build-extension.sh`` appear to hang after
+# ``code --install-extension`` completed on some macOS setups: when VS
+# Code auto-reloads the extension host in response to the install, it
+# occasionally SIGHUPs the terminal group containing this script,
+# which strands the process-substitution subshell (still holding the
+# pipe FD) even though its parent grep already exited.  Bash then
+# waits on the subshell forever.  Redirect through a tempfile
+# instead — outer shell never blocks on a background subshell.
 code_quiet() {
-    "$CODE" "$@" 2> >(grep -v -E 'DEP0169|url\.parse\(\)|trace-deprecation' >&2)
+    local tmp
+    tmp="$(mktemp -t kiss-code-quiet.XXXXXX)"
+    local rc=0
+    "$CODE" "$@" 2>"$tmp" || rc=$?
+    grep -v -E 'DEP0169|url\.parse\(\)|trace-deprecation' "$tmp" >&2 || true
+    rm -f "$tmp"
+    return "$rc"
 }
 
 echo "==> Installing extension..."
