@@ -1,0 +1,23 @@
+--- /Users/ksen/work/kiss/.kiss-worktrees/kiss_wt-1783740774-c8b091b0/cleverest_plus/benchmark/sources/tokread_safe.c	2026-07-10 20:41:38
++++ /Users/ksen/work/kiss/.kiss-worktrees/kiss_wt-1783740774-c8b091b0/cleverest_plus/benchmark/sources/tokread_bug.c	2026-07-10 20:41:47
+@@ -1,5 +1,5 @@
+ /* tokread: reads a JSON-like input and expects a "value":"..." field.
+- * SAFE variant: only frees the value buffer at end of program.
++ * BUG variant: RESET frees the buffer, PRINT then reads freed memory (UAF).
+  */
+ #include <stdio.h>
+ #include <stdlib.h>
+@@ -37,10 +37,11 @@
+ 
+     /* Command: RESET; PRINT sequence. */
+     if (strstr(buf, "RESET")) {
+-        /* SAFE: reset does NOT free the value here. */
++        free(g_value);
++        /* BUG: dangling pointer left in place. */
+     }
+     if (strstr(buf, "PRINT")) {
+-        if (g_value) printf("value=%s\n", g_value);
++        if (g_value) printf("value=%s\n", g_value);   /* UAF read */
+     }
+ 
+     free(g_value);
