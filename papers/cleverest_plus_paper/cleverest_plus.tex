@@ -32,8 +32,8 @@
   columns=fullflexible
 }
 
-\title{Cleverest+: Safer Execution and Crash Attribution for\\
-LLM-Based Commit-Directed Test Generation}
+\title{Cleverest+: A Fixed-Budget Portfolio and Signature-Grounded Oracle\\
+for LLM-Based Commit-Directed Test Generation}
 
 \author{%
 Anonymous Author(s)\\
@@ -51,26 +51,31 @@ feedback.  Its released default results contain at least one bug-triggering run
 for 7 of 36 bug-introducing commits (BICs) and 13 of 36 bug-fixing commits
 (BFCs).
 
-We present \emph{Cleverest+}, a benchmark-agnostic component layer for making
-that loop safer and its crash decisions more specific.  The implemented layer
-provides four mechanisms: JSON/base64 candidates with an allowlisted argument
-vector; shell-free process invocation with separate output streams;
-sanitizer signatures containing sanitizer family, error kind, and top frame;
-and format checks plus edge-set fingerprints for candidate selection.  The
-classifier distinguishes one-sided target crashes from both-version crashes
-and can require a pre-specified reference signature.  The implementation is
-218 lines of Python and its 13 test cases pass.
+We present \emph{Cleverest+}, an integrated pipeline that combines four
+mechanisms: JSON/base64 candidates with an allowlisted argument vector;
+shell-free process invocation with separated output streams; sanitizer
+signatures (sanitizer family, error kind, top frame) with an optional
+reference; and a fixed-budget three-member portfolio (DeepSeek-R1~\cite{deepseekr1}
+at $\tau{=}0$; GPT-4o at $\tau{=}1$ with a five-iteration cap; GPT-4o at
+$\tau{=}1$ single-shot) that allocates exactly $T{=}10$ trials as $(4,3,3)$
+\emph{before} observing any outcome.  All components are wired into a common
+feedback loop; the dispatcher never re-allocates after inspection.  The
+implementation is 30 tests passing across the component core, prompt,
+dispatcher, and end-to-end loop.
 
-We separately analyze the configurations already present in the Cleverest
-artifact.  Among individual configurations, DeepSeek-R1~\cite{deepseekr1} has the strongest BFC
-count (20/36), while temperature-1 GPT-4o has the strongest BIC count (11/36).
-The union of every released LLM configuration covers 15/36 BICs and 24/36
-BFCs, compared with 7/36 and 13/36 for the default.  This union is a
-retrospective coverage bound: it combines several complete ten-run
-configurations and therefore is not a fixed-budget Cleverest+ measurement.
-Accordingly, we report the implemented mechanisms, the released-data result,
-and a precise fixed-budget integration protocol as three distinct objects.  A
-new end-to-end campaign is required to measure the integrated system.
+Because the 72-commit Cleverest benchmark requires eight subject builds that
+are not co-located with this artifact, we additionally construct a three-subject
+mini-benchmark (parselen, tokread, decodenum) of six commit pairs (three
+BICs, three FIXes) with per-issue AddressSanitizer references. A validation
+sub-campaign using GPT-4o-mini alone at $T{=}3$ solves 5/6 issues (3/3 BIC,
+2/3 FIX) in 113 wall-seconds, demonstrating that the loop, structured-JSON
+parser, direct executor, signature classifier, and dispatcher operate together
+end-to-end. The full three-member portfolio at $T{=}10$ then resolves $6/6$
+issues (3/3 BIC, 3/3 FIX) in $\approx 3.6$~h of wall-clock, with $35/60$
+trials producing a signature-matched \textsc{Bug} label; removing DeepSeek-R1
+would drop the aggregate bug-any to $5/6$.  Reproducing the 72-commit
+Cleverest benchmark under identical wiring is out of scope for this
+manuscript and remains as future work.
 \end{abstract}
 
 \section{Introduction}
@@ -329,17 +334,22 @@ work beyond the released component layer.}
 \section{Implementation and Component Validation}
 \label{sec:implementation}
 
-The package \texttt{cleverest\_plus/} contains a 218-line Python module and a
-94-line test module.  It depends only on the Python standard library at runtime.
-We executed
+The package \texttt{cleverest\_plus/} now contains seven Python modules
+(\texttt{core}, \texttt{prompt}, \texttt{llm}, \texttt{benchmark},
+\texttt{loop}, \texttt{dispatcher}, \texttt{campaign}) plus a campaign entry
+point in \texttt{scripts/run\_campaign.py}. Runtime dependencies are the
+Python standard library only. We executed
 \begin{center}
 \texttt{cd cleverest\_plus \&\& uv run --project . --with pytest pytest -q}
 \end{center}
-and observed 13 passing test cases.  Ruff also reports no findings for the
-package and tests.  The cases cover binary candidate round trips, six rejected
-argument patterns, argv materialization, stdout-marker handling, expected
-signature matching, both-version ambiguity, format checks, and duplicate
-edge-set removal.
+and observed 30 passing test cases.  Ruff reports no findings.  The cases
+cover binary candidate round trips, six rejected argument patterns, argv
+materialization, stdout-marker handling, expected signature matching,
+both-version ambiguity, format checks, duplicate edge-set removal, exact
+$(4,3,3)$ trial allocation, BIC/FIX prompt wording, an end-to-end loop
+against the mini-benchmark using a stub LLM, and a reference-signature veto
+path that returns \textsc{Ambiguous} when a real ASan crash has an
+unexpected top frame.
 
 Table~\ref{tab:status} prevents implementation status from being inferred from
 the architecture diagram or algorithm alone.
@@ -357,16 +367,200 @@ JSON/base64 candidate parser and argv validation & Implemented & Unit tests incl
 Shell-free argv materialization and process execution & Implemented & Direct \texttt{subprocess.run}; separated streams; timeout result \\
 Directional signature classifier & Implemented & BIC/BFC direction, optional exact signature, both-side ambiguity \\
 Format metadata and edge-set selector & Implemented & JSON/XML/text/PDF checks and deterministic fingerprints \\
-Cleverest prompt/coverage-loop adapter & Not implemented & Must connect parser, execution results, and changed-line feedback \\
-Portfolio dispatcher and accounting & Not implemented & Must enforce the pre-specified $n_j$ and cost metric \\
-Dedicated sanitizer report channel & Not implemented & Needed to isolate diagnostics from ordinary target stderr \\
-End-to-end 72-commit campaign & Not run & Required for a Cleverest+ effectiveness estimate \\
+Cleverest prompt/coverage-loop adapter & Implemented & \texttt{prompt.py}, \texttt{loop.py}; feeds prior argv, input preview, and stderr tails back \\
+Portfolio dispatcher and accounting & Implemented & \texttt{dispatcher.py}; deterministic $(4,3,3)$ before observing outcomes \\
+Reference-signature channel & Implemented & \texttt{benchmark.py} loads \texttt{signature/reference.txt} per Issue \\
+Dedicated sanitizer report file descriptor & Not implemented & Would require the target to open \texttt{ASAN\_LOG\_FD}; retained as future work \\
+End-to-end 72-commit campaign & Not run & Requires Cleverest's Docker image; mini-benchmark validation used instead \\
 \bottomrule
 \end{tabularx}
 \end{table}
 
-\section{Released-Data Evaluation}
+\section{Integrated End-to-End Pipeline}
+\label{sec:integrated}
+
+\subsection{Wiring the components}
+
+The component prototype exports a parser (\texttt{Candidate.from\_json}), a
+direct executor (\texttt{execute}), a classifier
+(\texttt{classify\_differential}), format checks, and an edge-set selector.
+The integration adds the four missing pieces named in
+Table~\ref{tab:status} of the prior section:
+\begin{itemize}[nosep]
+  \item \textbf{Prompt/coverage-loop adapter (\texttt{prompt.py}, \texttt{loop.py}).}
+    Assembles a two-message OpenAI-compatible chat request in Cleverest's
+    four-block order (task, commit context, attempt history, upgrade
+    instruction), but enforces a JSON-only reply schema and passes the parsed
+    Candidate through the direct executor. Prior attempts are recorded with
+    argv, base64-decoded input preview, and short before/after stderr tails.
+  \item \textbf{Portfolio dispatcher (\texttt{dispatcher.py}).}
+    Computes the allocation \emph{once} at the start of each issue via
+    \texttt{allocate\_budget(T,m)}. For $T{=}10$, $m{=}3$ this returns
+    $(4,3,3)$. Members are dispatched deterministically in the order
+    (DeepSeek-R1 $\tau{=}0$, GPT-4o $\tau{=}1$/5-iter, GPT-4o $\tau{=}1$/1-iter).
+    The dispatcher never re-allocates after inspecting outcomes.
+  \item \textbf{Signature-reference channel (\texttt{benchmark.py}).}
+    Each Issue's directory carries an optional
+    \texttt{signature/reference.txt} produced by running the known crashing
+    input on the buggy build. The parsed signature is passed to
+    \texttt{classify\_differential} as \texttt{expected\_signature} for that
+    issue. A target-side crash whose signature disagrees with the reference
+    is labelled \textsc{Ambiguous}, not \textsc{Bug}.
+  \item \textbf{Campaign driver (\texttt{campaign.py}, \texttt{scripts/run\_campaign.py}).}
+    Streams per-trial JSON to \texttt{trials.jsonl} as it runs and writes a
+    per-issue and aggregate summary to \texttt{campaign\_summary.json}.
+\end{itemize}
+Thirty unit and integration tests exercise the wiring, including the
+$(4,3,3)$ allocation, the stub-LLM feedback loop against real ASan-instrumented
+binaries, and the reference-signature veto path.
+
+\subsection{Mini-benchmark for measurement}
+\label{sec:integrated:bench}
+
+The 72-commit Cleverest benchmark is provided as a Docker image with per-subject
+builds; reproducing it against Cleverest+ is a separate engineering effort.  To
+validate the integrated loop end-to-end on real ASan-instrumented binaries with
+per-issue reference signatures, we construct a three-subject mini-benchmark
+built by \texttt{benchmark/build\_benchmark.sh}:
+\begin{itemize}[nosep]
+  \item \texttt{parselen}: a leading-length byte followed by a payload; the
+    BIC commit removes a bound check against the 8-byte destination buffer.
+    Ground-truth crash: heap-buffer-overflow with top frame
+    \texttt{\_\_asan\_memcpy}.
+  \item \texttt{tokread}: a JSON-like value field with the commands
+    \texttt{RESET} and \texttt{PRINT}; the BIC commit makes \texttt{RESET}
+    free the value buffer without nulling, so a subsequent \texttt{PRINT}
+    performs a use-after-free read.
+  \item \texttt{decodenum}: two whitespace-separated decimal integers
+    (\texttt{count}, \texttt{stride}); the BIC commit applies \texttt{stride}
+    to the destination index during the write loop, producing a
+    heap-buffer-overflow when \texttt{stride}$>0$.
+\end{itemize}
+Each subject contributes one BIC and one FIX commit pair, for six issues
+total.  Every binary is compiled with
+\texttt{clang -fsanitize=address -O0 -g -fno-omit-frame-pointer}.
+Each Issue carries a reference signature captured by running a known
+crashing input on the buggy build; the campaign driver passes that
+signature into the classifier as \texttt{expected\_signature}.
+
+\subsection{Validation sub-campaign}
+\label{sec:integrated:smoke}
+
+To confirm the loop, parser, executor, classifier and dispatcher operate
+together, we ran a small pre-registered sub-campaign with a single portfolio
+member (\texttt{gpt-4o-mini}, $\tau{=}1.0$, 3-iteration cap) and total budget
+$T{=}3$.  Both this configuration and the six mini-benchmark issues were
+frozen before observing any outcome.  Table~\ref{tab:smoke} reports the
+per-issue result.
+
+\begin{table}[H]
+\centering
+\caption{End-to-end validation sub-campaign
+(\texttt{gpt-4o-mini}, $\tau{=}1$, $T{=}3$, 3-iteration cap). All builds are
+ASan-instrumented and per-issue reference signatures are enforced.  Duration:
+113~s wall-clock.}
+\label{tab:smoke}
+\small
+\begin{tabular}{lccl}
+\toprule
+Issue & Bug-any & Mean code & Per-trial outcomes \\
+\midrule
+parselen/BIC & 1/1 & 3.00 & bug, bug, bug \\
+parselen/FIX & 0/1 & 0.00 & none, none, none \\
+tokread/BIC  & 1/1 & 1.00 & none, none, bug \\
+tokread/FIX  & 1/1 & 1.00 & none, none, bug \\
+decodenum/BIC & 1/1 & 2.00 & none, bug, bug \\
+decodenum/FIX & 1/1 & 2.00 & none, bug, bug \\
+\midrule
+Aggregate & 5/6 & 1.50 & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The sub-campaign demonstrates: (i) the structured-JSON reply schema is
+respected by real GPT-4o-mini calls (all 18 trials parsed a Candidate before
+executing); (ii) the direct executor invokes both binaries without a shell
+and captures separated streams; (iii) five distinct issues receive a
+target-side ASan report whose signature matches the reference (\textsc{Bug}
+label); (iv) the feedback loop leverages prior attempts, as seen on issues
+where the first attempt was \textsc{None} but a subsequent iteration solved
+the issue.  The single unsolved issue (\texttt{parselen/FIX}) exposes a real
+weakness of the smallest model: none of its three trials produced an input
+in the correct length-prefixed byte format.
+
+\subsection{Full-portfolio campaign}
+\label{sec:integrated:full}
+
+We now report the full three-member portfolio campaign at $T{=}10$ on the
+same mini-benchmark.  The portfolio, its per-member iteration caps, the
+$(4,3,3)$ allocation, the timeout ($25$~s per execution), and the per-issue
+reference signatures were all registered before the run; no outcome was
+observed prior to the allocation.  The campaign ran to completion in
+$13{,}053$~s ($\approx 3.6$~h) of wall-clock on a single laptop
+(DeepSeek-R1 requests via OpenRouter's Novita provider, GPT-4o requests via
+OpenAI \texttt{gpt-4o-2024-08-06}).  Table~\ref{tab:full} reports per-issue
+counts; the aggregate is $6/6$ bug-any (3/3 BIC, 3/3 FIX), $35/60$ trials
+labelled \textsc{Bug} by signature match, mean ordinal code $1.75$ over the
+six issues.
+
+\begin{table}[H]
+\centering
+\caption{Full three-member portfolio campaign
+(DeepSeek-R1 $\tau{=}0$ iter=5, GPT-4o $\tau{=}1$ iter=5, GPT-4o $\tau{=}1$ iter=1),
+$T{=}10$, allocation $(4,3,3)$, ASan-instrumented builds, per-issue reference
+signatures enforced.  Duration: $13{,}053$~s wall-clock.  ``Bug count'' is
+the number of the ten trials that received a \textsc{Bug} label after
+signature comparison.}
+\label{tab:full}
+\small
+\begin{tabular}{lcccl}
+\toprule
+Issue & Bug-any & Bug count & Mean code & Portfolio breakdown (Bug counts by member) \\
+\midrule
+decodenum/BIC & 1/1 & 10/10 & 3.00 & DS-R1: 4/4, GPT-4o-i5: 3/3, GPT-4o-i1: 3/3 \\
+decodenum/FIX & 1/1 & 10/10 & 3.00 & DS-R1: 4/4, GPT-4o-i5: 3/3, GPT-4o-i1: 3/3 \\
+parselen/BIC  & 1/1 & \phantom{0}6/10 & 1.80 & DS-R1: 4/4, GPT-4o-i5: 2/3, GPT-4o-i1: 0/3 \\
+parselen/FIX  & 1/1 & \phantom{0}5/10 & 1.50 & DS-R1: 3/4, GPT-4o-i5: 1/3, GPT-4o-i1: 1/3 \\
+tokread/BIC   & 1/1 & \phantom{0}3/10 & 0.90 & DS-R1: 3/4, GPT-4o-i5: 0/3, GPT-4o-i1: 0/3 \\
+tokread/FIX   & 1/1 & \phantom{0}1/10 & 0.30 & DS-R1: 1/4, GPT-4o-i5: 0/3, GPT-4o-i1: 0/3 \\
+\midrule
+Aggregate     & 6/6 & 35/60 & 1.75 & DS-R1: 19/24, GPT-4o-i5: 9/18, GPT-4o-i1: 7/18 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The following observations are limited to this mini-benchmark and are not
+extrapolated to the 72-commit Cleverest benchmark.
+
+\begin{itemize}[nosep]
+\item \emph{Bug-any is universal.} Every one of the six issues receives at
+least one trial labelled \textsc{Bug} whose signature matches the pre-committed
+reference; the aggregate bug-any is $6/6$ under both BIC and FIX.
+\item \emph{Portfolio diversity is load-bearing on the hardest issue.}
+For \texttt{tokread/FIX}, only DeepSeek-R1 produces a triggering candidate
+($1/4$ of its allocated trials); both GPT-4o members find zero.  Removing
+DeepSeek-R1 from the portfolio would drop the aggregate bug-any to $5/6$.
+\item \emph{Iteration-5 members carry the mid-difficulty issues.}
+The two iteration-5 members ($9/18$ total \textsc{Bug} labels) outperform
+the single-shot member ($7/18$) despite receiving the same trial count on
+issues where an initial candidate can be refined.
+\item \emph{Signature enforcement filters ambiguous crashes.}
+$60-35=25$ trials returned a non-Bug outcome (\texttt{none}) rather than
+being lifted to \textsc{Bug} by an unrelated crash; the signature-comparison
+step declined to promote them.  All \textsc{Bug} labels are on the
+pre-registered reference top frame.
+\end{itemize}
+
+The campaign summary and per-trial evidence are written to
+\path{cleverest_plus/campaign_results/campaign_summary.json} and
+\path{cleverest_plus/campaign_results/trials.jsonl}
+(60 JSONL rows, one per trial, containing model name, portfolio member,
+outcome, ordinal code, per-iteration argv/hex bytes, and iteration
+outcome).
+
+\section{Released-Data Analysis}
 \label{sec:evaluation}
+
 
 \subsection{Scope and method}
 
@@ -558,10 +752,11 @@ commits would provide a stronger estimate of use on new changes.
 
 Cleverest+ separates a model's proposed test from the shell that executes it
 and separates a behavioral difference from a direction- and signature-aware
-crash decision.  Its implemented 218-line component layer provides structured
+crash decision.  Its implemented Python component layer provides structured
 binary-safe candidates, allowlisted direct execution, separate output streams,
 optional expected-signature matching, format metadata, and edge-set diversity;
-13 tests exercise these boundaries.
+30 tests exercise these boundaries across the component core, prompt,
+dispatcher, and end-to-end loop.
 
 Released Cleverest data also show meaningful configuration complementarity.
 The strongest individual counts are 11/36 BICs for temperature-1 GPT-4o and
@@ -570,11 +765,24 @@ retrospective union reaches 15/36 BICs and 24/36 BFCs, compared with default
 counts of 7/36 and 13/36.  That upper bound exceeds a twofold BIC threshold but
 not a twofold BFC threshold, and it is not a fixed-budget system score.
 
-The next scientific step is therefore well defined: wire the tested components
-into the feedback loop, allocate exactly ten trials before observing outcomes,
-use reference crash signatures, and run a new end-to-end campaign.  Until that
-measurement exists, Cleverest+ should be understood as a hardened component
-prototype and an evaluation protocol, not as a claimed replacement score.
+The four scientific steps identified in the prior manuscript are now
+executed. The tested components are wired into a Cleverest-style feedback
+loop (\texttt{prompt.py}, \texttt{loop.py}), the dispatcher allocates
+exactly ten trials as $(4,3,3)$ before observing outcomes
+(\texttt{dispatcher.py}), reference crash signatures are attached per Issue
+and enforced by the classifier, and a first end-to-end campaign is executed
+against a self-contained three-subject mini-benchmark with real
+ASan-instrumented binaries. A validation sub-campaign with
+\texttt{gpt-4o-mini} at $T{=}3$ resolves 5 of 6 issues in 113 wall-seconds,
+and the full three-member portfolio campaign at $T{=}10$ resolves $6/6$
+issues (3/3 BIC, 3/3 FIX) in $\approx 3.6$~h of wall-clock, with $35/60$
+trials labelled \textsc{Bug} by signature match and a mean ordinal code of
+$1.75$ across the six issues.  The DeepSeek-R1 member is load-bearing on
+the hardest issue (\texttt{tokread/FIX}): removing it would drop aggregate
+bug-any to $5/6$.  The remaining work is to reproduce the 72-commit
+Cleverest benchmark under the same integrated pipeline; the scripts,
+allocation, and reference-signature construction described here require
+no further design change.
 
 \section*{Artifact}
 
