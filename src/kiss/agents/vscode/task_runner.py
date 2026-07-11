@@ -488,6 +488,48 @@ class _TaskRunnerMixin:
             )
             return head, hunks, untracked, hashes
 
+    def _broadcast_early_prompts(
+        self, prompt: str, active_file: str | None, tab_id: str,
+    ) -> None:
+        """Broadcast optimistic ``system_prompt``/``prompt`` panels at submit.
+
+        Emitted before the slow pre-run steps (git pre-snapshot,
+        worktree creation, chat-context loading, model/tool setup) so
+        the chat webview shows the submitted prompt and the system
+        prompt right away.  The events are broadcast-only (``taskId:
+        ""`` — never recorded or persisted) and flagged ``early`` so
+        the frontend replaces them in place once the authoritative
+        events from ``KISSAgent.run`` arrive.  The system-prompt text
+        mirrors ``SorcarAgent.run``'s ``system_instructions``
+        (``SYSTEM_PROMPT`` plus the active-editor-file line); the later
+        authoritative event additionally carries the per-run
+        ``IMPORTANT_INSTRUCTIONS`` suffix.
+
+        Args:
+            prompt: The raw user prompt as submitted.
+            active_file: Path of the file open in the editor, if any.
+            tab_id: Frontend tab id that owns the run.
+        """
+        from kiss.core.base import SYSTEM_PROMPT
+
+        system_text = SYSTEM_PROMPT
+        if active_file:
+            system_text += (
+                "\n\n- The path of the file open in the editor is "
+                f"{active_file}"
+            )
+        for etype, text in (
+            ("system_prompt", system_text),
+            ("prompt", prompt),
+        ):
+            self.printer.broadcast({
+                "type": etype,
+                "text": text,
+                "tabId": tab_id,
+                "taskId": "",
+                "early": True,
+            })
+
     def _run_task_inner(self, cmd: dict[str, Any]) -> None:
         """Inner implementation of _run_task (without the status guarantee)."""
         prompt = cmd.get("prompt", "")
@@ -622,6 +664,23 @@ class _TaskRunnerMixin:
             stop_event = tab.stop_event
             use_worktree = tab.use_worktree
         self.printer._thread_local.stop_event = stop_event
+
+        # Show the user's prompt and the system prompt IMMEDIATELY.
+        # The authoritative ``prompt`` / ``system_prompt`` events are
+        # emitted deep inside ``KISSAgent.run`` — AFTER the git
+        # pre-snapshot below, worktree creation, chat-context loading
+        # and model/tool setup — so without this the chat webview shows
+        # an empty tab for the first seconds after submit.  ``taskId:
+        # ""`` keeps these events out of recording/persistence (no
+        # ``task_history`` row exists yet — see
+        # ``JsonPrinter._persist_event``), so a replayed session still
+        # contains exactly one authoritative pair; the explicit
+        # ``tabId`` routes them to the launching tab only; ``early:
+        # True`` lets the frontend REPLACE these optimistic panels in
+        # place when the authoritative events arrive (see the
+        # ``system_prompt``/``prompt`` case in ``media/main.js``)
+        # instead of appending duplicates.
+        self._broadcast_early_prompts(prompt, active_file, tab_id)
 
         # ``chat_id`` initialisation and the ``clear`` broadcast now
         # happen synchronously in ``_cmd_run`` (before the worker
