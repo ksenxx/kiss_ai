@@ -1,0 +1,188 @@
+{
+  "config": {
+    "benchmark_root": "/Users/ksen/work/kiss/.kiss-worktrees/kiss_wt-1783740774-c8b091b0/cleverest_plus/benchmark",
+    "output_dir": "campaign_results",
+    "portfolio": [
+      {
+        "iteration_cap": 5,
+        "name": "deepseek-r1-t0"
+      },
+      {
+        "iteration_cap": 5,
+        "name": "gpt4o-t1-iter5"
+      },
+      {
+        "iteration_cap": 1,
+        "name": "gpt4o-t1-iter1"
+      }
+    ],
+    "timeout_s": 25.0,
+    "total_trials": 10
+  },
+  "counts": {
+    "bic_bug_any": 3,
+    "bic_issues": 3,
+    "fix_bug_any": 3,
+    "fix_issues": 3,
+    "issues": 6
+  },
+  "duration_s": 13053.381515979767,
+  "per_issue": [
+    {
+      "bug_any": 1,
+      "bug_id": "bic-01",
+      "issue_id": "decodenum/bic-01/BIC",
+      "mean_code": 3.0,
+      "outcomes": [
+        "bug",
+        "bug",
+        "bug",
+        "bug",
+        "bug",
+        "bug",
+        "bug",
+        "bug",
+        "bug",
+        "bug"
+      ],
+      "portfolio_breakdown": {
+        "deepseek-r1-t0": 4,
+        "gpt4o-t1-iter1": 3,
+        "gpt4o-t1-iter5": 3
+      },
+      "scenario": "BIC",
+      "subject": "decodenum",
+      "trials_run": 10
+    },
+    {
+      "bug_any": 1,
+      "bug_id": "fix-01",
+      "issue_id": "decodenum/fix-01/FIX",
+      "mean_code": 3.0,
+      "outcomes": [
+        "bug",
+        "bug",
+        "bug",
+        "bug",
+        "bug",
+        "bug",
+        "bug",
+        "bug",
+        "bug",
+        "bug"
+      ],
+      "portfolio_breakdown": {
+        "deepseek-r1-t0": 4,
+        "gpt4o-t1-iter1": 3,
+        "gpt4o-t1-iter5": 3
+      },
+      "scenario": "FIX",
+      "subject": "decodenum",
+      "trials_run": 10
+    },
+    {
+      "bug_any": 1,
+      "bug_id": "bic-01",
+      "issue_id": "parselen/bic-01/BIC",
+      "mean_code": 1.8,
+      "outcomes": [
+        "bug",
+        "bug",
+        "bug",
+        "bug",
+        "none",
+        "bug",
+        "bug",
+        "none",
+        "none",
+        "none"
+      ],
+      "portfolio_breakdown": {
+        "deepseek-r1-t0": 4,
+        "gpt4o-t1-iter1": 0,
+        "gpt4o-t1-iter5": 2
+      },
+      "scenario": "BIC",
+      "subject": "parselen",
+      "trials_run": 10
+    },
+    {
+      "bug_any": 1,
+      "bug_id": "fix-01",
+      "issue_id": "parselen/fix-01/FIX",
+      "mean_code": 1.5,
+      "outcomes": [
+        "bug",
+        "bug",
+        "bug",
+        "none",
+        "none",
+        "none",
+        "bug",
+        "none",
+        "none",
+        "bug"
+      ],
+      "portfolio_breakdown": {
+        "deepseek-r1-t0": 3,
+        "gpt4o-t1-iter1": 1,
+        "gpt4o-t1-iter5": 1
+      },
+      "scenario": "FIX",
+      "subject": "parselen",
+      "trials_run": 10
+    },
+    {
+      "bug_any": 1,
+      "bug_id": "bic-01",
+      "issue_id": "tokread/bic-01/BIC",
+      "mean_code": 0.9,
+      "outcomes": [
+        "bug",
+        "bug",
+        "none",
+        "bug",
+        "none",
+        "none",
+        "none",
+        "none",
+        "none",
+        "none"
+      ],
+      "portfolio_breakdown": {
+        "deepseek-r1-t0": 3,
+        "gpt4o-t1-iter1": 0,
+        "gpt4o-t1-iter5": 0
+      },
+      "scenario": "BIC",
+      "subject": "tokread",
+      "trials_run": 10
+    },
+    {
+      "bug_any": 1,
+      "bug_id": "fix-01",
+      "issue_id": "tokread/fix-01/FIX",
+      "mean_code": 0.3,
+      "outcomes": [
+        "bug",
+        "none",
+        "none",
+        "none",
+        "none",
+        "none",
+        "none",
+        "none",
+        "none",
+        "none"
+      ],
+      "portfolio_breakdown": {
+        "deepseek-r1-t0": 1,
+        "gpt4o-t1-iter1": 0,
+        "gpt4o-t1-iter5": 0
+      },
+      "scenario": "FIX",
+      "subject": "tokread",
+      "trials_run": 10
+    }
+  ]
+}
