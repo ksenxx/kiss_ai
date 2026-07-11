@@ -14,8 +14,13 @@ import atexit
 import logging
 import os
 import re
+import shutil
+import signal
 import subprocess
 import sys
+import tempfile
+import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -106,6 +111,187 @@ _NAME_UNESCAPE_RE = re.compile(r'\\(["\\])')
 _SCROLL_DELTA = {"down": (0, 300), "up": (0, -300), "right": (300, 0), "left": (-300, 0)}
 
 
+def _pid_alive(pid: int) -> bool:
+    """Return True iff the OS process *pid* currently exists.
+
+    Args:
+        pid: Process id to probe with a null signal.
+
+    Returns:
+        True when the process exists (even if owned by another user),
+        False when it does not.
+    """
+    try:
+        os.kill(pid, 0)
+        return True
+    except PermissionError:  # pragma: no cover — foreign-owned process
+        return True
+    except OSError:
+        return False
+
+
+# Seconds a graceful Playwright close may take before the watchdog kills
+# the Chromium process directly (a wedged driver connection can otherwise
+# hang the close call forever, leaking the browser).
+_CLOSE_WATCHDOG_SECS = 15.0
+
+# Serializes stale-dir cleanup + profile resolution + launch within this
+# process so two concurrently-launching tools can never clean/select the
+# same profile directory out from under each other.
+_LAUNCH_LOCK = threading.RLock()
+
+# Substrings identifying a Chromium/Playwright browser process command
+# line; the SingletonLock PID fallback only trusts PIDs whose process
+# matches (the lock could be corrupt or its PID recycled).
+_BROWSER_CMD_MARKERS = ("chrom", "playwright", "headless")
+
+
+def _process_identity(pid: int) -> str | None:
+    """Return a stable identity string (start time + command) for *pid*.
+
+    Used to detect PID reuse before sending kill signals: two different
+    processes can never share both a start timestamp and a command line.
+
+    Args:
+        pid: Process id to fingerprint.
+
+    Returns:
+        The ``ps`` ``lstart``+``command`` line, or ``None`` when the
+        process is gone or ``ps`` failed.
+    """
+    try:
+        r = subprocess.run(
+            ["ps", "-ww", "-p", str(pid), "-o", "lstart=", "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return r.stdout.strip() or None
+    except Exception:  # pragma: no cover — ps missing/unresponsive
+        logger.debug("Exception caught", exc_info=True)
+        return None
+
+
+def _wait_pid_exit(pid: int, timeout: float) -> bool:
+    """Poll until *pid* exits, returning True if it died within *timeout*.
+
+    Args:
+        pid: Process id to wait for.
+        timeout: Maximum seconds to wait.
+
+    Returns:
+        True iff the process no longer exists.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _pid_alive(pid):
+            return True
+        time.sleep(0.05)
+    return not _pid_alive(pid)  # pragma: no cover — timing-dependent
+
+
+def _terminate_pid_escalating(pid: int, identity: str | None) -> None:
+    """Kill *pid* with SIGTERM then SIGKILL, verifying identity before EACH signal.
+
+    Fails closed: signals are sent only when the process's current
+    identity fingerprint is readable and equal to the one recorded at
+    capture time.  This refuses recycled PIDs (the browser exited and the
+    OS reassigned its PID — possibly between SIGTERM and SIGKILL) and
+    unverifiable targets — killing an unrelated process would be far
+    worse than leaking a browser.
+
+    Args:
+        pid: Process id to terminate.
+        identity: Identity string recorded when the PID was captured.
+    """
+    sig_kill = getattr(signal, "SIGKILL", signal.SIGTERM)
+    for sig in (signal.SIGTERM, sig_kill):
+        if not _pid_alive(pid):
+            return
+        current = _process_identity(pid)
+        if current is None:
+            # Process vanished between the checks (or ps failed): there
+            # is nothing that can be safely signalled.
+            return
+        if identity is None or current != identity:
+            logger.warning(
+                "Refusing to kill pid %d: cannot verify it is our browser "
+                "(recorded=%r, current=%r)",
+                pid,
+                identity,
+                current,
+            )
+            return
+        logger.warning("Killing leaked Chromium (pid %d) with %s", pid, sig.name)
+        try:
+            os.kill(pid, sig)
+        except OSError:  # pragma: no cover — died between checks
+            return
+        if _wait_pid_exit(pid, 2.0):
+            return
+    logger.error(  # pragma: no cover — SIGKILL cannot be ignored
+        "Chromium (pid %d) could not be killed", pid,
+    )
+
+
+def _watchdog_kill(pid: int, identity: str | None) -> None:  # pragma: no cover
+    """Watchdog timer body: kill a Chromium whose graceful close hung.
+
+    Killing the browser process also unwedges the hung driver call (the
+    driver observes the browser exit and completes/raises the close).
+
+    Args:
+        pid: Browser process id recorded at launch.
+        identity: Identity string recorded at PID capture time.
+    """
+    logger.warning(
+        "Graceful browser close is hung after %.0fs; killing Chromium "
+        "(pid %d) directly",
+        _CLOSE_WATCHDOG_SECS,
+        pid,
+    )
+    _terminate_pid_escalating(pid, identity)
+
+
+def _rmtree_logged(path: str) -> None:
+    """Remove *path* recursively, logging a WARNING if it survives.
+
+    Args:
+        path: Directory to delete.
+    """
+    try:
+        shutil.rmtree(path)
+    except FileNotFoundError:
+        return
+    except OSError:  # pragma: no cover — permissions/filesystem races
+        logger.warning("Failed to remove profile directory %s", path, exc_info=True)
+    if os.path.exists(path):  # pragma: no cover — partial deletion is rare
+        logger.warning("Profile directory %s still exists after removal", path)
+
+
+def _read_lock_pid(profile_dir: str) -> int | None:
+    """Return the PID recorded in a profile's ``SingletonLock`` symlink.
+
+    Chromium's lock symlink targets ``hostname-pid``.  Returns ``None``
+    when the lock is absent or unparsable.
+
+    Args:
+        profile_dir: Path to the Chromium user-data directory.
+
+    Returns:
+        The recorded PID, or ``None``.
+    """
+    lock_path = Path(profile_dir) / "SingletonLock"
+    if not lock_path.is_symlink():
+        return None
+    try:
+        target = os.readlink(str(lock_path))
+        pid = int(target.rsplit("-", 1)[-1])
+        return pid if pid > 0 else None
+    except (OSError, ValueError, IndexError):
+        return None
+
+
 def _is_profile_in_use(profile_dir: str) -> bool:
     """Check whether a Chromium profile directory is locked by a running process.
 
@@ -189,9 +375,18 @@ class WebUseTool:
         user_data_dir: str | None = _DEFAULT_USER_DATA_DIR,
         headless: bool = False,
         work_dir: str | None = None,
+        ephemeral: bool = False,
         **_kwargs: Any,
     ) -> None:
-        if user_data_dir == self._DEFAULT_USER_DATA_DIR:
+        # Ephemeral mode (parallel sub-agents): a throwaway profile in a
+        # fresh temp directory, deleted by close().  This keeps sub-agents
+        # off the user's persistent profile so they never escalate to
+        # ``browser_profile_N`` dirs (one leaked visible window each).
+        self._ephemeral_dir: str | None = None
+        if ephemeral:
+            self._ephemeral_dir = tempfile.mkdtemp(prefix="kiss_web_profile_")
+            user_data_dir = self._ephemeral_dir
+        elif user_data_dir == self._DEFAULT_USER_DATA_DIR:
             user_data_dir = str(_default_kiss_dir() / "browser_profile")
         self.viewport = viewport
         self.user_data_dir = user_data_dir
@@ -204,6 +399,11 @@ class WebUseTool:
         self._context: Any = None
         self._page: Any = None
         self._elements: list[dict[str, str]] = []
+        # OS PID + identity fingerprint of the Chromium main process,
+        # recorded at launch so a failed graceful close can escalate to
+        # killing the process (identity guards against PID reuse).
+        self._browser_pid: int | None = None
+        self._browser_identity: str | None = None
         atexit.register(self.close)
 
     def _context_args(self) -> dict[str, Any]:
@@ -273,15 +473,141 @@ class WebUseTool:
         self._elements = []
 
     def _close_browser_only(self) -> None:
-        """Close context/browser if present, leaving self._playwright running."""
-        for obj in (self._context, self._browser):
-            if obj is None:
-                continue
-            try:
-                obj.close()
-            except Exception:  # pragma: no cover — already-dead objects raise
-                logger.debug("Exception caught", exc_info=True)
+        """Close context/browser if present, leaving self._playwright running.
+
+        A failed graceful close (wedged driver connection, cross-thread
+        greenlet error) is logged at WARNING and followed by
+        :meth:`_kill_browser_process`, which guarantees the Chromium OS
+        process actually exits instead of leaking forever.  A watchdog
+        timer covers the remaining failure mode: a graceful close that
+        HANGS (never returns) — after ``_CLOSE_WATCHDOG_SECS`` it kills
+        the browser process directly, which also unwedges the hung call.
+        """
+        pid = self._browser_pid
+        identity = self._browser_identity
+        watchdog: threading.Timer | None = None
+        if (
+            (self._context is not None or self._browser is not None)
+            and pid is not None
+            and pid > 0
+            and pid != os.getpid()
+            and _pid_alive(pid)
+        ):
+            watchdog = threading.Timer(
+                _CLOSE_WATCHDOG_SECS, _watchdog_kill, args=(pid, identity),
+            )
+            watchdog.daemon = True
+            watchdog.start()
+        try:
+            for obj in (self._context, self._browser):
+                if obj is None:
+                    continue
+                try:
+                    obj.close()
+                except Exception:
+                    logger.warning(
+                        "Graceful browser close failed; killing the Chromium "
+                        "process if it survived",
+                        exc_info=True,
+                    )
+        finally:
+            if watchdog is not None:
+                watchdog.cancel()
+        self._kill_browser_process()
         self._on_browser_lost()
+
+    def _kill_browser_process(self) -> None:
+        """Ensure the recorded Chromium OS process is dead, escalating to signals.
+
+        Called after the graceful Playwright close attempts.  Waits briefly
+        for a clean exit, then sends SIGTERM and finally SIGKILL (after an
+        identity check so a recycled PID is never signalled).  Without
+        this, a close whose driver call raised (wedged connection,
+        cross-thread greenlet error) silently leaked the Chromium process —
+        the root cause of long-horizon tasks accumulating open browsers.
+        """
+        pid = self._browser_pid
+        identity = self._browser_identity
+        self._browser_pid = None
+        self._browser_identity = None
+        if pid is None or pid <= 0 or pid == os.getpid():
+            return
+        # A graceful close that succeeded needs only a moment to finish.
+        if _wait_pid_exit(pid, 2.0):
+            return
+        logger.warning("Chromium (pid %d) survived graceful close", pid)
+        _terminate_pid_escalating(pid, identity)
+
+    def _capture_browser_pid(self, profile_dir: str | None) -> None:
+        """Record the OS PID of the just-launched Chromium main process.
+
+        Primary source: a browser-level CDP session
+        (``SystemInfo.getProcessInfo``), which works for both persistent
+        and non-persistent contexts.  Fallback: the profile's
+        ``SingletonLock`` symlink (older Chromium versions).  A recorded
+        PID lets :meth:`_kill_browser_process` guarantee the process dies
+        even when the graceful Playwright close fails.
+
+        Args:
+            profile_dir: The effective user-data directory of the launch,
+                or ``None`` for a non-persistent context.
+        """
+        self._browser_pid = None
+        self._browser_identity = None
+        browser = self._browser
+        if browser is None and self._context is not None:
+            browser = getattr(self._context, "browser", None)
+        if browser is not None:
+            try:
+                cdp = browser.new_browser_cdp_session()
+                try:
+                    info = cdp.send("SystemInfo.getProcessInfo")
+                finally:
+                    try:
+                        cdp.detach()
+                    except Exception:  # pragma: no cover — detach rarely fails
+                        logger.debug("CDP detach failed", exc_info=True)
+                for proc in info.get("processInfo", []):
+                    if proc.get("type") == "browser":
+                        self._browser_pid = int(proc["id"])
+                        self._browser_identity = _process_identity(
+                            self._browser_pid,
+                        )
+                        return
+            except Exception:  # pragma: no cover — CDP rarely fails
+                logger.debug("CDP browser PID capture failed", exc_info=True)
+        if profile_dir:  # pragma: no cover — lock-file fallback path
+            pid = _read_lock_pid(profile_dir)
+            if pid is None:
+                return
+            # The lock could be corrupt or its PID recycled: only trust
+            # it when the process actually looks like a browser.
+            identity = _process_identity(pid)
+            if identity and any(
+                marker in identity.lower() for marker in _BROWSER_CMD_MARKERS
+            ):
+                self._browser_pid = pid
+                self._browser_identity = identity
+
+    def _cleanup_stale_escalation_dirs(self) -> None:
+        """Delete stale ``<user_data_dir>_N`` escalation profile directories.
+
+        ``_resolve_user_data_dir`` escalates to numbered profile variants
+        when the base profile is locked by a live Chromium.  Crashed or
+        leaked Chromiums leave those directories behind with dead
+        ``SingletonLock`` PIDs; remove them so escalation dirs cannot
+        accumulate across crash/relaunch cycles.  Only directories whose
+        lock PID is provably dead are removed — the base profile, live
+        profiles, and lock-less directories are never touched.
+        """
+        if not self.user_data_dir or self._ephemeral_dir:
+            return
+        for i in range(1, 100):
+            candidate = f"{self.user_data_dir}_{i}"
+            pid = _read_lock_pid(candidate)
+            if pid is None or _pid_alive(pid):
+                continue
+            _rmtree_logged(candidate)
 
     def _ensure_browser(self) -> None:
         """Ensure a Playwright browser page is ready, installing Chromium if needed.
@@ -340,6 +666,10 @@ class WebUseTool:
                 self._launch_browser(launcher, kwargs)
             except Exception:  # pragma: no cover – Chromium always pre-installed in CI
                 logger.info("Playwright Chromium not found, installing...")
+                # A partially-launched browser (launch succeeded, later
+                # setup raised) must be torn down before retrying or it
+                # would leak alongside the retry's browser.
+                self._close_browser_only()
                 subprocess.run(
                     [sys.executable, "-m", "playwright", "install", "chromium"],
                     check=True,
@@ -398,21 +728,36 @@ class WebUseTool:
         return None  # pragma: no cover — 100 concurrent instances is unlikely
 
     def _launch_browser(self, launcher: Any, kwargs: dict[str, Any]) -> None:
-        effective_dir = self._resolve_user_data_dir()
-        if effective_dir:
-            Path(effective_dir).mkdir(parents=True, exist_ok=True)
-            self._clean_singleton_locks(effective_dir)
-            self._context = launcher.launch_persistent_context(
-                effective_dir, **kwargs, **self._context_args()
-            )
-            page = (
-                self._context.pages[0] if self._context.pages
-                else self._context.new_page()
-            )
-        else:
-            self._browser = launcher.launch(**kwargs)
-            self._context = self._browser.new_context(**self._context_args())
-            page = self._context.new_page()
+        # The launch lock serializes cleanup + profile resolution + launch
+        # so two concurrently-launching tools in this process can never
+        # clean/select the same profile directory out from under each
+        # other.
+        with _LAUNCH_LOCK:
+            self._cleanup_stale_escalation_dirs()
+            effective_dir = self._resolve_user_data_dir()
+            if effective_dir:
+                Path(effective_dir).mkdir(parents=True, exist_ok=True)
+                self._clean_singleton_locks(effective_dir)
+                self._context = launcher.launch_persistent_context(
+                    effective_dir, **kwargs, **self._context_args()
+                )
+                # Record the Chromium OS PID immediately — before any
+                # post-launch setup that could raise — so close() can
+                # guarantee the process dies even when setup fails or a
+                # later graceful close fails.  NOTE: _on_browser_lost
+                # deliberately does NOT clear the PID — after the driver
+                # drops its references the PID is the only remaining
+                # handle to a possibly-still-running process.
+                self._capture_browser_pid(effective_dir)
+                page = (
+                    self._context.pages[0] if self._context.pages
+                    else self._context.new_page()
+                )
+            else:
+                self._browser = launcher.launch(**kwargs)
+                self._capture_browser_pid(None)
+                self._context = self._browser.new_context(**self._context_args())
+                page = self._context.new_page()
         # The accounts.google.com block applies to the tool as a whole,
         # not just persistent profiles: install it on every context.
         self._context.route(_ACCOUNTS_GOOGLE_URL_RE, _abort_route)
@@ -688,14 +1033,37 @@ class WebUseTool:
         # for the process lifetime (one leaked entry per agent run).
         # ``_ensure_browser`` re-registers if this tool is revived.
         atexit.unregister(self.close)
+        if self._ephemeral_dir:
+            # Keep _ephemeral_dir set: a closed tool can be revived by
+            # the next web tool call (_ensure_browser relaunches and
+            # mkdir-recreates the dir), and the revived browser's profile
+            # must be deleted again by the next close().
+            _rmtree_logged(self._ephemeral_dir)
         return "Browser closed."
+
+    def close_browser(self) -> str:
+        """Close the Chromium browser window and free its OS process.
+
+        Use when you are done with web browsing for now (its purpose is
+        over) so the browser window does not stay open for the rest of a
+        long task. Safe to call anytime: the next web tool call (e.g.
+        go_to_url) automatically relaunches a fresh browser with the same
+        profile, so logins are preserved.
+
+        Returns:
+            "Browser closed. It will relaunch automatically on the next web tool call."."""
+        self._close_browser_only()
+        return (
+            "Browser closed. It will relaunch automatically on the next "
+            "web tool call."
+        )
 
     def get_tools(self) -> list[Callable[..., str]]:
         """Return callable web tools for registration with an agent.
 
         Returns:
             List of callables: go_to_url, click, type_text, press_key, scroll, screenshot,
-            get_page_content. Does not include close."""
+            get_page_content, close_browser. Does not include close."""
         return [
             self.go_to_url,
             self.click,
@@ -704,4 +1072,5 @@ class WebUseTool:
             self.scroll,
             self.screenshot,
             self.get_page_content,
+            self.close_browser,
         ]
