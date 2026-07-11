@@ -1,5 +1,0 @@
-tokread: free stale value on RESET
-
-RESET should drop the current value so the next document starts clean. This
-change makes RESET call free(g_value), but the accompanying nulling was
-mistakenly removed, so a subsequent PRINT reads a dangling pointer.

@@ -1,9 +1,0 @@
-{
-  "subject": "tokread",
-  "bug_id": "fix-01",
-  "commit_short_hash": "b0a3c14",
-  "subject_description": "tokread, a small key/value parser that accepts a JSON-like value field with a string body plus one-word commands RESET and PRINT",
-  "format_name": "javascript",
-  "argv_template": ["tokread", "@@"],
-  "scenarios": ["FIX"]
-}
