@@ -1,0 +1,5 @@
+---
+triple:          'arm64-apple-darwin'
+binary-path:     '/Users/ksen/work/kiss/.kiss-worktrees/kiss_wt-1783740774-c8b091b0/cleverest_plus/benchmark/subjects/tokread/fix-01/after/tokread'
+relocations:     []
+...
