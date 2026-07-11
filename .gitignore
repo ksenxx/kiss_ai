@@ -29,6 +29,7 @@ tmp/
 src/kiss/benchmarks/results/
 !src/kiss/benchmarks/results/.gitkeep
 src/kiss/benchmarks/swebench_pro/vendor/
+deepscholar_bench_workdir/
 jobs/
 *.out
 *.aux
