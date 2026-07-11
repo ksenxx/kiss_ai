@@ -6,7 +6,7 @@
 - Add the following text to your prompt:
 
 ```
-Use claude-fable-5 model for all tasks including software development. Use gpt-5.6-sol-xhigh (not codex) for thorough review and debugging of the work done by the other model. Thoroughly check if the other model has missed some code or has introduced bugs. No need to check if the models exist.
+Use claude-fable-5 model for all tasks including software development. Use gpt-5.6-sol (not codex) for thorough review and debugging of the work done by the other model. Thoroughly check if the other model has missed some code or has introduced bugs. No need to check if the models exist.
 ```
 
 # Tip
