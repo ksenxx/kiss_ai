@@ -370,6 +370,13 @@ class _EventDispatcher:
             # Force a newline so the next panel starts on its own row.
             self.printer.flush_newline()
             return
+        if et in ("prompt", "system_prompt") and event.get("early"):
+            # Optimistic submit-time panels meant for the chat WEBVIEW
+            # (see ``task_runner._broadcast_early_prompts``): the
+            # authoritative events follow once the agent starts, so
+            # printing the early copies here would show every prompt
+            # twice in the CLI.
+            return
         if et == "prompt":
             self.printer.print(event.get("text") or "", type="prompt")
             return

@@ -3421,7 +3421,22 @@
       case 'prompt': {
         const cls = t === 'system_prompt' ? 'system-prompt' : 'prompt';
         const label = t === 'system_prompt' ? 'System Prompt' : 'Prompt';
-        const el = mkEl('div', 'ev ' + cls);
+        // The server broadcasts optimistic panels flagged `early` the
+        // moment a task is submitted (before worktree / model setup —
+        // see `_broadcast_early_prompts` in task_runner.py).  When the
+        // agent's authoritative event arrives, REPLACE the pending
+        // early panel of the same type in place instead of appending
+        // a duplicate.  Replayed (persisted) streams never contain
+        // early events, so replay is unaffected.
+        let el = null;
+        if (!ev.early) {
+          const pending = target.querySelectorAll(
+            '.ev.' + cls + '[data-early="1"]',
+          );
+          if (pending.length) el = pending[pending.length - 1];
+        }
+        const fresh = !el;
+        if (fresh) el = mkEl('div', 'ev ' + cls);
         const body =
           typeof marked !== 'undefined'
             ? kissSanitize(marked.parse(ev.text || ''))
@@ -3437,12 +3452,17 @@
           '-body md-body">' +
           body +
           '</div>';
+        if (ev.early) {
+          el.dataset.early = '1';
+        } else {
+          delete el.dataset.early;
+        }
         // Preserve the raw markdown so the panel Copy button reproduces
         // the original markdown rather than the rendered HTML.
         el.dataset.rawText = ev.text || '';
         addCollapse(el, el.querySelector('.' + cls + '-h'));
         hlBlock(el);
-        target.appendChild(el);
+        if (fresh) target.appendChild(el);
         const bodyEl = el.querySelector('.' + cls + '-body');
         if (bodyEl) {
           linkifyFilePaths(bodyEl);
