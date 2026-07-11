@@ -9,8 +9,8 @@
 //   * read a user prompt aloud (``speakText``) with the NATURAL
 //     synthesized voice — the webview posts a 'demoSpeak' request and
 //     plays the 'demoSpeakAudio' clip the daemon answers with (the
-//     robotic Web Speech voice is reserved for the remote browser
-//     page's fallback; see demoExtensionReplay.test.js),
+//     robotic Web Speech voice is never used; failed synthesis is
+//     skipped silently — see demoExtensionReplay.test.js),
 //   * actually play a replayed ``talk`` tool call (``playTalkEvent``),
 //     using the recorded GPT audio directly when the event carries it,
 //   * actually materialise sub-agent tabs for a replayed

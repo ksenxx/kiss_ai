@@ -7,15 +7,16 @@
 The ``talk`` tool (sorcar_agent.py) broadcasts a
 ``{"type": "talk", "text", "language", "emotion", "talkId",
 "audioB64", "audioMime"}`` event.  Chat-webview clients play the
-synthesized MP3 (``media/main.js`` ``playTalkAudio``) and fall back to
-the Web Speech API when the clip is missing or undecodable.  A pure
-CLI session has no webview, so :class:`TalkPlayer` gives the terminal
-machine the same behaviour.  The kiss-web daemon reuses the same
-:func:`shared_player` to play clips natively for LOCAL VS Code webview
-tabs (``web_server.WebPrinter._play_talk_clip_locally``), because a
+synthesized MP3 (``media/main.js`` ``playTalkAudio``) and stay silent
+when the clip is missing or undecodable (the old robotic Web Speech
+fallback is gone for good).  A pure CLI session has no webview, so
+:class:`TalkPlayer` gives the terminal machine the same behaviour.
+The kiss-web daemon reuses the same :func:`shared_player` to play
+clips natively for LOCAL VS Code webview tabs
+(``web_server.WebPrinter._play_talk_clip_locally``), because a
 webview's ``Audio.play()`` is rejected by Chromium's autoplay policy
-without a recent user gesture and would otherwise fall back to the
-robotic Web Speech voice:
+without a recent user gesture and the talk would otherwise be
+silent:
 
 * the base64 MP3 is decoded to a temp file and played with the
   machine's audio player (``afplay`` on macOS; ``mpg123`` / ``ffplay``
