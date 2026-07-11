@@ -4342,6 +4342,9 @@
         if (clip && clip.audioB64) {
           clipEv.audioB64 = clip.audioB64;
           clipEv.audioMime = clip.audioMime;
+          // Daemon-played clip (local webview): keep the in-page
+          // playback muted — see the 'demoSpeakAudio' handler.
+          clipEv.muted = !!clip.muted;
         }
         playTalkEventSound(clipEv, done);
       };
@@ -4413,6 +4416,13 @@
       if (typeof window.Audio !== 'function') return false;
       const mime = ev.audioMime || 'audio/mpeg';
       player = new window.Audio('data:' + mime + ';base64,' + ev.audioB64);
+      // Demo clips stamped ``muted`` are played natively by the
+      // daemon on this same machine (a local webview's unmuted
+      // play() is autoplay-rejected without a fresh user gesture —
+      // microsoft/vscode#197937).  MUTED autoplay is always allowed,
+      // so the element still fires 'ended' and the demo replay keeps
+      // its speech-length pacing while the daemon supplies the sound.
+      player.muted = !!ev.muted;
       // Track the playing clip so the demo pause/play button can
       // pause and resume it (see _demoApi.pauseSpeech/resumeSpeech).
       currentTalkAudio = player;
@@ -4660,10 +4670,20 @@
         // Daemon reply to a demo-mode 'demoSpeak' synthesis request
         // (see enqueueDemoSpeech).  An empty audioB64 means synthesis
         // failed — the waiter then degrades to silence.
+        // A ``muted: true`` stamp means the daemon plays this clip
+        // natively on its own machine's speakers (this webview is a
+        // local VS Code webview whose in-page ``Audio.play()`` would
+        // be autoplay-rejected — see _arbitrate_demo_speak in
+        // web_server.py): play the clip muted here so its 'ended'
+        // event still paces the demo replay without double audio.
         resolveDemoSpeak(
           ev.reqId,
           ev.audioB64
-            ? {audioB64: ev.audioB64, audioMime: ev.audioMime || 'audio/mpeg'}
+            ? {
+                audioB64: ev.audioB64,
+                audioMime: ev.audioMime || 'audio/mpeg',
+                muted: !!ev.muted,
+              }
             : null,
         );
         break;
@@ -7850,6 +7870,22 @@
       // class flips the row into a wrap-with-metrics layout
       // (multi-line text, metrics row on its own line).
       div.className = 'sidebar-item running-item';
+      // Keyboard/screen-reader accessibility: each history row acts
+      // as a button (click opens/replies the chat), so expose it as
+      // one and let Enter/Space activate it like a click.
+      div.tabIndex = 0;
+      div.setAttribute('role', 'button');
+      div.addEventListener('keydown', e => {
+        // The row also contains real action buttons (favourite / copy /
+        // delete).  Key events from those controls bubble through the
+        // row; do NOT turn Enter on a child button into an unwanted
+        // row-open click.
+        if (e.target !== div) return;
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          div.click();
+        }
+      });
       // Stamp the row with its filter-bar category and timestamp so
       // ``applyHistoryFilterVisibility()`` can toggle ``display`` on
       // each row in O(n) without re-rendering the list.
