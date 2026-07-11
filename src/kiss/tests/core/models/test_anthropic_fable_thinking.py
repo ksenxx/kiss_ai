@@ -52,6 +52,16 @@ from kiss.core.models.anthropic_model import (
 )
 from kiss.core.models.model_info import MODEL_INFO
 
+_ANTHROPIC_FINISH_TOOL = {
+    "name": "finish",
+    "description": "Finish the task",
+    "input_schema": {
+        "type": "object",
+        "properties": {"result": {"type": "string"}},
+        "required": ["result"],
+    },
+}
+
 
 class TestClaudeFable5ThinkingConfig:
     """``claude-fable-5`` must request adaptive thinking + interleaved beta."""
@@ -117,6 +127,20 @@ class TestClaudeFable5ThinkingConfig:
             f"the KISS Sorcar loop cannot route to the Thoughts panel."
         )
 
+    def test_build_kwargs_forces_tool_use_for_fable_5_tools(self) -> None:
+        """Agentic fable-5 turns must not be allowed to be tool-less.
+
+        KISSAgent always provides ``finish`` and requires a tool call on
+        each step.  For adaptive-thinking Claude families, Anthropic accepts
+        ``tool_choice={"type": "any"}``, which prevents the fable-5
+        reasoning-only / empty-text turn that otherwise trips the
+        consecutive-empty-response guard.
+        """
+        m = AnthropicModel("claude-fable-5", api_key="test-key")
+        m.conversation = [{"role": "user", "content": "ping"}]
+        kwargs = m._build_create_kwargs(tools=[_ANTHROPIC_FINISH_TOOL])
+        assert kwargs.get("tool_choice") == {"type": "any"}
+
 
 class TestClaudeSonnet5ThinkingConfig:
     """``claude-sonnet-5`` shares the fable-5 gap (no ``sonnet-4`` prefix)."""
@@ -138,6 +162,12 @@ class TestClaudeSonnet5ThinkingConfig:
         kwargs = m._build_create_kwargs()
         beta = kwargs.get("extra_headers", {}).get("anthropic-beta", "")
         assert "interleaved-thinking-2025-05-14" in beta, beta
+
+    def test_build_kwargs_forces_tool_use_for_sonnet_5_tools(self) -> None:
+        m = AnthropicModel("claude-sonnet-5", api_key="test-key")
+        m.conversation = [{"role": "user", "content": "ping"}]
+        kwargs = m._build_create_kwargs(tools=[_ANTHROPIC_FINISH_TOOL])
+        assert kwargs.get("tool_choice") == {"type": "any"}
 
 
 class TestLegacyPrefixPathStillWorks:
@@ -164,6 +194,19 @@ class TestLegacyPrefixPathStillWorks:
         assert thinking["type"] == expected_type, (name, thinking)
         beta = kwargs.get("extra_headers", {}).get("anthropic-beta", "")
         assert "interleaved-thinking-2025-05-14" in beta, (name, beta)
+
+    def test_enabled_thinking_does_not_force_tool_choice_any(self) -> None:
+        """Anthropic rejects forced tool use with ``thinking.type=enabled``.
+
+        This pins the guard that keeps older Claude 4 models on the default
+        ``tool_choice=auto`` path while still allowing fable-5 / sonnet-5
+        adaptive thinking to force a tool call.
+        """
+        m = AnthropicModel("claude-sonnet-4-5", api_key="test-key")
+        m.conversation = [{"role": "user", "content": "ping"}]
+        kwargs = m._build_create_kwargs(tools=[_ANTHROPIC_FINISH_TOOL])
+        assert kwargs.get("thinking", {}).get("type") == "enabled"
+        assert "tool_choice" not in kwargs
 
 
 class TestNonThinkingModelsUnaffected:

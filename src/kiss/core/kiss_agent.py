@@ -50,6 +50,15 @@ MAX_CONSECUTIVE_ERRORS = 3
 MAX_CONSECUTIVE_NO_TOOL_CALLS = 2
 
 
+class _EmptyModelResponseError(KISSError):
+    """Raised when a model repeatedly returns no text and no tool calls.
+
+    This is a recoverable model/adapter failure when the active model has a
+    registered fallback: unlike normal prompt/validation ``KISSError``s, the
+    agent loop can swap to the fallback model and continue the same task.
+    """
+
+
 def _call_args(function_call: dict[str, Any]) -> dict[str, Any]:
     """Return the arguments dict of a function call, or {} if absent/malformed."""
     raw_args = function_call.get("arguments")
@@ -297,13 +306,16 @@ class KISSAgent(Base):
             )
         return str(response_text)
 
-    def _try_switch_to_fallback(self) -> str | None:
+    def _try_switch_to_fallback(
+        self, reason: str = "a non-retryable error"
+    ) -> str | None:
         """Swap ``self.model`` to the registered fallback model, if any.
 
-        Consulted by :meth:`_run_agentic_loop` after a non-retryable
-        provider error (model gated / deprecated, credit balance too low,
-        etc.).  If ``MODEL_INFO`` registers a ``fallback`` for the
-        current model name, this method:
+        Consulted by :meth:`_run_agentic_loop` after a recoverable
+        model-level failure: a non-retryable provider error (model gated /
+        deprecated, credit balance too low, etc.) or repeated empty turns
+        from a provider adapter.  If ``MODEL_INFO`` registers a ``fallback``
+        for the current model name, this method:
 
         1. Guards against repeated swaps within a single run (only one
            fallback is allowed per :meth:`run` invocation).
@@ -356,7 +368,7 @@ class KISSAgent(Base):
         self._fallback_used = True
         if self.printer:
             self.printer.print(
-                f"Model {old_name} returned a non-retryable error; "
+                f"Model {old_name} returned {reason}; "
                 f"switching to fallback model: {new_name}",
                 type="system_prompt",
             )
@@ -381,13 +393,23 @@ class KISSAgent(Base):
                             cost=cost,
                         )
                     return result
-            except KISSError:  # pragma: no cover – requires model to raise KISSError mid-step
+            except KISSError as e:  # pragma: no cover – requires model to fail mid-step
                 logger.debug("Exception caught", exc_info=True)
+                if isinstance(e, _EmptyModelResponseError):
+                    new_name = self._try_switch_to_fallback(
+                        reason="repeated empty responses"
+                    )
+                    if new_name is not None:
+                        consecutive_errors = 0
+                        self._consecutive_no_tool_calls = 0
+                        continue
                 raise
             except Exception as e:
                 logger.debug("Exception caught", exc_info=True)
                 if not _is_retryable_error(e):
-                    new_name = self._try_switch_to_fallback()
+                    new_name = self._try_switch_to_fallback(
+                        reason="a non-retryable error"
+                    )
                     if new_name is None:
                         raise KISSError(f"Non-retryable error from model: {e}") from e
                     consecutive_errors = 0
@@ -461,7 +483,7 @@ class KISSAgent(Base):
                 # so RelentlessAgent can route it into a success=False
                 # result the user can act on.
                 if not response_text or not response_text.strip():
-                    raise KISSError(
+                    raise _EmptyModelResponseError(
                         f"Agent {self.name} aborted: model "
                         f"{self.model_name} returned "
                         f"{self._consecutive_no_tool_calls} consecutive "

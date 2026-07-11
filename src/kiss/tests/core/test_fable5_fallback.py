@@ -118,6 +118,26 @@ def _finish_tool_call_response(summary: str = "done") -> dict[str, Any]:
     }
 
 
+def _empty_assistant_response() -> dict[str, Any]:
+    """OpenAI-compatible response with no visible text and no tool calls."""
+    return {
+        "id": "chatcmpl-empty-primary",
+        "object": "chat.completion",
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": ""},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 0,
+            "total_tokens": 10,
+        },
+    }
+
+
 def _make_switching_handler(
     primary_model: str,
     fallback_model: str,
@@ -397,6 +417,75 @@ class TestFallbackEndToEnd:
             assert agent.model_name == fallback
         finally:
             server.shutdown()
+
+
+class TestFallbackOnEmptyAssistantTurns:
+    """Fallback also covers adapter-level empty-turn aborts.
+
+    The original fable-5 fallback only fired for provider exceptions (404,
+    low credit balance, etc.).  The user's still-failing path is different:
+    ``_execute_step`` raises ``KISSError`` after two empty/no-tool turns, so
+    the old ``except KISSError: raise`` branch bypassed fallback entirely.
+    """
+
+    def test_consecutive_empty_responses_switch_to_fallback(
+        self, monkeypatch: Any
+    ) -> None:
+        primary = "gpt-empty-primary-under-test"
+        fallback = "gpt-empty-fallback-under-test"
+        _register_synthetic_pair(monkeypatch, primary, fallback)
+        seen: dict[str, list[str]] = {}
+
+        class _EmptyThenFallbackHandler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802
+                length = int(self.headers.get("Content-Length", 0))
+                raw = self.rfile.read(length) if length else b""
+                try:
+                    payload = json.loads(raw)
+                except json.JSONDecodeError:
+                    payload = {}
+                model_name = payload.get("model", "")
+                seen.setdefault("models", []).append(model_name)
+                if model_name == primary:
+                    resp = _empty_assistant_response()
+                else:
+                    assert model_name == fallback, model_name
+                    resp = _finish_tool_call_response()
+                body = json.dumps(resp).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), _EmptyThenFallbackHandler)
+        port = server.server_address[1]
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        try:
+            agent = KISSAgent("test-empty-fallback")
+            result = agent.run(
+                model_name=primary,
+                prompt_template="hi",
+                max_steps=5,
+                max_budget=1.0,
+                verbose=False,
+                model_config={
+                    "base_url": f"http://127.0.0.1:{port}/v1",
+                    "api_key": "sk-test",
+                },
+            )
+        finally:
+            server.shutdown()
+
+        assert result == "done"
+        assert agent.model_name == fallback
+        assert agent._fallback_used is True
+        assert seen["models"][:2] == [primary, primary]
+        assert fallback in seen["models"][2:]
 
 
 class TestModelInfoJsonHasFallback:
