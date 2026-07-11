@@ -232,7 +232,7 @@ class TestWebBrowserToggle:
         tool_names = [t.__name__ for t in tools]
         browser_names = {
             "go_to_url", "click", "type_text", "press_key",
-            "scroll", "screenshot", "get_page_content",
+            "scroll", "screenshot", "get_page_content", "close_browser",
         }
         assert not browser_names.intersection(tool_names)
         assert agent.web_use_tool is None

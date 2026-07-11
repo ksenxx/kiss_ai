@@ -455,7 +455,19 @@ class SorcarAgent(RelentlessAgent):
             )
             tools = [useful_tools.Bash, useful_tools.Read, useful_tools.Edit, useful_tools.Write]
         if self._use_web_tools and self.web_use_tool is None:
-            self.web_use_tool = WebUseTool(work_dir=self.work_dir)
+            if getattr(self, "_subagent_info", None) is not None:
+                # Parallel sub-agents must never share (or escalate) the
+                # user's persistent browser profile: each profile-lock
+                # escalation opened one more visible Chromium window that
+                # stayed open for the sub-agent's whole lifetime.  Give
+                # sub-agents a headless browser in a throwaway profile
+                # that close() (invoked in this agent's run() finally
+                # block) deletes.
+                self.web_use_tool = WebUseTool(
+                    work_dir=self.work_dir, headless=True, ephemeral=True,
+                )
+            else:
+                self.web_use_tool = WebUseTool(work_dir=self.work_dir)
             tools.extend(self.web_use_tool.get_tools())
         def run_parallel(tasks: str, max_workers: str = "") -> str:
             """Run multiple independent tasks concurrently using parallel agents.
