@@ -676,6 +676,18 @@ class AnthropicModel(Model):
             kwargs["system"] = system_instruction
         if tools:
             kwargs["tools"] = tools
+            thinking = kwargs.get("thinking") or {}
+            thinking_type = thinking.get("type") if isinstance(thinking, dict) else None
+            if "tool_choice" not in kwargs and thinking_type != "enabled":
+                # KISSAgent's ReAct loop requires every agentic turn to
+                # produce a tool call (``finish`` is always present).  Claude's
+                # default ``tool_choice=auto`` can otherwise yield a
+                # reasoning-only / empty-text turn that KISS has to retry and,
+                # for thinking-first models like fable-5, may eventually abort.
+                # Anthropic rejects forced tool use with
+                # ``thinking.type=enabled``; adaptive-thinking and non-thinking
+                # requests accept ``any``.
+                kwargs["tool_choice"] = {"type": "any"}
 
         if enable_cache:
             kwargs["cache_control"] = {"type": "ephemeral"}
