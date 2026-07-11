@@ -1,6 +1,0 @@
-decodenum: apply stride to destination index
-
-Applies stride to the destination index during the write loop instead of only
-to the stored value. When stride is positive the write escapes the allocated
-region and corrupts the heap. Small counts with positive strides are enough
-to trigger it.
