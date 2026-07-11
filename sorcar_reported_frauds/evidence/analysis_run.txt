@@ -1,0 +1,46 @@
+{
+  "default": {
+    "BIC": {
+      "rows": 360,
+      "issues": 36,
+      "mean_ordinal_score": 1.3666666666666667,
+      "bug_success_trials": 60,
+      "bugs_any_of_ten": 7,
+      "reached_any_of_ten": 31,
+      "changed_any_of_ten": 20,
+      "mean_seconds": 79.25277777777778
+    },
+    "FIX": {
+      "rows": 360,
+      "issues": 36,
+      "mean_ordinal_score": 1.2694444444444444,
+      "bug_success_trials": 107,
+      "bugs_any_of_ten": 13,
+      "reached_any_of_ten": 25,
+      "changed_any_of_ten": 17,
+      "mean_seconds": 52.56666666666667
+    }
+  },
+  "ceiling": {
+    "BIC": {
+      "default": 7,
+      "union_all_released_llm_configs": 15,
+      "literal_double_target": 14,
+      "is_double": true,
+      "warning": "post-hoc union uses more compute and test outcomes; not a valid prospective score"
+    },
+    "FIX": {
+      "default": 13,
+      "union_all_released_llm_configs": 24,
+      "literal_double_target": 26,
+      "is_double": false,
+      "warning": "post-hoc union uses more compute and test outcomes; not a valid prospective score"
+    }
+  },
+  "manual": {
+    "raw_R_changed_to_D": 116,
+    "X_manual_reach_score": 4,
+    "X_different_crashes_changed_to_score_2": 84,
+    "nonreproducible_D_changed_to_N": 1
+  }
+}
