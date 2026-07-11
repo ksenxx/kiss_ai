@@ -6031,7 +6031,6 @@
         if (doneTab) {
           doneTab.isDone = true;
           doneTab.isRunning = false;
-          renderTabBar();
           // Mirror the regular task's status:false handling when the
           // finished sub-agent tab is the one the user is viewing.
           // Without this the status header stays at "Running …" and
@@ -6042,7 +6041,18 @@
           if (doneTab.id === activeTabId) {
             setRunningState(false);
           }
-          persistTabState();
+          // Close the sub-agent tab as soon as it finishes.
+          // ``closeTab`` notifies the backend, runs the run_parallel
+          // panel bookkeeping (``rpAfterTabsClosed`` marks the entry
+          // ``userClosed`` so no later panel sync resurrects the
+          // finished tab, and collapses the owning panel once no
+          // sibling sub-agent tab remains open), switches to an
+          // adjacent tab when the finished tab was the active one,
+          // and re-renders + persists the tab bar.  History-loaded
+          // finished sub-agent tabs (``openSubagentTab`` with
+          // ``isDone``) are deliberately opened by the user and are
+          // NOT auto-closed — only this live completion event is.
+          closeTab(doneTab.id);
         }
         break;
       }
