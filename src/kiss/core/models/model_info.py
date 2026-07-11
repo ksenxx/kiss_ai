@@ -37,6 +37,8 @@ class ModelInfo:
         cache_write_1h_price_per_million: float | None = None,
         thinking: str | None = None,
         fallback: str | None = None,
+        extended_thinking: bool | None = None,
+        adaptive_thinking: bool | None = None,
     ):
         self.context_length = context_length
         self.input_price_per_1M = input_price_per_million
@@ -54,6 +56,25 @@ class ModelInfo:
         #: or ``"credit balance is too low"``).  ``None`` disables the
         #: fallback behavior for this model.
         self.fallback = fallback
+        #: Tri-state override for whether this Anthropic model expects the
+        #: ``thinking`` request parameter and the
+        #: ``anthropic-beta: interleaved-thinking-2025-05-14`` header.
+        #:
+        #: * ``True``  — force extended thinking on (used for models like
+        #:   ``claude-fable-5`` / ``claude-sonnet-5`` whose family names
+        #:   are not covered by the legacy prefix heuristic in
+        #:   :func:`kiss.core.models.anthropic_model._build_create_kwargs`).
+        #: * ``False`` — force extended thinking off.
+        #: * ``None``  — no explicit opinion; the adapter falls back to
+        #:   its prefix-based default.
+        self.extended_thinking = extended_thinking
+        #: Tri-state override for ``thinking.type``.  ``True`` requests
+        #: ``{"type": "adaptive"}`` (required by Claude 4.6+ / fable /
+        #: sonnet-5 which reject ``"enabled"``); ``False`` forces
+        #: ``{"type": "enabled", "budget_tokens": ...}``; ``None`` falls
+        #: back to
+        #: :func:`kiss.core.models.anthropic_model._uses_adaptive_thinking`.
+        self.adaptive_thinking = adaptive_thinking
 
 
 PACKAGE_MODEL_INFO_PATH = Path(__file__).parent / "MODEL_INFO.json"
@@ -175,6 +196,16 @@ def _build_model_info_entry(entry: dict[str, Any]) -> ModelInfo:
       ``_apply_cache_pricing``).
     * ``comment`` — free-form annotation, ignored by the loader (kept so
       ``update_models.py`` can persist ``"NEW"`` markers).
+    * ``extended_thinking`` — tri-state override for whether the
+      Anthropic ``thinking`` request param (and the
+      ``interleaved-thinking-2025-05-14`` beta header) is attached.
+      ``True`` forces on, ``False`` forces off, ``None`` defers to the
+      adapter's prefix heuristic.
+    * ``adaptive_thinking`` — tri-state override for whether Anthropic
+      thinking is requested with ``{"type": "adaptive"}`` (required by
+      Claude 4.6+ / fable / sonnet-5 which reject ``"enabled"``) instead
+      of ``{"type": "enabled", "budget_tokens": ...}``.  ``None`` defers
+      to :func:`kiss.core.models.anthropic_model._uses_adaptive_thinking`.
     """
     return ModelInfo(
         context_length=entry["context_length"],
@@ -188,6 +219,8 @@ def _build_model_info_entry(entry: dict[str, Any]) -> ModelInfo:
         cache_write_1h_price_per_million=entry.get("cache_write_1h_price_per_1M"),
         thinking=entry.get("thinking"),
         fallback=entry.get("fallback"),
+        extended_thinking=entry.get("extended_thinking"),
+        adaptive_thinking=entry.get("adaptive_thinking"),
     )
 
 
