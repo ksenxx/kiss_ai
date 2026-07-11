@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from typing import Any
 from unittest import TestCase
 
@@ -176,6 +177,65 @@ class TestOrphanTaskRecovery(TestCase):
         _make_server()
         n = _persistence._recover_orphaned_tasks(set())
         assert n == 0, f"expected zero updates, got {n}"
+
+    def test_sweep_ignores_rows_created_after_cutoff(self) -> None:
+        """``created_before`` scopes the sweep to pre-boot rows.
+
+        A sentinel row inserted AFTER the cut-off models a task that
+        legitimately started while the background sweep was still
+        pending (e.g. delayed by SQLite lock contention).  It belongs
+        to the live process and must NOT be rewritten — only the
+        pre-cut-off row is a true orphan of a prior, dead process.
+        """
+        orphan_id = _insert_sentinel_row(
+            "pre-boot orphan",
+            chat_id="recovery-test-chat-6-orphan",
+        )
+        cutoff = time.time()
+        fresh_id = _insert_sentinel_row(
+            "task started after boot",
+            chat_id="recovery-test-chat-6-fresh",
+        )
+        _persistence._recover_orphaned_tasks(set(), created_before=cutoff)
+        assert _row_result(orphan_id) == (
+            "Task terminated unexpectedly (process killed)"
+        ), "pre-boot orphan row must still be swept"
+        assert _row_result(fresh_id) == "Agent Failed Abruptly", (
+            "regression: the sweep clobbered a sentinel row created "
+            "after the boot cut-off — a live task would be mislabeled "
+            "as 'process killed' and the pre-emptive shutdown "
+            "persistence (which conditions on the sentinel) defeated"
+        )
+
+    def test_background_sweep_never_clobbers_task_started_after_boot(
+        self,
+    ) -> None:
+        """End-to-end variant of the sweep-vs-new-task race.
+
+        Construct the server (spawning the background sweep thread),
+        then IMMEDIATELY insert a fresh sentinel row — exactly what
+        ``ChatSorcarAgent.run`` does when a task starts right after
+        boot.  Whatever order the sweep's UPDATE lands in relative to
+        the insert, the fresh row must survive with its sentinel
+        intact so the worker's cleanup ``finally`` (or the shutdown
+        helper's pre-emptive persist) can write the truthful result.
+        """
+        os.environ.setdefault("KISS_WORKDIR", "/tmp")
+        from kiss.agents.vscode.server import VSCodeServer
+
+        server = VSCodeServer()
+        fresh_id = _insert_sentinel_row(
+            "task racing the boot sweep",
+            chat_id="recovery-test-chat-7",
+        )
+        thread = server._orphan_sweep_thread
+        assert thread is not None
+        thread.join(timeout=30)
+        assert not thread.is_alive(), "orphan sweep did not finish"
+        assert _row_result(fresh_id) == "Agent Failed Abruptly", (
+            "regression: the background boot sweep rewrote a task row "
+            "created after server construction"
+        )
 
     def test_concurrent_boot_does_not_corrupt(self) -> None:
         """Two ``VSCodeServer`` constructions on different threads

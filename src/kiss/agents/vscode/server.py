@@ -26,6 +26,7 @@ import logging
 import os
 import queue
 import threading
+import time
 from collections.abc import Callable
 from typing import Any, cast
 
@@ -317,6 +318,17 @@ class VSCodeServer(
         # in-flight task row swept below: the worker's own cleanup
         # ``finally`` will persist the real result.  Snapshot those
         # task ids under the registry lock BEFORE clearing.
+        #
+        # Boot timestamp for the orphan sweep's eligibility cut-off.
+        # Captured BEFORE the sweep thread is spawned: only rows
+        # created strictly before this instant can be orphans of a
+        # prior, now-dead process.  Any row inserted AFTER this
+        # instant belongs to the live process (a task started while
+        # the background sweep was still pending — e.g. delayed by
+        # SQLite's 30 s ``busy_timeout``) and must never be rewritten
+        # to "Task terminated unexpectedly (process killed)" by a
+        # sweep that raced past its insertion.
+        boot_ts = time.time()
         still_running: set[str] = set()
         with _RunningAgentState._registry_lock:
             for tab in _RunningAgentState.running_agent_states.values():
@@ -368,7 +380,7 @@ class VSCodeServer(
         # tests (and embedders) can join it deterministically.
         self._orphan_sweep_thread = threading.Thread(
             target=self._run_orphan_sweep,
-            args=(still_running,),
+            args=(still_running, boot_ts),
             name="orphan-task-sweep",
             daemon=True,
         )
@@ -474,7 +486,7 @@ class VSCodeServer(
         self._cli_running_task_ids_lookup: Callable[[], set[str]] | None = None
 
     @staticmethod
-    def _run_orphan_sweep(still_running: set[str]) -> None:
+    def _run_orphan_sweep(still_running: set[str], boot_ts: float) -> None:
         """Run the orphan-task recovery sweep (background thread body).
 
         Rewrites the ``"Agent Failed Abruptly"`` sentinel on
@@ -487,15 +499,31 @@ class VSCodeServer(
         ``install.sh`` daemon restart.  Best-effort: failures are
         logged and never propagate.
 
+        Because the sweep runs asynchronously, a task can legitimately
+        START (inserting a fresh sentinel row via ``_add_task``) after
+        ``__init__`` returned but before this thread has executed its
+        UPDATE.  Such a row belongs to the LIVE process and is not an
+        orphan — rewriting it would mislabel a running task as
+        ``"Task terminated unexpectedly (process killed)"`` and defeat
+        the pre-emptive shutdown persistence in
+        :meth:`RemoteAccessServer._stop_active_agent_tasks` (which
+        conditions on the sentinel still being present).  The *boot_ts*
+        cut-off scopes the sweep to rows created strictly before this
+        server instance was constructed.
+
         Args:
             still_running: Task-history row ids owned by worker
                 threads still alive in this process; exempt from the
                 sweep.
+            boot_ts: Epoch-seconds timestamp captured in ``__init__``
+                before this thread was spawned.  Only rows whose
+                ``timestamp`` column is strictly older are eligible
+                for the sweep.
         """
         from kiss.agents.sorcar.persistence import _close_thread_db
 
         try:
-            _recover_orphaned_tasks(still_running)
+            _recover_orphaned_tasks(still_running, created_before=boot_ts)
         except Exception:  # pragma: no cover — best-effort sweep
             logger.exception(
                 "orphan-task recovery sweep failed; continuing startup",
