@@ -223,7 +223,8 @@
     "output_price_per_1M": 50.0,
     "fc": true,
     "emb": false,
-    "gen": true
+    "gen": true,
+    "fallback": "claude-opus-4-8"
   },
   "claude-haiku-4-5": {
     "context_length": 200000,
@@ -1875,7 +1876,8 @@
     "output_price_per_1M": 50.0,
     "fc": true,
     "emb": false,
-    "gen": true
+    "gen": true,
+    "fallback": "openrouter/anthropic/claude-opus-4.8"
   },
   "openrouter/anthropic/claude-haiku-4.5": {
     "context_length": 200000,
