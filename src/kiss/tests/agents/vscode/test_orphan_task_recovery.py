@@ -44,7 +44,17 @@ def _make_server() -> Any:
     os.environ.setdefault("KISS_WORKDIR", "/tmp")
     from kiss.agents.vscode.server import VSCodeServer
 
-    return VSCodeServer()
+    server = VSCodeServer()
+    # The sweep runs on a background thread (so daemon startup is
+    # never delayed by SQLite lock contention — see
+    # ``test_web_server_startup_orphan_sweep_nonblocking.py``).  Join
+    # it so the assertions below observe the post-sweep state
+    # deterministically.
+    thread = server._orphan_sweep_thread
+    if thread is not None:
+        thread.join(timeout=30)
+        assert not thread.is_alive(), "orphan sweep did not finish"
+    return server
 
 
 def _insert_sentinel_row(task: str, chat_id: str = "orphan-chat") -> str:
