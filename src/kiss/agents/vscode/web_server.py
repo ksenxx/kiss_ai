@@ -41,6 +41,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import contextlib
 import datetime
 import errno
 import hashlib
@@ -350,6 +351,18 @@ _SERVER_RESET_COMPLETE_DELAY = 3.0
 # regular launch / crash restart / install respawn and the
 # completion toast is intentionally suppressed.
 _SERVER_RESET_FLAG_NAME = "server-reset-pending.json"
+
+# Hard upper bound (seconds) a SIGTERM-initiated graceful shutdown may
+# take AFTER the in-flight agent tasks have been stopped and persisted
+# (see :meth:`RemoteAccessServer._shutdown_on_sigterm`).  If the event
+# loop still has not unwound by then — e.g. ``asyncio.run``'s
+# task-cancellation phase is wedged on a task that swallows
+# ``CancelledError``, or the default executor refuses to drain — the
+# process force-exits so the supervising LaunchAgent / systemd unit can
+# respawn a fresh daemon.  Without this failsafe a wedged loop leaves
+# the old daemon (and anything it still runs) alive forever and the
+# user's "Reset Server" click appears to do nothing.
+_SHUTDOWN_EXIT_FAILSAFE = 30.0
 
 # M7: cap the prompt size echoed back via ``setTaskText`` so a giant
 # JSON payload cannot push tens of MB through the broadcast pipeline.
@@ -3685,6 +3698,18 @@ class RemoteAccessServer:
         # ``subprocess.wait`` mid-sleep, and crash the process with an
         # unhandled traceback (killing any running agent task).
         self._shutdown_initiated = False
+        # Resolved by :meth:`_request_loop_shutdown` (scheduled from the
+        # SIGTERM handler via ``call_soon_threadsafe``) to make
+        # :meth:`_serve_async` return deterministically.  Raising
+        # ``KeyboardInterrupt`` from the signal handler instead proved
+        # unreliable: with many agents active the main thread is busy
+        # inside coroutine/callback frames whose broad ``except`` /
+        # ``finally`` clauses can swallow the injected exception — the
+        # shutdown then never begins while ``_shutdown_initiated`` stays
+        # latched, so every later SIGTERM (every further "Reset Server"
+        # click) is ignored and the daemon keeps running its agents
+        # until it is SIGKILLed.
+        self._shutdown_future: asyncio.Future[None] | None = None
         self._local_url = f"https://localhost:{self.port}"
         self._merge_states: dict[str, _WebMergeState] = {}
         # M6: a small lock guards _merge_states so the agent
@@ -4623,10 +4648,10 @@ class RemoteAccessServer:
         not pop a banner), then schedules a ``SIGTERM`` to this very
         process after a short delay so the notification flushes to the client
         before its socket drops.  The ``SIGTERM`` is caught by
-        :meth:`_handle_shutdown_signal`, which raises
-        :class:`KeyboardInterrupt` to unwind the ``asyncio.run`` loop in
-        :meth:`start` through its existing graceful-shutdown path
-        (stopping in-flight agent tasks and the tunnel).  The process
+        :meth:`_handle_shutdown_signal`, which runs the
+        :meth:`_shutdown_on_sigterm` graceful-shutdown path (stopping
+        in-flight agent tasks, then unwinding the ``asyncio.run`` loop
+        in :meth:`start` so its cleanup runs).  The process
         then exits and the supervising macOS LaunchAgent (``KeepAlive``)
         / Linux systemd unit (``Restart=always``) respawns a fresh
         ``kiss-web`` that re-adopts the same port and ``cloudflared``
@@ -6795,14 +6820,40 @@ class RemoteAccessServer:
         self._maybe_schedule_server_reset_complete()
 
     async def _serve_async(self) -> None:
-        """Internal async entry point for the server."""
+        """Internal async entry point for the server.
+
+        Serves until either the WSS listener stops on its own (its
+        exception is re-raised) or :meth:`_request_loop_shutdown`
+        resolves :attr:`_shutdown_future` — the deterministic
+        SIGTERM/"Reset Server" shutdown path, which cannot be swallowed
+        by whatever coroutine the loop happens to be executing (unlike
+        an injected ``KeyboardInterrupt``).
+        """
         await self._setup_server()
         print(f"KISS Sorcar remote access: {self._local_url}", file=sys.stderr)
         if self.use_tunnel and self._active_url != self._local_url:
             print(f"Cloudflare tunnel:         {self._active_url}", file=sys.stderr)
         elif self.use_tunnel:
             print("Warning: cloudflared tunnel failed to start", file=sys.stderr)
-        await self._ws_server.serve_forever()  # type: ignore[union-attr]
+        loop = asyncio.get_running_loop()
+        self._shutdown_future = loop.create_future()
+        serve_task: asyncio.Task[None] = asyncio.ensure_future(
+            self._ws_server.serve_forever(),  # type: ignore[union-attr]
+        )
+        try:
+            await asyncio.wait(
+                {serve_task, self._shutdown_future},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            if not serve_task.done():
+                serve_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await serve_task
+        if serve_task.done() and not serve_task.cancelled():
+            exc = serve_task.exception()
+            if exc is not None:
+                raise exc
 
     def _handle_shutdown_signal(
         self, signum: int, _frame: Any = None,
@@ -6811,10 +6862,17 @@ class RemoteAccessServer:
 
         Logs the signal alongside a snapshot of in-flight agent tasks
         (via :func:`_snapshot_active_tabs`, which is signal-safe) and
-        current memory.  For ``SIGTERM`` the *first* invocation raises
-        :class:`KeyboardInterrupt` so the ``asyncio.run`` loop in
-        :meth:`start` unwinds through its existing
-        ``except KeyboardInterrupt`` handler and runs its cleanup.
+        current memory.  For ``SIGTERM`` the *first* invocation starts
+        the :meth:`_shutdown_on_sigterm` thread, which stops the
+        in-flight agent worker threads and then unwinds the event loop
+        deterministically (via :meth:`_request_loop_shutdown`) so
+        ``asyncio.run`` in :meth:`start` returns and its ``finally``
+        cleanup runs.  Only when the loop is not running yet does the
+        handler fall back to raising :class:`KeyboardInterrupt`
+        (raising it mid-loop is unreliable — a busy loop can swallow
+        it inside foreign ``except``/``finally`` frames, leaving the
+        daemon and its agents running while every later SIGTERM is
+        ignored).
 
         A subsequent SIGTERM that arrives *while shutdown is already in
         progress* must NOT raise again.  During the ``finally`` cleanup,
@@ -6842,10 +6900,9 @@ class RemoteAccessServer:
             ", ".join(active_tabs) if active_tabs else "none",
             _rss_mb(),
         )
-        # For SIGTERM: raise KeyboardInterrupt so the asyncio loop can
-        # unwind cleanly through the existing try/except — but only on
-        # the first signal.  Re-raising during the cleanup phase would
-        # crash the process (see docstring).
+        # For SIGTERM: begin a deterministic graceful shutdown — but
+        # only on the first signal.  Re-triggering during the cleanup
+        # phase would crash the process (see docstring).
         if signum == signal.SIGTERM:
             if self._shutdown_initiated:
                 logger.info(
@@ -6855,7 +6912,103 @@ class RemoteAccessServer:
                 )
                 return
             self._shutdown_initiated = True
+            loop = self._loop
+            if loop is not None and loop.is_running():
+                # Do NOT raise KeyboardInterrupt here.  The signal
+                # handler fires at an arbitrary bytecode of whatever
+                # the main thread is executing; with agents active the
+                # loop is usually inside coroutine/callback frames
+                # whose broad ``except``/``finally`` clauses can
+                # swallow the injected exception (observed in
+                # production: SIGTERM logged, agents kept stepping, no
+                # shutdown, all later SIGTERMs ignored).  A dedicated
+                # shutdown thread stops the in-flight agents first and
+                # then unwinds the loop via a plain callback, which no
+                # foreign frame can intercept.
+                threading.Thread(
+                    target=self._shutdown_on_sigterm,
+                    name="kiss-sigterm-shutdown",
+                    daemon=True,
+                ).start()
+                return
+            # Loop not running yet (SIGTERM landed between
+            # ``_install_signal_handlers`` and ``asyncio.run``): the
+            # main thread is still in plain ``start()`` code where a
+            # raised KeyboardInterrupt reliably reaches the existing
+            # ``except KeyboardInterrupt`` handler.
             raise KeyboardInterrupt(f"Received {sig_name}")
+
+    def _request_loop_shutdown(self) -> None:
+        """Make :meth:`_serve_async` return (runs ON the event loop).
+
+        Scheduled by :meth:`_shutdown_on_sigterm` via
+        ``call_soon_threadsafe``.  Resolving :attr:`_shutdown_future`
+        completes the ``asyncio.wait`` in :meth:`_serve_async`, so
+        ``asyncio.run`` unwinds and :meth:`start` runs its shutdown
+        ``finally``.  If the future does not exist yet (SIGTERM landed
+        while :meth:`_setup_server` was still binding listeners) raise
+        ``KeyboardInterrupt`` instead: from a plain loop callback the
+        exception is re-raised by ``Handle._run`` straight out of
+        ``run_forever`` — no foreign coroutine frame can swallow it.
+        """
+        fut = self._shutdown_future
+        if fut is not None and not fut.done():
+            fut.set_result(None)
+            return
+        raise KeyboardInterrupt("SIGTERM received before serve loop started")
+
+    def _shutdown_on_sigterm(self) -> None:
+        """Drive the SIGTERM graceful shutdown off the main thread.
+
+        Runs in a dedicated daemon thread started by
+        :meth:`_handle_shutdown_signal` so the event loop stays live
+        (flushing the "Restarting…" notification, answering pings)
+        while the in-flight agent worker threads are cooperatively
+        stopped and joined.  Ordering matters:
+
+        1. :meth:`_stop_active_agent_tasks` FIRST — the user-visible
+           point of "Reset Server" is that running agents stop, and
+           this must not depend on the event loop being able to unwind
+           (a wedged loop previously left agents running forever).
+        2. Unwind the loop via :meth:`_request_loop_shutdown` so
+           ``asyncio.run`` returns and :meth:`start`'s ``finally``
+           performs the remaining cleanup (its second
+           ``_stop_active_agent_tasks`` call is then a no-op).
+        3. Failsafe: if the loop still has not stopped after
+           ``_SHUTDOWN_EXIT_FAILSAFE`` seconds — e.g. ``asyncio.run``'s
+           cancellation phase is stuck on a task swallowing
+           ``CancelledError`` — force-exit so the supervisor respawns a
+           fresh daemon instead of leaving a zombie that ignores every
+           further SIGTERM.
+        """
+        try:
+            self._stop_active_agent_tasks()
+        except Exception:  # noqa: BLE001 — shutdown must proceed regardless
+            logger.exception(
+                "SIGTERM shutdown: stopping in-flight agent tasks failed",
+            )
+        loop = self._loop
+        if loop is not None and loop.is_running():
+            try:
+                loop.call_soon_threadsafe(self._request_loop_shutdown)
+            except RuntimeError:
+                pass  # loop closed concurrently — start() is unwinding
+        deadline = time.monotonic() + _SHUTDOWN_EXIT_FAILSAFE
+        while time.monotonic() < deadline:
+            loop = self._loop
+            if loop is None or not loop.is_running():
+                return  # asyncio.run unwound; start()'s finally takes over
+            time.sleep(0.25)
+        logger.error(
+            "Shutdown failsafe: event loop did not unwind within %.0fs "
+            "of SIGTERM (agent tasks already stopped); forcing exit "
+            "so the supervisor can respawn: pid=%d",
+            _SHUTDOWN_EXIT_FAILSAFE,
+            os.getpid(),
+        )
+        self._detach_tunnel()
+        logging.shutdown()
+        os._exit(0)
 
     def _stop_active_agent_tasks(self, timeout: float = 12.0) -> None:
         """Stop in-flight agent worker threads so they unwind cleanly.
@@ -7036,6 +7189,11 @@ class RemoteAccessServer:
 
         try:
             asyncio.run(self._serve_async())
+            if self._shutdown_initiated:
+                # Deterministic SIGTERM path: _shutdown_on_sigterm
+                # resolved _shutdown_future, _serve_async returned and
+                # asyncio.run unwound without an exception.
+                logger.info("Server shutting down: pid=%d (SIGTERM)", pid)
         except KeyboardInterrupt:
             logger.info("Server shutting down: pid=%d (KeyboardInterrupt)", pid)
         finally:
