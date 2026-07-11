@@ -1,0 +1,93 @@
+diff --git a/eval/parsers/__init__.py b/eval/parsers/__init__.py
+index 0aaa4f2..ffe8526 100644
+--- a/eval/parsers/__init__.py
++++ b/eval/parsers/__init__.py
+@@ -6,6 +6,7 @@ try:
+     from parsers.openscholar import OpenScholarParser
+     from parsers.deepresearcher import DeepResearcherParser
+     from parsers.groundtruth import GroundTruthParser
++    from parsers.openai_deepresearch import OpenAIDeepResearchParser
+ except ImportError:
+     from .parser import Parser, ParserType
+     from .search_ai import SearchAIParser
+@@ -14,6 +15,7 @@ except ImportError:
+     from .openscholar import OpenScholarParser
+     from .deepresearcher import DeepResearcherParser
+     from .groundtruth import GroundTruthParser
++    from .openai_deepresearch import OpenAIDeepResearchParser
+ import logging
+ 
+ logging.basicConfig(
+@@ -28,6 +30,7 @@ __all__ = [
+     "OpenScholarParser",
+     "DeepResearcherParser",
+     "GroundTruthParser",
++    "OpenAIDeepResearchParser",
+     "Parser",
+     "ParserType",
+ ]
+@@ -52,3 +55,5 @@ def get_parser(config: dict, folder_path: str):
+         return DeepResearcherParser(folder_path, config)
+     elif parser_type == ParserType.GROUNDTRUTH:
+         return GroundTruthParser(folder_path, config)
++    elif parser_type == ParserType.OPENAI_DEEPRESEARCH:
++        return OpenAIDeepResearchParser(folder_path, config)
+diff --git a/eval/parsers/openai_deepresearch.py b/eval/parsers/openai_deepresearch.py
+index a6ac750..7054479 100644
+--- a/eval/parsers/openai_deepresearch.py
++++ b/eval/parsers/openai_deepresearch.py
+@@ -7,7 +7,6 @@ try:
+     from parse_generated_text import (
+         extract_arxiv_ids_from_text,
+         get_arxiv_title_and_abstract,
+-        replace_refs,
+     )
+     from utils import extract_html_content
+ except ImportError:
+@@ -15,7 +14,6 @@ except ImportError:
+     from ..parse_generated_text import (
+         extract_arxiv_ids_from_text,
+         get_arxiv_title_and_abstract,
+-        replace_refs,
+     )
+     from ..utils import extract_html_content
+ 
+@@ -44,7 +42,9 @@ class OpenAIDeepResearchParser(Parser):
+             else:
+                 self.docs.append({"title": f"ArXiv {arxiv_id}", "sent": ""})
+ 
+-        _, self.citations_for_cite_quality = self._process_for_cite_quality()
++        self.clean_text, self.citations_for_cite_quality = (
++            self._process_for_cite_quality()
++        )
+ 
+     def _process_for_cite_quality(self) -> tuple[str, list[dict]]:
+         # Load the pickle file
+@@ -109,7 +109,9 @@ class OpenAIDeepResearchParser(Parser):
+             else:
+                 pass
+ 
+-        updated_text = replace_refs(related_work_section, reference_map)
++        # Markdown links already carry their source URL. Rewriting numeric link
++        # labels via the zero-based reference_map shifts every citation by one.
++        updated_text = related_work_section
+         answer, docs = self.md_to_autoais_openai_deep_research(
+             updated_text, reference_map
+         )
+diff --git a/eval/evaluator/claim_coverage.py b/eval/evaluator/claim_coverage.py
+index 0cf6a07..39c1aa8 100644
+--- a/eval/evaluator/claim_coverage.py
++++ b/eval/evaluator/claim_coverage.py
+@@ -38,7 +38,11 @@ class ClaimCoverageEvaluator(Evaluator):
+                 refs = [int(x[1:]) - 1 for x in re.findall(r"\[\d+", sent)]
+                 sentence_docs = []
+                 for ref in refs:
+-                    if ref > len(parser.docs) - 1 or ref < 0:
++                    if (
++                        ref > len(parser.docs) - 1
++                        or ref < 0
++                        or ref >= len(parser.citations_for_cite_quality)
++                    ):
+                         continue
+                     sentence_docs.append(
+                         _format_document(parser.citations_for_cite_quality[ref])
