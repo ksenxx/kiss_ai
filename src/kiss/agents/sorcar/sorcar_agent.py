@@ -426,9 +426,10 @@ class SorcarAgent(RelentlessAgent):
             # Synthesize a far more natural voice server-side with a
             # GPT audio model (gpt-audio-1.5) and ship the MP3 inside
             # the event; every interface (VS Code webview, browser tab,
-            # iOS webapp) plays it directly and only falls back to the
-            # robotic Web Speech API when synthesis failed or audio
-            # playback is unavailable/blocked on the device.
+            # iOS webapp) plays it directly and stays silent when
+            # synthesis failed or audio playback is unavailable/blocked
+            # on the device (the CLI terminal alone falls back to the
+            # system TTS command).
             try:
                 from kiss.agents.vscode.speech_synthesis import synthesize_talk_audio
 

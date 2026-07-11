@@ -1186,7 +1186,7 @@ class _CommandsMixin:
 
         Demo replay in the chat webview narrates prompts and replays
         recorded ``talk`` tool calls, but the persisted events carry no
-        audio and the Web Speech fallback is the robotic "alien voice".
+        audio and would otherwise be skipped silently.
         This handler synthesizes the utterance with the same GPT audio
         model the live ``talk`` tool uses
         (:func:`kiss.agents.vscode.speech_synthesis.synthesize_talk_audio`)
