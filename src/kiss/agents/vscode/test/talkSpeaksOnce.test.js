@@ -3,27 +3,33 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 //
-// End-to-end regression test: the agent's ``talk`` tool must speak
+// End-to-end regression test: the agent's ``talk`` tool must play
 // each utterance EXACTLY ONCE per device.
 //
 // The backend fans out one ``{type: 'talk'}`` copy per subscribed
 // viewer tab of the task, and every stamped copy is delivered to
 // EVERY connected webview (the frontend is responsible for tabId
-// routing).  The webview must therefore:
+// routing).  Playback is ONLY the GPT-synthesized clip carried in
+// ``audioB64`` — the robotic Web Speech (speechSynthesis) fallback
+// is gone; an event without a playable clip degrades to silence.
+// The webview must therefore:
 //
-//  * speak a talk event only when its ``tabId`` belongs to one of
+//  * play a talk event only when its ``tabId`` belongs to one of
 //    THIS webview's tabs (a copy stamped for another window's tab
-//    must stay silent here — that window speaks it);
-//  * speak each utterance at most once, even when several stamped
+//    must stay silent here — that window plays it);
+//  * play each utterance at most once, even when several stamped
 //    copies land on this webview (two open tabs of the same task,
 //    a stale subscription left over from a reload, ...) — copies of
 //    one ``talk()`` call share the same ``talkId``;
-//  * still speak when the task's tab is open but in the BACKGROUND;
-//  * keep speaking legacy events that carry no ``talkId`` / ``tabId``.
+//  * still play when the task's tab is open but in the BACKGROUND;
+//  * keep playing legacy events that carry no ``talkId`` / ``tabId``;
+//  * NEVER call the Web Speech API, and keep the serialized talk
+//    queue advancing when a talk has no clip to play.
 //
 // Runs the REAL production ``media/main.js`` in jsdom (only the
-// vscode host API and the Web Speech API are recording stubs, as in
-// every webview test).  Run with:
+// vscode host API, a recording Audio constructor, and a tripwire
+// Web Speech stub are installed, as in every webview test).  Run
+// with:
 //
 //     node test/talkSpeaksOnce.test.js
 
@@ -36,12 +42,17 @@ const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
+const B64 = 'SUQzBAAAAAAAAA=='; // decodes to "ID3..." — an MP3 tag header
+
 /**
  * Build a jsdom window running the production chat webview with a
- * recording Web Speech API stub.  Returns ``{win, posted, spoken,
- * tabId}`` where ``spoken`` records every utterance passed to
- * ``speechSynthesis.speak`` and ``tabId`` is the webview's initial
- * (active) chat tab id, taken from the ``ready`` handshake.
+ * recording Audio constructor and a TRIPWIRE Web Speech stub.
+ * Returns ``{win, posted, played, spoken, tabId}`` where ``played``
+ * records every Audio element the production code created (fire an
+ * element's ``onended`` to complete the serialized talk queue),
+ * ``spoken`` records any FORBIDDEN speechSynthesis.speak call (must
+ * stay empty), and ``tabId`` is the webview's initial (active) chat
+ * tab id, taken from the ``ready`` handshake.
  */
 function makeWebview() {
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
@@ -75,16 +86,23 @@ function makeWebview() {
     };
   };
 
-  // Recording Web Speech API stub (jsdom has none).  The production
-  // handler reads ``window.speechSynthesis`` at event time, so the
-  // stub is honoured for every dispatched talk event.
+  // Recording Audio constructor (jsdom's media elements cannot
+  // play).  The production handler reads ``window.Audio`` at event
+  // time, so the stub is honoured for every dispatched talk event.
+  const played = [];
+  win.Audio = function Audio(src) {
+    played.push(this);
+    this.src = src;
+    this.play = () => Promise.resolve();
+  };
+
+  // Tripwire Web Speech stub: the robotic fallback was removed, so
+  // production code must NEVER call speak().
   const spoken = [];
   win.SpeechSynthesisUtterance = function (text) {
     this.text = text;
   };
   win.speechSynthesis = {
-    // Record the utterance object itself so tests can fire its
-    // ``onend`` to complete the (serialized) talk playback queue.
     speak: utter => spoken.push(utter),
   };
 
@@ -93,7 +111,7 @@ function makeWebview() {
 
   const ready = posted.find(m => m.type === 'ready');
   assert.ok(ready && ready.tabId, 'webview must post ready with its tab id');
-  return {win, posted, spoken, tabId: ready.tabId};
+  return {win, posted, played, spoken, tabId: ready.tabId};
 }
 
 function send(win, data) {
@@ -117,78 +135,76 @@ function test(name, fn) {
 
 // ---------------------------------------------------------------------------
 
-test('one stamped copy for an own tab speaks exactly once', () => {
-  const {win, spoken, tabId} = makeWebview();
+test('one stamped copy for an own tab plays exactly once', () => {
+  const {win, played, spoken, tabId} = makeWebview();
   send(win, {
     type: 'talk', language: 'en-US', text: 'hello there',
-    talkId: 't-1', taskId: 7, tabId,
+    talkId: 't-1', taskId: 7, tabId, audioB64: B64,
   });
-  assert.strictEqual(spoken.length, 1, JSON.stringify(spoken));
-  assert.strictEqual(spoken[0].text, 'hello there');
-  assert.strictEqual(spoken[0].lang, 'en-US');
+  assert.strictEqual(played.length, 1, JSON.stringify(played));
+  assert.strictEqual(played[0].src, 'data:audio/mpeg;base64,' + B64);
+  assert.strictEqual(spoken.length, 0, 'Web Speech must never speak');
 });
 
-test('duplicate stamped copies of one talk() call speak only once', () => {
+test('duplicate stamped copies of one talk() call play only once', () => {
   // Two viewer tabs of the same task on this device (or one live tab
   // plus a stale subscription from before a reload): the backend
   // sends one stamped copy per tab, all sharing the same talkId.
-  const {win, spoken, tabId} = makeWebview();
+  const {win, played, spoken, tabId} = makeWebview();
   send(win, {
     type: 'talk', language: 'en-US', text: 'do not repeat me',
-    talkId: 't-dup', taskId: 7, tabId,
+    talkId: 't-dup', taskId: 7, tabId, audioB64: B64,
   });
   send(win, {
     type: 'talk', language: 'en-US', text: 'do not repeat me',
-    talkId: 't-dup', taskId: 7, tabId,
+    talkId: 't-dup', taskId: 7, tabId, audioB64: B64,
   });
   assert.strictEqual(
-    spoken.length, 1,
-    `spoken ${spoken.length} times: ${JSON.stringify(spoken)}`,
+    played.length, 1,
+    `played ${played.length} times: ${JSON.stringify(played)}`,
   );
+  assert.strictEqual(spoken.length, 0, 'Web Speech must never speak');
 });
 
-test('copies stamped for two DIFFERENT owned tabs speak only once', () => {
+test('copies stamped for two DIFFERENT owned tabs play only once', () => {
   // The production duplication: this device has TWO tabs open on the
   // task (e.g. one live tab plus one reopened from history), so the
   // backend stamps one copy per tab — same talkId, different tabIds.
-  const {win, posted, spoken, tabId} = makeWebview();
+  const {win, posted, played, spoken, tabId} = makeWebview();
   win.document.querySelector('.chat-tab-add').click();
   const newChat = posted.filter(m => m.type === 'newChat').pop();
   assert.ok(newChat && newChat.tabId && newChat.tabId !== tabId);
-  // The click above is this device's first user gesture: the iOS
-  // speech unlock (``unlockSpeechSynthesis`` in main.js) must speak
-  // exactly one EMPTY — inaudible — primer utterance inside it.
-  assert.deepStrictEqual(
-    spoken.map(s => s.text), [''],
-    'first user gesture must speak the empty iOS unlock primer',
-  );
-  spoken.length = 0;
+  // The iOS speech-unlock primer is gone with the Web Speech
+  // fallback: a user gesture must not speak anything.
+  assert.strictEqual(spoken.length, 0, 'no unlock primer any more');
   send(win, {
     type: 'talk', language: 'en-US', text: 'once across tabs',
-    talkId: 't-two-tabs', taskId: 7, tabId,
+    talkId: 't-two-tabs', taskId: 7, tabId, audioB64: B64,
   });
   send(win, {
     type: 'talk', language: 'en-US', text: 'once across tabs',
-    talkId: 't-two-tabs', taskId: 7, tabId: newChat.tabId,
+    talkId: 't-two-tabs', taskId: 7, tabId: newChat.tabId, audioB64: B64,
   });
   assert.strictEqual(
-    spoken.length, 1,
-    `spoken ${spoken.length} times: ${JSON.stringify(spoken)}`,
+    played.length, 1,
+    `played ${played.length} times: ${JSON.stringify(played)}`,
   );
-  assert.strictEqual(spoken[0].text, 'once across tabs');
+  assert.strictEqual(spoken.length, 0, 'Web Speech must never speak');
 });
 
 test("a copy stamped for another window's tab stays silent", () => {
-  const {win, spoken} = makeWebview();
+  const {win, played, spoken} = makeWebview();
   send(win, {
     type: 'talk', language: 'en-US', text: 'for the other window',
     talkId: 't-2', taskId: 7, tabId: 'some-other-windows-tab',
+    audioB64: B64,
   });
-  assert.strictEqual(spoken.length, 0, JSON.stringify(spoken));
+  assert.strictEqual(played.length, 0, JSON.stringify(played));
+  assert.strictEqual(spoken.length, 0, 'Web Speech must never speak');
 });
 
-test('a copy for an own BACKGROUND tab still speaks', () => {
-  const {win, posted, spoken} = makeWebview();
+test('a copy for an own BACKGROUND tab still plays', () => {
+  const {win, posted, played, spoken} = makeWebview();
   // Open a second tab (becomes active); the original tab is now in
   // the background.  createNewTab posts ``newChat`` with the new id.
   win.document.querySelector('.chat-tab-add').click();
@@ -196,84 +212,107 @@ test('a copy for an own BACKGROUND tab still speaks', () => {
   assert.ok(newChat && newChat.tabId, 'new tab must post newChat');
   const firstTabId = posted.find(m => m.type === 'ready').tabId;
   assert.notStrictEqual(newChat.tabId, firstTabId);
-  // Drop the empty iOS unlock primer spoken inside the click's user
-  // gesture (inaudible on a real device; asserted in the two-tabs
-  // test above) so the counts below cover talk speech only.
-  assert.deepStrictEqual(spoken.map(s => s.text), ['']);
-  spoken.length = 0;
   send(win, {
     type: 'talk', language: 'fr-FR', text: 'arri\u00e8re-plan',
-    talkId: 't-3', taskId: 9, tabId: firstTabId,
+    talkId: 't-3', taskId: 9, tabId: firstTabId, audioB64: B64,
   });
-  assert.strictEqual(spoken.length, 1, JSON.stringify(spoken));
-  assert.strictEqual(spoken[0].text, 'arri\u00e8re-plan');
-  assert.strictEqual(spoken[0].lang, 'fr-FR');
+  assert.strictEqual(played.length, 1, JSON.stringify(played));
+  assert.strictEqual(played[0].src, 'data:audio/mpeg;base64,' + B64);
+  assert.strictEqual(spoken.length, 0, 'Web Speech must never speak');
 });
 
-test('two DIFFERENT talk() calls both speak', () => {
-  const {win, spoken, tabId} = makeWebview();
+test('two DIFFERENT talk() calls both play, serialized', () => {
+  const {win, played, tabId} = makeWebview();
   send(win, {
     type: 'talk', language: 'en-US', text: 'first thing',
-    talkId: 't-a', taskId: 7, tabId,
+    talkId: 't-a', taskId: 7, tabId, audioB64: B64,
   });
   send(win, {
     type: 'talk', language: 'en-US', text: 'second thing',
-    talkId: 't-b', taskId: 7, tabId,
+    talkId: 't-b', taskId: 7, tabId, audioB64: B64,
   });
   // Talk playback is serialized: the second talk waits in the queue
-  // until the speech engine finishes the first (its utterance's
-  // ``onend``) so the two never speak over each other.
-  assert.deepStrictEqual(spoken.map(s => s.text), ['first thing']);
-  spoken[0].onend();
-  assert.deepStrictEqual(
-    spoken.map(s => s.text),
-    ['first thing', 'second thing'],
-  );
+  // until the first clip finishes (its Audio element's ``ended``
+  // handler) so the two never play over each other.
+  assert.strictEqual(played.length, 1, JSON.stringify(played));
+  played[0].onended();
+  assert.strictEqual(played.length, 2, JSON.stringify(played));
 });
 
-test('legacy talk event without talkId or tabId still speaks', () => {
-  const {win, spoken} = makeWebview();
-  send(win, {type: 'talk', language: 'es', text: 'hola'});
-  assert.strictEqual(spoken.length, 1, JSON.stringify(spoken));
-  assert.strictEqual(spoken[0].text, 'hola');
-  assert.strictEqual(spoken[0].lang, 'es');
-});
-
-test('empty text never speaks', () => {
-  const {win, spoken, tabId} = makeWebview();
-  send(win, {type: 'talk', language: 'en-US', text: '', talkId: 't-4', tabId});
-  send(win, {type: 'talk', language: 'en-US', talkId: 't-5', tabId});
-  assert.strictEqual(spoken.length, 0, JSON.stringify(spoken));
-});
-
-test('missing Web Speech API is a silent no-op', () => {
-  const {win, spoken, tabId} = makeWebview();
-  win.speechSynthesis = undefined;
+test('an audio-less talk stays SILENT and the queue advances', () => {
+  // The old code degraded to the robotic Web Speech voice here; the
+  // new contract is silence — and the serialized queue must not get
+  // stuck behind the silent talk.
+  const {win, played, spoken, tabId} = makeWebview();
   send(win, {
-    type: 'talk', language: 'en-US', text: 'no synth',
-    talkId: 't-6', tabId,
+    type: 'talk', language: 'en-US', text: 'no clip for me',
+    talkId: 't-silent', taskId: 7, tabId,
   });
-  assert.strictEqual(spoken.length, 0);
+  assert.strictEqual(played.length, 0, 'nothing to play — silence');
+  assert.strictEqual(spoken.length, 0, 'Web Speech must never speak');
+  send(win, {
+    type: 'talk', language: 'en-US', text: 'but I have one',
+    talkId: 't-clip', taskId: 7, tabId, audioB64: B64,
+  });
+  assert.strictEqual(played.length, 1, 'queue advanced to the clip talk');
+  assert.strictEqual(spoken.length, 0, 'Web Speech must never speak');
+});
+
+test('legacy talk event without talkId or tabId still plays', () => {
+  const {win, played, spoken} = makeWebview();
+  send(win, {type: 'talk', language: 'es', text: 'hola', audioB64: B64});
+  assert.strictEqual(played.length, 1, JSON.stringify(played));
+  assert.strictEqual(played[0].src, 'data:audio/mpeg;base64,' + B64);
+  assert.strictEqual(spoken.length, 0, 'Web Speech must never speak');
+});
+
+test('empty text never plays', () => {
+  const {win, played, spoken, tabId} = makeWebview();
+  send(win, {type: 'talk', language: 'en-US', text: '', talkId: 't-4', tabId,
+             audioB64: B64});
+  send(win, {type: 'talk', language: 'en-US', talkId: 't-5', tabId});
+  assert.strictEqual(played.length, 0, JSON.stringify(played));
+  assert.strictEqual(spoken.length, 0, 'Web Speech must never speak');
+});
+
+test('missing Audio API degrades to silence, queue advances', () => {
+  const {win, played, spoken, tabId} = makeWebview();
+  const RecordingAudio = win.Audio;
+  win.Audio = undefined;
+  send(win, {
+    type: 'talk', language: 'en-US', text: 'no audio api',
+    talkId: 't-6', tabId, audioB64: B64,
+  });
+  assert.strictEqual(played.length, 0);
+  assert.strictEqual(spoken.length, 0, 'Web Speech must never speak');
+  // The silent degradation released the queue: a later talk plays
+  // once the Audio API is back.
+  win.Audio = RecordingAudio;
+  send(win, {
+    type: 'talk', language: 'en-US', text: 'audio is back',
+    talkId: 't-7', tabId, audioB64: B64,
+  });
+  assert.strictEqual(played.length, 1, 'queue advanced past silent talk');
 });
 
 test('dedupe memory is bounded (many talk calls keep working)', () => {
-  const {win, spoken, tabId} = makeWebview();
+  const {win, played, tabId} = makeWebview();
   for (let i = 0; i < 600; i++) {
     send(win, {
       type: 'talk', language: 'en-US', text: `utterance ${i}`,
-      talkId: `t-many-${i}`, taskId: 7, tabId,
+      talkId: `t-many-${i}`, taskId: 7, tabId, audioB64: B64,
     });
     // Finish each talk (serialized playback) so the next one starts.
-    spoken[spoken.length - 1].onend();
+    played[played.length - 1].onended();
   }
-  assert.strictEqual(spoken.length, 600);
+  assert.strictEqual(played.length, 600);
   // A duplicate of the LATEST utterance is still suppressed after
   // the pruning threshold has been crossed.
   send(win, {
     type: 'talk', language: 'en-US', text: 'utterance 599',
-    talkId: 't-many-599', taskId: 7, tabId,
+    talkId: 't-many-599', taskId: 7, tabId, audioB64: B64,
   });
-  assert.strictEqual(spoken.length, 600, 'latest talkId must stay deduped');
+  assert.strictEqual(played.length, 600, 'latest talkId must stay deduped');
 });
 
 // ---------------------------------------------------------------------------

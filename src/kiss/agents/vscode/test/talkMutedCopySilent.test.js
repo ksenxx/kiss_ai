@@ -15,11 +15,15 @@
 // offset — distorted, overlapping speech.
 //
 // A muted copy must also NOT poison the talkId dedupe set: a later
-// playable (unmuted) copy of the same talkId must still speak.
+// playable (unmuted) copy of the same talkId must still play.
+//
+// Playback is the GPT-synthesized clip carried in ``audioB64`` (the
+// robotic Web Speech fallback is gone — a canary stub asserts the
+// speech engine is never touched).
 //
 // Runs the REAL production ``media/main.js`` in jsdom (only the
-// vscode host API and the Web Speech API are recording stubs, as in
-// every webview test).  Run with:
+// vscode host API, Audio, and the Web Speech API are recording stubs,
+// as in every webview test).  Run with:
 //
 //     node test/talkMutedCopySilent.test.js
 
@@ -32,10 +36,12 @@ const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
+const B64 = 'SUQzBAAAAAAAAA=='; // decodes to "ID3..." — an MP3 tag header
+
 /**
  * Build a jsdom window running the production chat webview with a
- * recording Web Speech API stub (same harness as
- * talkSpeaksOnce.test.js).
+ * recording Audio stub (clips end immediately so the talk queue keeps
+ * flowing) and a CANARY Web Speech stub that must never record a call.
  */
 function makeWebview() {
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
@@ -69,9 +75,21 @@ function makeWebview() {
     };
   };
 
+  const played = [];
+  win.Audio = function Audio(src) {
+    this.src = src;
+    played.push(this);
+    this.play = () => {
+      // Complete at once so a played clip never blocks the queue.
+      if (typeof this.onended === 'function') this.onended({type: 'ended'});
+      return Promise.resolve();
+    };
+  };
+
   const spoken = [];
   win.SpeechSynthesisUtterance = function (text) {
     this.text = text;
+    spoken.push(this);
   };
   win.speechSynthesis = {
     speak: utter => spoken.push(utter),
@@ -82,7 +100,7 @@ function makeWebview() {
 
   const ready = posted.find(m => m.type === 'ready');
   assert.ok(ready && ready.tabId, 'webview must post ready with its tab id');
-  return {win, posted, spoken, tabId: ready.tabId};
+  return {win, posted, played, spoken, tabId: ready.tabId};
 }
 
 function send(win, data) {
@@ -107,15 +125,16 @@ function test(name, fn) {
 // ---------------------------------------------------------------------------
 
 test('a muted talk copy stays silent', () => {
-  const {win, spoken, tabId} = makeWebview();
+  const {win, played, spoken, tabId} = makeWebview();
   send(win, {
     type: 'talk', language: 'en-US', text: 'played on the terminal',
-    talkId: 't-muted-1', taskId: 7, tabId, muted: true,
+    audioB64: B64, talkId: 't-muted-1', taskId: 7, tabId, muted: true,
   });
   assert.strictEqual(
-    spoken.length, 0,
-    `muted copy must not speak, spoke: ${JSON.stringify(spoken)}`,
+    played.length, 0,
+    `muted copy must not play its clip, played: ${played.length}`,
   );
+  assert.strictEqual(spoken.length, 0, 'Web Speech must never be used');
 });
 
 test('a muted copy does not block a later playable copy', () => {
@@ -123,27 +142,29 @@ test('a muted copy does not block a later playable copy', () => {
   // must not add its talkId to the spoken set, otherwise a playable
   // copy that legitimately reaches this webview later (e.g. after a
   // subscription change) would be wrongly suppressed.
-  const {win, spoken, tabId} = makeWebview();
+  const {win, played, spoken, tabId} = makeWebview();
   send(win, {
     type: 'talk', language: 'en-US', text: 'first muted',
-    talkId: 't-muted-2', taskId: 7, tabId, muted: true,
+    audioB64: B64, talkId: 't-muted-2', taskId: 7, tabId, muted: true,
   });
   send(win, {
     type: 'talk', language: 'en-US', text: 'now audible',
-    talkId: 't-muted-2', taskId: 7, tabId,
+    audioB64: B64, talkId: 't-muted-2', taskId: 7, tabId,
   });
-  assert.strictEqual(spoken.length, 1, JSON.stringify(spoken));
-  assert.strictEqual(spoken[0].text, 'now audible');
+  assert.strictEqual(played.length, 1, `played ${played.length} clips`);
+  assert.strictEqual(played[0].src, 'data:audio/mpeg;base64,' + B64);
+  assert.strictEqual(spoken.length, 0, 'Web Speech must never be used');
 });
 
-test('an unmuted copy still speaks exactly once', () => {
-  const {win, spoken, tabId} = makeWebview();
+test('an unmuted copy still plays exactly once', () => {
+  const {win, played, spoken, tabId} = makeWebview();
   send(win, {
     type: 'talk', language: 'en-US', text: 'normal talk',
-    talkId: 't-plain', taskId: 7, tabId,
+    audioB64: B64, talkId: 't-plain', taskId: 7, tabId,
   });
-  assert.strictEqual(spoken.length, 1, JSON.stringify(spoken));
-  assert.strictEqual(spoken[0].text, 'normal talk');
+  assert.strictEqual(played.length, 1, `played ${played.length} clips`);
+  assert.strictEqual(played[0].src, 'data:audio/mpeg;base64,' + B64);
+  assert.strictEqual(spoken.length, 0, 'Web Speech must never be used');
 });
 
 // ---------------------------------------------------------------------------

@@ -376,8 +376,8 @@ export function buildChatHtml(
     ` font-src ${webview.cspSource};` +
     // media-src data: lets the webview play the GPT-synthesized talk
     // audio (a base64 MP3 data: URI shipped inside the 'talk' event by
-    // speech_synthesis.py); without it the webview silently fell back
-    // to the robotic Web Speech API voice.  The webview resource
+    // speech_synthesis.py); without it the talk would stay silent
+    // (the robotic Web Speech fallback is gone).  The webview resource
     // origin is also allowed so voice.js can play the bundled
     // "Working on it" ack clip (media/working-on-it.mp3).
     ` media-src data: ${webview.cspSource};` +
