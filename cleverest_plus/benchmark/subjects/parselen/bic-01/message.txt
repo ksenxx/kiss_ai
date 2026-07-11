@@ -1,6 +1,0 @@
-parselen: drop redundant length bound
-
-The upstream review claimed the size prefix could never exceed 8 because the
-caller already validated it, so the local length bound was removed. In fact
-callers pass untrusted bytes directly, so any first byte greater than 8
-overruns the destination buffer.
