@@ -8,7 +8,7 @@ Reproduce the issue by writing end-to-end tests. Then fix the issue.
 
 ## Trick
 
-Use claude-fable-5 model for all tasks including software development. Use gpt-5.6-sol-xhigh (not codex) for thorough review and debugging of the work done by the other model. You MUST thoroughly check if the other model has missed code or wirings or has introduced bugs. No need to check if the models exist.
+Use claude-fable-5 model for all tasks including software development. Use gpt-5.6-sol (not codex) for thorough review and debugging of the work done by the other model. You MUST thoroughly check if the other model has missed code or wirings or has introduced bugs. No need to check if the models exist.
 
 ## Trick
 
