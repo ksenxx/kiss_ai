@@ -4171,10 +4171,21 @@
   // only resolves in the tab that asked.
   const demoSpeakPending = new Map();
   let demoSpeakSeq = 0;
-  // Generous ceiling: GPT audio synthesis of a long prompt can take
-  // several seconds; on timeout the demo degrades per the fallback
-  // rules below instead of hanging.
-  const DEMO_SPEAK_TIMEOUT_MS = 15000;
+  // Ceiling for one synthesis round-trip.  It MUST outlast the
+  // daemon's whole synthesis operation, not just one API attempt:
+  // synthesize_talk_audio's 60s timeout (DEFAULT_AUDIO_TIMEOUT_SECONDS
+  // in voice_wake.py) is PER ATTEMPT, and the OpenAI SDK retries a
+  // timed-out request twice by default — up to three 60s attempts
+  // plus backoff, so a *successful* natural clip can legitimately
+  // arrive after 3+ minutes for a long replayed talk (a
+  // multi-paragraph answer).  The old 15s waiter made the demo give
+  // up long before that, read the text with the ROBOTIC Web Speech
+  // fallback, and silently discard the natural clip that arrived
+  // moments later.  Cancellation stays responsive regardless: demo
+  // stop/pause resolves waiters immediately via
+  // cancelPendingDemoSpeaks.  On (rare) timeout the demo degrades
+  // per the fallback rules below instead of hanging.
+  const DEMO_SPEAK_TIMEOUT_MS = 240000;
 
   /**
    * Start the sound of one ``talk`` utterance — THE playback mechanism
