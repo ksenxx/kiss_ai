@@ -50,7 +50,6 @@ import ssl
 import tempfile
 import time
 import unittest
-import unittest.mock
 from pathlib import Path
 from typing import Any
 from unittest import IsolatedAsyncioTestCase
@@ -379,8 +378,8 @@ class TestM5SpawnRetriesOnImmediateExit(IsolatedAsyncioTestCase):
         # test is robust against argv differences.  Implemented as a
         # /bin/bash script because bash startup has very low and
         # consistent latency, ensuring the first invocation reliably
-        # exits within the production code's 250ms fail-fast window
-        # in ``_spawn_cloudflared``.
+        # exits within the production code's 1s fail-fast window
+        # (``proc.wait(timeout=1.0)``) in ``_spawn_cloudflared``.
         cf = os.path.join(self._tmpdir, "cloudflared")
         Path(cf).write_text(
             "#!/bin/bash\n"
@@ -424,21 +423,15 @@ class TestM5SpawnRetriesOnImmediateExit(IsolatedAsyncioTestCase):
 
     async def test_spawn_retries_on_immediate_exit(self) -> None:
         """First spawn exits with rc=7, second succeeds; final proc is alive."""
-        # Widen the 250ms fail-fast window in production code so this
-        # test is not race-prone against bash startup latency: 2s is
-        # long enough for the fake to exit reliably, but still much
-        # less than real cloudflared's startup time.
-        real_sleep = time.sleep
-
-        def _wider_sleep(seconds: float) -> None:
-            real_sleep(2.0 if 0.2 < seconds < 0.3 else seconds)
-
+        # The production fail-fast window is ``proc.wait(timeout=1.0)``:
+        # it returns as soon as the first (failing) fake exits and
+        # tolerates bash startup latency well within the 1s budget, so
+        # no timing hooks are needed here.
         loop = asyncio.get_running_loop()
-        with unittest.mock.patch.object(ws_mod.time, "sleep", _wider_sleep):
-            await loop.run_in_executor(
-                None, self.server._spawn_cloudflared,
-                ["--url", "https://x"], 3,
-            )
+        await loop.run_in_executor(
+            None, self.server._spawn_cloudflared,
+            ["--url", "https://x"], 3,
+        )
         proc = self.server._tunnel_proc
         self.assertIsNotNone(proc)
         assert proc is not None

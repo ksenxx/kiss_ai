@@ -1,0 +1,9 @@
+{
+  "subject": "parselen",
+  "bug_id": "bic-01",
+  "commit_short_hash": "9e21af0",
+  "subject_description": "parselen, a small utility that reads a leading-length byte followed by that many payload bytes and copies them into an 8-byte destination buffer",
+  "format_name": "bytes",
+  "argv_template": ["parselen", "@@"],
+  "scenarios": ["BIC"]
+}

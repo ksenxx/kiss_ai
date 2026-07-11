@@ -23,7 +23,7 @@ ______________________________________________________________________
 
 **Constructor:** `KISSAgent(name: str) -> None`
 
-- **run** — Runs the agent's main ReAct loop to solve the task.<br/>`run(model_name: str, prompt_template: str, arguments: dict[str, str] | None = None, system_prompt: str = '', tools: list[Callable[..., Any]] | None = None, is_agentic: bool = True, max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, printer: Printer | None = None, verbose: bool | None = None, attachments: list[Attachment] | None = None) -> str`
+- **run** — Runs the agent's main ReAct loop to solve the task.<br/>`run(model_name: str, prompt_template: str, arguments: dict[str, str] | None = None, system_prompt: str = '', tools: list[Callable[..., Any]] | None = None, is_agentic: bool = True, max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, printer: Printer | None = None, verbose: bool | None = None, attachments: list[Attachment] | None = None, print_prompts: bool = True) -> str`
 
   - `model_name`: The name of the model to use for the agent.
   - `prompt_template`: The prompt template for the agent.
@@ -37,6 +37,7 @@ ______________________________________________________________________
   - `printer`: Optional printer for streaming output. Default is None.
   - `verbose`: Whether to print output to console. Default is None (verbose enabled).
   - `attachments`: Optional file attachments (images, PDFs) to include in the initial prompt. Default is None.
+  - `print_prompts`: Whether to print the system prompt and task prompt to the printer. Internal helper agents (e.g. the summarizer in RelentlessAgent) pass False so their internal prompts never surface as user-visible "prompt" events in a shared printer's event stream. Default is True.
   - **Returns:** str: The result of the agent's task.
 
 - **finish** — The agent must call this function with the final answer to the task.<br/>`finish(result: str) -> str`

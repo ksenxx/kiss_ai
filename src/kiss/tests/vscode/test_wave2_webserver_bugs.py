@@ -241,7 +241,14 @@ class TestF13SecondServerInitPreservesLiveTasks(unittest.TestCase):
         state.stop_event = stop
         _RunningAgentState.register("tab-live", state)
         try:
-            VSCodeServer()
+            server = VSCodeServer()
+            # The orphan sweep runs on a background thread so daemon
+            # startup is never blocked by SQLite lock contention; join
+            # it so the assertions below observe the post-sweep state.
+            sweep = server._orphan_sweep_thread
+            assert sweep is not None
+            sweep.join(timeout=30)
+            self.assertFalse(sweep.is_alive(), "orphan sweep did not finish")
             # The dead row has no live owner thread → swept.
             self.assertEqual(
                 _task_result(dead_id),

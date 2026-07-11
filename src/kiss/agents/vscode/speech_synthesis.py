@@ -11,8 +11,16 @@ with an OpenAI GPT audio-chat model from MODEL_INFO.json (default
 ``gpt-audio-1.5``: the newest, most natural of the ``gpt-audio*``
 family) so every client can play one identical, far more natural and
 emotionally expressive voice.  The synthesized MP3 travels inside the
-``talk`` broadcast event as base64; clients without audio support (or
-when synthesis fails) still fall back to the Web Speech API text path.
+``talk`` broadcast event as base64; browser clients without audio
+support (or when synthesis fails) stay silent — the old robotic Web
+Speech fallback is gone for good — while the sorcar CLI terminal falls
+back to the system TTS command (cli_talk.py).
+
+Synthesis routes through the core model layer: a single-shot
+(non-agentic) :class:`~kiss.core.kiss_agent.KISSAgent` run carries the
+audio request (``modalities``/``audio``/``timeout`` via
+``model_config``) to :class:`OpenAICompatibleModel`, which exposes the
+returned MP3 as ``last_audio_data`` — no direct OpenAI SDK call here.
 
 Prompt shape is empirically validated: the model must be framed as a
 text-to-speech engine reading a ``Script:`` block word-for-word —
@@ -24,6 +32,7 @@ import base64
 import sys
 
 from kiss.agents.vscode.voice_wake import audio_timeout_seconds
+from kiss.core.kiss_agent import KISSAgent
 
 # Newest, most natural GPT audio model in MODEL_INFO.json (validated
 # live: valid MP3 with the default voice).  ``gpt-audio-mini`` also
@@ -66,6 +75,18 @@ TTS_SYSTEM_PROMPT = (
 )
 
 
+class TalkSynthesisAgent(KISSAgent):
+    """Single-shot TTS agent whose trajectory is never persisted.
+
+    ``talk`` speech synthesis runs once per spoken utterance; writing a
+    trajectory YAML for each would clutter the artifact directory, and a
+    persistence failure would needlessly drop otherwise-good audio.
+    """
+
+    def _save(self) -> None:
+        """Skip trajectory persistence for per-utterance TTS runs."""
+
+
 def synthesize_talk_audio(
     text: str,
     language: str = "",
@@ -99,25 +120,21 @@ def synthesize_talk_audio(
     if language:
         system += f" The script's language tag is {language}."
     try:
-        from openai import OpenAI
-
-        from kiss.core.config import DEFAULT_CONFIG
-
-        client = OpenAI(
-            api_key=DEFAULT_CONFIG.OPENAI_API_KEY or None,
-            timeout=audio_timeout_seconds(),
+        agent = TalkSynthesisAgent("talk-speech-synthesis")
+        agent.run(
+            model_name=model,
+            prompt_template="Script:\n{script}",
+            arguments={"script": text},
+            system_prompt=system,
+            is_agentic=False,
+            model_config={
+                "modalities": ["text", "audio"],
+                "audio": {"voice": voice, "format": "mp3"},
+                "timeout": audio_timeout_seconds(),
+            },
+            verbose=False,
         )
-        response = client.chat.completions.create(
-            model=model,
-            modalities=["text", "audio"],
-            audio={"voice": voice, "format": "mp3"},
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": "Script:\n" + text},
-            ],
-        )
-        audio = response.choices[0].message.audio
-        data = audio.data if audio is not None else None
+        data = getattr(agent.model, "last_audio_data", None)
         if not data:
             return None
         # Round-trip validates the base64 before shipping it to clients.

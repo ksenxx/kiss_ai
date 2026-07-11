@@ -114,6 +114,9 @@ def _make_agent(model_obj: Any, max_steps: int = 5) -> KISSAgent:
     agent.budget_used = 0.0
     agent.run_start_timestamp = 0
     agent._cached_tools_schema = None
+    agent._consecutive_no_tool_calls = 0
+    agent._model_config = None
+    agent._fallback_used = False
     return agent
 
 

@@ -29,6 +29,20 @@ function isPathInside(target: string, root: string): boolean {
 }
 
 /**
+ * True for the trivial "Discarded branch '<name>'." confirmation of a
+ * successful worktree discard.  Discarding a worktree branch needs no
+ * notification — its visible effect (the merge/discard bar going away)
+ * is confirmation enough.  Mirrors ``isSilentDiscardMessage`` in
+ * ``media/main.js`` which suppresses the same message in the chat
+ * transcript.  Discard results that carry a warning (checkout failure,
+ * undeletable branch → "Partially discarded …"), merge results, and
+ * failures do NOT match and are still surfaced to the user.
+ */
+function isSilentDiscardMessage(message: string | undefined): boolean {
+  return /^Discarded branch '[^']+'\.$/.test(message || '');
+}
+
+/**
  * File extensions that VS Code's text editor can open without
  * corrupting the buffer.  Anything outside this set is routed to the
  * native viewer (``vscode.open``) by the ``openFile`` message handler
@@ -240,6 +254,14 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   // settings-panel slider; passed to the Python listener as
   // --sensitivity on every (re)start.
   private _voiceSensitivity: number | undefined;
+  // True while the wake-word listener is stopped ONLY because the
+  // sidebar view was hidden (secondary side bar closed): the sidebar
+  // is registered with retainContextWhenHidden, so closing the bar
+  // fires onDidChangeVisibility (visible=false) — never onDidDispose —
+  // and without this suspend/resume the mic would keep listening with
+  // no visible hint.  Re-showing the view restarts the listener iff
+  // this flag is set; an explicit user voiceToggle always clears it.
+  private _voiceWakeSuspendedByHide: boolean = false;
 
   /** Per-tab MergeManager instances — each tab gets its own merge review. */
   private _mergeManagers: Map<string, MergeManager> = new Map();
@@ -597,9 +619,11 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           this._resolveAllWorktreeActions();
         }
         if (msg.success) {
-          showInformationNotification(
-            msg.message || 'Worktree action completed.',
-          );
+          if (!isSilentDiscardMessage(msg.message)) {
+            showInformationNotification(
+              msg.message || 'Worktree action completed.',
+            );
+          }
         } else {
           showErrorNotification(msg.message || 'Worktree action failed.');
         }
@@ -731,8 +755,25 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     );
 
     webviewView.onDidChangeVisibility(() => {
+      // Ignore visibility events from a stale, superseded webview
+      // (VS Code can fire them after resolveWebviewView repointed
+      // _view at a fresh webview) so they cannot stop/start the mic.
+      if (this._view !== webviewView) return;
       if (webviewView.visible) {
         this._getClient().sendCommand({type: 'getInputHistory'});
+        // The secondary side bar was reopened: resume the wake-word
+        // listener that the hide below suspended.
+        if (this._voiceWakeSuspendedByHide) {
+          this._voiceWakeSuspendedByHide = false;
+          this._voiceWake?.start(this._voiceSensitivity);
+        }
+      } else if (this._voiceWake?.running) {
+        // The secondary side bar was closed.  retainContextWhenHidden
+        // keeps the webview alive, so onDidDispose never fires — stop
+        // the microphone here (holding it open from a hidden view is a
+        // privacy hazard) and remember to resume it on re-show.
+        this._voiceWakeSuspendedByHide = true;
+        this._voiceWake.stop();
       }
     });
 
@@ -761,7 +802,9 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         setWebviewNotificationPoster(undefined);
         // Stop the microphone listener: with the webview gone there is
         // nowhere to type the wake word, and holding the mic open from
-        // a closed view would be a privacy hazard.
+        // a closed view would be a privacy hazard.  Also drop any
+        // pending hide-suspend resume — a disposed view starts fresh.
+        this._voiceWakeSuspendedByHide = false;
         this._voiceWake?.stop();
       }
       this._resolveAllWorktreeActions();
@@ -1343,18 +1386,25 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       case 'worktreeAction': {
         const wtAction = message.action;
         const wtTabId = message.tabId;
-        const progressTitle =
-          wtAction === 'merge'
-            ? 'Committing and merging worktree…'
-            : wtAction === 'discard'
-              ? 'Discarding worktree…'
+        // Discard is silent: no progress toast and (below) no result
+        // notification.  The webview's action bar disables its buttons
+        // on click and disappears when ``worktree_result`` arrives, so
+        // the user already gets feedback, and the backend emits no
+        // ``worktree_progress`` updates for discard anyway.  Merge
+        // keeps the toast — its "Generating commit message…" LLM phase
+        // can take a while.
+        if (wtAction !== 'discard') {
+          const progressTitle =
+            wtAction === 'merge'
+              ? 'Committing and merging worktree…'
               : 'Processing worktree action…';
-        this._showActionProgress(
-          progressTitle,
-          wtTabId,
-          this._worktreeProgresses,
-          this._worktreeActionResolves,
-        );
+          this._showActionProgress(
+            progressTitle,
+            wtTabId,
+            this._worktreeProgresses,
+            this._worktreeActionResolves,
+          );
+        }
         this._getClient().sendCommand({
           type: 'worktreeAction',
           action: wtAction,
@@ -1434,6 +1484,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         if (typeof message.sensitivity === 'number') {
           this._voiceSensitivity = message.sensitivity;
         }
+        // An explicit user toggle overrides any pending hide-suspend
+        // auto-resume: off must stay off across hide/show, and on is
+        // already running so there is nothing left to resume.
+        this._voiceWakeSuspendedByHide = false;
         if (message.enabled) this._voiceWake.start(this._voiceSensitivity);
         else this._voiceWake.stop();
         break;
@@ -1795,6 +1849,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   public dispose(): void {
     this._disposed = true;
     setWebviewNotificationPoster(undefined);
+    this._voiceWakeSuspendedByHide = false;
     this._voiceWake?.dispose();
     this._voiceWake = undefined;
     if (this._urlFileWatchTimer) {
