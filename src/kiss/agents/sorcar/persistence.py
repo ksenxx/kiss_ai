@@ -1386,8 +1386,8 @@ def _resolve_task_id(
 
 def _log_orphaned_task_forensics(
     db: sqlite3.Connection,
-    not_in_clause: str,
-    active_ids: list[str] | None = None,
+    extra_clause: str,
+    extra_params: list[object] | None = None,
 ) -> None:
     """Log diagnostic info for each row still carrying the orphan sentinel.
 
@@ -1401,18 +1401,20 @@ def _log_orphaned_task_forensics(
 
     Args:
         db: Active database connection.
-        not_in_clause: SQL fragment excluding still-active task ids
-            (``""`` or ``"AND id NOT IN (?,?,...)"``).
-        active_ids: Bound-parameter values matching the placeholders
-            embedded in ``not_in_clause``.  Must be supplied (and
+        extra_clause: SQL fragment further restricting the sentinel
+            rows (``""``, or any combination of
+            ``"AND id NOT IN (?,?,...)"`` and
+            ``"AND timestamp < ?"``).
+        extra_params: Bound-parameter values matching the placeholders
+            embedded in ``extra_clause``.  Must be supplied (and
             ordered) when the clause is non-empty.
     """
     params: list[object] = ["Agent Failed Abruptly"]
-    if active_ids:
-        params.extend(active_ids)
+    if extra_params:
+        params.extend(extra_params)
     diag_rows = db.execute(
         "SELECT id, task, chat_id, model, start_ts, steps, cost "
-        "FROM task_history WHERE result = ? " + not_in_clause,
+        "FROM task_history WHERE result = ? " + extra_clause,
         params,
     ).fetchall()
     for row in diag_rows:
@@ -1460,7 +1462,10 @@ def _log_orphaned_task_forensics(
         )
 
 
-def _recover_orphaned_tasks(active_task_ids: set[str]) -> int:
+def _recover_orphaned_tasks(
+    active_task_ids: set[str],
+    created_before: float | None = None,
+) -> int:
     """Replace the ``"Agent Failed Abruptly"`` sentinel on dead rows.
 
     The sentinel is written by :func:`_add_task` at task-creation
@@ -1486,6 +1491,18 @@ def _recover_orphaned_tasks(active_task_ids: set[str]) -> int:
             Pass an empty set at fresh-server startup — by then any
             row carrying the sentinel must belong to a prior,
             now-dead process.
+        created_before: Optional epoch-seconds cut-off.  When given,
+            only sentinel rows whose ``timestamp`` column is strictly
+            older are rewritten.  ``VSCodeServer`` passes its boot
+            timestamp here because its sweep runs on a BACKGROUND
+            thread: a task legitimately started after boot (inserting
+            a fresh sentinel row) must never be mistaken for an
+            orphan of a prior process by a sweep whose UPDATE races
+            past the insertion — that mislabels a live task as
+            "process killed" and defeats the pre-emptive shutdown
+            persistence in ``_stop_active_agent_tasks`` (which only
+            rewrites rows still carrying the sentinel).  ``None``
+            applies no time filter.
 
     Returns:
         The number of rows whose ``result`` column was rewritten.
@@ -1497,21 +1514,25 @@ def _recover_orphaned_tasks(active_task_ids: set[str]) -> int:
     # realistic active-task count and ``?`` placeholders sidestep
     # the SQL-injection surface entirely.
     active_ids = [str(t) for t in active_task_ids]
+    extra_clause = ""
+    extra_params: list[object] = []
     if active_ids:
         placeholders = ",".join(["?"] * len(active_ids))
-        not_in_clause = f"AND id NOT IN ({placeholders})"
-    else:
-        not_in_clause = ""
+        extra_clause += f"AND id NOT IN ({placeholders}) "
+        extra_params.extend(active_ids)
+    if created_before is not None:
+        extra_clause += "AND timestamp < ? "
+        extra_params.append(float(created_before))
     sql = (
-        "UPDATE task_history SET result = ? WHERE result = ? " + not_in_clause
+        "UPDATE task_history SET result = ? WHERE result = ? " + extra_clause
     )
     params: list[object] = [
         "Task terminated unexpectedly (process killed)",
         "Agent Failed Abruptly",
     ]
-    params.extend(active_ids)
+    params.extend(extra_params)
     with _rw_lock.write_lock():
-        _log_orphaned_task_forensics(db, not_in_clause, active_ids)
+        _log_orphaned_task_forensics(db, extra_clause, extra_params)
         cursor = db.execute(sql, params)
         rowcount = cursor.rowcount or 0
         db.commit()
