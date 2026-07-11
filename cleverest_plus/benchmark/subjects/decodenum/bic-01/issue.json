@@ -1,0 +1,9 @@
+{
+  "subject": "decodenum",
+  "bug_id": "bic-01",
+  "commit_short_hash": "5cc39d2",
+  "subject_description": "decodenum, which reads two whitespace-separated decimal integers ('count' and 'stride'), allocates an int array, and writes stride*i into index i",
+  "format_name": "text",
+  "argv_template": ["decodenum", "@@"],
+  "scenarios": ["BIC"]
+}

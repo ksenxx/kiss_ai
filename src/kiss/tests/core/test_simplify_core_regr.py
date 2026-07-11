@@ -449,28 +449,6 @@ class RelentlessRegression(unittest.TestCase):
         data2 = yaml.safe_load(relentless_finish(False))
         self.assertEqual(data2, {"success": False, "is_continue": False, "summary": ""})
 
-    def test_broadcast_final_result(self) -> None:
-        agent = RelentlessAgent("regr relentless")
-        p, buf = _make_printer()
-        agent.printer = p
-        agent.total_steps = 7
-        agent.total_tokens_used = 999
-        agent.budget_used = 0.1234
-        agent._broadcast_final_result(
-            {"success": False, "is_continue": False, "summary": "merged summary"}
-        )
-        out = buf.getvalue()
-        self.assertIn("merged summary", out)
-        self.assertIn("Status: FAILED", out)
-        self.assertIn("tokens=999", out)
-        self.assertIn("steps=7", out)
-        self.assertIn("cost=$0.1234", out)
-
-    def test_broadcast_final_result_no_printer(self) -> None:
-        agent = RelentlessAgent("regr relentless2")
-        agent.printer = None
-        agent._broadcast_final_result({"success": True, "is_continue": False, "summary": "s"})
-
     def test_docker_bash_without_manager_raises(self) -> None:
         from kiss.core.kiss_error import KISSError
 

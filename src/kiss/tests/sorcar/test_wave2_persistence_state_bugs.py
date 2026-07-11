@@ -28,6 +28,18 @@ C2  ``_RunningAgentState.register()`` silently overwrote an existing
     state's ``stop_event``/``task_thread``.  It must emit a WARNING on
     overwrite (semantics unchanged: last registration wins).
 
+WAL ``_get_db()`` executed ``PRAGMA journal_mode=WAL`` on a fresh
+    connection before arming ``busy_timeout`` and outside
+    ``_init_tables_lock``.  The rollback→WAL transition needs an
+    exclusive lock, and when a peer connection holds a RESERVED
+    (write-transaction) lock SQLite reports ``SQLITE_BUSY``
+    *immediately* — the busy handler is never consulted — so a peer
+    mid-write on a brand-new ``sorcar.db`` (e.g. a parallel sub-agent
+    running ``_init_tables``, or the kiss-web daemon initialising) made
+    ``_get_db()`` die instantly with ``database is locked``.  The
+    pragma now sits inside the init lock with a bounded busy/locked
+    retry loop.
+
 All tests drive real SQLite databases, real JSON config files, real git
 repositories and real threads — no mocks, patches, or fakes.
 """
@@ -38,6 +50,7 @@ import json
 import logging
 import random
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import threading
@@ -265,3 +278,70 @@ class TestC2RegisterOverwriteWarning:
             _RunningAgentState.register(self._TAB, s1)
         assert self._warnings(caplog) == []
         assert _RunningAgentState.running_agent_states[self._TAB] is s1
+
+
+class TestWalSwitchLockRace(_DBSandbox):
+    """WAL: first-time ``_get_db()`` must survive a concurrent peer writer.
+
+    Regression for the ``PRAGMA journal_mode=WAL`` race: two parallel
+    sub-agents opening their first connections against a fresh
+    ``sorcar.db`` made one die instantly with ``sqlite3.OperationalError:
+    database is locked`` because the WAL switch ran outside
+    ``_init_tables_lock`` with no retry — and when a peer connection
+    holds a RESERVED (write-transaction) lock, the rollback→WAL
+    transition reports ``SQLITE_BUSY`` *immediately*, without consulting
+    the busy handler, so no ``busy_timeout``/``connect(timeout=...)``
+    can save it.  This test recreates that collision deterministically
+    with a real peer connection holding an uncommitted write transaction
+    (``BEGIN IMMEDIATE`` + DDL — the same RESERVED lock a parallel
+    sub-agent mid-``_init_tables`` holds) on the brand-new database file
+    while a real thread performs its first ``_get_db()``.  The pre-fix
+    code raises instantly here; the fixed code retries the WAL switch
+    until the peer releases the lock.
+    """
+
+    def test_wal_pragma_survives_concurrent_reserved_writer(self) -> None:
+        """``_get_db()`` retries the WAL switch instead of raising."""
+        # A peer (standing in for a parallel sub-agent thread mid-DDL or
+        # another process such as the kiss-web daemon) creates the fresh
+        # database file and holds a RESERVED lock via an uncommitted
+        # write transaction.  A RESERVED peer makes the WAL transition
+        # fail with an IMMEDIATE "database is locked" (busy handler
+        # bypassed), which is exactly the field failure.
+        peer = sqlite3.connect(str(th._DB_PATH), check_same_thread=False)
+        peer.execute("BEGIN IMMEDIATE")
+        peer.execute("CREATE TABLE _peer_probe (x INTEGER)")
+
+        errors: list[BaseException] = []
+        results: dict[str, str] = {}
+        started = threading.Event()
+
+        def worker() -> None:
+            started.set()
+            try:
+                conn = th._get_db()
+                results["journal"] = str(
+                    conn.execute("PRAGMA journal_mode").fetchone()[0]
+                )
+                # The schema must have been created despite the initial
+                # lock collision.
+                conn.execute("SELECT COUNT(*) FROM task_history").fetchone()
+            except BaseException as exc:  # noqa: BLE001 — recorded for assert
+                errors.append(exc)
+
+        thread = threading.Thread(target=worker)
+        try:
+            thread.start()
+            assert started.wait(5), "worker thread never started"
+            # Keep the RESERVED lock held long enough that the worker's
+            # WAL switch definitely collides with it (the buggy code
+            # raised instantly here; the fixed code retries).
+            time.sleep(0.5)
+        finally:
+            peer.execute("ROLLBACK")
+            peer.close()
+        thread.join(15)
+
+        assert not thread.is_alive(), "worker thread hung in _get_db()"
+        assert errors == [], f"_get_db() raised under lock contention: {errors!r}"
+        assert results["journal"] == "wal"

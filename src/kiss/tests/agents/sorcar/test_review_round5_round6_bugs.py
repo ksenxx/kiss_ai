@@ -145,7 +145,9 @@ def test_register_running_state_does_not_clobber_preexisting(temp_db: Path) -> N
 #   "false" / "0" / "no" as truthy.
 # ---------------------------------------------------------------------------
 
-def test_bx_handles_falsy_string_literals_during_migration(tmp_path: Path) -> None:
+def test_bx_handles_falsy_string_literals_during_migration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Legacy JSON-extra payloads sometimes encode boolean flags as
     string literals.  ``bool("false") == True`` in vanilla Python
     would silently flip every ``is_parallel`` / ``is_worktree`` /
@@ -189,7 +191,7 @@ def test_bx_handles_falsy_string_literals_during_migration(tmp_path: Path) -> No
     import kiss.agents.sorcar.persistence as P
 
     P._close_db()
-    P._DB_PATH = legacy_db
+    monkeypatch.setattr(P, "_DB_PATH", legacy_db)
     db = P._get_db()
     try:
         rows = list(db.execute(

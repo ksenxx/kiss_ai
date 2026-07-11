@@ -41,6 +41,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import contextlib
 import datetime
 import errno
 import hashlib
@@ -350,6 +351,18 @@ _SERVER_RESET_COMPLETE_DELAY = 3.0
 # regular launch / crash restart / install respawn and the
 # completion toast is intentionally suppressed.
 _SERVER_RESET_FLAG_NAME = "server-reset-pending.json"
+
+# Hard upper bound (seconds) a SIGTERM-initiated graceful shutdown may
+# take AFTER the in-flight agent tasks have been stopped and persisted
+# (see :meth:`RemoteAccessServer._shutdown_on_sigterm`).  If the event
+# loop still has not unwound by then — e.g. ``asyncio.run``'s
+# task-cancellation phase is wedged on a task that swallows
+# ``CancelledError``, or the default executor refuses to drain — the
+# process force-exits so the supervising LaunchAgent / systemd unit can
+# respawn a fresh daemon.  Without this failsafe a wedged loop leaves
+# the old daemon (and anything it still runs) alive forever and the
+# user's "Reset Server" click appears to do nothing.
+_SHUTDOWN_EXIT_FAILSAFE = 30.0
 
 # M7: cap the prompt size echoed back via ``setTaskText`` so a giant
 # JSON payload cannot push tens of MB through the broadcast pipeline.
@@ -1846,6 +1859,42 @@ def _rss_mb() -> float:
         return -1.0
 
 
+def _raise_open_file_limit() -> None:
+    """Raise the soft ``RLIMIT_NOFILE`` toward the hard limit.
+
+    macOS defaults the soft limit to 256 open files, which a
+    long-running kiss-web daemon (websocket connections, agent
+    subprocesses, log and trajectory files) exhausts under load,
+    surfacing as ``OSError: [Errno 24] Too many open files`` when e.g.
+    saving a trajectory YAML.  Raising the soft limit up to the hard
+    limit needs no privileges.  macOS rejects soft values above
+    ``kern.maxfilesperproc`` (and ``RLIM_INFINITY``) with
+    ``ValueError``, so descending candidates are tried until one
+    sticks.  Child agent subprocesses inherit the raised limit.
+    """
+    try:
+        import resource
+    except ImportError:  # pragma: no cover — non-POSIX platform
+        return
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    except (ValueError, OSError):  # pragma: no cover
+        return
+    for target in (1048576, 262144, 65536, 10240, 4096, 1024):
+        if target <= soft:
+            break
+        if hard != resource.RLIM_INFINITY and target > hard:
+            continue
+        try:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+            logger.info(
+                "Raised RLIMIT_NOFILE soft limit from %d to %d", soft, target
+            )
+            break
+        except (ValueError, OSError):
+            continue
+
+
 def _generate_self_signed_cert(
     cert_path: Path,
     key_path: Path,
@@ -2238,8 +2287,8 @@ class WebPrinter(JsonPrinter):
         Chromium's autoplay policy rejects ``Audio.play()`` in a
         webview unless the user interacted with it seconds earlier
         (microsoft/vscode#197937 / #178642, closed as not actionable),
-        so the webview silently fell back to the robotic Web Speech
-        system voice — the "alien" talk voice.  When the event carries
+        so the talk would stay silent in the webview (whose old
+        robotic Web Speech fallback is gone).  When the event carries
         a synthesized clip and a local webview tab is subscribed, the
         DAEMON therefore plays the clip natively on this machine's
         speakers (:mod:`kiss.agents.sorcar.cli_talk`, ``afplay`` on
@@ -3547,7 +3596,19 @@ class RemoteAccessServer:
         self.use_tunnel = use_tunnel
         self.tunnel_token = tunnel_token
         self.tunnel_url = tunnel_url
-        self._ssl_context: ssl.SSLContext = _create_ssl_context(certfile, keyfile)
+        # SSL context is deliberately NOT built in ``__init__`` — it
+        # costs ~0.5-2 s (cert load / RSA keygen on first boot or on
+        # near-expiry renewal) and would delay every listener bind by
+        # that much on the startup critical path.  Instead the cert /
+        # key paths are stashed here and the context is built inside
+        # :meth:`_setup_server` on a worker thread while the UDS
+        # listener (which does not need TLS) binds in parallel.  This
+        # is what makes ``install.sh`` see ``~/.kiss/sorcar.sock``
+        # within ~100 ms after ``launchctl kickstart`` even when the
+        # WSS listener is still waiting on ``load_cert_chain``.
+        self._ssl_certfile: str | None = certfile
+        self._ssl_keyfile: str | None = keyfile
+        self._ssl_context: ssl.SSLContext | None = None
         # Path to the JSON file used to publish the active URL.  Tests
         # override this to a per-test temporary path to avoid racing
         # the live ``~/.kiss/remote-url.json`` watched by the VS Code
@@ -3649,6 +3710,18 @@ class RemoteAccessServer:
         # ``subprocess.wait`` mid-sleep, and crash the process with an
         # unhandled traceback (killing any running agent task).
         self._shutdown_initiated = False
+        # Resolved by :meth:`_request_loop_shutdown` (scheduled from the
+        # SIGTERM handler via ``call_soon_threadsafe``) to make
+        # :meth:`_serve_async` return deterministically.  Raising
+        # ``KeyboardInterrupt`` from the signal handler instead proved
+        # unreliable: with many agents active the main thread is busy
+        # inside coroutine/callback frames whose broad ``except`` /
+        # ``finally`` clauses can swallow the injected exception — the
+        # shutdown then never begins while ``_shutdown_initiated`` stays
+        # latched, so every later SIGTERM (every further "Reset Server"
+        # click) is ignored and the daemon keeps running its agents
+        # until it is SIGKILLed.
+        self._shutdown_future: asyncio.Future[None] | None = None
         self._local_url = f"https://localhost:{self.port}"
         self._merge_states: dict[str, _WebMergeState] = {}
         # M6: a small lock guards _merge_states so the agent
@@ -4587,10 +4660,10 @@ class RemoteAccessServer:
         not pop a banner), then schedules a ``SIGTERM`` to this very
         process after a short delay so the notification flushes to the client
         before its socket drops.  The ``SIGTERM`` is caught by
-        :meth:`_handle_shutdown_signal`, which raises
-        :class:`KeyboardInterrupt` to unwind the ``asyncio.run`` loop in
-        :meth:`start` through its existing graceful-shutdown path
-        (stopping in-flight agent tasks and the tunnel).  The process
+        :meth:`_handle_shutdown_signal`, which runs the
+        :meth:`_shutdown_on_sigterm` graceful-shutdown path (stopping
+        in-flight agent tasks, then unwinding the ``asyncio.run`` loop
+        in :meth:`start` so its cleanup runs).  The process
         then exits and the supervising macOS LaunchAgent (``KeepAlive``)
         / Linux systemd unit (``Restart=always``) respawns a fresh
         ``kiss-web`` that re-adopts the same port and ``cloudflared``
@@ -5768,8 +5841,17 @@ class RemoteAccessServer:
             )
             # Give cloudflared a brief moment to fail-fast on a bind
             # collision.  Healthy cloudflared takes seconds to start
-            # so it will not have exited within 250ms.
-            time.sleep(0.25)
+            # so it will not have exited within 1s.  ``wait`` (rather
+            # than a fixed ``sleep`` + ``poll``) returns as soon as a
+            # fail-fast child exits — typically a few ms — and also
+            # reaps it, while tolerating up to 1s of scheduling delay
+            # under heavy machine load (a loaded box can take >250ms
+            # just to exec and exit the child, which used to
+            # misclassify a doomed spawn as healthy).
+            try:
+                proc.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                pass
             if proc.poll() is None:
                 self._tunnel_proc = proc
                 self._tunnel_started_at = time.monotonic()
@@ -6567,6 +6649,51 @@ class RemoteAccessServer:
         self._loop = asyncio.get_running_loop()
         self._printer._loop = self._loop
 
+        # Bind the local Unix-domain socket FIRST — before the WSS
+        # listener, before the SSL context, before anything that could
+        # take non-trivial time.  ``install.sh`` /
+        # ``build-extension.sh`` poll for ``~/.kiss/sorcar.sock`` to
+        # decide whether the freshly-launched daemon is back; giving
+        # them a bound UDS within ~100 ms of ``launchctl kickstart``
+        # is what makes the "KISS Sorcar Server is starting …"
+        # overlay disappear promptly.  UDS bind does not depend on
+        # ``self._ssl_context`` (local peers authenticate via
+        # filesystem permissions), so it can run on the fast path.
+        try:
+            self._uds_path.parent.mkdir(parents=True, exist_ok=True)
+            if self._uds_path.exists() or self._uds_path.is_symlink():
+                try:
+                    self._uds_path.unlink()
+                except OSError:
+                    logger.debug(
+                        "Could not unlink stale UDS socket at %s",
+                        self._uds_path, exc_info=True,
+                    )
+            self._uds_server = await asyncio.start_unix_server(
+                self._uds_handler, path=str(self._uds_path),
+                limit=_MAX_LINE_BYTES,
+            )
+            os.chmod(self._uds_path, 0o600)
+        except Exception:
+            logger.warning(
+                "Failed to bind UDS at %s; local extension clients "
+                "will fall back to WSS",
+                self._uds_path, exc_info=True,
+            )
+            self._uds_server = None
+
+        # Build the SSL context on a worker thread while the WSS
+        # bind retry loop below awaits it.  ``load_cert_chain`` (and
+        # RSA keygen on a near-expiry auto-generated cert) is CPU-
+        # heavy synchronous work that would otherwise block the
+        # event loop and the UDS accept-path we just bound.
+        if self._ssl_context is None:
+            self._ssl_context = await asyncio.to_thread(
+                _create_ssl_context,
+                self._ssl_certfile,
+                self._ssl_keyfile,
+            )
+
         # Bind the WSS listener with bounded retry on transient
         # ``OSError`` (most often ``EADDRINUSE`` lingering from a
         # previous instance still in ``TIME_WAIT`` during a fast
@@ -6639,31 +6766,9 @@ class RemoteAccessServer:
             )
             raise SystemExit(2)
 
-        # Bind the local Unix-domain socket for the VS Code extension.
-        # File permissions (mode 0o600) restrict access to the owning
-        # user, replacing the WSS password challenge for local peers.
-        try:
-            self._uds_path.parent.mkdir(parents=True, exist_ok=True)
-            if self._uds_path.exists() or self._uds_path.is_symlink():
-                try:
-                    self._uds_path.unlink()
-                except OSError:
-                    logger.debug(
-                        "Could not unlink stale UDS socket at %s",
-                        self._uds_path, exc_info=True,
-                    )
-            self._uds_server = await asyncio.start_unix_server(
-                self._uds_handler, path=str(self._uds_path),
-                limit=_MAX_LINE_BYTES,
-            )
-            os.chmod(self._uds_path, 0o600)
-        except Exception:
-            logger.warning(
-                "Failed to bind UDS at %s; local extension clients "
-                "will fall back to WSS",
-                self._uds_path, exc_info=True,
-            )
-            self._uds_server = None
+        # NOTE: UDS bind moved to the very top of ``_setup_server``
+        # so ``install.sh`` sees ``~/.kiss/sorcar.sock`` within
+        # ~100 ms even when WSS bind / SSL cert build are slow.
 
         tunnel_url: str | None = None
         if self.use_tunnel:
@@ -6750,14 +6855,40 @@ class RemoteAccessServer:
         self._maybe_schedule_server_reset_complete()
 
     async def _serve_async(self) -> None:
-        """Internal async entry point for the server."""
+        """Internal async entry point for the server.
+
+        Serves until either the WSS listener stops on its own (its
+        exception is re-raised) or :meth:`_request_loop_shutdown`
+        resolves :attr:`_shutdown_future` — the deterministic
+        SIGTERM/"Reset Server" shutdown path, which cannot be swallowed
+        by whatever coroutine the loop happens to be executing (unlike
+        an injected ``KeyboardInterrupt``).
+        """
         await self._setup_server()
         print(f"KISS Sorcar remote access: {self._local_url}", file=sys.stderr)
         if self.use_tunnel and self._active_url != self._local_url:
             print(f"Cloudflare tunnel:         {self._active_url}", file=sys.stderr)
         elif self.use_tunnel:
             print("Warning: cloudflared tunnel failed to start", file=sys.stderr)
-        await self._ws_server.serve_forever()  # type: ignore[union-attr]
+        loop = asyncio.get_running_loop()
+        self._shutdown_future = loop.create_future()
+        serve_task: asyncio.Task[None] = asyncio.ensure_future(
+            self._ws_server.serve_forever(),  # type: ignore[union-attr]
+        )
+        try:
+            await asyncio.wait(
+                {serve_task, self._shutdown_future},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            if not serve_task.done():
+                serve_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await serve_task
+        if serve_task.done() and not serve_task.cancelled():
+            exc = serve_task.exception()
+            if exc is not None:
+                raise exc
 
     def _handle_shutdown_signal(
         self, signum: int, _frame: Any = None,
@@ -6766,10 +6897,17 @@ class RemoteAccessServer:
 
         Logs the signal alongside a snapshot of in-flight agent tasks
         (via :func:`_snapshot_active_tabs`, which is signal-safe) and
-        current memory.  For ``SIGTERM`` the *first* invocation raises
-        :class:`KeyboardInterrupt` so the ``asyncio.run`` loop in
-        :meth:`start` unwinds through its existing
-        ``except KeyboardInterrupt`` handler and runs its cleanup.
+        current memory.  For ``SIGTERM`` the *first* invocation starts
+        the :meth:`_shutdown_on_sigterm` thread, which stops the
+        in-flight agent worker threads and then unwinds the event loop
+        deterministically (via :meth:`_request_loop_shutdown`) so
+        ``asyncio.run`` in :meth:`start` returns and its ``finally``
+        cleanup runs.  Only when the loop is not running yet does the
+        handler fall back to raising :class:`KeyboardInterrupt`
+        (raising it mid-loop is unreliable — a busy loop can swallow
+        it inside foreign ``except``/``finally`` frames, leaving the
+        daemon and its agents running while every later SIGTERM is
+        ignored).
 
         A subsequent SIGTERM that arrives *while shutdown is already in
         progress* must NOT raise again.  During the ``finally`` cleanup,
@@ -6797,10 +6935,9 @@ class RemoteAccessServer:
             ", ".join(active_tabs) if active_tabs else "none",
             _rss_mb(),
         )
-        # For SIGTERM: raise KeyboardInterrupt so the asyncio loop can
-        # unwind cleanly through the existing try/except — but only on
-        # the first signal.  Re-raising during the cleanup phase would
-        # crash the process (see docstring).
+        # For SIGTERM: begin a deterministic graceful shutdown — but
+        # only on the first signal.  Re-triggering during the cleanup
+        # phase would crash the process (see docstring).
         if signum == signal.SIGTERM:
             if self._shutdown_initiated:
                 logger.info(
@@ -6810,7 +6947,103 @@ class RemoteAccessServer:
                 )
                 return
             self._shutdown_initiated = True
+            loop = self._loop
+            if loop is not None and loop.is_running():
+                # Do NOT raise KeyboardInterrupt here.  The signal
+                # handler fires at an arbitrary bytecode of whatever
+                # the main thread is executing; with agents active the
+                # loop is usually inside coroutine/callback frames
+                # whose broad ``except``/``finally`` clauses can
+                # swallow the injected exception (observed in
+                # production: SIGTERM logged, agents kept stepping, no
+                # shutdown, all later SIGTERMs ignored).  A dedicated
+                # shutdown thread stops the in-flight agents first and
+                # then unwinds the loop via a plain callback, which no
+                # foreign frame can intercept.
+                threading.Thread(
+                    target=self._shutdown_on_sigterm,
+                    name="kiss-sigterm-shutdown",
+                    daemon=True,
+                ).start()
+                return
+            # Loop not running yet (SIGTERM landed between
+            # ``_install_signal_handlers`` and ``asyncio.run``): the
+            # main thread is still in plain ``start()`` code where a
+            # raised KeyboardInterrupt reliably reaches the existing
+            # ``except KeyboardInterrupt`` handler.
             raise KeyboardInterrupt(f"Received {sig_name}")
+
+    def _request_loop_shutdown(self) -> None:
+        """Make :meth:`_serve_async` return (runs ON the event loop).
+
+        Scheduled by :meth:`_shutdown_on_sigterm` via
+        ``call_soon_threadsafe``.  Resolving :attr:`_shutdown_future`
+        completes the ``asyncio.wait`` in :meth:`_serve_async`, so
+        ``asyncio.run`` unwinds and :meth:`start` runs its shutdown
+        ``finally``.  If the future does not exist yet (SIGTERM landed
+        while :meth:`_setup_server` was still binding listeners) raise
+        ``KeyboardInterrupt`` instead: from a plain loop callback the
+        exception is re-raised by ``Handle._run`` straight out of
+        ``run_forever`` — no foreign coroutine frame can swallow it.
+        """
+        fut = self._shutdown_future
+        if fut is not None and not fut.done():
+            fut.set_result(None)
+            return
+        raise KeyboardInterrupt("SIGTERM received before serve loop started")
+
+    def _shutdown_on_sigterm(self) -> None:
+        """Drive the SIGTERM graceful shutdown off the main thread.
+
+        Runs in a dedicated daemon thread started by
+        :meth:`_handle_shutdown_signal` so the event loop stays live
+        (flushing the "Restarting…" notification, answering pings)
+        while the in-flight agent worker threads are cooperatively
+        stopped and joined.  Ordering matters:
+
+        1. :meth:`_stop_active_agent_tasks` FIRST — the user-visible
+           point of "Reset Server" is that running agents stop, and
+           this must not depend on the event loop being able to unwind
+           (a wedged loop previously left agents running forever).
+        2. Unwind the loop via :meth:`_request_loop_shutdown` so
+           ``asyncio.run`` returns and :meth:`start`'s ``finally``
+           performs the remaining cleanup (its second
+           ``_stop_active_agent_tasks`` call is then a no-op).
+        3. Failsafe: if the loop still has not stopped after
+           ``_SHUTDOWN_EXIT_FAILSAFE`` seconds — e.g. ``asyncio.run``'s
+           cancellation phase is stuck on a task swallowing
+           ``CancelledError`` — force-exit so the supervisor respawns a
+           fresh daemon instead of leaving a zombie that ignores every
+           further SIGTERM.
+        """
+        try:
+            self._stop_active_agent_tasks()
+        except Exception:  # noqa: BLE001 — shutdown must proceed regardless
+            logger.exception(
+                "SIGTERM shutdown: stopping in-flight agent tasks failed",
+            )
+        loop = self._loop
+        if loop is not None and loop.is_running():
+            try:
+                loop.call_soon_threadsafe(self._request_loop_shutdown)
+            except RuntimeError:
+                pass  # loop closed concurrently — start() is unwinding
+        deadline = time.monotonic() + _SHUTDOWN_EXIT_FAILSAFE
+        while time.monotonic() < deadline:
+            loop = self._loop
+            if loop is None or not loop.is_running():
+                return  # asyncio.run unwound; start()'s finally takes over
+            time.sleep(0.25)
+        logger.error(
+            "Shutdown failsafe: event loop did not unwind within %.0fs "
+            "of SIGTERM (agent tasks already stopped); forcing exit "
+            "so the supervisor can respawn: pid=%d",
+            _SHUTDOWN_EXIT_FAILSAFE,
+            os.getpid(),
+        )
+        self._detach_tunnel()
+        logging.shutdown()
+        os._exit(0)
 
     def _stop_active_agent_tasks(self, timeout: float = 12.0) -> None:
         """Stop in-flight agent worker threads so they unwind cleanly.
@@ -6969,6 +7202,7 @@ class RemoteAccessServer:
 
         Call this from the main thread.  Press Ctrl-C to stop.
         """
+        _raise_open_file_limit()
         logging.basicConfig(
             level=logging.INFO,
             format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -6990,6 +7224,11 @@ class RemoteAccessServer:
 
         try:
             asyncio.run(self._serve_async())
+            if self._shutdown_initiated:
+                # Deterministic SIGTERM path: _shutdown_on_sigterm
+                # resolved _shutdown_future, _serve_async returned and
+                # asyncio.run unwound without an exception.
+                logger.info("Server shutting down: pid=%d (SIGTERM)", pid)
         except KeyboardInterrupt:
             logger.info("Server shutting down: pid=%d (KeyboardInterrupt)", pid)
         finally:
@@ -7022,6 +7261,7 @@ class RemoteAccessServer:
         Returns after the server is listening.  The caller must keep
         the event loop running.
         """
+        _raise_open_file_limit()
         await self._setup_server()
 
     async def stop_async(self) -> None:

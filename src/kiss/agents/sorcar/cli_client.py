@@ -370,6 +370,13 @@ class _EventDispatcher:
             # Force a newline so the next panel starts on its own row.
             self.printer.flush_newline()
             return
+        if et in ("prompt", "system_prompt") and event.get("early"):
+            # Optimistic submit-time panels meant for the chat WEBVIEW
+            # (see ``task_runner._broadcast_early_prompts``): the
+            # authoritative events follow once the agent starts, so
+            # printing the early copies here would show every prompt
+            # twice in the CLI.
+            return
         if et == "prompt":
             self.printer.print(event.get("text") or "", type="prompt")
             return
@@ -1188,16 +1195,22 @@ def _submit_task(
             )
             try:
                 ans = input("> ")
-            except EOFError:
-                ans = "done"
-            except KeyboardInterrupt:
-                # Ctrl+C at the question prompt is a cancellation
-                # gesture, not an answer.  The old code fabricated the
-                # literal reply "done", which the agent treated as a
-                # genuine user answer — inconsistent with the anchored
-                # path and with the surrounding loop's Ctrl+C
-                # semantics.  Forward ``stop`` to the daemon instead
-                # and keep waiting for the task to wind down.
+            except (EOFError, KeyboardInterrupt):
+                # Ctrl+C (KeyboardInterrupt) and Ctrl+D / closed
+                # stdin (EOFError) at the question prompt are both
+                # cancellation gestures, not answers.  The old code
+                # fabricated the literal reply "done" on EOF, which
+                # the agent treated as a genuine user answer —
+                # inconsistent with the anchored path and with the
+                # surrounding loop's Ctrl+C semantics.  There is
+                # also a signal-vs-EOF race under load: when a
+                # parent process delivers SIGINT and closes the
+                # child's stdin nearly simultaneously (as
+                # ``subprocess.communicate()`` does), the EOF may
+                # win the race and ``input()`` raises EOFError
+                # instead of KeyboardInterrupt.  Treat both
+                # identically: forward ``stop`` to the daemon and
+                # keep waiting for the task to wind down.
                 client.send({"type": "stop"})
                 client.dispatcher.printer.print(
                     "[yellow]⏹  Sent stop to daemon.[/yellow]",

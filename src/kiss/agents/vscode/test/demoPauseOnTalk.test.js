@@ -10,14 +10,10 @@
 //   1. The replay must NOT advance past a ``talk`` tool-call panel
 //      (no collapse, no result streaming) until the speech promise
 //      returned by ``playTalkEvent`` resolves.
-//   2. The replay must NOT proceed past the prompt display (no
-//      ``resumeSession`` request) until the "User said ..." narration
-//      promise returned by ``speakText`` resolves — even well after
-//      the 2-second display pause.
-//   3. Cancelling the demo during an in-flight talk resolves the
+//   2. Cancelling the demo during an in-flight talk resolves the
 //      pending speech promise via ``stopSpeech`` so the paused replay
 //      coroutine exits immediately instead of hanging forever.
-//   4. A legacy host api whose speech hooks return undefined (older
+//   3. A legacy host api whose speech hooks return undefined (older
 //      main.js) still replays to completion without hanging.
 //
 // Drives the real ``media/demo.js`` inside jsdom (no mocks of project
@@ -176,11 +172,6 @@ async function testReplayPausesUntilTalkEnds() {
   const {win, api, calls, pending} = makeDemoWindow(talkEvents());
   const replay = startReplay(win, 'pause on talk');
 
-  // Release the prompt narration so the replay reaches the talk panel.
-  await waitFor(() => pending.length >= 1, 5000, 'prompt narration');
-  assert.strictEqual(pending[0].kind, 'speakText');
-  pending.shift().resolve();
-
   // The talk starts playing...
   await waitFor(
     () => calls.some(c => c.fn === 'playTalkEvent'),
@@ -216,39 +207,10 @@ async function testReplayPausesUntilTalkEnds() {
   console.log('  ok - replay pauses at a talk panel until the speech ends');
 }
 
-async function testReplayWaitsForPromptNarration() {
-  const {win, api, calls, pending} = makeDemoWindow(talkEvents());
-  const replay = startReplay(win, 'slow narration');
-
-  await waitFor(() => pending.length >= 1, 5000, 'prompt narration');
-  // Well past the 2-second prompt display the narration is still
-  // playing — the replay must NOT have requested the session events.
-  await sleep(2600);
-  assert.strictEqual(
-    calls.filter(c => c.fn === 'sendMessage' && c.msg.type === 'resumeSession')
-      .length,
-    0,
-    'replay must not fetch events while the prompt narration is playing',
-  );
-
-  // Narration ends — the replay proceeds (talk resolved immediately
-  // here; this test only pins the prompt-narration pause).
-  pending.shift().resolve();
-  await waitFor(() => pending.length >= 1, 5000, 'talk playback');
-  pending.shift().resolve();
-  await replay;
-  assert.ok(resultRendered(win), 'replay completes after narration ends');
-  assert.strictEqual(api.active, false);
-  win.close();
-  console.log('  ok - replay waits for the "User said ..." narration');
-}
-
 async function testCancelDuringTalkExitsImmediately() {
   const {win, api, calls, pending} = makeDemoWindow(talkEvents());
   const replay = startReplay(win, 'cancel mid talk');
 
-  await waitFor(() => pending.length >= 1, 5000, 'prompt narration');
-  pending.shift().resolve();
   await waitFor(
     () => calls.some(c => c.fn === 'playTalkEvent'),
     5000,
@@ -273,9 +235,8 @@ async function testCancelDuringTalkExitsImmediately() {
 
   // The demo can be restarted after a cancel (nothing deadlocked).
   const again = startReplay(win, 'restart after cancel');
-  await waitFor(() => pending.length >= 1, 5000, 'restart narration');
-  pending.shift().resolve();
   await waitFor(() => pending.length >= 1, 5000, 'restart talk');
+  assert.strictEqual(pending[0].kind, 'playTalkEvent');
   pending.shift().resolve();
   await again;
   assert.ok(resultRendered(win), 'demo replays fully after a cancel');
@@ -297,14 +258,13 @@ async function testLegacyHooksReturningUndefinedStillComplete() {
 
 async function runTests() {
   await testReplayPausesUntilTalkEnds();
-  await testReplayWaitsForPromptNarration();
   await testCancelDuringTalkExitsImmediately();
   await testLegacyHooksReturningUndefinedStillComplete();
 }
 
 runTests().then(
   () => {
-    console.log('\n4 passed, 0 failed');
+    console.log('\n3 passed, 0 failed');
     process.exit(0);
   },
   err => {

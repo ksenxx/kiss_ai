@@ -60,6 +60,16 @@ def _restore(saved: tuple[Path, object, Path]) -> None:
 def _make_server() -> tuple[VSCodeServer, list[dict]]:
     """Create a VSCodeServer whose broadcasts go into an in-memory list."""
     server = VSCodeServer()
+    # ``VSCodeServer.__init__`` starts a background ``orphan-task-sweep``
+    # daemon thread that opens its own SQLite connection against the
+    # (temp-dir-redirected) ``sorcar.db``.  Join it before returning so
+    # ``teardown_method`` never closes the connection / rmtree's the
+    # temp dir while the sweep thread is still mid-query — that race
+    # segfaults the interpreter on Python 3.14.
+    thread = server._orphan_sweep_thread
+    if thread is not None:
+        thread.join(timeout=30)
+        assert not thread.is_alive(), "orphan sweep did not finish"
     events: list[dict] = []
     lock = threading.Lock()
 

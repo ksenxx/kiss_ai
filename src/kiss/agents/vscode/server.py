@@ -26,6 +26,7 @@ import logging
 import os
 import queue
 import threading
+import time
 from collections.abc import Callable
 from typing import Any, cast
 
@@ -287,6 +288,11 @@ class VSCodeServer(
     # non-``__init__`` instances see (and, for the dict, share) them.
     _tab_opened_task_ids: dict[str, str] = {}
     _cli_running_lookup: Callable[[str], bool] | None = None
+    # Handle of the background orphan-task sweep thread started by
+    # ``__init__``; ``None`` on instances built via ``object.__new__``
+    # (test shortcuts) that never run ``__init__``.  Kept so tests and
+    # embedders can join the sweep deterministically.
+    _orphan_sweep_thread: threading.Thread | None = None
 
     def __init__(self, printer: JsonPrinter | None = None) -> None:
         # The transport-specific printer is owned by the caller
@@ -312,6 +318,17 @@ class VSCodeServer(
         # in-flight task row swept below: the worker's own cleanup
         # ``finally`` will persist the real result.  Snapshot those
         # task ids under the registry lock BEFORE clearing.
+        #
+        # Boot timestamp for the orphan sweep's eligibility cut-off.
+        # Captured BEFORE the sweep thread is spawned: only rows
+        # created strictly before this instant can be orphans of a
+        # prior, now-dead process.  Any row inserted AFTER this
+        # instant belongs to the live process (a task started while
+        # the background sweep was still pending — e.g. delayed by
+        # SQLite's 30 s ``busy_timeout``) and must never be rewritten
+        # to "Task terminated unexpectedly (process killed)" by a
+        # sweep that raced past its insertion.
+        boot_ts = time.time()
         still_running: set[str] = set()
         with _RunningAgentState._registry_lock:
             for tab in _RunningAgentState.running_agent_states.values():
@@ -343,12 +360,31 @@ class VSCodeServer(
         # the sentinel from those rows is here, on every fresh
         # server boot.  Rows owned by worker threads that are still
         # alive in THIS process (collected above) are excluded.
-        try:
-            _recover_orphaned_tasks(still_running)
-        except Exception:  # pragma: no cover — best-effort sweep
-            logger.exception(
-                "orphan-task recovery sweep failed; continuing startup",
-            )
+        #
+        # The sweep runs in a BACKGROUND daemon thread.  It takes the
+        # persistence write lock and issues UPDATE/SELECT statements
+        # against ``sorcar.db``, whose connections are configured with
+        # ``PRAGMA busy_timeout=30000``.  Running it synchronously here
+        # blocked ``RemoteAccessServer.__init__`` — and therefore the
+        # UDS / WSS listeners bound later in ``_setup_server`` — for
+        # seconds on a large database and for up to ~30 s whenever
+        # another process held the SQLite write lock (most commonly the
+        # just-killed previous daemon flushing its final writes during
+        # an ``install.sh`` restart).  The user-visible symptom was the
+        # "KISS Sorcar Server is starting ..." overlay lingering after
+        # every install/update while ``~/.kiss/sorcar.sock`` did not
+        # yet exist.  Off-thread execution is safe: ``_get_db()`` opens
+        # a per-thread connection and ``_recover_orphaned_tasks``
+        # serialises with in-process writers via
+        # ``_rw_lock.write_lock()``.  The thread handle is kept so
+        # tests (and embedders) can join it deterministically.
+        self._orphan_sweep_thread = threading.Thread(
+            target=self._run_orphan_sweep,
+            args=(still_running, boot_ts),
+            name="orphan-task-sweep",
+            daemon=True,
+        )
+        self._orphan_sweep_thread.start()
         self.work_dir = os.environ.get("KISS_WORKDIR", os.getcwd())
         # ``_tab_chat_views`` maps every frontend tab id (from ANY
         # VS Code window or browser window) to the chat id that tab
@@ -448,6 +484,55 @@ class VSCodeServer(
         # CLI tasks too (the in-process ``_RunningAgentState``
         # registry only tracks UI-launched tasks).
         self._cli_running_task_ids_lookup: Callable[[], set[str]] | None = None
+
+    @staticmethod
+    def _run_orphan_sweep(still_running: set[str], boot_ts: float) -> None:
+        """Run the orphan-task recovery sweep (background thread body).
+
+        Rewrites the ``"Agent Failed Abruptly"`` sentinel on
+        ``task_history`` rows abandoned by a prior, now-dead process
+        (see :func:`_recover_orphaned_tasks`).  Executed on the
+        ``orphan-task-sweep`` daemon thread started by ``__init__`` so
+        that SQLite lock contention (``busy_timeout`` is 30 s) or a
+        slow sweep over a large database can never delay server
+        startup — the UDS / WSS listeners must bind promptly after an
+        ``install.sh`` daemon restart.  Best-effort: failures are
+        logged and never propagate.
+
+        Because the sweep runs asynchronously, a task can legitimately
+        START (inserting a fresh sentinel row via ``_add_task``) after
+        ``__init__`` returned but before this thread has executed its
+        UPDATE.  Such a row belongs to the LIVE process and is not an
+        orphan — rewriting it would mislabel a running task as
+        ``"Task terminated unexpectedly (process killed)"`` and defeat
+        the pre-emptive shutdown persistence in
+        :meth:`RemoteAccessServer._stop_active_agent_tasks` (which
+        conditions on the sentinel still being present).  The *boot_ts*
+        cut-off scopes the sweep to rows created strictly before this
+        server instance was constructed.
+
+        Args:
+            still_running: Task-history row ids owned by worker
+                threads still alive in this process; exempt from the
+                sweep.
+            boot_ts: Epoch-seconds timestamp captured in ``__init__``
+                before this thread was spawned.  Only rows whose
+                ``timestamp`` column is strictly older are eligible
+                for the sweep.
+        """
+        from kiss.agents.sorcar.persistence import _close_thread_db
+
+        try:
+            _recover_orphaned_tasks(still_running, created_before=boot_ts)
+        except Exception:  # pragma: no cover — best-effort sweep
+            logger.exception(
+                "orphan-task recovery sweep failed; continuing startup",
+            )
+        finally:
+            # Release this short-lived thread's per-thread SQLite
+            # connection; without this every server construction
+            # would leak one open connection until process exit.
+            _close_thread_db()
 
     def set_cli_running_lookup(
         self, lookup: Callable[[str], bool] | None,

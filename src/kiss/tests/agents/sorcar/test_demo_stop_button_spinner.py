@@ -109,10 +109,11 @@ class TestDemoStopButtonSpinnerStructural(unittest.TestCase):
 
     def test_replay_calls_set_running_state_true_at_start(self) -> None:
         """_startDemoReplay must call api.setRunningState(true) before
-        the main loop."""
+        the replay loop (which lives in the extracted ``replaySessions``
+        helper and is awaited from ``_startDemoReplay``)."""
         fn = _extract_fn(self.demo_src, "window._startDemoReplay")
         rs_idx = fn.index("setRunningState(true)")
-        loop_idx = fn.index("for (let i =")
+        loop_idx = fn.index("await replaySessions(")
         assert rs_idx < loop_idx, (
             "setRunningState(true) must be called before the replay loop"
         )
@@ -121,7 +122,7 @@ class TestDemoStopButtonSpinnerStructural(unittest.TestCase):
         """_startDemoReplay must call api.showSpinner() before the loop."""
         fn = _extract_fn(self.demo_src, "window._startDemoReplay")
         sp_idx = fn.index("showSpinner()")
-        loop_idx = fn.index("for (let i =")
+        loop_idx = fn.index("await replaySessions(")
         assert sp_idx < loop_idx, (
             "showSpinner() must be called before the replay loop"
         )
@@ -276,19 +277,23 @@ window._startDemoReplay(sessions).then(function() {
             f"setRunningState(true) was not called: {calls}"
         )
         rs_true_idx = calls.index("setRunningState:true")
-        hw_idx = calls.index("hideWelcome")
-        assert rs_true_idx < hw_idx, (
+        # The first visible replay mutation is the task header
+        # (welcome hiding is delegated to main.js's setTaskText /
+        # task_events path — demo.js no longer calls hideWelcome).
+        first_visible_idx = calls.index("setTaskText:Task A")
+        assert rs_true_idx < first_visible_idx, (
             f"setRunningState(true) (idx {rs_true_idx}) must come "
-            f"before hideWelcome (idx {hw_idx}): {calls}"
+            f"before the first task render (idx {first_visible_idx}): "
+            f"{calls}"
         )
 
         assert "showSpinner" in calls, (
             f"showSpinner was not called: {calls}"
         )
         sp_idx = calls.index("showSpinner")
-        assert sp_idx < hw_idx, (
-            f"showSpinner (idx {sp_idx}) must come before "
-            f"hideWelcome (idx {hw_idx}): {calls}"
+        assert sp_idx < first_visible_idx, (
+            f"showSpinner (idx {sp_idx}) must come before the first "
+            f"task render (idx {first_visible_idx}): {calls}"
         )
 
         assert "setRunningState:false" in calls, (

@@ -61,7 +61,7 @@ RUN_GEPA: Sample 100 data points from the val set and call it sval set. Maintain
    END_RUN_GEPA
    Repeat RUN_GEPA until there is no change in the prompt after 3 iterations.
 
-In each step, keep track of the best prompt which has the maximum number of successfully predicted datapoints in ./pareto/optimal.md. MAKE SURE THAT YOU DO NOT DO REWARD HACKING OR CHEATING IN THE AGENT YOU ARE IMPLEMENTING TO FIT DATA. YOUR SOLUTION MUST GENERALIZE BEYOND THE DATA PROVIDED. Use internet search extensively at every step. Do not worry about budget. Create an html report with diagrams and illustrations in ./reports and open it in the user's default browser. Do NOT STOP until you could not improve the accuracy and recall after three consecutive rollouts. Use gpt-5.5 model (not codex) for thorough review of the work done at every step by the other model.
+In each step, keep track of the best prompt which has the maximum number of successfully predicted datapoints in ./pareto/optimal.md. MAKE SURE THAT YOU DO NOT DO REWARD HACKING OR CHEATING IN THE AGENT YOU ARE IMPLEMENTING TO FIT DATA. YOUR SOLUTION MUST GENERALIZE BEYOND THE DATA PROVIDED. Use internet search extensively at every step. Do not worry about budget. Create an html report with diagrams and illustrations in ./reports and open it in the user's default browser. Do NOT STOP until you could not improve the accuracy and recall after three consecutive rollouts. Use gpt-5.6-sol-xhigh model (not codex) for thorough review of the work done at every step by the other model.
 
 ## Task
 
