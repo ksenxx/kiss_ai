@@ -11,8 +11,10 @@ with an OpenAI GPT audio-chat model from MODEL_INFO.json (default
 ``gpt-audio-1.5``: the newest, most natural of the ``gpt-audio*``
 family) so every client can play one identical, far more natural and
 emotionally expressive voice.  The synthesized MP3 travels inside the
-``talk`` broadcast event as base64; clients without audio support (or
-when synthesis fails) still fall back to the Web Speech API text path.
+``talk`` broadcast event as base64; browser clients without audio
+support (or when synthesis fails) stay silent — the old robotic Web
+Speech fallback is gone for good — while the sorcar CLI terminal falls
+back to the system TTS command (cli_talk.py).
 
 Synthesis routes through the core model layer: a single-shot
 (non-agentic) :class:`~kiss.core.kiss_agent.KISSAgent` run carries the

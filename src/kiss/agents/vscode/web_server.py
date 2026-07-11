@@ -2274,8 +2274,8 @@ class WebPrinter(JsonPrinter):
         Chromium's autoplay policy rejects ``Audio.play()`` in a
         webview unless the user interacted with it seconds earlier
         (microsoft/vscode#197937 / #178642, closed as not actionable),
-        so the webview silently fell back to the robotic Web Speech
-        system voice — the "alien" talk voice.  When the event carries
+        so the talk would stay silent in the webview (whose old
+        robotic Web Speech fallback is gone).  When the event carries
         a synthesized clip and a local webview tab is subscribed, the
         DAEMON therefore plays the clip natively on this machine's
         speakers (:mod:`kiss.agents.sorcar.cli_talk`, ``afplay`` on

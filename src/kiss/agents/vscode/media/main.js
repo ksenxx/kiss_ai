@@ -4094,11 +4094,10 @@
   // (one per subscribed viewer tab) is suppressed.  See case 'talk'.
   const spokenTalkIds = new Set();
 
-  // FIFO queue serializing ALL talk playback on this device — GPT
-  // audio clips and Web-Speech fallbacks alike.  Without it every
-  // talk event played its own Audio element immediately, so two
-  // talk() calls in quick succession spoke on top of each other
-  // (and a Web-Speech fallback could talk over a playing clip).
+  // FIFO queue serializing ALL talk playback on this device.
+  // Without it every talk event played its own Audio element
+  // immediately, so two talk() calls in quick succession spoke on
+  // top of each other.
   const talkQueue = [];
   let talkQueueBusy = false;
   // Discard hook of the IN-FLIGHT talk job (set by pumpTalkQueue,
@@ -4123,9 +4122,9 @@
   /**
    * Start the next queued talk job unless one is already playing.
    * Each job receives a ``finish`` callback (idempotent) that it MUST
-   * invoke when its sound completes — clip 'ended'/'error', rejected
-   * play() fallback finishing, or the speech engine going quiet —
-   * which releases the queue for the next job.
+   * invoke when its sound completes — clip 'ended'/'error', a
+   * rejected play(), or silent degradation — which releases the
+   * queue for the next job.
    */
   function pumpTalkQueue() {
     if (talkQueueBusy) return;
@@ -4159,9 +4158,7 @@
 
   // ---- Demo-mode speech synthesis (natural voice, never robotic) ----
   //
-  // Demo replay used to read narration and replayed ``talk`` calls with
-  // the Web Speech API — the robotic system voice, since recorded
-  // events carry no GPT audio.  Instead, the webview now asks the
+  // Recorded events carry no GPT audio, so the webview asks the
   // daemon to synthesize each utterance with the same GPT audio model
   // the live ``talk`` tool uses (speech_synthesis.py) and plays the
   // returned clip in-page: the user's history-row click that starts
@@ -4179,33 +4176,28 @@
   // plus backoff, so a *successful* natural clip can legitimately
   // arrive after 3+ minutes for a long replayed talk (a
   // multi-paragraph answer).  The old 15s waiter made the demo give
-  // up long before that, read the text with the ROBOTIC Web Speech
-  // fallback, and silently discard the natural clip that arrived
-  // moments later.  Cancellation stays responsive regardless: demo
-  // stop/pause resolves waiters immediately via
+  // up long before that and silently discard the natural clip that
+  // arrived moments later.  Cancellation stays responsive
+  // regardless: demo stop/pause resolves waiters immediately via
   // cancelPendingDemoSpeaks.  On (rare) timeout the demo degrades
-  // per the fallback rules below instead of hanging.
+  // to silence instead of hanging.
   const DEMO_SPEAK_TIMEOUT_MS = 240000;
 
   /**
    * Start the sound of one ``talk`` utterance — THE playback mechanism
    * of the agent ``talk`` tool: play the GPT-synthesized clip when the
-   * event carries audio (``ev.audioB64``), otherwise — or when clip
-   * playback is unavailable — read the text aloud with the Web Speech
-   * API.  Shared by live ``talk`` events (``case 'talk'``) and
-   * demo-mode replay (``enqueueDemoSpeech``) so a replayed talk or
-   * prompt narration sounds exactly like a live one.  *finish* fires
-   * exactly once when the sound is over so the talk queue can advance.
+   * event carries audio (``ev.audioB64``); otherwise — or when clip
+   * playback is unavailable/blocked — stay SILENT and complete
+   * immediately so the talk queue advances (the robotic Web Speech
+   * fallback is gone for good).  Shared by live ``talk`` events
+   * (``case 'talk'``) and demo-mode replay (``enqueueDemoSpeech``) so
+   * a replayed talk or prompt narration sounds exactly like a live
+   * one.  *finish* fires exactly once when the sound is over so the
+   * talk queue can advance.
    */
-  function playTalkEventSound(ev, finish, fallback) {
-    const useFallback =
-      typeof fallback === 'function'
-        ? fallback
-        : function () {
-            speakWithSystemVoice(ev, ev.text || '', finish);
-          };
-    if (ev.audioB64 && playTalkAudio(ev, finish, useFallback)) return;
-    useFallback();
+  function playTalkEventSound(ev, finish) {
+    if (ev.audioB64 && playTalkAudio(ev, finish)) return;
+    finish();
   }
 
   /**
@@ -4305,12 +4297,12 @@
    * (+ optional ``language`` / ``emotion`` / pre-recorded ``audioB64``);
    * *resolve* settles the promise the paused demo replay is awaiting —
    * it fires when the playback ends, was discarded by ``stopSpeech``,
-   * or degraded to the fallback below.
+   * or degraded to silence.
    *
    * Playback uses the exact same mechanism as a live ``talk`` event
-   * (``playTalkEventSound``): the synthesized clip when one arrived,
-   * the Web Speech API otherwise or when clip playback is
-   * unavailable/blocked.
+   * (``playTalkEventSound``): the synthesized clip when one arrived;
+   * otherwise — or when clip playback is unavailable/blocked — the
+   * utterance is skipped silently.
    */
   function enqueueDemoSpeech(ev, resolve) {
     let discarded = false;
@@ -4331,28 +4323,7 @@
           clipEv.audioB64 = clip.audioB64;
           clipEv.audioMime = clip.audioMime;
         }
-        const fallback = function () {
-          if (discarded) return;
-          waitForDemoPlaybackResume(
-            () => discarded,
-            release => {
-              releasePausedWait = release;
-            },
-          ).then(() => {
-            releasePausedWait = null;
-            if (discarded) return;
-            // Audio.play() can reject after the pause button was
-            // pressed.  Gate the Web-Speech fallback too, otherwise
-            // speakWithSystemVoice() would resume the synthesizer and
-            // make a stopped/paused demo start talking unexpectedly.
-            if (isDemoPlaybackPaused()) {
-              fallback();
-              return;
-            }
-            speakWithSystemVoice(clipEv, clipEv.text, done);
-          });
-        };
-        playTalkEventSound(clipEv, done, fallback);
+        playTalkEventSound(clipEv, done);
       };
       const playClip = function (clip) {
         if (discarded) return;
@@ -4396,71 +4367,6 @@
     enqueueTalkPlayback(job);
   }
 
-  /**
-   * Read *talkText* aloud with the browser's Web Speech API using the
-   * most natural available system voice — the fallback path of the
-   * agent ``talk`` tool, used when the event carries no
-   * GPT-synthesized audio or its playback is unavailable/blocked.
-   *
-   * *onDone* (optional) is invoked exactly when the engine finishes —
-   * last utterance ``onend``, any utterance ``onerror``, or
-   * immediately when nothing speakable remains / speech is
-   * unsupported — so the talk queue can advance without overlap.
-   */
-  function speakWithSystemVoice(ev, talkText, onDone) {
-    const done = typeof onDone === 'function' ? onDone : function () {};
-    try {
-      const synth = window.speechSynthesis;
-      const Utterance = window.SpeechSynthesisUtterance;
-      if (!synth || typeof Utterance !== 'function') {
-        done();
-        return;
-      }
-      // iOS leaves the synthesizer stuck paused after the page is
-      // backgrounded mid-speech; a paused queue swallows every
-      // new utterance.  resume() is a no-op when not paused.
-      if (typeof synth.resume === 'function') synth.resume();
-      // Natural, emotive delivery instead of a flat robotic read:
-      //  * strip markdown/emoji artifacts the engine would read
-      //    aloud;
-      //  * split into sentences so the engine breathes at
-      //    sentence boundaries;
-      //  * shape each sentence's rate/pitch from the agent's
-      //    emotion (or a vibe inferred from the wording) plus the
-      //    sentence's own punctuation.
-      const cleaned = cleanSpeechText(talkText);
-      if (!cleaned) {
-        done();
-        return;
-      }
-      const emotion = isKnownEmotion(ev.emotion)
-        ? ev.emotion
-        : inferEmotion(cleaned);
-      // Prefer a natural (neural) system voice over the often
-      // robotic browser default so the agent sounds human-like.
-      const voice = pickNaturalVoice(synth, ev.language);
-      const sentences = splitSpeechSentences(cleaned);
-      for (let i = 0; i < sentences.length; i++) {
-        const utter = new Utterance(sentences[i]);
-        if (ev.language) utter.lang = ev.language;
-        if (voice) utter.voice = voice;
-        const prosody = sentenceProsody(sentences[i], emotion, i);
-        utter.rate = prosody.rate;
-        utter.pitch = prosody.pitch;
-        // Completion for the talk queue: the engine speaks the
-        // utterances in order, so the LAST one's end marks the end of
-        // this talk; any utterance error also releases the queue.
-        utter.onerror = done;
-        if (i === sentences.length - 1) utter.onend = done;
-        synth.speak(utter);
-      }
-    } catch (_e) {
-      // Speech synthesis unsupported or blocked — audio is
-      // best-effort and must never break event handling.
-      done();
-    }
-  }
-
   // The Audio element of the currently playing talk/demo clip, or
   // null when no clip is playing — lets the demo pause/play button
   // pause and resume the speech alongside the demo animations.
@@ -4471,25 +4377,17 @@
    * produced server-side by speech_synthesis.py) on this device's
    * default speaker.  Returns true when playback was handed to an
    * Audio element — a rejected ``play()`` (e.g. an autoplay policy
-   * block) falls back to the Web Speech API asynchronously — and
-   * false when the Audio API is unavailable so the caller falls back
+   * block) completes silently via *onDone* asynchronously — and
+   * false when the Audio API is unavailable so the caller degrades
    * immediately.
    *
    * *onDone* (optional) is invoked exactly when this talk's sound is
-   * over — the clip's ``ended`` or ``error`` event, or the
-   * rejected-play() speech fallback finishing — so the talk queue can
-   * start the next talk without overlapping this one.  *onFallback*
-   * optionally owns rejected-play handling; demo replay supplies one
-   * that observes pause/cancel state before starting Web Speech.
+   * over — the clip's ``ended`` or ``error`` event, or a rejected
+   * ``play()`` — so the talk queue can start the next talk without
+   * overlapping this one.
    */
-  function playTalkAudio(ev, onDone, onFallback) {
+  function playTalkAudio(ev, onDone) {
     const rawDone = typeof onDone === 'function' ? onDone : function () {};
-    const fallback =
-      typeof onFallback === 'function'
-        ? onFallback
-        : function () {
-            speakWithSystemVoice(ev, ev.text || '', rawDone);
-          };
     let player = null;
     try {
       if (typeof window.Audio !== 'function') return false;
@@ -4511,17 +4409,17 @@
       if (played && typeof played.catch === 'function') {
         played.catch(() => {
           // An undecodable clip fires BOTH this rejection and a late
-          // 'error' event; the fallback speech owns completion now,
-          // so detach the element's handlers or the late event would
-          // start the next talk over the still-speaking fallback.
+          // 'error' event; completion is owned here now, so detach
+          // the element's handlers or the late event would fire done
+          // twice / start the next talk early.
           player.onended = null;
           player.onerror = null;
           player.onabort = null;
-          // The Audio element is not playing and is no longer the sound
-          // source; do not let demo pause/resume act on this stale clip
-          // while the Web-Speech fallback owns completion.
+          // The Audio element is not playing and is no longer the
+          // sound source; do not let demo pause/resume act on this
+          // stale clip.
           if (currentTalkAudio === player) currentTalkAudio = null;
-          fallback();
+          rawDone();
         });
       }
       return true;
@@ -4534,357 +4432,6 @@
       if (player && currentTalkAudio === player) currentTalkAudio = null;
       return false;
     }
-  }
-
-  // Voice-name markers of high-quality (neural) system voices, most
-  // natural first.  Modern OS / browser voices whose names carry one
-  // of these markers use neural TTS and sound far more human than the
-  // legacy default voice the Web Speech API otherwise picks (which is
-  // often a robotic formant/"compact" voice).  Examples:
-  //   * "Microsoft Aria Online (Natural) - English (United States)"
-  //   * "Samantha (Enhanced)" / "Ava (Premium)" / "Siri Voice 4" (macOS)
-  //   * "Google US English" (Chrome's server-side neural voices)
-  const NATURAL_VOICE_MARKERS = [
-    'natural',
-    'neural',
-    'premium',
-    'enhanced',
-    'siri',
-    'google',
-    'online',
-  ];
-
-  // First names of well-known MALE system voices (macOS `say -v ?`,
-  // Windows/Edge neural voices, eSpeak/Google presets).  The agent's
-  // one voice everywhere else is male: the server-synthesized clip is
-  // "cedar" (speech_synthesis.py DEFAULT_TTS_VOICE, a deep male
-  // narrator) and the sorcar CLI REPL plays that clip on its
-  // speakers — so the webview's Web-Speech fallback must keep the
-  // same male character instead of switching to a female voice.
-  // Matched as whole words of the voice name (never substrings, so
-  // "Alex" cannot match "Alexa").
-  const MALE_VOICE_NAMES = [
-    // macOS
-    'alex',
-    'daniel',
-    'fred',
-    'thomas',
-    'oliver',
-    'arthur',
-    'aaron',
-    'albert',
-    'bruce',
-    'ralph',
-    'lee',
-    'gordon',
-    'diego',
-    'jorge',
-    'juan',
-    'carlos',
-    'luca',
-    'xander',
-    'rishi',
-    'majed',
-    'maged',
-    'tarik',
-    'yuri',
-    'eddy',
-    'reed',
-    'rocko',
-    'grandpa',
-    // Windows / Edge neural
-    'david',
-    'mark',
-    'guy',
-    'davis',
-    'andrew',
-    'brian',
-    'christopher',
-    'eric',
-    'jacob',
-    'george',
-    'ryan',
-    'steffan',
-    'tony',
-    'william',
-    'james',
-    'liam',
-    'sonny',
-    'jason',
-    'remy',
-    'florian',
-    'giuseppe',
-    'hyunsu',
-    // Other engines
-    'paul',
-    'henri',
-    'conrad',
-    'stefan',
-    'pavel',
-    'antonio',
-    'cedar',
-  ];
-  const MALE_VOICE_NAME_SET = new Set(MALE_VOICE_NAMES);
-
-  /**
-   * True when the (lower-cased) voice *name* clearly names a male
-   * voice: the standalone word "male" ("Google UK English Male" —
-   * "female" has no word boundary before "male", so it never
-   * matches), or a known male first name as a whole word.  Edge's
-   * multilingual neural voices concatenate the suffix onto the name
-   * ("Microsoft AndrewMultilingual Online (Natural)"), so a trailing
-   * "multilingual" is stripped from each word before the lookup.
-   */
-  function isMaleVoiceName(name) {
-    if (/\bmale\b/.test(name)) return true;
-    for (let token of name.split(/[^a-z]+/)) {
-      if (token.endsWith('multilingual')) {
-        token = token.slice(0, -'multilingual'.length);
-      }
-      if (MALE_VOICE_NAME_SET.has(token)) return true;
-    }
-    return false;
-  }
-
-  /**
-   * Pick the most natural-sounding available system voice for
-   * *language* (a BCP-47 tag such as "en-US"; may be empty).
-   *
-   * Voices are ranked first by language match (exact tag > same base
-   * language > any), then male voices over others (parity with the
-   * male "cedar" narrator the CLI REPL and the synthesized-clip path
-   * play — see MALE_VOICE_NAMES), and finally by how early a
-   * NATURAL_VOICE_MARKERS keyword appears in the marker list.
-   * Returns ``null`` when the voice list is unavailable or empty, in
-   * which case the caller leaves the browser's default voice in
-   * place.
-   */
-  function pickNaturalVoice(synth, language) {
-    if (!synth || typeof synth.getVoices !== 'function') return null;
-    let voices;
-    try {
-      voices = synth.getVoices() || [];
-    } catch (_e) {
-      return null;
-    }
-    if (!voices.length) return null;
-    const wanted = String(language || '')
-      .toLowerCase()
-      .replace(/_/g, '-');
-    const wantedBase = wanted.split('-')[0];
-    let best = null;
-    let bestLang = -1;
-    let bestMale = -1;
-    let bestQuality = -1;
-    for (const voice of voices) {
-      const lang = String(voice.lang || '')
-        .toLowerCase()
-        .replace(/_/g, '-');
-      let langScore = 0;
-      if (!wanted) {
-        langScore = 1;
-      } else if (lang === wanted) {
-        langScore = 3;
-      } else if (lang.split('-')[0] === wantedBase) {
-        langScore = 2;
-      }
-      if (wanted && langScore === 0) continue;
-      const name = String(voice.name || '').toLowerCase();
-      const male = isMaleVoiceName(name) ? 1 : 0;
-      let quality = 0;
-      for (let i = 0; i < NATURAL_VOICE_MARKERS.length; i++) {
-        if (name.includes(NATURAL_VOICE_MARKERS[i])) {
-          quality = NATURAL_VOICE_MARKERS.length - i;
-          break;
-        }
-      }
-      if (
-        langScore > bestLang ||
-        (langScore === bestLang &&
-          (male > bestMale || (male === bestMale && quality > bestQuality)))
-      ) {
-        best = voice;
-        bestLang = langScore;
-        bestMale = male;
-        bestQuality = quality;
-      }
-    }
-    return best;
-  }
-
-  // Emotion → base prosody (Web Speech API rate/pitch multipliers).
-  // The agent's ``talk`` tool passes an optional ``emotion`` naming the
-  // vibe of the utterance; shaping rate and pitch around it keeps the
-  // delivery from sounding like a flat, robotic monotone.
-  const EMOTION_PROSODY = {
-    cheerful: {rate: 1.06, pitch: 1.12},
-    excited: {rate: 1.14, pitch: 1.18},
-    playful: {rate: 1.08, pitch: 1.15},
-    curious: {rate: 1.0, pitch: 1.08},
-    warm: {rate: 0.98, pitch: 1.05},
-    proud: {rate: 1.02, pitch: 1.06},
-    calm: {rate: 0.92, pitch: 0.97},
-    empathetic: {rate: 0.9, pitch: 1.02},
-    reassuring: {rate: 0.94, pitch: 1.0},
-    apologetic: {rate: 0.9, pitch: 0.95},
-    serious: {rate: 0.95, pitch: 0.9},
-    sad: {rate: 0.86, pitch: 0.9},
-    neutral: {rate: 1.0, pitch: 1.0},
-  };
-
-  /**
-   * Strip written-only artifacts from *text* so the speech engine
-   * never reads markdown punctuation ("asterisk asterisk") or emoji
-   * names ("party popper") aloud: code fences/backticks, emphasis
-   * markers, heading/bullet prefixes, and emoji/pictographs.
-   */
-  function cleanSpeechText(text) {
-    return String(text)
-      .replace(/```[a-zA-Z0-9_-]*\n?/g, ' ')
-      .replace(/`([^`]*)`/g, '$1')
-      .replace(/(\*\*|__)(.*?)\1/g, '$2')
-      .replace(/(^|\s)[*_]([^*_\n]+)[*_](?=\s|[.,!?;:]|$)/g, '$1$2')
-      .replace(/^#{1,6}\s+/gm, '')
-      .replace(/^[ \t]*[-*+][ \t]+/gm, '')
-      .replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}]/gu, '')
-      .replace(/\uFE0F|\u200D/g, '')
-      .replace(/[ \t]+/g, ' ')
-      .trim();
-  }
-
-  /**
-   * Split *text* into sentence-sized chunks at terminal punctuation
-   * and blank lines.  Speaking one utterance per sentence lets the
-   * engine breathe at sentence boundaries — natural pacing instead of
-   * one long run-on — and lets each sentence carry its own prosody
-   * (questions rise, exclamations energize, ellipses trail off).
-   */
-  function splitSpeechSentences(text) {
-    const parts = String(text)
-      .split(/(?<=[.!?\u2026])\s+|\n{2,}/)
-      .map(s => s.trim())
-      .filter(Boolean);
-    return parts.length ? parts : [String(text).trim()].filter(Boolean);
-  }
-
-  /**
-   * Infer a vibe from the wording of *text* when the agent did not
-   * pass an explicit emotion.  Cheap keyword/punctuation heuristics
-   * only — returns an EMOTION_PROSODY key.
-   */
-  function inferEmotion(text) {
-    const t = String(text).toLowerCase();
-    if (/sorry|apolog|my bad|unfortunately/.test(t)) return 'apologetic';
-    if (/error|failed|failure|broke|crash/.test(t)) return 'serious';
-    if (
-      /congrat|awesome|great news|amazing|fantastic|woohoo|yay|success/.test(t)
-    ) {
-      return 'cheerful';
-    }
-    const bangs = (t.match(/!/g) || []).length;
-    if (bangs >= 2) return 'excited';
-    if (bangs === 1) return 'cheerful';
-    if (/\?\s*$/.test(t)) return 'curious';
-    return 'neutral';
-  }
-
-  /**
-   * Compute the rate/pitch for one *sentence* given the base
-   * *emotion* prosody: questions rise in pitch, exclamations add
-   * energy, ellipses slow down and trail off, and a tiny per-sentence
-   * drift (by *index*) keeps long replies from sounding monotone.
-   * Values are clamped to the Web Speech API's safe ranges.
-   */
-  /** True if *name* is a known EMOTION_PROSODY key (own-property
-   * check so inherited names like "constructor" never match). */
-  function isKnownEmotion(name) {
-    return Object.prototype.hasOwnProperty.call(EMOTION_PROSODY, name);
-  }
-
-  function sentenceProsody(sentence, emotion, index) {
-    const base = isKnownEmotion(emotion)
-      ? EMOTION_PROSODY[emotion]
-      : EMOTION_PROSODY.neutral;
-    let rate = base.rate;
-    let pitch = base.pitch;
-    if (/\?\s*$/.test(sentence)) {
-      pitch += 0.08;
-    } else if (/!\s*$/.test(sentence)) {
-      pitch += 0.06;
-      rate += 0.06;
-    } else if (/(\.\.\.|\u2026)\s*$/.test(sentence)) {
-      rate -= 0.08;
-      pitch -= 0.03;
-    }
-    const drift = index % 3;
-    if (drift === 1) pitch += 0.03;
-    else if (drift === 2) pitch -= 0.02;
-    rate = Math.min(1.6, Math.max(0.6, rate));
-    pitch = Math.min(1.8, Math.max(0.5, pitch));
-    return {rate, pitch};
-  }
-
-  // Prime asynchronous voice loading: Chrome populates getVoices()
-  // only after a first call (and signals completion via the
-  // 'voiceschanged' event), so warm the list at startup to make the
-  // natural voice available by the time the first talk event arrives.
-  try {
-    const primeSynth = window.speechSynthesis;
-    if (primeSynth && typeof primeSynth.getVoices === 'function') {
-      primeSynth.getVoices();
-      if (typeof primeSynth.addEventListener === 'function') {
-        primeSynth.addEventListener('voiceschanged', () => {
-          primeSynth.getVoices();
-        });
-      }
-    }
-  } catch (_e) {
-    // Speech synthesis unsupported — talk playback is best-effort.
-  }
-
-  // --- iOS Safari speech unlock ---
-  // iOS Safari (and Chrome 71+) silently drop speechSynthesis.speak()
-  // calls that never originated from a user gesture: the FIRST
-  // speak() must execute synchronously inside a handler for one of
-  // WebKit's activation events (touchend / click / keydown), after
-  // which programmatic speaks work for the rest of the session.  The
-  // 'talk' handler below runs from a WebSocket/postMessage event —
-  // never a gesture — so on iPhone the agent's speech was silently
-  // dropped (no sound, no error).  Speaking one EMPTY utterance
-  // inside the user's first real gesture (e.g. the tap that submits
-  // their question) unlocks speech for every later talk event.
-  const SPEECH_UNLOCK_EVENTS = ['touchend', 'click', 'keydown'];
-  let speechUnlocked = false;
-
-  function unlockSpeechSynthesis() {
-    if (speechUnlocked) return;
-    try {
-      const synth = window.speechSynthesis;
-      const Utterance = window.SpeechSynthesisUtterance;
-      if (!synth || typeof Utterance !== 'function') return;
-      // The documented iOS workaround verbatim: speak one EMPTY
-      // utterance inside the gesture.  Empty text is inaudible, and
-      // deliberately nothing else is tweaked (e.g. volume) so Safari
-      // treats it as an ordinary speak that grants speaking rights.
-      synth.speak(new Utterance(''));
-      // iOS can leave the synthesizer stuck in a paused state (e.g.
-      // after the page was backgrounded mid-speech); resume() is a
-      // no-op when not paused.
-      if (typeof synth.resume === 'function') synth.resume();
-      speechUnlocked = true;
-      for (const type of SPEECH_UNLOCK_EVENTS) {
-        document.removeEventListener(type, unlockSpeechSynthesis, true);
-      }
-    } catch (_e) {
-      // Speech synthesis unsupported — talk playback is best-effort.
-    }
-  }
-
-  for (const type of SPEECH_UNLOCK_EVENTS) {
-    // Capture phase so the unlock runs on the user's very first
-    // interaction anywhere in the page, even when an inner handler
-    // stops propagation.
-    document.addEventListener(type, unlockSpeechSynthesis, true);
   }
 
   function handleEvent(ev) {
@@ -5039,7 +4586,8 @@
       }
       case 'talk': {
         // Agent-initiated text-to-speech (the ``talk`` tool): play the
-        // text on this device's default speaker via the Web Speech API.
+        // GPT-synthesized clip on this device's default speaker
+        // (silent when no clip can play).
         // Deliberately NOT gated on activeTabId — a device whose task
         // tab is in the BACKGROUND must still speak.  Two gates keep
         // each utterance to exactly one playback per device:
@@ -5078,11 +4626,11 @@
             }
           }
         }
-        // Prefer the agent-synthesized natural voice (a GPT audio
+        // Play the agent-synthesized natural voice (a GPT audio
         // model — see speech_synthesis.py) when the event carries
-        // audio; otherwise read the text with the Web Speech API.
-        // Playback goes through the talk queue so back-to-back
-        // talk() calls never speak over each other.
+        // audio; otherwise stay silent.  Playback goes through the
+        // talk queue so back-to-back talk() calls never speak over
+        // each other.
         enqueueTalkPlayback(finish => {
           playTalkEventSound(ev, finish);
         });
@@ -5091,8 +4639,7 @@
       case 'demoSpeakAudio':
         // Daemon reply to a demo-mode 'demoSpeak' synthesis request
         // (see enqueueDemoSpeech).  An empty audioB64 means synthesis
-        // failed — the waiter then uses the same Web-Speech fallback
-        // as a live audio-less ``talk`` event.
+        // failed — the waiter then degrades to silence.
         resolveDemoSpeak(
           ev.reqId,
           ev.audioB64
@@ -9707,20 +9254,13 @@
     // Demo-replay UI chrome: hide the input controls and show the
     // stop + pause/play buttons while a demo is playing.
     setDemoUi: setDemoUiState,
-    // Pause the currently playing demo speech (clip and/or Web
-    // Speech) — the demo pause button freezes animations AND sound.
+    // Pause the currently playing demo speech clip — the demo pause
+    // button freezes animations AND sound.
     pauseSpeech: function () {
       try {
         if (currentTalkAudio) currentTalkAudio.pause();
       } catch (_e) {
         // Audio pause unsupported — best-effort.
-      }
-      try {
-        if (window.speechSynthesis && window.speechSynthesis.pause) {
-          window.speechSynthesis.pause();
-        }
-      } catch (_e) {
-        // Speech synthesis unsupported — nothing to pause.
       }
     },
     // Resume speech paused by pauseSpeech.
@@ -9735,18 +9275,11 @@
       } catch (_e) {
         // Audio resume unsupported — best-effort.
       }
-      try {
-        if (window.speechSynthesis && window.speechSynthesis.resume) {
-          window.speechSynthesis.resume();
-        }
-      } catch (_e) {
-        // Speech synthesis unsupported — nothing to resume.
-      }
     },
     // Demo-mode speech: read *text* aloud with the NATURAL synthesized
     // voice through the same serialized talk queue the live ``talk``
     // tool uses (see enqueueDemoSpeech for the synthesis round-trip
-    // and fallback rules).  Returns a promise that resolves when the
+    // and silent degradation).  Returns a promise that resolves when the
     // speech has finished (or was discarded by stopSpeech) so the demo
     // replay can PAUSE until the talking ends.
     speakText: function (text, language) {
@@ -9812,11 +9345,6 @@
         // Audio pause unsupported — best-effort.
       }
       currentTalkAudio = null;
-      try {
-        if (window.speechSynthesis) window.speechSynthesis.cancel();
-      } catch (_e) {
-        // Speech synthesis unsupported — nothing to cancel.
-      }
     },
   };
 

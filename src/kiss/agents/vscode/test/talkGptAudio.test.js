@@ -6,10 +6,12 @@
 // End-to-end test for GPT-synthesized ``talk`` audio playback: when a
 // backend ``{type: 'talk', ...}`` event carries ``audioB64`` (base64
 // MP3 synthesized server-side by speech_synthesis.py with a GPT audio
-// model), the webview must play it through an Audio element instead of
-// the Web Speech API, and must fall back to the Web Speech API when
-// the Audio API is unavailable or playback is rejected (autoplay
-// policy).
+// model), the webview must play it through an Audio element.  The
+// clip is the ONLY sound source — the robotic Web Speech fallback
+// was removed — so when the Audio API is unavailable, the Audio
+// constructor throws, or ``play()`` is rejected (autoplay policy),
+// playback degrades to SILENCE and the serialized talk queue still
+// advances to the next talk.
 //
 // Run directly with ``node``:
 //
@@ -63,7 +65,11 @@ function makeWebview() {
   return {win};
 }
 
-/** Install a recording Web Speech API on *win* (jsdom has none). */
+/**
+ * Install a TRIPWIRE Web Speech API on *win* (jsdom has none).  The
+ * production code must never call it — the returned array records
+ * any forbidden utterance so tests can assert it stays empty.
+ */
 function installSpeech(win) {
   const spoken = [];
   win.SpeechSynthesisUtterance = function SpeechSynthesisUtterance(text) {
@@ -124,20 +130,26 @@ function testMissingMimeDefaultsToMpeg() {
   console.log('PASS: missing audioMime defaults to audio/mpeg');
 }
 
-function testNoAudioApiFallsBackToSpeech() {
+function testNoAudioApiDegradesToSilenceAndQueueAdvances() {
   const {win} = makeWebview();
   const spoken = installSpeech(win);
   win.Audio = undefined; // device without the Audio API
 
-  send(win, {type: 'talk', language: 'en', text: 'fallback please',
+  send(win, {type: 'talk', language: 'en', text: 'silence please',
              talkId: 'a3', audioB64: B64});
 
-  assert.strictEqual(spoken.length, 1, 'falls back to Web Speech API');
-  assert.strictEqual(spoken[0].text, 'fallback please');
-  console.log('PASS: missing Audio API falls back to Web Speech');
+  assert.strictEqual(spoken.length, 0, 'never falls back to Web Speech');
+  // The silent degradation must have released the serialized talk
+  // queue: a later talk with a playable clip starts immediately.
+  const created = installAudio(win, Promise.resolve());
+  send(win, {type: 'talk', language: 'en', text: 'audio works now',
+             talkId: 'a3b', audioB64: B64});
+  assert.strictEqual(created.length, 1, 'queue advanced past silent talk');
+  assert.strictEqual(spoken.length, 0, 'Web Speech API must stay silent');
+  console.log('PASS: missing Audio API degrades to silence, queue advances');
 }
 
-async function testRejectedPlayFallsBackToSpeech() {
+async function testRejectedPlayDegradesToSilenceAndQueueAdvances() {
   const {win} = makeWebview();
   const spoken = installSpeech(win);
   installAudio(win, Promise.reject(new Error('autoplay blocked')));
@@ -146,9 +158,15 @@ async function testRejectedPlayFallsBackToSpeech() {
              talkId: 'a4', audioB64: B64});
 
   await new Promise(resolve => setTimeout(resolve, 0));
-  assert.strictEqual(spoken.length, 1, 'rejected play() falls back');
-  assert.strictEqual(spoken[0].text, 'blocked audio');
-  console.log('PASS: rejected play() falls back to Web Speech');
+  assert.strictEqual(spoken.length, 0, 'never falls back to Web Speech');
+  // The rejected play() completed the talk silently — the queue must
+  // advance to the next talk.
+  const created = installAudio(win, Promise.resolve());
+  send(win, {type: 'talk', language: 'en', text: 'unblocked audio',
+             talkId: 'a4b', audioB64: B64});
+  assert.strictEqual(created.length, 1, 'queue advanced past blocked talk');
+  assert.strictEqual(spoken.length, 0, 'Web Speech API must stay silent');
+  console.log('PASS: rejected play() degrades to silence, queue advances');
 }
 
 function testDuplicateTalkIdPlaysOnce() {
@@ -165,28 +183,33 @@ function testDuplicateTalkIdPlaysOnce() {
   console.log('PASS: duplicate talkId with audio plays exactly once');
 }
 
-function testThrowingAudioConstructorFallsBack() {
+function testThrowingAudioConstructorDegradesToSilence() {
   const {win} = makeWebview();
   const spoken = installSpeech(win);
   win.Audio = function Audio() {
     throw new Error('data URLs forbidden');
   };
 
-  send(win, {type: 'talk', text: 'still spoken', talkId: 'a5',
+  send(win, {type: 'talk', text: 'never spoken', talkId: 'a5',
              audioB64: B64});
 
-  assert.strictEqual(spoken.length, 1, 'constructor failure falls back');
-  assert.strictEqual(spoken[0].text, 'still spoken');
-  console.log('PASS: throwing Audio constructor falls back to speech');
+  assert.strictEqual(spoken.length, 0, 'never falls back to Web Speech');
+  // The constructor failure degraded to silence and released the
+  // serialized talk queue.
+  const created = installAudio(win, Promise.resolve());
+  send(win, {type: 'talk', text: 'plays fine', talkId: 'a5b',
+             audioB64: B64});
+  assert.strictEqual(created.length, 1, 'queue advanced past the failure');
+  console.log('PASS: throwing Audio constructor degrades to silence');
 }
 
 async function main() {
   testAudioEventPlaysAudioNotSpeech();
   testMissingMimeDefaultsToMpeg();
-  testNoAudioApiFallsBackToSpeech();
-  await testRejectedPlayFallsBackToSpeech();
+  testNoAudioApiDegradesToSilenceAndQueueAdvances();
+  await testRejectedPlayDegradesToSilenceAndQueueAdvances();
   testDuplicateTalkIdPlaysOnce();
-  testThrowingAudioConstructorFallsBack();
+  testThrowingAudioConstructorDegradesToSilence();
   console.log('All talkGptAudio tests passed.');
 }
 

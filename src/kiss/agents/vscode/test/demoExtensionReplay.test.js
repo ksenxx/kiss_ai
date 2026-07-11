@@ -20,8 +20,9 @@
 //   * demo narration and replayed ``talk`` calls ask the daemon for a
 //     natural GPT-voice clip ('demoSpeak' -> 'demoSpeakAudio') and play
 //     it in-page.  If synthesis or Audio.play() fails, both VS Code and
-//     remote webviews must use the exact same Web-Speech fallback as a
-//     regular live ``talk`` event instead of silently dropping speech.
+//     remote webviews degrade to SILENCE and the replay advances — the
+//     robotic Web-Speech fallback is gone for good, so the speech stub
+//     below is a CANARY that must never record an utterance.
 //
 // Run directly with ``node``:
 //
@@ -169,8 +170,8 @@ function sleep(ms) {
   });
 }
 
-/** Utterances actually SPOKEN via the Web Speech API, ignoring the
- * empty click-unlock utterance main.js speaks on the first click. */
+/** Utterances actually SPOKEN via the Web Speech API — the webview
+ * never uses Web Speech anymore, so this must always be empty. */
 function realSpoken(spoken) {
   return spoken.filter(u => (u.text || '').trim() !== '');
 }
@@ -330,60 +331,76 @@ async function testDemoSpeechUsesNaturalClip() {
   console.log('PASS: demo speech plays the natural synthesized clip');
 }
 
-async function testWebviewFailedSynthesisUsesTalkFallback() {
+async function testWebviewFailedSynthesisIsSkippedSilently() {
   const {win} = makeWebview();
   const players = installAudio(win);
   const spoken = installSpeech(win);
   autoAnswerDemoSpeak(win, ''); // synthesis failed: empty audioB64
 
-  await win._demoApi.speakText('User said no key available');
+  await Promise.race([
+    win._demoApi.speakText('User said no key available'),
+    sleep(2000).then(() => {
+      throw new Error('failed synthesis must not stall the replay');
+    }),
+  ]);
   assert.strictEqual(players.length, 0, 'no clip to play');
-  const text = realSpoken(spoken).map(u => u.text).join(' ');
-  assert.ok(
-    text.includes('no key available'),
-    'failed synthesis must use the regular talk Web-Speech fallback',
-  );
-  console.log('PASS: failed synthesis uses the regular talk fallback');
-}
-
-async function testWebviewBlockedPlaybackUsesTalkFallback() {
-  const {win} = makeWebview();
-  installAudio(win, {reject: true}); // autoplay policy blocks play()
-  const spoken = installSpeech(win);
-  autoAnswerDemoSpeak(win);
-
-  await win._demoApi.speakText('User said blocked playback');
-  const text = realSpoken(spoken).map(u => u.text).join(' ');
-  assert.ok(
-    text.includes('blocked playback'),
-    'a blocked play() must use the regular talk Web-Speech fallback',
-  );
-  console.log('PASS: blocked playback uses the regular talk fallback');
-}
-
-async function testPausedDemoDefersRejectedPlayFallback() {
-  const {win} = makeWebview();
-  installAudio(win, {reject: true, rejectDelay: 50});
-  const spoken = installSpeech(win);
-  autoAnswerDemoSpeak(win);
-
-  const speech = win._demoApi.speakText('speak only after resume');
-  await sleep(30); // synthesis replied; Audio.play() is still pending
-  win._setDemoPaused(true);
-  await sleep(60); // play() rejected while the demo was paused
   assert.strictEqual(
     realSpoken(spoken).length,
     0,
-    'rejected-play fallback must not start while demo is paused',
+    'failed synthesis must be skipped SILENTLY, never spoken by the ' +
+      'robotic Web Speech voice',
+  );
+  console.log('PASS: failed synthesis is skipped silently');
+}
+
+async function testWebviewBlockedPlaybackDegradesSilently() {
+  const {win} = makeWebview();
+  const players = installAudio(win, {reject: true}); // autoplay block
+  const spoken = installSpeech(win);
+  autoAnswerDemoSpeak(win);
+
+  await Promise.race([
+    win._demoApi.speakText('User said blocked playback'),
+    sleep(2000).then(() => {
+      throw new Error('a blocked play() must not stall the replay');
+    }),
+  ]);
+  assert.strictEqual(players.length, 1, 'the clip playback was attempted');
+  assert.strictEqual(
+    realSpoken(spoken).length,
+    0,
+    'a blocked play() must degrade to SILENCE, never to Web Speech',
+  );
+  console.log('PASS: blocked playback degrades to silence');
+}
+
+async function testPausedDemoDefersClipPlayback() {
+  // A synthesis reply that arrives while the demo pause button is
+  // engaged must not start sounding until the user resumes.
+  const {win} = makeWebview();
+  const players = installAudio(win);
+  const spoken = installSpeech(win);
+  autoAnswerDemoSpeak(win);
+
+  const speech = win._demoApi.speakText('play only after resume');
+  win._setDemoPaused(true);
+  await sleep(60); // synthesis replied (~20ms) while the demo was paused
+  assert.strictEqual(
+    players.length,
+    0,
+    'the clip must not start playing while the demo is paused',
   );
   win._setDemoPaused(false);
   await speech;
-  const text = realSpoken(spoken).map(u => u.text).join(' ');
-  assert.ok(text.includes('only after resume'), 'fallback starts on resume');
-  console.log('PASS: pause gates a delayed rejected-play fallback');
+  assert.strictEqual(players.length, 1, 'the clip plays on resume');
+  assert.ok(players[0].playedNaturally, 'the natural clip actually played');
+  assert.strictEqual(realSpoken(spoken).length, 0, 'no robotic voice');
+  console.log('PASS: pause defers the clip playback until resume');
 }
 
-async function testStopBeforePlayRejectionPreventsZombieFallback() {
+async function testStopBeforePlayRejectionLeavesQueueUsable() {
+  // A play() rejection that lands AFTER stopSpeech must neither make
+  // any sound nor wedge the serialized talk queue.
   const {win} = makeWebview();
   installAudio(win, {reject: true, rejectDelay: 50});
   const spoken = installSpeech(win);
@@ -393,31 +410,44 @@ async function testStopBeforePlayRejectionPreventsZombieFallback() {
   await sleep(30); // synthesis replied; Audio.play() is still pending
   win._demoApi.stopSpeech();
   await speech;
-  await sleep(60); // delayed rejection must not start fallback speech
+  await sleep(60); // the delayed rejection settles after the stop
   assert.strictEqual(
     realSpoken(spoken).length,
     0,
     'a late play() rejection after stop must not create zombie speech',
   );
-  console.log('PASS: stop prevents a late rejected-play fallback');
+  // The queue must be free for the next demo run.
+  await Promise.race([
+    win._demoApi.speakText('User said next run'),
+    sleep(2000).then(() => {
+      throw new Error('talk queue wedged by the late play() rejection');
+    }),
+  ]);
+  console.log('PASS: stop absorbs a late rejected play(), queue stays free');
 }
 
-async function testRemotePageKeepsWebSpeechFallback() {
+async function testRemotePageAlsoDegradesSilently() {
+  // The remote browser page shares the exact same silent-degradation
+  // path — no Web Speech fallback anywhere.
   const {win} = makeWebview();
-  installAudio(win);
+  const players = installAudio(win);
   const spoken = installSpeech(win);
   win.document.body.classList.add('remote-chat');
   autoAnswerDemoSpeak(win, ''); // synthesis failed
 
-  await win._demoApi.speakText('User said browser fallback', 'en-US');
-  const texts = realSpoken(spoken)
-    .map(u => u.text)
-    .join(' ');
-  assert.ok(
-    texts.indexOf('browser fallback') !== -1,
-    'the remote browser page keeps the Web Speech fallback',
+  await Promise.race([
+    win._demoApi.speakText('User said browser fallback', 'en-US'),
+    sleep(2000).then(() => {
+      throw new Error('failed synthesis must not stall the remote page');
+    }),
+  ]);
+  assert.strictEqual(players.length, 0, 'no clip to play');
+  assert.strictEqual(
+    realSpoken(spoken).length,
+    0,
+    'the remote page must degrade to silence, never Web Speech',
   );
-  console.log('PASS: remote chat page falls back to Web Speech');
+  console.log('PASS: remote chat page degrades to silence too');
 }
 
 async function testStopSpeechCancelsPendingSynthesis() {
@@ -460,11 +490,11 @@ async function testStopSpeechCancelsPendingSynthesis() {
 async function runTests() {
   await testFanoutTabsVisibleAndPanelsExpanded();
   await testDemoSpeechUsesNaturalClip();
-  await testWebviewFailedSynthesisUsesTalkFallback();
-  await testWebviewBlockedPlaybackUsesTalkFallback();
-  await testPausedDemoDefersRejectedPlayFallback();
-  await testStopBeforePlayRejectionPreventsZombieFallback();
-  await testRemotePageKeepsWebSpeechFallback();
+  await testWebviewFailedSynthesisIsSkippedSilently();
+  await testWebviewBlockedPlaybackDegradesSilently();
+  await testPausedDemoDefersClipPlayback();
+  await testStopBeforePlayRejectionLeavesQueueUsable();
+  await testRemotePageAlsoDegradesSilently();
   await testStopSpeechCancelsPendingSynthesis();
   console.log('All demoExtensionReplay tests passed.');
   // The demo replay's running state starts webview timers that keep
