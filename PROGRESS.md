@@ -1,4 +1,35 @@
-# PROGRESS — Slack agent authentication for "learningsystems" (current task)
+# PROGRESS — Test Slack agent: post message to #sorcar (current task)
+
+## Task
+
+Test the Slack agent by posting a message to the #sorcar channel in the
+Sky Computing workspace using `uv run kiss-slack --workspace learningsystems`.
+
+## Steps completed
+
+1. Verified the stored token still works:
+   `SlackChannelBackend('learningsystems').connect()` → True
+   ("Authenticated as sorcar2 in Sky Computing").
+1. Located the channel: `conversations_list` (paginated over 393 channels)
+   found `#sorcar` = `C0AKYSNLB7W` (public, bot already a member). Note:
+   `find_channel('sorcar')` missed it because it only scans public channels
+   without full pagination past 200-per-page default types filter — the
+   channel was found by iterating all pages with
+   `types="public_channel,private_channel"`.
+1. Ran the agent CLI end-to-end:
+   `uv run kiss-slack --workspace learningsystems --no-web --no-worktree -t
+   "Post the message 'Hello from KISS Sorcar! ...' to channel C0AKYSNLB7W"`
+   — completed in ~16 s, cost ≈ $0.17. (Earlier runs by name '#sorcar' also
+   succeeded; the CLI prints only timing/cost, not the final answer.)
+1. Verified via `read_messages('C0AKYSNLB7W')` that the messages were
+   posted by the bot (user U0AKVLSTFGD). Deleted 3 duplicate test messages
+   from repeated runs, keeping the final one at ts=1783838044.975019.
+
+## TASK COMPLETE
+
+______________________________________________________________________
+
+# PROGRESS — Slack agent authentication for "learningsystems" (previous task)
 
 ## Task
 
