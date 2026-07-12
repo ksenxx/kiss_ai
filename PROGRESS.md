@@ -1,4 +1,59 @@
-# PROGRESS — fix (A): never post empty replies from the sorcar poller (current task)
+# PROGRESS — startup health check + Slack monitoring alert (current task)
+
+## Task
+
+Add a startup health check that verifies `get_available_models()` returns
+a non-empty list before the poller starts, so future shell/env
+misconfiguration is caught immediately and loudly (monitoring alert)
+instead of silently retrying with empty results.
+
+## Design (from web research — 10 sites)
+
+Best practices synthesized: fail fast in an isolated preflight; actively
+signal failures to a real-time channel (Slack) with actionable content
+(job name, cause, env, log path, recovery step); deduplicate alerts to
+avoid alert fatigue (cron fires every minute); post a recovery notice on
+state change; make the alert path itself robust (never let alert errors
+mask the failure); test the monitoring by intentionally breaking it.
+
+## Implementation (slack_channel_sorcar_poller.py)
+
+- New `HEALTH_ALERT_FILE` (`~/.kiss/slack_channel_sorcar_poller/health_alert.json`)
+  and `HEALTH_ALERT_COOLDOWN = 3600.0`.
+- `_post_channel_alert(text) -> bool`: posts to #sorcar with the existing
+  bot token; never raises (logs and returns False on any error).
+- `_load_health_alert()`: reads the persisted alert marker.
+- `_startup_health_check()`: called from `main()` right after
+  `source_shell_env()` (replacing the previous inline check):
+  - models available + marker present → unlink marker FIRST (concurrent
+    invocations race on recovery; unlink-before-post makes at most one
+    announce), then post `:white_check_mark:` recovery notice.
+  - models empty → log ERROR; post `:rotating_light:` alert with SHELL
+    value, log path, and recovery hint — only if the last alert is older
+    than the 1-hour cooldown (marker persists `last_alert_ts`);
+    `sys.exit(1)` so the failure also lands in cron.log.
+
+## Verification (end-to-end, real Slack)
+
+- Failure path: ran `_startup_health_check()` under a cron-identical env
+  (`env -i`, SHELL=/bin/bash, no \*\_API_KEY, CLI-model entries removed to
+  reproduce zero available models) → exit code 1, ONE alert posted in
+  #sorcar, marker written; second run within cooldown → exit 1 and NO
+  second alert (marker ts unchanged).
+- Recovery path: ran with real env + marker present → recovery notice
+  posted, marker cleared, no exit. (A concurrent real cron tick also
+  recovered in the same second — the race produced a duplicate notice,
+  which motivated the unlink-before-post fix; deleted the duplicate
+  Slack message.)
+- Live cron ticks after redeploy: poller.log shows normal
+  "Polling channel=sorcar" lines; cron.log clean (0 bytes).
+- `uv run check --full` → all checks passed.
+- Redeployed byte-identical module to the installed extension tree that
+  the cron venv python imports.
+
+______________________________________________________________________
+
+# PROGRESS — fix (A): never post empty replies from the sorcar poller (prior task)
 
 ## Task
 
