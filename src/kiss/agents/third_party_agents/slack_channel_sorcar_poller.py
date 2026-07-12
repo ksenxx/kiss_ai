@@ -54,7 +54,10 @@ import yaml
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.agents.third_party_agents._kiss_web_launcher import (
+    KissWebWorktreeSorcarAgent,
+    run_agent_via_kiss_web,
+)
 from kiss.agents.third_party_agents.slack_agent import _load_token
 from kiss.agents.vscode.vscode_config import load_config, source_shell_env
 
@@ -243,7 +246,7 @@ def _run_sorcar(prompt: str, chat_id: str) -> tuple[str, str]:
         prompt: The user's Slack message text.
         chat_id: Existing chat to resume, or empty for a new chat.
     """
-    agent = WorktreeSorcarAgent("Slack Channel Sorcar Poller")
+    agent = KissWebWorktreeSorcarAgent("Slack Channel Sorcar Poller")
     if chat_id:
         agent.resume_chat_by_id(chat_id)
     else:
@@ -253,16 +256,16 @@ def _run_sorcar(prompt: str, chat_id: str) -> tuple[str, str]:
     cfg = load_config()
     use_worktree = bool(cfg.get("is_worktree", False))
 
-    run_kwargs: dict[str, Any] = {
-        "prompt_template": full_prompt,
-        "max_budget": MAX_BUDGET,
-        "verbose": False,
-        "use_worktree": use_worktree,
-    }
-    if MODEL_NAME:
-        run_kwargs["model_name"] = MODEL_NAME
+    # Launch as a kiss-web registered agent via ``_cmd_run`` so the
+    # task is live-visible / interactable from remote webviews.
     try:
-        result = agent.run(**run_kwargs)
+        result = run_agent_via_kiss_web(
+            agent,
+            full_prompt,
+            model_name=MODEL_NAME,
+            max_budget=MAX_BUDGET,
+            use_worktree=use_worktree,
+        )
     finally:
         if agent._wt_pending:
             agent._release_worktree()
