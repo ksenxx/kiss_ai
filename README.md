@@ -185,7 +185,7 @@ sorcar mcp list --ping
 The interactive CLI includes:
 
 - `@` file/folder mentions with ranked project-file completion.
-- Slash commands: `/help`, `/clear` (alias `/new`), `/resume`, `/model`, `/model list`, `/cost` (aliases `/usage`, `/context`), `/commands`, `/skills`, `/mcp`, `/autocommit`, and `/exit` (alias `/quit`).
+- Slash commands: `/help`, `/clear` (alias `/new`), `/resume`, `/model`, `/model list`, `/cost` (aliases `/usage`, `/context`), `/commands`, `/skills`, `/mcp`, `/autocommit`, `/voice` (toggle wake-word voice chat), and `/exit` (alias `/quit`).
 - Custom Markdown slash commands loaded from `~/.kiss/commands`, `<project>/.kiss/commands`, `~/.claude/commands`, and `<project>/.claude/commands`.
 - Agent Skills loaded from `~/.kiss/skills`, `<project>/.kiss/skills`, Claude skill directories, `.agents/skills`, and bundled Sorcar skills.
 - MCP server discovery from `~/.kiss/mcp.json`, `<project>/.kiss/mcp.json`, and `<project>/.mcp.json`.
@@ -293,6 +293,12 @@ Full model list:
 - `gpt-5.5-2026-04-23`
 - `gpt-5.5-2026-04-23-xhigh`
 - `gpt-5.5-xhigh`
+- `gpt-5.6-luna`
+- `gpt-5.6-luna-xhigh`
+- `gpt-5.6-sol`
+- `gpt-5.6-sol-xhigh`
+- `gpt-5.6-terra`
+- `gpt-5.6-terra-xhigh`
 - `gpt-audio`
 - `gpt-audio-1.5`
 - `gpt-audio-2025-08-28`
@@ -490,6 +496,8 @@ Full model list:
 
 - `openrouter/ai21/jamba-large-1.7`
 - `openrouter/aion-labs/aion-2.0`
+- `openrouter/aion-labs/aion-3.0`
+- `openrouter/aion-labs/aion-3.0-mini`
 - `openrouter/aion-labs/aion-rp-llama-3.1-8b`
 - `openrouter/allenai/olmo-3-32b-think`
 - `openrouter/amazon/nova-2-lite-v1`
@@ -516,7 +524,6 @@ Full model list:
 - `openrouter/anthropic/claude-sonnet-5`
 - `openrouter/arcee-ai/coder-large`
 - `openrouter/arcee-ai/trinity-large-thinking`
-- `openrouter/arcee-ai/trinity-mini`
 - `openrouter/arcee-ai/virtuoso-large`
 - `openrouter/baidu/ernie-4.5-vl-424b-a47b`
 - `openrouter/bytedance-seed/seed-1.6`
@@ -524,6 +531,7 @@ Full model list:
 - `openrouter/bytedance-seed/seed-2.0-lite`
 - `openrouter/bytedance-seed/seed-2.0-mini`
 - `openrouter/bytedance/ui-tars-1.5-7b`
+- `openrouter/cognitivecomputations/dolphin-mistral-24b-venice-edition`
 - `openrouter/cohere/command-a`
 - `openrouter/cohere/command-r-08-2024`
 - `openrouter/cohere/command-r-plus-08-2024`
@@ -543,7 +551,6 @@ Full model list:
 - `openrouter/google/gemini-2.5-flash`
 - `openrouter/google/gemini-2.5-flash-image`
 - `openrouter/google/gemini-2.5-flash-lite`
-- `openrouter/google/gemini-2.5-flash-lite-preview-09-2025`
 - `openrouter/google/gemini-2.5-pro`
 - `openrouter/google/gemini-2.5-pro-preview`
 - `openrouter/google/gemini-2.5-pro-preview-05-06`
@@ -577,9 +584,7 @@ Full model list:
 - `openrouter/inflection/inflection-3-pi`
 - `openrouter/inflection/inflection-3-productivity`
 - `openrouter/kwaipilot/kat-coder-pro-v2`
-- `openrouter/liquid/lfm-2-24b-a2b`
 - `openrouter/mancer/weaver`
-- `openrouter/meta-llama/llama-3-8b-instruct`
 - `openrouter/meta-llama/llama-3.1-70b-instruct`
 - `openrouter/meta-llama/llama-3.1-8b-instruct`
 - `openrouter/meta-llama/llama-3.2-11b-vision-instruct`
@@ -618,6 +623,7 @@ Full model list:
 - `openrouter/moonshotai/kimi-k2.7-code`
 - `openrouter/morph/morph-v3-fast`
 - `openrouter/morph/morph-v3-large`
+- `openrouter/nex-agi/nex-n2-mini`
 - `openrouter/nex-agi/nex-n2-pro`
 - `openrouter/nousresearch/hermes-3-llama-3.1-405b`
 - `openrouter/nousresearch/hermes-3-llama-3.1-70b`
@@ -663,6 +669,12 @@ Full model list:
 - `openrouter/openai/gpt-5.4-nano`
 - `openrouter/openai/gpt-5.5`
 - `openrouter/openai/gpt-5.5-xhigh`
+- `openrouter/openai/gpt-5.6-luna`
+- `openrouter/openai/gpt-5.6-luna-xhigh`
+- `openrouter/openai/gpt-5.6-sol`
+- `openrouter/openai/gpt-5.6-sol-xhigh`
+- `openrouter/openai/gpt-5.6-terra`
+- `openrouter/openai/gpt-5.6-terra-xhigh`
 - `openrouter/openai/gpt-audio`
 - `openrouter/openai/gpt-audio-mini`
 - `openrouter/openai/gpt-chat-latest`
@@ -686,7 +698,7 @@ Full model list:
 - `openrouter/perplexity/sonar-pro-search`
 - `openrouter/perplexity/sonar-reasoning-pro`
 - `openrouter/poolside/laguna-m.1`
-- `openrouter/poolside/laguna-xs.2`
+- `openrouter/poolside/laguna-xs-2.1`
 - `openrouter/qwen/qwen-2.5-72b-instruct`
 - `openrouter/qwen/qwen-2.5-7b-instruct`
 - `openrouter/qwen/qwen-2.5-coder-32b-instruct`
@@ -746,6 +758,7 @@ Full model list:
 - `openrouter/stepfun/step-3.5-flash`
 - `openrouter/stepfun/step-3.7-flash`
 - `openrouter/tencent/hunyuan-a13b-instruct`
+- `openrouter/tencent/hy3`
 - `openrouter/tencent/hy3-preview`
 - `openrouter/thedrummer/cydonia-24b-v4.1`
 - `openrouter/thedrummer/rocinante-12b`
@@ -757,6 +770,7 @@ Full model list:
 - `openrouter/x-ai/grok-4.20`
 - `openrouter/x-ai/grok-4.20-multi-agent`
 - `openrouter/x-ai/grok-4.3`
+- `openrouter/x-ai/grok-4.5`
 - `openrouter/x-ai/grok-build-0.1`
 - `openrouter/xiaomi/mimo-v2.5`
 - `openrouter/xiaomi/mimo-v2.5-pro`
@@ -782,6 +796,7 @@ Full model list:
 - `openrouter/~openai/gpt-latest`
 - `openrouter/~openai/gpt-latest-xhigh`
 - `openrouter/~openai/gpt-mini-latest`
+- `openrouter/~x-ai/grok-latest`
 
 </details>
 
@@ -803,6 +818,9 @@ Full model list:
 - `codex/gpt-5.4`
 - `codex/gpt-5.4-mini`
 - `codex/gpt-5.5`
+- `codex/gpt-5.6-luna`
+- `codex/gpt-5.6-sol`
+- `codex/gpt-5.6-terra`
 
 </details>
 
