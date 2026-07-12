@@ -9,7 +9,7 @@
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://kisssorcar.github.io/">
   <meta property="og:title" content="KISS Sorcar — Tell it what to do, in English. It picks the best LLM and ships the work.">
-  <meta property="og:description" content="Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 530 models, 62.2% on Terminal Bench 2.0.">
+  <meta property="og:description" content="Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 530 models.">
   <meta property="og:image" content="https://kisssorcar.github.io/assets/og-card.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
@@ -1937,7 +1937,6 @@
     <h1>Tell it what to do, in any language and give it a concrete goal. It picks the best LLMs, runs on your laptop, and ships the work.</h1>
     <div class="hero-trust" aria-label="At a glance">
       <span><strong>Apache 2.0</strong> · open source</span>
-      <span><strong>62.2%</strong> on Terminal Bench 2.0</span>
       <span><strong>530 models</strong> · 9 providers</span>
       <span><strong>~2,900 lines</strong> of core agents code</span>
     </div>
@@ -2101,12 +2100,6 @@
               <td class="kiss"><span class="yes">✓</span> 23 third-party agents, including Slack, Gmail, Phone Control, SMS, and WhatsApp</td>
               <td><span class="warn">⚠</span> Slack, mobile Remote Control, and research-preview channels for Telegram, Discord, and iMessage; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel</td>
               <td><span class="warn">⚠</span> Slack and Microsoft Teams Cloud Agent integrations; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel</td>
-            </tr>
-            <tr>
-              <th class="cap">Terminal Bench 2.0 score</th>
-              <td class="kiss"><strong>62.2%</strong></td>
-              <td>58%</td>
-              <td>61.7% <small>(Cursor agent)</small></td>
             </tr>
           </tbody>
         </table>
@@ -2506,15 +2499,6 @@ In each step, keep track of the best prompt which has the maximum number of succ
           <div class="paper-actions">
             <a class="paper-pill primary" href="assets/writing_paper.pdf">PDF</a>
             <a class="paper-pill" href="https://github.com/ksenxx/kiss_ai/blob/main/papers/writingpaper/writing_paper.tex">Source</a>
-          </div>
-        </div>
-        <div class="inner-card paper-card" style="--i:3">
-          <div class="k">Applied research</div>
-          <h3>Cleverest+: A Fixed-Budget Portfolio and Signature-Grounded Oracle for LLM-Based Commit-Directed Test Generation</h3>
-          <p>An integrated pipeline for commit-directed test generation combining JSON/base64 candidates, shell-free execution, sanitizer signatures, and a fixed-budget three-member LLM portfolio &mdash; resolving 6/6 mini-benchmark issues at T=10.</p>
-          <div class="paper-actions">
-            <a class="paper-pill primary" href="assets/cleverest_plus.pdf">PDF</a>
-            <a class="paper-pill" href="https://github.com/ksenxx/kiss_ai/blob/main/papers/cleverest_plus_paper/cleverest_plus.tex">Source</a>
           </div>
         </div>
       </div>
@@ -3543,7 +3527,7 @@ In each step, keep track of the best prompt which has the maximum number of succ
     (function () {
       if (!('IntersectionObserver' in window)) return;
       const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-      // Find hero-trust strong elements containing numeric content (e.g. "62.2%", "530 models").
+      // Find hero-trust strong elements containing numeric content (e.g. "530 models").
       const strongs = document.querySelectorAll('.hero-trust strong');
       const items = [];
       strongs.forEach(el => {
