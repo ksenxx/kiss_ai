@@ -28,6 +28,7 @@ def _kiss_home() -> Path:
     env = os.environ.get("KISS_HOME")
     return Path(env) if env else _DEFAULT_KISS_DIR
 
+
 _NON_TOOL_METHODS = frozenset(
     {
         "connect",
@@ -280,6 +281,83 @@ class BaseChannelAgent:
             tools.extend(self._backend.get_tool_methods())
         return tools
 
+    def run(self, *args: Any, **kwargs: Any) -> str:  # type: ignore[override]
+        """Run the agent through the kiss-web task-runner contract.
+
+        Third-party agents are launched via
+        :func:`~kiss.agents.third_party_agents._kiss_web_launcher.run_agent_via_kiss_web`,
+        whose ``_cmd_run`` task runner passes chat-session-only kwargs
+        (``use_worktree``, ``_skip_persistence``, ``_subscribe_tab_id``,
+        ``_on_task_id_allocated``) that plain
+        :class:`~kiss.agents.sorcar.sorcar_agent.SorcarAgent` does not
+        accept.  This shim pops them, merges any launcher-provided
+        extra tools (``self._extra_run_tools``) into ``tools``, and
+        records the returned YAML in :attr:`last_run_result` so the
+        launcher can hand the result back to its caller.  Positional
+        arguments are preserved for direct calls to channel agents
+        that do not override ``run`` themselves.
+
+        Args:
+            *args: Forwarded unchanged to ``super().run()``.
+            **kwargs: Forwarded to ``super().run()`` after filtering.
+
+        Returns:
+            YAML string with 'success' and 'summary' keys.
+        """
+        kwargs.pop("use_worktree", None)
+        kwargs.pop("_skip_persistence", None)
+        kwargs.pop("_subscribe_tab_id", None)
+        kwargs.pop("_on_task_id_allocated", None)
+        extra_tools = list(getattr(self, "_extra_run_tools", []) or [])
+        if extra_tools:
+            kwargs["tools"] = [*(kwargs.get("tools") or []), *extra_tools]
+        try:
+            result: str = super().run(*args, **kwargs)  # type: ignore[misc]
+        except BaseException as exc:
+            summary = (
+                "Task interrupted" if isinstance(exc, KeyboardInterrupt) else f"Task failed: {exc}"
+            )
+            self.last_run_result = yaml.safe_dump(
+                {"success": False, "summary": summary},
+                sort_keys=False,
+            )
+            raise
+        self.last_run_result = result
+        return result
+
+
+def _make_runner_channel_agent(agent_name: str) -> Any:
+    """Create the minimal channel agent for a :class:`ChannelRunner` task.
+
+    The agent combines :class:`BaseChannelAgent` (whose ``run`` shim
+    filters kiss-web task-runner kwargs, merges ``_extra_run_tools``
+    and records ``last_run_result``) with
+    :class:`~kiss.agents.sorcar.sorcar_agent.SorcarAgent`.  It has no
+    channel-specific auth tools or backend of its own — the runner
+    supplies backend tools plus the per-message ``reply`` tool through
+    the launcher's ``tools`` parameter.  Defined via a factory to keep
+    the ``SorcarAgent`` import lazy (this module is imported by every
+    channel agent, some of which are used in minimal environments).
+
+    Args:
+        agent_name: Human-readable agent name.
+
+    Returns:
+        A fresh ``_RunnerChannelAgent`` instance.
+    """
+    global _RunnerChannelAgent
+    if _RunnerChannelAgent is None:
+        from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+
+        class _RunnerChannelAgentImpl(BaseChannelAgent, SorcarAgent):
+            """Runner channel agent: BaseChannelAgent shim + SorcarAgent."""
+
+        _RunnerChannelAgent = _RunnerChannelAgentImpl
+    return _RunnerChannelAgent(agent_name)
+
+
+_RunnerChannelAgent: type | None = None
+
 
 class ChannelRunner:
     """One-shot channel message runner.
@@ -383,14 +461,22 @@ class ChannelRunner:
             return False
 
     def _handle_message(self, channel_id: str, msg: dict[str, Any]) -> None:
-        """Run one agent task for an inbound message."""
-        from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+        """Run one agent task for an inbound message.
+
+        The agent is launched as a kiss-web registered agent via
+        :func:`run_agent_via_kiss_web` (``_cmd_run``) so the task is
+        live-visible and interactable from any connected remote
+        webview while it runs.
+        """
+        from kiss.agents.third_party_agents._kiss_web_launcher import (
+            run_agent_via_kiss_web,
+        )
 
         text = self._backend.strip_bot_mention(msg.get("text", ""))
         thread_ts = msg.get("thread_ts", msg.get("ts", ""))
         session_key = f"{channel_id}:{msg.get('ts', '')}"
 
-        agent = SorcarAgent(self._agent_name)
+        agent = _make_runner_channel_agent(self._agent_name)
 
         tools = list(self._extra_tools)
         replied = threading.Event()
@@ -415,13 +501,13 @@ class ChannelRunner:
 
         Path(self._work_dir).mkdir(parents=True, exist_ok=True)
         try:
-            result = agent.run(
-                prompt_template=text,
+            result = run_agent_via_kiss_web(
+                agent,
+                text,
                 model_name=self._model_name,
                 max_budget=self._max_budget,
                 work_dir=self._work_dir,
                 tools=tools,
-                verbose=False,
             )
             if not replied.is_set():  # pragma: no branch
                 result_yaml = yaml.safe_load(result)
@@ -563,8 +649,26 @@ def channel_main(
         agent = agent_cls()
     run_kwargs = _build_run_kwargs(args)
 
+    # Interactive mode launches the agent as a kiss-web registered
+    # agent via ``_cmd_run`` (see ``run_agent_via_kiss_web``) so the
+    # task is live-visible in remote webviews.  Map the run kwargs to
+    # the launcher's contract; the task runner supplies its own
+    # printer / web-tools / parallel settings from kiss-web config.
+    from kiss.agents.third_party_agents._kiss_web_launcher import (
+        run_agent_via_kiss_web,
+    )
+
     start_time = _time.time()
-    agent.run(**run_kwargs)
+    run_agent_via_kiss_web(
+        agent,
+        run_kwargs.get("prompt_template", ""),
+        model_name=run_kwargs.get("model_name") or "",
+        work_dir=run_kwargs.get("work_dir") or "",
+        max_budget=run_kwargs.get("max_budget"),
+        model_config=run_kwargs.get("model_config"),
+        web_tools=run_kwargs.get("web_tools"),
+        is_parallel=bool(run_kwargs.get("is_parallel", False)),
+    )
     elapsed = _time.time() - start_time
 
     _print_run_stats(agent, elapsed)

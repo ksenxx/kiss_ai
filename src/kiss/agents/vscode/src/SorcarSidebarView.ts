@@ -195,10 +195,6 @@ const FORWARDED_COMMANDS: Record<string, readonly string[]> = {
   getAdjacentTask: ['tabId', 'taskId', 'direction'],
   getConfig: [],
   saveConfig: ['config', 'apiKeys'],
-  // Demo-mode speech synthesis: the webview asks the daemon for a
-  // natural GPT-voice clip of a replayed utterance (the daemon
-  // answers with a 'demoSpeakAudio' broadcast keyed by reqId).
-  demoSpeak: ['reqId', 'text', 'language', 'emotion', 'tabId'],
 };
 
 /**
