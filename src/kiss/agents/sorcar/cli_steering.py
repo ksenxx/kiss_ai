@@ -46,7 +46,7 @@ import select
 import signal
 import sys
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any, cast
 
 from kiss.agents.sorcar.cli_line_continuation import (
@@ -1650,6 +1650,35 @@ class _InputBox:
             self.redraw()
 
 
+@contextlib.contextmanager
+def _locked_interruptible(lock: threading.RLock) -> Iterator[None]:
+    """Acquire *lock*, staying responsive to SIGINT while waiting.
+
+    On CPython 3.14+ the ``_thread`` lock implementation is
+    PyMutex-based and a blocking ``lock.acquire()`` parked in C never
+    returns to the bytecode loop, so a pending ``SIGINT`` on the main
+    thread cannot raise ``KeyboardInterrupt`` until the lock is won —
+    a worker thread flooding stdout through :class:`_StdoutProxy`
+    (which reacquires the unfair lock for every chunk) can therefore
+    starve the main thread indefinitely with Ctrl+C never delivered.
+    Acquiring in short timed slices returns control to bytecode
+    between attempts, letting the pending signal handler run and
+    ``KeyboardInterrupt`` propagate to the caller.
+
+    Args:
+        lock: The shared terminal lock to acquire.
+
+    Yields:
+        ``None`` once the lock is held; released on exit.
+    """
+    while not lock.acquire(timeout=0.2):
+        pass
+    try:
+        yield
+    finally:
+        lock.release()
+
+
 def _pump_stdin(
     box: _InputBox,
     is_done: Callable[[], bool],
@@ -1694,52 +1723,71 @@ def _pump_stdin(
     read_fds = [fd]
     last_size = _term_size()
     while not is_done():
-        # Programmatically injected lines (the ``/voice`` wake-word
-        # pump) submit exactly like Enter-terminated typed lines, then
-        # the loop condition is re-polled so a completed read returns
-        # promptly instead of waiting out one more select timeout.
-        injected = box.drain_injected()
-        if injected:
-            for line in injected:
-                on_submit(line)
-            continue
+        # Every branch that touches the box (and therefore acquires
+        # the shared terminal lock) runs inside
+        # :func:`_locked_interruptible`: on CPython 3.14+ a plain
+        # blocking acquire parked in PyMutex C code never returns to
+        # bytecode, so a SIGINT arriving while a flooding worker holds
+        # the unfair lock would otherwise never surface as
+        # ``KeyboardInterrupt`` and the pump (main thread) would starve
+        # with Ctrl+C undelivered.  The RLock is re-entrant, so the box
+        # methods' internal ``with self.lock`` acquisitions are instant
+        # while the pump already holds it.  ``KeyboardInterrupt``
+        # raised anywhere in the iteration invokes *on_abort* exactly
+        # like the in-``select`` Ctrl+C.
         try:
-            ready, _, _ = select.select(read_fds, [], [], 0.1)
-        except (InterruptedError, OSError):
-            continue
+            # Programmatically injected lines (the ``/voice`` wake-word
+            # pump) submit exactly like Enter-terminated typed lines,
+            # then the loop condition is re-polled so a completed read
+            # returns promptly instead of waiting out one more select
+            # timeout.
+            with _locked_interruptible(box.lock):
+                injected = box.drain_injected()
+            if injected:
+                for line in injected:
+                    on_submit(line)
+                continue
+            try:
+                ready, _, _ = select.select(read_fds, [], [], 0.1)
+            except (InterruptedError, OSError):
+                continue
+            if not ready:
+                # A chunk-final lone ESC deferred by feed() with no
+                # follow-up bytes by now was a bare ESC key press:
+                # dismiss the open completion menu.
+                with _locked_interruptible(box.lock):
+                    box.flush_pending_escape()
+                if on_idle is not None:
+                    try:
+                        on_idle()
+                    except Exception:  # noqa: BLE001 - defensive
+                        logger.debug("on_idle raised", exc_info=True)
+                # Poll for terminal resizes so the box re-anchors
+                # within one select timeout even when no key is
+                # pressed.
+                size = _term_size()
+                if size != last_size:
+                    last_size = size
+                    with _locked_interruptible(box.lock):
+                        box.redraw()
+                continue
+            try:
+                data = os.read(fd, 4096)
+            except (InterruptedError, OSError):
+                continue
+            if not data:
+                # EOF on stdin is permanent — stop selecting on the fd
+                # so the pump idles at the select timeout instead of
+                # busy-spinning at 100 % CPU until ``is_done`` flips.
+                read_fds = []
+                if on_stdin_close is not None:
+                    on_stdin_close()
+                continue
+            with _locked_interruptible(box.lock):
+                box.feed(data, on_submit, on_abort, on_eof)
         except KeyboardInterrupt:
             on_abort()
             continue
-        if not ready:
-            # A chunk-final lone ESC deferred by feed() with no
-            # follow-up bytes by now was a bare ESC key press:
-            # dismiss the open completion menu.
-            box.flush_pending_escape()
-            if on_idle is not None:
-                try:
-                    on_idle()
-                except Exception:  # noqa: BLE001 - defensive
-                    logger.debug("on_idle raised", exc_info=True)
-            # Poll for terminal resizes so the box re-anchors within
-            # one select timeout even when no key is pressed.
-            size = _term_size()
-            if size != last_size:
-                last_size = size
-                box.redraw()
-            continue
-        try:
-            data = os.read(fd, 4096)
-        except (InterruptedError, OSError):
-            continue
-        if not data:
-            # EOF on stdin is permanent — stop selecting on the fd so
-            # the pump idles at the select timeout instead of
-            # busy-spinning at 100 % CPU until ``is_done`` flips.
-            read_fds = []
-            if on_stdin_close is not None:
-                on_stdin_close()
-            continue
-        box.feed(data, on_submit, on_abort, on_eof)
 
 
 class SteeringSession:
