@@ -3286,13 +3286,20 @@
             b += '<div class="diff-new">+ ' + esc(ev.new_string) + '</div>';
         }
         if (ev.extras) {
-          for (const k in ev.extras)
+          for (const k in ev.extras) {
+            // A replayed ``talk`` tool_call carries the synthesized
+            // clip in its extras (persisted so demo replays can sound
+            // it — see attach_talk_audio in json_printer.py).  The
+            // base64 blob is audio data, not a tool argument — never
+            // render it as panel text.
+            if (k === 'audioB64' || k === 'audioMime') continue;
             b +=
               '<div class="extra">' +
               esc(k) +
               ': ' +
               esc(ev.extras[k]) +
               '</div>';
+          }
         }
         const tcBody = mkEl('div', 'tc-b');
         tcBody.innerHTML =
