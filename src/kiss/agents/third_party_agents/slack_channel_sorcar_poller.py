@@ -67,9 +67,11 @@ STATE_DIR = Path.home() / ".kiss" / "slack_channel_sorcar_poller"
 STATE_FILE = STATE_DIR / "state.json"
 LOG_FILE = STATE_DIR / "poller.log"
 LOCK_FILE = STATE_DIR / "poller.lock"
+HEALTH_ALERT_FILE = STATE_DIR / "health_alert.json"
 
 POLL_INTERVAL = 3.0
 RUN_DURATION = 57.0
+HEALTH_ALERT_COOLDOWN = 3600.0
 
 WORKSPACE = os.environ.get("KISS_SLACK_WORKSPACE", "learningsystems")
 USER_NAME = os.environ.get("KISS_SLACK_USER", "ksen")
@@ -442,6 +444,97 @@ def _poll_once(
             _handle_top_level(client, channel_id, msg, state, bot_id)
 
 
+def _post_channel_alert(text: str) -> bool:
+    """Post ``text`` to the polled channel; return True on success.
+
+    Never raises: monitoring alerts must not mask the underlying
+    health-check failure, so all Slack errors are logged and swallowed.
+    """
+    try:
+        client = _get_client()
+        channel_id = _find_channel_id(client, CHANNEL_NAME)
+        client.chat_postMessage(channel=channel_id, text=text)
+        return True
+    except Exception:
+        logging.exception("Failed to post health alert to channel %s", CHANNEL_NAME)
+        return False
+
+
+def _load_health_alert() -> dict[str, Any]:
+    """Read the persisted health-alert marker or return an empty dict."""
+    if HEALTH_ALERT_FILE.exists():
+        try:
+            data = json.loads(HEALTH_ALERT_FILE.read_text())
+            if isinstance(data, dict):
+                return data
+        except (json.JSONDecodeError, OSError):
+            logging.exception("Failed to read health alert marker")
+    return {}
+
+
+def _startup_health_check() -> None:
+    """Verify at least one LLM model is available before polling starts.
+
+    Guards against shell/env misconfiguration (e.g. cron leaving
+    ``$SHELL`` unset so the wrong RC file is sourced and no API keys
+    are imported), which previously made every Sorcar task abort with
+    "No model available" and silently retry forever.
+
+    On failure: logs an error, posts an alert message to the polled
+    Slack channel (rate-limited to one alert per
+    ``HEALTH_ALERT_COOLDOWN`` seconds so per-minute cron ticks do not
+    spam the channel), and exits with status 1 so the failure is also
+    visible in ``cron.log``.
+
+    On success after a previous failure: posts a recovery notice and
+    clears the alert marker.
+    """
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    alert = _load_health_alert()
+
+    if get_available_models():
+        if alert:
+            # Remove the marker first: concurrent invocations (my test
+            # run vs the real cron tick) race on the recovery path, and
+            # unlink-before-post makes at most one of them announce.
+            try:
+                HEALTH_ALERT_FILE.unlink(missing_ok=True)
+            except OSError:
+                logging.exception("Failed to remove health alert marker")
+                return
+            logging.info("Health check recovered: LLM models available again")
+            _post_channel_alert(
+                ":white_check_mark: *kiss-slack-sorcar-poller recovered* — "
+                "LLM models are available again; message processing has resumed."
+            )
+        return
+
+    shell = os.environ.get("SHELL", "")
+    logging.error(
+        "Health check failed: no LLM model available after sourcing shell env "
+        "(SHELL=%s); tasks would fail with empty results — exiting",
+        shell,
+    )
+    now = time.time()
+    last_alert = float(alert.get("last_alert_ts", 0.0))
+    if now - last_alert >= HEALTH_ALERT_COOLDOWN:
+        posted = _post_channel_alert(
+            ":rotating_light: *kiss-slack-sorcar-poller health check failed* — "
+            "no LLM model is available (no API key found in the environment), "
+            "so incoming messages cannot be processed.\n"
+            f"- Environment: `SHELL={shell or '(unset)'}`\n"
+            f"- Log: `{LOG_FILE}`\n"
+            "- Recovery: ensure the API keys (e.g. `ANTHROPIC_API_KEY`) are "
+            "exported in the login-shell RC file sourced by the poller, then "
+            "wait for the next cron tick."
+        )
+        if posted:
+            tmp = HEALTH_ALERT_FILE.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"last_alert_ts": now}))
+            tmp.replace(HEALTH_ALERT_FILE)
+    sys.exit(1)
+
+
 _LOCK_FP: Any = None
 
 
@@ -459,13 +552,7 @@ def main() -> None:
     if not os.environ.get("SHELL"):
         os.environ["SHELL"] = pwd.getpwuid(os.getuid()).pw_shell or "/bin/zsh"
     source_shell_env()
-    if not get_available_models():
-        logging.error(
-            "No LLM model available after sourcing shell env "
-            "(SHELL=%s); tasks would fail with empty results — exiting",
-            os.environ.get("SHELL", ""),
-        )
-        sys.exit(1)
+    _startup_health_check()
 
     try:
         client = _get_client()
