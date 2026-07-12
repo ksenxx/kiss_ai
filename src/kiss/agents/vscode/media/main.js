@@ -4176,33 +4176,6 @@
     pumpTalkQueue();
   }
 
-  // ---- Demo-mode speech synthesis (natural voice, never robotic) ----
-  //
-  // Recorded events carry no GPT audio, so the webview asks the
-  // daemon to synthesize each utterance with the same GPT audio model
-  // the live ``talk`` tool uses (speech_synthesis.py) and plays the
-  // returned clip in-page: the user's history-row click that starts
-  // the demo provides the sticky user activation Chromium's autoplay
-  // policy requires.  Pending requests are keyed by ``reqId`` so the
-  // ``demoSpeakAudio`` broadcast (it reaches every connected webview)
-  // only resolves in the tab that asked.
-  const demoSpeakPending = new Map();
-  let demoSpeakSeq = 0;
-  // Ceiling for one synthesis round-trip.  It MUST outlast the
-  // daemon's whole synthesis operation, not just one API attempt:
-  // synthesize_talk_audio's 60s timeout (DEFAULT_AUDIO_TIMEOUT_SECONDS
-  // in voice_wake.py) is PER ATTEMPT, and the OpenAI SDK retries a
-  // timed-out request twice by default — up to three 60s attempts
-  // plus backoff, so a *successful* natural clip can legitimately
-  // arrive after 3+ minutes for a long replayed talk (a
-  // multi-paragraph answer).  The old 15s waiter made the demo give
-  // up long before that and silently discard the natural clip that
-  // arrived moments later.  Cancellation stays responsive
-  // regardless: demo stop/pause resolves waiters immediately via
-  // cancelPendingDemoSpeaks.  On (rare) timeout the demo degrades
-  // to silence instead of hanging.
-  const DEMO_SPEAK_TIMEOUT_MS = 240000;
-
   /**
    * Start the sound of one ``talk`` utterance — THE playback mechanism
    * of the agent ``talk`` tool: play the GPT-synthesized clip when the
@@ -4218,53 +4191,6 @@
   function playTalkEventSound(ev, finish) {
     if (ev.audioB64 && playTalkAudio(ev, finish)) return;
     finish();
-  }
-
-  /**
-   * Ask the daemon to synthesize *text* as a natural-voice clip.
-   * Resolves with ``{audioB64, audioMime}``, ``null`` when synthesis
-   * failed or timed out, or the string ``'cancelled'`` when
-   * ``_demoApi.stopSpeech`` dropped the request (demo cancelled).
-   */
-  function requestDemoSpeechClip(text, language, emotion) {
-    return new Promise(resolve => {
-      const reqId = 'ds-' + Date.now() + '-' + ++demoSpeakSeq;
-      const timer = setTimeout(() => {
-        demoSpeakPending.delete(reqId);
-        resolve(null);
-      }, DEMO_SPEAK_TIMEOUT_MS);
-      demoSpeakPending.set(reqId, {resolve: resolve, timer: timer});
-      vscode.postMessage({
-        type: 'demoSpeak',
-        reqId: reqId,
-        text: text,
-        language: language || '',
-        emotion: emotion || '',
-        tabId: activeTabId,
-      });
-    });
-  }
-
-  /** Resolve the pending demo-speech request *reqId* with *clip*
-   * (``{audioB64, audioMime}`` or ``null``).  Late or foreign replies
-   * (timed out, another window's request) are ignored. */
-  function resolveDemoSpeak(reqId, clip) {
-    const pending = demoSpeakPending.get(reqId);
-    if (!pending) return;
-    demoSpeakPending.delete(reqId);
-    clearTimeout(pending.timer);
-    pending.resolve(clip);
-  }
-
-  /** Cancel every pending demo-speech synthesis request (demo replay
-   * stopped): each waiter resolves with ``'cancelled'`` so its queue
-   * job finishes without playing anything. */
-  function cancelPendingDemoSpeaks() {
-    for (const pending of demoSpeakPending.values()) {
-      clearTimeout(pending.timer);
-      pending.resolve('cancelled');
-    }
-    demoSpeakPending.clear();
   }
 
   /** Return true while demo.js has the replay pause button engaged. */
@@ -4312,17 +4238,16 @@
   }
 
   /**
-   * Enqueue one demo-mode utterance on the serialized talk queue and
-   * play it with the natural synthesized voice.  *ev* carries ``text``
-   * (+ optional ``language`` / ``emotion`` / pre-recorded ``audioB64``);
-   * *resolve* settles the promise the paused demo replay is awaiting —
-   * it fires when the playback ends, was discarded by ``stopSpeech``,
-   * or degraded to silence.
+   * Enqueue one demo-mode utterance on the serialized talk queue.
+   * *ev* carries ``text`` (+ optional ``language`` / ``emotion`` /
+   * pre-recorded ``audioB64``); *resolve* settles the promise the
+   * paused demo replay is awaiting — it fires when the playback ends,
+   * was discarded by ``stopSpeech``, or was skipped silently.
    *
    * Playback uses the exact same mechanism as a live ``talk`` event
-   * (``playTalkEventSound``): the synthesized clip when one arrived;
-   * otherwise — or when clip playback is unavailable/blocked — the
-   * utterance is skipped silently.
+   * (``playTalkEventSound``): the pre-recorded clip when the event
+   * carries one; otherwise — or when clip playback is
+   * unavailable/blocked — the utterance is skipped silently.
    */
   function enqueueDemoSpeech(ev, resolve) {
     let discarded = false;
@@ -4342,18 +4267,11 @@
         if (clip && clip.audioB64) {
           clipEv.audioB64 = clip.audioB64;
           clipEv.audioMime = clip.audioMime;
-          // Daemon-played clip (local webview): keep the in-page
-          // playback muted — see the 'demoSpeakAudio' handler.
-          clipEv.muted = !!clip.muted;
         }
         playTalkEventSound(clipEv, done);
       };
       const playClip = function (clip) {
         if (discarded) return;
-        if (clip === 'cancelled') {
-          done();
-          return;
-        }
         waitForDemoPlaybackResume(
           () => discarded,
           release => {
@@ -4373,12 +4291,10 @@
           startPlayback(clip);
         });
       };
-      if (ev.audioB64) {
-        playClip({audioB64: ev.audioB64, audioMime: ev.audioMime});
-        return;
-      }
-      requestDemoSpeechClip(ev.text || '', ev.language, ev.emotion).then(
-        playClip,
+      // Recorded events without audio are skipped silently — demo
+      // mode never synthesizes speech.
+      playClip(
+        ev.audioB64 ? {audioB64: ev.audioB64, audioMime: ev.audioMime} : null,
       );
     };
     job._onDiscard = function () {
@@ -4666,27 +4582,6 @@
         });
         break;
       }
-      case 'demoSpeakAudio':
-        // Daemon reply to a demo-mode 'demoSpeak' synthesis request
-        // (see enqueueDemoSpeech).  An empty audioB64 means synthesis
-        // failed — the waiter then degrades to silence.
-        // A ``muted: true`` stamp means the daemon plays this clip
-        // natively on its own machine's speakers (this webview is a
-        // local VS Code webview whose in-page ``Audio.play()`` would
-        // be autoplay-rejected — see _arbitrate_demo_speak in
-        // web_server.py): play the clip muted here so its 'ended'
-        // event still paces the demo replay without double audio.
-        resolveDemoSpeak(
-          ev.reqId,
-          ev.audioB64
-            ? {
-                audioB64: ev.audioB64,
-                audioMime: ev.audioMime || 'audio/mpeg',
-                muted: !!ev.muted,
-              }
-            : null,
-        );
-        break;
       case 'error':
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) break;
         addError(ev.text);
@@ -9332,23 +9227,22 @@
         // Audio resume unsupported — best-effort.
       }
     },
-    // Demo-mode speech: read *text* aloud with the NATURAL synthesized
-    // voice through the same serialized talk queue the live ``talk``
-    // tool uses (see enqueueDemoSpeech for the synthesis round-trip
-    // and silent degradation).  Returns a promise that resolves when the
-    // speech has finished (or was discarded by stopSpeech) so the demo
-    // replay can PAUSE until the talking ends.
+    // Demo-mode prompt narration through the same serialized talk
+    // queue the live ``talk`` tool uses.  Prompt events never carry
+    // recorded audio and demo mode never synthesizes speech, so the
+    // narration is silent — the returned promise still resolves via
+    // the queue so replay pacing and stopSpeech semantics stay intact.
     speakText: function (text, language) {
       return new Promise(resolve => {
         enqueueDemoSpeech({text: text, language: language || ''}, resolve);
       });
     },
-    // Demo-mode replay of a recorded ``talk`` tool call: actually play
-    // it (recorded GPT audio when present, freshly synthesized natural
-    // voice otherwise) via the shared talk queue.  Returns a promise
-    // that resolves when the playback has finished (or was discarded
-    // by stopSpeech) so the demo replay can PAUSE until the talking
-    // ends.
+    // Demo-mode replay of a recorded ``talk`` tool call: play the
+    // recorded GPT audio when the event carries it, otherwise skip
+    // silently (demo mode never synthesizes speech).  Returns a
+    // promise that resolves when the playback has finished (or was
+    // discarded by stopSpeech) so the demo replay can PAUSE until the
+    // talking ends.
     playTalkEvent: function (ev) {
       return new Promise(resolve => {
         enqueueDemoSpeech(ev, resolve);
@@ -9362,11 +9256,6 @@
     },
     // Cancel any queued/in-flight demo speech (demo replay stopped).
     stopSpeech: function () {
-      // Unblock the in-flight job first: if it is still waiting for a
-      // 'demoSpeakAudio' synthesis reply, resolve that wait with
-      // 'cancelled' so the job finishes WITHOUT playing the clip (a
-      // late reply must not speak over a restarted demo).
-      cancelPendingDemoSpeaks();
       // Resolve every pending demo-speech promise BEFORE dropping the
       // jobs: the demo replay awaits these promises (it pauses while
       // talking), and a discarded job's ``finish`` never fires — so
