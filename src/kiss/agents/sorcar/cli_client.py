@@ -413,7 +413,13 @@ class _EventDispatcher:
                 # ``extras`` keys are by definition not in ``KNOWN_KEYS``
                 # so merging them in straight is safe — they will be
                 # picked up by :func:`extract_extras` for display.
+                # EXCEPT the synthesized ``talk`` clip persisted for
+                # demo replays (see ``attach_talk_audio``): the base64
+                # blob is audio data, not a tool argument — printing
+                # it would flood the terminal panel.
                 for k, v in extras.items():
+                    if k in ("audioB64", "audioMime"):
+                        continue
                     tool_input[str(k)] = v
             self.printer.print(
                 event.get("name") or "",

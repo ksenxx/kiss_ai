@@ -2209,6 +2209,75 @@ def _append_chat_event(
     _flush_chat_events()
 
 
+def _amend_last_talk_tool_call_audio(
+    task_id: str, audio_b64: str, audio_mime: str,
+) -> bool:
+    """Attach a synthesized clip to the last persisted ``talk`` tool call.
+
+    The agentic loop persists a ``tool_call`` event for the ``talk``
+    tool BEFORE the tool executes, so the recorded event can never
+    carry the audio clip synthesized DURING execution.  Demo-mode
+    replay plays exactly ``extras.audioB64`` of that persisted event
+    (the synthesis fallback is gone), so without this amendment every
+    replayed ``talk`` narration would be silent.  Called by
+    :meth:`JsonPrinter.attach_talk_audio` right after synthesis
+    succeeds; finds the most recent ``talk`` ``tool_call`` event row
+    for *task_id* that does not yet carry audio and rewrites its
+    ``extras`` with the clip in place (an UPDATE — appending a second
+    copy would render the panel twice on replay).
+
+    Args:
+        task_id: Stable ``task_history`` row id the event was
+            persisted under.
+        audio_b64: Base64-encoded synthesized clip bytes.
+        audio_mime: The clip's MIME type (e.g. ``"audio/mpeg"``).
+
+    Returns:
+        ``True`` when a persisted event row was amended, ``False``
+        when no matching audio-less ``talk`` tool call exists.
+    """
+    if not task_id or not audio_b64:
+        return False
+    # The talk tool_call event reaches the events table through the
+    # asynchronous background writer; flush so the row we must amend
+    # is guaranteed to be visible (and so the UPDATE cannot be
+    # overtaken by its own INSERT).
+    _flush_chat_events()
+    with _rw_lock.write_lock():
+        db = _get_db()
+        rows = db.execute(
+            "SELECT id, event_json FROM events "
+            "WHERE task_id = ? AND event_json LIKE '%\"tool_call\"%' "
+            "AND event_json LIKE '%\"talk\"%' "
+            "ORDER BY seq DESC",
+            (task_id,),
+        ).fetchall()
+        for row in rows:
+            try:
+                event = json.loads(row["event_json"])
+            except (TypeError, ValueError):
+                continue
+            if event.get("type") != "tool_call" or event.get("name") != "talk":
+                continue
+            extras = event.get("extras")
+            if not isinstance(extras, dict):
+                extras = {}
+                event["extras"] = extras
+            if extras.get("audioB64"):
+                # Already amended (e.g. a retried synthesis); the most
+                # recent audio-less call is the one being spoken now.
+                continue
+            extras["audioB64"] = audio_b64
+            extras["audioMime"] = audio_mime
+            db.execute(
+                "UPDATE events SET event_json = ? WHERE id = ?",
+                (json.dumps(event), row["id"]),
+            )
+            db.commit()
+            return True
+    return False
+
+
 def _task_has_events(task_id: str) -> bool:
     """Return whether any chat events are persisted for *task_id*.
 
