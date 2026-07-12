@@ -1,4 +1,66 @@
-# PROGRESS — third_party_agents via \_CommandsMixin.\_cmd_run
+# PROGRESS — full-test-suite run + failure triage (current task)
+
+## Task
+
+Run ALL tests split into (cores-2)=8 parallel workers via run_parallel;
+report the cause of every failing test; classify each failure as a
+project bug vs a test bug; fix accordingly.
+
+## Steps completed
+
+1. Collected 6077 test ids, split round-robin into 8 files, ran all 8
+   splits in parallel via run_parallel.
+
+1. Results: splits 3/4/5/7 fully passed; split 0: 1 fail (PTY/interrupt
+   timing, flaky); split 1: 2 fails + 1 segfault; split 2: 1 fail +
+   2 segfaults; split 6: 1 segfault + 1 genuine fail.
+
+1. Genuine PROJECT DATA BUG:
+   `test_anthropic_fable_sonnet_5_live_capabilities.py::test_context_length_matches_max_input_tokens[claude-fable-5]`
+   — MODEL_INFO.json had `context_length=300000` while the live
+   Anthropic `/v1/models` endpoint reports `max_input_tokens=1000000`.
+   FIXED: `src/kiss/core/models/MODEL_INFO.json` claude-fable-5
+   context_length 300000 → 1000000. Re-ran the test file: 12 passed.
+
+1. Recurring SIGSEGV (splits 1/2/3/6) — TEST BUG: `VSCodeServer.__init__`
+   spawns daemon thread `orphan-task-sweep` executing SQL on the
+   per-thread sqlite connection aliased into `persistence._db_conn`;
+   many vscode tests close that connection / rmtree the temp DB in
+   `teardown_method` WITHOUT joining the thread → use-after-close in
+   `pysqlite_connection_execute` → SIGSEGV. FIXED centrally in
+   `src/kiss/tests/agents/vscode/conftest.py` with a
+   `pytest_runtest_call` hookwrapper that joins every live
+   `orphan-task-sweep` thread after the test body, before teardown:
+
+   ```python
+   @pytest.hookimpl(wrapper=True)
+   def pytest_runtest_call(item):
+       try:
+           yield
+       finally:
+           for thread in threading.enumerate():
+               if thread.name == "orphan-task-sweep" and thread.is_alive():
+                   thread.join(timeout=30)
+   ```
+
+1. Verified: test_replay_event_coalescing.py 5×/5× pass (previously
+   segfaulted 2/3); full vscode folder 1398 passed, 15 skipped, 0
+   segfaults; the sweep-asynchrony tests
+   (test_web_server_startup_orphan_sweep_nonblocking.py,
+   test_orphan_task_recovery.py) still pass — the hook runs after
+   the test body, so their in-body timing assertions are unaffected.
+
+1. 4 flaky signal/PTY tests (ctrl-c ×2, install-script SIGINT/SIGHUP)
+   pass 4/4 in isolation → load-flakiness only, NOT bugs; left as-is.
+
+1. `uv run check --full` — all checks passed. Both fixes committed
+   (6c72db78). tmp/ cleaned.
+
+## TASK COMPLETE
+
+______________________________________________________________________
+
+# PROGRESS — third_party_agents via \_CommandsMixin.\_cmd_run (previous task)
 
 ## Task
 
@@ -333,31 +395,3 @@ Files to change:
 - Flaky-under-load: test_install_script\_*, test_bughunt9_c_sigterm*,
   test_bughunt4_interrupt_lock, test_bughunt_cli ctrl-c tests — all
   pass in foreground runs with the diff applied.
-
----
-
-# PROGRESS — kisssorcar.github.io: light default + logo blend
-
-## Task
-Update website/kisssorcar.github.io so the hero logo blends nicely with the
-page and the website is white (light) by default. Validate.
-
-## Steps done
-1. Made LIGHT the default theme in website/kisssorcar.github.io/index.html:
-   - Theme bootstrap script: both fallbacks 'dark' → 'light'.
-   - `applyAria(root.getAttribute('data-theme') || 'light')`.
-   - Toggle button initial aria-label → "Switch to dark theme".
-2. Logo blend: the PNG (assets/KISS-Sorcar.png) had a solid white opaque
-   background. First tried `mix-blend-mode: multiply`; found `.hero { z-index:1 }`
-   created a stacking context isolating the blend (removed z-index with comment).
-   FINAL fix: rewrote the PNG itself with a transparent background (flood-fill
-   near-white from borders, feathered edges, removed right-edge scan artifact),
-   downscaled 2760x1504 → 1920x1046; 4.4MB → 0.96MB. Simplified `.hero-logo`
-   CSS back to just drop-shadows in both themes.
-3. Added `background: var(--bg)` to `html` rule (opaque backdrop).
-4. Copied the transparent PNG into website/kisssorcar.github.io/assets/
-   (was previously missing from the website dir).
-5. Validated with local HTTP server + Chromium screenshots:
-   - Light theme loads by default; logo blends seamlessly, no white box.
-   - Dark theme via toggle: logo floats on dark bg with teal/purple glow.
-6. Killed local server, cleaned tmp files, git-added index.html and PNG.
