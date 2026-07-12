@@ -156,6 +156,7 @@ markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "redundancy_check: marks tests for redundancy check",
     "live_cli: test spawns the real claude/codex CLI (opts out of the CLI-locator stub)",
+    "live_api: test makes real HTTP calls to a provider API (skipped when the required API key is unset)",
 ]
 # Disable timeout so tests run without time limit
 timeout = 0
