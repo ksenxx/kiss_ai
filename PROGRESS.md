@@ -1,4 +1,41 @@
-# PROGRESS — recount Core Agents LoC in README.md (current task)
+# PROGRESS — Slack agent authentication for "learningsystems" (current task)
+
+## Task
+
+Authenticate the user with the "learningsystems" Slack workspace using the
+Slack agent (`src/kiss/agents/third_party_agents/slack_agent.py`).
+
+## Steps completed (across 3 sessions)
+
+1. Verified no token existed at
+   `~/.kiss/third_party_agents/slack/learningsystems/token.json`.
+1. User chose the browser flow; user signed in manually to
+   api.slack.com as ksen@cs.berkeley.edu (reCAPTCHA required human help).
+1. The signed-in Slack session only had the "Sky Computing" team available
+   (no "learningsystems" team). User approved (option 3) proceeding with
+   Sky Computing while saving under the workspace key "learningsystems".
+1. Create-app-from-manifest modal proved un-automatable (CodeMirror editor
+   not exposed as a textbox; modal overlay intercepted clicks) — abandoned.
+1. Reused the EXISTING installed app "sorcar" (A0AKSMD7Q9H) in Sky
+   Computing: copied the Bot User OAuth Token (xoxb-…) from its
+   OAuth & Permissions page. Bot scopes already granted: channels:history,
+   channels:join, channels:read, chat:write, chat:write.public,
+   groups:history, groups:read, im:history, im:read, im:write,
+   mpim:history, mpim:read, users:read — sufficient for the agent.
+1. Saved the token via
+   `_save_token(token, 'learningsystems')` →
+   `~/.kiss/third_party_agents/slack/learningsystems/token.json`
+   (mode 600, key "access_token").
+1. Verified end-to-end:
+   `SlackChannelBackend('learningsystems').connect()` → True,
+   connection_info = "Authenticated as sorcar2 in Sky Computing".
+1. Cleaned up temp screenshots; closed the browser.
+
+## TASK COMPLETE
+
+______________________________________________________________________
+
+# PROGRESS — recount Core Agents LoC in README.md (previous task)
 
 ## Task
 
