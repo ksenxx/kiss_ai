@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import queue
+import socket
 import threading
 import time
 from typing import Any, cast
@@ -61,9 +62,16 @@ def test_slack_wait_for_reply_returns_new_matching_message() -> None:
     assert backend.wait_for_reply("c", "t", "u1", timeout_seconds=0.1) == "reply"
 
 
+def _free_port() -> int:
+    """Return an ephemeral free TCP port on localhost."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
 def test_whatsapp_disconnect_stops_server() -> None:
     backend = WhatsAppChannelBackend()
-    assert backend._start_webhook_server(port=18080)
+    assert backend._start_webhook_server(port=_free_port())
     assert backend._webhook_server is not None
     backend.disconnect()
     assert backend._webhook_server is None
@@ -73,16 +81,17 @@ def test_whatsapp_disconnect_stops_server() -> None:
 def test_webhook_connect_failure_is_reported() -> None:
     backend = LineChannelBackend()
     backend._message_queue = queue.Queue()
-    assert backend._start_webhook_server(port=18083)
+    port = _free_port()
+    assert backend._start_webhook_server(port=port)
     conflict = LineChannelBackend()
-    assert not conflict._start_webhook_server(port=18083)
+    assert not conflict._start_webhook_server(port=port)
     assert "bind failed" in conflict.connection_info.lower()
     backend.disconnect()
 
 
 def test_synology_disconnect_stops_server() -> None:
     backend = SynologyChatChannelBackend()
-    assert backend._start_webhook_server(port=18081)
+    assert backend._start_webhook_server(port=_free_port())
     backend.disconnect()
     assert backend._webhook_server is None
     assert backend._webhook_thread is None
@@ -90,7 +99,7 @@ def test_synology_disconnect_stops_server() -> None:
 
 def test_zalo_disconnect_stops_server() -> None:
     backend = ZaloChannelBackend()
-    assert backend._start_webhook_server(port=18082)
+    assert backend._start_webhook_server(port=_free_port())
     backend.disconnect()
     assert backend._webhook_server is None
     assert backend._webhook_thread is None
