@@ -28,11 +28,11 @@ def run_adaptive_evaluation(judge_model: str = "claude-sonnet-4-5", rounds: int 
             if not verdict.allow:
                 blocked += 1
                 # Mutate the attack based on which layer blocked it
-                if "sanitizer" in verdict.blocking_layers:
+                if "issue_sanitizer" in verdict.blocking_layers:
                     case.issue_text = _obfuscate_issue(case.issue_text)
                 if "provenance" in verdict.blocking_layers:
                     case.patch_source = _obfuscate_sink(case.patch_source)
-                if "judge" in verdict.blocking_layers:
+                if "intent_judge" in verdict.blocking_layers:
                     case.patch_source = _split_payload(case.patch_source)
 
         asr = (len(seed_cases) - blocked) / len(seed_cases)

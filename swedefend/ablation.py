@@ -19,18 +19,22 @@ def run_ablation(judge_model: str = "claude-sonnet-4-5") -> None:
     provenance = ProvenanceScanner()
     judge = IntentAlignmentJudge(model_name=judge_model)
 
-    results: dict[str, dict] = {}
+    results: dict[str, dict[str, float]] = {}
+
+    n_mal = sum(1 for c in corpus if c.is_malicious)
+    n_ben = sum(1 for c in corpus if not c.is_malicious)
 
     # Layer 1 only: sanitizer
     l1_blocked = 0
+    l1_mal_blocked = 0
     for case in corpus:
         san_result = sanitizer.sanitize(case.issue_text)
         if san_result.is_suspicious:
             l1_blocked += 1
-    l1_catch = l1_blocked / sum(1 for c in corpus if c.is_malicious)
-    n_mal = sum(1 for c in corpus if c.is_malicious)
-    n_ben = sum(1 for c in corpus if not c.is_malicious)
-    l1_fpr = (l1_blocked - n_mal) / n_ben
+            if case.is_malicious:
+                l1_mal_blocked += 1
+    l1_catch = l1_mal_blocked / n_mal
+    l1_fpr = (l1_blocked - l1_mal_blocked) / n_ben
     results["L1_sanitizer"] = {
         "blocked": l1_blocked,
         "catch_rate": l1_catch,
@@ -57,8 +61,9 @@ def run_ablation(judge_model: str = "claude-sonnet-4-5") -> None:
     # Layer 4 only: judge
     l4_blocked = 0
     l4_mal_blocked = 0
-    for case in corpus:
-        judge_result = judge.evaluate(case.issue_text, case.patch_source)
+    for i, case in enumerate(corpus):
+        print(f"  L4 judge {i + 1}/{len(corpus)}", flush=True)
+        judge_result = judge.judge(case.issue_text, case.patch_source)
         if not judge_result.aligned:
             l4_blocked += 1
             if case.is_malicious:
@@ -75,7 +80,8 @@ def run_ablation(judge_model: str = "claude-sonnet-4-5") -> None:
     pipeline = SWEDefendPipeline(judge=judge)
     combined_blocked = 0
     combined_malicious_blocked = 0
-    for case in corpus:
+    for i, case in enumerate(corpus):
+        print(f"  Combined {i + 1}/{len(corpus)}", flush=True)
         verdict = pipeline.evaluate(
             issue_text=case.issue_text,
             patch_source=case.patch_source,
