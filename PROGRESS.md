@@ -190,3 +190,80 @@ Slack (mrkdwn).
   KISS_SLACK_MODEL / KISS_SLACK_BUDGET (default $5/task).
 
 ## TASK COMPLETE
+
+______________________________________________________________________
+
+# Session: Run all tests in parallel splits and diagnose failures (continuation)
+
+## Context
+
+- Prior session created tmp/test_splits/split_{0..7}.txt (8 splits, ~764 tests each) + all_tests.txt.
+- This session was assigned SPLIT 0 as a sub-task after the earlier orchestrator crashed.
+
+## Findings so far (SPLIT 0)
+
+1. Command with `$(cat split_0.txt | tr ...)` fails: line 218 contains a
+   test id with spaces/`#` (`test_cli_voice_speaker_prefix.py::...[hi-2.0-None-Speaker #2 says that: hi]`).
+   MUST use `@tmp/test_splits/split_0.txt` argfile syntax instead of $(cat).
+2. Run 1 (result_0.log): SEGFAULT (Fatal Python error: Segmentation fault) at ~60% —
+   crash in sqlite `conn.execute` in `_log_orphaned_task_forensics` (persistence.py:1422)
+   on thread [orphan-task-sweep], while main thread was in
+   test_restore_tabs_with_subagents.py teardown_method (line 130) closing `th._db_conn`.
+   ROOT CAUSE HYPOTHESIS (project bug, not test bug): VSCodeServer.__init__ spawns a
+   daemon orphan-sweep thread using a per-thread sqlite connection; the test's
+   teardown closes `th._db_conn` (the last-created connection, possibly the sweep
+   thread's) while the sweep thread is mid-`execute` → use-after-free segfault.
+   sqlite3 connections with check_same_thread=False closed concurrently with
+   execute() → native crash.
+3. Segfault REPRODUCES in isolation: `uv run pytest src/kiss/tests/agents/sorcar/test_restore_tabs_with_subagents.py`
+   segfaulted 2/5 runs in isolation (flaky race).
+4. Run 2 (result_0_run2.log): 1 failed, 758 passed, 5 skipped —
+   FAILED test_bughunt4_interrupt_lock.py::test_ctrl_c_during_lock_wait_still_stops_the_worker
+   (PTY/timing flake: "child never reported worker status", tail full of XXXX flood).
+   Passes 10/10 in isolation; fails ~1/6 when run after neighbors under load.
+   This is a TEST bug (load-sensitive timing), already known flaky (commit 310ca15e
+   tried to deflake it before).
+
+## Next steps
+
+- Fix project bug: teardown/close race between test teardown closing _db_conn and
+  orphan-sweep thread using it (either join sweep thread in tests via server API,
+  or make _close_db/_get_db safe). Per task instructions "Fix them accordingly".
+- Fix test flake in bughunt4 (increase deadlines/robustness) — test bug.
+- Report split 0 results.
+
+## Findings (SPLIT 1 — this session)
+
+1. Same argfile issue: split_1.txt line 219 contains a test id with spaces
+   (`test_cli_voice_speaker_prefix.py::...[  hi  -1-None-Speaker #1 says that: hi]`);
+   `$(cat ...)` exploded it into bogus args (`ERROR: file or directory not found: hi`,
+   exit=4). Re-ran with `@tmp/test_splits/split_1.txt` argfile syntax.
+2. Run 1 (result_1_crash1.log): SEGFAULT at test #272 — IDENTICAL signature to
+   split 0's crash: [orphan-task-sweep] thread inside sqlite `execute` in
+   `_log_orphaned_task_forensics` (persistence.py:1422) while the main thread was
+   in `test_restore_tabs_with_subagents.py` teardown_method (line 130) closing
+   `th._db_conn`. Confirms the project bug is deterministic-ish under load and is
+   NOT split-specific. Note: `tests/agents/vscode/conftest.py` already has a
+   `pytest_runtest_call` hookwrapper that joins orphan-task-sweep threads before
+   teardown — but it only applies to the `tests/agents/vscode/` folder;
+   `tests/agents/sorcar/` (64 files constructing VSCodeServer) has NO conftest,
+   so the same use-after-close race crashes there. FIX DIRECTION: move/duplicate
+   the join hook into a conftest covering tests/agents/sorcar (or root conftest).
+3. Rest of split 1 (tests 273–764, result_1_rest.log): 1 failed, 490 passed,
+   1 skipped: FAILED test_install_script_tee_subshell_signal.py::
+   test_install_sh_outer_trap_survives_sigint — 'Interrupt received but ignored'
+   not in '' (PTY/SIGINT timing flake under load). PASSES in isolation.
+4. First 272 rerun (result_1_first272.log): 1 failed, 266 passed, 4 skipped:
+   FAILED test_bughunt_cli.py::test_ctrl_c_abort_actually_stops_the_running_agent —
+   "child never reported worker status" (PTY Ctrl+C flake, same family as split 0's
+   bughunt4 flake). Passes 3/3 in isolation and 3/3 with neighbor-window reruns
+   (125–135); only failed while another pytest split ran concurrently → load-
+   sensitive TEST flake, not a project bug.
+5. The one space-containing test id runs fine individually (1 passed).
+
+## SPLIT 1 verdict
+
+- Project bug (crash): orphan-sweep sqlite use-after-close SIGSEGV — same as split 0.
+- Test flakes (load-sensitive PTY timing): test_bughunt_cli.py::test_ctrl_c_abort...,
+  test_install_script_tee_subshell_signal.py::test_install_sh_outer_trap_survives_sigint.
+- All other 758 tests in split 1 pass.
