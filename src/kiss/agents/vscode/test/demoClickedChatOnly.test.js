@@ -132,34 +132,6 @@ function dispatch(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
-/** Answer every posted 'demoSpeak' with a synthesized clip after 10ms. */
-function autoAnswerDemoSpeak(win) {
-  autoAnswerDemoSpeakWith(win, () => 'QUJD');
-}
-
-/**
- * Answer posted 'demoSpeak' requests with audio selected by *choose*.
- * Returning '' simulates GPT-audio synthesis failure/timeout; in the
- * VS Code webview that degrades to SILENCE, reproducing the reported
- * "I cannot hear any voice" behavior for huge uncapped prompts.
- */
-function autoAnswerDemoSpeakWith(win, choose) {
-  const prev = win._onPosted;
-  win._onPosted = msg => {
-    if (prev) prev(msg);
-    if (msg.type !== 'demoSpeak') return;
-    setTimeout(() => {
-      dispatch(win, {
-        type: 'demoSpeakAudio',
-        reqId: msg.reqId,
-        audioB64: choose(msg),
-        audioMime: 'audio/mpeg',
-        tabId: msg.tabId,
-      });
-    }, 10);
-  };
-}
-
 function sleep(ms) {
   return new Promise(resolve => {
     setTimeout(resolve, ms);
@@ -270,7 +242,6 @@ async function testReplaysOnlyClickedTask() {
   const {win} = makeWebview();
   installAudio(win);
   installSpeech(win);
-  autoAnswerDemoSpeak(win);
 
   const {resumes, done} = startDemoFlow(win, 'Task A1 original');
   await done;
@@ -293,24 +264,28 @@ async function testReplaysOnlyClickedTask() {
 }
 
 async function testNoPromptNarrationRequested() {
-  const {win, posted} = makeWebview();
-  installAudio(win);
-  installSpeech(win);
-  autoAnswerDemoSpeak(win);
+  const {win} = makeWebview();
+  const players = installAudio(win);
+  const spoken = installSpeech(win);
 
   const {done} = startDemoFlow(win, 'Task A1 original');
   await done;
 
-  // The prompt display + "User said ..." narration step was removed:
-  // a replay with no ``talk`` tool calls must request NO speech
-  // synthesis at all — even for a huge recorded prompt.
-  const speaks = posted.filter(m => m.type === 'demoSpeak');
+  // The prompt display + "User said ..." narration step was removed
+  // and demo mode never synthesizes speech: a replay with no ``talk``
+  // tool calls must play NO audio at all — even for a huge recorded
+  // prompt.
   assert.strictEqual(
-    speaks.length,
+    players.length,
     0,
     'demo replay must not narrate the recorded prompt (got ' +
-      speaks.length +
-      ' demoSpeak requests)',
+      players.length +
+      ' audio players)',
+  );
+  assert.strictEqual(
+    spoken.length,
+    0,
+    'the robotic Web Speech voice must never narrate the prompt',
   );
   console.log('PASS: demo replay requests no prompt narration');
 }
@@ -319,7 +294,6 @@ async function testClickWhileActiveOpensNoNewTab() {
   const {win} = makeWebview();
   installAudio(win);
   installSpeech(win);
-  autoAnswerDemoSpeak(win);
 
   const {done} = startDemoFlow(win, 'Task A1 original');
   await sleep(300); // replay is now active, showing the first panel

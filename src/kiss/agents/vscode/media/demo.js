@@ -621,6 +621,8 @@
           text: talkText,
           language: extras.language,
           emotion: extras.emotion,
+          audioB64: extras.audioB64,
+          audioMime: extras.audioMime,
         });
       }
       return null;
