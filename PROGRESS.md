@@ -267,3 +267,44 @@ ______________________________________________________________________
 - Test flakes (load-sensitive PTY timing): test_bughunt_cli.py::test_ctrl_c_abort...,
   test_install_script_tee_subshell_signal.py::test_install_sh_outer_trap_survives_sigint.
 - All other 758 tests in split 1 pass.
+
+## Root-cause analysis of the two split-0 failures (session 2, steps 40-94)
+
+### 1. SEGFAULT (project/test-infra bug) — FIXED
+
+- `test_restore_tabs_with_subagents.py` teardown closes `th._db_conn` while the
+  `orphan-task-sweep` daemon thread (spawned by every `VSCodeServer.__init__`)
+  is mid-`conn.execute` in `_log_orphaned_task_forensics` → C-level
+  use-after-close → SIGSEGV. Reproduced 2/5 in isolation.
+- The vscode test dir already has the canonical fix:
+  `src/kiss/tests/agents/vscode/conftest.py` — a `pytest_runtest_call`
+  hookwrapper that joins live `orphan-task-sweep` threads after the test body,
+  BEFORE teardown. The sorcar test dir (64 files constructing VSCodeServer)
+  had NO such conftest.
+- FIX APPLIED: created `src/kiss/tests/agents/sorcar/conftest.py` with the same
+  join hook (mirrors vscode conftest). Verified: 8/8 clean runs of
+  test_restore_tabs_with_subagents.py after fix (was segfaulting ~40%).
+
+### 2. test_bughunt4_interrupt_lock flake — root cause identified (PROJECT bug: lock starvation)
+
+- Probes (tmp/probe*.py): failure reproduces ~100% when the probe runs with
+  stdio detached (nohup) and ~0% interactively; in pytest it fails under load.
+- faulthandler stack dumps 2s after Ctrl+C in the failing mode show:
+  worker blocked in `_StdoutProxy.write` (line 317) holding the shared terminal
+  lock; MAIN thread blocked acquiring the same lock in `drain_injected`
+  (cli_steering.py:682) at the top of `_pump_stdin`.
+- Sequence: KeyboardInterrupt IS delivered (interrupts the lock acquire);
+  `SteeringSession.run` catches it → `_on_abort()` → finally: `box.stop()`
+  (needs the same lock) → main thread STARVES against the flooding worker,
+  which reacquires the lock for every 64KB write; `_interrupt_worker(worker)`
+  (which would stop the flood) only runs AFTER `box.stop()` returns → the
+  worker floods all 65MB (~0.5MB/s drain) → 40s test drain deadline expires →
+  "child never reported worker status".
+- Correct fix direction (project code, cli_steering.py): inject the
+  KeyboardInterrupt into the worker BEFORE the box teardown in the `finally`
+  block (i.e., on abort, call `_interrupt_worker` first, or make
+  `_interrupt_worker` not depend on acquiring the terminal lock), so the abort
+  path cannot starve behind a flooding worker.
+
+### Status of other splits (1-7): NOT yet run in this session; orchestrator
+### crashed earlier. Splits need to be run via run_parallel by the orchestrator.
