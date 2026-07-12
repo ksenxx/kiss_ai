@@ -1250,6 +1250,7 @@ class _CommandsMixin:
             reply: dict[str, Any] = {
                 "type": "demoSpeakAudio",
                 "reqId": req_id,
+                "text": text,
                 "audioB64": audio_b64,
                 "audioMime": mime or "audio/mpeg",
                 "tabId": tab_id,

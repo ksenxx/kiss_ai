@@ -41,11 +41,29 @@ def _anthropic_cache_creation_tokens(usage: Any) -> tuple[int, int]:
 def _uses_adaptive_thinking(model_name: str) -> bool:
     """Return True if the Claude model requires ``thinking.type=adaptive``.
 
-    Newer Claude Opus models (4.6 and later) no longer support
-    ``thinking.type=enabled`` and must use ``adaptive`` instead. Older
-    Opus 4.x models (4, 4.1, 4.5) still use ``enabled``. Sonnet/Haiku 4
-    models continue to use ``enabled`` as before.
+    Consultation order:
+
+    1. ``MODEL_INFO[model_name].adaptive_thinking`` when explicitly set
+       (``True`` / ``False``) — the source of truth for
+       ``claude-fable-*``, ``claude-sonnet-5`` and any other new-family
+       Claude models whose name does not fit the legacy prefix
+       heuristic.  This is loaded from ``MODEL_INFO.json`` at import
+       time so a JSON edit reconfigures the adapter without a code
+       change.
+    2. The legacy prefix heuristic: newer Claude Opus models (4.6 and
+       later) no longer support ``thinking.type=enabled`` and must use
+       ``adaptive`` instead. Older Opus 4.x models (4, 4.1, 4.5) still
+       use ``enabled``. Sonnet/Haiku 4 models continue to use
+       ``enabled`` as before.
     """
+    # Deferred import to avoid a cycle between ``model_info`` (which
+    # imports the model classes lazily) and this module.
+    from kiss.core.models.model_info import MODEL_INFO
+
+    info = MODEL_INFO.get(model_name)
+    if info is not None and info.adaptive_thinking is not None:
+        return info.adaptive_thinking
+
     prefix = "claude-opus-4-"
     if not model_name.startswith(prefix):
         return False
@@ -61,6 +79,36 @@ def _uses_adaptive_thinking(model_name: str) -> bool:
     except ValueError:
         return False
     return minor >= 6
+
+
+def _supports_extended_thinking(model_name: str) -> bool:
+    """Return True if the Claude model should send the ``thinking`` param.
+
+    Consultation order:
+
+    1. ``MODEL_INFO[model_name].extended_thinking`` when explicitly set —
+       the source of truth for new-family Claude models whose name is
+       not covered by the legacy prefix allowlist below (e.g.
+       ``claude-fable-5``, ``claude-sonnet-5``). Setting the flag to
+       ``False`` also lets ``MODEL_INFO.json`` opt a specific model out
+       of extended thinking without a code change.
+    2. Legacy prefix allowlist: every ``claude-{opus,sonnet,haiku}-4``
+       model supports extended thinking.
+
+    The paper-analysed ``claude-fable-5`` failure lived in the gap
+    between these two rules: its name does not match the prefix
+    allowlist, so before this helper existed the adapter never sent the
+    ``thinking`` param and the model returned encrypted-only reasoning
+    turns that ``KISSAgent`` misread as "empty response".
+    """
+    from kiss.core.models.model_info import MODEL_INFO
+
+    info = MODEL_INFO.get(model_name)
+    if info is not None and info.extended_thinking is not None:
+        return info.extended_thinking
+    return model_name.startswith(
+        ("claude-opus-4", "claude-sonnet-4", "claude-haiku-4")
+    )
 
 
 _AUDIO_FORMAT_TO_MIME: dict[str, str] = {
@@ -576,9 +624,7 @@ class AnthropicModel(Model):
             elif isinstance(stop_val, list):
                 kwargs["stop_sequences"] = stop_val
 
-        if "thinking" not in kwargs and (
-            self.model_name.startswith(("claude-opus-4", "claude-sonnet-4", "claude-haiku-4"))
-        ):
+        if "thinking" not in kwargs and _supports_extended_thinking(self.model_name):
             if not user_set_max_tokens:
                 max_tokens = 65536 if self.model_name.startswith("claude-opus-4") else 64000
             if _uses_adaptive_thinking(self.model_name):
@@ -630,6 +676,18 @@ class AnthropicModel(Model):
             kwargs["system"] = system_instruction
         if tools:
             kwargs["tools"] = tools
+            thinking = kwargs.get("thinking") or {}
+            thinking_type = thinking.get("type") if isinstance(thinking, dict) else None
+            if "tool_choice" not in kwargs and thinking_type != "enabled":
+                # KISSAgent's ReAct loop requires every agentic turn to
+                # produce a tool call (``finish`` is always present).  Claude's
+                # default ``tool_choice=auto`` can otherwise yield a
+                # reasoning-only / empty-text turn that KISS has to retry and,
+                # for thinking-first models like fable-5, may eventually abort.
+                # Anthropic rejects forced tool use with
+                # ``thinking.type=enabled``; adaptive-thinking and non-thinking
+                # requests accept ``any``.
+                kwargs["tool_choice"] = {"type": "any"}
 
         if enable_cache:
             kwargs["cache_control"] = {"type": "ephemeral"}
