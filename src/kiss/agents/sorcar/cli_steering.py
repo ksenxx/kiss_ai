@@ -1993,6 +1993,17 @@ class SteeringSession:
             # interrupted below instead of leaking in the background.
             self._on_abort()
         finally:
+            if self._aborted.is_set():
+                # Interrupt the worker BEFORE any teardown that needs
+                # the shared terminal lock (``box.stop`` / ``redraw``).
+                # A flooding worker reacquires the unfair lock for
+                # every ``_StdoutProxy.write`` chunk, so a main thread
+                # queued behind it inside ``box.stop`` can starve
+                # indefinitely while the "interrupted" task keeps
+                # running and spending budget.  ``_interrupt_worker``
+                # itself never touches the terminal lock, so running
+                # it first stops the flood and lets teardown proceed.
+                self._interrupt_worker(worker)
             if self._owns_box:
                 self.box.stop()
                 sys.stdout = prev_stdout
@@ -2007,7 +2018,9 @@ class SteeringSession:
                     if self.box._active:
                         self.box.redraw()
         if self._aborted.is_set():
-            self._interrupt_worker(worker)
+            # The worker was already interrupted in the ``finally``
+            # above (before box teardown, to avoid starving on the
+            # terminal lock behind a flooding worker).
             raise KeyboardInterrupt
         if self._error is not None:
             raise self._error
