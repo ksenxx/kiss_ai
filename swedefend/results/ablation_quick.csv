@@ -1,0 +1,4 @@
+Layer,Mal_Blocked,Catch_Rate,FPR
+L1_sanitizer,3,30.00%,0.00%
+L3_provenance,3,30.00%,0.00%
+Combined_L1+L3,6,60.00%,0.00%
