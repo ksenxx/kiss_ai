@@ -1,4 +1,36 @@
-# PROGRESS — push website update to GitHub Pages (current task)
+# PROGRESS — recount Core Agents LoC in README.md (current task)
+
+## Task
+
+Update the "Core Agents # LoC" figure in `./README.md` after recounting,
+excluding empty lines, comment-only lines, and docstrings of private methods.
+
+## Steps completed
+
+1. Identified the five core agent files (matching the definition used in
+   `papers/kisssorcar/kiss_sorcar.tex` line 144, which counts the KISS
+   Agent, Relentless Agent, Sorcar Agent, Chat Sorcar Agent, and
+   Worktree Sorcar Agent with the same exclusion rules):
+   - `src/kiss/core/kiss_agent.py`
+   - `src/kiss/core/relentless_agent.py`
+   - `src/kiss/agents/sorcar/sorcar_agent.py`
+   - `src/kiss/agents/sorcar/chat_sorcar_agent.py`
+   - `src/kiss/agents/sorcar/worktree_sorcar_agent.py`
+1. Wrote a temporary AST/tokenize-based counter (`tmp/count_loc.py`)
+   that skips blank lines, comment-only lines (via `tokenize.COMMENT`
+   where the stripped line starts with `#`; trailing comments still
+   count as code), and docstring lines of private functions/methods
+   (name starts with `_`, dunders treated as public). Sanity-checked it
+   on a small synthetic file.
+1. Recount results: kiss_agent 486, relentless_agent 427, sorcar_agent
+   687, chat_sorcar_agent 468, worktree_sorcar_agent 787 → **2855
+   total**.
+1. Updated README.md line 63: `**~2900**` → `**~2850**`.
+1. Deleted the temp counter script and sanity file.
+
+---
+
+# PROGRESS — push website update to GitHub Pages (previous task)
 
 ## Task
 
