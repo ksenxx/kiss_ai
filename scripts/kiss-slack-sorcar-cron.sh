@@ -40,6 +40,15 @@ uninstall_cron() {
 
 run_poller() {
     export PATH="/opt/homebrew/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    # cron does not set SHELL to the user's login shell (it uses /bin/sh
+    # and leaves $SHELL unset in the child env), which made the poller's
+    # source_shell_env() fall back to sourcing ~/.bashrc instead of
+    # ~/.zshrc — so no API keys were imported, get_available_models()
+    # lacked the default model, and every Sorcar task aborted with
+    # "No model available" (empty Slack replies).  Export the user's
+    # real login shell so RC sourcing picks up the API keys.
+    SHELL="$(dscl . -read "/Users/$(id -un)" UserShell 2>/dev/null | awk '{print $2}')"
+    export SHELL="${SHELL:-/bin/zsh}"
     export KISS_SLACK_WORKSPACE="${KISS_SLACK_WORKSPACE:-learningsystems}"
     export KISS_SLACK_USER="${KISS_SLACK_USER:-ksen}"
     export KISS_SLACK_CHANNEL="${KISS_SLACK_CHANNEL:-sorcar}"

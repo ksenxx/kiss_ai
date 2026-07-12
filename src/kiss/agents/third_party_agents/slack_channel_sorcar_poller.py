@@ -44,6 +44,7 @@ import fcntl
 import json
 import logging
 import os
+import pwd
 import re
 import sys
 import time
@@ -60,6 +61,7 @@ from kiss.agents.third_party_agents._kiss_web_launcher import (
 )
 from kiss.agents.third_party_agents.slack_agent import _load_token
 from kiss.agents.vscode.vscode_config import load_config, source_shell_env
+from kiss.core.models.model_info import get_available_models
 
 STATE_DIR = Path.home() / ".kiss" / "slack_channel_sorcar_poller"
 STATE_FILE = STATE_DIR / "state.json"
@@ -234,6 +236,16 @@ def _strip_bot_mention(text: str, bot_id: str) -> str:
     return text.replace(f"<@{bot_id}>", "").strip()
 
 
+def _is_empty_reply(reply: str) -> bool:
+    """Return True if ``reply`` is blank or the empty-result placeholder.
+
+    Such replies mean the Sorcar task never produced a result (e.g. the
+    process was killed mid-run), so the poller must not post them and
+    must leave the message unanswered so the next tick retries it.
+    """
+    return not reply.strip() or reply.strip() == "(empty response)"
+
+
 def _run_sorcar(prompt: str, chat_id: str) -> tuple[str, str]:
     """Run a Sorcar task and return ``(slack_text, chat_id)``.
 
@@ -311,6 +323,13 @@ def _handle_top_level(
         return
     logging.info("New top-level message ts=%s text=%r", ts, text[:200])
     reply, chat_id = _run_sorcar(text, chat_id="")
+    if _is_empty_reply(reply):
+        logging.warning(
+            "Empty Sorcar result for ts=%s (chat_id=%s); not posting, will retry next tick",
+            ts,
+            chat_id,
+        )
+        return
     try:
         _post(client, channel_id, reply, thread_ts=ts)
     except SlackApiError:
@@ -357,6 +376,15 @@ def _handle_thread_replies(
             text[:200],
         )
         reply, new_chat_id = _run_sorcar(text, chat_id=chat_id)
+        if _is_empty_reply(reply):
+            logging.warning(
+                "Empty Sorcar result for thread reply ts=%s parent=%s (chat_id=%s); "
+                "not posting, will retry next tick",
+                reply_msg.get("ts"),
+                parent_ts,
+                new_chat_id,
+            )
+            return
         try:
             _post(client, channel_id, reply, thread_ts=parent_ts)
         except SlackApiError:
@@ -422,7 +450,22 @@ def main() -> None:
     global _LOCK_FP
     _setup_logging()
     _LOCK_FP = _acquire_lock()
+    # Under cron ``$SHELL`` is unset, which makes ``source_shell_env``
+    # fall back to sourcing ``~/.bashrc`` instead of the user's real
+    # login-shell RC (e.g. ``~/.zshrc``), silently importing zero API
+    # keys — every Sorcar task then aborts with "No model available"
+    # and the reply is empty.  Recover the login shell from the user
+    # database before sourcing.
+    if not os.environ.get("SHELL"):
+        os.environ["SHELL"] = pwd.getpwuid(os.getuid()).pw_shell or "/bin/zsh"
     source_shell_env()
+    if not get_available_models():
+        logging.error(
+            "No LLM model available after sourcing shell env "
+            "(SHELL=%s); tasks would fail with empty results — exiting",
+            os.environ.get("SHELL", ""),
+        )
+        sys.exit(1)
 
     try:
         client = _get_client()
