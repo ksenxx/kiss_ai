@@ -197,7 +197,7 @@ ______________________________________________________________________
 
 ## Context
 
-- Prior session created tmp/test_splits/split_{0..7}.txt (8 splits, ~764 tests each) + all_tests.txt.
+- Prior session created tmp/test_splits/split\_{0..7}.txt (8 splits, ~764 tests each) + all_tests.txt.
 - This session was assigned SPLIT 0 as a sub-task after the earlier orchestrator crashed.
 
 ## Findings so far (SPLIT 0)
@@ -205,7 +205,7 @@ ______________________________________________________________________
 1. Command with `$(cat split_0.txt | tr ...)` fails: line 218 contains a
    test id with spaces/`#` (`test_cli_voice_speaker_prefix.py::...[hi-2.0-None-Speaker #2 says that: hi]`).
    MUST use `@tmp/test_splits/split_0.txt` argfile syntax instead of $(cat).
-2. Run 1 (result_0.log): SEGFAULT (Fatal Python error: Segmentation fault) at ~60% —
+1. Run 1 (result_0.log): SEGFAULT (Fatal Python error: Segmentation fault) at ~60% —
    crash in sqlite `conn.execute` in `_log_orphaned_task_forensics` (persistence.py:1422)
    on thread [orphan-task-sweep], while main thread was in
    test_restore_tabs_with_subagents.py teardown_method (line 130) closing `th._db_conn`.
@@ -215,9 +215,9 @@ ______________________________________________________________________
    thread's) while the sweep thread is mid-`execute` → use-after-free segfault.
    sqlite3 connections with check_same_thread=False closed concurrently with
    execute() → native crash.
-3. Segfault REPRODUCES in isolation: `uv run pytest src/kiss/tests/agents/sorcar/test_restore_tabs_with_subagents.py`
+1. Segfault REPRODUCES in isolation: `uv run pytest src/kiss/tests/agents/sorcar/test_restore_tabs_with_subagents.py`
    segfaulted 2/5 runs in isolation (flaky race).
-4. Run 2 (result_0_run2.log): 1 failed, 758 passed, 5 skipped —
+1. Run 2 (result_0_run2.log): 1 failed, 758 passed, 5 skipped —
    FAILED test_bughunt4_interrupt_lock.py::test_ctrl_c_during_lock_wait_still_stops_the_worker
    (PTY/timing flake: "child never reported worker status", tail full of XXXX flood).
    Passes 10/10 in isolation; fails ~1/6 when run after neighbors under load.
@@ -226,9 +226,9 @@ ______________________________________________________________________
 
 ## Next steps
 
-- Fix project bug: teardown/close race between test teardown closing _db_conn and
+- Fix project bug: teardown/close race between test teardown closing \_db_conn and
   orphan-sweep thread using it (either join sweep thread in tests via server API,
-  or make _close_db/_get_db safe). Per task instructions "Fix them accordingly".
+  or make \_close_db/\_get_db safe). Per task instructions "Fix them accordingly".
 - Fix test flake in bughunt4 (increase deadlines/robustness) — test bug.
 - Report split 0 results.
 
@@ -238,7 +238,7 @@ ______________________________________________________________________
    (`test_cli_voice_speaker_prefix.py::...[  hi  -1-None-Speaker #1 says that: hi]`);
    `$(cat ...)` exploded it into bogus args (`ERROR: file or directory not found: hi`,
    exit=4). Re-ran with `@tmp/test_splits/split_1.txt` argfile syntax.
-2. Run 1 (result_1_crash1.log): SEGFAULT at test #272 — IDENTICAL signature to
+1. Run 1 (result_1_crash1.log): SEGFAULT at test #272 — IDENTICAL signature to
    split 0's crash: [orphan-task-sweep] thread inside sqlite `execute` in
    `_log_orphaned_task_forensics` (persistence.py:1422) while the main thread was
    in `test_restore_tabs_with_subagents.py` teardown_method (line 130) closing
@@ -249,17 +249,17 @@ ______________________________________________________________________
    `tests/agents/sorcar/` (64 files constructing VSCodeServer) has NO conftest,
    so the same use-after-close race crashes there. FIX DIRECTION: move/duplicate
    the join hook into a conftest covering tests/agents/sorcar (or root conftest).
-3. Rest of split 1 (tests 273–764, result_1_rest.log): 1 failed, 490 passed,
+1. Rest of split 1 (tests 273–764, result_1_rest.log): 1 failed, 490 passed,
    1 skipped: FAILED test_install_script_tee_subshell_signal.py::
    test_install_sh_outer_trap_survives_sigint — 'Interrupt received but ignored'
    not in '' (PTY/SIGINT timing flake under load). PASSES in isolation.
-4. First 272 rerun (result_1_first272.log): 1 failed, 266 passed, 4 skipped:
+1. First 272 rerun (result_1_first272.log): 1 failed, 266 passed, 4 skipped:
    FAILED test_bughunt_cli.py::test_ctrl_c_abort_actually_stops_the_running_agent —
    "child never reported worker status" (PTY Ctrl+C flake, same family as split 0's
    bughunt4 flake). Passes 3/3 in isolation and 3/3 with neighbor-window reruns
    (125–135); only failed while another pytest split ran concurrently → load-
    sensitive TEST flake, not a project bug.
-5. The one space-containing test id runs fine individually (1 passed).
+1. The one space-containing test id runs fine individually (1 passed).
 
 ## SPLIT 1 verdict
 
@@ -287,7 +287,7 @@ ______________________________________________________________________
 
 ### 2. test_bughunt4_interrupt_lock flake — root cause identified (PROJECT bug: lock starvation)
 
-- Probes (tmp/probe*.py): failure reproduces ~100% when the probe runs with
+- Probes (tmp/probe\*.py): failure reproduces ~100% when the probe runs with
   stdio detached (nohup) and ~0% interactively; in pytest it fails under load.
 - faulthandler stack dumps 2s after Ctrl+C in the failing mode show:
   worker blocked in `_StdoutProxy.write` (line 317) holding the shared terminal
@@ -306,5 +306,76 @@ ______________________________________________________________________
   `_interrupt_worker` not depend on acquiring the terminal lock), so the abort
   path cannot starve behind a flooding worker.
 
-### Status of other splits (1-7): NOT yet run in this session; orchestrator
-### crashed earlier. Splits need to be run via run_parallel by the orchestrator.
+## Final results — all 8 splits run + all fixes applied (later sessions)
+
+All 8 splits (6109 tests, cores=10 → 8 parallel workers via run_parallel,
+pytest argfile syntax `@tmp/test_splits/split_N.txt`) were run. Splits 2, 3
+and 7 were fully green. Four distinct failure causes were found, diagnosed,
+classified and fixed:
+
+### A. SIGSEGV in sorcar tests — PROJECT/test-infra bug — FIXED
+
+- Commits 6f843b13 + 19a251ad: new `src/kiss/tests/agents/sorcar/conftest.py`
+  with a `pytest_runtest_call` hookwrapper that joins live `orphan-task-sweep`
+  threads after the test body, before teardown (mirrors the existing vscode
+  conftest). Root cause: VSCodeServer's orphan-sweep daemon thread mid-sqlite
+  `execute` while teardown closed `th._db_conn` → C-level use-after-close.
+  Verified 8/8 clean runs of previously-segfaulting test file.
+
+### B. test_bughunt4_interrupt_lock Ctrl+C starvation — PROJECT bug — FIXED
+
+- Commits db2ec077 + 962970cb (`src/kiss/agents/sorcar/cli_steering.py`):
+  1. `SteeringSession.run`'s `finally` now interrupts the worker BEFORE
+     `box.stop()` (which needs the shared terminal lock).
+  1. New `_locked_interruptible(lock)` context manager (timed
+     `lock.acquire(timeout=0.2)` slices) used around all box-touching calls
+     in `_pump_stdin` (`drain_injected`, `flush_pending_escape`, `redraw`,
+     `feed`), with the whole loop iteration wrapped in
+     `try/except KeyboardInterrupt → on_abort(); continue`.
+- Why: on CPython 3.14 a blocking PyMutex `lock.acquire()` is not
+  signal-interruptible, so the main thread parked on the unfair terminal lock
+  behind a flooding worker (re-acquiring per 64KB `_StdoutProxy.write` chunk)
+  could never process Ctrl+C. Timed-slice acquisition returns to bytecode
+  every 0.2s so pending KeyboardInterrupt is raised promptly.
+- Verified 10/10 consecutive foreground passes (previously failed ~1/3 under
+  load); ~170 related steering/voice/CLI tests pass. NOTE: never verify these
+  tests under nohup/detached execution — async children inherit
+  SIGINT=SIG_IGN, so the child ignores Ctrl+C and the test can never pass.
+- The two load-sensitive PTY flakes from split 1
+  (test_bughunt_cli.py::test_ctrl_c_abort_actually_stops_the_running_agent,
+  test_install_script_tee_subshell_signal.py) are the same family and pass
+  after this fix; no separate change.
+
+### C. Slack token cross-process race — TEST bug — FIXED
+
+- Failure: test_slack_agent.py::TestSlackAgent::test_authenticate_invalid_token
+  (split 4) saw a leftover token because parallel pytest processes raced on the
+  REAL `~/.kiss/third_party_agents/slack/default/token.json`
+  (`slack_agent._SLACK_DIR` uses `Path.home()` and ignores the per-process
+  KISS_HOME set by tests/conftest.py; three test files back-up/clear/restore
+  the real file).
+- Fix: new `src/kiss/tests/agents/channels/conftest.py` with an autouse
+  fixture monkeypatching `slack_agent._SLACK_DIR` to a per-test tmp dir (and
+  the by-value `_SLACK_DIR` imports in the three test modules). Verified: 46
+  slack-related tests pass and no token file leaks into the real slack dir
+  (the real `learningsystems` workspace is untouched).
+
+### D. Hard-coded webhook ports — TEST bug — FIXED
+
+- Failures: test_backend_lifecycle.py::test_whatsapp_disconnect_stops_server
+  (hard-coded port 18080) and test_bughunt_round2_tlon_phone_wa.py::
+  TestWhatsAppWebhookVerification::test_correct_token_and_mode_echo_challenge
+  (`[Errno 48] Address already in use` — connect() always bound default 18080)
+  collided across parallel pytest processes.
+- Fix: `_free_port()` helper (bind ("127.0.0.1", 0) → getsockname) in both
+  test files; test_backend_lifecycle.py now uses ephemeral ports for all four
+  webhook tests (was 18080/18081/18082/18083). whatsapp_agent.connect() now
+  honors an optional `webhook_port` config key (backward-compatible; default
+  still 18080) so the webhook-verification tests can pass an ephemeral port
+  through the saved config. Verified: both files pass (17 tests), full
+  channels dir green (616 passed), all whatsapp tests green (57 passed).
+
+### Final verification
+
+- `uv run check --full` passes (ruff, mypy, pyright, tsc, eslint, mdformat).
+- Sanity rerun of every previously failing test: all pass.
