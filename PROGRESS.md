@@ -333,3 +333,31 @@ Files to change:
 - Flaky-under-load: test_install_script\_*, test_bughunt9_c_sigterm*,
   test_bughunt4_interrupt_lock, test_bughunt_cli ctrl-c tests — all
   pass in foreground runs with the diff applied.
+
+---
+
+# PROGRESS — kisssorcar.github.io: light default + logo blend
+
+## Task
+Update website/kisssorcar.github.io so the hero logo blends nicely with the
+page and the website is white (light) by default. Validate.
+
+## Steps done
+1. Made LIGHT the default theme in website/kisssorcar.github.io/index.html:
+   - Theme bootstrap script: both fallbacks 'dark' → 'light'.
+   - `applyAria(root.getAttribute('data-theme') || 'light')`.
+   - Toggle button initial aria-label → "Switch to dark theme".
+2. Logo blend: the PNG (assets/KISS-Sorcar.png) had a solid white opaque
+   background. First tried `mix-blend-mode: multiply`; found `.hero { z-index:1 }`
+   created a stacking context isolating the blend (removed z-index with comment).
+   FINAL fix: rewrote the PNG itself with a transparent background (flood-fill
+   near-white from borders, feathered edges, removed right-edge scan artifact),
+   downscaled 2760x1504 → 1920x1046; 4.4MB → 0.96MB. Simplified `.hero-logo`
+   CSS back to just drop-shadows in both themes.
+3. Added `background: var(--bg)` to `html` rule (opaque backdrop).
+4. Copied the transparent PNG into website/kisssorcar.github.io/assets/
+   (was previously missing from the website dir).
+5. Validated with local HTTP server + Chromium screenshots:
+   - Light theme loads by default; logo blends seamlessly, no white box.
+   - Dark theme via toggle: logo floats on dark bg with teal/purple glow.
+6. Killed local server, cleaned tmp files, git-added index.html and PNG.

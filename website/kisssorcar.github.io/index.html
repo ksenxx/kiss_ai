@@ -24,15 +24,15 @@
   <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
   <script>
     /* Theme bootstrap — runs synchronously before <style> parses to avoid FOUC.
-       Reads saved preference from localStorage; falls back to "dark" so the
-       site keeps its current first-load look for anyone without a preference. */
+       Reads saved preference from localStorage; falls back to "light" so the
+       site loads with the white theme for anyone without a preference. */
     (function () {
       try {
         var saved = localStorage.getItem('kiss-theme');
-        var theme = (saved === 'light' || saved === 'dark') ? saved : 'dark';
+        var theme = (saved === 'light' || saved === 'dark') ? saved : 'light';
         document.documentElement.setAttribute('data-theme', theme);
       } catch (e) {
-        document.documentElement.setAttribute('data-theme', 'dark');
+        document.documentElement.setAttribute('data-theme', 'light');
       }
     })();
   </script>
@@ -67,7 +67,9 @@
       --shadow-3: 0 12px 38px rgba(25,118,210,0.13), 0 4px 14px rgba(0,0,0,0.06);
     }
 
-    html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; }
+    /* Explicit html background so mix-blend-mode on the hero logo has an
+       opaque backdrop to blend into (Chrome requires this). */
+    html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; background: var(--bg); }
 
     body {
       font-family: 'Roboto', -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
@@ -134,14 +136,15 @@
     nav .gh-badge:hover { background: var(--surface-2); }
     nav .gh-badge svg { width: 16px; height: 16px; }
 
-    /* Hero */
+    /* Hero — no z-index here: a z-index would create a stacking context
+       that isolates the hero-logo's mix-blend-mode from the page backdrop
+       (the #magic-dust canvas stays behind via its own z-index: -1). */
     .hero {
       position: relative;
       padding: 4rem 1.5rem 2rem;
       text-align: center;
       max-width: 1100px;
       margin: 0 auto;
-      z-index: 1;
     }
 
     /* Magic-dust canvas behind the hero (Sorcar = magician). */
@@ -156,7 +159,12 @@
 
     .hero-mark, .screenshot { max-width: 960px; margin-left: auto; margin-right: auto; }
     .hero-mark { margin-bottom: 1.5rem; }
-    .hero-logo { display: block; width: 100%; height: auto; filter: drop-shadow(0 6px 24px rgba(25,118,210,0.18)); }
+    /* The logo PNG has a transparent background, so the artwork blends
+       seamlessly with the page in both themes; a soft drop-shadow lifts it. */
+    .hero-logo {
+      display: block; width: 100%; height: auto;
+      filter: drop-shadow(0 6px 24px rgba(25,118,210,0.14));
+    }
 
     .hero-quote { margin: 1.5rem auto 0; max-width: 640px; text-align: center; }
     .hero-quote blockquote {
@@ -1398,7 +1406,11 @@
       50%      { background-position: 100% center; }
     }
     html[data-theme="dark"] {
-    .hero-logo { filter: drop-shadow(0 10px 36px rgba(45,212,191,0.35)) drop-shadow(0 6px 18px rgba(167,139,250,0.25)); }
+    /* Dark theme: transparent-background logo sits directly on the dark
+       backdrop with the theme's teal/purple glow. */
+    .hero-logo {
+      filter: drop-shadow(0 10px 36px rgba(45,212,191,0.35)) drop-shadow(0 6px 18px rgba(167,139,250,0.25));
+    }
     .hero-quote blockquote { color: var(--text-dim); }
     .hero-quote figcaption { color: var(--text-soft); }
     .hero-trust {
@@ -1912,7 +1924,7 @@
         <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.36-3.88-1.36-.52-1.33-1.27-1.69-1.27-1.69-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.18 1.76 1.18 1.02 1.75 2.69 1.24 3.34.95.1-.74.4-1.24.72-1.53-2.55-.29-5.24-1.27-5.24-5.66 0-1.25.45-2.27 1.18-3.07-.12-.29-.51-1.46.11-3.05 0 0 .96-.31 3.16 1.17.92-.26 1.91-.39 2.88-.39s1.96.13 2.88.39c2.2-1.48 3.16-1.17 3.16-1.17.62 1.59.23 2.76.11 3.05.74.8 1.18 1.82 1.18 3.07 0 4.4-2.69 5.37-5.25 5.65.41.36.78 1.05.78 2.12v3.14c0 .31.21.66.79.55C20.21 21.39 23.5 17.08 23.5 12 23.5 5.65 18.35.5 12 .5z"/></svg>
         GitHub
       </a>
-      <button type="button" id="theme-toggle" class="theme-toggle" aria-label="Switch to light theme" title="Switch theme">
+      <button type="button" id="theme-toggle" class="theme-toggle" aria-label="Switch to dark theme" title="Switch theme">
         <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <circle cx="12" cy="12" r="4"></circle>
           <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"></path>
@@ -2859,7 +2871,7 @@ In each step, keep track of the best prompt which has the maximum number of succ
         btn.setAttribute('aria-label', nextLabel);
         btn.setAttribute('title', nextLabel);
       }
-      applyAria(root.getAttribute('data-theme') || 'dark');
+      applyAria(root.getAttribute('data-theme') || 'light');
       btn.addEventListener('click', function () {
         var current = root.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
         var next = current === 'dark' ? 'light' : 'dark';
