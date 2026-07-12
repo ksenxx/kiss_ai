@@ -1,4 +1,36 @@
-# PROGRESS — full-test-suite run + failure triage (current task)
+# PROGRESS — push website update to GitHub Pages (current task)
+
+## Task
+
+Push the committed light-theme + transparent-logo website changes to the
+GitHub Pages remote so the live kisssorcar.github.io reflects them.
+
+## Steps completed
+
+1. Verified local commit `27a1d8b0` (light theme default + transparent
+   hero logo) exists in this repo; the website lives in
+   `website/kisssorcar.github.io/` as a drop-in artifact — the actual
+   live site is a separate repo
+   `https://github.com/kisssorcar/kisssorcar.github.io` (per
+   `website/README.md`).
+1. Cloned the pages repo into `tmp/kisssorcar.github.io`, copied in the
+   updated `index.html` (34 changed lines: light-theme fallback, hero
+   CSS, aria-labels) and the transparent `assets/KISS-Sorcar.png`
+   (4.4 MB → 0.96 MB).
+1. Committed as `dc0f3ab` "Default to light theme and blend hero logo
+   seamlessly" and pushed to `origin main`
+   (`4091aeb..dc0f3ab main -> main`).
+1. Validated the LIVE site after deploy: `curl` confirms
+   `saved : 'light'` fallback at line 32 and the 958,897-byte PNG is
+   served; a real-browser screenshot of https://kisssorcar.github.io/
+   shows the light theme loading by default with the logo blending
+   seamlessly (no white box) and the toggle reading "Switch to dark
+   theme".
+1. Deleted the temp clone and screenshot from `tmp/`.
+
+---
+
+# PROGRESS — full-test-suite run + failure triage (previous task)
 
 ## Task
 
