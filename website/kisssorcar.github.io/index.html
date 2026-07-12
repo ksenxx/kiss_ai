@@ -4,12 +4,12 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>KISS Sorcar — Tell it what to do, in English. It picks the best LLM and ships the work.</title>
-  <meta name="description" content="Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 516 models, 62.2% on Terminal Bench 2.0. Works as a VS Code extension, a Claude-Code-style CLI, and a web app.">
+  <meta name="description" content="Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 530 models. Works as a VS Code extension, a Claude-Code-style CLI, and a web app.">
   <link rel="canonical" href="https://kisssorcar.github.io/">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://kisssorcar.github.io/">
   <meta property="og:title" content="KISS Sorcar — Tell it what to do, in English. It picks the best LLM and ships the work.">
-  <meta property="og:description" content="Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 516 models, 62.2% on Terminal Bench 2.0.">
+  <meta property="og:description" content="Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 530 models.">
   <meta property="og:image" content="https://kisssorcar.github.io/assets/og-card.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
@@ -24,15 +24,15 @@
   <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
   <script>
     /* Theme bootstrap — runs synchronously before <style> parses to avoid FOUC.
-       Reads saved preference from localStorage; falls back to "dark" so the
-       site keeps its current first-load look for anyone without a preference. */
+       Reads saved preference from localStorage; falls back to "light" so the
+       site loads with the white theme for anyone without a preference. */
     (function () {
       try {
         var saved = localStorage.getItem('kiss-theme');
-        var theme = (saved === 'light' || saved === 'dark') ? saved : 'dark';
+        var theme = (saved === 'light' || saved === 'dark') ? saved : 'light';
         document.documentElement.setAttribute('data-theme', theme);
       } catch (e) {
-        document.documentElement.setAttribute('data-theme', 'dark');
+        document.documentElement.setAttribute('data-theme', 'light');
       }
     })();
   </script>
@@ -67,7 +67,9 @@
       --shadow-3: 0 12px 38px rgba(25,118,210,0.13), 0 4px 14px rgba(0,0,0,0.06);
     }
 
-    html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; }
+    /* Explicit html background so mix-blend-mode on the hero logo has an
+       opaque backdrop to blend into (Chrome requires this). */
+    html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; background: var(--bg); }
 
     body {
       font-family: 'Roboto', -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
@@ -134,14 +136,15 @@
     nav .gh-badge:hover { background: var(--surface-2); }
     nav .gh-badge svg { width: 16px; height: 16px; }
 
-    /* Hero */
+    /* Hero — no z-index here: a z-index would create a stacking context
+       that isolates the hero-logo's mix-blend-mode from the page backdrop
+       (the #magic-dust canvas stays behind via its own z-index: -1). */
     .hero {
       position: relative;
       padding: 4rem 1.5rem 2rem;
       text-align: center;
       max-width: 1100px;
       margin: 0 auto;
-      z-index: 1;
     }
 
     /* Magic-dust canvas behind the hero (Sorcar = magician). */
@@ -156,7 +159,12 @@
 
     .hero-mark, .screenshot { max-width: 960px; margin-left: auto; margin-right: auto; }
     .hero-mark { margin-bottom: 1.5rem; }
-    .hero-logo { display: block; width: 100%; height: auto; filter: drop-shadow(0 6px 24px rgba(25,118,210,0.18)); }
+    /* The logo PNG has a transparent background, so the artwork blends
+       seamlessly with the page in both themes; a soft drop-shadow lifts it. */
+    .hero-logo {
+      display: block; width: 100%; height: auto;
+      filter: drop-shadow(0 6px 24px rgba(25,118,210,0.14));
+    }
 
     .hero-quote { margin: 1.5rem auto 0; max-width: 640px; text-align: center; }
     .hero-quote blockquote {
@@ -1398,7 +1406,11 @@
       50%      { background-position: 100% center; }
     }
     html[data-theme="dark"] {
-    .hero-logo { filter: drop-shadow(0 10px 36px rgba(45,212,191,0.35)) drop-shadow(0 6px 18px rgba(167,139,250,0.25)); }
+    /* Dark theme: transparent-background logo sits directly on the dark
+       backdrop with the theme's teal/purple glow. */
+    .hero-logo {
+      filter: drop-shadow(0 10px 36px rgba(45,212,191,0.35)) drop-shadow(0 6px 18px rgba(167,139,250,0.25));
+    }
     .hero-quote blockquote { color: var(--text-dim); }
     .hero-quote figcaption { color: var(--text-soft); }
     .hero-trust {
@@ -1912,7 +1924,7 @@
         <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.36-3.88-1.36-.52-1.33-1.27-1.69-1.27-1.69-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.18 1.76 1.18 1.02 1.75 2.69 1.24 3.34.95.1-.74.4-1.24.72-1.53-2.55-.29-5.24-1.27-5.24-5.66 0-1.25.45-2.27 1.18-3.07-.12-.29-.51-1.46.11-3.05 0 0 .96-.31 3.16 1.17.92-.26 1.91-.39 2.88-.39s1.96.13 2.88.39c2.2-1.48 3.16-1.17 3.16-1.17.62 1.59.23 2.76.11 3.05.74.8 1.18 1.82 1.18 3.07 0 4.4-2.69 5.37-5.25 5.65.41.36.78 1.05.78 2.12v3.14c0 .31.21.66.79.55C20.21 21.39 23.5 17.08 23.5 12 23.5 5.65 18.35.5 12 .5z"/></svg>
         GitHub
       </a>
-      <button type="button" id="theme-toggle" class="theme-toggle" aria-label="Switch to light theme" title="Switch theme">
+      <button type="button" id="theme-toggle" class="theme-toggle" aria-label="Switch to dark theme" title="Switch theme">
         <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <circle cx="12" cy="12" r="4"></circle>
           <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"></path>
@@ -1934,11 +1946,10 @@
         <figcaption>&mdash; Albert Einstein</figcaption>
       </figure>
     </div>
-    <h1>Tell it what to do, in English and give it a concrete goal. It picks the best LLMs, runs on your laptop, and ships the work.</h1>
+    <h1>Tell it what to do, in any language and give it a concrete goal. It picks the best LLMs, runs on your laptop, and ships the work.</h1>
     <div class="hero-trust" aria-label="At a glance">
       <span><strong>Apache 2.0</strong> · open source</span>
-      <span><strong>62.2%</strong> on Terminal Bench 2.0</span>
-      <span><strong>516 models</strong> · 9 providers</span>
+      <span><strong>530 models</strong> · 9 providers</span>
       <span><strong>~2,900 lines</strong> of core agents code</span>
     </div>
   </div>
@@ -1950,7 +1961,8 @@
       It is a simple, local-first, bring-your-own-key AI agent framework. It runs as a VS Code extension,
       a Claude-Code-style CLI, and a browser/mobile web app. Your prompts and code are sent directly to
       the model provider or local endpoint you configure &mdash; <em>not through our servers</em>. It supports
-      multi-model workflows just via prompts. All agents run as daemons.
+      multi-model workflows just via prompts. All agents run as daemons.  Complex AI systems/techniques
+       can be replaced with a paragraph of prompt in KISS Sorcar.
     </p>
   </div>
 
@@ -2067,7 +2079,7 @@
             </tr>
             <tr>
               <th class="cap">Models in bundled catalog</th>
-              <td class="kiss">516 across 9 provider categories</td>
+              <td class="kiss">530 across 9 provider categories</td>
               <td>Claude family only</td>
               <td>Subset chosen by Cursor</td>
             </tr>
@@ -2100,12 +2112,6 @@
               <td class="kiss"><span class="yes">✓</span> 23 third-party agents, including Slack, Gmail, Phone Control, SMS, and WhatsApp</td>
               <td><span class="warn">⚠</span> Slack, mobile Remote Control, and research-preview channels for Telegram, Discord, and iMessage; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel</td>
               <td><span class="warn">⚠</span> Slack and Microsoft Teams Cloud Agent integrations; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel</td>
-            </tr>
-            <tr>
-              <th class="cap">Terminal Bench 2.0 score</th>
-              <td class="kiss"><strong>62.2%</strong></td>
-              <td>58%</td>
-              <td>61.7% <small>(Cursor agent)</small></td>
             </tr>
           </tbody>
         </table>
@@ -2236,7 +2242,7 @@
           </div>
           <p class="panel-desc">Let Sorcar search, train, and benchmark candidate models on your data to find the lightest, fastest, cheapest model that hits a target accuracy and recall — without reward-hacking the evals.</p>
           <div class="prompt-body">
-            <pre>Sorcar for AI Discovery: Can you discover the lightest and fastest AI model that will give the best accuracy and recall on the data at &lt;&lt;/path/to/data&gt;&gt; at the cheapest price? Analyze the data and search the internet extensively to propose the first few models. Implement and experiment with each of your proposals. Note down the ideas you used to optimize the accuracy/recall and speed/cost metrics achieved in a file, so that you can use the file to not repeat ideas that have already been tried and/or failed. You can also use the file to combine ideas that have been successful in the past. Separate 20% of the data for evals, and your discovery strategy must not look at the evals data. Use 'lambda' CLI to train your models on GPUs and evaluate if needed. Total budget for Lambda Labs is $1000. Experiment with a smaller subset of data and fewer parameters in a model to do experiments quickly, and then extrapolate. Use internet search extensively at every step. MAKE SURE THAT YOU DO NOT DO REWARD HACKING OR CHEATING IN THE MODELS OR AGENTS YOU ARE IMPLEMENTING TO FIT DATA. YOUR SOLUTION MUST GENERALIZE BEYOND THE DATA PROVIDED. Do not STOP until accuracy/recall reaches 95% on evals and you can process each query in less than 600 seconds and under 50 USD per query amortized over all queries. Create an html report with diagrams and illustrations in ./reports and open it in the user's default browser?</pre>
+            <pre>Sorcar for AI Discovery: Can you discover the lightest and fastest AI model that will give the best accuracy and recall on the data at &lt;&lt;/path/to/data&gt;&gt; at the cheapest price? Analyze the data and search the internet extensively to propose the first few models. Implement and experiment with each of your proposals. Note down the ideas you used to optimize the accuracy/recall and speed/cost metrics achieved in a file, so that you can use the file to not repeat ideas that have already been tried and/or failed. You can also use the file to combine ideas that have been successful in the past. Separate 20% of the data for evals, and your discovery strategy must not look at the evals data. Use 'modal' CLI to train your models on GPUs and evaluate if needed. Total budget for Modal.com is $1000. Experiment with a smaller subset of data and fewer parameters in a model to do experiments quickly, and then extrapolate. Use internet search extensively at every step. MAKE SURE THAT YOU DO NOT DO REWARD HACKING OR CHEATING IN THE MODELS OR AGENTS YOU ARE IMPLEMENTING TO FIT DATA. YOUR SOLUTION MUST GENERALIZE BEYOND THE DATA PROVIDED. Do not STOP until accuracy/recall reaches 95% on evals and you can process each query in less than 600 seconds and under 50 USD per query amortized over all queries. Create an html report with diagrams and illustrations in ./reports and open it in the user's default browser?</pre>
             <div class="prompt-fade"></div>
           </div>
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
@@ -2283,7 +2289,7 @@ RUN_GEPA: Sample 100 data points from the val set and call it sval set. Maintain
 END_RUN_GEPA
 Repeat RUN_GEPA until there is no change in the prompt after 3 iterations.
 
-In each step, keep track of the best prompt which has the maximum number of successfully predicted datapoints in ./pareto/optimal.md. MAKE SURE THAT YOU DO NOT DO REWARD HACKING OR CHEATING IN THE AGENT YOU ARE IMPLEMENTING TO FIT DATA. YOUR SOLUTION MUST GENERALIZE BEYOND THE DATA PROVIDED. Use internet search extensively at every step. Do not worry about budget. Create an html report with diagrams and illustrations in ./reports and open it in the user's default browser. Do NOT STOP until you could not improve the accuracy and recall after three consecutive rollouts. Use gpt-5.5 model (not codex) for thorough review of the work done at every step by the other model.</pre>
+In each step, keep track of the best prompt which has the maximum number of successfully predicted datapoints in ./pareto/optimal.md. MAKE SURE THAT YOU DO NOT DO REWARD HACKING OR CHEATING IN THE AGENT YOU ARE IMPLEMENTING TO FIT DATA. YOUR SOLUTION MUST GENERALIZE BEYOND THE DATA PROVIDED. Use internet search extensively at every step. Do not worry about budget. Create an html report with diagrams and illustrations in ./reports and open it in the user's default browser. Do NOT STOP until you could not improve the accuracy and recall after three consecutive rollouts. Use gpt-5.6-sol-xhigh model (not codex) for thorough review of the work done at every step by the other model.</pre>
             <div class="prompt-fade"></div>
           </div>
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
@@ -2317,12 +2323,12 @@ In each step, keep track of the best prompt which has the maximum number of succ
 
         <article class="inner-card prompt-panel" style="--i:1">
           <div class="panel-head">
-            <h3 class="panel-title">Reproduce with an integration test</h3>
+            <h3 class="panel-title">Reproduce with end-to-end tests</h3>
             <span class="panel-badge trick">Trick</span>
           </div>
-          <p class="panel-desc">Enforce a test-first workflow for bug fixes — write a failing integration test that reproduces the issue before changing any production code.</p>
+          <p class="panel-desc">Enforce a test-first workflow for bug fixes &mdash; write failing end-to-end tests that reproduce the issue before changing any production code.</p>
           <div class="prompt-body">
-            <pre>Reproduce the issue by writing an integration test. Then fix the issue.</pre>
+            <pre>Reproduce the issue by writing end-to-end tests. Then fix the issue.</pre>
             <div class="prompt-fade"></div>
           </div>
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
@@ -2330,18 +2336,44 @@ In each step, keep track of the best prompt which has the maximum number of succ
 
         <article class="inner-card prompt-panel" style="--i:2">
           <div class="panel-head">
-            <h3 class="panel-title">Reproduce with an end-to-end test</h3>
+            <h3 class="panel-title">Pair-program with multi-model review</h3>
             <span class="panel-badge trick">Trick</span>
           </div>
-          <p class="panel-desc">Same as the integration-test trick, but demands full end-to-end coverage so the regression is locked down across module boundaries.</p>
+          <p class="panel-desc">Use Claude Fable as the implementer and GPT-5.6 Sol as the reviewer/debugger so missed code paths, missing wirings, and silent bugs are caught before they ship.</p>
           <div class="prompt-body">
-            <pre>Reproduce the issue by writing an end-to-end test. Then fix the issue.</pre>
+            <pre>Use claude-fable-5 model for all tasks including software development. Use gpt-5.6-sol (not codex) for thorough review and debugging of the work done by the other model. You MUST thoroughly check if the other model has missed code or wirings or has introduced bugs. No need to check if the models exist.</pre>
             <div class="prompt-fade"></div>
           </div>
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
         </article>
 
         <article class="inner-card prompt-panel" style="--i:3">
+          <div class="panel-head">
+            <h3 class="panel-title">Run a task from an instructions file</h3>
+            <span class="panel-badge trick">Trick</span>
+          </div>
+          <p class="panel-desc">Point Sorcar at a file of instructions and have it follow them to carry out the task &mdash; handy for reusable runbooks and playbooks.</p>
+          <div class="prompt-body">
+            <pre>Can you use the instructions in the following file to perform the following task?</pre>
+            <div class="prompt-fade"></div>
+          </div>
+          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
+        </article>
+
+        <article class="inner-card prompt-panel" style="--i:4">
+          <div class="panel-head">
+            <h3 class="panel-title">Generate an HTML report</h3>
+            <span class="panel-badge trick">Trick</span>
+          </div>
+          <p class="panel-desc">Have Sorcar package its findings into a polished HTML report with diagrams and illustrations under <code>./reports</code>, and open it in your default browser.</p>
+          <div class="prompt-body">
+            <pre>Create an html report with diagrams and illustrations in ./reports and open it in the user's default browser?</pre>
+            <div class="prompt-fade"></div>
+          </div>
+          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
+        </article>
+
+        <article class="inner-card prompt-panel" style="--i:5">
           <div class="panel-head">
             <h3 class="panel-title">Reproduce invariant violations</h3>
             <span class="panel-badge trick">Trick</span>
@@ -2354,40 +2386,14 @@ In each step, keep track of the best prompt which has the maximum number of succ
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
         </article>
 
-        <article class="inner-card prompt-panel" style="--i:4">
-          <div class="panel-head">
-            <h3 class="panel-title">Pair-program with multi-model review</h3>
-            <span class="panel-badge trick">Trick</span>
-          </div>
-          <p class="panel-desc">Use Claude Opus as the implementer and GPT-5.5 as the reviewer/debugger so missed code paths and silent bugs are caught before they ship.</p>
-          <div class="prompt-body">
-            <pre>Use claude-opus-4-7 model for all tasks including coding, bug fixing, and test creation. Use gpt-5.5-xhigh (not codex) for thorough review and debugging of the work done by the other model. Check if the other model has missed some code or has introduced bugs. No need to check if the models exist.</pre>
-            <div class="prompt-fade"></div>
-          </div>
-          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
-        </article>
-
-        <article class="inner-card prompt-panel" style="--i:5">
-          <div class="panel-head">
-            <h3 class="panel-title">Review the last task with GPT-5.5</h3>
-            <span class="panel-badge trick">Trick</span>
-          </div>
-          <p class="panel-desc">Spawn a review pass on your previous task: GPT-5.5 finds bugs and missing code, Claude Opus reproduces and fixes them with end-to-end tests, in a loop until the review is clean.</p>
-          <div class="prompt-body">
-            <pre>Can you review the updates made in the last task using gpt-5.5-xhigh (non codex) and find bugs or missing code. Then write end-to-end tests reproducing the bugs reported by the review, fix them, and test them using claude-opus-4-7? Run all the tests in parallel and fix bugs after thoroughly reviewing the fixes with gpt-5.5-xhigh (non codex). Repeat the process until you fail to reproduce the bugs reported by the review done by gpt-5.5-xhigh (non codex). No need to check if the models exist.</pre>
-            <div class="prompt-fade"></div>
-          </div>
-          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
-        </article>
-
         <article class="inner-card prompt-panel" style="--i:6">
           <div class="panel-head">
-            <h3 class="panel-title">Self-review the current task</h3>
+            <h3 class="panel-title">Use GLM-5.2 with dual review</h3>
             <span class="panel-badge trick">Trick</span>
           </div>
-          <p class="panel-desc">The same dual-model review loop, but applied to the in-flight task before you finish — bugs are reproduced, fixed, and re-reviewed in place.</p>
+          <p class="panel-desc">Switch the implementer to OpenRouter's GLM-5.2 and have both GPT-5.6 Sol and Claude Fable carefully review its output for bugs and missing code.</p>
           <div class="prompt-body">
-            <pre>Review the updates made in the current task using gpt-5.5-xhigh (non codex) and find bugs or missing code or wirings. Then write end-to-end tests reproducing the bugs reported by the review, fix them, and test them using claude-opus-4-7? Run all the tests in parallel and fix bugs after thoroughly reviewing the fixes with gpt-5.5-xhigh (non codex). Repeat the process until you fail to reproduce the bugs reported by the review done by gpt-5.5-xhigh (non codex). No need to check if the models exist.</pre>
+            <pre>Use openrouter/z-ai/glm-5.2 model for all tasks including coding, bug fixing, and test creation. ALWAYS use gpt-5.6-sol (not codex) to carefully and thoroughly review and debug the work done by openrouter/z-ai/glm-5.2 for bugs and missing code. Then use claude-fable-5 to do the same thing.</pre>
             <div class="prompt-fade"></div>
           </div>
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
@@ -2395,31 +2401,18 @@ In each step, keep track of the best prompt which has the maximum number of succ
 
         <article class="inner-card prompt-panel" style="--i:7">
           <div class="panel-head">
-            <h3 class="panel-title">Use GLM-5.2 with dual review</h3>
+            <h3 class="panel-title">Split tests across cores in parallel</h3>
             <span class="panel-badge trick">Trick</span>
           </div>
-          <p class="panel-desc">Switch the implementer to OpenRouter's GLM-5.2 and have both GPT-5.5 and Claude Opus carefully review its output for bugs and missing code.</p>
+          <p class="panel-desc">Have Sorcar triage the entire test suite &mdash; splitting the tests by method count into (cores &minus; 2) shards, running them with <code>run_parallel</code>, then classifying and fixing each failure as a project bug or a test bug.</p>
           <div class="prompt-body">
-            <pre>Use openrouter/z-ai/glm-5.2 model for all tasks including coding, bug fixing, and test creation. ALWAYS use gpt-5.5-xhigh (not codex) to carefully and thoroughly review and debug the work done by openrouter/z-ai/glm-5.2 for bugs and missing code. Then use claude-opus-4-7 to do the same thing.</pre>
+            <pre>Can you run all tests and report the cause of failing tests? Do not modify any code. Running all tests, collecting information, and fixing them is time consuming. So split the set of tests by the number of test methods into number of cores - 2, and run all splits in parallel using `run_parallel` tool. Determine which test failures are due to a bug in the project or a bug in the test. Fix them accordingly.</pre>
             <div class="prompt-fade"></div>
           </div>
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
         </article>
 
         <article class="inner-card prompt-panel" style="--i:8">
-          <div class="panel-head">
-            <h3 class="panel-title">Split tests across cores in parallel</h3>
-            <span class="panel-badge trick">Trick</span>
-          </div>
-          <p class="panel-desc">Have Sorcar collect failure causes for the entire test suite without touching code &mdash; splitting the tests by method count into (cores &minus; 2) shards and running them with <code>run_parallel</code>.</p>
-          <div class="prompt-body">
-            <pre>Can you run all tests and report the cause of failing tests? Do not modify any code. Running all tests, collecting information, and fixing them is time consuming. So split the set of tests by the number of test methods into number of cores - 2, and run all splits in parallel using `run_parallel` tool.</pre>
-            <div class="prompt-fade"></div>
-          </div>
-          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
-        </article>
-
-        <article class="inner-card prompt-panel" style="--i:9">
           <div class="panel-head">
             <h3 class="panel-title">Resolve a merge conflict</h3>
             <span class="panel-badge trick">Trick</span>
@@ -2432,20 +2425,7 @@ In each step, keep track of the best prompt which has the maximum number of succ
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
         </article>
 
-        <article class="inner-card prompt-panel" style="--i:10">
-          <div class="panel-head">
-            <h3 class="panel-title">Generate an HTML report</h3>
-            <span class="panel-badge trick">Trick</span>
-          </div>
-          <p class="panel-desc">Have Sorcar package its findings into a polished HTML report with diagrams and illustrations under <code>./reports</code>, and open it in your default browser.</p>
-          <div class="prompt-body">
-            <pre>Can you create an html report with diagrams and illustrations in ./reports and open it in the user's default browser?</pre>
-            <div class="prompt-fade"></div>
-          </div>
-          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
-        </article>
-
-        <article class="inner-card prompt-panel" style="--i:11">
+        <article class="inner-card prompt-panel" style="--i:9">
           <div class="panel-head">
             <h3 class="panel-title">Guard against reward hacking</h3>
             <span class="panel-badge trick">Trick</span>
@@ -2458,33 +2438,7 @@ In each step, keep track of the best prompt which has the maximum number of succ
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
         </article>
 
-        <article class="inner-card prompt-panel" style="--i:12">
-          <div class="panel-head">
-            <h3 class="panel-title">Push to origin</h3>
-            <span class="panel-badge trick">Trick</span>
-          </div>
-          <p class="panel-desc">A quick reminder for Sorcar to push your committed work upstream when you're done.</p>
-          <div class="prompt-body">
-            <pre>git push origin</pre>
-            <div class="prompt-fade"></div>
-          </div>
-          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
-        </article>
-
-        <article class="inner-card prompt-panel" style="--i:13">
-          <div class="panel-head">
-            <h3 class="panel-title">Rewind to a specific commit</h3>
-            <span class="panel-badge trick">Trick</span>
-          </div>
-          <p class="panel-desc">Reset both your local branch and the remote to a specific commit, discarding every commit that came after it.</p>
-          <div class="prompt-body">
-            <pre>Get rid of all commits after the following commit from both main and origin:</pre>
-            <div class="prompt-fade"></div>
-          </div>
-          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
-        </article>
-
-        <article class="inner-card prompt-panel" style="--i:14">
+        <article class="inner-card prompt-panel" style="--i:10">
           <div class="panel-head">
             <h3 class="panel-title">Build paper &amp; screenshot-check formatting</h3>
             <span class="panel-badge trick">Trick</span>
@@ -2497,7 +2451,7 @@ In each step, keep track of the best prompt which has the maximum number of succ
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
         </article>
 
-        <article class="inner-card prompt-panel" style="--i:15">
+        <article class="inner-card prompt-panel" style="--i:11">
           <div class="panel-head">
             <h3 class="panel-title">Debug the last failure</h3>
             <span class="panel-badge trick">Trick</span>
@@ -2722,7 +2676,7 @@ In each step, keep track of the best prompt which has the maximum number of succ
           <div class="code-line"><span class="c">sorcar</span> <span class="f">-t</span> <span class="s">'Send "Hello from Sorcar!" to ksen via the desktop Slack app.'</span></div>
         </div>
         <p style="margin-top:1rem;font-size:0.95rem;color:var(--text-dim);">
-          Full reference (every flag, <code>sorcar mcp</code> subcommands, slash commands, skills, MCP discovery, and VS Code Tricks): <a href="https://github.com/ksenxx/kiss_ai/blob/main/README.md#-cli-reference" target="_blank" rel="noopener"><strong>Full CLI reference →</strong></a>
+          Full reference (every flag, <code>sorcar mcp</code> subcommands, slash commands, skills, MCP discovery, and VS Code Tricks): <a href="https://github.com/ksenxx/kiss_ai/blob/main/README.md#cli-interface" target="_blank" rel="noopener"><strong>Full CLI reference →</strong></a>
         </p>
       </div>
     </div>
@@ -2776,23 +2730,23 @@ In each step, keep track of the best prompt which has the maximum number of succ
   <div class="section-wrap">
   <section id="models" class="section-card">
     <span class="num">§ 09 — Models Supported</span>
-    <h2>🤖 516 models. 9 provider categories.<a href="#models" class="anchor">¶</a></h2>
-    <p class="sub">KISS Sorcar ships a catalog of <strong>516 models</strong> across <strong>9 provider categories</strong>, with built-in prices, context lengths, and capability flags (<code>fc</code> function calling, <code>gen</code> generation, <code>emb</code> embedding). The source of truth is <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/core/models/MODEL_INFO.json">src/kiss/core/models/MODEL_INFO.json</a>.</p>
+    <h2>🤖 530 models. 9 provider categories.<a href="#models" class="anchor">¶</a></h2>
+    <p class="sub">KISS Sorcar ships a catalog of <strong>530 models</strong> across <strong>9 provider categories</strong>, with built-in prices, context lengths, and capability flags (<code>fc</code> function calling, <code>gen</code> generation, <code>emb</code> embedding). The source of truth is <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/core/models/MODEL_INFO.json">src/kiss/core/models/MODEL_INFO.json</a>.</p>
 
     <div class="section-body">
       <div class="grid-2">
         <div class="inner-card" style="--i:0">
           <h3>Provider categories</h3>
           <div style="margin-top:0.5rem;">
-            <div class="provider-row"><span class="label">OpenAI</span><span class="count">78</span></div>
+            <div class="provider-row"><span class="label">OpenAI</span><span class="count">84</span></div>
             <div class="provider-row"><span class="label">Anthropic</span><span class="count">14</span></div>
             <div class="provider-row"><span class="label">Gemini / Google</span><span class="count">24</span></div>
             <div class="provider-row"><span class="label">Together AI</span><span class="count">79</span></div>
             <div class="provider-row"><span class="label">Z.AI</span><span class="count">8</span></div>
             <div class="provider-row"><span class="label">Moonshot AI</span><span class="count">6</span></div>
-            <div class="provider-row"><span class="label">OpenRouter</span><span class="count">297</span></div>
+            <div class="provider-row"><span class="label">OpenRouter</span><span class="count">303</span></div>
             <div class="provider-row"><span class="label">Claude Code CLI (<code>cc/*</code>)</span><span class="count">3</span></div>
-            <div class="provider-row"><span class="label">Codex CLI (<code>codex/*</code>)</span><span class="count">7</span></div>
+            <div class="provider-row"><span class="label">Codex CLI (<code>codex/*</code>)</span><span class="count">9</span></div>
           </div>
         </div>
 
@@ -2801,11 +2755,11 @@ In each step, keep track of the best prompt which has the maximum number of succ
           <p>Across all bundled providers, the catalog currently reports:</p>
           <div class="stat-row">
             <div class="stat-pill">
-              <div class="n">500</div>
+              <div class="n">514</div>
               <div class="l">generation-capable models</div>
             </div>
             <div class="stat-pill">
-              <div class="n">341</div>
+              <div class="n">359</div>
               <div class="l">function-calling-capable models</div>
             </div>
             <div class="stat-pill">
@@ -2917,7 +2871,7 @@ In each step, keep track of the best prompt which has the maximum number of succ
         btn.setAttribute('aria-label', nextLabel);
         btn.setAttribute('title', nextLabel);
       }
-      applyAria(root.getAttribute('data-theme') || 'dark');
+      applyAria(root.getAttribute('data-theme') || 'light');
       btn.addEventListener('click', function () {
         var current = root.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
         var next = current === 'dark' ? 'light' : 'dark';
@@ -3585,7 +3539,7 @@ In each step, keep track of the best prompt which has the maximum number of succ
     (function () {
       if (!('IntersectionObserver' in window)) return;
       const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-      // Find hero-trust strong elements containing numeric content (e.g. "62.2%", "516 models").
+      // Find hero-trust strong elements containing numeric content (e.g. "530 models").
       const strongs = document.querySelectorAll('.hero-trust strong');
       const items = [];
       strongs.forEach(el => {

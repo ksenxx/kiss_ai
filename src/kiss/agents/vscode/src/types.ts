@@ -90,19 +90,7 @@ export type FromWebviewMessage =
   | {type: 'notificationAction'; id: string; action?: string}
   | {type: 'voiceToggle'; enabled: boolean; sensitivity?: number}
   | {type: 'voiceSensitivity'; value: number}
-  | {type: 'voiceAck'}
-  // Demo-mode speech synthesis request: the webview asks the daemon
-  // for a natural GPT-voice clip of a replayed utterance, synthesized
-  // by the same function the live ``talk`` tool uses (the daemon
-  // answers with a 'demoSpeakAudio' reply keyed by reqId).
-  | {
-      type: 'demoSpeak';
-      reqId: string;
-      text: string;
-      language?: string;
-      emotion?: string;
-      tabId?: string;
-    };
+  | {type: 'voiceAck'};
 
 /** Messages from extension to webview (matches browser event protocol) */
 export type ToWebviewMessage = ToWebviewMessageBody & {tabId?: string};
@@ -168,15 +156,6 @@ type ToWebviewMessageBody =
       audioB64?: string;
       audioMime?: string;
       muted?: boolean;
-    }
-  // Daemon reply to a demo-mode 'demoSpeak' synthesis request; an
-  // empty audioB64 means synthesis failed and the webview skips the
-  // utterance silently, like a live audio-less ``talk`` event.
-  | {
-      type: 'demoSpeakAudio';
-      reqId: string;
-      audioB64: string;
-      audioMime?: string;
     }
   // Lifecycle events
   | {type: 'clear'; chat_id?: number}
@@ -336,8 +315,7 @@ export interface AgentCommand {
     | 'setWorkDir'
     | 'getConfig'
     | 'saveConfig'
-    | 'serverReset'
-    | 'demoSpeak';
+    | 'serverReset';
   prompt?: string;
   model?: string;
   workDir?: string;
@@ -363,8 +341,4 @@ export interface AgentCommand {
   config?: Record<string, unknown>;
   apiKeys?: Record<string, string>;
   isFavorite?: boolean;
-  reqId?: string;
-  text?: string;
-  language?: string;
-  emotion?: string;
 }

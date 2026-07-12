@@ -522,6 +522,69 @@ class JsonPrinter(Printer):
         if rec is not None:
             rec.append(event)
 
+    def attach_talk_audio(self, audio_b64: str, audio_mime: str) -> bool:
+        """Attach a synthesized clip to the current task's last ``talk`` call.
+
+        The agentic loop broadcasts (and records/persists) the ``talk``
+        ``tool_call`` event BEFORE the tool runs, so the event never
+        carries the clip synthesized DURING execution — and demo-mode
+        replay plays exactly ``extras.audioB64`` of that recorded event
+        (the synthesis fallback is gone).  The ``talk`` tool calls this
+        right after :func:`synthesize_talk_audio` succeeds; it amends
+        BOTH copies of the event:
+
+        - the in-memory recording (the recorded list holds the same
+          dict that was broadcast, so mutating ``extras`` in place is
+          enough — the live fan-out already happened and is unaffected);
+        - the persisted ``events`` row, via
+          :func:`_amend_last_talk_tool_call_audio`.
+
+        Args:
+            audio_b64: Base64-encoded synthesized clip bytes.
+            audio_mime: The clip's MIME type (e.g. ``"audio/mpeg"``).
+
+        Returns:
+            ``True`` when at least one copy (recording or DB row) was
+            amended, ``False`` otherwise.
+        """
+        if not audio_b64:
+            return False
+        key = self._task_key()
+        amended = False
+        with self._lock:
+            rec = self._recordings.get(key) if key else None
+            for event in reversed(rec or []):
+                if (
+                    event.get("type") != "tool_call"
+                    or event.get("name") != "talk"
+                ):
+                    continue
+                extras = event.get("extras")
+                if not isinstance(extras, dict):
+                    extras = {}
+                    event["extras"] = extras
+                if extras.get("audioB64"):
+                    # Already carries a clip (an earlier talk in the
+                    # same task); the most recent audio-less call is
+                    # the one being spoken now.
+                    continue
+                extras["audioB64"] = audio_b64
+                extras["audioMime"] = audio_mime
+                amended = True
+                break
+            agent = self._persist_agents.get(key) if key else None
+        task_id = getattr(agent, "_last_task_id", None)
+        if task_id is not None:
+            from kiss.agents.sorcar.persistence import (
+                _amend_last_talk_tool_call_audio,
+            )
+
+            if _amend_last_talk_tool_call_audio(
+                str(task_id), audio_b64, audio_mime,
+            ):
+                amended = True
+        return amended
+
     def broadcast(self, event: dict[str, Any]) -> None:
         """Inject the thread-local taskId, record, and persist the event.
 
