@@ -7,12 +7,13 @@
 The agent's one voice is the GPT-synthesized natural clip
 (speech_synthesis.py).  Historically the webview fell back to the
 browser's Web Speech API — the robotic "alien voice" — whenever a
-``talk`` event carried no audio, clip playback was blocked/undecodable,
-or a demo-replay synthesis request timed out or never got a reply.
-Per product decision (matching voice.js: "a quiet ack is a far better
-failure than the loud robotic voice"), that fallback is removed: when
-no natural clip can play, the talk degrades to SILENCE and the talk
-queue advances so later talks still play.
+``talk`` event carried no audio or clip playback was
+blocked/undecodable.  Per product decision (matching voice.js: "a
+quiet ack is a far better failure than the loud robotic voice"), that
+fallback is removed: when no natural clip can play, the talk degrades
+to SILENCE and the talk queue advances so later talks still play.
+Demo mode never synthesizes speech: a replayed talk without recorded
+audio is skipped silently.
 
 These tests run the REAL production ``media/main.js`` (+ ``demo.js``
 for the demo scenarios) in jsdom with NO production code mocked, under
@@ -28,9 +29,9 @@ Scenarios:
 * ``live-silent``  — live ``talk`` event without ``audioB64``;
 * ``live-reject``  — live ``talk`` whose clip ``play()`` rejects
   (autoplay policy block / undecodable clip);
-* ``demo-noreply`` — demo replay whose ``demoSpeak`` synthesis request
-  never gets a reply (daemon died mid-request);
-* ``demo-reject``  — demo replay whose synthesized clip's ``play()``
+* ``demo-silent``  — demo replay of a ``talk`` event with no recorded
+  audio (skipped silently, replay completes);
+* ``demo-reject``  — demo replay whose recorded clip's ``play()``
   rejects.
 
 Each live scenario queues a SECOND talk carrying a good clip and
@@ -57,9 +58,7 @@ TALK_TEXT = (
     "probability."
 )
 
-# Virtual-time ceiling of one driver run.  Must exceed the webview's
-# demoSpeak waiter timeout (DEMO_SPEAK_TIMEOUT_MS = 240000) so the
-# demo-noreply scenario reaches its degradation path.
+# Virtual-time ceiling of one driver run.
 VIRTUAL_CAP_MS = 600_000
 
 # Node driver: loads chat.html (script tags stripped), installs a
@@ -77,7 +76,7 @@ const {JSDOM} = require('jsdom');
 
 const MEDIA = process.argv[2];
 const mode = process.argv[3]; // live-silent | live-reject |
-                              // demo-noreply | demo-reject
+                              // demo-silent | demo-reject
 const capMs = parseInt(process.argv[4], 10);
 const talkText = process.argv[5];
 
@@ -199,6 +198,15 @@ win.acquireVsCodeApi = function () {
     postMessage: msg => {
       if (msg.type === 'resumeSession') {
         const tabId = msg.tabId;
+        // demo-silent: the recorded talk carries no audio (skipped
+        // silently); demo-reject: it carries a recorded clip whose
+        // play() rejects.
+        const talkExtras = {
+          text: talkText, language: 'en-US', emotion: 'warm'};
+        if (mode === 'demo-reject') {
+          talkExtras.audioB64 = REJECT_CLIP;
+          talkExtras.audioMime = 'audio/mpeg';
+        }
         win.setTimeout(() => {
           win.dispatchEvent(new win.MessageEvent('message', {data: {
             type: 'task_events',
@@ -210,25 +218,12 @@ win.acquireVsCodeApi = function () {
             events: [
               {type: 'text_delta', text: 'Answering out loud now. '},
               {type: 'tool_call', name: 'talk', tool_id: 'tc-1',
-               arguments: '', extras: {
-                 text: talkText, language: 'en-US', emotion: 'warm'}},
+               arguments: '', extras: talkExtras},
               {type: 'tool_result', tool_id: 'tc-1',
                result: 'Spoke to the user.'},
             ],
           }}));
         }, 0);
-      } else if (msg.type === 'demoSpeak') {
-        if (mode === 'demo-noreply') return; // reply never arrives
-        // demo-reject: synthesis succeeds fast, clip playback rejects.
-        win.setTimeout(() => {
-          win.dispatchEvent(new win.MessageEvent('message', {data: {
-            type: 'demoSpeakAudio',
-            reqId: msg.reqId,
-            audioB64: REJECT_CLIP,
-            audioMime: 'audio/mpeg',
-            tabId: msg.tabId,
-          }}));
-        }, 100);
       }
     },
   };
@@ -238,7 +233,7 @@ win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
 win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
 
 let replayDone = false;
-if (mode === 'demo-noreply' || mode === 'demo-reject') {
+if (mode === 'demo-silent' || mode === 'demo-reject') {
   win.eval(fs.readFileSync(path.join(MEDIA, 'demo.js'), 'utf8'));
   const sessions = [{
     id: 'chat-1', task_id: 'task-1', has_events: true,
@@ -300,7 +295,7 @@ def run_fallback_driver(mode: str) -> dict:
 
     Args:
         mode: Fallback scenario — ``live-silent``, ``live-reject``,
-            ``demo-noreply`` or ``demo-reject``.
+            ``demo-silent`` or ``demo-reject``.
 
     Returns:
         ``{"spoken": [...], "clips": [...], "vnow": N, "replayDone":
@@ -380,25 +375,26 @@ class TestNoWebSpeechFallback(unittest.TestCase):
             f"{result}"
         )
 
-    def test_demo_synthesis_no_reply_stays_silent_replay_completes(
+    def test_demo_talk_without_audio_stays_silent_replay_completes(
         self,
     ) -> None:
-        """A demo replay whose synthesis request never gets a reply
-        must degrade to silence — never the robotic voice — and the
-        replay must still run to completion (no hang)."""
-        result = run_fallback_driver("demo-noreply")
+        """A demo replay of a ``talk`` event without recorded audio
+        must be skipped silently — never synthesized, never the
+        robotic voice — and the replay must still run to completion
+        (no hang)."""
+        result = run_fallback_driver("demo-silent")
         self.check_no_web_speech(result)
         assert result["replayDone"], (
             f"demo replay never finished: {result}"
         )
         assert not result["clips"], (
-            f"no clip reply was ever sent, yet a clip played: {result}"
+            f"the talk carried no audio, yet a clip played: {result}"
         )
 
     def test_demo_clip_rejected_play_stays_silent_replay_completes(
         self,
     ) -> None:
-        """A demo replay whose synthesized clip's ``play()`` rejects
+        """A demo replay whose recorded clip's ``play()`` rejects
         must degrade to silence — never the robotic voice — and the
         replay must still run to completion."""
         result = run_fallback_driver("demo-reject")
