@@ -16,7 +16,7 @@
 
 ### Open-source general-purpose AI agent for long-horizon tasks and AI discovery
 
-**KISS Sorcar is a free, simple, local-first, bring-your-own-key AI agent framework.** It runs as a VS Code extension, a Claude-Code-style CLI, and a browser/mobile web app. Your prompts and code are sent directly to the model provider or local endpoint you configure — not through our servers. It supports multi-model workflows just via prompts. All agents run as daemons.
+**KISS Sorcar is a free, simple, local-first, bring-your-own-key AI agent framework.** It runs as a VS Code extension, a Claude-Code-style CLI, and a browser/mobile web app. Your prompts and code are sent directly to the model provider or local endpoint you configure — not through our servers. It supports multi-model workflows just via prompts. All agents run as daemons.  Complex AI systems/techniques can be replaced with a paragraph of prompt in KISS Sorcar.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install.sh | bash
@@ -104,11 +104,11 @@ Provide at least one model backend. You can use environment variables such as:
 ```bash
 export ANTHROPIC_API_KEY=...
 export OPENAI_API_KEY=...
-export GEMINI_API_KEY=...
-export TOGETHER_API_KEY=...
 export ZAI_API_KEY=...
 export MOONSHOT_API_KEY=...
+export TOGETHER_API_KEY=...
 export OPENROUTER_API_KEY=...
+export GEMINI_API_KEY=...
 ```
 
 You can also configure a custom endpoint with `--endpoint` / `-e` and optional repeated `--header Key:Value` CLI flags.
@@ -136,7 +136,7 @@ sorcar -m "claude-sonnet-4-6" -t "What is 2435*234?"
 
 # Custom endpoint and headers for a local or self-hosted model.
 sorcar -e "http://localhost:8000/v1" --header "Authorization:Bearer xxx" \
-       -t "Summarise this codebase."
+       -t "Summarize this codebase."
 
 # Cap spend at $2 and pin the working directory.
 sorcar -b 2.0 -w "$HOME/projects/my-repo" -t "Refactor utils.py for clarity."
