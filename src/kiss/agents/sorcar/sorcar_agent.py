@@ -438,6 +438,22 @@ class SorcarAgent(RelentlessAgent):
                 synthesized = None
             if synthesized:
                 payload["audioB64"], payload["audioMime"] = synthesized
+                # Attach the clip to the recorded/persisted ``talk``
+                # ``tool_call`` event too: that event was emitted (and
+                # persisted) BEFORE this tool ran, so it carries no
+                # audio — and demo-mode replay plays exactly the
+                # persisted ``extras.audioB64`` (the synthesis
+                # fallback is gone).  Without this every replayed
+                # narration would be silent.
+                attach = getattr(self.printer, "attach_talk_audio", None)
+                if callable(attach):
+                    try:
+                        attach(payload["audioB64"], payload["audioMime"])
+                    except Exception:
+                        logger.exception(
+                            "failed to attach talk audio to the recorded"
+                            " tool_call event"
+                        )
             broadcast(payload)
             return f"Spoke to the user in language {language!r}."
 
