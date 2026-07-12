@@ -246,9 +246,12 @@ class ProvenanceScanner:
             path: The file to scan.
             report: The report to populate.
         """
+        # Use local offline taint rules instead of network-fetched p/python
+        rules_path = Path(__file__).resolve().parents[1] / "rules" / "taint.yaml"
+        config_arg = str(rules_path) if rules_path.exists() else "p/python"
         try:
             proc = subprocess.run(
-                [SEMGREP_BIN, "--config=p/python", "--json", "--quiet", str(path)],
+                [SEMGREP_BIN, f"--config={config_arg}", "--json", "--quiet", str(path)],
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,
