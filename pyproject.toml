@@ -68,6 +68,11 @@ dependencies = [
     # file/folder picker as you type, navigable with Up/Down and
     # selectable with Tab/Enter (readline cannot render such a menu).
     "prompt_toolkit>=3.0.0",
+    # Static-analysis scanners wired into SWEDefend's taint/dataflow
+    # provenance layer (swedefend.defense.provenance): the harness invokes
+    # ./.venv/bin/bandit and ./.venv/bin/semgrep to flag dangerous sinks.
+    "bandit>=1.9.4",
+    "semgrep>=1.169.0",
 ]
 
 [build-system]
@@ -96,7 +101,7 @@ exclude = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/kiss"]
+packages = ["src/kiss", "swedefend"]
 
 [dependency-groups]
 dev = [
@@ -358,3 +363,4 @@ kiss-twitch = "kiss.agents.third_party_agents.twitch_agent:main"
 kiss-zalo = "kiss.agents.third_party_agents.zalo_agent:main"
 kiss-phone = "kiss.agents.third_party_agents.phone_control_agent:main"
 kiss-sms = "kiss.agents.third_party_agents.sms_agent:main"
+swedefend-eval = "swedefend.evaluate_fable5:main"

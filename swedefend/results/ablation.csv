@@ -1,0 +1,5 @@
+Layer,Blocked,Catch_Rate,FPR
+L1_sanitizer,10,19.23%,0.00%
+L3_provenance,18,34.62%,0.00%
+L4_judge,46,80.77%,20.00%
+Combined,56,100.00%,20.00%
