@@ -139,24 +139,6 @@ function dispatch(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
-/** Answer every posted 'demoSpeak' with a synthesized clip after *delayMs*. */
-function autoAnswerDemoSpeak(win, delayMs) {
-  const prev = win._onPosted;
-  win._onPosted = msg => {
-    if (prev) prev(msg);
-    if (msg.type !== 'demoSpeak') return;
-    setTimeout(() => {
-      dispatch(win, {
-        type: 'demoSpeakAudio',
-        reqId: msg.reqId,
-        audioB64: 'QUJD',
-        audioMime: 'audio/mpeg',
-        tabId: msg.tabId,
-      });
-    }, delayMs == null ? 10 : delayMs);
-  };
-}
-
 function sleep(ms) {
   return new Promise(resolve => {
     setTimeout(resolve, ms);
@@ -191,17 +173,22 @@ const SESSIONS = [
 ];
 
 /**
- * Replayed event stream: a ``talk`` tool call (the speech clip the
- * pause/stop tests exercise — replayed talks are synthesized through
- * the same demoSpeak path the removed prompt narration used), a
- * thought panel, then a long result.
+ * Replayed event stream: a ``talk`` tool call carrying its RECORDED
+ * audio clip (the speech clip the pause/stop tests exercise — demo
+ * mode only plays recorded audio, never synthesizes), a thought
+ * panel, then a long result.
  */
 function eventsFor(label) {
   return [
     {
       type: 'tool_call',
       name: 'talk',
-      extras: {text: 'Starting the investigation now.', language: 'en-US'},
+      extras: {
+        text: 'Starting the investigation now.',
+        language: 'en-US',
+        audioB64: 'QUJD',
+        audioMime: 'audio/mpeg',
+      },
     },
     {type: 'tool_result', content: 'Playing audio', tool_name: 'talk'},
     {type: 'thinking_start'},
@@ -213,27 +200,32 @@ function eventsFor(label) {
 /**
  * Enable demo mode, deliver SESSIONS, auto-answer resumeSession with
  * per-task events, click the (single) history row.  Returns a promise
- * resolving when the replay ends.
+ * resolving when the replay ends.  When *noResponder* is true the
+ * built-in 10ms resumeSession responder is NOT installed — the caller
+ * has installed its own ``win._onPosted`` responder (e.g. one that
+ * delays task_events) and a second answer would double-deliver.
  */
-function startDemoFlow(win) {
+function startDemoFlow(win, noResponder) {
   dispatch(win, {type: 'updateSetting', key: 'demo_mode', value: true});
   dispatch(win, {type: 'history', offset: 0, generation: 0, sessions: SESSIONS});
 
-  const prev = win._onPosted;
-  win._onPosted = msg => {
-    if (prev) prev(msg);
-    if (msg.type !== 'resumeSession') return;
-    setTimeout(() => {
-      dispatch(win, {
-        type: 'task_events',
-        tabId: msg.tabId,
-        events: eventsFor(String(msg.taskId || msg.id)),
-        task: 'task ' + String(msg.taskId || msg.id),
-        chat_id: msg.id,
-        extra: '',
-      });
-    }, 10);
-  };
+  if (!noResponder) {
+    const prev = win._onPosted;
+    win._onPosted = msg => {
+      if (prev) prev(msg);
+      if (msg.type !== 'resumeSession') return;
+      setTimeout(() => {
+        dispatch(win, {
+          type: 'task_events',
+          tabId: msg.tabId,
+          events: eventsFor(String(msg.taskId || msg.id)),
+          task: 'task ' + String(msg.taskId || msg.id),
+          chat_id: msg.id,
+          extra: '',
+        });
+      }, 10);
+    };
+  }
 
   const rows = Array.from(win.document.querySelectorAll('#history-list > div'));
   const row = rows.find(
@@ -279,7 +271,6 @@ async function testControlsHiddenWhileDemoPlays() {
   const {win} = makeWebview();
   installAudio(win, 40);
   installSpeech(win);
-  autoAnswerDemoSpeak(win);
 
   const done = startDemoFlow(win);
   await sleep(300);
@@ -365,27 +356,46 @@ async function testControlsHiddenWhileDemoPlays() {
   console.log('PASS: controls hidden and pause/stop shown while demo plays');
 }
 
-async function testPauseBeforeClipArrivesDefersSpeechUntilResume() {
+async function testPauseBeforeClipStartsDefersSpeechUntilResume() {
   const {win} = makeWebview();
   const players = installAudio(win, 40);
   installSpeech(win);
-  // Delay the natural-voice clip long enough to pause while the daemon
-  // synthesis request is still pending.  The pre-fix bug started the
-  // Audio clip as soon as this late reply arrived, even though the demo
-  // was paused.
-  autoAnswerDemoSpeak(win, 300);
+  // Delay the recorded events long enough to pause BEFORE the talk
+  // clip's queue job starts: a recorded Audio clip whose turn comes
+  // while the demo is paused must not start playing —
+  // waitForDemoPlaybackResume must gate recorded-clip playback too.
+  // This 300ms responder REPLACES startDemoFlow's built-in 10ms one
+  // (noResponder below) — with both installed, the instant answer
+  // would start the clip before the pause click.
+  win._onPosted = msg => {
+    if (msg.type !== 'resumeSession') return;
+    setTimeout(() => {
+      dispatch(win, {
+        type: 'task_events',
+        tabId: msg.tabId,
+        events: eventsFor(String(msg.taskId || msg.id)),
+        task: 'task ' + String(msg.taskId || msg.id),
+        chat_id: msg.id,
+        extra: '',
+      });
+    }, 300);
+  };
 
-  const done = startDemoFlow(win);
+  const done = startDemoFlow(win, true);
   const btn = win.document.getElementById('demo-pause-btn');
   await sleep(50);
   btn.click();
-  assert.strictEqual(win._isDemoPaused(), true, 'demo paused before clip reply');
+  assert.strictEqual(
+    win._isDemoPaused(),
+    true,
+    'demo paused before the talk clip starts',
+  );
 
   await sleep(450);
   assert.strictEqual(
     players.length,
     0,
-    'a demo speech clip whose synthesis reply arrives while paused ' +
+    'a recorded demo speech clip whose turn arrives while paused ' +
       'must not start playing until the demo is resumed',
   );
 
@@ -418,7 +428,6 @@ async function testPauseFreezesSpeechAndStreamingThenResumes() {
   const {win} = makeWebview();
   const players = installAudio(win, 600);
   installSpeech(win);
-  autoAnswerDemoSpeak(win);
 
   const done = startDemoFlow(win);
   const btn = win.document.getElementById('demo-pause-btn');
@@ -493,7 +502,6 @@ async function testDemoToggleOffCancelsPausedReplayAndRestoresUi() {
   const {win} = makeWebview();
   installAudio(win, 600);
   installSpeech(win);
-  autoAnswerDemoSpeak(win);
 
   const done = startDemoFlow(win);
   await sleep(150);
@@ -528,7 +536,6 @@ async function testStopWhilePausedRestoresUiAndNextDemoResetsPause() {
   const {win} = makeWebview();
   installAudio(win, 600);
   installSpeech(win);
-  autoAnswerDemoSpeak(win);
 
   const done = startDemoFlow(win);
   const pauseBtn = win.document.getElementById('demo-pause-btn');
@@ -553,7 +560,6 @@ async function testStopWhilePausedRestoresUiAndNextDemoResetsPause() {
   // hook so the first startDemoFlow resumeSession responder is not
   // chained and cannot answer the second run twice.
   win._onPosted = null;
-  autoAnswerDemoSpeak(win);
   const done2 = startDemoFlow(win);
   await sleep(150);
   assert.ok(win._demoApi.active, 'second demo starts after a paused stop');
@@ -575,7 +581,6 @@ async function testStopButtonCancelsDemoAndRestoresControls() {
   const {win} = makeWebview();
   const players = installAudio(win, 600);
   installSpeech(win);
-  autoAnswerDemoSpeak(win);
 
   const done = startDemoFlow(win);
   await sleep(150); // talk clip is playing now
@@ -618,7 +623,7 @@ async function testStopButtonCancelsDemoAndRestoresControls() {
 
 (async () => {
   await testControlsHiddenWhileDemoPlays();
-  await testPauseBeforeClipArrivesDefersSpeechUntilResume();
+  await testPauseBeforeClipStartsDefersSpeechUntilResume();
   await testPauseFreezesSpeechAndStreamingThenResumes();
   await testStopButtonCancelsDemoAndRestoresControls();
   await testDemoToggleOffCancelsPausedReplayAndRestoresUi();
