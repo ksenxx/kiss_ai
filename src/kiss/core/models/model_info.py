@@ -143,7 +143,7 @@ def _seed_my_models_file() -> None:
         if USER_MY_MODELS_PATH.exists():
             return
         USER_MY_MODELS_PATH.parent.mkdir(parents=True, exist_ok=True)
-        USER_MY_MODELS_PATH.write_text(MY_MODELS_DEFAULT_CONTENT)
+        USER_MY_MODELS_PATH.write_text(MY_MODELS_DEFAULT_CONTENT, encoding="utf-8")
     except OSError:
         pass
 
@@ -164,7 +164,7 @@ def _read_my_models() -> dict[str, dict[str, Any]]:
     """
     _seed_my_models_file()
     try:
-        text = USER_MY_MODELS_PATH.read_text()
+        text = USER_MY_MODELS_PATH.read_text(encoding="utf-8")
     except OSError:
         return {}
     try:
@@ -232,7 +232,7 @@ def _load_model_info() -> dict[str, ModelInfo]:
     first read) is then merged on top: matching keys override the
     bundled entry, and brand-new keys are added.
     """
-    raw = json.loads(PACKAGE_MODEL_INFO_PATH.read_text())
+    raw = json.loads(PACKAGE_MODEL_INFO_PATH.read_text(encoding="utf-8"))
     for name, entry in _read_my_models().items():
         raw[name] = entry
     return {name: _build_model_info_entry(entry) for name, entry in raw.items()}

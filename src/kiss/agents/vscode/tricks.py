@@ -93,7 +93,7 @@ def _read_my_injection_tricks() -> list[str]:
     if user_path is None:
         return []
     try:
-        text = user_path.read_text()
+        text = user_path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         # A corrupted MY_INJECTION.md (binary blob, bad encoding) must
         # not kill the singleton autocomplete worker thread — let the
@@ -127,7 +127,7 @@ def _read_bundled_tricks() -> list[str]:
     """
     path = _bundled_injections_path()
     try:
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return []
     return _parse_trick_sections(text)
