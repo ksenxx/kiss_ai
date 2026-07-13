@@ -721,3 +721,147 @@ explicitly everywhere (same precedent as issue #33 for subprocess pipes).
   `DockerTools.Edit` command smoke test passed.
 - `uv run check --full`: **all checks passed** (dependency sync, API docs,
   compileall, ruff, mypy, pyright, and mdformat).
+
+# PROGRESS — Fix adjacent-task overscroll ("side scrolling of chats") in the chat webview
+
+## Task
+
+When a chat tab's chat-id has multiple tasks, overscrolling at the
+top/bottom of `#output` must load the previous/next task
+(Cursor-style adjacent-task navigation). This "worked several days
+ago" and regressed. Reproduce with e2e tests first, then fix.
+Dev model: claude-fable-5; independent review: gpt-5.6-sol.
+
+## Root cause (confirmed by bisecting behavior against `df31a0e8~1`)
+
+Regression introduced by commit `df31a0e8` ("show prompt/system-prompt
+panels immediately on task submit"), which added
+`_broadcast_early_prompts` to `src/kiss/agents/vscode/task_runner.py`.
+It broadcasts optimistic `system_prompt`/`prompt` events with
+`taskId: ''` (EMPTY STRING) and `early: true` at submit time, BEFORE
+the task's DB row exists.
+
+Poisoning chain in `src/kiss/agents/vscode/media/main.js`:
+
+1. `setTaskText` resets `currentTaskId = null` and calls
+   `resetAdjacentState()` → both scroll anchors
+   (`oldestLoadedTaskId`/`newestLoadedTaskId`) become `null`.
+2. The early prompt event falls into the message-switch DEFAULT-case
+   taskId-adoption block, whose guard only rejected
+   `undefined`/`null` — the empty string passed → `currentTaskId = ''`
+   and (both anchors being null) the anchors were seeded to `''`.
+3. The real taskId (e.g. `'123'`) streamed moments later updates
+   `currentTaskId`, but the anchor re-seed only fired when BOTH
+   anchors were still `null` — they were `''`, so they stayed `''`
+   forever.
+4. Overscroll posted `getAdjacentTask {taskId: ''}`; backend
+   `commands.py` `_opt_str('')` → `None` → persistence returns no
+   task → server broadcast an EMPTY `adjacent_task_events` →
+   `renderAdjacentTask` latched `noPrevTask = true` PERMANENTLY.
+   Adjacent scrolling dead for the tab.
+
+Secondary bug: `task_events` replays carrying a valid `task_id` but an
+empty/missing `task` title (server.py resume-race replay path) never
+synced `currentTaskId`/anchors/`currentTaskName`, so overscroll stayed
+blocked after such a replay.
+
+## Changes
+
+All in `src/kiss/agents/vscode/media/main.js`:
+
+1. DEFAULT-case adoption guard: added `ev.taskId !== ''` so early
+   empty-string taskIds are never adopted; anchor re-seed now also
+   fires when anchors are `''` (defensive), not only `null`.
+2. `accumulateOverscroll()`: early-return when the anchor taskId is
+   `undefined`/`null`/`''` so `getAdjacentTask` is never posted with
+   an unknown row id (prevents the empty-reply noPrev/noNext latch).
+3. `task_events` active-tab path: new `else if` branch — when
+   `ev.task` is empty but `ev.task_id` is present, still set
+   `currentTaskId = ev.task_id`, derive `currentTaskName` from the tab
+   title (fallback `'Task'`) only when it is empty, and call
+   `resetAdjacentState()`.
+
+New permanent e2e test `src/kiss/agents/vscode/test/adjacentTaskScroll.test.js`
+(jsdom harness on the real `chat.html` + `panelCopy.js` + `main.js`,
+same pattern as `sideScrollWhileRunning.test.js`), wired into the
+`package.json` `test` chain. Covers:
+
+- REGRESSION: full live-task lifecycle with early `taskId:''` prompts →
+  overscroll must post `getAdjacentTask` with the REAL task id.
+- Never post `getAdjacentTask` with an empty taskId.
+- `task_events` with `task_id` but no `task` title still enables
+  overscroll.
+- History-load → wheel-up prev request → `adjacent_task_events` reply
+  renders `.adjacent-task` → chained prev uses the new oldest id.
+- Wheel-down at bottom requests `next`.
+- Touch pull-down at top requests `prev`.
+
+## Verification
+
+- New test FAILS on pre-fix code (verified via
+  `git stash push media/main.js`: posted `taskId:""`), PASSES after fix.
+- Full vscode test chain (96 `node test/*.js` files) run in 8 parallel
+  batches: all passed except `installFailureNoCompleteNotification.test.js`,
+  which is unrelated (exercises `DependencyInstaller` in a PATH-empty
+  sandbox; on this machine it triggers the Xcode CLT install poll loop
+  and a `uv sync` pyproject fixture parse error — fails identically on
+  the untouched base commit; no files it touches were modified).
+- `npm run typecheck` (tsc): clean. `npm run lint:ts` (eslint on
+  `src/**/*.ts` + `media/**/*.js`): clean. `npm run compile`: clean.
+- No Python files changed.
+
+## Review pass (gpt-5.6-sol)
+
+Independent review conducted on gpt-5.6-sol (via `set_model`):
+
+- Audited ALL taskId/anchor write sites in `media/main.js`
+  (lines 582-584 declarations, 847 `restoreTab` — sets
+  `currentTaskId` from `tab.currentTaskId` and calls
+  `resetAdjacentState()` last so anchors seed correctly; 2154-2155
+  `resetAdjacentState`; 2228/2232 `renderAdjacentTask` anchor
+  updates — guarded against ''/null taskIds; 4835 background-tab
+  `teTab.currentTaskId`; 4922 active `task_events` with title;
+  4937 the NEW no-title branch; 5009 `setTaskText` clear;
+  5651/5655/5666-5667 default-case adoption + re-seed): consistent,
+  no site can reintroduce a '' anchor.
+- The default-case adoption change cannot regress the
+  result/usage_info misroute guard: early events have `taskId: ''`
+  and `ev.taskId` being falsy also skips the guard's drop branch, so
+  behavior for early events is unchanged (they render, as intended by
+  df31a0e8's promptPanelEarlyReplace design — that test still passes).
+- Wheel and touch handlers both funnel through `accumulateOverscroll`
+  (single choke point), so the ''-taskId protection covers both input
+  paths; `oldestLoadedTaskId != null` guards in the handlers remain
+  correct because `''` now never reaches the anchors.
+- Backend wiring verified intact end-to-end: main.js posts
+  `getAdjacentTask {tabId, taskId, direction}` → SorcarSidebarView.ts
+  FORWARDED_COMMANDS forwards exactly those fields → commands.py
+  `_cmd_get_adjacent_task` resolves chat_id from the
+  `_RunningAgentState` registry with `_tab_chat_views` fallback and
+  parses taskId via `_opt_str` (non-empty string else None) →
+  server.py `_get_adjacent_task` → persistence
+  `_get_adjacent_task_by_chat_id` ((timestamp, rowid) total order,
+  sub-agent rows filtered) → broadcast `adjacent_task_events` stamped
+  with tabId → extension forwards (not in the merge_data drop list) →
+  main.js drops if `ev.tabId !== activeTabId`, else renders.
+  web_server.py routes browser commands through the same
+  `VSCodeServer._handle_command`, so the remote webapp inherits the fix.
+- The new `task_events` `else if` branch sits in the active-tab
+  section (after the `teTabId !== activeTabId` early-break) and only
+  derives `currentTaskName` when it is empty, so it cannot clobber a
+  real title; server.py's resume-race replay (line ~1428, `task: ""`
+  with valid task_id) now correctly re-seeds the anchors.
+- Sub-agent tabs remain excluded (isSubagentTab guards in both wheel
+  and touch handlers untouched).
+- Verified the new test fails pre-fix (git stash → posts `taskId:""`)
+  and passes post-fix; existing `sideScrollWhileRunning.test.js` (4/4)
+  and `promptPanelEarlyReplace.test.js` still pass.
+- Minor pre-existing (not introduced) nits, no action needed: types.ts
+  declares `taskId: number | null` for getAdjacentTask while the
+  webview actually sends string row ids (same looseness as
+  deleteTask/setFavorite; backend accepts strings), and the
+  adjacent_task_events type omits the `task_id` field it carries at
+  runtime. Both predate this change and are cast through
+  `as unknown as AgentCommand` at the single forwarding site.
+
+No missed wirings or introduced bugs found.
