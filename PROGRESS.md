@@ -1,4 +1,92 @@
-# PROGRESS — Resolve stranded-branch merge conflict (kiss/wt-1783912825-c143d801) (current task)
+# PROGRESS — Run all tests in parallel, diagnose & fix failures (current task)
+
+## Task
+
+Run all 6113 tests split by test-method count into (cores − 2 = 8)
+parallel splits via `run_parallel`, report causes of failing tests,
+classify each failure as a project bug vs a test bug, and fix
+accordingly.
+
+## What was done
+
+1. Collected 6113 tests (`uv run pytest --collect-only -q`; addopts add
+   `-m 'not slow'`, 73 slow tests deselected); split node IDs
+   round-robin into 8 files (~764 each); ran all 8 splits concurrently
+   with `run_parallel`, each worker running
+   `uv run pytest --no-cov -q -p no:cacheprovider @./tmp/split_N.txt`.
+1. Results: splits 0, 2–7 ALL PASSED. Split 1: 5 FAILED, all with
+   `sqlite3.OperationalError: disk I/O error` raised from
+   `src/kiss/agents/sorcar/persistence.py` against the shared
+   per-process test DB:
+   - test_bughunt_srv2_stale_subscriptions.py::TestReplayOtherChatDropsOldStream::test_replay_back_to_running_chat_restores_stream
+   - test_non_git_workdir.py::TestNonGitCommandsDoNotCrash::test_resume_session_unknown_chat
+   - test_orphan_task_recovery.py::TestOrphanTaskRecovery::test_sweep_ignores_rows_created_after_cutoff
+   - test_simplify_server_cmds_regr.py::test_get_input_history_conn_id_stamping
+   - test_wave3_runner_merge_bugs.py::test_b2_warm_agent_second_run_still_attributes_own_metrics
+     All 5 passed when re-run serially → order/race-dependent poisoning,
+     not a deterministic logic bug. One additional flake surfaced during
+     subset reruns: test_install_script_npm_ignore_scripts.py::
+     test_run_with_heartbeat_double_sigint_aborts ("first SIGINT trap
+     never fired" — empty log after the 10 s `_wait_for_log_text`
+     default timeout).
+1. Root cause of the 5 disk-I/O failures (confirmed with targeted
+   SQLite experiments + a full-stack race harness): **PROJECT BUG** — a
+   TOCTOU race in `_get_db()` (persistence.py ~line 910). The stale
+   side-file cleanup `if not _DB_PATH.exists(): unlink _DB_PATH+'-wal'/'-shm'` re-read the `_DB_PATH` **global** between
+   the existence check and the unlink. Tests that redirect `_DB_PATH`
+   to a scratch dir, delete the scratch DB, and restore the shared path
+   (e.g. test_persistence_db_deleted_file.py) let a background thread
+   (kiss-event-writer / orphan-sweep) observe "missing" for the SCRATCH
+   file while computing unlink targets from the freshly RESTORED shared
+   path — unlinking the live shared DB's `-shm`. SQLite then fails
+   every NEW connection to that DB with a permanent `disk I/O error`
+   while any old connection keeps the unlinked `-shm` mapped, poisoning
+   later vscode-server tests in the same process.
+1. Fix (project code): in `_get_db()` both the existence check and the
+   unlink targets are now derived from the single `current_path`
+   snapshot (`os.path.exists(current_path)` /
+   `os.unlink(current_path + suffix)` in try/except OSError), never a
+   re-read of `_DB_PATH`; detailed comment documents the TOCTOU.
+1. Regression test added (e2e, no mocks):
+   `src/kiss/tests/agents/sorcar/test_persistence_wal_unlink_toctou.py`
+   — hammers the redirect/delete/restore pattern with background
+   `_get_db()` threads for 5 s, watches the shared `-shm` inode, then
+   health-checks a fresh thread. Verified to FAIL on pre-fix code
+   ("shared -shm was unlinked") and PASS with the fix.
+1. Sigint flake — TRUE root cause found (the earlier "timeout too
+   tight" theory was wrong; the test failed again with a 30 s timeout
+   and a completely empty harness log even in a solo run): the failure
+   reproduces 100% whenever pytest is launched as a **background job of
+   a non-job-control shell** (`sh -c 'pytest … &'` — exactly how
+   `run_parallel` workers and `nohup … &` invoke it). POSIX requires
+   such a shell to start background jobs with SIGINT set to `SIG_IGN`;
+   the ignored disposition is inherited across fork/exec down to the
+   harness bash, and bash cannot trap signals ignored on entry
+   ("Signals ignored upon entry to the shell cannot be trapped or
+   reset") — so install.sh's `trap handle_interrupt INT` silently
+   became a no-op and `handle_interrupt` never ran (empty log,
+   `sleep 30` unaffected). Confirmed empirically: identical harness
+   loop fails 36/36 when backgrounded (`getsignal(SIGINT) == SIG_IGN`), passes 13/13 in the foreground. Classification:
+   **TEST BUG** — install.sh is correct in a real terminal (SIGINT
+   default); the test assumed the pytest process never inherits
+   SIGINT=SIG_IGN. Fix: `_reset_signal_dispositions()` helper passed as
+   `preexec_fn=` to both harness `subprocess.Popen` calls in
+   test_install_script_npm_ignore_scripts.py, resetting SIGINT/SIGTERM
+   to `SIG_DFL` between fork and exec so the harness always gets the
+   same signal environment as a real terminal. (The earlier 30 s
+   `_wait_for_log_text` timeouts were kept — harmless robustness.)
+1. Verification: toctou regression test + test_persistence_db_deleted_file
+   (5 passed); the 5 previously failing tests + sigint test file +
+   persistence neighborhood (32 passed); full split_1 re-run green
+   (758/759, only the sigint test failing pre-final-fix); after the
+   preexec_fn fix the two sigint tests pass 5/5 iterations when pytest
+   runs as a background job (previously 0/5) and the whole sigint test
+   file passes in the foreground (8 passed); `uv run check --full` all
+   checks pass.
+
+______________________________________________________________________
+
+# PROGRESS — Resolve stranded-branch merge conflict (kiss/wt-1783912825-c143d801)
 
 ## Task
 
