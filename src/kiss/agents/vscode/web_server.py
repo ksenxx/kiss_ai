@@ -2165,8 +2165,6 @@ class WebPrinter(JsonPrinter):
             # (these are transient UI replies, not task events).  A
             # vanished endpoint (client disconnected before the reply
             # was ready) silently drops the event.
-            if event.get("type") == "demoSpeakAudio":
-                event = self._arbitrate_demo_speak(conn_id, event)
             self._send_to_conn(conn_id, json.dumps(event))
             return
 
@@ -2376,55 +2374,6 @@ class WebPrinter(JsonPrinter):
         except Exception:
             logger.exception("daemon-side talk clip playback failed")
             return False
-
-    def _arbitrate_demo_speak(
-        self, conn_id: str, event: dict[str, Any]
-    ) -> dict[str, Any]:
-        """Arbitrate playback of one demo-replay speech clip reply.
-
-        ``demoSpeakAudio`` replies carry the synthesized clip a
-        demo-mode webview requested for one replayed utterance.  A
-        local UDS VS Code webview cannot reliably play that clip
-        in-page: Chromium's autoplay policy rejects ``Audio.play()``
-        unless the user interacted with the webview seconds earlier
-        (microsoft/vscode#197937 / #178642, closed as not actionable),
-        so only the first clip after the history-row click played and
-        every subsequent demo speech stayed silent.  Mirroring the
-        live-talk arbitration in :meth:`_fanout_talk`, when the
-        requesting connection is a local UDS webview the daemon plays
-        the clip natively on this machine's speakers and stamps the
-        reply ``muted`` — muted autoplay is always allowed, so the
-        webview's muted Audio element still fires ``ended`` and the
-        demo pacing (speech-length pauses) is preserved.  Remote WSS
-        browser tabs keep the playable copy: they run on other devices
-        where this machine's speakers are inaudible, and the click
-        that started the demo grants them sticky user activation.
-
-        The native playback is keyed ``talkId = "demo-" + reqId`` so
-        the :class:`~kiss.agents.sorcar.cli_talk.TalkPlayer` dedupe
-        never suppresses a repeat replay of the same utterance (every
-        request carries a fresh ``reqId``).
-
-        Args:
-            conn_id: The requesting connection's id.
-            event: The ``demoSpeakAudio`` reply event (``connId``
-                already stripped by :meth:`broadcast`).
-
-        Returns:
-            A ``muted``-stamped copy of *event* when the daemon plays
-            the clip natively; otherwise *event* unchanged (empty
-            clip, remote WSS requester, or no local audio player).
-        """
-        if not event.get("audioB64"):
-            return event
-        with self._ws_lock:
-            endpoint = self._conn_endpoints.get(conn_id)
-        if not isinstance(endpoint, asyncio.StreamWriter):
-            return event
-        clip = {**event, "talkId": f"demo-{event.get('reqId', '')}"}
-        if self._play_talk_clip_locally(clip):
-            return {**event, "muted": True}
-        return event
 
     def _fanout_talk_cli_origin(self, event: dict[str, Any]) -> None:
         """Fan out a CLI-forwarded ``talk`` event already played locally.

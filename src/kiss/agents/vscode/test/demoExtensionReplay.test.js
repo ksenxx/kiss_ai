@@ -17,12 +17,13 @@
 //     active (demo.js owns collapsing), and fan-out groups pause
 //     longer so the tabs are actually watchable.
 //
-//   * demo narration and replayed ``talk`` calls ask the daemon for a
-//     natural GPT-voice clip ('demoSpeak' -> 'demoSpeakAudio') and play
-//     it in-page.  If synthesis or Audio.play() fails, both VS Code and
-//     remote webviews degrade to SILENCE and the replay advances — the
-//     robotic Web-Speech fallback is gone for good, so the speech stub
-//     below is a CANARY that must never record an utterance.
+//   * replayed ``talk`` calls play their RECORDED audio clip in-page
+//     (demo mode never synthesizes speech).  Events without recorded
+//     audio — and prompt narration — are skipped SILENTLY and the
+//     replay advances; if Audio.play() fails, both VS Code and remote
+//     webviews degrade to SILENCE too.  The robotic Web-Speech
+//     fallback is gone for good, so the speech stub below is a CANARY
+//     that must never record an utterance.
 //
 // Run directly with ``node``:
 //
@@ -144,26 +145,6 @@ function dispatch(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
-/** Answer every posted 'demoSpeak' with a synthesized clip (or an
- * empty audioB64 when ``audioB64`` is passed as '') after 20ms. */
-function autoAnswerDemoSpeak(win, audioB64) {
-  const clip = audioB64 === undefined ? 'QUJD' : audioB64;
-  const prev = win._onPosted;
-  win._onPosted = msg => {
-    if (prev) prev(msg);
-    if (msg.type !== 'demoSpeak') return;
-    setTimeout(() => {
-      dispatch(win, {
-        type: 'demoSpeakAudio',
-        reqId: msg.reqId,
-        audioB64: clip,
-        audioMime: 'audio/mpeg',
-        tabId: msg.tabId,
-      });
-    }, 20);
-  };
-}
-
 function sleep(ms) {
   return new Promise(resolve => {
     setTimeout(resolve, ms);
@@ -182,7 +163,12 @@ const REPLAY_EVENTS = [
   {
     type: 'tool_call',
     name: 'talk',
-    extras: {text: 'Hello, I am the demo.', language: 'en-US'},
+    extras: {
+      text: 'Hello, I am the demo.',
+      language: 'en-US',
+      audioB64: 'QUJD',
+      audioMime: 'audio/mpeg',
+    },
   },
   {type: 'tool_result', content: 'ok'},
   {
@@ -247,7 +233,6 @@ async function testFanoutTabsVisibleAndPanelsExpanded() {
   const {win, posted} = makeWebview();
   installAudio(win);
   const spoken = installSpeech(win);
-  autoAnswerDemoSpeak(win);
 
   const doc = win.document;
   let maxSubTabs = 0;
@@ -307,60 +292,67 @@ async function testFanoutTabsVisibleAndPanelsExpanded() {
   console.log('PASS: fan-out tabs visible >=1.5s, panels stay expanded');
 }
 
-async function testDemoSpeechUsesNaturalClip() {
+async function testDemoSpeechUsesRecordedClip() {
   const {win} = makeWebview();
   const players = installAudio(win);
   const spoken = installSpeech(win);
-  autoAnswerDemoSpeak(win);
 
-  await win._demoApi.speakText('User said hello world', 'en-US');
-  assert.strictEqual(players.length, 1, 'narration played as an Audio clip');
+  await win._demoApi.playTalkEvent({
+    text: 'Replay me.',
+    language: 'en-GB',
+    audioB64: 'QUJD',
+    audioMime: 'audio/mpeg',
+  });
+  assert.strictEqual(players.length, 1, 'talk replay played an Audio clip');
   assert.ok(
     players[0].src.indexOf('data:audio/mpeg;base64,QUJD') === 0,
-    'the synthesized clip from demoSpeakAudio is what plays',
+    'the RECORDED clip is what plays',
   );
   assert.strictEqual(
     realSpoken(spoken).length,
     0,
-    'Web Speech must not be used when the natural clip is available',
+    'Web Speech must not be used when the recorded clip is available',
   );
 
-  await win._demoApi.playTalkEvent({text: 'Replay me.', language: 'en-GB'});
-  assert.strictEqual(players.length, 2, 'talk replay also plays a clip');
+  // Prompt narration never carries audio — it resolves silently.
+  await win._demoApi.speakText('User said hello world', 'en-US');
+  assert.strictEqual(players.length, 1, 'narration plays no clip');
   assert.strictEqual(realSpoken(spoken).length, 0, 'still no robotic voice');
-  console.log('PASS: demo speech plays the natural synthesized clip');
+  console.log('PASS: demo speech plays the recorded clip; narration silent');
 }
 
-async function testWebviewFailedSynthesisIsSkippedSilently() {
+async function testWebviewNoRecordedAudioIsSkippedSilently() {
   const {win} = makeWebview();
   const players = installAudio(win);
   const spoken = installSpeech(win);
-  autoAnswerDemoSpeak(win, ''); // synthesis failed: empty audioB64
 
   await Promise.race([
-    win._demoApi.speakText('User said no key available'),
+    win._demoApi.playTalkEvent({text: 'No audio was recorded for me.'}),
     sleep(2000).then(() => {
-      throw new Error('failed synthesis must not stall the replay');
+      throw new Error('an audio-less talk event must not stall the replay');
     }),
   ]);
   assert.strictEqual(players.length, 0, 'no clip to play');
   assert.strictEqual(
     realSpoken(spoken).length,
     0,
-    'failed synthesis must be skipped SILENTLY, never spoken by the ' +
-      'robotic Web Speech voice',
+    'a talk event without recorded audio must be skipped SILENTLY, ' +
+      'never spoken by the robotic Web Speech voice',
   );
-  console.log('PASS: failed synthesis is skipped silently');
+  console.log('PASS: talk event without recorded audio is skipped silently');
 }
 
 async function testWebviewBlockedPlaybackDegradesSilently() {
   const {win} = makeWebview();
   const players = installAudio(win, {reject: true}); // autoplay block
   const spoken = installSpeech(win);
-  autoAnswerDemoSpeak(win);
 
   await Promise.race([
-    win._demoApi.speakText('User said blocked playback'),
+    win._demoApi.playTalkEvent({
+      text: 'Blocked playback.',
+      audioB64: 'QUJD',
+      audioMime: 'audio/mpeg',
+    }),
     sleep(2000).then(() => {
       throw new Error('a blocked play() must not stall the replay');
     }),
@@ -375,16 +367,19 @@ async function testWebviewBlockedPlaybackDegradesSilently() {
 }
 
 async function testPausedDemoDefersClipPlayback() {
-  // A synthesis reply that arrives while the demo pause button is
-  // engaged must not start sounding until the user resumes.
+  // A recorded clip whose queue turn comes while the demo pause
+  // button is engaged must not start sounding until the user resumes.
   const {win} = makeWebview();
   const players = installAudio(win);
   const spoken = installSpeech(win);
-  autoAnswerDemoSpeak(win);
 
-  const speech = win._demoApi.speakText('play only after resume');
   win._setDemoPaused(true);
-  await sleep(60); // synthesis replied (~20ms) while the demo was paused
+  const speech = win._demoApi.playTalkEvent({
+    text: 'play only after resume',
+    audioB64: 'QUJD',
+    audioMime: 'audio/mpeg',
+  });
+  await sleep(60);
   assert.strictEqual(
     players.length,
     0,
@@ -393,7 +388,7 @@ async function testPausedDemoDefersClipPlayback() {
   win._setDemoPaused(false);
   await speech;
   assert.strictEqual(players.length, 1, 'the clip plays on resume');
-  assert.ok(players[0].playedNaturally, 'the natural clip actually played');
+  assert.ok(players[0].playedNaturally, 'the recorded clip actually played');
   assert.strictEqual(realSpoken(spoken).length, 0, 'no robotic voice');
   console.log('PASS: pause defers the clip playback until resume');
 }
@@ -404,10 +399,13 @@ async function testStopBeforePlayRejectionLeavesQueueUsable() {
   const {win} = makeWebview();
   installAudio(win, {reject: true, rejectDelay: 50});
   const spoken = installSpeech(win);
-  autoAnswerDemoSpeak(win);
 
-  const speech = win._demoApi.speakText('must stay silent after stop');
-  await sleep(30); // synthesis replied; Audio.play() is still pending
+  const speech = win._demoApi.playTalkEvent({
+    text: 'must stay silent after stop',
+    audioB64: 'QUJD',
+    audioMime: 'audio/mpeg',
+  });
+  await sleep(30); // the clip started; Audio.play() is still pending
   win._demoApi.stopSpeech();
   await speech;
   await sleep(60); // the delayed rejection settles after the stop
@@ -433,12 +431,11 @@ async function testRemotePageAlsoDegradesSilently() {
   const players = installAudio(win);
   const spoken = installSpeech(win);
   win.document.body.classList.add('remote-chat');
-  autoAnswerDemoSpeak(win, ''); // synthesis failed
 
   await Promise.race([
     win._demoApi.speakText('User said browser fallback', 'en-US'),
     sleep(2000).then(() => {
-      throw new Error('failed synthesis must not stall the remote page');
+      throw new Error('silent narration must not stall the remote page');
     }),
   ]);
   assert.strictEqual(players.length, 0, 'no clip to play');
@@ -450,52 +447,53 @@ async function testRemotePageAlsoDegradesSilently() {
   console.log('PASS: remote chat page degrades to silence too');
 }
 
-async function testStopSpeechCancelsPendingSynthesis() {
-  const {win, posted} = makeWebview();
+async function testStopSpeechCancelsQueuedClips() {
+  // Stopping the demo must resolve every queued clip promise without
+  // sound and leave the talk queue usable for the next run.
+  const {win} = makeWebview();
   const players = installAudio(win);
   const spoken = installSpeech(win);
-  // No auto-answer: the synthesis request stays pending.
 
-  const p = win._demoApi.speakText('User said cancel me');
+  win._setDemoPaused(true); // park the clip before it starts
+  const p = win._demoApi.playTalkEvent({
+    text: 'User said cancel me',
+    audioB64: 'QUJD',
+    audioMime: 'audio/mpeg',
+  });
   await sleep(10);
-  const req = posted.find(m => m.type === 'demoSpeak');
-  assert.ok(req, 'synthesis was requested');
+  assert.strictEqual(players.length, 0, 'clip parked behind the pause');
 
   win._demoApi.stopSpeech();
+  win._setDemoPaused(false);
   await Promise.race([
     p,
     sleep(1000).then(() => {
       throw new Error('speech promise did not resolve after stopSpeech');
     }),
   ]);
-
-  // A LATE synthesis reply after the cancel must not start playback.
-  dispatch(win, {
-    type: 'demoSpeakAudio',
-    reqId: req.reqId,
-    audioB64: 'QUJD',
-    audioMime: 'audio/mpeg',
-  });
   await sleep(50);
-  assert.strictEqual(players.length, 0, 'late reply must not play audio');
+  assert.strictEqual(players.length, 0, 'a stopped clip must not play');
   assert.strictEqual(realSpoken(spoken).length, 0, 'and must not speak');
 
   // The queue must be free for the next demo run.
-  autoAnswerDemoSpeak(win);
-  await win._demoApi.speakText('User said next run');
+  await win._demoApi.playTalkEvent({
+    text: 'User said next run',
+    audioB64: 'REVG',
+    audioMime: 'audio/mpeg',
+  });
   assert.strictEqual(players.length, 1, 'queue serves speech after cancel');
-  console.log('PASS: stopSpeech cancels pending synthesis cleanly');
+  console.log('PASS: stopSpeech cancels queued clips cleanly');
 }
 
 async function runTests() {
   await testFanoutTabsVisibleAndPanelsExpanded();
-  await testDemoSpeechUsesNaturalClip();
-  await testWebviewFailedSynthesisIsSkippedSilently();
+  await testDemoSpeechUsesRecordedClip();
+  await testWebviewNoRecordedAudioIsSkippedSilently();
   await testWebviewBlockedPlaybackDegradesSilently();
   await testPausedDemoDefersClipPlayback();
   await testStopBeforePlayRejectionLeavesQueueUsable();
   await testRemotePageAlsoDegradesSilently();
-  await testStopSpeechCancelsPendingSynthesis();
+  await testStopSpeechCancelsQueuedClips();
   console.log('All demoExtensionReplay tests passed.');
   // The demo replay's running state starts webview timers that keep
   // the node event loop alive — exit explicitly.

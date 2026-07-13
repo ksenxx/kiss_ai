@@ -1,0 +1,9 @@
+User-agent: *
+Allow: /
+
+# LLM-friendly content index
+# https://llmstxt.org/
+# llms.txt: https://kisssorcar.github.io/llms.txt
+# llms-full.txt: https://kisssorcar.github.io/llms-full.txt
+
+Sitemap: https://kisssorcar.github.io/sitemap.xml

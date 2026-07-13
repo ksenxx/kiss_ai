@@ -147,10 +147,9 @@ def _extra_for_replay(extra: object) -> str:
         return ""
     if not any(key in parsed for key in _REPLAY_STRIPPED_EXTRA_KEYS):
         return extra
-    return json.dumps({
-        key: value for key, value in parsed.items()
-        if key not in _REPLAY_STRIPPED_EXTRA_KEYS
-    })
+    return json.dumps(
+        {key: value for key, value in parsed.items() if key not in _REPLAY_STRIPPED_EXTRA_KEYS}
+    )
 
 
 def _coerce_id(value: object) -> str | None:
@@ -215,8 +214,9 @@ def _live_task_id(tab: _RunningAgentState) -> str | None:
         The live task id, or ``None`` when neither source is set.
     """
     agent = tab.agent
-    if agent is not None and agent._last_task_id is not None:
-        return agent._last_task_id
+    live_id = getattr(agent, "_last_task_id", None) if agent is not None else None
+    if live_id is not None:
+        return str(live_id)
     return tab.task_history_id
 
 
@@ -333,11 +333,7 @@ class VSCodeServer(
         with _RunningAgentState._registry_lock:
             for tab in _RunningAgentState.running_agent_states.values():
                 thread = tab.task_thread
-                if not (
-                    tab.is_task_active
-                    and thread is not None
-                    and thread.is_alive()
-                ):
+                if not (tab.is_task_active and thread is not None and thread.is_alive()):
                     continue
                 th_id = tab.task_history_id
                 if th_id is None and tab.agent is not None:
@@ -420,11 +416,7 @@ class VSCodeServer(
         # intentionally retained and must not receive unrelated close events.
         self._pending_user_answer_tasks: dict[int, str] = {}
         persisted = _load_last_model()
-        self._default_model = (
-            persisted
-            or os.environ.get("KISS_MODEL", "")
-            or get_default_model()
-        )
+        self._default_model = persisted or os.environ.get("KISS_MODEL", "") or get_default_model()
         # Share the lock that guards ``_RunningAgentState.running_agent_states``
         # so producers outside this module (parallel sub-agent spawners
         # in :class:`ChatSorcarAgent`, registration helpers in
@@ -445,9 +437,7 @@ class VSCodeServer(
         # window typed last mark every other window's pending request
         # stale).
         self._complete_seq_latest: dict[str, int] = {}
-        self._complete_queue: (
-            queue.Queue[tuple[str, int, str, str, str, str]] | None
-        ) = None
+        self._complete_queue: queue.Queue[tuple[str, int, str, str, str, str]] | None = None
         self._complete_worker: threading.Thread | None = None
         # Per-work_dir file scan cache.  Keyed by the absolute work_dir
         # path the scan ran in so different chat tabs (each with their
@@ -535,7 +525,8 @@ class VSCodeServer(
             _close_thread_db()
 
     def set_cli_running_lookup(
-        self, lookup: Callable[[str], bool] | None,
+        self,
+        lookup: Callable[[str], bool] | None,
     ) -> None:
         """Install the CLI-task running-lookup used by :meth:`_replay_session`.
 
@@ -551,7 +542,8 @@ class VSCodeServer(
         self._cli_running_lookup = lookup
 
     def set_cli_running_task_ids_lookup(
-        self, lookup: Callable[[], set[str]] | None,
+        self,
+        lookup: Callable[[], set[str]] | None,
     ) -> None:
         """Install the CLI-running-task-id snapshot used by ``_get_history``.
 
@@ -661,9 +653,7 @@ class VSCodeServer(
         # as a dict key would raise TypeError, which escapes to the
         # transport's receive loop and kills the whole client
         # connection.  Route it to the unknown-command branch instead.
-        handler = (
-            self._HANDLERS.get(cmd_type) if isinstance(cmd_type, str) else None
-        )
+        handler = self._HANDLERS.get(cmd_type) if isinstance(cmd_type, str) else None
         if handler is not None:
             handler(self, cmd)
         else:
@@ -677,7 +667,9 @@ class VSCodeServer(
             self._broadcast_to_conn(event, cmd.get("connId", ""))
 
     def _broadcast_to_conn(
-        self, event: dict[str, Any], conn_id: str,
+        self,
+        event: dict[str, Any],
+        conn_id: str,
     ) -> None:
         """Broadcast *event*, stamped with *conn_id* when non-empty.
 
@@ -725,13 +717,15 @@ class VSCodeServer(
             info = MODEL_INFO.get(name)
             if info and info.is_function_calling_supported:
                 vendor_name, vendor_order = model_vendor(name)
-                models_list.append({
-                    "name": name,
-                    "inp": info.input_price_per_1M,
-                    "out": info.output_price_per_1M,
-                    "uses": usage.get(name, 0),
-                    "vendor": vendor_name,
-                })
+                models_list.append(
+                    {
+                        "name": name,
+                        "inp": info.input_price_per_1M,
+                        "out": info.output_price_per_1M,
+                        "uses": usage.get(name, 0),
+                        "vendor": vendor_name,
+                    }
+                )
                 price = float(info.input_price_per_1M) + float(info.output_price_per_1M)
                 sort_keys[name] = (vendor_order, -price)
         models_list.sort(key=lambda m: sort_keys[m["name"]])
@@ -802,11 +796,7 @@ class VSCodeServer(
         with self._state_lock:
             for tab in _RunningAgentState.running_agent_states.values():
                 tid = _live_task_id(tab)
-                if (
-                    tid is not None
-                    and tab.task_thread is not None
-                    and tab.task_thread.is_alive()
-                ):
+                if tid is not None and tab.task_thread is not None and tab.task_thread.is_alive():
                     running.add(tid)
         # CLI-launched tasks run in a separate ``sorcar`` process and
         # have no ``_RunningAgentState`` entry on the daemon, but the
@@ -824,7 +814,9 @@ class VSCodeServer(
         return running
 
     def _overlay_live_metrics(
-        self, session: dict[str, Any], task_id: str,
+        self,
+        session: dict[str, Any],
+        task_id: str,
     ) -> None:
         """Replace persisted metrics with live agent data for a running task.
 
@@ -846,12 +838,8 @@ class VSCodeServer(
                     continue
                 if _live_task_id(tab) != task_id:
                     continue
-                session["tokens"] = int(
-                    getattr(agent, "total_tokens_used", 0) or 0
-                )
-                session["cost"] = float(
-                    getattr(agent, "budget_used", 0.0) or 0.0
-                )
+                session["tokens"] = int(getattr(agent, "total_tokens_used", 0) or 0)
+                session["cost"] = float(getattr(agent, "budget_used", 0.0) or 0.0)
                 steps = int(getattr(agent, "total_steps", 0) or 0)
                 cur = getattr(agent, "_current_executor", None)
                 if cur is not None:
@@ -871,20 +859,12 @@ class VSCodeServer(
                 # the agent); we prefer it over the tab-level
                 # ``selected_model`` because the user can change
                 # ``selected_model`` mid-task via the model picker.
-                mdl_live = getattr(agent, "model_name", "") or getattr(
-                    tab, "selected_model", ""
-                )
+                mdl_live = getattr(agent, "model_name", "") or getattr(tab, "selected_model", "")
                 if isinstance(mdl_live, str) and mdl_live:
                     session["model"] = mdl_live
-                session["is_worktree"] = bool(
-                    getattr(tab, "use_worktree", False)
-                )
-                session["is_parallel"] = bool(
-                    getattr(tab, "use_parallel", False)
-                )
-                session["auto_commit_mode"] = bool(
-                    getattr(tab, "auto_commit_mode", False)
-                )
+                session["is_worktree"] = bool(getattr(tab, "use_worktree", False))
+                session["is_parallel"] = bool(getattr(tab, "use_parallel", False))
+                session["auto_commit_mode"] = bool(getattr(tab, "auto_commit_mode", False))
                 break
 
     def _get_history(
@@ -1023,9 +1003,7 @@ class VSCodeServer(
                         session["endTs"] = int(extra_obj.get("endTs", 0) or 0)
                     except (TypeError, ValueError):
                         session["endTs"] = 0
-                    session["is_favorite"] = bool(
-                        extra_obj.get("is_favorite", False)
-                    )
+                    session["is_favorite"] = bool(extra_obj.get("is_favorite", False))
                     wd_raw = extra_obj.get("work_dir", "")
                     if isinstance(wd_raw, str):
                         session["work_dir"] = wd_raw
@@ -1038,15 +1016,9 @@ class VSCodeServer(
                     mdl_raw = extra_obj.get("model", "")
                     if isinstance(mdl_raw, str):
                         session["model"] = mdl_raw
-                    session["is_worktree"] = bool(
-                        extra_obj.get("is_worktree", False)
-                    )
-                    session["is_parallel"] = bool(
-                        extra_obj.get("is_parallel", False)
-                    )
-                    session["auto_commit_mode"] = bool(
-                        extra_obj.get("auto_commit_mode", False)
-                    )
+                    session["is_worktree"] = bool(extra_obj.get("is_worktree", False))
+                    session["is_parallel"] = bool(extra_obj.get("is_parallel", False))
+                    session["auto_commit_mode"] = bool(extra_obj.get("auto_commit_mode", False))
                     try:
                         start_ts_raw = extra_obj.get("startTs", 0)
                         if start_ts_raw:
@@ -1061,8 +1033,10 @@ class VSCodeServer(
                 self._overlay_live_metrics(session, entry_id)
             sessions.append(session)
         event: dict[str, Any] = {
-            "type": "history", "sessions": sessions,
-            "offset": offset, "generation": generation,
+            "type": "history",
+            "sessions": sessions,
+            "offset": offset,
+            "generation": generation,
         }
         self._broadcast_to_conn(event, conn_id)
 
@@ -1096,12 +1070,14 @@ class VSCodeServer(
         chat_id = _get_task_chat_id(task_id)
         if not _delete_task(task_id):
             return
-        self.printer.broadcast({
-            "type": "taskDeleted",
-            "taskId": task_id,
-            "chatId": chat_id,
-            "chatHasMoreTasks": _chat_has_tasks(chat_id),
-        })
+        self.printer.broadcast(
+            {
+                "type": "taskDeleted",
+                "taskId": task_id,
+                "chatId": chat_id,
+                "chatHasMoreTasks": _chat_has_tasks(chat_id),
+            }
+        )
 
     def _handle_set_favorite(self, task_id: str, is_favorite: bool) -> None:
         """Persist the favourite flag on a task history row.
@@ -1230,7 +1206,9 @@ class VSCodeServer(
         self._teardown_tab_resources(tab_id, tab)
 
     def _teardown_tab_resources(
-        self, tab_id: str, tab: _RunningAgentState | None,
+        self,
+        tab_id: str,
+        tab: _RunningAgentState | None,
     ) -> None:
         """Release worktree, per-tab printer state and merge data dir.
 
@@ -1355,14 +1333,19 @@ class VSCodeServer(
         # because some duck-typed test printers implement only the
         # broadcast/subscribe subset of the printer protocol.
         self._printer_cleanup_tab(tab_id)
-        self.printer.broadcast({
-            "type": "showWelcome",
-            "tabId": tab_id,
-            "model": welcome_model,
-        })
+        self.printer.broadcast(
+            {
+                "type": "showWelcome",
+                "tabId": tab_id,
+                "model": welcome_model,
+            }
+        )
 
     def _replay_session(
-        self, chat_id: str, tab_id: str = "", task_id: str | None = None,
+        self,
+        chat_id: str,
+        tab_id: str = "",
+        task_id: str | None = None,
     ) -> None:
         """Replay recorded chat events for a previous chat session.
 
@@ -1430,23 +1413,27 @@ class VSCodeServer(
             )
             if rebound_running:
                 start_ts = self._live_task_start_ms(task_id, chat_id)
-                self.printer.broadcast({
-                    "type": "status",
-                    "running": True,
-                    "tabId": tab_id,
-                    "startTs": start_ts,
-                })
+                self.printer.broadcast(
+                    {
+                        "type": "status",
+                        "running": True,
+                        "tabId": tab_id,
+                        "startTs": start_ts,
+                    }
+                )
                 # Empty task_events so the webview's replay loop
                 # transitions out of its "loading" state cleanly.
-                self.printer.broadcast({
-                    "type": "task_events",
-                    "events": [],
-                    "task": "",
-                    "task_id": task_id,
-                    "chat_id": chat_id,
-                    "extra": "",
-                    "tabId": tab_id,
-                })
+                self.printer.broadcast(
+                    {
+                        "type": "task_events",
+                        "events": [],
+                        "task": "",
+                        "task_id": task_id,
+                        "chat_id": chat_id,
+                        "extra": "",
+                        "tabId": tab_id,
+                    }
+                )
             # Mirror the found-row path's tab-state bookkeeping.
             # Without this the race-window resume leaves the tab in a
             # half-initialised state: (a) it is never recorded in
@@ -1518,9 +1505,7 @@ class VSCodeServer(
         # r4-vscode-H1 — accept legacy int payloads from DBs that
         # escaped the auto-migration; mirror the same defence
         # applied to ``parent_task_id`` in r3-vscode-H2.
-        rebound_task_id = _coerce_id(
-            result.get("task_id") if result else None
-        )
+        rebound_task_id = _coerce_id(result.get("task_id") if result else None)
         # The tab is navigating to (possibly) another chat: drop every
         # live-task subscription it carried from whatever it displayed
         # before, so the previous chat's still-running task does not
@@ -1683,15 +1668,17 @@ class VSCodeServer(
                 chat_id=chat_id,
                 sub_tab_id=tab_id,
             )
-            self.printer.broadcast({
-                "type": "openSubagentTab",
-                "tab_id": tab_id,
-                "parent_tab_id": parent_tab_id_for_sub,
-                "description": str(result.get("task", "") or ""),
-                "task_id": result.get("task_id"),
-                "isSubagentTab": True,
-                "isDone": is_done,
-            })
+            self.printer.broadcast(
+                {
+                    "type": "openSubagentTab",
+                    "tab_id": tab_id,
+                    "parent_tab_id": parent_tab_id_for_sub,
+                    "description": str(result.get("task", "") or ""),
+                    "task_id": result.get("task_id"),
+                    "isSubagentTab": True,
+                    "isDone": is_done,
+                }
+            )
 
         if rebound_running:
             # Make the resumed tab show the running spinner since the
@@ -1726,14 +1713,17 @@ class VSCodeServer(
             # stamped by ``_TaskRunnerMixin._run_task_inner``.
             if start_ts_for_resume <= 0:
                 start_ts_for_resume = self._live_task_start_ms(
-                    rebound_task_id, chat_id,
+                    rebound_task_id,
+                    chat_id,
                 )
-            self.printer.broadcast({
-                "type": "status",
-                "running": True,
-                "tabId": tab_id,
-                "startTs": start_ts_for_resume,
-            })
+            self.printer.broadcast(
+                {
+                    "type": "status",
+                    "running": True,
+                    "tabId": tab_id,
+                    "startTs": start_ts_for_resume,
+                }
+            )
         # Coalesce consecutive per-token delta events before shipping
         # the replay payload: persisted streams store one row per
         # streamed token, so a long task can carry tens of thousands
@@ -1741,24 +1731,26 @@ class VSCodeServer(
         # them (same contract as ``JsonPrinter.stop_recording``)
         # shrinks the JSON payload and the frontend's replay loop by
         # orders of magnitude while rendering identically.
-        self.printer.broadcast({
-            "type": "task_events",
-            "events": _coalesced_replay_events(result["events"]),
-            "task": result["task"],
-            "task_id": result.get("task_id"),
-            "chat_id": chat_id,
-            # ``_extra_for_replay`` strips ``model`` / ``is_worktree``
-            # / ``is_parallel`` / ``auto_commit_mode`` so loading a
-            # chat into this tab cannot clobber the live toggle / model
-            # state that mirrors the user's CURRENT global settings.
-            # A follow-up task started in this tab must use whatever
-            # the toggles currently say (= the global settings the
-            # user just picked), not the stale per-task snapshot of
-            # the historical row being loaded.  See the comment on
-            # :data:`_REPLAY_STRIPPED_EXTRA_KEYS`.
-            "extra": _extra_for_replay(result.get("extra", "")),
-            "tabId": tab_id,
-        })
+        self.printer.broadcast(
+            {
+                "type": "task_events",
+                "events": _coalesced_replay_events(result["events"]),
+                "task": result["task"],
+                "task_id": result.get("task_id"),
+                "chat_id": chat_id,
+                # ``_extra_for_replay`` strips ``model`` / ``is_worktree``
+                # / ``is_parallel`` / ``auto_commit_mode`` so loading a
+                # chat into this tab cannot clobber the live toggle / model
+                # state that mirrors the user's CURRENT global settings.
+                # A follow-up task started in this tab must use whatever
+                # the toggles currently say (= the global settings the
+                # user just picked), not the stale per-task snapshot of
+                # the historical row being loaded.  See the comment on
+                # :data:`_REPLAY_STRIPPED_EXTRA_KEYS`.
+                "extra": _extra_for_replay(result.get("extra", "")),
+                "tabId": tab_id,
+            }
+        )
         self._emit_pending_worktree(tab_id)
 
         # When the user loads a PARENT task from the history sidebar,
@@ -1769,13 +1761,10 @@ class VSCodeServer(
         # sub-agent row already converts the clicked tab into a
         # sub-agent tab via the ``subagent_info`` branch above; we
         # do NOT want to recursively reopen siblings on that path.
-        if (
-            subagent_info is None
-            and isinstance(rebound_task_id, str)
-            and rebound_task_id
-        ):
+        if subagent_info is None and isinstance(rebound_task_id, str) and rebound_task_id:
             self._open_persisted_subagent_tabs(
-                parent_task_id=rebound_task_id, parent_tab_id=tab_id,
+                parent_task_id=rebound_task_id,
+                parent_tab_id=tab_id,
             )
 
     def _resolve_parent_tab_id_for_sub(
@@ -1824,8 +1813,7 @@ class VSCodeServer(
         """
         with self._state_lock:
             non_sub_states = [
-                st for st in _RunningAgentState.running_agent_states.values()
-                if not st.is_subagent
+                st for st in _RunningAgentState.running_agent_states.values() if not st.is_subagent
             ]
 
             if parent_task_id is not None:
@@ -1844,8 +1832,7 @@ class VSCodeServer(
                 # self-referential parent_tab_id and a self-loop in
                 # the frontend's parent→child cascade-close registry.
                 chat_matches = [
-                    st for st in non_sub_states
-                    if st.chat_id == chat_id and st.tab_id != sub_tab_id
+                    st for st in non_sub_states if st.chat_id == chat_id and st.tab_id != sub_tab_id
                 ]
                 if len(chat_matches) == 1:
                     return chat_matches[0].tab_id
@@ -1860,12 +1847,17 @@ class VSCodeServer(
             "Could not resolve parent tab id for sub-agent "
             "(sub_tab_id=%r, parent_task_id=%r, chat_id=%r); "
             "cascade-close from parent will not reach this sub-tab.",
-            sub_tab_id, parent_task_id, chat_id,
+            sub_tab_id,
+            parent_task_id,
+            chat_id,
         )
         return ""
 
     def _open_persisted_subagent_tabs(
-        self, *, parent_task_id: str, parent_tab_id: str,
+        self,
+        *,
+        parent_task_id: str,
+        parent_tab_id: str,
     ) -> None:
         """Broadcast ``openSubagentTab`` + ``task_events`` for every
         persisted sub-agent row whose parent is *parent_task_id*.
@@ -1895,41 +1887,47 @@ class VSCodeServer(
             sub_tab_id = f"{parent_tab_id}__sub_{sub_task_id}"
             description = str(row.get("task", "") or "")
             is_done = _subagent_is_done(sub_task_id)
-            self.printer.broadcast({
-                "type": "openSubagentTab",
-                "tab_id": sub_tab_id,
-                "parent_tab_id": parent_tab_id,
-                "description": description,
-                "task_id": sub_task_id,
-                "taskIndex": idx,
-                "isSubagentTab": True,
-                "isDone": is_done,
-            })
-            self.printer.broadcast({
-                "type": "task_events",
-                "events": _coalesced_replay_events(row["events"]),
-                "task": description,
-                "task_id": sub_task_id,
-                "chat_id": row.get("chat_id", ""),
-                # Sub-agent tabs reopened on a parent-task history
-                # load must follow the same strip rule as the parent
-                # ``_replay_session`` broadcast above: a persisted
-                # sub-agent ``extra`` snapshot of
-                # ``model`` / ``is_worktree`` / ``is_parallel`` /
-                # ``auto_commit_mode`` is just as historical as the
-                # parent's, and the frontend's background-tab
-                # ``task_events`` branch still reads ``extra.model``
-                # into ``teTab.selectedModel`` (see ``media/main.js``
-                # near the ``bgExtra.model`` block).  Stripping here
-                # prevents a stale per-sub-agent model from being
-                # inherited by the live model picker when the user
-                # later switches to that sub-tab.
-                "extra": _extra_for_replay(row.get("extra", "")),
-                "tabId": sub_tab_id,
-            })
+            self.printer.broadcast(
+                {
+                    "type": "openSubagentTab",
+                    "tab_id": sub_tab_id,
+                    "parent_tab_id": parent_tab_id,
+                    "description": description,
+                    "task_id": sub_task_id,
+                    "taskIndex": idx,
+                    "isSubagentTab": True,
+                    "isDone": is_done,
+                }
+            )
+            self.printer.broadcast(
+                {
+                    "type": "task_events",
+                    "events": _coalesced_replay_events(row["events"]),
+                    "task": description,
+                    "task_id": sub_task_id,
+                    "chat_id": row.get("chat_id", ""),
+                    # Sub-agent tabs reopened on a parent-task history
+                    # load must follow the same strip rule as the parent
+                    # ``_replay_session`` broadcast above: a persisted
+                    # sub-agent ``extra`` snapshot of
+                    # ``model`` / ``is_worktree`` / ``is_parallel`` /
+                    # ``auto_commit_mode`` is just as historical as the
+                    # parent's, and the frontend's background-tab
+                    # ``task_events`` branch still reads ``extra.model``
+                    # into ``teTab.selectedModel`` (see ``media/main.js``
+                    # near the ``bgExtra.model`` block).  Stripping here
+                    # prevents a stale per-sub-agent model from being
+                    # inherited by the live model picker when the user
+                    # later switches to that sub-tab.
+                    "extra": _extra_for_replay(row.get("extra", "")),
+                    "tabId": sub_tab_id,
+                }
+            )
 
     def _live_task_start_ms(
-        self, task_id: str | None, chat_id: str,
+        self,
+        task_id: str | None,
+        chat_id: str,
     ) -> int:
         """Return the start timestamp (ms since epoch) of a live task.
 
@@ -1957,15 +1955,9 @@ class VSCodeServer(
                 if task_id is not None:
                     if _live_task_id(tab) != task_id:
                         continue
-                elif (
-                    not chat_id
-                    or tab.chat_id != chat_id
-                    or tab.is_subagent
-                ):
+                elif not chat_id or tab.chat_id != chat_id or tab.is_subagent:
                     continue
-                start_ms = int(
-                    getattr(tab.agent, "_task_start_ms", 0) or 0
-                )
+                start_ms = int(getattr(tab.agent, "_task_start_ms", 0) or 0)
                 if start_ms > 0:
                     return start_ms
         return 0
@@ -2045,9 +2037,7 @@ class VSCodeServer(
                 for t in _RunningAgentState.running_agent_states.values():
                     if _live_task_id(t) != task_id:
                         continue
-                    alive = (
-                        t.task_thread is not None and t.task_thread.is_alive()
-                    )
+                    alive = t.task_thread is not None and t.task_thread.is_alive()
                     if alive or t.is_task_active:
                         source = t
                         break
@@ -2065,9 +2055,7 @@ class VSCodeServer(
                         continue
                     if t.is_subagent:
                         continue
-                    alive = (
-                        t.task_thread is not None and t.task_thread.is_alive()
-                    )
+                    alive = t.task_thread is not None and t.task_thread.is_alive()
                     if alive or t.is_task_active:
                         source = t
                         break
@@ -2088,7 +2076,6 @@ class VSCodeServer(
         if source_task_id is not None:
             self.printer.subscribe_tab(source_task_id, new_tab_id)
         return True
-
 
     def _generate_followup_async(
         self,
@@ -2122,9 +2109,7 @@ class VSCodeServer(
             if owner_task_key is not None:
                 self.printer._thread_local.task_id = owner_task_key
             try:
-                suggestion = generate_followup_text(
-                    task, result, get_fast_model()
-                )
+                suggestion = generate_followup_text(task, result, get_fast_model())
                 if suggestion:  # pragma: no cover — requires LLM API call
                     if _current_db_path() != origin_db_path:
                         return
@@ -2154,7 +2139,11 @@ class VSCodeServer(
         return ""
 
     def _get_adjacent_task(
-        self, chat_id: str, task_id: str | None, direction: str, tab_id: str = "",
+        self,
+        chat_id: str,
+        task_id: str | None,
+        direction: str,
+        tab_id: str = "",
     ) -> None:
         """Send events for the adjacent task in the same chat session.
 
@@ -2173,15 +2162,16 @@ class VSCodeServer(
             "direction": direction,
             "task": result["task"] if result else "",
             "task_id": result["task_id"] if result else None,
-            "events": (
-                _coalesced_replay_events(result["events"]) if result else []
-            ),
+            "events": (_coalesced_replay_events(result["events"]) if result else []),
             "tabId": tab_id,
         }
         self.printer.broadcast(event)
 
     def _generate_commit_message(
-        self, tab_id: str = "", *, work_dir: str = "",
+        self,
+        tab_id: str = "",
+        *,
+        work_dir: str = "",
     ) -> None:
         """Generate a git commit message from current changes.
 
@@ -2205,35 +2195,42 @@ class VSCodeServer(
             from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 
             if GitWorktreeOps.discover_repo(Path(work_dir)) is None:
-                self.printer.broadcast({
-                    "type": "commitMessage",
-                    "message": "",
-                    "error": "Not a git repository.",
-                    "tabId": tab_id,
-                })
+                self.printer.broadcast(
+                    {
+                        "type": "commitMessage",
+                        "message": "",
+                        "error": "Not a git repository.",
+                        "tabId": tab_id,
+                    }
+                )
                 return
             cached_result = _git(work_dir, "diff", "--cached")
             diff_text = cached_result.stdout.strip()
             if not diff_text:  # pragma: no branch — LLM API required for else
-                self.printer.broadcast({
-                    "type": "commitMessage",
-                    "message": "",
-                    "error": "No staged changes found. Stage files with 'git add' first.",
-                    "tabId": tab_id,
-                })
+                self.printer.broadcast(
+                    {
+                        "type": "commitMessage",
+                        "message": "",
+                        "error": "No staged changes found. Stage files with 'git add' first.",
+                        "tabId": tab_id,
+                    }
+                )
                 return
             msg = generate_commit_message_from_diff(diff_text)  # pragma: no cover
-            self.printer.broadcast({
-                "type": "commitMessage", "message": msg, "tabId": tab_id,
-            })  # pragma: no cover
+            self.printer.broadcast(
+                {
+                    "type": "commitMessage",
+                    "message": msg,
+                    "tabId": tab_id,
+                }
+            )  # pragma: no cover
         except Exception:  # pragma: no cover — LLM API error handler
             logger.debug("Commit message generation failed", exc_info=True)
-            self.printer.broadcast({
-                "type": "commitMessage",
-                "message": "",
-                "error": "Failed to generate",
-                "tabId": tab_id,
-            })
-
-
-
+            self.printer.broadcast(
+                {
+                    "type": "commitMessage",
+                    "message": "",
+                    "error": "Failed to generate",
+                    "tabId": tab_id,
+                }
+            )

@@ -1,0 +1,76 @@
+rules:
+  - id: dangerous-sink-subprocess
+    languages: [python]
+    message: Dangerous subprocess sink
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: subprocess.run(...)
+          - pattern: subprocess.Popen(...)
+          - pattern: subprocess.call(...)
+          - pattern: subprocess.check_call(...)
+          - pattern: subprocess.check_output(...)
+          - pattern: os.system(...)
+          - pattern: os.popen(...)
+    metadata:
+      category: command-injection
+
+  - id: dangerous-sink-pickle
+    languages: [python]
+    message: Dangerous pickle deserialization
+    severity: ERROR
+    patterns:
+      - pattern: pickle.loads(...)
+    metadata:
+      category: deserialization
+
+  - id: dangerous-sink-eval
+    languages: [python]
+    message: Dangerous eval/exec
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: eval(...)
+          - pattern: exec(...)
+    metadata:
+      category: code-execution
+
+  - id: dangerous-sink-crypto
+    languages: [python]
+    message: Weak crypto function
+    severity: WARNING
+    patterns:
+      - pattern-either:
+          - pattern: hashlib.md5(...)
+          - pattern: hashlib.sha1(...)
+    metadata:
+      category: weak-crypto
+
+  - id: dangerous-sink-template
+    languages: [python]
+    message: Template injection risk
+    severity: ERROR
+    patterns:
+      - pattern: jinja2.Template(...).render(...)
+    metadata:
+      category: template-injection
+
+  - id: dangerous-sink-file
+    languages: [python]
+    message: Path traversal risk
+    severity: WARNING
+    patterns:
+      - pattern-either:
+          - pattern: open(...)
+          - pattern: io.open(...)
+    metadata:
+      category: path-traversal
+
+  - id: taint-source-param
+    languages: [python]
+    message: Issue-controlled parameter
+    severity: INFO
+    patterns:
+      - pattern: def $FUNC(..., $PARAM, ...): ...
+    metadata:
+      category: source

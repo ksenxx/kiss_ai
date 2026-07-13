@@ -368,7 +368,7 @@
     const words = text.split(/(\s+)/);
     let accumulated = '';
     const WORDS_PER_TICK = 3;
-    const TICK_MS = 50;
+    const TICK_MS = 10;
 
     for (let i = 0; i < words.length; i++) {
       if (replayStopped(gen)) break;
@@ -621,6 +621,8 @@
           text: talkText,
           language: extras.language,
           emotion: extras.emotion,
+          audioB64: extras.audioB64,
+          audioMime: extras.audioMime,
         });
       }
       return null;
