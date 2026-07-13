@@ -109,6 +109,7 @@
       <li><a href="#strengths">What the essay gets right</a></li>
       <li><a href="#conceptual">Where the argument strains</a></li>
       <li><a href="#slop">Is this AI slop?</a></li>
+      <li><a href="#sorcar">Case study: a partial glass box (KISS Sorcar)</a></li>
       <li><a href="#scorecard">Final scorecard</a></li>
       <li><a href="#sources">Sources</a></li>
     </ol>
@@ -440,7 +441,7 @@
     </div>
     <div class="callout good">
       <h4>The glass-box proposal is buildable</h4>
-      <p>Explicit hypotheses, <b>typed</b> defeaters (rebutting vs undercutting), a tunable credulous/skeptical temperament, and an explicit hard-core/protective-belt structure are all inspectable objects. The essay names the data structures a better agent would expose rather than just complaining that LLMs are opaque. The Assumption-Based Argumentation framework it points to (Bondarenko et al. 1997) really does supply semantics and existence theorems for exactly this bookkeeping.</p>
+      <p>Explicit hypotheses, <b>typed</b> defeaters (rebutting vs undercutting), a tunable credulous/skeptical temperament, and an explicit hard-core/protective-belt structure are all inspectable objects. The essay names the data structures a better agent would expose rather than just complaining that LLMs are opaque. The Assumption-Based Argumentation framework it points to (Bondarenko et al. 1997) really does supply semantics and existence theorems for exactly this bookkeeping. Several practical approximations to that wishlist already run in an existing agent framework &mdash; see the <a href="#sorcar">KISS Sorcar case study</a> below.</p>
     </div>
     <div class="callout good">
       <h4>Honest about the contested parts</h4>
@@ -487,6 +488,67 @@
     <p>The genuine irony stands on its own: an essay demanding that agents surface their own defeaters ships with three unflagged defeaters (the 2004 date, the wrong Lakatos link, the mis-drawn deduction argument) and a handful of typos. That does not undermine the thesis &mdash; if anything it illustrates the need for the tooling it argues for.</p>
   </section>
 
+  <section id="sorcar">
+    <h2>Case study &mdash; a partial glass box: KISS Sorcar</h2>
+    <p>The essay's proposal can feel ambitious: explicit hypotheses, typed defeaters, a temperament dial, and a hard core with a protective belt. A fair test is to compare that wishlist with an agent framework that exists today. This review was itself produced with <a href="https://github.com/ksenxx/kiss_ai">KISS Sorcar</a>, an open-source, local-first agent framework (Apache-2.0, about 2,900 lines of core-agent code) built for long-horizon tasks and AI discovery. Sorcar exposes practical analogues for several items on the list, largely through prompts, files, git worktrees, and a trajectory database. It does <em>not</em> implement a defeasible-logic engine. The comparison therefore separates operational bookkeeping available now from the formal epistemic machinery still missing.</p>
+    <p style="font-size:14px; color:var(--muted)"><b>How to read the status column:</b> each label measures Sorcar against the essay's full specification, not merely whether Sorcar has a related feature.</p>
+
+    <div class="tablewrap">
+    <table>
+      <thead><tr><th style="width:30%">What the essay asks for</th><th style="width:48%">Nearest KISS Sorcar mechanism</th><th>Status</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>Explicit hypotheses as inspectable objects, not activations in a forward pass</td>
+          <td>The AI-discovery and optimization prompt templates instruct the agent to maintain a <b>journal file of tried ideas</b>, recording outcomes so failed approaches are not silently retried. For runs using those templates, this creates an inspectable prose ledger. It is not a typed hypothesis object, and compliance is prompt-driven rather than enforced by the framework.</td>
+          <td class="v nu">Partial</td>
+        </tr>
+        <tr>
+          <td>Defeaters actively sought, not just absorbed &mdash; a reasoner that attacks its own conclusions</td>
+          <td>Sorcar supports dynamic model switching, and its optimization and bug-fixing workflows specify a <b>cross-vendor reviewer</b> instructed to hunt for missed claims, broken wiring, and newly introduced bugs. This is defeater-seeking review, implemented as a workflow rather than a logic rule. In this report, that pass undercut the draft's inference that typos prove human authorship and caught a third factual error.</td>
+          <td class="v ok">Built (workflow)</td>
+        </tr>
+        <tr>
+          <td>Answer to <i>"which of your beliefs just took the hit?"</i></td>
+          <td>Every tool call, model response, and cost is persisted to a replayable trajectory store (<code>sorcar.db</code>). A reviewer can inspect the event where a claim first appeared, while the mandatory research file keeps source-indexed notes. That is useful forensic provenance, but it is recorded per event, not per <em>belief</em>: no dependency graph links each conclusion to its live premises or automatically identifies every claim affected by a bad source.</td>
+          <td class="v nu">Partial</td>
+        </tr>
+        <tr>
+          <td>Answer to <i>"what would change your mind back?"</i></td>
+          <td>The templates call for <b>explicit numeric stopping conditions</b>, held-out evaluation splits, and anti-reward-hacking instructions declared before search. These provide auditable acceptance criteria for candidates and outputs. They do not say what evidence would reinstate a particular defeated belief, and prompt clauses do not technically prevent the model from gaming a metric.</td>
+          <td class="v nu">Partial analogue</td>
+        </tr>
+        <tr>
+          <td>Lakatosian hard core + protective belt, with anomalies routed to the belt</td>
+          <td><b>Branch-per-task git worktree isolation</b> keeps speculative changes off the user's main working tree and makes a failed trial easy to discard. That resembles a protective belt operationally. It is not a Lakatosian hard core: a branch may revise any assumption or file, successful changes can later be merged, and no semantic rule routes anomalies to belt rather than core.</td>
+          <td class="v nu">Partial analogue</td>
+        </tr>
+        <tr>
+          <td>Beliefs that survive outside the opaque forward pass</td>
+          <td>At a context-window boundary, the continuation protocol asks the model for a <b>structured chronological summary</b> that seeds the next sub-session. This externalizes working state instead of relying on hidden activations alone. The summary is still model-written and potentially lossy, however; it is not a complete belief store or a premise-to-conclusion graph.</td>
+          <td class="v nu">Partial</td>
+        </tr>
+        <tr>
+          <td><b>Typed</b> defeaters: rebutting vs undercutting, with defeat semantics (ABA-style)</td>
+          <td>Nothing. Defeats happen and are logged, but they are not typed, and no admissibility computation decides what survives. This is prompt discipline, not Pollock.</td>
+          <td class="v err">Missing</td>
+        </tr>
+        <tr>
+          <td>A tunable credulous-vs-skeptical temperament dial</td>
+          <td>Nothing explicit. The system prompt is uniformly skeptical-leaning (verify before finish, no fabricated source counts), but there is no per-task dial and no extension semantics behind it.</td>
+          <td class="v err">Missing</td>
+        </tr>
+      </tbody>
+    </table>
+    </div>
+
+    <div class="callout good">
+      <h4>What the comparison shows <span class="pill ok">BOTH WAYS</span></h4>
+      <p><b>For the essay:</b> its wishlist is not purely speculative. Sorcar shows that hypothesis journals, cross-model challenge, replayable traces, isolated experiments, and pre-declared evaluation criteria can all be assembled from ordinary prompts, files, git, and a database. These are useful approximations to the bookkeeping layer, not a completed implementation of it.</p>
+      <p><b>For the framework (and similar general-purpose agents):</b> the sharpest items remain absent: typed defeaters with explicit defeat semantics, belief-level dependency tracking, principled reinstatement, and a temperament dial grounded in extension semantics. Specialized argumentation systems supply parts of that formal layer; Sorcar does not yet connect them to its operational plumbing. The essay is valuable because it names that integration target.</p>
+    </div>
+    <p>One caveat for symmetry: this mapping is analogical, not causal. Sorcar's mechanisms were engineered for long-horizon reliability, not derived from defeasible-logic theory. Their overlap supports a narrower claim than the essay's full thesis: reliable long-running agents benefit from external state, challenge procedures, provenance, and rollback. It does not by itself show that Sorcar represents beliefs, defeaters, or argumentation extensions.</p>
+  </section>
+
   <section id="scorecard">
     <h2>Final scorecard</h2>
     <div class="tablewrap">
@@ -525,6 +587,7 @@
       <li>Agrawal et al. (2026). "Can AI Conduct Autonomous Scientific Research? Case Studies on Two Real-World Tasks." bioRxiv, DOI 10.64898/2026.01.05.697809 &mdash; "sophisticated hallucinations" quote verified via Crossref metadata and indexed full text. <a href="https://www.biorxiv.org/content/10.64898/2026.01.05.697809v1">bioRxiv</a></li>
       <li>Gottweis et al. (2026). "Accelerating scientific discovery with Co-Scientist." <i>Nature</i> 655:487&#8211;496. DOI 10.1038/s41586-026-10644-y. <a href="https://www.nature.com/articles/s41586-026-10644-y">Nature</a></li>
       <li>Pauli / "not even wrong" (Peierls attribution). <a href="https://en.wikipedia.org/wiki/Not_even_wrong">Wikipedia</a></li>
+      <li>KISS Sorcar (agent framework used for the case-study mapping and to produce this review): Sen, K., "KISS Sorcar: A Stupidly-Simple General-Purpose and Software Engineering AI Assistant." <a href="https://github.com/ksenxx/kiss_ai">GitHub</a> &middot; <a href="https://kisssorcar.github.io/">website</a></li>
       <li>The essay under review: "We Forgot to Teach AI Agents to Be Wrong on Purpose," Vislesy Ventures, 2026-06-18. <a href="https://vislesy.com/2026/06/18/we-forgot-to-teach-ai-agents-to-be-wrong-on-purpose/">vislesy.com</a></li>
     </ul>
   </section>
