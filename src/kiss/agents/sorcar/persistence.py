@@ -907,10 +907,25 @@ def _get_db() -> sqlite3.Connection:
             pass
 
     _ensure_kiss_dir()
-    if not _DB_PATH.exists():
+    # Stale -wal/-shm cleanup for a deleted main database file.  Both
+    # the existence check and the unlink targets are derived from the
+    # ONE ``current_path`` snapshot taken above — never from a re-read
+    # of the ``_DB_PATH`` global.  Re-reading it here is a TOCTOU race:
+    # a test (or embedder) can redirect ``_DB_PATH`` to a scratch
+    # directory, delete that scratch database, and restore the original
+    # path at any moment.  With a re-read, this thread could observe
+    # "missing" for the SCRATCH file but compute the unlink targets
+    # from the freshly RESTORED path — deleting the live shared
+    # database's -wal/-shm side files out from under every open
+    # connection.  SQLite then fails all NEW connections to that
+    # database with a permanent ``disk I/O error`` for as long as any
+    # old connection keeps the unlinked -shm mapped.
+    if not os.path.exists(current_path):
         for suffix in ("-wal", "-shm"):
-            stale_file = _DB_PATH.with_name(_DB_PATH.name + suffix)
-            stale_file.unlink(missing_ok=True)
+            try:
+                os.unlink(current_path + suffix)
+            except OSError:
+                pass
     conn = sqlite3.connect(
         current_path,
         check_same_thread=False,
