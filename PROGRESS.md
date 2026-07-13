@@ -82,30 +82,3 @@ directories (per https://llmstxt.org/#directories):
 
 Both live URLs (https://kisssorcar.github.io/llms.txt and /llms-full.txt)
 were re-verified in the browser before and after submitting.
-
-# Task: Directory listing follow-up check (2026-07-12)
-
-Checked both directories for the KISS Sorcar listing and followed up where it
-had not appeared. Neither directory publishes a contact email, so the
-follow-up channel in both cases is their own submission form (explicitly
-marked as a follow-up), with approval notifications going to
-ksen@berkeley.edu.
-
-1. **llmstxt.site** — NOT live yet. Searched the site's "Search products..."
-   box for "KISS Sorcar", "kisssorcar", "sorcar", "kiss", "github.io" — all
-   "No results." No contact email exists on the site; the /submit form is the
-   only channel. FOLLOW-UP DONE: re-submitted https://llmstxt.site/submit
-   with the same details plus a note explicitly marked as a follow-up
-   re-submission. Confirmed via redirect to https://llmstxt.site/thankyou.
-2. **directory.llmstxt.cloud** — NOT approved/live yet. Verified via
-   ?search=sorcar / kiss / kisssorcar.github.io (all "No results found";
-   search itself verified working). No contact email on the directory or the
-   Tally form; only channels are the Tally form and X handles (@ifox,
-   @joyceverheije, @llmsdottxt). FOLLOW-UP DONE: re-submitted the Tally form
-   https://tally.so/r/wAydjB (name "KISS Sorcar", llms.txt URL, Category
-   "AI", email ksen@berkeley.edu, adoption note explicitly marked FOLLOW-UP
-   re-submission, Sponsoring "No"). Confirmed "Form submitted / Thanks for
-   completing this form!".
-
-Next: watch ksen@berkeley.edu for the directory.llmstxt.cloud approval
-notification and re-check both directories in ~1 week.
