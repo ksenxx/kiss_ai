@@ -1,47 +1,102 @@
-# PROGRESS — Fix side scrolling in chat webview while a task is running (current task)
+# PROGRESS — Codex-mobile remote webapp restyle — Sessions 4–6 (current task)
 
 ## Task
 
-Side scrolling in the chat webview does not work while a task is running.
-Reproduce with e2e tests, then fix. Development done with claude-fable-5;
-review/debug pass done with gpt-5.6-sol.
+Restyle the standalone remote webapp (served by `RemoteAccessServer` in
+`src/kiss/agents/vscode/web_server.py`) to look like the OpenAI Codex
+mobile / ChatGPT app. Constraints: every existing control and DOM id
+must remain identical (visual/layout change only), the change must be
+scoped to the remote view only (`body.remote-chat`; shared `chat.html`
+and `main.css` used by the VS Code webview stay untouched), e2e tests
+written first, claude-fable-5 for development and gpt-5.6-sol for an
+independent review pass, full suite run 8-way parallel via
+`run_parallel` with failure classification, and final validation by
+running the remote webview and taking screenshots.
 
-## Session 2 (this run — continuation of the investigation session)
+## What was done
 
-1. Root cause confirmed: while `isRunning`, every #output mutation fires the
-   MutationObserver → `sb()` → `O.scrollTo({top: scrollHeight})` rAF storm,
-   plus per-panel tails (`thinkEl/bashPanel/llmPanel .scrollTop = scrollHeight`).
-   The wheel handler only honoured vertical intent
-   (`if (isRunning && e.deltaY < 0) _scrollLock = true`) — horizontal wheel
-   gestures (deltaX) were ignored, so a user's side-scroll of a wide
-   `pre`/bash panel was immediately aborted by the programmatic scrolls.
-2. Wrote failing-first e2e test `src/kiss/agents/vscode/test/sideScrollWhileRunning.test.js`
-   (jsdom harness on real chat.html + main.js with a *recording* scrollTo and
-   faked scroll geometry; hides welcome via `win._demoApi.hideWelcome()`).
-   4 tests: horizontal wheel engages lock; bash-panel tail pauses under lock;
-   dominant downward wheel does NOT lock; lock releases at bottom.
-   Verified FAIL pre-fix (git stash) and PASS post-fix.
-3. Fix in `src/kiss/agents/vscode/media/main.js`:
-   - wheel handler: `if (isRunning && (e.deltaY < 0 || Math.abs(e.deltaX) > Math.abs(e.deltaY))) _scrollLock = true;`
-   - thinking-panel tail (≈line 3146), bash-panel tail (≈line 3398) and
-     llm-panel rAF tail (≈line 3635) now skip while `_scrollLock` is set.
-   - Lock release unchanged: scroll-to-bottom handler clears `_scrollLock`.
-4. Registered the new test in `package.json` npm test chain.
-5. Ran all 121 vscode node tests in 8 parallel splits: 120 pass; only
-   `installFailureNoCompleteNotification.test.js` hangs — pre-existing
-   (fails identically with the fix stashed; sandbox/env dependent).
-   `npm run lint:ts` clean; `npm run compile` + `tsc` clean.
-6. gpt-5.6-sol review pass: audited every scrollTop/scrollTo/scrollLeft/wheel
-   site in media/*.js, all overflow-x:auto scrollers in main.css, git blame
-   provenance, and test-vs-production wiring. Confirmed: `#output`'s history
-   prepend (`O.scrollTop += newScrollHeight - prevScrollHeight`, line 2226)
-   and merge-hunk `scrollTo` (line 6558) are user-initiated/not-running paths
-   — correctly untouched; `bodyEl.scrollTop` (line 3483) fires once at prompt
-   panel creation, not per-token — correctly untouched; no missed wirings.
+1. **Web research (10/10 sources)** on the Codex app / ChatGPT mobile
+   design language; extracted tokens: `#0d0d0d` page, `#ececec` text,
+   `#212121` composer card at 28px radius with inset white edge shadow,
+   36px circular composer controls, white circular send button, 22px
+   light user bubble right-aligned at max 75% width, 768px centered
+   content column, pill tab chips, `#171717` drawers/panels.
 
----
+1. **TDD tests first**: added
+   `src/kiss/tests/agents/vscode/test_codex_mobile_layout.py` (16
+   tests, red before implementation): cache-busted
+   `remote-codex.css` link ordered after `main.css`, no unresolved
+   placeholders, control-id parity (explicit inventory ∪ every id
+   parsed from `chat.html`), `body.remote-chat` retained, no Codex CSS
+   leakage into shared `chat.html`/`main.css`, every selector in the
+   new stylesheet scoped under `body.remote-chat` (including inside
+   `@media`), design-token assertions (palette, composer, circular
+   send, pill tabs, task-panel bubble), a real-`RemoteAccessServer`
+   HTTPS e2e test (production `start_async`/`_process_request`
+   lifecycle, MIME + byte-for-byte body checks), and `_media_url`
+   cache-bust hashing.
 
-# PROGRESS — Run all tests in parallel, diagnose & fix failures — Session 3 (previous task)
+1. **Implementation**: new file
+   `src/kiss/agents/vscode/media/remote-codex.css` (all selectors
+   prefixed `body.remote-chat`); `_build_html()` in `web_server.py` now
+   prepends a cache-busted `<link href="/media/remote-codex.css?v=...">`
+   to the remote-only `HEAD_STYLE` placeholder (the VS Code extension
+   passes `HEAD_STYLE=''`, so the webview is provably unaffected).
+   `chat.html` and `main.css` untouched; packaging includes the new css
+   automatically (no media allowlist exists).
+
+1. **gpt-5.6-sol review pass** found and fixed: the HTTP test
+   originally used a look-alike server (replaced with the production
+   `RemoteAccessServer`), the control-parity test was hardened to also
+   include every id parsed from `chat.html`, and the pinned task panel
+   lacked the Codex light-bubble treatment (test added first, then CSS:
+   `#ececec` bg, `#0d0d0d` text, 22px radius, right-aligned 75%).
+
+1. **Full suite 8-way parallel run** (6138 tests, splits of ~767 via
+   `run_parallel`): splits 0/3/6 green. Five individual failures in
+   splits 2/4/5/7 (`test_bughunt4_merge_replay_on_reconnect`,
+   `test_chat_agent_state_registration` ×2, `test_talk_tool`,
+   `test_cli_history_click_resumes_live_stream`) each re-run 3× in
+   isolation — all passed → classified as pre-existing parallel-load
+   timing flakes (test-environment issues, not project bugs; the CSS
+   change cannot affect WS replay or threading).
+
+1. **split_1 SEGFAULT root-caused and fixed (pre-existing TEST BUG)**:
+   the `orphan-task-sweep` daemon thread was executing `db.execute`
+   against a redirected/deleted temp DB while
+   `test_web_server_bugs.py`'s `IsolatedAsyncioTestCase.asyncTearDown`
+   closed the connection and `rmtree`'d the tmpdir (the conftest
+   join hook runs only after the pytest call phase, i.e. too late for
+   asyncTearDown-based classes). Fix in `asyncTearDown`:
+
+   ```python
+   sweep = self.server._vscode_server._orphan_sweep_thread
+   if sweep is not None and sweep.is_alive():
+       await asyncio.to_thread(sweep.join, 30)
+   ```
+
+   Full split_1 re-run: **764 passed, 4 skipped — GREEN**. Net full
+   suite result: 6138 tests, 0 project bugs from the change.
+
+1. **Visual validation**: launched the real `RemoteAccessServer`
+   locally (hermetic temp persistence, TLS disabled for localhost
+   automation), loaded the page in Chromium: accessibility tree showed
+   every control present and functional (tabs, status, composer, model
+   pill, upload/tricks/voice, send, history filters, frequent/tricks/
+   settings panels, API key fields, auth). Screenshots confirmed the
+   Codex look: near-black `#0d0d0d` page, pill "new chat" tab chip,
+   centered welcome, bottom rounded `#212121` composer card, pill model
+   button, circular icon buttons, white circular send button, and the
+   `#171717` history drawer with rounded search field.
+
+1. **Final checks**: fixed two mypy `[misc]` errors in the new test
+   (raise-from on `state["error"]` typed `object` — narrowed with
+   `isinstance(..., BaseException)`); `uv run check --full` fully
+   green; feature + bug-fix suites green (23 passed).
+
+______________________________________________________________________
+
+# PROGRESS — Run all tests in parallel, diagnose & fix failures — Session 3
 
 ## Task
 
