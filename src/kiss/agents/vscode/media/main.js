@@ -3139,7 +3139,10 @@
                 cnt.appendChild(document.createTextNode(tState.thinkBuf));
               }
               tState.thinkBuf = '';
-              if (tState.thinkEl)
+              // Pause tailing while the user's scroll lock is engaged
+              // (reading back or side-scrolling) — see the bash-panel
+              // tail below for the rationale.
+              if (tState.thinkEl && !_scrollLock)
                 tState.thinkEl.scrollTop = tState.thinkEl.scrollHeight;
             });
           }
@@ -3387,7 +3390,11 @@
               }
               tState.bashBuf = '';
               tState.bashRaf = 0;
-              if (tState.bashPanel)
+              // Pause tailing while the user's scroll lock is engaged
+              // (reading back or side-scrolling): a programmatic
+              // scrollTop assignment on the very panel being panned
+              // aborts the in-progress horizontal gesture.
+              if (tState.bashPanel && !_scrollLock)
                 tState.bashPanel.scrollTop = tState.bashPanel.scrollHeight;
             });
           }
@@ -3623,7 +3630,9 @@
       const _lp = llmPanel;
       _lp._scrollRaf = requestAnimationFrame(() => {
         _lp._scrollRaf = 0;
-        _lp.scrollTop = _lp.scrollHeight;
+        // Pause tailing while the user's scroll lock is engaged
+        // (reading back or side-scrolling a wide code block).
+        if (!_scrollLock) _lp.scrollTop = _lp.scrollHeight;
       });
     }
     // Keep the collapsed state consistent across new panels added by streaming.
@@ -3824,7 +3833,19 @@
   }
 
   O.addEventListener('wheel', e => {
-    if (isRunning && e.deltaY < 0) _scrollLock = true;
+    // Suspend auto-scroll while the user scrolls UP (reading back) or
+    // scrolls SIDEWAYS (panning a wide pre/bash panel).  A dominant
+    // horizontal wheel must engage the lock too: the rAF auto-scroll
+    // storm (sb() + per-panel scrollTop tailing) aborts an in-progress
+    // horizontal pan, making side scrolling impossible while a task is
+    // running.  Ignore the tiny deltaX jitter of a mostly-vertical
+    // gesture so normal downward scrolling keeps following the tail.
+    if (
+      isRunning &&
+      (e.deltaY < 0 || Math.abs(e.deltaX) > Math.abs(e.deltaY))
+    ) {
+      _scrollLock = true;
+    }
 
     // Adjacent task loading via overscroll detection.  Sub-agent
     // tabs MUST NOT show siblings from the same chat_id — they
