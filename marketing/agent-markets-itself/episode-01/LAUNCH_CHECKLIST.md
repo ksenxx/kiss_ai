@@ -1,29 +1,55 @@
 # 48-Hour Show HN Launch Checklist — KISS Sorcar
 
+## Chosen slot (picked 2026-07-12)
+
+- **Primary: Wednesday 2026-07-15, 9:30am ET** (6:30am PT). Tue 7/14 is too
+  soon to complete the human pre-flight (hand-rewrite, karma warm-up,
+  public-repo publication of this directory); Wednesday keeps a full buffer
+  day inside the strongest Tue–Thu band.
+- Fallback 1: Thursday 2026-07-16, 9:30am ET.
+- Fallback 2: Tuesday 2026-07-21, 9:30am ET (if pre-flight slips).
+
 ## T-7 to T-1 days: pre-flight
 
-- [ ] **Hand-rewrite the first comment.** Rewrite SHOW_HN_DRAFT.md's v2 text
-      yourself, by hand, from scratch, using it only as a content checklist.
-      Do not paste or LLM-edit any of it (HN rule, dang 2026-03-28). Keep the
-      same coverage: intro, backstory, 5 mechanism bullets, quickstart,
-      limitations, meta disclosure, links, feedback ask.
-- [ ] README: hero GIF visible in the first screen; quickstart works
-      first-try on a clean machine in ≤ 5 minutes (`pipx install
-      kiss-agent-framework` on fresh Python 3.13; test on macOS + Linux).
+- [ ] **Hand-rewrite the first comment.** HUMAN-ONLY step: follow
+      HAND_REWRITE_GUIDE.md (beat checklist + verified-facts table; contains
+      no prose to copy). Write from scratch in a plain text editor; do not
+      paste or LLM-edit any sentence (HN rule, dang 2026-03-28). The agent
+      cannot do this step by definition — any agent-written text is
+      LLM-generated.
+- [x] Quickstart works first-try on a clean machine in ≤ 5 minutes —
+      **VERIFIED 2026-07-12** on clean Docker containers:
+      `python:3.13-slim` → `pip install pipx && pipx install
+      kiss-agent-framework` installs 2026.7.18 and `sorcar --help` runs;
+      timed end-to-end **34 seconds**. `python:3.14-slim` also passes.
+      `python:3.12-slim` fails gracefully ("No matching distribution
+      found"), validating the "Python 3.13+ only" limitation claim. Only
+      caveat: pipx PATH warning (`pipx ensurepath` fixes). Still to do by
+      hand: spot-check on a clean macOS user account.
+- [ ] README: hero GIF visible in the first screen.
 - [ ] Repo loads fast; no signup anywhere in the try path.
 - [ ] HN account: personal username (a person, not a brand), email set in
       profile (repost/second-chance invites go there), some comment karma
       from genuine participation in the prior week.
-- [ ] Verify links: repo, https://arxiv.org/abs/2604.23822,
+- [x] Verify links — **VERIFIED 2026-07-12**, all 200:
+      https://github.com/ksenxx/kiss_ai,
+      https://arxiv.org/abs/2604.23822,
       https://kisssorcar.github.io/docs/index.md,
-      https://kisssorcar.github.io/llms.txt, and this episode directory.
-- [ ] Ensure marketing/agent-markets-itself/episode-01/ is pushed and public
-      (the meta disclosure links to it).
+      https://kisssorcar.github.io/llms.txt.
+- [ ] **BLOCKER — must clear before T-0.** Ensure
+      marketing/agent-markets-itself/episode-01/ is pushed and PUBLIC:
+      as of 2026-07-12,
+      https://github.com/ksenxx/kiss_ai/tree/main/marketing returns **404**
+      (the episode lives in the private dev repo only). Either publish the
+      marketing/ directory to the public ksenxx/kiss_ai repo, or mirror the
+      episode to kisssorcar.github.io and point the meta-disclosure link
+      there. The hand-written comment's meta paragraph depends on this link
+      resolving.
 - [ ] Prepare (do not pre-post) tailored Reddit drafts: r/selfhosted,
       r/LocalLLaMA, r/ChatGPTCoding, r/opensource — first-person, karma > 80.
 - [ ] Clear your calendar for the submission day + next morning.
 
-## T-0: submission (Tue/Wed/Thu, 9am–12pm ET)
+## T-0: submission (Wed 2026-07-15, 9:30am ET — fallbacks above)
 
 - [ ] Submit at https://news.ycombinator.com/submit
       - Title: chosen candidate from SHOW_HN_DRAFT.md (must start `Show HN:`).

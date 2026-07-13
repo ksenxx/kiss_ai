@@ -110,10 +110,35 @@ disclosure, and a specific feedback ask — is in
 [SHOW_HN_DRAFT.md](SHOW_HN_DRAFT.md), with all nine v1→v2 edits annotated
 and mapped to research findings.
 
+## Act 6 — Pre-flight verification (2026-07-12)
+
+Before handing off to the human, the agent ran the launch pre-flight itself:
+
+- **Clean-machine quickstart test (Docker):** on `python:3.13-slim`,
+  `pip install pipx && pipx install kiss-agent-framework` installed
+  2026.7.18 cleanly and `sorcar --help` ran — **34 seconds end-to-end**,
+  well inside the 5-minute target. `python:3.14-slim` passes too.
+  `python:3.12-slim` fails with a clear "No matching distribution found"
+  message, so the draft's "Python 3.13+ only" limitation is verified, not
+  assumed.
+- **Link check:** repo, arXiv 2604.23822, docs/index.md, and llms.txt all
+  return 200. One blocker found: the public repo's `marketing/` path
+  404s — the episode directory must be published publicly before the meta
+  paragraph's link goes live (tracked in the checklist).
+- **Slot picked:** Wednesday 2026-07-15, 9:30am ET (fallbacks Thu 7/16,
+  Tue 7/21).
+- **Hand-off artifact:** [HAND_REWRITE_GUIDE.md](HAND_REWRITE_GUIDE.md) — a
+  beat checklist and verified-facts table with deliberately **no prose to
+  copy**, so the founder's hand-written text can't accidentally contain an
+  agent sentence.
+
+An agent that runs its own launch QA but is forbidden, by rule, from writing
+the launch post: that's the hand-off line for Episode 1.
+
 ## Epilogue — what ships and when
 
 The launch itself follows [LAUNCH_CHECKLIST.md](LAUNCH_CHECKLIST.md):
-pre-flight repo polish, submit Tue–Thu 9am–12pm ET, hand-written text,
+pre-flight repo polish, submit Wed 2026-07-15 9:30am ET, hand-written text,
 48 hours of personal replies, then the staggered Reddit/newsletter wave.
 
 **Episode 1 scorecard**
@@ -124,6 +149,10 @@ pre-flight repo polish, submit Tue–Thu 9am–12pm ET, hand-written text,
 | Founder spec written | done ([SPEC.md](SPEC.md)) |
 | Agent draft v1 | done (rejected against spec, 2 disqualifiers) |
 | Agent draft v2 | done ([SHOW_HN_DRAFT.md](SHOW_HN_DRAFT.md)) |
+| Clean-machine quickstart test | done (34 s on Python 3.13; 3.14 ok; 3.12 fails cleanly) |
+| Link pre-flight | done (all 200; one public-repo 404 blocker logged) |
+| Submission slot picked | done (Wed 2026-07-15, 9:30am ET) |
+| Hand-rewrite guide for the founder | done ([HAND_REWRITE_GUIDE.md](HAND_REWRITE_GUIDE.md)) |
 | Hand-rewrite by founder | pending (must be human-written, by rule) |
 | Actual HN submission | pending (48-hour launch window) |
 

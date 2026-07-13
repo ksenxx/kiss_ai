@@ -9,7 +9,7 @@ agent did, what the human reviewed, and what shipped.
 
 | # | Episode | Artifacts |
 |---|---|---|
-| 1 | The agent writes its own Show HN launch post | [episode-01/](episode-01/) — [EPISODE.md](episode-01/EPISODE.md) (the episode), [SPEC.md](episode-01/SPEC.md) (the brief given to the agent), [SHOW_HN_DRAFT.md](episode-01/SHOW_HN_DRAFT.md) (the agent's refined draft), [REVIEW.md](episode-01/REVIEW.md) (v1→v2 rulings mapped to research), [LAUNCH_CHECKLIST.md](episode-01/LAUNCH_CHECKLIST.md) (48-hour runbook) |
+| 1 | The agent writes its own Show HN launch post | [episode-01/](episode-01/) — [EPISODE.md](episode-01/EPISODE.md) (the episode), [SPEC.md](episode-01/SPEC.md) (the brief given to the agent), [SHOW_HN_DRAFT.md](episode-01/SHOW_HN_DRAFT.md) (the agent's refined draft), [REVIEW.md](episode-01/REVIEW.md) (v1→v2 rulings mapped to research), [LAUNCH_CHECKLIST.md](episode-01/LAUNCH_CHECKLIST.md) (48-hour runbook, slot: Wed 2026-07-15 9:30am ET), [HAND_REWRITE_GUIDE.md](episode-01/HAND_REWRITE_GUIDE.md) (founder's hand-rewrite beat checklist + verified facts) |
 
 ## Ground rules
 
