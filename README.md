@@ -2,7 +2,7 @@
 
 ![KISS Framework](assets/KISS-Sorcar.png)
 
-[![Version](https://img.shields.io/badge/version-2026.7.19-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
+[![Version](https://img.shields.io/badge/version-2026.7.20-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.13-blue?style=flat-square)](https://www.python.org/)
 [![Website](https://img.shields.io/badge/website-kisssorcar.github.io-1976d2?style=flat-square)](https://kisssorcar.github.io/)
@@ -158,12 +158,16 @@ sorcar -t 'Can you show me the detailed step-by-step workflow of gepa.py?'
 
 # Manage MCP servers (see "sorcar mcp" subcommand below).
 sorcar mcp list --ping
+
+# Print the installed sorcar version and exit.
+sorcar --version
 ```
 
 ### CLI options
 
 | Flag | Description |
 |------|-------------|
+| `-V`, `--version` | Print `sorcar <version>` (from `kiss.__version__`) and exit |
 | `-t`, `--task` | Task description; switches to non-interactive mode |
 | `-f`, `--file` | Path to a file whose contents are used as the task; switches to non-interactive mode |
 | `-m`, `--model_name` | LLM model name; defaults to the best available model for the configured API keys |
