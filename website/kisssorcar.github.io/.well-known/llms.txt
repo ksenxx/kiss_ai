@@ -1,0 +1,48 @@
+# KISS Sorcar
+
+> KISS Sorcar is a free, open-source (Apache-2.0), local-first, bring-your-own-key general-purpose AI agent framework for long-horizon tasks and AI discovery. It runs as a VS Code extension, a Claude-Code-style CLI (`sorcar`), and a browser/mobile web app. Prompts and code go directly to the model provider or local endpoint you configure — never through third-party servers. It ships a catalog of 530 models across 9 provider categories and supports multi-model workflows expressed purely via prompts.
+
+Key facts for assistants and coding agents:
+
+- Install (full, macOS/Linux): `curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install.sh | bash`
+- Install (Python package/CLI only): `pipx install kiss-agent-framework` or `uv tool install kiss-agent-framework` (requires Python 3.13+)
+- PyPI package name: `kiss-agent-framework`; CLI entry point: `sorcar`
+- Source repository: https://github.com/ksenxx/kiss_ai
+- Website: https://kisssorcar.github.io/
+- Paper: "KISS Sorcar: A Stupidly-Simple General-Purpose and Software Engineering AI Assistant" (arXiv:2604.23822)
+- Differentiators vs Claude Code / Cursor: multi-vendor multi-model in a single task, AI discovery and GEPA prompt optimization via plain prompts, 23 messaging/third-party agents (Slack, Gmail, WhatsApp, SMS, phone control, …), git-worktree task isolation, dynamic model switching (`set_model`) and mid-run user steering, ~2850 LoC core agents, free framework (you pay only your model provider).
+
+## Docs
+
+- [Documentation index](https://kisssorcar.github.io/docs/index.md): Table of contents for all Markdown documentation
+- [Overview](https://kisssorcar.github.io/docs/overview.md): What KISS Sorcar is, the name, and a feature comparison vs Claude Code and Cursor
+- [Installation](https://kisssorcar.github.io/docs/installation.md): Install from source, pipx/uv, model API-key configuration, VS Code extension, Docker
+- [CLI reference](https://kisssorcar.github.io/docs/cli.md): `sorcar` interactive and non-interactive modes, all CLI options, interactive features, and the `sorcar mcp` subcommand
+- [Python API reference](https://kisssorcar.github.io/docs/api.md): KISSAgent, RelentlessAgent, SorcarAgent, ChatSorcarAgent, WorktreeSorcarAgent, and GitWorktreeOps
+- [Supported models](https://kisssorcar.github.io/docs/models.md): 530-model catalog across 9 provider categories with capability totals
+- [Messaging & third-party agents](https://kisssorcar.github.io/docs/messaging-agents.md): The 23 built-in messaging agents and the Govee smart-home CLI
+- [Sample tasks](https://kisssorcar.github.io/docs/sample-tasks.md): Ready-to-use example prompts, including AI discovery, optimization, and GEPA
+- [Prompt tricks](https://kisssorcar.github.io/docs/prompt-tricks.md): Reusable prompt snippets ("tricks") that boost result quality
+- [Tips](https://kisssorcar.github.io/docs/tips.md): Practical tips for getting the highest-quality work from KISS Sorcar
+
+## Papers
+
+- [KISS Sorcar main paper (PDF)](https://kisssorcar.github.io/assets/kiss_sorcar.pdf): Introduces KISS Sorcar and the KISS Agent Framework
+- [arXiv abstract](https://arxiv.org/abs/2604.23822): Canonical citation record for the main paper
+- [Software Engineering KISS Sorcar with KISS Sorcar (PDF)](https://kisssorcar.github.io/assets/se_kiss_sorcar.pdf): 44-day, 3,099-task case study of the system building itself
+- [Writing a Research Paper with an AI Agent (PDF)](https://kisssorcar.github.io/assets/writing_paper.pdf): Chronicle of KISS Sorcar writing its own paper
+
+## Source & Install
+
+- [GitHub repository](https://github.com/ksenxx/kiss_ai): Full source code, issues, and commit history
+- [README](https://raw.githubusercontent.com/ksenxx/kiss_ai/main/README.md): Canonical project README with the full model list
+- [API.md](https://raw.githubusercontent.com/ksenxx/kiss_ai/main/API.md): Auto-generated API reference in the source repo
+- [PyPI package](https://pypi.org/project/kiss-agent-framework/): `kiss-agent-framework` releases
+- [Model catalog JSON](https://raw.githubusercontent.com/ksenxx/kiss_ai/main/src/kiss/core/models/MODEL_INFO.json): Machine-readable source of truth for all 530 models with prices, context lengths, and capability flags
+
+## Optional
+
+- [Homepage as Markdown](https://kisssorcar.github.io/index.html.md): Plain-Markdown twin of the website homepage
+- [Full docs in one file](https://kisssorcar.github.io/llms-full.txt): All Markdown documentation concatenated for single-fetch ingestion
+- [SWEDefend paper (PDF)](https://kisssorcar.github.io/assets/swedefend.pdf): Related research artifact hosted on this site
+- [Cleverest+ paper (PDF)](https://kisssorcar.github.io/assets/cleverest_plus.pdf): Related research artifact hosted on this site
