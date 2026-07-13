@@ -1036,7 +1036,7 @@ def _ensure_downloaded_model(
         return model_dir
     models_dir.mkdir(parents=True, exist_ok=True)
     lock_path = models_dir / f".{model_name}.lock"
-    with open(lock_path, "w") as lock_file:
+    with open(lock_path, "w", encoding="utf-8") as lock_file:
         fcntl.flock(lock_file, fcntl.LOCK_EX)
         # Another process/thread may have completed the download while
         # we waited on the lock.

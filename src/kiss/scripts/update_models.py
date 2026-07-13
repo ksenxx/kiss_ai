@@ -1105,14 +1105,14 @@ def _read_model_info_json(path: Path) -> dict[str, dict]:
     """
     if not path.exists():  # pragma: no branch
         return {}
-    return json.loads(path.read_text())  # type: ignore[no-any-return]
+    return json.loads(path.read_text(encoding="utf-8"))  # type: ignore[no-any-return]
 
 
 def _write_model_info_json(path: Path, data: dict[str, dict]) -> None:
     """Write ``data`` to ``path`` as sorted, pretty-printed JSON."""
     sorted_data = dict(sorted(data.items()))
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(sorted_data, indent=2) + "\n")
+    path.write_text(json.dumps(sorted_data, indent=2) + "\n", encoding="utf-8")
 
 
 def apply_updates_to_file(
@@ -1261,7 +1261,7 @@ def sync_readme_catalog(readme_path: Path, model_info_path: Path) -> bool:
     substitutions, leaving the rest of the file untouched. Returns
     ``True`` when the file was modified.
     """
-    data: dict[str, dict[str, Any]] = json.loads(model_info_path.read_text())
+    data: dict[str, dict[str, Any]] = json.loads(model_info_path.read_text(encoding="utf-8"))
     counts: dict[str, int] = {}
     for name in data:
         category = _readme_provider_category(name)
@@ -1272,7 +1272,7 @@ def sync_readme_catalog(readme_path: Path, model_info_path: Path) -> bool:
     function_calling = sum(1 for entry in data.values() if entry.get("fc"))
     embedding = sum(1 for entry in data.values() if entry.get("emb"))
 
-    text = readme_path.read_text()
+    text = readme_path.read_text(encoding="utf-8")
     original = text
 
     text = re.sub(
@@ -1310,7 +1310,7 @@ def sync_readme_catalog(readme_path: Path, model_info_path: Path) -> bool:
 
     if text == original:
         return False
-    readme_path.write_text(text)
+    readme_path.write_text(text, encoding="utf-8")
     return True
 
 

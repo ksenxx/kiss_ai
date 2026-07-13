@@ -99,7 +99,7 @@ def _load_service(sa_path: str = "") -> Any:
             return build("chat", "v1", credentials=creds)
         if creds.expired and creds.refresh_token:  # pragma: no branch
             creds.refresh(Request())
-            token_file.write_text(creds.to_json())
+            token_file.write_text(creds.to_json(), encoding="utf-8")
             if sys.platform != "win32":  # pragma: no branch
                 token_file.chmod(0o600)
             return build("chat", "v1", credentials=creds)
@@ -134,7 +134,7 @@ def _run_oauth_flow() -> Any:
         creds = cast(Credentials, flow.run_local_server(port=0))
     token_file = _token_path()
     token_file.parent.mkdir(parents=True, exist_ok=True)
-    token_file.write_text(creds.to_json())
+    token_file.write_text(creds.to_json(), encoding="utf-8")
     if sys.platform != "win32":  # pragma: no branch
         token_file.chmod(0o600)
     return build("chat", "v1", credentials=creds)

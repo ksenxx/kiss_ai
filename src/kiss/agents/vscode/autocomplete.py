@@ -160,7 +160,7 @@ class _AutocompleteMixin:
             active_path = snapshot_file
             if active_path:
                 try:
-                    with open(active_path) as f:
+                    with open(active_path, encoding="utf-8") as f:
                         content = f.read(50000)
                 except (OSError, UnicodeDecodeError):
                     content = ""

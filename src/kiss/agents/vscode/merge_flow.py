@@ -189,7 +189,7 @@ class _MergeFlowMixin:
             True if a merge session was started, False otherwise.
         """
         try:
-            with open(merge_json_path) as f:
+            with open(merge_json_path, encoding="utf-8") as f:
                 merge_data = json.load(f)
             merge_data["work_dir"] = work_dir or self.work_dir
             files = merge_data.get("files", [])

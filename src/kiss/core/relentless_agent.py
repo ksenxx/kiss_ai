@@ -337,7 +337,7 @@ class RelentlessAgent(Base):
                     tmp_dir = Path(self.work_dir) / "tmp"
                     tmp_dir.mkdir(parents=True, exist_ok=True)
                     trajectory_path = tmp_dir / f"trajectory_{session}.json"
-                    trajectory_path.write_text(executor.get_trajectory())
+                    trajectory_path.write_text(executor.get_trajectory(), encoding="utf-8")
                     _stop_ev = getattr(self.printer, "stop_event", None) if self.printer else None
                     shell_tools = UsefulTools(stop_event=_stop_ev)
                     summarizer_budget = max(
