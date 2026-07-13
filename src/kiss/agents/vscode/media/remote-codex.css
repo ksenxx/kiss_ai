@@ -28,7 +28,7 @@ body.remote-chat {
   --surface2: #212121;
   --fg: #ececec;
   --dim: #afafaf;
-  --border: rgba(255, 255, 255, 0.1);
+  --border: rgb(255 255 255 / 10%);
   --input-bg: #212121;
 
   background: #0d0d0d;
@@ -45,8 +45,8 @@ body.remote-chat #tab-bar {
 body.remote-chat #tab-list { gap: 6px; }
 
 body.remote-chat #tab-bar .chat-tab {
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  border: 1px solid rgb(255 255 255 / 10%);
+  border-bottom: 1px solid rgb(255 255 255 / 10%);
   border-radius: 999px;
   padding: 5px 12px;
   background: transparent;
@@ -55,20 +55,20 @@ body.remote-chat #tab-bar .chat-tab {
 }
 
 body.remote-chat #tab-bar .chat-tab:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: rgb(255 255 255 / 8%);
   color: #ececec;
 }
 
 body.remote-chat #tab-bar .chat-tab.active {
   background: #212121;
-  border-color: rgba(255, 255, 255, 0.18);
+  border-color: rgb(255 255 255 / 18%);
   color: #ececec;
 }
 
 body.remote-chat #tab-bar .chat-tab-close { border-radius: 999px; }
 
 body.remote-chat #tab-bar .chat-tab-add {
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border: 1px solid rgb(255 255 255 / 10%);
   border-radius: 999px;
   color: #afafaf;
 }
@@ -103,14 +103,14 @@ body.remote-chat #task-panel {
 }
 
 body.remote-chat #task-panel-collapse-btn {
-  background: rgba(13, 13, 13, 0.07);
-  border-color: rgba(13, 13, 13, 0.15);
+  background: rgb(13 13 13 / 7%);
+  border-color: rgb(13 13 13 / 15%);
   color: #565656;
 }
 
 body.remote-chat #task-panel-collapse-btn:hover {
-  background: rgba(13, 13, 13, 0.12);
-  border-color: rgba(13, 13, 13, 0.25);
+  background: rgb(13 13 13 / 12%);
+  border-color: rgb(13 13 13 / 25%);
   color: #0d0d0d;
 }
 
@@ -121,12 +121,6 @@ body.remote-chat #task-panel-copy:hover { color: #0d0d0d; }
 body.remote-chat #output {
   background: #0d0d0d;
   padding: 16px 16px 24px;
-}
-
-body.remote-chat #output > *:not(#welcome) {
-  max-width: 768px;
-  margin-left: auto;
-  margin-right: auto;
 }
 
 body.remote-chat #welcome h2 { color: #ececec; }
@@ -143,7 +137,7 @@ body.remote-chat #input-container {
   background: #212121;
   border: 1px solid transparent;
   border-radius: 28px;
-  box-shadow: inset 0 0 1px rgba(255, 255, 255, 0.2);
+  box-shadow: inset 0 0 1px rgb(255 255 255 / 20%);
   padding: 10px 14px 8px;
   max-width: 768px;
   margin: 0 auto;
@@ -151,7 +145,7 @@ body.remote-chat #input-container {
 
 body.remote-chat #input-container:focus-within {
   border-color: transparent;
-  box-shadow: inset 0 0 1px rgba(255, 255, 255, 0.35);
+  box-shadow: inset 0 0 1px rgb(255 255 255 / 35%);
 }
 
 body.remote-chat #task-input {
@@ -190,20 +184,20 @@ body.remote-chat #menu-btn:hover:not(:disabled),
 body.remote-chat #upload-btn:hover:not(:disabled),
 body.remote-chat #tricks-btn:hover:not(:disabled),
 body.remote-chat #voice-btn:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.15);
+  background: rgb(255 255 255 / 15%);
   color: #ececec;
 }
 
 body.remote-chat #tricks-btn.active,
 body.remote-chat #voice-btn.active {
-  background: rgba(255, 255, 255, 0.15);
+  background: rgb(255 255 255 / 15%);
   color: #fff;
 }
 
 /* Model pill (Codex "5.6 Sol" style) */
 body.remote-chat #model-btn {
   background: transparent;
-  border: 1px solid rgba(255, 255, 255, 0.15);
+  border: 1px solid rgb(255 255 255 / 15%);
   border-radius: 999px;
   padding: 6px 12px;
   height: 32px;
@@ -211,8 +205,8 @@ body.remote-chat #model-btn {
 }
 
 body.remote-chat #model-btn:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.08);
-  border-color: rgba(255, 255, 255, 0.25);
+  background: rgb(255 255 255 / 8%);
+  border-color: rgb(255 255 255 / 25%);
   color: #ececec;
 }
 
@@ -233,7 +227,7 @@ body.remote-chat #send-btn:hover {
 }
 
 body.remote-chat #send-btn:disabled {
-  background: rgba(255, 255, 255, 0.25);
+  background: rgb(255 255 255 / 25%);
   color: #0d0d0d;
   opacity: 1;
 }
@@ -257,9 +251,9 @@ body.remote-chat #demo-pause-btn {
 /* Model dropdown → rounded popover card */
 body.remote-chat #model-dropdown {
   background: #212121;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border: 1px solid rgb(255 255 255 / 10%);
   border-radius: 16px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 50%);
   overflow: hidden;
 }
 
@@ -274,14 +268,14 @@ body.remote-chat .file-chip {
 /* Suggestion chips → pill cards */
 body.remote-chat .suggestion-chip {
   background: transparent;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  border: 1px solid rgb(255 255 255 / 12%);
   border-radius: 16px;
   color: #ececec;
 }
 
 body.remote-chat .suggestion-chip:hover {
-  background: rgba(255, 255, 255, 0.08);
-  border-color: rgba(255, 255, 255, 0.2);
+  background: rgb(255 255 255 / 8%);
+  border-color: rgb(255 255 255 / 20%);
   color: #ececec;
 }
 
@@ -290,12 +284,12 @@ body.remote-chat #sidebar,
 body.remote-chat #frequent-panel,
 body.remote-chat #tricks-panel {
   background: #171717;
-  border-right: 1px solid rgba(255, 255, 255, 0.08);
+  border-right: 1px solid rgb(255 255 255 / 8%);
 }
 
 body.remote-chat #settings-panel {
   background: #171717;
-  border-left: 1px solid rgba(255, 255, 255, 0.08);
+  border-left: 1px solid rgb(255 255 255 / 8%);
 }
 
 body.remote-chat .sidebar-hdr {
@@ -311,12 +305,12 @@ body.remote-chat .sidebar-item {
 }
 
 body.remote-chat .sidebar-item:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: rgb(255 255 255 / 8%);
 }
 
 body.remote-chat .search-wrap input {
   background: #212121;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border: 1px solid rgb(255 255 255 / 10%);
   border-radius: 999px;
   color: #ececec;
 }
@@ -331,7 +325,7 @@ body.remote-chat .config-label input[type="password"],
 body.remote-chat .config-label input[type="number"],
 body.remote-chat .config-label textarea {
   background: #212121;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border: 1px solid rgb(255 255 255 / 10%);
   border-radius: 10px;
   color: #ececec;
 }
@@ -346,9 +340,9 @@ body.remote-chat #ask-user-modal .modal-content,
 body.remote-chat #auth-modal .auth-modal-content,
 body.remote-chat .server-reset-confirm-content {
   background: #212121;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border: 1px solid rgb(255 255 255 / 10%);
   border-radius: 16px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 50%);
 }
 
 body.remote-chat .auth-modal-btn,
@@ -357,11 +351,146 @@ body.remote-chat .server-reset-confirm-btn {
 }
 
 /* ── Mobile polish ───────────────────────────────────── */
-@media (max-width: 600px) {
+@media (width <= 600px) {
   body.remote-chat #output { padding: 12px 12px 20px; }
 
   body.remote-chat #input-area {
     padding-left: 8px;
     padding-right: 8px;
+  }
+}
+
+/* ── Colorless chat panels (Codex thread) ────────────────
+ * The Codex desktop thread renders assistant/tool content in flat
+ * neutral panels: no orange tool headers, no green result cards, no
+ * purple/cyan prompt headers.  Error red is intentionally KEPT
+ * (main.css .tr.err / .rl.fail / .wt-result-err are not overridden)
+ * so failures still stand out. */
+body.remote-chat .tc {
+  border-color: rgb(255 255 255 / 10%);
+  background: #171717;
+}
+
+body.remote-chat .tc-h {
+  background: rgb(255 255 255 / 4%);
+  color: #afafaf;
+}
+
+body.remote-chat .tc-h.tc-h-bash {
+  background: rgb(255 255 255 / 4%);
+  color: #afafaf;
+}
+
+body.remote-chat .rc {
+  border: 1px solid rgb(255 255 255 / 10%);
+  background: #171717;
+}
+
+body.remote-chat .rc-h {
+  background: rgb(255 255 255 / 4%);
+}
+
+body.remote-chat .rc-h h3 {
+  color: #ececec;
+}
+
+body.remote-chat .system-prompt,
+body.remote-chat .prompt {
+  border-color: rgb(255 255 255 / 10%);
+  background: #171717;
+}
+
+body.remote-chat .system-prompt-h,
+body.remote-chat .prompt-h {
+  background: rgb(255 255 255 / 4%);
+  color: #afafaf;
+}
+
+body.remote-chat .think {
+  border-color: rgb(255 255 255 / 10%);
+  background: #171717;
+}
+
+body.remote-chat .think .lbl {
+  color: #afafaf;
+}
+
+body.remote-chat .llm-panel {
+  border-color: rgb(255 255 255 / 10%);
+  background: #171717;
+}
+
+body.remote-chat .tr {
+  background: #171717;
+  border-color: rgb(255 255 255 / 10%);
+}
+
+body.remote-chat .tr.note {
+  border-color: rgb(255 255 255 / 15%);
+}
+
+body.remote-chat .tr.note strong {
+  color: #ececec;
+}
+
+body.remote-chat .tr.warn {
+  background: #171717;
+  border-color: rgb(255 255 255 / 15%);
+}
+
+body.remote-chat .tr.warn strong {
+  color: #ececec;
+}
+
+body.remote-chat .merge-info {
+  border-color: rgb(255 255 255 / 10%);
+  background: #171717;
+}
+
+body.remote-chat .merge-info-hdr {
+  color: #ececec;
+}
+
+body.remote-chat .wt-result-ok {
+  color: #ececec;
+  border-left-color: rgb(255 255 255 / 30%);
+}
+
+body.remote-chat .bash-panel {
+  background: #171717;
+  border-color: rgb(255 255 255 / 10%);
+}
+
+/* ── Codex chat alignment ────────────────────────────────
+ * The pinned user prompt (#task-panel, OUTSIDE #output) is a
+ * right-aligned bubble (rule above); everything streamed into the
+ * #output thread — tool calls, results, thinking, text — hugs the
+ * LEFT edge of the 768px column like Codex's assistant lane.  This
+ * later rule overrides the centering rule above (same specificity,
+ * later in file wins). */
+body.remote-chat #output > *:not(#welcome) {
+  max-width: min(85%, 768px);
+  margin-left: 0;
+  margin-right: auto;
+}
+
+/* ── Desktop: dock the history sidebar on the left ───────
+ * body.remote-desktop is added by main.js only on the remote page
+ * when matchMedia('(min-width: 900px)') matches.  The sidebar keeps
+ * its position:fixed; left:0 from main.css and simply stops
+ * translating off-canvas; #app clears the docked 300px column. */
+@media (width >= 900px) {
+  body.remote-chat.remote-desktop #sidebar {
+    transform: none;
+    width: 300px;
+    border-right: 1px solid rgb(255 255 255 / 8%);
+  }
+
+  body.remote-chat.remote-desktop #sidebar-overlay {
+    display: none;
+  }
+
+  body.remote-chat.remote-desktop #app {
+    margin-left: 300px;
   }
 }

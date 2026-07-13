@@ -52,13 +52,19 @@ class TestAdjacentScrollWhileRunning(unittest.TestCase):
         )
 
     def test_scroll_lock_still_set_on_upward_scroll_while_running(self) -> None:
-        """The ``_scrollLock = true`` line for upward scroll while running
+        """The ``_scrollLock = true`` branch for upward scroll while running
         must still exist — it prevents auto-scroll-to-bottom from fighting
-        the user's manual scroll."""
-        self.assertIn(
-            "if (isRunning && e.deltaY < 0) _scrollLock = true;",
-            self.src,
-            "_scrollLock line for running + upward scroll is missing",
+        the user's manual scroll.  The guard was later widened to also
+        engage on dominant horizontal wheel gestures, so match the current
+        multi-line form instead of the original single-line form."""
+        pattern = re.compile(
+            r"if\s*\(\s*isRunning\s*&&\s*\(e\.deltaY < 0"
+            r".*?\)\s*\{\s*_scrollLock = true;",
+            re.DOTALL,
+        )
+        self.assertIsNotNone(
+            pattern.search(self.src),
+            "_scrollLock branch for running + upward scroll is missing",
         )
 
 

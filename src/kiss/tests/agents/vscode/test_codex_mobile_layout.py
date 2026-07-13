@@ -327,9 +327,9 @@ def test_codex_composer_card() -> None:
     css = _read_codex_css()
     assert "#212121" in css, "composer surface #212121 missing"
     assert "28px" in css, "28px composer radius missing"
-    assert re.search(r"inset 0 0 1px rgba\(255,\s*255,\s*255", css), (
-        "inset white edge shadow missing"
-    )
+    assert re.search(
+        r"inset 0 0 1px rgba?\(255[,\s]+255[,\s]+255", css
+    ), "inset white edge shadow missing"
 
 
 def test_codex_circular_composer_controls() -> None:
@@ -374,6 +374,147 @@ def test_codex_rounded_panels() -> None:
     assert "body.remote-chat #sidebar" in css
     assert "body.remote-chat #settings-panel" in css
     assert "#171717" in css, "drawer surface #171717 missing"
+
+
+# ── Desktop docked sidebar + colorless chat panels ──────────────────
+
+
+def _find_rule(css: str, selector: str) -> str:
+    """Return the declaration body of the first ``body.remote-chat``
+    scoped rule for *selector* in remote-codex.css, or fail."""
+    pattern = (
+        r"body\.remote-chat[^{,]*"
+        + re.escape(selector)
+        + r"\s*(?:,[^{]*)?\{([^}]*)\}"
+    )
+    m = re.search(pattern, css)
+    assert m, f"body.remote-chat scoped rule for {selector!r} missing"
+    return m.group(1)
+
+
+def test_desktop_media_query_docks_sidebar() -> None:
+    """A min-width:900px block docks the history sidebar on the left
+    (transform:none, fixed 300px column, overlay hidden, #app cleared)."""
+    css = _read_codex_css()
+    m = re.search(
+        r"@media \((?:min-width: 900px|width >= 900px)\)\s*\{(.*)\}\s*$",
+        css,
+        flags=re.S,
+    )
+    assert m, "@media (min-width: 900px) desktop block missing"
+    block = m.group(1)
+    sidebar = re.search(
+        r"body\.remote-chat\.remote-desktop #sidebar\s*\{([^}]*)\}", block
+    )
+    assert sidebar, "docked #sidebar rule missing from desktop block"
+    assert "transform: none" in sidebar.group(1)
+    assert "width: 300px" in sidebar.group(1)
+    overlay = re.search(
+        r"body\.remote-chat\.remote-desktop #sidebar-overlay\s*"
+        r"\{([^}]*)\}",
+        block,
+    )
+    assert overlay and "display: none" in overlay.group(1), (
+        "the dark overlay must be hidden while docked"
+    )
+    app = re.search(
+        r"body\.remote-chat\.remote-desktop #app\s*\{([^}]*)\}", block
+    )
+    assert app and "margin-left: 300px" in app.group(1), (
+        "#app must clear the 300px docked sidebar"
+    )
+
+
+DECOLORIZED_PANEL_SELECTORS = [
+    ".tc-h",
+    ".tc-h.tc-h-bash",
+    ".rc",
+    ".rc-h",
+    ".rc-h h3",
+    ".system-prompt-h",
+    ".prompt-h",
+    ".think",
+    ".think .lbl",
+    ".llm-panel",
+    ".tr",
+    ".tr.note strong",
+    ".tr.warn",
+    ".merge-info",
+    ".merge-info-hdr",
+    ".wt-result-ok",
+]
+
+
+@pytest.mark.parametrize("selector", DECOLORIZED_PANEL_SELECTORS)
+def test_chat_panel_decolorized(selector: str) -> None:
+    """Each colored chat panel gets a neutral remote override rule."""
+    _find_rule(_read_codex_css(), selector)
+
+
+def test_no_decorative_color_tokens_in_codex_css() -> None:
+    """remote-codex.css must stay neutral: none of main.css's
+    decorative color variables may appear (red stays in main.css for
+    errors and is intentionally NOT overridden here)."""
+    css = _read_codex_css()
+    for token in (
+        "var(--orange)",
+        "var(--purple)",
+        "var(--green)",
+        "var(--yellow)",
+        "var(--cyan)",
+        "var(--accent)",
+    ):
+        assert token not in css, f"decorative token {token} leaked in"
+
+
+def test_error_panels_keep_red() -> None:
+    """Error affordances stay red for usability: remote-codex.css must
+    NOT override .tr.err / .tr .rl.fail / .wt-result-err (comments are
+    stripped before scanning for selectors)."""
+    css = re.sub(r"/\*.*?\*/", "", _read_codex_css(), flags=re.S)
+    assert ".tr.err" not in css
+    assert ".rl.fail" not in css
+    assert ".wt-result-err" not in css
+
+
+def test_chat_panels_left_aligned() -> None:
+    """Non-task chat panels align LEFT (Codex assistant column) while
+    the pinned #task-panel keeps its right-aligned bubble."""
+    css = _read_codex_css()
+    left = re.search(
+        r"body\.remote-chat #output > \*:not\(#welcome\)\s*\{([^}]*)\}",
+        css,
+    )
+    assert left, "left-align rule for #output children missing"
+    rule = left.group(1)
+    assert "margin-left: 0" in rule
+    assert "margin-right: auto" in rule
+    assert "max-width" in rule
+    # The pinned user bubble stays right-aligned (outside #output).
+    task = re.search(r"body\.remote-chat #task-panel\s*\{([^}]*)\}", css)
+    assert task and "margin-left: auto" in task.group(1)
+
+
+def test_main_js_remote_desktop_wiring() -> None:
+    """main.js wires the desktop dock: remote-chat guard FIRST, then a
+    typeof-guarded matchMedia('(min-width: 900px)') listener that
+    toggles the remote-desktop body class."""
+    js = (MEDIA_DIR / "main.js").read_text(encoding="utf-8")
+    assert "remote-desktop" in js
+    assert "matchMedia" in js
+    assert "typeof window.matchMedia === 'function'" in js
+    assert "(min-width: 900px)" in js
+    guard = js.find(
+        "document.body.classList.contains('remote-chat') &&\n"
+    )
+    if guard == -1:
+        guard = js.find(
+            "document.body.classList.contains('remote-chat') &&"
+        )
+    mm = js.find("window.matchMedia('(min-width: 900px)')")
+    assert guard != -1 and mm != -1 and guard < mm, (
+        "the remote-chat guard must run before matchMedia is queried"
+    )
 
 
 # ── Live HTTP serving ────────────────────────────────────────────────
