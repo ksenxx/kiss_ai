@@ -133,24 +133,6 @@ function dispatch(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
-/** Answer every posted 'demoSpeak' with a synthesized clip. */
-function autoAnswerDemoSpeak(win) {
-  const prev = win._onPosted;
-  win._onPosted = msg => {
-    if (prev) prev(msg);
-    if (msg.type !== 'demoSpeak') return;
-    setTimeout(() => {
-      dispatch(win, {
-        type: 'demoSpeakAudio',
-        reqId: msg.reqId,
-        audioB64: 'QUJD',
-        audioMime: 'audio/mpeg',
-        tabId: msg.tabId,
-      });
-    }, 10);
-  };
-}
-
 function sleep(ms) {
   return new Promise(resolve => {
     setTimeout(resolve, ms);
@@ -327,7 +309,6 @@ async function testEndedNaturallyShowsOnlyPlayButton() {
   const {win} = makeWebview();
   installAudio(win);
   installSpeech(win);
-  autoAnswerDemoSpeak(win);
 
   await startDemoFlow(win);
   assert.strictEqual(win._demoApi.active, false, 'demo finished');
@@ -339,7 +320,6 @@ async function testStoppedShowsOnlyPlayButton() {
   const {win} = makeWebview();
   installAudio(win);
   installSpeech(win);
-  autoAnswerDemoSpeak(win);
 
   const done = startDemoFlow(win);
   await waitUntil(() => win._demoApi.active, 3000, 'demo to start');
@@ -354,7 +334,6 @@ async function testPlayButtonRestartsDemo() {
   const {win, posted} = makeWebview();
   installAudio(win);
   installSpeech(win);
-  autoAnswerDemoSpeak(win);
 
   await startDemoFlow(win);
   assertEndedUi(win, 'before restart');
@@ -427,7 +406,6 @@ async function testToggleOffFromEndedRestoresFullUi() {
   const {win, posted} = makeWebview();
   installAudio(win);
   installSpeech(win);
-  autoAnswerDemoSpeak(win);
 
   await startDemoFlow(win);
   assertEndedUi(win, 'before toggle off');
@@ -467,7 +445,6 @@ async function testSwitchingTabClearsEndedUi() {
   const {win} = makeWebview();
   installAudio(win);
   installSpeech(win);
-  autoAnswerDemoSpeak(win);
 
   await startDemoFlow(win);
   assertEndedUi(win, 'before tab switch');
@@ -498,7 +475,6 @@ async function testClosingDemoTabClearsEndedUi() {
   const {win, posted} = makeWebview();
   installAudio(win);
   installSpeech(win);
-  autoAnswerDemoSpeak(win);
 
   await startDemoFlow(win);
   assertEndedUi(win, 'before closing the demo tab');
@@ -538,7 +514,6 @@ async function testNewHistoryClickFromEndedStartsFreshDemo() {
   const {win} = makeWebview();
   installAudio(win);
   installSpeech(win);
-  autoAnswerDemoSpeak(win);
 
   await startDemoFlow(win);
   assertEndedUi(win, 'before second history click');

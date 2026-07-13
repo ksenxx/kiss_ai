@@ -23,6 +23,7 @@ Bugs covered:
 from __future__ import annotations
 
 import json
+import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -104,6 +105,13 @@ class _RecordingHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
         """Silence request logging."""
+
+
+def _free_port() -> int:
+    """Return an ephemeral free TCP port on localhost."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
 
 
 def _start_server() -> tuple[ThreadingHTTPServer, str]:
@@ -277,7 +285,11 @@ class TestWhatsAppWebhookVerification:
         self._cfg.restore()
 
     def _connect(self, verify_token: str | None) -> str:
-        cfg = {"access_token": "tok", "phone_number_id": "pnid"}
+        cfg = {
+            "access_token": "tok",
+            "phone_number_id": "pnid",
+            "webhook_port": str(_free_port()),
+        }
         if verify_token is not None:
             cfg["verify_token"] = verify_token
         _wa_config.save(cfg)

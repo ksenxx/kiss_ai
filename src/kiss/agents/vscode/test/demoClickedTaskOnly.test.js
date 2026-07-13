@@ -125,24 +125,6 @@ function dispatch(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
-/** Answer every posted 'demoSpeak' with a synthesized clip after 10ms. */
-function autoAnswerDemoSpeak(win) {
-  const prev = win._onPosted;
-  win._onPosted = msg => {
-    if (prev) prev(msg);
-    if (msg.type !== 'demoSpeak') return;
-    setTimeout(() => {
-      dispatch(win, {
-        type: 'demoSpeakAudio',
-        reqId: msg.reqId,
-        audioB64: 'QUJD',
-        audioMime: 'audio/mpeg',
-        tabId: msg.tabId,
-      });
-    }, 10);
-  };
-}
-
 function sleep(ms) {
   return new Promise(resolve => {
     setTimeout(resolve, ms);
@@ -253,7 +235,6 @@ async function testClickingMiddleTaskReplaysOnlyThatTask() {
   const {win} = makeWebview();
   installAudio(win);
   installSpeech(win);
-  autoAnswerDemoSpeak(win);
 
   const {resumes, done} = startDemoFlow(win, 'Task A2 middle');
   await done;
@@ -274,7 +255,6 @@ async function testClickingNewestTaskReplaysOnlyThatTask() {
   const {win} = makeWebview();
   installAudio(win);
   installSpeech(win);
-  autoAnswerDemoSpeak(win);
 
   const {resumes, done} = startDemoFlow(win, 'Task A3 newest');
   await done;
@@ -295,7 +275,6 @@ async function testClickingSubagentRowReplaysOnlyThatSubagentTask() {
   const {win} = makeWebview();
   installAudio(win);
   installSpeech(win);
-  autoAnswerDemoSpeak(win);
 
   const {resumes, done} = startDemoFlow(win, 'sub-agent task of chat B');
   await done;

@@ -907,10 +907,25 @@ def _get_db() -> sqlite3.Connection:
             pass
 
     _ensure_kiss_dir()
-    if not _DB_PATH.exists():
+    # Stale -wal/-shm cleanup for a deleted main database file.  Both
+    # the existence check and the unlink targets are derived from the
+    # ONE ``current_path`` snapshot taken above — never from a re-read
+    # of the ``_DB_PATH`` global.  Re-reading it here is a TOCTOU race:
+    # a test (or embedder) can redirect ``_DB_PATH`` to a scratch
+    # directory, delete that scratch database, and restore the original
+    # path at any moment.  With a re-read, this thread could observe
+    # "missing" for the SCRATCH file but compute the unlink targets
+    # from the freshly RESTORED path — deleting the live shared
+    # database's -wal/-shm side files out from under every open
+    # connection.  SQLite then fails all NEW connections to that
+    # database with a permanent ``disk I/O error`` for as long as any
+    # old connection keeps the unlinked -shm mapped.
+    if not os.path.exists(current_path):
         for suffix in ("-wal", "-shm"):
-            stale_file = _DB_PATH.with_name(_DB_PATH.name + suffix)
-            stale_file.unlink(missing_ok=True)
+            try:
+                os.unlink(current_path + suffix)
+            except OSError:
+                pass
     conn = sqlite3.connect(
         current_path,
         check_same_thread=False,
@@ -2207,6 +2222,75 @@ def _append_chat_event(
     # task; the flush makes the write synchronous.
     _queue_chat_event(event, resolved, origin_db_path)
     _flush_chat_events()
+
+
+def _amend_last_talk_tool_call_audio(
+    task_id: str, audio_b64: str, audio_mime: str,
+) -> bool:
+    """Attach a synthesized clip to the last persisted ``talk`` tool call.
+
+    The agentic loop persists a ``tool_call`` event for the ``talk``
+    tool BEFORE the tool executes, so the recorded event can never
+    carry the audio clip synthesized DURING execution.  Demo-mode
+    replay plays exactly ``extras.audioB64`` of that persisted event
+    (the synthesis fallback is gone), so without this amendment every
+    replayed ``talk`` narration would be silent.  Called by
+    :meth:`JsonPrinter.attach_talk_audio` right after synthesis
+    succeeds; finds the most recent ``talk`` ``tool_call`` event row
+    for *task_id* that does not yet carry audio and rewrites its
+    ``extras`` with the clip in place (an UPDATE — appending a second
+    copy would render the panel twice on replay).
+
+    Args:
+        task_id: Stable ``task_history`` row id the event was
+            persisted under.
+        audio_b64: Base64-encoded synthesized clip bytes.
+        audio_mime: The clip's MIME type (e.g. ``"audio/mpeg"``).
+
+    Returns:
+        ``True`` when a persisted event row was amended, ``False``
+        when no matching audio-less ``talk`` tool call exists.
+    """
+    if not task_id or not audio_b64:
+        return False
+    # The talk tool_call event reaches the events table through the
+    # asynchronous background writer; flush so the row we must amend
+    # is guaranteed to be visible (and so the UPDATE cannot be
+    # overtaken by its own INSERT).
+    _flush_chat_events()
+    with _rw_lock.write_lock():
+        db = _get_db()
+        rows = db.execute(
+            "SELECT id, event_json FROM events "
+            "WHERE task_id = ? AND event_json LIKE '%\"tool_call\"%' "
+            "AND event_json LIKE '%\"talk\"%' "
+            "ORDER BY seq DESC",
+            (task_id,),
+        ).fetchall()
+        for row in rows:
+            try:
+                event = json.loads(row["event_json"])
+            except (TypeError, ValueError):
+                continue
+            if event.get("type") != "tool_call" or event.get("name") != "talk":
+                continue
+            extras = event.get("extras")
+            if not isinstance(extras, dict):
+                extras = {}
+                event["extras"] = extras
+            if extras.get("audioB64"):
+                # Already amended (e.g. a retried synthesis); the most
+                # recent audio-less call is the one being spoken now.
+                continue
+            extras["audioB64"] = audio_b64
+            extras["audioMime"] = audio_mime
+            db.execute(
+                "UPDATE events SET event_json = ? WHERE id = ?",
+                (json.dumps(event), row["id"]),
+            )
+            db.commit()
+            return True
+    return False
 
 
 def _task_has_events(task_id: str) -> bool:
