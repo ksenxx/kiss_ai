@@ -329,6 +329,31 @@ class TestQuery:
         out = built.query("run stop")
         assert "--calls [EXTRACTED]-->" in out
 
+    def test_query_exact_label_outranks_longer_substring(self) -> None:
+        nodes = {
+            "exact": {
+                "id": "exact", "label": "UsefulTools", "kind": "class",
+                "file": "useful_tools.py", "line": 10,
+            },
+            "test-a": {
+                "id": "test-a", "label": "TestUsefulTools", "kind": "class",
+                "file": "test_a.py", "line": 10,
+            },
+            "test-b": {
+                "id": "test-b", "label": "TestUsefulToolsBranches", "kind": "class",
+                "file": "test_b.py", "line": 10,
+            },
+            "test-c": {
+                "id": "test-c", "label": "AnotherUsefulToolsTest", "kind": "class",
+                "file": "test_c.py", "line": 10,
+            },
+        }
+        graph = CodeGraph(nodes, [])
+
+        out = graph.query("UsefulTools")
+
+        assert out.splitlines()[0].startswith("NODE UsefulTools ")
+
     def test_query_no_match(self, built: CodeGraph) -> None:
         out = built.query("zzz_nonexistent_qqq")
         assert "No matching nodes" in out
@@ -336,6 +361,50 @@ class TestQuery:
     def test_query_token_budget(self, built: CodeGraph) -> None:
         out = built.query("Application", max_chars=200)
         assert len(out) <= 260  # budget + truncation notice
+
+    def test_query_budget_prioritizes_seed_and_nearest_neighbors(self) -> None:
+        nodes = {
+            "target": {
+                "id": "target", "label": "target_fn", "kind": "function",
+                "file": "target.py", "line": 10,
+            },
+            "caller": {
+                "id": "caller", "label": "Caller", "kind": "function",
+                "file": "caller.py", "line": 5,
+            },
+            "hub": {
+                "id": "hub", "label": "target.py", "kind": "file",
+                "file": "target.py", "line": 1,
+            },
+        }
+        edges = [
+            {"source": "caller", "target": "target", "relation": "calls",
+             "confidence": "EXTRACTED"},
+            {"source": "hub", "target": "target", "relation": "defines",
+             "confidence": "EXTRACTED"},
+        ]
+        # A file hub can connect the seed to hundreds of alphabetically earlier
+        # nodes.  Under a tight hint budget, those distant nodes must never
+        # displace the exact seed or its direct caller.
+        for index in range(30):
+            node_id = f"other-{index}"
+            nodes[node_id] = {
+                "id": node_id, "label": f"aaa_{index:02d}", "kind": "function",
+                "file": "target.py", "line": 20 + index,
+            }
+            edges.append(
+                {"source": "hub", "target": node_id, "relation": "defines",
+                 "confidence": "EXTRACTED"}
+            )
+        graph = CodeGraph(nodes, edges)
+
+        out = graph.query("target_fn", max_chars=260)
+
+        assert out.splitlines()[0].startswith("NODE target_fn ")
+        assert "NODE Caller " in out
+        assert "EDGE Caller --calls [EXTRACTED]--> target_fn" in out
+        first_distant = out.find("NODE aaa_")
+        assert first_distant == -1 or out.index("NODE Caller ") < first_distant
 
     def test_path_between_nodes(self, built: CodeGraph) -> None:
         out = built.path("entry_point", "shared_calc")
@@ -431,6 +500,19 @@ class TestGrepHint:
         # The expensive grep is denied: the interception response is the
         # answer, matching graphify's one-model-call hook pattern.
         assert "class Application" not in out
+
+    def test_repeated_identifier_grep_falls_through_for_verification(
+        self, project: Path, built: CodeGraph
+    ) -> None:
+        tools = UsefulTools(work_dir=str(project))
+        command = "grep -n 'Application' main.py"
+
+        first = tools.Bash(command, "initial graph lookup")
+        second = tools.Bash(command, "verify with grep")
+
+        assert "[code_graph]" in first
+        assert "[code_graph]" not in second
+        assert "class Application" in second
 
     def test_bash_tool_no_hint_for_other_commands(
         self, project: Path, built: CodeGraph
@@ -746,6 +828,10 @@ class TestAgentTool:
         assert "[code_graph]" in out
         assert "NODE Application" in out
         assert "docker-result" not in out
+
+        verification = bash("rg Application .", "verify")
+        assert "[code_graph]" not in verification
+        assert "docker-result:rg Application .:verify" == verification
 
 # ---------------------------------------------------------------------------
 # Independent review regressions (gpt-5.6-sol)

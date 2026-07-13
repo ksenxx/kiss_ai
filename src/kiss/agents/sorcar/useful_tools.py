@@ -486,6 +486,11 @@ class UsefulTools:
         self.stream_callback = stream_callback
         self.stop_event = stop_event
         self.work_dir = work_dir
+        # A graph answer replaces the first grep for an identifier.  If the
+        # agent asks again, it is explicitly seeking verification or context
+        # the graph did not provide, so let the real command run rather than
+        # trapping it in a repeated deny-message loop.
+        self._code_graph_hints_seen: set[str] = set()
 
     def _spawn(self, command: str) -> subprocess.Popen:
         """Launch *command* with the shared Popen configuration.
@@ -889,7 +894,8 @@ class UsefulTools:
             hint = grep_hint(command, self.work_dir) or ""
         except Exception:
             logger.debug("code_graph grep hint failed", exc_info=True)
-        if hint:
+        if hint and hint not in self._code_graph_hints_seen:
+            self._code_graph_hints_seen.add(hint)
             return hint
 
         if self.stream_callback:
