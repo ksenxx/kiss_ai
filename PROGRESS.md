@@ -1,4 +1,44 @@
-# PROGRESS — Audit third-party agent dirs for KISS_HOME test isolation (current task)
+# PROGRESS — Resolve stranded-branch merge conflict (kiss/wt-1783911737-192f8ce6) (current task)
+
+## Task
+
+The framework's auto-merge of worktree branch `kiss/wt-1783911737-192f8ce6`
+(which carried commit c8bd1176, the gmail/googlechat KISS_HOME isolation
+fixes) reported "Merge conflict detected. Resolve manually" with cherry-pick
+instructions. Resolve it and land the branch.
+
+## What was done
+
+1. Investigated: the stranded branch held exactly one commit (c8bd1176) on
+   top of dc59fed9; main had advanced to 886d06b1 (Episode 1 marketing
+   artifacts). Both sides edited `PROGRESS.md`. `git merge-tree --write-tree`
+   showed the merge is now clean (the original conflict came from the
+   framework's cherry-pick path against a dirty/stashed main).
+1. Merged the branch into the current worktree branch (based on main):
+   merge commit 984137bf — brought in c8bd1176 (gmail/googlechat/\_channel
+   work_dir KISS_HOME fixes + `test_gmail_gchat_isolation.py` + website
+   mdformat fixes) with zero conflicts.
+1. Post-merge review of `PROGRESS.md` showed the merged branch's version
+   (written before the Episode 1 task) had dropped the Episode 1 section
+   that main added; restored it verbatim (commit 2834c7f1) and mdformatted.
+1. `uv run check --full` initially failed on 6 pre-existing unformatted
+   marketing markdown files from main's 886d06b1; mdformatted them
+   (commit 049df754). Full check now passes.
+1. Verified merged-in tests: `test_gmail_gchat_isolation.py`,
+   `test_gmail_agent.py`, `test_tlon_config_isolation.py` — 39 passed.
+1. Verified both auto-stashes (`kiss: auto-stash before merge`) contain no
+   unique content: every blob in stash@{0} matches either HEAD or the
+   pre-merge commits (its PROGRESS.md/api.md/index.html.md copies are the
+   older dc59fed9 versions). The user's uncommitted changes were the same
+   c8bd1176 content that is now merged. Stashes left in place for the user
+   to drop (`git stash drop`) after confirming.
+1. Advised: the stranded branch `kiss/wt-1783911737-192f8ce6` can now be
+   deleted (`git branch -D kiss/wt-1783911737-192f8ce6`) since its commit
+   is contained in the merge.
+
+______________________________________________________________________
+
+# PROGRESS — Audit third-party agent dirs for KISS_HOME test isolation (previous task)
 
 ## Task
 
