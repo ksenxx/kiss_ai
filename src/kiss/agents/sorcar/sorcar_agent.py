@@ -461,6 +461,7 @@ class SorcarAgent(RelentlessAgent):
             from kiss.docker.docker_tools import DockerTools
 
             docker_tools = DockerTools(self._docker_bash)
+            code_graph_hints_seen: set[str] = set()
 
             def Bash(command: str, description: str) -> str:  # noqa: N802
                 """Run a command in Docker, preferring a code-graph answer."""
@@ -471,7 +472,8 @@ class SorcarAgent(RelentlessAgent):
                     hint = grep_hint(command, self.work_dir) or ""
                 except Exception:
                     logger.debug("code_graph Docker grep hint failed", exc_info=True)
-                if hint:
+                if hint and hint not in code_graph_hints_seen:
+                    code_graph_hints_seen.add(hint)
                     return hint
                 return self._docker_bash(command, description)
 

@@ -1,116 +1,100 @@
-# PROGRESS — Remote webapp DESKTOP: docked history sidebar + colorless Codex-style chat panels — Sessions 7–12 (current task)
+# PROGRESS — Local tree-sitter `code_graph` tool — Sessions 1–4 (current task)
 
-## Task (desktop feature)
+## Task
 
-In the remote webapp (served by `RemoteAccessServer`) for desktop-wide
-browser windows: (1) show the agent history panel (the `#sidebar`
-burger-menu drawer) persistently docked on the LEFT side of the
-window; (2) remove per-panel colors in the main chat webview
-(`#output`) and lay chats out Codex-style — the fixed task panel
-(`#task-panel`, pinned user prompt) as a right-aligned chat bubble and
-all remaining panels (tool calls, results, prompts, thinking, text,
-sys, bash/llm panels) left-aligned and neutrally colored. Tests first;
-claude-fable-5 for development; gpt-5.6-sol for independent review;
-full-suite 8-way parallel run with failure classification; live
-validation by running a real task through the webapp.
+Implement Graphify-inspired features #1, #3, and #5 in KISS Sorcar with minimal
+coupling: a per-worktree tree-sitter knowledge graph, the “deny message is the
+answer” query-before-grep pattern, and SHA256-incremental Git-hook freshness.
+Write end-to-end tests first with 100% branch coverage; use `claude-fable-5` for
+development and `gpt-5.6-sol` for an independent review/debug pass.
 
-## What was done (desktop feature, commit e988326c + follow-up)
+## What was done
 
-1. **Web research (10/10 sources)** on ChatGPT/Codex desktop layout:
-   sidebar docked left at ~260–300px, `min-width: 900px` breakpoint,
-   only the user message is a (right, light `#ececec`) bubble while
-   assistant content is flat/left, `matchMedia` +
-   `addEventListener('change')` + initial call is the standard
-   responsive-JS pattern, jsdom needs a `window.matchMedia` stub
-   installed before script eval.
+1. Researched 10 current primary/technical sources: Graphify README,
+   `ARCHITECTURE.md`, and `SKILL.md`; tree-sitter and
+   tree-sitter-language-pack documentation/package pages; Aider’s repository-map
+   implementation; Claude Code’s `PreToolUse` hook contract; and Git’s
+   `post-commit` hook documentation. The resulting design follows Graphify’s
+   top-three seed / three-hop BFS query, confidence-tagged edges, SHA256 cache,
+   and detached post-commit update patterns.
 
-1. **TDD tests first**:
+1. Added `tree-sitter>=0.24.0` and
+   `tree-sitter-language-pack>=1.10.0` to `pyproject.toml` and refreshed
+   `uv.lock`. Parser acquisition is optional and failure-safe, so an unavailable
+   grammar cannot break Sorcar startup or graph builds.
 
-   - NEW `src/kiss/agents/vscode/test/remoteDesktopSidebar.test.js` —
-     10 jsdom e2e tests running the real `chat.html` + `panelCopy.js` +
-     `main.js` with a controllable `matchMedia('(min-width: 900px)')`
-     stub: desktop load docks (body gets `remote-desktop`, sidebar gets
-     `open`, `getHistory` posted, overlay hidden); mobile load stays
-     closed; live resize docks/undocks; non-remote body isolation;
-     missing `matchMedia` no-crash; Escape/overlay-click/history-row
-     click do NOT undock; burger toggles hide/show (re-fetching
-     history, no overlay); sidebar-close hides; mobile drawer semantics
-     unchanged. Registered in the `package.json` test chain.
-   - EXTENDED `src/kiss/tests/agents/vscode/test_codex_mobile_layout.py`
-     to 37 tests: desktop `@media (width >= 900px)` dock rules
-     (`#sidebar` transform none / 300px, `#sidebar-overlay` hidden,
-     `#app` margin-left 300px), 16 parametrized de-colorized panel
-     selectors (`.tc-h`, `.rc`, `.rc-h h3`, `.system-prompt-h`,
-     `.prompt-h`, `.think`, `.llm-panel`, `.tr`, `.merge-info`,
-     `.wt-result-ok`, …), no decorative color tokens
-     (`var(--orange/purple/green/yellow/cyan/accent)`) anywhere in
-     `remote-codex.css`, error panels intentionally keep red
-     (`.tr.err`/`.rl.fail`/`.wt-result-err` not overridden),
-     left-alignment rule for `#output` children while `#task-panel`
-     keeps `margin-left: auto`, and `main.js` wiring (the
-     `remote-chat` body-class guard positioned before the `matchMedia`
-     query).
+1. Wrote the end-to-end feature suite first in
+   `src/kiss/tests/agents/sorcar/test_code_graph.py`. It builds real Python,
+   JavaScript, TypeScript/TSX, Go, Rust, Java, Ruby, C, and C++ fixture projects;
+   executes real Git commits/hooks and real Bash commands; verifies persistence,
+   incremental add/change/delete behavior, graph query/path/explain formats,
+   local/streaming/Docker interception, CLI behavior, and graceful failure paths.
 
-1. **Implementation** (all scoped `body.remote-chat`; VS Code webview
-   provably unaffected):
+1. Implemented the standalone
+   `src/kiss/agents/sorcar/code_graph.py` with only stdlib plus the optional
+   tree-sitter language pack. Each worktree stores versioned, atomically-written
+   state in `.kiss/code_graph/{graph.json,cache.json}` and adds that generated
+   directory to Git’s local exclude file. Nodes represent files, modules,
+   classes, interfaces, structs, traits, functions, and methods. Edges represent
+   `defines`, `contains`, `imports`, and `calls`, tagged `EXTRACTED` for direct
+   same-file/source relationships or `INFERRED` for unique cross-file call
+   resolution; ambiguous relationships are omitted rather than invented.
 
-   - `media/remote-codex.css`: removed the old both-margins centering
-     rule; appended a de-colorize section (panels → `#171717`
-     background, `rgb(255 255 255 / 4–15%)` headers/borders,
-     `#afafaf`/`#ececec` text; red error styles untouched); left-align
-     rule `body.remote-chat #output > *:not(#welcome) { max-width: min(85%, 768px); margin-left: 0; margin-right: auto; }`; desktop
-     dock block `@media (width >= 900px)` — `#sidebar` transform none
-     - 300px + border-right, `#sidebar-overlay` display none, `#app`
-       margin-left 300px. File passes stylelint with 0 errors.
-   - `media/main.js`: `closeSidebar(force)` keeps the sidebar docked on
-     `body.remote-desktop` unless forced (menu-btn toggle and
-     sidebar-close button force; Escape/overlay/history clicks don't);
-     `toggleHistorySidebar` skips the dark overlay when docked; new
-     guarded block `if (document.body.classList.contains('remote-chat') && typeof window.matchMedia === 'function')` creates the 900px
-     media query, and `applyRemoteDesktop()` adds/removes the
-     `remote-desktop` body class, opens the sidebar +
-     `resetHistoryPagination()` + posts `getHistory` on dock, closes on
-     undock; `addEventListener('change')` with `addListener` fallback +
-     initial call.
+1. Implemented graph operations:
 
-1. **gpt-5.6-sol review (two passes)**: verified guard ordering
-   (`remote-chat` checked before `matchMedia`), IIFE scope of all
-   referenced symbols, `refreshHistory` gating on `open` still works
-   while docked, z-indices of fixed overlays vs docked sidebar,
-   mobile drawer semantics unchanged, VS Code webview double-isolated
-   (CSS scoping + JS body-class guard), left-align rule ordered after
-   the removed centering rule, error-red panels intentionally
-   preserved. No missed wirings or bugs found on the second pass.
+   - `query(question)`: term-ranked top-three seeds and a deterministic
+     three-hop BFS rendered as compact `NODE`/`EDGE` lines under a character
+     budget.
+   - `path(a, b)`: shortest undirected connection while preserving each stored
+     edge’s direction, relation, and confidence.
+   - `explain(name)`: source location, kind, degree, and directional neighbors.
+   - Agent actions: `build`, `query`, `path`, `explain`, `install_hook`, and
+     `uninstall_hook`; querying auto-builds when no graph exists.
 
-1. **Live validation**: launched a real `RemoteAccessServer`
-   (self-signed TLS), opened it in a desktop-width Chromium window, and
-   ran the task "Say just the word: hello" to completion (Done, 6s, 1
-   step). Screenshots confirmed: history sidebar docked persistently on
-   the left (~300px, populated), no dark overlay; the pinned task
-   rendered as a right-aligned light `#ececec` bubble; all streamed
-   panels (SYSTEM PROMPT, PROMPT, FINISH, Result, SUGGESTED NEXT)
-   left-aligned and neutral `#171717` (no orange/green/cyan/purple
-   headers); sidebar stayed docked throughout the run.
+1. Kept production coupling to two guarded seams: `SorcarAgent._get_tools()`
+   lazily adds `make_code_graph_tool(...)`, and local plus Docker Bash wrappers
+   lazily consult `grep_hint(...)`. An exact graph identifier hit returns the
+   inline graph answer without spawning `grep`/`rg`:
 
-1. **Full suite 8-way parallel run** (6159 tests split round-robin into
-   8 × ~770 via `run_parallel`, plus the ~100-file JS suite as a ninth
-   task): splits 1/2/5/6/7 fully green. Split 0 had one real failure —
-   `test_adjacent_scroll_while_running.py::test_scroll_lock_still_set_on_upward_scroll_while_running`
-   — classified as a STALE TEST (asserted the exact old single-line
-   `_scrollLock` guard string; commit 487400a9 had legitimately widened
-   the guard to also preserve horizontal scrolling); fixed the test
-   with a `re.DOTALL` regex matching the current multi-line form (2/2
-   green). Split 3 (`test_install_sh_outer_trap_survives_sigint`),
-   split 4 (3 PTY/signal/timing tests), and one JS real-microphone
-   voice test were environment flakes under detached parallel shells —
-   all pass standalone/foreground. Net: 0 project bugs.
+   ```python
+   hint = grep_hint(command, self.work_dir) or ""
+   if hint:
+       return hint  # “the deny message IS the answer”
+   ```
 
-1. **`uv run check --full` GREEN** (ruff, pyright, VS Code
-   typecheck + lint, mdformat) after an mdformat reflow of this file.
+   Literal text and regex searches that the graph cannot answer continue to the
+   real command. This exact-label guard fixed a review-discovered false positive
+   where prose containing `app` incorrectly matched the `Application` node and
+   suppressed a legitimate grep.
+
+1. Implemented idempotent post-commit hook install/uninstall without overwriting
+   existing shell hooks. The hook runs a fully detached incremental update via
+   the current Python executable. A PID lock deduplicates concurrent hook jobs
+   and reclaims dead/stale locks; a full worktree hash pass avoids unsafe shell
+   expansion, including filenames containing spaces/newlines, while reparsing
+   only changed files.
+
+1. The `gpt-5.6-sol` independent review added regression tests that exposed and
+   fixed: duplicate method-label scope collapse, incorrect reverse-path arrows,
+   empty self-paths, two-hop instead of three-hop queries, dropped recursive
+   calls, missing `grep -e`/`--regexp` parsing, whitespace-unsafe hook arguments,
+   non-shell/corrupt hook handling, generated graph artifacts in Git status, a
+   missed Docker Bash seam, stale cache-schema reuse, and non-atomic persistence.
+   Definition/caller records now use stable per-file integer identities and
+   lexical-scope resolution, and persisted state carries a cache schema version.
+
+1. Final verification:
+
+   - `103 passed`; `code_graph.py`: **628 statements, 250 branches, 100% branch
+     coverage**.
+   - Impacted Bash/Sorcar regressions: **83 passed, 2 deselected**.
+   - `uv run check --full`: dependency sync, API generation, compileall, Ruff,
+     mypy, Pyright, and Markdown formatting all passed (0 errors/warnings from
+     static analysis).
 
 ______________________________________________________________________
 
-# PROGRESS — Codex-mobile remote webapp restyle — Sessions 4–6 (previous task)
+# PROGRESS — Codex-mobile remote webapp restyle — Sessions 4–6
 
 ## Task
 
@@ -978,68 +962,127 @@ Independent review conducted on gpt-5.6-sol (via `set_model`):
 
 No missed wirings or introduced bugs found.
 
-## Session (Continuation 5): Desktop docked sidebar + colorless Codex chat layout — IMPLEMENTED
+______________________________________________________________________
 
-### Tests first (claude-fable-5)
+# PROGRESS — Long-running `code_graph` cost/speed/accuracy benchmark
 
-- NEW `src/kiss/agents/vscode/test/remoteDesktopSidebar.test.js` — 10 jsdom e2e tests
-  running real chat.html + panelCopy.js + main.js with a controllable
-  `window.matchMedia('(min-width: 900px)')` stub installed BEFORE main.js eval:
-  desktop load docks sidebar ('remote-desktop' body class, sidebar 'open',
-  getHistory posted, overlay hidden); mobile load stays closed; live resize
-  docks/undocks; VS Code webview isolation (no remote-chat class ⇒ no-op);
-  missing matchMedia ⇒ no crash; Escape/overlay/history-click do NOT undock;
-  burger + sidebar-close explicitly toggle (re-open re-fetches history);
-  mobile drawer regressions guarded (history-click / Escape still close).
-  Registered at end of package.json "test" chain.
-- EXTENDED `src/kiss/tests/agents/vscode/test_codex_mobile_layout.py` (37 tests):
-  desktop @media block assertions (transform:none, width 300px, overlay
-  display:none, #app margin-left 300px), 16 parametrized de-colorize rule
-  checks, no decorative color tokens (orange/purple/green/yellow/cyan/accent),
-  error red intentionally NOT overridden, left-align rule for #output children
-  - #task-panel stays margin-left:auto, main.js wiring guard order test.
+## Task
 
-### Implementation
+Evaluate the new Graphify-inspired `code_graph` feature against the previous
+Sorcar behavior on a large project. Measure cost, speed, and accuracy; research
+modern agent-evaluation methodology extensively; use `claude-fable-5` for the
+benchmark/development work and `gpt-5.6-sol` for an independent review that
+checks the harness, production wiring, trajectories, and implementation bugs.
 
-- `media/remote-codex.css`: removed old centering rule; appended de-colorize
-  section (.tc/.tc-h/.tc-h-bash/.rc/.rc-h/.rc-h h3/.system-prompt(-h)/
-  .prompt(-h)/.think/.think .lbl/.llm-panel/.tr/.tr.note/.tr.warn/.merge-info/
-  .merge-info-hdr/.wt-result-ok/.bash-panel → #171717 / rgb(255 255 255/4-15%)
-  neutrals; red error styles untouched); left-align rule
-  `body.remote-chat #output > *:not(#welcome) {max-width:min(85%,768px); margin-left:0; margin-right:auto}` (task-panel right bubble is outside
-  #output, unaffected); desktop dock block `@media (width >= 900px)` for
-  `body.remote-chat.remote-desktop` (#sidebar transform:none width:300px,
-  #sidebar-overlay display:none, #app margin-left:300px). stylelint --fix
-  normalized color notation; file passes stylelint clean.
-- `media/main.js`: guarded desktop wiring after sidebar listeners —
-  `if (body.remote-chat && typeof window.matchMedia === 'function')` →
-  mq('(min-width: 900px)'), applyRemoteDesktop() toggles 'remote-desktop'
-  class, opens sidebar + posts getHistory on dock, closes on undock;
-  addEventListener('change') with addListener fallback. closeSidebar(force):
-  no-op (overlay only) on remote-desktop unless force=true;
-  toggleHistorySidebar passes force=true and skips overlay on desktop;
-  sidebarClose passes force=true. Escape/overlay/history-click keep no-force.
+## Method
 
-### Review (gpt-5.6-sol)
+1. Researched 10 current sources before designing the evaluation: Anthropic's
+   agent-eval and tool-design guidance, Databricks' multi-million-line codebase
+   benchmark, SWE-bench, CodexGraph, Graphify's README/architecture, Mem0's
+   memory evaluation, and deterministic gold-fact grading references. Applied
+   their core recommendations: same harness in both arms, sealed Git history,
+   isolated environments, deterministic grading rather than an LLM judge,
+   retained trajectories, cost/tokens/latency reported together, and repeated
+   trials.
 
-Audited full diff: wiring order (remote-chat guard before matchMedia), scope
-availability (sidebar/historySearch/historyGeneration all in same IIFE),
-refreshHistory gating works while docked (sidebar keeps 'open'),
-mobile paths unchanged, VS Code webview isolation double-guarded (CSS scoping
+1. Created a controlled feature ablation over two isolated 222 MB copies of the
+   KISS repository. Both copies excluded `.git`, `.kiss`, `.venv`, `tmp`,
+   `node_modules`, caches, and benchmark output. Baseline used the real
+   `UsefulTools.Bash`/`Read` path with no graph; treatment used those same tools
+   plus the production `code_graph` tool and a prebuilt graph. The graph had
+   18,008 nodes and 47,480 edges from 1,036 source files and took 2.17 seconds
+   and $0 of LLM spend to build.
 
-- JS body-class), package.json single "test" key updated + JSON valid,
-  error-red retention verified, no missed call sites of closeSidebar
-  (6722/7155/8211/8262 keep drawer semantics on mobile only).
+1. Added `benchmarks/code_graph_eval/`:
 
-### Verification
+   - `tasks.json`: 14 deterministic code-comprehension tasks (11 structure and
+     3 general) with reviewed gold-fact checklists.
+   - `runner.py`: reproducible corpus preparation, arm/trial selection,
+     resumable incremental results, real `KISSAgent` execution using
+     `claude-fable-5`, full trajectories, wall time, steps, tokens, model cost,
+     graph interception/call counters, and arm-purity assertions.
+   - `analyze.py`: matrix completeness, duplicate/missing-cell, grade, error,
+     and baseline-contamination audits; aggregate statistics; and 50,000-sample
+     deterministic task-cluster bootstrap intervals.
+   - `results.json`, `transcripts/`, `metadata.json`, and `RESULTS.md`: the 84
+     final runs, all raw trajectories, setup metadata, and full report.
+   - `results_pre_review.json`/`transcripts_pre_review/` and
+     `results_query_fix.json`/`transcripts_query_fix/`: archived diagnostic
+     stages so the original regression and review fixes remain reproducible.
 
-- node remoteDesktopSidebar/adjacentTaskScroll/historyBurgerMenuRunningTask/
-  sideScrollWhileRunning/bashHeaderCyan/voiceWakeSidebarVisibility/
-  historyClickSwitchExistingChat/promptPanelEarlyReplace — ALL PASS.
-- uv run pytest test_codex_mobile_layout.py: 37 passed.
-- npm run lint (eslint+stylelint+htmlhint): PASS (baseline errors fixed by
-  stylelint --fix in remote-codex.css only).
-- LIVE validation: launched RemoteAccessServer on 127.0.0.1:8471 (TLS,
-  self-signed), authenticated in Chromium desktop window; screenshot confirms
-  history panel docked persistently on the LEFT (300px), overlay absent,
-  composer/chat column cleared to the right.
+1. Ran 14 tasks × 2 arms × 3 trials (84 final independent agent runs). The
+   final matrix cost $5.4448175. All 42 baseline trajectories had zero graph
+   hints; treatment generated 25 grep interceptions and no explicit graph-tool
+   calls. Both arms had zero run errors and 100% deterministic gold-fact
+   coverage.
+
+## Results
+
+Per task-trial mean:
+
+| Metric | Baseline | `code_graph` | Treatment delta |
+|---|---:|---:|---:|
+| Gold-fact accuracy | 100.0% | 100.0% | tie / ceiling |
+| Tokens | 6,413 | 7,188 | +12.1% |
+| Model cost | $0.06428 | $0.06536 | +1.7% |
+| Wall time | 18.81 s | 20.84 s | +10.8% |
+| Agent steps | 3.05 | 3.24 | +6.3% |
+
+Task-cluster bootstrap 95% intervals all crossed zero: tokens −4.9% to +33.5%,
+cost −8.9% to +13.6%, time −5.9% to +33.6%, and steps −7.5% to +24.5%.
+Therefore this workload **does not verify an overall improvement** and also
+does not establish a statistically stable regression. Accuracy is inconclusive
+because both arms reached the suite's 100% ceiling. Structure tasks—the subset
+where the graph should help—used 15.0% more treatment tokens and took 15.9%
+longer, although individual caller tasks had meaningful wins.
+
+## Independent `gpt-5.6-sol` review and fixes
+
+1. Verified corpus identity and arm isolation, absence of Git-history leakage,
+   baseline purity, identical prompts/model/budget/step limits, real treatment
+   tool registration, model token/cost accounting, every saved answer, and
+   representative paired trajectories. A stricter word-boundary audit found no
+   false-positive grades. The reviewer added the omitted valid `Skill.source`
+   value `user`; all scores remained 100% because both answers had included it.
+1. Fixed benchmark instrumentation that conflated `[code_graph]` tool labels
+   with grep interception and missed textual `code_graph(action=...)` model
+   calls. Reprocessed the archived raw trajectories with separate exact-marker
+   and model-message counters.
+1. Found a production relevance bug: a three-hop query globally sorted every
+   discovered node and rendered all nodes before all edges, so high-degree hubs
+   could consume the 1,500-character hint budget before the exact seed, direct
+   callers, or relationships appeared. Added a failing tight-budget regression
+   first, then ranked by BFS distance and interleaved each ring's nodes with
+   edges back toward earlier rings. The released-feature one-trial treatment
+   dropped from 15,500 to 9,349 tokens/task after this fix.
+1. Found repeated deny-message loops: repeated verification greps received the
+   same graph answer forever. Added tests and changed local/streaming/Docker Bash
+   wiring so each distinct graph answer intercepts once per tool instance; a
+   repeat falls through to real grep/Docker. The reviewed trial-1 treatment
+   dropped further to 7,801 tokens/task.
+1. Found a second relevance edge case: substring matches such as
+   `AnotherUsefulToolsTest` displaced the exact `UsefulTools` seed. Added a
+   failing test, exact-label scoring, and stable seed-rank rendering. One-letter
+   identifiers still bypass interception as intended.
+1. Reviewed missed wiring explicitly: one-shot behavior covers normal,
+   streaming, and Docker Bash; treatment receives the tool while baseline does
+   not; graph failures still degrade to normal Bash; the final benchmark saw
+   the production interception path; and no new startup or fallback bug was
+   found.
+
+## Verification
+
+- `uv run python benchmarks/code_graph_eval/analyze.py`: audited 84 unique
+  cells, 14 tasks, trials 1–3, zero errors/contamination, $5.4448175 total final
+  matrix spend, and reproduced every report aggregate and bootstrap interval.
+- Focused feature suite: **106 passed**; `code_graph.py`: **656 statements, 266
+  branches, 100% statement and branch coverage**.
+- Impacted Bash/UsefulTools/Sorcar suites: **78 passed, 2 deselected**.
+- Focused Ruff, mypy, and Pyright: clean (0 errors/warnings).
+- `uv run check --full`: all dependency, API generation, compileall, Ruff,
+  mypy, Pyright, and Markdown checks passed.
+- The final report honestly recommends keeping interception opt-in, returning
+  compact operation-shaped caller/callee/definition answers, suppressing test
+  and hub noise, avoiding unused tool-schema overhead, and next running 20–50
+  harder tasks on a repository of at least one million lines with randomized
+  arm order.
