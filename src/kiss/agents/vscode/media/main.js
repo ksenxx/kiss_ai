@@ -3808,6 +3808,11 @@
    * accumulator and requests the adjacent task relative to `taskId`.
    */
   function accumulateOverscroll(dir, delta, taskId) {
+    // Never request an adjacent task relative to an unknown row id:
+    // the backend maps ''/null to None and replies with an EMPTY
+    // adjacent_task_events, which would latch noPrevTask/noNextTask
+    // and silently kill overscroll navigation for the whole session.
+    if (taskId === undefined || taskId === null || taskId === '') return;
     if (overscrollDir !== dir) {
       overscrollAccum = 0;
       overscrollDir = dir;
@@ -4922,6 +4927,19 @@
             refreshWelcomeLayout();
           }
           updateActiveTabTitle(ev.task);
+        } else if (ev.task_id !== undefined && ev.task_id !== null) {
+          // Some replay paths (e.g. server.py's resume-race replay)
+          // send ``task_events`` with an empty ``task`` string but a
+          // valid ``task_id``.  Adjacent scrolling keys off the row
+          // id, so sync it and re-seed the anchors even without a
+          // task title; keep/derive currentTaskName so the wheel
+          // handler's ``currentTaskName`` guard doesn't stay blocked.
+          currentTaskId = ev.task_id;
+          if (!currentTaskName) {
+            const tetTab = getTab(activeTabId);
+            currentTaskName = (tetTab && tetTab.title) || 'Task';
+          }
+          resetAdjacentState(); // sets oldest/newest to current task
         }
         if (ev.extra) {
           try {
@@ -5609,9 +5627,19 @@
         // not weaken the cross-tab defense.  Skip ``result`` /
         // ``usage_info`` themselves so a genuinely misrouted result
         // can still be dropped by the guard below.
+        // ``ev.taskId !== ''`` is essential: ``_broadcast_early_prompts``
+        // (task_runner.py) streams optimistic ``system_prompt``/``prompt``
+        // panels with ``taskId: ''`` BEFORE the DB row exists.  Adopting
+        // that empty string would poison ``currentTaskId`` and — worse —
+        // seed ``oldestLoadedTaskId``/``newestLoadedTaskId`` to ``''``,
+        // permanently breaking adjacent-task overscroll: the later real
+        // taskId only re-seeds the anchors when BOTH are still null, so
+        // they'd stay ``''`` and every ``getAdjacentTask`` request would
+        // carry an empty taskId the backend resolves to "no such task".
         if (
           ev.taskId !== undefined &&
           ev.taskId !== null &&
+          ev.taskId !== '' &&
           ev.type !== 'result' &&
           ev.type !== 'usage_info'
         ) {
@@ -5628,7 +5656,13 @@
             // Re-seed oldest/newest boundary ids whenever none has
             // been loaded yet (no .adjacent-task containers), so a
             // fresh task immediately becomes the scroll anchor.
-            if (oldestLoadedTaskId === null && newestLoadedTaskId === null) {
+            // ``''`` counts as unset too (defensive: an empty-string
+            // taskId adopted by an older webview build must not block
+            // re-seeding forever).
+            if (
+              (oldestLoadedTaskId === null || oldestLoadedTaskId === '') &&
+              (newestLoadedTaskId === null || newestLoadedTaskId === '')
+            ) {
               oldestLoadedTaskId = ev.taskId;
               newestLoadedTaskId = ev.taskId;
             }
