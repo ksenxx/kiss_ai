@@ -1,4 +1,70 @@
-# PROGRESS — Run all tests in parallel, diagnose & fix failures (current task)
+# PROGRESS — Run all tests in parallel, diagnose & fix failures — Session 2 (current task)
+
+## Task
+
+Run all tests split by test-method count into (cores − 2 = 8) parallel
+splits via `run_parallel`, report causes of failing tests, classify
+each failure as a project bug vs a test bug, and fix accordingly.
+(Session 1's fixes — the persistence.py `_get_db()` TOCTOU project-bug
+fix and the SIGINT `preexec_fn` test-bug fix in
+test_install_script_npm_ignore_scripts.py — were already committed as
+c64acc16.)
+
+## Session 2
+
+1. Collected 6114 tests, split round-robin into 8 files (765/764 each),
+   ran all 8 splits concurrently via `run_parallel`
+   (`uv run pytest --no-cov -q -p no:cacheprovider @./tmp/split_N.txt`).
+1. Results: splits 1–7 fully green (761+757+756+755+759+757+762 passed,
+   plus skips/subtests). Split 0: exactly ONE failure — a HANG at test
+   #410, `test_bughunt9_c_sigterm_during_cleanup.py::TestSigtermDuringSigintCleanup::test_sigint_shutdown_arms_sigterm_guard`
+   (`pytest-timeout` dump: main thread parked forever in
+   `KqueueSelector.select()` inside `srv.start()` →
+   `asyncio.run(self._serve_async())`; server had printed its
+   listening banner; only idle helper threads alive). All 6113 other
+   tests passed. Confirmed the previous 5 disk-I/O persistence
+   failures are gone (fixed in c64acc16).
+1. Root cause of the hang — **TEST BUG**, the same SIG_IGN inheritance
+   family as Session 1's install-script flake but in a different test:
+   `run_parallel` workers launch pytest as a background job of a
+   non-job-control shell (`sh -c 'pytest … &'`), which per POSIX starts
+   the job with SIGINT set to `SIG_IGN`. CPython then never installs
+   its default `KeyboardInterrupt` handler (verified:
+   `signal.getsignal(SIGINT) == SIG_IGN` inside a backgrounded pytest;
+   a backgrounded python survives a self-delivered SIGINT). The test's
+   interrupter thread `os.kill(pid, SIGINT)` is therefore a silent
+   no-op, `srv.start()` never unwinds, and the test hangs. Not a
+   web_server.py bug: `RemoteAccessServer` deliberately relies on
+   Python's default SIGINT→KeyboardInterrupt path, which is correct in
+   a real terminal (test passes instantly in the foreground and passed
+   in the earlier serial re-run).
+1. Fix (test code only): in
+   `test_bughunt9_c_sigterm_during_cleanup.py`, after snapshotting the
+   old handlers, install `signal.signal(signal.SIGINT, signal.default_int_handler)` for the duration of the test (restored
+   in the existing `finally`), with a comment documenting the POSIX
+   background-job SIG_IGN semantics. This gives the test the same
+   signal environment as a real terminal regardless of how pytest was
+   launched.
+1. Verification: test passes in foreground and 4/4 iterations as a
+   `sh -c '… &'` background job (previously hung/failed 100% when
+   backgrounded); the first-410-tests-of-split-0 run that reproduced
+   the hang now passes (406 passed, 4 skipped); full split_0 re-run
+   green (759 passed, 6 skipped); `uv run check --full` all checks
+   pass.
+
+## FINAL RESULT
+
+- 6114 collected tests (non-slow), 8 parallel splits: **6113 passed /
+  skipped cleanly; 1 failure**.
+- The 1 failure was an order-independent, environment-dependent hang:
+  a **test bug** (SIGINT test assumed the pytest process never inherits
+  SIGINT=SIG_IGN from a backgrounding shell). Fixed in the test.
+- No project-code bugs found this session (Session 1's TOCTOU
+  persistence bug was the only project bug, already fixed).
+
+______________________________________________________________________
+
+# PROGRESS — Run all tests in parallel, diagnose & fix failures — Session 1
 
 ## Task
 
