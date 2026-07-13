@@ -46,7 +46,7 @@ def _resolve_task(args: argparse.Namespace) -> str:
         FileNotFoundError: If -f path does not exist.
     """
     if args.file is not None:
-        return Path(args.file).read_text()
+        return Path(args.file).read_text(encoding="utf-8")
     if args.task is not None:
         task: str = args.task
         return task

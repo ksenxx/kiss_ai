@@ -95,7 +95,7 @@ def _parse_lcov_file(path: str) -> dict[str, set[CoverageItem]]:
     method_items: dict[str, set[CoverageItem]] = {}
     cur_test = default_test
     cur_file: str | None = None
-    with open(path) as fp:
+    with open(path, encoding="utf-8") as fp:
         for raw in fp:
             line = raw.strip()
             if not line:
