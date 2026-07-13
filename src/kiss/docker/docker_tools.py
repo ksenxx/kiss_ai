@@ -120,7 +120,7 @@ class DockerTools:
             f"    print('Error: new_string must be different from old_string'); sys.exit(1)\n"
             f"path = sys.argv[1]\n"
             f"try:\n"
-            f"    content = open(path).read()\n"
+            f"    content = open(path, encoding='utf-8').read()\n"
             f"except FileNotFoundError:\n"
             f"    print(f'Error: File not found: {{path}}'); sys.exit(1)\n"
             f"count = content.count(old)\n"
@@ -131,7 +131,7 @@ class DockerTools:
             f"    print(f'Error: String appears {{count}} times (not unique). "
             f"Use replace_all=True to replace all occurrences.'); sys.exit(1)\n"
             f"new_content = content.replace(old, new) if ra else content.replace(old, new, 1)\n"
-            f"open(path, 'w').write(new_content)\n"
+            f"open(path, 'w', encoding='utf-8').write(new_content)\n"
             f"replaced = count if ra else 1\n"
             f"print(f'Successfully replaced {{replaced}} occurrence(s) in {{path}}')\n"
             f'" {path}'

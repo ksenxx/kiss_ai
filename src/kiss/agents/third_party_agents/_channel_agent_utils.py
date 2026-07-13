@@ -152,7 +152,7 @@ def load_json_config(path: Path, required_keys: tuple[str, ...]) -> dict[str, st
     if not path.exists():
         return None
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return None
     if not isinstance(data, dict):
@@ -173,7 +173,7 @@ def save_json_config(path: Path, data: dict[str, str]) -> None:
         data: String dictionary to persist.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2))
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
     if sys.platform != "win32":
         path.chmod(0o600)
 

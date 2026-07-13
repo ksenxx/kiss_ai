@@ -824,7 +824,7 @@ def _reject_hunk_in_file(
     # repo) while leaving the rejected link itself untouched.
     if dest.is_symlink():
         dest.unlink()
-    with open(write_to, "w", newline="") as f:
+    with open(write_to, "w", encoding="utf-8", newline="") as f:
         f.write("".join(new_lines))
     if make_executable:
         _apply_exec_bit(write_to)
@@ -1071,7 +1071,7 @@ def _save_cloudflared_pidfile(
         tmp = _CLOUDFLARED_PIDFILE.with_name(
             f"cloudflared.pid.tmp.{os.getpid()}",
         )
-        tmp.write_text(json.dumps(data) + "\n")
+        tmp.write_text(json.dumps(data) + "\n", encoding="utf-8")
         tmp.replace(_CLOUDFLARED_PIDFILE)
     except OSError as exc:
         logger.debug("Failed to write cloudflared pidfile: %s", exc)
@@ -1084,7 +1084,7 @@ def _load_cloudflared_pidfile() -> dict[str, Any] | None:
     ``None`` if the file is missing, malformed, or invalid.
     """
     try:
-        raw = _CLOUDFLARED_PIDFILE.read_text()
+        raw = _CLOUDFLARED_PIDFILE.read_text(encoding="utf-8")
     except OSError:
         return None
     try:
@@ -1548,7 +1548,7 @@ def _save_url_file(
     if tunnel_url:
         data["tunnel"] = tunnel_url
     url_file.parent.mkdir(parents=True, exist_ok=True)
-    url_file.write_text(json.dumps(data, indent=2) + "\n")
+    url_file.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
 def _remove_url_file(url_file: Path) -> None:
@@ -1569,7 +1569,7 @@ def _read_url_from_file(url_file: Path) -> str | None:
     empty content.
     """
     try:
-        data = json.loads(url_file.read_text())
+        data = json.loads(url_file.read_text(encoding="utf-8"))
     except Exception:
         return None
     if not isinstance(data, dict):
@@ -1598,7 +1598,7 @@ def _get_machine_topic() -> str:
     """
     topic_file = _KISS_HOME / "ntfy_topic"
     try:
-        stored = topic_file.read_text().strip()
+        stored = topic_file.read_text(encoding="utf-8").strip()
     except OSError:
         stored = ""
     if stored:
@@ -1608,7 +1608,7 @@ def _get_machine_topic() -> str:
     try:
         topic_file.parent.mkdir(parents=True, exist_ok=True)
         tmp = topic_file.with_name(f"ntfy_topic.tmp.{os.getpid()}")
-        tmp.write_text(topic + "\n")
+        tmp.write_text(topic + "\n", encoding="utf-8")
         tmp.replace(topic_file)
     except OSError:
         logger.debug("Failed to persist ntfy topic", exc_info=True)
@@ -2821,7 +2821,7 @@ def _parse_version_py(vfile: Path) -> str:
     the daemon booting even if a foreign ``_version.py`` is malformed.
     """
     try:
-        for line in vfile.read_text().splitlines():
+        for line in vfile.read_text(encoding="utf-8").splitlines():
             if line.startswith("__version__"):
                 return line.split("=", 1)[1].strip().strip("\"'")
     except Exception:
@@ -3470,12 +3470,12 @@ def _augment_merge_data(event: dict[str, Any]) -> dict[str, Any]:
         # silently rewritten — and whose line COUNT differs for
         # lone-"\r" content — misaligning hunk highlighting.
         try:
-            with open(f["base"], newline="") as bfh:
+            with open(f["base"], encoding="utf-8", newline="") as bfh:
                 f["base_text"] = bfh.read()
         except (OSError, KeyError, UnicodeDecodeError):
             f["base_text"] = ""
         try:
-            with open(f["current"], newline="") as cfh:
+            with open(f["current"], encoding="utf-8", newline="") as cfh:
                 f["current_text"] = cfh.read()
         except (OSError, KeyError, UnicodeDecodeError):
             f["current_text"] = ""

@@ -33,9 +33,9 @@ def _load_json(path: str) -> list[dict] | dict | None:
     if not p.exists():
         return None
     if p.suffix == ".jsonl":
-        with open(p) as f:
+        with open(p, encoding="utf-8") as f:
             return [json.loads(line) for line in f if line.strip()]
-    with open(p) as f:
+    with open(p, encoding="utf-8") as f:
         result: list[dict] | dict = json.load(f)
         return result
 
@@ -208,7 +208,7 @@ def generate_dashboard(
 
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(html)
+    out.write_text(html, encoding="utf-8")
     print(f"Dashboard written to {out}")
 
 
