@@ -1,4 +1,100 @@
-# PROGRESS — Codex-mobile remote webapp restyle — Sessions 4–6 (current task)
+# PROGRESS — Local tree-sitter `code_graph` tool — Sessions 1–4 (current task)
+
+## Task
+
+Implement Graphify-inspired features #1, #3, and #5 in KISS Sorcar with minimal
+coupling: a per-worktree tree-sitter knowledge graph, the “deny message is the
+answer” query-before-grep pattern, and SHA256-incremental Git-hook freshness.
+Write end-to-end tests first with 100% branch coverage; use `claude-fable-5` for
+development and `gpt-5.6-sol` for an independent review/debug pass.
+
+## What was done
+
+1. Researched 10 current primary/technical sources: Graphify README,
+   `ARCHITECTURE.md`, and `SKILL.md`; tree-sitter and
+   tree-sitter-language-pack documentation/package pages; Aider’s repository-map
+   implementation; Claude Code’s `PreToolUse` hook contract; and Git’s
+   `post-commit` hook documentation. The resulting design follows Graphify’s
+   top-three seed / three-hop BFS query, confidence-tagged edges, SHA256 cache,
+   and detached post-commit update patterns.
+
+1. Added `tree-sitter>=0.24.0` and
+   `tree-sitter-language-pack>=1.10.0` to `pyproject.toml` and refreshed
+   `uv.lock`. Parser acquisition is optional and failure-safe, so an unavailable
+   grammar cannot break Sorcar startup or graph builds.
+
+1. Wrote the end-to-end feature suite first in
+   `src/kiss/tests/agents/sorcar/test_code_graph.py`. It builds real Python,
+   JavaScript, TypeScript/TSX, Go, Rust, Java, Ruby, C, and C++ fixture projects;
+   executes real Git commits/hooks and real Bash commands; verifies persistence,
+   incremental add/change/delete behavior, graph query/path/explain formats,
+   local/streaming/Docker interception, CLI behavior, and graceful failure paths.
+
+1. Implemented the standalone
+   `src/kiss/agents/sorcar/code_graph.py` with only stdlib plus the optional
+   tree-sitter language pack. Each worktree stores versioned, atomically-written
+   state in `.kiss/code_graph/{graph.json,cache.json}` and adds that generated
+   directory to Git’s local exclude file. Nodes represent files, modules,
+   classes, interfaces, structs, traits, functions, and methods. Edges represent
+   `defines`, `contains`, `imports`, and `calls`, tagged `EXTRACTED` for direct
+   same-file/source relationships or `INFERRED` for unique cross-file call
+   resolution; ambiguous relationships are omitted rather than invented.
+
+1. Implemented graph operations:
+
+   - `query(question)`: term-ranked top-three seeds and a deterministic
+     three-hop BFS rendered as compact `NODE`/`EDGE` lines under a character
+     budget.
+   - `path(a, b)`: shortest undirected connection while preserving each stored
+     edge’s direction, relation, and confidence.
+   - `explain(name)`: source location, kind, degree, and directional neighbors.
+   - Agent actions: `build`, `query`, `path`, `explain`, `install_hook`, and
+     `uninstall_hook`; querying auto-builds when no graph exists.
+
+1. Kept production coupling to two guarded seams: `SorcarAgent._get_tools()`
+   lazily adds `make_code_graph_tool(...)`, and local plus Docker Bash wrappers
+   lazily consult `grep_hint(...)`. An exact graph identifier hit returns the
+   inline graph answer without spawning `grep`/`rg`:
+
+   ```python
+   hint = grep_hint(command, self.work_dir) or ""
+   if hint:
+       return hint  # “the deny message IS the answer”
+   ```
+
+   Literal text and regex searches that the graph cannot answer continue to the
+   real command. This exact-label guard fixed a review-discovered false positive
+   where prose containing `app` incorrectly matched the `Application` node and
+   suppressed a legitimate grep.
+
+1. Implemented idempotent post-commit hook install/uninstall without overwriting
+   existing shell hooks. The hook runs a fully detached incremental update via
+   the current Python executable. A PID lock deduplicates concurrent hook jobs
+   and reclaims dead/stale locks; a full worktree hash pass avoids unsafe shell
+   expansion, including filenames containing spaces/newlines, while reparsing
+   only changed files.
+
+1. The `gpt-5.6-sol` independent review added regression tests that exposed and
+   fixed: duplicate method-label scope collapse, incorrect reverse-path arrows,
+   empty self-paths, two-hop instead of three-hop queries, dropped recursive
+   calls, missing `grep -e`/`--regexp` parsing, whitespace-unsafe hook arguments,
+   non-shell/corrupt hook handling, generated graph artifacts in Git status, a
+   missed Docker Bash seam, stale cache-schema reuse, and non-atomic persistence.
+   Definition/caller records now use stable per-file integer identities and
+   lexical-scope resolution, and persisted state carries a cache schema version.
+
+1. Final verification:
+
+   - `103 passed`; `code_graph.py`: **628 statements, 250 branches, 100% branch
+     coverage**.
+   - Impacted Bash/Sorcar regressions: **83 passed, 2 deselected**.
+   - `uv run check --full`: dependency sync, API generation, compileall, Ruff,
+     mypy, Pyright, and Markdown formatting all passed (0 errors/warnings from
+     static analysis).
+
+______________________________________________________________________
+
+# PROGRESS — Codex-mobile remote webapp restyle — Sessions 4–6
 
 ## Task
 
