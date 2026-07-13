@@ -1,4 +1,62 @@
-# PROGRESS — Run all tests in parallel, diagnose & fix failures — Session 2 (current task)
+# PROGRESS — Issue #41: `sorcar --version` (current task)
+
+## Task
+
+Address https://github.com/ksenxx/kiss_ai/issues/41 — `sorcar --version`
+should print `sorcar <version>` (from `kiss.__version__`) and exit 0
+immediately, no task/model/keys needed. Implementation by claude-fable-5,
+review/debugging by gpt-5.6-sol.
+
+## What was done (chronological)
+
+1. Web research (10 sites, ./tmp/information-issue41.md): consensus =
+   argparse `action='version'`; `-V` spelling (pip precedent) since `-v`
+   is taken by `--verbose`; version action exits 0 during `parse_args`
+   before any app logic.
+1. Implementation (claude-fable-5):
+   - `src/kiss/agents/sorcar/cli_helpers.py`: added
+     `from kiss import __version__` and, as the first argument in
+     `_build_arg_parser()`:
+     ```python
+     parser.add_argument(
+         "-V", "--version", action="version",
+         version=f"sorcar {__version__}",
+         help="Show the sorcar version and exit",
+     )
+     ```
+     Literal `"sorcar ..."` (not `%(prog)s`) so output is stable
+     regardless of argv[0] (pytest, python -m, console script).
+   - New e2e test `src/kiss/tests/agents/sorcar/test_cli_version_flag.py`
+     (5 tests, no mocks): `--version` & `-V` → stdout `sorcar <ver>\n`,
+     exit 0, empty stderr; `--version -t x --worktree` still exits 0
+     printing version (argparse first-flag-wins, before the
+     `_reject_interactive_only_flags` guard); `kiss.__version__` ==
+     `kiss._version.__version__`; `--vers` rejected (allow_abbrev=False).
+   - Docs: README.md + website/kisssorcar.github.io/docs/cli.md — added
+     `sorcar --version` example and `-V, --version` row to CLI options
+     tables.
+1. Review (gpt-5.6-sol) — findings & resolutions:
+   - `sorcar mcp --version` → exit 2 (mcp subparser has its own parser,
+     dispatched before main parser); acceptable, issue only asks for
+     `sorcar --version`.
+   - `get_default_model()` default evaluated at parser-build time is
+     cheap env-var checks only — `--version` needs no API keys
+     (verified with all key env vars unset: still exits 0).
+   - Verified real console script: `uv run sorcar --version`,
+     `-V`, `--version -t x --worktree`, `-t x --version` all print
+     `sorcar 2026.7.19`, exit 0.
+   - MISSED WIRING found: `website/kisssorcar.github.io/llms-full.txt`
+     is the concatenation of docs/\*.md and contained the stale cli.md
+     section → updated to match (verified with awk/diff extraction).
+   - No completion tables/`_INTERACTIVE_ONLY_FLAGS`/import-cycle issues
+     (kiss/__init__.py only imports \_version).
+1. Verification: `uv run check --full` all green; 71 CLI-parser tests
+   (version flag + non-interactive validation + default modes + only
+   sorcar agent + wave2/wave3 CLI bugs) all pass.
+
+______________________________________________________________________
+
+# PROGRESS — Run all tests in parallel, diagnose & fix failures — Session 2 (previous task)
 
 ## Task
 

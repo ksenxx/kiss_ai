@@ -46,12 +46,16 @@ sorcar -t 'Can you show me the detailed step-by-step workflow of gepa.py?'
 
 # Manage MCP servers.
 sorcar mcp list --ping
+
+# Print the installed sorcar version and exit.
+sorcar --version
 ```
 
 ## CLI Options
 
 | Flag | Description |
 |------|-------------|
+| `-V`, `--version` | Print `sorcar <version>` (from `kiss.__version__`) and exit |
 | `-t`, `--task` | Task description; switches to non-interactive mode |
 | `-f`, `--file` | Path to a file whose contents are used as the task; switches to non-interactive mode |
 | `-m`, `--model_name` | LLM model name; defaults to the best available model for the configured API keys |
