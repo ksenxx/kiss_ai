@@ -83,29 +83,62 @@ directories (per https://llmstxt.org/#directories):
 Both live URLs (https://kisssorcar.github.io/llms.txt and /llms-full.txt)
 were re-verified in the browser before and after submitting.
 
-# Task: Directory listing follow-up check (2026-07-12)
+# Task: Episode 1 of "The Agent That Markets Itself" — Show HN launch post (2026-07)
 
-Checked both directories for the KISS Sorcar listing and followed up where it
-had not appeared. Neither directory publishes a contact email, so the
-follow-up channel in both cases is their own submission form (explicitly
-marked as a follow-up), with approval notifications going to
-ksen@berkeley.edu.
+Drafted and "recorded" (written-serial format) Episode 1: KISS Sorcar wrote
+its own Show HN launch post, then the draft was reviewed and refined for the
+48-hour launch window.
 
-1. **llmstxt.site** — NOT live yet. Searched the site's "Search products..."
-   box for "KISS Sorcar", "kisssorcar", "sorcar", "kiss", "github.io" — all
-   "No results." No contact email exists on the site; the /submit form is the
-   only channel. FOLLOW-UP DONE: re-submitted https://llmstxt.site/submit
-   with the same details plus a note explicitly marked as a follow-up
-   re-submission. Confirmed via redirect to https://llmstxt.site/thankyou.
-2. **directory.llmstxt.cloud** — NOT approved/live yet. Verified via
-   ?search=sorcar / kiss / kisssorcar.github.io (all "No results found";
-   search itself verified working). No contact email on the directory or the
-   Tally form; only channels are the Tally form and X handles (@ifox,
-   @joyceverheije, @llmsdottxt). FOLLOW-UP DONE: re-submitted the Tally form
-   https://tally.so/r/wAydjB (name "KISS Sorcar", llms.txt URL, Category
-   "AI", email ksen@berkeley.edu, adoption note explicitly marked FOLLOW-UP
-   re-submission, Sponsoring "No"). Confirmed "Form submitted / Thanks for
-   completing this form!".
+## Session 1 (research)
 
-Next: watch ksen@berkeley.edu for the directory.llmstxt.cloud approval
-notification and re-check both directories in ~1 week.
+Completed the mandatory 10-site web research on Show HN norms 2026:
+official Show HN guidelines; dang's tips (item 22336638 — **edited
+2026-03-28: HN submission text must be hand-written, no LLM text at all**);
+syften.com May-2026 guide (first-comment anatomy, kill-triggers, 9am–12pm ET
+weekday); lucasfcosta.com (concrete titles, link the repo, cut 30%);
+HN Algolia survey of 223 agent-framework Show HNs (winners: Mastra 442 pts,
+AnythingLLM 368, Superset 96/90 comments; anti-example Orcbot 4 pts);
+forkoff.xyz agent-native GTM (spec-driven agent workflow); indiehackers KTool
+(second-chance pool, reply to everything).
+
+## Session 2 (artifacts) — COMPLETE
+
+Created `marketing/agent-markets-itself/` (git-tracked artifact directory):
+
+- `README.md` — series index + ground rules (always disclose agent work;
+  HN text hand-written by the founder; no upvote solicitation).
+- `episode-01/SPEC.md` — the 300–800-word brief given to the agent: goal
+  (titles + URL + first comment), hard constraints (factual language,
+  verifiable numbers, ≤450 words, quickstart + limitations + disclosure),
+  3 positive examples (Mastra/Superset/AnythingLLM), 3 disqualifiers,
+  and the dang-2026 post-draft rule (agent draft = episode artifact only;
+  final HN text must be hand-rewritten by the human).
+- `episode-01/SHOW_HN_DRAFT.md` — the agent's refined v2 package:
+  5 concrete title candidates (recommended: "Show HN: KISS Sorcar –
+  open-source agent framework, ~2,850 LoC core, 530 models"), submission URL
+  = the GitHub repo, and a 418-word first comment (intro + credibility line,
+  backstory, 5 mechanism-anchored bullets, `pipx install
+  kiss-agent-framework` quickstart, honest limitations incl. single
+  maintainer + no benchmark yet, meta disclosure of the agent-drafted
+  experiment, links block, specific feedback asks on security model and
+  small-core claim), plus 9 annotated v1→v2 edits.
+- `episode-01/REVIEW.md` — reproduces rejected draft v1 ("does everything"
+  title + buzzword bullets = 2 disqualifiers) and maps all 11 rulings to
+  research sources; records the 3 spec deltas (word cap, number-or-mechanism
+  rule, specific-ask requirement).
+- `episode-01/EPISODE.md` — the episode itself in 5 acts, including the
+  twist: while researching, the agent discovered HN's 2026 rule banning
+  LLM-written submission text, so the episode's resolution is
+  "agent draft = published artifact, human hand-rewrites the HN text,
+  the HN comment discloses the experiment" — transparency becomes the hook.
+  Includes scorecard and video shot-list note.
+- `episode-01/LAUNCH_CHECKLIST.md` — 48-hour runbook: T-7 pre-flight
+  (hand-rewrite, README GIF, clean-machine quickstart test, personal HN
+  account with profile email), T-0 submission (Tue–Thu 9am–12pm ET, repo
+  URL, no upvote solicitation), T+48h rules (reply to every comment
+  personally, never AI-written replies, second-chance pool), staggered
+  Reddit/newsletter wave after traction, and a metrics table that feeds
+  Episode 2.
+
+All artifacts committed to git. Remaining human-only steps: hand-rewrite the
+first comment and execute the launch window per the checklist.
