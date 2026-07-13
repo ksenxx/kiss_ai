@@ -384,7 +384,7 @@ class ChannelRunner:
         self._extra_tools = extra_tools or []
         self._model_name = model_name
         self._max_budget = max_budget
-        self._work_dir = work_dir or str(Path.home() / ".kiss" / "channel_work")
+        self._work_dir = work_dir or str(_kiss_home() / "channel_work")
         self._allow_users = set(allow_users) if allow_users else None
         self._poll_thread_fn = getattr(backend, "poll_thread_messages", None)
 
@@ -634,7 +634,7 @@ def channel_main(
             extra_tools=backend.get_tool_methods(),
             model_name=args.model_name,
             max_budget=args.max_budget,
-            work_dir=args.work_dir or str(Path.home() / ".kiss" / "channel_work"),
+            work_dir=args.work_dir or str(_kiss_home() / "channel_work"),
             allow_users=allow_users,
         )
         print(f"Checking {channel_name} channel for pending messages...")
