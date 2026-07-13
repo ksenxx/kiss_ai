@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
+from kiss import __version__
 from kiss.agents.sorcar.persistence import _list_recent_chats
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.models.model_info import get_default_model
@@ -270,6 +271,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run SorcarAgent demo",
         allow_abbrev=False,
+    )
+    parser.add_argument(
+        "-V", "--version", action="version",
+        version=f"sorcar {__version__}",
+        help="Show the sorcar version and exit",
     )
     parser.add_argument(
         "-m", "--model_name", type=str, default=get_default_model(),
