@@ -1,4 +1,67 @@
-# PROGRESS — Ship llms.txt + pure-Markdown docs on kisssorcar.github.io (current task)
+# PROGRESS — Audit third-party agent dirs for KISS_HOME test isolation (current task)
+
+## Task
+
+Audit the ~20 third-party agent integrations sharing the
+`Path.home()`-based directory pattern of `slack_agent.py` and apply the
+KISS_HOME/tmp-dir test-isolation fix to prevent cross-process races in
+parallel test runs (follow-up to the slack token fix in a4e6c58b).
+
+## Audit results
+
+All 23 module-level `_*_DIR` globals in `src/kiss/agents/third_party_agents/`
+were audited:
+
+1. **Already isolated (20 agents, no change needed):** bluebubbles, discord,
+   feishu, imessage, irc, line, matrix, mattermost, msteams, nextcloud_talk,
+   nostr, phone_control, signal, sms, synology_chat, telegram, tlon, twitch,
+   whatsapp, zalo. Each module's `_*_DIR` is used only to construct a
+   `ChannelConfig`, whose `.path` property already resolves lazily via
+   `_kiss_home()` (honours `$KISS_HOME`, which `src/kiss/tests/conftest.py`
+   sets to a fresh temp dir per pytest process).
+1. **Gap — gmail_agent.py:** `_GMAIL_DIR = Path.home()/...` was used directly
+   by `_token_path()`/`_credentials_path()`, bypassing `KISS_HOME`. Tests
+   (`test_gmail_agent.py`, `test_bughunt_gmail_whatsapp.py`) backed up,
+   overwrote, and restored the REAL user `token.json`/`credentials.json` —
+   the same cross-process race that broke slack, plus a risk of clobbering
+   real Gmail credentials on a crash.
+1. **Gap — googlechat_agent.py:** same direct-path pattern for
+   `token.json`/`credentials.json`/`service_account.json` (latent — no test
+   currently writes them).
+1. **Gap (minor) — \_channel_agent_utils.py:** `ChannelRunner` and
+   `channel_main` defaulted `work_dir` to `Path.home()/".kiss"/"channel_work"`
+   instead of `_kiss_home()/"channel_work"`.
+1. **Intentionally unchanged:** `slack_sorcar_poller.py` /
+   `slack_channel_sorcar_poller.py` `STATE_DIR` constants (live production
+   cron state; tests already monkeypatch `mod.LOCK_FILE` etc., and the
+   code paths exercised by tests never touch the real state files).
+
+## Fixes applied
+
+1. `gmail_agent.py`: replaced the `_GMAIL_DIR` module global with a lazy
+   `_gmail_dir()` helper returning
+   `_kiss_home() / "third_party_agents" / "gmail"`; `_token_path()` and
+   `_credentials_path()` now call it.
+1. `googlechat_agent.py`: same pattern — `_gchat_dir()` helper; the three
+   path helpers now resolve lazily.
+1. `_channel_agent_utils.py`: both `work_dir` defaults now use
+   `_kiss_home() / "channel_work"`.
+1. New regression test `src/kiss/tests/agents/channels/test_gmail_gchat_isolation.py`
+   (mirrors `test_tlon_config_isolation.py`): proves gmail/googlechat paths
+   and the `ChannelRunner` default `work_dir` follow `$KISS_HOME` changes
+   made after import, and that a token written under one `KISS_HOME` never
+   leaks into another.
+
+## Verification
+
+- New isolation tests: 4 passed.
+- Full channels test dir: 620 passed, 32 skipped.
+- Real `~/.kiss/third_party_agents/gmail/` untouched (empty before and after).
+- `uv run check --full` clean.
+
+______________________________________________________________________
+
+# PROGRESS — Ship llms.txt + pure-Markdown docs on kisssorcar.github.io (previous task)
 
 ## Task
 
@@ -11,17 +74,17 @@ website.
 1. Read `SORCAR.md`; explored repo. The live site is a separate repo,
    `https://github.com/kisssorcar/kisssorcar.github.io`, mirrored locally at
    `website/kisssorcar.github.io/`. `gh` is authenticated with push permission.
-2. Completed the mandatory 10-site web research on the llms.txt convention
+1. Completed the mandatory 10-site web research on the llms.txt convention
    (llmstxt.org spec, Mintlify/Anthropic/Vite practice, `.md` twin pages,
    `llms-full.txt`, `.well-known/` mirror, GitHub Pages static serving).
-3. Read source-of-truth content: `README.md`, `API.md`,
+1. Read source-of-truth content: `README.md`, `API.md`,
    `src/kiss/SAMPLE_TASKS.md`, `src/kiss/INJECTIONS.md`, `src/kiss/TIPS.md`.
 
 ## Session 2 (implementation + deploy) — COMPLETE
 
 1. Re-cloned the live site repo to a scratch dir (previous clone was lost with
    the old worktree).
-2. Authored new files (all pure Markdown / plain text, no HTML):
+1. Authored new files (all pure Markdown / plain text, no HTML):
    - `llms.txt` — spec-compliant: H1 `# KISS Sorcar`, `>` blockquote summary,
      "Key facts" detail block, then `## Docs` (10 links), `## Papers` (4),
      `## Source & Install` (5), `## Optional` (4) — all `- [name](url): notes`
@@ -38,23 +101,23 @@ website.
    - `.well-known/llms.txt` — copy of `llms.txt`.
    - `robots.txt` (allow all, references llms.txt + sitemap), `sitemap.xml`
      (homepage + all md/txt URLs), `.nojekyll`.
-3. Edited `index.html` head:
+1. Edited `index.html` head:
    `<link rel="alternate" type="text/markdown" href=".../index.html.md">` and
    `<link rel="llms-txt" type="text/plain" href=".../llms.txt">`; footer
    gained `Docs` (docs/index.md) and `llms.txt` links.
-4. Verified locally (python3 -m http.server): all 16 URLs returned 200.
-5. Committed ("Ship llms.txt + pure-Markdown docs for LLM/coding-assistant
+1. Verified locally (python3 -m http.server): all 16 URLs returned 200.
+1. Committed ("Ship llms.txt + pure-Markdown docs for LLM/coding-assistant
    indexing", b11a7a2) and pushed to `kisssorcar/kisssorcar.github.io` main.
-6. Verified LIVE after Pages deploy: 200 for `/llms.txt`, `/llms-full.txt`,
+1. Verified LIVE after Pages deploy: 200 for `/llms.txt`, `/llms-full.txt`,
    `/robots.txt`, `/sitemap.xml`, `/index.html.md`, `/.well-known/llms.txt`,
    `/docs/index.md`; rendered llms.txt in browser; homepage contains the two
    llms.txt references.
-7. Mirrored everything into the main repo artifact dir
+1. Mirrored everything into the main repo artifact dir
    `website/kisssorcar.github.io/` via rsync (also picked up previously
    missing live assets: og-card.png, sorcar-main.gif, KISS-Sorcar-UI.png,
    swedefend.pdf, cleverest_plus.pdf, .gitignore) and rewrote
    `website/README.md` to document the shipped llms.txt work.
-8. Cleaned up `./tmp/site` and research notes; staged website changes in git.
+1. Cleaned up `./tmp/site` and research notes; staged website changes in git.
 
 ## Possible follow-ups (not required)
 
@@ -73,7 +136,7 @@ directories (per https://llmstxt.org/#directories):
    /docs/index.md, arXiv 2604.23822). Confirmed via redirect to
    https://llmstxt.site/thankyou. Listing appears after their moderation /
    site refresh.
-2. **directory.llmstxt.cloud** — submitted via their Tally form
+1. **directory.llmstxt.cloud** — submitted via their Tally form
    (https://tally.so/r/wAydjB): name "KISS Sorcar", llms.txt URL,
    Category "AI", email ksen@berkeley.edu for approval notification,
    adoption note. Confirmed "Form submitted / Thanks for completing this
