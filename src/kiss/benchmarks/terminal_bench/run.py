@@ -73,7 +73,7 @@ def is_docker_hub_authenticated() -> bool:
         return False
 
     try:
-        config = json.loads(config_path.read_text())
+        config = json.loads(config_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return False
 
@@ -128,7 +128,7 @@ async def _resolve_docker_images(dataset: str) -> list[str]:
         task_toml = tc.get_local_path() / "task.toml"
         if task_toml.exists():  # pragma: no branch
             try:
-                cfg = TaskTomlConfig.model_validate_toml(task_toml.read_text())
+                cfg = TaskTomlConfig.model_validate_toml(task_toml.read_text(encoding="utf-8"))
                 if cfg.environment.docker_image:  # pragma: no branch
                     images.add(cfg.environment.docker_image)
             except Exception:
@@ -260,7 +260,7 @@ def score_results(results_path: Path) -> None:
         results_path: Path to harbor results JSON file.
     """
     try:
-        results: list[dict[str, Any]] = json.loads(results_path.read_text())
+        results: list[dict[str, Any]] = json.loads(results_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as e:
         print(f"ERROR: Could not read {results_path}: {e}", file=sys.stderr)
         sys.exit(1)

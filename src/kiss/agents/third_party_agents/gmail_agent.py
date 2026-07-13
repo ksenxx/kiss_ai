@@ -109,7 +109,7 @@ def _save_credentials(creds: Credentials) -> None:
     """
     path = _token_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(creds.to_json())
+    path.write_text(creds.to_json(), encoding="utf-8")
     if sys.platform != "win32":  # pragma: no branch
         path.chmod(0o600)
 

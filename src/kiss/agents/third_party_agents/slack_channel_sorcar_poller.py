@@ -98,6 +98,7 @@ def _setup_logging() -> None:
         filename=str(LOG_FILE),
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
+        encoding="utf-8",
     )
 
 
@@ -111,7 +112,7 @@ def _acquire_lock() -> Any:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     # Open without truncating so a losing contender never clobbers the
     # PID recorded by the current lock holder.
-    fp = LOCK_FILE.open("a+")
+    fp = LOCK_FILE.open("a+", encoding="utf-8")
     try:
         fcntl.flock(fp.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
@@ -127,7 +128,7 @@ def _load_state() -> dict[str, Any]:
     """Read the on-disk state file or return a fresh state dict."""
     if STATE_FILE.exists():
         try:
-            data = json.loads(STATE_FILE.read_text())
+            data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
             if isinstance(data, dict):
                 data.setdefault("threads", {})
                 return data
@@ -140,7 +141,7 @@ def _save_state(state: dict[str, Any]) -> None:
     """Persist ``state`` to disk atomically."""
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     tmp = STATE_FILE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state, indent=2))
+    tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
     tmp.replace(STATE_FILE)
 
 
@@ -464,7 +465,7 @@ def _load_health_alert() -> dict[str, Any]:
     """Read the persisted health-alert marker or return an empty dict."""
     if HEALTH_ALERT_FILE.exists():
         try:
-            data = json.loads(HEALTH_ALERT_FILE.read_text())
+            data = json.loads(HEALTH_ALERT_FILE.read_text(encoding="utf-8"))
             if isinstance(data, dict):
                 return data
         except (json.JSONDecodeError, OSError):
@@ -530,7 +531,7 @@ def _startup_health_check() -> None:
         )
         if posted:
             tmp = HEALTH_ALERT_FILE.with_suffix(".tmp")
-            tmp.write_text(json.dumps({"last_alert_ts": now}))
+            tmp.write_text(json.dumps({"last_alert_ts": now}), encoding="utf-8")
             tmp.replace(HEALTH_ALERT_FILE)
     sys.exit(1)
 

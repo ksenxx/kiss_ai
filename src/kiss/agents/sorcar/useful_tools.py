@@ -639,7 +639,7 @@ class UsefulTools:
                 )
 
             try:
-                text = resolved.read_text()
+                text = resolved.read_text(encoding="utf-8")
             except UnicodeDecodeError:
                 logger.debug("Binary file detected", exc_info=True)
                 return self._read_binary(file_path, resolved)
@@ -758,7 +758,7 @@ class UsefulTools:
             # (matching Edit) so the file's bytes equal *content*
             # exactly — LF content is not CRLF-ified on Windows and a
             # Write-then-Read round trip is byte-identical.
-            resolved.write_text(content, newline="")
+            resolved.write_text(content, encoding="utf-8", newline="")
             return f"Successfully wrote {len(content)} characters to {file_path}"
         except Exception as e:
             logger.debug("Exception caught", exc_info=True)
@@ -820,7 +820,7 @@ class UsefulTools:
             # translated text and writing it back would silently rewrite
             # EVERY line ending in a CRLF file as LF (huge spurious
             # diffs) even for a one-character edit.
-            content = resolved.read_text(newline="")
+            content = resolved.read_text(encoding="utf-8", newline="")
             count = content.count(old_string)
             if count == 0 and "\r\n" in content and "\r\n" not in old_string:
                 # Models see files through Read(), which translates CRLF
@@ -846,7 +846,7 @@ class UsefulTools:
                 new_content = content.replace(old_string, new_string, 1)
             # newline="" prevents os.linesep translation on write so the
             # preserved (untranslated) line endings round-trip verbatim.
-            resolved.write_text(new_content, newline="")
+            resolved.write_text(new_content, encoding="utf-8", newline="")
             replaced = count if replace_all else 1
             return f"Successfully replaced {replaced} occurrence(s) in {file_path}"
         except Exception as e:
