@@ -7136,10 +7136,15 @@
     });
     function toggleHistorySidebar() {
       if (sidebar.classList.contains('open')) {
-        closeSidebar();
+        closeSidebar(true);
       } else {
         sidebar.classList.add('open');
-        sidebarOverlay.classList.add('open');
+        // No dark modal overlay while the sidebar is DOCKED on the
+        // remote desktop layout — the overlay is a mobile-drawer
+        // affordance only.
+        if (!document.body.classList.contains('remote-desktop')) {
+          sidebarOverlay.classList.add('open');
+        }
         resetHistoryPagination();
         vscode.postMessage({
           type: 'getHistory',
@@ -7151,8 +7156,45 @@
     if (menuBtn) {
       menuBtn.addEventListener('click', toggleHistorySidebar);
     }
-    sidebarClose.addEventListener('click', closeSidebar);
+    sidebarClose.addEventListener('click', () => closeSidebar(true));
     sidebarOverlay.addEventListener('click', closeSidebar);
+    // ── Remote-webapp DESKTOP layout ─────────────────────────────
+    // On desktop-wide browser windows the remote webapp docks the
+    // history sidebar persistently on the left (Codex / ChatGPT
+    // desktop layout).  The wiring is a no-op inside the VS Code
+    // extension webview (no body.remote-chat class) and in embedders
+    // without window.matchMedia.
+    if (
+      document.body.classList.contains('remote-chat') &&
+      typeof window.matchMedia === 'function'
+    ) {
+      const desktopMq = window.matchMedia('(min-width: 900px)');
+      const applyRemoteDesktop = () => {
+        if (desktopMq.matches) {
+          document.body.classList.add('remote-desktop');
+          if (!sidebar.classList.contains('open')) {
+            sidebar.classList.add('open');
+            resetHistoryPagination();
+            vscode.postMessage({
+              type: 'getHistory',
+              query: historySearch ? historySearch.value : '',
+              generation: historyGeneration,
+            });
+          }
+          sidebarOverlay.classList.remove('open');
+        } else {
+          document.body.classList.remove('remote-desktop');
+          sidebar.classList.remove('open');
+          sidebarOverlay.classList.remove('open');
+        }
+      };
+      if (typeof desktopMq.addEventListener === 'function') {
+        desktopMq.addEventListener('change', applyRemoteDesktop);
+      } else if (typeof desktopMq.addListener === 'function') {
+        desktopMq.addListener(applyRemoteDesktop);
+      }
+      applyRemoteDesktop();
+    }
     if (frequentTasksBtn) {
       frequentTasksBtn.addEventListener('click', () => {
         if (frequentPanel && frequentPanel.classList.contains('open')) {
@@ -8544,7 +8586,22 @@
     }
   }
 
-  function closeSidebar() {
+  /**
+   * Close the history sidebar drawer.
+   *
+   * On the remote-webapp DESKTOP layout (body.remote-desktop) the
+   * sidebar is DOCKED on the left, so implicit close paths (Escape,
+   * overlay click, history-row click) must keep it open — only an
+   * explicit user toggle (burger #menu-btn / #sidebar-close, which
+   * pass ``force=true``) hides the docked panel.
+   *
+   * @param {boolean} [force] hide the sidebar even while docked.
+   */
+  function closeSidebar(force) {
+    if (force !== true && document.body.classList.contains('remote-desktop')) {
+      sidebarOverlay.classList.remove('open');
+      return;
+    }
     sidebar.classList.remove('open');
     sidebarOverlay.classList.remove('open');
   }
