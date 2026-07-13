@@ -244,3 +244,38 @@ Created `marketing/agent-markets-itself/` (git-tracked artifact directory):
 
 All artifacts committed to git. Remaining human-only steps: hand-rewrite the
 first comment and execute the launch window per the checklist.
+
+# Task: Show HN launch pre-flight — hand-rewrite prep, quickstart test, slot (2026-07-12)
+
+Follow-up to Episode 1 of "The Agent That Markets Itself" (see
+marketing/agent-markets-itself/episode-01/). Three deliverables:
+
+1. **Hand-rewrite handled correctly.** Per HN's 2026-03-28 rule, any
+   agent-written text is LLM-generated and disallowed as submission text —
+   so the agent CANNOT produce the final comment. Instead, created
+   `marketing/agent-markets-itself/episode-01/HAND_REWRITE_GUIDE.md`: an
+   8-beat content checklist (intro/credibility, backstory, 5
+   mechanism-anchored bullets, pipx quickstart, honest limitations,
+   meta-disclosure, links, feedback asks) plus a verified-facts table and a
+   pre-post self-check — deliberately containing NO prose to copy. The
+   founder writes the actual comment by hand from this guide.
+1. **Clean-machine quickstart test — PASSED.** Docker as clean machine:
+   - `python:3.13-slim`: `pip install pipx && pipx install kiss-agent-framework` → 2026.7.18 installs; `sorcar --help` works;
+     **34 seconds end-to-end** (≤5-min target met).
+   - `python:3.14-slim`: passes (3.13+ claim holds upward).
+   - `python:3.12-slim`: fails gracefully ("No matching distribution
+     found") — validates the "Python 3.13+ only" limitation claim.
+   - Caveat: pipx PATH warning; `pipx ensurepath` fixes.
+1. **Slot picked:** primary **Wed 2026-07-15, 9:30am ET**; fallbacks Thu
+   2026-07-16 and Tue 2026-07-21 (Tue 7/14 too soon for human pre-flight).
+
+Also: link pre-flight all 200 (repo, arXiv 2604.23822, docs/index.md,
+llms.txt); found one **BLOCKER** — the public repo path
+https://github.com/ksenxx/kiss_ai/tree/main/marketing returns 404; the
+episode dir must be published publicly (push marketing/ to the public repo
+or mirror to kisssorcar.github.io) before T-0, since the comment's meta
+paragraph links to it. Updated LAUNCH_CHECKLIST.md (checked off verified
+items, added slot + blocker), EPISODE.md (new Act 6: pre-flight
+verification + scorecard rows), and the series README (guide + slot).
+Remaining human-only steps: hand-rewrite, HN-account karma warm-up, README
+hero GIF check, clear the public-repo blocker, submit Wed 9:30am ET.
