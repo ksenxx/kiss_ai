@@ -1,4 +1,44 @@
-# PROGRESS — Resolve stranded-branch merge conflict (kiss/wt-1783911737-192f8ce6) (current task)
+# PROGRESS — Resolve stranded-branch merge conflict (kiss/wt-1783912825-c143d801) (current task)
+
+## Task
+
+The framework's auto-merge of worktree branch `kiss/wt-1783912825-c143d801`
+(which carried the previous merge-conflict-resolution session's 5 commits:
+merge 984137bf of the gmail/googlechat KISS_HOME fixes, the Episode 1
+PROGRESS restore, marketing mdformat, and the PROGRESS log) reported
+"Merge conflict detected. Resolve manually" with `git merge --squash`
+instructions. Resolve it and land the branch.
+
+## What was done
+
+1. Investigated: the branch held 6 commits on top of merge-base 886d06b1;
+   main had meanwhile advanced by one commit (f56e7a4e, Episode 1
+   pre-flight). `git merge-tree` showed exactly ONE conflicted file:
+   `marketing/agent-markets-itself/episode-01/LAUNCH_CHECKLIST.md` — main's
+   f56e7a4e rewrote its pre-flight section (verified quickstart, launch
+   slot, 404 blocker) while the branch's 049df754 mdformatted the older
+   version of the same lines.
+1. Ran `git merge --no-ff kiss/wt-1783912825-c143d801` (merge commit
+   7d7c7fac) and resolved the single conflict by keeping main's newer
+   pre-flight CONTENT (verified items, slot, blocker) and applying the
+   branch's mdformat indentation style; re-ran `mdformat` on the file.
+1. Post-merge review: the ort merge of PROGRESS.md had dropped main's
+   "Show HN launch pre-flight" section (from f56e7a4e, absent on the
+   branch); restored it verbatim + mdformat (commit 900fc669).
+1. `uv run check --full` failed only on the pre-existing unformatted
+   `HAND_REWRITE_GUIDE.md` (new in f56e7a4e, never mdformatted);
+   formatted it (commit aac21482). Full check now passes.
+1. Verified merged-in tests still pass (test_gmail_gchat_isolation.py,
+   test_gmail_agent.py, test_tlon_config_isolation.py — 39 passed).
+1. Verified the auto-stashes hold nothing unique (every differing blob in
+   stash@{0} is the stale dc59fed9 version of PROGRESS.md / docs/api.md /
+   index.html.md); left them for the user to drop.
+1. Deleted the fully-merged branch `kiss/wt-1783912825-c143d801`
+   (tip cb8a0d0b is an ancestor of HEAD).
+
+______________________________________________________________________
+
+# PROGRESS — Resolve stranded-branch merge conflict (kiss/wt-1783911737-192f8ce6) (previous task)
 
 ## Task
 
