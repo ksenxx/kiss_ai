@@ -28,10 +28,10 @@ from kiss.agents.third_party_agents._backend_utils import (
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ToolMethodBackend,
+    _kiss_home,
     channel_main,
 )
 
-_GCHAT_DIR = Path.home() / ".kiss" / "third_party_agents" / "googlechat"
 _SCOPES = [
     "https://www.googleapis.com/auth/chat.messages",
     "https://www.googleapis.com/auth/chat.spaces",
@@ -39,19 +39,29 @@ _SCOPES = [
 ]
 
 
+def _gchat_dir() -> Path:
+    """Return the Google Chat credential directory, honoring ``KISS_HOME``.
+
+    Returns:
+        Path to ``$KISS_HOME/third_party_agents/googlechat`` (defaults to
+        ``~/.kiss/third_party_agents/googlechat``).
+    """
+    return _kiss_home() / "third_party_agents" / "googlechat"
+
+
 def _token_path() -> Path:
     """Return the path to the stored OAuth2 token file."""
-    return _GCHAT_DIR / "token.json"
+    return _gchat_dir() / "token.json"
 
 
 def _credentials_path() -> Path:
     """Return the path to the OAuth2 client credentials file."""
-    return _GCHAT_DIR / "credentials.json"
+    return _gchat_dir() / "credentials.json"
 
 
 def _service_account_path() -> Path:
     """Return the path to the service account JSON file."""
-    return _GCHAT_DIR / "service_account.json"
+    return _gchat_dir() / "service_account.json"
 
 
 def _load_service(sa_path: str = "") -> Any:

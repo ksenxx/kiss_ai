@@ -59,6 +59,6 @@ sorcar -t "What is 2435*234?"
 }
 ```
 
----
+______________________________________________________________________
 
 KISS Sorcar · Apache 2.0 · [GitHub](https://github.com/ksenxx/kiss_ai) · Named after [P. C. Sorcar](https://en.wikipedia.org/wiki/P._C._Sorcar), the legendary Bengali magician.

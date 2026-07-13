@@ -61,7 +61,7 @@ SorcarAgent with chat-session state management.
 - **resume_chat_by_id(chat_id)** — Resume a chat session by stable identifier.
 - **resume_from_task_id(task_id)** — One-shot seed of the next prompt's context from a task's parent chain.
 - **build_chat_prompt(prompt) -> str** — Load chat context and prepend previous tasks/results to the prompt.
-- **run(prompt_template='', **kwargs) -> str** — Run with chat-session context: loads prior context, persists the new task, runs the underlying agent, and saves the result to history.
+- **`run(prompt_template='', **kwargs) -> str`** — Run with chat-session context: loads prior context, persists the new task, runs the underlying agent, and saves the result to history.
 
 ## `kiss.agents.sorcar.git_worktree` — Git worktree operations
 
@@ -94,7 +94,7 @@ Highlights (all methods take explicit `repo`/`wt_dir` paths):
 
 SorcarAgent that isolates every task in a git worktree.
 
-- **run(prompt_template='', **kwargs) -> str** — Creates a new worktree and branch, redirects `work_dir` into the worktree, and delegates to `ChatSorcarAgent.run()`. Any previously pending branch is auto-committed and squash-merged first. Falls back to direct execution when `use_worktree=False`, when `work_dir` is not in a git repo, when the repo has no commits, or when HEAD is detached.
+- **`run(prompt_template='', **kwargs) -> str`** — Creates a new worktree and branch, redirects `work_dir` into the worktree, and delegates to `ChatSorcarAgent.run()`. Any previously pending branch is auto-committed and squash-merged first. Falls back to direct execution when `use_worktree=False`, when `work_dir` is not in a git repo, when the repo has no commits, or when HEAD is detached.
 - **merge() -> str** — Merge the task branch into the original branch. Idempotent; auto-commits uncommitted worktree changes and stashes/restores user edits on main.
 - **discard() -> str** — Throw away the task branch and worktree, checkout the original branch. Idempotent.
 - **new_chat()** — Reset to a new chat session, auto-merging any pending worktree first.
