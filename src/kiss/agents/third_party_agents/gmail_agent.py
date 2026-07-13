@@ -39,31 +39,41 @@ from kiss.agents.third_party_agents._backend_utils import (
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ToolMethodBackend,
+    _kiss_home,
     channel_main,
 )
 
-_GMAIL_DIR = Path.home() / ".kiss" / "third_party_agents" / "gmail"
 _SCOPES = [
     "https://mail.google.com/",
 ]
+
+
+def _gmail_dir() -> Path:
+    """Return the Gmail credential directory, honoring ``KISS_HOME``.
+
+    Returns:
+        Path to ``$KISS_HOME/third_party_agents/gmail`` (defaults to
+        ``~/.kiss/third_party_agents/gmail``).
+    """
+    return _kiss_home() / "third_party_agents" / "gmail"
 
 
 def _token_path() -> Path:
     """Return the path to the stored Gmail OAuth2 token file.
 
     Returns:
-        Path to ``~/.kiss/third_party_agents/gmail/token.json``.
+        Path to ``token.json`` inside :func:`_gmail_dir`.
     """
-    return _GMAIL_DIR / "token.json"
+    return _gmail_dir() / "token.json"
 
 
 def _credentials_path() -> Path:
     """Return the path to the OAuth2 client credentials file.
 
     Returns:
-        Path to ``~/.kiss/third_party_agents/gmail/credentials.json``.
+        Path to ``credentials.json`` inside :func:`_gmail_dir`.
     """
-    return _GMAIL_DIR / "credentials.json"
+    return _gmail_dir() / "credentials.json"
 
 
 def _load_credentials() -> Credentials | None:

@@ -338,6 +338,26 @@ def _extract_signal_helpers(script: Path) -> str:
     return chunk
 
 
+def _reset_signal_dispositions() -> None:
+    """Restore default SIGINT/SIGTERM dispositions in the harness child.
+
+    Runs between ``fork`` and ``exec`` (``subprocess.Popen(preexec_fn=…)``).
+    When pytest itself is launched as a *background job of a non-job-control
+    shell* (``sh -c 'pytest … &'`` — exactly what CI wrappers and parallel
+    test runners do), POSIX requires that shell to start the job with SIGINT
+    set to ``SIG_IGN``.  The ignored disposition is inherited across
+    fork/exec all the way down to the harness bash, and bash refuses to trap
+    signals that were ignored on entry ("Signals ignored upon entry to the
+    shell cannot be trapped or reset"), silently turning install.sh's
+    ``trap handle_interrupt INT`` into a no-op — the SIGINT tests then fail
+    with an empty harness log because ``handle_interrupt`` can never run.
+    Resetting to ``SIG_DFL`` here gives the harness the same signal
+    environment as a real terminal running install.sh.
+    """
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+
+
 def _wait_for_log_text(log: Path, needle: str, timeout: float = 10.0) -> str:
     """Re-read *log* until *needle* appears or *timeout* elapses.
 
@@ -422,6 +442,7 @@ def test_run_with_heartbeat_survives_stray_sigint(tmp_path: Path) -> None:
             stderr=subprocess.STDOUT,
             start_new_session=True,
             cwd=str(tmp_path),
+            preexec_fn=_reset_signal_dispositions,
         )
         try:
             # Wait until the wrapped command is actually running (it writes
@@ -447,7 +468,9 @@ def test_run_with_heartbeat_survives_stray_sigint(tmp_path: Path) -> None:
                 except ProcessLookupError:
                     pass
 
-    stdout = _wait_for_log_text(log, "Interrupt received but ignored")
+    stdout = _wait_for_log_text(
+        log, "Interrupt received but ignored", timeout=30.0
+    )
     assert proc.returncode == 0, (
         "run_with_heartbeat must NOT abort on a single stray SIGINT — the "
         "harness exited "
@@ -502,6 +525,7 @@ def test_run_with_heartbeat_double_sigint_aborts(tmp_path: Path) -> None:
             stderr=subprocess.STDOUT,
             start_new_session=True,
             cwd=str(tmp_path),
+            preexec_fn=_reset_signal_dispositions,
         )
         try:
             deadline = time.time() + 15.0
@@ -517,7 +541,14 @@ def test_run_with_heartbeat_double_sigint_aborts(tmp_path: Path) -> None:
             # wrapped ``sleep 30`` would outlive the wait below.  The
             # 3-second double-interrupt window starts at the first trap's
             # execution, so detect-then-send stays safely inside it.
-            first = _wait_for_log_text(log, "Interrupt received but ignored")
+            # A generous timeout: under heavy parallel test load (8
+            # concurrent pytest processes) scheduler starvation can delay
+            # the parent bash between the ready-marker write and the trap
+            # execution/log flush well past the 10 s default, producing a
+            # spurious "first SIGINT trap never fired" flake.
+            first = _wait_for_log_text(
+                log, "Interrupt received but ignored", timeout=30.0
+            )
             assert "Interrupt received but ignored" in first, (
                 f"first SIGINT trap never fired.  Output:\n{first}"
             )
@@ -535,7 +566,7 @@ def test_run_with_heartbeat_double_sigint_aborts(tmp_path: Path) -> None:
                 except ProcessLookupError:
                     pass
 
-    stdout = _wait_for_log_text(log, "Second interrupt received")
+    stdout = _wait_for_log_text(log, "Second interrupt received", timeout=30.0)
     assert proc.returncode == 130, (
         "double-Ctrl+C must abort with exit 130; got "
         f"{proc.returncode}.  Output:\n{stdout}"

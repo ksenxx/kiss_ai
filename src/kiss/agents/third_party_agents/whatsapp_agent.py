@@ -144,7 +144,8 @@ class WhatsAppChannelBackend(ToolMethodBackend):
             f"Authenticated as {result.get('verified_name', '')} "
             f"({result.get('display_phone_number', '')})"
         )
-        if not self._start_webhook_server():  # pragma: no branch
+        port = int(cfg.get("webhook_port", _DEFAULT_WEBHOOK_PORT))
+        if not self._start_webhook_server(port=port):  # pragma: no branch
             return False
         return True
 
@@ -152,7 +153,8 @@ class WhatsAppChannelBackend(ToolMethodBackend):
         """Start the webhook HTTP server in a background thread.
 
         Args:
-            port: Port to listen on. Default: 18080.
+            port: Port to listen on. Default: 18080 (overridable via the
+                ``webhook_port`` config key in :meth:`connect`).
 
         Returns:
             True if the server started successfully, False otherwise.
