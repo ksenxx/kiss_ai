@@ -2711,8 +2711,16 @@ def _build_html() -> str:
     tips_json = json.dumps(
         {"tips": read_tips(), "show": False},
     ).replace("</", "<\\/")
+    # Codex-mobile restyle for the remote page ONLY: the stylesheet is
+    # linked via the remote-only HEAD_STYLE substitution (SorcarTab
+    # passes HEAD_STYLE: '' for the VS Code webview) and every rule in
+    # it is additionally scoped under ``body.remote-chat``, so the
+    # extension webview can never pick it up.  It comes AFTER main.css
+    # (linked via STYLE_HREF above HEAD_STYLE in chat.html) so its
+    # overrides win by normal cascade order.
     head_style = (
-        "<style>\n"
+        f'<link href="{_media_url("remote-codex.css")}" rel="stylesheet">\n'
+        "  <style>\n"
         "    html, body { height: 100%; margin: 0; padding: 0; overflow: hidden; }\n"
         "    body { background: var(--vscode-editor-background, #1e1e1e);\n"
         "            color: var(--vscode-editor-foreground, #cccccc); }\n"
