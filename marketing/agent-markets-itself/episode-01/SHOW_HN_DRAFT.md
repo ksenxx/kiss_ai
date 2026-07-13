@@ -16,10 +16,10 @@ compound.)
 ## Title candidates (pick one; ≤ 80 chars)
 
 1. `Show HN: KISS Sorcar – open-source agent framework, ~2,850 LoC core, 530 models` *(recommended: two concrete numbers, states category)*
-2. `Show HN: KISS Sorcar – BYOK agent that codes, browses, and messages (Apache-2.0)`
-3. `Show HN: KISS Sorcar – a small open-source alternative to Claude Code and Cursor`
-4. `Show HN: An agent framework where one task can mix models from nine providers`
-5. `Show HN: KISS Sorcar – local-first AI agent for VS Code, CLI, and web`
+1. `Show HN: KISS Sorcar – BYOK agent that codes, browses, and messages (Apache-2.0)`
+1. `Show HN: KISS Sorcar – a small open-source alternative to Claude Code and Cursor`
+1. `Show HN: An agent framework where one task can mix models from nine providers`
+1. `Show HN: KISS Sorcar – local-first AI agent for VS Code, CLI, and web`
 
 ## First comment (v2, 418 words)
 
@@ -55,7 +55,9 @@ What's technically different:
 
 Quickstart (no signup; you need Python 3.13+ and one provider API key):
 
-    pipx install kiss-agent-framework
+```
+pipx install kiss-agent-framework
+```
 
 Limitations, honestly: Python 3.13+ only; single maintainer; no published
 SWE-bench score yet (running it is on the list); the web/mobile app is
@@ -80,25 +82,25 @@ Each edit maps to a research finding; see REVIEW.md for the finding sources.
 
 1. **Cut 31%** (609 → 418 words). Finding: successful drafts get ~30% shorter
    in editing; cut everything that repeats the README.
-2. **Title candidates rewritten to be concrete/technical.** v1 had
+1. **Title candidates rewritten to be concrete/technical.** v1 had
    "Show HN: KISS Sorcar – The open-source AI agent that does everything"
    → disqualified (marketing-speak, unverifiable). Replaced with
    number-anchored titles per the Layerform/PromptTools pattern.
-3. **Removed the feature-list-only middle.** v1 bullets read like the Orcbot
+1. **Removed the feature-list-only middle.** v1 bullets read like the Orcbot
    anti-example (buzzwords, no story). v2 anchors every bullet in a number or
    a mechanism (worktrees, JSON catalog, paragraph-of-prompt).
-4. **Added the credibility line** ("CUTE/concolic testing, DART lineage") —
+1. **Added the credibility line** ("CUTE/concolic testing, DART lineage") —
    the Mastra "Previously we built Gatsby" move, one line only per spec.
-5. **Added honest-limitations block** including "no published benchmark yet"
+1. **Added honest-limitations block** including "no published benchmark yet"
    and "single maintainer" — syften/dang: a small useful thing beats an
    inflated claim; front page needs something to argue with.
-6. **Added the dogfooding/meta paragraph with explicit hand-rewrite
+1. **Added the dogfooding/meta paragraph with explicit hand-rewrite
    disclosure** — resolves the dang-2026 LLM-text rule by making transparency
    the hook instead of a violation.
-7. **Specific feedback ask** (security model, small-core claim) replaces v1's
+1. **Specific feedback ask** (security model, small-core claim) replaces v1's
    generic "let me know what you think" — syften: say what feedback helps.
-8. **Quickstart switched** from the `curl | bash` installer to
+1. **Quickstart switched** from the `curl | bash` installer to
    `pipx install kiss-agent-framework` — HN is hostile to `curl | bash`;
    pipx is the lower-friction, higher-trust path.
-9. **Removed the P. C. Sorcar name story** — cost 2 sentences, spec allows
+1. **Removed the P. C. Sorcar name story** — cost 2 sentences, spec allows
    at most 1; it survives in the README where curious readers will find it.
