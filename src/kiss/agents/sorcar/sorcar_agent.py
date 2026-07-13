@@ -461,8 +461,22 @@ class SorcarAgent(RelentlessAgent):
             from kiss.docker.docker_tools import DockerTools
 
             docker_tools = DockerTools(self._docker_bash)
+
+            def Bash(command: str, description: str) -> str:  # noqa: N802
+                """Run a command in Docker, preferring a code-graph answer."""
+                hint = ""
+                try:
+                    from kiss.agents.sorcar.code_graph import grep_hint
+
+                    hint = grep_hint(command, self.work_dir) or ""
+                except Exception:
+                    logger.debug("code_graph Docker grep hint failed", exc_info=True)
+                if hint:
+                    return hint
+                return self._docker_bash(command, description)
+
             tools: list = [
-                self._docker_bash, docker_tools.Read, docker_tools.Edit, docker_tools.Write,
+                Bash, docker_tools.Read, docker_tools.Edit, docker_tools.Write,
             ]
         else:
             useful_tools = UsefulTools(
@@ -679,6 +693,18 @@ class SorcarAgent(RelentlessAgent):
         skill_tool = make_skill_tool(self.work_dir or ".")
         if skill_tool is not None:
             tools.append(skill_tool)
+        # code_graph: local tree-sitter knowledge graph of the work dir
+        # (query/path/explain instead of grep).  Registered only when the
+        # optional tree-sitter grammars are importable; a failure here
+        # must never break agent startup.
+        try:
+            from kiss.agents.sorcar.code_graph import make_code_graph_tool
+
+            code_graph_tool = make_code_graph_tool(self.work_dir or ".")
+            if code_graph_tool is not None:
+                tools.append(code_graph_tool)
+        except Exception:
+            logger.warning("code_graph tool setup failed", exc_info=True)
         # MCP servers: every tool of every configured server becomes a
         # ``<server>_<tool>`` function (filtered by the
         # ``mcp_permissions`` wildcard rules).  A broken server is

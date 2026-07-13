@@ -877,6 +877,21 @@ class UsefulTools:
         if guard is not None:
             return guard
 
+        # Query-before-grep interception (code_graph feature): when a
+        # built graph already knows the identifier a grep/rg command
+        # searches for, deny the expensive grep and return the graph answer
+        # directly ("the deny message IS the answer").  A missing/broken
+        # code_graph module can never affect Bash (lazy try/except import).
+        hint = ""
+        try:
+            from kiss.agents.sorcar.code_graph import grep_hint
+
+            hint = grep_hint(command, self.work_dir) or ""
+        except Exception:
+            logger.debug("code_graph grep hint failed", exc_info=True)
+        if hint:
+            return hint
+
         if self.stream_callback:
             return self._bash_streaming(command, timeout_seconds, max_output_chars)
 
