@@ -1,4 +1,47 @@
-# PROGRESS — Run all tests in parallel, diagnose & fix failures — Session 3 (current task)
+# PROGRESS — Fix side scrolling in chat webview while a task is running (current task)
+
+## Task
+
+Side scrolling in the chat webview does not work while a task is running.
+Reproduce with e2e tests, then fix. Development done with claude-fable-5;
+review/debug pass done with gpt-5.6-sol.
+
+## Session 2 (this run — continuation of the investigation session)
+
+1. Root cause confirmed: while `isRunning`, every #output mutation fires the
+   MutationObserver → `sb()` → `O.scrollTo({top: scrollHeight})` rAF storm,
+   plus per-panel tails (`thinkEl/bashPanel/llmPanel .scrollTop = scrollHeight`).
+   The wheel handler only honoured vertical intent
+   (`if (isRunning && e.deltaY < 0) _scrollLock = true`) — horizontal wheel
+   gestures (deltaX) were ignored, so a user's side-scroll of a wide
+   `pre`/bash panel was immediately aborted by the programmatic scrolls.
+2. Wrote failing-first e2e test `src/kiss/agents/vscode/test/sideScrollWhileRunning.test.js`
+   (jsdom harness on real chat.html + main.js with a *recording* scrollTo and
+   faked scroll geometry; hides welcome via `win._demoApi.hideWelcome()`).
+   4 tests: horizontal wheel engages lock; bash-panel tail pauses under lock;
+   dominant downward wheel does NOT lock; lock releases at bottom.
+   Verified FAIL pre-fix (git stash) and PASS post-fix.
+3. Fix in `src/kiss/agents/vscode/media/main.js`:
+   - wheel handler: `if (isRunning && (e.deltaY < 0 || Math.abs(e.deltaX) > Math.abs(e.deltaY))) _scrollLock = true;`
+   - thinking-panel tail (≈line 3146), bash-panel tail (≈line 3398) and
+     llm-panel rAF tail (≈line 3635) now skip while `_scrollLock` is set.
+   - Lock release unchanged: scroll-to-bottom handler clears `_scrollLock`.
+4. Registered the new test in `package.json` npm test chain.
+5. Ran all 121 vscode node tests in 8 parallel splits: 120 pass; only
+   `installFailureNoCompleteNotification.test.js` hangs — pre-existing
+   (fails identically with the fix stashed; sandbox/env dependent).
+   `npm run lint:ts` clean; `npm run compile` + `tsc` clean.
+6. gpt-5.6-sol review pass: audited every scrollTop/scrollTo/scrollLeft/wheel
+   site in media/*.js, all overflow-x:auto scrollers in main.css, git blame
+   provenance, and test-vs-production wiring. Confirmed: `#output`'s history
+   prepend (`O.scrollTop += newScrollHeight - prevScrollHeight`, line 2226)
+   and merge-hunk `scrollTo` (line 6558) are user-initiated/not-running paths
+   — correctly untouched; `bodyEl.scrollTop` (line 3483) fires once at prompt
+   panel creation, not per-token — correctly untouched; no missed wirings.
+
+---
+
+# PROGRESS — Run all tests in parallel, diagnose & fix failures — Session 3 (previous task)
 
 ## Task
 
