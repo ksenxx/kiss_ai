@@ -358,8 +358,8 @@ def run_sorcar_one(
         elapsed = time.time() - start
         stdout_log = task_dir / "sorcar_stdout.log"
         stderr_log = task_dir / "sorcar_stderr.log"
-        stdout_log.write_text(proc.stdout or "")
-        stderr_log.write_text(proc.stderr or "")
+        stdout_log.write_text(proc.stdout or "", encoding="utf-8")
+        stderr_log.write_text(proc.stderr or "", encoding="utf-8")
         # Prefer the produced file regardless of sorcar's exit code —
         # a non-zero return code often reflects a cosmetic issue
         # (e.g., budget warning) rather than a missing artefact.
@@ -374,7 +374,7 @@ def run_sorcar_one(
             }
         # Fall back: dump stdout so the parser still has something to
         # score rather than skipping the task entirely.
-        output_md.write_text(proc.stdout or "")
+        output_md.write_text(proc.stdout or "", encoding="utf-8")
         return {
             "idx": idx,
             "arxiv_id": query["arxiv_id"],
@@ -458,7 +458,7 @@ def generate_all(
                 flush=True,
             )
     summary_path = results_dir / "summary.json"
-    summary_path.write_text(json.dumps(results, indent=2))
+    summary_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
     return [r for r in results if r is not None]
 
 
@@ -544,7 +544,7 @@ def print_summary(results_csv: Path, sorcar_summary: Path) -> None:
     print("=" * 70)
 
     if sorcar_summary.exists():
-        raw = json.loads(sorcar_summary.read_text())
+        raw = json.loads(sorcar_summary.read_text(encoding="utf-8"))
         n = len(raw)
         by_status: dict[str, int] = {}
         for r in raw:

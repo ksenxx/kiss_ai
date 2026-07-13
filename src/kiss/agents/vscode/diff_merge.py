@@ -60,7 +60,7 @@ def _read_lines_preserved(path: str | Path) -> list[str]:
         OSError: If the file cannot be read.
         UnicodeDecodeError: If the content is not decodable text.
     """
-    with open(path, newline="") as f:
+    with open(path, encoding="utf-8", newline="") as f:
         return _split_lines_keepends(f.read())
 
 
@@ -86,7 +86,7 @@ def _load_gitignore_dirs(work_dir: str) -> tuple[set[str], set[str]]:
     skip_paths: set[str] = set()
     try:
         gitignore = Path(work_dir) / ".gitignore"
-        for raw_line in gitignore.read_text().splitlines():
+        for raw_line in gitignore.read_text(encoding="utf-8").splitlines():
             line = raw_line.strip()
             if not line or line.startswith("#") or line.startswith("!"):
                 continue
@@ -924,7 +924,7 @@ def _prepare_merge_view(
             deleted_dir = merge_dir / ".deleted"
             deleted_placeholder = deleted_dir / fname
             deleted_placeholder.parent.mkdir(parents=True, exist_ok=True)
-            deleted_placeholder.write_text("")
+            deleted_placeholder.write_text("", encoding="utf-8")
             current_path = deleted_placeholder
         base_path = _write_base_copy(
             work_dir, merge_dir, ub_dir, fname, base_ref,
@@ -981,6 +981,7 @@ def _prepare_merge_view(
                 "files": manifest_files,
             },
         ),
+        encoding="utf-8",
     )
     total_hunks = sum(len(f["hunks"]) for f in manifest_files)
     return {"status": "opened", "count": len(manifest_files), "hunk_count": total_hunks}

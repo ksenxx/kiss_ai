@@ -95,6 +95,15 @@ class _ServerTestBase(IsolatedAsyncioTestCase):
         self.server._printer.broadcast = self.broadcasts.append  # type: ignore[method-assign, assignment]
 
     async def asyncTearDown(self) -> None:
+        # Join the orphan-task-sweep daemon thread BEFORE closing the
+        # per-thread sqlite connection, restoring persistence paths, and
+        # deleting the temp dir that holds the DB.  Otherwise the sweep
+        # thread can still be executing ``db.execute`` against a
+        # connection whose backing file is being removed, which crashes
+        # the interpreter with a segfault inside the sqlite3 C layer.
+        sweep = self.server._vscode_server._orphan_sweep_thread
+        if sweep is not None and sweep.is_alive():
+            await asyncio.to_thread(sweep.join, 30)
         with self.server._merge_states_lock:
             self.server._merge_states.clear()
         with self.server._pending_tab_closes_lock:
