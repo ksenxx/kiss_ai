@@ -746,15 +746,15 @@ Poisoning chain in `src/kiss/agents/vscode/media/main.js`:
 1. `setTaskText` resets `currentTaskId = null` and calls
    `resetAdjacentState()` → both scroll anchors
    (`oldestLoadedTaskId`/`newestLoadedTaskId`) become `null`.
-2. The early prompt event falls into the message-switch DEFAULT-case
+1. The early prompt event falls into the message-switch DEFAULT-case
    taskId-adoption block, whose guard only rejected
    `undefined`/`null` — the empty string passed → `currentTaskId = ''`
    and (both anchors being null) the anchors were seeded to `''`.
-3. The real taskId (e.g. `'123'`) streamed moments later updates
+1. The real taskId (e.g. `'123'`) streamed moments later updates
    `currentTaskId`, but the anchor re-seed only fired when BOTH
    anchors were still `null` — they were `''`, so they stayed `''`
    forever.
-4. Overscroll posted `getAdjacentTask {taskId: ''}`; backend
+1. Overscroll posted `getAdjacentTask {taskId: ''}`; backend
    `commands.py` `_opt_str('')` → `None` → persistence returns no
    task → server broadcast an EMPTY `adjacent_task_events` →
    `renderAdjacentTask` latched `noPrevTask = true` PERMANENTLY.
@@ -772,10 +772,10 @@ All in `src/kiss/agents/vscode/media/main.js`:
 1. DEFAULT-case adoption guard: added `ev.taskId !== ''` so early
    empty-string taskIds are never adopted; anchor re-seed now also
    fires when anchors are `''` (defensive), not only `null`.
-2. `accumulateOverscroll()`: early-return when the anchor taskId is
+1. `accumulateOverscroll()`: early-return when the anchor taskId is
    `undefined`/`null`/`''` so `getAdjacentTask` is never posted with
    an unknown row id (prevents the empty-reply noPrev/noNext latch).
-3. `task_events` active-tab path: new `else if` branch — when
+1. `task_events` active-tab path: new `else if` branch — when
    `ev.task` is empty but `ev.task_id` is present, still set
    `currentTaskId = ev.task_id`, derive `currentTaskName` from the tab
    title (fallback `'Task'`) only when it is empty, and call
