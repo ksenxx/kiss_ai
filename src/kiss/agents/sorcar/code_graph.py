@@ -453,18 +453,23 @@ class CodeGraph:
             ``NODE``/``EDGE`` lines, or a no-match message.
         """
         terms = [t.lower() for t in re.findall(r"\w+", question) if len(t) > 1]
+        exact_question = question.strip().casefold()
         scored: list[tuple[int, str]] = []
         for nid, node in self.nodes.items():
-            label = node["label"].lower()
+            label = node["label"].casefold()
             score = sum(1 for t in terms if t in label)
+            if terms and label == exact_question:
+                score += len(terms) + 1
             if score:
                 scored.append((score, nid))
         if not scored:
             return "No matching nodes in the code graph."
         scored.sort(key=lambda pair: (-pair[0], self.nodes[pair[1]]["label"]))
         seeds = [nid for _, nid in scored[:3]]
+        seed_rank = {nid: rank for rank, nid in enumerate(seeds)}
         adj = self._adjacency()
         seen: set[str] = set(seeds)
+        distance = {nid: 0 for nid in seeds}
         frontier = deque((nid, 0) for nid in seeds)
         sub_edges: list[dict[str, Any]] = []
         seen_edges: set[int] = set()
@@ -478,10 +483,17 @@ class CodeGraph:
                     sub_edges.append(edge)
                 if neighbor not in seen:
                     seen.add(neighbor)
+                    distance[neighbor] = depth + 1
                     frontier.append((neighbor, depth + 1))
+        # Relevance must outrank alphabetical determinism.  Large file/class
+        # hubs can pull thousands of third-hop nodes into ``seen``; sorting
+        # those globally by label used to truncate the exact seed and its
+        # direct callers out of the 1,500-character grep hint entirely.
         ordered_nodes = sorted(
             seen,
             key=lambda nid: (
+                distance[nid],
+                seed_rank.get(nid, len(seeds)),
                 self.nodes[nid]["label"].lower(),
                 self.nodes[nid]["file"],
                 self.nodes[nid]["line"],
@@ -491,13 +503,52 @@ class CodeGraph:
         ordered_edges = sorted(
             sub_edges,
             key=lambda edge: (
+                max(distance[edge["source"]], distance[edge["target"]]),
+                min(distance[edge["source"]], distance[edge["target"]]),
                 self.nodes[edge["source"]]["label"].lower(),
                 edge["relation"],
                 self.nodes[edge["target"]]["label"].lower(),
             ),
         )
-        lines = [self._node_line(self.nodes[nid]) for nid in ordered_nodes]
-        lines += [self._edge_line(edge) for edge in ordered_edges]
+        # Interleave each discovered node with the relationships that connect
+        # it to the preceding BFS rings.  Emitting every node before every
+        # edge made tight grep hints contain no relationships at all on
+        # hub-heavy real repositories (a high-degree target can have dozens of
+        # direct neighbours by itself).
+        nodes_by_depth: dict[int, list[str]] = {}
+        for nid in ordered_nodes:
+            nodes_by_depth.setdefault(distance[nid], []).append(nid)
+        edges_by_depth: dict[int, list[dict[str, Any]]] = {}
+        for edge in ordered_edges:
+            edge_depth = max(
+                distance[edge["source"]], distance[edge["target"]]
+            )
+            edges_by_depth.setdefault(edge_depth, []).append(edge)
+
+        lines = [
+            self._node_line(self.nodes[nid]) for nid in nodes_by_depth.get(0, [])
+        ]
+        lines.extend(self._edge_line(edge) for edge in edges_by_depth.get(0, []))
+        max_distance = max(distance.values(), default=0)
+        for depth in range(1, max_distance + 1):
+            parent_edges: dict[str, list[dict[str, Any]]] = {}
+            same_ring_edges: list[dict[str, Any]] = []
+            for edge in edges_by_depth.get(depth, []):
+                source, target = edge["source"], edge["target"]
+                if distance[source] > distance[target]:
+                    parent_edges.setdefault(source, []).append(edge)
+                elif distance[target] > distance[source]:
+                    parent_edges.setdefault(target, []).append(edge)
+                else:
+                    same_ring_edges.append(edge)
+            for nid in nodes_by_depth.get(depth, []):
+                lines.append(self._node_line(self.nodes[nid]))
+                lines.extend(
+                    self._edge_line(edge) for edge in parent_edges.get(nid, [])
+                )
+            # Same-ring relationships are less useful than every node's path
+            # back toward the seed, so render them only after the whole ring.
+            lines.extend(self._edge_line(edge) for edge in same_ring_edges)
         out: list[str] = []
         used = 0
         for line in lines:
