@@ -51,7 +51,7 @@ def read_tips() -> list[str]:
     no tips window).
     """
     try:
-        text = _bundled_tips_path().read_text()
+        text = _bundled_tips_path().read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return []
     sections = _TIP_DELIMITER.split(text)

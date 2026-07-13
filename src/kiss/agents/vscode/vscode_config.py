@@ -197,7 +197,7 @@ def load_config() -> dict[str, Any]:
     result = dict(DEFAULTS)
     if CONFIG_PATH.exists():
         try:
-            with open(CONFIG_PATH) as f:
+            with open(CONFIG_PATH, encoding="utf-8") as f:
                 stored = json.load(f)
             if isinstance(stored, dict):
                 result.update(stored)
@@ -232,13 +232,16 @@ def save_config(data: dict[str, Any]) -> None:
     # service daemon persists ``last_model``) — without it, two daemons
     # that each read the same old file and replace it would drop one
     # another's keys.
-    with _config_lock, open(CONFIG_DIR / ".config.lock", "w") as lock_file:
+    with (
+        _config_lock,
+        open(CONFIG_DIR / ".config.lock", "w", encoding="utf-8") as lock_file,
+    ):
         fcntl.flock(lock_file, fcntl.LOCK_EX)
         try:
             existing: dict[str, Any] = {}
             if CONFIG_PATH.exists():
                 try:
-                    with open(CONFIG_PATH) as f:
+                    with open(CONFIG_PATH, encoding="utf-8") as f:
                         stored = json.load(f)
                     if isinstance(stored, dict):
                         existing = stored
@@ -375,7 +378,7 @@ def save_api_key_to_shell(key_name: str, key_value: str) -> None:
     lines: list[str] = []
     replaced = False
     if rc.exists():
-        lines = rc.read_text().splitlines(keepends=True)
+        lines = rc.read_text(encoding="utf-8").splitlines(keepends=True)
         new_lines: list[str] = []
         for line in lines:
             if line.strip().startswith(pattern):

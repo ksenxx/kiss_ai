@@ -167,15 +167,15 @@ def _sync_extension_version() -> None:
         return
 
     namespace: dict[str, str] = {}
-    exec(version_file.read_text(), namespace)  # noqa: S102
+    exec(version_file.read_text(encoding="utf-8"), namespace)  # noqa: S102
     version = namespace.get("__version__", "")
     if not version:
         return
 
-    data = json.loads(package_json.read_text())
+    data = json.loads(package_json.read_text(encoding="utf-8"))
     if data.get("version") != version:
         data["version"] = version
-        package_json.write_text(json.dumps(data, indent=2) + "\n")
+        package_json.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
         print(f"Synced extension version to {version}")
 
 

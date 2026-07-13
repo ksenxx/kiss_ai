@@ -32,7 +32,7 @@ def _str_presenter(dumper: yaml.Dumper, data: str) -> ScalarNode:
 yaml.add_representer(str, _str_presenter)
 
 _kiss_pkg_dir = Path(__file__).parent.parent
-SYSTEM_PROMPT = (_kiss_pkg_dir / "SYSTEM.md").read_text()
+SYSTEM_PROMPT = (_kiss_pkg_dir / "SYSTEM.md").read_text(encoding="utf-8")
 
 if sys.platform == "win32":  # pragma: no branch
     if shutil.which("bash"):  # pragma: no branch

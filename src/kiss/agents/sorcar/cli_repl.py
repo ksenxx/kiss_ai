@@ -586,7 +586,7 @@ class CliCompleter:
             return ""
         partial = m.group(1)
         try:
-            content = Path(self.active_file).read_text()[:50000]
+            content = Path(self.active_file).read_text(encoding="utf-8")[:50000]
         except OSError:
             return ""
         words = set(re.findall(r"\b[A-Za-z_]\w{2,}\b", content))

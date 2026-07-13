@@ -1,0 +1,367 @@
+/*
+ * remote-codex.css — Codex mobile / ChatGPT-app restyle for the
+ * REMOTE webapp only.
+ *
+ * Loaded exclusively by the standalone remote page built by
+ * ``web_server._build_html()`` (linked after main.css so overrides
+ * win).  The VS Code extension webview shares chat.html + main.css
+ * but NEVER loads this file — and as a second safety net EVERY rule
+ * below is scoped under ``body.remote-chat``, the class only the
+ * remote page's BODY_CLASS_ATTR substitution adds.
+ *
+ * Design tokens (OpenAI Codex app / ChatGPT mobile, dark):
+ *   page bg        #0d0d0d      primary text  #ececec
+ *   muted text     #afafaf      placeholder   #8e8e8e
+ *   composer card  #212121, radius 28px, inset white edge
+ *   drawer/panel   #171717 / #212121, radius 12-16px
+ *   controls       36px circles; Send = white circle w/ black icon
+ *   chips/tabs     rounded pills; hover bg white/15
+ *
+ * ONLY presentation changes: no DOM ids, classes, or behavior differ.
+ */
+
+/* ── Page & core palette ─────────────────────────────── */
+body.remote-chat {
+  --bg: #0d0d0d;
+  --bg2: #0d0d0d;
+  --surface: #171717;
+  --surface2: #212121;
+  --fg: #ececec;
+  --dim: #afafaf;
+  --border: rgba(255, 255, 255, 0.1);
+  --input-bg: #212121;
+
+  background: #0d0d0d;
+  color: #ececec;
+}
+
+/* ── Tab bar → segmented pill chips ──────────────────── */
+body.remote-chat #tab-bar {
+  background: #0d0d0d;
+  border-bottom: none;
+  padding: 8px 10px 4px;
+}
+
+body.remote-chat #tab-list { gap: 6px; }
+
+body.remote-chat #tab-bar .chat-tab {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  padding: 5px 12px;
+  background: transparent;
+  color: #afafaf;
+  transition: background 0.15s, color 0.15s;
+}
+
+body.remote-chat #tab-bar .chat-tab:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #ececec;
+}
+
+body.remote-chat #tab-bar .chat-tab.active {
+  background: #212121;
+  border-color: rgba(255, 255, 255, 0.18);
+  color: #ececec;
+}
+
+body.remote-chat #tab-bar .chat-tab-close { border-radius: 999px; }
+
+body.remote-chat #tab-bar .chat-tab-add {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  color: #afafaf;
+}
+
+/* ── Status bar → subtle muted pill row ──────────────── */
+body.remote-chat #tab-status-bar {
+  background: #0d0d0d;
+  border-bottom: none;
+  padding: 2px 16px 6px;
+}
+
+body.remote-chat #tab-status-bar .status {
+  font-size: 12px;
+  color: #8e8e8e;
+}
+
+body.remote-chat #tab-status-bar .status-metric {
+  font-size: 12px;
+  color: #afafaf;
+}
+
+/* ── Task panel → rounded quoted card ────────────────── */
+body.remote-chat #task-panel {
+  margin: 8px 16px 0;
+  margin-left: auto;
+  max-width: 75%;
+  border: none;
+  border-radius: 22px;
+  background: #ececec;
+  color: #0d0d0d;
+  padding: 10px 38px 10px 16px;
+}
+
+body.remote-chat #task-panel-collapse-btn {
+  background: rgba(13, 13, 13, 0.07);
+  border-color: rgba(13, 13, 13, 0.15);
+  color: #565656;
+}
+
+body.remote-chat #task-panel-collapse-btn:hover {
+  background: rgba(13, 13, 13, 0.12);
+  border-color: rgba(13, 13, 13, 0.25);
+  color: #0d0d0d;
+}
+
+body.remote-chat #task-panel-copy { color: #565656; }
+body.remote-chat #task-panel-copy:hover { color: #0d0d0d; }
+
+/* ── Output column (Codex thread) ────────────────────── */
+body.remote-chat #output {
+  background: #0d0d0d;
+  padding: 16px 16px 24px;
+}
+
+body.remote-chat #output > *:not(#welcome) {
+  max-width: 768px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+body.remote-chat #welcome h2 { color: #ececec; }
+body.remote-chat #welcome p { color: #afafaf; }
+
+/* ── Composer → elevated rounded 28px card ───────────── */
+body.remote-chat #input-area {
+  background: #0d0d0d;
+  border-top: none;
+  padding: 4px 12px calc(10px + env(safe-area-inset-bottom, 0px));
+}
+
+body.remote-chat #input-container {
+  background: #212121;
+  border: 1px solid transparent;
+  border-radius: 28px;
+  box-shadow: inset 0 0 1px rgba(255, 255, 255, 0.2);
+  padding: 10px 14px 8px;
+  max-width: 768px;
+  margin: 0 auto;
+}
+
+body.remote-chat #input-container:focus-within {
+  border-color: transparent;
+  box-shadow: inset 0 0 1px rgba(255, 255, 255, 0.35);
+}
+
+body.remote-chat #task-input {
+  color: #ececec;
+  min-height: 2.4em;
+}
+
+body.remote-chat #task-input::placeholder { color: #8e8e8e; }
+
+body.remote-chat #input-footer {
+  border-top: none;
+  padding-top: 2px;
+  margin-top: 2px;
+}
+
+/* Composer controls: 36px circular buttons, hover white/15 */
+body.remote-chat #menu-btn,
+body.remote-chat #upload-btn,
+body.remote-chat #tricks-btn,
+body.remote-chat #voice-btn {
+  width: 36px;
+  height: 36px;
+  min-width: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 50%;
+  color: #cdcdcd;
+  transition: background 0.15s;
+}
+
+body.remote-chat #menu-btn:hover:not(:disabled),
+body.remote-chat #upload-btn:hover:not(:disabled),
+body.remote-chat #tricks-btn:hover:not(:disabled),
+body.remote-chat #voice-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.15);
+  color: #ececec;
+}
+
+body.remote-chat #tricks-btn.active,
+body.remote-chat #voice-btn.active {
+  background: rgba(255, 255, 255, 0.15);
+  color: #fff;
+}
+
+/* Model pill (Codex "5.6 Sol" style) */
+body.remote-chat #model-btn {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 999px;
+  padding: 6px 12px;
+  height: 32px;
+  color: #cdcdcd;
+}
+
+body.remote-chat #model-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.25);
+  color: #ececec;
+}
+
+/* Send = white circle with dark icon (ChatGPT primary action) */
+body.remote-chat #send-btn {
+  background: #fff;
+  color: #0d0d0d;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  box-shadow: none;
+}
+
+body.remote-chat #send-btn:hover {
+  background: #ececec;
+  color: #0d0d0d;
+  box-shadow: none;
+}
+
+body.remote-chat #send-btn:disabled {
+  background: rgba(255, 255, 255, 0.25);
+  color: #0d0d0d;
+  opacity: 1;
+}
+
+/* Stop = same circle, red accent kept for clarity */
+body.remote-chat #stop-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: #fff;
+  color: #0d0d0d;
+  border: none;
+}
+
+body.remote-chat #demo-pause-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+}
+
+/* Model dropdown → rounded popover card */
+body.remote-chat #model-dropdown {
+  background: #212121;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 16px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+
+/* File chips → rounded attachment cards */
+body.remote-chat .file-chip {
+  background: #1a1a1a;
+  border: 1px solid #3a3a3a;
+  border-radius: 16px;
+  color: #ececec;
+}
+
+/* Suggestion chips → pill cards */
+body.remote-chat .suggestion-chip {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 16px;
+  color: #ececec;
+}
+
+body.remote-chat .suggestion-chip:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.2);
+  color: #ececec;
+}
+
+/* ── Drawers: sidebar / frequent / tricks / settings ─── */
+body.remote-chat #sidebar,
+body.remote-chat #frequent-panel,
+body.remote-chat #tricks-panel {
+  background: #171717;
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+body.remote-chat #settings-panel {
+  background: #171717;
+  border-left: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+body.remote-chat .sidebar-hdr {
+  color: #8e8e8e;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 12px;
+}
+
+body.remote-chat .sidebar-item {
+  border-radius: 10px;
+  transition: background 0.15s;
+}
+
+body.remote-chat .sidebar-item:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+body.remote-chat .search-wrap input {
+  background: #212121;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  color: #ececec;
+}
+
+body.remote-chat .history-filter-chk {
+  border-radius: 999px;
+}
+
+/* Settings form fields → dark rounded inputs */
+body.remote-chat .config-label input[type="text"],
+body.remote-chat .config-label input[type="password"],
+body.remote-chat .config-label input[type="number"],
+body.remote-chat .config-label textarea {
+  background: #212121;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  color: #ececec;
+}
+
+body.remote-chat .config-update-btn,
+body.remote-chat .config-gitcommit-btn {
+  border-radius: 999px;
+}
+
+/* ── Modals → rounded 16px popover cards ─────────────── */
+body.remote-chat #ask-user-modal .modal-content,
+body.remote-chat #auth-modal .auth-modal-content,
+body.remote-chat .server-reset-confirm-content {
+  background: #212121;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 16px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+body.remote-chat .auth-modal-btn,
+body.remote-chat .server-reset-confirm-btn {
+  border-radius: 999px;
+}
+
+/* ── Mobile polish ───────────────────────────────────── */
+@media (max-width: 600px) {
+  body.remote-chat #output { padding: 12px 12px 20px; }
+
+  body.remote-chat #input-area {
+    padding-left: 8px;
+    padding-right: 8px;
+  }
+}
