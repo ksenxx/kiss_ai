@@ -5,7 +5,7 @@ an open-source agent framework — doing its own marketing, with every prompt,
 draft, and edit published. Everything below actually happened; the session
 logs live in the Sorcar task database.*
 
----
+______________________________________________________________________
 
 ## The setup
 
@@ -23,27 +23,27 @@ Episode 1's task, verbatim:
 ## Act 1 — The agent does its homework (10 sources)
 
 Before writing a word, the agent researched how Show HN actually works in
-2026. It visited ten sources and kept a counter file. The highlights it
+2026\. It visited ten sources and kept a counter file. The highlights it
 extracted:
 
 1. **Official Show HN guidelines** — must be tryable without signup; must be
    personal, non-trivial work; title starts `Show HN:`; never solicit
    upvotes.
-2. **dang's official tips thread (item 22336638)** — backstory + what's
+1. **dang's official tips thread (item 22336638)** — backstory + what's
    different; factual direct language ("drop any language that sounds like
    marketing — on HN, that is an instant turnoff"); personal username; email
    in profile. And one line, added in an edit dated 2026-03-28, that changed
    this whole episode — more on that in Act 4.
-3. **syften.com's 2026 HN guide** — first comment = who/why + the specific
+1. **syften.com's 2026 HN guide** — first comment = who/why + the specific
    problem + what's technically interesting + what feedback helps. Timing
    matters only so you can spend the next hours replying (9am–12pm ET,
    weekday). "On Hacker News, the product is rarely the story. The
    interesting thing you learned while building it might be."
-4. **lucasfcosta.com** — titles must be specific and technical
+1. **lucasfcosta.com** — titles must be specific and technical
    ("Show HN: Layerform – Open-source development environments using
    Terraform files", not "...a staging environment for each engineer");
    link the repo, not a landing page; cut ~30% of words.
-5. **HN Algolia, 223 "agent framework" Show HNs** — the winners share an
+1. **HN Algolia, 223 "agent framework" Show HNs** — the winners share an
    anatomy: personal intro with names, one credibility line, pain backstory,
    one-command quickstart, deep technical specifics, honest limitations,
    dogfooding claim, links block, specific feedback ask. Mastra (442 pts),
@@ -94,9 +94,9 @@ The resolution the agent proposed (and the founder adopted):
 
 1. The agent's draft is the **episode artifact**, published in full in this
    directory with complete disclosure.
-2. The founder **rewrites the HN text by hand**, using the draft only as a
+1. The founder **rewrites the HN text by hand**, using the draft only as a
    content checklist (what to cover, in what order, with which numbers).
-3. The HN comment itself discloses the experiment and links here — turning
+1. The HN comment itself discloses the experiment and links here — turning
    the constraint into the story. Transparency posts perform on HN
    (Anthropic's post-mortem, Zed's parallel-agents thread), and per syften:
    the product is rarely the story; the interesting thing you learned is.
@@ -159,7 +159,7 @@ pre-flight repo polish, submit Wed 2026-07-15 9:30am ET, hand-written text,
 *Next episode: the launch itself — what the thread said, what broke, and
 whether the small-core claim survived contact with HN.*
 
----
+______________________________________________________________________
 
 ### A note on video
 

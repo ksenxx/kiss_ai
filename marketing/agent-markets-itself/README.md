@@ -14,8 +14,8 @@ agent did, what the human reviewed, and what shipped.
 ## Ground rules
 
 1. The agent's marketing work is always disclosed as agent work.
-2. Text submitted to Hacker News is hand-written by the human founder
+1. Text submitted to Hacker News is hand-written by the human founder
    (per HN's official Show HN tips, edited 2026-03-28); agent drafts serve
    as content checklists and are published here.
-3. No upvote solicitation, booster comments, or undisclosed automation on
+1. No upvote solicitation, booster comments, or undisclosed automation on
    any platform, ever.

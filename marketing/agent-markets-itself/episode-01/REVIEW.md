@@ -15,6 +15,7 @@ was tightened and the draft regenerated (iterate the spec, not the prompt).
 > other agents, shop, bank, message, email, browse, and do data science.
 >
 > Key features:
+>
 > - Multi-agent orchestration
 > - AI discovery and GEPA prompt optimization
 > - 530 models across 9 providers
@@ -23,8 +24,8 @@ was tightened and the draft regenerated (iterate the spec, not the prompt).
 > - Local-first and bring-your-own-key
 > - VS Code extension, CLI, and web/mobile app
 >
-> [... continued for 609 words, largely restating the README feature list,
-> ending with "Let me know what you think!"]
+> \[... continued for 609 words, largely restating the README feature list,
+> ending with "Let me know what you think!"\]
 
 ## Rulings
 
@@ -45,8 +46,8 @@ was tightened and the draft regenerated (iterate the spec, not the prompt).
 ## Spec deltas made during review
 
 1. Added hard word cap (≤ 450 words).
-2. Added "every bullet needs a number or a mechanism" to hard constraints.
-3. Added "specific feedback ask" to the required first-comment elements.
+1. Added "every bullet needs a number or a mechanism" to hard constraints.
+1. Added "specific feedback ask" to the required first-comment elements.
 
 ## Verdict
 
