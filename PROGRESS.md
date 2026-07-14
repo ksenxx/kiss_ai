@@ -1,4 +1,35 @@
-# PROGRESS — Add `*` and `/` operators to ./test_data/ calculator
+# PROGRESS — Remove `*` and `/` operators from ./test_data/ calculator
+
+## Task
+
+Remove multiplication (`*`) and division (`/`) operators from the
+extensible CLI calculator under `./test_data/` (undo of the previous
+task's addition).
+
+## Session (this run)
+
+1. Read `SORCAR.md`, inspected `./test_data/` (operator-registry design
+   unchanged since the previous task).
+1. Deleted `test_data/calculator/operators/multiply.py` and
+   `test_data/calculator/operators/divide.py`.
+1. Updated `test_data/calculator/operators/__init__.py`: imports and
+   OPERATORS registry back to only `add` and `subtract`.
+1. Updated `test_data/test_calculator.py`: registry set back to
+   `{"+", "-"}`; removed multiply/divide unit tests, precedence/
+   parentheses/left-associativity/mixed-expression/division-by-zero
+   evaluator tests, the CLI `1 / 0` error test, and the
+   `3 * 8 / 2` subprocess integration test.
+1. Verified no remaining `*`/`/`/multiply/divide references in
+   `evaluator.py`/`cli.py` (registry-driven, no changes needed there).
+1. Verified: `uv run pytest test_data/test_calculator.py -v` — all 21
+   tests pass; CLI smoke: `2 + 3` → 5, `10 - 4` → 6, `2 * 3` →
+   `Error: unexpected character: '*'` (exit 1); `uv run check --full`
+   — all checks pass.
+1. Committed the changes to git.
+
+______________________________________________________________________
+
+# PROGRESS — Add `*` and `/` operators to ./test_data/ calculator (previous task, now reverted)
 
 ## Task
 
