@@ -1,3 +1,91 @@
+# PROGRESS — Run all tests in parallel, diagnose failures, classify and fix
+
+## Task
+
+Run the full test suite split into (cores − 2 = 8) parallel workers via
+`run_parallel`, report the cause of every failing test, classify each
+failure as a project bug vs a test bug, and fix accordingly.
+
+## Session 1 — full parallel run
+
+1. Read `SORCAR.md`. Machine has 10 cores → 8 splits.
+1. Collected 6320 tests (`uv run pytest --collect-only -q -m 'not slow' --no-cov`), split round-robin into 8 files of 790 tests each.
+1. Ran all 8 splits concurrently via `run_parallel`
+   (`uv run pytest --no-cov -q -p no:randomly @tmp/split_N.txt`).
+1. Results: splits 0, 4, 5, 6, 7 fully passed. 4 unique failures:
+   - `test_install_script_tee_subshell_signal.py::test_install_sh_outer_trap_survives_sigint`
+     — log empty although rc==0 and post-signal marker existed.
+   - same file `::test_install_sh_outer_trap_survives_sighup` — same
+     symptom.
+   - `test_bughunt4_interrupt_lock.py::test_ctrl_c_during_lock_wait_still_stops_the_worker`
+     — `WORKER[...]` abort marker never appeared in PTY output.
+   - `test_bughunt_cli.py::test_ctrl_c_abort_actually_stops_the_running_agent`
+     — Ctrl+C byte sent but interruption never observed.
+1. All 4 pass serially in the foreground → environment-sensitive, not
+   deterministic code failures.
+
+## Session 2 — root-cause analysis
+
+1. Ruled out subprocess-coverage theory (`.coveragerc.subprocess` does
+   not exist, so `COVERAGE_PROCESS_START` is never set).
+1. Standalone concurrency repro (30 simultaneous foreground harness
+   runs): 30/30 pass → concurrency itself is NOT causal.
+1. Key discovery: any repro launched via `nohup cmd … &` from a
+   non-interactive shell fails even alone with zero load; the same repro
+   via `setsid` or in the foreground passes.
+   `nohup python3 -c "print(signal.getsignal(SIGINT))" &` prints
+   `1` (SIG_IGN).
+1. ROOT CAUSE: POSIX requires non-interactive shells to start
+   background (`&`) children with SIGINT/SIGQUIT set to `SIG_IGN`, and
+   ignored dispositions survive fork+exec. The `run_parallel` workers
+   launch pytest as background jobs, so the whole pytest process tree
+   has SIGINT ignored. Consequences:
+   - install-script tests: bash cannot trap a signal ignored on entry
+     to the shell → the harness `trap handle_interrupt INT` never
+     installs → `os.killpg(..., SIGINT)` is a no-op → script completes
+     (rc 0, marker written) but the trap diagnostic is never logged →
+     log assertion fails.
+   - sorcar PTY tests: the PTY child python inherits SIGINT=SIG_IGN;
+     CPython installs its KeyboardInterrupt handler only when SIGINT is
+     not ignored at startup → `\x03` on the PTY does nothing → steering
+     never aborts → `WORKER[...]` marker never printed.
+1. Proof: each failing test run standalone via `nohup … &` with no
+   other load fails deterministically; with `signal.signal(SIGINT, SIG_DFL)` reset first, 50/50 concurrent runs pass.
+1. CLASSIFICATION: all 4 failures are TEST BUGS (harnesses assume the
+   default SIGINT disposition in the pytest process). `install.sh`'s
+   trap logic and `cli_steering`'s abort logic are correct — no project
+   bug; no project code changed.
+
+## Session 3 — fixes and verification
+
+1. Fixed `src/kiss/tests/agents/sorcar/_pty_helper.py`: `_acquire_ctty`
+   (the `preexec_fn` used by `pty_spawn`, running post-fork/pre-exec)
+   now resets SIGINT/SIGQUIT/SIGTERM/SIGHUP to `SIG_DFL` before exec,
+   with a docstring explaining the POSIX background-job rule. Fixes
+   both sorcar PTY failures and hardens every pty_spawn-based test.
+   ```python
+   for sig in (signal.SIGINT, signal.SIGQUIT, signal.SIGTERM, signal.SIGHUP):
+       signal.signal(sig, signal.SIG_DFL)
+   ```
+1. Fixed `src/kiss/tests/agents/vscode/test_install_script_tee_subshell_signal.py`:
+   added module-level `_reset_signals()` helper (same reset, fully
+   documented) and passed `preexec_fn=_reset_signals` to both harness
+   `subprocess.Popen` calls (SIGINT and SIGHUP tests).
+1. Verified all 4 previously failing tests pass BOTH in the foreground
+   (7 passed in 13.15s, including the other tests in those files) AND
+   under the reproducing condition
+   (`nohup uv run pytest … & disown`: 7 passed in 13.33s).
+1. Regression check: all 8 other pty_spawn-using test files
+   (test_bughunt4_sigcont, test_bughunt8_ui_backslash_parity,
+   test_bughunt4_prompt_markers, test_pty_helper,
+   test_cli_steering_bare_cr_multiline, test_bughunt6_stderr_proxy,
+   test_cli_repl, test_cli_multiline_input_pty) — 31 passed in 49s.
+1. `uv run check --full` — all checks pass (ruff, mypy, pyright,
+   compileall, mdformat).
+1. Committed the two test-file fixes to git; cleaned `tmp/`.
+
+______________________________________________________________________
+
 # PROGRESS — Remove `*` and `/` operators from ./test_data/ calculator
 
 ## Task
