@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""E2E test: the remote webapp composer buttons sit at HALVED gaps.
+"""E2E test: the remote webapp composer buttons sit at QUARTERED gaps.
 
 The remote webapp composer row (``#model-picker`` in
 ``media/chat.html``) holds five controls — burger menu (``#menu-btn``),
@@ -11,18 +11,20 @@ promptlet (``#tricks-btn``) and mic (``#voice-btn``).  Each circular
 button is 36px wide around a 16px icon, so with the historical layout
 adjacent icons sat ~21px apart (icon to icon) and ~11px from the model
 pill's border.  The restyle in ``remote-codex.css`` pulls the circles
-together with body.remote-chat-scoped negative margins, halving the
-VISIBLE gaps to ~10.5px and ~5.5px while keeping the full 36px touch
-targets and the row's outer alignment.
+together with body.remote-chat-scoped negative margins; the gaps were
+first halved (-5px per inner edge) and then halved AGAIN (-8px per
+inner edge), so the VISIBLE gaps are now ~5px and ~3px — a quarter of
+the historical values — while keeping the full 36px touch targets and
+the row's outer alignment.
 
 This test drives the production ``RemoteAccessServer`` + headless
 Chromium and asserts on the rendered geometry: the visible gap between
 each adjacent pair of controls (measured between the icon <svg> edges,
-or the pill's own border box for ``#model-btn``) must be at most half
-of the historical value (plus a 1px layout tolerance) and must stay
-positive (no glyph overlap).  The VS Code webview is unaffected: the
-override lives in ``remote-codex.css``, which only the remote page
-loads and which is scoped under ``body.remote-chat``.
+or the pill's own border box for ``#model-btn``) must be at most a
+QUARTER of the historical value (plus a 0.5px layout tolerance) and
+must stay positive (no glyph overlap).  The VS Code webview is
+unaffected: the override lives in ``remote-codex.css``, which only the
+remote page loads and which is scoped under ``body.remote-chat``.
 """
 
 from __future__ import annotations
@@ -124,10 +126,11 @@ def _start_live_server(
 
 
 @pytest.mark.timeout(180)
-def test_remote_composer_button_gaps_halved(tmp_path: Path) -> None:
+def test_remote_composer_button_gaps_quartered(tmp_path: Path) -> None:
     """Served page + real Chromium: every adjacent composer-control
-    visible gap is at most HALF its historical value, stays positive,
-    and the 36px touch targets survive."""
+    visible gap is at most a QUARTER of its historical value (i.e. the
+    once-halved gap halved again), stays positive, and the 36px touch
+    targets survive."""
     ready = threading.Event()
     done = threading.Event()
     state: dict[str, object] = {}
@@ -177,9 +180,10 @@ def test_remote_composer_button_gaps_halved(tmp_path: Path) -> None:
 
     for (a, b), old_gap in _OLD_VISIBLE_GAPS.items():
         gap = edges[b]["left"] - edges[a]["right"]
-        assert gap <= old_gap / 2 + 1.0, (
+        assert gap <= old_gap / 4 + 0.5, (
             f"visible gap {a} -> {b} is {gap:.2f}px; expected at most "
-            f"half the historical {old_gap:.0f}px (+1px tolerance)"
+            f"a quarter of the historical {old_gap:.0f}px "
+            "(+0.5px tolerance)"
         )
         assert gap > 0, (
             f"visible gap {a} -> {b} is {gap:.2f}px; controls must "
