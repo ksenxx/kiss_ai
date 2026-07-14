@@ -186,7 +186,16 @@ body.remote-chat #input-footer {
   margin-top: 2px;
 }
 
-/* Composer controls: 36px circular buttons, hover white/15 */
+/* Composer controls: 36px circular buttons, hover white/15.
+   The -8px horizontal margins quarter the visible gap between the
+   composer buttons (burger menu, model pill, attach, promptlet, mic).
+   Each 36px circular button pads its 16px icon by 10px per side, so
+   adjacent icons historically sat ~21px apart (icon-icon) and ~11px
+   from the model pill's border.  Pulling the circles together by 8px
+   per inner edge shrinks those visible gaps to ~5px and ~3px — half of
+   the previous -5px halving — while keeping the full 36px touch
+   targets.  Outer edges stay put (see the #menu-btn / #voice-btn
+   overrides below) so row alignment is unchanged. */
 body.remote-chat #menu-btn,
 body.remote-chat #upload-btn,
 body.remote-chat #tricks-btn,
@@ -198,6 +207,8 @@ body.remote-chat #voice-btn {
   align-items: center;
   justify-content: center;
   padding: 0;
+  margin-left: -8px;
+  margin-right: -8px;
   background: transparent;
   border: none;
   border-radius: 50%;
@@ -217,22 +228,6 @@ body.remote-chat #tricks-btn.active,
 body.remote-chat #voice-btn.active {
   background: rgb(255 255 255 / 15%);
   color: #fff;
-}
-
-/* Quarter the visible gap between the composer buttons (burger menu,
-   model pill, attach, promptlet, mic).  Each 36px circular button
-   pads its 16px icon by 10px per side, so adjacent icons historically
-   sat ~21px apart (icon-icon) and ~11px from the model pill's border.
-   Pulling the circles together by 8px per inner edge shrinks those
-   visible gaps to ~5px and ~3px — half of the previous -5px halving —
-   while keeping the full 36px touch targets.  Outer edges stay put so
-   row alignment is unchanged. */
-body.remote-chat #menu-btn,
-body.remote-chat #upload-btn,
-body.remote-chat #tricks-btn,
-body.remote-chat #voice-btn {
-  margin-left: -8px;
-  margin-right: -8px;
 }
 
 body.remote-chat #menu-btn { margin-left: 0; }
