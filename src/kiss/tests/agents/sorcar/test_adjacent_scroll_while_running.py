@@ -52,13 +52,20 @@ class TestAdjacentScrollWhileRunning(unittest.TestCase):
         )
 
     def test_scroll_lock_still_set_on_upward_scroll_while_running(self) -> None:
-        """The ``_scrollLock = true`` line for upward scroll while running
-        must still exist — it prevents auto-scroll-to-bottom from fighting
-        the user's manual scroll."""
-        self.assertIn(
-            "if (isRunning && e.deltaY < 0) _scrollLock = true;",
-            self.src,
-            "_scrollLock line for running + upward scroll is missing",
+        """The ``_scrollLock = true`` assignment for upward scroll while
+        running must still exist — it prevents auto-scroll-to-bottom from
+        fighting the user's manual scroll.  The guard may include extra
+        disjuncts (e.g. dominant-horizontal wheel detection), so match a
+        condition that starts with ``isRunning && … e.deltaY < 0`` and sets
+        ``_scrollLock = true`` in its body, tolerating formatting."""
+        pattern = re.compile(
+            r"if\s*\(\s*isRunning\s*&&\s*\(?\s*e\.deltaY\s*<\s*0"
+            r"[^{;]*\)\s*\{?\s*_scrollLock\s*=\s*true;",
+            re.DOTALL,
+        )
+        self.assertIsNotNone(
+            pattern.search(self.src),
+            "_scrollLock assignment for running + upward scroll is missing",
         )
 
 
