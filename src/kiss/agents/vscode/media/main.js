@@ -8592,6 +8592,25 @@
   }
 
   /**
+   * Canonicalize a work-directory string for the History Workspace
+   * filter's equality test.  This is deliberately lexical (the
+   * browser cannot call ``realpath``): strip trailing separators,
+   * normalize Windows ``\\`` to ``/``, and case-fold Windows paths.
+   * POSIX case remains significant.  Filesystem roots are preserved.
+   */
+  function normalizeHistoryWorkDir(p) {
+    if (typeof p !== 'string' || p === '') return '';
+    const isWindowsPath = /^[A-Za-z]:[\\/]/.test(p) || p.startsWith('\\\\');
+    let normalized = isWindowsPath ? p.replace(/\\/g, '/') : p;
+    // Keep POSIX "/" and Windows drive roots such as "C:/" intact.
+    const minLength = /^[A-Za-z]:\/$/.test(normalized) ? 3 : 1;
+    while (normalized.length > minLength && normalized.endsWith('/')) {
+      normalized = normalized.slice(0, -1);
+    }
+    return isWindowsPath ? normalized.toLowerCase() : normalized;
+  }
+
+  /**
    * Show/hide rows in the history sidebar based on the filter bar
    * state (Running / Errors / Completed / Favorite checkboxes and
    * From / To date inputs).  Reads ``data-category``,
@@ -8613,15 +8632,14 @@
     const showErrors = hfErrors.checked;
     const showCompleted = hfCompleted.checked;
     const onlyFavorite = hfFavorite && hfFavorite.checked;
-    // Workspace filter — when checked, only show rows whose
-    // ``data-work-dir`` (mirroring ``extra.work_dir`` set at task
-    // completion) equals the client's currently-configured work
-    // directory.  An empty client work_dir or an empty row work_dir
-    // both pass the filter so the user sees rows that pre-date the
-    // ``extra.work_dir`` persistence change and rows running in the
-    // "no folder open" state.
+    // Workspace filter — when checked, completed/error rows with a
+    // non-empty ``data-work-dir`` (mirroring persisted
+    // ``extra.work_dir``) must match the client's currently-configured
+    // work directory.  Running rows always pass this ONE filter; an
+    // empty client or row work_dir also passes for legacy/no-folder
+    // rows.  Category, date, and Favorite filters remain independent.
     const onlyWorkspace = hfWorkspace && hfWorkspace.checked;
-    const clientWorkDir = configWorkDir || '';
+    const normClientWorkDir = normalizeHistoryWorkDir(configWorkDir || '');
     // Date inputs are <input type=date> with value="YYYY-MM-DD".
     // Convert to local-midnight epoch seconds for inclusive bounds.
     let fromTs = -Infinity;
@@ -8645,24 +8663,34 @@
       else if (cat === 'completed') catOk = showCompleted;
       const dateOk = ts >= fromTs && ts <= toTs;
       const favOk = !onlyFavorite || row.dataset.favorite === '1';
-      const rowWorkDir = row.dataset.workDir || '';
-      // Workspace match honors the documented contract above: an
-      // empty client work_dir or an empty row work_dir BOTH pass so
-      // (a) freshly-started running tasks whose ``extra.work_dir``
-      //     hasn't been persisted yet still appear in History when
-      //     the user opens the burger menu in a real workspace, and
-      // (b) standalone web clients with no folder open ("client
-      //     work_dir empty") see every row.
-      // Without this, the strict ``rowWorkDir === clientWorkDir``
-      // test silently hides every running-task row whose work_dir
-      // hasn't been written yet — exactly the user-reported
-      // "task panel does not show up in History after burger open"
-      // regression.
+      const rowWorkDir = normalizeHistoryWorkDir(row.dataset.workDir || '');
+      // Workspace match honors the documented contract above:
+      // (a) RUNNING rows ALWAYS pass — ``ChatSorcarAgent.run``
+      //     persists ``extra.work_dir`` EARLY (at ``_add_task``), and
+      //     for worktree runs that path comes from
+      //     ``git rev-parse --show-toplevel`` which RESOLVES symlinks
+      //     (macOS ``/var`` → ``/private/var``), so a just-started
+      //     running row can carry a path VARIANT of the client's
+      //     configured workspace.  A strict comparison silently hid
+      //     the row — exactly the user-reported "task panel does not
+      //     show up in History as soon as kiss-web starts a task"
+      //     regression.  A live agent must never be invisible; the
+      //     Running category checkbox (not the Workspace filter) is
+      //     the control for running rows.
+      // (b) An empty client work_dir or an empty row work_dir BOTH
+      //     pass so legacy rows that pre-date the ``extra.work_dir``
+      //     persistence change and standalone web clients with no
+      //     folder open see every row.
+      // (c) Non-running rows compare via
+      //     ``normalizeHistoryWorkDir`` on both sides so trailing
+      //     separators and Windows slash/case variants do not cause
+      //     false mismatches.
       const wsOk =
         !onlyWorkspace ||
+        cat === 'running' ||
         rowWorkDir === '' ||
-        clientWorkDir === '' ||
-        rowWorkDir === clientWorkDir;
+        normClientWorkDir === '' ||
+        rowWorkDir === normClientWorkDir;
       if (catOk && dateOk && favOk && wsOk) {
         row.style.display = '';
         visible++;
