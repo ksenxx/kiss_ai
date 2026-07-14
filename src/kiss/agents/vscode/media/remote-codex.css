@@ -407,12 +407,13 @@ body.remote-chat .rc-h {
 
 body.remote-chat .rc-h h3 {
   color: #ececec;
-  font-size: 15px;
+  font-size: var(--fs-base);
 }
 
 body.remote-chat .rc-body {
   padding-left: 0;
   padding-right: 0;
+  font-size: var(--fs-base);
 }
 
 body.remote-chat .system-prompt,
@@ -447,6 +448,7 @@ body.remote-chat .think .lbl {
 
 body.remote-chat .think .cnt {
   color: #8e8e8e;
+  font-size: var(--fs-base);
 }
 
 body.remote-chat .llm-panel {
@@ -469,6 +471,7 @@ body.remote-chat .tr {
   border: 1px solid rgb(255 255 255 / 8%);
   border-radius: 12px;
   color: #afafaf;
+  font-size: var(--fs-base);
 }
 
 body.remote-chat .tr .rl {
@@ -504,6 +507,7 @@ body.remote-chat .merge-info {
 body.remote-chat .merge-info-hdr {
   color: #ececec;
   font-weight: 500;
+  font-size: var(--fs-base);
 }
 
 body.remote-chat .wt-result-ok {
@@ -586,6 +590,88 @@ body.remote-chat #sidebar-resizer {
 /* Disable text selection while dragging the resize handle. */
 body.remote-chat.sidebar-resizing {
   user-select: none;
+}
+
+/* ── Uniform panel typography ────────────────────────────
+ * On the remote page every piece of body text inside a chat
+ * panel renders at ONE size (--fs-base) regardless of nesting
+ * (main.css shrinks .txt inside .llm-panel, uses --fs-md for
+ * tool/result/prompt bodies and hard-codes 12px merge hunks). */
+body.remote-chat .txt {
+  font-size: var(--fs-base);
+}
+
+body.remote-chat .llm-panel .txt {
+  font-size: var(--fs-base);
+}
+
+body.remote-chat .llm-panel .think .cnt {
+  font-size: var(--fs-base);
+}
+
+body.remote-chat .tc-b {
+  font-size: var(--fs-base);
+}
+
+body.remote-chat .tp {
+  font-size: var(--fs-base);
+}
+
+body.remote-chat .bash-panel-content {
+  font-size: var(--fs-base);
+}
+
+body.remote-chat .rs {
+  font-size: var(--fs-base);
+}
+
+body.remote-chat .rs b {
+  font-size: var(--fs-base);
+}
+
+body.remote-chat .rc-status {
+  font-size: var(--fs-base);
+}
+
+body.remote-chat .system-prompt-body {
+  font-size: var(--fs-base);
+}
+
+body.remote-chat .prompt-body {
+  font-size: var(--fs-base);
+}
+
+body.remote-chat .sys {
+  font-size: var(--fs-base);
+}
+
+body.remote-chat .merge-info-body {
+  font-size: var(--fs-base);
+}
+
+body.remote-chat .merge-ctx {
+  font-size: var(--fs-base);
+}
+
+body.remote-chat .merge-hunk {
+  font-size: var(--fs-base);
+}
+
+body.remote-chat .txt code {
+  font-size: var(--fs-base);
+}
+
+body.remote-chat .md-body code {
+  font-size: var(--fs-base);
+}
+
+body.remote-chat .md-body pre code {
+  font-size: var(--fs-base);
+}
+
+body.remote-chat .md-body th,
+body.remote-chat .md-body td {
+  font-size: var(--fs-base);
 }
 
 /* ── Desktop: dock the history sidebar on the left ───────
