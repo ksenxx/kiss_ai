@@ -7232,8 +7232,14 @@
     if (document.body.classList.contains('remote-chat') && sidebarResizer) {
       const SB_MIN = 220;
       const SB_MAX = 600;
-      const SB_DEF = 300;
       const SB_KEY = 'kiss-sidebar-w';
+      // Default: 1/4 of the browser screen, clamped to the resize
+      // range (matches the clamp(220px, 25vw, 600px) CSS fallback).
+      const sidebarDefaultW = () =>
+        Math.max(
+          SB_MIN,
+          Math.min(SB_MAX, Math.round(window.innerWidth * 0.25)),
+        );
       const setSidebarW = px => {
         const w = Math.max(SB_MIN, Math.min(SB_MAX, Math.round(px)));
         document.documentElement.style.setProperty('--sidebar-w', w + 'px');
@@ -7242,8 +7248,8 @@
       };
       sidebarResizer.setAttribute('aria-valuemin', String(SB_MIN));
       sidebarResizer.setAttribute('aria-valuemax', String(SB_MAX));
-      sidebarResizer.setAttribute('aria-valuenow', String(SB_DEF));
-      let sidebarW = SB_DEF;
+      sidebarResizer.setAttribute('aria-valuenow', String(sidebarDefaultW()));
+      let sidebarW = sidebarDefaultW();
       let persisted = null;
       try {
         persisted = window.localStorage.getItem(SB_KEY);
@@ -7303,7 +7309,7 @@
       sidebarResizer.addEventListener('pointercancel', endSidebarResize);
       sidebarResizer.addEventListener('dblclick', () => {
         if (!document.body.classList.contains('remote-desktop')) return;
-        sidebarW = setSidebarW(SB_DEF);
+        sidebarW = setSidebarW(sidebarDefaultW());
         try {
           window.localStorage.removeItem(SB_KEY);
         } catch {

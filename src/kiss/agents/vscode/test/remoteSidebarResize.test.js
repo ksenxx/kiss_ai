@@ -23,7 +23,8 @@
 //     out-of-range persisted values are sanitized;
 //   * ArrowLeft/ArrowRight on the focused handle resize by 16px steps
 //     (W3C window-splitter keyboard pattern);
-//   * double-click resets to the 300px default and clears persistence;
+//   * double-click resets to the 1/4-window default and clears
+//     persistence;
 //   * NONE of this activates on mobile-width windows nor inside the
 //     VS Code extension webview (no remote-chat class), and jsdom-less
 //     pointer-capture APIs must never crash main.js.
@@ -179,10 +180,11 @@ function testResizerExistsAndIsAccessible() {
   );
   assert.strictEqual(resizer.getAttribute('aria-valuemin'), '220');
   assert.strictEqual(resizer.getAttribute('aria-valuemax'), '600');
+  // Default width is 1/4 of the window (jsdom innerWidth 1024 → 256).
   assert.strictEqual(
     resizer.getAttribute('aria-valuenow'),
-    '300',
-    'default width 300 must be reflected in aria-valuenow',
+    '256',
+    'default width (1/4 window) must be reflected in aria-valuenow',
   );
   assert.strictEqual(
     resizer.parentElement.id,
@@ -305,23 +307,24 @@ function testPersistedGarbageSanitized() {
 // 6. Keyboard: ArrowRight/ArrowLeft resize by 16px and persist.
 // ---------------------------------------------------------------------------
 function testKeyboardResize() {
+  // Baseline is the 1/4-window default (jsdom 1024 → 256px).
   const {win} = makeWebview({remote: true, desktopMatches: true});
   const resizer = win.document.getElementById('sidebar-resizer');
   resizer.dispatchEvent(
     new win.KeyboardEvent('keydown', {key: 'ArrowRight', bubbles: true}),
   );
-  assert.strictEqual(sidebarW(win), '316px', 'ArrowRight grows by 16px');
+  assert.strictEqual(sidebarW(win), '272px', 'ArrowRight grows by 16px');
   resizer.dispatchEvent(
     new win.KeyboardEvent('keydown', {key: 'ArrowLeft', bubbles: true}),
   );
   resizer.dispatchEvent(
     new win.KeyboardEvent('keydown', {key: 'ArrowLeft', bubbles: true}),
   );
-  assert.strictEqual(sidebarW(win), '284px', 'ArrowLeft shrinks by 16px');
-  assert.strictEqual(resizer.getAttribute('aria-valuenow'), '284');
+  assert.strictEqual(sidebarW(win), '240px', 'ArrowLeft shrinks by 16px');
+  assert.strictEqual(resizer.getAttribute('aria-valuenow'), '240');
   assert.strictEqual(
     win.localStorage.getItem('kiss-sidebar-w'),
-    '284',
+    '240',
     'keyboard resize must persist too',
   );
   win.close();
@@ -329,7 +332,8 @@ function testKeyboardResize() {
 }
 
 // ---------------------------------------------------------------------------
-// 7. Double-click resets to the 300px default and clears persistence.
+// 7. Double-click resets to the 1/4-window default and clears
+//    persistence (jsdom innerWidth 1024 → 256px).
 // ---------------------------------------------------------------------------
 function testDoubleClickResets() {
   const {win} = makeWebview({remote: true, desktopMatches: true});
@@ -339,10 +343,10 @@ function testDoubleClickResets() {
   resizer.dispatchEvent(new win.MouseEvent('dblclick', {bubbles: true}));
   assert.strictEqual(
     sidebarW(win),
-    '300px',
-    'double-click must reset to the 300px default',
+    '256px',
+    'double-click must reset to the 1/4-window default',
   );
-  assert.strictEqual(resizer.getAttribute('aria-valuenow'), '300');
+  assert.strictEqual(resizer.getAttribute('aria-valuenow'), '256');
   assert.strictEqual(
     win.localStorage.getItem('kiss-sidebar-w'),
     null,
