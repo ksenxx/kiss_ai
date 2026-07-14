@@ -94,7 +94,7 @@ body.remote-chat #tab-status-bar .status-metric {
 body.remote-chat #task-panel {
   margin: 8px 16px 0;
   margin-left: auto;
-  max-width: 75%;
+  max-width: 90%;
   border: none;
   border-radius: 22px;
   background: #ececec;
@@ -139,7 +139,7 @@ body.remote-chat #input-container {
   border-radius: 28px;
   box-shadow: inset 0 0 1px rgb(255 255 255 / 20%);
   padding: 10px 14px 8px;
-  max-width: 768px;
+  max-width: 90%;
   margin: 0 auto;
 }
 
@@ -465,11 +465,11 @@ body.remote-chat .bash-panel {
  * The pinned user prompt (#task-panel, OUTSIDE #output) is a
  * right-aligned bubble (rule above); everything streamed into the
  * #output thread — tool calls, results, thinking, text — hugs the
- * LEFT edge of the 768px column like Codex's assistant lane.  This
- * later rule overrides the centering rule above (same specificity,
- * later in file wins). */
+ * LEFT edge of the chat column like Codex's assistant lane and spans
+ * 90% of the chat webview.  This later rule overrides the centering
+ * rule above (same specificity, later in file wins). */
 body.remote-chat #output > *:not(#welcome) {
-  max-width: min(85%, 768px);
+  max-width: 90%;
   margin-left: 0;
   margin-right: auto;
 }
@@ -495,11 +495,12 @@ body.remote-chat.sidebar-resizing {
  * translating off-canvas; #app clears the docked column.  BOTH the
  * sidebar width and #app's margin are driven by the SAME
  * --sidebar-w custom property (set by the resize handle in main.js)
- * so they can never desync. */
+ * so they can never desync.  The DEFAULT (nothing dragged yet) is
+ * 1/4 of the browser screen (25vw), clamped to the resize range. */
 @media (width >= 900px) {
   body.remote-chat.remote-desktop #sidebar {
     transform: none;
-    width: var(--sidebar-w, 300px);
+    width: var(--sidebar-w, clamp(220px, 25vw, 600px));
     border-right: 1px solid rgb(255 255 255 / 8%);
   }
 
@@ -508,7 +509,7 @@ body.remote-chat.sidebar-resizing {
   }
 
   body.remote-chat.remote-desktop #app {
-    margin-left: var(--sidebar-w, 300px);
+    margin-left: var(--sidebar-w, clamp(220px, 25vw, 600px));
   }
 
   /* Right-edge drag handle: a 6px col-resize strip.  #sidebar is
