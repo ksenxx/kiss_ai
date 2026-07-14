@@ -76,7 +76,7 @@ from websockets.datastructures import Headers
 from websockets.http11 import Request, Response
 
 from kiss.agents.vscode.diff_merge import _read_lines_preserved
-from kiss.agents.vscode.json_printer import JsonPrinter
+from kiss.agents.vscode.json_printer import GLOBAL_EVENT_TYPES, JsonPrinter
 from kiss.agents.vscode.server import VSCodeServer
 from kiss.agents.vscode.tips import read_tips
 from kiss.agents.vscode.voice_wake import (
@@ -2127,6 +2127,10 @@ class WebPrinter(JsonPrinter):
           targeted "system" events: sent verbatim to all connected
           clients (which filter by ``tabId``), but **not** recorded
           or persisted.
+        * Events whose type is in :data:`GLOBAL_EVENT_TYPES`
+          (``taskDeleted``) carry a ``taskId`` payload field but are
+          global system broadcasts: sent verbatim to every connected
+          client, never recorded, persisted, or fanned out per tab.
         * Events with no ``tabId`` but a thread-local ``task_id`` are
           task events: ``taskId`` is injected, the event is recorded
           under the task and queued for persistence, and one stamped
@@ -2178,6 +2182,15 @@ class WebPrinter(JsonPrinter):
             # Targeted "system" event — forward verbatim, never record
             # or persist (recording / persistence is per-task and is
             # owned by the agent thread).
+            self._send_to_ws_clients(json.dumps(event))
+            return
+
+        if event.get("type") in GLOBAL_EVENT_TYPES:
+            # Global system broadcast that carries a ``taskId`` PAYLOAD
+            # field (e.g. ``taskDeleted``) — it is NOT a task-stream
+            # event.  Send verbatim to every connected client; never
+            # record, persist, or fan out per subscribed tab (the named
+            # task no longer exists / has no subscribers).
             self._send_to_ws_clients(json.dumps(event))
             return
 

@@ -33,6 +33,16 @@ from kiss.core.printer import (
     truncate_result,
 )
 
+# Event types that carry a ``taskId`` PAYLOAD field but are NOT
+# task-stream events.  ``taskDeleted`` announces that a History-panel
+# row was deleted; its ``taskId`` names the just-removed DB row.  Such
+# events are global system broadcasts: they must never be recorded
+# under (or persisted for) the named task, and transport subclasses
+# (see :meth:`WebPrinter.broadcast` in ``web_server.py``) must send
+# them verbatim to EVERY connected client instead of fanning them out
+# to the task's subscribers.
+GLOBAL_EVENT_TYPES = frozenset({"taskDeleted"})
+
 _DISPLAY_EVENT_TYPES = frozenset({
     "clear", "thinking_start", "thinking_delta", "thinking_end",
     "text_delta", "text_end", "tool_call", "tool_result",
@@ -598,6 +608,13 @@ class JsonPrinter(Printer):
         Args:
             event: The event dictionary to broadcast.
         """
+        if event.get("type") in GLOBAL_EVENT_TYPES:
+            # Global system broadcast (e.g. ``taskDeleted``): its
+            # ``taskId`` is a payload field naming a just-deleted task,
+            # not a stream tag.  Never record or persist it — that
+            # would append it to an active recording / re-insert event
+            # rows for the deleted task.
+            return
         event = self._inject_task_id(event)
         with self._lock:
             self._record_event(event)
