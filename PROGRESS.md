@@ -1346,3 +1346,162 @@ auto-commit path appends) never reached the final commit on main.
 14/14 new tests; 124 tests green across all merge-message, baseline,
 audit, dirty-merge, conflict, lockdown, path-remap, and autocommit suites;
 `uv run check --full` all green.
+
+______________________________________________________________________
+
+# PROGRESS — Remote-webapp History panel misses just-started tasks
+
+## Task
+
+The History panel bug "task not shown as soon as kiss-web starts it" was
+fixed for the VS Code path (b49ef08a), but STILL remained when a task was
+sent from a remote mobile device via the standalone webapp. Reproduce with
+end-to-end jsdom tests, fix, dev model `claude-fable-5`, independent
+review with `gpt-5.6-sol`.
+
+## Root cause (verified session 1, see task-continuation notes)
+
+The start-time `{"type": "tasks_updated", "taskId": ""}` broadcast by
+`ChatSorcarAgent.run` is a ONE-SHOT, never-persisted global system event
+(`WebPrinter.broadcast`, web_server.py — "Not recorded, not persisted").
+Mobile Safari routinely kills the remote webapp's WebSocket whenever the
+phone backgrounds/switches apps. If the socket is down at the broadcast
+instant the event is lost forever, and NOTHING resynchronised history on
+reconnect:
+
+- main.js `case 'daemonStatus'` only called `setServerLoading(!ev.connected)`;
+- `RemoteAccessServer._handle_ready` fanned out only
+  getModels/getInputHistory/getConfig;
+- the shim's `location.reload()` recovery only fires on the
+  `_hadAuthThenClosed` latch path.
+
+So a remote client whose sidebar was open across a reconnect (the ≥900px
+remote-desktop docked sidebar is ALWAYS open) showed a stale list without
+the just-started running task. The local VS Code path is unaffected (UDS
+never drops).
+
+## Fix (session 2)
+
+1. `src/kiss/agents/vscode/media/main.js` `case 'daemonStatus'`: when
+   `ev.connected === true`, also call `refreshHistory()`. It is a no-op
+   while the sidebar is closed and bumps `historyGeneration` so stale
+   pre-disconnect replies are dropped.
+
+```js
+case 'daemonStatus':
+  setServerLoading(!ev.connected);
+  if (ev.connected) {
+    // Re-synchronise an OPEN History sidebar after every (re)connect...
+    refreshHistory();
+  }
+  return;
+```
+
+2. `src/kiss/agents/vscode/web_server.py` `_handle_ready`: after the
+   getModels/getInputHistory/getConfig fan-out, send a targeted
+   `{"type": "tasks_updated"}` nudge to the (re)connecting endpoint
+   (belt-and-braces server-side convergence; the webview treats
+   tasks_updated as a refetch hint, never as data).
+
+```python
+try:
+    await self._endpoint_send(
+        websocket, json.dumps({"type": "tasks_updated"}),
+    )
+except Exception:
+    pass
+```
+
+3. New e2e jsdom suite
+   `src/kiss/agents/vscode/test/remoteHistoryReconnectRefresh.test.js`
+   (registered in package.json test chain), 9 cases (7 from session 2 +
+   2 added after review):
+
+   1. remote desktop docked sidebar: daemonStatus false→true refetches
+      (THE regression — proven RED pre-fix via git stash of main.js);
+   1. remote mobile open drawer: reconnect refetches with a BUMPED
+      generation;
+   1. connected:false posts no getHistory;
+   1. closed sidebar + reconnect posts no getHistory;
+   1. full mobile lifecycle: drawer open → disconnect → task starts
+      while offline (tasks_updated lost) → reconnect → refetch reply
+      renders the running row VISIBLE (running rows pass Workspace
+      filter per b49ef08a);
+   1. stale-generation reply dropped after the reconnect refetch
+      (review finding 4);
+   1. tasks_updated live path still refetches (regression guard);
+   1. VS Code webview isolation: daemonStatus true + closed sidebar → no
+      getHistory spam;
+   1. VS Code webview OPEN sidebar refetches on daemon reconnect
+      (review finding 5).
+
+1. New Python e2e tests in
+   `src/kiss/tests/agents/vscode/test_web_server.py`:
+   `test_ready_sends_tasks_updated_resync_nudge` (real WSS server +
+   client, sends `ready`, asserts a `tasks_updated` event arrives;
+   proven RED with web_server.py fix stashed) and
+   `test_ready_nudge_targets_only_the_ready_client` (two clients; the
+   non-ready client must NOT receive the nudge).
+
+## Verification
+
+- RED/GREEN proofs for both the JS suite (main.js stashed) and the
+  Python test (web_server.py stashed).
+- JS suites green: remoteHistoryReconnectRefresh (7/7),
+  remoteDesktopSidebar, remoteSidebarResize, remoteDesktopWidths,
+  historyRunningRowAtTaskStart, historyWorkspaceFilter,
+  historyBurgerMenuRunningTask, historyRunningPulsingDot,
+  historyTaskDuration, historyTaskWorkspace, historyTaskMeta,
+  historyClickSwitchExistingChat, modelPickerReconnectRace,
+  webviewNotifications, serverLoadingOverlay, webappServerLoadingOverlay.
+- Python: full test_web_server.py 204 passed; ready/deferred-close/
+  merge-replay suites 21 passed.
+- npm run lint PASS; npm run compile PASS; `uv run check --full` run.
+
+## gpt-5.6-sol review (session 3) + resolutions (session 4)
+
+Independent review by gpt-5.6-sol (4 parallel read-only audit agents:
+frontend fix, server nudge, root-cause challenge, test quality). Routing,
+connId targeting, no-feedback-loop, and spoofing analyses all passed.
+Findings and their resolutions:
+
+1. **HIGH — production lifecycle mismatch.** The shim's authenticated
+   onclose reconnects latch `_hadAuthThenClosed` and the next `auth_ok`
+   `location.reload()`s BEFORE dispatching `daemonStatus connected:true`.
+   So the daemonStatus→refreshHistory fix actually covers: first auth on
+   a kept page, resumed/half-open sockets where the server kept the
+   connection (the exact iOS-backgrounding case — no onclose observed →
+   no reload latch), the pre-auth `auth_required` dispatch, and the VS
+   Code extension-host reconnect path. Post-reload pages converge via
+   the `_handle_ready` tasks_updated nudge. RESOLVED: main.js comment
+   rewritten to the corrected lifecycle story; web_server.py nudge
+   comment fixed (WSS `ready` path only — UDS reconnects never resend
+   `ready`, they converge via the frontend daemonStatus refetch).
+1. **MEDIUM — `auth_required` also dispatches connected:true while
+   unauthenticated**: the posted getHistory sits in the shim's
+   `_pending` queue and is flushed after auth; generation guard drops
+   stale replies. Verified harmless; documented in the main.js comment.
+1. **MEDIUM — duplicate-request churn on cold remote-desktop load**
+   (dock-open getHistory + daemonStatus refetch + ready-nudge refetch,
+   plus one extra getInputHistory from the tasks_updated handler).
+   Finite, no loop, generation-guarded — accepted and documented.
+1. **MEDIUM — stale-generation coverage gap.** RESOLVED: added test 5b
+   (`testStaleGenerationReplyIsDropped`) — delivers an old-generation
+   history reply after the reconnect refetch and asserts it is dropped
+   by the `generation !== historyGeneration` guard in renderHistory.
+1. **MEDIUM — VS Code OPEN-sidebar case untested.** The change is not
+   remote-scoped: an open VS Code sidebar now refetches on every
+   `daemonStatus connected:true` (extension posts it on daemon connect
+   and webview ready). Judged DESIRABLE (same resync argument — the UDS
+   path has no ready-time nudge). RESOLVED: added test 8
+   (`testVsCodeWebviewOpenSidebarRefetches`).
+1. **LOW — nudge except clause + overclaiming comment.** RESOLVED:
+   `except Exception: pass` → `logger.debug("ready tasks_updated nudge failed", exc_info=True)`; comment now scoped to the WSS ready path.
+1. **Test adequacy — Python happy-path only.** RESOLVED: added
+   `test_ready_nudge_targets_only_the_ready_client` (two WSS clients;
+   the non-ready client must NOT receive the nudge).
+
+Post-review verification: JS suite now 9/9 (RED/GREEN re-proof of the
+daemonStatus block retained); TestHandleReadyRestoredTabs 4/4 including
+the new targeting test; impacted JS suites re-run green; npm run lint;
+`uv run check --full` — all passed.

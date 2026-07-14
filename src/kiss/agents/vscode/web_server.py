@@ -5283,6 +5283,29 @@ class RemoteAccessServer:
             if work_dir:
                 init["workDir"] = work_dir
             await self._run_cmd(init)
+        # Belt-and-braces history resync: the start-time
+        # ``tasks_updated`` broadcast by ``ChatSorcarAgent.run`` is a
+        # one-shot global system event ("Not recorded, not persisted"
+        # — see :meth:`WebPrinter.broadcast`), so a client whose
+        # WebSocket was down at that instant (mobile Safari kills the
+        # socket whenever the phone backgrounds) misses it forever.
+        # Nudging the WSS client that just sent ``ready`` — i.e. a
+        # fresh or reloaded remote page, including the shim's
+        # ``location.reload()`` recovery after an authenticated close
+        # — with a targeted ``tasks_updated`` makes its open History
+        # sidebar refetch and converge on the current task list.
+        # (UDS/VS Code-extension reconnects don't resend ``ready``;
+        # they converge via the webview's ``daemonStatus
+        # connected:true`` → ``refreshHistory()`` path instead.)  The
+        # webview treats ``tasks_updated`` as a hint (refetch via
+        # ``getHistory``), never as data, so a redundant nudge after
+        # a clean page load is harmless.
+        try:
+            await self._endpoint_send(
+                websocket, json.dumps({"type": "tasks_updated"}),
+            )
+        except Exception:
+            logger.debug("ready tasks_updated nudge failed", exc_info=True)
         await self._send_welcome_info()
         try:
             await self._endpoint_send(
