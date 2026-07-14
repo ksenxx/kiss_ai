@@ -1,3 +1,35 @@
+# PROGRESS — Run all tests in parallel, diagnose & fix failures — Session 4
+
+## Task
+
+Same recurring task as Sessions 1–3: run all tests split by test-method
+count into (cores − 2 = 8) parallel splits via `run_parallel`, report
+causes of failing tests, classify each as project bug vs test bug, fix
+accordingly. Do not modify code otherwise.
+
+## Session 4 (this run)
+
+1. Collected 6301 tests (`uv run pytest --collect-only -q --no-cov`,
+   73 slow deselected), split node IDs round-robin into 8 files
+   (788×5, 787×3), ran all 8 splits concurrently via `run_parallel`
+   (`uv run pytest --no-cov -q -p no:cacheprovider @./tmp/split_N.txt`).
+1. Results verified directly from the 8 result logs: **ALL 8 SPLITS
+   GREEN — 6253 passed, 48 skipped, 0 failed, 0 errors, all EXIT=0**
+   (784+4, 781+7, 783+5, 779+9, 778+10, 782+5, 781+6, 785+2; totals
+   add up to all 6301 collected tests). 445 subtests also passed.
+   Only benign warnings observed: supabase timeout/verify and pydantic
+   memory/storage DeprecationWarnings in test_run.py, and one known
+   CPython 3.14 asyncio `_SelectorTransport.__del__` teardown
+   PytestUnraisableExceptionWarning in test_web_server_security.py.
+1. Nothing to fix this session: the fixes from Sessions 1–2
+   (persistence.py `_get_db()` TOCTOU project bug; SIGINT
+   SIG_IGN-inheritance test bugs) continue to hold — no disk-I/O
+   poisoning, no SIGINT hangs, no flakes at all under the
+   backgrounded `run_parallel` environment.
+1. No source or test code modified; temp split/result files cleaned up.
+
+______________________________________________________________________
+
 # PROGRESS — Just-started task hidden from History panel
 
 ## Task
