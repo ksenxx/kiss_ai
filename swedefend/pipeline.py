@@ -149,14 +149,29 @@ class SWEDefendPipeline:
 
         if self.judge is not None:
             verdict = self.judge.judge(sanitation.sanitized_text, patch_source)
-            layers.append(
-                LayerResult(
-                    name="intent_judge",
-                    passed=verdict.aligned,
-                    reasons=[
-                        f"aligned={verdict.aligned} ({verdict.confidence:.2f}): {verdict.reason}"
-                    ],
+            # A judge veto counts only when its confidence is above the
+            # configured threshold; a low-confidence "unsure" verdict is *not*
+            # treated as a block.  Under the AI-Discovery corroboration knob
+            # (D1) we additionally require the veto to be corroborated either
+            # by a named added-capability / removed-control in the verdict
+            # itself or by an independent static signal from L1 or L3 (already
+            # accumulated in ``layers`` above).
+            static_evidence = any(not layer.passed for layer in layers)
+            if self.judge.require_corroboration:
+                passed = not verdict.should_veto_with_corroboration(
+                    self.judge.confidence_threshold,
+                    static_evidence=static_evidence,
                 )
+            else:
+                passed = not verdict.should_veto(self.judge.confidence_threshold)
+            reason = (
+                f"aligned={verdict.aligned} conf={verdict.confidence:.2f} "
+                f"tau={self.judge.confidence_threshold:.2f} "
+                f"added={verdict.added_capabilities} "
+                f"removed={verdict.removed_controls}: {verdict.reason}"
+            )
+            layers.append(
+                LayerResult(name="intent_judge", passed=passed, reasons=[reason])
             )
 
         allow = all(layer.passed for layer in layers)

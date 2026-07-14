@@ -71,7 +71,11 @@ class TestAutocommitPersistence(unittest.TestCase):
         self._real_broadcast = self.server.printer.broadcast
         self.server.printer.broadcast = capture  # type: ignore[assignment]
 
-        def fake_compose(diff_text: str, user_prompt: str | None = None) -> str:
+        def fake_compose(
+            diff_text: str,
+            user_prompt: str | None = None,
+            task_result: str | None = None,
+        ) -> str:
             return "feat: autocommit persistence test"
 
         _merge_flow_module.generate_commit_message_from_diff = fake_compose  # type: ignore[assignment]

@@ -1272,6 +1272,29 @@ def _load_history(limit: int = 0, offset: int = 0) -> list[_HistoryEntry]:
         return [_history_row_to_dict(r) for r in rows]
 
 
+def _history_date_range() -> tuple[float | None, float | None]:
+    """Return the first and last task timestamps in the history.
+
+    Computes ``(MIN(timestamp), MAX(timestamp))`` over the same row
+    set the History sidebar lists (i.e. excluding sub-agent rows) so
+    the sidebar's From/To date inputs can be pre-filled with the
+    first and last task dates.  Thread-safe.
+
+    Returns:
+        ``(min_ts, max_ts)`` in epoch seconds, or ``(None, None)``
+        when no listable rows exist.
+    """
+    with _rw_lock.read_lock():
+        db = _get_db()
+        row = db.execute(
+            "SELECT MIN(timestamp) AS mn, MAX(timestamp) AS mx "
+            f"FROM task_history WHERE {_HISTORY_NOT_SUBAGENT}"
+        ).fetchone()
+    if row is None or row["mn"] is None or row["mx"] is None:
+        return (None, None)
+    return (float(row["mn"]), float(row["mx"]))
+
+
 def _prefix_match_task(query: str) -> str:
     """Find the most recent task starting with *query* (case-sensitive).
 

@@ -173,6 +173,54 @@ def _extract_deepseek_reasoning(content: str) -> tuple[str, str]:
     return "", content
 
 
+def _delta_reasoning_text(delta: Any) -> str | None:
+    """Extract reasoning text from a Chat Completions streaming delta.
+
+    Providers expose reasoning on different delta fields:
+
+    * ``reasoning_content`` — DeepSeek-native (and vLLM-style) servers.
+    * ``reasoning`` — OpenRouter's normalized plain-string field (also
+      newer vLLM versions).
+    * ``reasoning_details`` — OpenRouter's structured list of
+      ``reasoning.text`` / ``reasoning.summary`` entries.
+
+    The plain string fields are preferred; ``reasoning_details`` is
+    consulted ONLY when both string fields are empty because OpenRouter
+    sends the same text in ``reasoning`` AND ``reasoning_details``
+    simultaneously — reading both would double-emit every thinking token.
+
+    Args:
+        delta: A streaming chunk's ``choices[0].delta`` object.
+
+    Returns:
+        The reasoning text for this delta, or None when the delta carries
+        no reasoning.
+    """
+    reasoning_content = getattr(delta, "reasoning_content", None)
+    if isinstance(reasoning_content, str) and reasoning_content:
+        return reasoning_content
+    reasoning = getattr(delta, "reasoning", None)
+    if isinstance(reasoning, str) and reasoning:
+        return reasoning
+    details = getattr(delta, "reasoning_details", None)
+    if not isinstance(details, list):
+        return None
+    texts: list[str] = []
+    for entry in details:
+        if isinstance(entry, dict):
+            entry_type = entry.get("type")
+            text = entry.get("text")
+            summary = entry.get("summary")
+        else:
+            entry_type = getattr(entry, "type", None)
+            text = getattr(entry, "text", None)
+            summary = getattr(entry, "summary", None)
+        value = text if entry_type == "reasoning.text" else summary
+        if isinstance(value, str) and value:
+            texts.append(value)
+    return "".join(texts) or None
+
+
 def _anthropic_media_block_to_openai_part(block: dict[str, Any]) -> dict[str, Any] | None:
     """Convert an Anthropic ``image``/``document`` block to an OpenAI content part.
 
@@ -822,7 +870,7 @@ class OpenAICompatibleModel(Model):
             if chunk.choices:
                 delta = chunk.choices[0].delta
                 if delta:
-                    reasoning = getattr(delta, "reasoning_content", None)
+                    reasoning = _delta_reasoning_text(delta)
                     if reasoning:
                         if not in_reasoning:
                             in_reasoning = True
@@ -982,7 +1030,7 @@ class OpenAICompatibleModel(Model):
                 if chunk.choices:
                     delta = chunk.choices[0].delta
                     if delta:
-                        reasoning = getattr(delta, "reasoning_content", None)
+                        reasoning = _delta_reasoning_text(delta)
                         if reasoning:
                             if not in_reasoning:
                                 in_reasoning = True

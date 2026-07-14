@@ -128,6 +128,7 @@ class _RunningAgentState:
         "chat_id",
         "last_task_id",
         "last_user_prompt",
+        "last_result_summary",
         "task_history_id",
         "use_worktree",
         "use_parallel",
@@ -188,6 +189,14 @@ class _RunningAgentState:
         # generated commit message can include the user's intent.
         # Empty string before the first task has run.
         self.last_user_prompt: str = ""
+        # Result summary of the most recently completed task on this
+        # tab.  Populated by :meth:`_TaskRunnerMixin._run_task_inner`
+        # after each agent run and read by post-task auto-commit hooks
+        # (:meth:`_MergeFlowMixin._handle_autocommit_action`) so the
+        # generated commit message can record the task's outcome.
+        # Reset to "" when a new task starts so a stale result never
+        # leaks into the next task's commit message.
+        self.last_result_summary: str = ""
         # In-flight task id within the current ``_run_task_inner``
         # iteration — used as the persistence target for the
         # ``task_done`` / ``task_stopped`` / ``task_error`` event,

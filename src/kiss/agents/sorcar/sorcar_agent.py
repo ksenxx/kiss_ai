@@ -47,19 +47,25 @@ logger = logging.getLogger(__name__)
 
 
 def _generate_commit_message(
-    commit_dir: Path, user_prompt: str | None = None,
+    commit_dir: Path,
+    user_prompt: str | None = None,
+    task_result: str | None = None,
 ) -> str:
     """Generate a commit message for staged changes using an LLM.
 
     Gets the staged diff and delegates to
     :func:`~kiss.agents.vscode.helpers.generate_commit_message_from_diff`.
     When *user_prompt* is provided, it is forwarded so the user's
-    task prompt is incorporated into the commit message.
+    task prompt is incorporated into the commit message.  When
+    *task_result* is provided, the task's result summary is appended
+    to the commit message as well.
 
     Args:
         commit_dir: The directory containing staged changes.
         user_prompt: The user's task prompt that produced these
             staged changes, or ``None`` when not available.
+        task_result: The task's result summary, or ``None`` when
+            not available.
 
     Returns:
         A commit message string.
@@ -68,14 +74,17 @@ def _generate_commit_message(
     from kiss.agents.vscode.helpers import generate_commit_message_from_diff
 
     diff_text = GitWorktreeOps.staged_diff(commit_dir)
-    return generate_commit_message_from_diff(diff_text, user_prompt=user_prompt)
+    return generate_commit_message_from_diff(
+        diff_text, user_prompt=user_prompt, task_result=task_result,
+    )
 
 
 def auto_commit_changes(
     commit_dir: Path,
     user_prompt: str | None,
-    message_fn: Callable[[Path, str | None], str],
+    message_fn: Callable[[Path, str | None, str | None], str],
     notify_fn: Callable[[str, str], None] | None = None,
+    task_result: str | None = None,
 ) -> bool:
     """Stage all changes, generate a commit message, and commit.
 
@@ -102,7 +111,10 @@ def auto_commit_changes(
         user_prompt: The user's task prompt, woven into the commit
             message (or its fallback), or ``None`` when unavailable.
         message_fn: Callable producing a commit message from
-            ``(commit_dir, user_prompt)``.
+            ``(commit_dir, user_prompt, task_result)``.
+        task_result: The task's result summary, appended to the
+            commit message (or its fallback) under a ``Result:``
+            heading, or ``None`` when unavailable.
         notify_fn: Optional UI callback invoked at two life-cycle
             points so the chat webview can render toasts:
 
@@ -140,7 +152,7 @@ def auto_commit_changes(
         return False
     _safe_notify(notify_fn, "generating", "")
     try:
-        msg = message_fn(commit_dir, user_prompt)
+        msg = message_fn(commit_dir, user_prompt, task_result)
     except Exception:
         logger.debug(
             "LLM commit message generation failed; using fallback", exc_info=True,
@@ -150,6 +162,10 @@ def auto_commit_changes(
             from kiss.agents.vscode.helpers import _append_user_prompt
 
             msg = _append_user_prompt(msg, user_prompt)
+        if task_result:
+            from kiss.agents.vscode.helpers import _append_task_result
+
+            msg = _append_task_result(msg, task_result)
     # Re-stage immediately before committing to capture any files
     # that materialized during the (typically slow) *message_fn*
     # call — see the docstring above for the production race this
@@ -461,8 +477,24 @@ class SorcarAgent(RelentlessAgent):
             from kiss.docker.docker_tools import DockerTools
 
             docker_tools = DockerTools(self._docker_bash)
+            code_graph_hints_seen: set[str] = set()
+
+            def Bash(command: str, description: str) -> str:  # noqa: N802
+                """Run a command in Docker, preferring a code-graph answer."""
+                hint = ""
+                try:
+                    from kiss.agents.sorcar.code_graph import grep_hint
+
+                    hint = grep_hint(command, self.work_dir) or ""
+                except Exception:
+                    logger.debug("code_graph Docker grep hint failed", exc_info=True)
+                if hint and hint not in code_graph_hints_seen:
+                    code_graph_hints_seen.add(hint)
+                    return hint
+                return self._docker_bash(command, description)
+
             tools: list = [
-                self._docker_bash, docker_tools.Read, docker_tools.Edit, docker_tools.Write,
+                Bash, docker_tools.Read, docker_tools.Edit, docker_tools.Write,
             ]
         else:
             useful_tools = UsefulTools(
@@ -679,6 +711,18 @@ class SorcarAgent(RelentlessAgent):
         skill_tool = make_skill_tool(self.work_dir or ".")
         if skill_tool is not None:
             tools.append(skill_tool)
+        # code_graph: local tree-sitter knowledge graph of the work dir
+        # (query/path/explain instead of grep).  Registered only when the
+        # optional tree-sitter grammars are importable; a failure here
+        # must never break agent startup.
+        try:
+            from kiss.agents.sorcar.code_graph import make_code_graph_tool
+
+            code_graph_tool = make_code_graph_tool(self.work_dir or ".")
+            if code_graph_tool is not None:
+                tools.append(code_graph_tool)
+        except Exception:
+            logger.warning("code_graph tool setup failed", exc_info=True)
         # MCP servers: every tool of every configured server becomes a
         # ``<server>_<tool>`` function (filtered by the
         # ``mcp_permissions`` wildcard rules).  A broken server is

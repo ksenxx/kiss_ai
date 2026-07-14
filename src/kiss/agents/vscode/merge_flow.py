@@ -530,9 +530,14 @@ class _MergeFlowMixin:
                 user_prompt = (
                     prompt_tab.last_user_prompt if prompt_tab else ""
                 ) or None
+                task_result = (
+                    prompt_tab.last_result_summary if prompt_tab else ""
+                ) or None
                 msg = (
                     generate_commit_message_from_diff(
-                        diff.stdout, user_prompt=user_prompt,
+                        diff.stdout,
+                        user_prompt=user_prompt,
+                        task_result=task_result,
                     )
                     or "Auto-commit"
                 )

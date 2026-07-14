@@ -138,12 +138,19 @@ function assertGroupedTrio(win, which) {
   );
 
   // 4) The grouping element itself must live directly inside the
-  //    history filter bar — otherwise it would not behave as a
-  //    flex item of that bar.
-  const bar = group.parentElement;
+  //    unified ``.history-filter-daterange`` pill, which in turn is
+  //    a direct child of the history filter bar — so the whole
+  //    From→To control wraps as one atomic unit of the bar.
+  const rangeWrap = group.parentElement;
+  assert.ok(
+    rangeWrap && rangeWrap.classList.contains('history-filter-daterange'),
+    `"${which}" date group must be a direct child of ` +
+      '.history-filter-daterange',
+  );
+  const bar = rangeWrap.parentElement;
   assert.ok(
     bar && bar.classList.contains('history-filter-bar'),
-    `"${which}" date group must be a direct child of ` +
+    '.history-filter-daterange must be a direct child of ' +
       '.history-filter-bar',
   );
 

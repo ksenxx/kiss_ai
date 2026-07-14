@@ -899,6 +899,9 @@ body.remote-chat #welcome-config { display: none !important; }
 }
 .rc-body.pre { white-space: pre-wrap; }
 
+.rc-status { color: var(--yellow); font-weight: 700; font-size: var(--fs-xl); margin-bottom: 10px; }
+.rc-status.rc-status-fail { color: var(--red); }
+
 /* System prompt / prompt */
 .system-prompt, .prompt {
   border: 1px solid var(--border); border-radius: 8px; margin: 8px 0;
@@ -1156,7 +1159,7 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
 }
 
 /* Model Picker */
-#model-picker { position: relative; display: flex; align-items: center; gap: 4px; min-width: 0; overflow: visible; flex-wrap: wrap; }
+#model-picker { position: relative; display: flex; align-items: center; gap: 1px; min-width: 0; overflow: visible; flex-wrap: wrap; }
 
 #model-btn {
   display: flex; align-items: center; gap: 6px;
@@ -1173,7 +1176,7 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
 #upload-btn {
   background: color-mix(in srgb, var(--fg) 3%, transparent); color: color-mix(in srgb, var(--fg) 58%, transparent);
   border: 1px solid color-mix(in srgb, var(--fg) 8%, transparent); border-radius: 6px;
-  padding: 4px 6px; cursor: pointer; flex-shrink: 0;
+  padding: 2px 3px; cursor: pointer; flex-shrink: 0;
   transition: color 0.15s, border-color 0.2s;
   display: flex; align-items: center; justify-content: center;
 }
@@ -1183,7 +1186,7 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
 #menu-btn {
   background: none; border: none;
   color: color-mix(in srgb, var(--fg) 50%, transparent); cursor: pointer;
-  padding: 4px; transition: color 0.15s, opacity 0.15s;
+  padding: 2px; transition: color 0.15s, opacity 0.15s;
   display: flex; align-items: center; position: relative;
 }
 #menu-btn:hover:not(:disabled) { color: color-mix(in srgb, var(--fg) 66%, transparent); }
@@ -1193,7 +1196,7 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
 .toggle-btn {
   background: none; border: none;
   color: color-mix(in srgb, var(--fg) 50%, transparent); cursor: pointer;
-  padding: 4px; transition: color 0.15s, opacity 0.15s;
+  padding: 2px; transition: color 0.15s, opacity 0.15s;
   display: flex; align-items: center; position: relative;
 }
 .toggle-btn:hover:not(:disabled) { color: color-mix(in srgb, var(--fg) 66%, transparent); }
@@ -1630,28 +1633,129 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
 .sidebar-section .search-wrap { margin-bottom: 10px; }
 #history-search:focus { border-color: var(--accent); }
 
-/* History filter bar: single-line row with 3 category checkboxes
-   and From / To date pickers.  Lives between the search box and
-   the history list inside #sidebar-tab-history-panel. */
+/* History filter bar: a row of Material-style filter chips (pill
+   toggles with a hidden checkbox + status dot / icon) followed by
+   one unified From → To date-range pill.  Lives between the search
+   box and the history list inside #sidebar-tab-history-panel. */
 .history-filter-bar {
   display: flex; align-items: center; gap: 6px 8px; flex-wrap: wrap;
   margin-bottom: 10px; font-size: var(--fs-md);
   color: var(--fg);
 }
 
-.history-filter-chk {
-  display: inline-flex; align-items: center; gap: 3px;
-  cursor: pointer; user-select: none;
-  color: color-mix(in srgb, var(--fg) 80%, transparent);
+/* Chip set: wraps to new rows when the sidebar is narrow. */
+.history-filter-chips {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  width: 100%;
 }
 
-.history-filter-chk input[type="checkbox"] {
-  margin: 0; cursor: pointer;
+/* One filter chip: <label class="hf-chip"> wrapping a visually
+   hidden checkbox, a leading status dot (or SVG icon) and a short
+   text label.  Selected = translucent accent fill + accent border;
+   unselected = muted outline (Material filter-chip convention). */
+.hf-chip {
+  position: relative;
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 1px 7px; border-radius: 999px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
+  color: color-mix(in srgb, var(--fg) 70%, transparent);
+  cursor: pointer; user-select: none;
+  line-height: 1.3; white-space: nowrap;
+  font-size: var(--fs-sm, 11px);
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.hf-chip:hover {
+  background: color-mix(in srgb, var(--fg) 10%, transparent);
+}
+
+/* The checkbox stays in the DOM (keyboard + a11y + the existing
+   filter logic reads .checked) but is visually hidden inside the
+   chip. */
+.hf-chip input[type="checkbox"] {
+  position: absolute; opacity: 0; pointer-events: none;
+  width: 0; height: 0; margin: 0;
+}
+
+.hf-chip:has(> input:checked) {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  color: var(--fg);
+}
+
+/* Keyboard focus ring for the hidden checkbox. */
+.hf-chip:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+/* Leading status dot — colored per category when selected. */
+.hf-chip-dot {
+  flex: 0 0 auto; width: 6px; height: 6px; border-radius: 50%;
+  background: color-mix(in srgb, var(--fg) 35%, transparent);
+}
+
+.hf-chip-running:has(> input:checked) .hf-chip-dot {
+  background: #3fb950;
+  box-shadow: 0 0 4px color-mix(in srgb, #3fb950 60%, transparent);
+}
+
+.hf-chip-errored:has(> input:checked) .hf-chip-dot {
+  background: #f85149;
+  box-shadow: 0 0 4px color-mix(in srgb, #f85149 60%, transparent);
+}
+
+.hf-chip-succeeded:has(> input:checked) .hf-chip-dot {
+  background: #58a6ff;
+  box-shadow: 0 0 4px color-mix(in srgb, #58a6ff 60%, transparent);
+}
+
+/* Leading SVG icon (Workspace folder, Favorites star). */
+.hf-chip-icon {
+  flex: 0 0 auto; width: 10px; height: 10px; opacity: 0.85;
+}
+
+.hf-chip-favorite:has(> input:checked) .hf-chip-icon {
+  color: #e3b341; opacity: 1;
 }
 
 .history-filter-date-lbl {
   user-select: none; cursor: pointer;
-  color: color-mix(in srgb, var(--fg) 80%, transparent);
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em;
+  color: color-mix(in srgb, var(--fg) 55%, transparent);
+}
+
+/* Unified From → To date-range pill wrapping both date groups.
+   ``max-width: 100%`` + shrinkable date groups keep the pill inside
+   a narrow sidebar instead of overflowing it. */
+.history-filter-daterange {
+  display: inline-flex; align-items: center; gap: 4px;
+  flex-wrap: nowrap; white-space: nowrap;
+  max-width: 100%; box-sizing: border-box; overflow: hidden;
+  padding: 2px 6px; border-radius: 999px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
+}
+
+.hf-daterange-sep {
+  color: color-mix(in srgb, var(--fg) 45%, transparent);
+  user-select: none;
+}
+
+/* Small × that clears both dates; hidden by JS while empty. */
+.hf-date-clear {
+  flex: 0 0 auto;
+  background: transparent; border: none; border-radius: 50%;
+  color: color-mix(in srgb, var(--fg) 60%, transparent);
+  width: 16px; height: 16px; line-height: 1;
+  padding: 0; cursor: pointer; font-size: 13px;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+
+.hf-date-clear:hover {
+  background: color-mix(in srgb, var(--fg) 12%, transparent);
+  color: var(--fg);
 }
 
 /* Atomic wrapper around a date filter trio (label + <input
@@ -1666,17 +1770,18 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
 .history-filter-date-group {
   display: inline-flex; align-items: center; gap: 4px;
   flex-wrap: nowrap; white-space: nowrap;
+  flex: 0 1 auto; min-width: 0;
 }
 
 .history-filter-date {
-  flex: 0 1 auto; min-width: 0; width: 7.5em;
-  background: color-mix(in srgb, var(--fg) 5%, transparent);
-  border: 1px solid var(--border); border-radius: 4px;
-  color: var(--fg); font-size: var(--fs-md);
-  padding: 2px 4px; outline: none; box-sizing: border-box;
+  flex: 1 1 auto; min-width: 0; width: 6.9em;
+  background: transparent;
+  border: none; border-bottom: 1px solid transparent;
+  color: var(--fg); font-size: 11px;
+  padding: 2px 0; outline: none; box-sizing: border-box;
   font-family: inherit;
 }
-.history-filter-date:focus { border-color: var(--accent); }
+.history-filter-date:focus { border-bottom-color: var(--accent); }
 
 /* Hide the native picker indicator so it does not overlap the
    text in the date input; clicking the adjacent button below
@@ -1690,25 +1795,30 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
   display: none;
 }
 
-/* Standalone calendar picker button placed next to each date
-   textbox.  Clicking it opens the native date picker via
-   ``showPicker()`` and replaces the invisible picker indicator
-   that was overlapping the textbox content. */
+/* Calendar picker icon button placed next to each date textbox.
+   Renders an inline SVG calendar and opens the custom in-webview
+   calendar popup (the native picker indicator is hidden above). */
 .history-filter-date-btn {
   flex: 0 0 auto;
-  background: color-mix(in srgb, var(--fg) 5%, transparent);
-  border: 1px solid var(--border); border-radius: 4px;
-  color: var(--fg); font-size: var(--fs-md);
-  padding: 1px 5px; cursor: pointer; line-height: 1;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: transparent;
+  border: none; border-radius: 4px;
+  color: color-mix(in srgb, var(--fg) 65%, transparent);
+  padding: 2px; cursor: pointer; line-height: 1;
   font-family: inherit;
+}
+
+.history-filter-date-btn svg {
+  width: 13px; height: 13px;
 }
 
 .history-filter-date-btn:hover {
   background: color-mix(in srgb, var(--fg) 12%, transparent);
+  color: var(--fg);
 }
 
 .history-filter-date-btn:focus {
-  border-color: var(--accent); outline: none;
+  outline: none; color: var(--accent);
 }
 
 /* Custom in-webview calendar popup opened by ``.history-filter-date-btn``.
@@ -1847,6 +1957,13 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
   padding-bottom: 9px;
   padding-left: 13px;
   min-height: 96px;
+
+  /* Per-chat pastel look, driven by the --task-color custom property
+     that renderHistory stamps on every row (it used to be an inline
+     background-color + color pair, which no stylesheet — e.g. the
+     remote page's remote-codex.css — could override). */
+  background-color: var(--task-color, color-mix(in srgb, var(--fg) 3%, transparent));
+  color: #1a1a1a;
 }
 
 .running-item > .sidebar-item-text {
@@ -1916,6 +2033,40 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* Tiny icon-only copy buttons that sit right after the chat id and
+   the task id on the ids row.  Clicking one copies just that raw id
+   to the clipboard (see makeIdCopyButton in main.js).  Rendered as
+   inline-flex so the 10px clipboard icon lines up with the small
+   ids text; ``vertical-align: middle`` keeps it from pushing the
+   row's line-height around. */
+.ids-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+  border: none;
+  background: none;
+  cursor: pointer;
+  padding: 0 2px;
+  margin: 0 0 0 3px;
+  border-radius: 3px;
+  line-height: 1;
+  color: #000;
+  opacity: 0.45;
+  transition: opacity 0.15s, background 0.15s, color 0.15s;
+}
+
+.ids-copy-btn svg {
+  width: 10px;
+  height: 10px;
+}
+
+.ids-copy-btn:hover {
+  opacity: 0.9;
+  background: color-mix(in srgb, #000 10%, transparent);
+}
+
+.ids-copy-btn.copied { opacity: 0.9; color: #006400; }
 
 @keyframes sidebar-running-pulse {
   0%, 100% { opacity: 1; box-shadow: 0 0 0 1px rgb(0 0 0 / 15%); }
@@ -2420,6 +2571,13 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 
 .adjacent-task:first-child {
   border-top: none;
+}
+
+.adjacent-task-placeholder {
+  padding: 10px;
+  color: var(--dim);
+  font-size: var(--fs-sm);
+  font-style: italic;
 }
 
 /* ── Collapsible panels ─────────────────────────────── */

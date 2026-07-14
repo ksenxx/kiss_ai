@@ -1,0 +1,12 @@
+{
+  "model": "claude-fable-5",
+  "max_steps": 15,
+  "max_budget_usd": 1.0,
+  "graph_build_seconds": 2.17,
+  "graph_nodes": 18008,
+  "graph_edges": 47480,
+  "graph_files": 1036,
+  "baseline_graph_absent": true,
+  "corpus_source_commit": "2c63801b",
+  "design": "controlled feature ablation; identical current-code corpus copies, no Git history"
+}
