@@ -73,6 +73,31 @@ body.remote-chat #tab-bar .chat-tab-add {
   color: #afafaf;
 }
 
+/* Settings button (gear icon): main.css caps .chat-tab-settings at
+ * min/max-width 30px with padding 4px 8px 4px 0 (~22px of content
+ * space for the 18x18 SVG).  The higher-specificity
+ * ``body.remote-chat #tab-bar .chat-tab`` rule above overrides that
+ * padding to 5px 12px, collapsing the 30px-wide flex item to ~6px of
+ * content — enough to shrink the SVG flex-child to a dot.  Restore a
+ * pill-shaped hit target with enough room for the 18x18 gear (mirrors
+ * the .chat-tab-add pill treatment) and pin the SVG's intrinsic size
+ * so it can never be flex-shrunk. */
+body.remote-chat #tab-bar .chat-tab-settings {
+  border: 1px solid rgb(255 255 255 / 10%);
+  border-radius: 999px;
+  color: #afafaf;
+  padding: 5px 8px;
+  min-width: 36px;
+  max-width: 36px;
+}
+
+body.remote-chat #tab-bar .chat-tab-settings svg {
+  display: block;
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+
 /* ── Status bar → subtle muted pill row ──────────────── */
 body.remote-chat #tab-status-bar {
   background: #0d0d0d;
