@@ -196,7 +196,11 @@ class TestTalkTool(unittest.TestCase):
 
         t = threading.Thread(target=agent_thread, daemon=True)
         t.start()
-        t.join(timeout=5.0)
+        # Two ``talk()`` calls each round-trip through the GPT audio
+        # model for speech synthesis; a 5s cap was routinely too tight
+        # under parallel-suite load.  10s comfortably covers the
+        # sequential pair while still failing fast on a hung endpoint.
+        t.join(timeout=10.0)
         self.assertFalse(t.is_alive())
 
         talk_events = [
