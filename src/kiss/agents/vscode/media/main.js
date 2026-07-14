@@ -2983,12 +2983,10 @@
     let rb = '';
     let rawBody = '';
     if (showStatus && ev.is_continue) {
-      rb +=
-        '<div style="color:var(--yellow);font-weight:700;font-size:var(--fs-xl);margin-bottom:10px">Status: Continue</div>';
+      rb += '<div class="rc-status">Status: Continue</div>';
       rawBody += 'Status: Continue\n\n';
     } else if (showStatus && ev.success === false) {
-      rb +=
-        '<div style="color:var(--red);font-weight:700;font-size:var(--fs-xl);margin-bottom:10px">Status: FAILED</div>';
+      rb += '<div class="rc-status rc-status-fail">Status: FAILED</div>';
       rawBody += 'Status: FAILED\n\n';
     }
     let usePre = true;
