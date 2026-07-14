@@ -628,7 +628,14 @@ class AnthropicModel(Model):
             if not user_set_max_tokens:
                 max_tokens = 65536 if self.model_name.startswith("claude-opus-4") else 64000
             if _uses_adaptive_thinking(self.model_name):
-                kwargs["thinking"] = {"type": "adaptive"}
+                # ``display`` defaults to "omitted" on adaptive-thinking
+                # models (fable-5, mythos-5, sonnet-5, opus-4-7/4-8): the
+                # API then returns thinking blocks with an EMPTY ``thinking``
+                # field (encrypted signature only) and emits no
+                # ``thinking_delta`` stream events, so no thinking tokens
+                # are ever revealed to the user.  Request the readable
+                # summary explicitly.
+                kwargs["thinking"] = {"type": "adaptive", "display": "summarized"}
             else:
                 # The API requires ``max_tokens > budget_tokens`` and
                 # ``budget_tokens >= 1024``.  Cap the budget below the
@@ -676,17 +683,17 @@ class AnthropicModel(Model):
             kwargs["system"] = system_instruction
         if tools:
             kwargs["tools"] = tools
-            thinking = kwargs.get("thinking") or {}
-            thinking_type = thinking.get("type") if isinstance(thinking, dict) else None
-            if "tool_choice" not in kwargs and thinking_type != "enabled":
+            if "tool_choice" not in kwargs and "thinking" not in kwargs:
                 # KISSAgent's ReAct loop requires every agentic turn to
-                # produce a tool call (``finish`` is always present).  Claude's
-                # default ``tool_choice=auto`` can otherwise yield a
-                # reasoning-only / empty-text turn that KISS has to retry and,
-                # for thinking-first models like fable-5, may eventually abort.
-                # Anthropic rejects forced tool use with
-                # ``thinking.type=enabled``; adaptive-thinking and non-thinking
-                # requests accept ``any``.
+                # produce a tool call (``finish`` is always present), so
+                # non-thinking models force ``tool_choice=any`` to prevent
+                # tool-less turns.  When thinking is active (``enabled`` or
+                # ``adaptive``) tool use only supports ``tool_choice``
+                # ``auto``/``none``: ``enabled`` rejects forced tool use with
+                # a 400, and adaptive models (fable-5, sonnet-5, opus-4-7/4-8)
+                # silently DISABLE thinking for the request ("graceful
+                # thinking degradation") — the response then contains only
+                # ``tool_use`` blocks and no thinking is ever revealed.
                 kwargs["tool_choice"] = {"type": "any"}
 
         if enable_cache:
