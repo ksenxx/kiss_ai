@@ -466,16 +466,30 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                         )
                     return (MergeResult.CHECKOUT_FAILED, stash_warning)
 
+            # Thread the recorded task prompt/result into the merge
+            # commit message so the final commit on the user's
+            # original branch ALWAYS records them — even when the
+            # agent hand-committed its own work in the worktree (so
+            # the post-task auto-commit was a no-op and the branch
+            # HEAD message carries neither block).  See
+            # ``GitWorktreeOps._merge_commit_message`` for the dedup
+            # contract (production incident: commit dd563a7c).
+            user_prompt = getattr(self, "_last_user_prompt", "") or None
+            task_result = getattr(self, "_last_result_summary", "") or None
             if wt.baseline_commit:
                 result = GitWorktreeOps.squash_merge_from_baseline(
                     wt.repo_root,
                     wt.branch,
                     wt.baseline_commit,
+                    user_prompt=user_prompt,
+                    task_result=task_result,
                 )
             else:
                 result = GitWorktreeOps.squash_merge_branch(
                     wt.repo_root,
                     wt.branch,
+                    user_prompt=user_prompt,
+                    task_result=task_result,
                 )
             if did_stash:
                 if result == MergeResult.SUCCESS:
