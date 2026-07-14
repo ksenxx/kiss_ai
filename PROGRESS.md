@@ -1,4 +1,67 @@
-# PROGRESS — Local tree-sitter `code_graph` tool — Sessions 1–4 (current task)
+# PROGRESS — Fix: short-trajectory task blocks adjacent-task side scrolling (current task)
+
+## Task
+
+When side-scrolling (overscroll prev/next navigation) in the chat webview, a
+previous task with a very short/empty trajectory made every task beyond it
+unreachable. Reproduce with e2e tests, then fix. Dev model: `claude-fable-5`;
+independent review/debug pass: `gpt-5.6-sol`.
+
+## Root cause
+
+`renderAdjacentTask` in `src/kiss/agents/vscode/media/main.js` latched
+`noPrevTask`/`noNextTask` whenever the `adjacent_task_events` reply had
+`events.length === 0` — even when the reply carried a REAL adjacent row
+(valid `task_id` + title) whose trajectory simply recorded no replayable
+events. The anchors (`oldestLoadedTaskId`/`newestLoadedTaskId`) never
+advanced, permanently killing overscroll past the short task. The backend
+(`_get_adjacent_task_by_chat_id` in `src/kiss/agents/sorcar/persistence.py`
+and `_get_adjacent_task` in `src/kiss/agents/vscode/server.py`) was correct:
+a genuine end-of-chat reply is `task: ''` AND `task_id: null`; a real row
+with an empty trajectory keeps its real `task_id` with `events: []`.
+
+## Fix (media/main.js `renderAdjacentTask`)
+
+- Latch `noPrevTask`/`noNextTask` only when `!hasTaskId && !task` (genuine
+  end-of-chat). A real row with empty events now renders a
+  `.adjacent-task-placeholder` (`<task> — (no output recorded)`) inside the
+  `.adjacent-task` container and advances the scroll anchors so chaining
+  continues past it.
+- Placeholder also covers trajectories whose only events are non-rendering
+  terminal markers (e.g. just `task_done`): after `replayEventsInto`, if the
+  container has no children the placeholder is appended.
+- Review fix (gpt-5.6-sol finding): a real row with an EMPTY title now uses
+  display label `(untitled task)` for `dataset.task` / header /
+  `applyChevronState` targeting, so `applyChevronState(…, '')` can no longer
+  fall through to ALL panels and `setTaskText('')` no longer hides the header.
+- CSS: added `.adjacent-task-placeholder` to `media/main.css`.
+- Types (review finding): `src/kiss/agents/vscode/src/types.ts` —
+  `getAdjacentTask.taskId` corrected to `string | number | null` (row ids are
+  UUID strings), `adjacent_task_events` now declares `task_id` and
+  `direction: 'prev' | 'next'`.
+
+## Tests
+
+- `src/kiss/agents/vscode/test/adjacentTaskScroll.test.js` (jsdom e2e on real
+  chat.html + main.js): 6 new tests — short-trajectory prev/next don't latch
+  and chain past (verified to FAIL pre-fix via `git stash`), genuine
+  end-of-chat still latches, `taskDeleted` removes the placeholder container,
+  empty-title row still chains with `(untitled task)` label, terminal-only
+  trajectory renders placeholder + chains.
+- `src/kiss/tests/agents/vscode/test_replay_event_coalescing.py`: new backend
+  contract test `test_adjacent_task_with_empty_trajectory_keeps_task_id`
+  (real row + empty trajectory ⇒ real `task_id`, `events: []`, NOT the
+  end-of-chat shape) and strengthened the end-of-chat shape assertion.
+- Verified: all 12 adjacentTaskScroll tests pass; full vscode JS suite (122
+  files, 8 parallel batches) passes (`installFailureNoCompleteNotification`
+  hangs identically on unmodified main repo — pre-existing, unrelated);
+  `npm run compile`/`typecheck`/`lint:ts`/`lint:css` clean;
+  related pytest files pass; `uv run check --full` passes.
+
+Both the VS Code webview and the remote web app share `media/main.js` /
+`chat.html` (served by `web_server.py`), so one frontend fix covers both.
+
+# PROGRESS — Local tree-sitter `code_graph` tool — Sessions 1–4
 
 ## Task
 
@@ -1086,137 +1149,3 @@ longer, although individual caller tasks had meaningful wins.
   and hub noise, avoiding unused tool-schema overhead, and next running 20–50
   harder tasks on a repository of at least one million lines with randomized
   arm order.
-
-______________________________________________________________________
-
-# PROGRESS — Auto-commit: append task description AND result to commit message
-
-## Task
-
-In auto commit, the auto-generated commit message MUST have the task description
-AND the task RESULTS appended before committing. Reproduce with e2e tests first,
-then fix. claude-fable-5 for development; gpt-5.6-sol for independent review.
-
-## What was done (fix phase, this session)
-
-1. Tests were already written in an earlier session
-   (`src/kiss/tests/agents/sorcar/test_autocommit_task_result_in_message.py`,
-   14 tests, verified FAILING before the fix — ImportError on
-   `_append_task_result`, and no `Result:` block in commit messages).
-
-1. Production fix — threaded `task_result` through the full auto-commit chain:
-
-   - `src/kiss/agents/vscode/helpers.py`: new `_append_task_result(message, task_result)` helper (mirrors `_append_user_prompt`, heading `Result:`);
-     `generate_commit_message_from_diff(diff_text, user_prompt=None, task_result=None)` now appends the result after the user prompt on ALL
-     branches (empty-diff early return and LLM/fallback return).
-   - `src/kiss/agents/sorcar/sorcar_agent.py`:
-     `_generate_commit_message(commit_dir, user_prompt=None, task_result=None)`
-     forwards `task_result`; `auto_commit_changes(..., task_result=None)` —
-     `message_fn` contract widened to `Callable[[Path, str|None, str|None], str]`,
-     called as `message_fn(commit_dir, user_prompt, task_result)`; the
-     except-fallback path also appends the result via `_append_task_result`.
-   - `src/kiss/agents/sorcar/worktree_sorcar_agent.py`:
-     `_auto_commit_worktree()` passes
-     `task_result=getattr(self, "_last_result_summary", "") or None`.
-   - `src/kiss/agents/sorcar/chat_sorcar_agent.py`: new
-     `self._last_result_summary: str = ""` in `__init__`; reset to `""` at run
-     start (no stale leak across runs); set to `result_summary` in `run()`'s
-     `finally` (covers success / "Task failed" / "Task interrupted" paths).
-   - `src/kiss/agents/sorcar/running_agent_state.py`: new
-     `last_result_summary` slot + init on `_RunningAgentState`.
-   - `src/kiss/agents/vscode/task_runner.py`: `tab.last_result_summary = ""`
-     when `tab.last_user_prompt = task_prompt` is set (per-subtask reset);
-     `tab.last_result_summary = result_summary` in the per-subtask `finally`
-     (before the post-task autocommit hook runs).
-   - `src/kiss/agents/vscode/merge_flow.py` `_handle_autocommit_action`:
-     reads `prompt_tab.last_result_summary` and passes `task_result=` to
-     `generate_commit_message_from_diff`.
-   - `src/kiss/agents/vscode/server.py:2219` manual UI generation left
-     unchanged (no task result exists for user-invoked manual generation).
-
-1. Updated existing test doubles to the widened 3-arg contract (mechanical,
-   optional third param): test_autocommit_race_new_file.py,
-   test_autocommit_notifications.py (lambdas + message_fn defs),
-   test_finalize_worktree_no_spurious_hook_warning.py,
-   test_wave2_agent_bugs.py (`_IntruderCommitMessageFn.__call__`),
-   test_autocommit_after_merge.py, test_autocommit_toggle.py,
-   test_merge_autocommit_lifecycle.py (x2), test_autocommit_persistence.py,
-   test_bughunt_server_runner.py.
-
-1. Verification: new test file 14/14 pass; impacted suites all pass
-   (autocommit race/notifications/user-prompt/finalize: 29; wave2+workflow: 12;
-   persistence/after-merge/off-on-failure/toggle/lifecycle/merge-commit-message/
-   bughunt-server-runner: 68; 100pct-branch-coverage/no-autocommit-branch/
-   bughunt4: 13). `uv run check --full` → All checks passed (API.md
-   regenerated by the check with the new signatures).
-
-______________________________________________________________________
-
-# PROGRESS — Independent API-compatibility audit (read-only, this session)
-
-## Task
-
-Independently audit API compatibility and all call sites/signatures for
-`auto_commit_changes`, `_generate_commit_message`, and
-`generate_commit_message_from_diff`. Check tests and production wiring for
-missed callers or introduced TypeErrors. Report findings without modifying
-production code.
-
-## Audit verdict: API-COMPATIBLE — no missed callers, no TypeErrors
-
-1. Verified all three signatures use keyword-defaulted new params
-   (`task_result: str | None = None`), so every legacy 1-/2-arg caller stays
-   valid. `auto_commit_changes` invokes `message_fn(commit_dir, user_prompt, task_result)` with 3 positional args, and every production `message_fn`
-   (`_generate_commit_message`) and every updated test double accepts them.
-
-1. Verified production wiring end-to-end: worktree path
-   (`worktree_sorcar_agent._auto_commit_worktree` →
-   `getattr(self, "_last_result_summary", "") or None`), chat agent
-   (`_last_result_summary` init/reset/finally-set covering success, `Exception`
-   → "Task failed", `BaseException` → "Task interrupted"), task runner
-   (per-subtask reset at line 893 and finally-set at line 994 before the
-   post-task autocommit hook), merge flow (`prompt_tab.last_result_summary`
-   read under `_state_lock`, `or None` normalization), `_RunningAgentState`
-   slot present. `server.py:2219` 1-positional-arg call remains compatible.
-
-1. Empirically ran all 14 impacted test files (124 tests) in 4 parallel
-   splits: 124 passed, 0 failed, 1 deselected. Ran `python -m compileall` on
-   all 7 touched production files (OK) and `uv run check` (all green after
-   mdformat-fixing PROGRESS.md, the only file touched this session).
-
-1. Two benign semantic-drift findings (documented, intentionally NOT changed):
-
-   - `test_workflow_bugs.py:274` `_failing_commit_msg(wt_dir)` (1-arg) now
-     fails with `TypeError` instead of the intended `RuntimeError` inside
-     `auto_commit_changes` — both are swallowed by the same `except Exception` fallback the test asserts, so the test still passes and still
-     covers the fallback branch.
-   - `test_autocommit_notifications.py:530` 2-arg `spy` patches
-     `sorcar_agent._generate_commit_message` after
-     `worktree_sorcar_agent` already imported its own reference, so the patch
-     is inert on the worktree path; the test only asserts the spy is NEVER
-     called (nothing staged), so it remains correct.
-
-## gpt-5.6-sol independent review (this session)
-
-Four parallel review agents audited data flow, API compatibility, test
-coverage, and lifecycle ordering. Verdicts:
-- API compatibility: PASS — no missed callers, no TypeErrors; 124 impacted
-  tests re-run green; legacy 1-arg callers (server.py manual UI) still valid.
-- One review bug FIXED: in `task_runner.py`'s outer `except BaseException`
-  handler, `result_summary` is recomputed AFTER the per-subtask `finally`
-  already copied the stale value into `tab.last_result_summary`. Added
-  `tab.last_result_summary = result_summary` in the outer handler so the tab
-  field always mirrors the final persisted result before any later
-  auto-commit reads it. Verified with
-  test_outer_baseexception_emits_result.py + autocommit suites (46 passed)
-  and `uv run check --full` (all green).
-- Documented (accepted, out of scope for this fix): (a) the late-arriver
-  retry commit uses a fixed generic message by design; (b) multi-<task>
-  submissions commit under the last subtask's prompt/result (pre-existing
-  last-wins semantics shared with `last_user_prompt`); (c) a delayed manual
-  autocommit click after a NEW task starts reads the newer tab state —
-  pre-existing behavior for `last_user_prompt`, unchanged; (d) the worktree
-  path reads the agent's own `_last_result_summary` ("Task failed"/"Task
-  interrupted" generic strings on failure) while task history may store a
-  more detailed runner-side string — both are truthful, sourced from
-  different normalization layers, and failure paths skip auto-merge anyway.

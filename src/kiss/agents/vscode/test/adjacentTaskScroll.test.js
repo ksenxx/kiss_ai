@@ -310,10 +310,247 @@ function testTouchPrev() {
   console.log('PASS touch pull-down requests prev');
 }
 
+// ---------------------------------------------------------------------------
+// 7. REGRESSION: a previous task that EXISTS (valid task_id) but has a
+//    very short/empty trajectory (events: []) must NOT latch noPrevTask.
+//    It must render a placeholder container and a further overscroll
+//    must chain PAST it (request the task before the short one) — the
+//    reported bug: "if the previous task has a very short trajectory,
+//    I cannot scroll to the last task".
+// ---------------------------------------------------------------------------
+function testShortPrevTaskDoesNotBlockChaining() {
+  const {win, posted, tabId, O} = setupWithHistoryTask();
+  O.scrollTop = 0;
+  wheel(win, O, -50, 10);
+  let adj = getAdjacent(posted);
+  assert.ok(adj.length >= 1, 'wheel overscroll at top must request prev task');
+  assert.strictEqual(adj[0].taskId, '42');
+  // Backend reply: the previous task exists but recorded NO events.
+  send(win, {
+    type: 'adjacent_task_events',
+    tabId,
+    direction: 'prev',
+    task: 'Short task',
+    task_id: '41',
+    events: [],
+  });
+  const cont = O.querySelector('.adjacent-task[data-task-id="41"]');
+  assert.ok(
+    cont,
+    'an adjacent task with an empty trajectory must still render a ' +
+      'container (placeholder), not be silently dropped',
+  );
+  assert.ok(
+    cont.querySelector('.adjacent-task-placeholder'),
+    'empty-trajectory adjacent task must render a visible placeholder',
+  );
+  // The critical part: overscroll again — navigation must chain past
+  // the short task using its id '41', not be dead (noPrevTask latched).
+  O.scrollTop = 0;
+  wheel(win, O, -50, 10);
+  adj = getAdjacent(posted);
+  assert.ok(
+    adj.length >= 2,
+    'overscroll after a short-trajectory prev task must request the ' +
+      'task before it (noPrevTask must NOT be latched); got ' +
+      JSON.stringify(adj),
+  );
+  assert.strictEqual(
+    adj[adj.length - 1].taskId,
+    '41',
+    'chained overscroll must key off the short task id',
+  );
+  assert.strictEqual(adj[adj.length - 1].direction, 'prev');
+  win.close();
+  console.log('PASS short-trajectory prev task does not block chaining');
+}
+
+// ---------------------------------------------------------------------------
+// 8. Same for the NEXT direction: a next task with an empty trajectory
+//    must not latch noNextTask; further overscroll-down chains past it.
+// ---------------------------------------------------------------------------
+function testShortNextTaskDoesNotBlockChaining() {
+  const {win, posted, tabId, O} = setupWithHistoryTask();
+  O.scrollTop = O.scrollHeight - O.clientHeight; // at bottom
+  wheel(win, O, 50, 10);
+  let adj = getAdjacent(posted);
+  assert.ok(adj.length >= 1, 'overscroll at bottom must request next task');
+  assert.strictEqual(adj[0].taskId, '42');
+  send(win, {
+    type: 'adjacent_task_events',
+    tabId,
+    direction: 'next',
+    task: 'Short next task',
+    task_id: '43',
+    events: [],
+  });
+  assert.ok(
+    O.querySelector('.adjacent-task[data-task-id="43"]'),
+    'empty-trajectory next task must still render a container',
+  );
+  O.scrollTop = O.scrollHeight - O.clientHeight;
+  wheel(win, O, 50, 10);
+  adj = getAdjacent(posted);
+  assert.ok(
+    adj.length >= 2,
+    'overscroll after a short-trajectory next task must request the ' +
+      'task after it (noNextTask must NOT be latched); got ' +
+      JSON.stringify(adj),
+  );
+  assert.strictEqual(adj[adj.length - 1].taskId, '43');
+  assert.strictEqual(adj[adj.length - 1].direction, 'next');
+  win.close();
+  console.log('PASS short-trajectory next task does not block chaining');
+}
+
+// ---------------------------------------------------------------------------
+// 9. Genuine end-of-chat (task:'' AND task_id:null) must STILL latch
+//    noPrevTask: further overscroll must not spam getAdjacentTask.
+// ---------------------------------------------------------------------------
+function testGenuineEndOfChatStillLatches() {
+  const {win, posted, tabId, O} = setupWithHistoryTask();
+  O.scrollTop = 0;
+  wheel(win, O, -50, 10);
+  let adj = getAdjacent(posted);
+  assert.strictEqual(adj.length, 1);
+  // Backend found no adjacent row: task '' and task_id null.
+  send(win, {
+    type: 'adjacent_task_events',
+    tabId,
+    direction: 'prev',
+    task: '',
+    task_id: null,
+    events: [],
+  });
+  assert.strictEqual(
+    O.querySelector('.adjacent-task'),
+    null,
+    'a genuine no-more-tasks reply must not render a container',
+  );
+  O.scrollTop = 0;
+  wheel(win, O, -50, 10);
+  adj = getAdjacent(posted);
+  assert.strictEqual(
+    adj.length,
+    1,
+    'after a genuine end-of-chat reply, further overscroll must NOT ' +
+      'post more getAdjacentTask requests',
+  );
+  win.close();
+  console.log('PASS genuine end-of-chat still latches noPrevTask');
+}
+
+// ---------------------------------------------------------------------------
+// 10. taskDeleted removes an empty-trajectory placeholder container too.
+// ---------------------------------------------------------------------------
+function testTaskDeletedRemovesPlaceholder() {
+  const {win, posted, tabId, O} = setupWithHistoryTask();
+  O.scrollTop = 0;
+  wheel(win, O, -50, 10);
+  send(win, {
+    type: 'adjacent_task_events',
+    tabId,
+    direction: 'prev',
+    task: 'Short task',
+    task_id: '41',
+    events: [],
+  });
+  assert.ok(O.querySelector('.adjacent-task[data-task-id="41"]'));
+  send(win, {type: 'taskDeleted', chatId: 'chat-abc', taskId: '41', chatHasMoreTasks: true});
+  assert.strictEqual(
+    O.querySelector('.adjacent-task[data-task-id="41"]'),
+    null,
+    'taskDeleted must remove the placeholder adjacent-task container',
+  );
+  win.close();
+  console.log('PASS taskDeleted removes placeholder container');
+}
+
+// ---------------------------------------------------------------------------
+// 11. A real adjacent row with a valid id but an EMPTY title must still
+//     render (label '(untitled task)'), not latch noPrevTask, and must
+//     not target every panel via applyChevronState(…, '').
+// ---------------------------------------------------------------------------
+function testEmptyTitleTaskStillChains() {
+  const {win, posted, tabId, O} = setupWithHistoryTask();
+  O.scrollTop = 0;
+  wheel(win, O, -50, 10);
+  send(win, {
+    type: 'adjacent_task_events',
+    tabId,
+    direction: 'prev',
+    task: '',
+    task_id: '41',
+    events: [],
+  });
+  const cont = O.querySelector('.adjacent-task[data-task-id="41"]');
+  assert.ok(
+    cont,
+    'a real adjacent row with an empty title must still render a container',
+  );
+  assert.strictEqual(
+    cont.dataset.task,
+    '(untitled task)',
+    'empty-title adjacent task must get a non-empty display label',
+  );
+  O.scrollTop = 0;
+  wheel(win, O, -50, 10);
+  const adj = getAdjacent(posted);
+  assert.ok(
+    adj.length >= 2 && adj[adj.length - 1].taskId === '41',
+    'empty-title real task must not latch noPrevTask; got ' +
+      JSON.stringify(adj),
+  );
+  win.close();
+  console.log('PASS empty-title adjacent task still chains');
+}
+
+// ---------------------------------------------------------------------------
+// 12. A trajectory whose only events are non-rendering terminal markers
+//     (e.g. just task_done) must render the placeholder too — the
+//     replay loop skips terminal events, leaving zero visible content.
+// ---------------------------------------------------------------------------
+function testTerminalOnlyTrajectoryRendersPlaceholder() {
+  const {win, posted, tabId, O} = setupWithHistoryTask();
+  O.scrollTop = 0;
+  wheel(win, O, -50, 10);
+  send(win, {
+    type: 'adjacent_task_events',
+    tabId,
+    direction: 'prev',
+    task: 'Terminal-only task',
+    task_id: '41',
+    events: [{type: 'task_done'}],
+  });
+  const cont = O.querySelector('.adjacent-task[data-task-id="41"]');
+  assert.ok(cont, 'terminal-only trajectory must still render a container');
+  assert.ok(
+    cont.querySelector('.adjacent-task-placeholder'),
+    'terminal-only trajectory must render the placeholder (replay ' +
+      'produced no visible content)',
+  );
+  O.scrollTop = 0;
+  wheel(win, O, -50, 10);
+  const adj = getAdjacent(posted);
+  assert.ok(
+    adj.length >= 2 && adj[adj.length - 1].taskId === '41',
+    'terminal-only trajectory must not block chaining; got ' +
+      JSON.stringify(adj),
+  );
+  win.close();
+  console.log('PASS terminal-only trajectory renders placeholder + chains');
+}
+
 testEarlyPromptPoisoning();
 testNoEmptyTaskIdRequest();
 testTaskEventsWithoutTitle();
 testPrevRequestRenderAndChain();
 testNextAtBottom();
 testTouchPrev();
+testShortPrevTaskDoesNotBlockChaining();
+testShortNextTaskDoesNotBlockChaining();
+testGenuineEndOfChatStillLatches();
+testTaskDeletedRemovesPlaceholder();
+testEmptyTitleTaskStillChains();
+testTerminalOnlyTrajectoryRendersPlaceholder();
 console.log('All adjacentTaskScroll tests passed');
