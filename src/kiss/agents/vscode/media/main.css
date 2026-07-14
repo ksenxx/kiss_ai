@@ -899,6 +899,9 @@ body.remote-chat #welcome-config { display: none !important; }
 }
 .rc-body.pre { white-space: pre-wrap; }
 
+.rc-status { color: var(--yellow); font-weight: 700; font-size: var(--fs-xl); margin-bottom: 10px; }
+.rc-status.rc-status-fail { color: var(--red); }
+
 /* System prompt / prompt */
 .system-prompt, .prompt {
   border: 1px solid var(--border); border-radius: 8px; margin: 8px 0;
