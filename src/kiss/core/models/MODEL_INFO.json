@@ -4138,8 +4138,8 @@
   },
   "openrouter/z-ai/glm-5.2": {
     "context_length": 1048576,
-    "input_price_per_1M": 0.924,
-    "output_price_per_1M": 2.904,
+    "input_price_per_1M": 0.91,
+    "output_price_per_1M": 2.86,
     "fc": true,
     "emb": false,
     "gen": true
