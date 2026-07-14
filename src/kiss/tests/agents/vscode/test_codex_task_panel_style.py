@@ -593,9 +593,25 @@ def test_live_task_panel_typography_and_history_rows(
                     pass
                 page.evaluate(_INJECT_HISTORY_JS)
                 page.wait_for_selector(
-                    "#history-list .running-item", state="attached"
+                    "#history-list .running-item", state="visible"
                 )
-                page.wait_for_timeout(200)
+                # Wait for the metadata layout to settle: the info
+                # container must have real text rects (i.e. its inline
+                # children have been laid out) before probing.  Under
+                # heavy parallel load a fixed sleep was not enough and
+                # ``getClientRects`` occasionally returned 0.
+                page.wait_for_function(
+                    """() => {
+                        const info = document.querySelector(
+                            '.running-item-info'
+                        );
+                        if (!info) return false;
+                        const range = document.createRange();
+                        range.selectNodeContents(info);
+                        return range.getClientRects().length >= 2;
+                    }""",
+                    timeout=10000,
+                )
                 probes = page.evaluate(_PROBE_STYLES_JS)
             finally:
                 browser.close()
