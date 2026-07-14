@@ -2145,8 +2145,8 @@
   },
   "openrouter/deepseek/deepseek-chat-v3.1": {
     "context_length": 163840,
-    "input_price_per_1M": 0.21,
-    "output_price_per_1M": 0.79,
+    "input_price_per_1M": 0.25,
+    "output_price_per_1M": 0.95,
     "fc": false,
     "emb": false,
     "gen": false
@@ -2201,8 +2201,8 @@
   },
   "openrouter/deepseek/deepseek-v4-flash": {
     "context_length": 1048576,
-    "input_price_per_1M": 0.077,
-    "output_price_per_1M": 0.154,
+    "input_price_per_1M": 0.09,
+    "output_price_per_1M": 0.18,
     "fc": true,
     "emb": false,
     "gen": true
@@ -2402,7 +2402,7 @@
   },
   "openrouter/google/gemma-4-31b-it": {
     "context_length": 262144,
-    "input_price_per_1M": 0.12,
+    "input_price_per_1M": 0.06,
     "output_price_per_1M": 0.35,
     "fc": true,
     "emb": false,
@@ -2496,6 +2496,15 @@
     "emb": false,
     "gen": true
   },
+  "openrouter/kwaipilot/kat-coder-air-v2.5": {
+    "context_length": 256000,
+    "input_price_per_1M": 0.15,
+    "output_price_per_1M": 0.6,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW"
+  },
   "openrouter/kwaipilot/kat-coder-pro-v2": {
     "context_length": 256000,
     "input_price_per_1M": 0.3,
@@ -2503,6 +2512,15 @@
     "fc": true,
     "emb": false,
     "gen": true
+  },
+  "openrouter/kwaipilot/kat-coder-pro-v2.5": {
+    "context_length": 256000,
+    "input_price_per_1M": 0.74,
+    "output_price_per_1M": 2.96,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW"
   },
   "openrouter/mancer/weaver": {
     "context_length": 8000,
@@ -2562,8 +2580,8 @@
   },
   "openrouter/meta-llama/llama-4-maverick": {
     "context_length": 1048576,
-    "input_price_per_1M": 0.15,
-    "output_price_per_1M": 0.6,
+    "input_price_per_1M": 0.2,
+    "output_price_per_1M": 0.8,
     "fc": false,
     "emb": false,
     "gen": true
@@ -2795,7 +2813,7 @@
   "openrouter/moonshotai/kimi-k2.7-code": {
     "context_length": 262144,
     "input_price_per_1M": 0.72,
-    "output_price_per_1M": 3.5,
+    "output_price_per_1M": 3.49,
     "fc": true,
     "emb": false,
     "gen": true
@@ -3274,8 +3292,8 @@
   },
   "openrouter/openai/gpt-oss-120b": {
     "context_length": 131072,
-    "input_price_per_1M": 0.036,
-    "output_price_per_1M": 0.18,
+    "input_price_per_1M": 0.03,
+    "output_price_per_1M": 0.15,
     "fc": false,
     "emb": false,
     "gen": true
@@ -3518,7 +3536,7 @@
   "openrouter/qwen/qwen3-235b-a22b-2507": {
     "context_length": 262144,
     "input_price_per_1M": 0.09,
-    "output_price_per_1M": 0.1,
+    "output_price_per_1M": 0.55,
     "fc": false,
     "emb": false,
     "gen": true
@@ -3868,14 +3886,6 @@
     "emb": false,
     "gen": true
   },
-  "openrouter/sao10k/l3.1-70b-hanami-x1": {
-    "context_length": 16000,
-    "input_price_per_1M": 3.0,
-    "output_price_per_1M": 3.0,
-    "fc": false,
-    "emb": false,
-    "gen": true
-  },
   "openrouter/sao10k/l3.1-euryale-70b": {
     "context_length": 131072,
     "input_price_per_1M": 0.85,
@@ -4071,9 +4081,9 @@
     "gen": true
   },
   "openrouter/z-ai/glm-4.6": {
-    "context_length": 202752,
+    "context_length": 200000,
     "input_price_per_1M": 0.43,
-    "output_price_per_1M": 1.74,
+    "output_price_per_1M": 1.75,
     "fc": false,
     "emb": false,
     "gen": true
@@ -4128,8 +4138,8 @@
   },
   "openrouter/z-ai/glm-5.2": {
     "context_length": 1048576,
-    "input_price_per_1M": 0.56,
-    "output_price_per_1M": 1.76,
+    "input_price_per_1M": 0.924,
+    "output_price_per_1M": 2.904,
     "fc": true,
     "emb": false,
     "gen": true
