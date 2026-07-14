@@ -7219,6 +7219,105 @@
       }
       applyRemoteDesktop();
     }
+    // ── Docked-sidebar horizontal resize (remote desktop) ────────
+    // A 6px drag handle (#sidebar-resizer) on the docked sidebar's
+    // right edge resizes it via the --sidebar-w custom property that
+    // drives BOTH the sidebar width and #app's margin-left in
+    // remote-codex.css.  Pointer capture keeps fast drags from
+    // escaping the thin handle; ArrowLeft/ArrowRight implement the
+    // W3C window-splitter keyboard pattern; double-click resets.
+    // Inert outside the remote desktop layout (guards below) and in
+    // the VS Code extension webview (no body.remote-chat class).
+    const sidebarResizer = document.getElementById('sidebar-resizer');
+    if (document.body.classList.contains('remote-chat') && sidebarResizer) {
+      const SB_MIN = 220;
+      const SB_MAX = 600;
+      const SB_DEF = 300;
+      const SB_KEY = 'kiss-sidebar-w';
+      const setSidebarW = px => {
+        const w = Math.max(SB_MIN, Math.min(SB_MAX, Math.round(px)));
+        document.documentElement.style.setProperty('--sidebar-w', w + 'px');
+        sidebarResizer.setAttribute('aria-valuenow', String(w));
+        return w;
+      };
+      sidebarResizer.setAttribute('aria-valuemin', String(SB_MIN));
+      sidebarResizer.setAttribute('aria-valuemax', String(SB_MAX));
+      sidebarResizer.setAttribute('aria-valuenow', String(SB_DEF));
+      let sidebarW = SB_DEF;
+      let persisted = null;
+      try {
+        persisted = window.localStorage.getItem(SB_KEY);
+      } catch {
+        // localStorage unavailable — keep the default width.
+      }
+      if (persisted !== null && /^\d+$/.test(persisted)) {
+        sidebarW = setSidebarW(parseInt(persisted, 10));
+      }
+      const persistSidebarW = () => {
+        try {
+          window.localStorage.setItem(SB_KEY, String(sidebarW));
+        } catch {
+          // localStorage unavailable — width lasts this session only.
+        }
+      };
+      let sidebarResizing = false;
+      const endSidebarResize = e => {
+        if (!sidebarResizing) return;
+        sidebarResizing = false;
+        document.body.classList.remove('sidebar-resizing');
+        try {
+          if (
+            e.pointerId !== undefined &&
+            typeof sidebarResizer.releasePointerCapture === 'function'
+          ) {
+            sidebarResizer.releasePointerCapture(e.pointerId);
+          }
+        } catch {
+          // Pointer was not captured — nothing to release.
+        }
+        persistSidebarW();
+      };
+      sidebarResizer.addEventListener('pointerdown', e => {
+        if (e.button !== 0) return;
+        if (!document.body.classList.contains('remote-desktop')) return;
+        e.preventDefault();
+        sidebarResizing = true;
+        document.body.classList.add('sidebar-resizing');
+        try {
+          if (
+            e.pointerId !== undefined &&
+            typeof sidebarResizer.setPointerCapture === 'function'
+          ) {
+            sidebarResizer.setPointerCapture(e.pointerId);
+          }
+        } catch {
+          // Pointer capture unsupported — drags stay on the handle.
+        }
+      });
+      sidebarResizer.addEventListener('pointermove', e => {
+        if (!sidebarResizing) return;
+        if (!document.body.classList.contains('remote-desktop')) return;
+        sidebarW = setSidebarW(e.clientX);
+      });
+      sidebarResizer.addEventListener('pointerup', endSidebarResize);
+      sidebarResizer.addEventListener('pointercancel', endSidebarResize);
+      sidebarResizer.addEventListener('dblclick', () => {
+        if (!document.body.classList.contains('remote-desktop')) return;
+        sidebarW = setSidebarW(SB_DEF);
+        try {
+          window.localStorage.removeItem(SB_KEY);
+        } catch {
+          // localStorage unavailable — nothing persisted anyway.
+        }
+      });
+      sidebarResizer.addEventListener('keydown', e => {
+        if (!document.body.classList.contains('remote-desktop')) return;
+        if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+        e.preventDefault();
+        sidebarW = setSidebarW(sidebarW + (e.key === 'ArrowRight' ? 16 : -16));
+        persistSidebarW();
+      });
+    }
     if (frequentTasksBtn) {
       frequentTasksBtn.addEventListener('click', () => {
         if (frequentPanel && frequentPanel.classList.contains('open')) {

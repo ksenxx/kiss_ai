@@ -1,67 +1,74 @@
-# PROGRESS — Fix: short-trajectory task blocks adjacent-task side scrolling (current task)
+# PROGRESS — Horizontally resizable docked history sidebar (remote webapp)
 
 ## Task
 
-When side-scrolling (overscroll prev/next navigation) in the chat webview, a
-previous task with a very short/empty trajectory made every task beyond it
-unreachable. Reproduce with e2e tests, then fix. Dev model: `claude-fable-5`;
-independent review/debug pass: `gpt-5.6-sol`.
+The agent history panel (`#sidebar`, docked LEFT on desktop-wide ≥900px remote
+webapp windows) MUST be horizontally resizable. Reproduce the issue with
+end-to-end tests first (failing), then fix. Dev model `claude-fable-5`; review
+model `gpt-5.6-sol`.
 
-## Root cause
+## What was done
 
-`renderAdjacentTask` in `src/kiss/agents/vscode/media/main.js` latched
-`noPrevTask`/`noNextTask` whenever the `adjacent_task_events` reply had
-`events.length === 0` — even when the reply carried a REAL adjacent row
-(valid `task_id` + title) whose trajectory simply recorded no replayable
-events. The anchors (`oldestLoadedTaskId`/`newestLoadedTaskId`) never
-advanced, permanently killing overscroll past the short task. The backend
-(`_get_adjacent_task_by_chat_id` in `src/kiss/agents/sorcar/persistence.py`
-and `_get_adjacent_task` in `src/kiss/agents/vscode/server.py`) was correct:
-a genuine end-of-chat reply is `task: ''` AND `task_id: null`; a real row
-with an empty trajectory keeps its real `task_id` with `events: []`.
+1. Internet research (10/10 sources): pointer-capture drag pattern
+   (`setPointerCapture` on `pointerdown`, `touch-action: none` on the handle,
+   `pointercancel` handled like `pointerup`), the W3C ARIA Window Splitter
+   pattern (`role=separator`, `aria-orientation=vertical`,
+   `aria-valuenow/min/max`, ArrowLeft/ArrowRight keyboard resize), the
+   single-CSS-custom-property rule to keep sidebar width and content margin in
+   sync, localStorage persistence conventions, and jsdom caveats (no
+   `PointerEvent` constructor / element pointer-capture methods → tests
+   dispatch `MouseEvent`s with pointer event types and stub
+   `setPointerCapture`/`releasePointerCapture`; implementation guards with
+   `typeof` + try/catch).
 
-## Fix (media/main.js `renderAdjacentTask`)
+1. Tests FIRST — `src/kiss/agents/vscode/test/remoteSidebarResize.test.js`
+   (NEW, 11 jsdom e2e tests running real `chat.html` + `panelCopy.js` +
+   `main.js`): resizer existence + ARIA attributes; drag 300→420 sets
+   `--sidebar-w: 420px` with pointer capture/release; clamping to 220px/600px;
+   localStorage `kiss-sidebar-w` persistence on pointerup and restore on load;
+   garbage/out-of-range sanitization; ArrowLeft/ArrowRight ±16px keyboard
+   resize; dblclick reset to 300px + key removal; mobile inertness; non-remote
+   (VS Code webview) isolation; pointercancel ends the drag; `sidebar-resizing`
+   body class during drag with the dock kept open. The suite FAILED before the
+   implementation (`#sidebar-resizer handle must exist in chat.html`),
+   reproducing the issue. `src/kiss/tests/agents/vscode/test_codex_mobile_layout.py`
+   extended to 40 tests (resizer HTML/CSS/JS-wiring assertions, CONTROL_IDS,
+   `var(--sidebar-w, 300px)` in the dock block).
 
-- Latch `noPrevTask`/`noNextTask` only when `!hasTaskId && !task` (genuine
-  end-of-chat). A real row with empty events now renders a
-  `.adjacent-task-placeholder` (`<task> — (no output recorded)`) inside the
-  `.adjacent-task` container and advances the scroll anchors so chaining
-  continues past it.
-- Placeholder also covers trajectories whose only events are non-rendering
-  terminal markers (e.g. just `task_done`): after `replayEventsInto`, if the
-  container has no children the placeholder is appended.
-- Review fix (gpt-5.6-sol finding): a real row with an EMPTY title now uses
-  display label `(untitled task)` for `dataset.task` / header /
-  `applyChevronState` targeting, so `applyChevronState(…, '')` can no longer
-  fall through to ALL panels and `setTaskText('')` no longer hides the header.
-- CSS: added `.adjacent-task-placeholder` to `media/main.css`.
-- Types (review finding): `src/kiss/agents/vscode/src/types.ts` —
-  `getAdjacentTask.taskId` corrected to `string | number | null` (row ids are
-  UUID strings), `adjacent_task_events` now declares `task_id` and
-  `direction: 'prev' | 'next'`.
+1. Implementation — `media/chat.html`: `#sidebar-resizer` separator element as
+   last child of `#sidebar`. `media/remote-codex.css`: dock block now uses
+   `width: var(--sidebar-w, 300px)` and `margin-left: var(--sidebar-w, 300px)`
+   (one variable drives both, no desync); resizer hidden by default,
+   `display:block` 6px `cursor: col-resize; touch-action: none` strip in the
+   ≥900px block with hover/active/focus-visible highlight;
+   `body.remote-chat.sidebar-resizing { user-select: none; }`. `media/main.js`:
+   resizer wiring after the remote-desktop matchMedia block, guarded by
+   `remote-chat` + `remote-desktop` classes — clamp 220–600px, pointer-capture
+   drag, localStorage persist/restore (`/^\d+$/` validated), ArrowLeft/Right
+   ±16px, dblclick reset. `package.json`: test registered in the chain.
 
-## Tests
+1. Review — `gpt-5.6-sol` independent pass over the full diff: guard ordering,
+   IIFE scope, box-sizing, closeSidebar(force) compatibility, ARIA correctness,
+   eslint/stylelint clean. No missed wirings or bugs found.
 
-- `src/kiss/agents/vscode/test/adjacentTaskScroll.test.js` (jsdom e2e on real
-  chat.html + main.js): 6 new tests — short-trajectory prev/next don't latch
-  and chain past (verified to FAIL pre-fix via `git stash`), genuine
-  end-of-chat still latches, `taskDeleted` removes the placeholder container,
-  empty-title row still chains with `(untitled task)` label, terminal-only
-  trajectory renders placeholder + chains.
-- `src/kiss/tests/agents/vscode/test_replay_event_coalescing.py`: new backend
-  contract test `test_adjacent_task_with_empty_trajectory_keeps_task_id`
-  (real row + empty trajectory ⇒ real `task_id`, `events: []`, NOT the
-  end-of-chat shape) and strengthened the end-of-chat shape assertion.
-- Verified: all 12 adjacentTaskScroll tests pass; full vscode JS suite (122
-  files, 8 parallel batches) passes (`installFailureNoCompleteNotification`
-  hangs identically on unmodified main repo — pre-existing, unrelated);
-  `npm run compile`/`typecheck`/`lint:ts`/`lint:css` clean;
-  related pytest files pass; `uv run check --full` passes.
+1. Verification — 11/11 resize tests green; 10/10 remoteDesktopSidebar dock
+   tests green (no regression); 40/40 pytest layout tests green; npm lint
+   green; `uv run check --full` green. Full JS chain (~100 test files) run to
+   completion: every executed test file reported `0 failed`; one PRE-EXISTING
+   environment hang was found in `installFailureNoCompleteNotification.test.js`
+   (its sandbox empties `PATH`, `xcode-select -p` then fails and the compiled
+   installer polls up to 10 minutes for git) — verified it hangs identically on
+   a clean tree with the feature stashed, so it is unrelated to this change;
+   the remaining chain segments after it (including the two remote sidebar
+   suites) were run separately and exited 0. Live validation: real
+   `RemoteAccessServer` over HTTPS in a desktop-width Chromium window —
+   docked sidebar with the resizer present, and the served page/main.js/CSS
+   verified end-to-end to carry the resizer element, wiring, and
+   `var(--sidebar-w)` rules.
 
-Both the VS Code webview and the remote web app share `media/main.js` /
-`chat.html` (served by `web_server.py`), so one frontend fix covers both.
+______________________________________________________________________
 
-# PROGRESS — Local tree-sitter `code_graph` tool — Sessions 1–4
+# PROGRESS — Local tree-sitter `code_graph` tool — Sessions 1–4 (current task)
 
 ## Task
 
