@@ -49,6 +49,59 @@ _REPO_SCOPED_GIT_ENV = (
 )
 
 
+def _ensure_task_metadata(
+    message: str,
+    user_prompt: str | None,
+    task_result: str | None,
+) -> str:
+    """Ensure the CURRENT task prompt/result are the message's suffix.
+
+    Appends canonical ``User prompt:`` / ``Result:`` blocks carrying
+    the current values to *message* unless the message ALREADY ends
+    with those exact canonical blocks (the framework auto-commit path
+    appends the same blocks, so a branch-HEAD message it produced must
+    not be double-stamped).
+
+    Dedup is by exact current-value suffix — NEVER by heading
+    substring: a hand-written commit body that merely mentions
+    ``Result:``, a stale block from a previous task, or a prompt whose
+    own text contains ``Result:`` must not suppress stamping the
+    current values (gpt-5.6-sol review findings).  When the message
+    ends with only the current result block, the missing prompt block
+    is inserted before it to preserve canonical prompt-then-result
+    order.
+
+    Args:
+        message: The base commit message (subject + optional body).
+        user_prompt: The current task's prompt, or ``None``/empty.
+        task_result: The current task's result summary, or
+            ``None``/empty.
+
+    Returns:
+        The commit message ending with the canonical metadata blocks
+        for every non-empty current value.
+    """
+    msg = message.rstrip()
+    prompt = user_prompt.strip() if user_prompt else ""
+    result = task_result.strip() if task_result else ""
+    prompt_block = f"\n\nUser prompt:\n{prompt}" if prompt else ""
+    result_block = f"\n\nResult:\n{result}" if result else ""
+    if prompt and result:
+        if msg.endswith(prompt_block + result_block):
+            return msg
+        if msg.endswith(prompt_block):
+            return msg + result_block
+        if msg.endswith(result_block):
+            base = msg[: -len(result_block)].rstrip()
+            return base + prompt_block + result_block
+        return msg + prompt_block + result_block
+    if prompt:
+        return msg if msg.endswith(prompt_block) else msg + prompt_block
+    if result:
+        return msg if msg.endswith(result_block) else msg + result_block
+    return msg
+
+
 def repo_lock(repo: Path) -> threading.RLock:
     """Return a per-repo re-entrant lock for multi-step git operations.
 
@@ -613,7 +666,12 @@ class GitWorktreeOps:
         return result.returncode == 0
 
     @staticmethod
-    def _merge_commit_message(repo: Path, branch: str) -> str:
+    def _merge_commit_message(
+        repo: Path,
+        branch: str,
+        user_prompt: str | None = None,
+        task_result: str | None = None,
+    ) -> str:
         """Return the commit message to use for a squash-merge commit.
 
         When the agent has made at least one commit on *branch* (the
@@ -629,10 +687,31 @@ class GitWorktreeOps:
         error).  Never returns an empty string, because ``git commit``
         rejects empty messages.
 
+        When *user_prompt* / *task_result* are provided, they are
+        appended to the message under ``User prompt:`` / ``Result:``
+        headings — UNLESS the message already ends with those exact
+        canonical blocks carrying the CURRENT values (see
+        :func:`_ensure_task_metadata`).  This guarantees the final
+        commit on the user's original branch always records the task
+        description and its outcome even when the branch HEAD commit
+        was hand-written by the agent itself (production incident:
+        commit ``dd563a7c`` — the agent committed its own work with
+        its own message, the post-task auto-commit was a no-op, and
+        the squash-merge reused that message verbatim, losing both
+        blocks).  Dedup is by exact current-value suffix so the
+        framework auto-commit path (which already appends both
+        blocks) is never double-stamped, while incidental heading
+        text or stale blocks from a previous task can never suppress
+        the current values.
+
         Args:
             repo: Git repo root path (the working directory that will
                 run ``git log``).
             branch: The worktree branch whose HEAD message to read.
+            user_prompt: The user's task prompt to append, or ``None``
+                when unavailable.
+            task_result: The task's result summary to append, or
+                ``None`` when unavailable.
 
         Returns:
             A non-empty commit message string.
@@ -646,11 +725,16 @@ class GitWorktreeOps:
         result = _git("log", "-1", "--format=%B", branch, "--", cwd=repo)
         msg = result.stdout.rstrip()
         if result.returncode != 0 or not msg:
-            return f"kiss: merged from {branch}"
-        return msg
+            msg = f"kiss: merged from {branch}"
+        return _ensure_task_metadata(msg, user_prompt, task_result)
 
     @staticmethod
-    def _commit_staged_merge(repo: Path, branch: str) -> MergeResult:
+    def _commit_staged_merge(
+        repo: Path,
+        branch: str,
+        user_prompt: str | None = None,
+        task_result: str | None = None,
+    ) -> MergeResult:
         """Commit the staged result of a squash merge, if any.
 
         Shared tail of :meth:`squash_merge_branch` and
@@ -663,13 +747,20 @@ class GitWorktreeOps:
         Args:
             repo: Git repo root path.
             branch: The worktree branch the changes came from.
+            user_prompt: The user's task prompt, appended to the merge
+                commit message when not already present (see
+                :meth:`_merge_commit_message`), or ``None``.
+            task_result: The task's result summary, appended likewise,
+                or ``None``.
 
         Returns:
             :attr:`MergeResult.SUCCESS` or :attr:`MergeResult.MERGE_FAILED`.
         """
         diff = _git("diff", "--cached", "--quiet", cwd=repo)
         if diff.returncode != 0:
-            msg = GitWorktreeOps._merge_commit_message(repo, branch)
+            msg = GitWorktreeOps._merge_commit_message(
+                repo, branch, user_prompt=user_prompt, task_result=task_result,
+            )
             commit_result = _git("commit", "-m", msg, cwd=repo)
             if commit_result.returncode != 0:
                 logger.warning(
@@ -681,18 +772,29 @@ class GitWorktreeOps:
         return MergeResult.SUCCESS
 
     @staticmethod
-    def squash_merge_branch(repo: Path, branch: str) -> MergeResult:
+    def squash_merge_branch(
+        repo: Path,
+        branch: str,
+        user_prompt: str | None = None,
+        task_result: str | None = None,
+    ) -> MergeResult:
         """Squash-merge a branch and commit the result.
 
         Uses ``git merge --squash`` to apply all changes from *branch*,
         then commits the staged result using the HEAD commit message
-        of *branch* (see :meth:`_merge_commit_message`).
+        of *branch* (see :meth:`_merge_commit_message`) with the task
+        prompt and result appended when provided and not already
+        present in that message.
 
         On conflict, resets to a clean state with ``git reset --hard``.
 
         Args:
             repo: Git repo root path.
             branch: Branch to squash-merge.
+            user_prompt: The user's task prompt for the merge commit
+                message, or ``None``.
+            task_result: The task's result summary for the merge
+                commit message, or ``None``.
 
         Returns:
             :attr:`MergeResult.SUCCESS` or :attr:`MergeResult.CONFLICT`.
@@ -705,7 +807,9 @@ class GitWorktreeOps:
             )
             _git("reset", "--hard", "HEAD", cwd=repo)
             return MergeResult.CONFLICT
-        return GitWorktreeOps._commit_staged_merge(repo, branch)
+        return GitWorktreeOps._commit_staged_merge(
+            repo, branch, user_prompt=user_prompt, task_result=task_result,
+        )
 
     @staticmethod
     def _diff_name_only(repo: Path, *flags: str) -> list[str]:
@@ -1146,6 +1250,8 @@ class GitWorktreeOps:
         repo: Path,
         branch: str,
         baseline: str,
+        user_prompt: str | None = None,
+        task_result: str | None = None,
     ) -> MergeResult:
         """Squash-merge only the agent's changes (after baseline) into HEAD.
 
@@ -1195,6 +1301,11 @@ class GitWorktreeOps:
             repo: Git repo root path.
             branch: The worktree branch to merge from.
             baseline: SHA of the baseline commit to diff against.
+            user_prompt: The user's task prompt for the merge commit
+                message (see :meth:`_merge_commit_message`), or
+                ``None``.
+            task_result: The task's result summary for the merge
+                commit message, or ``None``.
 
         Returns:
             :attr:`MergeResult.SUCCESS` or :attr:`MergeResult.CONFLICT`.
@@ -1234,7 +1345,9 @@ class GitWorktreeOps:
             _git("cherry-pick", "--abort", cwd=repo)
             return MergeResult.CONFLICT
 
-        return GitWorktreeOps._commit_staged_merge(repo, branch)
+        return GitWorktreeOps._commit_staged_merge(
+            repo, branch, user_prompt=user_prompt, task_result=task_result,
+        )
 
     @staticmethod
     def cleanup_partial(repo: Path, branch: str, wt_dir: Path) -> None:
