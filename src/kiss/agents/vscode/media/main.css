@@ -1920,6 +1920,40 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
   text-overflow: ellipsis;
 }
 
+/* Tiny icon-only copy buttons that sit right after the chat id and
+   the task id on the ids row.  Clicking one copies just that raw id
+   to the clipboard (see makeIdCopyButton in main.js).  Rendered as
+   inline-flex so the 10px clipboard icon lines up with the small
+   ids text; ``vertical-align: middle`` keeps it from pushing the
+   row's line-height around. */
+.ids-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+  border: none;
+  background: none;
+  cursor: pointer;
+  padding: 0 2px;
+  margin: 0 0 0 3px;
+  border-radius: 3px;
+  line-height: 1;
+  color: #000;
+  opacity: 0.45;
+  transition: opacity 0.15s, background 0.15s, color 0.15s;
+}
+
+.ids-copy-btn svg {
+  width: 10px;
+  height: 10px;
+}
+
+.ids-copy-btn:hover {
+  opacity: 0.9;
+  background: color-mix(in srgb, #000 10%, transparent);
+}
+
+.ids-copy-btn.copied { opacity: 0.9; color: #006400; }
+
 @keyframes sidebar-running-pulse {
   0%, 100% { opacity: 1; box-shadow: 0 0 0 1px rgb(0 0 0 / 15%); }
   50% { opacity: 0.4; box-shadow: 0 0 6px 2px rgb(46 125 50 / 50%); }

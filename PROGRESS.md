@@ -1,91 +1,88 @@
-# PROGRESS — Uniform chat-panel font size in the remote web app
+# PROGRESS — Run all tests in parallel, diagnose failures, classify and fix
 
 ## Task
 
-In the remote web app (RemoteAccessServer page sharing chat.html /
-main.css / main.js with the VS Code webview, restyled by
-remote-codex.css), make the body-text font size in every chat panel
-uniform. Reproduce with real e2e tests first, then fix. Dev with
-claude-fable-5; independent review with gpt-5.6-sol.
+Run the full test suite split into (cores − 2 = 8) parallel workers via
+`run_parallel`, report the cause of every failing test, classify each
+failure as a project bug vs a test bug, and fix accordingly.
 
-## Root cause
+## Session 1 — full parallel run
 
-Remote page 1rem=16px. Chat-panel body text split across four sizes:
+1. Read `SORCAR.md`. Machine has 10 cores → 8 splits.
+1. Collected 6320 tests (`uv run pytest --collect-only -q -m 'not slow' --no-cov`), split round-robin into 8 files of 790 tests each.
+1. Ran all 8 splits concurrently via `run_parallel`
+   (`uv run pytest --no-cov -q -p no:randomly @tmp/split_N.txt`).
+1. Results: splits 0, 4, 5, 6, 7 fully passed. 4 unique failures:
+   - `test_install_script_tee_subshell_signal.py::test_install_sh_outer_trap_survives_sigint`
+     — log empty although rc==0 and post-signal marker existed.
+   - same file `::test_install_sh_outer_trap_survives_sighup` — same
+     symptom.
+   - `test_bughunt4_interrupt_lock.py::test_ctrl_c_during_lock_wait_still_stops_the_worker`
+     — `WORKER[...]` abort marker never appeared in PTY output.
+   - `test_bughunt_cli.py::test_ctrl_c_abort_actually_stops_the_running_agent`
+     — Ctrl+C byte sent but interruption never observed.
+1. All 4 pass serially in the foreground → environment-sensitive, not
+   deterministic code failures.
 
-- 16px (`--fs-base`): `.txt`, `.sys`, `.rs b`, `.merge-info-hdr`,
-  `.wt-result-*`, `#task-panel`.
-- 14.5px (`--fs-md`): `.think .cnt`, `.tc-b`/`.tc-arg`/`.tp`, `.tr`,
-  `.bash-panel-content`, `.rc-body`, `.rs`, `.system-prompt-body`,
-  `.prompt-body`, `.llm-panel .txt` (nested text shrinks!),
-  `.merge-info-body`, all code (`.txt code`, `.md-body code`,
-  `.md-body pre code`, `.md-body th/td`).
-- Hard-coded 12px: `.merge-ctx`/`.merge-hunk` (main.css).
-- Hard-coded 15px: `body.remote-chat .rc-h h3` (remote-codex.css).
-- Inline `font-size:var(--fs-xl)` status line emitted by
-  `createResultPanel` in main.js AND `streamResultEvent` in demo.js
-  (inline styles beat any stylesheet override).
+## Session 2 — root-cause analysis
 
-## Fix (remote page only; VS Code webview pixel-identical)
+1. Ruled out subprocess-coverage theory (`.coveragerc.subprocess` does
+   not exist, so `COVERAGE_PROCESS_START` is never set).
+1. Standalone concurrency repro (30 simultaneous foreground harness
+   runs): 30/30 pass → concurrency itself is NOT causal.
+1. Key discovery: any repro launched via `nohup cmd … &` from a
+   non-interactive shell fails even alone with zero load; the same repro
+   via `setsid` or in the foreground passes.
+   `nohup python3 -c "print(signal.getsignal(SIGINT))" &` prints
+   `1` (SIG_IGN).
+1. ROOT CAUSE: POSIX requires non-interactive shells to start
+   background (`&`) children with SIGINT/SIGQUIT set to `SIG_IGN`, and
+   ignored dispositions survive fork+exec. The `run_parallel` workers
+   launch pytest as background jobs, so the whole pytest process tree
+   has SIGINT ignored. Consequences:
+   - install-script tests: bash cannot trap a signal ignored on entry
+     to the shell → the harness `trap handle_interrupt INT` never
+     installs → `os.killpg(..., SIGINT)` is a no-op → script completes
+     (rc 0, marker written) but the trap diagnostic is never logged →
+     log assertion fails.
+   - sorcar PTY tests: the PTY child python inherits SIGINT=SIG_IGN;
+     CPython installs its KeyboardInterrupt handler only when SIGINT is
+     not ignored at startup → `\x03` on the PTY does nothing → steering
+     never aborts → `WORKER[...]` marker never printed.
+1. Proof: each failing test run standalone via `nohup … &` with no
+   other load fails deterministically; with `signal.signal(SIGINT, SIG_DFL)` reset first, 50/50 concurrent runs pass.
+1. CLASSIFICATION: all 4 failures are TEST BUGS (harnesses assume the
+   default SIGINT disposition in the pytest process). `install.sh`'s
+   trap logic and `cli_steering`'s abort logic are correct — no project
+   bug; no project code changed.
 
-1. `media/main.js` `createResultPanel`: status divs now use
-   `class="rc-status"` / `class="rc-status rc-status-fail"` instead of
-   inline styles.
-1. `media/demo.js` `streamResultEvent`: same class-based status divs
-   (was `style.cssText` with inline `--fs-xl`); found by the
-   gpt-5.6-sol review — demo.js is loaded by the remote page via
-   `{{DEMO_SRC}}`.
-1. `media/main.css`: added `.rc-status { color: var(--yellow);
-   font-weight: 700; font-size: var(--fs-xl); margin-bottom: 10px; }`
-   and `.rc-status.rc-status-fail { color: var(--red); }` replicating
-   the old inline look for the VS Code webview.
-1. `media/remote-codex.css`: "Uniform panel typography" section — all
-   `body.remote-chat`-scoped rules pinning `font-size: var(--fs-base)`
-   on every panel body-text selector (`.txt`, `.llm-panel .txt`,
-   `.think .cnt`, `.llm-panel .think .cnt`, `.tc-b`, `.tp`, `.tr`,
-   `.bash-panel-content`, `.rs`, `.rs b`, `.rc-body`, `.rc-status`,
-   `.system-prompt-body`, `.prompt-body`, `.sys`, `.merge-info-hdr`,
-   `.merge-info-body`, `.merge-ctx`, `.merge-hunk`, `.txt code`,
-   `.md-body code`, `.md-body pre code`, `.md-body th/td`) and the
-   `.rc-h h3` 15px outlier changed to `var(--fs-base)`. Duplicate
-   selectors merged into existing rules to satisfy stylelint
-   no-duplicate-selectors. Headers/labels stay `--fs-sm` (uniform
-   among themselves); md headings keep their heading scale.
+## Session 3 — fixes and verification
 
-## Tests (src/kiss/tests/agents/vscode/test_codex_uniform_font_size.py)
-
-- 26 static regex tests: every panel body selector pinned to
-  `var(--fs-base)` in remote-codex.css; no 15px `.rc-h h3`; main.js
-  AND demo.js emit class-based status (no inline font-size); main.css
-  `.rc-status` replicates the old inline declarations.
-- 1 live e2e: boots the production RemoteAccessServer (TLS, ephemeral
-  port) + headless Chromium (Playwright); injects a transcript
-  covering 28 probes; renders the result card through the PRODUCTION
-  renderer (`window._demoApi.processEvent({type:'result',...})` →
-  `createResultPanel`); asserts every computed font-size == 16px.
-  Confirmed RED pre-fix (16px / 14.545px / 12px / 15px split) and
-  GREEN post-fix; re-verified RED via `git stash` after the fix.
-
-## Verification
-
-- `uv run pytest test_codex_uniform_font_size.py` → 30 passed.
-- `test_codex_mobile_layout.py` + `test_codex_flat_thread_live.py` →
-  62 passed (fixed one scoping-guard failure by replacing
-  `.md-body :is(th, td)` with `th`/`td` split selectors).
-- JS: remoteDesktopWidths, remoteSidebarResize, buttonSizeAndBlur,
-  remoteDesktopSidebar, bughunt2_demo_continue, demoExtensionReplay,
-  demoSecondReplayCleanState — all pass.
-- eslint (main.js, demo.js) + stylelint (main.css, remote-codex.css)
-  clean; `uv run check --full` → all checks passed.
-
-## Review (gpt-5.6-sol)
-
-Findings fixed: (1) demo.js inline status style missed (production
-wiring via chat.html {{DEMO_SRC}}); (2) live test originally injected
-hand-written `.rc-status` markup — now exercises the real
-createResultPanel path; (3) added `.merge-file-name`/`.wt-result-ok`
-probes. Confirmed: specificity sufficient without !important, VS Code
-webview isolation intact (scoping-guard test), header/heading scales
-intentionally preserved.
+1. Fixed `src/kiss/tests/agents/sorcar/_pty_helper.py`: `_acquire_ctty`
+   (the `preexec_fn` used by `pty_spawn`, running post-fork/pre-exec)
+   now resets SIGINT/SIGQUIT/SIGTERM/SIGHUP to `SIG_DFL` before exec,
+   with a docstring explaining the POSIX background-job rule. Fixes
+   both sorcar PTY failures and hardens every pty_spawn-based test.
+   ```python
+   for sig in (signal.SIGINT, signal.SIGQUIT, signal.SIGTERM, signal.SIGHUP):
+       signal.signal(sig, signal.SIG_DFL)
+   ```
+1. Fixed `src/kiss/tests/agents/vscode/test_install_script_tee_subshell_signal.py`:
+   added module-level `_reset_signals()` helper (same reset, fully
+   documented) and passed `preexec_fn=_reset_signals` to both harness
+   `subprocess.Popen` calls (SIGINT and SIGHUP tests).
+1. Verified all 4 previously failing tests pass BOTH in the foreground
+   (7 passed in 13.15s, including the other tests in those files) AND
+   under the reproducing condition
+   (`nohup uv run pytest … & disown`: 7 passed in 13.33s).
+1. Regression check: all 8 other pty_spawn-using test files
+   (test_bughunt4_sigcont, test_bughunt8_ui_backslash_parity,
+   test_bughunt4_prompt_markers, test_pty_helper,
+   test_cli_steering_bare_cr_multiline, test_bughunt6_stderr_proxy,
+   test_cli_repl, test_cli_multiline_input_pty) — 31 passed in 49s.
+1. `uv run check --full` — all checks pass (ruff, mypy, pyright,
+   compileall, mdformat).
+1. Committed the two test-file fixes to git; cleaned `tmp/`.
 
 ______________________________________________________________________
 
@@ -1783,3 +1780,71 @@ Post-review verification: JS suite now 9/9 (RED/GREEN re-proof of the
 daemonStatus block retained); TestHandleReadyRestoredTabs 4/4 including
 the new targeting test; impacted JS suites re-run green; npm run lint;
 `uv run check --full` — all passed.
+
+______________________________________________________________________
+
+# PROGRESS — History-panel copy buttons for chat id / task id
+
+## Task
+
+Add copy buttons next to the chat id and task id in the History
+sidebar's task rows (`.running-item-ids` line rendered by
+`renderHistory` in `src/kiss/agents/vscode/media/main.js`). Clicking a
+button must copy the raw id to the clipboard. Reproduce with e2e tests
+first, then fix. Development with claude-fable-5; review/debug pass
+with gpt-5.6-sol.
+
+## Sessions 1–2 — reproduce + implement
+
+1. Located the feature: `renderHistory` ids-row builder (~line 8385)
+   built a plain text span `chat <id> • task <id> • parent <id>`;
+   existing copy pattern `makeSidebarCopyButton` + `panelCopy.js`
+   (`PANEL_COPY_SVG`, `PANEL_CHECK_SVG`, `fallbackCopyText`).
+1. Wrote e2e test `test/historyIdsCopyButtons.test.js` (jsdom, drives
+   real `chat.html` + `panelCopy.js` + `main.js`): buttons render
+   exactly for ids that exist; icon-only (ids-line text unchanged);
+   clicking copies exactly the raw id via `navigator.clipboard`, does
+   not bubble into the row (no new tab / `resumeSession`); numeric
+   `task_id` copied as string; `execCommand('copy')` fallback; CSS
+   rule assertions. Test FAILED before the fix (issue reproduced).
+1. Fix in `media/main.js`: new `makeIdCopyButton(idText, kind)`
+   (button `.ids-copy-btn.ids-copy-{chat|task}`, copy SVG,
+   `stopPropagation`+`preventDefault`, clipboard write with fallback,
+   1.5 s green-check "copied" flash); rewrote the ids-row builder
+   with an `idSegments` array appending buttons after the chat and
+   task segments (parent id gets no button); `title` preserved.
+1. `media/main.css`: `.ids-copy-btn` rules (inline icon button,
+   `background:none`, `cursor:pointer`, hover/copied states) matching
+   sibling sidebar styling (#000 color-mix, #006400 copied).
+1. Added pytest wrapper
+   `src/kiss/tests/agents/vscode/test_history_ids_copy_buttons.py`.
+
+## Session 3 — gpt-5.6-sol review pass 1 + verification
+
+1. Review pass 1 (gpt-5.6-sol via run_parallel) flagged 4 items:
+   (a) rejected `clipboard.writeText` never fell back to
+   `execCommand` — REAL BUG; (b) numeric chat id dropped by
+   `typeof s.id === 'string'` — investigated, NOT a bug (line is
+   pre-existing at HEAD; backend `server.py` always sends `id` as a
+   string, DB column CHAR(32); `types.ts` `id:number` is stale);
+   (c) hardcoded colors / ellipsis clipping — consistent with
+   sibling rules, keep; (d) repeated clicks didn't clear the prior
+   flash timer — REAL robustness issue.
+
+## Session 4 — fixes + review pass 2 + final checks
+
+1. Fixed (a): rejection handler now
+   `.then(flash, () => { if (fallbackCopyText(payload)) flash(); })`.
+1. Fixed (d): per-button `flashTimer` with `clearTimeout` before
+   rescheduling.
+1. Extended the e2e test with `testRejectedClipboardFallsBackToExecCommand`
+   and `testRepeatedClicksRestartFlashTimer` — 8 tests, all pass.
+1. gpt-5.6-sol review pass 2 (run_parallel): traced all surfaces
+   (`SorcarTab.ts:408`, `web_server.py:2793` both load `panelCopy.js`
+   before `main.js`; `renderHistory` is the sole `.running-item-ids`
+   renderer; no `chat.html` change needed; no XSS — ids inserted as
+   text nodes, `innerHTML` only trusted static SVGs). VERDICT: PASS.
+1. Final: `node test/historyIdsCopyButtons.test.js`,
+   `historyTaskIds.test.js`, `panelCopy.test.js`, related history
+   tests, pytest wrappers — all pass; eslint clean on modified
+   `media/main.js`; `uv run check --full` — all checks passed.
