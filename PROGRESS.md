@@ -1214,3 +1214,67 @@ model `gpt-5.6-sol`.
 1. Verification — 9/9 new widths tests, 11/11 resize tests, 10/10 dock tests,
    adjacentTaskScroll, `npm run lint` exit 0, 43/43 pytest layout tests,
    `uv run check --full` ✅ (twice, incl. after review fixes).
+
+______________________________________________________________________
+
+# PROGRESS — Squash-merge commit message must carry task prompt + result
+
+## Task
+
+The last commit (dd563a7c) on main lost the "User prompt:" and "Result:"
+blocks even after the previous auto-commit fix. Reproduce with e2e tests,
+then fix. Dev model `claude-fable-5`; review model `gpt-5.6-sol`.
+
+## Root cause (proven from ~/.kiss/kiss-web-stderr.log + events DB)
+
+The agent COMMITTED ITS OWN WORK manually inside its worktree (`git commit -m "feat(remote webapp): ..."`, unreachable object 6388d17c) before calling
+finish(). The post-task framework auto-commit was therefore a NO-OP
+(`auto_commit_changes` short-circuits on an empty staged diff), and the
+squash-merge (`GitWorktreeOps._merge_commit_message`) reused the branch
+HEAD message VERBATIM — so the prompt/result blocks (which only the
+auto-commit path appends) never reached the final commit on main.
+
+## Fix
+
+1. Tests FIRST — new `src/kiss/tests/agents/sorcar/`
+   `test_merge_message_task_and_result.py` (14 e2e tests on real git
+   repos/worktrees): production repro (manual agent commit → auto-commit
+   no-op asserted → merge → main HEAD message must end with the canonical
+   blocks), baseline + legacy (no-baseline) squash paths, agent-level
+   `WorktreeSorcarAgent.merge()` wiring for both routes, exact-suffix
+   dedup (framework auto-commit HEAD not double-stamped), per-block dedup,
+   result-only suffix reordering, stale-block/incidental-heading
+   non-suppression, prompt containing "Result:", fallback message, and
+   backward compatibility. Verified FAILING pre-fix (agent-level test
+   fails exactly like production: no blocks in the merged message).
+1. `git_worktree.py`: new module-level `_ensure_task_metadata(message, user_prompt, task_result)` — appends canonical `\n\nUser prompt:\n…`
+   and `\n\nResult:\n…` blocks unless the message already ENDS with the
+   exact current-value blocks (suffix match, never heading-substring;
+   result-only suffix gets the prompt inserted before it).
+   `_merge_commit_message`, `_commit_staged_merge`, `squash_merge_branch`,
+   `squash_merge_from_baseline` take optional `user_prompt`/`task_result`
+   (trailing kwargs, default None → fully backward compatible).
+1. `worktree_sorcar_agent.py` `_do_merge()`: passes
+   `self._last_user_prompt` / `self._last_result_summary` into both squash
+   routes.
+
+## gpt-5.6-sol independent review (4 parallel read-only agents)
+
+- Confirmed root cause forensically (6388d17c and dd563a7c share tree
+  8ae8b48f and parent 7ba9bda2; result persisted at 20:35:33, merge at
+  20:35:37 — state existed, merge path ignored it).
+- HIGH finding FIXED: initial heading-substring dedup ("Result:" in msg)
+  could suppress the current blocks (stale blocks, prose mentioning the
+  heading, prompt containing "Result:"). Replaced with exact
+  current-value suffix dedup (`_ensure_task_metadata`) + 4 new tests.
+- Noted (documented, unchanged): failure-path summary divergence
+  (agent's "Task failed" vs task-runner's richer text) matches existing
+  `last_user_prompt` semantics; no durable branch→task binding across
+  server restarts (worktrees are deliberately not restored cross-process);
+  `_append_*` helpers living in vscode.helpers is pre-existing layering.
+
+## Verification
+
+14/14 new tests; 124 tests green across all merge-message, baseline,
+audit, dirty-merge, conflict, lockdown, path-remap, and autocommit suites;
+`uv run check --full` all green.
