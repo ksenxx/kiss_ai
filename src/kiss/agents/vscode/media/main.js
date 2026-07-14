@@ -2185,27 +2185,53 @@
     removeAdjacentLoader();
     adjacentLoading = false;
 
-    if (!task || !events || events.length === 0) {
+    // Only latch "no more tasks" when the backend genuinely found no
+    // adjacent row: it then replies with task:'' AND task_id:null.  A
+    // task that EXISTS (valid task_id) but has an empty/very-short
+    // trajectory (events:[]) must NOT block navigation past it —
+    // otherwise a single short task makes every task beyond it
+    // unreachable via overscroll.
+    const hasTaskId = taskId !== undefined && taskId !== null && taskId !== '';
+    if (!hasTaskId && !task) {
       if (direction === 'prev') noPrevTask = true;
       else noNextTask = true;
       return;
     }
 
+    // A persisted row may carry an empty title ('' is NOT NULL-safe in
+    // the schema).  Use a non-empty display label everywhere (dataset,
+    // header via updateVisibleTask, placeholder, chevron targeting) so
+    // an empty title neither hides the task header nor makes
+    // applyChevronState(…, '') fall through to ALL panels.
+    const taskLabel = task || '(untitled task)';
+
     // Create a container for the adjacent task
     const container = mkEl('div', 'adjacent-task');
-    container.dataset.task = task;
+    container.dataset.task = taskLabel;
     // Stamp the row id so a 'taskDeleted' broadcast from the backend
     // can locate and remove this exact block via
     //   .adjacent-task[data-task-id="<id>"]
-    if (taskId !== undefined && taskId !== null && taskId !== '')
-      container.dataset.taskId = String(taskId);
+    if (hasTaskId) container.dataset.taskId = String(taskId);
 
     // Replay events into the container (save/restore header metrics so
     // adjacent-task replay doesn't overwrite the current task's values)
     const savedTokens = statusTokens ? statusTokens.textContent : '';
     const savedBudget = statusBudget ? statusBudget.textContent : '';
     const savedSteps = statusSteps ? statusSteps.textContent : '';
-    replayEventsInto(container, events);
+    if (events && events.length > 0) {
+      replayEventsInto(container, events);
+    }
+    if (!container.firstChild) {
+      // The adjacent task exists but produced no visible output: either
+      // its trajectory is empty (events:[]) or every event was a
+      // non-rendering terminal marker (e.g. only task_done).  Render a
+      // visible placeholder so the user sees the task while scrolling
+      // past it, and so the container has nonzero height for the
+      // scroll-anchor math.
+      const ph = mkEl('div', 'adjacent-task-placeholder');
+      ph.textContent = taskLabel + ' — (no output recorded)';
+      container.appendChild(ph);
+    }
     // Capture the adjacent task's metrics before restoring the current ones
     container.dataset.metricTokens = statusTokens
       ? statusTokens.textContent
@@ -2224,15 +2250,13 @@
       O.insertBefore(container, O.firstChild);
       const newScrollHeight = O.scrollHeight;
       O.scrollTop += newScrollHeight - prevScrollHeight;
-      if (taskId !== undefined && taskId !== null && taskId !== '')
-        oldestLoadedTaskId = taskId;
+      if (hasTaskId) oldestLoadedTaskId = taskId;
     } else {
       O.appendChild(container);
-      if (taskId !== undefined && taskId !== null && taskId !== '')
-        newestLoadedTaskId = taskId;
+      if (hasTaskId) newestLoadedTaskId = taskId;
     }
     const tab = getTab(activeTabId);
-    if (tab) applyChevronState(!!tab.panelsExpandedMap[task], task);
+    if (tab) applyChevronState(!!tab.panelsExpandedMap[taskLabel], taskLabel);
   }
 
   function clearOutput() {

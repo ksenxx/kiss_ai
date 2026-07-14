@@ -174,6 +174,33 @@ class TestReplayCoalescing:
         adj = [e for e in events if e.get("type") == "adjacent_task_events"]
         assert len(adj) == 1
         assert adj[0]["events"] == []
+        # Genuine "no adjacent row" contract: the frontend distinguishes
+        # end-of-chat (task '' AND task_id None) from a real row with an
+        # empty trajectory (real task_id, events []).
+        assert adj[0]["task"] == ""
+        assert adj[0]["task_id"] is None
+
+    def test_adjacent_task_with_empty_trajectory_keeps_task_id(self) -> None:
+        """A real adjacent row whose trajectory recorded NO events must
+        reply with its real ``task_id``/title and ``events: []`` — NOT
+        the end-of-chat shape (task '', task_id None).  The frontend
+        relies on this to scroll PAST short/empty tasks instead of
+        latching noPrevTask/noNextTask on them."""
+        chat_id = "chat-empty-traj"
+        first_id, _ = th._add_task("short empty task", chat_id=chat_id)
+        # No events persisted for first_id — empty trajectory.
+        time.sleep(0.01)
+        second_id, _ = th._add_task("current task", chat_id=chat_id)
+        _persist_stream(second_id, _RAW_STREAM)
+
+        server, events = _make_server()
+        server._get_adjacent_task(chat_id, second_id, "prev", tab_id="t2")
+
+        adj = [e for e in events if e.get("type") == "adjacent_task_events"]
+        assert len(adj) == 1
+        assert adj[0]["task_id"] == first_id
+        assert adj[0]["task"] == "short empty task"
+        assert adj[0]["events"] == []
 
     def test_persisted_subagent_task_events_coalesced(self) -> None:
         chat_id = "chat-coalesce-3"

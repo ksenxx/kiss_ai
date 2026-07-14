@@ -75,7 +75,9 @@ export type FromWebviewMessage =
   | {
       type: 'getAdjacentTask';
       tabId?: string;
-      taskId: number | null;
+      // DB row id of the reference task (UUID string; legacy rows may
+      // carry ints), or null when the tab has no known task row yet.
+      taskId: string | number | null;
       direction: 'prev' | 'next';
     }
   | {type: 'getConfig'}
@@ -249,8 +251,11 @@ type ToWebviewMessageBody =
   | {type: 'droppedPaths'; paths: string[]}
   | {
       type: 'adjacent_task_events';
-      direction: string;
+      direction: 'prev' | 'next';
       task: string;
+      // DB row id (UUID string; legacy rows may carry ints) of the
+      // adjacent task, or null when no adjacent row exists.
+      task_id: string | number | null;
       events: unknown[];
     }
   | {type: 'triggerStop'}
