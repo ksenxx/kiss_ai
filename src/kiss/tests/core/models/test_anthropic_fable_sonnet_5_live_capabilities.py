@@ -17,7 +17,11 @@ was wrong on two counts:
    ``GET https://api.anthropic.com/v1/models``.
 2. The ``context_length=300000`` originally hardcoded for
    ``claude-fable-5`` did not match Anthropic's reported
-   ``max_input_tokens=1_000_000``.
+   ``max_input_tokens=1_000_000``.  KISS deliberately pins
+   ``claude-fable-5`` to ``400_000`` (a KISS-side cap chosen to
+   bound worst-case prompt cost while still leaving comfortable
+   headroom over the 200K legacy models); ``claude-sonnet-5`` still
+   tracks the live API value.
 
 This test locks in the corrected values by querying the *live*
 Anthropic ``/v1/models`` endpoint and comparing every capability
@@ -41,6 +45,15 @@ anthropic = pytest.importorskip("anthropic")
 
 
 _MODELS_UNDER_TEST = ("claude-fable-5", "claude-sonnet-5")
+
+# KISS deliberately pins ``claude-fable-5.context_length`` below
+# Anthropic's advertised ``max_input_tokens=1_000_000`` to bound
+# worst-case prompt-cost and truncate before the tail of the window
+# where quality is known to degrade.  Models absent from this map
+# still track the live API value.
+_CONTEXT_LENGTH_OVERRIDES: dict[str, int] = {
+    "claude-fable-5": 400_000,
+}
 
 
 @pytest.fixture(scope="module")
@@ -96,14 +109,31 @@ class TestClaudeFableSonnet5MatchLiveAPI:
         model_id: str,
         anthropic_models: dict[str, Any],
     ) -> None:
-        """``context_length`` must equal Anthropic's ``max_input_tokens``.
+        """``context_length`` must equal Anthropic's ``max_input_tokens``
+        unless the model appears in ``_CONTEXT_LENGTH_OVERRIDES``.
 
         The historical value ``300_000`` for ``claude-fable-5`` was an
-        assumption; the API reports ``1_000_000``.
+        assumption; the API reports ``1_000_000``.  KISS now pins
+        ``claude-fable-5`` to ``400_000`` deliberately (see
+        ``_CONTEXT_LENGTH_OVERRIDES``); all other models still track
+        the live API value so drift in Anthropic's advertised window
+        is caught immediately.
         """
         api_model = anthropic_models[model_id]
-        expected = api_model.max_input_tokens
         actual = MODEL_INFO[model_id].context_length
+        if model_id in _CONTEXT_LENGTH_OVERRIDES:
+            expected = _CONTEXT_LENGTH_OVERRIDES[model_id]
+            assert actual == expected, (
+                f"MODEL_INFO[{model_id!r}].context_length={actual} but "
+                f"KISS pins this model to {expected} (see "
+                f"_CONTEXT_LENGTH_OVERRIDES).  Anthropic /v1/models "
+                f"reports max_input_tokens="
+                f"{api_model.max_input_tokens}; if the override was "
+                f"removed intentionally, drop the entry from "
+                f"_CONTEXT_LENGTH_OVERRIDES too."
+            )
+            return
+        expected = api_model.max_input_tokens
         assert actual == expected, (
             f"MODEL_INFO[{model_id!r}].context_length={actual} but "
             f"Anthropic /v1/models reports max_input_tokens={expected}. "
