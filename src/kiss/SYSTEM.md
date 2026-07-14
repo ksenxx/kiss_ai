@@ -168,5 +168,3 @@ Sorcar-specific
 - DO NOT GENERATE/SHOW worktree directories in your final results/summaries because worktree directories are discarded after a task is completed. Rather show the directories relative to the main repo.
 - Authenticate unauthenticated third-party agents; ask the user only when a page requires human authentication. You MUST collect any security or authentication code or token.
   \</sorcar_specific>
-
-

@@ -13,7 +13,7 @@ Use claude-fable-5 model for all tasks, including software development. Use gpt-
 
 ## Novel Features: set_model and Steering-on-the-Fly
 
-You can **instantaneously inject a user message** into a running agent and make the agent take the message into account in the rest of its execution. 
+You can **instantaneously inject a user message** into a running agent and make the agent take the message into account in the rest of its execution.
 
 Moreover, while an agent is running, you can ask it to **dynamically change its model** for the rest of the execution of the agent.
 
@@ -47,7 +47,7 @@ If you have an **OPENAI_API_KEY**, with the __sorcar__ wake word, KISS Sorcar st
 Speak 'sorcar', your task ...
 ```
 
-Click the **mic** button below the chat input box if it is grey and wait for it to start pulsing blue. For Sorcar CLI, type /voice and enter to activate voice interaction. Speak 'sorcar' followed by your task, and KISS Sorcar will automatically run the task and tell you the results using its own voice. The voice interface distinguishes among different speakers.  
+Click the **mic** button below the chat input box if it is grey and wait for it to start pulsing blue. For Sorcar CLI, type /voice and enter to activate voice interaction. Speak 'sorcar' followed by your task, and KISS Sorcar will automatically run the task and tell you the results using its own voice. The voice interface distinguishes among different speakers.
 
 You can also steer the agent's execution and ask for status when an agent is running using voice.
 
@@ -162,5 +162,3 @@ Click the burger menu button in the bottom-left corner to see all agents in KISS
 ## Settings
 
 Click on the settings button at the top right corner. You can get the URL for the remote web/mobile app, set the remote web app access password, set the budget limit per task, set the working directory, and set various API keys and a custom model endpoint using the Settings interface.
-
-

@@ -32,11 +32,11 @@ MAKE SURE THAT YOU DO NOT DO REWARD HACKING OR CHEATING IN THE MODELS OR AGENTS 
 
 ## Trick
 
-Use openrouter/z-ai/glm-5.2 model for all tasks including coding, bug fixing, and test creation. ALWAYS use claude-fable-5 to carefully and thoroughly review and debug the work done by openrouter/z-ai/glm-5.2 for bugs and missing code. 
+Use openrouter/z-ai/glm-5.2 model for all tasks including coding, bug fixing, and test creation. ALWAYS use claude-fable-5 to carefully and thoroughly review and debug the work done by openrouter/z-ai/glm-5.2 for bugs and missing code.
 
 ## Trick
 
-Use the best model from ~/.kiss/MODEL_INFO.json for various subtasks. Search the internet extensively to figure out which model is best yet cheap for each sub-task. Here are some hints, but the internet has better knowledge: claude-fable-5 — best for SWE work, gpt-5.6-sol — best for reviewing, and openrouter/z-ai/glm-5.2 — for SWE tasks when budget is low, and gpt-5.5 for review when budget is low.  After the task completes, based on your experience and internet research, add a model routing strategy (as text) to ./ROUTING.md that reduces token cost while not degrading the quality of the work. 
+Use the best model from ~/.kiss/MODEL_INFO.json for various subtasks. Search the internet extensively to figure out which model is best yet cheap for each sub-task. Here are some hints, but the internet has better knowledge: claude-fable-5 — best for SWE work, gpt-5.6-sol — best for reviewing, and openrouter/z-ai/glm-5.2 — for SWE tasks when budget is low, and gpt-5.5 for review when budget is low. After the task completes, based on your experience and internet research, add a model routing strategy (as text) to ./ROUTING.md that reduces token cost while not degrading the quality of the work.
 
 ## Trick
 
@@ -53,5 +53,3 @@ Build the paper, then take screenshots to check and fix the formatting.
 ## Trick
 
 Why did the last task fail? Thoroughly and precisely analyze the logs and the events of the task. Reproduce the issue by writing an integration test. Then fix the issue.
-
-
