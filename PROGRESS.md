@@ -1,3 +1,34 @@
+# PROGRESS — Add `*` and `/` operators to ./test_data/ calculator
+
+## Task
+
+Add multiplication (`*`) and division (`/`) operators to the extensible
+CLI calculator under `./test_data/`.
+
+## Session (this run)
+
+1. Read `SORCAR.md`, explored `./test_data/` (operator-registry design:
+   each operator is a module with `symbol`, `precedence`, `eval(a, b)`,
+   registered in `test_data/calculator/operators/__init__.py`).
+1. Created `test_data/calculator/operators/multiply.py`
+   (`symbol = "*"`, `precedence = 2`) and
+   `test_data/calculator/operators/divide.py`
+   (`symbol = "/"`, `precedence = 2`, raises
+   `ZeroDivisionError("division by zero")` on `b == 0`).
+1. Registered both in `operators/__init__.py` OPERATORS dict.
+1. Updated `test_data/test_calculator.py`: registry set now
+   `{"+", "-", "*", "/"}`; added unit tests for multiply/divide
+   (incl. divide-by-zero), evaluator tests for precedence
+   (`2 + 3 * 4 == 14`), parens override (`(2 + 3) * 4 == 20`),
+   left-associativity (`8 / 4 / 2 == 1`), mixed expression, and
+   division-by-zero; CLI test for `1 / 0` error path and a
+   subprocess integration test (`3 * 8 / 2` -> `12`).
+1. Verified: `uv run pytest ./test_data/test_calculator.py -v` —
+   all 33 tests pass; `uv run check --full` — all checks pass.
+1. Committed the changes to git.
+
+______________________________________________________________________
+
 # PROGRESS — Run all tests in parallel, diagnose & fix failures — Session 4
 
 ## Task
