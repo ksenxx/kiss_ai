@@ -1159,7 +1159,7 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
 }
 
 /* Model Picker */
-#model-picker { position: relative; display: flex; align-items: center; gap: 4px; min-width: 0; overflow: visible; flex-wrap: wrap; }
+#model-picker { position: relative; display: flex; align-items: center; gap: 2px; min-width: 0; overflow: visible; flex-wrap: wrap; }
 
 #model-btn {
   display: flex; align-items: center; gap: 6px;
