@@ -170,7 +170,9 @@ def model_vendor(name: str) -> tuple[str, int]:
 
 
 def generate_commit_message_from_diff(
-    diff_text: str, user_prompt: str | None = None,
+    diff_text: str,
+    user_prompt: str | None = None,
+    task_result: str | None = None,
 ) -> str:
     """Generate a git commit message from a diff via LLM.
 
@@ -179,7 +181,9 @@ def generate_commit_message_from_diff(
     task prompt is included in the LLM context so the generated
     subject/body reflect the *intent* of the change (not just the
     mechanical diff) and the full prompt is appended at the end of
-    the commit message body for traceability.  Returns a fallback
+    the commit message body for traceability.  When *task_result*
+    is provided, the task's result summary is appended after the
+    user prompt under a ``Result:`` heading.  Returns a fallback
     string on any failure.
 
     Args:
@@ -187,6 +191,8 @@ def generate_commit_message_from_diff(
         user_prompt: The user's task prompt that produced the diff,
             or ``None`` when not available (e.g. user-invoked manual
             commit-message generation from the UI).
+        task_result: The task's result summary to append to the
+            commit message, or ``None`` when not available.
 
     Returns:
         The cleaned commit-message string, or ``"kiss: auto-commit agent work"``
@@ -194,11 +200,12 @@ def generate_commit_message_from_diff(
     """
     fallback = "kiss: auto-commit agent work"
     if not diff_text:
-        return (
+        msg = (
             _append_user_prompt(fallback, user_prompt)
             if user_prompt
             else fallback
         )
+        return _append_task_result(msg, task_result) if task_result else msg
     if user_prompt:
         context = f"User task prompt:\n{user_prompt}\n\nDiff:\n{diff_text}"
         template = (
@@ -231,7 +238,8 @@ def generate_commit_message_from_diff(
         fallback=fallback,
         failure_log="Commit message generation failed",
     )
-    return _append_user_prompt(msg, user_prompt) if user_prompt else msg
+    msg = _append_user_prompt(msg, user_prompt) if user_prompt else msg
+    return _append_task_result(msg, task_result) if task_result else msg
 
 
 def _append_user_prompt(message: str, user_prompt: str) -> str:
@@ -252,6 +260,26 @@ def _append_user_prompt(message: str, user_prompt: str) -> str:
     if not trimmed:
         return message
     return f"{message.rstrip()}\n\nUser prompt:\n{trimmed}"
+
+
+def _append_task_result(message: str, task_result: str) -> str:
+    """Append the task's result summary to a commit message body.
+
+    Trims whitespace from *task_result* and appends it under a
+    ``Result:`` heading separated by a blank line.  If the result
+    is empty after trimming, *message* is returned unchanged.
+
+    Args:
+        message: The base commit message (subject + optional body).
+        task_result: The task's result summary string.
+
+    Returns:
+        The combined commit message with the task result appended.
+    """
+    trimmed = task_result.strip()
+    if not trimmed:
+        return message
+    return f"{message.rstrip()}\n\nResult:\n{trimmed}"
 
 
 def generate_followup_text(task: str, result: str, model: str) -> str:
