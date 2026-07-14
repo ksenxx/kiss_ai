@@ -1781,70 +1781,95 @@ daemonStatus block retained); TestHandleReadyRestoredTabs 4/4 including
 the new targeting test; impacted JS suites re-run green; npm run lint;
 `uv run check --full` — all passed.
 
-______________________________________________________________________
-
-# PROGRESS — History-panel copy buttons for chat id / task id
+# PROGRESS — Deleting a task from History must remove its chat from every open tab
 
 ## Task
 
-Add copy buttons next to the chat id and task id in the History
-sidebar's task rows (`.running-item-ids` line rendered by
-`renderHistory` in `src/kiss/agents/vscode/media/main.js`). Clicking a
-button must copy the raw id to the clipboard. Reproduce with e2e tests
-first, then fix. Development with claude-fable-5; review/debug pass
-with gpt-5.6-sol.
+When a task is deleted from the task history panel, any open tab on any
+client showing the task's chat MUST remove the task and its chat from
+the tab's chat webview. Reproduce with real end-to-end jsdom tests,
+then fix. claude-fable-5 for development; gpt-5.6-sol for independent
+review/debugging.
 
-## Sessions 1–2 — reproduce + implement
+## Root cause (proven by failing real-WSS e2e tests)
 
-1. Located the feature: `renderHistory` ids-row builder (~line 8385)
-   built a plain text span `chat <id> • task <id> • parent <id>`;
-   existing copy pattern `makeSidebarCopyButton` + `panelCopy.js`
-   (`PANEL_COPY_SVG`, `PANEL_CHECK_SVG`, `fallbackCopyText`).
-1. Wrote e2e test `test/historyIdsCopyButtons.test.js` (jsdom, drives
-   real `chat.html` + `panelCopy.js` + `main.js`): buttons render
-   exactly for ids that exist; icon-only (ids-line text unchanged);
-   clicking copies exactly the raw id via `navigator.clipboard`, does
-   not bubble into the row (no new tab / `resumeSession`); numeric
-   `task_id` copied as string; `execCommand('copy')` fallback; CSS
-   rule assertions. Test FAILED before the fix (issue reproduced).
-1. Fix in `media/main.js`: new `makeIdCopyButton(idText, kind)`
-   (button `.ids-copy-btn.ids-copy-{chat|task}`, copy SVG,
-   `stopPropagation`+`preventDefault`, clipboard write with fallback,
-   1.5 s green-check "copied" flash); rewrote the ids-row builder
-   with an `idSegments` array appending buttons after the chat and
-   task segments (parent id gets no button); `title` preserved.
-1. `media/main.css`: `.ids-copy-btn` rules (inline icon button,
-   `background:none`, `cursor:pointer`, hover/copied states) matching
-   sibling sidebar styling (#000 color-mix, #006400 copied).
-1. Added pytest wrapper
-   `src/kiss/tests/agents/vscode/test_history_ids_copy_buttons.py`.
+`VSCodeServer._handle_delete_task` (server.py) broadcasts
+`{"type": "taskDeleted", "taskId": <id>, "chatId": <chat>, "chatHasMoreTasks": <bool>}` via `self.printer.broadcast`. The
+production printer `WebPrinter.broadcast` (web_server.py) classifies
+ANY event carrying a truthy top-level `taskId` as a *task-stream*
+event: it records it, queues it for persistence, and fans it out ONLY
+to tabs subscribed to that task id. The `taskDeleted` event names the
+just-DELETED (completed → zero subscribers) task, so the event was
+SILENTLY SWALLOWED and never reached any client — neither VS Code UDS
+webviews nor remote WSS browsers (both are served by
+`_send_to_ws_clients`). The frontend handler in media/main.js
+(`case 'taskDeleted'`, ~line 4822) was already correct; it simply
+never received the event. A pre-existing Python test had hidden this
+by monkeypatching `printer.broadcast`.
 
-## Session 3 — gpt-5.6-sol review pass 1 + verification
+## Fix (claude-fable-5)
 
-1. Review pass 1 (gpt-5.6-sol via run_parallel) flagged 4 items:
-   (a) rejected `clipboard.writeText` never fell back to
-   `execCommand` — REAL BUG; (b) numeric chat id dropped by
-   `typeof s.id === 'string'` — investigated, NOT a bug (line is
-   pre-existing at HEAD; backend `server.py` always sends `id` as a
-   string, DB column CHAR(32); `types.ts` `id:number` is stale);
-   (c) hardcoded colors / ellipsis clipping — consistent with
-   sibling rules, keep; (d) repeated clicks didn't clear the prior
-   flash timer — REAL robustness issue.
+- `json_printer.py`: new module-level
+  `GLOBAL_EVENT_TYPES = frozenset({"taskDeleted"})` documenting that
+  these events carry a `taskId` PAYLOAD field but are NOT stream
+  events; base `JsonPrinter.broadcast` returns early for them (never
+  `_inject_task_id`/`_record_event`/`_persist_event` — prevents
+  appending to an active recording or re-inserting event rows for a
+  deleted task).
+- `web_server.py`: `WebPrinter.broadcast` gained a branch after the
+  `"tabId" in event` branch and before `_inject_task_id`:
+  `if event.get("type") in GLOBAL_EVENT_TYPES: self._send_to_ws_clients(json.dumps(event)); return` — verbatim
+  global broadcast to EVERY connected client (WSS browsers + VS Code
+  UDS writers in lockstep). Docstring updated.
 
-## Session 4 — fixes + review pass 2 + final checks
+## New end-to-end tests (no mocks)
 
-1. Fixed (a): rejection handler now
-   `.then(flash, () => { if (fallbackCopyText(payload)) flash(); })`.
-1. Fixed (d): per-button `flashTimer` with `clearTimeout` before
-   rescheduling.
-1. Extended the e2e test with `testRejectedClipboardFallsBackToExecCommand`
-   and `testRepeatedClicksRestartFlashTimer` — 8 tests, all pass.
-1. gpt-5.6-sol review pass 2 (run_parallel): traced all surfaces
-   (`SorcarTab.ts:408`, `web_server.py:2793` both load `panelCopy.js`
-   before `main.js`; `renderHistory` is the sole `.running-item-ids`
-   renderer; no `chat.html` change needed; no XSS — ids inserted as
-   text nodes, `innerHTML` only trusted static SVGs). VERDICT: PASS.
-1. Final: `node test/historyIdsCopyButtons.test.js`,
-   `historyTaskIds.test.js`, `panelCopy.test.js`, related history
-   tests, pytest wrappers — all pass; eslint clean on modified
-   `media/main.js`; `uv run check --full` — all checks passed.
+- `src/kiss/tests/agents/vscode/test_delete_task_broadcast_all_clients.py`
+  (real `RemoteAccessServer` over WSS + real `websockets` clients,
+  persistence pinned to a temp dir): (1) two clients — client 1 sends
+  `deleteTask`, BOTH must receive `taskDeleted` with
+  taskId/chatId/chatHasMoreTasks=true; (2) deleting the last task in a
+  chat yields `chatHasMoreTasks: false`; (3) `taskDeleted` is never
+  persisted as a chat event for the deleted task. All 3 FAILED
+  pre-fix, PASS post-fix.
+- `src/kiss/agents/vscode/test/taskDeletedRemovesChat.test.js` (real
+  chat.html + panelCopy.js + main.js jsdom harness, registered in
+  package.json test chain): (1) deleting the tab's current task closes
+  the tab and posts closeTab; (2) `chatHasMoreTasks:false` closes the
+  chat's tab even when currentTaskId differs; (3) an INACTIVE tab's
+  outputFragment is pruned of the deleted `.adjacent-task` block while
+  surviving content stays intact; (4) an unrelated chat's tab is
+  untouched; (5) full live lifecycle (submit → clear with chat_id →
+  running → streamed events → task_done) then `taskDeleted` closes the
+  tab with no stale content. All 5 pass.
+
+## gpt-5.6-sol independent review — no bugs found
+
+- Full diff reviewed. `_send_to_ws_clients` confirmed to reach both
+  WSS clients and UDS writers; `SorcarSidebarView._installClientListener`
+  forwards everything except `merge_data` → the webview receives
+  `taskDeleted`; types.ts already declares the message variant; the
+  remote-webapp shim dispatches every non-auth WS message as a window
+  MessageEvent → browsers handle it too.
+- Audited ALL `printer.broadcast` call sites (server.py, commands.py,
+  task_runner.py, web_server.py, merge_flow.py, autocomplete.py):
+  `taskDeleted` is the only tabId-less broadcast carrying a payload
+  `taskId`; no other event suffers the misclassification.
+- main.js handler: `String()` coercion covers int/str taskId; closing
+  the last tab creates a fresh tab (locked by jsdom test 5); chatId is
+  never `""` for an existing row so fresh tabs can't be spuriously
+  matched; `_delete_task` flushes chat events before deleting and
+  cascade-deletes sub-agent rows; broadcast ordering
+  (chat lookup → delete → `_chat_has_tasks`) is correct.
+- JsonPrinter guard placement verified: an active in-memory recording
+  can no longer capture `taskDeleted`.
+
+## Verification
+
+- New Python suite 3/3; `test_delete_task_removes_from_tabs.py` 11/11;
+  `test_web_server.py` 205/205; printer-equivalence/UDS/lockdown
+  suites 38/38.
+- `node test/taskDeletedRemovesChat.test.js` 5/5;
+  `node test/adjacentTaskScroll.test.js` all pass.
+- `npm run lint`, `npm run compile` (tsc) clean;
+  `uv run check --full` — ALL CHECKS PASSED.
