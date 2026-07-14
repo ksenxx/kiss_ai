@@ -886,6 +886,11 @@ class _TaskRunnerMixin:
                 # in the generated commit message (see
                 # :meth:`_MergeFlowMixin._handle_autocommit_action`).
                 tab.last_user_prompt = task_prompt
+                # Reset the previous task's result so a failure
+                # before this task's summary is computed can never
+                # leak a stale result into this task's auto-commit
+                # message.
+                tab.last_result_summary = ""
                 # Metric baselines for THIS subtask's attribution
                 # (see the W2-F2 note above).  The first subtask keeps
                 # ``start_ms`` (the true task start, including setup)
@@ -982,6 +987,11 @@ class _TaskRunnerMixin:
                         "_last_task_id",
                         None,
                     )
+                    # Record the task's outcome so post-task
+                    # auto-commit hooks can append it to the commit
+                    # message under a "Result:" heading (see
+                    # :meth:`_MergeFlowMixin._handle_autocommit_action`).
+                    tab.last_result_summary = result_summary
                 if subtask_failed:
                     # W2-F2 symmetry: report per-subtask DELTAS against
                     # the baselines captured just before this subtask's
@@ -1086,6 +1096,14 @@ class _TaskRunnerMixin:
                     }
             else:
                 task_end_event = task_end_event or {"type": "task_stopped"}
+            # Keep the tab's recorded outcome in sync with the
+            # recomputed ``result_summary``: the per-subtask
+            # ``finally`` above may have stored the stale sentinel
+            # (or a previous subtask's summary) into
+            # ``tab.last_result_summary`` before this handler rewrote
+            # the local.  A later auto-commit reads the tab field, so
+            # it must always mirror the final persisted value.
+            tab.last_result_summary = result_summary
             # Mirror the per-subtask failure broadcast in the for-loop:
             # the cleanup ``finally`` only broadcasts ``task_end_event``
             # (``task_stopped`` / ``task_error`` / ``task_interrupted``)

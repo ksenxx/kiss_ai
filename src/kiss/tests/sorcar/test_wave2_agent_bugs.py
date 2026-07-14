@@ -239,7 +239,12 @@ class _IntruderCommitMessageFn:
     def __init__(self, agent: WorktreeSorcarAgent) -> None:
         self.agent = agent
 
-    def __call__(self, commit_dir: Path, user_prompt: str | None) -> str:
+    def __call__(
+        self,
+        commit_dir: Path,
+        user_prompt: str | None,
+        task_result: str | None = None,
+    ) -> str:
         self.agent._commit_run_id = "intruder-run-id"  # type: ignore[attr-defined]
         return "wave2 test commit"
 
