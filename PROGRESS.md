@@ -1156,3 +1156,61 @@ longer, although individual caller tasks had meaningful wins.
   and hub noise, avoiding unused tool-schema overhead, and next running 20–50
   harder tasks on a repository of at least one million lines with randomized
   arm order.
+
+______________________________________________________________________
+
+# PROGRESS — Desktop width defaults: 1/4-screen history panel, 90% chat column
+
+## Task
+
+In the remote web app on desktop browsers: (1) the history panel must occupy
+1/4 of the browser screen by default; (2) the chat panels and the fixed task
+panel (and composer) must occupy 90% of the chat webview. Reproduce with
+jsdom-based e2e tests first, then fix. Dev model `claude-fable-5`; review
+model `gpt-5.6-sol`.
+
+## What was done
+
+1. Internet research (10/10 sources): `clamp(min, 25vw, max)` is the canonical
+   quarter-screen sidebar default (CSS-Tricks/MDN, baseline widely available);
+   `25vw` = 25% of the viewport; `max-width: 90%` resolves against the
+   containing block (the chat webview column); ChatGPT width-fix userscripts
+   use exactly `maxWidth: 90%` for wide chat columns; jsdom does no layout so
+   tests assert parsed CSS rules + runtime seeding.
+
+1. Tests FIRST — NEW `src/kiss/agents/vscode/test/remoteDesktopWidths.test.js`
+   (9 jsdom e2e tests, real `chat.html` + `panelCopy.js` + `main.js`):
+   CSS `var(--sidebar-w, clamp(220px, 25vw, 600px))` on BOTH the docked
+   sidebar and `#app` margin; 90% max-width for `#output` children,
+   `#task-panel`, `#input-container`; JS default seeding
+   (`aria-valuenow` = 256 at jsdom innerWidth 1024), keyboard baseline
+   256→272, dblclick reset to 256, persisted width still wins, clamp range
+   unchanged, VS Code webview isolation. FAILED before the fix (found
+   `width: var(--sidebar-w, 300px)` and 75%/85%/768px caps), reproducing the
+   issue. Pytest `test_codex_mobile_layout.py` extended to 43 tests
+   (quarter-screen fallback, 90% column rules, `window.innerWidth * 0.25`
+   in main.js).
+
+1. Implementation — `media/remote-codex.css`: dock block fallback
+   `300px` → `clamp(220px, 25vw, 600px)` in both `width` and `margin-left`
+   (single `--sidebar-w` variable still drives both, no desync);
+   `#task-panel` 75% → 90%; `#input-container` 768px → 90%;
+   `#output > *:not(#welcome)` `min(85%, 768px)` → 90%. `media/main.js`:
+   `SB_DEF = 300` replaced by `sidebarDefaultW()` =
+   `clamp(220, round(window.innerWidth * 0.25), 600)`; used for the initial
+   `aria-valuenow`, the keyboard baseline, and the dblclick reset. Existing
+   `remoteSidebarResize.test.js` expectations updated (300 → 256 baseline).
+   `package.json`: `remoteDesktopWidths.test.js` appended to the test chain.
+
+1. Review — `gpt-5.6-sol` independent pass: searched for stale
+   300px/75%/85%/768px remnants (none in rules; only comments/tests), checked
+   `* { box-sizing: border-box }` (90% of padded parents correct), confirmed
+   percentage max-widths resolve against `#output`/`#input-area` content
+   boxes (the chat webview column), verified jsdom parses the nested
+   `var(...clamp(...))` syntax, mobile (\<600px) rules untouched, VS Code
+   webview isolation intact, localStorage persistence flow unchanged. One
+   stale comment in remoteSidebarResize.test.js fixed.
+
+1. Verification — 9/9 new widths tests, 11/11 resize tests, 10/10 dock tests,
+   adjacentTaskScroll, `npm run lint` exit 0, 43/43 pytest layout tests,
+   `uv run check --full` ✅ (twice, incl. after review fixes).

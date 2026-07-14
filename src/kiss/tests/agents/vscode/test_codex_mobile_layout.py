@@ -365,7 +365,7 @@ def test_codex_user_prompt_bubble() -> None:
     assert "background: #ececec" in rule
     assert "color: #0d0d0d" in rule
     assert "border-radius: 22px" in rule
-    assert "max-width: 75%" in rule
+    assert "max-width: 90%" in rule
     assert "margin-left: auto" in rule
 
 
@@ -409,7 +409,7 @@ def test_desktop_media_query_docks_sidebar() -> None:
     )
     assert sidebar, "docked #sidebar rule missing from desktop block"
     assert "transform: none" in sidebar.group(1)
-    assert "width: var(--sidebar-w, 300px)" in sidebar.group(1), (
+    assert "width: var(--sidebar-w," in sidebar.group(1), (
         "sidebar width must be driven by the --sidebar-w variable"
     )
     overlay = re.search(
@@ -423,9 +423,9 @@ def test_desktop_media_query_docks_sidebar() -> None:
     app = re.search(
         r"body\.remote-chat\.remote-desktop #app\s*\{([^}]*)\}", block
     )
-    assert app and "margin-left: var(--sidebar-w, 300px)" in app.group(
-        1
-    ), "#app must clear the docked sidebar via the SAME width variable"
+    assert app and "margin-left: var(--sidebar-w," in app.group(1), (
+        "#app must clear the docked sidebar via the SAME width variable"
+    )
 
 
 DECOLORIZED_PANEL_SELECTORS = [
@@ -577,6 +577,70 @@ def test_main_js_sidebar_resize_wiring() -> None:
     assert "--sidebar-w" in js
     assert "setPointerCapture" in js
     assert "pointercancel" in js
+
+
+# ── Desktop width defaults (1/4-screen sidebar, 90% chat column) ────
+
+
+def test_sidebar_defaults_to_quarter_screen() -> None:
+    """The docked sidebar (and #app's margin) defaults to 1/4 of the
+    browser screen: the --sidebar-w fallback is a 25vw-based clamp()
+    bounded by the resize range, identical in BOTH rules."""
+    css = _read_codex_css()
+    m = re.search(
+        r"@media \((?:min-width: 900px|width >= 900px)\)\s*\{(.*)\}\s*$",
+        css,
+        flags=re.S,
+    )
+    assert m, "@media (min-width: 900px) desktop block missing"
+    block = m.group(1)
+    fallback = "var(--sidebar-w, clamp(220px, 25vw, 600px))"
+    sidebar = re.search(
+        r"body\.remote-chat\.remote-desktop #sidebar\s*\{([^}]*)\}", block
+    )
+    assert sidebar and f"width: {fallback}" in sidebar.group(1), (
+        "docked sidebar must default to 25vw (1/4 screen), clamped"
+    )
+    app = re.search(
+        r"body\.remote-chat\.remote-desktop #app\s*\{([^}]*)\}", block
+    )
+    assert app and f"margin-left: {fallback}" in app.group(1), (
+        "#app must clear the sidebar via the SAME 25vw-based fallback"
+    )
+
+
+def test_chat_column_spans_ninety_percent() -> None:
+    """Chat panels, the pinned task panel, and the composer all span
+    90% of the chat webview column (no more 768px / 85% / 75% caps)."""
+    css = _read_codex_css()
+    panels = re.search(
+        r"body\.remote-chat #output > \*:not\(#welcome\)\s*\{([^}]*)\}",
+        css,
+    )
+    assert panels and re.search(r"max-width:\s*90%", panels.group(1)), (
+        "chat panels must span 90% of the chat webview"
+    )
+    assert "768px" not in panels.group(1)
+    task = re.search(r"body\.remote-chat #task-panel\s*\{([^}]*)\}", css)
+    assert task and re.search(r"max-width:\s*90%", task.group(1)), (
+        "the fixed task panel must span 90% of the chat webview"
+    )
+    composer = re.search(
+        r"body\.remote-chat #input-container\s*\{([^}]*)\}", css
+    )
+    assert composer and re.search(
+        r"max-width:\s*90%", composer.group(1)
+    ), "the composer must span 90% of the chat webview"
+    assert "768px" not in composer.group(1)
+
+
+def test_main_js_quarter_screen_default() -> None:
+    """main.js seeds the sidebar resize default from 25% of the window
+    width instead of a fixed 300px."""
+    js = (MEDIA_DIR / "main.js").read_text(encoding="utf-8")
+    assert "window.innerWidth * 0.25" in js, (
+        "the resize default must be computed as 1/4 of the window width"
+    )
 
 
 # ── Live HTTP serving ────────────────────────────────────────────────
