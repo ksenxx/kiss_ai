@@ -20,10 +20,18 @@
 
 ## Final verification session (mobile)
 
-- Confirmed no `@media` rule in remote-codex.css overrides the negative margins at mobile widths (only `#output`/`#input-area` padding change at <=600px), so the halving applies on mobile.
+- Confirmed no `@media` rule in remote-codex.css overrides the negative margins at mobile widths (only `#output`/`#input-area` padding change at \<=600px), so the halving applies on mobile.
 - Ran `uv run pytest src/kiss/tests/agents/vscode/test_remote_composer_button_gap.py -v` (mobile 420x900 viewport): 1 passed.
 - Fresh visual check at true mobile viewport (390x844, dpr=2, is_mobile=True) via live RemoteAccessServer + Playwright: measured visible gaps 6/6/11/11 px (historical 11/11/21/21 px) — halved; screenshot of `#input-footer` inspected — burger, model pill, attach, promptlet, mic evenly tight, no glyph overlap, send button intact.
 - `uv run check --full`: all checks passed.
+
+## Follow-up task: "can you halve it further?" (DONE)
+
+- Read `remote-codex.css` (lines 183-256) and the existing e2e test; current margins were `-5px` per inner edge, live gaps 6/6/11/11 px.
+- Edited `src/kiss/agents/vscode/media/remote-codex.css`: changed the scoped negative margins on #menu-btn/#upload-btn/#tricks-btn/#voice-btn from `-5px` to `-8px` (outer pins `menu-btn { margin-left: 0 }` / `voice-btn { margin-right: 0 }` unchanged), updated the comment. -8px per inner edge halves the once-halved gaps again: pill seams 6 -> 3 px, circle seams 11 -> 5 px.
+- Updated `src/kiss/tests/agents/vscode/test_remote_composer_button_gap.py`: renamed test to `test_remote_composer_button_gaps_quartered`, assertion now `gap <= old_gap / 4 + 0.5` (quarter of historical 11/11/21/21 px), still requires gap > 0 and 36x36 touch targets. Test passes.
+- Fresh visual check at mobile viewport (390x844, dpr=2, is_mobile=True) via live RemoteAccessServer + Playwright: measured visible gaps 3/3/5/5 px (was 6/6/11/11); screenshots of `#input-footer` and full page inspected — icons tight but distinct, no overlap, touch targets 36x36, model pill/send button intact.
+- `uv run check --full`: all checks pass (also mdformat-fixed this PROGRESS.md).
 
 ## Remaining plan (was)
 
