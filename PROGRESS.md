@@ -1,81 +1,22 @@
-# PROGRESS — Task-panel-matched typography + history-row restyle (remote)
+# PROGRESS — Task history filter redesign and database date range
 
-## Task
+## Completed
 
-In the remote webview: (1) chat-panel CONTENTS use the same font
-style and size (NOT color) as the pinned task panel `#task-panel`;
-(2) History rows drop their per-chat pastel background — the color
-moves to the row's left border; (3) ALL task metadata (steps, tok,
-cost, duration, time, work dir, model, wt, parallel, auto-commit,
-chat id, task id) renders as ONE wrapping line. E2E tests written
-first (RED), then fix. Dev claude-fable-5; independent review
-gpt-5.6-sol.
-
-## Root cause
-
-- `#task-panel` renders sans (`--vscode-font-family`) at 16px
-  (`--vscode-editor-font-size`); main.css puts `.tp`, `.tc-b`, `.tr`,
-  `.sys`, `.bash-panel-content` and all `code` in the editor mono
-  font (plus UA-mono `pre` for `.merge-ctx`/`.merge-hunk`), and
-  italicises `.think .cnt`.
-- `renderHistory` (media/main.js) set INLINE
-  `div.style.backgroundColor = chatIdBgColor(...)` + `color:#1a1a1a`
-  — unoverridable by any stylesheet.
-- `.running-item-info` was a flex column of three spans; workspace
-  and ids spans nowrap+ellipsis-clipped.
-
-## Fix
-
-- media/main.js `renderHistory`: row now stamps
-  `div.style.setProperty('--task-color', chatIdBgColor(String(s.id)))`
-  (no inline colors). Frequent tab untouched.
-- media/main.css `.running-item`: `background-color: var(--task-color, ...)` + `color:#1a1a1a` → VS Code webview
-  pixel-identical.
-- media/remote-codex.css: sans `var(--vscode-font-family, ...)` added
-  to `.tp .tc-b .tr .sys .bash-panel-content .merge-ctx .merge-hunk`
-  - catch-all `#output pre, #output code`; `font-style: normal` on
-    `.think .cnt`; history section: neutral `rgb(255 255 255 / 4%)` row
-    bg, `#ececec` text, `border-left: 4px solid var(--task-color)`,
-    light metadata/button colors (+ favorited/copied state colors);
-    single-line metadata: `.running-item-info{display:block; overflow-wrap:anywhere}`, spans `white-space:normal; overflow:visible`, `::before " • "` separators on workspace/ids.
-
-## Tests (RED first, then GREEN)
-
-`src/kiss/tests/agents/vscode/test_codex_task_panel_style.py` (28):
-27 static wiring tests + 1 live e2e booting the production
-RemoteAccessServer + headless Chromium, asserting: all 28 content
-probes' computed font family/size == `#task-panel`'s; colors NOT
-dragged (task panel `rgb(13,13,13)` vs thread `#8e8e8e`/`#afafaf`);
-row border-left carries the djb2 pastel, bg neutral; metadata spans
-flow inline, wrap over ≥2 line boxes (Range.getClientRects), never
-clip; full metrics/workspace/ids text incl. date+time. Live history
-injection posts `{type:'history'}` for generations 0..30 (desktop
-boot bumps the private counter) after the boot round-trip settles,
-opens the sidebar, and unchecks the default-on Workspace filter (it
-would display:none a row whose work_dir differs).
+- Researched 10 UI/UX sources covering Material filter chips, chip selection states, compact date-range controls, date-input usability, accessibility, and dark-theme behavior.
+- Wrote tests first: production-markup/jsdom end-to-end tests for chip structure and filtering, SVG date controls, database-driven date auto-fill, refresh/user-edit/clear/empty-database behavior, inclusive dates, and epoch-zero handling; SQLite/server integration tests for empty, populated, subagent-excluded, search, and event payload cases.
+- Replaced native checkbox clutter with compact status/icon filter chips and replaced emoji calendar buttons with inline SVG controls in one responsive From→To pill with a clear affordance.
+- Added `_history_date_range()` over all non-subagent history rows and included `dateRange: {min,max}` in every history response. The webview converts epoch seconds to local `YYYY-MM-DD`, refreshes untouched values, and never overwrites user-managed values.
+- Added the `dateRange` field to the TypeScript backend→webview message contract; shared media means both VS Code and remote web app use the feature.
+- Independent gpt-5.6-sol review audited all selectors, history consumers, event typing, database predicates, pagination/search behavior, timezone inclusivity, remote styling, and stale-state paths. Review fixes: removed a remote CSS specificity override that masked selected-chip styling, wired the missing TypeScript field, cleared untouched auto-filled dates when the DB becomes empty, and accepted epoch-zero timestamps.
+- Verified the actual `~/.kiss/sorcar.db` non-subagent range resolves locally to 2009-02-13 through 2026-07-14 (values are populated dynamically, not hard-coded).
 
 ## Verification
 
-- 28/28 new tests; 117 impacted pytest (uniform font, mobile layout,
-  flat thread live, history live suites); 13 impacted jsdom suites;
-  full jsdom run 128/129 (1 pre-existing env-dependent installer
-  timeout, unrelated); `uv run check --full` all 10 checks pass
-  (also mdformat-fixed 4 pre-existing unformatted md files).
-
-## Review (gpt-5.6-sol) — findings fixed
-
-1. Live test now proves the "not the color" constraint explicitly.
-1. Wrap GEOMETRY asserted (≥2 line boxes, no horizontal clipping) —
-   exposed the hidden-row/Workspace-filter issue.
-1. Time assertion strengthened from year-only to full date+time.
-1. Legacy-row metadata availability contract documented (rows
-   without persisted `model` omit run-mode flags by design, per
-   historyTaskMeta.test.js).
-1. Stale "Mono output" comment in test_codex_flat_thread_live.py
-   corrected.
-   All-renderer audit: every History row goes through renderHistory
-   (demo mode included); Frequent tab is a separate surface, out of
-   scope.
+- Feature/affected JS end-to-end suites: all passed (chip, auto-fill, date grouping, workspace, running-row, remote reconnect).
+- Backend/HTML integration: 10 passed.
+- Related Python UI regression matrix: 82 passed.
+- TypeScript typecheck, ESLint, and Stylelint: clean.
+- Earlier full `uv run check`: passed. The full npm suite's only observed failure was the pre-existing `installFailureNoCompleteNotification` environment fixture timing out after `uv` rejected the repository's dynamic version metadata; it is unrelated to this feature.
 
 ______________________________________________________________________
 

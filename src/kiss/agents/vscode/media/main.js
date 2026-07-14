@@ -553,6 +553,9 @@
   let historyLoading = false;
   let historyHasMore = true;
   let historyGeneration = 0;
+  // True once the user has edited (or cleared) the History From/To
+  // date inputs; blocks the ``dateRange`` auto-fill on refreshes.
+  let historyDateRangeUserSet = false;
   // Session-scoped sets tracking the live running→completed
   // transition for the History panel's status dot.  The invariant:
   //   * A running row renders the pulsing green dot.
@@ -4572,6 +4575,7 @@
         break;
       case 'history':
         renderHistory(ev.sessions || [], ev.offset || 0, ev.generation || 0);
+        autofillHistoryDateRange(ev.dateRange);
         break;
       case 'frequentTasks':
         renderFrequentTasks(ev.tasks || []);
@@ -7433,6 +7437,29 @@
     ].forEach(el => {
       if (el) el.addEventListener('change', applyHistoryFilterVisibility);
     });
+    // A ``change`` on a date input only ever comes from the USER
+    // (typing or the custom picker); the auto-fill writes ``.value``
+    // directly without dispatching events.  Once the user touches
+    // the range, later ``history`` refreshes must not overwrite it.
+    [hfFrom, hfTo].forEach(el => {
+      if (el) {
+        el.addEventListener('change', () => {
+          historyDateRangeUserSet = true;
+        });
+      }
+    });
+    const hfDateClear = document.getElementById('hf-date-clear');
+    if (hfDateClear) {
+      hfDateClear.addEventListener('click', e => {
+        e.stopPropagation();
+        if (hfFrom) hfFrom.value = '';
+        if (hfTo) hfTo.value = '';
+        // Clearing is a user decision: pin the empty range so the
+        // next history refresh does not re-fill it.
+        historyDateRangeUserSet = true;
+        applyHistoryFilterVisibility();
+      });
+    }
     // The calendar selector buttons sit next to each date textbox and
     // open a custom in-webview calendar popup.  The native
     // <input type=date> picker (showPicker / focus+click) is unreliable
@@ -8506,6 +8533,54 @@
   }
 
   /**
+   * Pre-fill the History From/To date inputs from the ``dateRange``
+   * payload of a ``history`` event (the first and last task
+   * timestamps in ~/.kiss/sorcar.db, epoch seconds).  Values are
+   * written as LOCAL calendar dates in the ``YYYY-MM-DD`` format
+   * the ``<input type=date>`` elements produce, mirroring how
+   * ``applyHistoryFilterVisibility`` interprets them (local
+   * midnight → 23:59), so the auto-filled [first, last] range never
+   * hides a row.  The fill is skipped once the user has edited or
+   * cleared the inputs (``historyDateRangeUserSet``).
+   *
+   * @param {{min: ?number, max: ?number}|undefined} range - the
+   *   ``dateRange`` payload. Missing payloads preserve the current
+   *   values for compatibility with older servers; explicit null
+   *   bounds clear untouched auto-filled values (the database is
+   *   empty).
+   */
+  function autofillHistoryDateRange(range) {
+    if (historyDateRangeUserSet || !range) return;
+    const hfFrom = document.getElementById('hf-from');
+    const hfTo = document.getElementById('hf-to');
+    if (!hfFrom || !hfTo) return;
+    // Explicit null bounds mean the database has no listable tasks.
+    // Clear a prior programmatic fill rather than showing stale dates.
+    if (range.min == null || range.max == null) {
+      hfFrom.value = '';
+      hfTo.value = '';
+      applyHistoryFilterVisibility();
+      return;
+    }
+    const isoOfSec = sec => {
+      const n = Number(sec);
+      if (!isFinite(n)) return '';
+      const d = new Date(n * 1000);
+      if (isNaN(d.getTime())) return '';
+      const p = x => (x < 10 ? '0' + x : '' + x);
+      return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+    };
+    const fromIso = isoOfSec(range.min);
+    const toIso = isoOfSec(range.max);
+    if (!fromIso || !toIso) return;
+    // Set .value directly (no change event) so this programmatic
+    // fill is never mistaken for a user edit.
+    hfFrom.value = fromIso;
+    hfTo.value = toIso;
+    applyHistoryFilterVisibility();
+  }
+
+  /**
    * Open a custom in-webview calendar popup anchored next to the
    * supplied date input.  Picking a day sets ``input.value`` to the
    * ISO ``YYYY-MM-DD`` string (the same format ``<input type=date>``
@@ -8817,6 +8892,12 @@
       }
     } else if (placeholder) {
       placeholder.remove();
+    }
+    // The date-range clear "×" is only useful while a date is set.
+    const hfDateClear = document.getElementById('hf-date-clear');
+    if (hfDateClear) {
+      const hasDate = !!((hfFrom && hfFrom.value) || (hfTo && hfTo.value));
+      hfDateClear.style.display = hasDate ? '' : 'none';
     }
   }
 

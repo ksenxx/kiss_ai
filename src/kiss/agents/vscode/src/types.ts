@@ -197,6 +197,7 @@ type ToWebviewMessageBody =
       sessions: SessionInfo[];
       offset?: number;
       generation?: number;
+      dateRange?: {min: number | null; max: number | null};
     }
   | {
       type: 'files';

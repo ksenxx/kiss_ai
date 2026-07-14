@@ -38,6 +38,7 @@ from kiss.agents.sorcar.persistence import (
     _delete_task,
     _get_adjacent_task_by_chat_id,
     _get_task_chat_id,
+    _history_date_range,
     _is_failed_result,
     _load_chat_events_by_task_id,
     _load_frequent_tasks,
@@ -1033,11 +1034,16 @@ class VSCodeServer(
             if session.get("is_running") and entry_id is not None:
                 self._overlay_live_metrics(session, entry_id)
             sessions.append(session)
+        # First/last task timestamps over the WHOLE db (not just this
+        # page / search subset) so the sidebar can pre-fill its
+        # From/To date inputs with the true first and last task dates.
+        min_ts, max_ts = _history_date_range()
         event: dict[str, Any] = {
             "type": "history",
             "sessions": sessions,
             "offset": offset,
             "generation": generation,
+            "dateRange": {"min": min_ts, "max": max_ts},
         }
         self._broadcast_to_conn(event, conn_id)
 

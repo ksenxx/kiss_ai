@@ -315,10 +315,6 @@ body.remote-chat .search-wrap input {
   color: #ececec;
 }
 
-body.remote-chat .history-filter-chk {
-  border-radius: 999px;
-}
-
 /* Settings form fields → dark rounded inputs */
 body.remote-chat .config-label input[type="text"],
 body.remote-chat .config-label input[type="password"],
