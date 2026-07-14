@@ -134,6 +134,25 @@ def test_install_sh_traps_sighup_for_pty_teardown() -> None:
     )
 
 
+def _reset_signals() -> None:
+    """Restore default terminal-signal dispositions in the harness child.
+
+    POSIX requires a non-interactive shell to start asynchronous
+    (``cmd &``) children with SIGINT/SIGQUIT *ignored*, and ignored
+    dispositions survive fork+exec — so when the pytest session itself is
+    launched as a background job (CI runners, ``nohup pytest &``, parallel
+    test drivers), the harness bash would inherit ``SIG_IGN`` for SIGINT.
+    Bash cannot trap a signal that was ignored on entry to the shell, so
+    ``trap handle_interrupt INT`` would silently never install and the
+    ``os.killpg(..., SIGINT)`` below would be a no-op.  Resetting to
+    ``SIG_DFL`` (via ``preexec_fn``, i.e. post-fork/pre-exec) restores the
+    disposition the harness — and the real VS Code integrated terminal —
+    assumes.
+    """
+    for sig in (signal.SIGINT, signal.SIGQUIT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, signal.SIG_DFL)
+
+
 def _wait_for_log(log: Path, needle: str, timeout: float = 10.0) -> str:
     """Re-read *log* until *needle* appears or *timeout* elapses.
 
@@ -220,6 +239,7 @@ def test_install_sh_outer_trap_survives_sigint(tmp_path: Path) -> None:
     proc = subprocess.Popen(
         ["bash", str(harness)],
         start_new_session=True,
+        preexec_fn=_reset_signals,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -274,6 +294,7 @@ def test_install_sh_outer_trap_survives_sighup(tmp_path: Path) -> None:
     proc = subprocess.Popen(
         ["bash", str(harness)],
         start_new_session=True,
+        preexec_fn=_reset_signals,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
