@@ -1176,7 +1176,7 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
 #upload-btn {
   background: color-mix(in srgb, var(--fg) 3%, transparent); color: color-mix(in srgb, var(--fg) 58%, transparent);
   border: 1px solid color-mix(in srgb, var(--fg) 8%, transparent); border-radius: 6px;
-  padding: 4px 6px; cursor: pointer; flex-shrink: 0;
+  padding: 2px 3px; cursor: pointer; flex-shrink: 0;
   transition: color 0.15s, border-color 0.2s;
   display: flex; align-items: center; justify-content: center;
 }
@@ -1186,7 +1186,7 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
 #menu-btn {
   background: none; border: none;
   color: color-mix(in srgb, var(--fg) 50%, transparent); cursor: pointer;
-  padding: 4px; transition: color 0.15s, opacity 0.15s;
+  padding: 2px; transition: color 0.15s, opacity 0.15s;
   display: flex; align-items: center; position: relative;
 }
 #menu-btn:hover:not(:disabled) { color: color-mix(in srgb, var(--fg) 66%, transparent); }
@@ -1196,7 +1196,7 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
 .toggle-btn {
   background: none; border: none;
   color: color-mix(in srgb, var(--fg) 50%, transparent); cursor: pointer;
-  padding: 4px; transition: color 0.15s, opacity 0.15s;
+  padding: 2px; transition: color 0.15s, opacity 0.15s;
   display: flex; align-items: center; position: relative;
 }
 .toggle-btn:hover:not(:disabled) { color: color-mix(in srgb, var(--fg) 66%, transparent); }
