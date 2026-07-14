@@ -105,6 +105,7 @@ CONTROL_IDS = [
     "stop-btn",
     "sidebar",
     "sidebar-close",
+    "sidebar-resizer",
     "sidebar-tab-history-panel",
     "history-search",
     "history-search-clear",
@@ -408,7 +409,9 @@ def test_desktop_media_query_docks_sidebar() -> None:
     )
     assert sidebar, "docked #sidebar rule missing from desktop block"
     assert "transform: none" in sidebar.group(1)
-    assert "width: 300px" in sidebar.group(1)
+    assert "width: var(--sidebar-w, 300px)" in sidebar.group(1), (
+        "sidebar width must be driven by the --sidebar-w variable"
+    )
     overlay = re.search(
         r"body\.remote-chat\.remote-desktop #sidebar-overlay\s*"
         r"\{([^}]*)\}",
@@ -420,9 +423,9 @@ def test_desktop_media_query_docks_sidebar() -> None:
     app = re.search(
         r"body\.remote-chat\.remote-desktop #app\s*\{([^}]*)\}", block
     )
-    assert app and "margin-left: 300px" in app.group(1), (
-        "#app must clear the 300px docked sidebar"
-    )
+    assert app and "margin-left: var(--sidebar-w, 300px)" in app.group(
+        1
+    ), "#app must clear the docked sidebar via the SAME width variable"
 
 
 DECOLORIZED_PANEL_SELECTORS = [
@@ -515,6 +518,65 @@ def test_main_js_remote_desktop_wiring() -> None:
     assert guard != -1 and mm != -1 and guard < mm, (
         "the remote-chat guard must run before matchMedia is queried"
     )
+
+
+# ── Resizable docked sidebar ─────────────────────────────────────────
+
+
+def test_sidebar_resizer_in_chat_html() -> None:
+    """chat.html ships an accessible resize handle inside #sidebar."""
+    html = CHAT_HTML.read_text(encoding="utf-8")
+    m = re.search(r"<div id=\"sidebar-resizer\"[^>]*>", html)
+    assert m, "#sidebar-resizer handle missing from chat.html"
+    tag = m.group(0)
+    assert 'role="separator"' in tag
+    assert 'aria-orientation="vertical"' in tag
+    assert 'tabindex="0"' in tag
+
+
+def test_sidebar_resizer_css() -> None:
+    """The handle is hidden by default and becomes a col-resize strip
+    on the docked desktop sidebar; drags disable text selection."""
+    css = _read_codex_css()
+    hidden = re.search(
+        r"body\.remote-chat #sidebar-resizer\s*\{([^}]*)\}", css
+    )
+    assert hidden and "display: none" in hidden.group(1), (
+        "resizer must be hidden outside the desktop dock"
+    )
+    resizing = re.search(
+        r"body\.remote-chat\.sidebar-resizing\s*\{([^}]*)\}", css
+    )
+    assert resizing and "user-select: none" in resizing.group(1), (
+        "text selection must be disabled while dragging"
+    )
+    m = re.search(
+        r"@media \((?:min-width: 900px|width >= 900px)\)\s*\{(.*)\}\s*$",
+        css,
+        flags=re.S,
+    )
+    assert m
+    desktop = re.search(
+        r"body\.remote-chat\.remote-desktop #sidebar-resizer\s*"
+        r"\{([^}]*)\}",
+        m.group(1),
+    )
+    assert desktop, "desktop resizer rule missing from the media block"
+    rule = desktop.group(1)
+    assert "display: block" in rule
+    assert "cursor: col-resize" in rule
+    assert "touch-action: none" in rule
+
+
+def test_main_js_sidebar_resize_wiring() -> None:
+    """main.js wires the resizer: pointer capture drag, persistence,
+    pointercancel handling, all driven through --sidebar-w."""
+    js = (MEDIA_DIR / "main.js").read_text(encoding="utf-8")
+    assert "sidebar-resizer" in js
+    assert "kiss-sidebar-w" in js
+    assert "--sidebar-w" in js
+    assert "setPointerCapture" in js
+    assert "pointercancel" in js
 
 
 # ── Live HTTP serving ────────────────────────────────────────────────

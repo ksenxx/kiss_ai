@@ -474,15 +474,32 @@ body.remote-chat #output > *:not(#welcome) {
   margin-right: auto;
 }
 
+/* ── Sidebar resize handle ───────────────────────────────
+ * The #sidebar-resizer drag handle only exists visually on the
+ * docked desktop sidebar (rules in the media block below); it is
+ * hidden everywhere else, including the mobile drawer and the
+ * VS Code extension webview (all rules body.remote-chat scoped). */
+body.remote-chat #sidebar-resizer {
+  display: none;
+}
+
+/* Disable text selection while dragging the resize handle. */
+body.remote-chat.sidebar-resizing {
+  user-select: none;
+}
+
 /* ── Desktop: dock the history sidebar on the left ───────
  * body.remote-desktop is added by main.js only on the remote page
  * when matchMedia('(min-width: 900px)') matches.  The sidebar keeps
  * its position:fixed; left:0 from main.css and simply stops
- * translating off-canvas; #app clears the docked 300px column. */
+ * translating off-canvas; #app clears the docked column.  BOTH the
+ * sidebar width and #app's margin are driven by the SAME
+ * --sidebar-w custom property (set by the resize handle in main.js)
+ * so they can never desync. */
 @media (width >= 900px) {
   body.remote-chat.remote-desktop #sidebar {
     transform: none;
-    width: 300px;
+    width: var(--sidebar-w, 300px);
     border-right: 1px solid rgb(255 255 255 / 8%);
   }
 
@@ -491,6 +508,27 @@ body.remote-chat #output > *:not(#welcome) {
   }
 
   body.remote-chat.remote-desktop #app {
-    margin-left: 300px;
+    margin-left: var(--sidebar-w, 300px);
+  }
+
+  /* Right-edge drag handle: a 6px col-resize strip.  #sidebar is
+   * position:fixed (a containing block), so the absolute child
+   * pins to its right edge.  touch-action:none lets pointer events
+   * drive the drag on touch screens too. */
+  body.remote-chat.remote-desktop #sidebar-resizer {
+    display: block;
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 6px;
+    cursor: col-resize;
+    touch-action: none;
+  }
+
+  body.remote-chat.remote-desktop #sidebar-resizer:hover,
+  body.remote-chat.remote-desktop #sidebar-resizer:active,
+  body.remote-chat.remote-desktop #sidebar-resizer:focus-visible {
+    background: rgb(255 255 255 / 12%);
   }
 }
