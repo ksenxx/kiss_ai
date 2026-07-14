@@ -131,8 +131,19 @@ class ProvenanceReport:
 
     @property
     def has_dangerous_sink(self) -> bool:
-        """Return ``True`` when any dangerous sink was found."""
-        return bool(self.findings)
+        """Return ``True`` when a MEDIUM-or-HIGH dangerous sink was found.
+
+        LOW-severity findings (e.g. bandit ``B603`` for ordinary hardcoded
+        ``subprocess.run(['git', 'rev-parse', 'HEAD'])`` calls) are treated
+        as advisory only — otherwise every legitimate use of ``subprocess``
+        anywhere in the patched codebase becomes a false positive.  This
+        matches the MSR-25 finding that a raw sink-name detector (CodeQL out
+        of the box) flags 0% of real backdoors while raising noise on benign
+        code; the veto-worthy findings are the ones bandit already labels
+        MEDIUM/HIGH (``B602`` shell=True, ``B301`` pickle, ``B506`` yaml,
+        ``B701`` autoescape=False, etc.).
+        """
+        return any(f.severity in {"MEDIUM", "HIGH"} for f in self.findings)
 
     @property
     def categories(self) -> set[str]:
