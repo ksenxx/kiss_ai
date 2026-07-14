@@ -267,8 +267,10 @@ def test_live_thread_renders_codex_flat_style_with_screenshots(
     assert styles["tchTransform"] == "none"
     assert styles["tchColor"] == "rgb(142, 142, 142)"
     assert styles["tchBg"] == "rgba(0, 0, 0, 0)"
-    # Mono output keeps the #171717 inset surface; nested inside a
-    # .tc only the bottom corners stay rounded.
+    # Tool-result output keeps the #171717 inset surface (rendered in
+    # the task panel's sans stack since the task-panel-matched
+    # typography change); nested inside a .tc only the bottom corners
+    # stay rounded.
     assert styles["trBg"] == "rgb(23, 23, 23)"
     assert styles["trRadius"] in ("12px", "0px 0px 12px 12px")
     # Result card renders like a plain assistant reply.

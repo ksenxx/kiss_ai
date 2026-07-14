@@ -449,6 +449,9 @@ body.remote-chat .think .lbl {
 body.remote-chat .think .cnt {
   color: #8e8e8e;
   font-size: var(--fs-base);
+
+  /* The task panel renders upright — thinking content matches. */
+  font-style: normal;
 }
 
 body.remote-chat .llm-panel {
@@ -465,13 +468,16 @@ body.remote-chat .llm-panel-hdr {
   font-weight: 500;
 }
 
-/* Monospace output blocks: the one inset surface in the thread. */
+/* Inset output blocks: the one inset surface in the thread.  Like
+ * every other chat-panel content they render in the task panel's
+ * sans stack, not the editor's monospace font. */
 body.remote-chat .tr {
   background: #171717;
   border: 1px solid rgb(255 255 255 / 8%);
   border-radius: 12px;
   color: #afafaf;
   font-size: var(--fs-base);
+  font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
 }
 
 body.remote-chat .tr .rl {
@@ -592,11 +598,16 @@ body.remote-chat.sidebar-resizing {
   user-select: none;
 }
 
-/* ── Uniform panel typography ────────────────────────────
+/* ── Uniform panel typography (task-panel-matched) ───────
  * On the remote page every piece of body text inside a chat
  * panel renders at ONE size (--fs-base) regardless of nesting
  * (main.css shrinks .txt inside .llm-panel, uses --fs-md for
- * tool/result/prompt bodies and hard-codes 12px merge hunks). */
+ * tool/result/prompt bodies and hard-codes 12px merge hunks)
+ * AND in the same sans --vscode-font-family stack the pinned
+ * task panel (#task-panel) uses — main.css (plus the browser's
+ * UA stylesheet for pre/code) puts tool paths/bodies, results,
+ * system/bash output, merge hunks and code in the editor's
+ * monospace font. */
 body.remote-chat .txt {
   font-size: var(--fs-base);
 }
@@ -611,14 +622,17 @@ body.remote-chat .llm-panel .think .cnt {
 
 body.remote-chat .tc-b {
   font-size: var(--fs-base);
+  font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
 }
 
 body.remote-chat .tp {
   font-size: var(--fs-base);
+  font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
 }
 
 body.remote-chat .bash-panel-content {
   font-size: var(--fs-base);
+  font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
 }
 
 body.remote-chat .rs {
@@ -643,6 +657,7 @@ body.remote-chat .prompt-body {
 
 body.remote-chat .sys {
   font-size: var(--fs-base);
+  font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
 }
 
 body.remote-chat .merge-info-body {
@@ -651,10 +666,12 @@ body.remote-chat .merge-info-body {
 
 body.remote-chat .merge-ctx {
   font-size: var(--fs-base);
+  font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
 }
 
 body.remote-chat .merge-hunk {
   font-size: var(--fs-base);
+  font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
 }
 
 body.remote-chat .txt code {
@@ -672,6 +689,82 @@ body.remote-chat .md-body pre code {
 body.remote-chat .md-body th,
 body.remote-chat .md-body td {
   font-size: var(--fs-base);
+}
+
+/* Catch-all for every pre/code content in the thread (main.css's
+ * bare ``code`` rule and the UA's ``pre`` default are monospace);
+ * the #output id outranks main.css's class-based mono rules. */
+body.remote-chat #output pre,
+body.remote-chat #output code {
+  font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
+}
+
+/* ── History rows: per-chat color on the left border ─────
+ * main.css paints each History row with its per-chat pastel
+ * --task-color background and near-black text/buttons.  On the
+ * remote page the row goes neutral-dark with light text and the
+ * per-chat color moves to a thick left border. */
+body.remote-chat .running-item {
+  background-color: rgb(255 255 255 / 4%);
+  color: #ececec;
+  border-left: 4px solid var(--task-color, transparent);
+}
+
+body.remote-chat .running-item-metrics {
+  color: #afafaf;
+}
+
+body.remote-chat .running-item-workspace,
+body.remote-chat .running-item-ids {
+  color: #8e8e8e;
+}
+
+body.remote-chat .running-item .ids-copy-btn,
+body.remote-chat .running-item .sidebar-item-delete,
+body.remote-chat .running-item .sidebar-item-copy,
+body.remote-chat .running-item .sidebar-item-favorite {
+  color: #ececec;
+}
+
+body.remote-chat .running-item .ids-copy-btn:hover,
+body.remote-chat .running-item .sidebar-item-delete:hover,
+body.remote-chat .running-item .sidebar-item-copy:hover,
+body.remote-chat .running-item .sidebar-item-favorite:hover {
+  background: rgb(255 255 255 / 10%);
+}
+
+/* Keep the state colors the light overrides above would otherwise
+ * outrank, with dark-page-legible greens for the copied ticks. */
+body.remote-chat .running-item .sidebar-item-favorite.favorited {
+  color: #f5b400;
+}
+
+body.remote-chat .running-item .ids-copy-btn.copied,
+body.remote-chat .running-item .sidebar-item-copy.copied {
+  color: #4caf50;
+}
+
+/* ── History rows: all metadata on ONE wrapping line ─────
+ * main.css stacks the metrics / workspace+meta / ids spans as a
+ * flex column and nowrap-clips the long ones.  The remote page
+ * flows all of them inline — steps, tok, cost, duration, time,
+ * work dir, model, wt, parallel, auto-commit, chat id, task id —
+ * as a single dot-separated line that wraps. */
+body.remote-chat .running-item-info {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+body.remote-chat .running-item-info .running-item-metrics,
+body.remote-chat .running-item-info .running-item-workspace,
+body.remote-chat .running-item-info .running-item-ids {
+  white-space: normal;
+  overflow: visible;
+}
+
+body.remote-chat .running-item-workspace::before,
+body.remote-chat .running-item-ids::before {
+  content: " • ";
 }
 
 /* ── Desktop: dock the history sidebar on the left ───────
