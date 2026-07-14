@@ -360,69 +360,122 @@ body.remote-chat .server-reset-confirm-btn {
   }
 }
 
-/* ── Colorless chat panels (Codex thread) ────────────────
- * The Codex desktop thread renders assistant/tool content in flat
- * neutral panels: no orange tool headers, no green result cards, no
- * purple/cyan prompt headers.  Error red is intentionally KEPT
- * (main.css .tr.err / .rl.fail / .wt-result-err are not overridden)
- * so failures still stand out. */
+/* ── Codex flat thread (indistinguishable from Codex) ────
+ * The real Codex desktop/app thread renders assistant, tool, and
+ * thinking content FLAT on the page background: no cards, no filled
+ * header strips, no uppercase labels.  Activity labels ("Bash",
+ * "Thinking", nested-agent output) are quiet sentence-case muted-gray
+ * rows with the chevron as the only affordance.  The one elevated
+ * element is monospace output (bash stream / tool results), which
+ * gets a subtle inset #171717 block at the Codex 12px radius.  Error
+ * red is intentionally KEPT (main.css .tr.err / .rl.fail /
+ * .wt-result-err are not overridden) so failures still stand out. */
+
+/* Container panels: flat on the page, no card chrome. */
 body.remote-chat .tc {
-  border-color: rgb(255 255 255 / 10%);
-  background: #171717;
+  border: 1px solid rgb(255 255 255 / 8%);
+  border-radius: 12px;
+  background: transparent;
 }
 
 body.remote-chat .tc-h {
-  background: rgb(255 255 255 / 4%);
-  color: #afafaf;
+  background: transparent;
+  color: #8e8e8e;
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: 500;
 }
 
 body.remote-chat .tc-h.tc-h-bash {
-  background: rgb(255 255 255 / 4%);
-  color: #afafaf;
+  background: transparent;
+  color: #8e8e8e;
 }
 
 body.remote-chat .rc {
-  border: 1px solid rgb(255 255 255 / 10%);
-  background: #171717;
+  border: none;
+  border-radius: 0;
+  background: transparent;
 }
 
 body.remote-chat .rc-h {
-  background: rgb(255 255 255 / 4%);
+  background: transparent;
+  text-transform: none;
+  letter-spacing: normal;
+  padding-left: 0;
+  padding-right: 0;
 }
 
 body.remote-chat .rc-h h3 {
   color: #ececec;
+  font-size: 15px;
+}
+
+body.remote-chat .rc-body {
+  padding-left: 0;
+  padding-right: 0;
 }
 
 body.remote-chat .system-prompt,
 body.remote-chat .prompt {
-  border-color: rgb(255 255 255 / 10%);
-  background: #171717;
+  border: 1px solid rgb(255 255 255 / 8%);
+  border-radius: 12px;
+  background: transparent;
 }
 
 body.remote-chat .system-prompt-h,
 body.remote-chat .prompt-h {
-  background: rgb(255 255 255 / 4%);
-  color: #afafaf;
+  background: transparent;
+  color: #8e8e8e;
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: 500;
 }
 
 body.remote-chat .think {
-  border-color: rgb(255 255 255 / 10%);
-  background: #171717;
+  border: none;
+  background: transparent;
+  padding-left: 0;
+  padding-right: 0;
 }
 
 body.remote-chat .think .lbl {
-  color: #afafaf;
+  color: #8e8e8e;
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: 500;
+}
+
+body.remote-chat .think .cnt {
+  color: #8e8e8e;
 }
 
 body.remote-chat .llm-panel {
-  border-color: rgb(255 255 255 / 10%);
-  background: #171717;
+  border: 1px solid rgb(255 255 255 / 8%);
+  border-radius: 12px;
+  background: transparent;
 }
 
+body.remote-chat .llm-panel-hdr {
+  background: transparent;
+  color: #8e8e8e;
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: 500;
+}
+
+/* Monospace output blocks: the one inset surface in the thread. */
 body.remote-chat .tr {
   background: #171717;
-  border-color: rgb(255 255 255 / 10%);
+  border: 1px solid rgb(255 255 255 / 8%);
+  border-radius: 12px;
+  color: #afafaf;
+}
+
+body.remote-chat .tr .rl {
+  color: #8e8e8e;
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: 500;
 }
 
 body.remote-chat .tr.note {
@@ -443,12 +496,14 @@ body.remote-chat .tr.warn strong {
 }
 
 body.remote-chat .merge-info {
-  border-color: rgb(255 255 255 / 10%);
-  background: #171717;
+  border: 1px solid rgb(255 255 255 / 8%);
+  border-radius: 12px;
+  background: transparent;
 }
 
 body.remote-chat .merge-info-hdr {
   color: #ececec;
+  font-weight: 500;
 }
 
 body.remote-chat .wt-result-ok {
@@ -458,7 +513,52 @@ body.remote-chat .wt-result-ok {
 
 body.remote-chat .bash-panel {
   background: #171717;
-  border-color: rgb(255 255 255 / 10%);
+  border: 1px solid rgb(255 255 255 / 8%);
+  border-radius: 12px;
+}
+
+/* Nested mono blocks inside a tool-call panel keep the panel's own
+ * rounding (main.css strips their border/margin when nested). */
+body.remote-chat .tc > .bash-panel,
+body.remote-chat .tc > .tr {
+  border: none;
+  border-radius: 0 0 12px 12px;
+  border-top: 1px solid rgb(255 255 255 / 8%);
+}
+
+/* Code blocks inside streamed markdown match the inset surface. */
+body.remote-chat .txt pre,
+body.remote-chat .md-body pre {
+  background: #171717;
+  border: 1px solid rgb(255 255 255 / 8%);
+  border-radius: 12px;
+}
+
+/* main.css paints .hljs with `background: var(--surface2) !important`,
+ * which would clash with the pre's #171717 inset surface; make the
+ * highlighted code transparent so the pre's surface shows through. */
+body.remote-chat .txt pre code.hljs,
+body.remote-chat .md-body pre code.hljs {
+  background: transparent !important;
+  border-radius: 0;
+}
+
+/* Muted argument/metadata rows inside tool-call bodies. */
+body.remote-chat .tc-arg {
+  color: #8e8e8e;
+}
+
+body.remote-chat .tc-arg-name {
+  color: #afafaf;
+}
+
+/* Quiet time footer + collapse preview, Codex-muted. */
+body.remote-chat .panel-time {
+  color: #8e8e8e;
+}
+
+body.remote-chat .collapse-preview {
+  color: #8e8e8e;
 }
 
 /* ── Codex chat alignment ────────────────────────────────
