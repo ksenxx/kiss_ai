@@ -21,11 +21,14 @@ def test_corpus_balance():
 
 
 def test_cwe_coverage():
-    """Verify all 5 CWE families are present."""
+    """Verify all 5 SWExploit CWE families are present in the corpus."""
     corpus = generate_corpus()
     cwes = {c.cwe_type for c in corpus if c.cwe_type}
     expected = {"CWE-78", "CWE-502", "CWE-327", "CWE-94", "CWE-22"}
-    assert cwes == expected, f"Missing CWEs: {expected - cwes}"
+    # The corpus additionally contains false-premise cases with different CWE
+    # tags (e.g. CWE-284, CWE-352); those are welcome extras — we only require
+    # the SWExploit-canonical five to be a subset.
+    assert expected.issubset(cwes), f"Missing CWEs: {expected - cwes}"
 
 
 def test_corpus_structure():
