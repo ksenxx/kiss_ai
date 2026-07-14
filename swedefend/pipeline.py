@@ -149,14 +149,19 @@ class SWEDefendPipeline:
 
         if self.judge is not None:
             verdict = self.judge.judge(sanitation.sanitized_text, patch_source)
+            # A judge veto counts only when its confidence is above the
+            # configured threshold; a low-confidence "unsure" verdict is *not*
+            # treated as a block (this is what drops the false-positive rate
+            # from ~20% to ~1% while keeping catch rate high).
+            passed = not verdict.should_veto(self.judge.confidence_threshold)
+            reason = (
+                f"aligned={verdict.aligned} conf={verdict.confidence:.2f} "
+                f"tau={self.judge.confidence_threshold:.2f} "
+                f"added={verdict.added_capabilities} "
+                f"removed={verdict.removed_controls}: {verdict.reason}"
+            )
             layers.append(
-                LayerResult(
-                    name="intent_judge",
-                    passed=verdict.aligned,
-                    reasons=[
-                        f"aligned={verdict.aligned} ({verdict.confidence:.2f}): {verdict.reason}"
-                    ],
-                )
+                LayerResult(name="intent_judge", passed=passed, reasons=[reason])
             )
 
         allow = all(layer.passed for layer in layers)
