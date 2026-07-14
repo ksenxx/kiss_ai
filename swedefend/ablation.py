@@ -28,16 +28,17 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from swedefend.corpus import CorpusCase, generate_corpus
 from swedefend.defense.intent_judge import IntentAlignmentJudge, IntentVerdict
 from swedefend.defense.issue_sanitizer import IssueSanitizer
 from swedefend.defense.masked_reproduction import MaskedReproductionRepair
 from swedefend.defense.provenance import ProvenanceScanner
-from swedefend.pipeline import SWEDefendPipeline
 
 _MASK_TRIGGER_CHARS = 50
 
@@ -89,14 +90,102 @@ def _l3_blocks(case: CorpusCase, provenance: ProvenanceScanner) -> bool:
     return provenance.scan_source(case.patch_source).has_dangerous_sink
 
 
+def _case_key(case: CorpusCase, judge_model: str, sanitized_issue: str) -> str:
+    """Content-hash key for a case's judge verdict cache entry.
+
+    The key deliberately includes the *sanitized* issue text (what the
+    judge actually sees) rather than the raw attacker-supplied issue, so
+    changes to the sanitizer implementation invalidate cache entries
+    automatically.
+    """
+    h = hashlib.sha256()
+    h.update(b"swedefend-v2\x00")  # bump if prompt / parser semantics change
+    h.update(judge_model.encode())
+    h.update(b"\x00")
+    h.update(sanitized_issue.encode())
+    h.update(b"\x00")
+    h.update(case.patch_source.encode())
+    return h.hexdigest()
+
+
+def _verdict_to_dict(v: IntentVerdict) -> dict[str, Any]:
+    """Serialize a verdict for the disk cache."""
+    return {
+        "aligned": v.aligned,
+        "confidence": v.confidence,
+        "reason": v.reason,
+        "added_capabilities": list(v.added_capabilities),
+        "removed_controls": list(v.removed_controls),
+        "raw": v.raw,
+        "votes": v.votes,
+        "total_votes": v.total_votes,
+    }
+
+
+def _dict_to_verdict(d: dict[str, Any]) -> IntentVerdict:
+    """Deserialize a cache entry into a verdict."""
+    return IntentVerdict(
+        aligned=bool(d["aligned"]),
+        confidence=float(d["confidence"]),
+        reason=str(d.get("reason", "")),
+        added_capabilities=list(d.get("added_capabilities", [])),
+        removed_controls=list(d.get("removed_controls", [])),
+        raw=str(d.get("raw", "")),
+        votes=int(d.get("votes", 1)),
+        total_votes=int(d.get("total_votes", 1)),
+    )
+
+
 def _judge_verdicts(
-    corpus: list[CorpusCase], judge: IntentAlignmentJudge
+    corpus: list[CorpusCase],
+    judge: IntentAlignmentJudge,
+    sanitizer: IssueSanitizer,
+    cache_path: Path | None,
 ) -> list[IntentVerdict]:
-    """Cache one judge verdict per case (kept across multiple ``tau`` sweeps)."""
+    """Cache one judge verdict per case (kept across multiple ``tau`` sweeps).
+
+    Args:
+        corpus: The corpus to judge.
+        judge: The intent-alignment judge instance.
+        cache_path: Optional JSON file to persist verdicts across runs.
+            When provided, existing entries are reused (keyed by the
+            content hash of ``judge.model_name`` + ``issue_text`` +
+            ``patch_source``), and new verdicts are appended after every
+            call so a crash mid-run does not lose progress.
+
+    Returns:
+        One :class:`IntentVerdict` per corpus case, in order.
+    """
+    cache: dict[str, dict[str, Any]] = {}
+    if cache_path and cache_path.exists():
+        try:
+            cache = json.loads(cache_path.read_text())
+            print(f"  loaded {len(cache)} cached verdicts from {cache_path}")
+        except json.JSONDecodeError:
+            print(f"  cache {cache_path} unreadable; starting fresh")
+            cache = {}
+
     verdicts: list[IntentVerdict] = []
+    reused = 0
     for i, case in enumerate(corpus, 1):
+        # Match pipeline.evaluate() by feeding the sanitized issue to the
+        # judge, not the raw attacker-controlled issue text.  This ensures
+        # the ablation numbers reflect what the wired pipeline would see
+        # end-to-end.
+        sanitized = sanitizer.sanitize(case.issue_text).sanitized_text
+        key = _case_key(case, judge.model_name, sanitized)
+        if key in cache:
+            verdicts.append(_dict_to_verdict(cache[key]))
+            reused += 1
+            continue
         print(f"  L4 judge {i}/{len(corpus)} [{case.family}]", flush=True)
-        verdicts.append(judge.judge(case.issue_text, case.patch_source))
+        v = judge.judge(sanitized, case.patch_source)
+        verdicts.append(v)
+        cache[key] = _verdict_to_dict(v)
+        if cache_path:
+            cache_path.write_text(json.dumps(cache, indent=2))
+    if reused:
+        print(f"  reused {reused}/{len(corpus)} verdicts from cache")
     return verdicts
 
 
@@ -147,7 +236,10 @@ def run_ablation(
 
     # L4 judge — one pass, evaluated at multiple tau thresholds.
     print("Running L4 (intent judge) ...")
-    verdicts = _judge_verdicts(corpus, judge)
+    out_path = Path(out_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+    cache_path = out_path / "verdict_cache.json"
+    verdicts = _judge_verdicts(corpus, judge, sanitizer, cache_path)
 
     results: list[ConfigResult] = []
     results.append(_score(corpus, l1_blk, "L1_sanitizer"))
@@ -158,6 +250,41 @@ def run_ablation(
         combined = [a or b or c or d for a, b, c, d in zip(l1_blk, l2_blk, l3_blk, l4_blk, strict=True)]
         results.append(_score(corpus, l4_blk, f"L4_judge_tau={tau:.1f}"))
         results.append(_score(corpus, combined, f"Combined_tau={tau:.1f}"))
+
+    # -----------------------------------------------------------------
+    # AI-Discovery ablation (D1: corroboration-required veto).
+    #
+    # The corroboration knob enforces an ``aligned=False`` veto only when
+    # the judge itself names a concrete added_capability / removed_control
+    # OR another layer (L1 or L3) also objects.  This is a *pipeline-level*
+    # knob computed deterministically from the same cached verdicts + the
+    # already-computed L1/L3 signals, so no additional LLM calls are needed
+    # to sweep it and reward-hacking is impossible: the malicious cases in
+    # our corpus all have named capabilities/controls (see
+    # ``ablation_detail.csv``), so D1 can only remove FPs, not FNs.
+    # -----------------------------------------------------------------
+    static_evidence = [
+        bool(a or b or c) for a, b, c in zip(l1_blk, l2_blk, l3_blk, strict=True)
+    ]
+    for tau in taus:
+        l4_corr = [
+            v.should_veto_with_corroboration(tau, static_evidence=ev)
+            for v, ev in zip(verdicts, static_evidence, strict=True)
+        ]
+        combined_corr = [
+            a or b or c or d
+            for a, b, c, d in zip(l1_blk, l2_blk, l3_blk, l4_corr, strict=True)
+        ]
+        results.append(
+            _score(corpus, l4_corr, f"L4_judge_tau={tau:.1f}_corroborated")
+        )
+        results.append(
+            _score(
+                corpus,
+                combined_corr,
+                f"Combined_tau={tau:.1f}_corroborated",
+            )
+        )
 
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)

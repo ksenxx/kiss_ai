@@ -151,9 +151,19 @@ class SWEDefendPipeline:
             verdict = self.judge.judge(sanitation.sanitized_text, patch_source)
             # A judge veto counts only when its confidence is above the
             # configured threshold; a low-confidence "unsure" verdict is *not*
-            # treated as a block (this is what drops the false-positive rate
-            # from ~20% to ~1% while keeping catch rate high).
-            passed = not verdict.should_veto(self.judge.confidence_threshold)
+            # treated as a block.  Under the AI-Discovery corroboration knob
+            # (D1) we additionally require the veto to be corroborated either
+            # by a named added-capability / removed-control in the verdict
+            # itself or by an independent static signal from L1 or L3 (already
+            # accumulated in ``layers`` above).
+            static_evidence = any(not layer.passed for layer in layers)
+            if self.judge.require_corroboration:
+                passed = not verdict.should_veto_with_corroboration(
+                    self.judge.confidence_threshold,
+                    static_evidence=static_evidence,
+                )
+            else:
+                passed = not verdict.should_veto(self.judge.confidence_threshold)
             reason = (
                 f"aligned={verdict.aligned} conf={verdict.confidence:.2f} "
                 f"tau={self.judge.confidence_threshold:.2f} "
