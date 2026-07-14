@@ -846,13 +846,14 @@ class VSCodeServer(
                     steps += int(getattr(cur, "step_count", 0) or 0)
                 session["steps"] = steps
                 # Overlay run-mode metadata for the meta line.
-                # The persisted ``extra`` is only written at task
-                # END (see ``_TaskRunnerMixin._run_task_inner``),
-                # so a still-running task has no model / flag
-                # values in its row.  Read them straight off the
-                # live agent / tab so the history sidebar's meta
-                # line renders the same model + flags the running
-                # tab actually uses.  ``agent.model_name`` is the
+                # ``ChatSorcarAgent.run`` now persists an early
+                # ``extra`` payload when it inserts the row, but live
+                # state remains authoritative while the task runs
+                # (and supports legacy rows without that payload).
+                # Read it straight off the live agent / tab so the
+                # history sidebar's meta line renders the same model
+                # + flags the running tab actually uses.
+                # ``agent.model_name`` is the
                 # model the in-flight task was launched with
                 # (``_TaskRunnerMixin._cmd_run`` plumbs this from
                 # the ``run`` command's ``model`` field through to
@@ -916,14 +917,14 @@ class VSCodeServer(
                 "cost": 0.0,
                 "steps": 0,
                 "is_favorite": False,
-                # ``work_dir`` persisted on this task's row at
-                # completion time (see ``_TaskRunnerMixin`` →
-                # ``_save_task_extra``).  Surfaced so the history
-                # sidebar's Workspace filter checkbox can hide rows
-                # whose ``work_dir`` differs from the client's
-                # currently-configured workspace.  Empty string when
-                # the task pre-dates the persistence change or is
-                # still running.
+                # ``work_dir`` persisted on this task's row: first in
+                # the early ``extra`` payload at row insertion, then
+                # finalized by ``_TaskRunnerMixin._save_task_extra``.
+                # Surfaced so the history sidebar's Workspace filter
+                # can compare completed/error rows with the client's
+                # configured workspace.  Empty only for legacy rows
+                # that pre-date the persistence change (or no-folder
+                # launches).
                 "work_dir": "",
                 # Per-task run-mode metadata persisted by
                 # ``_TaskRunnerMixin._run_task_inner`` into the row's

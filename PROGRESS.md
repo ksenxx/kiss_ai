@@ -1,3 +1,71 @@
+# PROGRESS — Just-started task hidden from History panel
+
+## Task
+
+The task History panel did not show a task as soon as kiss-web started it.
+Reproduce with end-to-end jsdom tests, fix it, use `claude-fable-5` for
+development, and complete an independent `gpt-5.6-sol` review.
+
+## Root cause
+
+The refresh/event pipeline was already correct: `ChatSorcarAgent.run` inserts
+the task row, immediately broadcasts global `tasks_updated`, the open webview
+posts `getHistory`, and `_get_history` returns the row with `is_running: true`.
+The row was rendered but hidden by the default-checked Workspace filter.
+
+`applyHistoryFilterVisibility()` compared the early-persisted row `work_dir`
+with the browser's configured workspace using strict string equality. Worktree
+setup obtains its repository root from `git rev-parse --show-toplevel`, which
+can resolve symlinks (macOS `/var` → `/private/var`), and Windows can mix VS
+Code `fsPath` backslashes with Git forward slashes. Therefore a just-started
+running row could have a non-empty path variant and receive `display: none`.
+
+## Changes
+
+1. Added and registered
+   `src/kiss/agents/vscode/test/historyRunningRowAtTaskStart.test.js`: seven
+   end-to-end jsdom tests drive the real `chat.html`, `panelCopy.js`, and
+   `main.js`. They cover the full open-sidebar → start-time `tasks_updated` →
+   `getHistory` → running-row render sequence, resolved-path mismatch,
+   completely different running workspace, Running-checkbox independence,
+   completed-row mismatch, trailing separators on either side, and Windows
+   separator/case variants. The primary test failed before the fix with the
+   row rendered as `display:none`, and passes afterward.
+1. Fixed `applyHistoryFilterVisibility()` so `data-category="running"` always
+   passes only the Workspace predicate. Running rows remain governed by the
+   Running, date, and Favorite filters.
+1. Added lexical work-dir normalization for non-running rows: trailing
+   separators are removed while roots are preserved; Windows backslashes are
+   folded to `/` and Windows paths are case-folded. POSIX case remains
+   significant.
+1. Corrected stale server comments that still said `extra.work_dir` and run
+   metadata were persisted only at completion; they are now saved early and
+   finalized at completion.
+
+## Independent review (`gpt-5.6-sol`)
+
+Audited all `dataset.category`/`dataset.workDir` write/read sites, category/date/
+Favorite interactions, `tasks_updated` broadcasting and CLI/WS transport,
+running-task ID timing, server `_get_history`, sidebar-open gating, and the
+shared remote-webapp routing. The review found one cross-platform gap in the
+initial trailing-slash-only normalizer: Windows `Uri.fsPath` uses backslashes
+while Git can return forward slashes. Added the seventh regression test and the
+Windows-aware normalization above. It also strengthened the primary test to
+use the real `tasks_updated` lifecycle and corrected stale persistence
+comments. No remaining missed wiring or introduced behavior bug was found.
+
+## Verification
+
+- New jsdom regression: **7 passed**; confirmed **fails pre-fix / passes
+  post-fix**.
+- Final impacted jsdom matrix: **16 suites passed**, including all History,
+  adjacent-scroll, work-dir, and running-task regressions.
+- Backend task-start/transport/history suites: **13 passed**.
+- `npm run lint`, TypeScript compile/typecheck: passed.
+- `uv run check --full`: **all checks passed**.
+
+______________________________________________________________________
+
 # PROGRESS — Horizontally resizable docked history sidebar (remote webapp)
 
 ## Task
