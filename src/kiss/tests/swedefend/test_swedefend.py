@@ -264,6 +264,179 @@ class TestIntentJudge:
         assert not verdict.aligned
         assert "exfiltration" in verdict.reason
 
+    def test_corroboration_gate_blocks_uncorroborated_veto(
+        self, monkeypatch: Any
+    ) -> None:
+        """AI-Discovery D1: an uncorroborated ``aligned=False`` veto is passed.
+
+        A high-confidence ``aligned=False`` verdict that names neither an
+        added capability nor a removed control, and where no other layer
+        objects, is treated as *no veto* by the corroboration gate.
+        """
+        _register_synthetic_pair(monkeypatch, "gpt-judge-primary", "gpt-judge-fallback")
+        server = HTTPServer(
+            ("127.0.0.1", 0),
+            _make_judge_handler(
+                {
+                    "aligned": False,
+                    "confidence": 0.9,
+                    "reason": "scope creep",
+                    "added_capabilities": [],
+                    "removed_controls": [],
+                }
+            ),
+        )
+        port = server.server_address[1]
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        judge = IntentAlignmentJudge(
+            "gpt-judge-primary",
+            model_config={"base_url": f"http://127.0.0.1:{port}/v1", "api_key": "sk-test"},
+            confidence_threshold=0.9,
+            require_corroboration=True,
+        )
+        try:
+            should_block, _ = judge.veto("issue", "def f():\n    return 1\n")
+        finally:
+            server.shutdown()
+        assert not should_block
+
+    def test_corroboration_gate_allows_named_capability_veto(
+        self, monkeypatch: Any
+    ) -> None:
+        """AI-Discovery D1: a named-capability veto still enforces."""
+        _register_synthetic_pair(monkeypatch, "gpt-judge-primary", "gpt-judge-fallback")
+        server = HTTPServer(
+            ("127.0.0.1", 0),
+            _make_judge_handler(
+                {
+                    "aligned": False,
+                    "confidence": 0.95,
+                    "reason": "adds shell execution",
+                    "added_capabilities": ["subprocess shell=True"],
+                    "removed_controls": [],
+                }
+            ),
+        )
+        port = server.server_address[1]
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        judge = IntentAlignmentJudge(
+            "gpt-judge-primary",
+            model_config={"base_url": f"http://127.0.0.1:{port}/v1", "api_key": "sk-test"},
+            confidence_threshold=0.9,
+            require_corroboration=True,
+        )
+        try:
+            should_block, _ = judge.veto("issue", "def f():\n    return 1\n")
+        finally:
+            server.shutdown()
+        assert should_block
+
+    def test_corroboration_gate_allows_static_evidence_veto(
+        self, monkeypatch: Any
+    ) -> None:
+        """AI-Discovery D1: static evidence (L1/L3) unlocks the veto."""
+        _register_synthetic_pair(monkeypatch, "gpt-judge-primary", "gpt-judge-fallback")
+        server = HTTPServer(
+            ("127.0.0.1", 0),
+            _make_judge_handler(
+                {
+                    "aligned": False,
+                    "confidence": 0.9,
+                    "reason": "scope creep",
+                    "added_capabilities": [],
+                    "removed_controls": [],
+                }
+            ),
+        )
+        port = server.server_address[1]
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        judge = IntentAlignmentJudge(
+            "gpt-judge-primary",
+            model_config={"base_url": f"http://127.0.0.1:{port}/v1", "api_key": "sk-test"},
+            confidence_threshold=0.9,
+            require_corroboration=True,
+        )
+        try:
+            should_block, _ = judge.veto(
+                "issue", "def f():\n    return 1\n", static_evidence=True
+            )
+        finally:
+            server.shutdown()
+        assert should_block
+
+    def test_self_consistency_majority_vote(self, monkeypatch: Any) -> None:
+        """AI-Discovery D2: 2/3 misaligned votes -> aggregate misaligned."""
+        _register_synthetic_pair(monkeypatch, "gpt-judge-primary", "gpt-judge-fallback")
+        # A stateful handler that cycles through three fixed replies to
+        # simulate self-consistency's N=3 sampling.
+        replies = [
+            {"aligned": False, "confidence": 0.9, "reason": "sink",
+             "added_capabilities": ["subprocess"], "removed_controls": []},
+            {"aligned": True, "confidence": 0.6, "reason": "ok",
+             "added_capabilities": [], "removed_controls": []},
+            {"aligned": False, "confidence": 0.95, "reason": "sink",
+             "added_capabilities": ["subprocess"], "removed_controls": []},
+        ]
+        state = {"i": 0}
+
+        class _Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802
+                length = int(self.headers.get("Content-Length", 0))
+                if length:
+                    self.rfile.read(length)
+                reply = replies[state["i"] % len(replies)]
+                state["i"] += 1
+                body = json.dumps(
+                    {
+                        "id": "x",
+                        "object": "chat.completion",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": json.dumps(reply),
+                                },
+                                "finish_reason": "stop",
+                            }
+                        ],
+                        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                    }
+                ).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), _Handler)
+        port = server.server_address[1]
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        judge = IntentAlignmentJudge(
+            "gpt-judge-primary",
+            model_config={"base_url": f"http://127.0.0.1:{port}/v1", "api_key": "sk-test"},
+            self_consistency_n=3,
+        )
+        try:
+            verdict = judge.judge("issue", "patch")
+        finally:
+            server.shutdown()
+        assert not verdict.aligned  # 2/3 vote misaligned
+        assert verdict.total_votes == 3
+        assert verdict.votes == 2  # misaligned votes
+        assert "subprocess" in verdict.added_capabilities
+        assert verdict.confidence == 0.925  # mean of the two misaligned samples
+
+    def test_self_consistency_requires_positive_n(self) -> None:
+        """AI-Discovery D2: n<1 is a programmer error."""
+        import pytest
+
+        with pytest.raises(ValueError):
+            IntentAlignmentJudge("gpt-judge-primary", self_consistency_n=0)
+
     def test_malformed_reply_fails_closed(self, monkeypatch: Any) -> None:
         _register_synthetic_pair(monkeypatch, "gpt-judge-primary", "gpt-judge-fallback")
 
