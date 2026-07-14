@@ -2422,6 +2422,13 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
   border-top: none;
 }
 
+.adjacent-task-placeholder {
+  padding: 10px;
+  color: var(--dim);
+  font-size: var(--fs-sm);
+  font-style: italic;
+}
+
 /* ── Collapsible panels ─────────────────────────────── */
 .collapse-header {
   display: flex; align-items: center;
