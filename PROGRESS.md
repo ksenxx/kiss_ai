@@ -1,4 +1,34 @@
-# PROGRESS — Run all tests in 16 parallel splits, diagnose & fix failures — Sessions 7–8 (current task)
+# PROGRESS — Run all tests in 16 parallel splits, diagnose & fix failures — Session 9 (current task)
+
+## Task
+
+Run all tests split by test-method count into (cores − 2 = 16) parallel
+splits via `run_parallel`, report causes of failing tests, classify each
+failure as project bug vs test bug, fix accordingly.
+
+## Session 9 (this run)
+
+1. Collected 6138 tests (`uv run pytest --collect-only -q -p no:cov`;
+   73 slow deselected by the pyproject `-m 'not slow'` addopts). Machine
+   has 18 cores → 16 splits. Balanced node IDs into 16 buckets by test
+   count keeping each test file whole (384×10 / 383×6 = 6138).
+1. Ran all 16 splits concurrently via `run_parallel`
+   (`uv run python -m pytest -p no:cov -p no:cacheprovider -q "@./tmp/split_N.txt"`, one worker per split, logs in
+   `./tmp/result_N.log`).
+1. Results verified directly from all 16 logs: **ALL 16 SPLITS GREEN —
+   6085 passed, 53 skipped, 0 failed, 0 errors** (totals add up to all
+   6138 collected tests; 445 subtests also passed). Only non-fatal
+   supabase DeprecationWarnings appeared in split 11.
+1. Nothing to fix this session: the fixes from Session 8 (commit
+   649e48fa — `prog="sorcar"` in cli_helpers.py and the
+   formatting-tolerant regex in
+   test_adjacent_scroll_while_running.py) held, and the previously
+   flaky PTY Ctrl+C abort test passed under full 16-way parallel load.
+1. No source or test code modified; temp split/result files cleaned up.
+
+______________________________________________________________________
+
+# PROGRESS — Run all tests in 16 parallel splits, diagnose & fix failures — Sessions 7–8
 
 ## Task
 
