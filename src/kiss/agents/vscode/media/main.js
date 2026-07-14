@@ -7970,6 +7970,58 @@
     return btn;
   }
 
+  /**
+   * Build a tiny icon-only copy button for a single id (chat id or
+   * task id) on the History sidebar's per-row ids line.
+   *
+   * Clicking the button copies the raw *idText* string to the system
+   * clipboard via ``navigator.clipboard.writeText`` (falling back to
+   * ``fallbackCopyText`` when the async clipboard API is unavailable)
+   * and briefly swaps the clipboard icon for a green check mark.
+   * Click propagation is stopped so the surrounding history row's
+   * click handler (which reopens the chat) does not fire.
+   *
+   * @param {string} idText - the raw id string to copy.
+   * @param {string} kind - 'chat' or 'task'; used for the modifier
+   *   class (``ids-copy-chat`` / ``ids-copy-task``) and the aria/
+   *   tooltip labels.
+   * @returns {HTMLButtonElement}
+   */
+  function makeIdCopyButton(idText, kind) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'ids-copy-btn ids-copy-' + kind;
+    btn.dataset.tooltip = 'Copy ' + kind + ' id';
+    btn.setAttribute('aria-label', 'Copy ' + kind + ' id to clipboard');
+    btn.innerHTML = PANEL_COPY_SVG;
+
+    let flashTimer = 0;
+    const flash = () => {
+      btn.innerHTML = PANEL_CHECK_SVG;
+      btn.classList.add('copied');
+      clearTimeout(flashTimer);
+      flashTimer = setTimeout(() => {
+        btn.innerHTML = PANEL_COPY_SVG;
+        btn.classList.remove('copied');
+      }, 1500);
+    };
+
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      e.preventDefault();
+      const payload = String(idText == null ? '' : idText);
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(payload).then(flash, () => {
+          if (fallbackCopyText(payload)) flash();
+        });
+      } else if (fallbackCopyText(payload)) {
+        flash();
+      }
+    });
+
+    return btn;
+  }
+
   function chatIdBgColor(chatId) {
     if (!chatId) return 'hsl(0, 0%, 75%)';
     let hash = 5381;
@@ -8335,19 +8387,41 @@
         parentIdRaw === undefined || parentIdRaw === null
           ? ''
           : String(parentIdRaw);
-      const idParts = [];
-      if (chatId) idParts.push('chat ' + chatId);
-      if (taskIdStr) idParts.push('task ' + taskIdStr);
-      if (parentIdStr) idParts.push('parent ' + parentIdStr);
-      if (idParts.length > 0) {
+      // The line is built from text nodes plus (for the chat and
+      // task ids) a tiny icon-only copy button appended right after
+      // the id it copies.  The buttons contribute no text of their
+      // own, so the span's ``textContent`` keeps the exact
+      // ``chat <id> • task <id> • parent <id>`` format.
+      const idSegments = [];
+      if (chatId) {
+        idSegments.push({text: 'chat ' + chatId, copy: chatId, kind: 'chat'});
+      }
+      if (taskIdStr) {
+        idSegments.push({
+          text: 'task ' + taskIdStr,
+          copy: taskIdStr,
+          kind: 'task',
+        });
+      }
+      if (parentIdStr) {
+        idSegments.push({text: 'parent ' + parentIdStr});
+      }
+      if (idSegments.length > 0) {
         const idsSpan = document.createElement('span');
         idsSpan.className = 'running-item-ids';
-        const idsText = idParts.join(' • ');
-        idsSpan.textContent = idsText;
+        idSegments.forEach((seg, i) => {
+          if (i > 0) {
+            idsSpan.appendChild(document.createTextNode(' • '));
+          }
+          idsSpan.appendChild(document.createTextNode(seg.text));
+          if (seg.copy) {
+            idsSpan.appendChild(makeIdCopyButton(seg.copy, seg.kind));
+          }
+        });
         // Native HTML tooltip — useful when the combined line is
         // long enough to be clipped by overflow:hidden in the
         // sidebar.
-        idsSpan.title = idsText;
+        idsSpan.title = idSegments.map(seg => seg.text).join(' • ');
         info.appendChild(idsSpan);
       }
 
