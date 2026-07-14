@@ -18,6 +18,13 @@
 - Edited `src/kiss/agents/vscode/media/remote-codex.css`: added body.remote-chat-scoped rule after the `.active` rule giving #menu-btn/#upload-btn/#tricks-btn/#voice-btn `margin-left:-5px; margin-right:-5px` with menu-btn margin-left:0 and voice-btn margin-right:0 (outer edges pinned).
 - Measured live with tmp/measure_gaps.py (RemoteAccessServer + Playwright): visible icon gaps BEFORE: 11/11/21/21 px; AFTER: 6/6/11/11 px — halved. Screenshots verified (tmp/composer_before.png, composer_after.png): looks good, no glyph overlap.
 
+## Final verification session (mobile)
+
+- Confirmed no `@media` rule in remote-codex.css overrides the negative margins at mobile widths (only `#output`/`#input-area` padding change at <=600px), so the halving applies on mobile.
+- Ran `uv run pytest src/kiss/tests/agents/vscode/test_remote_composer_button_gap.py -v` (mobile 420x900 viewport): 1 passed.
+- Fresh visual check at true mobile viewport (390x844, dpr=2, is_mobile=True) via live RemoteAccessServer + Playwright: measured visible gaps 6/6/11/11 px (historical 11/11/21/21 px) — halved; screenshot of `#input-footer` inspected — burger, model pill, attach, promptlet, mic evenly tight, no glyph overlap, send button intact.
+- `uv run check --full`: all checks passed.
+
 ## Remaining plan (was)
 
 1. Write a small scratch script in ./tmp/ (based on the harness above) to launch server + Playwright, measure adjacent gaps between #menu-btn, #model-btn, #upload-btn, #tricks-btn, #voice-btn bounding boxes, and take a BEFORE screenshot of the composer.
