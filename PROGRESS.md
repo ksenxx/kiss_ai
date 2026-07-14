@@ -1,88 +1,90 @@
-# PROGRESS — Run all tests in parallel, diagnose failures, classify and fix
+# PROGRESS — Uniform chat-panel font size in the remote web app
 
 ## Task
 
-Run the full test suite split into (cores − 2 = 8) parallel workers via
-`run_parallel`, report the cause of every failing test, classify each
-failure as a project bug vs a test bug, and fix accordingly.
+In the remote web app (RemoteAccessServer page sharing chat.html /
+main.css / main.js with the VS Code webview, restyled by
+remote-codex.css), make the body-text font size in every chat panel
+uniform. Reproduce with real e2e tests first, then fix. Dev with
+claude-fable-5; independent review with gpt-5.6-sol.
 
-## Session 1 — full parallel run
+## Root cause
 
-1. Read `SORCAR.md`. Machine has 10 cores → 8 splits.
-1. Collected 6320 tests (`uv run pytest --collect-only -q -m 'not slow' --no-cov`), split round-robin into 8 files of 790 tests each.
-1. Ran all 8 splits concurrently via `run_parallel`
-   (`uv run pytest --no-cov -q -p no:randomly @tmp/split_N.txt`).
-1. Results: splits 0, 4, 5, 6, 7 fully passed. 4 unique failures:
-   - `test_install_script_tee_subshell_signal.py::test_install_sh_outer_trap_survives_sigint`
-     — log empty although rc==0 and post-signal marker existed.
-   - same file `::test_install_sh_outer_trap_survives_sighup` — same
-     symptom.
-   - `test_bughunt4_interrupt_lock.py::test_ctrl_c_during_lock_wait_still_stops_the_worker`
-     — `WORKER[...]` abort marker never appeared in PTY output.
-   - `test_bughunt_cli.py::test_ctrl_c_abort_actually_stops_the_running_agent`
-     — Ctrl+C byte sent but interruption never observed.
-1. All 4 pass serially in the foreground → environment-sensitive, not
-   deterministic code failures.
+Remote page 1rem=16px. Chat-panel body text split across four sizes:
 
-## Session 2 — root-cause analysis
+- 16px (`--fs-base`): `.txt`, `.sys`, `.rs b`, `.merge-info-hdr`,
+  `.wt-result-*`, `#task-panel`.
+- 14.5px (`--fs-md`): `.think .cnt`, `.tc-b`/`.tc-arg`/`.tp`, `.tr`,
+  `.bash-panel-content`, `.rc-body`, `.rs`, `.system-prompt-body`,
+  `.prompt-body`, `.llm-panel .txt` (nested text shrinks!),
+  `.merge-info-body`, all code (`.txt code`, `.md-body code`,
+  `.md-body pre code`, `.md-body th/td`).
+- Hard-coded 12px: `.merge-ctx`/`.merge-hunk` (main.css).
+- Hard-coded 15px: `body.remote-chat .rc-h h3` (remote-codex.css).
+- Inline `font-size:var(--fs-xl)` status line emitted by
+  `createResultPanel` in main.js AND `streamResultEvent` in demo.js
+  (inline styles beat any stylesheet override).
 
-1. Ruled out subprocess-coverage theory (`.coveragerc.subprocess` does
-   not exist, so `COVERAGE_PROCESS_START` is never set).
-1. Standalone concurrency repro (30 simultaneous foreground harness
-   runs): 30/30 pass → concurrency itself is NOT causal.
-1. Key discovery: any repro launched via `nohup cmd … &` from a
-   non-interactive shell fails even alone with zero load; the same repro
-   via `setsid` or in the foreground passes.
-   `nohup python3 -c "print(signal.getsignal(SIGINT))" &` prints
-   `1` (SIG_IGN).
-1. ROOT CAUSE: POSIX requires non-interactive shells to start
-   background (`&`) children with SIGINT/SIGQUIT set to `SIG_IGN`, and
-   ignored dispositions survive fork+exec. The `run_parallel` workers
-   launch pytest as background jobs, so the whole pytest process tree
-   has SIGINT ignored. Consequences:
-   - install-script tests: bash cannot trap a signal ignored on entry
-     to the shell → the harness `trap handle_interrupt INT` never
-     installs → `os.killpg(..., SIGINT)` is a no-op → script completes
-     (rc 0, marker written) but the trap diagnostic is never logged →
-     log assertion fails.
-   - sorcar PTY tests: the PTY child python inherits SIGINT=SIG_IGN;
-     CPython installs its KeyboardInterrupt handler only when SIGINT is
-     not ignored at startup → `\x03` on the PTY does nothing → steering
-     never aborts → `WORKER[...]` marker never printed.
-1. Proof: each failing test run standalone via `nohup … &` with no
-   other load fails deterministically; with `signal.signal(SIGINT, SIG_DFL)` reset first, 50/50 concurrent runs pass.
-1. CLASSIFICATION: all 4 failures are TEST BUGS (harnesses assume the
-   default SIGINT disposition in the pytest process). `install.sh`'s
-   trap logic and `cli_steering`'s abort logic are correct — no project
-   bug; no project code changed.
+## Fix (remote page only; VS Code webview pixel-identical)
 
-## Session 3 — fixes and verification
+1. `media/main.js` `createResultPanel`: status divs now use
+   `class="rc-status"` / `class="rc-status rc-status-fail"` instead of
+   inline styles.
+1. `media/demo.js` `streamResultEvent`: same class-based status divs
+   (was `style.cssText` with inline `--fs-xl`); found by the
+   gpt-5.6-sol review — demo.js is loaded by the remote page via
+   `{{DEMO_SRC}}`.
+1. `media/main.css`: added `.rc-status { color: var(--yellow); font-weight: 700; font-size: var(--fs-xl); margin-bottom: 10px; }`
+   and `.rc-status.rc-status-fail { color: var(--red); }` replicating
+   the old inline look for the VS Code webview.
+1. `media/remote-codex.css`: "Uniform panel typography" section — all
+   `body.remote-chat`-scoped rules pinning `font-size: var(--fs-base)`
+   on every panel body-text selector (`.txt`, `.llm-panel .txt`,
+   `.think .cnt`, `.llm-panel .think .cnt`, `.tc-b`, `.tp`, `.tr`,
+   `.bash-panel-content`, `.rs`, `.rs b`, `.rc-body`, `.rc-status`,
+   `.system-prompt-body`, `.prompt-body`, `.sys`, `.merge-info-hdr`,
+   `.merge-info-body`, `.merge-ctx`, `.merge-hunk`, `.txt code`,
+   `.md-body code`, `.md-body pre code`, `.md-body th/td`) and the
+   `.rc-h h3` 15px outlier changed to `var(--fs-base)`. Duplicate
+   selectors merged into existing rules to satisfy stylelint
+   no-duplicate-selectors. Headers/labels stay `--fs-sm` (uniform
+   among themselves); md headings keep their heading scale.
 
-1. Fixed `src/kiss/tests/agents/sorcar/_pty_helper.py`: `_acquire_ctty`
-   (the `preexec_fn` used by `pty_spawn`, running post-fork/pre-exec)
-   now resets SIGINT/SIGQUIT/SIGTERM/SIGHUP to `SIG_DFL` before exec,
-   with a docstring explaining the POSIX background-job rule. Fixes
-   both sorcar PTY failures and hardens every pty_spawn-based test.
-   ```python
-   for sig in (signal.SIGINT, signal.SIGQUIT, signal.SIGTERM, signal.SIGHUP):
-       signal.signal(sig, signal.SIG_DFL)
-   ```
-1. Fixed `src/kiss/tests/agents/vscode/test_install_script_tee_subshell_signal.py`:
-   added module-level `_reset_signals()` helper (same reset, fully
-   documented) and passed `preexec_fn=_reset_signals` to both harness
-   `subprocess.Popen` calls (SIGINT and SIGHUP tests).
-1. Verified all 4 previously failing tests pass BOTH in the foreground
-   (7 passed in 13.15s, including the other tests in those files) AND
-   under the reproducing condition
-   (`nohup uv run pytest … & disown`: 7 passed in 13.33s).
-1. Regression check: all 8 other pty_spawn-using test files
-   (test_bughunt4_sigcont, test_bughunt8_ui_backslash_parity,
-   test_bughunt4_prompt_markers, test_pty_helper,
-   test_cli_steering_bare_cr_multiline, test_bughunt6_stderr_proxy,
-   test_cli_repl, test_cli_multiline_input_pty) — 31 passed in 49s.
-1. `uv run check --full` — all checks pass (ruff, mypy, pyright,
-   compileall, mdformat).
-1. Committed the two test-file fixes to git; cleaned `tmp/`.
+## Tests (src/kiss/tests/agents/vscode/test_codex_uniform_font_size.py)
+
+- 26 static regex tests: every panel body selector pinned to
+  `var(--fs-base)` in remote-codex.css; no 15px `.rc-h h3`; main.js
+  AND demo.js emit class-based status (no inline font-size); main.css
+  `.rc-status` replicates the old inline declarations.
+- 1 live e2e: boots the production RemoteAccessServer (TLS, ephemeral
+  port) + headless Chromium (Playwright); injects a transcript
+  covering 28 probes; renders the result card through the PRODUCTION
+  renderer (`window._demoApi.processEvent({type:'result',...})` →
+  `createResultPanel`); asserts every computed font-size == 16px.
+  Confirmed RED pre-fix (16px / 14.545px / 12px / 15px split) and
+  GREEN post-fix; re-verified RED via `git stash` after the fix.
+
+## Verification
+
+- `uv run pytest test_codex_uniform_font_size.py` → 30 passed.
+- `test_codex_mobile_layout.py` + `test_codex_flat_thread_live.py` →
+  62 passed (fixed one scoping-guard failure by replacing
+  `.md-body :is(th, td)` with `th`/`td` split selectors).
+- JS: remoteDesktopWidths, remoteSidebarResize, buttonSizeAndBlur,
+  remoteDesktopSidebar, bughunt2_demo_continue, demoExtensionReplay,
+  demoSecondReplayCleanState — all pass.
+- eslint (main.js, demo.js) + stylelint (main.css, remote-codex.css)
+  clean; `uv run check --full` → all checks passed.
+
+## Review (gpt-5.6-sol)
+
+Findings fixed: (1) demo.js inline status style missed (production
+wiring via chat.html {{DEMO_SRC}}); (2) live test originally injected
+hand-written `.rc-status` markup — now exercises the real
+createResultPanel path; (3) added `.merge-file-name`/`.wt-result-ok`
+probes. Confirmed: specificity sufficient without !important, VS Code
+webview isolation intact (scoping-guard test), header/heading scales
+intentionally preserved.
 
 ______________________________________________________________________
 
@@ -1781,95 +1783,76 @@ daemonStatus block retained); TestHandleReadyRestoredTabs 4/4 including
 the new targeting test; impacted JS suites re-run green; npm run lint;
 `uv run check --full` — all passed.
 
-# PROGRESS — Deleting a task from History must remove its chat from every open tab
+______________________________________________________________________
+
+# PROGRESS — claude-fable-5 not revealing thinking tokens
 
 ## Task
 
-When a task is deleted from the task history panel, any open tab on any
-client showing the task's chat MUST remove the task and its chat from
-the tab's chat webview. Reproduce with real end-to-end jsdom tests,
-then fix. claude-fable-5 for development; gpt-5.6-sol for independent
-review/debugging.
+"Why are you not revealing thinking tokens when you run a task using
+claude-fable-5?" Reproduce with e2e tests, then fix. Dev with
+claude-fable-5; independent review with gpt-5.6-sol.
 
-## Root cause (proven by failing real-WSS e2e tests)
+## Root cause (confirmed via 10-site web research + 5 live API probes)
 
-`VSCodeServer._handle_delete_task` (server.py) broadcasts
-`{"type": "taskDeleted", "taskId": <id>, "chatId": <chat>, "chatHasMoreTasks": <bool>}` via `self.printer.broadcast`. The
-production printer `WebPrinter.broadcast` (web_server.py) classifies
-ANY event carrying a truthy top-level `taskId` as a *task-stream*
-event: it records it, queues it for persistence, and fans it out ONLY
-to tabs subscribed to that task id. The `taskDeleted` event names the
-just-DELETED (completed → zero subscribers) task, so the event was
-SILENTLY SWALLOWED and never reached any client — neither VS Code UDS
-webviews nor remote WSS browsers (both are served by
-`_send_to_ws_clients`). The frontend handler in media/main.js
-(`case 'taskDeleted'`, ~line 4822) was already correct; it simply
-never received the event. A pre-existing Python test had hidden this
-by monkeypatching `printer.broadcast`.
+Two independent bugs in `AnthropicModel._build_create_kwargs`
+(src/kiss/core/models/anthropic_model.py):
 
-## Fix (claude-fable-5)
+1. **Missing `display: "summarized"`.** KISS sent
+   `thinking={"type": "adaptive"}`. On fable-5 / mythos-5 / sonnet-5 /
+   opus-4-7 / opus-4-8, `thinking.display` defaults to `"omitted"` —
+   the API returns thinking blocks with an EMPTY `thinking` field
+   (encrypted signature only) and emits NO `thinking_delta` stream
+   events, so `thinking_callback` never fires with text.
+1. **Forced `tool_choice={"type": "any"}`.** For adaptive-thinking
+   models with tools (KISSAgent always passes tools), KISS forced
+   `tool_choice=any`. Tool use with thinking supports only
+   `auto`/`none`; forcing tool use makes the API *silently disable*
+   thinking ("graceful thinking degradation") — live probe: `any` →
+   `['tool_use']` only; `auto` → `['thinking','text','tool_use']`.
 
-- `json_printer.py`: new module-level
-  `GLOBAL_EVENT_TYPES = frozenset({"taskDeleted"})` documenting that
-  these events carry a `taskId` PAYLOAD field but are NOT stream
-  events; base `JsonPrinter.broadcast` returns early for them (never
-  `_inject_task_id`/`_record_event`/`_persist_event` — prevents
-  appending to an active recording or re-inserting event rows for a
-  deleted task).
-- `web_server.py`: `WebPrinter.broadcast` gained a branch after the
-  `"tabId" in event` branch and before `_inject_task_id`:
-  `if event.get("type") in GLOBAL_EVENT_TYPES: self._send_to_ws_clients(json.dumps(event)); return` — verbatim
-  global broadcast to EVERY connected client (WSS browsers + VS Code
-  UDS writers in lockstep). Docstring updated.
+## Fix (src/kiss/core/models/anthropic_model.py)
 
-## New end-to-end tests (no mocks)
+- Adaptive branch now sends
+  `thinking={"type": "adaptive", "display": "summarized"}`.
+- `tool_choice=any` is now forced only when `"thinking" not in kwargs`
+  (non-thinking models like claude-3-5-sonnet); any thinking mode
+  (enabled or adaptive) stays on the API default `auto`.
+- User-supplied `thinking`/`tool_choice` in model_config still pass
+  through unchanged.
 
-- `src/kiss/tests/agents/vscode/test_delete_task_broadcast_all_clients.py`
-  (real `RemoteAccessServer` over WSS + real `websockets` clients,
-  persistence pinned to a temp dir): (1) two clients — client 1 sends
-  `deleteTask`, BOTH must receive `taskDeleted` with
-  taskId/chatId/chatHasMoreTasks=true; (2) deleting the last task in a
-  chat yields `chatHasMoreTasks: false`; (3) `taskDeleted` is never
-  persisted as a chat event for the deleted task. All 3 FAILED
-  pre-fix, PASS post-fix.
-- `src/kiss/agents/vscode/test/taskDeletedRemovesChat.test.js` (real
-  chat.html + panelCopy.js + main.js jsdom harness, registered in
-  package.json test chain): (1) deleting the tab's current task closes
-  the tab and posts closeTab; (2) `chatHasMoreTasks:false` closes the
-  chat's tab even when currentTaskId differs; (3) an INACTIVE tab's
-  outputFragment is pruned of the deleted `.adjacent-task` block while
-  surviving content stays intact; (4) an unrelated chat's tab is
-  untouched; (5) full live lifecycle (submit → clear with chat_id →
-  running → streamed events → task_done) then `taskDeleted` closes the
-  tab with no stale content. All 5 pass.
+## Tests
 
-## gpt-5.6-sol independent review — no bugs found
-
-- Full diff reviewed. `_send_to_ws_clients` confirmed to reach both
-  WSS clients and UDS writers; `SorcarSidebarView._installClientListener`
-  forwards everything except `merge_data` → the webview receives
-  `taskDeleted`; types.ts already declares the message variant; the
-  remote-webapp shim dispatches every non-auth WS message as a window
-  MessageEvent → browsers handle it too.
-- Audited ALL `printer.broadcast` call sites (server.py, commands.py,
-  task_runner.py, web_server.py, merge_flow.py, autocomplete.py):
-  `taskDeleted` is the only tabId-less broadcast carrying a payload
-  `taskId`; no other event suffers the misclassification.
-- main.js handler: `String()` coercion covers int/str taskId; closing
-  the last tab creates a fresh tab (locked by jsdom test 5); chatId is
-  never `""` for an existing row so fresh tabs can't be spuriously
-  matched; `_delete_task` flushes chat events before deleting and
-  cascade-deletes sub-agent rows; broadcast ordering
-  (chat lookup → delete → `_chat_has_tasks`) is correct.
-- JsonPrinter guard placement verified: an active in-memory recording
-  can no longer capture `taskDeleted`.
+- NEW `src/kiss/tests/core/models/test_anthropic_fable_thinking_display.py`
+  (13 tests, no mocks): kwargs-level display/tool_choice assertions for
+  fable-5/sonnet-5/opus-4-7/opus-4-8; user-config passthrough; e2e SSE
+  ThreadingHTTPServer test that captures the wire request (asserts
+  `display: summarized` present, `tool_choice` absent) and streams a
+  fable-5-shaped thinking+text+tool_use response, asserting thinking
+  text reaches thinking_callback/token_callback and the JsonPrinter
+  event stream (thinking_start/delta/end). All 13 failed before the
+  fix (bug reproduced), all pass after.
+- UPDATED stale assertions: test_anthropic_fable_thinking.py (thinking
+  dict + renamed tool_choice tests), test_anthropic_opus_adaptive_thinking.py
+  (2 kwargs tests), test_simplify_models_regr_providers.py (opus-4-6).
 
 ## Verification
 
-- New Python suite 3/3; `test_delete_task_removes_from_tabs.py` 11/11;
-  `test_web_server.py` 205/205; printer-equivalence/UDS/lockdown
-  suites 38/38.
-- `node test/taskDeletedRemovesChat.test.js` 5/5;
-  `node test/adjacentTaskScroll.test.js` all pass.
-- `npm run lint`, `npm run compile` (tsc) clean;
-  `uv run check --full` — ALL CHECKS PASSED.
+- Live Anthropic API: fable-5 agentic turn → blocks
+  ['thinking','text','tool_use'], thinking_callback [True, False],
+  readable summarized thinking streamed; multi-turn tool_result
+  round-trip with preserved thinking blocks → second turn also thinks
+  and finishes (no 400).
+- All anthropic model tests green (172 passed across 10 files);
+  `uv run check --full` all green.
+
+## gpt-5.6-sol review findings (addressed)
+
+1. Audited all `_build_create_kwargs` callers, thinking_callback
+   plumbing (kiss_agent, printers, cli_client, sorcar set_model,
+   fallback swap), MODEL_INFO flags — no missed wirings; openai/
+   openrouter/claude_code paths have no Anthropic tool_choice logic.
+1. Live task-level proof: this very task ran on claude-fable-5 after
+   the fix and the Thoughts panel showed streaming thinking.
+1. Unrelated PROGRESS.md reformat (mdformat collateral) reverted in a
+   follow-up commit to keep the change minimal.

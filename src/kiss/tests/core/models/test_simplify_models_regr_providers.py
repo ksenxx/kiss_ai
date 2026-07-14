@@ -260,7 +260,7 @@ class TestAnthropicNormalization:
         m = AnthropicModel("claude-opus-4-6", api_key="test")
         m.conversation = [{"role": "user", "content": "hi"}]
         kwargs = m._build_create_kwargs()
-        assert kwargs["thinking"] == {"type": "adaptive"}
+        assert kwargs["thinking"] == {"type": "adaptive", "display": "summarized"}
         assert kwargs["max_tokens"] == 65536
 
     def test_build_create_kwargs_user_config_respected(self) -> None:

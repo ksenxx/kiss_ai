@@ -370,7 +370,10 @@ class TestOpus47AdaptiveThinking:
         m = AnthropicModel("claude-opus-4-7", api_key="test-key")
         m.conversation = [{"role": "user", "content": "hi"}]
         kwargs = m._build_create_kwargs()
-        assert kwargs.get("thinking") == {"type": "adaptive"}, kwargs.get("thinking")
+        assert kwargs.get("thinking") == {
+            "type": "adaptive",
+            "display": "summarized",
+        }, kwargs.get("thinking")
 
     def test_opus_4_8_uses_adaptive_thinking_config(self) -> None:
         """``_build_create_kwargs`` must request adaptive thinking for opus-4-8.
@@ -387,7 +390,10 @@ class TestOpus47AdaptiveThinking:
         m = AnthropicModel("claude-opus-4-8", api_key="test-key")
         m.conversation = [{"role": "user", "content": "hi"}]
         kwargs = m._build_create_kwargs()
-        assert kwargs.get("thinking") == {"type": "adaptive"}, kwargs.get("thinking")
+        assert kwargs.get("thinking") == {
+            "type": "adaptive",
+            "display": "summarized",
+        }, kwargs.get("thinking")
 
     def test_opus_4_uses_enabled_thinking_config(self) -> None:
         """Older opus-4 / opus-4-1 still use ``thinking.type=enabled``."""
