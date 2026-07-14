@@ -13,7 +13,7 @@ from typing import Any
 
 from anthropic import Anthropic
 
-from kiss.core.kiss_error import KISSError
+from kiss.core.kiss_error import KISSError, ModelRefusalError
 from kiss.core.models.model import (
     Attachment,
     Model,
@@ -754,6 +754,34 @@ class AnthropicModel(Model):
                                 thinking_started = False
             return stream.get_final_message()
 
+    def _raise_on_refusal(self, response: Any) -> None:
+        """Raise :class:`ModelRefusalError` when the model refused the request.
+
+        Adaptive-thinking Claude models (fable-5 in production, task
+        ``daa89a7e``/``c3cd9c95`` in ``~/.kiss/sorcar.db``) can return
+        ``stop_reason="refusal"`` with an EMPTY ``content`` list when their
+        safety layer declines an otherwise benign prompt (observed on
+        security-research text that opus-4-8 answers normally).  Without
+        this check the empty turn propagated as ``("", [])``, KISSAgent
+        burned a useless "MUST have at least one function call" retry (a
+        refusal is deterministic for identical content), and the eventual
+        fallback swap was misreported as "repeated empty responses" — a
+        misleading adapter-bug diagnosis.
+
+        Args:
+            response: The raw Anthropic response message.
+
+        Raises:
+            ModelRefusalError: When ``response.stop_reason`` is ``"refusal"``.
+        """
+        if getattr(response, "stop_reason", None) == "refusal":
+            raise ModelRefusalError(
+                f"Model {self.model_name} refused the request for safety "
+                f'reasons (stop_reason="refusal", empty response). Retrying '
+                f"the identical request will keep failing; rephrase the "
+                f"prompt or use a different model."
+            )
+
     def generate(self) -> tuple[str, Any]:  # pragma: no cover – API call
         """Generates content from the current conversation.
 
@@ -762,6 +790,7 @@ class AnthropicModel(Model):
         """
         kwargs = self._build_create_kwargs()
         response = self._create_message(kwargs)
+        self._raise_on_refusal(response)
 
         blocks = self._normalize_content_blocks(getattr(response, "content", None))
         content = self._extract_text_from_blocks(blocks)
@@ -787,6 +816,7 @@ class AnthropicModel(Model):
         tools = self._build_anthropic_tools_schema(resolved)
         kwargs = self._build_create_kwargs(tools=tools or None)
         response = self._create_message(kwargs)
+        self._raise_on_refusal(response)
 
         stop_reason = getattr(response, "stop_reason", None)
         blocks = self._normalize_content_blocks(getattr(response, "content", None))
