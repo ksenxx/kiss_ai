@@ -1,4 +1,88 @@
-# PROGRESS — Codex-mobile remote webapp restyle — Sessions 4–6 (current task)
+# PROGRESS — Run all tests in 16 parallel splits, diagnose & fix failures — Sessions 7–8 (current task)
+
+## Task
+
+Run all tests split by test-method count into (cores − 2 = 16) parallel
+splits via `run_parallel`, report causes of failing tests, classify each
+failure as project bug vs test bug, fix accordingly. Do not modify
+project code except to fix identified bugs.
+
+## Session 7 (collection + parallel run)
+
+1. Collected 6138 tests (`uv run pytest --collect-only -q -p no:cov`;
+   73 slow deselected by pyproject addopts). Machine has 18 cores → 16
+   splits. Split node IDs into 16 balanced buckets keeping each test
+   file whole (~384 tests each).
+1. Ran all 16 splits concurrently via `run_parallel`
+   (`uv run python -m pytest -p no:cov -q "@./tmp/split_N.txt"`; the
+   args-from-file syntax is required because some parametrized node IDs
+   contain spaces).
+1. Results: **6138 tests, 3 failures** (rest passed; ~50
+   env-dependent skips):
+   - `test_bughunt_cli.py::test_ctrl_c_abort_actually_stops_the_running_agent`
+     — `WORKER[...]` PTY marker never observed.
+   - `test_cli_version_flag.py::test_version_abbreviation_rejected` —
+     `"sorcar" in captured.err` failed; stderr said
+     `python3 -m pytest: error: unrecognized arguments: --vers`.
+   - `test_adjacent_scroll_while_running.py::test_scroll_lock_still_set_on_upward_scroll_while_running`
+     — exact-literal structural assertion on main.js no longer matched.
+
+## Session 8 (this run — diagnosis + fixes)
+
+1. **Failure 1 — FLAKY under parallel CPU load, no bug.** Re-ran the
+   PTY Ctrl+C abort test 6× in isolation: 6/6 passed (\<1 s each). The
+   test forks a child interpreter on a PTY, waits up to 30 s for the
+   agent to start, then drains PTY output up to 20 s for the
+   `WORKER[...]` marker. Under 16 concurrent pytest processes the
+   child was CPU-starved past the drain deadline. Abort-injection
+   project code is correct; the generous existing timeouts are
+   adequate for any reasonable load, so no change was made.
+1. **Failure 2 — environment-sensitive prog name; hardened project
+   CLI.** Root cause: `_build_arg_parser()` in
+   `src/kiss/agents/sorcar/cli_helpers.py` created
+   `argparse.ArgumentParser(...)` without `prog=`. Python 3.14's
+   argparse derives prog from `__main__.__spec__` first, so under
+   `python -m pytest` the usage/error text says
+   `python3 -m pytest: error: ...` instead of `sorcar: error: ...`
+   (under script-style `uv run pytest` it falls back to
+   `basename(argv[0])` and the test passes). Classified as a project
+   robustness gap (the sorcar CLI's usage text should always say
+   `sorcar` no matter how the interpreter was launched). Fix: added
+   `prog="sorcar"` to the ArgumentParser call. Verified the test file
+   now passes under BOTH `uv run pytest` and
+   `uv run python -m pytest`, and all 56 tests touching
+   `_build_arg_parser` still pass.
+1. **Failure 3 — TEST BUG (stale brittle structural assertion).** The
+   test asserted the exact literal
+   `if (isRunning && e.deltaY < 0) _scrollLock = true;` in
+   `media/main.js`, but commit 487400a9 (preserve horizontal
+   scrolling while running) intentionally extended the condition to a
+   multi-line
+   `if (isRunning && (e.deltaY < 0 || Math.abs(e.deltaX) > Math.abs(e.deltaY))) { _scrollLock = true; }`.
+   The guarded behavior (upward scroll while running sets
+   `_scrollLock`) is intact and covered by the e2e
+   `sideScrollWhileRunning.test.js`. Fix: replaced the literal
+   assertion in
+   `src/kiss/tests/agents/sorcar/test_adjacent_scroll_while_running.py`
+   with a formatting-tolerant regex that matches an `if` whose
+   condition starts with `isRunning && … e.deltaY < 0` and whose body
+   sets `_scrollLock = true`.
+1. Verification: all three affected test files pass (8 passed) via
+   `uv run pytest`, and the version-flag file also passes via
+   `uv run python -m pytest`. `uv run check --full` fully green
+   (also mdformatted this PROGRESS.md, whose numbered-list style was
+   left non-canonical by a previous session).
+
+## FINAL RESULT
+
+- 6138 tests in 16 parallel splits: 3 failures. 1 parallel-load flake
+  (no change), 1 project robustness fix (`prog="sorcar"` in
+  cli_helpers.py), 1 test bug fix (regex-based structural assertion in
+  test_adjacent_scroll_while_running.py).
+
+______________________________________________________________________
+
+# PROGRESS — Codex-mobile remote webapp restyle — Sessions 4–6
 
 ## Task
 
@@ -746,15 +830,15 @@ Poisoning chain in `src/kiss/agents/vscode/media/main.js`:
 1. `setTaskText` resets `currentTaskId = null` and calls
    `resetAdjacentState()` → both scroll anchors
    (`oldestLoadedTaskId`/`newestLoadedTaskId`) become `null`.
-2. The early prompt event falls into the message-switch DEFAULT-case
+1. The early prompt event falls into the message-switch DEFAULT-case
    taskId-adoption block, whose guard only rejected
    `undefined`/`null` — the empty string passed → `currentTaskId = ''`
    and (both anchors being null) the anchors were seeded to `''`.
-3. The real taskId (e.g. `'123'`) streamed moments later updates
+1. The real taskId (e.g. `'123'`) streamed moments later updates
    `currentTaskId`, but the anchor re-seed only fired when BOTH
    anchors were still `null` — they were `''`, so they stayed `''`
    forever.
-4. Overscroll posted `getAdjacentTask {taskId: ''}`; backend
+1. Overscroll posted `getAdjacentTask {taskId: ''}`; backend
    `commands.py` `_opt_str('')` → `None` → persistence returns no
    task → server broadcast an EMPTY `adjacent_task_events` →
    `renderAdjacentTask` latched `noPrevTask = true` PERMANENTLY.
@@ -772,10 +856,10 @@ All in `src/kiss/agents/vscode/media/main.js`:
 1. DEFAULT-case adoption guard: added `ev.taskId !== ''` so early
    empty-string taskIds are never adopted; anchor re-seed now also
    fires when anchors are `''` (defensive), not only `null`.
-2. `accumulateOverscroll()`: early-return when the anchor taskId is
+1. `accumulateOverscroll()`: early-return when the anchor taskId is
    `undefined`/`null`/`''` so `getAdjacentTask` is never posted with
    an unknown row id (prevents the empty-reply noPrev/noNext latch).
-3. `task_events` active-tab path: new `else if` branch — when
+1. `task_events` active-tab path: new `else if` branch — when
    `ev.task` is empty but `ev.task_id` is present, still set
    `currentTaskId = ev.task_id`, derive `currentTaskName` from the tab
    title (fallback `'Task'`) only when it is empty, and call
