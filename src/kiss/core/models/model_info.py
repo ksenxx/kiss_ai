@@ -69,10 +69,12 @@ class ModelInfo:
         #:   its prefix-based default.
         self.extended_thinking = extended_thinking
         #: Tri-state override for ``thinking.type``.  ``True`` requests
-        #: ``{"type": "adaptive"}`` (required by Claude 4.6+ / fable /
-        #: sonnet-5 which reject ``"enabled"``); ``False`` forces
-        #: ``{"type": "enabled", "budget_tokens": ...}``; ``None`` falls
-        #: back to
+        #: ``{"type": "adaptive", "display": "summarized"}`` (required by
+        #: Claude 4.6+ / fable / sonnet-5 which reject ``"enabled"``;
+        #: ``display`` must be ``"summarized"`` because it defaults to
+        #: ``"omitted"``, which returns empty signature-only thinking);
+        #: ``False`` forces ``{"type": "enabled", "budget_tokens": ...}``;
+        #: ``None`` falls back to
         #: :func:`kiss.core.models.anthropic_model._uses_adaptive_thinking`.
         self.adaptive_thinking = adaptive_thinking
 
@@ -202,10 +204,14 @@ def _build_model_info_entry(entry: dict[str, Any]) -> ModelInfo:
       ``True`` forces on, ``False`` forces off, ``None`` defers to the
       adapter's prefix heuristic.
     * ``adaptive_thinking`` — tri-state override for whether Anthropic
-      thinking is requested with ``{"type": "adaptive"}`` (required by
-      Claude 4.6+ / fable / sonnet-5 which reject ``"enabled"``) instead
-      of ``{"type": "enabled", "budget_tokens": ...}``.  ``None`` defers
-      to :func:`kiss.core.models.anthropic_model._uses_adaptive_thinking`.
+      thinking is requested with
+      ``{"type": "adaptive", "display": "summarized"}`` (required by
+      Claude 4.6+ / fable / sonnet-5 which reject ``"enabled"``; the
+      explicit ``display: summarized`` is mandatory because the API
+      default ``"omitted"`` returns empty signature-only thinking)
+      instead of ``{"type": "enabled", "budget_tokens": ...}``.
+      ``None`` defers to
+      :func:`kiss.core.models.anthropic_model._uses_adaptive_thinking`.
     """
     return ModelInfo(
         context_length=entry["context_length"],

@@ -1856,3 +1856,60 @@ Two independent bugs in `AnthropicModel._build_create_kwargs`
    the fix and the Thoughts panel showed streaming thinking.
 1. Unrelated PROGRESS.md reformat (mdformat collateral) reverted in a
    follow-up commit to keep the change minimal.
+
+# Session: Adaptive-thinking catalog audit + future-model regression guard
+
+Task: audit all Anthropic adaptive-thinking-capable models (current and
+future MODEL_INFO.json entries) for reliance on the old
+`tool_choice: any` / missing `display: summarized` behavior, then add a
+regression test that fails automatically if a new adaptive-thinking
+model is added with a regressed request shape.
+
+## Audit (full src/ sweep — verdict: no functional issues)
+
+- The ONLY adaptive thinking dict in src/ is anthropic_model.py
+  `kwargs["thinking"] = {"type": "adaptive", "display": "summarized"}`.
+- The ONLY forced `tool_choice={"type":"any"}` is guarded by
+  `"tool_choice" not in kwargs and "thinking" not in kwargs` — can never
+  fire for thinking-capable requests.
+- MODEL_INFO.json: only claude-fable-5 and claude-sonnet-5 set
+  adaptive_thinking/extended_thinking=true; opus-4-6/4-7/4-8 rely on the
+  claude-opus-4-≥6 prefix heuristic; all consistent.
+- Other adapters (openai_compatible_model/2, claude_code_model,
+  gemini_model, codex_model, model.py) contain NO Anthropic
+  thinking-dict or tool_choice-any logic; openrouter/anthropic/\* routes
+  through openai_compatible (out of Anthropic-API scope).
+- update_models.py preserves hand-added flags on existing entries;
+  forward-looking gap: `_build_entry` emits no flags for NEW models — a
+  future adaptive-family model added without flags would silently get no
+  thinking (the original fable-5 gap class). Guarded by the new test.
+- All existing tests/docs already describe the NEW behavior; only
+  cosmetic gap was model_info.py docstrings.
+
+## Changes
+
+- NEW src/kiss/tests/core/models/
+  test_anthropic_adaptive_thinking_catalog_regression.py (18 tests):
+  dynamically walks MODEL_INFO (bare `claude-*` names, i.e. the
+  AnthropicModel-served catalog) + the prefix heuristic, so a future
+  adaptive model is covered automatically. Per adaptive model asserts:
+  (1) `thinking == {"type":"adaptive","display":"summarized"}`,
+  (2) no `tool_choice` when tools are passed,
+  (3) `_supports_extended_thinking` is also true (catches
+  adaptive_thinking=true with extended_thinking forgotten → no thinking
+  param at all). Plus: catalog-wide flag-consistency check over ALL
+  entries (adaptive_thinking=true must not pair with
+  extended_thinking=false), a non-vacuous-discovery sanity test, and an
+  inverse guard that non-thinking models still force tool_choice=any.
+- Verified the guard end-to-end: temporarily injected a hypothetical
+  `claude-mythos-5` (adaptive_thinking=true, no extended_thinking) into
+  MODEL_INFO.json and ran the file in a fresh pytest process → FAILED as
+  designed; JSON restored.
+- model_info.py: both adaptive_thinking docstrings (attribute + loader)
+  now spell out `{"type": "adaptive", "display": "summarized"}` and why
+  display is mandatory (API default "omitted" → empty thinking).
+
+## Verification
+
+- 18/18 new tests pass; 129 tests green across the impacted anthropic
+  thinking test files; `uv run check --full` all green.
