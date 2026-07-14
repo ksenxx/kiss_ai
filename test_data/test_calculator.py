@@ -16,7 +16,7 @@ from test_data.calculator.operators import OPERATORS
 
 class TestOperatorRegistry:
     def test_all_operators_registered(self):
-        assert set(OPERATORS.keys()) == {"+", "-"}
+        assert set(OPERATORS.keys()) == {"+", "-", "*", "/"}
 
     def test_each_operator_has_eval_and_precedence(self):
         for sym, mod in OPERATORS.items():
@@ -32,6 +32,22 @@ class TestOperatorRegistry:
         from test_data.calculator.operators import subtract
         assert subtract.eval(5, 3) == 2
         assert subtract.eval(0, 5) == -5
+
+    def test_multiply(self):
+        from test_data.calculator.operators import multiply
+        assert multiply.eval(3, 4) == 12
+        assert multiply.eval(-2, 5) == -10
+        assert multiply.eval(0.5, 0.5) == pytest.approx(0.25)
+
+    def test_divide(self):
+        from test_data.calculator.operators import divide
+        assert divide.eval(10, 4) == 2.5
+        assert divide.eval(-9, 3) == -3
+
+    def test_divide_by_zero(self):
+        from test_data.calculator.operators import divide
+        with pytest.raises(ZeroDivisionError, match="division by zero"):
+            divide.eval(1, 0)
 
 
 class TestTokenizer:
@@ -78,6 +94,29 @@ class TestEvaluator:
     def test_complex_expression(self):
         assert evaluate("2 + (3 - 4)") == 1
 
+    def test_multiplication(self):
+        assert evaluate("6 * 7") == 42
+
+    def test_division(self):
+        assert evaluate("10 / 4") == 2.5
+
+    def test_precedence_over_addition(self):
+        assert evaluate("2 + 3 * 4") == 14
+        assert evaluate("10 - 6 / 2") == 7
+
+    def test_parens_override_precedence(self):
+        assert evaluate("(2 + 3) * 4") == 20
+
+    def test_left_associative_division(self):
+        assert evaluate("8 / 4 / 2") == 1
+
+    def test_mixed_expression(self):
+        assert evaluate("2 * (3 + 4) - 10 / 5") == 12
+
+    def test_division_by_zero(self):
+        with pytest.raises(ZeroDivisionError):
+            evaluate("1 / 0")
+
     def test_unknown_operator_via_get_operator(self):
         with pytest.raises(ValueError, match="unknown operator"):
             _get_operator("^")
@@ -102,6 +141,12 @@ class TestCLI:
         captured = capsys.readouterr()
         assert "Error" in captured.err
 
+    def test_division_by_zero_reports_error(self, capsys):
+        ret = main(["1 / 0"])
+        assert ret == 1
+        captured = capsys.readouterr()
+        assert "Error" in captured.err
+
     def test_subprocess_integration(self):
         result = subprocess.run(
             [sys.executable, "-m", "test_data.calculator.cli", "4 + 5"],
@@ -110,3 +155,12 @@ class TestCLI:
         )
         assert result.returncode == 0
         assert result.stdout.strip() == "9"
+
+    def test_subprocess_multiply_divide(self):
+        result = subprocess.run(
+            [sys.executable, "-m", "test_data.calculator.cli", "3 * 8 / 2"],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert result.stdout.strip() == "12"
