@@ -208,7 +208,11 @@ class TestAutocommitActionCommit(_ServerHarness):
         super().setUp()
         self._messages: list[str] = []
 
-        def fake_compose(diff_text: str, user_prompt: str | None = None) -> str:
+        def fake_compose(
+            diff_text: str,
+            user_prompt: str | None = None,
+            task_result: str | None = None,
+        ) -> str:
             self._messages.append(diff_text)
             return "feat: deterministic test commit"
 
@@ -312,7 +316,11 @@ class TestAutocommitCommandRouting(_ServerHarness):
     def test_routed_commit(self) -> None:
         Path(self.tmpdir, "seed.txt").write_text("x\n")
 
-        def fake_compose(diff_text: str, user_prompt: str | None = None) -> str:
+        def fake_compose(
+            diff_text: str,
+            user_prompt: str | None = None,
+            task_result: str | None = None,
+        ) -> str:
             return "chore: test"
 
         _merge_flow_module.generate_commit_message_from_diff = fake_compose  # type: ignore[assignment]
@@ -347,7 +355,11 @@ class TestAutocommitPromptRoundtrip(_ServerHarness):
         prompt = self._event("autocommit_prompt")
         assert set(prompt["changedFiles"]) >= {"seed.txt", "extra.txt"}
 
-        def fake_compose(_diff: str, user_prompt: str | None = None) -> str:
+        def fake_compose(
+            _diff: str,
+            user_prompt: str | None = None,
+            task_result: str | None = None,
+        ) -> str:
             return "chore: auto"
 
         _merge_flow_module.generate_commit_message_from_diff = fake_compose  # type: ignore[assignment]

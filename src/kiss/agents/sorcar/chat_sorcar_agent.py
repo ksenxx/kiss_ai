@@ -107,6 +107,10 @@ class ChatSorcarAgent(SorcarAgent):
         self._subagent_info: dict[str, object] | None = None
         self._last_task_id: str | None = None
         self._last_user_prompt: str = ""
+        # Result summary of the most recently completed run(); appended
+        # to auto-commit messages under a "Result:" heading so the
+        # commit records both the task description and its outcome.
+        self._last_result_summary: str = ""
         # r4-sorcar-H3 — guards the paired ``self._last_task_id = ...``
         # assignment and ``_register_running_state()`` /
         # ``_unregister_running_state()`` calls so a concurrent reader
@@ -649,6 +653,10 @@ class ChatSorcarAgent(SorcarAgent):
         # a defensive try/except that unregisters on failure.
         try:
             self._last_user_prompt = prompt_template
+            # Reset the previous run's result so a failure before
+            # this run's summary is computed can never leak a stale
+            # result into this run's auto-commit message.
+            self._last_result_summary = ""
 
             agent_prompt = self.build_chat_prompt(prompt_template)
 
@@ -870,6 +878,10 @@ class ChatSorcarAgent(SorcarAgent):
             result_summary = "Task interrupted"
             raise
         finally:
+            # Record the run's outcome so a later auto-commit (e.g.
+            # from ``_finalize_worktree`` or merge/teardown paths)
+            # can append it to the commit message under "Result:".
+            self._last_result_summary = result_summary
             with ChatSorcarAgent._running_agents_lock:
                 ChatSorcarAgent.running_agents.pop(task_id, None)
             if registered_here:

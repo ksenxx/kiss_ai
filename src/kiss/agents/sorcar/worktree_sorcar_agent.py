@@ -253,6 +253,7 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             notify_fn=functools.partial(
                 self._broadcast_commit_notification, commit_run_id,
             ),
+            task_result=getattr(self, "_last_result_summary", "") or None,
         )
 
     def _broadcast_commit_notification(

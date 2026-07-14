@@ -88,7 +88,11 @@ def test_finalize_worktree_no_spurious_hook_warning(
         # auto-commit kicks off.
         (wt_dir / "agent_report.txt").write_text("agent's output\n")
 
-        def racing_message_fn(commit_dir: Path, user_prompt: str | None) -> str:
+        def racing_message_fn(
+            commit_dir: Path,
+            user_prompt: str | None,
+            task_result: str | None = None,
+        ) -> str:
             """Drop a new file while the (simulated) LLM is in flight.
 
             Mirrors the production race: ``stage_all`` has already
@@ -178,7 +182,11 @@ def test_finalize_worktree_warning_includes_porcelain_when_truly_stuck(
         hook.write_text("#!/bin/sh\nexit 1\n")
         hook.chmod(0o755)
 
-        def msg_fn(commit_dir: Path, user_prompt: str | None) -> str:
+        def msg_fn(
+            commit_dir: Path,
+            user_prompt: str | None,
+            task_result: str | None = None,
+        ) -> str:
             return "test: agent work"
 
         monkeypatch.setattr(  # type: ignore[attr-defined]

@@ -202,7 +202,7 @@ class TestAutoCommitChangesNotifyFn:
                 created = auto_commit_changes(
                     repo,
                     user_prompt="add f.txt",
-                    message_fn=lambda d, p: "feat: add f.txt\n\ndetails",
+                    message_fn=lambda d, p, r: "feat: add f.txt\n\ndetails",
                     notify_fn=notify,
                 )
 
@@ -235,7 +235,9 @@ class TestAutoCommitChangesNotifyFn:
 
             msg_fn_called = []
 
-            def message_fn(_d: Path, _p: str | None) -> str:
+            def message_fn(
+                _d: Path, _p: str | None, _r: str | None = None,
+            ) -> str:
                 msg_fn_called.append(True)
                 return "feat: noop"
 
@@ -267,7 +269,7 @@ class TestAutoCommitChangesNotifyFn:
                 created = auto_commit_changes(
                     repo,
                     user_prompt=None,
-                    message_fn=lambda d, p: "feat: hello",
+                    message_fn=lambda d, p, r: "feat: hello",
                 )
 
             assert created is True
@@ -287,7 +289,7 @@ class TestAutoCommitChangesNotifyFn:
                 created = auto_commit_changes(
                     repo,
                     user_prompt=None,
-                    message_fn=lambda d, p: "feat: ok",
+                    message_fn=lambda d, p, r: "feat: ok",
                     notify_fn=notify,
                 )
 
@@ -312,7 +314,7 @@ class TestAutoCommitChangesNotifyFn:
                 created = auto_commit_changes(
                     repo,
                     user_prompt=None,
-                    message_fn=lambda d, p: message,
+                    message_fn=lambda d, p, r: message,
                     notify_fn=notify,
                 )
 
@@ -332,7 +334,9 @@ class TestAutoCommitChangesNotifyFn:
 
             invocations: list[str] = []
 
-            def message_fn(_d: Path, _p: str | None) -> str:
+            def message_fn(
+                _d: Path, _p: str | None, _r: str | None = None,
+            ) -> str:
                 invocations.append("called")
                 return "feat: should not happen"
 
