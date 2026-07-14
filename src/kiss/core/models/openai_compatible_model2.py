@@ -967,7 +967,13 @@ class OpenAICompatibleModel2(Model):
         * ``system_instruction`` → top-level ``instructions=``.
         * ``reasoning_effort`` → ``reasoning.effort`` (merged into a
           shallow-copy of any caller-supplied ``reasoning`` dict so the
-          caller's config is never mutated).
+          caller's config is never mutated).  Whenever an effort is sent,
+          ``reasoning.summary`` defaults to ``"auto"`` — OpenAI returns
+          reasoning items with EMPTY summaries (and emits zero
+          ``response.reasoning_summary_text.delta`` stream events) unless
+          the request explicitly opts in, so without this default no
+          thinking tokens would ever be revealed.  A caller-supplied
+          ``summary`` always wins.
         * ``max_tokens`` / ``max_completion_tokens`` → ``max_output_tokens``
           (``max_completion_tokens`` wins when both are set).
         * ``response_format`` → ``text.format`` (Responses-API shape).
@@ -1066,6 +1072,24 @@ class OpenAICompatibleModel2(Model):
             # v1 → v2 translation contract holds.
             existing["effort"] = reasoning_effort
             kwargs["reasoning"] = existing
+        # Opt in to reasoning summaries whenever an effort is requested
+        # (covers both the ``reasoning_effort`` compatibility key handled
+        # above AND a caller-native ``reasoning: {"effort": ...}`` dict).
+        # OpenAI returns reasoning items with EMPTY summaries — and emits
+        # no ``response.reasoning_summary_text.delta`` stream events —
+        # unless the request carries ``reasoning.summary``; ``"auto"``
+        # yields the most detailed summary available.  A caller-supplied
+        # ``summary`` wins, and non-reasoning requests (no effort) never
+        # get a ``reasoning`` dict attached.
+        reasoning_cfg = kwargs.get("reasoning")
+        if (
+            isinstance(reasoning_cfg, dict)
+            and "effort" in reasoning_cfg
+            and "summary" not in reasoning_cfg
+        ):
+            reasoning_cfg = dict(reasoning_cfg)
+            reasoning_cfg["summary"] = "auto"
+            kwargs["reasoning"] = reasoning_cfg
         # ``tools`` from ``model_config`` is overridden by the explicit
         # ``tools`` argument for THIS call.  Pop it so callers can't
         # accidentally leak a baseline tool list into the no-tools path

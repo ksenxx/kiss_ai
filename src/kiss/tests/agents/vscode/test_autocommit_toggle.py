@@ -98,8 +98,12 @@ class _AutocommitTaskHarness(unittest.TestCase):
         _init_repo(self.tmpdir)
         self.server, self.events = _make_server(self.tmpdir)
         self._orig_gen = _merge_flow_module.generate_commit_message_from_diff
-        def _stub(diff_text: str, user_prompt: str | None = None) -> str:
-            del diff_text, user_prompt
+        def _stub(
+            diff_text: str,
+            user_prompt: str | None = None,
+            task_result: str | None = None,
+        ) -> str:
+            del diff_text, user_prompt, task_result
             return "auto-commit-toggle-test"
 
         _merge_flow_module.generate_commit_message_from_diff = _stub

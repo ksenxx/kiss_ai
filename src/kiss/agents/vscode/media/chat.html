@@ -114,28 +114,35 @@
           <button class="search-clear-btn" id="history-search-clear" style="display:none;">&times;</button>
         </div>
         <div class="history-filter-bar">
-          <label class="history-filter-chk" title="Show running tasks">
-            <input type="checkbox" id="hf-running" checked>Running
-          </label>
-          <label class="history-filter-chk" title="Show tasks that finished with error">
-            <input type="checkbox" id="hf-errors" checked>Errored
-          </label>
-          <label class="history-filter-chk" title="Show successfully completed tasks">
-            <input type="checkbox" id="hf-completed" checked>Succeeded
-          </label>
-          <label class="history-filter-chk" title="Show only tasks whose work_dir matches the configured workspace">
-            <input type="checkbox" id="hf-workspace" checked>Workspace
-          </label>
-          <label class="history-filter-chk" title="Show only tasks marked as favourite">
-            <input type="checkbox" id="hf-favorite">Favorites
-          </label>
-          <span class="history-filter-date-group"><label for="hf-from" class="history-filter-date-lbl">From:</label><input type="date" id="hf-from" class="history-filter-date" title="From date" aria-label="From date"><button type="button" id="hf-from-btn" class="history-filter-date-btn" title="Pick From date" aria-label="Pick From date">📅</button></span>
-          <span class="history-filter-date-group"><label for="hf-to" class="history-filter-date-lbl">To:</label><input type="date" id="hf-to" class="history-filter-date" title="To date" aria-label="To date"><button type="button" id="hf-to-btn" class="history-filter-date-btn" title="Pick To date" aria-label="Pick To date">📅</button></span>
+          <div class="history-filter-chips" role="group" aria-label="Filter tasks by status">
+            <label class="hf-chip hf-chip-running" title="Show running tasks">
+              <input type="checkbox" id="hf-running" checked><span class="hf-chip-dot" aria-hidden="true"></span><span class="hf-chip-label">Running</span>
+            </label>
+            <label class="hf-chip hf-chip-errored" title="Show tasks that finished with error">
+              <input type="checkbox" id="hf-errors" checked><span class="hf-chip-dot" aria-hidden="true"></span><span class="hf-chip-label">Errored</span>
+            </label>
+            <label class="hf-chip hf-chip-succeeded" title="Show successfully completed tasks">
+              <input type="checkbox" id="hf-completed" checked><span class="hf-chip-dot" aria-hidden="true"></span><span class="hf-chip-label">Succeeded</span>
+            </label>
+            <label class="hf-chip hf-chip-workspace" title="Show only tasks whose work_dir matches the configured workspace">
+              <input type="checkbox" id="hf-workspace" checked><svg class="hf-chip-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M1.5 4a1 1 0 0 1 1-1h3l1.5 1.8h6.5a1 1 0 0 1 1 1V12a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1V4z"/></svg><span class="hf-chip-label">Workspace</span>
+            </label>
+            <label class="hf-chip hf-chip-favorite" title="Show only tasks marked as favourite">
+              <input type="checkbox" id="hf-favorite"><svg class="hf-chip-icon" viewBox="0 0 16 16" fill="currentColor" stroke="none" aria-hidden="true"><path d="M8 1.6l1.9 3.9 4.3.62-3.1 3.03.73 4.28L8 11.4l-3.83 2.03.73-4.28-3.1-3.03 4.3-.62z"/></svg><span class="hf-chip-label">Favorites</span>
+            </label>
+          </div>
+          <div class="history-filter-daterange" role="group" aria-label="Filter tasks by date range">
+            <span class="history-filter-date-group"><label for="hf-from" class="history-filter-date-lbl">From</label><input type="date" id="hf-from" class="history-filter-date" title="From date" aria-label="From date"><button type="button" id="hf-from-btn" class="history-filter-date-btn" title="Pick From date" aria-label="Pick From date"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="1.75" y="2.75" width="12.5" height="11.5" rx="1.5"/><path d="M1.75 6.25h12.5M5 1v3M11 1v3"/></svg></button></span>
+            <span class="hf-daterange-sep" aria-hidden="true">&#8594;</span>
+            <span class="history-filter-date-group"><label for="hf-to" class="history-filter-date-lbl">To</label><input type="date" id="hf-to" class="history-filter-date" title="To date" aria-label="To date"><button type="button" id="hf-to-btn" class="history-filter-date-btn" title="Pick To date" aria-label="Pick To date"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="1.75" y="2.75" width="12.5" height="11.5" rx="1.5"/><path d="M1.75 6.25h12.5M5 1v3M11 1v3"/></svg></button></span>
+            <button type="button" id="hf-date-clear" class="hf-date-clear" title="Clear date range" aria-label="Clear date range" style="display:none;">&times;</button>
+          </div>
         </div>
         <div id="history-list">
           <div class="sidebar-empty">No conversations yet</div>
         </div>
       </div>
+      <div id="sidebar-resizer" role="separator" aria-orientation="vertical" aria-label="Resize history panel" aria-controls="sidebar" tabindex="0"></div>
     </div>
     <div id="sidebar-overlay"></div>
 

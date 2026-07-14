@@ -73,6 +73,11 @@ dependencies = [
     # ./.venv/bin/bandit and ./.venv/bin/semgrep to flag dangerous sinks.
     "bandit>=1.9.4",
     "semgrep>=1.169.0",
+    # Local tree-sitter code knowledge graph (kiss.agents.sorcar.code_graph):
+    # deterministic, zero-LLM-cost AST extraction across ~300 languages with
+    # pre-compiled grammars downloaded on first use and cached locally.
+    "tree-sitter>=0.24.0",
+    "tree-sitter-language-pack>=1.10.0",
 ]
 
 [build-system]

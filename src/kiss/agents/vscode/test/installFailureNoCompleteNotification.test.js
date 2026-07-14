@@ -20,7 +20,13 @@
 // This test drives the REAL compiled ``out/DependencyInstaller.js``
 // (only ``vscode`` and the notification sink are stubbed) in a sandbox:
 // fresh HOME, a PATH with no uv/curl/tar, a fake kiss project, and the
-// update marker present.  It asserts the curl error IS shown and no
+// update marker present.  ``findUvPath`` in ``kissPaths.ts`` also
+// probes fixed absolute locations (/usr/local/bin/uv,
+// /opt/homebrew/bin/uv) that an empty PATH cannot hide, so
+// ``fs.existsSync`` is shimmed to report any ``uv`` binary outside the
+// sandbox HOME as missing — otherwise a host with Homebrew uv skips
+// the "uv missing" branch entirely and runs ``uv sync`` against the
+// fake project.  The test asserts the curl error IS shown and no
 // "Installation complete" notification follows.
 //
 // Run directly with ``node`` (after ``npm run compile``):
@@ -59,6 +65,23 @@ process.env.KISS_PROJECT_PATH = fakeProject;
 // No uv, no curl, no tar anywhere on PATH (the shell for `which` lookups
 // is spawned via an absolute path, so an empty PATH dir suffices).
 process.env.PATH = emptyBin;
+
+// --- Hide system-wide uv installs from findUvPath -----------------------
+// ``findUvPath`` probes absolute candidate paths (/usr/local/bin/uv,
+// /opt/homebrew/bin/uv, $HOME/.local/bin/uv, $HOME/.cargo/bin/uv) with
+// ``fs.existsSync`` before falling back to ``which uv``.  HOME already
+// points inside the sandbox and PATH is empty, but the two system-wide
+// candidates would leak a host uv install into the test.  Shim
+// ``existsSync`` to report any uv binary outside the sandbox as absent;
+// every other path is answered truthfully.
+const realExistsSync = fs.existsSync;
+fs.existsSync = function (p) {
+  const base = path.basename(String(p));
+  if ((base === 'uv' || base === 'uv.exe') && !String(p).startsWith(tmpHome)) {
+    return false;
+  }
+  return realExistsSync.apply(fs, arguments);
+};
 
 // --- vscode stub ---------------------------------------------------------
 const vscodeStub = {

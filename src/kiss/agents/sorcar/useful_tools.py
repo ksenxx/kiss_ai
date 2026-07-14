@@ -486,6 +486,11 @@ class UsefulTools:
         self.stream_callback = stream_callback
         self.stop_event = stop_event
         self.work_dir = work_dir
+        # A graph answer replaces the first grep for an identifier.  If the
+        # agent asks again, it is explicitly seeking verification or context
+        # the graph did not provide, so let the real command run rather than
+        # trapping it in a repeated deny-message loop.
+        self._code_graph_hints_seen: set[str] = set()
 
     def _spawn(self, command: str) -> subprocess.Popen:
         """Launch *command* with the shared Popen configuration.
@@ -876,6 +881,22 @@ class UsefulTools:
         guard = _bash_parent_repo_guard(command, self.work_dir)
         if guard is not None:
             return guard
+
+        # Query-before-grep interception (code_graph feature): when a
+        # built graph already knows the identifier a grep/rg command
+        # searches for, deny the expensive grep and return the graph answer
+        # directly ("the deny message IS the answer").  A missing/broken
+        # code_graph module can never affect Bash (lazy try/except import).
+        hint = ""
+        try:
+            from kiss.agents.sorcar.code_graph import grep_hint
+
+            hint = grep_hint(command, self.work_dir) or ""
+        except Exception:
+            logger.debug("code_graph grep hint failed", exc_info=True)
+        if hint and hint not in self._code_graph_hints_seen:
+            self._code_graph_hints_seen.add(hint)
+            return hint
 
         if self.stream_callback:
             return self._bash_streaming(command, timeout_seconds, max_output_chars)

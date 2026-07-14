@@ -553,6 +553,9 @@
   let historyLoading = false;
   let historyHasMore = true;
   let historyGeneration = 0;
+  // True once the user has edited (or cleared) the History From/To
+  // date inputs; blocks the ``dateRange`` auto-fill on refreshes.
+  let historyDateRangeUserSet = false;
   // Session-scoped sets tracking the live running→completed
   // transition for the History panel's status dot.  The invariant:
   //   * A running row renders the pulsing green dot.
@@ -2185,27 +2188,53 @@
     removeAdjacentLoader();
     adjacentLoading = false;
 
-    if (!task || !events || events.length === 0) {
+    // Only latch "no more tasks" when the backend genuinely found no
+    // adjacent row: it then replies with task:'' AND task_id:null.  A
+    // task that EXISTS (valid task_id) but has an empty/very-short
+    // trajectory (events:[]) must NOT block navigation past it —
+    // otherwise a single short task makes every task beyond it
+    // unreachable via overscroll.
+    const hasTaskId = taskId !== undefined && taskId !== null && taskId !== '';
+    if (!hasTaskId && !task) {
       if (direction === 'prev') noPrevTask = true;
       else noNextTask = true;
       return;
     }
 
+    // A persisted row may carry an empty title ('' is NOT NULL-safe in
+    // the schema).  Use a non-empty display label everywhere (dataset,
+    // header via updateVisibleTask, placeholder, chevron targeting) so
+    // an empty title neither hides the task header nor makes
+    // applyChevronState(…, '') fall through to ALL panels.
+    const taskLabel = task || '(untitled task)';
+
     // Create a container for the adjacent task
     const container = mkEl('div', 'adjacent-task');
-    container.dataset.task = task;
+    container.dataset.task = taskLabel;
     // Stamp the row id so a 'taskDeleted' broadcast from the backend
     // can locate and remove this exact block via
     //   .adjacent-task[data-task-id="<id>"]
-    if (taskId !== undefined && taskId !== null && taskId !== '')
-      container.dataset.taskId = String(taskId);
+    if (hasTaskId) container.dataset.taskId = String(taskId);
 
     // Replay events into the container (save/restore header metrics so
     // adjacent-task replay doesn't overwrite the current task's values)
     const savedTokens = statusTokens ? statusTokens.textContent : '';
     const savedBudget = statusBudget ? statusBudget.textContent : '';
     const savedSteps = statusSteps ? statusSteps.textContent : '';
-    replayEventsInto(container, events);
+    if (events && events.length > 0) {
+      replayEventsInto(container, events);
+    }
+    if (!container.firstChild) {
+      // The adjacent task exists but produced no visible output: either
+      // its trajectory is empty (events:[]) or every event was a
+      // non-rendering terminal marker (e.g. only task_done).  Render a
+      // visible placeholder so the user sees the task while scrolling
+      // past it, and so the container has nonzero height for the
+      // scroll-anchor math.
+      const ph = mkEl('div', 'adjacent-task-placeholder');
+      ph.textContent = taskLabel + ' — (no output recorded)';
+      container.appendChild(ph);
+    }
     // Capture the adjacent task's metrics before restoring the current ones
     container.dataset.metricTokens = statusTokens
       ? statusTokens.textContent
@@ -2224,15 +2253,13 @@
       O.insertBefore(container, O.firstChild);
       const newScrollHeight = O.scrollHeight;
       O.scrollTop += newScrollHeight - prevScrollHeight;
-      if (taskId !== undefined && taskId !== null && taskId !== '')
-        oldestLoadedTaskId = taskId;
+      if (hasTaskId) oldestLoadedTaskId = taskId;
     } else {
       O.appendChild(container);
-      if (taskId !== undefined && taskId !== null && taskId !== '')
-        newestLoadedTaskId = taskId;
+      if (hasTaskId) newestLoadedTaskId = taskId;
     }
     const tab = getTab(activeTabId);
-    if (tab) applyChevronState(!!tab.panelsExpandedMap[task], task);
+    if (tab) applyChevronState(!!tab.panelsExpandedMap[taskLabel], taskLabel);
   }
 
   function clearOutput() {
@@ -2959,12 +2986,10 @@
     let rb = '';
     let rawBody = '';
     if (showStatus && ev.is_continue) {
-      rb +=
-        '<div style="color:var(--yellow);font-weight:700;font-size:var(--fs-xl);margin-bottom:10px">Status: Continue</div>';
+      rb += '<div class="rc-status">Status: Continue</div>';
       rawBody += 'Status: Continue\n\n';
     } else if (showStatus && ev.success === false) {
-      rb +=
-        '<div style="color:var(--red);font-weight:700;font-size:var(--fs-xl);margin-bottom:10px">Status: FAILED</div>';
+      rb += '<div class="rc-status rc-status-fail">Status: FAILED</div>';
       rawBody += 'Status: FAILED\n\n';
     }
     let usePre = true;
@@ -4421,6 +4446,35 @@
         // socket is connected.  Hide #app and show the loading overlay
         // until ``connected === true``, then reveal the regular tabs.
         setServerLoading(!ev.connected);
+        if (ev.connected) {
+          // Re-synchronise an OPEN History sidebar on every
+          // ``connected === true`` signal.  The start-time
+          // ``tasks_updated`` broadcast is a one-shot, never-persisted
+          // global system event, so a task started while this client
+          // could not hear it would otherwise stay invisible in the
+          // panel until the next unrelated refetch.  Paths covered:
+          //  - remote webapp, resumed/half-open socket: iOS Safari
+          //    suspends the page while backgrounded; when the server
+          //    KEPT the connection there is no close event, no reload
+          //    latch in the shim, and this dispatch is the only
+          //    resync trigger (authenticated closes instead reload
+          //    the page via the shim's ``_hadAuthThenClosed`` latch,
+          //    after which the ready-time ``tasks_updated`` nudge
+          //    from the server converges the fresh page);
+          //  - remote webapp, pre-auth ``auth_required`` dispatch:
+          //    the posted ``getHistory`` sits in the shim's pending
+          //    queue and is flushed after auth — harmless, the
+          //    generation guard drops any stale replies;
+          //  - VS Code webview: the extension posts
+          //    ``daemonStatus connected:true`` on daemon connect and
+          //    on webview ready, so an open sidebar converges after
+          //    extension-host reconnects too.
+          // ``refreshHistory()`` is a no-op while the sidebar is
+          // closed (opening it posts a fresh ``getHistory`` anyway)
+          // and bumps ``historyGeneration`` so replies to
+          // pre-disconnect requests are dropped.
+          refreshHistory();
+        }
         return;
       case 'notification':
         updateNotification(ev);
@@ -4521,6 +4575,7 @@
         break;
       case 'history':
         renderHistory(ev.sessions || [], ev.offset || 0, ev.generation || 0);
+        autofillHistoryDateRange(ev.dateRange);
         break;
       case 'frequentTasks':
         renderFrequentTasks(ev.tasks || []);
@@ -7136,10 +7191,15 @@
     });
     function toggleHistorySidebar() {
       if (sidebar.classList.contains('open')) {
-        closeSidebar();
+        closeSidebar(true);
       } else {
         sidebar.classList.add('open');
-        sidebarOverlay.classList.add('open');
+        // No dark modal overlay while the sidebar is DOCKED on the
+        // remote desktop layout — the overlay is a mobile-drawer
+        // affordance only.
+        if (!document.body.classList.contains('remote-desktop')) {
+          sidebarOverlay.classList.add('open');
+        }
         resetHistoryPagination();
         vscode.postMessage({
           type: 'getHistory',
@@ -7151,8 +7211,150 @@
     if (menuBtn) {
       menuBtn.addEventListener('click', toggleHistorySidebar);
     }
-    sidebarClose.addEventListener('click', closeSidebar);
+    sidebarClose.addEventListener('click', () => closeSidebar(true));
     sidebarOverlay.addEventListener('click', closeSidebar);
+    // ── Remote-webapp DESKTOP layout ─────────────────────────────
+    // On desktop-wide browser windows the remote webapp docks the
+    // history sidebar persistently on the left (Codex / ChatGPT
+    // desktop layout).  The wiring is a no-op inside the VS Code
+    // extension webview (no body.remote-chat class) and in embedders
+    // without window.matchMedia.
+    if (
+      document.body.classList.contains('remote-chat') &&
+      typeof window.matchMedia === 'function'
+    ) {
+      const desktopMq = window.matchMedia('(min-width: 900px)');
+      const applyRemoteDesktop = () => {
+        if (desktopMq.matches) {
+          document.body.classList.add('remote-desktop');
+          if (!sidebar.classList.contains('open')) {
+            sidebar.classList.add('open');
+            resetHistoryPagination();
+            vscode.postMessage({
+              type: 'getHistory',
+              query: historySearch ? historySearch.value : '',
+              generation: historyGeneration,
+            });
+          }
+          sidebarOverlay.classList.remove('open');
+        } else {
+          document.body.classList.remove('remote-desktop');
+          sidebar.classList.remove('open');
+          sidebarOverlay.classList.remove('open');
+        }
+      };
+      if (typeof desktopMq.addEventListener === 'function') {
+        desktopMq.addEventListener('change', applyRemoteDesktop);
+      } else if (typeof desktopMq.addListener === 'function') {
+        desktopMq.addListener(applyRemoteDesktop);
+      }
+      applyRemoteDesktop();
+    }
+    // ── Docked-sidebar horizontal resize (remote desktop) ────────
+    // A 6px drag handle (#sidebar-resizer) on the docked sidebar's
+    // right edge resizes it via the --sidebar-w custom property that
+    // drives BOTH the sidebar width and #app's margin-left in
+    // remote-codex.css.  Pointer capture keeps fast drags from
+    // escaping the thin handle; ArrowLeft/ArrowRight implement the
+    // W3C window-splitter keyboard pattern; double-click resets.
+    // Inert outside the remote desktop layout (guards below) and in
+    // the VS Code extension webview (no body.remote-chat class).
+    const sidebarResizer = document.getElementById('sidebar-resizer');
+    if (document.body.classList.contains('remote-chat') && sidebarResizer) {
+      const SB_MIN = 220;
+      const SB_MAX = 600;
+      const SB_KEY = 'kiss-sidebar-w';
+      // Default: 1/4 of the browser screen, clamped to the resize
+      // range (matches the clamp(220px, 25vw, 600px) CSS fallback).
+      const sidebarDefaultW = () =>
+        Math.max(
+          SB_MIN,
+          Math.min(SB_MAX, Math.round(window.innerWidth * 0.25)),
+        );
+      const setSidebarW = px => {
+        const w = Math.max(SB_MIN, Math.min(SB_MAX, Math.round(px)));
+        document.documentElement.style.setProperty('--sidebar-w', w + 'px');
+        sidebarResizer.setAttribute('aria-valuenow', String(w));
+        return w;
+      };
+      sidebarResizer.setAttribute('aria-valuemin', String(SB_MIN));
+      sidebarResizer.setAttribute('aria-valuemax', String(SB_MAX));
+      sidebarResizer.setAttribute('aria-valuenow', String(sidebarDefaultW()));
+      let sidebarW = sidebarDefaultW();
+      let persisted = null;
+      try {
+        persisted = window.localStorage.getItem(SB_KEY);
+      } catch {
+        // localStorage unavailable — keep the default width.
+      }
+      if (persisted !== null && /^\d+$/.test(persisted)) {
+        sidebarW = setSidebarW(parseInt(persisted, 10));
+      }
+      const persistSidebarW = () => {
+        try {
+          window.localStorage.setItem(SB_KEY, String(sidebarW));
+        } catch {
+          // localStorage unavailable — width lasts this session only.
+        }
+      };
+      let sidebarResizing = false;
+      const endSidebarResize = e => {
+        if (!sidebarResizing) return;
+        sidebarResizing = false;
+        document.body.classList.remove('sidebar-resizing');
+        try {
+          if (
+            e.pointerId !== undefined &&
+            typeof sidebarResizer.releasePointerCapture === 'function'
+          ) {
+            sidebarResizer.releasePointerCapture(e.pointerId);
+          }
+        } catch {
+          // Pointer was not captured — nothing to release.
+        }
+        persistSidebarW();
+      };
+      sidebarResizer.addEventListener('pointerdown', e => {
+        if (e.button !== 0) return;
+        if (!document.body.classList.contains('remote-desktop')) return;
+        e.preventDefault();
+        sidebarResizing = true;
+        document.body.classList.add('sidebar-resizing');
+        try {
+          if (
+            e.pointerId !== undefined &&
+            typeof sidebarResizer.setPointerCapture === 'function'
+          ) {
+            sidebarResizer.setPointerCapture(e.pointerId);
+          }
+        } catch {
+          // Pointer capture unsupported — drags stay on the handle.
+        }
+      });
+      sidebarResizer.addEventListener('pointermove', e => {
+        if (!sidebarResizing) return;
+        if (!document.body.classList.contains('remote-desktop')) return;
+        sidebarW = setSidebarW(e.clientX);
+      });
+      sidebarResizer.addEventListener('pointerup', endSidebarResize);
+      sidebarResizer.addEventListener('pointercancel', endSidebarResize);
+      sidebarResizer.addEventListener('dblclick', () => {
+        if (!document.body.classList.contains('remote-desktop')) return;
+        sidebarW = setSidebarW(sidebarDefaultW());
+        try {
+          window.localStorage.removeItem(SB_KEY);
+        } catch {
+          // localStorage unavailable — nothing persisted anyway.
+        }
+      });
+      sidebarResizer.addEventListener('keydown', e => {
+        if (!document.body.classList.contains('remote-desktop')) return;
+        if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+        e.preventDefault();
+        sidebarW = setSidebarW(sidebarW + (e.key === 'ArrowRight' ? 16 : -16));
+        persistSidebarW();
+      });
+    }
     if (frequentTasksBtn) {
       frequentTasksBtn.addEventListener('click', () => {
         if (frequentPanel && frequentPanel.classList.contains('open')) {
@@ -7235,6 +7437,29 @@
     ].forEach(el => {
       if (el) el.addEventListener('change', applyHistoryFilterVisibility);
     });
+    // A ``change`` on a date input only ever comes from the USER
+    // (typing or the custom picker); the auto-fill writes ``.value``
+    // directly without dispatching events.  Once the user touches
+    // the range, later ``history`` refreshes must not overwrite it.
+    [hfFrom, hfTo].forEach(el => {
+      if (el) {
+        el.addEventListener('change', () => {
+          historyDateRangeUserSet = true;
+        });
+      }
+    });
+    const hfDateClear = document.getElementById('hf-date-clear');
+    if (hfDateClear) {
+      hfDateClear.addEventListener('click', e => {
+        e.stopPropagation();
+        if (hfFrom) hfFrom.value = '';
+        if (hfTo) hfTo.value = '';
+        // Clearing is a user decision: pin the empty range so the
+        // next history refresh does not re-fill it.
+        historyDateRangeUserSet = true;
+        applyHistoryFilterVisibility();
+      });
+    }
     // The calendar selector buttons sit next to each date textbox and
     // open a custom in-webview calendar popup.  The native
     // <input type=date> picker (showPicker / focus+click) is unreliable
@@ -7772,6 +7997,58 @@
     return btn;
   }
 
+  /**
+   * Build a tiny icon-only copy button for a single id (chat id or
+   * task id) on the History sidebar's per-row ids line.
+   *
+   * Clicking the button copies the raw *idText* string to the system
+   * clipboard via ``navigator.clipboard.writeText`` (falling back to
+   * ``fallbackCopyText`` when the async clipboard API is unavailable)
+   * and briefly swaps the clipboard icon for a green check mark.
+   * Click propagation is stopped so the surrounding history row's
+   * click handler (which reopens the chat) does not fire.
+   *
+   * @param {string} idText - the raw id string to copy.
+   * @param {string} kind - 'chat' or 'task'; used for the modifier
+   *   class (``ids-copy-chat`` / ``ids-copy-task``) and the aria/
+   *   tooltip labels.
+   * @returns {HTMLButtonElement}
+   */
+  function makeIdCopyButton(idText, kind) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'ids-copy-btn ids-copy-' + kind;
+    btn.dataset.tooltip = 'Copy ' + kind + ' id';
+    btn.setAttribute('aria-label', 'Copy ' + kind + ' id to clipboard');
+    btn.innerHTML = PANEL_COPY_SVG;
+
+    let flashTimer = 0;
+    const flash = () => {
+      btn.innerHTML = PANEL_CHECK_SVG;
+      btn.classList.add('copied');
+      clearTimeout(flashTimer);
+      flashTimer = setTimeout(() => {
+        btn.innerHTML = PANEL_COPY_SVG;
+        btn.classList.remove('copied');
+      }, 1500);
+    };
+
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      e.preventDefault();
+      const payload = String(idText == null ? '' : idText);
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(payload).then(flash, () => {
+          if (fallbackCopyText(payload)) flash();
+        });
+      } else if (fallbackCopyText(payload)) {
+        flash();
+      }
+    });
+
+    return btn;
+  }
+
   function chatIdBgColor(chatId) {
     if (!chatId) return 'hsl(0, 0%, 75%)';
     let hash = 5381;
@@ -7863,8 +8140,12 @@
       div.dataset.workDir = s.work_dir || '';
       const itemText = s.title || s.preview || 'Untitled';
       div.dataset.tooltip = s.preview || itemText;
-      div.style.backgroundColor = chatIdBgColor(String(s.id));
-      div.style.color = '#1a1a1a';
+      // Expose the per-chat color as a custom property instead of
+      // inline background/text colors: main.css paints the webview's
+      // pastel row from it, while remote-codex.css can restyle the
+      // remote page (neutral row, colored left border) — inline
+      // styles would beat every stylesheet.
+      div.style.setProperty('--task-color', chatIdBgColor(String(s.id)));
 
       if (s.is_running) {
         const runningDot = document.createElement('span');
@@ -8137,19 +8418,41 @@
         parentIdRaw === undefined || parentIdRaw === null
           ? ''
           : String(parentIdRaw);
-      const idParts = [];
-      if (chatId) idParts.push('chat ' + chatId);
-      if (taskIdStr) idParts.push('task ' + taskIdStr);
-      if (parentIdStr) idParts.push('parent ' + parentIdStr);
-      if (idParts.length > 0) {
+      // The line is built from text nodes plus (for the chat and
+      // task ids) a tiny icon-only copy button appended right after
+      // the id it copies.  The buttons contribute no text of their
+      // own, so the span's ``textContent`` keeps the exact
+      // ``chat <id> • task <id> • parent <id>`` format.
+      const idSegments = [];
+      if (chatId) {
+        idSegments.push({text: 'chat ' + chatId, copy: chatId, kind: 'chat'});
+      }
+      if (taskIdStr) {
+        idSegments.push({
+          text: 'task ' + taskIdStr,
+          copy: taskIdStr,
+          kind: 'task',
+        });
+      }
+      if (parentIdStr) {
+        idSegments.push({text: 'parent ' + parentIdStr});
+      }
+      if (idSegments.length > 0) {
         const idsSpan = document.createElement('span');
         idsSpan.className = 'running-item-ids';
-        const idsText = idParts.join(' • ');
-        idsSpan.textContent = idsText;
+        idSegments.forEach((seg, i) => {
+          if (i > 0) {
+            idsSpan.appendChild(document.createTextNode(' • '));
+          }
+          idsSpan.appendChild(document.createTextNode(seg.text));
+          if (seg.copy) {
+            idsSpan.appendChild(makeIdCopyButton(seg.copy, seg.kind));
+          }
+        });
         // Native HTML tooltip — useful when the combined line is
         // long enough to be clipped by overflow:hidden in the
         // sidebar.
-        idsSpan.title = idsText;
+        idsSpan.title = idSegments.map(seg => seg.text).join(' • ');
         info.appendChild(idsSpan);
       }
 
@@ -8226,6 +8529,54 @@
     if (sessions.length < 50) {
       historyHasMore = false;
     }
+    applyHistoryFilterVisibility();
+  }
+
+  /**
+   * Pre-fill the History From/To date inputs from the ``dateRange``
+   * payload of a ``history`` event (the first and last task
+   * timestamps in ~/.kiss/sorcar.db, epoch seconds).  Values are
+   * written as LOCAL calendar dates in the ``YYYY-MM-DD`` format
+   * the ``<input type=date>`` elements produce, mirroring how
+   * ``applyHistoryFilterVisibility`` interprets them (local
+   * midnight → 23:59), so the auto-filled [first, last] range never
+   * hides a row.  The fill is skipped once the user has edited or
+   * cleared the inputs (``historyDateRangeUserSet``).
+   *
+   * @param {{min: ?number, max: ?number}|undefined} range - the
+   *   ``dateRange`` payload. Missing payloads preserve the current
+   *   values for compatibility with older servers; explicit null
+   *   bounds clear untouched auto-filled values (the database is
+   *   empty).
+   */
+  function autofillHistoryDateRange(range) {
+    if (historyDateRangeUserSet || !range) return;
+    const hfFrom = document.getElementById('hf-from');
+    const hfTo = document.getElementById('hf-to');
+    if (!hfFrom || !hfTo) return;
+    // Explicit null bounds mean the database has no listable tasks.
+    // Clear a prior programmatic fill rather than showing stale dates.
+    if (range.min == null || range.max == null) {
+      hfFrom.value = '';
+      hfTo.value = '';
+      applyHistoryFilterVisibility();
+      return;
+    }
+    const isoOfSec = sec => {
+      const n = Number(sec);
+      if (!isFinite(n)) return '';
+      const d = new Date(n * 1000);
+      if (isNaN(d.getTime())) return '';
+      const p = x => (x < 10 ? '0' + x : '' + x);
+      return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+    };
+    const fromIso = isoOfSec(range.min);
+    const toIso = isoOfSec(range.max);
+    if (!fromIso || !toIso) return;
+    // Set .value directly (no change event) so this programmatic
+    // fill is never mistaken for a user edit.
+    hfFrom.value = fromIso;
+    hfTo.value = toIso;
     applyHistoryFilterVisibility();
   }
 
@@ -8421,6 +8772,25 @@
   }
 
   /**
+   * Canonicalize a work-directory string for the History Workspace
+   * filter's equality test.  This is deliberately lexical (the
+   * browser cannot call ``realpath``): strip trailing separators,
+   * normalize Windows ``\\`` to ``/``, and case-fold Windows paths.
+   * POSIX case remains significant.  Filesystem roots are preserved.
+   */
+  function normalizeHistoryWorkDir(p) {
+    if (typeof p !== 'string' || p === '') return '';
+    const isWindowsPath = /^[A-Za-z]:[\\/]/.test(p) || p.startsWith('\\\\');
+    let normalized = isWindowsPath ? p.replace(/\\/g, '/') : p;
+    // Keep POSIX "/" and Windows drive roots such as "C:/" intact.
+    const minLength = /^[A-Za-z]:\/$/.test(normalized) ? 3 : 1;
+    while (normalized.length > minLength && normalized.endsWith('/')) {
+      normalized = normalized.slice(0, -1);
+    }
+    return isWindowsPath ? normalized.toLowerCase() : normalized;
+  }
+
+  /**
    * Show/hide rows in the history sidebar based on the filter bar
    * state (Running / Errors / Completed / Favorite checkboxes and
    * From / To date inputs).  Reads ``data-category``,
@@ -8442,15 +8812,14 @@
     const showErrors = hfErrors.checked;
     const showCompleted = hfCompleted.checked;
     const onlyFavorite = hfFavorite && hfFavorite.checked;
-    // Workspace filter — when checked, only show rows whose
-    // ``data-work-dir`` (mirroring ``extra.work_dir`` set at task
-    // completion) equals the client's currently-configured work
-    // directory.  An empty client work_dir or an empty row work_dir
-    // both pass the filter so the user sees rows that pre-date the
-    // ``extra.work_dir`` persistence change and rows running in the
-    // "no folder open" state.
+    // Workspace filter — when checked, completed/error rows with a
+    // non-empty ``data-work-dir`` (mirroring persisted
+    // ``extra.work_dir``) must match the client's currently-configured
+    // work directory.  Running rows always pass this ONE filter; an
+    // empty client or row work_dir also passes for legacy/no-folder
+    // rows.  Category, date, and Favorite filters remain independent.
     const onlyWorkspace = hfWorkspace && hfWorkspace.checked;
-    const clientWorkDir = configWorkDir || '';
+    const normClientWorkDir = normalizeHistoryWorkDir(configWorkDir || '');
     // Date inputs are <input type=date> with value="YYYY-MM-DD".
     // Convert to local-midnight epoch seconds for inclusive bounds.
     let fromTs = -Infinity;
@@ -8474,24 +8843,34 @@
       else if (cat === 'completed') catOk = showCompleted;
       const dateOk = ts >= fromTs && ts <= toTs;
       const favOk = !onlyFavorite || row.dataset.favorite === '1';
-      const rowWorkDir = row.dataset.workDir || '';
-      // Workspace match honors the documented contract above: an
-      // empty client work_dir or an empty row work_dir BOTH pass so
-      // (a) freshly-started running tasks whose ``extra.work_dir``
-      //     hasn't been persisted yet still appear in History when
-      //     the user opens the burger menu in a real workspace, and
-      // (b) standalone web clients with no folder open ("client
-      //     work_dir empty") see every row.
-      // Without this, the strict ``rowWorkDir === clientWorkDir``
-      // test silently hides every running-task row whose work_dir
-      // hasn't been written yet — exactly the user-reported
-      // "task panel does not show up in History after burger open"
-      // regression.
+      const rowWorkDir = normalizeHistoryWorkDir(row.dataset.workDir || '');
+      // Workspace match honors the documented contract above:
+      // (a) RUNNING rows ALWAYS pass — ``ChatSorcarAgent.run``
+      //     persists ``extra.work_dir`` EARLY (at ``_add_task``), and
+      //     for worktree runs that path comes from
+      //     ``git rev-parse --show-toplevel`` which RESOLVES symlinks
+      //     (macOS ``/var`` → ``/private/var``), so a just-started
+      //     running row can carry a path VARIANT of the client's
+      //     configured workspace.  A strict comparison silently hid
+      //     the row — exactly the user-reported "task panel does not
+      //     show up in History as soon as kiss-web starts a task"
+      //     regression.  A live agent must never be invisible; the
+      //     Running category checkbox (not the Workspace filter) is
+      //     the control for running rows.
+      // (b) An empty client work_dir or an empty row work_dir BOTH
+      //     pass so legacy rows that pre-date the ``extra.work_dir``
+      //     persistence change and standalone web clients with no
+      //     folder open see every row.
+      // (c) Non-running rows compare via
+      //     ``normalizeHistoryWorkDir`` on both sides so trailing
+      //     separators and Windows slash/case variants do not cause
+      //     false mismatches.
       const wsOk =
         !onlyWorkspace ||
+        cat === 'running' ||
         rowWorkDir === '' ||
-        clientWorkDir === '' ||
-        rowWorkDir === clientWorkDir;
+        normClientWorkDir === '' ||
+        rowWorkDir === normClientWorkDir;
       if (catOk && dateOk && favOk && wsOk) {
         row.style.display = '';
         visible++;
@@ -8513,6 +8892,12 @@
       }
     } else if (placeholder) {
       placeholder.remove();
+    }
+    // The date-range clear "×" is only useful while a date is set.
+    const hfDateClear = document.getElementById('hf-date-clear');
+    if (hfDateClear) {
+      const hasDate = !!((hfFrom && hfFrom.value) || (hfTo && hfTo.value));
+      hfDateClear.style.display = hasDate ? '' : 'none';
     }
   }
 
@@ -8544,7 +8929,22 @@
     }
   }
 
-  function closeSidebar() {
+  /**
+   * Close the history sidebar drawer.
+   *
+   * On the remote-webapp DESKTOP layout (body.remote-desktop) the
+   * sidebar is DOCKED on the left, so implicit close paths (Escape,
+   * overlay click, history-row click) must keep it open — only an
+   * explicit user toggle (burger #menu-btn / #sidebar-close, which
+   * pass ``force=true``) hides the docked panel.
+   *
+   * @param {boolean} [force] hide the sidebar even while docked.
+   */
+  function closeSidebar(force) {
+    if (force !== true && document.body.classList.contains('remote-desktop')) {
+      sidebarOverlay.classList.remove('open');
+      return;
+    }
     sidebar.classList.remove('open');
     sidebarOverlay.classList.remove('open');
   }
