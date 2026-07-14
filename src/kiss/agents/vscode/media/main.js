@@ -4445,6 +4445,35 @@
         // socket is connected.  Hide #app and show the loading overlay
         // until ``connected === true``, then reveal the regular tabs.
         setServerLoading(!ev.connected);
+        if (ev.connected) {
+          // Re-synchronise an OPEN History sidebar on every
+          // ``connected === true`` signal.  The start-time
+          // ``tasks_updated`` broadcast is a one-shot, never-persisted
+          // global system event, so a task started while this client
+          // could not hear it would otherwise stay invisible in the
+          // panel until the next unrelated refetch.  Paths covered:
+          //  - remote webapp, resumed/half-open socket: iOS Safari
+          //    suspends the page while backgrounded; when the server
+          //    KEPT the connection there is no close event, no reload
+          //    latch in the shim, and this dispatch is the only
+          //    resync trigger (authenticated closes instead reload
+          //    the page via the shim's ``_hadAuthThenClosed`` latch,
+          //    after which the ready-time ``tasks_updated`` nudge
+          //    from the server converges the fresh page);
+          //  - remote webapp, pre-auth ``auth_required`` dispatch:
+          //    the posted ``getHistory`` sits in the shim's pending
+          //    queue and is flushed after auth — harmless, the
+          //    generation guard drops any stale replies;
+          //  - VS Code webview: the extension posts
+          //    ``daemonStatus connected:true`` on daemon connect and
+          //    on webview ready, so an open sidebar converges after
+          //    extension-host reconnects too.
+          // ``refreshHistory()`` is a no-op while the sidebar is
+          // closed (opening it posts a fresh ``getHistory`` anyway)
+          // and bumps ``historyGeneration`` so replies to
+          // pre-disconnect requests are dropped.
+          refreshHistory();
+        }
         return;
       case 'notification':
         updateNotification(ev);
