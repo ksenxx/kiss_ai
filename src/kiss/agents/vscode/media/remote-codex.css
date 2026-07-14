@@ -219,6 +219,24 @@ body.remote-chat #voice-btn.active {
   color: #fff;
 }
 
+/* Halve the visible gap between the composer buttons (burger menu,
+   model pill, attach, promptlet, mic).  Each 36px circular button
+   pads its 16px icon by 10px per side, so adjacent icons sit ~21px
+   apart (icon-icon) and ~11px from the model pill's border.  Pulling
+   the circles together by 5px per inner edge halves those visible
+   gaps (~10.5px and ~5.5px) while keeping the full 36px touch
+   targets.  Outer edges stay put so row alignment is unchanged. */
+body.remote-chat #menu-btn,
+body.remote-chat #upload-btn,
+body.remote-chat #tricks-btn,
+body.remote-chat #voice-btn {
+  margin-left: -5px;
+  margin-right: -5px;
+}
+
+body.remote-chat #menu-btn { margin-left: 0; }
+body.remote-chat #voice-btn { margin-right: 0; }
+
 /* Model pill (Codex "5.6 Sol" style) */
 body.remote-chat #model-btn {
   background: transparent;
