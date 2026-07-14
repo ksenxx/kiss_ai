@@ -498,6 +498,132 @@ def test_chat_panels_left_aligned() -> None:
     assert task and "margin-left: auto" in task.group(1)
 
 
+# ── Codex flat-thread panels (indistinguishable from Codex) ─────────
+#
+# The real Codex desktop/app thread is FLATTER than a card layout:
+# assistant/tool content sits directly on the page background, tool
+# and thinking labels are quiet sentence-case muted-gray rows with a
+# chevron, and only monospace output blocks (bash/tool results) get a
+# subtle inset #171717 surface.  These tests pin that language so the
+# remote webapp thread is visually indistinguishable from Codex.
+
+FLAT_PAGE_BG_SELECTORS = [
+    ".tc",
+    ".rc",
+    ".system-prompt",
+    ".prompt",
+    ".think",
+    ".llm-panel",
+    ".merge-info",
+]
+
+
+@pytest.mark.parametrize("selector", FLAT_PAGE_BG_SELECTORS)
+def test_chat_panel_sits_on_page_background(selector: str) -> None:
+    """Codex thread items are flat: each container panel must use the
+    transparent page background, not an elevated #171717 card."""
+    rule = _find_rule(_read_codex_css(), selector)
+    assert "background: transparent" in rule, (
+        f"{selector} must sit flat on the page background like Codex"
+    )
+    assert "#171717" not in rule
+
+
+QUIET_HEADER_SELECTORS = [
+    ".tc-h",
+    ".rc-h",
+    ".system-prompt-h",
+    ".prompt-h",
+    ".llm-panel-hdr",
+]
+
+
+@pytest.mark.parametrize("selector", QUIET_HEADER_SELECTORS)
+def test_chat_panel_headers_are_quiet(selector: str) -> None:
+    """Codex activity labels are quiet sentence-case muted rows: no
+    uppercase transform, no letter-spacing, no filled header strip."""
+    rule = _find_rule(_read_codex_css(), selector)
+    assert "text-transform: none" in rule, (
+        f"{selector} must drop main.css's UPPERCASE transform"
+    )
+    assert "letter-spacing: normal" in rule, (
+        f"{selector} must drop main.css's letter-spacing"
+    )
+    assert "background: transparent" in rule, (
+        f"{selector} must not paint a filled header strip"
+    )
+
+
+def test_think_label_is_quiet() -> None:
+    """The Thinking label matches Codex: sentence case, muted gray."""
+    rule = _find_rule(_read_codex_css(), ".think .lbl")
+    assert "text-transform: none" in rule
+    assert "letter-spacing: normal" in rule
+
+
+def test_mono_output_blocks_keep_inset_surface() -> None:
+    """Monospace output (bash stream, tool results) keeps a subtle
+    inset #171717 surface at a 12px radius — the one elevated element
+    in the Codex thread."""
+    css = _read_codex_css()
+    for selector in (".bash-panel", ".tr"):
+        rule = _find_rule(css, selector)
+        assert "#171717" in rule, (
+            f"{selector} must keep the inset #171717 mono surface"
+        )
+        assert "border-radius: 12px" in rule, (
+            f"{selector} must use the Codex 12px block radius"
+        )
+
+
+def test_result_card_is_flat_and_quiet() -> None:
+    """The final result renders like a plain Codex assistant reply:
+    flat container, no green border, quiet plain heading."""
+    css = _read_codex_css()
+    rc = _find_rule(css, ".rc")
+    assert "border: none" in rc or "border-color: transparent" in rc, (
+        ".rc must not keep a visible card border"
+    )
+    h3 = _find_rule(css, ".rc-h h3")
+    assert "#ececec" in h3
+
+
+def test_muted_label_color_tokens_present() -> None:
+    """Activity labels use the Codex muted grays."""
+    css = _read_codex_css()
+    assert "#8e8e8e" in css or "#afafaf" in css
+
+
+def test_markdown_code_blocks_match_inset_surface() -> None:
+    """Fenced code blocks in streamed text (.txt pre) AND rendered
+    markdown bodies (.md-body pre) both use the #171717 inset surface
+    at the Codex 12px radius."""
+    css = _read_codex_css()
+    m = re.search(
+        r"body\.remote-chat \.txt pre,\s*"
+        r"body\.remote-chat \.md-body pre\s*\{([^}]*)\}",
+        css,
+    )
+    assert m, ".txt pre / .md-body pre inset-surface rule missing"
+    rule = m.group(1)
+    assert "#171717" in rule
+    assert "border-radius: 12px" in rule
+
+
+def test_hljs_background_neutralized_inside_code_blocks() -> None:
+    """main.css paints .hljs with `var(--surface2) !important`; the
+    remote stylesheet must force it transparent inside pre blocks so
+    the #171717 inset surface shows through."""
+    css = _read_codex_css()
+    m = re.search(
+        r"body\.remote-chat \.txt pre code\.hljs,\s*"
+        r"body\.remote-chat \.md-body pre code\.hljs\s*\{([^}]*)\}",
+        css,
+    )
+    assert m, "code.hljs transparency override missing"
+    assert "background: transparent !important" in m.group(1)
+
+
 def test_main_js_remote_desktop_wiring() -> None:
     """main.js wires the desktop dock: remote-chat guard FIRST, then a
     typeof-guarded matchMedia('(min-width: 900px)') listener that
