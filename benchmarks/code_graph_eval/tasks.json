@@ -1,0 +1,89 @@
+{
+  "description": "Code-comprehension QA tasks over the KISS repo corpus. Gold facts are case-insensitive substrings that must appear in the final answer. Derived deterministically via grep/AST on the corpus before the benchmark run.",
+  "tasks": [
+    {
+      "id": "callers_kill_process_group",
+      "category": "structure",
+      "prompt": "In the file src/kiss/agents/sorcar/useful_tools.py, which functions or methods contain calls to _kill_process_group? List every distinct enclosing function/method name.",
+      "gold_facts": ["_stop_monitor", "Bash", "_bash_streaming"]
+    },
+    {
+      "id": "where_class_useful_tools",
+      "category": "structure",
+      "prompt": "In which file is the class UsefulTools defined? Give the path relative to the repo root.",
+      "gold_facts": ["src/kiss/agents/sorcar/useful_tools.py"]
+    },
+    {
+      "id": "where_class_kissagent",
+      "category": "structure",
+      "prompt": "In which file is the class KISSAgent defined (the production class, not tests), and what class does it inherit from?",
+      "gold_facts": ["src/kiss/core/kiss_agent.py", "Base"]
+    },
+    {
+      "id": "callers_make_skill_tool",
+      "category": "structure",
+      "prompt": "The function make_skill_tool is defined in src/kiss/agents/sorcar/skills.py. Which other production (non-test) Python file in src/kiss calls it?",
+      "gold_facts": ["sorcar_agent.py"]
+    },
+    {
+      "id": "callers_discover_skills",
+      "category": "structure",
+      "prompt": "Which production (non-test) Python files under src/kiss call the function discover_skills? List all file names.",
+      "gold_facts": ["skills.py", "cli_repl.py", "commands.py"]
+    },
+    {
+      "id": "where_docker_manager",
+      "category": "structure",
+      "prompt": "In which file is the class DockerManager defined? Give the path relative to the repo root.",
+      "gold_facts": ["src/kiss/docker/docker_manager.py"]
+    },
+    {
+      "id": "callers_format_bash_result",
+      "category": "structure",
+      "prompt": "In src/kiss/agents/sorcar/useful_tools.py, which methods call the module-level helper _format_bash_result? List the distinct enclosing method names.",
+      "gold_facts": ["Bash", "_bash_streaming"]
+    },
+    {
+      "id": "sorcar_agent_parent",
+      "category": "structure",
+      "prompt": "What is the parent class of SorcarAgent and in which file is that parent class defined?",
+      "gold_facts": ["RelentlessAgent", "src/kiss/core/relentless_agent.py"]
+    },
+    {
+      "id": "callers_load_skill_content",
+      "category": "structure",
+      "prompt": "Which production (non-test) Python files under src/kiss call the function load_skill_content? List all file names.",
+      "gold_facts": ["skills.py", "commands.py"]
+    },
+    {
+      "id": "callers_catalog_xml",
+      "category": "structure",
+      "prompt": "Which function in src/kiss/agents/sorcar/skills.py uses the private helper _catalog_xml?",
+      "gold_facts": ["make_skill_tool"]
+    },
+    {
+      "id": "guard_wiring",
+      "category": "structure",
+      "prompt": "In src/kiss/agents/sorcar/useful_tools.py there is a module-level function _bash_parent_repo_guard. Which method calls it?",
+      "gold_facts": ["Bash"]
+    },
+    {
+      "id": "general_skill_sources",
+      "category": "general",
+      "prompt": "According to the Skill dataclass docstring in src/kiss/agents/sorcar/skills.py, what are the possible values of the 'source' attribute of a Skill? List them all.",
+      "gold_facts": ["bundled", "claude-user", "agents-user", "user", "claude-project", "agents-project", "project"]
+    },
+    {
+      "id": "general_bundled_skills_dir",
+      "category": "general",
+      "prompt": "What directory (relative to the kiss package) does bundled_skills_dir() in src/kiss/agents/sorcar/skills.py return, and which script downloads content into it?",
+      "gold_facts": ["claude_skills", "fetch-claude-skills.sh"]
+    },
+    {
+      "id": "general_kissagent_run_params",
+      "category": "general",
+      "prompt": "Name at least five parameters of the KISSAgent.run method in src/kiss/core/kiss_agent.py.",
+      "gold_facts": ["model_name", "prompt_template", "tools", "max_steps", "max_budget"]
+    }
+  ]
+}

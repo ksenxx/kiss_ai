@@ -31,7 +31,11 @@ The test builds real ``AnthropicModel`` instances (no mocks, no
 patches) for ``claude-fable-5`` and ``claude-sonnet-5`` and asserts
 that ``_build_create_kwargs`` now:
 
-* sets ``thinking = {"type": "adaptive"}``, and
+* sets ``thinking = {"type": "adaptive", "display": "summarized"}``
+  (``display`` defaults to ``"omitted"`` on fable-5/sonnet-5, which
+  would hide all thinking text),
+* does NOT force ``tool_choice`` (forced tool use silently disables
+  adaptive thinking — see test_anthropic_fable_thinking_display.py), and
 * adds ``interleaved-thinking-2025-05-14`` to the
   ``anthropic-beta`` extra header.
 
@@ -107,11 +111,17 @@ class TestClaudeFable5ThinkingConfig:
         m = AnthropicModel("claude-fable-5", api_key="test-key")
         m.conversation = [{"role": "user", "content": "ping"}]
         kwargs = m._build_create_kwargs()
-        assert kwargs.get("thinking") == {"type": "adaptive"}, (
-            f"claude-fable-5 must request adaptive thinking; got "
+        assert kwargs.get("thinking") == {
+            "type": "adaptive",
+            "display": "summarized",
+        }, (
+            f"claude-fable-5 must request adaptive thinking with "
+            f"display='summarized'; got "
             f"kwargs['thinking']={kwargs.get('thinking')!r}. Without "
-            f"this the model returns encrypted-only reasoning turns "
-            f"that KISSAgent misreads as 'empty response'."
+            f"adaptive thinking the model returns encrypted-only reasoning "
+            f"turns that KISSAgent misreads as 'empty response'; without "
+            f"display='summarized' fable-5 defaults to display='omitted' "
+            f"and reveals no thinking text at all."
         )
 
     def test_build_kwargs_attaches_interleaved_beta_for_fable_5(self) -> None:
@@ -127,19 +137,19 @@ class TestClaudeFable5ThinkingConfig:
             f"the KISS Sorcar loop cannot route to the Thoughts panel."
         )
 
-    def test_build_kwargs_forces_tool_use_for_fable_5_tools(self) -> None:
-        """Agentic fable-5 turns must not be allowed to be tool-less.
+    def test_build_kwargs_never_forces_tool_use_for_fable_5_tools(self) -> None:
+        """Agentic fable-5 turns must NOT force ``tool_choice=any``.
 
-        KISSAgent always provides ``finish`` and requires a tool call on
-        each step.  For adaptive-thinking Claude families, Anthropic accepts
-        ``tool_choice={"type": "any"}``, which prevents the fable-5
-        reasoning-only / empty-text turn that otherwise trips the
-        consecutive-empty-response guard.
+        Forced tool use is incompatible with thinking: on adaptive-thinking
+        models the API silently disables thinking for the request
+        ("graceful thinking degradation"), so ``tool_choice={"type":
+        "any"}`` suppressed every thinking block on every agentic fable-5
+        turn.  The default ``tool_choice=auto`` must be used instead.
         """
         m = AnthropicModel("claude-fable-5", api_key="test-key")
         m.conversation = [{"role": "user", "content": "ping"}]
         kwargs = m._build_create_kwargs(tools=[_ANTHROPIC_FINISH_TOOL])
-        assert kwargs.get("tool_choice") == {"type": "any"}
+        assert "tool_choice" not in kwargs, kwargs.get("tool_choice")
 
 
 class TestClaudeSonnet5ThinkingConfig:
@@ -154,7 +164,10 @@ class TestClaudeSonnet5ThinkingConfig:
         m = AnthropicModel("claude-sonnet-5", api_key="test-key")
         m.conversation = [{"role": "user", "content": "ping"}]
         kwargs = m._build_create_kwargs()
-        assert kwargs.get("thinking") == {"type": "adaptive"}, kwargs.get("thinking")
+        assert kwargs.get("thinking") == {
+            "type": "adaptive",
+            "display": "summarized",
+        }, kwargs.get("thinking")
 
     def test_build_kwargs_attaches_interleaved_beta_for_sonnet_5(self) -> None:
         m = AnthropicModel("claude-sonnet-5", api_key="test-key")
@@ -163,11 +176,11 @@ class TestClaudeSonnet5ThinkingConfig:
         beta = kwargs.get("extra_headers", {}).get("anthropic-beta", "")
         assert "interleaved-thinking-2025-05-14" in beta, beta
 
-    def test_build_kwargs_forces_tool_use_for_sonnet_5_tools(self) -> None:
+    def test_build_kwargs_never_forces_tool_use_for_sonnet_5_tools(self) -> None:
         m = AnthropicModel("claude-sonnet-5", api_key="test-key")
         m.conversation = [{"role": "user", "content": "ping"}]
         kwargs = m._build_create_kwargs(tools=[_ANTHROPIC_FINISH_TOOL])
-        assert kwargs.get("tool_choice") == {"type": "any"}
+        assert "tool_choice" not in kwargs, kwargs.get("tool_choice")
 
 
 class TestLegacyPrefixPathStillWorks:

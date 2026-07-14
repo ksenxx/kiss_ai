@@ -83,7 +83,9 @@ class _BugHuntBase(unittest.TestCase):
         self._orig_followup = _server_module.generate_followup_text
 
         def fake_commit_msg(
-            diff_text: str, user_prompt: str | None = None,
+            diff_text: str,
+            user_prompt: str | None = None,
+            task_result: str | None = None,
         ) -> str:
             return "test: bughunt autocommit"
 
