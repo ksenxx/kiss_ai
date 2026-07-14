@@ -342,14 +342,12 @@
     // backend emits continue-results with ``success: false``.
     if (ev.is_continue) {
       const contDiv = document.createElement('div');
-      contDiv.style.cssText =
-        'color:var(--yellow);font-weight:700;font-size:var(--fs-xl);margin-bottom:10px';
+      contDiv.className = 'rc-status';
       contDiv.textContent = 'Status: Continue';
       rc.appendChild(contDiv);
     } else if (ev.success === false) {
       const failDiv = document.createElement('div');
-      failDiv.style.cssText =
-        'color:var(--red);font-weight:700;font-size:var(--fs-xl);margin-bottom:10px';
+      failDiv.className = 'rc-status rc-status-fail';
       failDiv.textContent = 'Status: FAILED';
       rc.appendChild(failDiv);
     }

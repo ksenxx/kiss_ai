@@ -3334,6 +3334,93 @@ class TestHandleReadyRestoredTabs(IsolatedAsyncioTestCase):
             self.assertIn("models", types)
             self.assertIn("focusInput", types)
 
+    async def test_ready_sends_tasks_updated_resync_nudge(self) -> None:
+        """Every ``ready`` gets a targeted ``tasks_updated`` nudge.
+
+        The start-time ``tasks_updated`` broadcast by
+        ``ChatSorcarAgent.run`` is a one-shot, never-persisted global
+        system event.  A remote client whose WebSocket was down when a
+        task started (mobile Safari kills the socket while the phone
+        is backgrounded) misses it forever — so ``_handle_ready`` must
+        nudge every (re)connecting client with ``tasks_updated`` so an
+        open History sidebar refetches and converges on the current
+        task list.
+        """
+        async with connect(
+            f"wss://127.0.0.1:{self.port}/ws",
+            ssl=_no_verify_ssl(),
+        ) as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+            self.assertEqual(resp["type"], "auth_ok")
+
+            await ws.send(json.dumps({"type": "ready", "tabId": "t1"}))
+            events: list[dict] = []
+            for _ in range(20):
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=2)
+                    events.append(json.loads(raw))
+                except TimeoutError:
+                    break
+            types = [e.get("type") for e in events]
+            self.assertIn(
+                "tasks_updated",
+                types,
+                "ready must trigger a targeted tasks_updated resync "
+                "nudge so a reconnecting client's open History sidebar "
+                f"refetches (got event types: {types})",
+            )
+
+    async def test_ready_nudge_targets_only_the_ready_client(self) -> None:
+        """The ready-time ``tasks_updated`` nudge is a TARGETED send.
+
+        A second authenticated client that never sends ``ready`` must
+        not receive the nudge — the resync hint is delivered directly
+        to the (re)connecting endpoint, not broadcast to everyone
+        (unrelated clients already heard the live broadcast or will
+        resync via their own ``ready``/reconnect).
+        """
+        async with (
+            connect(
+                f"wss://127.0.0.1:{self.port}/ws",
+                ssl=_no_verify_ssl(),
+            ) as ws_ready,
+            connect(
+                f"wss://127.0.0.1:{self.port}/ws",
+                ssl=_no_verify_ssl(),
+            ) as ws_other,
+        ):
+            for ws in (ws_ready, ws_other):
+                await ws.send(json.dumps({"type": "auth", "password": ""}))
+                resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+                self.assertEqual(resp["type"], "auth_ok")
+
+            await ws_ready.send(json.dumps({"type": "ready", "tabId": "t1"}))
+
+            ready_types: list[str] = []
+            for _ in range(20):
+                try:
+                    raw = await asyncio.wait_for(ws_ready.recv(), timeout=2)
+                    ready_types.append(json.loads(raw).get("type"))
+                except TimeoutError:
+                    break
+            self.assertIn("tasks_updated", ready_types)
+
+            other_types: list[str] = []
+            for _ in range(20):
+                try:
+                    raw = await asyncio.wait_for(ws_other.recv(), timeout=1)
+                    other_types.append(json.loads(raw).get("type"))
+                except TimeoutError:
+                    break
+            self.assertNotIn(
+                "tasks_updated",
+                other_types,
+                "the ready nudge must be targeted at the ready client "
+                "only, not broadcast to other connected clients "
+                f"(other client saw: {other_types})",
+            )
+
     async def test_ready_with_empty_restored_tabs(self) -> None:
         """ready command with empty restoredTabs doesn't crash."""
         async with connect(

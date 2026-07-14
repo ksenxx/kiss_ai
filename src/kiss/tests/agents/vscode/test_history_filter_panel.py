@@ -4,12 +4,13 @@
 # add your name here
 """Integration test for the History panel filter bar.
 
-The History sidebar panel renders a single-line filter bar between
-the search box and the history list with:
+The History sidebar panel renders a filter bar between the search
+box and the history list with:
 
-* four category checkboxes — ``Running`` / ``Errored`` / ``Succeeded``
-  / ``Favorites``
-* two date inputs — ``From`` / ``To``
+* five status filter chips (labels wrapping hidden checkboxes) —
+  ``Running`` / ``Errored`` / ``Succeeded`` / ``Workspace`` /
+  ``Favorites``
+* a date-range pill with two date inputs — ``From`` / ``To``
 
 This test asserts the HTML, CSS, and JS surfaces all line up: the
 served page contains the form controls with the expected IDs in
@@ -84,7 +85,8 @@ class TestHistoryFilterPanel(unittest.TestCase):
         ).read_text(encoding="utf-8")
         for selector in (
             ".history-filter-bar",
-            ".history-filter-chk",
+            ".hf-chip",
+            ".history-filter-daterange",
             ".history-filter-date",
         ):
             self.assertIn(selector, css)

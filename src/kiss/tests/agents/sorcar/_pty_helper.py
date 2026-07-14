@@ -33,6 +33,7 @@ from __future__ import annotations
 import fcntl
 import os
 import pty
+import signal
 import subprocess
 import termios
 
@@ -97,11 +98,26 @@ def _acquire_ctty() -> None:
     deliver SIGINT through ``\\x03`` because the child has no foreground
     process group on the PTY.
 
+    It also resets terminal-signal dispositions (SIGINT, SIGQUIT,
+    SIGTERM, SIGHUP) to ``SIG_DFL``.  POSIX requires a non-interactive
+    shell to start asynchronous (``cmd &``) children with SIGINT/SIGQUIT
+    *ignored*, and ignored dispositions survive fork+exec — so when the
+    test session itself is launched as a background job (CI runners,
+    ``nohup pytest &``, parallel test drivers), every child would
+    inherit ``SIG_IGN`` for SIGINT.  CPython only installs its
+    ``KeyboardInterrupt`` handler when SIGINT is *not* ignored at
+    startup, so a ``\\x03`` written to the PTY master would silently do
+    nothing and every Ctrl+C test would fail.  Resetting to ``SIG_DFL``
+    before ``exec`` restores the disposition the tests (and real
+    interactive use) assume.
+
     Returns:
         None. ``TIOCSCTTY`` failures are silenced because on some
         platforms (or when re-entered) the fd is already the
         controlling terminal — that is the desired end state anyway.
     """
+    for sig in (signal.SIGINT, signal.SIGQUIT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, signal.SIG_DFL)
     try:
         fcntl.ioctl(0, termios.TIOCSCTTY, 0)
     except OSError:

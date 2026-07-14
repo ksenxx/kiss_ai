@@ -76,7 +76,7 @@ from websockets.datastructures import Headers
 from websockets.http11 import Request, Response
 
 from kiss.agents.vscode.diff_merge import _read_lines_preserved
-from kiss.agents.vscode.json_printer import JsonPrinter
+from kiss.agents.vscode.json_printer import GLOBAL_EVENT_TYPES, JsonPrinter
 from kiss.agents.vscode.server import VSCodeServer
 from kiss.agents.vscode.tips import read_tips
 from kiss.agents.vscode.voice_wake import (
@@ -2127,6 +2127,10 @@ class WebPrinter(JsonPrinter):
           targeted "system" events: sent verbatim to all connected
           clients (which filter by ``tabId``), but **not** recorded
           or persisted.
+        * Events whose type is in :data:`GLOBAL_EVENT_TYPES`
+          (``taskDeleted``) carry a ``taskId`` payload field but are
+          global system broadcasts: sent verbatim to every connected
+          client, never recorded, persisted, or fanned out per tab.
         * Events with no ``tabId`` but a thread-local ``task_id`` are
           task events: ``taskId`` is injected, the event is recorded
           under the task and queued for persistence, and one stamped
@@ -2178,6 +2182,15 @@ class WebPrinter(JsonPrinter):
             # Targeted "system" event — forward verbatim, never record
             # or persist (recording / persistence is per-task and is
             # owned by the agent thread).
+            self._send_to_ws_clients(json.dumps(event))
+            return
+
+        if event.get("type") in GLOBAL_EVENT_TYPES:
+            # Global system broadcast that carries a ``taskId`` PAYLOAD
+            # field (e.g. ``taskDeleted``) — it is NOT a task-stream
+            # event.  Send verbatim to every connected client; never
+            # record, persist, or fan out per subscribed tab (the named
+            # task no longer exists / has no subscribers).
             self._send_to_ws_clients(json.dumps(event))
             return
 
@@ -5283,6 +5296,29 @@ class RemoteAccessServer:
             if work_dir:
                 init["workDir"] = work_dir
             await self._run_cmd(init)
+        # Belt-and-braces history resync: the start-time
+        # ``tasks_updated`` broadcast by ``ChatSorcarAgent.run`` is a
+        # one-shot global system event ("Not recorded, not persisted"
+        # — see :meth:`WebPrinter.broadcast`), so a client whose
+        # WebSocket was down at that instant (mobile Safari kills the
+        # socket whenever the phone backgrounds) misses it forever.
+        # Nudging the WSS client that just sent ``ready`` — i.e. a
+        # fresh or reloaded remote page, including the shim's
+        # ``location.reload()`` recovery after an authenticated close
+        # — with a targeted ``tasks_updated`` makes its open History
+        # sidebar refetch and converge on the current task list.
+        # (UDS/VS Code-extension reconnects don't resend ``ready``;
+        # they converge via the webview's ``daemonStatus
+        # connected:true`` → ``refreshHistory()`` path instead.)  The
+        # webview treats ``tasks_updated`` as a hint (refetch via
+        # ``getHistory``), never as data, so a redundant nudge after
+        # a clean page load is harmless.
+        try:
+            await self._endpoint_send(
+                websocket, json.dumps({"type": "tasks_updated"}),
+            )
+        except Exception:
+            logger.debug("ready tasks_updated nudge failed", exc_info=True)
         await self._send_welcome_info()
         try:
             await self._endpoint_send(

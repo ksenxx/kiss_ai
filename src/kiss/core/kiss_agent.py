@@ -14,7 +14,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from kiss.core.base import Base
-from kiss.core.kiss_error import KISSError
+from kiss.core.kiss_error import KISSError, ModelRefusalError
 from kiss.core.models.model import Attachment
 from kiss.core.models.model_info import calculate_cost, get_max_context_length, model
 from kiss.core.utils import substitute_prompt_args
@@ -395,10 +395,19 @@ class KISSAgent(Base):
                     return result
             except KISSError as e:  # pragma: no cover – requires model to fail mid-step
                 logger.debug("Exception caught", exc_info=True)
-                if isinstance(e, _EmptyModelResponseError):
-                    new_name = self._try_switch_to_fallback(
-                        reason="repeated empty responses"
+                if isinstance(e, _EmptyModelResponseError | ModelRefusalError):
+                    # ModelRefusalError: the provider's safety layer refused
+                    # the request (stop_reason="refusal", empty content —
+                    # fable-5 does this on benign security-research prompts
+                    # that opus-4-8 answers normally).  A refusal is
+                    # deterministic for identical content, so retrying is
+                    # pointless — swap to the fallback model immediately.
+                    reason = (
+                        'a safety refusal (stop_reason="refusal")'
+                        if isinstance(e, ModelRefusalError)
+                        else "repeated empty responses"
                     )
+                    new_name = self._try_switch_to_fallback(reason=reason)
                     if new_name is not None:
                         consecutive_errors = 0
                         self._consecutive_no_tool_calls = 0
