@@ -218,13 +218,13 @@
     "gen": true
   },
   "claude-fable-5": {
-    "context_length": 1000000,
+    "context_length": 300000,
     "input_price_per_1M": 10.0,
     "output_price_per_1M": 50.0,
     "fc": true,
     "emb": false,
     "gen": true,
-    "fallback": "claude-opus-4-8",
+    "fallback": "claude-opus-4-7",
     "extended_thinking": true,
     "adaptive_thinking": true
   },
