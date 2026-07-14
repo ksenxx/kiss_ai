@@ -8113,8 +8113,12 @@
       div.dataset.workDir = s.work_dir || '';
       const itemText = s.title || s.preview || 'Untitled';
       div.dataset.tooltip = s.preview || itemText;
-      div.style.backgroundColor = chatIdBgColor(String(s.id));
-      div.style.color = '#1a1a1a';
+      // Expose the per-chat color as a custom property instead of
+      // inline background/text colors: main.css paints the webview's
+      // pastel row from it, while remote-codex.css can restyle the
+      // remote page (neutral row, colored left border) — inline
+      // styles would beat every stylesheet.
+      div.style.setProperty('--task-color', chatIdBgColor(String(s.id)));
 
       if (s.is_running) {
         const runningDot = document.createElement('span');

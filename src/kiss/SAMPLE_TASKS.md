@@ -36,8 +36,7 @@ Sorcar for AI Discovery: Can you AI-discover the lightest and fastest AI model t
 
 ## Task
 
-Sorcar for Optimization: Can you run the command \<<command>> in the background and monitor its output in real time to optimize the code at \<<folder_name_or_url>> with respect to the following metrics: \<<speed, accuracy, recall, cost>>. Then use AI discovery to optimize.  You can add a diagnostic code that prints metrics, such as running time, at a finer granularity.  Do not forget to remove the diagnostic code after the optimization is complete. You MUST NOT STOP until the metrics achieve the following values: \<<give_concrete_values_for_metrics>>. Create an HTML report with diagrams and illustrations (that do not look AI-generated) in ./reports, and open it in the user's default browser.
-
+Sorcar for Optimization: Can you run the command \<<command>> in the background and monitor its output in real time to optimize the code at \<<folder_name_or_url>> with respect to the following metrics: \<<speed, accuracy, recall, cost>>. Then use AI discovery to optimize. You can add a diagnostic code that prints metrics, such as running time, at a finer granularity. Do not forget to remove the diagnostic code after the optimization is complete. You MUST NOT STOP until the metrics achieve the following values: \<<give_concrete_values_for_metrics>>. Create an HTML report with diagrams and illustrations (that do not look AI-generated) in ./reports, and open it in the user's default browser.
 
 ## Task
 
@@ -67,5 +66,3 @@ At each step, keep track of the best prompt, which has the maximum number of suc
 ## Task
 
 Can you run gepa.py on hotpotqa using gpt-4o-mini as both models?
-
-

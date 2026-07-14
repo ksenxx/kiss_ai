@@ -1850,6 +1850,13 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
   padding-bottom: 9px;
   padding-left: 13px;
   min-height: 96px;
+
+  /* Per-chat pastel look, driven by the --task-color custom property
+     that renderHistory stamps on every row (it used to be an inline
+     background-color + color pair, which no stylesheet — e.g. the
+     remote page's remote-codex.css — could override). */
+  background-color: var(--task-color, color-mix(in srgb, var(--fg) 3%, transparent));
+  color: #1a1a1a;
 }
 
 .running-item > .sidebar-item-text {
