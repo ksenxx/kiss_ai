@@ -326,6 +326,99 @@ development and `gpt-5.6-sol` for an independent review/debug pass.
 
 ______________________________________________________________________
 
+# PROGRESS — Codex flat-thread chat panels — Sessions 7–10
+
+## Task
+
+Make the remote webapp's chat panels (tool calls, thinking, prompts,
+result cards) indistinguishable from the OpenAI Codex app thread, with
+e2e tests using the live remote webapp + screenshots. Dev model:
+claude-fable-5; independent review/debug: gpt-5.6-sol.
+
+## Sessions 7–10 (this task)
+
+1. **Web research (10/10 sites)** — `tmp/information-codex-chat.md`
+   (Google, github.com/openai/codex issues #24310/#23008, openai.com
+   Codex-app announcement, learn.chatgpt.com/docs/app with live thread
+   mock, news.smol.ai, Substack guide, simonwillison.net). Synthesis:
+   the real Codex thread is **flat** — assistant/tool/thinking content
+   sits directly on the page background `#0d0d0d`; labels are quiet
+   sentence-case muted-gray `#8e8e8e` rows with a chevron (no
+   uppercase, no letter-spacing, no filled header strips, no colored
+   cards); the only elevated element is monospace output (`#171717`,
+   12px radius); the final result renders like a plain assistant
+   reply; the user prompt stays a right-aligned light bubble; error
+   red is kept.
+
+1. **Tests first (claude-fable-5)** — new "Codex flat-thread panels"
+   section in
+   `src/kiss/tests/agents/vscode/test_codex_mobile_layout.py`:
+
+   - `test_chat_panel_sits_on_page_background` (parametrized over
+     `.tc,.rc,.system-prompt,.prompt,.think,.llm-panel,.merge-info` —
+     must be `background: transparent`, never `#171717`);
+   - `test_chat_panel_headers_are_quiet` (parametrized over
+     `.tc-h,.rc-h,.system-prompt-h,.prompt-h,.llm-panel-hdr` —
+     `text-transform: none`, `letter-spacing: normal`, transparent);
+   - `test_think_label_is_quiet`;
+   - `test_mono_output_blocks_keep_inset_surface` (`.bash-panel`/`.tr`
+     keep `#171717` + `border-radius: 12px`);
+   - `test_result_card_is_flat_and_quiet` (`.rc` border none, `.rc-h h3` `#ececec`);
+   - `test_muted_label_color_tokens_present`;
+   - `test_markdown_code_blocks_match_inset_surface` (`.txt pre` AND
+     `.md-body pre` get the inset surface);
+   - `test_hljs_background_neutralized_inside_code_blocks` (see bug
+     below). Verified RED before implementing.
+
+1. **Implementation (claude-fable-5)** — rewrote the panel section of
+   `src/kiss/agents/vscode/media/remote-codex.css` into "Codex flat
+   thread": `.tc/.system-prompt/.prompt/.llm-panel` → transparent bg,
+   hairline `1px rgb(255 255 255 / 8%)` border, 12px radius; all
+   headers + `.think .lbl` + `.tr .rl` → transparent, `#8e8e8e`,
+   `text-transform: none`, `letter-spacing: normal`, weight 500;
+   `.think` borderless; `.rc` → border none, transparent, flush
+   header/body, `h3` `#ececec` 15px; `.tr/.bash-panel/.txt pre` →
+   `#171717` inset, 12px radius; nested `.tc > .bash-panel/.tc > .tr`
+   → `0 0 12px 12px` + hairline top; muted `.tc-arg`, `.panel-time`,
+   `.collapse-preview`. All rules `body.remote-chat` scoped; VS Code
+   webview + error red untouched.
+
+1. **Independent review (gpt-5.6-sol)** — audited the full CSS diff,
+   `main.js` renderer-class wiring, and `_find_rule` regex for false
+   positives. **Found real bug**: `main.css` paints `.hljs` with
+   `background: var(--surface2) !important` (`#212121` under the
+   remote tokens), which overrode the pre's `#171717` inset surface —
+   highlighted code fences rendered a mismatched `#212121` box; also
+   `.md-body pre` (result-card / prompt markdown) wasn't covered, only
+   `.txt pre`. **Fix (claude-fable-5)**: remote-codex.css now styles
+   `body.remote-chat .txt pre, body.remote-chat .md-body pre`
+   (`#171717`, hairline, 12px) plus
+   `... pre code.hljs { background: transparent !important; }` so the
+   pre surface shows through. Collapsed `.tc` preview, copy-button
+   contrast, nested `.tr` radius, `.rc` flatness all verified OK live.
+
+1. **Permanent live e2e with screenshots** — new
+   `src/kiss/tests/agents/vscode/test_codex_flat_thread_live.py`
+   (`test_live_thread_renders_codex_flat_style_with_screenshots`):
+   starts the production `RemoteAccessServer` (real TLS, ephemeral
+   port), loads the page in headless Chromium via Playwright, injects
+   a representative transcript (thinking, markdown + hljs code fence,
+   collapsed tool call, Bash call with mono output + result, Edit
+   diff, result card), captures `codex_welcome.png` +
+   `codex_thread.png` (asserted non-empty), and asserts computed
+   styles in the real browser: body `rgb(13,13,13)`; `.tc`
+   transparent/12px; `.tc-h` none/`#8e8e8e`/transparent; nested `.tr`
+   `#171717` radius `0 0 12px 12px`; `.rc` transparent/borderless;
+   `.think .lbl` quiet; `.md-body pre` `#171717`/12px with
+   transparent `.hljs`; collapsed preview visible + body hidden.
+
+1. **Verification** — 61 tests in `test_codex_mobile_layout.py` + the
+   live Playwright test all pass; `npm run lint:css`/`lint:ts` clean;
+   `uv run check --full` all green; ad-hoc live screenshot validation
+   against a long-running real server also PASS.
+
+______________________________________________________________________
+
 # PROGRESS — Codex-mobile remote webapp restyle — Sessions 4–6
 
 ## Task
