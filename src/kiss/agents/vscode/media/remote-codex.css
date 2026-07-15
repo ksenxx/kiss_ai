@@ -739,6 +739,20 @@ body.remote-chat #output code {
   font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
 }
 
+/* The per-panel "time spent" footer is the last mono label left
+ * (main.css puts it in the editor's monospace font); render it in
+ * the same sans stack as every other panel label. */
+body.remote-chat .panel-time {
+  font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
+}
+
+/* Thread-scroll placeholders render italic in main.css; every other
+ * panel text on the remote page is upright — match it. */
+body.remote-chat .adjacent-loader,
+body.remote-chat .adjacent-task-placeholder {
+  font-style: normal;
+}
+
 /* ── History rows: per-chat color on the left border ─────
  * main.css paints each History row with its per-chat pastel
  * --task-color background and near-black text/buttons.  On the
