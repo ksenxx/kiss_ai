@@ -42,6 +42,7 @@ import threading
 from pathlib import Path
 
 import pytest
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
 MEDIA_DIR = (
@@ -340,6 +341,21 @@ _INJECT_HISTORY_JS = r"""
   document.getElementById('sidebar').classList.add('open');
   const wsChk = document.getElementById('hf-workspace');
   if (wsChk) wsChk.checked = false;
+  // Neutralize the date-range filter too: the page's boot getHistory
+  // response autofills #hf-from/#hf-to from the REAL task database's
+  // dateRange, and when the oldest listed task is newer than this
+  // session's fixed Nov-2023 timestamp (e.g. after parallel test
+  // sessions mutate the shared DB) the From bound would
+  // display:none the injected row.  Clearing the inputs and
+  // dispatching ``change`` pins the empty range
+  // (``historyDateRangeUserSet``) so no later autofill re-hides the
+  // row — the same path the filter bar's own clear button uses.
+  for (const id of ['hf-from', 'hf-to']) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    el.value = '';
+    el.dispatchEvent(new Event('change', {bubbles: true}));
+  }
   const session = {
     id: 'chat-abc123',
     task_id: 42,
@@ -581,20 +597,36 @@ def test_live_task_panel_typography_and_history_rows(
                 count = page.evaluate(_INJECT_PAGE_JS)
                 assert count >= 9, "transcript injection failed"
                 # Let the page's own boot-time getHistory round-trip
-                # settle (it renders the backend's empty history) so a
-                # late backend response cannot wipe the injected row.
-                try:
-                    page.wait_for_selector(
-                        "#history-list .sidebar-empty",
-                        state="attached",
-                        timeout=5000,
-                    )
-                except Exception:
-                    pass
-                page.evaluate(_INJECT_HISTORY_JS)
+                # settle BEFORE injecting: the server serves the real
+                # task database, so the boot response renders either
+                # real history rows or the empty placeholder — wait
+                # for either deterministically.  (The old swallowed
+                # 5s ``.sidebar-empty`` wait always timed out on a
+                # machine with a non-empty DB, and under
+                # parallel-suite load a late offset-0 boot render
+                # could wipe the injected row.)
                 page.wait_for_selector(
-                    "#history-list .running-item", state="visible"
+                    "#history-list .sidebar-empty, "
+                    "#history-list .sidebar-item",
+                    state="attached",
+                    timeout=60000,
                 )
+                # Inject the fixed history session.  Retry in case a
+                # straggling backend history response (the boot flow
+                # can issue more than one getHistory) re-renders the
+                # list over the injected row.
+                for attempt in range(3):
+                    page.evaluate(_INJECT_HISTORY_JS)
+                    try:
+                        page.wait_for_selector(
+                            "#history-list .running-item",
+                            state="visible",
+                            timeout=10000,
+                        )
+                        break
+                    except PlaywrightTimeoutError:
+                        if attempt == 2:
+                            raise
                 # Wait for the metadata layout to settle: the info
                 # container must have real text rects (i.e. its inline
                 # children have been laid out) before probing.  Under

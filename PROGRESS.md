@@ -1,4 +1,41 @@
-# PROGRESS — fix 7 pre-existing test_install_script_new_session_immunity failures (this session, COMPLETE)
+# PROGRESS — run full suite in 8 parallel splits; diagnose + fix 3 failures (this session)
+
+Task: run all 6514 tests split by test-method count into cores-2 = 8 groups via
+run_parallel; classify each failure as project bug vs test bug; fix accordingly.
+
+- Collected 6514 test IDs (`uv run pytest --collect-only -q -p no:cov`), split into 8
+  file-aligned groups (818/818/817/828/820/819/835/759), ran all 8 in parallel
+  (`uv run pytest --no-cov -q`). Result: 6511 passed/skipped, 3 FAILED — all three
+  diagnosed as TEST bugs (parallel-load flakiness / shared-state races); no
+  project-code bugs found.
+
+1. test_talk_tool.py::test_talk_is_live_only_not_replayed_from_history —
+   `t.join(timeout=5.0)` too tight: `talk()` round-trips through the GPT audio model.
+   FIX: bumped to `t.join(timeout=10.0)` (with comment) in the 4 tests still using 5s,
+   matching the sibling test that already documented/used 10s.
+1. test_system_prompt_internet_search.py::[gpt-5.4-mini] — live agent sometimes
+   exhausts max_steps (KISSError) AFTER having searched; test re-raised anyway.
+   FIX: except-KISSError block now accepts the run when VISITED_URLS is non-empty
+   (policy under test is only that a search happened); still retries once/raises
+   when no search occurred. Solo rerun had passed → flaky live-LLM behavior.
+1. test_codex_task_panel_style.py::test_live_task_panel_typography_and_history_rows —
+   injected history row (fixed Nov-2023 timestamp, work_dir /tmp/w) existed but stayed
+   HIDDEN 30s. Root cause: main.js autofills #hf-from/#hf-to from the REAL shared
+   ~/.kiss/sorcar.db dateRange (autofillHistoryDateRange, 'history' handler); when the
+   DB's oldest listed task is newer than Nov 2023 (parallel test sessions mutate the DB)
+   the date filter display:none's the injected row. The injection neutralized only the
+   workspace filter. FIXES (test-side): (a) \_INJECT_HISTORY_JS clears hf-from/hf-to and
+   dispatches `change` (pins historyDateRangeUserSet, same as the filter bar's clear
+   button); (b) replaced the swallowed 5s `.sidebar-empty` wait with a deterministic
+   wait for `.sidebar-empty OR .sidebar-item` (boot render settle, 60s); (c) 3-attempt
+   re-inject retry around the visible wait (a straggling boot getHistory response can
+   re-render over the injected row); imported PlaywrightTimeoutError.
+
+Verification: reran all 3 affected test files; `uv run check --full` green.
+
+______________________________________________________________________
+
+# PROGRESS — fix 7 pre-existing test_install_script_new_session_immunity failures (prior session, COMPLETE)
 
 All 7 tests in src/kiss/tests/agents/vscode/test_install_script_new_session_immunity.py
 failed because they extracted the perl new-session re-exec block from install.sh via
