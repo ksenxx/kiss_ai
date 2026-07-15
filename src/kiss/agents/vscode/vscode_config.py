@@ -22,7 +22,9 @@ import subprocess
 import tempfile
 import threading
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+from kiss.core.config import kiss_home
 
 logger = logging.getLogger(__name__)
 
@@ -44,14 +46,45 @@ _ENV_VAR_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # handler persists a settings toggle) serialize so every update survives.
 _config_lock = threading.Lock()
 
-# ``KISS_HOME`` overrides the default ``~/.kiss`` location so that
-# tests (see ``src/kiss/tests/conftest.py``) can redirect persistent
-# state into a temporary directory without clobbering the user's real
-# ``~/.kiss/config.json`` — which the running ``kiss-web`` daemon
-# watches and would otherwise restart its cloudflared tunnel for every
-# time a test calls ``save_config({"remote_password": ...})``.
-CONFIG_DIR = Path(os.environ.get("KISS_HOME") or (Path.home() / ".kiss"))
-CONFIG_PATH = CONFIG_DIR / "config.json"
+# ``CONFIG_DIR``/``CONFIG_PATH`` are exposed as *lazy* module
+# attributes via the PEP 562 ``__getattr__`` below: each access
+# re-resolves ``$KISS_HOME`` (or ``~/.kiss``) through
+# :func:`kiss.core.config.kiss_home`, so ``KISS_HOME`` set after
+# import (as ``src/kiss/tests/conftest.py`` does) is honored and tests
+# never clobber the user's real ``~/.kiss/config.json`` — which the
+# running ``kiss-web`` daemon watches and would otherwise restart its
+# cloudflared tunnel for every time a test calls
+# ``save_config({"remote_password": ...})``.  Tests may still assign
+# ``vscode_config.CONFIG_DIR = tmp`` to pin an explicit override; the
+# assignment lands in the module dict and shadows the lazy lookup
+# until the test deletes or restores it.
+if TYPE_CHECKING:
+    # Static declaration of the PEP 562 lazy attributes so type
+    # checkers (pyright) know they exist; at runtime the names are
+    # absent from the module dict unless a test pins an override.
+    CONFIG_DIR: Path
+    CONFIG_PATH: Path
+
+
+def _config_dir() -> Path:
+    """Return the config directory: test override or lazy $KISS_HOME."""
+    override = globals().get("CONFIG_DIR")
+    return override if override is not None else kiss_home()
+
+
+def _config_path() -> Path:
+    """Return the ``config.json`` path: test override or lazy resolution."""
+    override = globals().get("CONFIG_PATH")
+    return override if override is not None else _config_dir() / "config.json"
+
+
+def __getattr__(name: str) -> Path:
+    """Resolve ``CONFIG_DIR``/``CONFIG_PATH`` lazily (see comment above)."""
+    if name == "CONFIG_DIR":
+        return _config_dir()
+    if name == "CONFIG_PATH":
+        return _config_path()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 DEFAULTS: dict[str, Any] = {
     "max_budget": 100,
@@ -195,9 +228,10 @@ def load_config() -> dict[str, Any]:
     value cannot break downstream consumers.
     """
     result = dict(DEFAULTS)
-    if CONFIG_PATH.exists():
+    cfg_path = _config_path()
+    if cfg_path.exists():
         try:
-            with open(CONFIG_PATH, encoding="utf-8") as f:
+            with open(cfg_path, encoding="utf-8") as f:
                 stored = json.load(f)
             if isinstance(stored, dict):
                 result.update(stored)
@@ -223,7 +257,9 @@ def save_config(data: dict[str, Any]) -> None:
         data: Configuration dict.
     """
     data = sanitize_config(data)
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    cfg_dir = _config_dir()
+    cfg_path = _config_path()
+    cfg_dir.mkdir(parents=True, exist_ok=True)
     # Serialize the whole read-modify-write so concurrent callers cannot
     # each read the same old file and clobber one another's keys.  The
     # threading lock covers callers inside this process; the ``flock``
@@ -234,14 +270,14 @@ def save_config(data: dict[str, Any]) -> None:
     # another's keys.
     with (
         _config_lock,
-        open(CONFIG_DIR / ".config.lock", "w", encoding="utf-8") as lock_file,
+        open(cfg_dir / ".config.lock", "w", encoding="utf-8") as lock_file,
     ):
         fcntl.flock(lock_file, fcntl.LOCK_EX)
         try:
             existing: dict[str, Any] = {}
-            if CONFIG_PATH.exists():
+            if cfg_path.exists():
                 try:
-                    with open(CONFIG_PATH, encoding="utf-8") as f:
+                    with open(cfg_path, encoding="utf-8") as f:
                         stored = json.load(f)
                     if isinstance(stored, dict):
                         existing = stored
@@ -252,7 +288,7 @@ def save_config(data: dict[str, Any]) -> None:
                     existing[k] = data[k]
             serialized = json.dumps(existing, indent=2)
             fd, tmp = tempfile.mkstemp(
-                prefix=".kiss-config-", dir=str(CONFIG_DIR),
+                prefix=".kiss-config-", dir=str(cfg_dir),
             )
             # W3-D3: unlink the staged temp file when the write or the
             # replace fails (ENOSPC, EACCES, …) — otherwise every
@@ -263,7 +299,7 @@ def save_config(data: dict[str, Any]) -> None:
                     os.write(fd, serialized.encode("utf-8"))
                 finally:
                     os.close(fd)
-                os.replace(tmp, CONFIG_PATH)
+                os.replace(tmp, cfg_path)
             except BaseException:
                 Path(tmp).unlink(missing_ok=True)
                 raise

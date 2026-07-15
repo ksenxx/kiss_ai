@@ -7,10 +7,46 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
+from kiss.agents.sorcar.git_worktree import (
+    TASK_RESULT_HEADING,
+    USER_PROMPT_HEADING,
+)
+from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.core.models.model_info import _OPENAI_PREFIXES, get_fast_model
 
 logger = logging.getLogger(__name__)
+
+
+def tab_owns_answer_queue(tab: Any, task_key: str) -> bool:
+    """Return whether *tab*'s live answer queue belongs to *task_key*.
+
+    Task-ownership filter (BUG-TR2-2) shared by
+    ``commands._resolve_user_answer_queue`` and
+    ``task_runner._resolve_task_answer_queue``:
+    ``JsonPrinter.cleanup_task`` intentionally preserves subscriber
+    sets of FINISHED tasks, so a tab that co-subscribed to an old,
+    finished task may now be running a brand-new UNRELATED task — its
+    live ``user_answer_queue`` belongs to THAT task.  Delivering a
+    stale answer there would answer the wrong question and dismiss the
+    wrong task's askUser modal.  A tab is disqualified only when its
+    live agent is actively running a task other than *task_key*.
+
+    Args:
+        tab: The ``_RunningAgentState`` whose queue is a candidate.
+        task_key: The coerced task id the answer/question belongs to.
+
+    Returns:
+        True when the tab's queue may serve *task_key*.
+    """
+    agent = getattr(tab, "agent", None)
+    agent_task = (
+        JsonPrinter._coerce_task_id(getattr(agent, "_last_task_id", None))
+        if agent is not None
+        else ""
+    )
+    return not (tab.is_task_active and agent_task and agent_task != task_key)
 
 
 def clean_llm_output(text: str) -> str:
@@ -259,7 +295,10 @@ def _append_user_prompt(message: str, user_prompt: str) -> str:
     trimmed = user_prompt.strip()
     if not trimmed:
         return message
-    return f"{message.rstrip()}\n\nUser prompt:\n{trimmed}"
+    # USER_PROMPT_HEADING is single-sourced in git_worktree.py: its
+    # ``_ensure_task_metadata`` dedup detection depends on byte-exact
+    # agreement with the block appended here.
+    return f"{message.rstrip()}{USER_PROMPT_HEADING}{trimmed}"
 
 
 def _append_task_result(message: str, task_result: str) -> str:
@@ -279,7 +318,9 @@ def _append_task_result(message: str, task_result: str) -> str:
     trimmed = task_result.strip()
     if not trimmed:
         return message
-    return f"{message.rstrip()}\n\nResult:\n{trimmed}"
+    # TASK_RESULT_HEADING is single-sourced in git_worktree.py (see
+    # ``_append_user_prompt``).
+    return f"{message.rstrip()}{TASK_RESULT_HEADING}{trimmed}"
 
 
 def generate_followup_text(task: str, result: str, model: str) -> str:
@@ -310,11 +351,19 @@ def generate_followup_text(task: str, result: str, model: str) -> str:
     )
 
 
+# Maximum number of dropdown suggestion items emitted to the webview
+# per request.  Single-sourced here and shared by the @-mention file
+# picker (:func:`rank_file_suggestions`) and the fast-complete
+# dropdown (``autocomplete``) so the two pickers stay scrollable
+# without UI tuning differences between them.
+SUGGESTION_LIMIT = 20
+
+
 def rank_file_suggestions(
     file_cache: list[str],
     query: str,
     usage: dict[str, int],
-    limit: int = 20,
+    limit: int = SUGGESTION_LIMIT,
 ) -> list[dict[str, str]]:
     """Rank and filter file paths by query match, recency, and usage.
 

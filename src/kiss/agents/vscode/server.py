@@ -53,7 +53,10 @@ from kiss.agents.sorcar.persistence import (
 )
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-from kiss.agents.vscode.autocomplete import _AutocompleteMixin
+from kiss.agents.vscode.autocomplete import (
+    _AutocompleteMixin,
+    ranked_function_calling_models,
+)
 from kiss.agents.vscode.commands import _CommandsMixin
 from kiss.agents.vscode.diff_merge import (
     _cleanup_merge_data,
@@ -70,14 +73,12 @@ from kiss.agents.vscode.merge_flow import _MergeFlowMixin
 from kiss.agents.vscode.task_runner import _TaskRunnerMixin, parse_task_tags
 from kiss.core.models.model_info import (
     MODEL_INFO,
-    get_available_models,
     get_default_model,
     get_fast_model,
 )
 
 __all__ = [
     "VSCodeServer",
-    "_RunningAgentState",
     "parse_task_tags",
 ]
 
@@ -89,7 +90,7 @@ logger = logging.getLogger(__name__)
 # parallel / auto-commit toggles) at the moment the task ran.  When a
 # chat tab is LOADED FROM HISTORY into a tab, the live toggles in the
 # webview already reflect the user's CURRENT global preferences (synced
-# from ``~/.kiss/config.json`` via ``updateSetting`` / ``configData``);
+# from ``~/.kiss/config.json`` via ``configData``);
 # replaying these stale per-task values would stamp the toggles back
 # onto the loaded task's old settings and silently make the NEXT task
 # run with those old settings instead of whatever the user just picked
@@ -248,6 +249,30 @@ def _tab_busy(tab: _RunningAgentState) -> bool:
     )
 
 
+def broadcast_to_conn(
+    printer: Any,
+    event: dict[str, Any],
+    conn_id: str,
+) -> None:
+    """Broadcast *event* on *printer*, stamped with *conn_id* when non-empty.
+
+    Stamping ``connId`` makes the printer deliver the event ONLY to the
+    requesting connection (the VS Code window / browser tab whose user
+    triggered the command), so one window's request never repaints — or
+    pops a banner in — another window's UI; ``""`` broadcasts to all.
+    Shared by :meth:`VSCodeServer._broadcast_to_conn` and
+    ``RemoteAccessServer._broadcast_to_conn`` (web_server.py).
+
+    Args:
+        printer: Any printer exposing ``broadcast(event)``.
+        event: The event payload to broadcast (mutated in place).
+        conn_id: Requesting connection id (``""`` reaches all).
+    """
+    if conn_id:
+        event["connId"] = conn_id
+    printer.broadcast(event)
+
+
 def _subagent_is_done(sub_task_id: Any) -> bool:
     """True when the sub-agent owning *sub_task_id* is no longer running.
 
@@ -257,7 +282,7 @@ def _subagent_is_done(sub_task_id: Any) -> bool:
 
     Args:
         sub_task_id: The sub-agent's ``task_history`` row id (any type;
-            non-int values are treated as done).
+            non-str values are treated as done).
 
     Returns:
         True when no live agent is registered for *sub_task_id*.
@@ -674,17 +699,35 @@ class VSCodeServer(
     ) -> None:
         """Broadcast *event*, stamped with *conn_id* when non-empty.
 
-        Stamping ``connId`` routes the reply only to the requesting
-        connection so one window's request never repaints another
-        window's UI.
-
         Args:
             event: The event payload to broadcast (mutated in place).
             conn_id: Requesting connection id (``""`` reaches all).
         """
-        if conn_id:
-            event["connId"] = conn_id
-        self.printer.broadcast(event)
+        broadcast_to_conn(self.printer, event, conn_id)
+
+    def _refresh_default_model(self, valid: set[str] | None = None) -> None:
+        """Re-read the persisted last model and adopt it as the default.
+
+        ``kiss-web`` can outlive VS Code windows.  A fresh VS Code
+        activation asks this long-lived daemon for ``getModels``; if
+        the user selected a different model in a previous window
+        session, that choice is persisted in ``config.json`` and must
+        take precedence over this process's stale in-memory default.
+
+        The persisted value is read INSIDE ``_state_lock`` (an RLock,
+        so callers already holding it may call this freely) so a
+        concurrent ``_cmd_select_model`` — which persists under the
+        same lock — cannot leave us with a stale on-disk value that
+        would clobber the user's just-picked in-memory selection.
+
+        Args:
+            valid: When given, adopt the persisted model only when it
+                is in this set of currently-runnable model names.
+        """
+        with self._state_lock:
+            persisted = _load_last_model()
+            if persisted and (valid is None or persisted in valid):
+                self._default_model = persisted
 
     def _printer_cleanup_tab(self, tab_id: str) -> None:
         """Drop the printer's per-tab subscriptions/state for *tab_id*.
@@ -713,23 +756,17 @@ class VSCodeServer(
         """
         usage = _load_model_usage()
         models_list: list[dict[str, Any]] = []
-        sort_keys: dict[str, tuple[int, float]] = {}
-        for name in get_available_models():
-            info = MODEL_INFO.get(name)
-            if info and info.is_function_calling_supported:
-                vendor_name, vendor_order = model_vendor(name)
-                models_list.append(
-                    {
-                        "name": name,
-                        "inp": info.input_price_per_1M,
-                        "out": info.output_price_per_1M,
-                        "uses": usage.get(name, 0),
-                        "vendor": vendor_name,
-                    }
-                )
-                price = float(info.input_price_per_1M) + float(info.output_price_per_1M)
-                sort_keys[name] = (vendor_order, -price)
-        models_list.sort(key=lambda m: sort_keys[m["name"]])
+        for name in ranked_function_calling_models():
+            info = MODEL_INFO[name]
+            models_list.append(
+                {
+                    "name": name,
+                    "inp": info.input_price_per_1M,
+                    "out": info.output_price_per_1M,
+                    "uses": usage.get(name, 0),
+                    "vendor": model_vendor(name)[0],
+                }
+            )
 
         from kiss.agents.vscode.vscode_config import get_custom_model_entry, load_config
 
@@ -746,14 +783,7 @@ class VSCodeServer(
         # Honor the persisted last model whenever it is still runnable.
         available_names = {m["name"] for m in models_list}
         with self._state_lock:
-            # Read the persisted last model INSIDE the lock so a
-            # concurrent ``_cmd_select_model`` (which now persists
-            # under the same lock) cannot leave us with a stale
-            # on-disk value that would clobber the user's just-picked
-            # in-memory selection.
-            persisted = _load_last_model()
-            if persisted in available_names:
-                self._default_model = persisted
+            self._refresh_default_model(available_names)
 
             # On a fresh installation the server is constructed before any
             # API key is configured, so ``self._default_model`` is the
@@ -1161,7 +1191,8 @@ class VSCodeServer(
     def _close_tab(self, tab_id: str) -> None:
         """Clean up all backend state for a closed tab.
 
-        Removes the tab from ``_running_agent_states``, cleans up per-tab printer
+        Removes the tab from
+        ``_RunningAgentState.running_agent_states``, cleans up per-tab printer
         state (bash buffers, recordings), and drops the persist-agent
         reference.
 
@@ -1221,7 +1252,8 @@ class VSCodeServer(
 
         Shared cleanup tail used by both the immediate (:meth:`_close_tab`)
         and the deferred (:meth:`_dispose_if_closed`) disposal paths.
-        Caller must have already popped *tab* from ``_running_agent_states``.
+        Caller must have already popped *tab* from
+        ``_RunningAgentState.running_agent_states``.
 
         Args:
             tab_id: The frontend tab identifier being disposed.
@@ -1298,19 +1330,7 @@ class VSCodeServer(
             return
         tab = self._get_tab(tab_id)
         with self._state_lock:
-            # Read the persisted last model INSIDE ``_state_lock`` so a
-            # concurrent ``_cmd_select_model`` (which now persists
-            # under the same lock) cannot leave us with a stale
-            # on-disk value that would clobber the user's just-picked
-            # in-memory selection.  Without this guard,
-            # ``_load_last_model()`` could read the OLD on-disk value
-            # mid-flight of ``_cmd_select_model``'s disk write, then
-            # ``self._default_model = persisted`` would revert the
-            # just-picked model both on the daemon-wide default AND
-            # on this new tab's ``selected_model``.
-            persisted = _load_last_model()
-            if persisted:
-                self._default_model = persisted
+            self._refresh_default_model()
             tab.selected_model = self._default_model
             # Clear the long-lived chat identity for this tab; the
             # next ``_cmd_run`` will mint a fresh chat id when it
@@ -1357,7 +1377,8 @@ class VSCodeServer(
         """Replay recorded chat events for a previous chat session.
 
         Sets the tab's agent chat_id to match the resumed session.
-        The tab_id (frontend key in ``_running_agent_states``) does not change.
+        The tab_id (frontend key in
+        ``_RunningAgentState.running_agent_states``) does not change.
 
         When ``tab_id`` is empty the call is a no-op — the previous
         behavior of synthesizing a phantom tab keyed by ``chat_id`` and
