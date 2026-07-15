@@ -1,4 +1,31 @@
-# PROGRESS — invalid-byte filename repro for current diff (this session, COMPLETE)
+# PROGRESS — fix 7 pre-existing test_install_script_new_session_immunity failures (this session, COMPLETE)
+
+All 7 tests in src/kiss/tests/agents/vscode/test_install_script_new_session_immunity.py
+failed because they extracted the perl new-session re-exec block from install.sh via
+`# BEGIN: kiss-new-session-reexec` / `# END:` marker comments and a narrative comment
+block above it — neither of which exists in the current (correct, fully functional)
+install.sh. install.sh itself was NOT touched (user confirmed it works correctly).
+Test-only fixes:
+
+- `_extract_reexec_block()` now locates the block structurally: from the top-level
+  `if [ -z "${_KISS_NEW_SESSION:-}" ]` guard line up to (exclusive) `set -eo pipefail`.
+- `test_install_sh_reexecs_in_new_session_via_perl` asserts guard presence + position
+  before `set -eo pipefail` instead of BEGIN/END markers; all behavioural assertions
+  (perl, POSIX::setsid, fork(), exec /usr/bin/env perl, $SIG{INT/TERM/HUP}=IGNORE,
+  \_KISS_NEW_SESSION sentinel) unchanged.
+- `test_install_sh_explanatory_comment_present` now inspects the `#` comment lines
+  inside the re-exec block (requires setsid/session/terminal/signal) instead of a
+  removed narrative block above it; dropped the stale `node.js` wording requirement.
+- Removed dead `_comment_block_above_reexec()`; updated module docstring.
+
+Verification: all 7 tests pass; 22 sibling install-script tests pass
+(terminal_freeze_notice, tee_subshell_signal, upgrade_prompt, npm_ignore_scripts,
+installer_path_parity); `uv run check --full` fully green. Only marker references
+repo-wide were in this one test file (grep-verified).
+
+______________________________________________________________________
+
+# PROGRESS — invalid-byte filename repro for current diff (prior session, COMPLETE)
 
 REPRO-ONLY task; no source edits. Built ./tmp/repro_harness.py + ./tmp/consume_manifest.js
 (temp, deleted at finish) exercising git_worktree/\_porcelain_entries, \_diff_name_only,
