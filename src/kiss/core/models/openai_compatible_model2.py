@@ -35,6 +35,7 @@ from kiss.core.models.model import (
     TokenCallback,
     _build_text_based_tools_prompt,
     _parse_text_based_tool_calls,
+    _tool_result_to_string,
     parse_binary_attachments,
 )
 from kiss.core.models.openai_compatible_model import (
@@ -114,13 +115,6 @@ class OpenAICompatibleModel2(Model):
         # original ``call_id`` values regardless of intervening
         # ``function_call_output`` items in the conversation.
         self._pending_function_calls: list[dict[str, str]] = []
-        # Buffer for binary attachments lifted from tool results.  When
-        # the model issues parallel function_calls and the caller
-        # submits results incrementally, attachments must wait until all
-        # outstanding outputs have been recorded so the conversation
-        # never interleaves a ``user`` message between ``function_call``
-        # and its ``function_call_output``.
-        self._pending_tool_result_attachments: list[Attachment] = []
         # Per-stream mapping of item_id → original ``output_index`` for
         # every output item observed (message / function_call / reasoning).
         # Reset at the start of each ``_consume_stream`` call.  Used by
@@ -180,7 +174,6 @@ class OpenAICompatibleModel2(Model):
         )
         self.conversation = []
         self._pending_function_calls = []
-        self._pending_tool_result_attachments = []
         self._last_stream_item_indexes = {}
         self._last_stream_message_output_index = None
         if attachments:
@@ -433,8 +426,10 @@ class OpenAICompatibleModel2(Model):
     ) -> None:
         """Add ``cache_control`` to ``extra_body`` for OpenRouter Anthropic models.
 
-        Mirrors v1's behaviour exactly so prompt caching keeps working when
-        callers swap to v2.
+        Same guard conditions as v1 so prompt caching keeps working when
+        callers swap to v2; like v1 it copies any caller-supplied
+        ``extra_body`` before writing so the caller's config is never
+        mutated.
 
         Args:
             kwargs: The kwargs dict that will be passed to
@@ -998,6 +993,9 @@ class OpenAICompatibleModel2(Model):
         system_instruction = kwargs.pop("system_instruction", None)
         reasoning_effort = kwargs.pop("reasoning_effort", None)
         kwargs.pop("enable_cache", None)
+        # v1-only transport-selection flag; meaningless on the Responses
+        # transport, so drop it like the Chat-Completions-only keys below.
+        kwargs.pop("use_responses_api", None)
         # Chat-Completions-only / legacy keys that the Responses API does
         # not accept (streaming controls, sampling knobs, legacy
         # function-calling fields).  Drop silently so v1-shaped configs
@@ -2816,13 +2814,11 @@ class OpenAICompatibleModel2(Model):
         # call_ids already consumed.
         conv_snapshot_len = len(self.conversation)
         pending_snapshot = list(self._pending_function_calls)
-        attachments_snapshot = list(self._pending_tool_result_attachments)
         try:
             self._add_function_results_inner(function_results)
         except Exception:
             self.conversation = self.conversation[:conv_snapshot_len]
             self._pending_function_calls = pending_snapshot
-            self._pending_tool_result_attachments = attachments_snapshot
             raise
 
     def _add_function_results_inner(
@@ -2838,21 +2834,10 @@ class OpenAICompatibleModel2(Model):
             if not self._pending_function_calls
             else None
         )
-        pending_attachments: list[Attachment] = []
-
         for i, (func_name, result_dict) in enumerate(function_results):
-            raw_result = result_dict.get("result", str(result_dict))
             # ``function_call_output.output`` MUST be a string per the
-            # Responses API contract.  When tools return structured data,
-            # JSON-encode it so the conversation stays valid input for
-            # the next ``responses.create(...)`` call.
-            if isinstance(raw_result, str):
-                result_content = raw_result
-            else:
-                try:
-                    result_content = json.dumps(raw_result, ensure_ascii=False)
-                except TypeError:
-                    result_content = str(raw_result)
+            # Responses API contract.
+            result_content = _tool_result_to_string(result_dict)
             result_content, attachments = parse_binary_attachments(result_content)
             if self.usage_info_for_messages:
                 result_content = (
@@ -2868,12 +2853,12 @@ class OpenAICompatibleModel2(Model):
                     "output": result_content,
                 }
             )
-            # For every attachment lifted from this tool result, also
-            # append a durable sentinel item so the attachment survives
-            # conversation serialization / process restart (the
-            # in-memory ``_pending_tool_result_attachments`` buffer
-            # alone would be lost on restore).  ``_normalize_input``
-            # strips these sentinels before sending to the API.
+            # For every attachment lifted from this tool result, append a
+            # durable sentinel item so the attachment survives conversation
+            # serialization / process restart and can be flushed as a
+            # follow-up user message once every outstanding function_call
+            # has an output.  ``_normalize_input`` strips these sentinels
+            # before sending to the API.
             for att in attachments:
                 self.conversation.append(
                     {
@@ -2882,21 +2867,10 @@ class OpenAICompatibleModel2(Model):
                         "data": base64.b64encode(att.data).decode("ascii"),
                     }
                 )
-            pending_attachments.extend(attachments)
 
-        # Buffer attachments lifted from tool results.  Defer flushing
-        # them as a follow-up ``user`` message until ALL of the model's
-        # outstanding function_calls from the current turn have received
-        # outputs — otherwise an incremental result-submission caller
-        # would interleave a ``user`` message between a ``function_call``
-        # and its sibling ``function_call_output``, which the Responses
-        # API rejects.
-        self._pending_tool_result_attachments.extend(pending_attachments)
-
-        # Recover any sentinel attachments from the conversation that
-        # are not represented in the live in-memory buffer (this is the
-        # restored-conversation case — the buffer is empty after a
-        # process restart but the sentinels persisted).
+        # Collect every sentinel attachment currently in the conversation
+        # (covers both attachments appended above and ones persisted from
+        # earlier incremental submissions or a restored conversation).
         sentinel_indexes = [
             i
             for i, item in enumerate(self.conversation)
@@ -2935,9 +2909,6 @@ class OpenAICompatibleModel2(Model):
             # Remove sentinels (in reverse so indexes stay valid).
             for i in reversed(sentinel_indexes):
                 del self.conversation[i]
-            # Drop the live buffer — we just replayed equivalents via
-            # the sentinels.
-            self._pending_tool_result_attachments = []
             parts = self._attachments_to_content_parts(sentinel_attachments)
             if parts:
                 parts.append(
@@ -2970,8 +2941,10 @@ class OpenAICompatibleModel2(Model):
 
         Returns:
             ``(input_tokens, output_tokens, cache_read_tokens,
-            cache_write_tokens)``.  ``cache_write_tokens`` is always 0 for
-            OpenAI (no cache write fees).
+            cache_write_tokens)``.  ``cache_write_tokens`` is 0 for
+            api.openai.com (no cache write fees) but is passed through
+            when a gateway (e.g. OpenRouter Anthropic passthrough)
+            reports ``input_tokens_details.cache_write_tokens``.
         """
         usage = self._get_attr_or_key(response, "usage")
         if usage is None:

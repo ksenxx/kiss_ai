@@ -18,7 +18,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar.git_worktree import _unquote_git_path
+from kiss.agents.sorcar.git_worktree import _REPO_SCOPED_GIT_ENV, _unquote_git_path
 from kiss.core import config as config_module
 
 logger = logging.getLogger(__name__)
@@ -147,6 +147,22 @@ def _scan_files(work_dir: str) -> list[str]:
 _GIT_TIMEOUT_SECONDS: float = 30.0
 
 
+def _scrubbed_git_env() -> dict[str, str]:
+    """Return a copy of the environment without repo-scoped GIT_* vars.
+
+    Strips ``GIT_DIR`` / ``GIT_WORK_TREE`` / ``GIT_INDEX_FILE`` etc.
+    (see :data:`kiss.agents.sorcar.git_worktree._REPO_SCOPED_GIT_ENV`)
+    so an inherited variable — e.g. from a git hook that launched this
+    process — cannot redirect the command away from the ``cwd`` passed
+    to :func:`_git` / :func:`_git_bytes`.  This is the same scrub
+    ``git_worktree._git`` applies.
+
+    Returns:
+        Environment mapping safe to pass to a git subprocess.
+    """
+    return {k: v for k, v in os.environ.items() if k not in _REPO_SCOPED_GIT_ENV}
+
+
 def _git(cwd: str, *args: str) -> subprocess.CompletedProcess[str]:
     """Run a git command with captured text output.
 
@@ -154,6 +170,13 @@ def _git(cwd: str, *args: str) -> subprocess.CompletedProcess[str]:
     on a credential-helper prompt or a network remote) cannot block the
     agent thread forever (M1).  On timeout returns a non-zero
     ``CompletedProcess`` so callers don't crash.
+
+    Repo-scoped ``GIT_*`` environment variables are scrubbed (see
+    :func:`_scrubbed_git_env`) and output is decoded with
+    ``errors="surrogateescape"`` because git paths are byte strings
+    that may be invalid UTF-8 — a strict decode would raise
+    ``UnicodeDecodeError`` out of every git call touching such a
+    filename.  Both behaviors match ``git_worktree._git``.
 
     Args:
         cwd: Working directory for the git command.
@@ -168,20 +191,24 @@ def _git(cwd: str, *args: str) -> subprocess.CompletedProcess[str]:
             capture_output=True,
             text=True,
             encoding="utf-8",
+            errors="surrogateescape",
             cwd=cwd,
+            env=_scrubbed_git_env(),
             timeout=_GIT_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired as exc:
         logger.warning("git %s timed out after %ss", args, _GIT_TIMEOUT_SECONDS)
         # Synthesise a failed CompletedProcess so callers (which expect
-        # a returncode/stdout/stderr triple) keep working.
+        # a returncode/stdout/stderr triple) keep working.  Decode any
+        # partial output with the same surrogateescape policy as the
+        # normal path.
         stdout = (
-            exc.stdout.decode("utf-8", "replace")
+            exc.stdout.decode("utf-8", "surrogateescape")
             if isinstance(exc.stdout, bytes)
             else (exc.stdout or "")
         )
         stderr = (
-            exc.stderr.decode("utf-8", "replace")
+            exc.stderr.decode("utf-8", "surrogateescape")
             if isinstance(exc.stderr, bytes)
             else (exc.stderr or "")
         )
@@ -196,6 +223,9 @@ def _git(cwd: str, *args: str) -> subprocess.CompletedProcess[str]:
 def _git_bytes(cwd: str, *args: str) -> subprocess.CompletedProcess[bytes]:
     """Run a git command and return raw bytes (for binary content).
 
+    Applies the same repo-scoped ``GIT_*`` env scrub as :func:`_git`
+    (see :func:`_scrubbed_git_env`).
+
     Args:
         cwd: Working directory for the git command.
         *args: Git sub-command and arguments.
@@ -208,6 +238,7 @@ def _git_bytes(cwd: str, *args: str) -> subprocess.CompletedProcess[bytes]:
             ["git", "-c", "core.quotepath=false", *args],
             capture_output=True,
             cwd=cwd,
+            env=_scrubbed_git_env(),
             timeout=_GIT_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired:

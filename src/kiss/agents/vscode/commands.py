@@ -26,6 +26,7 @@ from kiss.agents.sorcar.persistence import (
     _record_model_usage,
 )
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.agents.vscode.helpers import tab_owns_answer_queue
 
 if TYPE_CHECKING:
     from kiss.agents.vscode.json_printer import JsonPrinter
@@ -110,8 +111,9 @@ def _restart_kiss_web_daemon() -> bool:
 def _parse_int(value: Any) -> int | None:
     """Parse a frontend-supplied JSON value as an int.
 
-    Mirrors ``_cmd_get_adjacent_task``'s guarded parse so malformed
-    payloads (e.g. ``"taskId": "abc"``) never raise out of a command
+    Guarded parse for int-typed command fields (e.g. the history
+    pager's ``offset`` / ``generation`` / ``limit``) so malformed
+    payloads (e.g. ``"offset": "abc"``) never raise out of a command
     handler — an escaping exception terminates the transport's whole
     receive loop and with it the client connection.
 
@@ -679,24 +681,12 @@ class _CommandsMixin:
             state = _RunningAgentState.running_agent_states.get(tab_id)
             if state is None or state.user_answer_queue is None:
                 continue
-            # Task-ownership filter (mirrors
-            # ``task_runner._resolve_task_answer_queue`` / BUG-TR2-2):
-            # ``cleanup_task`` intentionally preserves subscriber sets
-            # of FINISHED tasks, so a peer that co-subscribed with
-            # ``ans_tab`` to an old, finished task may now be running a
-            # brand-new UNRELATED task — its live ``user_answer_queue``
-            # belongs to THAT task.  Delivering the stale answer there
-            # would answer the wrong question and dismiss the wrong
-            # task's askUser modal.  Skip peers whose live agent is
-            # actively running a task other than the shared one.
-            agent_task = (
-                self.printer._coerce_task_id(
-                    getattr(state.agent, "_last_task_id", None),
-                )
-                if state.agent is not None
-                else ""
-            )
-            if state.is_task_active and agent_task and agent_task != task_key:
+            # Task-ownership filter (BUG-TR2-2), shared with
+            # ``task_runner._resolve_task_answer_queue`` — see
+            # :func:`kiss.agents.vscode.helpers.tab_owns_answer_queue`.
+            # Skip peers whose live agent is actively running a task
+            # other than the shared one.
+            if not tab_owns_answer_queue(state, task_key):
                 continue
             return state.user_answer_queue
         return None
@@ -834,7 +824,7 @@ class _CommandsMixin:
         if not isinstance(query, str):
             # A non-string query queued to the singleton autocomplete
             # worker killed the worker thread (AttributeError inside
-            # ``_prefix_match_task``); the worker is never restarted,
+            # ``_prefix_match_tasks``); the worker is never restarted,
             # so ghost text would die for the daemon's whole lifetime.
             query = ""
         active_file = cmd.get("activeFile")
@@ -1197,7 +1187,7 @@ class _CommandsMixin:
                 any subtype-specific arguments (``arg`` / ``name`` /
                 ``args`` / ``tabId`` / ``workDir``).
         """
-        from kiss.agents.sorcar.cli_repl import SLASH_COMMANDS
+        from kiss.agents.sorcar.cli_repl import build_help_text
         from kiss.agents.sorcar.custom_commands import (
             discover_commands,
             expand_command,
@@ -1215,29 +1205,9 @@ class _CommandsMixin:
         extra: dict[str, Any] = {}
 
         if subtype == "help":
-            lines = ["Commands:"]
-            for c, d in SLASH_COMMANDS.items():
-                lines.append(f"  {c:<10} {d}")
-            try:
-                custom = discover_commands(work_dir)
-            except Exception:  # pragma: no cover - discovery guard
-                logger.debug("custom command discovery failed", exc_info=True)
-                custom = {}
-            if custom:
-                lines.append("")
-                lines.append("Custom commands:")
-                lines.append(format_command_listing(custom))
-            lines.append("")
-            lines.append(
-                "Input fast-completes (Tab): @path mentions files, "
-                "/ completes commands, a command followed by a space "
-                "completes its argument options (e.g. /resume --task, "
-                "/model list, /skills <name>), a value-taking flag "
-                "completes its value (--task pops recent task ids, "
-                "--model pops model names), and typing a prefix of a "
-                "previous task suggests its completion.",
-            )
-            text = "\n".join(lines)
+            # Single-sourced with the standalone REPL's ``/help`` (see
+            # ``build_help_text``) so the two surfaces can never drift.
+            text = build_help_text(work_dir)
         elif subtype == "commands":
             try:
                 custom = discover_commands(work_dir)

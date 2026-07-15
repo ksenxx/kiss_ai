@@ -33,6 +33,7 @@ import urllib.parse
 import webbrowser
 from typing import Any
 
+from kiss.agents.sorcar.cli_helpers import _parse_kv
 from kiss.agents.sorcar.mcp_servers import (
     CONNECT_TIMEOUT,
     FileTokenStorage,
@@ -50,31 +51,6 @@ from kiss.agents.sorcar.mcp_servers import (
 
 # How long ``sorcar mcp auth`` waits for the browser redirect.
 AUTH_TIMEOUT = 300.0
-
-
-def _parse_kv(pairs: list[str], sep: str) -> tuple[tuple[str, str], ...]:
-    """Parse repeated ``KEY<sep>VALUE`` CLI options into tuples.
-
-    Args:
-        pairs: The raw option values (e.g. ``["FOO=bar"]``).
-        sep: The key/value separator (``"="`` for env, ``":"`` for
-            headers).
-
-    Returns:
-        The parsed ``(key, value)`` tuples.
-
-    Raises:
-        SystemExit: When an entry has no separator.
-    """
-    out: list[tuple[str, str]] = []
-    for pair in pairs:
-        key, found, value = pair.partition(sep)
-        if not found or not key.strip():
-            raise SystemExit(
-                f"Invalid option {pair!r}: expected KEY{sep}VALUE"
-            )
-        out.append((key.strip(), value.strip()))
-    return tuple(out)
 
 
 def _build_parser() -> argparse.ArgumentParser:

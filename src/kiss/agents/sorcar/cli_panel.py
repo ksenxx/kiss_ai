@@ -38,6 +38,34 @@ RED = f"{_ESC}[31m"
 YELLOW = f"{_ESC}[33m"
 # Cursor marker shown before the editable text inside the panel body.
 PROMPT_MARKER = "› "
+# Extended-keyboard-protocol enable / disable pairs shared by the idle
+# prompt (:mod:`kiss.agents.sorcar.cli_prompt`) and the mid-task
+# steering box (:mod:`kiss.agents.sorcar.cli_steering`) so both input
+# paths behave identically on every terminal:
+#
+# * ``ESC[>4;2m`` — xterm ``modifyOtherKeys`` level 2.  Makes
+#   Shift/Ctrl/Alt+Enter emit ``ESC[27;<m>;13~``.
+# * ``ESC[>1u``   — Kitty keyboard protocol, push flag 1 (disambiguate
+#   escape codes).  Makes Shift+Enter emit ``ESC[13;<m>u``.
+#
+# The disable pair restores ``modifyOtherKeys`` level 0 (``ESC[>4;0m``)
+# and pops the pushed Kitty flag entry (``ESC[<u``).
+KEYBOARD_PROTO_ENABLE = f"{_ESC}[>4;2m{_ESC}[>1u"
+KEYBOARD_PROTO_DISABLE = f"{_ESC}[>4;0m{_ESC}[<u"
+# Modifier+Enter escape sequences emitted by terminals for every
+# modifier value ``<m> = 2..16`` (per kitty / xterm conventions the
+# modifier code is ``1 + bits`` with bit 0 = Shift, bit 1 = Alt,
+# bit 2 = Ctrl, bit 3 = Cmd/Meta — so 2 = Shift+Enter, 3 = Alt+Enter,
+# 5 = Ctrl+Enter, 9 = Cmd/Meta+Enter, … 16 = Cmd+Ctrl+Alt+Shift+Enter).
+# Both input paths (cli_prompt key bindings and cli_steering's
+# ``_NEWLINE_AFTER_ESC``) derive their tables from these canonical
+# tuples so the two paths can never drift apart.
+#
+# ``MODIFY_OTHER_KEYS_ENTER`` is the xterm modifyOtherKeys=2 form
+# (``ESC[27;<m>;13~``); ``CSI_U_ENTER`` is the kitty / CSI-u form
+# (``ESC[13;<m>u``).
+MODIFY_OTHER_KEYS_ENTER = tuple(f"{_ESC}[27;{_m};13~" for _m in range(2, 17))
+CSI_U_ENTER = tuple(f"{_ESC}[13;{_m}u" for _m in range(2, 17))
 # Titles shown in the panel's top border for each input mode.  A
 # short hint advertises TAB autocompletion and the multi-line entry
 # chords (Alt+Enter / Shift+Enter insert a newline instead of
@@ -48,10 +76,19 @@ IDLE_TITLE = (
     "Ctrl+D to exit "
 )
 STEER_TITLE = (
-    " Dynamic steer, type a text, Enter to steer . "
+    "Dynamic steer · type a task, Enter to steer · "
     "Tab to autocomplete · Alt+Enter/Shift+Enter for newline · "
     "Ctrl+C to abort "
 )
+# Shared user-visible literals for the ``ask_user_question`` flow and
+# the queued-instruction feedback, used by both the in-process steering
+# session (:mod:`kiss.agents.sorcar.cli_steering`) and the daemon
+# client (:mod:`kiss.agents.sorcar.cli_client`) so the two modes can
+# never diverge in wording or styling.
+ASK_TITLE = " answer the question above, then Enter "
+QUESTION_FMT = f"\n{YELLOW}? {{question}}{RESET}\n"
+QUEUED_FMT = f"{DIM}▸ queued: {{text}}{RESET}\n"
+QUEUED_STATUS_FMT = " queued: {n} "
 # Dim placeholder shown in the panel body when the edit buffer is empty.
 PLACEHOLDER = "Add an instruction for the agent while it works to steer…"
 
@@ -105,15 +142,8 @@ def _clip_pad(text: str, width: int) -> str:
     Returns:
         A string occupying exactly *width* terminal columns.
     """
-    w = 0
-    kept: list[str] = []
-    for ch in text:
-        cw = char_width(ch)
-        if w + cw > width:
-            break
-        kept.append(ch)
-        w += cw
-    return "".join(kept) + " " * (width - w)
+    clipped = _clip_to_width(text, width)
+    return clipped + " " * (width - display_width(clipped))
 
 
 def panel_cols() -> int:
@@ -232,22 +262,12 @@ def clip_buf(buf: str, cols: int) -> str:
         The portion of *buf* that fits on the body row (possibly the
         whole buffer, or its tail when it would overflow).
     """
-    # Newlines (from Shift+Enter or a bracketed paste) render as ⏎ and
-    # tabs as a space so the one-row body never emits control chars.
-    shown = buf.replace("\n", "⏎").replace("\t", " ")
-    inner_w = cols - 4  # room between "│ " and " │"
-    avail = inner_w - display_width(PROMPT_MARKER)
-    if display_width(shown) <= avail:
-        return shown
-    w = 0
-    idx = len(shown)
-    for k in range(len(shown) - 1, -1, -1):
-        cw = char_width(shown[k])
-        if w + cw > avail:
-            break
-        w += cw
-        idx = k
-    return shown[idx:]
+    # With the cursor parked at the end of the buffer,
+    # :func:`visible_line_window` reduces exactly to the tail-clip
+    # behaviour this function guarantees (see its docstring), so the
+    # windowing logic lives in one place.
+    shown, _ = visible_line_window(buf, cols, len(buf))
+    return shown
 
 
 def visible_line_window(

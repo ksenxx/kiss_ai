@@ -57,9 +57,76 @@ from kiss.agents.sorcar.persistence import _default_kiss_dir
 
 logger = logging.getLogger(__name__)
 
-# ``---\n<yaml>\n---`` frontmatter block at the very start of the file
-# (same convention as custom_commands.py).
+# ``---\n<yaml>\n---`` frontmatter block at the very start of the file.
+# Shared with custom_commands.py via :func:`parse_frontmatter`.
 _FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
+
+
+def claude_config_dir() -> Path:
+    """Return Claude Code's config directory (``~/.claude``).
+
+    Honours the ``CLAUDE_CONFIG_DIR`` environment variable, the same
+    override Claude Code itself uses for its ``~/.claude`` directory.
+    Shared by the skill and custom-command discovery paths.
+
+    Returns:
+        The resolved config directory path.
+    """
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    return Path(config_dir) if config_dir else Path.home() / ".claude"
+
+
+def parse_frontmatter(path: Path) -> tuple[dict[str, Any], str] | None:
+    """Read *path* and split its YAML frontmatter from the Markdown body.
+
+    Shared parsing pipeline for skill (``SKILL.md``) and custom-command
+    (``*.md``) definition files, so the two discovery paths can never
+    drift.
+
+    Args:
+        path: The Markdown file to read and split.
+
+    Returns:
+        A ``(meta, body)`` pair — *meta* is the frontmatter mapping
+        (empty when the block is absent, malformed YAML, or not a
+        mapping) and *body* is the text after the frontmatter block
+        (the whole text when no block is present) — or ``None`` when
+        the file is unreadable.
+    """
+    try:
+        # utf-8-sig drops a leading BOM (common in Windows-authored
+        # files) that would otherwise defeat the \A frontmatter match.
+        text = path.read_text(encoding="utf-8-sig")
+    except OSError:
+        logger.debug("unreadable definition file: %s", path, exc_info=True)
+        return None
+    meta: dict[str, Any] = {}
+    match = _FRONTMATTER_RE.match(text)
+    body = text
+    if match:
+        body = text[match.end():]
+        try:
+            loaded = yaml.safe_load(match.group(1))
+            if isinstance(loaded, dict):
+                meta = loaded
+        except yaml.YAMLError:
+            logger.debug("bad frontmatter in %s", path, exc_info=True)
+    return meta, body
+
+
+def collapse_whitespace(value: object) -> str:
+    """Collapse all whitespace in *value* into single spaces.
+
+    A YAML block scalar may span lines; the one-line listings (skills
+    catalog, ``/commands``, ``/help``) require single-line strings.
+
+    Args:
+        value: Any value; ``None``/falsy becomes ``""``.
+
+    Returns:
+        The whitespace-collapsed single-line string.
+    """
+    return " ".join(str(value or "").split())
 
 # Maximum number of bundled resource files listed on activation.
 _MAX_RESOURCE_LISTING = 50
@@ -109,12 +176,10 @@ def bundled_skills_dir() -> Path:
 def claude_user_skills_dir() -> Path:
     """Return Claude Code's user skills directory (``~/.claude/skills``).
 
-    Honours the ``CLAUDE_CONFIG_DIR`` environment variable, the same
-    override Claude Code itself uses for its ``~/.claude`` directory.
+    Honours the ``CLAUDE_CONFIG_DIR`` environment variable via
+    :func:`claude_config_dir`.
     """
-    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
-    base = Path(config_dir) if config_dir else Path.home() / ".claude"
-    return base / "skills"
+    return claude_config_dir() / "skills"
 
 
 def agents_user_skills_dir() -> Path:
@@ -145,32 +210,18 @@ def _parse_skill_file(path: Path, name: str, source: str) -> Skill | None:
         The parsed skill, or ``None`` when the file is unreadable or
         has no description.
     """
-    try:
-        # utf-8-sig drops a leading BOM (common in Windows-authored
-        # files) that would otherwise defeat the \A frontmatter match.
-        text = path.read_text(encoding="utf-8-sig")
-    except OSError:
-        logger.debug("unreadable skill file: %s", path, exc_info=True)
+    parsed = parse_frontmatter(path)
+    if parsed is None:
         return None
-    meta: dict[str, Any] = {}
-    match = _FRONTMATTER_RE.match(text)
-    body = text
-    if match:
-        body = text[match.end():]
-        try:
-            loaded = yaml.safe_load(match.group(1))
-            if isinstance(loaded, dict):
-                meta = loaded
-        except yaml.YAMLError:
-            logger.debug("bad frontmatter in %s", path, exc_info=True)
+    meta, body = parsed
     # Collapse all whitespace (a YAML block scalar may span lines) so
     # the description is the one-line summary the catalog and the
     # /skills listing require.
-    description = " ".join(str(meta.get("description", "") or "").split())
+    description = collapse_whitespace(meta.get("description", ""))
     if not description:
         # Claude Code falls back to the first paragraph of the body.
         first_paragraph = body.strip().split("\n\n", 1)[0]
-        description = " ".join(first_paragraph.split())
+        description = collapse_whitespace(first_paragraph)
     if not description:
         logger.debug("skill %s has no description; skipping", path)
         return None

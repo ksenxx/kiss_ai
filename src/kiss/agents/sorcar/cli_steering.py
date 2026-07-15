@@ -54,10 +54,18 @@ from kiss.agents.sorcar.cli_line_continuation import (
 )
 from kiss.agents.sorcar.cli_panel import (
     _ESC,
+    ASK_TITLE,
+    CSI_U_ENTER,
     CYAN,
     DIM,
     IDLE_TITLE,
+    KEYBOARD_PROTO_DISABLE,
+    KEYBOARD_PROTO_ENABLE,
+    MODIFY_OTHER_KEYS_ENTER,
     PROMPT_MARKER,
+    QUESTION_FMT,
+    QUEUED_FMT,
+    QUEUED_STATUS_FMT,
     RESET,
     STEER_TITLE,
     _term_size,
@@ -161,9 +169,14 @@ _PASTE_SEQ_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b.")
 # Order matters: longest multi-char sequences are listed before single
 # bytes so the prefix-startswith match in
 # :meth:`_InputBox.feed` cannot mistake a CSI prefix for a bare CR / LF.
+#
+# The CSI tables are derived from the canonical full-sequence tuples in
+# :mod:`kiss.agents.sorcar.cli_panel` (shared with the cli_prompt key
+# bindings) by dropping the leading ESC byte, so the two input paths
+# can never drift apart.
 _NEWLINE_AFTER_ESC: tuple[str, ...] = (
-    *(f"[27;{_m};13~" for _m in range(2, 17)),
-    *(f"[13;{_m}u" for _m in range(2, 17)),
+    *(seq[1:] for seq in MODIFY_OTHER_KEYS_ENTER),
+    *(seq[1:] for seq in CSI_U_ENTER),
     "\r",
     "\n",
 )
@@ -539,7 +552,7 @@ class _InputBox:
             # which the CSI parser in :meth:`feed` swallows as an
             # unknown sequence).  See :meth:`stop` for the matching
             # disable sequences.
-            out.write(f"{_ESC}[>4;2m{_ESC}[>1u")
+            out.write(KEYBOARD_PROTO_ENABLE)
             # Keep the real cursor *visible*: it rests (blinking) in the
             # box body, mirroring the idle ``sorcar`` prompt's caret.
             out.write(f"{_ESC}[?25h")
@@ -586,7 +599,7 @@ class _InputBox:
             # * ``ESC[>4;0m`` — restore modifyOtherKeys to level 0.
             # * ``ESC[<u``    — pop one Kitty keyboard flag entry off
             #   the stack (matching the ``ESC[>1u`` push).
-            out.write(f"{_ESC}[>4;0m{_ESC}[<u")
+            out.write(KEYBOARD_PROTO_DISABLE)
             out.write(f"{_ESC}[r")  # reset scroll region to full screen
             # Erase the box's rows so the steering panel does not linger
             # once the task ends.  Otherwise the idle REPL prompt would
@@ -645,7 +658,7 @@ class _InputBox:
             # Re-opt into extended-keyboard protocols after resume —
             # the shell may have popped them off while we were
             # suspended.  Mirrors the enable sequences in :meth:`start`.
-            self._out.write(f"{_ESC}[>4;2m{_ESC}[>1u")
+            self._out.write(KEYBOARD_PROTO_ENABLE)
             # Force _draw_locked to re-emit the scroll region.
             self._rows = 0
             self._draw_locked()
@@ -1853,7 +1866,7 @@ class SteeringSession:
             The user's typed answer (possibly empty).
         """
         with self.lock:
-            sys.stdout.write(f"\n\x1b[33m? {question}\x1b[0m\n")
+            sys.stdout.write(QUESTION_FMT.format(question=question))
             sys.stdout.flush()
         # Dismiss any open in-place completion menu so the next Enter
         # in the question loop submits the user's answer instead of
@@ -1864,7 +1877,7 @@ class SteeringSession:
         # same lock so a redraw can never render a torn title (w2 F5).
         with self.lock:
             prev_title = self.box.title
-            self.box.title = " answer the question above, then Enter "
+            self.box.title = ASK_TITLE
         self.box.redraw()
         # Drop any stale answer left in the queue by the previous
         # question's submit/clear race: ``_on_submit`` can observe
@@ -1904,8 +1917,8 @@ class SteeringSession:
         with self.lock:
             # ``status`` is read by locked redraws; mutate it under
             # the same lock (w2 F5).
-            self.box.status = f" queued: {self._queued_count} "
-            sys.stdout.write(f"\x1b[2m▸ queued: {text}\x1b[0m\n")
+            self.box.status = QUEUED_STATUS_FMT.format(n=self._queued_count)
+            sys.stdout.write(QUEUED_FMT.format(text=text))
             sys.stdout.flush()
 
     def _on_abort(self) -> None:

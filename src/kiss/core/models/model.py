@@ -353,6 +353,22 @@ def parse_binary_attachments(text: str) -> tuple[str, list[Attachment]]:
     return "".join(out_parts), attachments
 
 
+def _tool_result_to_string(result_dict: dict[str, Any]) -> str:
+    """Return a provider-safe string for a tool result payload.
+
+    Structured values are JSON encoded consistently across the base,
+    Chat-Completions, and Responses implementations.  Values unsupported by
+    JSON fall back to ``str`` so attachment parsing always receives text.
+    """
+    raw_result = result_dict.get("result", str(result_dict))
+    if isinstance(raw_result, str):
+        return raw_result
+    try:
+        return json.dumps(raw_result, ensure_ascii=False)
+    except TypeError:
+        return str(raw_result)
+
+
 _AUDIO_MIME_TO_EXT: dict[str, str] = {
     "audio/mpeg": ".mp3",
     "audio/mp3": ".mp3",
@@ -507,7 +523,8 @@ class Model(ABC):
     ) -> None:
         """Replace the last assistant message with one that includes tool calls.
 
-        Used by text-based tool calling paths (ClaudeCodeModel, OpenAIModel)
+        Used by text-based tool calling paths (ClaudeCodeModel, CodexModel,
+        OpenAICompatibleModel)
         where ``generate()`` already appended a plain assistant message and it
         needs to be upgraded to include parsed tool call metadata.
 
@@ -642,7 +659,7 @@ class Model(ABC):
         tool_calls = self._find_tool_call_ids_from_last_assistant()
 
         for i, (func_name, result_dict) in enumerate(function_results):
-            result_content = result_dict.get("result", str(result_dict))
+            result_content = _tool_result_to_string(result_dict)
             # Strip binary attachment payloads — the default OpenAI-style
             # ``role: tool`` message does not accept image content blocks,
             # so we drop the base64 bytes and keep only the placeholder

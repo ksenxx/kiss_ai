@@ -22,24 +22,142 @@ from kiss.agents.sorcar.persistence import (
     _prefix_match_tasks,
 )
 from kiss.agents.vscode.helpers import (
+    # ``SUGGESTION_LIMIT`` caps the fast-complete dropdown items
+    # emitted to the webview per ``complete`` request.  Single-sourced
+    # in helpers.py and shared with the @-mention file picker so the
+    # dropdown stays scrollable without UI tuning differences between
+    # the two pickers.
+    SUGGESTION_LIMIT as _COMPLETIONS_LIMIT,
+)
+from kiss.agents.vscode.helpers import (
     clip_autocomplete_suggestion,
+    model_vendor,
     rank_file_suggestions,
 )
 from kiss.agents.vscode.tricks import (
     current_sentence_partial,
     prefix_match_tricks,
 )
-
-# Maximum number of fast-complete dropdown items emitted to the
-# webview per ``complete`` request.  Mirrors the @-mention file
-# picker's 20-item cap so the dropdown stays scrollable without UI
-# tuning differences between the two pickers.
-_COMPLETIONS_LIMIT = 20
+from kiss.core.models.model_info import MODEL_INFO, get_available_models
 
 if TYPE_CHECKING:
     from kiss.agents.vscode.json_printer import JsonPrinter
 
 logger = logging.getLogger(__name__)
+
+# Trailing word / dot-chain token of a query (e.g. ``self.met`` at the
+# end of ``call self.met``) — the piece identifier completion extends.
+# ``\Z`` (not ``$``): Python's ``$`` also matches immediately before a
+# final newline.  Completion must inspect the text at the actual cursor
+# position; a query ending in ``"name\n"`` is on a fresh line and has no
+# trailing identifier to extend.
+_TRAILING_IDENT_RE = re.compile(r"([\w][\w.]*)\Z")
+
+# Identifier completion reads at most this many characters of the
+# active file so huge buffers cannot stall a per-keystroke request.
+_ACTIVE_FILE_READ_CAP = 50000
+
+
+def trailing_identifier(query: str) -> str:
+    """Return the trailing identifier token of *query*, or ``""``.
+
+    The token is the trailing word / dot-chain (``[\\w][\\w.]*``) of
+    *query*; tokens shorter than 2 characters are rejected so a lone
+    letter never triggers identifier completion.
+
+    Args:
+        query: The input text being completed.
+
+    Returns:
+        The trailing token, or ``""`` when *query* does not end in a
+        completable identifier prefix.
+    """
+    m = _TRAILING_IDENT_RE.search(query)
+    if not m or len(m.group(1)) < 2:
+        return ""
+    return m.group(1)
+
+
+def read_active_file_head(path: str) -> str:
+    """Return up to the first 50 000 characters of *path*.
+
+    Unreadable or non-UTF-8 files yield ``""`` (best effort — the
+    active file is only a suggestion source).
+
+    Args:
+        path: Path of the active editor file.
+
+    Returns:
+        The capped file content, or ``""`` on any read failure.
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read(_ACTIVE_FILE_READ_CAP)
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
+def identifier_prefix_matches(content: str, partial: str) -> list[str]:
+    """Return identifiers in *content* that strictly extend *partial*.
+
+    Harvests single-word identifiers and dot-chained identifiers
+    (e.g. ``self.method``, ``os.path.join``) from *content* and keeps
+    those that case-sensitively start with *partial* and are longer
+    than it.  Shared by the VS Code daemon's ghost-text completion and
+    the sorcar CLI completer so both surfaces harvest identically.
+
+    Args:
+        content: Text to harvest identifiers from.
+        partial: The typed identifier prefix (may contain dots).
+
+    Returns:
+        The matching full identifier strings, in no particular order.
+    """
+    words = set(re.findall(r"\b[A-Za-z_]\w{2,}\b", content))
+    chains = set(re.findall(r"\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+\b", content))
+    return [
+        c for c in (words | chains)
+        if c.startswith(partial) and len(c) > len(partial)
+    ]
+
+
+def model_picker_sort_key(name: str) -> tuple[int, float]:
+    """Return the model picker's canonical sort key for *name*.
+
+    Models are grouped by vendor (see
+    :func:`~kiss.agents.vscode.helpers.model_vendor`) with the most
+    expensive model first within each vendor.  Shared by the daemon's
+    ``getModels`` reply and the CLI's ``--model`` value completion so
+    both pickers order identically.
+
+    Args:
+        name: A model name present in ``MODEL_INFO``.
+
+    Returns:
+        ``(vendor_order, -total_price_per_1M)``.
+    """
+    info = MODEL_INFO[name]
+    price = float(info.input_price_per_1M) + float(info.output_price_per_1M)
+    return (model_vendor(name)[1], -price)
+
+
+def ranked_function_calling_models() -> list[str]:
+    """Return the available function-calling models in picker order.
+
+    Candidates are the currently-runnable models (a provider credential
+    is configured) that support function calling, sorted by
+    :func:`model_picker_sort_key` — the single business rule behind
+    both the VS Code model picker and the CLI's model completion.
+
+    Returns:
+        Model names, best-vendor-first, most expensive first per vendor.
+    """
+    names = [
+        name for name in get_available_models()
+        if name in MODEL_INFO and MODEL_INFO[name].is_function_calling_supported
+    ]
+    names.sort(key=model_picker_sort_key)
+    return names
 
 
 def _ghost_suffix(query: str, completions: list[dict[str, str]]) -> str:
@@ -72,7 +190,7 @@ def _ghost_suffix(query: str, completions: list[dict[str, str]]) -> str:
     else:
         # ``identifier`` — the only other kind ``_complete_many``
         # produces.
-        m = re.search(r"([\w][\w.]*)$", query)
+        m = _TRAILING_IDENT_RE.search(query)
         prefix = m.group(1) if m else ""
     if not prefix or not text.startswith(prefix):
         return ""
@@ -93,47 +211,6 @@ class _AutocompleteMixin:
         _complete_seq_latest: dict[str, int]
         _file_cache: dict[str, list[str]]
 
-    def _complete_from_active_file(
-        self,
-        query: str,
-        snapshot_file: str = "",
-        snapshot_content: str = "",
-        chat_id: str = "",
-    ) -> str:
-        """Complete the trailing token of *query* using identifiers from the active file.
-
-        Extracts single-word identifiers and dot-chained identifiers
-        (e.g. ``self.method``, ``os.path.join``) from the active editor
-        buffer (or falls back to reading from disk).  When *chat_id* is
-        provided, also harvests identifiers from the ``task`` and
-        ``result`` text of every prior task in that chat session, so
-        completions can suggest words the user has already used earlier
-        in the same conversation.  Matches the trailing token of the
-        query — which may contain dots — against all candidates via
-        case-sensitive prefix matching.
-
-        Args:
-            query: The full query string from the chat input.
-            snapshot_file: Atomically-captured active file path.
-            snapshot_content: Atomically-captured active file content.
-            chat_id: Current chat session id; when non-empty, identifiers
-                from previous tasks in this chat are added to the
-                candidate pool.
-
-        Returns:
-            The remaining suffix to append, or empty string if no match.
-        """
-        matches = self._active_file_identifier_matches(
-            query, snapshot_file, snapshot_content, chat_id,
-        )
-        if not matches:
-            return ""
-        m = re.search(r"([\w][\w.]*)$", query)
-        assert m is not None  # matches non-empty implies a trailing token
-        # Matches are sorted longest-first, so the first one yields the
-        # longest suffix (every match starts with the same partial).
-        return matches[0][len(m.group(1)):]
-
     def _active_file_identifier_matches(
         self,
         query: str,
@@ -143,12 +220,15 @@ class _AutocompleteMixin:
     ) -> list[str]:
         """Return every identifier from the active file/chat context.
 
-        Multi-result counterpart of :meth:`_complete_from_active_file`:
-        scans the active editor buffer (or the on-disk fallback) plus
-        the chat context for single-word identifiers and dot-chained
-        identifiers that prefix-match the trailing token of *query*.
-        The result is sorted longest-first so the dropdown shows the
-        most informative completion at the top.
+        Extracts single-word identifiers and dot-chained identifiers
+        (e.g. ``self.method``, ``os.path.join``) from the active
+        editor buffer (or the on-disk fallback) plus the chat context
+        — when *chat_id* is non-empty, the ``task``/``result`` text of
+        every prior task in that chat session — and returns those that
+        case-sensitively prefix-match the trailing token of *query*
+        (which may contain dots).  The result is sorted longest-first
+        so the dropdown shows the most informative completion at the
+        top.
 
         Returns the *full identifier strings* (not the suffix) so the
         caller can build the textarea-replacement text by combining
@@ -156,34 +236,16 @@ class _AutocompleteMixin:
         identifier.
         """
         content = snapshot_content
-        if not content:
-            active_path = snapshot_file
-            if active_path:
-                try:
-                    with open(active_path, encoding="utf-8") as f:
-                        content = f.read(50000)
-                except (OSError, UnicodeDecodeError):
-                    content = ""
-        if query and not (
-            query[-1].isalnum() or query[-1] == "_" or query[-1] == "."
-        ):
-            return []
-        m = re.search(r"([\w][\w.]*)$", query)
-        if not m:
-            return []
-        partial = m.group(1)
-        if len(partial) < 2:
+        if not content and snapshot_file:
+            content = read_active_file_head(snapshot_file)
+        partial = trailing_identifier(query)
+        if not partial:
             return []
         chat_text = _load_chat_context_text(chat_id)
         if not content and not chat_text:
             return []
         combined = content + ("\n" + chat_text if chat_text else "")
-        words = set(re.findall(r"\b[A-Za-z_]\w{2,}\b", combined))
-        chains = set(re.findall(r"\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+\b", combined))
-        matches = [
-            c for c in (words | chains)
-            if c.startswith(partial) and len(c) > len(partial)
-        ]
+        matches = identifier_prefix_matches(combined, partial)
         # Longest-first so the dropdown's auto-selected first item is
         # the most informative completion.  Tie-breaker is
         # alphabetical for stable ordering across runs.

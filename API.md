@@ -59,27 +59,21 @@ ______________________________________________________________________
 
 - **run** — Run the agent with the provided tools.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, system_prompt: str = '', max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, verbose: bool | None = None, tools: list[Callable[..., Any]] | None = None, attachments: list[Attachment] | None = None) -> str`
 
-  - `model_name`: LLM model to use. Defaults to config value.
+  - `model_name`: LLM model to use. Defaults to "claude-opus-4-6".
   - `prompt_template`: Task prompt template with format placeholders.
   - `arguments`: Dictionary of values to fill prompt_template placeholders.
   - `system_prompt`: System-level instructions passed to the underlying LLM via model_config. Defaults to empty string (no system instructions).
-  - `max_steps`: Maximum steps per sub-session. Defaults to config value.
-  - `max_budget`: Maximum budget in USD. Defaults to config value.
+  - `max_steps`: Maximum steps per sub-session. Defaults to 100.
+  - `max_budget`: Maximum budget in USD. Defaults to 200.0.
   - `model_config`: Optional dictionary of additional model configuration parameters (e.g. temperature, top_p). Defaults to None.
   - `work_dir`: Working directory for the agent. Defaults to artifact_dir/kiss_workdir.
   - `printer`: Printer instance for output display.
-  - `max_sub_sessions`: Maximum continuation sub-sessions. Defaults to config value.
+  - `max_sub_sessions`: Maximum continuation sub-sessions. Defaults to 10000.
   - `docker_image`: Docker image name to run tools inside a container.
   - `verbose`: Whether to print output to console. Defaults to True.
   - `tools`: List of callable tools available to the agent during execution.
   - `attachments`: Optional file attachments (images, PDFs) for the initial prompt.
   - **Returns:** YAML string with 'success' and 'summary' keys.
-
-**`finish`** — Finish execution with status and summary.<br/>`def finish(success: bool, is_continue: bool = False, summary: str = '') -> str`
-
-- `success`: True if the agent has successfully completed the task, False otherwise
-- `is_continue`: True if the task is incomplete and should continue, False otherwise
-- `summary`: precise chronologically-ordered list of things the agent did with the reason for doing that along with relevant code snippets
 
 ______________________________________________________________________
 
@@ -132,6 +126,7 @@ ______________________________________________________________________
 - `model_name`: LLM model name for all parallel agents. `None` uses the default from persistence (same as :meth:`SorcarAgent.run`).
 - `work_dir`: Working directory for all parallel agents. `None` uses the default (`artifact_dir/kiss_workdir`).
 - `printer`: Optional printer from the parent agent. Forwarded verbatim to each sub-agent's `run` so live events continue to flow through the same channel. The executor itself does not call any printer methods.
+- `totals_out`: Optional dict that receives the aggregated usage of all sub-agents. When provided, the summed spend across every spawned agent is written into it under the keys `"budget_used"`, `"total_tokens_used"` and `"total_steps"` so the caller can attribute sub-agent usage back to the parent task (see :func:`_attribute_sub_usage`).
 - **Returns:** List of YAML result strings in the **same order** as *tasks*. Each string contains `success` and `summary` keys. If a task raises an unhandled exception the corresponding entry is a YAML string with `success: false` and the traceback in `summary`.
 
 ______________________________________________________________________
@@ -144,7 +139,7 @@ ______________________________________________________________________
 
 - **chat_id** — Return the current chat session ID ("" means new session).<br/>`chat_id() -> str` *(property)*
 
-- **new_chat** — Reset to a new chat session (equivalent to VS Code 'Clear').<br/>`new_chat() -> None`
+- **new_chat** — Reset to a new chat session (equivalent to VS Code 'Clear'). Also drops any pending one-shot :meth:`resume_from_task_id` seed: a brand-new chat must never have its first prompt augmented with the previous task's parent-chain context.<br/>`new_chat() -> None`
 
 - **resume_chat_by_id** — Resume a chat session using a stable chat identifier.<br/>`resume_chat_by_id(chat_id: str) -> None`
 
@@ -257,16 +252,6 @@ ______________________________________________________________________
   - `task_result`: The task's result summary for the merge commit message, or `None`.
   - **Returns:** :attr:`MergeResult.SUCCESS` or :attr:`MergeResult.CONFLICT`.
 
-- **unstaged_files** — List files with unstaged changes in the working tree.<br/>`unstaged_files(repo: Path) -> list[str]`
-
-  - `repo`: Git repo root path.
-  - **Returns:** List of files with uncommitted, unstaged modifications, or an empty list if the command fails.
-
-- **staged_files** — List files with staged (cached) changes in the index.<br/>`staged_files(repo: Path) -> list[str]`
-
-  - `repo`: Git repo root path.
-  - **Returns:** List of files staged for commit, or an empty list if the command fails.
-
 - **delete_branch** — Delete a branch and its git config section (best-effort). Tries `-d` first (safe delete), falls back to `-D` (force). Also removes the `branch.<name>.*` config section.<br/>`delete_branch(repo: Path, branch: str) -> bool`
 
   - `repo`: Git repo root path.
@@ -287,12 +272,6 @@ ______________________________________________________________________
 
   - `repo`: Git repo root path.
 
-- **load_original_branch** — Load the original branch from git config.<br/>`load_original_branch(repo: Path, branch: str) -> str | None`
-
-  - `repo`: Git repo root path.
-  - `branch`: The worktree branch name.
-  - **Returns:** The original branch name, or `None` if not stored.
-
 - **save_original_branch** — Store the original branch in git config.<br/>`save_original_branch(repo: Path, branch: str, original: str) -> bool`
 
   - `repo`: Git repo root path.
@@ -306,12 +285,6 @@ ______________________________________________________________________
   - `branch`: The worktree branch name.
   - `sha`: The baseline commit SHA to store.
   - **Returns:** True if config was saved successfully, False otherwise.
-
-- **load_baseline_commit** — Load the baseline commit SHA from git config. Companion reader for :meth:`save_baseline_commit` — recovers the persisted `branch.<branch>.kiss-baseline` value (e.g. after a crash between worktree creation and merge, when the in-memory `GitWorktree.baseline_commit` is lost).<br/>`load_baseline_commit(repo: Path, branch: str) -> str | None`
-
-  - `repo`: Git repo root path.
-  - `branch`: The worktree branch name.
-  - **Returns:** The baseline commit SHA, or `None` if not stored.
 
 - **copy_dirty_state** — Copy uncommitted/staged/untracked files from main worktree. Reads `git status --porcelain` in *repo* and mirrors every dirty file into *wt_dir*. Files that exist in the main worktree are copied; files that were deleted are removed from *wt_dir*. The caller is expected to stage and commit the result as a baseline commit.<br/>`copy_dirty_state(repo: Path, wt_dir: Path) -> bool`
 
