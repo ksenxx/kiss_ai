@@ -2682,17 +2682,89 @@
   const _rpClosedSubagentTabs = new Set();
   let _rpSyncing = false;
 
+  /**
+   * The chat DOM root owned by tab *parentId*: the live ``#output``
+   * element for the active tab, the saved ``outputFragment`` for a
+   * background tab, or null when the tab is unknown / has no DOM yet.
+   */
+  function rpTaskDomRootForParent(parentId) {
+    if (parentId === activeTabId) return O;
+    const parentTab = getTab(parentId);
+    return parentTab ? parentTab.outputFragment : null;
+  }
+
+  /**
+   * The run_parallel panels of *parentId*'s CURRENT task DOM, oldest
+   * first.  Panels rendered inside an ``.adjacent-task`` history block
+   * belong to a different (long-gone) session: they must never own,
+   * steal, or defer a live fan-out's sub-agent tabs, so they are
+   * excluded here.
+   */
+  function rpDirectPanelsForParent(parentId) {
+    const root = rpTaskDomRootForParent(parentId);
+    if (!root || !root.querySelectorAll) return [];
+    return Array.from(root.querySelectorAll('.tc-run-parallel')).filter(
+      p => !(p.closest && p.closest('.adjacent-task')),
+    );
+  }
+
   /** Newest run_parallel panel in *parentId*'s chat DOM (or null). */
   function runParallelPanelForParent(parentId) {
-    let root = null;
-    if (parentId === activeTabId) {
-      root = O;
-    } else {
-      const parentTab = getTab(parentId);
-      root = parentTab ? parentTab.outputFragment : null;
+    const panels = rpDirectPanelsForParent(parentId);
+    return panels.length ? panels[panels.length - 1] : null;
+  }
+
+  /**
+   * Number of sub-agents a run_parallel call is expected to spawn,
+   * parsed from the tool_call's ``extras.tasks`` payload — a
+   * JSON-encoded list of task strings (json_printer stringifies every
+   * extra; raw arrays are tolerated for robustness).  Returns null
+   * when the count cannot be determined.
+   */
+  function rpExpectedTaskCount(rawTasks) {
+    if (Array.isArray(rawTasks)) return rawTasks.length;
+    if (typeof rawTasks !== 'string' || !rawTasks) return null;
+    try {
+      const parsed = JSON.parse(rawTasks);
+      return Array.isArray(parsed) ? parsed.length : null;
+    } catch (_e) {
+      return null;
     }
-    if (!root || !root.querySelectorAll) return null;
-    const panels = root.querySelectorAll('.tc-run-parallel');
+  }
+
+  /**
+   * The panel of *parentId* whose fan-out registry already contains
+   * sub-agent *taskId* (or null).  Lets a delayed ``openSubagentTab``
+   * re-attach to the run_parallel call that actually spawned the
+   * sub-agent instead of the newest panel of a LATER call.
+   */
+  function rpPanelOwningTask(parentId, taskId) {
+    if (taskId === undefined || taskId === null || taskId === '') return null;
+    for (const p of rpDirectPanelsForParent(parentId)) {
+      const entries = p._rpSubagents || [];
+      if (entries.some(en => String(en.taskId) === String(taskId))) return p;
+    }
+    return null;
+  }
+
+  /**
+   * Pick the panel of *parentId* that should own a sub-agent being
+   * (re)opened for *taskId*: the panel already registered for the
+   * task, else the oldest panel whose fan-out is still missing
+   * sub-agents (fresh history reopens deliver the persisted rows of
+   * sequential run_parallel calls in spawn order, so filling panels
+   * oldest-first reconstructs the per-call grouping), else the newest
+   * panel.
+   */
+  function rpPanelForNewSubagent(parentId, taskId) {
+    const owner = rpPanelOwningTask(parentId, taskId);
+    if (owner) return owner;
+    const panels = rpDirectPanelsForParent(parentId);
+    for (const p of panels) {
+      const expected = p._rpExpectedCount;
+      if (typeof expected !== 'number') continue;
+      if ((p._rpSubagents || []).length < expected) return p;
+    }
     return panels.length ? panels[panels.length - 1] : null;
   }
 
@@ -2730,33 +2802,47 @@
     return rpOwnerTabIdForContainer(root);
   }
 
-  /** True when *panelEl* is the newest run_parallel panel in its task DOM. */
-  function rpIsNewestRunParallelPanel(panelEl) {
-    let root = null;
-    if (panelEl.parentNode === O) root = O;
-    else {
-      root = panelEl.getRootNode ? panelEl.getRootNode() : null;
-      if (!root || !root.querySelectorAll) return true;
-    }
-    const panels = root.querySelectorAll('.tc-run-parallel');
-    return !panels.length || panels[panels.length - 1] === panelEl;
-  }
-
   /**
    * If a parent tab was replayed/re-rendered, the freshly-created
    * run_parallel panel element has lost the expando registry that
    * associated it with already-open sub-agent tabs.  Before collapsing
    * or syncing such a panel, adopt the open sub-agent tabs of the same
    * parent so the invariant machinery can close/reopen them normally.
+   *
+   * An agent may call run_parallel SEVERAL times: each call owns its
+   * own panel and its own fan-out of sub-agent tabs, so adoption must
+   * preserve the per-call grouping:
+   *   * a tab registered to a LIVE sibling panel belongs to a
+   *     different run_parallel call and is never stolen into this one
+   *     (stealing made collapsing panel #N close panel #M's tabs);
+   *   * a tab registered to a DETACHED panel (its element was replaced
+   *     by a replay/re-render) is adopted by the fresh panel of the
+   *     SAME call — matched by ``_rpCallIndex``, the per-task ordinal
+   *     of the run_parallel call that both render passes stamp;
+   *   * a tab never registered with any panel is adopted by the
+   *     newest panel only (the live fan-out that spawned it).
    */
   function rpAdoptOpenSubagents(panelEl, parentId) {
     if (!panelEl.classList.contains('tc-run-parallel') || !parentId) return;
-    if (!rpIsNewestRunParallelPanel(panelEl)) return;
+    const livePanels = new Set(rpDirectPanelsForParent(parentId));
+    // A panel that is not part of the parent's CURRENT task DOM (e.g.
+    // an adjacent-task history panel) owns no live fan-out.
+    if (!livePanels.has(panelEl)) return;
+    const newest = runParallelPanelForParent(parentId);
     const openChildren = tabs.filter(
       tab => tab.isSubagentTab && tab.parentTabId === parentId,
     );
     for (const tab of openChildren) {
       const previousPanel = _rpTabPanel.get(tab.id);
+      if (previousPanel) {
+        // Registered to a live panel (possibly this one): nothing to
+        // adopt.  Registered to a detached panel: adopt only into the
+        // fresh panel of the same run_parallel call.
+        if (livePanels.has(previousPanel)) continue;
+        if (previousPanel._rpCallIndex !== panelEl._rpCallIndex) continue;
+      } else if (panelEl !== newest) {
+        continue;
+      }
       const previousEntry = previousPanel
         ? (previousPanel._rpSubagents || []).find(en => en.tabId === tab.id)
         : null;
@@ -3275,6 +3361,19 @@
           c.classList.add('tc-run-parallel');
           if (ev.tabId !== undefined && ev.tabId !== null)
             c._rpParentTabId = ev.tabId;
+          // Per-task ordinal of this run_parallel call within its
+          // render stream (live, background, and replay streams each
+          // count from 1).  Lets rpAdoptOpenSubagents re-associate a
+          // replayed panel with the open sub-agent tabs of the SAME
+          // call when the agent made several run_parallel calls.
+          tState.runParallelCount = (tState.runParallelCount || 0) + 1;
+          c._rpCallIndex = tState.runParallelCount;
+          // Expected fan-out size (from the tool's ``tasks`` argument)
+          // so rpPanelForNewSubagent can re-group persisted sub-agent
+          // rows per call on a fresh history reopen.
+          c._rpExpectedCount = rpExpectedTaskCount(
+            ev.extras ? ev.extras.tasks : undefined,
+          );
         }
         let b = '';
         if (ev.path) {
@@ -5475,7 +5574,14 @@
         const subTaskId =
           ev.task_id === undefined || ev.task_id === null ? '' : ev.task_id;
         let rpPanel = _rpTabPanel.get(ev.tab_id) || null;
-        if (!rpPanel && parentId) rpPanel = runParallelPanelForParent(parentId);
+        if (!rpPanel && parentId) {
+          // No live mapping for this tab id: pick the run_parallel
+          // call that owns the sub-agent (matching registered taskId,
+          // else the oldest not-yet-full panel for history reopens,
+          // else the newest panel) — never blindly the newest, which
+          // would merge every call's fan-out into the last panel.
+          rpPanel = rpPanelForNewSubagent(parentId, subTaskId);
+        }
         // Idempotent: if a tab with the same id already exists, update
         // it in place rather than pushing a duplicate.  Defends against
         // accidental duplicate events from the backend.
