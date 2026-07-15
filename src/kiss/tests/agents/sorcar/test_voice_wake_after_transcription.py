@@ -285,8 +285,8 @@ class TestWakeCooldownSurvivesCapture(unittest.TestCase):
     def test_wake_right_after_capture_with_continued_speech(self) -> None:
         from kiss.agents.vscode.voice_wake import (
             DEFAULT_MODELS_DIR,
-            VoiceSession,
             WakeDetector,
+            WakeSession,
             ensure_model,
         )
 
@@ -324,7 +324,7 @@ class TestWakeCooldownSurvivesCapture(unittest.TestCase):
         saved = {key: os.environ.get(key) for key in overrides}
         os.environ.update(overrides)
         try:
-            session = VoiceSession(
+            session = WakeSession(
                 WakeDetector(ensure_model(DEFAULT_MODELS_DIR))
             )
             block = 2 * 800  # 50ms of s16le samples
@@ -349,15 +349,15 @@ class TestWatchdogSilenceAdvancesSession(unittest.TestCase):
     def test_dead_gap_closes_capture_and_expires_cooldown(self) -> None:
         from kiss.agents.vscode.voice_wake import (
             DEFAULT_MODELS_DIR,
-            VoiceSession,
             WakeDetector,
+            WakeSession,
             ensure_model,
         )
 
         with tempfile.TemporaryDirectory() as tmp:
             sorcar = _tts_pcm(Path(tmp), "sorcar-dead-gap", "Sorcar")
 
-        session = VoiceSession(WakeDetector(ensure_model(DEFAULT_MODELS_DIR)))
+        session = WakeSession(WakeDetector(ensure_model(DEFAULT_MODELS_DIR)))
         block = 2 * 800  # 50ms of s16le samples
 
         def feed(pcm: bytes) -> None:

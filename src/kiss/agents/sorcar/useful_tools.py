@@ -415,6 +415,45 @@ def _format_bash_result(returncode: int, output: str, max_output_chars: int) -> 
     return _truncate_output(output, max_output_chars)
 
 
+def intercept_grep_hint(
+    command: str, work_dir: str | None, seen: set[str],
+) -> str | None:
+    """Return a code-graph answer for a grep-like *command*, at most once.
+
+    Query-before-grep interception (code_graph feature): when a built
+    graph already knows the identifier a grep/rg command searches for,
+    the expensive grep is denied and the graph answer is returned
+    directly ("the deny message IS the answer").  A missing/broken
+    code_graph module can never affect Bash (lazy try/except import).
+    Each distinct hint is returned at most once per *seen* set, so a
+    repeated identical grep falls through to the real command.
+
+    Shared by :meth:`UsefulTools.Bash` and the Docker ``Bash`` wrapper
+    in ``SorcarAgent._get_tools`` so the interception logic cannot
+    drift between the two.
+
+    Args:
+        command: The bash command about to be executed.
+        work_dir: Working directory used to locate the built graph.
+        seen: Mutable per-session dedupe set of already-returned hints.
+
+    Returns:
+        The hint string to return INSTEAD of running the command, or
+        ``None`` when the command should run normally.
+    """
+    hint = ""
+    try:
+        from kiss.agents.sorcar.code_graph import grep_hint
+
+        hint = grep_hint(command, work_dir) or ""
+    except Exception:
+        logger.debug("code_graph grep hint failed", exc_info=True)
+    if hint and hint not in seen:
+        seen.add(hint)
+        return hint
+    return None
+
+
 def _kill_process_group(process: subprocess.Popen) -> None:
     """Kill a subprocess and all its children.
 
@@ -882,20 +921,10 @@ class UsefulTools:
         if guard is not None:
             return guard
 
-        # Query-before-grep interception (code_graph feature): when a
-        # built graph already knows the identifier a grep/rg command
-        # searches for, deny the expensive grep and return the graph answer
-        # directly ("the deny message IS the answer").  A missing/broken
-        # code_graph module can never affect Bash (lazy try/except import).
-        hint = ""
-        try:
-            from kiss.agents.sorcar.code_graph import grep_hint
-
-            hint = grep_hint(command, self.work_dir) or ""
-        except Exception:
-            logger.debug("code_graph grep hint failed", exc_info=True)
-        if hint and hint not in self._code_graph_hints_seen:
-            self._code_graph_hints_seen.add(hint)
+        hint = intercept_grep_hint(
+            command, self.work_dir, self._code_graph_hints_seen,
+        )
+        if hint is not None:
             return hint
 
         if self.stream_callback:

@@ -56,6 +56,7 @@ from kiss.agents.vscode.diff_merge import (
 # minimal printer without ``_coerce_task_id`` used to crash
 # ``_resolve_task_answer_queue`` with ``AttributeError`` (see
 # ``TestM4AwaitUserResponseEmptyQueue``).
+from kiss.agents.vscode.helpers import tab_owns_answer_queue
 from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.core.models.model import Attachment
 from kiss.core.models.model_info import get_available_models
@@ -1265,33 +1266,24 @@ class _TaskRunnerMixin:
                 # cumulative across the whole run.  For single-task
                 # prompts the baselines capture the agent's counters
                 # before its only ``run``, so the arithmetic is a
-                # no-op for freshly created agents.
+                # no-op for freshly created agents.  Routed through
+                # ``_subtask_metric_deltas`` so the persisted row uses
+                # the SAME arithmetic — including the ``step_count``
+                # fallback — as the failure ``result`` broadcasts.
+                tokens_delta, cost_delta, steps_delta = self._subtask_metric_deltas(
+                    tab.agent,
+                    sub_tokens_base,
+                    sub_cost_base,
+                    sub_steps_base,
+                )
                 _save_task_extra(
                     build_task_extra_payload(
                         model=model,
                         work_dir=work_dir,
                         version=__version__,
-                        tokens=max(
-                            0,
-                            int(
-                                getattr(tab.agent, "total_tokens_used", 0) or 0,
-                            )
-                            - sub_tokens_base,
-                        ),
-                        cost=round(
-                            max(
-                                0.0,
-                                float(
-                                    getattr(tab.agent, "budget_used", 0.0) or 0.0,
-                                )
-                                - sub_cost_base,
-                            ),
-                            6,
-                        ),
-                        steps=max(
-                            0,
-                            int(getattr(tab.agent, "total_steps", 0) or 0) - sub_steps_base,
-                        ),
+                        tokens=tokens_delta,
+                        cost=round(cost_delta, 6),
+                        steps=steps_delta,
                         is_parallel=tab.use_parallel,
                         is_worktree=use_worktree,
                         auto_commit_mode=tab.auto_commit_mode,
@@ -1543,26 +1535,23 @@ class _TaskRunnerMixin:
                 task_id=tab.task_history_id,
                 task=task_prompt,
             )
+            # Same delta arithmetic (incl. the ``step_count``
+            # fallback) as the failure broadcasts and the task-level
+            # cleanup save — single-sourced in the helper.
+            tokens_delta, cost_delta, steps_delta = self._subtask_metric_deltas(
+                tab.agent,
+                sub_tokens_base,
+                sub_cost_base,
+                sub_steps_base,
+            )
             _save_task_extra(
                 build_task_extra_payload(
                     model=model,
                     work_dir=work_dir,
                     version=__version__,
-                    tokens=max(
-                        0,
-                        int(getattr(tab.agent, "total_tokens_used", 0) or 0) - sub_tokens_base,
-                    ),
-                    cost=round(
-                        max(
-                            0.0,
-                            float(getattr(tab.agent, "budget_used", 0.0) or 0.0) - sub_cost_base,
-                        ),
-                        6,
-                    ),
-                    steps=max(
-                        0,
-                        int(getattr(tab.agent, "total_steps", 0) or 0) - sub_steps_base,
-                    ),
+                    tokens=tokens_delta,
+                    cost=round(cost_delta, 6),
+                    steps=steps_delta,
                     is_parallel=tab.use_parallel,
                     is_worktree=use_worktree,
                     auto_commit_mode=tab.auto_commit_mode,
@@ -2019,16 +2008,11 @@ class _TaskRunnerMixin:
                 tab = _RunningAgentState.running_agent_states.get(tab_id)
                 if tab is None or tab.user_answer_queue is None:
                     continue
-                agent_task = (
-                    JsonPrinter._coerce_task_id(
-                        getattr(tab.agent, "_last_task_id", None),
-                    )
-                    if tab.agent is not None
-                    else ""
-                )
-                if tab.is_task_active and agent_task and agent_task != task_key:
+                if not tab_owns_answer_queue(tab, task_key):
                     # This subscriber is running a DIFFERENT task; its
-                    # queue belongs to that task, not this one.
+                    # queue belongs to that task, not this one.  Shared
+                    # BUG-TR2-2 filter — see
+                    # :func:`kiss.agents.vscode.helpers.tab_owns_answer_queue`.
                     continue
                 return tab.user_answer_queue
         return None

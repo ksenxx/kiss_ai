@@ -81,9 +81,10 @@ import logging
 import re
 import sys
 from pathlib import Path
+from typing import Any
 
 from kiss.agents.sorcar.cli_line_continuation import (
-    ends_with_line_continuation,
+    read_continuations,
 )
 from kiss.agents.sorcar.cli_panel import (
     _ESC,
@@ -106,6 +107,13 @@ from kiss.agents.sorcar.persistence import (
     _load_file_usage,
     _load_history,
     _prefix_match_tasks,
+)
+from kiss.agents.vscode.autocomplete import (
+    identifier_prefix_matches,
+    model_picker_sort_key,
+    ranked_function_calling_models,
+    read_active_file_head,
+    trailing_identifier,
 )
 from kiss.agents.vscode.helpers import (
     clip_autocomplete_suggestion,
@@ -297,30 +305,24 @@ def picker_ordered_models(query: str) -> list[tuple[str, str]]:
     """
     from kiss.agents.sorcar.persistence import _load_model_usage
     from kiss.agents.vscode.helpers import model_vendor
-    from kiss.core.models.model_info import MODEL_INFO, get_available_models
+    from kiss.core.models.model_info import MODEL_INFO
 
-    names = [
-        name for name in get_available_models()
-        if name in MODEL_INFO and MODEL_INFO[name].is_function_calling_supported
-    ]
+    names = ranked_function_calling_models()
     if not names:
         # No provider credential configured (e.g. a fresh checkout):
         # offer every candidate model so the menu is never empty,
         # mirroring ``get_completion_model_names``' fallback.
-        names = [
-            name for name, info in MODEL_INFO.items()
-            if info.is_generation_supported and info.is_function_calling_supported
-        ]
+        names = sorted(
+            (
+                name for name, info in MODEL_INFO.items()
+                if info.is_generation_supported
+                and info.is_function_calling_supported
+            ),
+            key=model_picker_sort_key,
+        )
     q = query.strip().lower()
     if q:
         names = [name for name in names if q in name.lower()]
-
-    def base_key(name: str) -> tuple[int, float]:
-        info = MODEL_INFO[name]
-        price = float(info.input_price_per_1M) + float(info.output_price_per_1M)
-        return (model_vendor(name)[1], -price)
-
-    names.sort(key=base_key)
     usage = _load_model_usage()
     used = [name for name in names if usage.get(name, 0) > 0]
     # Stable sort: usage ties keep the vendor/price base order, exactly
@@ -578,25 +580,26 @@ class CliCompleter:
         return []
 
     def _active_file_suffix(self, line: str) -> str:
-        """Complete the trailing identifier of *line* from the active file."""
+        """Complete the trailing identifier of *line* from the active file.
+
+        Harvesting is shared with the VS Code daemon's ghost-text
+        completion (see :func:`~kiss.agents.vscode.autocomplete
+        .identifier_prefix_matches`); this CLI variant keeps only the
+        single longest suffix, clipped for a one-line ghost.
+        """
         if not self.active_file:
             return ""
-        m = re.search(r"([\w][\w.]*)$", line)
-        if not m or len(m.group(1)) < 2:
+        partial = trailing_identifier(line)
+        if not partial:
             return ""
-        partial = m.group(1)
-        try:
-            content = Path(self.active_file).read_text(encoding="utf-8")[:50000]
-        except OSError:
+        content = read_active_file_head(self.active_file)
+        if not content:
             return ""
-        words = set(re.findall(r"\b[A-Za-z_]\w{2,}\b", content))
-        chains = set(re.findall(r"\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+\b", content))
         best = ""
-        for cand in words | chains:
-            if cand.startswith(partial) and len(cand) > len(partial):
-                suffix = cand[len(partial):]
-                if len(suffix) > len(best):
-                    best = suffix
+        for cand in identifier_prefix_matches(content, partial):
+            suffix = cand[len(partial):]
+            if len(suffix) > len(best):
+                best = suffix
         return clip_autocomplete_suggestion(line, best)
 
     def complete(self, text: str, state: int) -> str | None:
@@ -620,6 +623,60 @@ class CliCompleter:
     def _build_matches(self, line: str) -> list[str]:
         """Compute the ordered candidate list for the current *line*."""
         return [replacement for replacement, _ in self.build_menu(line)]
+
+    def completion_branch(self, line: str) -> tuple[str, Any]:
+        """Classify *line* into its completion category, in menu order.
+
+        Single source for the completion dispatch chain shared by the
+        readline menu (:meth:`build_menu`) and the prompt_toolkit
+        dropdown (:meth:`~kiss.agents.sorcar.cli_prompt.PtkCompleter
+        .get_completions`), so the branch order — ``@``-mention →
+        ``/model`` → slash command → flag value → argument options →
+        predictive — lives in exactly one place.
+
+        Args:
+            line: The full input line being completed.
+
+        Returns:
+            A ``(kind, payload)`` pair:
+
+            * ``("at", match)`` — *match* is the ``_AT_RE`` match of
+              the ``@``-mention token;
+            * ``("model", query)`` — *query* is the partial after
+              ``/model ``;
+            * ``("slash", None)`` — complete the command name itself;
+            * ``("flag-value", triples)`` — value candidates for a
+              trailing ``--task`` / ``--model`` (see
+              :meth:`_flag_value_matches`); terminal even when empty;
+            * ``("arg-options", triples)`` — argument options (see
+              :meth:`_slash_arg_matches`);
+            * ``("predictive", None)`` — whole-line predictive
+              completion.
+        """
+        at = _AT_RE.search(line)
+        if at:
+            return ("at", at)
+        model_cmd = _MODEL_CMD_RE.match(line)
+        if model_cmd:
+            return ("model", model_cmd.group(1))
+        # Left-strip only: a trailing space after a slash command
+        # (``/resume ``) switches from command-name completion to the
+        # command's argument options.
+        lstripped = line.lstrip()
+        if lstripped.startswith("/") and " " not in lstripped:
+            return ("slash", None)
+        if lstripped.startswith("/"):
+            # A trailing value-taking flag (``--task `` / ``--model ``)
+            # completes the flag's VALUE; the branch is terminal (an
+            # empty candidate list must not fall back to the option
+            # menu, which would wrongly re-offer flags as the value).
+            value_matches = self._flag_value_matches(line)
+            if value_matches is not None:
+                return ("flag-value", value_matches)
+            arg_matches = self._slash_arg_matches(line)
+            if arg_matches:
+                return ("arg-options", arg_matches)
+        return ("predictive", None)
 
     def build_menu(self, line: str) -> list[tuple[str, str]]:
         """Compute ``(replacement, display)`` menu pairs for *line*.
@@ -646,41 +703,30 @@ class CliCompleter:
             Ordered ``(replacement, display)`` pairs; *replacement*
             is always a whole-line substitution for *line*.
         """
-        at = _AT_RE.search(line)
-        if at:
+        kind, payload = self.completion_branch(line)
+        if kind == "at":
+            at = payload
             return [
                 (m, m)
                 for m in self._at_mention_matches(line, at.start(), at.group(1))
             ]
-        model_cmd = _MODEL_CMD_RE.match(line)
-        if model_cmd:
-            return [(m, m) for m in self._model_matches(model_cmd.group(1))]
-        # Left-strip only: a trailing space after a slash command
-        # (``/resume ``) switches from command-name completion to the
-        # command's argument options.
-        lstripped = line.lstrip()
-        if lstripped.startswith("/") and " " not in lstripped:
+        if kind == "model":
+            return [(m, m) for m in self._model_matches(payload)]
+        if kind == "slash":
             return [(m, m) for m in self._slash_matches(line)]
-        if lstripped.startswith("/"):
-            # A trailing value-taking flag (``--task `` / ``--model ``)
-            # completes the flag's VALUE; the branch is terminal (an
-            # empty candidate list must not fall back to the option
-            # menu, which would wrongly re-offer flags as the value).
-            value_matches = self._flag_value_matches(line)
-            if value_matches is not None:
-                # ``--task`` rows already embed the description; the
-                # ``task`` note would be noise.  Model rows append the
-                # picker group (vendor / recently used).
-                return [
-                    (full, disp if help_ == "task" else f"{disp} — {help_}")
-                    for full, disp, help_ in value_matches
-                ]
-            arg_matches = [
-                (full, f"{opt} — {help_}" if help_ else opt)
-                for full, opt, help_ in self._slash_arg_matches(line)
+        if kind == "flag-value":
+            # ``--task`` rows already embed the description; the
+            # ``task`` note would be noise.  Model rows append the
+            # picker group (vendor / recently used).
+            return [
+                (full, disp if help_ == "task" else f"{disp} — {help_}")
+                for full, disp, help_ in payload
             ]
-            if arg_matches:
-                return arg_matches
+        if kind == "arg-options":
+            return [
+                (full, f"{opt} — {help_}" if help_ else opt)
+                for full, opt, help_ in payload
+            ]
         return [(m, m) for m in self._predictive_matches(line)]
 
 
@@ -803,6 +849,47 @@ def _print_welcome(work_dir: str, model_name: str) -> None:
     print("  /help for commands, /exit (or Ctrl+D) to quit.\n")
 
 
+def build_help_text(work_dir: str) -> str:
+    """Return the ``/help`` body shared by the CLI and the daemon.
+
+    Lists the built-in slash commands, the custom commands discovered
+    for *work_dir*, and the input fast-complete cheat sheet.  Single
+    source for both the standalone REPL's :func:`_print_help` and the
+    daemon's ``cliInfo`` ``help`` reply (``_cmd_cli_info`` in
+    :mod:`kiss.agents.vscode.commands`) so the two surfaces can never
+    drift.
+
+    Args:
+        work_dir: Project directory whose custom commands to list.
+
+    Returns:
+        The help text (no leading/trailing blank lines).
+    """
+    lines = ["Commands:"]
+    for cmd, desc in SLASH_COMMANDS.items():
+        lines.append(f"  {cmd:<10} {desc}")
+    try:
+        custom = discover_commands(work_dir)
+    except Exception:  # pragma: no cover - defensive discovery guard
+        logger.debug("custom command discovery failed", exc_info=True)
+        custom = {}
+    if custom:
+        lines.append("")
+        lines.append("Custom commands:")
+        lines.append(format_command_listing(custom))
+    lines.append("")
+    lines.append(
+        "Input fast-completes (Tab): @path mentions files, "
+        "/ completes commands, a command followed by a space completes "
+        "its argument options (e.g. /resume --task, /model list, "
+        "/skills <name>), a value-taking flag completes its value "
+        "(--task pops recent task ids, --model pops model names), "
+        "and typing a prefix of a previous task "
+        "suggests its completion."
+    )
+    return "\n".join(lines)
+
+
 def _print_help(work_dir: str = "") -> None:
     """Print the list of available slash commands.
 
@@ -810,22 +897,7 @@ def _print_help(work_dir: str = "") -> None:
         work_dir: Project directory whose custom commands to list; when
             empty, only user-level custom commands are shown.
     """
-    print("\nCommands:")
-    for cmd, desc in SLASH_COMMANDS.items():
-        print(f"  {cmd:<10} {desc}")
-    custom = discover_commands(work_dir or ".")
-    if custom:
-        print("\nCustom commands:")
-        print(format_command_listing(custom))
-    print(
-        "\nInput fast-completes (Tab): @path mentions files, "
-        "/ completes commands, a command followed by a space completes "
-        "its argument options (e.g. /resume --task, /model list, "
-        "/skills <name>), a value-taking flag completes its value "
-        "(--task pops recent task ids, --model pops model names), "
-        "and typing a prefix of a previous task "
-        "suggests its completion.\n"
-    )
+    print(f"\n{build_help_text(work_dir or '.')}\n")
 
 
 def _print_model_list(current: str = "") -> None:
@@ -938,19 +1010,13 @@ def _read_line_ptk(reader: PtkLineReader, prompt: str) -> str | None:
     except KeyboardInterrupt:
         print(bottom)
         raise
-    while True:
-        cont, keep = ends_with_line_continuation(line)
-        if not cont:
-            break
-        try:
-            more = reader.read(framed_prompt)
-        except EOFError:
-            line = line[:keep]
-            break
-        except KeyboardInterrupt:
-            print(bottom)
-            raise
-        line = line[:keep] + "\n" + more
+    def _read_more() -> str:
+        return reader.read(framed_prompt)
+
+    def _close_panel() -> None:
+        print(bottom)
+
+    line = read_continuations(line, _read_more, on_interrupt=_close_panel)
     print(bottom)
     return line
 
@@ -1007,16 +1073,10 @@ def _read_line(prompt: str, reader: PtkLineReader | None = None) -> str | None:
         except EOFError:
             print(bottom)
             return None
-        while True:
-            cont, keep = ends_with_line_continuation(line)
-            if not cont:
-                break
-            try:
-                more = input(framed_prompt)
-            except EOFError:
-                line = line[:keep]
-                break
-            line = line[:keep] + "\n" + more
+        def _read_more() -> str:
+            return input(framed_prompt)
+
+        line = read_continuations(line, _read_more)
         print(bottom)
         return line
 
@@ -1065,27 +1125,31 @@ def _read_line(prompt: str, reader: PtkLineReader | None = None) -> str | None:
     # old bottom-rule row: clear it, frame it as the next body row,
     # redraw the bottom rule one line down, and read the continuation
     # there.
-    while True:
-        cont, keep = ends_with_line_continuation(line)
-        if not cont:
-            break
+    def _reframe_body_row() -> None:
         sys.stdout.write(
             f"\r{_ESC}[2K{_ESC}[{cols}G{CYAN}│{RESET}\r\n{bottom}{_ESC}[1A\r"
         )
         sys.stdout.flush()
-        try:
-            more = input(framed_prompt)
-        except EOFError:
-            sys.stdout.write("\n")
-            sys.stdout.flush()
-            line = line[:keep]
-            break
-        except KeyboardInterrupt:
-            # Same bottom-rule cleanup as the first input() above.
-            sys.stdout.write(f"\n{_ESC}[2K")
-            sys.stdout.flush()
-            raise
-        line = line[:keep] + "\n" + more
+
+    def _read_next_row() -> str:
+        return input(framed_prompt)
+
+    def _step_past_frame() -> None:
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+
+    def _erase_bottom_rule() -> None:
+        # Same bottom-rule cleanup as the first input() above.
+        sys.stdout.write(f"\n{_ESC}[2K")
+        sys.stdout.flush()
+
+    line = read_continuations(
+        line,
+        _read_next_row,
+        on_continue=_reframe_body_row,
+        on_eof=_step_past_frame,
+        on_interrupt=_erase_bottom_rule,
+    )
     # Enter already moved the cursor onto the bottom rule line; step past
     # it so following output never overwrites the closed box.
     sys.stdout.write("\n")

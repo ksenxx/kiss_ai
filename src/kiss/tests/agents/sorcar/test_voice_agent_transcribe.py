@@ -47,7 +47,6 @@ from kiss.agents.vscode.voice_wake import (
     SAMPLE_RATE,
     parse_transcription_reply,
     transcribe_pcm,
-    translate_pcm_to_english,
     trim_trailing_silence,
 )
 
@@ -351,11 +350,11 @@ class TestTranscribeAgentDirect(unittest.TestCase):
         self.assertNotIn("paris", text)
         self.assertEqual(result["language"], "en")
 
-    def test_translate_wrapper_returns_text_only(self) -> None:
+    def test_transcribe_text_field_is_plain_english(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             pcm = _tts_pcm(Path(tmp), "w", "Delete the temporary files.")
         self.assertIn(
-            "temporary files", translate_pcm_to_english(pcm).lower()
+            "temporary files", str(transcribe_pcm(pcm)["text"]).lower()
         )
 
 

@@ -443,7 +443,7 @@ class TestSteerHeaderIndicator:
         # Blinking after WAKE, with the STEER title following the
         # indicator on the same top border.
         assert (
-            f"{HDR_BLINK}Listening ...{RESET}{CYAN} Dynamic steer"
+            f"{HDR_BLINK}Listening ...{RESET}{CYAN}Dynamic steer"
             in rendered
         )
         assert HDR_BLINK + "Transcribing ..." in rendered

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -30,7 +31,9 @@ from kiss.agents.vscode.vscode_config import (
 
 
 @pytest.fixture(autouse=True)
-def _isolate_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _isolate_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[None]:
     """Redirect config and RC files to temp dir for isolation.
 
     Sets HOME and CONFIG_DIR/CONFIG_PATH to a temp directory so tests
@@ -61,6 +64,13 @@ def _isolate_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from kiss.core import config as config_module
 
     monkeypatch.setattr(config_module, "DEFAULT_CONFIG", config_module.DEFAULT_CONFIG)
+    # ``apply_config_to_env`` mutates DEFAULT_CONFIG *in place*
+    # (e.g. ``max_budget``), so restoring the binding alone is not
+    # enough — restore the field values too.
+    saved = config_module.DEFAULT_CONFIG
+    snapshot = saved.model_copy(deep=True).__dict__
+    yield
+    saved.__dict__.update(snapshot)
 
 
 class TestLoadSaveConfig:

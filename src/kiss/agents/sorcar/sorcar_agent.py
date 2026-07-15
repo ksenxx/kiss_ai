@@ -30,7 +30,7 @@ from kiss.agents.sorcar.cli_helpers import (
 )
 from kiss.agents.sorcar.persistence import _load_last_model
 from kiss.agents.sorcar.skills import make_skill_tool
-from kiss.agents.sorcar.useful_tools import UsefulTools
+from kiss.agents.sorcar.useful_tools import UsefulTools, intercept_grep_hint
 from kiss.agents.sorcar.web_use_tool import WebUseTool
 from kiss.core.base import SYSTEM_PROMPT
 from kiss.core.models.model import Attachment
@@ -481,15 +481,10 @@ class SorcarAgent(RelentlessAgent):
 
             def Bash(command: str, description: str) -> str:  # noqa: N802
                 """Run a command in Docker, preferring a code-graph answer."""
-                hint = ""
-                try:
-                    from kiss.agents.sorcar.code_graph import grep_hint
-
-                    hint = grep_hint(command, self.work_dir) or ""
-                except Exception:
-                    logger.debug("code_graph Docker grep hint failed", exc_info=True)
-                if hint and hint not in code_graph_hints_seen:
-                    code_graph_hints_seen.add(hint)
+                hint = intercept_grep_hint(
+                    command, self.work_dir, code_graph_hints_seen,
+                )
+                if hint is not None:
                     return hint
                 return self._docker_bash(command, description)
 
@@ -1039,6 +1034,13 @@ def run_tasks_parallel(
             verbatim to each sub-agent's ``run`` so live events
             continue to flow through the same channel.  The executor
             itself does not call any printer methods.
+        totals_out: Optional dict that receives the aggregated usage of
+            all sub-agents.  When provided, the summed spend across
+            every spawned agent is written into it under the keys
+            ``"budget_used"``, ``"total_tokens_used"`` and
+            ``"total_steps"`` so the caller can attribute sub-agent
+            usage back to the parent task (see
+            :func:`_attribute_sub_usage`).
 
     Returns:
         List of YAML result strings in the **same order** as *tasks*.

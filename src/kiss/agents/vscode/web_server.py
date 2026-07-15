@@ -67,7 +67,7 @@ from concurrent.futures import Future as ConcurrentFuture
 from functools import partial
 from http import HTTPStatus
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote, urlsplit
 
 import websockets
@@ -77,15 +77,17 @@ from websockets.http11 import Request, Response
 
 from kiss.agents.vscode.diff_merge import _read_lines_preserved
 from kiss.agents.vscode.json_printer import GLOBAL_EVENT_TYPES, JsonPrinter
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.agents.vscode.server import VSCodeServer, broadcast_to_conn
 from kiss.agents.vscode.tips import read_tips
+from kiss.agents.vscode.tricks import read_tricks
 from kiss.agents.vscode.voice_wake import (
     DEFAULT_MODELS_DIR,
+    MODEL_NAME,
     SpeakerIdentifier,
     transcribe_pcm,
 )
 from kiss.agents.vscode.vscode_config import load_config, source_shell_env
-from kiss.core.config import get_jobs_root
+from kiss.core.config import get_jobs_root, kiss_home
 from kiss.viz_trajectory.server import find_job_dir, list_jobs, load_job_trajectories
 
 __all__ = ["RemoteAccessServer", "WebPrinter"]
@@ -101,10 +103,63 @@ VOICE_MODEL_URL = (
     "https://ccoreilly.github.io/vosk-browser/models/"
     "vosk-model-small-en-us-0.15.tar.gz"
 )
-VOICE_MODEL_CACHE = (
-    Path.home() / ".kiss" / "models" / "vosk-model-small-en-us-0.15.tar.gz"
-)
+VOICE_MODEL_CACHE = DEFAULT_MODELS_DIR / f"{MODEL_NAME}.tar.gz"
 _voice_model_lock = threading.Lock()
+
+
+def _atomic_publish(target: Path, write_tmp: Callable[[Path], object]) -> None:
+    """Atomically publish *target* via a pid-unique temp + ``Path.replace``.
+
+    Creates the parent directory, calls *write_tmp* with a pid-unique
+    temporary path in the same directory, then atomically renames it
+    onto *target* so a concurrent reader can never observe a torn
+    write.  The pid suffix matters: an in-process lock cannot
+    serialize a SIBLING process (a second kiss-web daemon, a test
+    running next to a live daemon), and a shared fixed temp name would
+    let two processes interleave writes into the same file and then
+    publish the corrupted result — or race ``replace`` so the loser
+    raised ``FileNotFoundError``.  On failure the temp file is removed
+    and the exception propagates to the caller.
+
+    Args:
+        target: Final path to publish.
+        write_tmp: Callable that writes the content to the temp path.
+    """
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
+    try:
+        write_tmp(tmp)
+        tmp.replace(target)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _write_text_to(tmp: Path, text: str) -> None:
+    """Write *text* to *tmp* as UTF-8 (writer for :func:`_atomic_publish`)."""
+    tmp.write_text(text, encoding="utf-8")
+
+
+def _atomic_write_text(target: Path, text: str) -> None:
+    """Atomically write *text* (UTF-8) to *target*.
+
+    Thin text convenience over :func:`_atomic_publish`; see it for the
+    pid-unique-temp + ``Path.replace`` rationale.
+
+    Args:
+        target: Final path to publish.
+        text: Full file content to write.
+    """
+    _atomic_publish(target, partial(_write_text_to, text=text))
+
+
+def _download_voice_model_to(tmp: Path) -> None:
+    """Download the browser voice-model archive to *tmp*.
+
+    Writer callback for :func:`_atomic_publish` used by
+    :func:`_ensure_voice_model`.
+    """
+    urllib.request.urlretrieve(VOICE_MODEL_URL, tmp)
 
 
 def _ensure_voice_model() -> Path | None:
@@ -127,17 +182,11 @@ def _ensure_voice_model() -> Path | None:
     with _voice_model_lock:
         if VOICE_MODEL_CACHE.is_file() and VOICE_MODEL_CACHE.stat().st_size > 0:
             return VOICE_MODEL_CACHE
-        tmp = VOICE_MODEL_CACHE.with_name(
-            f"{VOICE_MODEL_CACHE.name}.{os.getpid()}.tmp",
-        )
         try:
-            VOICE_MODEL_CACHE.parent.mkdir(parents=True, exist_ok=True)
-            urllib.request.urlretrieve(VOICE_MODEL_URL, tmp)
-            tmp.replace(VOICE_MODEL_CACHE)
+            _atomic_publish(VOICE_MODEL_CACHE, _download_voice_model_to)
             return VOICE_MODEL_CACHE
         except Exception:
             logger.exception("voice model download failed: %s", VOICE_MODEL_URL)
-            tmp.unlink(missing_ok=True)
             return None
 _MEDIA_VERSION_CACHE: dict[str, str] = {}
 
@@ -364,9 +413,47 @@ _SERVER_RESET_FLAG_NAME = "server-reset-pending.json"
 # user's "Reset Server" click appears to do nothing.
 _SHUTDOWN_EXIT_FAILSAFE = 30.0
 
-# M7: cap the prompt size echoed back via ``setTaskText`` so a giant
-# JSON payload cannot push tens of MB through the broadcast pipeline.
+# M7: cap the prompt size (in UTF-8 BYTES) echoed back via
+# ``setTaskText`` so a giant JSON payload cannot push tens of MB
+# through the broadcast pipeline.  Enforced with byte-based truncation
+# in ``_handle_submit`` that never splits inside a character.
 _MAX_PROMPT_BYTES = 1_000_000
+
+
+def _truncate_utf8_bytes(text: str, max_bytes: int) -> tuple[str, int]:
+    """Return *text* capped to *max_bytes* and its original byte size.
+
+    ``json.loads`` may legitimately produce strings containing lone
+    UTF-16 surrogate code points (for example from ``"\\ud800"``).
+    Strict UTF-8 encoding raises ``UnicodeEncodeError`` for those
+    strings, which aborts that submit command (and can close transports
+    whose receive loop does not isolate command errors).  ``surrogatepass``
+    gives every Python string a
+    deterministic byte representation while preserving such code
+    points in an untruncated prompt.  If the cap lands inside any UTF-8
+    sequence, the incomplete suffix is removed before decoding.
+
+    Args:
+        text: Prompt text to measure and possibly truncate.
+        max_bytes: Maximum encoded size.
+
+    Returns:
+        ``(possibly_truncated_text, original_encoded_size)``.
+    """
+    encoded = text.encode("utf-8", errors="surrogatepass")
+    original_size = len(encoded)
+    if original_size <= max_bytes:
+        return text, original_size
+    prefix = encoded[:max_bytes]
+    while prefix:
+        try:
+            return prefix.decode("utf-8", errors="surrogatepass"), original_size
+        except UnicodeDecodeError as exc:
+            # ``encoded`` itself is valid under surrogatepass, so the
+            # only possible error is a final sequence cut by the cap.
+            prefix = prefix[:exc.start]
+    return "", original_size
+
 
 # Maximum length of a single newline-delimited JSON command line read
 # from a UDS or WSS client.  The default ``asyncio.StreamReader`` limit
@@ -396,20 +483,72 @@ _MAX_VOICE_AUDIO_B64 = 4 * 1024 * 1024
 # letting an orphaned ``_RunningAgentState`` linger meaningfully.
 _TAB_CLOSE_GRACE = 10.0
 
-_KISS_HOME = Path(os.environ.get("KISS_HOME") or (Path.home() / ".kiss"))
-_TLS_DIR = _KISS_HOME / "tls"
-_URL_FILE = _KISS_HOME / "remote-url.json"
+# Test-override slots: tests monkeypatch these module attributes to
+# redirect state into a temporary directory.  When left as ``None``
+# (production), the location is resolved lazily on every access via
+# :func:`kiss.core.config.kiss_home`, so ``KISS_HOME`` set after
+# import (as the test conftest does) is honored.
+_KISS_HOME: Path | None = None
+_TLS_DIR: Path | None = None
 
-# Path to the localhost Unix-domain socket exposed by
-# :class:`RemoteAccessServer` in addition to the public WSS port.
-# Local clients (the VS Code extension) connect to this socket over
-# the SAME newline-delimited JSON protocol that browsers speak over
-# WSS — no password challenge is performed because POSIX filesystem
-# permissions (mode 0o600) restrict access to the owning user.  A
-# fresh ``RemoteAccessServer(uds_path=...)`` argument overrides this
-# location for tests so multiple instances do not race on the same
-# socket file.
-_UDS_PATH = _KISS_HOME / "sorcar.sock"
+
+def _kiss_home_dir() -> Path:
+    """Return the KISS home dir ($KISS_HOME or ~/.kiss), resolved lazily."""
+    return _KISS_HOME if _KISS_HOME is not None else kiss_home()
+
+
+def _tls_dir() -> Path:
+    """Return the directory holding the self-signed TLS cert/key pair."""
+    return _TLS_DIR if _TLS_DIR is not None else _kiss_home_dir() / "tls"
+
+
+def _url_file_path() -> Path:
+    """Return the persisted remote-URL path: override or lazy default.
+
+    Assigning ``web_server._URL_FILE`` is a supported test override,
+    matching the lazy ``CONFIG_DIR`` / ``CONFIG_PATH`` attributes in
+    :mod:`kiss.agents.vscode.vscode_config`.  The override must be
+    consulted here (rather than only exposed through ``__getattr__``)
+    because production consumers such as :class:`RemoteAccessServer`
+    call this accessor directly.
+    """
+    override = globals().get("_URL_FILE")
+    return override if override is not None else _kiss_home_dir() / "remote-url.json"
+
+
+if TYPE_CHECKING:
+    # Static declaration of the PEP 562 lazy attribute below so type
+    # checkers (pyright) know it exists; at runtime the name is served
+    # by ``__getattr__`` and never lives in the module dict.
+    _URL_FILE: Path
+
+
+def __getattr__(name: str) -> Path:
+    """Resolve ``_URL_FILE`` lazily (PEP 562).
+
+    Several test modules import ``_URL_FILE`` by value; resolving it at
+    access time keeps that import surface working while honoring a
+    ``KISS_HOME`` set after this module was first imported.
+    """
+    if name == "_URL_FILE":
+        return _url_file_path()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def _default_uds_path() -> Path:
+    """Return the default localhost Unix-domain socket path.
+
+    The socket is exposed by :class:`RemoteAccessServer` in addition
+    to the public WSS port.  Local clients (the VS Code extension)
+    connect to this socket over the SAME newline-delimited JSON
+    protocol that browsers speak over WSS — no password challenge is
+    performed because POSIX filesystem permissions (mode 0o600)
+    restrict access to the owning user.  A fresh
+    ``RemoteAccessServer(uds_path=...)`` argument overrides this
+    location for tests so multiple instances do not race on the same
+    socket file.
+    """
+    return _kiss_home_dir() / "sorcar.sock"
 
 
 def _tunnel_backoff_delay(failure_count: int) -> int:
@@ -830,6 +969,54 @@ def _reject_hunk_in_file(
         _apply_exec_bit(write_to)
 
 
+def _record_hunk_rejected(
+    hunks: list[dict[str, Any]],
+    hi: int,
+    still_pending: Callable[[int], bool],
+) -> None:
+    """Record the post-reject offset bookkeeping for ``hunks[hi]``.
+
+    The reject splice just replaced the hunk's ``cc`` current lines
+    with its ``bc`` base lines; record that in the hunk itself so a
+    RETRY (and the replayed ``merge_data``) re-applies it idempotently
+    and stays consistent with disk.  Without this, a mid-file write
+    failure on a LATER hunk (ENOSPC/EFBIG/EIO) followed by the user
+    rejecting again re-spliced this hunk with its stale ``cc``,
+    duplicating ``bc - cc`` lines whenever ``bc != cc``.  Then shifts
+    the ``cs`` start offset of every LATER still-pending hunk by the
+    just-applied line-count delta.  Shared by
+    :func:`_reject_all_hunks_in_file` and the per-hunk ``reject``
+    branch of ``_apply_web_merge_action``.
+
+    Args:
+        hunks: The file's hunk dicts (mutated in place).
+        hi: Index of the hunk whose reject splice just succeeded.
+        still_pending: Predicate; True for a later hunk index that is
+            still unresolved and therefore needs its ``cs`` shifted.
+    """
+    hunk = hunks[hi]
+    delta = hunk["bc"] - hunk["cc"]
+    hunk["cc"] = hunk["bc"]
+    for later_hi in range(hi + 1, len(hunks)):
+        if still_pending(later_hi):
+            hunks[later_hi]["cs"] += delta
+
+
+def _hunk_unresolved(state: Any, fi: int, later_hi: int) -> bool:
+    """Return True when hunk ``(fi, later_hi)`` is unresolved in *state*.
+
+    ``still_pending`` predicate (via :func:`functools.partial`) for
+    :func:`_record_hunk_rejected` in the per-hunk ``reject`` branch of
+    ``_apply_web_merge_action``.
+
+    Args:
+        state: The ``_WebMergeState`` of the review.
+        fi: File index of the hunk.
+        later_hi: Hunk index within the file.
+    """
+    return not state.is_resolved(fi, later_hi)
+
+
 def _reject_all_hunks_in_file(
     file_data: dict[str, Any], hunk_indices: list[int] | None = None,
 ) -> None:
@@ -876,19 +1063,7 @@ def _reject_all_hunks_in_file(
             make_executable=bool(file_data.get("exec")),
         )
         pending.discard(hi)
-        delta = hunk["bc"] - hunk["cc"]
-        # The splice just replaced this hunk's ``cc`` current lines
-        # with its ``bc`` base lines; record that in the hunk itself so
-        # a RETRY re-applies it idempotently.  Without this, a
-        # mid-file write failure on a LATER hunk (ENOSPC/EFBIG/EIO —
-        # the caller then marks NO hunks of the file resolved) followed
-        # by the user clicking reject-all/reject-file again re-spliced
-        # this hunk with its stale ``cc``, duplicating ``bc - cc``
-        # lines whenever ``bc != cc``.
-        hunk["cc"] = hunk["bc"]
-        for later_hi in range(hi + 1, len(hunks)):
-            if later_hi in pending:
-                hunks[later_hi]["cs"] += delta
+        _record_hunk_rejected(hunks, hi, pending.__contains__)
 
 
 # Maximum file size (bytes) the remote webapp's ``openFile`` handler
@@ -900,9 +1075,13 @@ _OPEN_FILE_MAX_BYTES = 2_000_000
 _VSCODE_ONLY_COMMANDS = frozenset({
     "focusEditor",
     "webviewFocusChanged",
-    "openFile",
     "resolveDroppedPaths",
-    "pickFolder",
+    # ``notificationAction`` is posted by ``media/main.js`` when the
+    # user clicks an action button on an in-webview notification; only
+    # the VS Code extension host (``SorcarSidebarView``) handles it.
+    # Listed here so it is dropped instead of surfacing as "Unknown
+    # command" if a remote-web client ever emits it.
+    "notificationAction",
     # ``sizeReport`` is the webview's reply to the extension-only
     # ``measureSize`` request; it never has meaning for the web
     # server but must not surface as "Unknown command" if a client
@@ -1027,7 +1206,15 @@ def _pick_free_local_port() -> int:
     return port
 
 
-_CLOUDFLARED_PIDFILE = _KISS_HOME / "cloudflared.pid"
+# Test-override slot; ``None`` means lazy $KISS_HOME resolution.
+_CLOUDFLARED_PIDFILE: Path | None = None
+
+
+def _cloudflared_pidfile() -> Path:
+    """Return the path of the persisted cloudflared PID file."""
+    if _CLOUDFLARED_PIDFILE is not None:
+        return _CLOUDFLARED_PIDFILE
+    return _kiss_home_dir() / "cloudflared.pid"
 
 
 def _is_pid_alive(pid: int) -> bool:
@@ -1067,12 +1254,7 @@ def _save_cloudflared_pidfile(
     if url:
         data["url"] = url
     try:
-        _CLOUDFLARED_PIDFILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = _CLOUDFLARED_PIDFILE.with_name(
-            f"cloudflared.pid.tmp.{os.getpid()}",
-        )
-        tmp.write_text(json.dumps(data) + "\n", encoding="utf-8")
-        tmp.replace(_CLOUDFLARED_PIDFILE)
+        _atomic_write_text(_cloudflared_pidfile(), json.dumps(data) + "\n")
     except OSError as exc:
         logger.debug("Failed to write cloudflared pidfile: %s", exc)
 
@@ -1084,7 +1266,7 @@ def _load_cloudflared_pidfile() -> dict[str, Any] | None:
     ``None`` if the file is missing, malformed, or invalid.
     """
     try:
-        raw = _CLOUDFLARED_PIDFILE.read_text(encoding="utf-8")
+        raw = _cloudflared_pidfile().read_text(encoding="utf-8")
     except OSError:
         return None
     try:
@@ -1105,7 +1287,7 @@ def _unlink_cloudflared_pidfile() -> None:
     attempt rejects via its pid-liveness check.
     """
     try:
-        _CLOUDFLARED_PIDFILE.unlink(missing_ok=True)
+        _cloudflared_pidfile().unlink(missing_ok=True)
     except OSError:
         pass
 
@@ -1596,7 +1778,7 @@ def _get_machine_topic() -> str:
     Returns:
         A hex string suitable for use as an ntfy.sh topic name.
     """
-    topic_file = _KISS_HOME / "ntfy_topic"
+    topic_file = _kiss_home_dir() / "ntfy_topic"
     try:
         stored = topic_file.read_text(encoding="utf-8").strip()
     except OSError:
@@ -1606,10 +1788,7 @@ def _get_machine_topic() -> str:
     identity = f"{platform.node()}:{uuid.getnode()}"
     topic = "kiss-" + hashlib.sha256(identity.encode()).hexdigest()[:32]
     try:
-        topic_file.parent.mkdir(parents=True, exist_ok=True)
-        tmp = topic_file.with_name(f"ntfy_topic.tmp.{os.getpid()}")
-        tmp.write_text(topic + "\n", encoding="utf-8")
-        tmp.replace(topic_file)
+        _atomic_write_text(topic_file, topic + "\n")
     except OSError:
         logger.debug("Failed to persist ntfy topic", exc_info=True)
     return topic
@@ -1788,7 +1967,7 @@ def _print_url() -> None:
     Exits with code 1 if the server is not running or the file is
     missing.
     """
-    url = _read_url_from_file(_URL_FILE)
+    url = _read_url_from_file(_url_file_path())
     if url:
         print(url)
     else:
@@ -1995,10 +2174,11 @@ def _create_ssl_context(
         cert_path = Path(certfile)
         key_path = Path(keyfile)
     else:
-        cert_path = _TLS_DIR / "cert.pem"
-        key_path = _TLS_DIR / "key.pem"
+        tls_dir = _tls_dir()
+        cert_path = tls_dir / "cert.pem"
+        key_path = tls_dir / "key.pem"
         if not cert_path.is_file() or not key_path.is_file():
-            logger.info("Generating self-signed TLS certificate in %s", _TLS_DIR)
+            logger.info("Generating self-signed TLS certificate in %s", tls_dir)
             _generate_self_signed_cert(cert_path, key_path)
         # M4: regenerate a self-signed cert that is already expired or
         # within 30 days of expiry.  Without this the server would
@@ -2451,15 +2631,16 @@ class WebPrinter(JsonPrinter):
         Factored out of :meth:`broadcast` so fan-out copies for
         subscribed viewer tab ids reuse the same dispatch and pending-
         future tracking as the primary broadcast.  Fans out to BOTH
-        WSS clients and local Unix-domain socket writers in lockstep.
+        WSS clients and local Unix-domain socket writers in lockstep by
+        delegating to :meth:`_send_to_wss_clients` and
+        :meth:`_send_to_uds_writers` (per-endpoint FIFO order is
+        preserved by each endpoint's ``send_lock``).
 
         Args:
             data: The JSON payload (already encoded with ``json.dumps``).
         """
-        with self._ws_lock:
-            endpoints = list(self._ws_clients) + list(self._uds_writers)
-        for endpoint in endpoints:
-            self._schedule_send(endpoint, data)
+        self._send_to_wss_clients(data)
+        self._send_to_uds_writers(data)
 
     def _send_to_conn(self, conn_id: str, data: str) -> None:
         """Send a pre-serialised JSON payload to ONE connection.
@@ -2718,7 +2899,7 @@ def _build_html() -> str:
     # ``</`` must never appear raw inside the inline <script> block —
     # a trick or tip body containing ``</script>`` would otherwise
     # terminate it (tricks come from the user-editable INJECTIONS.md).
-    tricks_json = json.dumps(_read_tricks()).replace("</", "<\\/")
+    tricks_json = json.dumps(read_tricks()).replace("</", "<\\/")
     # ``show`` is always false here: the tips window only auto-opens in
     # the VS Code webview after a fresh installation (SorcarTab.ts).
     tips_json = json.dumps(
@@ -2840,14 +3021,17 @@ def _parse_version_py(vfile: Path) -> str:
     Returns an empty string when the file is missing, unreadable, or
     does not define ``__version__``.  A best-effort parser that keeps
     the daemon booting even if a foreign ``_version.py`` is malformed.
+    Uses the exact same regex as ``readVersionPy`` in the extension's
+    ``UpdateChecker.js`` (its documented twin) so the daemon and the
+    extension can never disagree about what an installed
+    ``_version.py`` says.
     """
     try:
-        for line in vfile.read_text(encoding="utf-8").splitlines():
-            if line.startswith("__version__"):
-                return line.split("=", 1)[1].strip().strip("\"'")
+        text = vfile.read_text(encoding="utf-8")
     except Exception:
-        pass
-    return ""
+        return ""
+    m = re.search(r"""__version__\s*=\s*["']([^"']+)["']""", text)
+    return m.group(1) if m else ""
 
 
 def _scan_installed_extension_versions(root: Path) -> list[str]:
@@ -2924,16 +3108,27 @@ def _read_version() -> str:
 def _version_tuple(v: str) -> tuple[int, ...] | None:
     """Return ``v`` parsed as an int-tuple, or ``None`` on failure.
 
-    ``kiss-agent-framework`` uses CalVer ``YYYY.M.P`` so a simple
-    ``int`` split on ``.`` is sufficient; ``None`` is returned for
-    anything that cannot be parsed so a malformed PyPI payload never
-    triggers a false "update available" notification.
+    ``kiss-agent-framework`` uses CalVer ``YYYY.M.P``; ``None`` is
+    returned for anything that cannot be parsed so a malformed PyPI
+    payload never triggers a false "update available" notification.
+    Each dot-separated component must be ASCII digits only (the strict
+    ``/^\\d+$/`` check of ``versionTuple`` in the extension's
+    ``UpdateChecker.js``, this helper's documented twin) — a bare
+    ``int()`` also accepts ``"+1"``, ``"1_0"`` and unicode digits,
+    which would let the daemon and the extension disagree on update
+    direction for malformed version strings.
     """
-    try:
-        parts = [int(p) for p in v.strip().split(".") if p != ""]
-    except (ValueError, AttributeError):
+    if not isinstance(v, str):
         return None
-    return tuple(parts) if parts else None
+    parts = [p for p in v.strip().split(".") if p != ""]
+    if not parts:
+        return None
+    out: list[int] = []
+    for p in parts:
+        if re.fullmatch(r"\d+", p, re.ASCII) is None:
+            return None
+        out.append(int(p))
+    return tuple(out)
 
 
 def _compare_versions(a: str, b: str) -> int:
@@ -2988,25 +3183,6 @@ def _fetch_latest_version() -> str | None:
     return version.strip()
 
 
-def _read_tricks() -> list[str]:
-    """Parse ``~/.kiss/INJECTIONS.md`` and return the trick texts.
-
-    Thin wrapper around :func:`kiss.agents.vscode.tricks.read_tricks`
-    kept for backward compatibility with existing call sites in
-    :mod:`web_server`.  The user-local copy at
-    ``~/.kiss/INJECTIONS.md`` is the runtime source of truth — the
-    sidebar "Inject" panel and the ghost-text fast-complete pipeline
-    share that same file via the helper module.
-
-    Returns:
-        Ordered list of trick text strings (one per ``## Trick``
-        section), or an empty list when INJECTIONS.md is missing or
-        unparseable so the button still renders.
-    """
-    from kiss.agents.vscode.tricks import read_tricks
-    return read_tricks()
-
-
 _WS_SHIM_JS = r"""
 (function() {
   var _state = null;
@@ -3014,7 +3190,6 @@ _WS_SHIM_JS = r"""
   var _ws = null;
   var _pending = [];
   var _authenticated = false;
-  var _needsPassword = false;
   // Tracks whether this client has previously completed a full
   // auth handshake.  Once true, the next successful ``auth_ok``
   // after an ``onclose`` (i.e. a server restart or network blip)
@@ -3220,7 +3395,6 @@ _WS_SHIM_JS = r"""
           return;
         }
         _authenticated = true;
-        _needsPassword = false;
         // We have a live, authenticated socket — any future
         // disconnect IS a reconnect, but the just-completed
         // handshake is not.  Drop the sessionStorage flag so a
@@ -3257,7 +3431,6 @@ _WS_SHIM_JS = r"""
         return;
       }
       if (msg.type === 'auth_required') {
-        _needsPassword = true;
         // Stored password (if any) was rejected; drop it so a refresh
         // re-prompts instead of silently retrying the bad value.
         try { localStorage.removeItem('sorcar-remote-pwd'); } catch(e) {}
@@ -3517,8 +3690,10 @@ def _translate_webview_command(cmd: dict[str, Any]) -> dict[str, Any]:
 
     Translations applied:
 
-    * ``userActionDone`` → ``userAnswer`` with ``answer="done"``
     * ``resumeSession`` → renames ``id`` field to ``chatId``
+
+    (``media/main.js`` posts ``userAnswer`` directly, so no
+    ``userActionDone`` rewrite is needed here.)
 
     Args:
         cmd: Raw command dictionary from the browser WebSocket.
@@ -3528,15 +3703,6 @@ def _translate_webview_command(cmd: dict[str, Any]) -> dict[str, Any]:
         ``VSCodeServer._handle_command``.
     """
     cmd_type = cmd.get("type", "")
-    if cmd_type == "userActionDone":
-        # Copy the command (like the resumeSession branch below) so the
-        # ``connId``/``workDir`` stamps from ``_dispatch_client_command``
-        # survive the translation.
-        out = dict(cmd)
-        out["type"] = "userAnswer"
-        out["answer"] = "done"
-        out["tabId"] = cmd.get("tabId", "")
-        return out
     if cmd_type == "resumeSession" and "id" in cmd and "chatId" not in cmd:
         out = dict(cmd)
         out["chatId"] = out.pop("id")
@@ -3634,7 +3800,7 @@ class RemoteAccessServer:
         # override this to a per-test temporary path to avoid racing
         # the live ``~/.kiss/remote-url.json`` watched by the VS Code
         # extension and the ``kiss-web`` daemon.
-        self._url_file: Path = Path(url_file) if url_file else _URL_FILE
+        self._url_file: Path = Path(url_file) if url_file else _url_file_path()
 
         if not work_dir:
             work_dir = load_config().get("work_dir", "") or None
@@ -3711,7 +3877,7 @@ class RemoteAccessServer:
         # ``uds_path`` so concurrent instances do not race on the
         # shared default ``~/.kiss/sorcar.sock``.
         self._uds_path: Path = (
-            Path(uds_path) if uds_path else _UDS_PATH
+            Path(uds_path) if uds_path else _default_uds_path()
         )
         self._uds_server: asyncio.Server | None = None
         self._watchdog_task: asyncio.Task[None] | None = None
@@ -3796,7 +3962,7 @@ class RemoteAccessServer:
         # extension's ``installerPath.js`` lookup; tests override both
         # to temp paths.
         self._install_root: Path = _KISS_AI_ROOT
-        self._update_log_path: Path = _KISS_HOME / "update.log"
+        self._update_log_path: Path = _kiss_home_dir() / "update.log"
         # Task ids the local ``sorcar`` CLI has announced as running
         # via ``cliTaskStart`` envelopes (see
         # :meth:`_handle_cli_task_start`).  Consulted by
@@ -3898,27 +4064,44 @@ class RemoteAccessServer:
                 if isinstance(task_id, str) and task_id:
                     self._handle_cli_task_end(task_id, conn_state)
 
+    @staticmethod
+    def _validated_cli_task_id(cmd: dict[str, Any]) -> str:
+        """Extract and validate the ``taskId`` of a CLI task command.
+
+        Shared by the ``cliTaskStart`` / ``cliTaskEnd`` branches of
+        :meth:`_dispatch_client_command`, which require a non-empty
+        string task id.
+
+        Args:
+            cmd: The parsed ``cliTaskStart`` / ``cliTaskEnd`` command.
+
+        Returns:
+            The task id, or ``""`` (after a debug log) when the field
+            is missing, empty, or not a string.
+        """
+        raw_id = cmd.get("taskId")
+        if isinstance(raw_id, str) and raw_id:
+            return raw_id
+        logger.debug("%s with bad taskId %r", cmd.get("type"), raw_id)
+        return ""
+
     def _fanout_cli_status(self, task_id: str, *, running: bool) -> None:
         """Send ``status:running`` to every tab subscribed to *task_id*.
 
-        Mirrors the per-tab fan-out idiom from
-        :meth:`WebPrinter.broadcast` /
-        :meth:`_relay_cli_event`: looks up the viewer tabs currently
-        subscribed to the task id, then for each one writes a
-        ``status`` event with that tab's ``tabId`` spliced in.  Used
-        when a CLI task ends so the blinking-green-circle indicator
-        clears on every webview that was watching it.
+        Delegates to :meth:`WebPrinter._fanout_stamped`, which looks up
+        the viewer tabs currently subscribed to the task id and writes
+        one copy of the ``status`` event per tab with that tab's
+        ``tabId`` spliced in.  The event carries ``taskId`` like every
+        other task-scoped status broadcast (task_runner, cli_client)
+        so clients can filter on it.  Used when a CLI task ends so the
+        blinking-green-circle indicator clears on every webview that
+        was watching it.
         """
-        targets = self._printer._fanout_targets(task_id)
-        if not targets:
-            return
-        for tab_id in targets:
-            payload = json.dumps({
-                "type": "status",
-                "running": running,
-                "tabId": tab_id,
-            })
-            self._printer._send_to_ws_clients(payload)
+        self._printer._fanout_stamped({
+            "type": "status",
+            "running": running,
+            "taskId": task_id,
+        })
 
     async def _process_request(
         self, _connection: ServerConnection, request: Request
@@ -4325,8 +4508,9 @@ class RemoteAccessServer:
     ) -> None:
         """Handle a local Unix-domain socket client connection.
 
-        Speaks the SAME newline-delimited JSON protocol as
-        :meth:`_ws_handler` but skips the password challenge — POSIX
+        Speaks the same JSON command protocol as :meth:`_ws_handler`
+        but framed as newline-delimited JSON lines instead of
+        WebSocket frames, and skips the password challenge — POSIX
         filesystem permissions (mode 0o600 on the socket file) gate
         access to the owning user.  Used by the VS Code extension so
         the same :class:`VSCodeServer` instance serves both local and
@@ -4521,32 +4705,22 @@ class RemoteAccessServer:
                     cli_tabs.add(raw_tab)
                     self._printer.register_cli_tab(raw_tab)
             return
-        if cmd_type == "cliTaskStart":
-            # CLI announces a fresh running task so a webview tab that
-            # later resumes it from the history sidebar is subscribed
-            # to the live stream and shows the blinking-green-circle
-            # "running" indicator.  See ``_handle_cli_task_start``.
-            raw_id = cmd.get("taskId")
-            task_id_str = (
-                raw_id if isinstance(raw_id, str) and raw_id else ""
-            )
-            if not task_id_str:
-                logger.debug("cliTaskStart with bad taskId %r", raw_id)
-                return
-            self._handle_cli_task_start(task_id_str, conn_state)
-            return
-        if cmd_type == "cliTaskEnd":
-            # CLI announces the task finished; the daemon stops the
-            # indicator on every subscribed webview tab.  See
+        if cmd_type in ("cliTaskStart", "cliTaskEnd"):
+            # ``cliTaskStart``: CLI announces a fresh running task so a
+            # webview tab that later resumes it from the history
+            # sidebar is subscribed to the live stream and shows the
+            # blinking-green-circle "running" indicator.
+            # ``cliTaskEnd``: CLI announces the task finished; the
+            # daemon stops the indicator on every subscribed webview
+            # tab.  See ``_handle_cli_task_start`` /
             # ``_handle_cli_task_end``.
-            raw_id = cmd.get("taskId")
-            task_id_str = (
-                raw_id if isinstance(raw_id, str) and raw_id else ""
-            )
+            task_id_str = self._validated_cli_task_id(cmd)
             if not task_id_str:
-                logger.debug("cliTaskEnd with bad taskId %r", raw_id)
                 return
-            self._handle_cli_task_end(task_id_str, conn_state)
+            if cmd_type == "cliTaskStart":
+                self._handle_cli_task_start(task_id_str, conn_state)
+            else:
+                self._handle_cli_task_end(task_id_str, conn_state)
             return
         if cmd_type == "setWorkDir":
             new_wd = cmd.get("workDir", "")
@@ -4554,16 +4728,17 @@ class RemoteAccessServer:
                 conn_state["work_dir"] = new_wd
         elif conn_state["work_dir"] and not cmd.get("workDir"):
             cmd["workDir"] = conn_state["work_dir"]
-        if cmd_type == "openFile" and not isinstance(
-            endpoint, asyncio.StreamWriter,
-        ):
+        if cmd_type == "openFile":
             # A remote-web (WSS) client clicked a file link in a chat
             # webview.  The browser has no editor to open the file in,
             # so the server reads the file and replies with its content
             # for an in-page content tab.  UDS clients (VS Code
-            # windows) never reach this branch: their webview's
+            # windows) never take the WSS path: their webview's
             # ``openFile`` is consumed by the extension host, which
-            # opens the file in a real editor tab.
+            # opens the file in a real editor tab — so a UDS-delivered
+            # ``openFile`` is dropped here as a defensive no-op.
+            if is_uds:
+                return
             await self._handle_open_file(cmd, endpoint)
             return
         if cmd_type == "voiceTranscribe":
@@ -4590,21 +4765,22 @@ class RemoteAccessServer:
             # this connection too — record them in ``tabs_seen`` or a
             # later disconnect would never re-arm their deferred
             # close, leaking the restored backend state forever.
-            restored = cmd.get("restoredTabs")
-            if isinstance(restored, list):
-                for rt in restored[:_MAX_RESTORED_TABS]:
-                    if isinstance(rt, dict):
-                        rt_id = rt.get("tabId", "")
-                        if isinstance(rt_id, str) and rt_id:
-                            if rt_id not in tabs_seen:
-                                tabs_seen.add(rt_id)
-                            if is_uds:
-                                local_tabs = conn_state.setdefault(
-                                    "local_tabs", set()
-                                )
-                                if rt_id not in local_tabs:
-                                    local_tabs.add(rt_id)
-                                    self._printer.register_local_uds_tab(rt_id)
+            # Sanitize ONCE here (warnings included) and write the
+            # cleaned list back so ``_handle_ready``'s own sanitize
+            # pass finds nothing left to reject or truncate.
+            cmd["restoredTabs"] = self._sanitized_restored_tabs(cmd)
+            for rt in cmd["restoredTabs"]:
+                rt_id = rt["tabId"]
+                if rt_id:
+                    if rt_id not in tabs_seen:
+                        tabs_seen.add(rt_id)
+                    if is_uds:
+                        local_tabs = conn_state.setdefault(
+                            "local_tabs", set()
+                        )
+                        if rt_id not in local_tabs:
+                            local_tabs.add(rt_id)
+                            self._printer.register_local_uds_tab(rt_id)
             await self._handle_ready(cmd, endpoint)
             return
         if cmd_type == "submit":
@@ -4641,7 +4817,7 @@ class RemoteAccessServer:
             cmd_type == "closeTab"
             and isinstance(tab_id, str)
             and tab_id
-            and not isinstance(endpoint, asyncio.StreamWriter)
+            and not is_uds
         ):
             # A WEB client closing its chat tab destroys the only UI
             # that could ever finish an in-flight (server-tracked)
@@ -4668,9 +4844,7 @@ class RemoteAccessServer:
         Code window / browser tab whose user triggered the command),
         so siblings do not pop a banner; ``""`` broadcasts to all.
         """
-        if conn_id:
-            event["connId"] = conn_id
-        self._printer.broadcast(event)
+        broadcast_to_conn(self._printer, event, conn_id)
 
     async def _handle_server_reset(self, conn_id: str = "") -> None:
         """Restart the ``kiss-web`` daemon at the user's request.
@@ -5245,6 +5419,66 @@ class RemoteAccessServer:
             else:
                 await endpoint.send(data)
 
+    @staticmethod
+    def _sanitized_restored_tabs(cmd: dict[str, Any]) -> list[dict[str, str]]:
+        """Sanitize the ``restoredTabs`` field of a ``ready`` command.
+
+        Single source of the M7 hardening shared by the ``ready``
+        branch of :meth:`_dispatch_client_command` and
+        :meth:`_handle_ready`:
+
+        * caps the list at ``_MAX_RESTORED_TABS`` so an
+          authenticated-but-malicious or buggy client cannot flood the
+          executor with thousands of ``resumeSession`` jobs;
+        * skips malformed (non-dict) elements — an ``AttributeError``
+          would propagate out of ``_dispatch_client_command`` and tear
+          down the whole authenticated connection over one bad field;
+        * blanks non-str ``tabId`` / ``chatId`` values — a non-str
+          ``tabId`` (e.g. a list) would raise ``TypeError`` in
+          ``_cancel_pending_tab_close``'s dict lookup, and a non-str
+          ``chatId`` would flow into backend handlers that assume
+          strings.
+
+        Every rejection is logged with a ``warning``.  The dispatch
+        path writes the cleaned list back into ``cmd`` so the second
+        pass inside :meth:`_handle_ready` is a no-op (no duplicate
+        warnings); direct callers of :meth:`_handle_ready` (replays,
+        tests) still get the full sanitize.
+
+        Args:
+            cmd: The ``ready`` command dict.
+
+        Returns:
+            Cleaned entries, each ``{"tabId": str, "chatId": str}``
+            (fields blanked to ``""`` when missing or malformed).
+        """
+        restored = cmd.get("restoredTabs") or []
+        if not isinstance(restored, list):
+            restored = []
+        if len(restored) > _MAX_RESTORED_TABS:
+            logger.warning(
+                "restoredTabs count %d exceeds cap %d; truncating",
+                len(restored), _MAX_RESTORED_TABS,
+            )
+            restored = restored[:_MAX_RESTORED_TABS]
+        cleaned: list[dict[str, str]] = []
+        for rt in restored:
+            if not isinstance(rt, dict):
+                logger.warning("ignoring non-dict restoredTabs entry: %r", rt)
+                continue
+            rt_id = rt.get("tabId", "")
+            if not isinstance(rt_id, str):
+                logger.warning("ignoring non-str restoredTabs tabId: %r", rt_id)
+                rt_id = ""
+            chat_id = rt.get("chatId", "")
+            if not isinstance(chat_id, str):
+                logger.warning(
+                    "ignoring non-str restoredTabs chatId: %r", chat_id,
+                )
+                chat_id = ""
+            cleaned.append({"tabId": rt_id, "chatId": chat_id})
+        return cleaned
+
     async def _handle_ready(
         self, cmd: dict[str, Any], websocket: Any,
     ) -> None:
@@ -5349,48 +5583,11 @@ class RemoteAccessServer:
         if tab_id:
             merge_tabs_to_replay.append(tab_id)
             seen_merge_tabs.add(tab_id)
-        # M7: cap the number of restored tabs a single client can ask
-        # the server to resume so an authenticated-but-malicious or
-        # buggy client cannot flood the executor with thousands of
-        # ``resumeSession`` jobs.
-        restored = cmd.get("restoredTabs") or []
-        if not isinstance(restored, list):
-            restored = []
-        if len(restored) > _MAX_RESTORED_TABS:
-            logger.warning(
-                "restoredTabs count %d exceeds cap %d; truncating",
-                len(restored), _MAX_RESTORED_TABS,
-            )
-            restored = restored[:_MAX_RESTORED_TABS]
-        for rt in restored:
-            # M7: the list itself is type-checked above, but a
-            # malformed (non-dict) ELEMENT must be skipped too — an
-            # ``AttributeError`` here would propagate out of
-            # ``_dispatch_client_command`` and tear down the whole
-            # authenticated connection over one bad field.
-            if not isinstance(rt, dict):
-                logger.warning("ignoring non-dict restoredTabs entry: %r", rt)
-                continue
-            # M7: apply the same ``isinstance(str)`` hardening the
-            # merge-replay branch below (and the ``ready`` branch of
-            # ``_dispatch_client_command``) already uses — a non-str
-            # ``tabId`` (e.g. a list) would raise ``TypeError`` in
-            # ``_cancel_pending_tab_close``'s dict lookup, aborting
-            # the remaining restored-tab resumes and merge replays,
-            # and a non-str ``chatId`` would flow into backend
-            # handlers that assume strings.
-            rt_id = rt.get("tabId", "")
-            if not isinstance(rt_id, str):
-                logger.warning("ignoring non-str restoredTabs tabId: %r", rt_id)
-                rt_id = ""
+        for rt in self._sanitized_restored_tabs(cmd):
+            rt_id = rt["tabId"]
             if rt_id:
                 self._cancel_pending_tab_close(rt_id)
-            chat_id = rt.get("chatId", "")
-            if not isinstance(chat_id, str):
-                logger.warning(
-                    "ignoring non-str restoredTabs chatId: %r", chat_id,
-                )
-                chat_id = ""
+            chat_id = rt["chatId"]
             if chat_id:
                 await self._run_cmd(
                     {"type": "resumeSession", "chatId": chat_id,
@@ -5432,63 +5629,54 @@ class RemoteAccessServer:
         # hand the reconnecting client a torn ``current_text`` and
         # mid-mutation offsets that no later ``merge_nav`` broadcast
         # can repair (``merge_nav`` carries no file text).
-        while True:
+        lock = await self._acquire_merge_action_lock(tab_id)
+        if lock is None:
+            return
+        try:
+            # Re-check under the lock: the action we waited for may
+            # have resolved the final hunk and finished the review.
             with self._merge_states_lock:
-                if tab_id not in self._merge_states:
-                    return
-            lock = self._merge_action_lock(tab_id)
-            async with lock:
-                # Re-check under the lock: the action we waited for
-                # may have resolved the final hunk and finished the
-                # review — and the lock itself may have ROTATED (the
-                # completing holder pops both entries while a new
-                # review for the same tab mints a fresh lock; see
-                # ``_handle_web_merge_action``).  Acting under the
-                # stale object would race the new review's lock, so
-                # retry with the current one.
-                with self._merge_states_lock:
-                    if self._merge_action_locks.get(tab_id) is not lock:
-                        continue
-                    state = self._merge_states.get(tab_id)
-                if state is None or not state.remaining:
-                    return
-                assert self._loop is not None
-                # ``_augment_merge_data`` reads every reviewed file
-                # from disk; do it off the event loop like the
-                # broadcast path's callers.
-                event = await self._loop.run_in_executor(
-                    None,
-                    _augment_merge_data,
-                    {
-                        "type": "merge_data",
-                        "tabId": tab_id,
-                        "data": state.data,
-                        "hunk_count": state.total_hunks,
-                    },
-                )
-                cur = state.current()
-                nav = {
-                    "type": "merge_nav",
-                    "tabId": tab_id,
-                    "remaining": state.remaining,
-                    "total": state.total_hunks,
-                    "cur": (
-                        {"fi": cur[0], "hi": cur[1]}
-                        if cur is not None
-                        else None
-                    ),
-                    "resolved": state.resolutions(),
-                }
-                try:
-                    await self._endpoint_send(websocket, json.dumps(event))
-                    await self._endpoint_send(
-                        websocket,
-                        json.dumps({"type": "merge_started", "tabId": tab_id}),
-                    )
-                    await self._endpoint_send(websocket, json.dumps(nav))
-                except Exception:
-                    logger.debug("Merge review replay failed", exc_info=True)
+                state = self._merge_states.get(tab_id)
+            if state is None or not state.remaining:
                 return
+            assert self._loop is not None
+            # ``_augment_merge_data`` reads every reviewed file
+            # from disk; do it off the event loop like the
+            # broadcast path's callers.
+            event = await self._loop.run_in_executor(
+                None,
+                _augment_merge_data,
+                {
+                    "type": "merge_data",
+                    "tabId": tab_id,
+                    "data": state.data,
+                    "hunk_count": state.total_hunks,
+                },
+            )
+            cur = state.current()
+            nav = {
+                "type": "merge_nav",
+                "tabId": tab_id,
+                "remaining": state.remaining,
+                "total": state.total_hunks,
+                "cur": (
+                    {"fi": cur[0], "hi": cur[1]}
+                    if cur is not None
+                    else None
+                ),
+                "resolved": state.resolutions(),
+            }
+            try:
+                await self._endpoint_send(websocket, json.dumps(event))
+                await self._endpoint_send(
+                    websocket,
+                    json.dumps({"type": "merge_started", "tabId": tab_id}),
+                )
+                await self._endpoint_send(websocket, json.dumps(nav))
+            except Exception:
+                logger.debug("Merge review replay failed", exc_info=True)
+        finally:
+            lock.release()
 
     async def _handle_submit(self, cmd: dict[str, Any]) -> None:
         """Translate the webview ``submit`` command into a backend ``run``.
@@ -5505,12 +5693,20 @@ class RemoteAccessServer:
         # M7: clamp the prompt size so a giant payload cannot push
         # tens of MB through the broadcast pipeline (every connected
         # client receives a ``setTaskText`` echo of this string).
-        if isinstance(prompt, str) and len(prompt) > _MAX_PROMPT_BYTES:
-            logger.warning(
-                "prompt size %d exceeds cap %d bytes; truncating",
-                len(prompt), _MAX_PROMPT_BYTES,
+        # Measured and truncated in UTF-8 BYTES (matching the
+        # ``_MAX_PROMPT_BYTES`` name — a 1M-char multibyte prompt is
+        # up to ~4 MB on the wire); ``_truncate_utf8_bytes`` removes a
+        # trailing partial sequence so the cut never splits inside a
+        # character, and safely handles JSON lone-surrogate escapes.
+        if isinstance(prompt, str):
+            prompt, prompt_size = _truncate_utf8_bytes(
+                prompt, _MAX_PROMPT_BYTES,
             )
-            prompt = prompt[:_MAX_PROMPT_BYTES]
+            if prompt_size > _MAX_PROMPT_BYTES:
+                logger.warning(
+                    "prompt size %d bytes exceeds cap %d bytes; truncating",
+                    prompt_size, _MAX_PROMPT_BYTES,
+                )
         # M7: clamp the attachments list size symmetrically.
         attachments = cmd.get("attachments")
         if isinstance(attachments, list) and len(attachments) > _MAX_ATTACHMENTS:
@@ -5597,6 +5793,48 @@ class RemoteAccessServer:
                 self._merge_action_locks[tab_id] = lock
             return lock
 
+    async def _acquire_merge_action_lock(
+        self, tab_id: str,
+    ) -> asyncio.Lock | None:
+        """Acquire the tab's CURRENT merge-action lock, retrying rotations.
+
+        Owns the acquire-with-rotation-retry invariant shared by
+        :meth:`_handle_web_merge_action` and
+        :meth:`_replay_merge_review`: after acquiring, the lock must be
+        re-verified as still being the tab's registered one.  A holder
+        completing the review pops both the state and the lock entry
+        (``_pop_merge_state``) while still holding its lock object; if
+        a NEW review for the same tab is registered in that window, a
+        waiter that acted under the stale object would mutate the new
+        :class:`_WebMergeState` concurrently with actions holding the
+        freshly-minted lock — so on rotation the stale lock is released
+        and the acquire retried with the current one.
+
+        The lock is only minted when a merge review actually exists for
+        *tab_id*.  Without the membership check, an
+        authenticated-but-buggy (or malicious) client spamming merge
+        commands with random tab ids would grow
+        ``_merge_action_locks`` without bound, one permanent
+        :class:`asyncio.Lock` per never-seen tab id.
+
+        Args:
+            tab_id: The frontend tab id whose merge review is acted on.
+
+        Returns:
+            The HELD current lock (the caller MUST release it), or
+            ``None`` when no merge review exists for *tab_id*.
+        """
+        while True:
+            with self._merge_states_lock:
+                if tab_id not in self._merge_states:
+                    return None
+            lock = self._merge_action_lock(tab_id)
+            await lock.acquire()
+            with self._merge_states_lock:
+                if self._merge_action_locks.get(tab_id) is lock:
+                    return lock
+            lock.release()
+
     def _broadcast_reject_failure(
         self, tab_id: str, file_data: dict[str, Any], exc: OSError,
     ) -> None:
@@ -5632,44 +5870,24 @@ class RemoteAccessServer:
         equivalent functionality by tracking hunk state and modifying
         files on disk.
 
-        Serialised per tab via :meth:`_merge_action_lock` so two clients
-        (the local UDS VS Code extension and a remote WebSocket browser)
-        acting on the *same* tab's merge review cannot interleave at the
-        ``run_in_executor`` await inside the reject branches and drop a
-        hunk resolution.
-
-        The lock is only minted when a merge review actually exists
-        for *tab_id* — mirroring :meth:`_replay_merge_review`'s guard.
-        Without the membership check, an authenticated-but-buggy (or
-        malicious) client spamming ``mergeAction`` commands with
-        random tab ids would grow ``_merge_action_locks`` without
-        bound, one permanent ``asyncio.Lock`` per never-seen tab id.
+        Serialised per tab via :meth:`_acquire_merge_action_lock` so
+        two clients (the local UDS VS Code extension and a remote
+        WebSocket browser) acting on the *same* tab's merge review
+        cannot interleave at the ``run_in_executor`` await inside the
+        reject branches and drop a hunk resolution.
 
         Args:
             cmd: The ``mergeAction`` command from the browser, with
                 ``action`` and ``tabId`` fields.
         """
         tab_id = cmd.get("tabId", "")
-        while True:
-            with self._merge_states_lock:
-                if tab_id not in self._merge_states:
-                    return
-            lock = self._merge_action_lock(tab_id)
-            async with lock:
-                # Re-verify the lock is still the tab's CURRENT one: a
-                # holder completing the review pops both the state and
-                # the lock entry (``_pop_merge_state``) and then awaits
-                # the ``all-done`` dispatch while still holding this
-                # object.  If a NEW review for the same tab was
-                # registered in that window, acting under the stale
-                # object would let this coroutine mutate the new
-                # ``_WebMergeState`` concurrently with actions holding
-                # the freshly-minted lock.  Retry with the current one.
-                with self._merge_states_lock:
-                    if self._merge_action_locks.get(tab_id) is not lock:
-                        continue
-                await self._apply_web_merge_action(cmd)
-                return
+        lock = await self._acquire_merge_action_lock(tab_id)
+        if lock is None:
+            return
+        try:
+            await self._apply_web_merge_action(cmd)
+        finally:
+            lock.release()
 
     async def _apply_web_merge_action(self, cmd: dict[str, Any]) -> None:
         """Apply a single merge action while holding the per-tab lock.
@@ -5736,15 +5954,9 @@ class RemoteAccessServer:
                     # the whole client connection over one bad hunk.
                     self._broadcast_reject_failure(tab_id, fd, exc)
                 else:
-                    delta = hunk["bc"] - hunk["cc"]
-                    # Mirror ``_reject_all_hunks_in_file``: the region
-                    # now holds ``bc`` base lines, so record it in the
-                    # hunk itself to keep any re-application (and the
-                    # replayed ``merge_data``) consistent with disk.
-                    hunk["cc"] = hunk["bc"]
-                    for later_hi in range(hi + 1, len(fd["hunks"])):
-                        if not state.is_resolved(fi, later_hi):
-                            fd["hunks"][later_hi]["cs"] += delta
+                    _record_hunk_rejected(
+                        fd["hunks"], hi, partial(_hunk_unresolved, state, fi),
+                    )
                     state.mark_resolved(fi, hi, "rejected")
                     state.advance()
         elif action == "prev":
@@ -6253,8 +6465,10 @@ class RemoteAccessServer:
         """Terminate ``_tunnel_proc`` and reset per-process state.
 
         Resets :attr:`_tunnel_proc`, :attr:`_tunnel_metrics_port`,
-        :attr:`_tunnel_started_at`, and :attr:`_tunnel_unhealthy_ticks`
-        so the next restart starts cleanly.  Leaves
+        :attr:`_tunnel_started_at`, :attr:`_tunnel_unhealthy_ticks`,
+        and :attr:`_tunnel_adopted_pid` (via
+        :meth:`_reset_tunnel_proc_state`) so the next restart starts
+        cleanly.  Leaves
         :attr:`_active_url` and the URL file alone so the file is not
         removed before a replacement tunnel writes its own URL.
 
@@ -6361,8 +6575,12 @@ class RemoteAccessServer:
            Without this the VS Code settings panel's 10-second poller
            cannot discover the active URL.
         3. **IP change** — if the host's network addresses changed
-           (WiFi switch, DHCP renewal, VPN), initiate a graceful
-           shutdown so the daemon manager restarts the process.
+           (WiFi switch, DHCP renewal, VPN): in direct-LAN mode
+           (``use_tunnel=False``) initiate a graceful shutdown so the
+           daemon manager restarts the process on the new address; in
+           tunnel mode only log the change — ``cloudflared``
+           re-registers with the edge automatically, so no restart is
+           needed.
         4. **WebSocket ping** — send a ping to every connected client
            and close connections that fail to respond within
            :data:`_WS_PING_TIMEOUT` seconds.
@@ -6809,10 +7027,6 @@ class RemoteAccessServer:
                 file=sys.stderr,
             )
             raise SystemExit(2)
-
-        # NOTE: UDS bind moved to the very top of ``_setup_server``
-        # so ``install.sh`` sees ``~/.kiss/sorcar.sock`` within
-        # ~100 ms even when WSS bind / SSL cert build are slow.
 
         tunnel_url: str | None = None
         if self.use_tunnel:

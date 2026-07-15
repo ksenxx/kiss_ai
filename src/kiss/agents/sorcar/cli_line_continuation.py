@@ -35,13 +35,17 @@ The rules mirror POSIX shell continuation semantics:
 * A buffer that is only whitespace + ``\\`` continues (matching the
   shell convention where indented continuation is valid).
 
-This module exposes exactly one function, :func:`ends_with_line_continuation`,
-so both call sites — the mid-task steering box's raw-mode line editor
-and the initial-prompt :class:`~prompt_toolkit.PromptSession` — share
-one source of truth for the rule.
+This module exposes the rule itself, :func:`ends_with_line_continuation`
+— shared by the mid-task steering box's raw-mode line editor and the
+initial-prompt :class:`~prompt_toolkit.PromptSession` so every input
+surface applies one source of truth — plus :func:`read_continuations`,
+the read-until-complete loop built on it that the REPL's line readers
+(prompt_toolkit, plain :func:`input`, and interactive readline) share.
 """
 
 from __future__ import annotations
+
+from collections.abc import Callable
 
 
 def ends_with_line_continuation(buf: str) -> tuple[bool, int]:
@@ -95,3 +99,57 @@ def ends_with_line_continuation(buf: str) -> tuple[bool, int]:
     # user can still literally include ``\\`` characters at the end
     # of a continued line.
     return (True, end - 1)
+
+
+def read_continuations(
+    line: str,
+    read_more: Callable[[], str],
+    on_continue: Callable[[], None] | None = None,
+    on_eof: Callable[[], None] | None = None,
+    on_interrupt: Callable[[], None] | None = None,
+) -> str:
+    """Extend *line* with continuation rows until it stops continuing.
+
+    Shared read loop for the REPL's line readers: while *line* ends
+    with an unescaped trailing backslash (see
+    :func:`ends_with_line_continuation`), the marker is stripped and
+    one more row is read via *read_more*, joined with a real ``"\\n"``.
+
+    Args:
+        line: The initially-read input line.
+        read_more: Zero-argument callable reading the next row (e.g.
+            ``input(prompt)`` or the prompt_toolkit session's read).
+        on_continue: Optional hook invoked before each *read_more*
+            (the interactive readline path redraws its panel frame
+            here).
+        on_eof: Optional hook invoked when *read_more* raises
+            ``EOFError`` (cursor cleanup), before returning the input
+            accumulated so far (with the dangling marker stripped).
+        on_interrupt: Optional hook invoked when *read_more* raises
+            ``KeyboardInterrupt`` (panel cleanup); the interrupt is
+            then re-raised for the caller's prompt-level handling.
+
+    Returns:
+        The (possibly multi-line) input.
+
+    Raises:
+        KeyboardInterrupt: Propagated from *read_more* after the
+            *on_interrupt* hook runs.
+    """
+    while True:
+        cont, keep = ends_with_line_continuation(line)
+        if not cont:
+            return line
+        if on_continue is not None:
+            on_continue()
+        try:
+            more = read_more()
+        except EOFError:
+            if on_eof is not None:
+                on_eof()
+            return line[:keep]
+        except KeyboardInterrupt:
+            if on_interrupt is not None:
+                on_interrupt()
+            raise
+        line = line[:keep] + "\n" + more

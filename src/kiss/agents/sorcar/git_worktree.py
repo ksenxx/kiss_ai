@@ -49,6 +49,16 @@ _REPO_SCOPED_GIT_ENV = (
 )
 
 
+# Canonical commit-message metadata block headings.  Single-sourced
+# here because :func:`_ensure_task_metadata`'s dedup detection depends
+# on byte-exact agreement with what the writers append — both this
+# module's stamping below and ``vscode/helpers._append_user_prompt`` /
+# ``_append_task_result`` (which import these constants) build blocks
+# as ``f"{HEADING}{text}"`` appended to an ``rstrip()``-ed message.
+USER_PROMPT_HEADING = "\n\nUser prompt:\n"
+TASK_RESULT_HEADING = "\n\nResult:\n"
+
+
 def _ensure_task_metadata(
     message: str,
     user_prompt: str | None,
@@ -84,8 +94,8 @@ def _ensure_task_metadata(
     msg = message.rstrip()
     prompt = user_prompt.strip() if user_prompt else ""
     result = task_result.strip() if task_result else ""
-    prompt_block = f"\n\nUser prompt:\n{prompt}" if prompt else ""
-    result_block = f"\n\nResult:\n{result}" if result else ""
+    prompt_block = f"{USER_PROMPT_HEADING}{prompt}" if prompt else ""
+    result_block = f"{TASK_RESULT_HEADING}{result}" if result else ""
     if prompt and result:
         if msg.endswith(prompt_block + result_block):
             return msg
@@ -129,6 +139,13 @@ def repo_lock(repo: Path) -> threading.RLock:
         return _repo_locks[key]
 
 
+# Local git operations can legitimately be slow in very large repositories
+# (``add -A``, stash, merge/cherry-pick, and user pre-commit hooks).  Five
+# minutes matches the Bash tool's normal execution budget while still putting
+# a hard ceiling on a wedged hook or git process.
+_GIT_TIMEOUT_SECONDS: float = 300.0
+
+
 def _git(
     *args: str,
     cwd: str | Path,
@@ -139,6 +156,13 @@ def _git(
     enforces that every git invocation specifies a working directory
     (passed via ``git -C <cwd>``).  This prevents accidental git
     operations against the process's current working directory.
+
+    Always passes a timeout so a hung git process (e.g. waiting on a
+    credential-helper prompt or a network remote) cannot block the
+    agent thread forever — the same protection
+    ``vscode/diff_merge._git`` documents.  On expiry a synthesized
+    non-zero ``CompletedProcess`` (returncode 124, the timeout
+    convention) is returned so callers keep working.
 
     Args:
         *args: Git sub-command and arguments (without the leading ``git``).
@@ -170,14 +194,67 @@ def _git(
     # a strict decode would raise UnicodeDecodeError out of EVERY git
     # call.  Surrogate escapes round-trip through ``os.fsencode`` for
     # filesystem operations, matching :func:`_unquote_git_path`.
-    return subprocess.run(
+    # Use a fresh POSIX process group rather than ``subprocess.run``.
+    # Killing only the top-level git process on timeout is insufficient:
+    # a hung hook can keep the captured stdout/stderr pipes open, making
+    # ``run``'s post-timeout ``communicate()`` wait indefinitely even
+    # after git itself has died.
+    proc = subprocess.Popen(
         cmd,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
         encoding="utf-8",
         errors="surrogateescape",
         env=env,
+        start_new_session=os.name != "nt",
     )
+    try:
+        stdout, stderr = proc.communicate(timeout=_GIT_TIMEOUT_SECONDS)
+        return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+    except subprocess.TimeoutExpired as exc:
+        logger.warning("git %s timed out after %ss", args, _GIT_TIMEOUT_SECONDS)
+        if os.name != "nt":
+            try:
+                os.killpg(proc.pid, 9)
+            except ProcessLookupError:
+                pass
+        else:  # pragma: no cover - Windows CI is not available here
+            # ``Popen.kill`` does not terminate hook descendants on
+            # Windows; taskkill's /T switch closes the whole tree.
+            subprocess.run(  # noqa: S603, S607
+                ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+            if proc.poll() is None:
+                proc.kill()
+        try:
+            stdout, stderr = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:  # pragma: no cover - defensive
+            proc.kill()
+            stdout = (
+                exc.stdout.decode("utf-8", "surrogateescape")
+                if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+            )
+            stderr = (
+                exc.stderr.decode("utf-8", "surrogateescape")
+                if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+            )
+        # TimeoutExpired may expose bytes even for a text-mode process.
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode("utf-8", "surrogateescape")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode("utf-8", "surrogateescape")
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=124,  # convention: timeout
+            stdout=stdout or "",
+            stderr=stderr
+            or f"git {args[0] if args else ''} timed out"
+            f" after {_GIT_TIMEOUT_SECONDS}s",
+        )
 
 
 @dataclass(frozen=True)
@@ -355,6 +432,47 @@ def _split_rename_tail(tail: str) -> tuple[str, str]:
                 i += 1
     idx = tail.index(" -> ")
     return tail[:idx], tail[idx + 4 :]
+
+
+def _porcelain_entries(output: str) -> list[tuple[str, str | None, str]]:
+    """Parse ``git status --porcelain`` output into unquoted entries.
+
+    The single shared porcelain parser — used by
+    :meth:`GitWorktreeOps.copy_dirty_state` and (via
+    ``merge_flow._porcelain_paths``) by the VS Code merge flow — so
+    the parsers cannot drift apart.
+
+    The output is split on ``\\n`` only (NOT ``splitlines()``, which
+    would also split on a raw unicode line/paragraph-separator byte
+    sequence inside an unquoted filename) and the path tail
+    (``line[3:]``) is never ``strip()``-ed: space-adjacent filenames
+    are legal and git leaves them unquoted.  Rename/copy entries are
+    split on the `` -> `` boundary (respecting quoting) BEFORE each
+    side is unquoted exactly once.
+
+    Args:
+        output: Raw stdout from a ``git status --porcelain`` command.
+
+    Returns:
+        List of ``(code, old_name, new_name)`` tuples in output order:
+        ``code`` is the two-character status code, ``old_name`` is the
+        rename/copy source path (``None`` for non-rename entries), and
+        ``new_name`` is the entry's (current) path.
+    """
+    entries: list[tuple[str, str | None, str]] = []
+    for line in output.split("\n"):
+        if len(line) < 4:
+            continue
+        code = line[:2]
+        tail = line[3:]
+        if ("R" in code or "C" in code) and " -> " in tail:
+            old_raw, new_raw = _split_rename_tail(tail)
+            entries.append(
+                (code, _unquote_git_path(old_raw), _unquote_git_path(new_raw))
+            )
+        else:
+            entries.append((code, None, _unquote_git_path(tail)))
+    return entries
 
 
 class GitWorktreeOps:
@@ -813,43 +931,19 @@ class GitWorktreeOps:
 
     @staticmethod
     def _diff_name_only(repo: Path, *flags: str) -> list[str]:
-        """Return ``git diff --name-only`` output lines (empty on failure).
+        """Return ``git diff --name-only`` paths (empty on failure).
 
-        Paths are unquoted via :func:`_unquote_git_path`: even with
-        ``core.quotepath=false`` git C-quotes any path containing a
-        double-quote, backslash, or control character, and callers
-        compare these names against real on-disk paths.
+        Uses ``-z`` NUL-separated output and splits on NUL only, so
+        paths are returned byte-exact: no C-quoting to undo (git never
+        quotes ``-z`` output), no ``strip()``/``splitlines()`` that
+        would mangle filenames with leading/trailing spaces or raw
+        unicode line-separator sequences.  Callers compare these names
+        against real on-disk paths.
         """
-        result = _git("diff", "--name-only", *flags, cwd=repo)
+        result = _git("diff", "--name-only", "-z", *flags, cwd=repo)
         if result.returncode != 0:
             return []
-        return [_unquote_git_path(f) for f in result.stdout.strip().splitlines() if f]
-
-    @staticmethod
-    def unstaged_files(repo: Path) -> list[str]:
-        """List files with unstaged changes in the working tree.
-
-        Args:
-            repo: Git repo root path.
-
-        Returns:
-            List of files with uncommitted, unstaged modifications,
-            or an empty list if the command fails.
-        """
-        return GitWorktreeOps._diff_name_only(repo)
-
-    @staticmethod
-    def staged_files(repo: Path) -> list[str]:
-        """List files with staged (cached) changes in the index.
-
-        Args:
-            repo: Git repo root path.
-
-        Returns:
-            List of files staged for commit, or an empty list if the
-            command fails.
-        """
-        return GitWorktreeOps._diff_name_only(repo, "--cached")
+        return [f for f in result.stdout.split("\0") if f]
 
     @staticmethod
     def _remove_branch_config_section(repo: Path, branch: str) -> None:
@@ -1000,12 +1094,6 @@ class GitWorktreeOps:
         _git("config", "merge.kiss-scratch.driver", "cp -f %B %A", cwd=repo)
 
     @staticmethod
-    def _load_branch_config(repo: Path, branch: str, key: str) -> str | None:
-        """Read ``branch.<branch>.<key>`` from git config (None if unset)."""
-        result = _git("config", f"branch.{branch}.{key}", cwd=repo)
-        return result.stdout.strip() or None
-
-    @staticmethod
     def _save_branch_config(
         repo: Path, branch: str, key: str, value: str, what: str,
     ) -> bool:
@@ -1030,19 +1118,6 @@ class GitWorktreeOps:
             )
             return False
         return True
-
-    @staticmethod
-    def load_original_branch(repo: Path, branch: str) -> str | None:
-        """Load the original branch from git config.
-
-        Args:
-            repo: Git repo root path.
-            branch: The worktree branch name.
-
-        Returns:
-            The original branch name, or ``None`` if not stored.
-        """
-        return GitWorktreeOps._load_branch_config(repo, branch, "kiss-original")
 
     @staticmethod
     def save_original_branch(repo: Path, branch: str, original: str) -> bool:
@@ -1085,24 +1160,6 @@ class GitWorktreeOps:
         )
 
     @staticmethod
-    def load_baseline_commit(repo: Path, branch: str) -> str | None:
-        """Load the baseline commit SHA from git config.
-
-        Companion reader for :meth:`save_baseline_commit` — recovers
-        the persisted ``branch.<branch>.kiss-baseline`` value (e.g.
-        after a crash between worktree creation and merge, when the
-        in-memory ``GitWorktree.baseline_commit`` is lost).
-
-        Args:
-            repo: Git repo root path.
-            branch: The worktree branch name.
-
-        Returns:
-            The baseline commit SHA, or ``None`` if not stored.
-        """
-        return GitWorktreeOps._load_branch_config(repo, branch, "kiss-baseline")
-
-    @staticmethod
     def _remove_path(path: Path) -> None:
         """Remove *path* whatever it is (symlink, dir, file, or absent).
 
@@ -1140,22 +1197,12 @@ class GitWorktreeOps:
             return False
 
         copied = False
-        for line in status.stdout.splitlines():
-            if len(line) < 4:
-                continue
-            code = line[:2]
-            tail = line[3:]
-            old_name: str | None = None
-            if ("R" in code or "C" in code) and " -> " in tail:
-                # Rename/copy entry: split the RAW tail on the
-                # ``" -> "`` boundary (respecting quoting) first, then
-                # unquote each side exactly once.
-                old_raw, new_raw = _split_rename_tail(tail)
-                old_name = _unquote_git_path(old_raw)
-                fname = _unquote_git_path(new_raw)
-            else:
-                fname = _unquote_git_path(tail)
-
+        # Parse via the shared :func:`_porcelain_entries` helper (the
+        # same parser backing merge_flow's ``_porcelain_paths``) so the
+        # baseline-seeding and merge-flow porcelain parsers cannot
+        # drift apart (split on ``\n`` only, no strip, quote-aware
+        # rename splitting).
+        for _code, old_name, fname in _porcelain_entries(status.stdout):
             src = repo / fname
             dst = wt_dir / fname
 

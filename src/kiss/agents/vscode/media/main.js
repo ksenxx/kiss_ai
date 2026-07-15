@@ -4750,11 +4750,6 @@
         }
         break;
       }
-      case 'ensureChat':
-        if (tabs.length === 0) {
-          createNewTab();
-        }
-        break;
       case 'showWelcome': {
         const swTabId = ev.tabId || activeTabId;
         const swTab = getTab(swTabId);
@@ -5024,7 +5019,7 @@
             // the toggles read AT THE TIME this task ran, not the
             // user's CURRENT global settings.  The live toggles in
             // this webview already mirror ``~/.kiss/config.json``
-            // (kept in sync via ``updateSetting`` / ``configData``);
+            // (kept in sync via ``configData``);
             // overwriting them with the loaded task's stale snapshot
             // would silently make the NEXT task submitted in this
             // tab run with the loaded task's old settings instead of
@@ -5119,61 +5114,6 @@
           /* ignored */
         }
         break;
-
-      case 'updateSetting': {
-        const sKey = ev.key;
-        const sVal = ev.value;
-        if (sKey === 'is_parallel') {
-          // Parallel-agents setting updated server-side (no UI toggle)
-        } else if (sKey === 'is_worktree' && worktreeToggleBtn) {
-          worktreeToggleBtn.checked = !!sVal;
-        } else if (sKey === 'model' && typeof sVal === 'string') {
-          // Update #model-name (not #model-btn.textContent, which would
-          // destroy the button's SVG icon).
-          if (modelName) modelName.textContent = sVal;
-          selectedModel = sVal;
-        } else if (sKey === 'max_budget') {
-          // Budget updated server-side; UI may show in config panel
-        } else if (sKey === 'use_web_browser') {
-          // Web browser setting updated server-side
-        } else if (sKey === 'demo_mode' && demoToggleBtn) {
-          demoMode = !!sVal;
-          demoToggleBtn.checked = demoMode;
-          // Demo mode turned off (possibly from another window):
-          // dismiss a finished demo's ended play-button UI.
-          if (!demoMode) clearDemoEndedUi();
-        } else if (sKey === 'auto_commit') {
-          // Auto-commit triggered server-side
-        } else if (sKey === 'auto_commit_mode' && autocommitToggleBtn) {
-          autocommitToggleBtn.checked = !!sVal;
-        } else if (sKey === 'custom_endpoint' && typeof sVal === 'string') {
-          const epEl = document.getElementById('cfg-custom-endpoint');
-          if (epEl) epEl.value = sVal;
-        } else if (sKey === 'custom_api_key' && sVal === true) {
-          // Custom API key updated server-side; mask in UI
-          const akEl = document.getElementById('cfg-custom-api-key');
-          if (akEl && !akEl.value) akEl.value = '••••••••';
-        } else if (sKey === 'custom_headers' && sVal === true) {
-          // Custom headers updated server-side
-        } else if (sKey.endsWith('_api_key') && sVal === true) {
-          // API key updated server-side; map param name to env var
-          const envMap = {
-            gemini_api_key: 'GEMINI_API_KEY',
-            openai_api_key: 'OPENAI_API_KEY',
-            anthropic_api_key: 'ANTHROPIC_API_KEY',
-            together_api_key: 'TOGETHER_API_KEY',
-            openrouter_api_key: 'OPENROUTER_API_KEY',
-            zai_api_key: 'ZAI_API_KEY',
-            moonshot_api_key: 'MOONSHOT_API_KEY',
-          };
-          const envVar = envMap[sKey];
-          if (envVar) {
-            const keyEl = document.getElementById('cfg-key-' + envVar);
-            if (keyEl && !keyEl.value) keyEl.value = '••••••••';
-          }
-        }
-        break;
-      }
 
       case 'inputHistory':
         histCache = ev.tasks || [];

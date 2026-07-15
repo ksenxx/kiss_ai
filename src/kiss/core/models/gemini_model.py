@@ -501,8 +501,11 @@ class GeminiModel(Model):
         thinking_config = self.model_config.get("thinking_config")
         if thinking_config is None:
             thinking_config = types.ThinkingConfig(include_thoughts=True)
+        max_output_tokens = self.model_config.get("max_tokens")
+        if max_output_tokens is None:
+            max_output_tokens = self.model_config.get("max_completion_tokens")
         return types.GenerateContentConfig(
-            max_output_tokens=self.model_config.get("max_tokens"),
+            max_output_tokens=max_output_tokens,
             temperature=self.model_config.get("temperature"),
             top_p=self.model_config.get("top_p"),
             stop_sequences=self.model_config.get("stop"),
