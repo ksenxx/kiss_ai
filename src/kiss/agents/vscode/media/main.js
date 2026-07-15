@@ -5875,27 +5875,25 @@
     renderTabBar();
   }
 
-  function addError(text) {
-    const div = mkEl('div', 'ev tr err');
-    div.innerHTML = '<strong>Error:</strong> ' + esc(text);
+  function addBanner(cls, label, text) {
+    const div = mkEl('div', 'ev tr ' + cls);
+    div.innerHTML = '<strong>' + label + '</strong> ' + esc(text);
     O.appendChild(div);
     sb();
+  }
+
+  function addError(text) {
+    addBanner('err', 'Error:', text);
   }
 
   /** Render an informational server notice (green-tinted banner). */
   function addNotice(text) {
-    const div = mkEl('div', 'ev tr note');
-    div.innerHTML = '<strong>Note:</strong> ' + esc(text);
-    O.appendChild(div);
-    sb();
+    addBanner('note', 'Note:', text);
   }
 
   /** Render a backend warning (amber-tinted banner). */
   function addWarning(text) {
-    const div = mkEl('div', 'ev tr warn');
-    div.innerHTML = '<strong>Warning:</strong> ' + esc(text);
-    O.appendChild(div);
-    sb();
+    addBanner('warn', 'Warning:', text);
   }
 
   // --- Remote URL (dynamic) ---
@@ -6006,6 +6004,17 @@
     '<line x1="12" y1="15" x2="12" y2="3"/>' +
     '</svg>';
 
+  // 12px variant of the same Feather download arrow, injected as the
+  // settings-panel Update-button badge by renderUpdateAvailableBadge.
+  const UPDATE_BADGE_SVG =
+    '<svg class="update-available-icon" width="12" height="12" ' +
+    'viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+    '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>' +
+    '<polyline points="7 10 12 15 17 10"/>' +
+    '<line x1="12" y1="15" x2="12" y2="3"/>' +
+    '</svg>';
+
   function renderUpdateAvailable(available, latest, current) {
     renderUpdateAvailableBadge(available, latest, current);
     renderUpdateAvailableNotification(available, latest, current);
@@ -6030,33 +6039,10 @@
           '— click to update'
         : 'A new version is available — click to update';
     btn.setAttribute('title', tip);
-    // Build an inline SVG download-arrow icon (matches the 12px
-    // visual weight of the autocommit button's circle icon).  Use
-    // namespaced createElementNS so the browser parses it as SVG
-    // rather than HTML.
-    const svgNs = 'http://www.w3.org/2000/svg';
-    const icon = document.createElementNS(svgNs, 'svg');
-    icon.setAttribute('class', 'update-available-icon');
-    icon.setAttribute('width', '12');
-    icon.setAttribute('height', '12');
-    icon.setAttribute('viewBox', '0 0 24 24');
-    icon.setAttribute('fill', 'none');
-    icon.setAttribute('stroke', 'currentColor');
-    icon.setAttribute('stroke-width', '2');
-    icon.setAttribute('stroke-linecap', 'round');
-    icon.setAttribute('stroke-linejoin', 'round');
-    // Download arrow path (Feather "download" icon).
-    const parts = [
-      ['path', {d: 'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4'}],
-      ['polyline', {points: '7 10 12 15 17 10'}],
-      ['line', {x1: '12', y1: '15', x2: '12', y2: '3'}],
-    ];
-    for (const [tag, attrs] of parts) {
-      const el = document.createElementNS(svgNs, tag);
-      for (const k of Object.keys(attrs)) el.setAttribute(k, attrs[k]);
-      icon.appendChild(el);
-    }
-    btn.insertBefore(icon, btn.firstChild);
+    // Inject the 12px Feather download-arrow badge icon (matches the
+    // visual weight of the autocommit button's circle icon) before
+    // the "Update" label.
+    btn.insertAdjacentHTML('afterbegin', UPDATE_BADGE_SVG);
   }
 
   /**
@@ -7912,12 +7898,38 @@
     btn.type = 'button';
     btn.className = 'sidebar-item-copy';
     btn.setAttribute('aria-label', 'Copy task to clipboard');
+    wireCopyButton(btn, text, false, false);
+    return btn;
+  }
+
+  /**
+   * Wire the shared copy-to-clipboard behavior onto an icon-only
+   * button: set the clipboard SVG icon and, on click, stop
+   * propagation (so the surrounding row's click handler does not
+   * fire), copy *text* via ``navigator.clipboard.writeText`` (falling
+   * back to ``fallbackCopyText`` when the async clipboard API is
+   * unavailable) and swap the icon for a green check mark for 1.5 s.
+   *
+   * @param {HTMLButtonElement} btn - the button to wire up.
+   * @param {*} text - payload to copy (stringified at click time).
+   * @param {boolean} retryFallback - when true, a rejected clipboard
+   *   write retries via ``fallbackCopyText`` before giving up.
+   * @param {boolean} resetFlashTimer - when true, a rapid second click
+   *   restarts the 1.5 s feedback window; false preserves the sidebar
+   *   row button's independent per-click timers.
+   */
+  function wireCopyButton(btn, text, retryFallback, resetFlashTimer) {
     btn.innerHTML = PANEL_COPY_SVG;
 
+    let flashTimer = 0;
     const flash = () => {
       btn.innerHTML = PANEL_CHECK_SVG;
       btn.classList.add('copied');
-      setTimeout(() => {
+      // Preserve the two builders' historical rapid-click behavior:
+      // id buttons reset their existing timer, while sidebar-row buttons
+      // leave each click's timer independently scheduled.
+      if (resetFlashTimer) clearTimeout(flashTimer);
+      flashTimer = setTimeout(() => {
         btn.innerHTML = PANEL_COPY_SVG;
         btn.classList.remove('copied');
       }, 1500);
@@ -7928,13 +7940,13 @@
       e.preventDefault();
       const payload = String(text == null ? '' : text);
       if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(payload).then(flash, () => {});
+        navigator.clipboard.writeText(payload).then(flash, () => {
+          if (retryFallback && fallbackCopyText(payload)) flash();
+        });
       } else if (fallbackCopyText(payload)) {
         flash();
       }
     });
-
-    return btn;
   }
 
   /**
@@ -7960,32 +7972,7 @@
     btn.className = 'ids-copy-btn ids-copy-' + kind;
     btn.dataset.tooltip = 'Copy ' + kind + ' id';
     btn.setAttribute('aria-label', 'Copy ' + kind + ' id to clipboard');
-    btn.innerHTML = PANEL_COPY_SVG;
-
-    let flashTimer = 0;
-    const flash = () => {
-      btn.innerHTML = PANEL_CHECK_SVG;
-      btn.classList.add('copied');
-      clearTimeout(flashTimer);
-      flashTimer = setTimeout(() => {
-        btn.innerHTML = PANEL_COPY_SVG;
-        btn.classList.remove('copied');
-      }, 1500);
-    };
-
-    btn.addEventListener('click', e => {
-      e.stopPropagation();
-      e.preventDefault();
-      const payload = String(idText == null ? '' : idText);
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(payload).then(flash, () => {
-          if (fallbackCopyText(payload)) flash();
-        });
-      } else if (fallbackCopyText(payload)) {
-        flash();
-      }
-    });
-
+    wireCopyButton(btn, idText, true, true);
     return btn;
   }
 
@@ -8890,14 +8877,23 @@
   }
 
   /**
+   * Toggle the 'open' class on a slide-up/slide-in panel and its
+   * backdrop overlay.  Shared by the Settings, Frequent-tasks, and
+   * Tricks panels below.
+   */
+  function setPanelOpen(panel, overlay, open) {
+    if (panel) panel.classList.toggle('open', open);
+    if (overlay) overlay.classList.toggle('open', open);
+  }
+
+  /**
    * Open the standalone Settings panel (slides in from the right) and
    * request the current config from the backend so the form is freshly
    * populated.
    */
   function openSettingsPanel() {
     if (!settingsPanel) return;
-    settingsPanel.classList.add('open');
-    if (settingsOverlay) settingsOverlay.classList.add('open');
+    setPanelOpen(settingsPanel, settingsOverlay, true);
     configFormPopulated = false;
     vscode.postMessage({type: 'getConfig'});
   }
@@ -8908,8 +8904,7 @@
    */
   function closeSettingsPanel() {
     saveSettingsIfPopulated();
-    if (settingsPanel) settingsPanel.classList.remove('open');
-    if (settingsOverlay) settingsOverlay.classList.remove('open');
+    setPanelOpen(settingsPanel, settingsOverlay, false);
   }
 
   /**
@@ -8918,15 +8913,13 @@
    */
   function openFrequentPanel() {
     if (!frequentPanel) return;
-    frequentPanel.classList.add('open');
-    if (frequentOverlay) frequentOverlay.classList.add('open');
+    setPanelOpen(frequentPanel, frequentOverlay, true);
     vscode.postMessage({type: 'getFrequentTasks', limit: 50});
   }
 
   /** Close the standalone Frequent tasks panel. */
   function closeFrequentPanel() {
-    if (frequentPanel) frequentPanel.classList.remove('open');
-    if (frequentOverlay) frequentOverlay.classList.remove('open');
+    setPanelOpen(frequentPanel, frequentOverlay, false);
   }
 
   /**
@@ -8936,15 +8929,13 @@
    */
   function openTricksPanel() {
     if (!tricksPanel) return;
-    tricksPanel.classList.add('open');
-    if (tricksOverlay) tricksOverlay.classList.add('open');
+    setPanelOpen(tricksPanel, tricksOverlay, true);
     renderTricks(window.__TRICKS__ || []);
   }
 
   /** Close the standalone Tricks panel. */
   function closeTricksPanel() {
-    if (tricksPanel) tricksPanel.classList.remove('open');
-    if (tricksOverlay) tricksOverlay.classList.remove('open');
+    setPanelOpen(tricksPanel, tricksOverlay, false);
   }
 
   /**

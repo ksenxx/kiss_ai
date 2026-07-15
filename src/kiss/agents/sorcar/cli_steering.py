@@ -182,6 +182,16 @@ _NEWLINE_AFTER_ESC: tuple[str, ...] = (
 )
 
 
+# Navigation finals shared by the CSI (``ESC[``) and SS3 (``ESC O``)
+# escape-sequence branches of :meth:`_InputBox.feed`; both dispatch
+# through :meth:`_InputBox._nav_action` so the two encodings can never
+# drift apart.
+_NAV_FINALS: dict[str, str] = {
+    "A": "up", "B": "down", "C": "right", "D": "left",
+    "H": "home", "F": "end",
+}
+
+
 def _box_top_row(rows: int, box_h: int = _BOX_H) -> int:
     """Return the box's first screen row (1-based) for *rows* total rows.
 
@@ -1039,6 +1049,46 @@ class _InputBox:
         else:
             self._cursor_down_line()
 
+    def _nav_action(self, key: str) -> None:
+        """Apply one navigation key to the box (arrows / Home / End).
+
+        Shared by the CSI (``ESC[``) and SS3 (``ESC O``) branches of
+        :meth:`feed` so both encodings behave identically: Up/Down
+        navigate the in-place completion menu when it is open (and
+        otherwise browse the input history / move the caret between
+        buffer lines — see :meth:`_arrow_up` / :meth:`_arrow_down`),
+        Left/Right move the edit cursor, and Home/End jump to the
+        buffer's ends.
+
+        Args:
+            key: One of ``"up"``, ``"down"``, ``"left"``, ``"right"``,
+                ``"home"``, ``"end"`` (see :data:`_NAV_FINALS`).
+        """
+        if key == "up":
+            if self._menu_open:
+                self._menu_move(-1)
+            else:
+                self._arrow_up()
+        elif key == "down":
+            if self._menu_open:
+                self._menu_move(1)
+            else:
+                self._arrow_down()
+        elif key == "left":
+            with self.lock:
+                if self.cursor > 0:
+                    self.cursor -= 1
+        elif key == "right":
+            with self.lock:
+                if self.cursor < len(self.buf):
+                    self.cursor += 1
+        elif key == "home":
+            with self.lock:
+                self.cursor = 0
+        else:  # "end"
+            with self.lock:
+                self.cursor = len(self.buf)
+
     def _reset_completion_state(self) -> None:
         """Close the in-place completion menu and drop its state."""
         with self.lock:
@@ -1389,44 +1439,25 @@ class _InputBox:
                         break
                     final = text[j]
                     seq = text[i + 2 : j]
-                    if final == "A" and seq == "":  # Up arrow
-                        if self._menu_open:
-                            self._menu_move(-1)
-                        else:
-                            self._arrow_up()
-                        changed = True
-                    elif final == "B" and seq == "":  # Down arrow
-                        if self._menu_open:
-                            self._menu_move(1)
-                        else:
-                            self._arrow_down()
+                    # Arrow / Home / End dispatch is shared with the
+                    # SS3 branch below via :meth:`_nav_action`; the
+                    # tilde-terminated Home (``ESC[1~`` / ``ESC[7~``)
+                    # and End (``ESC[4~`` / ``ESC[8~``) variants map
+                    # onto the same actions.
+                    nav_key: str | None = None
+                    if seq == "":
+                        nav_key = _NAV_FINALS.get(final)
+                    elif final == "~" and seq in ("1", "7"):
+                        nav_key = "home"
+                    elif final == "~" and seq in ("4", "8"):
+                        nav_key = "end"
+                    if nav_key is not None:
+                        self._nav_action(nav_key)
                         changed = True
                     elif final == "Z" and seq == "":  # Shift+Tab
                         if self._menu_open:
                             self._menu_move(-1)
                             changed = True
-                    elif final == "D" and seq == "":  # Left arrow
-                        with self.lock:
-                            if self.cursor > 0:
-                                self.cursor -= 1
-                        changed = True
-                    elif final == "C" and seq == "":  # Right arrow
-                        with self.lock:
-                            if self.cursor < len(self.buf):
-                                self.cursor += 1
-                        changed = True
-                    elif (final == "H" and seq == "") or (
-                        final == "~" and seq in ("1", "7")
-                    ):  # Home (``ESC[H`` / ``ESC[1~`` / ``ESC[7~``)
-                        with self.lock:
-                            self.cursor = 0
-                        changed = True
-                    elif (final == "F" and seq == "") or (
-                        final == "~" and seq in ("4", "8")
-                    ):  # End (``ESC[F`` / ``ESC[4~`` / ``ESC[8~``)
-                        with self.lock:
-                            self.cursor = len(self.buf)
-                        changed = True
                     i = j + 1
                     continue
                 # SS3 sequences (``ESC O <final>``): arrow keys in
@@ -1441,35 +1472,11 @@ class _InputBox:
                         self._pending_esc = text[i:]
                         break
                     ss3 = text[i + 2]
-                    if ss3 == "A":  # Up arrow (application cursor mode)
-                        if self._menu_open:
-                            self._menu_move(-1)
-                        else:
-                            self._arrow_up()
-                        changed = True
-                    elif ss3 == "B":  # Down arrow
-                        if self._menu_open:
-                            self._menu_move(1)
-                        else:
-                            self._arrow_down()
-                        changed = True
-                    elif ss3 == "D":  # Left arrow
-                        with self.lock:
-                            if self.cursor > 0:
-                                self.cursor -= 1
-                        changed = True
-                    elif ss3 == "C":  # Right arrow
-                        with self.lock:
-                            if self.cursor < len(self.buf):
-                                self.cursor += 1
-                        changed = True
-                    elif ss3 == "H":  # Home
-                        with self.lock:
-                            self.cursor = 0
-                        changed = True
-                    elif ss3 == "F":  # End
-                        with self.lock:
-                            self.cursor = len(self.buf)
+                    # Same shared navigation dispatch as the CSI
+                    # branch above (see :meth:`_nav_action`).
+                    ss3_key = _NAV_FINALS.get(ss3)
+                    if ss3_key is not None:
+                        self._nav_action(ss3_key)
                         changed = True
                     i += 3
                     continue
