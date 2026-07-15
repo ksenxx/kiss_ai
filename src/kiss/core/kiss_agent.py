@@ -14,7 +14,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from kiss.core.base import Base
-from kiss.core.kiss_error import KISSError, ModelRefusalError
+from kiss.core.kiss_error import BudgetExceededError, KISSError, ModelRefusalError
 from kiss.core.models.model import Attachment
 from kiss.core.models.model_info import calculate_cost, get_max_context_length, model
 from kiss.core.utils import substitute_prompt_args
@@ -93,6 +93,16 @@ class KISSAgent(Base):
         # ``appendUserMessage`` command — see
         # :meth:`kiss.agents.sorcar.sorcar_agent.SorcarAgent.run`).
         self.pre_step_hook: Callable[..., None] | None = None
+        # Optional hook invoked by :meth:`_check_limits` after this
+        # agent's own budget/step checks.  Installed by
+        # :class:`kiss.core.relentless_agent.RelentlessAgent` on each
+        # per-session executor so the executor also enforces the
+        # PARENT task's total budget — including spend attributed to
+        # the parent mid-session by parallel sub-agents (see
+        # ``_attribute_sub_usage`` in ``sorcar_agent``), which this
+        # executor's own ``budget_used`` never sees.  The hook raises
+        # :class:`KISSError` when the parent's budget is exceeded.
+        self.budget_check_hook: Callable[[], None] | None = None
 
     def _reset(
         self,
@@ -472,6 +482,17 @@ class KISSAgent(Base):
                 total_steps=self.step_count,
             )
 
+        # Enforce the budget on the very response that exceeded it:
+        # without this, an over-budget response would still execute a
+        # full round of (potentially very expensive) tool calls and only
+        # stop at the top of the NEXT step.  When the response contains
+        # ONLY ``finish`` calls the agent is already stopping — let it
+        # through so the final result is returned instead of discarded.
+        # A mixed finish + non-finish response is still checked, so the
+        # finish call cannot become a loophole for extra tool execution.
+        if function_calls and any(fc["name"] != "finish" for fc in function_calls):
+            self._check_limits()
+
         if not function_calls:
             self._consecutive_no_tool_calls += 1
             self._add_message(
@@ -523,6 +544,13 @@ class KISSAgent(Base):
             function_results.append((name, {"result": response_str}))
             if name == "finish":
                 finish_result = response_str
+            else:
+                # A tool such as ``run_parallel`` can attribute a large
+                # amount of sub-agent spend to the relentless parent.
+                # Re-check immediately after EVERY non-finish tool so a
+                # later tool from this same response cannot run after the
+                # parent budget has already been exhausted.
+                self._check_limits()
 
         model_content = (
             response_text + "\n" + "\n".join(call_reprs) + "\n```text\n" + usage_info + "\n```\n"
@@ -570,6 +598,11 @@ class KISSAgent(Base):
             if function_name not in self.function_map:  # pragma: no cover
                 raise KISSError(f"Function {function_name} is not a registered tool")
             function_response = str(self.function_map[function_name](**function_args))
+        except BudgetExceededError:
+            # Budget exhaustion is a hard stop, not a recoverable tool
+            # failure.  Propagate it instead of converting it into text
+            # that would let the agent continue spending.
+            raise
         except (Exception, SystemExit) as e:
             logger.debug("Exception caught", exc_info=True)
             fn = self.function_map.get(function_name)
@@ -607,9 +640,11 @@ class KISSAgent(Base):
             KISSError: If agent budget or step limit is exceeded.
         """
         if self.budget_used > self.max_budget:
-            raise KISSError(f"Agent {self.name} budget exceeded.")
+            raise BudgetExceededError(f"Agent {self.name} budget exceeded.")
         if self.step_count > self.max_steps:
             raise KISSError(f"Agent {self.name} exceeded {self.max_steps} steps.")
+        if self.budget_check_hook is not None:
+            self.budget_check_hook()
 
     def _add_functions(self, tools: list[Callable[..., Any]]) -> None:
         """Adds callable tools to the agent's function map.
