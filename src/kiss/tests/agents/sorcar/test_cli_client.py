@@ -43,6 +43,7 @@ CLI client merely forwards the message verbatim through the
 from __future__ import annotations
 
 import asyncio
+import gc
 import os
 import queue
 import shutil
@@ -973,6 +974,54 @@ class TestSubmitTaskAnchored(CliClientBase):
             watcher._stop_event.set()  # type: ignore[attr-defined]
             watcher.join(timeout=2)
         self.assertLess(time.monotonic() - start, 5.0)
+
+
+class TestPendingSendTaskCleanup(CliClientBase):
+    """The loop thread must retire pending ``_send_async`` tasks on exit.
+
+    Regression for the asyncio teardown warning ``Task was destroyed
+    but it is pending!`` naming ``CliClient._send_async``.  The
+    production race: :meth:`CliClient.close` fires a fall-back
+    ``loop.call_soon_threadsafe(loop.stop)`` (and, symmetrically, a
+    daemon-side EOF makes ``_main`` return) while a ``_send_async``
+    coroutine scheduled by :meth:`CliClient.send` has not yet had its
+    first step.  ``run_until_complete`` then unwinds with the task
+    still pending, and ``loop.close()`` destroys it — asyncio reports
+    the destruction via an ERROR record on the ``asyncio`` logger when
+    the orphaned task object is garbage-collected.
+    """
+
+    def test_close_after_loop_stop_leaves_no_pending_send_task(self) -> None:
+        """No 'Task was destroyed' ERROR log after close() + GC."""
+        loop = self.client._loop
+        assert loop is not None
+        thread = self.client._thread
+        assert thread is not None
+
+        def schedule_send_and_stop() -> None:
+            # Runs ON the loop thread: create the send task and stop
+            # the loop in the SAME callback so the task is guaranteed
+            # to still be pending (zero steps run) when
+            # ``run_until_complete`` unwinds — exactly the window the
+            # ``close()`` fall-back stop / daemon EOF race hits.
+            loop.create_task(
+                self.client._send_async({"type": "getModels"}),
+            )
+            loop.stop()
+
+        loop.call_soon_threadsafe(schedule_send_and_stop)
+        thread.join(timeout=5)
+        self.assertFalse(thread.is_alive())
+
+        # ``close()`` closes the loop; a still-pending task destroyed
+        # with it logs "Task was destroyed but it is pending!" at
+        # ERROR on the "asyncio" logger once the task object is
+        # garbage-collected.  The loop thread's shutdown path must
+        # have cancelled and retired the task so no such record ever
+        # appears.
+        with self.assertNoLogs("asyncio", level="ERROR"):
+            self.client.close()
+            gc.collect()
 
 
 if __name__ == "__main__":
