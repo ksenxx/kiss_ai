@@ -30,7 +30,6 @@ from openai import OpenAI
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model import (
     Attachment,
-    Model,
     ThinkingCallback,
     TokenCallback,
     _build_text_based_tools_prompt,
@@ -38,8 +37,12 @@ from kiss.core.models.model import (
     _tool_result_to_string,
     parse_binary_attachments,
 )
+from kiss.core.models.model import Model as Model
 from kiss.core.models.openai_compatible_model import (
-    DEEPSEEK_REASONING_MODELS,
+    DEEPSEEK_REASONING_MODELS as DEEPSEEK_REASONING_MODELS,
+)
+from kiss.core.models.openai_compatible_model import (
+    OpenAICompatibleBase,
     OpenAICompatibleModel,
     _audio_mime_to_format,
     _extract_deepseek_reasoning,
@@ -66,7 +69,7 @@ _RESPONSES_INPUT_IMAGE_MIME_TYPES = {
 logger = logging.getLogger(__name__)
 
 
-class OpenAICompatibleModel2(Model):
+class OpenAICompatibleModel2(OpenAICompatibleBase):
     """OpenAI-compatible model that targets the Responses API.
 
     The only behavioural difference vs :class:`OpenAICompatibleModel` is the
@@ -403,51 +406,6 @@ class OpenAICompatibleModel2(Model):
             break
         collected.reverse()
         return collected
-
-    # ------------------------------------------------------------------
-    # Model-specific helpers
-    # ------------------------------------------------------------------
-
-    def _is_deepseek_reasoning_model(self) -> bool:
-        """Return ``True`` if this model is a DeepSeek R1 reasoning model.
-
-        Returns:
-            ``True`` when the bare model name is in
-            :data:`DEEPSEEK_REASONING_MODELS`.
-        """
-        return self._api_model_name in DEEPSEEK_REASONING_MODELS
-
-    def _is_openrouter_anthropic(self) -> bool:
-        """Return ``True`` when the model is an OpenRouter Anthropic alias."""
-        return self.model_name.startswith("openrouter/anthropic/")
-
-    def _apply_cache_control_for_openrouter_anthropic(
-        self, kwargs: dict[str, Any]
-    ) -> None:
-        """Add ``cache_control`` to ``extra_body`` for OpenRouter Anthropic models.
-
-        Same guard conditions as v1 so prompt caching keeps working when
-        callers swap to v2; like v1 it copies any caller-supplied
-        ``extra_body`` before writing so the caller's config is never
-        mutated.
-
-        Args:
-            kwargs: The kwargs dict that will be passed to
-                ``responses.create(...)``.  Mutated in place.
-        """
-        if not self._is_openrouter_anthropic():
-            return
-        if not self.model_config.get("enable_cache", True):
-            return
-        # Shallow-copy the caller-supplied ``extra_body`` dict (when
-        # present) before adding ``cache_control``.  Without this copy
-        # the nested dict in ``self.model_config["extra_body"]`` would
-        # be mutated in place — which leaks the auto-injected cache
-        # marker back into the caller's configuration.
-        existing = kwargs.get("extra_body")
-        extra_body = dict(existing) if isinstance(existing, dict) else {}
-        extra_body["cache_control"] = {"type": "ephemeral"}
-        kwargs["extra_body"] = extra_body
 
     @staticmethod
     def _flatten_tools_schema(

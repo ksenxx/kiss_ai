@@ -93,6 +93,38 @@ def listener_command() -> list[str]:
 # capture loop) so the two paths handle the same race identically.
 _FINAL_FLUSH_TIMEOUT = 0.2
 
+# User-visible message printed when the wake-word listener child dies
+# unexpectedly — shared by the modal capture loop and the anchored
+# pump's ``on_dead`` so the two voice modes can never diverge.
+_LISTENER_DIED_MSG = (
+    "✗ voice: the wake-word listener exited "
+    "unexpectedly — leaving voice mode."
+)
+
+
+def _spawn_listener() -> VoiceListener | None:
+    """Spawn the wake-word listener child, printing an error on failure.
+
+    Shared by :func:`start_voice` (modal) and
+    :func:`start_voice_anchored` (background) so both entry points
+    handle a missing/broken listener command identically: the error is
+    printed and ``None`` is returned so the REPL stays usable.
+
+    Returns:
+        The started :class:`VoiceListener`, or ``None`` when the
+        listener process could not be spawned.
+    """
+    try:
+        listener = VoiceListener()
+        listener.start()
+    except (OSError, ValueError) as exc:
+        print(
+            f"{YELLOW}✗ voice: could not start the wake-word listener: "
+            f"{exc}{RESET}"
+        )
+        return None
+    return listener
+
 
 class VoiceListener:
     """Child wake-word listener process with a non-blocking line queue.
@@ -389,14 +421,8 @@ def start_voice(
         process could not be spawned (an error is printed and the
         REPL stays usable).
     """
-    try:
-        listener = VoiceListener()
-        listener.start()
-    except (OSError, ValueError) as exc:
-        print(
-            f"{YELLOW}✗ voice: could not start the wake-word listener: "
-            f"{exc}{RESET}"
-        )
+    listener = _spawn_listener()
+    if listener is None:
         return None
     print(
         f"{YELLOW}🎤 Voice mode: say the wake word, then speak your task "
@@ -548,10 +574,7 @@ def _capture_utterance(
                 if result is not _NO_LINE_RESULT:
                     return str(result)
                 continue
-            print(
-                f"{YELLOW}✗ voice: the wake-word listener exited "
-                f"unexpectedly — leaving voice mode.{RESET}"
-            )
+            print(f"{YELLOW}{_LISTENER_DIED_MSG}{RESET}")
             return None
         if fd is None:
             time.sleep(0.05)
@@ -608,14 +631,8 @@ def start_voice_anchored(box: _InputBox) -> VoiceSession | None:
         listener process could not be spawned (an error is printed and
         the REPL stays usable).
     """
-    try:
-        listener = VoiceListener()
-        listener.start()
-    except (OSError, ValueError) as exc:
-        print(
-            f"{YELLOW}✗ voice: could not start the wake-word listener: "
-            f"{exc}{RESET}"
-        )
+    listener = _spawn_listener()
+    if listener is None:
         return None
 
     def show(text: str, blink: bool) -> None:
@@ -627,10 +644,7 @@ def start_voice_anchored(box: _InputBox) -> VoiceSession | None:
     session = VoiceSession(listener)
 
     def on_dead() -> None:
-        print(
-            f"{YELLOW}✗ voice: the wake-word listener exited "
-            f"unexpectedly — leaving voice mode.{RESET}"
-        )
+        print(f"{YELLOW}{_LISTENER_DIED_MSG}{RESET}")
         show("", False)
         session.active = False
 

@@ -507,6 +507,25 @@ def make_skill_tool(work_dir: str) -> Callable[[str], str] | None:
     return skill
 
 
+def truncate_listing_description(desc: str) -> str:
+    """Cap *desc* at 100 characters for aligned catalog listings.
+
+    Shared by :func:`format_skill_listing` and
+    :func:`~kiss.agents.sorcar.custom_commands.format_command_listing`
+    so the two listings can never drift.
+
+    Args:
+        desc: The raw one-line description.
+
+    Returns:
+        *desc* unchanged when at most 100 characters, otherwise its
+        first 97 characters followed by ``"..."``.
+    """
+    if len(desc) > 100:
+        return desc[:97] + "..."
+    return desc
+
+
 def format_skill_listing(skills: dict[str, Skill]) -> str:
     """Format *skills* as the aligned listing printed by ``/skills``.
 
@@ -532,8 +551,6 @@ def format_skill_listing(skills: dict[str, Skill]) -> str:
     width = max(len(s.name) for s in entries)
     lines = []
     for skill in entries:
-        desc = skill.description
-        if len(desc) > 100:
-            desc = desc[:97] + "..."
+        desc = truncate_listing_description(skill.description)
         lines.append(f"  {skill.name:<{width}}  ({skill.source}) {desc}")
     return "\n".join(lines)

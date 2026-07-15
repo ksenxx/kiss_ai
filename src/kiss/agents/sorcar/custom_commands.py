@@ -59,6 +59,7 @@ from kiss.agents.sorcar.skills import (
     claude_config_dir,
     collapse_whitespace,
     parse_frontmatter,
+    truncate_listing_description,
 )
 
 logger = logging.getLogger(__name__)
@@ -353,9 +354,6 @@ def format_command_listing(commands: dict[str, CustomCommand]) -> str:
     lines = []
     for cmd in entries:
         invocation = f"/{cmd.name} {cmd.argument_hint}".rstrip()
-        desc = cmd.description or Path(cmd.path).name
-        if len(desc) > 100:
-            # format_skill_listing parity: keep the listing aligned.
-            desc = desc[:97] + "..."
+        desc = truncate_listing_description(cmd.description or Path(cmd.path).name)
         lines.append(f"  {invocation:<{width}}  ({cmd.source}) {desc}")
     return "\n".join(lines)

@@ -319,7 +319,60 @@ def _merge_tools_prompt_into_content(content: Any, tools_prompt: str) -> Any:
     return str(content) + "\n" + tools_prompt
 
 
-class OpenAICompatibleModel(Model):
+class OpenAICompatibleBase(Model):
+    """Shared vendor-detection helpers for the OpenAI-compatible transports.
+
+    Both :class:`OpenAICompatibleModel` (Chat Completions) and
+    :class:`~kiss.core.models.openai_compatible_model2.OpenAICompatibleModel2`
+    (Responses) route the same model names to the same vendors, so the
+    DeepSeek-R1 / OpenRouter-Anthropic detection and the OpenRouter
+    prompt-cache request marker live here once.
+    """
+
+    #: Bare model id sent to the API (``openrouter/`` routing prefix stripped).
+    _api_model_name: str
+
+    def _is_deepseek_reasoning_model(self) -> bool:
+        """Check if this is a DeepSeek R1 reasoning model.
+
+        Uses ``_api_model_name`` (which strips the ``openrouter/`` routing
+        prefix) so that models accessed via OpenRouter are matched correctly.
+
+        Returns:
+            True if the API model name is in DEEPSEEK_REASONING_MODELS.
+        """
+        return self._api_model_name in DEEPSEEK_REASONING_MODELS
+
+    def _is_openrouter_anthropic(self) -> bool:
+        """Check if this is an OpenRouter Anthropic model (Claude via OpenRouter)."""
+        return self.model_name.startswith("openrouter/anthropic/")
+
+    def _apply_cache_control_for_openrouter_anthropic(self, kwargs: dict[str, Any]) -> None:
+        """Add top-level cache_control for OpenRouter Anthropic prompt caching.
+
+        Uses the same approach as AnthropicModel: a single top-level cache_control
+        that lets OpenRouter automatically place the breakpoint at the last cacheable
+        block and move it forward as the conversation grows.
+
+        Args:
+            kwargs: The request kwargs dict (``chat.completions.create`` or
+                ``responses.create``).  Mutated in place.
+        """
+        if not self._is_openrouter_anthropic():
+            return
+        if not self.model_config.get("enable_cache", True):
+            return
+        # Shallow-copy the caller-supplied ``extra_body`` dict (when present)
+        # before adding ``cache_control``.  Without this copy the nested dict
+        # in ``self.model_config["extra_body"]`` would be mutated in place —
+        # leaking the auto-injected cache marker into the caller's config.
+        existing = kwargs.get("extra_body")
+        extra_body = dict(existing) if isinstance(existing, dict) else {}
+        extra_body["cache_control"] = {"type": "ephemeral"}
+        kwargs["extra_body"] = extra_body
+
+
+class OpenAICompatibleModel(OpenAICompatibleBase):
     """A model that uses an OpenAI-compatible API with a custom base URL.
 
     This model can be used with any API that implements the OpenAI chat completions
@@ -530,21 +583,6 @@ class OpenAICompatibleModel(Model):
                 )
                 self.conversation.append({"role": "user", "content": parts})
 
-    def _is_deepseek_reasoning_model(self) -> bool:
-        """Check if this is a DeepSeek R1 reasoning model.
-
-        Uses ``_api_model_name`` (which strips the ``openrouter/`` routing
-        prefix) so that models accessed via OpenRouter are matched correctly.
-
-        Returns:
-            True if the API model name is in DEEPSEEK_REASONING_MODELS.
-        """
-        return self._api_model_name in DEEPSEEK_REASONING_MODELS
-
-    def _is_openrouter_anthropic(self) -> bool:
-        """Check if this is an OpenRouter Anthropic model (Claude via OpenRouter)."""
-        return self.model_name.startswith("openrouter/anthropic/")
-
     @classmethod
     def _normalize_content_blocks(cls, content: Any) -> list[dict[str, Any]]:
         """Normalize content blocks to JSON-serializable dicts.
@@ -729,26 +767,6 @@ class OpenAICompatibleModel(Model):
             return [msg_copy] if has_tool_calls else []
         msg_copy["content"] = blocks
         return [msg_copy]
-
-    def _apply_cache_control_for_openrouter_anthropic(self, kwargs: dict[str, Any]) -> None:
-        """Add top-level cache_control for OpenRouter Anthropic prompt caching.
-
-        Uses the same approach as AnthropicModel: a single top-level cache_control
-        that lets OpenRouter automatically place the breakpoint at the last cacheable
-        block and move it forward as the conversation grows.
-        """
-        if not self._is_openrouter_anthropic():
-            return
-        if not self.model_config.get("enable_cache", True):
-            return
-        # Shallow-copy the caller-supplied ``extra_body`` dict (when present)
-        # before adding ``cache_control``.  Without this copy the nested dict
-        # in ``self.model_config["extra_body"]`` would be mutated in place —
-        # leaking the auto-injected cache marker into the caller's config.
-        existing = kwargs.get("extra_body")
-        extra_body = dict(existing) if isinstance(existing, dict) else {}
-        extra_body["cache_control"] = {"type": "ephemeral"}
-        kwargs["extra_body"] = extra_body
 
     @staticmethod
     def _build_tool_call_lists(

@@ -966,6 +966,27 @@ def _make_ptk_reader(
         return None
 
 
+def _idle_panel_frame(prompt: str) -> tuple[str, str, str, int]:
+    """Build the idle input panel's frame strings.
+
+    Shared by :func:`_read_line_ptk` and :func:`_read_line` so the
+    prompt_toolkit, readline and plain-``input`` paths always draw the
+    identical rounded-border panel.
+
+    Args:
+        prompt: The (coloured) prompt marker shown inside the panel.
+
+    Returns:
+        A ``(top, bottom, framed_prompt, cols)`` tuple: the coloured
+        top / bottom border lines, the prompt prefixed with the left
+        border glyph, and the panel width in columns.
+    """
+    cols = panel_cols()
+    top = f"{CYAN}{panel_top(IDLE_TITLE, cols)}{RESET}"
+    bottom = f"{CYAN}{panel_bottom('', cols)}{RESET}"
+    return top, bottom, f"{CYAN}│{RESET} {prompt}", cols
+
+
 def _read_line_ptk(reader: PtkLineReader, prompt: str) -> str | None:
     """Read one input line via prompt_toolkit inside the input panel.
 
@@ -997,10 +1018,7 @@ def _read_line_ptk(reader: PtkLineReader, prompt: str) -> str | None:
     Raises:
         KeyboardInterrupt: When the user presses Ctrl+C at the prompt.
     """
-    cols = panel_cols()
-    top = f"{CYAN}{panel_top(IDLE_TITLE, cols)}{RESET}"
-    bottom = f"{CYAN}{panel_bottom('', cols)}{RESET}"
-    framed_prompt = f"{CYAN}│{RESET} {prompt}"
+    top, bottom, framed_prompt, _ = _idle_panel_frame(prompt)
     print(top)
     try:
         line = reader.read(framed_prompt)
@@ -1057,10 +1075,7 @@ def _read_line(prompt: str, reader: PtkLineReader | None = None) -> str | None:
     """
     if reader is not None:
         return _read_line_ptk(reader, prompt)
-    cols = panel_cols()
-    top = f"{CYAN}{panel_top(IDLE_TITLE, cols)}{RESET}"
-    bottom = f"{CYAN}{panel_bottom('', cols)}{RESET}"
-    framed_prompt = f"{CYAN}│{RESET} {prompt}"
+    top, bottom, framed_prompt, cols = _idle_panel_frame(prompt)
 
     try:
         isatty = bool(sys.stdout.isatty())
