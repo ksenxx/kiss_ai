@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import os
 import threading
+from collections.abc import Generator
 from pathlib import Path
 
 import pytest
@@ -204,14 +205,22 @@ class TestSaveApiKeyNameValidation:
     @pytest.fixture(autouse=True)
     def fake_home(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    ) -> Path:
+    ) -> Generator[Path]:
         """Point ``HOME``/``SHELL`` at a scratch dir so the real RC is safe."""
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("SHELL", "/bin/bash")
         # Pre-set via monkeypatch so any value written by the function
         # under test is restored on teardown.
         monkeypatch.setenv("OPENAI_API_KEY", "sentinel-original")
-        return tmp_path
+        # ``save_api_key_to_shell`` rebuilds the ``DEFAULT_CONFIG``
+        # singleton via ``_refresh_config()``, capturing the fake key
+        # from the patched environment.  monkeypatch restores the env
+        # on teardown but not the singleton, so later tests (e.g. live
+        # model tests) would see the stale fake key.  Restore the
+        # original singleton object after the test.
+        saved_config = config_module.DEFAULT_CONFIG
+        yield tmp_path
+        config_module.DEFAULT_CONFIG = saved_config
 
     def test_newline_name_cannot_inject_rc_commands(
         self, fake_home: Path,
