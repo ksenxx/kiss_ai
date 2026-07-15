@@ -602,9 +602,13 @@ body.remote-chat .tc-arg-name {
   color: #afafaf;
 }
 
-/* Quiet time footer + collapse preview, Codex-muted. */
+/* Quiet time footer + collapse preview, Codex-muted.  The footer is
+ * the last mono label left (main.css puts it in the editor's
+ * monospace font); render it in the same sans stack as every other
+ * panel label. */
 body.remote-chat .panel-time {
   color: #8e8e8e;
+  font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
 }
 
 body.remote-chat .collapse-preview {
@@ -736,13 +740,6 @@ body.remote-chat .md-body td {
  * the #output id outranks main.css's class-based mono rules. */
 body.remote-chat #output pre,
 body.remote-chat #output code {
-  font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
-}
-
-/* The per-panel "time spent" footer is the last mono label left
- * (main.css puts it in the editor's monospace font); render it in
- * the same sans stack as every other panel label. */
-body.remote-chat .panel-time {
   font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
 }
 

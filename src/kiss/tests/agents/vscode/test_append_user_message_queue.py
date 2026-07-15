@@ -91,8 +91,16 @@ class TestAppendUserMessageHandler:
         )
 
         assert tab.pending_user_messages == ["follow up A", "follow up B"]
-        prompt_echoes = [e for e in events if e.get("type") == "prompt"]
-        assert prompt_echoes == [
+        # The bare test state has no agent (and therefore no task id
+        # yet): the user still sees an IMMEDIATE transient echo (no
+        # ``taskId`` stamp), and a durable copy is deferred to the
+        # drain hook, which records + persists it under the consuming
+        # task's id (``recordOnly`` — replay-safe, never re-sent live).
+        assert tab.unattributed_prompt_echoes == [
+            "follow up A", "follow up B",
+        ]
+        echoes = [e for e in events if e.get("type") == "prompt"]
+        assert echoes == [
             {"type": "prompt", "text": "follow up A", "tabId": "tab-1"},
             {"type": "prompt", "text": "follow up B", "tabId": "tab-1"},
         ]

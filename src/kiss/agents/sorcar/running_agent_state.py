@@ -138,6 +138,7 @@ class _RunningAgentState:
         "task_thread",
         "user_answer_queue",
         "pending_user_messages",
+        "unattributed_prompt_echoes",
         "is_merging",
         "is_running_non_wt",
         "is_task_active",
@@ -234,6 +235,19 @@ class _RunningAgentState:
         # 's outer ``finally`` so pending messages never leak across
         # successive tasks on the same tab.
         self.pending_user_messages: list[str] = []
+        # Subset of :attr:`pending_user_messages` that could NOT be
+        # attributed to a task id at queueing time (the narrow window
+        # between a task's ``run()`` entry and its ``_add_task`` row
+        # allocation — e.g. a fast double-submit).  The live agent's
+        # drain hook (:meth:`kiss.agents.sorcar.sorcar_agent.
+        # SorcarAgent._drain_pending_user_messages`) broadcasts one
+        # durable ``prompt`` event per entry from the agent thread —
+        # where the printer's thread-local task id names the task that
+        # actually CONSUMED the message — so the echo lands in the
+        # correct trajectory instead of being lost on replay.  Mutated
+        # under :attr:`_registry_lock`, same as
+        # :attr:`pending_user_messages`.
+        self.unattributed_prompt_echoes: list[str] = []
         self.is_merging: bool = False
         self.is_running_non_wt: bool = False
         self.is_task_active: bool = is_task_active
