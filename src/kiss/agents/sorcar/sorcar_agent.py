@@ -322,8 +322,10 @@ class SorcarAgent(RelentlessAgent):
 
         Splits this task's REMAINING budget — ``max_budget`` minus the
         spend already attributed to this agent minus the live executor
-        session's own spend — evenly across *num_tasks* sub-agents, so
-        no single sub-agent can consume the parent task's entire budget.
+        session's own spend — evenly across *num_tasks* sub-agents PLUS
+        one reserved parent share.  Reserving that share leaves the main
+        agent enough budget to process the results and finish; importantly,
+        even a one-item fan-out cannot consume the parent's entire remainder.
 
         Args:
             num_tasks: Number of parallel sub-agent tasks about to spawn.
@@ -350,7 +352,10 @@ class SorcarAgent(RelentlessAgent):
                 f"sub-agents (${max_budget - remaining:.4f} / "
                 f"${max_budget:.2f})."
             )
-        return remaining / max(1, num_tasks)
+        # Keep one equal share for the parent to consume the sub-agent
+        # results and issue its terminal ``finish`` call.  With no tasks
+        # there is no fan-out and the full remainder stays with the parent.
+        return remaining if num_tasks <= 0 else remaining / (num_tasks + 1)
 
     def _run_tasks_parallel(
         self,
@@ -388,7 +393,8 @@ class SorcarAgent(RelentlessAgent):
             # Cap every sub-agent to a fair share of THIS task's
             # remaining budget — without it each sub-agent would default
             # to the full configured budget and a single sub-agent could
-            # spend the entire budget of the main task.
+            # spend the entire budget of the main task.  One equal share
+            # remains reserved for the parent to process results and finish.
             max_budget=self._subagent_budget_share(len(tasks)),
             # Sub-agents must talk to the same provider endpoint as the
             # parent (custom ``base_url``/``api_key`` routing).
@@ -1114,9 +1120,10 @@ def run_tasks_parallel(
             :func:`_attribute_sub_usage`).
         max_budget: Per-sub-agent budget cap in USD, forwarded to each
             sub-agent's ``run``.  Callers spawning sub-agents on behalf
-            of a parent task pass a fair SHARE of the parent's remaining
-            budget (see :meth:`SorcarAgent._subagent_budget_share`) so a
-            single sub-agent can never spend the parent's whole budget.
+            of a parent task pass each child one share of the parent's
+            remaining budget and reserve one equal share for the parent
+            (see :meth:`SorcarAgent._subagent_budget_share`), so even a
+            one-child fan-out cannot spend the parent's whole remainder.
             ``None`` uses the sub-agent's default (config value).
         model_config: Model configuration (e.g. custom ``base_url`` /
             ``api_key`` routing) forwarded to each sub-agent's ``run``
