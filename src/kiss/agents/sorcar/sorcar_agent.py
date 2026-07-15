@@ -967,6 +967,18 @@ class SorcarAgent(RelentlessAgent):
         line.  The list is emptied on every drain so the same queued
         message is never injected twice.
 
+        Messages whose ``prompt`` echo could not be attributed to a
+        task id at queueing time (``unattributed_prompt_echoes`` —
+        the narrow window between ``run()`` entry and ``_add_task``)
+        get a durable copy HERE: a ``recordOnly`` broadcast from the
+        agent thread, where the printer's thread-local task id names
+        the task that actually consumed the message, so the echo is
+        recorded and persisted into the correct trajectory instead of
+        being lost on replay.  The copy is NOT re-sent live (the
+        command handler already emitted a transient echo at queueing
+        time — see ``_echo_injected_prompt`` — so a live re-send
+        would render a duplicate prompt panel).
+
         Args:
             model: The live model whose conversation receives the
                 queued user messages.
@@ -982,6 +994,19 @@ class SorcarAgent(RelentlessAgent):
                 return
             queued = list(tab.pending_user_messages)
             tab.pending_user_messages.clear()
+            deferred = list(tab.unattributed_prompt_echoes)
+            tab.unattributed_prompt_echoes.clear()
+        if deferred:
+            broadcast = getattr(
+                getattr(self, "printer", None), "broadcast", None,
+            )
+            if broadcast is not None:
+                for msg in deferred:
+                    broadcast({
+                        "type": "prompt",
+                        "text": msg,
+                        "recordOnly": True,
+                    })
         for msg in queued:
             model.add_message_to_conversation(
                 "user",
