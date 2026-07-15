@@ -505,6 +505,56 @@ class _EventDispatcher:
         # events that have no useful CLI rendering.
 
 
+def _retire_pending_tasks(loop: asyncio.AbstractEventLoop) -> None:
+    """Cancel and retire every task still pending on *loop*.
+
+    :meth:`CliClient.send` schedules :meth:`CliClient._send_async`
+    coroutines on the loop via :func:`asyncio.run_coroutine_threadsafe`.
+    When the connection tears down — a daemon-side EOF makes
+    :meth:`CliClient._main` return, or :meth:`CliClient.close` fires
+    its fall-back ``loop.call_soon_threadsafe(loop.stop)`` — the loop
+    can unwind while such a task has not yet finished (or has not even
+    had its first step).  Closing the loop then destroys the orphan and
+    asyncio logs ``Task was destroyed but it is pending!`` (plus a
+    ``coroutine ... was never awaited`` RuntimeWarning for a task that
+    never started).  Called on the loop thread right after
+    ``run_until_complete(self._main())`` unwinds, this drains that
+    window: one zero-length sleep converts any queued
+    ``run_coroutine_threadsafe`` callbacks into tasks, then every
+    still-pending task (including a stopped-mid-flight ``_main``) is
+    cancelled and awaited to completion BEFORE the loop is closed.
+
+    Args:
+        loop: The client's private event loop; stopped but not yet
+            closed, and owned by the calling (loop) thread.
+    """
+    # A concurrent ``loop.stop()`` kick from ``close()`` can abort a
+    # ``run_until_complete`` below with ``RuntimeError: Event loop
+    # stopped before Future completed`` — at most one such kick is
+    # ever queued, so a single retry absorbs it.
+    for _ in range(2):
+        try:
+            # Flush ready callbacks so ``run_coroutine_threadsafe``
+            # calls that raced with shutdown become real tasks and are
+            # visible to ``asyncio.all_tasks`` (their coroutines would
+            # otherwise be dropped un-awaited by ``loop.close()``).
+            loop.run_until_complete(asyncio.sleep(0))
+            pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+            if not pending:
+                return
+            for task in pending:
+                task.cancel()
+            loop.run_until_complete(
+                asyncio.gather(*pending, return_exceptions=True),
+            )
+            return
+        except RuntimeError:
+            logger.debug("pending-task drain interrupted", exc_info=True)
+        except Exception:
+            logger.debug("pending-task drain failed", exc_info=True)
+            return
+
+
 class CliClient:
     """Persistent UDS connection to the local ``sorcar web`` daemon.
 
@@ -569,7 +619,10 @@ class CliClient:
         try:
             self._loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self._loop)
-            self._loop.run_until_complete(self._main())
+            try:
+                self._loop.run_until_complete(self._main())
+            finally:
+                _retire_pending_tasks(self._loop)
         except BaseException as exc:  # noqa: BLE001 - record startup error
             self._connect_error = exc
             self._connected.set()  # unblock start()
