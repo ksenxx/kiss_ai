@@ -639,7 +639,10 @@ class KISSAgent(Base):
         Raises:
             KISSError: If agent budget or step limit is exceeded.
         """
-        if self.budget_used > self.max_budget:
+        # A budget is a hard cap.  At exact equality there is no money
+        # left for another provider request, so stop before starting one
+        # (this also makes a configured $0 budget issue zero requests).
+        if self.budget_used >= self.max_budget:
             raise BudgetExceededError(f"Agent {self.name} budget exceeded.")
         if self.step_count > self.max_steps:
             raise KISSError(f"Agent {self.name} exceeded {self.max_steps} steps.")

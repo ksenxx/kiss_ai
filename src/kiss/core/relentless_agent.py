@@ -173,7 +173,7 @@ class RelentlessAgent(Base):
         executor = self._current_executor
         live = executor.budget_used if executor is not None else 0.0
         total = self.budget_used + live
-        if total > self.max_budget:
+        if total >= self.max_budget:
             raise BudgetExceededError(
                 f"Agent {self.name} budget exceeded "
                 f"(${total:.4f} / ${self.max_budget:.2f})."
