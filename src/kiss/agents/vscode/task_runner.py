@@ -376,6 +376,7 @@ class _TaskRunnerMixin:
                     # fresh, empty queue.  Keeping them would leak
                     # stale context into the next unrelated task.
                     tab.pending_user_messages.clear()
+                    tab.unattributed_prompt_echoes.clear()
                     tab.is_task_active = False
                     tab.is_running_non_wt = False
                     # Clear the shutdown-cancellation marker so a reused
