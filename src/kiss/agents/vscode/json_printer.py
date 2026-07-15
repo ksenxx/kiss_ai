@@ -604,9 +604,16 @@ class JsonPrinter(Printer):
         sufficient for tests that only need the recording and
         persistence side effects.
 
+        A ``recordOnly`` marker (a durable copy of a prompt echo that
+        was already rendered live at queueing time — see
+        ``SorcarAgent._drain_pending_user_messages``) is stripped
+        before recording; this default implementation has no transport,
+        so record + persist is exactly the marker's semantics.
+
         Args:
             event: The event dictionary to broadcast.
         """
+        event.pop("recordOnly", None)
         if event.get("type") in GLOBAL_EVENT_TYPES:
             # Global system broadcast (e.g. ``taskDeleted``): its
             # ``taskId`` is a payload field naming a just-deleted task,

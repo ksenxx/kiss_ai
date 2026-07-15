@@ -1915,7 +1915,9 @@ class WebPrinter(JsonPrinter):
           askUser, commitMessage, merge_data, etc.) are treated as
           targeted "system" events: sent verbatim to all connected
           clients (which filter by ``tabId``), but **not** recorded
-          or persisted.
+          or persisted — except ``prompt`` echoes that ALSO carry a
+          ``taskId``, whose tabId-stripped copy is recorded and
+          persisted under that task (see the tabId branch below).
         * Events whose type is in :data:`GLOBAL_EVENT_TYPES`
           (``taskDeleted``) carry a ``taskId`` payload field but are
           global system broadcasts: sent verbatim to every connected
@@ -1937,11 +1939,18 @@ class WebPrinter(JsonPrinter):
           event is sent ONLY to the connection (= VS Code window /
           browser tab) that issued the request, so one window's
           webview activity can never change another window's UI.
+        * Events stamped ``recordOnly`` (the drain hook's durable copy
+          of a prompt echo that was already rendered live at queueing
+          time — see ``SorcarAgent._drain_pending_user_messages``) are
+          recorded and persisted under the thread-local task id but
+          never sent to clients; with no resolvable task id they are
+          dropped.
 
         Args:
             event: The event dictionary to emit.
         """
         conn_id = event.pop("connId", "")
+        record_only = bool(event.pop("recordOnly", False))
         if event.get("type") == "configData":
             cfg = event.get("config")
             if isinstance(cfg, dict) and not cfg.get("work_dir"):
@@ -1968,9 +1977,35 @@ class WebPrinter(JsonPrinter):
                 self._merge_state_callback(evt_tab, event.get("data", {}))
 
         if "tabId" in event:
-            # Targeted "system" event — forward verbatim, never record
-            # or persist (recording / persistence is per-task and is
-            # owned by the agent thread).
+            # Targeted "system" event — forward verbatim.  Recording /
+            # persistence is per-task and normally owned by the agent
+            # thread, so tab-stamped events are not recorded — EXCEPT
+            # the injected-prompt echo (``_cmd_append_user_message`` /
+            # ``_cmd_run``'s busy-tab conversion) which the emitter
+            # explicitly stamped with the owning ``taskId``: record +
+            # persist a tabId-stripped copy under that task so the
+            # injected prompt survives ``task_events`` replay
+            # (sub-agent tabs rebuild their transcript from the
+            # recording on every reopen) and page reloads.  The
+            # stamped ``tabId`` is stripped from the recorded copy
+            # because replay re-stamps events with the subscribing
+            # viewer's own tab id.  The exception is gated on
+            # ``type == "prompt"`` — other tab-stamped events (e.g.
+            # ``status``) may carry a ``taskId`` that is a
+            # client-supplied CORRELATION id, not a task-stream key,
+            # and must stay transient.
+            if event.get("type") == "prompt" and event.get("taskId"):
+                record = {k: v for k, v in event.items() if k != "tabId"}
+                with self._lock:
+                    self._record_event(record)
+                self._persist_event(record)
+            if record_only:
+                # Defensive: no emitter currently produces a
+                # ``tabId`` + ``recordOnly`` event (the drain hook's
+                # durable copies are tab-less), but the marker's
+                # contract is "never re-send live" — honour it here
+                # too rather than leak a duplicate panel.
+                return
             self._send_to_ws_clients(json.dumps(event))
             return
 
@@ -1986,6 +2021,12 @@ class WebPrinter(JsonPrinter):
         event = self._inject_task_id(event)
 
         if not event.get("taskId"):
+            if record_only:
+                # A ``recordOnly`` durable copy with no resolvable task
+                # id has nowhere to be recorded — and it was already
+                # rendered live at queueing time, so sending it verbatim
+                # would duplicate the prompt panel.  Drop it.
+                return
             # Global system event with no task context (configData,
             # models, history, error, etc.) — broadcast verbatim to
             # every connected client.  Not recorded, not persisted.
@@ -1996,6 +2037,15 @@ class WebPrinter(JsonPrinter):
             self._record_event(event)
 
         self._persist_event(event)
+
+        if record_only:
+            # Durable copy of a prompt echo that was already rendered
+            # live at queueing time (``recordOnly`` — see
+            # ``SorcarAgent._drain_pending_user_messages``): recorded
+            # and persisted above so it survives ``task_events``
+            # replay, but never re-sent to clients (a live re-send
+            # would render a duplicate prompt panel).
+            return
 
         # Fan out one stamped copy per subscribed tab (see
         # :meth:`_fanout_stamped`).
