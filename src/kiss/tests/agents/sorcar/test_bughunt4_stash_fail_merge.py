@@ -110,7 +110,8 @@ class TestStashFailureAbortsMerge:
                     f"stash failed; merge() said: {msg}"
                 )
                 # The user's staged edit must still be staged.
-                assert "f.txt" in GitWorktreeOps.staged_files(repo), (
+                cached = _git("diff", "--name-only", "--cached", cwd=repo)
+                assert "f.txt" in cached.stdout.splitlines(), (
                     "user's staged change to f.txt was lost; "
                     f"merge() said: {msg}"
                 )
@@ -169,7 +170,8 @@ class TestStashFailureAbortsMerge:
                     "auto-merge committed on a dirty main tree after "
                     "the stash failed"
                 )
-                assert "f.txt" in GitWorktreeOps.staged_files(repo)
+                cached = _git("diff", "--name-only", "--cached", cwd=repo)
+                assert "f.txt" in cached.stdout.splitlines()
                 assert GitWorktreeOps.branch_exists(repo, branch), (
                     "task branch deleted even though the auto-merge "
                     "was aborted"

@@ -269,7 +269,9 @@ def _rmtree_logged(path: str) -> None:
         logger.warning("Profile directory %s still exists after removal", path)
 
 
-def _read_lock_pid(profile_dir: str) -> int | None:
+def _read_lock_pid(
+    profile_dir: str, *, propagate_permission_error: bool = False,
+) -> int | None:
     """Return the PID recorded in a profile's ``SingletonLock`` symlink.
 
     Chromium's lock symlink targets ``hostname-pid``.  Returns ``None``
@@ -277,6 +279,10 @@ def _read_lock_pid(profile_dir: str) -> int | None:
 
     Args:
         profile_dir: Path to the Chromium user-data directory.
+        propagate_permission_error: Re-raise a permission failure while
+            reading the symlink.  The profile-in-use check enables this
+            conservative mode because an inaccessible lock may belong
+            to a live foreign-owned Chromium and must not look free.
 
     Returns:
         The recorded PID, or ``None``.
@@ -288,6 +294,10 @@ def _read_lock_pid(profile_dir: str) -> int | None:
         target = os.readlink(str(lock_path))
         pid = int(target.rsplit("-", 1)[-1])
         return pid if pid > 0 else None
+    except PermissionError:
+        if propagate_permission_error:
+            raise
+        return None
     except (OSError, ValueError, IndexError):
         return None
 
@@ -305,27 +315,20 @@ def _is_profile_in_use(profile_dir: str) -> bool:
     Returns:
         True if the profile is currently locked by a live process.
     """
-    lock_path = Path(profile_dir) / "SingletonLock"
-    if not lock_path.is_symlink():
-        return False
+    # Composition of the two shared helpers: ``_read_lock_pid``
+    # already rejects absent/unparsable/corrupt locks (including the
+    # ``pid <= 0`` case — ``os.kill(0, 0)`` signals the caller's own
+    # process group and always succeeds, which would mark the profile
+    # permanently in use), and ``_pid_alive`` implements the
+    # EPERM-means-alive liveness probe.
     try:
-        target = os.readlink(str(lock_path))
-        pid_str = target.rsplit("-", 1)[-1]
-        pid = int(pid_str)
-        if pid <= 0:
-            # A corrupt/stale lock (e.g. "host-0").  os.kill(0, 0)
-            # signals the CALLER'S OWN process group and always
-            # succeeds, which would mark the profile permanently in
-            # use and silently escalate to <dir>_1, <dir>_2, …
-            return False
-        os.kill(pid, 0)
-        return True
+        pid = _read_lock_pid(profile_dir, propagate_permission_error=True)
     except PermissionError:
-        # EPERM: the process exists but is owned by another user (or
-        # root), so the profile IS locked by a live Chromium.
+        # Preserve the old inline check's conservative behaviour: a
+        # lock symlink we cannot inspect may belong to another user's
+        # live Chromium, so never launch a second browser into it.
         return True
-    except (OSError, ValueError, IndexError):
-        return False
+    return pid is not None and _pid_alive(pid)
 
 
 def _number_interactive_elements(snapshot: str) -> tuple[str, list[dict[str, str]]]:

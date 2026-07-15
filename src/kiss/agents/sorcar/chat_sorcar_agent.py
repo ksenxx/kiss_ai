@@ -123,8 +123,14 @@ class ChatSorcarAgent(SorcarAgent):
         return self._chat_id
 
     def new_chat(self) -> None:
-        """Reset to a new chat session (equivalent to VS Code 'Clear')."""
+        """Reset to a new chat session (equivalent to VS Code 'Clear').
+
+        Also drops any pending one-shot :meth:`resume_from_task_id`
+        seed: a brand-new chat must never have its first prompt
+        augmented with the previous task's parent-chain context.
+        """
         self._chat_id = ""
+        self._context_task_id = ""
 
     def resume_chat_by_id(self, chat_id: str) -> None:
         """Resume a chat session using a stable chat identifier.

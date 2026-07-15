@@ -22,7 +22,9 @@ class TestEscapeInvalidTemplateFieldNames:
 
     def test_invalid_field_with_conversion_and_spec(self) -> None:
         """Invalid field with conversion+format_spec enters the escape branch (line 92->93)."""
-        from kiss.core.utils import escape_invalid_template_field_names
+        from kiss.agents.obsolete.gepa.template_utils import (
+            escape_invalid_template_field_names,
+        )
 
         result = escape_invalid_template_field_names("{bad!r:>10}", set())
         assert "{{bad!r:>10}}" in result

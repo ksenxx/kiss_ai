@@ -24,7 +24,10 @@ import time
 from functools import partial
 from typing import Any
 
-from kiss.agents.sorcar.persistence import _queue_chat_event
+from kiss.agents.sorcar.persistence import (
+    _amend_last_talk_tool_call_audio,
+    _queue_chat_event,
+)
 from kiss.core.printer import (
     Printer,
     extract_extras,
@@ -585,10 +588,6 @@ class JsonPrinter(Printer):
             agent = self._persist_agents.get(key) if key else None
         task_id = getattr(agent, "_last_task_id", None)
         if task_id is not None:
-            from kiss.agents.sorcar.persistence import (
-                _amend_last_talk_tool_call_audio,
-            )
-
             if _amend_last_talk_tool_call_audio(
                 str(task_id), audio_b64, audio_mime,
             ):
@@ -652,7 +651,7 @@ class JsonPrinter(Printer):
         # are included in the final result panel.  Otherwise the parent
         # agent's displayed cost would be smaller than the sum of its
         # sub-agents' costs.  Matches the offset arithmetic in the
-        # ``usage_info`` branch of :meth:`WebPrinter.print`.
+        # ``usage_info`` branch of :meth:`JsonPrinter.print`.
         cost = self._cost_with_offset(cost)
         total_tokens = total_tokens + self.tokens_offset
         step_count = step_count + self.steps_offset

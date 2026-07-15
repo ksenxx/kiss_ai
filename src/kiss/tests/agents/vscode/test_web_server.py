@@ -356,11 +356,11 @@ console.log('OK');
 class TestTranslateWebviewCommand(unittest.TestCase):
     """Test the command translation from webview format to backend format."""
 
-    def test_user_action_done_translated(self) -> None:
-        """userActionDone becomes userAnswer with answer='done'."""
+    def test_user_action_done_passes_through(self) -> None:
+        """userActionDone has no producer; it is no longer rewritten."""
         result = _translate_webview_command({"type": "userActionDone"})
-        self.assertEqual(result["type"], "userAnswer")
-        self.assertEqual(result["answer"], "done")
+        self.assertEqual(result["type"], "userActionDone")
+        self.assertNotIn("answer", result)
 
     def test_resume_session_id_becomes_chat_id(self) -> None:
         """resumeSession 'id' field is renamed to 'chatId'."""
@@ -802,16 +802,17 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                     "submit command should be translated to run, not error",
                 )
 
-    async def test_ws_user_action_done(self) -> None:
-        """userActionDone is translated to userAnswer (no Unknown command error)."""
+    async def test_ws_user_action_done_is_unknown_command(self) -> None:
+        """userActionDone has no producer; the dead rewrite was removed
+        so it now surfaces as an Unknown command error."""
         async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
             await ws.send(json.dumps({"type": "userActionDone"}))
-            await ws.send(json.dumps({"type": "getModels"}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
-            self.assertEqual(resp["type"], "models")
+            self.assertEqual(resp["type"], "error")
+            self.assertIn("Unknown command: userActionDone", resp.get("text", ""))
 
     async def test_ws_resume_session_translates_id(self) -> None:
         """resumeSession translates the webview 'id' field to 'chatId'."""
@@ -1189,7 +1190,6 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                 {"type": "selectModel", "model": "gemini-2.5-pro", "tabId": "t"},
                 {"type": "newChat", "tabId": "all-t"},
                 {"type": "closeTab", "tabId": "all-t"},
-                {"type": "userActionDone"},
                 {"type": "userAnswer", "answer": "yes", "tabId": "t"},
                 {"type": "resumeSession", "id": 1, "tabId": "t"},
                 {"type": "stop", "tabId": "t"},
@@ -4664,12 +4664,19 @@ class TestRemoveUrlFileOSError(unittest.TestCase):
         """_remove_url_file does not raise when file path is problematic."""
         import kiss.agents.vscode.web_server as ws_mod
 
-        original = ws_mod._URL_FILE
-        ws_mod._URL_FILE = Path("/nonexistent_dir_abc/remote-url.json")
-        try:
-            _remove_url_file(_URL_FILE)
-        finally:
-            ws_mod._URL_FILE = original
+        # ``_URL_FILE`` is a lazy PEP 562 module attribute; restore by
+        # deleting the pin so the module resolves it lazily again
+        # (re-assigning the computed value would freeze it forever).
+        # Passing an existing directory deterministically makes
+        # ``Path.unlink`` raise IsADirectoryError on every platform;
+        # the helper must swallow that OSError and leave it intact.
+        with tempfile.TemporaryDirectory() as td:
+            ws_mod._URL_FILE = Path(td)
+            try:
+                _remove_url_file(ws_mod._URL_FILE)
+                self.assertTrue(ws_mod._URL_FILE.is_dir())
+            finally:
+                del ws_mod._URL_FILE
 
 
 class TestReadVersionException(unittest.TestCase):
@@ -6223,15 +6230,20 @@ class TestRemoveUrlFileReadOnly(unittest.TestCase):
             fake_url_file.parent.mkdir(parents=True, exist_ok=True)
             fake_url_file.write_text('{"local":"https://localhost:8787"}')
 
-            old_url_file = ws_mod._URL_FILE
+            # ``_URL_FILE`` is a lazy PEP 562 module attribute; restore
+            # by deleting the pin so the module resolves it lazily again
+            # (re-assigning the computed value would freeze it forever).
             ws_mod._URL_FILE = fake_url_file  # type: ignore[misc]
 
             os.chmod(str(fake_url_file.parent), 0o444)
             try:
-                _remove_url_file(_URL_FILE)
+                _remove_url_file(ws_mod._URL_FILE)
+                # On normal POSIX users the read-only directory blocks
+                # unlink; privileged test users may still remove it, so
+                # the portable contract asserted here is no exception.
             finally:
                 os.chmod(str(fake_url_file.parent), 0o755)
-                ws_mod._URL_FILE = old_url_file  # type: ignore[misc]
+                del ws_mod._URL_FILE
         finally:
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)

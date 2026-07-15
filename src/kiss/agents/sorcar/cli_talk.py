@@ -77,6 +77,45 @@ _FALLBACK_SAY: tuple[tuple[str, ...], ...] = (
 )
 
 
+def _resolve_command(
+    env_var: str,
+    darwin_argv: list[str],
+    fallbacks: tuple[tuple[str, ...], ...],
+) -> list[str] | None:
+    """Return the argv prefix for an external audio command, or ``None``.
+
+    Shared resolution policy for :func:`player_command` and
+    :func:`say_command`: an environment override in *env_var* (parsed
+    with :func:`shlex.split`, so quoted arguments survive) wins; a
+    malformed override logs a warning and disables the command.  With
+    no override, macOS uses *darwin_argv* directly and every other
+    platform picks the first entry of *fallbacks* whose executable is
+    found on ``PATH``.
+
+    Args:
+        env_var: Name of the override environment variable.
+        darwin_argv: The fixed argv prefix used on macOS.
+        fallbacks: Candidate argv prefixes scanned on other platforms.
+
+    Returns:
+        The resolved argv prefix, or ``None`` when no command exists.
+    """
+    override = os.environ.get(env_var, "").strip()
+    if override:
+        try:
+            parts = shlex.split(override)
+        except ValueError:
+            logger.warning("Malformed %s: %r", env_var, override)
+            return None
+        return parts or None
+    if sys.platform == "darwin":
+        return darwin_argv
+    for candidate in fallbacks:
+        if shutil.which(candidate[0]):
+            return list(candidate)
+    return None
+
+
 def player_command() -> list[str] | None:
     """Return the argv prefix used to play an audio file, or ``None``.
 
@@ -89,20 +128,7 @@ def player_command() -> list[str] | None:
     Returns:
         The player argv prefix, or ``None`` when no player exists.
     """
-    override = os.environ.get(_PLAY_CMD_ENV, "").strip()
-    if override:
-        try:
-            parts = shlex.split(override)
-        except ValueError:
-            logger.warning("Malformed %s: %r", _PLAY_CMD_ENV, override)
-            return None
-        return parts or None
-    if sys.platform == "darwin":
-        return ["afplay"]
-    for candidate in _FALLBACK_PLAYERS:
-        if shutil.which(candidate[0]):
-            return list(candidate)
-    return None
+    return _resolve_command(_PLAY_CMD_ENV, ["afplay"], _FALLBACK_PLAYERS)
 
 
 def say_command() -> list[str] | None:
@@ -117,20 +143,7 @@ def say_command() -> list[str] | None:
     Returns:
         The TTS argv prefix, or ``None`` when no TTS command exists.
     """
-    override = os.environ.get(_SAY_CMD_ENV, "").strip()
-    if override:
-        try:
-            parts = shlex.split(override)
-        except ValueError:
-            logger.warning("Malformed %s: %r", _SAY_CMD_ENV, override)
-            return None
-        return parts or None
-    if sys.platform == "darwin":
-        return ["say"]
-    for candidate in _FALLBACK_SAY:
-        if shutil.which(candidate[0]):
-            return list(candidate)
-    return None
+    return _resolve_command(_SAY_CMD_ENV, ["say"], _FALLBACK_SAY)
 
 
 def _run_playback(argv: list[str]) -> bool:

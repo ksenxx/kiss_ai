@@ -227,7 +227,7 @@ class ClaudeCodeModel(Model):
             List of CLI arguments.
         """
         cli = _find_claude_cli()
-        # ``--bare`` and ``--disable-slash-commands`` make the CLI behave as
+        # ``--print`` and ``--disable-slash-commands`` make the CLI behave as
         # a pure single-shot LLM: no hooks, LSP, plugin sync, auto-memory,
         # background prefetches, keychain reads, CLAUDE.md auto-discovery,
         # skills, or agents.  Combined with ``--tools ""`` and
@@ -444,8 +444,6 @@ class ClaudeCodeModel(Model):
                                     content = content[:last_tc_end]
                                     self._stopped_for_tool_calls = True
                                     break
-            if self._stopped_for_tool_calls:
-                break
             elif event_type == "content_block_stop":
                 if current_block_type == "thinking" and thinking_started:
                     self._invoke_thinking_callback(False)
@@ -550,7 +548,9 @@ class ClaudeCodeModel(Model):
             response: The parsed JSON response from the CLI.
 
         Returns:
-            (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens).
+            (input_tokens, output_tokens, cache_read_tokens,
+            cache_write_5m_tokens, cache_write_1h_tokens).  The last element
+            is the Anthropic one-hour cache-write token count.
         """
         if not isinstance(response, dict):
             return 0, 0, 0, 0, 0

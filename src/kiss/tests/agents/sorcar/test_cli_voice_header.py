@@ -175,7 +175,7 @@ class TestHeaderIndicator:
         # The box's normal title follows the indicator on the same top
         # border (voice no longer swaps in a modal title — the box
         # stays fully typeable).
-        assert f"{RED}Listening ...{RESET}{CYAN} Dynamic steer" in rendered
+        assert f"{RED}Listening ...{RESET}{CYAN}Dynamic steer" in rendered
         # The body never shows the indicator (chevron row is buffer/placeholder).
         assert "› Listening" not in rendered
 

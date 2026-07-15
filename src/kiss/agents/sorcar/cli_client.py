@@ -17,7 +17,8 @@ output are preserved by re-using
 rendering of streamed events received from the server.
 
 Transport: a local Unix-domain-socket connection to
-``$KISS_SORCAR_SOCK`` (default ``~/.kiss/sorcar.sock``).  The daemon's
+``$KISS_SORCAR_SOCK`` (default ``$KISS_HOME/sorcar.sock``, falling
+back to ``~/.kiss/sorcar.sock``).  The daemon's
 :meth:`RemoteAccessServer._uds_handler` skips password authentication
 because POSIX mode 0o600 on the socket file gates access to the owning
 user.  The CLI client therefore needs no password.
@@ -66,8 +67,10 @@ from kiss.agents.sorcar.cli_helpers import (
     _print_recent_chats,
 )
 from kiss.agents.sorcar.cli_panel import (
-    CYAN,
-    PROMPT_MARKER,
+    ASK_TITLE,
+    QUESTION_FMT,
+    QUEUED_FMT,
+    QUEUED_STATUS_FMT,
     RESET,
     STEER_TITLE,
     YELLOW,
@@ -75,6 +78,7 @@ from kiss.agents.sorcar.cli_panel import (
 )
 from kiss.agents.sorcar.cli_repl import (
     _EXIT_WORDS,
+    _PROMPT,
     CliCompleter,
     _history_path,
     _load_history_lines,
@@ -96,8 +100,6 @@ from kiss.agents.sorcar.persistence import _load_chat_events_by_task_id
 from kiss.core.print_to_console import ConsolePrinter
 
 logger = logging.getLogger(__name__)
-
-_PROMPT = f"{CYAN}{PROMPT_MARKER}{RESET}"
 
 
 def _clear_terminal() -> None:
@@ -1302,7 +1304,8 @@ def _submit_task_anchored(
                 with repl.lock:
                     repl.box.title = STEER_TITLE
                     repl.box.status = (
-                        f" queued: {queued[0]} " if queued[0] else ""
+                        QUEUED_STATUS_FMT.format(n=queued[0])
+                        if queued[0] else ""
                     )
                     repl.box.redraw()
                 return
@@ -1313,9 +1316,9 @@ def _submit_task_anchored(
             })
             queued[0] += 1
             with repl.lock:
-                repl.box.status = f" queued: {queued[0]} "
+                repl.box.status = QUEUED_STATUS_FMT.format(n=queued[0])
                 repl.box.redraw()
-                sys.stdout.write(f"\x1b[2m▸ queued: {text}\x1b[0m\n")
+                sys.stdout.write(QUEUED_FMT.format(text=text))
                 sys.stdout.flush()
 
         def on_abort() -> None:
@@ -1334,9 +1337,9 @@ def _submit_task_anchored(
             except queue.Empty:
                 return
             with repl.lock:
-                sys.stdout.write(f"\n\x1b[33m? {question}\x1b[0m\n")
+                sys.stdout.write(QUESTION_FMT.format(question=question))
                 sys.stdout.flush()
-                repl.box.title = " answer the question above, then Enter "
+                repl.box.title = ASK_TITLE
                 repl.box.redraw()
             pending_question[0] = True
 

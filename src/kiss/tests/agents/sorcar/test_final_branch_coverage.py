@@ -150,19 +150,19 @@ class TestGetHistoryBranches:
         assert sessions[0]["preview"] == "fix the bug"
 
 
-class TestCompleteFromActiveFileEqualSuffix:
-    """Cover the False branch of 'if len(suffix) > len(best)' (line 622).
+class TestActiveFileMatchesEqualLength:
+    """Equal-length identifier candidates keep a stable order.
 
-    When two candidates match with equal-length suffixes, the second
-    iteration finds len(suffix) == len(best), making the condition False.
+    ``_active_file_identifier_matches`` sorts longest-first with an
+    alphabetical tie-breaker, so two equal-length candidates must both
+    be returned, alphabetically ordered.
     """
 
-    def test_equal_length_suffixes(self) -> None:
-        """Two equal-length candidates: second doesn't replace first."""
+    def test_equal_length_candidates(self) -> None:
+        """Two equal-length candidates: both returned, alphabetical."""
         server = VSCodeServer()
         content = "method_ab method_cd"
-        result = server._complete_from_active_file(
+        matches = server._active_file_identifier_matches(
             "x method_", snapshot_content=content
         )
-        assert len(result) == 2
-        assert result in ("ab", "cd")
+        assert matches == ["method_ab", "method_cd"]

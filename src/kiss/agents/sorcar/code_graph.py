@@ -833,14 +833,24 @@ def _ensure_graph_git_excluded(work_dir: str) -> None:
         exclude = Path(result.stdout.strip())
         if not exclude.is_absolute():
             exclude = Path(work_dir).resolve() / exclude
-        existing = exclude.read_text() if exclude.is_file() else ""
+        # Git treats info/exclude as raw bytes — non-UTF-8 patterns or
+        # comments are legal, so a strict ``read_text()`` would raise
+        # UnicodeDecodeError (a ValueError, NOT caught below) out of
+        # ``_save`` -> ``build_graph`` and crash the code_graph tool on
+        # such repos.  Decode/encode with surrogateescape so arbitrary
+        # bytes round-trip unchanged.
+        existing = ""
+        if exclude.is_file():
+            existing = exclude.read_bytes().decode("utf-8", errors="surrogateescape")
         pattern = ".kiss/code_graph/"
         if pattern not in existing.splitlines():
             if existing and not existing.endswith("\n"):
                 existing += "\n"
             exclude.parent.mkdir(parents=True, exist_ok=True)
-            exclude.write_text(existing + pattern + "\n")
-    except (OSError, subprocess.CalledProcessError):
+            exclude.write_bytes(
+                (existing + pattern + "\n").encode("utf-8", errors="surrogateescape")
+            )
+    except (OSError, ValueError, subprocess.CalledProcessError):
         logger.debug("could not add code_graph to git info/exclude", exc_info=True)
 
 
