@@ -115,32 +115,37 @@ body.remote-chat #tab-status-bar .status-metric {
   color: #afafaf;
 }
 
-/* ── Task panel → rounded quoted card ────────────────── */
+/* ── Task panel → dark elevated user bubble ──────────────
+ * The pinned recent-task panel matches the rest of the dark
+ * Codex palette instead of the old bright #ececec card: same
+ * #212121 surface + inset white hairline as the composer
+ * (#input-container), light #ececec text, right-aligned. */
 body.remote-chat #task-panel {
   margin: 8px 16px 0;
   margin-left: auto;
   max-width: 90%;
-  border: none;
+  border: 1px solid rgb(255 255 255 / 10%);
   border-radius: 22px;
-  background: #ececec;
-  color: #0d0d0d;
+  background: #212121;
+  color: #ececec;
+  box-shadow: inset 0 0 1px rgb(255 255 255 / 20%);
   padding: 10px 38px 10px 16px;
 }
 
 body.remote-chat #task-panel-collapse-btn {
-  background: rgb(13 13 13 / 7%);
-  border-color: rgb(13 13 13 / 15%);
-  color: #565656;
+  background: rgb(255 255 255 / 6%);
+  border-color: rgb(255 255 255 / 15%);
+  color: #afafaf;
 }
 
 body.remote-chat #task-panel-collapse-btn:hover {
-  background: rgb(13 13 13 / 12%);
-  border-color: rgb(13 13 13 / 25%);
-  color: #0d0d0d;
+  background: rgb(255 255 255 / 12%);
+  border-color: rgb(255 255 255 / 25%);
+  color: #ececec;
 }
 
-body.remote-chat #task-panel-copy { color: #565656; }
-body.remote-chat #task-panel-copy:hover { color: #0d0d0d; }
+body.remote-chat #task-panel-copy { color: #8e8e8e; }
+body.remote-chat #task-panel-copy:hover { color: #ececec; }
 
 /* ── Output column (Codex thread) ────────────────────── */
 body.remote-chat #output {
