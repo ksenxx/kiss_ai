@@ -501,6 +501,15 @@ class ChatSorcarAgent(SorcarAgent):
         model = self.model_name
         work_dir = self.work_dir
         chat_id = self._chat_id
+        # Cap every sub-agent to a fair share of THIS task's remaining
+        # budget (see :meth:`SorcarAgent._subagent_budget_share`) —
+        # without it each sub-agent would default to the full configured
+        # budget and a single sub-agent could spend the entire budget of
+        # the main task.  Also forward the parent's ``model_config`` so
+        # sub-agents talk to the same provider endpoint (custom
+        # ``base_url``/``api_key`` routing).
+        budget_share = self._subagent_budget_share(len(tasks))
+        model_config = getattr(self, "model_config", None)
         # IMPORTANT: keep two ids strictly separate.
         #
         # ``persisted_parent_task_id`` is the REAL ``task_history.id``
@@ -683,6 +692,8 @@ class ChatSorcarAgent(SorcarAgent):
                     work_dir=work_dir,
                     printer=printer,
                     is_parallel=True,
+                    max_budget=budget_share,
+                    model_config=model_config,
                 )
                 return result
             except KeyboardInterrupt:

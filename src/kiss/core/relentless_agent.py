@@ -17,7 +17,7 @@ import yaml
 from kiss.core import config as config_module
 from kiss.core.base import Base
 from kiss.core.kiss_agent import KISSAgent
-from kiss.core.kiss_error import KISSError
+from kiss.core.kiss_error import BudgetExceededError, KISSError
 from kiss.core.models.model import Attachment
 from kiss.core.printer import Printer
 from kiss.core.utils import _coerce_bool as _str_to_bool
@@ -156,6 +156,29 @@ class RelentlessAgent(Base):
         self.total_tokens_used += agent.total_tokens_used
         self.total_steps += agent.step_count
 
+    def _check_total_budget(self) -> None:
+        """Raise :class:`KISSError` when the task's cumulative spend exceeds max_budget.
+
+        Installed as :attr:`KISSAgent.budget_check_hook` on every
+        per-session executor, so the executor's ``_check_limits`` also
+        enforces the PARENT task's total budget.  ``self.budget_used``
+        holds the spend of prior sub-sessions plus any spend attributed
+        mid-session by parallel sub-agents (``_attribute_sub_usage``);
+        the live executor's own spend is added on top because it is only
+        folded into ``self.budget_used`` when its session ends.
+
+        Raises:
+            KISSError: If the cumulative spend exceeds ``self.max_budget``.
+        """
+        executor = self._current_executor
+        live = executor.budget_used if executor is not None else 0.0
+        total = self.budget_used + live
+        if total > self.max_budget:
+            raise BudgetExceededError(
+                f"Agent {self.name} budget exceeded "
+                f"(${total:.4f} / ${self.max_budget:.2f})."
+            )
+
     def _docker_bash(self, command: str, description: str) -> str:
         if self.docker_manager is None:
             raise KISSError("Docker manager not initialized")
@@ -206,7 +229,7 @@ class RelentlessAgent(Base):
         for session in range(self.max_sub_sessions):
             remaining_budget = self.max_budget - self.budget_used
             if remaining_budget <= 0:
-                raise KISSError(
+                raise BudgetExceededError(
                     f"Agent {self.name} budget exhausted "
                     f"(${self.budget_used:.4f} / ${self.max_budget:.2f})."
                 )
@@ -229,6 +252,13 @@ class RelentlessAgent(Base):
             # drain) to the per-session inner executor — that's the
             # layer that actually calls the model.
             executor.pre_step_hook = getattr(self, "pre_step_hook", None)
+            # Enforce the parent task's TOTAL budget from inside the
+            # executor's step loop — the executor's own ``budget_used``
+            # never sees spend attributed to the parent mid-session by
+            # parallel sub-agents (``_attribute_sub_usage``), so without
+            # this hook the session would keep running long after the
+            # task's budget was exhausted.
+            executor.budget_check_hook = self._check_total_budget
             self._current_executor = executor
             try:
                 result = executor.run(
@@ -247,6 +277,15 @@ class RelentlessAgent(Base):
                     verbose=self.verbose,
                     attachments=attachments if session == 0 else None,
                 )
+            except BudgetExceededError:
+                # A budget limit is a hard stop.  Never launch the LLM
+                # trajectory summarizer here: doing so would make more
+                # paid model calls after the configured limit.  Account
+                # for the live executor exactly once, clear the pointer,
+                # and preserve the typed error for task-runner/UI handling.
+                self._current_executor = None
+                self._accumulate_usage(executor)
+                raise
             except Exception as exc:
                 logger.debug("Exception caught", exc_info=True)
                 if (

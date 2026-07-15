@@ -25,6 +25,15 @@ class KISSError(ValueError):
         return f"KISS Error: {super().__str__()}"
 
 
+class BudgetExceededError(KISSError):
+    """Raised when an agent reaches or exceeds its configured budget.
+
+    A distinct type lets orchestrators stop immediately without invoking
+    recovery LLMs (for example ``RelentlessAgent``'s trajectory summarizer),
+    which would otherwise spend still more money after the hard limit.
+    """
+
+
 class ModelRefusalError(KISSError):
     """Raised when a model refuses to answer for safety reasons.
 
