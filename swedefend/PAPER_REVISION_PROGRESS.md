@@ -198,3 +198,15 @@ code/wiring/bugs. (No need to check models exist.)
 - `uv run check --full`: ALL checks pass.
 
 - ./tmp/ cleaned before finish.
+
+## Continuation 6 (standalone-paper pass + gpt-5.6-sol regression review)
+Goal: paper must not reference any previous draft; fix consistency/hallucination/citation/duplication/AI-slop; human-indistinguishable.
+- Verified prior session removed all literal draft/AI-slop tells (grep clean).
+- Fixed baseline (Przymus et al., arXiv:2509.05372v2) number mixing: structured gpt-4o-mini = 35% catch @ 1% FPR; best single pre-filter = 47% (FPR unpaired); full pre-repair ensemble relabelled 62.7% (was mislabelled "best ensemble 68%"); full pre-repair ensemble + post-APR review = 72.5%. Added \MSRStructuredCatch macro; removed unused \MSRFPRUnstructured.
+- Removed false "held-out calibration" claim (tau chosen on benign set, 3 places).
+- Fixed citations: jury claims -> \cite{polljury} (was zheng2023, 3 places); Wang self-consistency described as CoT method we adapt; GCG superlative removed; bandit/semgrep now cited in L3; MELON/Task Shield bibitems given authors+venue; msrdefense -> v2/2026.
+- Removed residual review-memo/AI-slop tells: "deviations from paper's claims", "Contrary to what we hoped", "We should have introduced", "matched-FPR"/"like with like" overclaim, "verified numbers", "Anti-overclaim note", "We verified by hand and by grep", "This paper does exactly that", D1 prose reversal (vetoes->suppresses), "substantially larger corpus" (149<151), 40-vs-5 iteration mismatch, unused \todo macro, stale source comments; renamed sec:aidiscovery->sec:fprcontrol.
+- Fixed Table 1 caption self-contradiction ("on all 49"); Wilson wording -> "two-sided 95% Wilson upper endpoint".
+- Split unbreakable slash-token run in prompt box to kill 81pt overfull hbox.
+- gpt-5.6-sol independent regression review (tmp/gpt_regression.md) drove the above fixes; verified no broken \ref/\cite, all keys defined+used.
+- pdflatex x2: 14 pages, 0 undefined refs/citations, no overfull >40pt.
