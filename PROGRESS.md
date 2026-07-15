@@ -51,3 +51,12 @@
 - INVARIANTS.md: daemon is started by the extension's DependencyInstaller (never install.sh); new invariant: install.sh MUST NOT touch kiss-web.
 - Verification: 15 + 48 impacted tests pass; `uv run check --full` all green.
 - ACTUAL INSTALL TEST on this machine: ran `bash install.sh` from the worktree while this very task was running inside the kiss-web daemon (PID 26105). Install completed ("=== Source bootstrap complete ==="), extension ksenxx.kiss-sorcar@2026.7.21 freshly installed (extension dir mtime updated), daemon PID and `~/.kiss/sorcar.sock` inode (184036613) unchanged, zero "Stopping/kickstart/Pre-building/Waiting" lines in the log. The `.extension-updated` marker was consumed by the reloaded extension (`ensureDependencies`), and `~/.kiss/.kiss-web.fingerprint` was NOT rewritten → DependencyInstaller deferred the kiss-web restart because this task is active; the fingerprint mismatch persists, so the extension restarts kiss-web at the next activation/idle — exactly the designed extension-owned restart.
+
+# Task: Add `*` and `/` to `./test_data/`
+
+## DONE
+
+- Read `SORCAR.md`, inspected `test_data/calculator/evaluator.py`, `test_data/calculator/cli.py`, `test_data/test_calculator.py`, and existing operator modules.
+- Added `test_data/calculator/operators/multiply.py` and `test_data/calculator/operators/divide.py` with precedence `2`, matching the existing static operator-module pattern.
+- Updated `test_data/calculator/operators/__init__.py` to register `*` and `/`.
+- Extended `test_data/test_calculator.py` for registry coverage, operator behavior, tokenizer support, precedence, left associativity, division by zero, and CLI integration.
