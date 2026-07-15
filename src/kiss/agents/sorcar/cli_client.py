@@ -47,6 +47,7 @@ expansion.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import functools
 import json
 import logging
@@ -56,7 +57,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -739,6 +740,88 @@ def _print_daemon_lost(printer: ConsolePrinter) -> None:
     )
 
 
+@contextlib.contextmanager
+def _armed_submission(client: CliClient) -> Iterator[str]:
+    """Arm the dispatcher for one task submission; always reset after.
+
+    Shared by :func:`_submit_task` and :func:`_submit_task_anchored`,
+    which used to copy-paste this dance.  On entry: mints the
+    per-submission task id (BEFORE clearing ``task_active`` so any
+    inbound status event observed mid-transition matches the new task
+    id — review B1 round 2 ordering fix), clears the ``task_active``
+    level and the ``task_started`` latch, and drains stale ``askUser``
+    entries left over from a prior task.  On exit — regardless of exit
+    path (early returns, timeout, disconnect, exceptions) — the armed
+    task id is reset so the next task's status events are not filtered
+    under the OLD id, both events are cleared, and the elapsed-time
+    line is printed.
+
+    Args:
+        client: The live :class:`CliClient`.
+
+    Yields:
+        The freshly minted per-submission task id.
+    """
+    new_task_id = uuid.uuid4().hex
+    with client.dispatcher.task_id_lock:
+        client.dispatcher.current_task_id = new_task_id
+    client.dispatcher.task_active.clear()
+    client.dispatcher.task_started.clear()
+    _drain_queue(client.dispatcher.ask_user_q)
+    start = time.time()
+    try:
+        yield new_task_id
+    finally:
+        with client.dispatcher.task_id_lock:
+            client.dispatcher.current_task_id = ""
+        client.dispatcher.task_active.clear()
+        client.dispatcher.task_started.clear()
+        _print_elapsed(client, start)
+
+
+def _poll_reply(
+    client: CliClient,
+    q: queue.Queue[dict[str, Any]],
+    timeout: float,
+    accept: Callable[[dict[str, Any]], bool] | None = None,
+) -> tuple[dict[str, Any] | None, bool]:
+    """Wait for one accepted reply, preserving timeout/disconnect ordering.
+
+    This is the shared poll loop behind every synchronous request/reply
+    wait.  It returns the terminal reason together with the reply rather
+    than asking callers to re-read ``client._closed`` after iteration;
+    that avoids a race where a disconnect immediately *after* timeout
+    could change an old timeout result into a disconnect result.
+
+    Args:
+        client: The live :class:`CliClient`.
+        q: The dispatcher queue the loop thread routes replies into.
+        timeout: Hard cap on the total wait, in seconds.
+        accept: Optional predicate used to discard stale/nonmatching events.
+
+    Returns:
+        ``(reply, False)`` for an accepted event, ``(None, True)`` when
+        the daemon disconnected, or ``(None, False)`` on timeout.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        # Keep the original loops' ordering: disconnect wins when it was
+        # already visible at the top of an iteration; otherwise an expired
+        # deadline is reported as a timeout even if the daemon drops a
+        # moment later.
+        if client._closed.is_set():
+            return None, True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None, False
+        try:
+            event = q.get(timeout=min(0.25, remaining))
+        except queue.Empty:
+            continue
+        if accept is None or accept(event):
+            return event, False
+
+
 def _start_task(
     client: CliClient,
     prompt: str,
@@ -849,40 +932,30 @@ def _request_cli_info(
     if client._closed.is_set():
         return disc_reply
     client.send(cmd)
-    deadline = time.monotonic() + timeout
-    while True:
-        if client._closed.is_set():
-            return disc_reply
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            timeout_msg = f"Daemon timed out waiting for {subtype} reply"
-            return {"type": "cliInfo", "subtype": subtype,
-                    "text": f"(no reply for {subtype})",
-                    "error": True, "errorMessage": timeout_msg,
-                    "timedOut": True}
-        try:
-            ev = client.dispatcher.cli_info_q.get(
-                timeout=min(0.25, remaining),
-            )
-        except queue.Empty:
-            continue
+
+    def matches_request(ev: dict[str, Any]) -> bool:
         # Filter on requestId so stale replies from prior requests do
         # not get routed to the current waiter.  Replies without an id
         # are accepted as wildcard matches for backwards compat (the
-        # server may be older than the client during a rolling
-        # upgrade) — but if the subtype also mismatches we keep
-        # looking.
+        # server may be older than the client during a rolling upgrade),
+        # but only when the subtype matches.
         ev_rid = ev.get("requestId", "")
         if ev_rid:
-            if ev_rid == request_id:
-                return ev
-            # Stale reply for a previous request — discard and keep
-            # waiting for our matching reply.
-            continue
-        # No id on the reply: accept only when the subtype matches so
-        # at least we cannot confuse a /mcp reply with a /help reply.
-        if ev.get("subtype") == subtype:
-            return ev
+            return bool(ev_rid == request_id)
+        return bool(ev.get("subtype") == subtype)
+
+    ev, disconnected = _poll_reply(
+        client, client.dispatcher.cli_info_q, timeout, matches_request,
+    )
+    if ev is not None:
+        return ev
+    if disconnected:
+        return disc_reply
+    timeout_msg = f"Daemon timed out waiting for {subtype} reply"
+    return {"type": "cliInfo", "subtype": subtype,
+            "text": f"(no reply for {subtype})",
+            "error": True, "errorMessage": timeout_msg,
+            "timedOut": True}
 
 
 def _request_models(client: CliClient) -> list[dict[str, Any]]:
@@ -898,21 +971,26 @@ def _request_models(client: CliClient) -> list[dict[str, Any]]:
     if client._closed.is_set():
         return []
     client.send({"type": "getModels"})
-    deadline = time.monotonic() + 10.0
-    while True:
-        if client._closed.is_set():
-            return []
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return []
-        try:
-            ev = client.dispatcher.models_q.get(
-                timeout=min(0.25, remaining),
-            )
-        except queue.Empty:
-            continue
-        raw = ev.get("models", [])
-        return list(raw) if isinstance(raw, list) else []
+    ev, _disconnected = _poll_reply(client, client.dispatcher.models_q, 10.0)
+    if ev is None:
+        return []
+    raw = ev.get("models", [])
+    return list(raw) if isinstance(raw, list) else []
+
+
+# Information-panel slash commands answered by one server-side
+# ``cliInfo`` round-trip whose reply text is printed verbatim; maps
+# command -> ``cliInfo`` subtype.  ``/skills`` additionally forwards
+# its argument as the ``name`` field.  ``/help`` is NOT here because
+# it falls back to the local :func:`_print_help` on an empty reply.
+_INFO_SUBTYPES: dict[str, str] = {
+    "/commands": "commands",
+    "/skills": "skills",
+    "/mcp": "mcp",
+    "/cost": "cost",
+    "/usage": "cost",
+    "/context": "cost",
+}
 
 
 def _handle_client_slash(  # noqa: PLR0911,PLR0912 - branchy by design
@@ -971,16 +1049,10 @@ def _handle_client_slash(  # noqa: PLR0911,PLR0912 - branchy by design
         else:
             _print_help(client.work_dir)
         return False
-    if cmd == "/commands":
-        reply = _request_cli_info(client, "commands")
-        print(f"\n{reply.get('text', '')}\n")
-        return False
-    if cmd == "/skills":
-        reply = _request_cli_info(client, "skills", name=arg)
-        print(f"\n{reply.get('text', '')}\n")
-        return False
-    if cmd == "/mcp":
-        reply = _request_cli_info(client, "mcp")
+    info_subtype = _INFO_SUBTYPES.get(cmd)
+    if info_subtype is not None:
+        extra: dict[str, Any] = {"name": arg} if cmd == "/skills" else {}
+        reply = _request_cli_info(client, info_subtype, **extra)
         print(f"\n{reply.get('text', '')}\n")
         return False
     if cmd in ("/clear", "/new"):
@@ -1053,10 +1125,6 @@ def _handle_client_slash(  # noqa: PLR0911,PLR0912 - branchy by design
         client.dispatcher.current_model = arg
         print(f"Model switched to {arg} for subsequent tasks.\n")
         return False
-    if cmd in ("/cost", "/usage", "/context"):
-        reply = _request_cli_info(client, "cost")
-        print(f"\n{reply.get('text', '')}\n")
-        return False
     if cmd == "/autocommit":
         # Drive the same flow the webview kicks off: request a
         # generated commit message, then dispatch the autocommit
@@ -1067,28 +1135,20 @@ def _handle_client_slash(  # noqa: PLR0911,PLR0912 - branchy by design
         # Poll for the reply but honour ``client._closed`` so a
         # daemon disconnect mid-commit does NOT freeze the REPL for
         # the full 30 s budget (review A3 round 2).
-        ev: dict[str, Any] | None = None
-        deadline = time.monotonic() + 30.0
-        while True:
-            if client._closed.is_set():
+        ev, disconnected = _poll_reply(
+            client, client.dispatcher.commit_q, 30.0,
+        )
+        if ev is None:
+            if disconnected:
                 print(
                     "\n✗ Auto-commit aborted: daemon connection lost.\n",
                 )
-                return False
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
+            else:
                 print(
                     "\n✗ Auto-commit timed out waiting for a "
                     "commit message.\n",
                 )
-                return False
-            try:
-                ev = client.dispatcher.commit_q.get(
-                    timeout=min(0.25, remaining),
-                )
-                break
-            except queue.Empty:
-                continue
+            return False
         msg = ev.get("message", "")
         if not msg:
             # Prefer ``errorMessage`` (string) over the bool ``error``
@@ -1158,21 +1218,10 @@ def _submit_task(
         timeout_seconds: Hard cap on the wait loop so a wedged daemon
             does not pin the REPL forever.
     """
-    # Mint a per-submission task id BEFORE clearing ``task_active``
-    # so any inbound status event observed mid-transition matches
-    # the new task id (review B1 round 2 ordering fix).
-    new_task_id = uuid.uuid4().hex
-    with client.dispatcher.task_id_lock:
-        client.dispatcher.current_task_id = new_task_id
-    # Drain any stale status / askUser queue entries left over from a
-    # prior task; this closes issue #46 from the review (a stale
-    # ``status:false`` between two tasks would otherwise clear
-    # ``task_active`` immediately and silently drop the new task).
-    client.dispatcher.task_active.clear()
-    client.dispatcher.task_started.clear()
-    _drain_queue(client.dispatcher.ask_user_q)
-    start = time.time()
-    try:
+    # The arm/reset dance (mint task id, clear latches, drain stale
+    # ``askUser`` entries, always reset in ``finally``) lives in
+    # :func:`_armed_submission`, shared with the anchored variant.
+    with _armed_submission(client) as new_task_id:
         if not _start_task(
             client, prompt, new_task_id,
             use_worktree=use_worktree, use_parallel=use_parallel,
@@ -1226,17 +1275,6 @@ def _submit_task(
                 )
                 continue
             client.send({"type": "userAnswer", "answer": ans})
-    finally:
-        # Always reset the per-task dispatcher state, regardless of
-        # which exit path was taken (early returns, timeout, disconnect,
-        # exceptions) — review B1 round 2.  Without this, a stale
-        # ``current_task_id`` survives the call and the next task's
-        # status events get filtered out under the OLD id.
-        with client.dispatcher.task_id_lock:
-            client.dispatcher.current_task_id = ""
-        client.dispatcher.task_active.clear()
-        client.dispatcher.task_started.clear()
-        _print_elapsed(client, start)
 
 
 def _submit_task_anchored(
@@ -1273,20 +1311,16 @@ def _submit_task_anchored(
         timeout_seconds: Hard wall-clock cap on the wait so a wedged
             daemon never pins the REPL forever.
     """
-    new_task_id = uuid.uuid4().hex
-    with client.dispatcher.task_id_lock:
-        client.dispatcher.current_task_id = new_task_id
-    client.dispatcher.task_active.clear()
-    client.dispatcher.task_started.clear()
-    _drain_queue(client.dispatcher.ask_user_q)
     queued = [0]
     pending_question = [False]
-    # Wall-clock ``start`` is only for the elapsed-time display; the task
-    # timeout must use a monotonic deadline (comparing ``time.monotonic()``
-    # against a ``time.time()`` anchor never fires).
-    start = time.time()
-    deadline = time.monotonic() + timeout_seconds
-    try:
+    # The task timeout must use a monotonic deadline (comparing
+    # ``time.monotonic()`` against a ``time.time()`` anchor never
+    # fires); the elapsed-time display is handled by
+    # :func:`_armed_submission`.  Start the deadline only after arming,
+    # exactly as before the extraction: lock contention or stale-queue
+    # draining must not consume the task's runtime budget.
+    with _armed_submission(client) as new_task_id:
+        deadline = time.monotonic() + timeout_seconds
         if not _start_task(
             client, prompt, new_task_id,
             use_worktree=use_worktree, use_parallel=use_parallel,
@@ -1353,12 +1387,6 @@ def _submit_task_anchored(
         repl.run_steering_loop(on_submit, on_abort, is_done, on_idle)
         if client._closed.is_set():
             _print_daemon_lost(client.dispatcher.printer)
-    finally:
-        with client.dispatcher.task_id_lock:
-            client.dispatcher.current_task_id = ""
-        client.dispatcher.task_active.clear()
-        client.dispatcher.task_started.clear()
-        _print_elapsed(client, start)
 
 
 def _run_repl_loop(

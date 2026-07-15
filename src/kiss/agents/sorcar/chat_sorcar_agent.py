@@ -79,6 +79,43 @@ def _dir_inside_worktree(work_dir: str, wt_dir: object) -> bool:
         return False
 
 
+def _extract_result_summary(result: str) -> str:
+    """Return the persistable summary text for a finished run's *result*.
+
+    Parses *result* as YAML and extracts its ``summary`` field for the
+    task-history record.  Handles every shape LLMs emit:
+
+    * dict with a string ``summary`` — returned as-is;
+    * dict with ``summary: null`` (or no ``summary`` key) — ``""``;
+    * dict with a list/mapping/scalar ``summary`` — its YAML text form
+      (passing the raw object to ``_save_task_result`` would raise
+      ``sqlite3.ProgrammingError``, destroying the task's successful
+      return value);
+    * valid YAML that is not a dict, or unparseable text — the raw
+      text capped at 500 characters (otherwise the task history would
+      record an empty result).
+
+    Args:
+        result: The raw string returned by the agent run.
+
+    Returns:
+        The summary text to persist (possibly empty, never ``None``).
+    """
+    try:
+        result_yaml = yaml.safe_load(result)
+        if isinstance(result_yaml, dict):
+            summary_val = result_yaml.get("summary", "")
+            if isinstance(summary_val, str):
+                return summary_val
+            if summary_val is None:
+                return ""
+            dumped: str = yaml.safe_dump(summary_val, sort_keys=False)
+            return dumped.strip()
+        return result[:500] if result else ""
+    except Exception:
+        return result[:500] if result else ""
+
+
 class ChatSorcarAgent(SorcarAgent):
     """SorcarAgent with chat-session state management.
 
@@ -838,32 +875,7 @@ class ChatSorcarAgent(SorcarAgent):
         try:
             result = super().run(prompt_template=agent_prompt, **kwargs)
             result_raw = result if isinstance(result, str) else ""
-            try:
-                result_yaml = yaml.safe_load(result)
-                if isinstance(result_yaml, dict):
-                    summary_val = result_yaml.get("summary", "")
-                    if isinstance(summary_val, str):
-                        result_summary = summary_val
-                    elif summary_val is None:
-                        result_summary = ""
-                    else:
-                        # LLMs sometimes emit a YAML list/mapping under
-                        # ``summary``.  Persist its text form — passing
-                        # the raw object to ``_save_task_result`` would
-                        # raise sqlite3.ProgrammingError from the
-                        # ``finally`` block below, destroying the task's
-                        # successful return value.
-                        result_summary = yaml.safe_dump(
-                            summary_val, sort_keys=False,
-                        ).strip()
-                else:
-                    # Valid YAML but not a dict (plain string, list,
-                    # number): persist the raw text, consistent with
-                    # the parse-failure fallback below — otherwise the
-                    # task history records an empty result.
-                    result_summary = result[:500] if result else ""
-            except Exception:
-                result_summary = result[:500] if result else ""
+            result_summary = _extract_result_summary(result)
             return result
         except Exception:
             result_summary = "Task failed"
