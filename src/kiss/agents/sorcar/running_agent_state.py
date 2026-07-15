@@ -157,6 +157,7 @@ class _RunningAgentState:
         is_subagent: bool = False,
         parent_task_id: str | None = None,
         is_task_active: bool = False,
+        stop_event: threading.Event | None = None,
     ) -> None:
         # ``agent`` is transient — the VS Code server flow leaves it
         # ``None`` until :meth:`_TaskRunnerMixin._run_task_inner`
@@ -213,7 +214,12 @@ class _RunningAgentState:
         # the original branch).
         self.auto_commit_mode: bool = True
         self.selected_model: str = default_model
-        self.stop_event: threading.Event | None = None
+        # Cooperative stop signal for the task running on this tab.
+        # ``None`` until a task starts (the VS Code task runner
+        # populates it per run).  Parallel sub-agent states pass their
+        # own per-sub-agent event via the constructor so ``_stop_task``
+        # can stop ONLY that sub-agent's task.
+        self.stop_event: threading.Event | None = stop_event
         self.task_thread: threading.Thread | None = None
         self.user_answer_queue: queue.Queue[str] | None = None
         # Prompts submitted by the user via the task-input textbox

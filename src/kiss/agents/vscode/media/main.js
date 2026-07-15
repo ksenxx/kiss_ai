@@ -914,12 +914,18 @@
     } else if (isMerging) {
       showMergeToolbar(tab.id);
     }
-    // Set inputContainer visibility based on active bars and subagent tab status
+    // Set inputContainer visibility based on active bars and subagent tab
+    // status.  A sub-agent tab hides the input only once its sub-agent
+    // task is DONE: while the sub-agent is still RUNNING the input
+    // textbox and the buttons below it stay visible so the user can
+    // inject follow-up prompts into the running sub-agent
+    // (``sendMessage`` posts ``appendUserMessage`` with this tab's id)
+    // and stop ONLY the sub-agent's task via the Stop button.
     const hideInput =
       worktreeBar ||
       autocommitBar ||
       document.getElementById('merge-toolbar') ||
-      tab.isSubagentTab;
+      (tab.isSubagentTab && !tab.isRunning);
     if (hideInput) {
       if (inputContainer) inputContainer.style.display = 'none';
     } else {
@@ -4624,6 +4630,19 @@
         // window's running state.
         if (ev.tabId === undefined || ev.tabId === activeTabId) {
           setRunningState(ev.running);
+          // A sub-agent tab's prompt-injection surface (the input
+          // textbox and the buttons below it) exists ONLY while the
+          // sub-agent's task runs.  On any ``running:false`` for the
+          // active sub-agent tab, remove it immediately — a lifecycle
+          // fallback that enforces the rule even when the
+          // ``subagentDone`` broadcast is delayed or lost.  Mirrors
+          // the ``(tab.isSubagentTab && !tab.isRunning)`` rule in
+          // ``restoreTab``.
+          if (!ev.running) {
+            const stTab = getTab(activeTabId);
+            if (stTab && stTab.isSubagentTab && inputContainer)
+              inputContainer.style.display = 'none';
+          }
           // Refresh collapse-button-driven visibility so panels of the
           // now-running task become visible even while collapsed.  Needed
           // after resuming a running task from history: the prior
@@ -5640,13 +5659,24 @@
         // If the backend converted the active tab into a sub-agent tab
         // (e.g. the user clicked a sub-agent row in the history panel,
         // which created a fresh chat tab that ``_replay_session`` then
-        // flips via ``openSubagentTab``), hide the input textbox + the
-        // buttons below it.  ``restoreTab`` already enforces this rule
-        // when *switching* tabs, but the tab-switch ran BEFORE
-        // ``isSubagentTab`` was set, so the input bar is still showing
-        // for the active tab at this point.
+        // flips via ``openSubagentTab``), sync the input textbox + the
+        // buttons below it to the sub-agent's running state:
+        //
+        //   * still RUNNING — keep the input VISIBLE so the user can
+        //     inject follow-up prompts into the live sub-agent and
+        //     stop ONLY the sub-agent's task;
+        //   * already DONE (``isDone`` history replay) — hide it, the
+        //     sub-agent accepts no further input.
+        //
+        // ``restoreTab`` enforces the same rule when *switching* tabs,
+        // but the tab-switch ran BEFORE ``isSubagentTab`` was set, so
+        // the input bar state is stale for the active tab at this
+        // point.
         if (subTab.id === activeTabId) {
-          if (inputContainer) inputContainer.style.display = 'none';
+          if (inputContainer) {
+            if (subTab.isRunning) inputContainer.style.display = '';
+            else inputContainer.style.display = 'none';
+          }
           // History-load case: the new tab was created and switched
           // to before this handler fired, so ``restoreTab`` initialised
           // the global running state from the brand-new tab's default
@@ -5678,8 +5708,15 @@
           // already completed — diverging from the fresh-launch path
           // where ``restoreTab(setRunningState(false))`` would
           // eventually run when the user clicks back to the tab.
+          // Also hide the input textbox + the buttons below it
+          // IMMEDIATELY: the sub-agent task just completed, so the
+          // prompt-injection surface must disappear at once (the
+          // ``closeTab`` below switches to an adjacent tab whose
+          // ``restoreTab`` then re-resolves the input visibility for
+          // that tab).
           if (doneTab.id === activeTabId) {
             setRunningState(false);
+            if (inputContainer) inputContainer.style.display = 'none';
           }
           // Close the sub-agent tab as soon as it finishes.
           // ``closeTab`` notifies the backend, runs the run_parallel
