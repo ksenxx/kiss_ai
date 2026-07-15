@@ -632,8 +632,9 @@ The testing section is perhaps the most opinionated:
   before the suspected racing statements.
 - **CRITICAL**: Before running all tests or tests in
   a folder, split the set of tests equally by the
-  number of test methods into number of cores - 2 and
-  run all splits in parallel using run_parallel tool.
+  number of test methods into the number of cores - 2
+  and run all splits in parallel using the run_parallel
+  tool.
 \end{prompt}
 
 \noindent Each testing instruction addresses a specific concern:
@@ -694,8 +695,8 @@ what they'd like to work on. Awaiting a specific task."
 **Good** (actual content): "Hi! I'm KISS Sorcar, ready
 to help. What would you like to work on?"
 
-The summary must contain the actual content the user
-should see, not a third-person narration of what
+The summary MUST contain the actual content the user
+should see, NOT a third-person narration of what
 happened.
 </visibility_constraint>
 \end{prompt}
@@ -726,10 +727,10 @@ Tool usage rules are explicit and mechanical:
   commands exceeding 10 minutes, run in background with
   stdio fully detached -- nohup cmd > ./tmp/out.log
   2>&1 < /dev/null & -- then poll the log file
-  periodically. Never background without redirecting
-  stdout/stderr: the child inherits the Bash tool's
-  output pipe and the call blocks until every
-  background child exits.
+  periodically. Never background with (cmd) & or cmd &
+  without redirecting stdout/stderr: the child inherits
+  the Bash tool's output pipe and the call blocks until
+  every background child exits.
 - Use go_to_url() for browser navigation.
 - Read large files in chunks.
 - **Temporary files -- CRITICAL**: ALL temporary,
@@ -759,15 +760,21 @@ Tool usage rules are explicit and mechanical:
   as text input to the task.
 - When a user speaks to you, you MUST respond back to
   the user in the language they spoke using the
-  talk(language, text) tool. [...] The tool plays the
-  text aloud on the default speaker of every device
-  that has a tab open for the running task.
+  talk(language, text) tool, passing the user's spoken
+  language tag (e.g. "en-US") as language. Distinguish
+  between different users using voice recognition. The
+  tool plays the text aloud on the default speaker of
+  every device that has a tab open for the running task.
 </tool_rules>
 
 - If there is ambiguity or under-specification in the
   user task, search the internet using Google to find
   the most reliable and modern solution to resolve the
   ambiguity.
+- Use Google search on the Internet extensively for all
+  tasks unless you are confident you can complete the
+  task correctly without using the Internet (see Web
+  Research below).
 \end{prompt}
 
 Each tool rule addresses a specific failure mode.  An earlier revision of this section opened with an explicit definition (``\textbf{PWD denotes current working directory} and does not refer to a directory named PWD'') added after we observed the model creating a literal \texttt{PWD/} subdirectory inside the workspace.  The current revision drops the disambiguation entirely by replacing every occurrence of \texttt{PWD/} in the prompt with the shell-conventional relative form \texttt{./}~(e.g., \texttt{./tmp/}, \texttt{./SORCAR.md}), which frontier models interpret unambiguously as the working directory.  This is a small example of a recurring simplification pattern: when a prompt rule exists solely to disambiguate a confusing notation, replacing the notation is preferable to explaining it.
@@ -776,7 +783,7 @@ Each tool rule addresses a specific failure mode.  An earlier revision of this s
 
 \textbf{Bash timeout guidance.}  LLMs frequently launch shell commands without considering their runtime.  A compilation or test suite that takes five minutes will time out at the default 30-second shell timeout in most agent frameworks, causing spurious failures.  The instruction to use 120~seconds as the default, retry with higher timeouts on timeouts, and run long-running commands in the background provides a mechanical protocol that handles common cases without requiring the model to estimate runtime from first principles.  The background recipe is spelled out verbatim (\texttt{nohup \ldots\ > ./tmp/out.log 2>\&1 < /dev/null \&}) because we observed the model backgrounding commands without detaching stdio, which left the child attached to the Bash tool's output pipe and blocked the tool call until the child exited.
 
-\textbf{Voice interaction.}  The \texttt{talk} tool rules make voice a first-class I/O channel: spoken user input arrives as ordinary text in the running task, and the agent must reply aloud, in the language the user spoke, on every device with a tab open for the task.
+\textbf{Voice interaction.}  The \texttt{talk} tool rules make voice a first-class I/O channel: spoken user input arrives as ordinary text in the running task, and the agent must reply aloud, in the language the user spoke, on every device with a tab open for the task, using voice recognition to distinguish among different speakers.
 
 \textbf{``Use go\_to\_url() for browser navigation.''}  The agent has access to multiple tools that could plausibly interact with the web (shell-based \texttt{curl}, a Python program, the browser tool, etc.).  This clause eliminates ambiguity by specifying which tool to use for browser-based interactions.
 
@@ -784,7 +791,7 @@ Each tool rule addresses a specific failure mode.  An earlier revision of this s
 
 \textbf{Temporary files (CRITICAL).}  A separate, emphatically marked clause requires that \emph{all} temporary, scratch, and intermediate files (research notes, file-information dumps, downloaded artifacts, build outputs) live inside \texttt{./tmp/} (the \texttt{tmp/} subdirectory of the working directory) and never directly in the working directory.  Without this directive, the model creates temporary files in unpredictable locations (the system \texttt{/tmp}, the home directory, or scattered throughout the project) or sometimes directly in the project root, polluting the working tree with artifacts that are difficult to distinguish from legitimate project files.  Centralizing temporary files in a known directory makes cleanup mechanical and predictable.  The companion clause requires the agent to create \texttt{./tmp/} if it does not exist and to delete every temporary file it created before calling \texttt{finish}, while preserving the \texttt{./tmp/} directory itself if it was pre-existing, a deliberately narrow cleanup contract that prevents the agent from accidentally deleting unrelated files that happened to be in the same directory.
 
-\textbf{Ambiguity protocol.}  A trailing instruction outside the \texttt{<tool\_rules>} block (``If there is ambiguity or under-specification in the user task, search the internet using Google to find the most reliable and modern solution to resolve the ambiguity'') channels the model's natural tendency to confabulate when underspecified into the structured web-research workflow described below.  Rather than letting the model guess (the default behavior) or stop and ask the user (which interrupts the workflow), this directive turns ambiguity into a research task that produces an auditable artifact.
+\textbf{Ambiguity protocol.}  Two trailing instructions outside the \texttt{<tool\_rules>} block channel the model's natural tendency to confabulate when underspecified into the structured web-research workflow described below.  The first (``If there is ambiguity or under-specification in the user task, search the internet using Google to find the most reliable and modern solution to resolve the ambiguity'') targets ambiguity specifically; the second (``Use Google search on the Internet extensively for all tasks unless you are confident\ldots'') states the research-by-default policy up front and forwards to the Web Research section that elaborates it.  Rather than letting the model guess (the default behavior) or stop and ask the user (which interrupts the workflow), this directive turns ambiguity into a research task that produces an auditable artifact.
 
 \textbf{Parallel tool calls.}  The instruction to ``make them all in the same turn'' when tool calls are independent reduces latency by allowing the framework to execute multiple tool calls concurrently.  Without this instruction, the model tends to issue one tool call per turn even when the calls are independent, wasting round trips.
 
@@ -797,7 +804,7 @@ Each tool rule addresses a specific failure mode.  An earlier revision of this s
 We begin every task with mandatory reads, then enforce a read-before-modify discipline:
 
 \begin{prompt}
-## Mandatory First Actions for project related
+## Mandatory First Actions for project-related
 tasks -- CRITICAL
 
 **Your VERY FIRST tool call** in every task MUST be
@@ -832,7 +839,7 @@ guessing.
 
 **When fixing bugs, issues, or race conditions: write an
 end-to-end test that reproduces the problem first, then
-fix the code, then verify the test passes.**
+fix the code, and finally verify the test passes.**
 \end{prompt}
 
 \noindent The ``Mandatory First Actions'' section ensures that project-specific overrides are loaded before any work begins.  This section has undergone several rounds of empirical refinement.  In an earlier version that merely mentioned the read inside a separate ``Self-Improvement Loop'' section, the agent read \texttt{SORCAR.md} as its first tool call only 46\% of the time.  After promoting the read to a dedicated section with imperative language, compliance improved in integration tests but regressed in production: analysis of 91~real tasks showed that 92\% never read \texttt{SORCAR.md}.  Two evasion patterns emerged: (1)~the agent used \texttt{Bash("cat...")} instead of the \texttt{Read()} tool, and (2)~the agent combined the file read with other commands in a single \texttt{Bash} call.  Explicit prohibitions and ordinal position mandates raised compliance to 100\% in integration tests.
@@ -847,7 +854,7 @@ Each pre-flight check targets a specific category of avoidable error:
 
 \textbf{``If referenced files, commands, or config don't exist, stop and ask the user rather than guessing.''}  LLMs have a strong tendency to confabulate: when asked to modify a file that does not exist, the model will often proceed as if it does, producing edits against phantom content.  This instruction converts a silent failure (incorrect edits applied to a nonexistent file, which silently creates it) into an explicit clarification request.
 
-\textbf{``Write an end-to-end test that reproduces the problem first, then fix the code, then verify the test passes.''}  This instruction mandates a test-first discipline for bug fixes, specifying the three-step sequence explicitly.  The motivation is two-fold: first, a test that reproduces the bug provides concrete verification that the fix is correct (the test should pass after the fix and fail before it).  Second, writing the test forces the model to understand the bug precisely before attempting a fix, reducing the risk of an ad~hoc patch that addresses a symptom rather than the root cause.  Specifying ``end-to-end test'' rather than just ``test'' reinforces the no-mocks testing discipline described in Section~\ref{sec:system-prompt}.
+\textbf{``Write an end-to-end test that reproduces the problem first, then fix the code, and finally verify the test passes.''}  This instruction mandates a test-first discipline for bug fixes, specifying the three-step sequence explicitly.  The motivation is two-fold: first, a test that reproduces the bug provides concrete verification that the fix is correct (the test should pass after the fix and fail before it).  Second, writing the test forces the model to understand the bug precisely before attempting a fix, reducing the risk of an ad~hoc patch that addresses a symptom rather than the root cause.  Specifying ``end-to-end test'' rather than just ``test'' reinforces the no-mocks testing discipline described in Section~\ref{sec:system-prompt}.
 
 %......................................................................
 \subsection{Code Style Guidelines}
@@ -1005,8 +1012,8 @@ information, WITHOUT Internet search using Google?"
 Only when the answer is a clear yes (e.g., trivial
 arithmetic, or a purely mechanical edit fully specified
 by the user in files you have already read, coding based
-on local files) may you skip Google research. When in
-doubt, search the Internet using Google first.
+on local files) may you skip Google Internet research.
+When in doubt, search the Internet using Google first.
 
 When doing Google Internet research (which is the
 default for every task):
@@ -1043,11 +1050,18 @@ default for every task):
 
 This requirement applies to ALL tasks by default --
 research, coding, debugging, configuration, and design
-alike. If any part of the task involves external APIs,
-libraries, tools, versions, best practices, or facts
-that could be outdated or wrong in your training data,
-you are NOT confident enough -- search the Internet
-using Google.
+alike. Skip Google Internet research only when you are
+confident you can complete the task correctly without
+it (e.g., trivial arithmetic, or a purely mechanical
+file edit fully specified by the user where you already
+have complete context). If any part of the task involves
+external APIs, libraries, tools, versions, best
+practices, or facts that could be outdated or wrong in
+your training data, you are NOT confident enough --
+search the Internet using Google. If Google search is
+blocked, open a random keyword search in the Chromium
+browser and ask the user to manually pass the bot
+check. If that fails, you can use other search engines.
 
 **The information file is mandatory.** You MUST create
 the ./tmp/information-{unique_id}.md file and track the
@@ -1063,8 +1077,8 @@ For questions about **current events, weather, stock
 prices, sports scores, or any time-sensitive
 information**: you MUST use tools (go_to_url, Bash) to
 look up the data. Do NOT answer from your training data
--- it is outdated and will produce wrong dates, wrong
-numbers, and wrong facts.
+-- it is outdated and will produce incorrect dates,
+numbers, and facts.
 
 **Do NOT fabricate or exaggerate source counts.** If
 you visited 4 websites, do not claim "10+ sources" or
@@ -1080,7 +1094,7 @@ A second audit uncovered two additional failure modes.  First, the mandatory inf
 
 The login instruction addresses a practical obstacle in web research: many websites require authentication before revealing their content.  Rather than silently skipping gated pages or hallucinating their contents, we instruct the agent to ask the user for help with login.
 
-\textbf{Research-by-default with a confidence gate.}  Earlier revisions scoped the protocol to research and information-gathering tasks and let the agent ``proceed directly'' for pure code edits.  The current revision inverts the default: research applies to \emph{all} tasks, and the agent may skip it only after answering a confidence question (``Am I fully confident I can complete this task correctly, with current and accurate information, without searching Google?'') with a clear yes.  The narrow exemptions (trivial arithmetic, mechanical edits fully specified by the user, coding based on local files) still avoid wasting ten website visits on a one-line typo fix, but any task touching external APIs, library versions, best practices, or facts that may be stale in the training data is explicitly declared ``not confident enough.''  The inversion was made because the model systematically over-claimed sufficient context and skipped research on tasks where its training data was outdated.
+\textbf{Research-by-default with a confidence gate.}  Earlier revisions scoped the protocol to research and information-gathering tasks and let the agent ``proceed directly'' for pure code edits.  The current revision inverts the default: research applies to \emph{all} tasks, and the agent may skip it only after answering a confidence question (``Am I fully confident I can complete this task correctly, with current and accurate information, without searching Google?'') with a clear yes.  The narrow exemptions (trivial arithmetic, mechanical edits fully specified by the user, coding based on local files) still avoid wasting ten website visits on a one-line typo fix, but any task touching external APIs, library versions, best practices, or facts that may be stale in the training data is explicitly declared ``not confident enough.''  The inversion was made because the model systematically over-claimed sufficient context and skipped research on tasks where its training data was outdated.  A companion fallback clause handles blocked search: if Google is unreachable (e.g., behind a bot check), the agent opens a keyword search in the Chromium browser and asks the user to pass the bot check manually, falling back to other search engines only if that fails.
 
 %......................................................................
 \subsection{File Browsing Protocol}
@@ -1093,13 +1107,13 @@ When a task requires understanding multiple source files before making changes, 
 
 When exploring unfamiliar code, collect information and
 code snippets in ./tmp/file-information-{unique_id}.md
-as you go relevant for the task, then review the
+as you go, relevant for the task, then review the
 collected material and think deeply before acting.
 \end{prompt}
 
 \noindent This instruction addresses a failure mode distinct from the web research case.  When an agent must read many project files to understand a codebase before making changes, it tends to read a file, form a hypothesis, and immediately begin editing, anchoring on the first few files it encounters and missing relevant context in files it never opens.  Worse, each file read consumes context window tokens; by the time the agent has read enough files to understand the full picture, it may have already spent most of its context window on the raw file contents, leaving little room for reasoning and code generation.
 
-The file browsing protocol counteracts both problems.  By writing a structured summary of each file's relevant information into a temporary markdown file, the agent externalizes its understanding into a compact artifact that persists across context boundaries.  The instruction to collect ``without overthinking'' is deliberate: during the collection phase, the agent should extract and record facts (function signatures, class hierarchies, call sites, invariants) rather than analyze or plan.  Analysis happens in the second phase, when the agent reads its own summary file and reasons about the collected information as a whole.
+The file browsing protocol counteracts both problems.  By writing a structured summary of each file's relevant information into a temporary markdown file, the agent externalizes its understanding into a compact artifact that persists across context boundaries.  The phase split is deliberate: during the collection phase, the agent should extract and record facts (function signatures, class hierarchies, call sites, invariants) rather than analyze or plan.  Deep thinking is deferred to the second phase, when, per the instruction to ``review the collected material and think deeply before acting,'' the agent reads its own summary file and reasons about the collected information as a whole.
 
 This two-phase separation provides three benefits.  First, it prevents premature commitment: the agent cannot start editing until it has surveyed the relevant files, reducing the risk of changes that are locally correct but globally inconsistent.  Second, the summary file is typically much smaller than the raw source files, freeing up context window capacity for subsequent reasoning and editing phases.  Third, the summary file serves as an auditable artifact: the developer can inspect it to verify that the agent considered the right files and extracted the right information before making changes.
 
