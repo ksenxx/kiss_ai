@@ -505,7 +505,9 @@ class ChatSorcarAgent(SorcarAgent):
         # budget (see :meth:`SorcarAgent._subagent_budget_share`) —
         # without it each sub-agent would default to the full configured
         # budget and a single sub-agent could spend the entire budget of
-        # the main task.  Also forward the parent's ``model_config`` so
+        # the main task.  The share calculation also reserves one equal
+        # share for the parent to process results and finish.  Also forward
+        # the parent's ``model_config`` so
         # sub-agents talk to the same provider endpoint (custom
         # ``base_url``/``api_key`` routing).
         budget_share = self._subagent_budget_share(len(tasks))

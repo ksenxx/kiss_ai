@@ -129,8 +129,11 @@ _CHEAP = (10, 5)
 class _ExpensiveNoopHandler(BaseHTTPRequestHandler):
     """Always returns a non-finish ``noop`` tool call costing $0.375."""
 
+    requests = 0
+
     def do_POST(self) -> None:  # noqa: N802
         _read_body(self)
+        type(self).requests += 1
         _send_json(self, _tool_call_response("noop", "{}", *_EXPENSIVE))
 
     def log_message(self, format: str, *args: object) -> None:  # noqa: A002
@@ -242,6 +245,34 @@ class _ParallelParentHandler(BaseHTTPRequestHandler):
 
 class TestMidStepBudgetEnforcement:
     """The agent must not execute further tools once over budget."""
+
+    def test_exhausted_budget_blocks_model_request(self) -> None:
+        """A budget is a hard cap: once exactly exhausted, the agent must
+        not start another paid model request.  In particular, a zero-dollar
+        settings-panel budget must make zero provider requests."""
+        _ExpensiveNoopHandler.requests = 0
+        srv, url = _start_server(_ExpensiveNoopHandler)
+
+        def noop() -> str:
+            """A tool that must never run."""
+            return "ok"
+
+        try:
+            agent = KISSAgent("zero-budget")
+            with pytest.raises(KISSError, match="budget exceeded"):
+                agent.run(
+                    model_name="gpt-4o-mini",
+                    prompt_template="Call noop.",
+                    tools=[noop],
+                    max_steps=10,
+                    max_budget=0.0,
+                    verbose=False,
+                    model_config={"base_url": url, "api_key": "test-key"},
+                )
+            assert _ExpensiveNoopHandler.requests == 0
+            assert agent.budget_used == 0.0
+        finally:
+            srv.shutdown()
 
     def test_tools_not_executed_once_over_budget(self) -> None:
         """The very response that exceeds the budget must abort the step
@@ -461,12 +492,24 @@ class TestSubagentBudgetShare:
         agent.max_budget = 1.2
         agent.budget_used = 0.2
         agent._current_executor = None
-        assert agent._subagent_budget_share(4) == pytest.approx(0.25)
+        # Four sub-agents plus one equal share reserved for the parent.
+        assert agent._subagent_budget_share(4) == pytest.approx(0.2)
 
         executor = KISSAgent("share-executor")
         executor.budget_used = 0.2
         agent._current_executor = executor
-        assert agent._subagent_budget_share(2) == pytest.approx(0.4)
+        # $0.80 remains: two children + the parent each get one share.
+        assert agent._subagent_budget_share(2) == pytest.approx(0.8 / 3)
+
+    def test_single_subagent_cannot_consume_parent_remainder(self) -> None:
+        """Even a one-item fan-out must reserve budget for the main agent
+        to process the result and finish; otherwise that one sub-agent can
+        consume the entire remaining main-task budget."""
+        agent = SorcarAgent("share-single")
+        agent.max_budget = 1.0
+        agent.budget_used = 0.2
+        agent._current_executor = None
+        assert agent._subagent_budget_share(1) == pytest.approx(0.4)
 
     def test_share_guards_zero_tasks(self) -> None:
         agent = SorcarAgent("share-zero")
