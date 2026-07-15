@@ -16,7 +16,7 @@ from test_data.calculator.operators import OPERATORS
 
 class TestOperatorRegistry:
     def test_all_operators_registered(self):
-        assert set(OPERATORS.keys()) == {"+", "-"}
+        assert set(OPERATORS.keys()) == {"+", "-", "*", "/"}
 
     def test_each_operator_has_eval_and_precedence(self):
         for sym, mod in OPERATORS.items():
@@ -33,6 +33,17 @@ class TestOperatorRegistry:
         assert subtract.eval(5, 3) == 2
         assert subtract.eval(0, 5) == -5
 
+    def test_multiply(self):
+        from test_data.calculator.operators import multiply
+        assert multiply.eval(6, 7) == 42
+        assert multiply.eval(0.5, 8) == 4
+
+    def test_divide(self):
+        from test_data.calculator.operators import divide
+        assert divide.eval(8, 2) == 4
+        with pytest.raises(ZeroDivisionError):
+            divide.eval(1, 0)
+
 
 class TestTokenizer:
     def test_simple(self):
@@ -40,6 +51,9 @@ class TestTokenizer:
 
     def test_no_spaces(self):
         assert tokenize("2+3") == ["2", "+", "3"]
+
+    def test_multiply_and_divide(self):
+        assert tokenize("2*3/4") == ["2", "*", "3", "/", "4"]
 
     def test_standalone_minus_as_operator(self):
         assert tokenize("- + 3") == ["-", "+", "3"]
@@ -56,8 +70,26 @@ class TestEvaluator:
     def test_subtraction(self):
         assert evaluate("10 - 4") == 6
 
+    def test_multiplication(self):
+        assert evaluate("6 * 7") == 42
+
+    def test_division(self):
+        assert evaluate("8 / 2") == 4
+
+    def test_division_by_zero(self):
+        with pytest.raises(ZeroDivisionError):
+            evaluate("8 / 0")
+
     def test_chained_operations(self):
         assert evaluate("1 + 2 + 3 + 4") == 10
+
+    def test_operator_precedence(self):
+        assert evaluate("2 + 3 * 4") == 14
+        assert evaluate("(2 + 3) * 4") == 20
+
+    def test_multiply_divide_left_associative(self):
+        assert evaluate("8 / 4 / 2") == 1
+        assert evaluate("2 * 3 / 4") == 1.5
 
     def test_empty_expression(self):
         with pytest.raises(ValueError):
@@ -104,9 +136,9 @@ class TestCLI:
 
     def test_subprocess_integration(self):
         result = subprocess.run(
-            [sys.executable, "-m", "test_data.calculator.cli", "4 + 5"],
+            [sys.executable, "-m", "test_data.calculator.cli", "4 + 5 * 2"],
             capture_output=True,
             text=True,
         )
         assert result.returncode == 0
-        assert result.stdout.strip() == "9"
+        assert result.stdout.strip() == "14"
