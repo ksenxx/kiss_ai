@@ -1915,6 +1915,23 @@ class VSCodeServer(
             sub_tab_id = f"{parent_tab_id}__sub_{sub_task_id}"
             description = str(row.get("task", "") or "")
             is_done = _subagent_is_done(sub_task_id)
+            if not is_done:
+                # The sub-agent is STILL RUNNING: subscribe the reopened
+                # deterministic frontend tab to the live sub-agent's
+                # event stream.  Without this the reopened tab would be
+                # a dead viewer — no live events, no ``subagentDone``,
+                # and (critically) ``_find_source_tab_for_viewer`` could
+                # not resolve it to the sub-agent's registry entry, so
+                # the input textbox shown while the sub-agent runs
+                # (Stop / ``appendUserMessage``) would silently no-op.
+                # The exact ``task_id`` match keys the subscription to
+                # the sub-agent's own row, never the parent's.
+                self._reattach_running_chat(
+                    str(row.get("chat_id", "") or ""),
+                    sub_tab_id,
+                    task_id=str(sub_task_id),
+                    is_subagent=True,
+                )
             self.printer.broadcast(
                 {
                     "type": "openSubagentTab",
@@ -1951,6 +1968,26 @@ class VSCodeServer(
                     "tabId": sub_tab_id,
                 }
             )
+            if not is_done and _subagent_is_done(sub_task_id):
+                # Completion race: the sub-agent finished BETWEEN the
+                # ``is_done`` snapshot above and now.  Its own
+                # ``subagentDone`` fan-out may have run before this
+                # tab was subscribed, so without this recheck the
+                # reopened tab would keep pulsing "running" (with a
+                # live-looking input surface that routes nowhere)
+                # forever.  The ordering in ``_run_single``'s finally
+                # (``running_agents`` pop → ``subagentDone`` fan-out →
+                # state unregister) guarantees the two paths cannot
+                # BOTH miss: if the sub-agent was still registered at
+                # this recheck, its later fan-out includes this tab's
+                # fresh subscription.
+                self.printer.broadcast(
+                    {
+                        "type": "subagentDone",
+                        "tab_id": sub_tab_id,
+                        "tabId": "",
+                    }
+                )
 
     def _live_task_start_ms(
         self,

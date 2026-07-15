@@ -21,6 +21,7 @@ import queue
 import re
 import threading
 import time
+from collections.abc import Callable
 from contextlib import nullcontext, suppress
 from functools import partial
 from pathlib import Path
@@ -70,6 +71,34 @@ ctypes.pythonapi.PyThreadState_SetAsyncExc.argtypes = [
     ctypes.c_ulong,
     ctypes.py_object,
 ]
+
+
+def _state_owns_thread(
+    tab_id: str,
+    state: _RunningAgentState | None,
+    thread: threading.Thread,
+) -> bool:
+    """True while *tab_id* still maps *state* and *state* still runs *thread*.
+
+    Ownership guard for :meth:`_TaskRunnerMixin._force_stop_thread`'s
+    asynchronous ``KeyboardInterrupt`` injection.  Callers evaluate it
+    under :attr:`_RunningAgentState._registry_lock`; the producers of
+    parallel sub-agent states clear ``state.task_thread`` (and
+    unregister the state) under the same lock before their pool worker
+    thread returns to the executor, so a ``False`` here reliably means
+    the stop target already finished and *thread* must not be touched.
+
+    Args:
+        tab_id: Registry key of the state that owned the stopped task.
+        state: The state object resolved at ``_stop_task`` time.
+        thread: The task thread captured at ``_stop_task`` time.
+
+    Returns:
+        ``True`` when the registry entry is unchanged and still owns
+        *thread*; ``False`` otherwise.
+    """
+    current = _RunningAgentState.running_agent_states.get(tab_id)
+    return current is not None and current is state and current.task_thread is thread
 
 
 def build_task_extra_payload(
@@ -1776,6 +1805,8 @@ class _TaskRunnerMixin:
             tab = _RunningAgentState.running_agent_states.get(tab_id)
             stop_event = tab.stop_event if tab is not None else None
             task_thread = tab.task_thread if tab is not None else None
+            owner_tab_id = tab_id
+            owner_state = tab
 
         # When the tab has no stop_event (e.g. a subscriber/viewer tab
         # created by _replay_session → subscribe_tab), look up which
@@ -1790,13 +1821,33 @@ class _TaskRunnerMixin:
                     if source is not None:
                         stop_event = source.stop_event
                         task_thread = source.task_thread
+                        owner_tab_id = source_tab_id
+                        owner_state = source
 
         if stop_event:
             stop_event.set()
         if task_thread is not None and task_thread.is_alive():
+            # Ownership guard for the async injection: only interrupt
+            # *task_thread* while the resolved state STILL maps it.
+            # Parallel sub-agent states publish a ``ThreadPoolExecutor``
+            # worker thread that outlives the sub-agent's task and is
+            # reused for sibling tasks — without this guard the
+            # watchdog's delayed ``PyThreadState_SetAsyncExc`` could
+            # land in whatever UNRELATED task the pool thread runs
+            # next.  ``_run_single`` clears ``task_thread`` (and
+            # unregisters the state) under ``_registry_lock`` before
+            # the worker returns to the pool, and ``_force_stop_thread``
+            # evaluates this guard under the same lock, so the
+            # check+inject pair is race-free.
+            still_owns = partial(
+                _state_owns_thread,
+                owner_tab_id,
+                owner_state,
+                task_thread,
+            )
             threading.Thread(
                 target=self._force_stop_thread,
-                args=(task_thread,),
+                args=(task_thread, still_owns),
                 daemon=True,
             ).start()
 
@@ -1872,16 +1923,59 @@ class _TaskRunnerMixin:
                         return peer
                     if fallback is None:
                         fallback = peer
+            # Registry-wide pass — parallel SUB-AGENT states are
+            # registered under their deterministic backend tab id
+            # (``task-{parent}__sub_{idx}``) but are never subscribed
+            # to their own task's stream, so the peer scan above cannot
+            # see them: the sub-agent's only subscriber is the viewer
+            # tab itself.  Match any registered state whose live
+            # agent is running one of the tasks the viewer watches;
+            # this is what lets the Stop button and prompt injection
+            # (``appendUserMessage``) on a sub-agent's chat tab reach
+            # ONLY that sub-agent's ``stop_event`` /
+            # ``pending_user_messages``.  The exact task-id match
+            # keeps the cross-task hijack guarantee of the peer scan.
+            for task_key, _peers in peer_lists:
+                if not task_key:
+                    continue
+                for tid, state in _RunningAgentState.running_agent_states.items():
+                    if tid == viewer_tab_id or state.stop_event is None:
+                        continue
+                    agent_task = (
+                        JsonPrinter._coerce_task_id(
+                            getattr(state.agent, "_last_task_id", None),
+                        )
+                        if state.agent is not None
+                        else ""
+                    )
+                    if agent_task and agent_task == task_key:
+                        return tid
         return fallback
 
     @staticmethod
-    def _force_stop_thread(task_thread: threading.Thread) -> None:
+    def _force_stop_thread(
+        task_thread: threading.Thread,
+        still_owns: Callable[[], bool] | None = None,
+    ) -> None:
         """Watchdog that forces ``KeyboardInterrupt`` in *task_thread*.
 
         Waits 1 second for the cooperative stop-event mechanism to work.
         If the thread is still alive, raises ``KeyboardInterrupt``
         asynchronously in it.  Retries once after 5 seconds in case the
         first exception was swallowed or the thread was in C code.
+
+        Args:
+            task_thread: The thread running the task being stopped.
+            still_owns: Optional ownership guard evaluated — under
+                :attr:`_RunningAgentState._registry_lock` — immediately
+                before every injection.  When it returns ``False`` the
+                watchdog exits without injecting: the task being
+                stopped has already finished and *task_thread* (e.g. a
+                reusable ``ThreadPoolExecutor`` worker running a
+                parallel sub-agent) may now be executing an unrelated
+                sibling task that must not be interrupted.  Producers
+                of the guarded state clear ``task_thread`` under the
+                same lock, making the check+inject pair race-free.
         """
         task_thread.join(timeout=1)
         for _ in range(2):  # pragma: no branch — thread always dies within 2 attempts
@@ -1889,10 +1983,13 @@ class _TaskRunnerMixin:
                 return
             tid = task_thread.ident
             if tid is not None:  # pragma: no branch — running thread always has ident
-                rc = ctypes.pythonapi.PyThreadState_SetAsyncExc(
-                    ctypes.c_ulong(tid),
-                    ctypes.py_object(KeyboardInterrupt),
-                )
+                with _RunningAgentState._registry_lock:
+                    if still_owns is not None and not still_owns():
+                        return
+                    rc = ctypes.pythonapi.PyThreadState_SetAsyncExc(
+                        ctypes.c_ulong(tid),
+                        ctypes.py_object(KeyboardInterrupt),
+                    )
                 if rc == 0:
                     return
                 if rc > 1:  # pragma: no cover — rare: exception set in multiple states
