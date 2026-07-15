@@ -357,13 +357,14 @@ def test_codex_pill_tabs_and_status() -> None:
 
 
 def test_codex_user_prompt_bubble() -> None:
-    """The pinned user prompt matches Codex's right-aligned light bubble."""
+    """The pinned user prompt is a right-aligned dark bubble on the
+    composer's #212121 surface so it blends with the dark thread."""
     css = _read_codex_css()
     m = re.search(r"body\.remote-chat #task-panel\s*\{([^}]*)\}", css)
     assert m, "remote task/user-prompt rule missing"
     rule = m.group(1)
-    assert "background: #ececec" in rule
-    assert "color: #0d0d0d" in rule
+    assert "background: #212121" in rule
+    assert "color: #ececec" in rule
     assert "border-radius: 22px" in rule
     assert "max-width: 90%" in rule
     assert "margin-left: auto" in rule

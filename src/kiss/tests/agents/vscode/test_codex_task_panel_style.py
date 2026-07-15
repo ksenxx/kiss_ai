@@ -474,6 +474,7 @@ _PROBE_STYLES_JS = (
     taskPanelFont: tp.fontFamily + ' | ' + tp.fontSize,
     taskPanelFontStyle: tp.fontStyle,
     taskPanelColor: tp.color,
+    taskPanelBg: tp.backgroundColor,
     thinkFontStyle: thinkCnt ? getComputedStyle(thinkCnt).fontStyle
       : 'MISSING',
     thinkColor: thinkCnt ? getComputedStyle(thinkCnt).color : 'MISSING',
@@ -674,12 +675,12 @@ def test_live_task_panel_typography_and_history_rows(
         "thinking content font style must match the task panel: "
         + repr(probes)
     )
-    # "…not the color": matching the task panel's FONT must not drag
-    # its dark-on-light colors into the thread — chat text keeps the
-    # remote thread palette.
-    assert probes["taskPanelColor"] == "rgb(13, 13, 13)", probes
-    assert probes["txtColor"] != probes["taskPanelColor"], (
-        "chat text color must NOT change to the task panel's: "
+    # The pinned task panel is a dark right-aligned bubble that
+    # blends with the thread: light #ececec text on the composer's
+    # #212121 surface (not the old light #ececec card).
+    assert probes["taskPanelColor"] == "rgb(236, 236, 236)", probes
+    assert probes["taskPanelBg"] == "rgb(33, 33, 33)", (
+        "the task panel background must be the dark #212121 surface: "
         + repr(probes)
     )
     assert probes["thinkColor"] == "rgb(142, 142, 142)", (
