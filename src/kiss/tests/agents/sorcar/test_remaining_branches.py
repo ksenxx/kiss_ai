@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import tempfile
 import threading
@@ -34,6 +35,30 @@ from kiss.agents.vscode.server import VSCodeServer
 def _git(tmpdir: str, *args: str) -> None:
     """Run a git command in tmpdir, suppressing output."""
     subprocess.run(["git", *args], cwd=tmpdir, capture_output=True, check=True)
+
+
+def _file_suffix(
+    server: VSCodeServer,
+    query: str,
+    snapshot_file: str = "",
+    snapshot_content: str = "",
+    chat_id: str = "",
+) -> str:
+    """Longest identifier-completion suffix for *query*.
+
+    Exercises ``_active_file_identifier_matches`` (the production
+    identifier harvester behind the fast-complete dropdown) the way
+    the ghost-text pipeline consumes it: the longest-first match list
+    is reduced to the top match's remaining suffix.
+    """
+    matches = server._active_file_identifier_matches(
+        query, snapshot_file, snapshot_content, chat_id,
+    )
+    if not matches:
+        return ""
+    m = re.search(r"([\w][\w.]*)$", query)
+    assert m is not None
+    return matches[0][len(m.group(1)):]
 
 
 class TestPersistenceBranches:
@@ -246,83 +271,83 @@ class TestVSCodeServerBranches:
         assert len(ghost) == 1
         assert ghost[0]["suggestion"] == ""
 
-    def test_complete_from_active_file_trailing_whitespace(self) -> None:
-        """_complete_from_active_file returns empty when query ends with space."""
+    def test_file_suffix_trailing_whitespace(self) -> None:
+        """_file_suffix returns empty when query ends with space."""
         server = VSCodeServer()
-        result = server._complete_from_active_file("hello ", "", "some content")
+        result = _file_suffix(server, "hello ", "", "some content")
         assert result == ""
 
-    def test_complete_from_active_file_no_partial_match(self) -> None:
-        """_complete_from_active_file returns empty when regex finds nothing."""
+    def test_file_suffix_no_partial_match(self) -> None:
+        """_file_suffix returns empty when regex finds nothing."""
         server = VSCodeServer()
-        result = server._complete_from_active_file("!@#$", "", "some content")
+        result = _file_suffix(server, "!@#$", "", "some content")
         assert result == ""
 
-    def test_complete_from_active_file_short_partial(self) -> None:
-        """_complete_from_active_file returns empty when partial < 2 chars."""
+    def test_file_suffix_short_partial(self) -> None:
+        """_file_suffix returns empty when partial < 2 chars."""
         server = VSCodeServer()
-        result = server._complete_from_active_file("a", "", "apple banana")
+        result = _file_suffix(server, "a", "", "apple banana")
         assert result == ""
 
-    def test_complete_from_active_file_reads_file(self) -> None:
-        """_complete_from_active_file reads from disk when no snapshot_content."""
+    def test_file_suffix_reads_file(self) -> None:
+        """_file_suffix reads from disk when no snapshot_content."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
             f.write("def calculate_total():\n    pass\n")
             f.flush()
             path = f.name
         try:
             server = VSCodeServer()
-            result = server._complete_from_active_file("calc", path, "")
+            result = _file_suffix(server, "calc", path, "")
             assert result == "ulate_total"
         finally:
             os.unlink(path)
 
-    def test_complete_from_active_file_file_not_found(self) -> None:
-        """_complete_from_active_file returns empty for nonexistent file."""
+    def test_file_suffix_file_not_found(self) -> None:
+        """_file_suffix returns empty for nonexistent file."""
         server = VSCodeServer()
-        result = server._complete_from_active_file("test", "/nonexistent/file.py", "")
+        result = _file_suffix(server, "test", "/nonexistent/file.py", "")
         assert result == ""
 
-    def test_complete_from_active_file_uses_chat_history(self) -> None:
-        """_complete_from_active_file harvests identifiers from prior chat tasks."""
+    def test_file_suffix_uses_chat_history(self) -> None:
+        """_file_suffix harvests identifiers from prior chat tasks."""
         task_id, chat_id = th._add_task("first task with calculate_total_amount usage")
         th._save_task_result(
             "the result mentions parse_xml_payload again", task_id=task_id,
         )
         server = VSCodeServer()
         # No file content at all — must still find a candidate from chat history.
-        assert server._complete_from_active_file(
+        assert _file_suffix(server,
             "calc", "", "", chat_id,
         ) == "ulate_total_amount"
-        assert server._complete_from_active_file(
+        assert _file_suffix(server,
             "parse_xml", "", "", chat_id,
         ) == "_payload"
         # Without chat_id, the same call returns nothing because there is
         # no active-file content to harvest identifiers from.
-        assert server._complete_from_active_file("calc", "", "") == ""
+        assert _file_suffix(server, "calc", "", "") == ""
 
-    def test_complete_from_active_file_combines_file_and_chat(self) -> None:
+    def test_file_suffix_combines_file_and_chat(self) -> None:
         """File content and chat history both contribute candidates."""
         _task_id, chat_id = th._add_task("chat had wonderful_widget_factory in it")
         server = VSCodeServer()
         file_content = "class HelperUtil:\n    pass\n"
         # Match from file content.
-        assert server._complete_from_active_file(
+        assert _file_suffix(server,
             "Help", "", file_content, chat_id,
         ) == "erUtil"
         # Match from chat history when the partial doesn't appear in file.
-        assert server._complete_from_active_file(
+        assert _file_suffix(server,
             "wonderful", "", file_content, chat_id,
         ) == "_widget_factory"
 
-    def test_complete_from_active_file_caches_chat_context(self) -> None:
+    def test_file_suffix_caches_chat_context(self) -> None:
         """Chat-context text is cached between keystrokes in the same chat."""
         task_id, chat_id = th._add_task("first wonderful_alpha_token here")
         th._save_task_result("nothing useful", task_id=task_id)
         server = VSCodeServer()
 
         # First call populates the cache; suggestion comes from chat text.
-        assert server._complete_from_active_file(
+        assert _file_suffix(server,
             "wonderful_a", "", "", chat_id,
         ) == "lpha_token"
 
@@ -335,17 +360,17 @@ class TestVSCodeServerBranches:
             ("first beta_zero_marker different", task_id),
         )
         db.commit()
-        assert server._complete_from_active_file(
+        assert _file_suffix(server,
             "wonderful_a", "", "", chat_id,
         ) == "lpha_token"
 
         # An explicit invalidation forces a reload; now beta_zero_marker
         # is visible and the old token is not.
         th._invalidate_chat_context_cache(chat_id)
-        assert server._complete_from_active_file(
+        assert _file_suffix(server,
             "beta_zero", "", "", chat_id,
         ) == "_marker"
-        assert server._complete_from_active_file(
+        assert _file_suffix(server,
             "wonderful_a", "", "", chat_id,
         ) == ""
 
@@ -354,13 +379,13 @@ class TestVSCodeServerBranches:
         th._save_task_result(
             "gamma_three_signal appears now", task_id=task_id,
         )
-        assert server._complete_from_active_file(
+        assert _file_suffix(server,
             "gamma_three", "", "", chat_id,
         ) == "_signal"
 
         # _add_task also auto-invalidates.
         th._add_task("delta_four_indicator was added", chat_id=chat_id)
-        assert server._complete_from_active_file(
+        assert _file_suffix(server,
             "delta_four", "", "", chat_id,
         ) == "_indicator"
 

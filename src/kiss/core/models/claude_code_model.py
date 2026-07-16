@@ -22,16 +22,19 @@ from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 
 from kiss.core.kiss_error import KISSError
+from kiss.core.models.model import Attachment as Attachment
 from kiss.core.models.model import (
-    Attachment,
-    Model,
+    CLITextModel,
     ThinkingCallback,
     TokenCallback,
-    _build_text_based_tools_prompt,
     _iter_balanced_json_objects,
     _iter_tool_calls_lists,
     _parse_text_based_tool_calls,
     flatten_content_to_text,
+)
+from kiss.core.models.model import Model as Model
+from kiss.core.models.model import (
+    _build_text_based_tools_prompt as _build_text_based_tools_prompt,
 )
 
 logger = logging.getLogger(__name__)
@@ -127,7 +130,7 @@ def _find_consecutive_tool_calls_end(content: str) -> int:
     return last_tc_end
 
 
-class ClaudeCodeModel(Model):
+class ClaudeCodeModel(CLITextModel):
     """A model that delegates to the Claude Code CLI for LLM completions.
 
     Model names use the ``cc/`` prefix.  The part after the prefix is passed
@@ -138,6 +141,9 @@ class ClaudeCodeModel(Model):
     are injected into the system prompt and the model's text output is
     parsed for JSON ``tool_calls`` blocks.  Embeddings are not available.
     """
+
+    _cli_model_name = "ClaudeCodeModel"
+    _cli_logger = logger
 
     def __init__(
         self,
@@ -181,17 +187,6 @@ class ClaudeCodeModel(Model):
         # a complete ``tool_calls`` JSON block was found in the stream.
         self._stopped_for_tool_calls: bool = False
 
-    def initialize(self, prompt: str, attachments: list[Attachment] | None = None) -> None:
-        """Initialize the conversation with an initial user prompt.
-
-        Args:
-            prompt: The initial user prompt.
-            attachments: Not supported — ignored with a warning if provided.
-        """
-        if attachments:  # pragma: no cover – attachments not used in practice
-            logger.warning("ClaudeCodeModel does not support attachments; they will be ignored.")
-        self.conversation = [{"role": "user", "content": prompt}]
-
     def _build_prompt(self) -> str:
         """Build a single prompt string from the conversation history.
 
@@ -204,17 +199,7 @@ class ClaudeCodeModel(Model):
         """
         if len(self.conversation) == 1:
             return flatten_content_to_text(self.conversation[0]["content"])
-        parts: list[str] = []
-        for msg in self.conversation:
-            role = msg["role"]
-            content = flatten_content_to_text(msg.get("content", ""))
-            if role == "user":
-                parts.append(f"[User]: {content}")
-            elif role == "assistant":
-                parts.append(f"[Assistant]: {content}")
-            elif role == "tool":
-                parts.append(f"[Tool Result]: {content}")
-        return "\n\n".join(parts)
+        return self._conversation_as_dialogue()
 
     def _build_cli_args(self) -> list[str]:
         """Build the ``claude`` CLI argument list.
@@ -227,7 +212,7 @@ class ClaudeCodeModel(Model):
             List of CLI arguments.
         """
         cli = _find_claude_cli()
-        # ``--bare`` and ``--disable-slash-commands`` make the CLI behave as
+        # ``--print`` and ``--disable-slash-commands`` make the CLI behave as
         # a pure single-shot LLM: no hooks, LSP, plugin sync, auto-memory,
         # background prefetches, keychain reads, CLAUDE.md auto-discovery,
         # skills, or agents.  Combined with ``--tools ""`` and
@@ -444,8 +429,6 @@ class ClaudeCodeModel(Model):
                                     content = content[:last_tc_end]
                                     self._stopped_for_tool_calls = True
                                     break
-            if self._stopped_for_tool_calls:
-                break
             elif event_type == "content_block_stop":
                 if current_block_type == "thinking" and thinking_started:
                     self._invoke_thinking_callback(False)
@@ -508,16 +491,7 @@ class ClaudeCodeModel(Model):
         Returns:
             Tuple of ``(function_calls, content, response)``.
         """
-        tools_prompt = _build_text_based_tools_prompt(function_map)
-
-        original_config = self.model_config
-        config = dict(original_config)
-        original_system = config.get("system_instruction", "")
-        config["system_instruction"] = (
-            (original_system + "\n\n" + tools_prompt).strip()
-        )
-        self.model_config = config
-
+        original_config = self._install_tools_prompt_in_system_instruction(function_map)
         try:
             content, response = self.generate(stop_on_tool_calls=True)
         finally:
@@ -550,7 +524,9 @@ class ClaudeCodeModel(Model):
             response: The parsed JSON response from the CLI.
 
         Returns:
-            (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens).
+            (input_tokens, output_tokens, cache_read_tokens,
+            cache_write_5m_tokens, cache_write_1h_tokens).  The last element
+            is the Anthropic one-hour cache-write token count.
         """
         if not isinstance(response, dict):
             return 0, 0, 0, 0, 0
@@ -563,11 +539,3 @@ class ClaudeCodeModel(Model):
             cache_write_5m,
             cache_write_1h,
         )
-
-    def get_embedding(self, text: str, embedding_model: str | None = None) -> list[float]:
-        """Not supported — Claude Code CLI does not provide embeddings.
-
-        Raises:
-            KISSError: Always.
-        """
-        raise KISSError("ClaudeCodeModel does not support embeddings.")

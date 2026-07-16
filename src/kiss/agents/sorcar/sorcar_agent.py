@@ -30,9 +30,10 @@ from kiss.agents.sorcar.cli_helpers import (
 )
 from kiss.agents.sorcar.persistence import _load_last_model
 from kiss.agents.sorcar.skills import make_skill_tool
-from kiss.agents.sorcar.useful_tools import UsefulTools
+from kiss.agents.sorcar.useful_tools import UsefulTools, intercept_grep_hint
 from kiss.agents.sorcar.web_use_tool import WebUseTool
 from kiss.core.base import SYSTEM_PROMPT
+from kiss.core.kiss_error import BudgetExceededError
 from kiss.core.models.model import Attachment
 from kiss.core.models.model_info import (
     MODEL_INFO,
@@ -316,6 +317,46 @@ class SorcarAgent(RelentlessAgent):
         self._use_web_tools: bool = True
         self._is_parallel: bool = False
 
+    def _subagent_budget_share(self, num_tasks: int) -> float | None:
+        """Return the ``max_budget`` each parallel sub-agent may spend.
+
+        Splits this task's REMAINING budget — ``max_budget`` minus the
+        spend already attributed to this agent minus the live executor
+        session's own spend — evenly across *num_tasks* sub-agents PLUS
+        one reserved parent share.  Reserving that share leaves the main
+        agent enough budget to process the results and finish; importantly,
+        even a one-item fan-out cannot consume the parent's entire remainder.
+
+        Args:
+            num_tasks: Number of parallel sub-agent tasks about to spawn.
+
+        Returns:
+            The per-sub-agent budget share in USD, or ``None`` when this
+            agent has no budget context yet (``run``/``_reset`` never
+            ran, e.g. direct ``_run_tasks_parallel`` invocations) — the
+            sub-agents then fall back to their default budget.
+
+        Raises:
+            KISSError: If the task has no remaining budget.
+        """
+        raw_max_budget = getattr(self, "max_budget", None)
+        if raw_max_budget is None:
+            return None
+        max_budget = float(raw_max_budget)
+        executor = getattr(self, "_current_executor", None)
+        live = executor.budget_used if executor is not None else 0.0
+        remaining = max_budget - float(getattr(self, "budget_used", 0.0) or 0.0) - live
+        if remaining <= 0:
+            raise BudgetExceededError(
+                f"Agent {self.name} has no remaining budget for parallel "
+                f"sub-agents (${max_budget - remaining:.4f} / "
+                f"${max_budget:.2f})."
+            )
+        # Keep one equal share for the parent to consume the sub-agent
+        # results and issue its terminal ``finish`` call.  With no tasks
+        # there is no fan-out and the full remainder stays with the parent.
+        return remaining if num_tasks <= 0 else remaining / (num_tasks + 1)
+
     def _run_tasks_parallel(
         self,
         tasks: list[str],
@@ -349,6 +390,15 @@ class SorcarAgent(RelentlessAgent):
             work_dir=self.work_dir,
             printer=self.printer,
             totals_out=totals,
+            # Cap every sub-agent to a fair share of THIS task's
+            # remaining budget — without it each sub-agent would default
+            # to the full configured budget and a single sub-agent could
+            # spend the entire budget of the main task.  One equal share
+            # remains reserved for the parent to process results and finish.
+            max_budget=self._subagent_budget_share(len(tasks)),
+            # Sub-agents must talk to the same provider endpoint as the
+            # parent (custom ``base_url``/``api_key`` routing).
+            model_config=getattr(self, "model_config", None),
         )
         _attribute_sub_usage(
             self,
@@ -481,15 +531,10 @@ class SorcarAgent(RelentlessAgent):
 
             def Bash(command: str, description: str) -> str:  # noqa: N802
                 """Run a command in Docker, preferring a code-graph answer."""
-                hint = ""
-                try:
-                    from kiss.agents.sorcar.code_graph import grep_hint
-
-                    hint = grep_hint(command, self.work_dir) or ""
-                except Exception:
-                    logger.debug("code_graph Docker grep hint failed", exc_info=True)
-                if hint and hint not in code_graph_hints_seen:
-                    code_graph_hints_seen.add(hint)
+                hint = intercept_grep_hint(
+                    command, self.work_dir, code_graph_hints_seen,
+                )
+                if hint is not None:
                     return hint
                 return self._docker_bash(command, description)
 
@@ -928,6 +973,18 @@ class SorcarAgent(RelentlessAgent):
         line.  The list is emptied on every drain so the same queued
         message is never injected twice.
 
+        Messages whose ``prompt`` echo could not be attributed to a
+        task id at queueing time (``unattributed_prompt_echoes`` —
+        the narrow window between ``run()`` entry and ``_add_task``)
+        get a durable copy HERE: a ``recordOnly`` broadcast from the
+        agent thread, where the printer's thread-local task id names
+        the task that actually consumed the message, so the echo is
+        recorded and persisted into the correct trajectory instead of
+        being lost on replay.  The copy is NOT re-sent live (the
+        command handler already emitted a transient echo at queueing
+        time — see ``_echo_injected_prompt`` — so a live re-send
+        would render a duplicate prompt panel).
+
         Args:
             model: The live model whose conversation receives the
                 queued user messages.
@@ -943,6 +1000,19 @@ class SorcarAgent(RelentlessAgent):
                 return
             queued = list(tab.pending_user_messages)
             tab.pending_user_messages.clear()
+            deferred = list(tab.unattributed_prompt_echoes)
+            tab.unattributed_prompt_echoes.clear()
+        if deferred:
+            broadcast = getattr(
+                getattr(self, "printer", None), "broadcast", None,
+            )
+            if broadcast is not None:
+                for msg in deferred:
+                    broadcast({
+                        "type": "prompt",
+                        "text": msg,
+                        "recordOnly": True,
+                    })
         for msg in queued:
             model.add_message_to_conversation(
                 "user",
@@ -1004,6 +1074,8 @@ def run_tasks_parallel(
     work_dir: str | None = None,
     printer: Printer | None = None,
     totals_out: dict[str, float] | None = None,
+    max_budget: float | None = None,
+    model_config: dict[str, Any] | None = None,
 ) -> list[str]:
     """Execute multiple SorcarAgent tasks concurrently using threads.
 
@@ -1039,6 +1111,24 @@ def run_tasks_parallel(
             verbatim to each sub-agent's ``run`` so live events
             continue to flow through the same channel.  The executor
             itself does not call any printer methods.
+        totals_out: Optional dict that receives the aggregated usage of
+            all sub-agents.  When provided, the summed spend across
+            every spawned agent is written into it under the keys
+            ``"budget_used"``, ``"total_tokens_used"`` and
+            ``"total_steps"`` so the caller can attribute sub-agent
+            usage back to the parent task (see
+            :func:`_attribute_sub_usage`).
+        max_budget: Per-sub-agent budget cap in USD, forwarded to each
+            sub-agent's ``run``.  Callers spawning sub-agents on behalf
+            of a parent task pass each child one share of the parent's
+            remaining budget and reserve one equal share for the parent
+            (see :meth:`SorcarAgent._subagent_budget_share`), so even a
+            one-child fan-out cannot spend the parent's whole remainder.
+            ``None`` uses the sub-agent's default (config value).
+        model_config: Model configuration (e.g. custom ``base_url`` /
+            ``api_key`` routing) forwarded to each sub-agent's ``run``
+            so sub-agents talk to the same provider endpoint as the
+            parent.  ``None`` uses default provider routing.
 
     Returns:
         List of YAML result strings in the **same order** as *tasks*.
@@ -1111,6 +1201,8 @@ def run_tasks_parallel(
                 work_dir=work_dir,
                 printer=printer,
                 is_parallel=True,
+                max_budget=max_budget,
+                model_config=model_config,
             )
             return result
         except Exception as exc:

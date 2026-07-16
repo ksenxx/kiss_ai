@@ -15,9 +15,10 @@ coverage gaps) cannot silently change it:
   path-traversal attempts, 404 for unknown paths, and the raw
   ``HEAD`` 200/empty-body health-check reply from
   ``_HeadAwareServerConnection``.
-* Silent dropping of VS Code-only webview commands (``pickFolder``,
-  ``sizeReport``) on a live server connection, contrasted with the
-  ``Unknown command`` error broadcast for genuinely unknown commands.
+* Silent dropping of VS Code-only webview commands
+  (``notificationAction``, ``sizeReport``) on a live server connection,
+  contrasted with the ``Unknown command`` error broadcast for genuinely
+  unknown commands.
 * ``_translate_webview_command``: pass-through of normal commands and
   the legacy ``resumeSession`` ``id`` -> ``chatId`` rename.
 * ``_version_tuple`` / ``_compare_versions`` ordering semantics (guards
@@ -215,20 +216,25 @@ class TestVscodeOnlyCommandsDropped(_ServerTestBase):
     async def test_vscode_only_commands_dropped_unknown_command_errors(
         self,
     ) -> None:
-        """``pickFolder``/``sizeReport`` produce no error; an unknown
-        command produces exactly the ``Unknown command`` error broadcast.
+        """``notificationAction``/``sizeReport``/UDS ``openFile``
+        produce no error; an unknown command produces exactly the
+        ``Unknown command`` error broadcast.
 
         Commands on one connection are dispatched strictly in order, so
         any (erroneous) broadcast caused by the VS Code-only commands
         would arrive before the unknown-command error sentinel.
+        ``openFile`` is no longer in ``_VSCODE_ONLY_COMMANDS`` (the web
+        server implements it for WSS clients) but must still be a
+        silent defensive drop on the UDS transport.
         """
         reader, writer = await asyncio.open_unix_connection(
             str(self.uds_path), limit=16 * 1024 * 1024,
         )
         try:
             for cmd in (
-                {"type": "pickFolder"},
+                {"type": "notificationAction", "action": "openTab"},
                 {"type": "sizeReport", "width": 100, "height": 100},
+                {"type": "openFile", "path": "/tmp/nonexistent.txt"},
                 {"type": "unknownCmdLockdownXyz"},
             ):
                 writer.write(json.dumps(cmd).encode("utf-8") + b"\n")
@@ -250,8 +256,9 @@ class TestVscodeOnlyCommandsDropped(_ServerTestBase):
             )
             for msg in seen:
                 text = str(msg.get("text", ""))
-                self.assertNotIn("pickFolder", text)
+                self.assertNotIn("notificationAction", text)
                 self.assertNotIn("sizeReport", text)
+                self.assertNotIn("openFile", text)
         finally:
             writer.close()
             with contextlib.suppress(Exception):

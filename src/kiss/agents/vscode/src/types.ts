@@ -268,7 +268,6 @@ type ToWebviewMessageBody =
     }
   | {type: 'measureSize'}
   | {type: 'daemonStatus'; connected: boolean}
-  | {type: 'updateSetting'; key: string; value: unknown}
   | {
       type: 'openSubagentTab';
       tab_id?: string;

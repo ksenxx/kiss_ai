@@ -54,10 +54,18 @@ from kiss.agents.sorcar.cli_line_continuation import (
 )
 from kiss.agents.sorcar.cli_panel import (
     _ESC,
+    ASK_TITLE,
+    CSI_U_ENTER,
     CYAN,
     DIM,
     IDLE_TITLE,
+    KEYBOARD_PROTO_DISABLE,
+    KEYBOARD_PROTO_ENABLE,
+    MODIFY_OTHER_KEYS_ENTER,
     PROMPT_MARKER,
+    QUESTION_FMT,
+    QUEUED_FMT,
+    QUEUED_STATUS_FMT,
     RESET,
     STEER_TITLE,
     _term_size,
@@ -161,12 +169,27 @@ _PASTE_SEQ_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b.")
 # Order matters: longest multi-char sequences are listed before single
 # bytes so the prefix-startswith match in
 # :meth:`_InputBox.feed` cannot mistake a CSI prefix for a bare CR / LF.
+#
+# The CSI tables are derived from the canonical full-sequence tuples in
+# :mod:`kiss.agents.sorcar.cli_panel` (shared with the cli_prompt key
+# bindings) by dropping the leading ESC byte, so the two input paths
+# can never drift apart.
 _NEWLINE_AFTER_ESC: tuple[str, ...] = (
-    *(f"[27;{_m};13~" for _m in range(2, 17)),
-    *(f"[13;{_m}u" for _m in range(2, 17)),
+    *(seq[1:] for seq in MODIFY_OTHER_KEYS_ENTER),
+    *(seq[1:] for seq in CSI_U_ENTER),
     "\r",
     "\n",
 )
+
+
+# Navigation finals shared by the CSI (``ESC[``) and SS3 (``ESC O``)
+# escape-sequence branches of :meth:`_InputBox.feed`; both dispatch
+# through :meth:`_InputBox._nav_action` so the two encodings can never
+# drift apart.
+_NAV_FINALS: dict[str, str] = {
+    "A": "up", "B": "down", "C": "right", "D": "left",
+    "H": "home", "F": "end",
+}
 
 
 def _box_top_row(rows: int, box_h: int = _BOX_H) -> int:
@@ -539,7 +562,7 @@ class _InputBox:
             # which the CSI parser in :meth:`feed` swallows as an
             # unknown sequence).  See :meth:`stop` for the matching
             # disable sequences.
-            out.write(f"{_ESC}[>4;2m{_ESC}[>1u")
+            out.write(KEYBOARD_PROTO_ENABLE)
             # Keep the real cursor *visible*: it rests (blinking) in the
             # box body, mirroring the idle ``sorcar`` prompt's caret.
             out.write(f"{_ESC}[?25h")
@@ -586,7 +609,7 @@ class _InputBox:
             # * ``ESC[>4;0m`` — restore modifyOtherKeys to level 0.
             # * ``ESC[<u``    — pop one Kitty keyboard flag entry off
             #   the stack (matching the ``ESC[>1u`` push).
-            out.write(f"{_ESC}[>4;0m{_ESC}[<u")
+            out.write(KEYBOARD_PROTO_DISABLE)
             out.write(f"{_ESC}[r")  # reset scroll region to full screen
             # Erase the box's rows so the steering panel does not linger
             # once the task ends.  Otherwise the idle REPL prompt would
@@ -645,7 +668,7 @@ class _InputBox:
             # Re-opt into extended-keyboard protocols after resume —
             # the shell may have popped them off while we were
             # suspended.  Mirrors the enable sequences in :meth:`start`.
-            self._out.write(f"{_ESC}[>4;2m{_ESC}[>1u")
+            self._out.write(KEYBOARD_PROTO_ENABLE)
             # Force _draw_locked to re-emit the scroll region.
             self._rows = 0
             self._draw_locked()
@@ -1026,6 +1049,46 @@ class _InputBox:
         else:
             self._cursor_down_line()
 
+    def _nav_action(self, key: str) -> None:
+        """Apply one navigation key to the box (arrows / Home / End).
+
+        Shared by the CSI (``ESC[``) and SS3 (``ESC O``) branches of
+        :meth:`feed` so both encodings behave identically: Up/Down
+        navigate the in-place completion menu when it is open (and
+        otherwise browse the input history / move the caret between
+        buffer lines — see :meth:`_arrow_up` / :meth:`_arrow_down`),
+        Left/Right move the edit cursor, and Home/End jump to the
+        buffer's ends.
+
+        Args:
+            key: One of ``"up"``, ``"down"``, ``"left"``, ``"right"``,
+                ``"home"``, ``"end"`` (see :data:`_NAV_FINALS`).
+        """
+        if key == "up":
+            if self._menu_open:
+                self._menu_move(-1)
+            else:
+                self._arrow_up()
+        elif key == "down":
+            if self._menu_open:
+                self._menu_move(1)
+            else:
+                self._arrow_down()
+        elif key == "left":
+            with self.lock:
+                if self.cursor > 0:
+                    self.cursor -= 1
+        elif key == "right":
+            with self.lock:
+                if self.cursor < len(self.buf):
+                    self.cursor += 1
+        elif key == "home":
+            with self.lock:
+                self.cursor = 0
+        else:  # "end"
+            with self.lock:
+                self.cursor = len(self.buf)
+
     def _reset_completion_state(self) -> None:
         """Close the in-place completion menu and drop its state."""
         with self.lock:
@@ -1376,44 +1439,25 @@ class _InputBox:
                         break
                     final = text[j]
                     seq = text[i + 2 : j]
-                    if final == "A" and seq == "":  # Up arrow
-                        if self._menu_open:
-                            self._menu_move(-1)
-                        else:
-                            self._arrow_up()
-                        changed = True
-                    elif final == "B" and seq == "":  # Down arrow
-                        if self._menu_open:
-                            self._menu_move(1)
-                        else:
-                            self._arrow_down()
+                    # Arrow / Home / End dispatch is shared with the
+                    # SS3 branch below via :meth:`_nav_action`; the
+                    # tilde-terminated Home (``ESC[1~`` / ``ESC[7~``)
+                    # and End (``ESC[4~`` / ``ESC[8~``) variants map
+                    # onto the same actions.
+                    nav_key: str | None = None
+                    if seq == "":
+                        nav_key = _NAV_FINALS.get(final)
+                    elif final == "~" and seq in ("1", "7"):
+                        nav_key = "home"
+                    elif final == "~" and seq in ("4", "8"):
+                        nav_key = "end"
+                    if nav_key is not None:
+                        self._nav_action(nav_key)
                         changed = True
                     elif final == "Z" and seq == "":  # Shift+Tab
                         if self._menu_open:
                             self._menu_move(-1)
                             changed = True
-                    elif final == "D" and seq == "":  # Left arrow
-                        with self.lock:
-                            if self.cursor > 0:
-                                self.cursor -= 1
-                        changed = True
-                    elif final == "C" and seq == "":  # Right arrow
-                        with self.lock:
-                            if self.cursor < len(self.buf):
-                                self.cursor += 1
-                        changed = True
-                    elif (final == "H" and seq == "") or (
-                        final == "~" and seq in ("1", "7")
-                    ):  # Home (``ESC[H`` / ``ESC[1~`` / ``ESC[7~``)
-                        with self.lock:
-                            self.cursor = 0
-                        changed = True
-                    elif (final == "F" and seq == "") or (
-                        final == "~" and seq in ("4", "8")
-                    ):  # End (``ESC[F`` / ``ESC[4~`` / ``ESC[8~``)
-                        with self.lock:
-                            self.cursor = len(self.buf)
-                        changed = True
                     i = j + 1
                     continue
                 # SS3 sequences (``ESC O <final>``): arrow keys in
@@ -1428,35 +1472,11 @@ class _InputBox:
                         self._pending_esc = text[i:]
                         break
                     ss3 = text[i + 2]
-                    if ss3 == "A":  # Up arrow (application cursor mode)
-                        if self._menu_open:
-                            self._menu_move(-1)
-                        else:
-                            self._arrow_up()
-                        changed = True
-                    elif ss3 == "B":  # Down arrow
-                        if self._menu_open:
-                            self._menu_move(1)
-                        else:
-                            self._arrow_down()
-                        changed = True
-                    elif ss3 == "D":  # Left arrow
-                        with self.lock:
-                            if self.cursor > 0:
-                                self.cursor -= 1
-                        changed = True
-                    elif ss3 == "C":  # Right arrow
-                        with self.lock:
-                            if self.cursor < len(self.buf):
-                                self.cursor += 1
-                        changed = True
-                    elif ss3 == "H":  # Home
-                        with self.lock:
-                            self.cursor = 0
-                        changed = True
-                    elif ss3 == "F":  # End
-                        with self.lock:
-                            self.cursor = len(self.buf)
+                    # Same shared navigation dispatch as the CSI
+                    # branch above (see :meth:`_nav_action`).
+                    ss3_key = _NAV_FINALS.get(ss3)
+                    if ss3_key is not None:
+                        self._nav_action(ss3_key)
                         changed = True
                     i += 3
                     continue
@@ -1853,7 +1873,7 @@ class SteeringSession:
             The user's typed answer (possibly empty).
         """
         with self.lock:
-            sys.stdout.write(f"\n\x1b[33m? {question}\x1b[0m\n")
+            sys.stdout.write(QUESTION_FMT.format(question=question))
             sys.stdout.flush()
         # Dismiss any open in-place completion menu so the next Enter
         # in the question loop submits the user's answer instead of
@@ -1864,7 +1884,7 @@ class SteeringSession:
         # same lock so a redraw can never render a torn title (w2 F5).
         with self.lock:
             prev_title = self.box.title
-            self.box.title = " answer the question above, then Enter "
+            self.box.title = ASK_TITLE
         self.box.redraw()
         # Drop any stale answer left in the queue by the previous
         # question's submit/clear race: ``_on_submit`` can observe
@@ -1904,8 +1924,8 @@ class SteeringSession:
         with self.lock:
             # ``status`` is read by locked redraws; mutate it under
             # the same lock (w2 F5).
-            self.box.status = f" queued: {self._queued_count} "
-            sys.stdout.write(f"\x1b[2m▸ queued: {text}\x1b[0m\n")
+            self.box.status = QUEUED_STATUS_FMT.format(n=self._queued_count)
+            sys.stdout.write(QUEUED_FMT.format(text=text))
             sys.stdout.flush()
 
     def _on_abort(self) -> None:

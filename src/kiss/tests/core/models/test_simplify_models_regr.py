@@ -250,7 +250,7 @@ def test_get_max_context_length() -> None:
     name = next(n for n in MODEL_INFO if n.startswith("gpt-"))
     assert get_max_context_length(name) == MODEL_INFO[name].context_length
     assert get_max_context_length(f"openai/{name}") == MODEL_INFO[name].context_length
-    with pytest.raises(KeyError, match="not found in MODEL_INFO"):
+    with pytest.raises(KISSError, match="not found in MODEL_INFO"):
         get_max_context_length("no-such-model")
 
 

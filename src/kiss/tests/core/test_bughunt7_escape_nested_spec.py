@@ -19,7 +19,7 @@ violations existed for placeholders with *nested* format specs:
    ``"{a:{{b}}}"`` instead of round-tripping ``"{a:{b}}"``.
 """
 
-from kiss.core.utils import escape_invalid_template_field_names
+from kiss.agents.obsolete.gepa.template_utils import escape_invalid_template_field_names
 
 
 def test_valid_outer_invalid_nested_spec_field_formats_safely() -> None:

@@ -255,30 +255,6 @@ class TestStash:
         assert (repo / "fresh.txt").read_text() == "untracked\n"
 
 
-class TestChangedFileLists:
-    """C8: unstaged_files / staged_files report the right lists."""
-
-    def test_staged_and_unstaged_reported_separately(self, tmp_path: Path) -> None:
-        """One staged and one unstaged modification land in the right list."""
-        repo = _make_repo(tmp_path / "repo")
-        (repo / "tracked2.txt").write_text("v1\n")
-        _git("add", "tracked2.txt", cwd=repo)
-        _git("commit", "-m", "add tracked2", cwd=repo)
-
-        (repo / "tracked2.txt").write_text("v2 staged\n")
-        _git("add", "tracked2.txt", cwd=repo)
-        (repo / "README.md").write_text("# unstaged edit\n")
-
-        assert GitWorktreeOps.staged_files(repo) == ["tracked2.txt"]
-        assert GitWorktreeOps.unstaged_files(repo) == ["README.md"]
-
-    def test_clean_repo_returns_empty_lists(self, tmp_path: Path) -> None:
-        """Clean tree yields empty lists from both helpers."""
-        repo = _make_repo(tmp_path / "repo")
-        assert GitWorktreeOps.staged_files(repo) == []
-        assert GitWorktreeOps.unstaged_files(repo) == []
-
-
 class TestCleanupPartial:
     """C5: cleanup_partial removes worktree registration and branch."""
 
@@ -343,30 +319,36 @@ class TestSquashMergeRoundTrip:
 
 
 class TestBranchConfigRoundTrip:
-    """C3: save/load original-branch and baseline-commit config pairs."""
+    """C3: save original-branch and baseline-commit config pairs.
 
-    def test_original_branch_round_trip(self, tmp_path: Path) -> None:
-        """save_original_branch then load_original_branch returns the value."""
+    The dedicated ``load_*`` readers were removed as production-dead
+    API; persistence is verified by reading the git config directly.
+    """
+
+    def test_original_branch_persisted_to_config(self, tmp_path: Path) -> None:
+        """save_original_branch stores ``branch.<b>.kiss-original``."""
         repo = _make_repo(tmp_path / "repo")
         branch = "kiss/wt-cfg"
         _git("branch", branch, cwd=repo)
         assert GitWorktreeOps.save_original_branch(repo, branch, "main") is True
-        assert GitWorktreeOps.load_original_branch(repo, branch) == "main"
+        stored = _git("config", f"branch.{branch}.kiss-original", cwd=repo)
+        assert stored.stdout.strip() == "main"
 
     def test_baseline_commit_save_succeeds(self, tmp_path: Path) -> None:
-        """save_baseline_commit returns True on success."""
+        """save_baseline_commit returns True and persists the SHA."""
         repo = _make_repo(tmp_path / "repo")
         branch = "kiss/wt-cfg2"
         _git("branch", branch, cwd=repo)
         assert GitWorktreeOps.save_baseline_commit(repo, branch, "deadbeef") is True
+        stored = _git("config", f"branch.{branch}.kiss-baseline", cwd=repo)
+        assert stored.stdout.strip() == "deadbeef"
 
-    def test_load_returns_none_when_unset(self, tmp_path: Path) -> None:
-        """``load_original_branch`` returns None for branches without stored config."""
+    def test_config_unset_for_untouched_branch(self, tmp_path: Path) -> None:
+        """Branches without stored config have no ``kiss-original`` key."""
         repo = _make_repo(tmp_path / "repo")
         branch = "kiss/wt-bare"
         _git("branch", branch, cwd=repo)
-        assert GitWorktreeOps.load_original_branch(repo, branch) is None
-        assert GitWorktreeOps.load_original_branch(repo, "no/such") is None
+        assert _git("config", f"branch.{branch}.kiss-original", cwd=repo).returncode != 0
 
 
 class TestSquashMergeFromBaseline:

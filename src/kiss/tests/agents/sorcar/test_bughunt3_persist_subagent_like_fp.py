@@ -4,7 +4,7 @@
 # add your name here
 """Bug-hunt 3: ``_HISTORY_NOT_SUBAGENT`` LIKE filter false positives.
 
-``_load_history``, ``_search_history`` and ``_prefix_match_task``
+``_load_history``, ``_search_history`` and ``_prefix_match_tasks``
 filter sub-agent rows with the raw SQL
 substring predicate ``extra NOT LIKE '%"subagent"%'`` — with NO JSON
 re-validation.  A regular (parent) task whose ``extra`` JSON merely
@@ -34,7 +34,7 @@ from kiss.agents.sorcar.persistence import (
     _add_task,
     _load_chat_context,
     _load_history,
-    _prefix_match_task,
+    _prefix_match_tasks,
     _search_history,
 )
 
@@ -93,7 +93,7 @@ class TestSubagentLikeFalsePositive(_TempDbTestBase):
         found = _search_history("review")
         assert [h["id"] for h in found] == [task_id]
 
-        assert _prefix_match_task("review sub") == task_text
+        assert _prefix_match_tasks("review sub", limit=1) == [task_text]
 
     def test_true_subagent_rows_remain_filtered(self) -> None:
         parent_id, chat_id = _add_task("parent task")
@@ -106,7 +106,7 @@ class TestSubagentLikeFalsePositive(_TempDbTestBase):
         hist = _load_history()
         assert [h["id"] for h in hist] == [parent_id]
         assert _search_history("child") == []
-        assert _prefix_match_task("child") == ""
+        assert _prefix_match_tasks("child", limit=1) == []
         # Chat context also filters genuine sub-agent rows.
         ctx = _load_chat_context(chat_id)
         assert [e["task"] for e in ctx] == ["parent task"]
