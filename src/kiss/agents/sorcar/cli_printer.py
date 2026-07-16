@@ -12,7 +12,7 @@ later opens the session in the chat webview — every intermediate
 ``tool_call``, ``tool_result``, ``text_delta`` etc. is silently lost.
 
 :class:`RecordingConsolePrinter` extends
-:class:`~kiss.agents.vscode.json_printer.JsonPrinter` (which already
+:class:`~kiss.server.json_printer.JsonPrinter` (which already
 records every display event into the task-keyed recording and queues
 it to the ``events`` table via ``_queue_chat_event``) and forwards
 each :meth:`print`, :meth:`token_callback`, :meth:`thinking_callback`,
@@ -30,8 +30,8 @@ from typing import Any
 
 from kiss.agents.sorcar import cli_daemon_bridge, cli_talk
 from kiss.agents.sorcar.persistence import is_task_history_id
-from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.core.print_to_console import ConsolePrinter
+from kiss.server.json_printer import JsonPrinter
 
 # Task ids that have announced ``cliTaskStart`` to the daemon but not
 # yet ``cliTaskEnd``.  A module-level STRONG registry (w3 F4): the

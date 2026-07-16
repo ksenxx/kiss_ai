@@ -2832,7 +2832,7 @@ def _load_last_model() -> str:
     in the SQLite ``model_usage`` table, which now tracks only per-model
     usage counts.
     """
-    from kiss.agents.vscode.vscode_config import load_config
+    from kiss.server.vscode_config import load_config
 
     return str(load_config().get("last_model", "") or "")
 
@@ -2852,7 +2852,7 @@ def _save_last_model(model: str) -> None:
     Args:
         model: The model name to save as the last-selected model.
     """
-    from kiss.agents.vscode.vscode_config import save_config
+    from kiss.server.vscode_config import save_config
 
     save_config({"last_model": model})
 

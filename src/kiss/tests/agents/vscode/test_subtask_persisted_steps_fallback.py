@@ -31,11 +31,11 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-import kiss.agents.vscode.server as _server_module
+import kiss.server.server as _server_module
 from kiss.agents.sorcar.persistence import _add_task, _load_history
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.agents.vscode.server import VSCodeServer
 from kiss.core.models.model_info import get_available_models
+from kiss.server.server import VSCodeServer
 
 _TASK_PROMPT = "steps-fallback persisted metrics task"
 

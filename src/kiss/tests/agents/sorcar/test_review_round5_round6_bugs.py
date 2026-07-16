@@ -240,7 +240,7 @@ def test_live_task_id_returns_str_or_none() -> None:
     flagged that an int slipping through breaks
     ``set[str]`` membership comparisons downstream.
     """
-    src = Path("src/kiss/agents/vscode/server.py").read_text()
+    src = Path("src/kiss/server/server.py").read_text()
     # Function signature
     assert "_live_task_id" in src
     # Strict-typed return contract.

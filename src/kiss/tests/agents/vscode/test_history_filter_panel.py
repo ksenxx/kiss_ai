@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import re
 import unittest
-from pathlib import Path
 
 from kiss.agents.vscode import web_server
 
@@ -81,7 +80,7 @@ class TestHistoryFilterPanel(unittest.TestCase):
     def test_css_styles_filter_bar(self) -> None:
         """Stylesheet has rules for the new filter bar selectors."""
         css = (
-            Path(web_server.__file__).parent / "media" / "main.css"
+            web_server.MEDIA_DIR / "main.css"
         ).read_text(encoding="utf-8")
         for selector in (
             ".history-filter-bar",
@@ -95,7 +94,7 @@ class TestHistoryFilterPanel(unittest.TestCase):
         """``main.js`` defines the visibility helper and binds change
         listeners on every filter control."""
         js = (
-            Path(web_server.__file__).parent / "media" / "main.js"
+            web_server.MEDIA_DIR / "main.js"
         ).read_text(encoding="utf-8")
         self.assertIn("function applyHistoryFilterVisibility", js)
         # The renderHistory pass stamps each row with its category

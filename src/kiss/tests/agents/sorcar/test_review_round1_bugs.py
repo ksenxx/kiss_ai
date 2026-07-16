@@ -282,7 +282,7 @@ def test_vs_bug1_replay_uses_str_parent_task_id() -> None:
     from kiss.agents.vscode.server import _coerce_id
 
     src = Path(
-        "src/kiss/agents/vscode/server.py"
+        "src/kiss/server/server.py"
     ).read_text()
     assert (
         'parent_tid = _coerce_id(subagent_info.get("parent_task_id"))' in src
@@ -308,7 +308,7 @@ def test_vs_bug2_shutdown_helper_accepts_uuid_strings() -> None:
     suite's daemon-shutdown tests.
     """
     src = Path(
-        "src/kiss/agents/vscode/web_server.py"
+        "src/kiss/server/web_server.py"
     ).read_text()
     assert "active_task_history_ids: set[int]" not in src
     assert "active_task_history_ids: set[str]" in src
@@ -332,7 +332,7 @@ def test_vs_bug3_commands_reject_non_string_taskid() -> None:
     from kiss.agents.vscode.commands import _opt_str
 
     src = Path(
-        "src/kiss/agents/vscode/commands.py"
+        "src/kiss/server/commands.py"
     ).read_text()
     occurrences = src.count('task_id = _opt_str(cmd.get("taskId"))')
     assert occurrences == 4, (

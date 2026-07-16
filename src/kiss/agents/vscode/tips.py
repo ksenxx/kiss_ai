@@ -2,57 +2,22 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Load the fresh-install tips shown by the chat webview.
+"""Backward-compatibility alias — module moved to :mod:`kiss.server.tips`.
 
-Python counterpart to ``getTips`` in ``SorcarTab.ts``: parses the
-bundled ``src/kiss/TIPS.md`` into a list of markdown tip strings, one
-per ``# Tip`` section.  The remote webapp builder
-(``web_server._build_html``) injects the list as ``window.__TIPS__``
-so the shared ``media/chat.html`` template never contains an
-unsubstituted ``{{TIPS_JSON}}`` placeholder.
-
-The file path can be overridden via the ``KISS_TIPS_PATH`` environment
-variable, which the test suite uses to pin deterministic tips.
+Importing this module yields the real :mod:`kiss.server.tips`
+module object (via a ``sys.modules`` alias), so attribute access and
+monkeypatching through either import path affect the same module.
 """
 
-from __future__ import annotations
+import sys
+from typing import Any
 
-import os
-import re
-from pathlib import Path
+from kiss.server import tips as _mod
+from kiss.server.tips import *  # noqa: F403 — precise types for static analysis
 
-#: Every line starting with ``# Tip`` begins a new tip section.
-_TIP_DELIMITER = re.compile(r"^# Tip.*$", re.MULTILINE)
-
-
-def _bundled_tips_path() -> Path:
-    """Return the path to the bundled ``src/kiss/TIPS.md``.
-
-    Honours the ``KISS_TIPS_PATH`` env override (used by the test
-    suite), falling back to the file shipped inside the package.
-    """
-    override = os.environ.get("KISS_TIPS_PATH")
-    if override:
-        return Path(override)
-    # ``__file__`` is ``…/kiss/agents/vscode/tips.py``; the bundled
-    # TIPS.md lives at ``…/kiss/TIPS.md`` (two ``parent``s up from
-    # ``vscode/``).
-    return Path(__file__).parent.parent.parent / "TIPS.md"
+sys.modules[__name__] = _mod
 
 
-def read_tips() -> list[str]:
-    """Return one markdown string per ``# Tip`` section in ``TIPS.md``.
-
-    Every line starting with ``# Tip`` begins a new tip; the tip body
-    is the markdown text up to the next such line (or EOF), trimmed.
-    Text before the first ``# Tip`` line and tips with empty bodies
-    are skipped.  Returns ``[]`` when the file is missing or
-    unreadable (graceful degradation — the chat webview simply shows
-    no tips window).
-    """
-    try:
-        text = _bundled_tips_path().read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return []
-    sections = _TIP_DELIMITER.split(text)
-    return [body.strip() for body in sections[1:] if body.strip()]
+def __getattr__(name: str) -> Any:  # pragma: no cover — static-analysis aid
+    """Delegate attribute lookup to the relocated module (PEP 562)."""
+    return getattr(_mod, name)

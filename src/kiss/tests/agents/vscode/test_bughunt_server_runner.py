@@ -41,11 +41,11 @@ from pathlib import Path
 from typing import Any, cast
 
 import kiss.agents.sorcar.persistence as _persistence
-import kiss.agents.vscode.merge_flow as _merge_flow_module
-import kiss.agents.vscode.server as _server_module
+import kiss.server.merge_flow as _merge_flow_module
+import kiss.server.server as _server_module
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.server import VSCodeServer
 
 
 def _run_git(cwd: str, *args: str) -> subprocess.CompletedProcess[str]:

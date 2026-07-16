@@ -169,7 +169,7 @@ CONTROL_IDS = [
 
 
 def _build_html() -> str:
-    from kiss.agents.vscode.web_server import _build_html
+    from kiss.server.web_server import _build_html
 
     return _build_html()
 
@@ -785,8 +785,8 @@ def test_server_serves_codex_stylesheet_over_http(
     its production lifecycle.  Thus the test covers the actual
     ``_process_request`` route rather than a look-alike test server.
     """
-    from kiss.agents.vscode.web_server import MEDIA_DIR as SRV_MEDIA
-    from kiss.agents.vscode.web_server import (
+    from kiss.server.web_server import MEDIA_DIR as SRV_MEDIA
+    from kiss.server.web_server import (
         RemoteAccessServer,
         _generate_self_signed_cert,
     )
@@ -885,7 +885,7 @@ def test_media_url_cache_busts_codex_css() -> None:
     """_media_url must hash remote-codex.css for cache busting."""
     import hashlib
 
-    from kiss.agents.vscode.web_server import (
+    from kiss.server.web_server import (
         _MEDIA_VERSION_CACHE,
         _media_url,
     )
