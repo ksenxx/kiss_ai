@@ -34,8 +34,8 @@ from __future__ import annotations
 import io
 import unittest
 
-from kiss.agents.sorcar.cli_client import _EventDispatcher
 from kiss.core.print_to_console import ConsolePrinter
+from kiss.ui.cli.cli_client import _EventDispatcher
 
 
 class TestEventDispatcherFiltersByTabId(unittest.TestCase):

@@ -44,8 +44,8 @@ from typing import Any
 from unittest import IsolatedAsyncioTestCase, TestCase
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar.cli_repl import CliCompleter
 from kiss.server.web_server import RemoteAccessServer
+from kiss.ui.cli.cli_repl import CliCompleter
 
 
 def _redirect_persistence(tmpdir: str) -> tuple[Any, Any, Any]:

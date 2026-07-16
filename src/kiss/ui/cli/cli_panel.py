@@ -4,8 +4,8 @@
 # add your name here
 """Shared rounded-border input panel for the ``sorcar`` command line.
 
-The idle REPL prompt (:mod:`kiss.agents.sorcar.cli_repl`) and the
-anchored steering box (:mod:`kiss.agents.sorcar.cli_steering`) used to
+The idle REPL prompt (:mod:`kiss.ui.cli.cli_repl`) and the
+anchored steering box (:mod:`kiss.ui.cli.cli_steering`) used to
 draw two visually different input dialogs — the idle prompt was framed
 by plain horizontal rules while the steering box used a rounded border.
 Both now render the *same* panel through the helpers in this module, so
@@ -39,8 +39,8 @@ YELLOW = f"{_ESC}[33m"
 # Cursor marker shown before the editable text inside the panel body.
 PROMPT_MARKER = "› "
 # Extended-keyboard-protocol enable / disable pairs shared by the idle
-# prompt (:mod:`kiss.agents.sorcar.cli_prompt`) and the mid-task
-# steering box (:mod:`kiss.agents.sorcar.cli_steering`) so both input
+# prompt (:mod:`kiss.ui.cli.cli_prompt`) and the mid-task
+# steering box (:mod:`kiss.ui.cli.cli_steering`) so both input
 # paths behave identically on every terminal:
 #
 # * ``ESC[>4;2m`` — xterm ``modifyOtherKeys`` level 2.  Makes
@@ -82,8 +82,8 @@ STEER_TITLE = (
 )
 # Shared user-visible literals for the ``ask_user_question`` flow and
 # the queued-instruction feedback, used by both the in-process steering
-# session (:mod:`kiss.agents.sorcar.cli_steering`) and the daemon
-# client (:mod:`kiss.agents.sorcar.cli_client`) so the two modes can
+# session (:mod:`kiss.ui.cli.cli_steering`) and the daemon
+# client (:mod:`kiss.ui.cli.cli_client`) so the two modes can
 # never diverge in wording or styling.
 ASK_TITLE = " answer the question above, then Enter "
 QUESTION_FMT = f"\n{YELLOW}? {{question}}{RESET}\n"

@@ -67,7 +67,7 @@ os.environ.pop("COLUMNS", None)
 os.environ.pop("LINES", None)
 os.environ["LC_ALL"] = "en_US.UTF-8"
 import sys
-from kiss.agents.sorcar.cli_repl import _PROMPT, _read_line
+from kiss.ui.cli.cli_repl import _PROMPT, _read_line
 
 line = _read_line(_PROMPT)
 sys.stdout.write("\\nGOT[" + repr(line) + "]\\n")

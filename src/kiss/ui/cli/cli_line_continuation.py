@@ -11,8 +11,8 @@ byte-parsing trick can rescue multi-line input on that terminal.
 
 To provide a universal multi-line entry mechanism that works on every
 terminal (including Terminal.app), the interactive input areas
-(:mod:`~kiss.agents.sorcar.cli_prompt` and
-:mod:`~kiss.agents.sorcar.cli_steering`) treat a trailing backslash as
+(:mod:`~kiss.ui.cli.cli_prompt` and
+:mod:`~kiss.ui.cli.cli_steering`) treat a trailing backslash as
 a line-continuation marker — the same convention shells (bash, zsh,
 fish) use.  When the buffer to be submitted ends with an unescaped
 ``\\``, pressing Enter inserts a newline into the buffer instead of

@@ -11,19 +11,19 @@ previously duplicated code paths:
   daemon's ghost-text completion
   (:meth:`~kiss.server.autocomplete._AutocompleteMixin
   ._active_file_identifier_matches`) and the CLI completer
-  (:meth:`~kiss.agents.sorcar.cli_repl.CliCompleter
+  (:meth:`~kiss.ui.cli.cli_repl.CliCompleter
   ._active_file_suffix`);
 * the ``/help`` body — single-sourced in
-  :func:`~kiss.agents.sorcar.cli_repl.build_help_text` and used by
+  :func:`~kiss.ui.cli.cli_repl.build_help_text` and used by
   both the standalone REPL and the daemon's ``cliInfo`` reply;
 * the model-picker ordering rule — single-sourced in
   :func:`~kiss.server.autocomplete
   .ranked_function_calling_models` and used by both the daemon's
   ``getModels`` reply and the CLI's model completion;
 * the backslash line-continuation read loop — single-sourced in
-  :func:`~kiss.agents.sorcar.cli_line_continuation.read_continuations`;
+  :func:`~kiss.ui.cli.cli_line_continuation.read_continuations`;
 * the completion dispatch chain — single-sourced in
-  :meth:`~kiss.agents.sorcar.cli_repl.CliCompleter.completion_branch`
+  :meth:`~kiss.ui.cli.cli_repl.CliCompleter.completion_branch`
   and consumed by both the readline menu and the prompt_toolkit
   dropdown.
 
@@ -43,15 +43,6 @@ from prompt_toolkit.document import Document
 
 import kiss.agents.sorcar.persistence as th
 import kiss.server.vscode_config as vc
-from kiss.agents.sorcar.cli_line_continuation import read_continuations
-from kiss.agents.sorcar.cli_prompt import PtkCompleter
-from kiss.agents.sorcar.cli_repl import (
-    SLASH_COMMANDS,
-    CliCompleter,
-    _print_help,
-    build_help_text,
-    picker_ordered_models,
-)
 from kiss.server.autocomplete import (
     _AutocompleteMixin,
     identifier_prefix_matches,
@@ -60,6 +51,15 @@ from kiss.server.autocomplete import (
     trailing_identifier,
 )
 from kiss.server.helpers import clip_autocomplete_suggestion
+from kiss.ui.cli.cli_line_continuation import read_continuations
+from kiss.ui.cli.cli_prompt import PtkCompleter
+from kiss.ui.cli.cli_repl import (
+    SLASH_COMMANDS,
+    CliCompleter,
+    _print_help,
+    build_help_text,
+    picker_ordered_models,
+)
 
 
 @pytest.fixture

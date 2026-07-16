@@ -35,9 +35,9 @@ from typing import Any
 
 import pytest
 
-from kiss.agents.sorcar import cli_voice
-from kiss.agents.sorcar.cli_steering import AnchoredRepl
 from kiss.server.voice_wake import speaker_prefixed_text
+from kiss.ui.cli import cli_voice
+from kiss.ui.cli.cli_steering import AnchoredRepl
 
 
 def _speech_line(
