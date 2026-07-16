@@ -143,15 +143,10 @@ class TestGeminiModel:
     def test_get_embedding(self):
         m = model("gemini-3-flash-preview")
         m.initialize("test")
-        try:
-            embedding = m.get_embedding("Hello world", embedding_model="models/text-embedding-005")
-            assert isinstance(embedding, list)
-            assert len(embedding) > 0
-            assert isinstance(embedding[0], float)
-        except KISSError as e:
-            if "404" in str(e) or "NOT_FOUND" in str(e):
-                pytest.skip(f"Embedding model not available: {e}")
-            raise
+        embedding = m.get_embedding("Hello world")
+        assert isinstance(embedding, list)
+        assert len(embedding) > 0
+        assert isinstance(embedding[0], float)
 
 
 @requires_openai_api_key

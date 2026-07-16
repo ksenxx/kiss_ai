@@ -683,7 +683,7 @@ class GeminiModel(Model):
 
         Args:
             text: The text to generate an embedding for.
-            embedding_model: Optional model name. Defaults to "text-embedding-004".
+            embedding_model: Optional model name. Defaults to "gemini-embedding-001".
 
         Returns:
             list[float]: The embedding vector as a list of floats.
@@ -691,7 +691,7 @@ class GeminiModel(Model):
         Raises:
             KISSError: If embedding generation fails.
         """
-        model_to_use = embedding_model or "text-embedding-004"
+        model_to_use = embedding_model or "gemini-embedding-001"
         try:
             response = self.client.models.embed_content(model=model_to_use, contents=text)
             return list(response.embeddings[0].values)
