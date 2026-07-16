@@ -40,7 +40,7 @@ import threading
 import unittest
 
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.server import VSCodeServer
 
 
 def _register_state(tab_id: str) -> _RunningAgentState:

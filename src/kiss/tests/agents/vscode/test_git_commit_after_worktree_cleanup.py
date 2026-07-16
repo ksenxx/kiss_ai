@@ -41,7 +41,7 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.server import VSCodeServer
 
 
 def _run_git(cwd: str, *args: str) -> subprocess.CompletedProcess[str]:

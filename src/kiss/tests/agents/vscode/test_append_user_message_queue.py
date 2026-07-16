@@ -32,7 +32,7 @@ from typing import Any
 
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.server import VSCodeServer
 
 
 def _clear_registry() -> None:
@@ -155,7 +155,7 @@ class TestAppendUserMessageHandler:
 
     def test_handler_registered_in_dispatch_table(self) -> None:
         """``appendUserMessage`` must be wired into ``_HANDLERS``."""
-        from kiss.agents.vscode.commands import _CommandsMixin
+        from kiss.server.commands import _CommandsMixin
 
         assert "appendUserMessage" in _CommandsMixin._HANDLERS
         handler = _CommandsMixin._HANDLERS["appendUserMessage"]

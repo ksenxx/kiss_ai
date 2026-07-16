@@ -14,7 +14,7 @@ page capture the utterance and ship it as ``{"type":
 "voiceTranscribe", "audio": <base64 16kHz mono s16le PCM>}`` over the
 WebSocket, and adds a server-side handler that translates the audio
 with the same KISS transcription agent the local listener uses
-(:func:`kiss.agents.vscode.voice_wake.transcribe_pcm`) and replies
+(:func:`kiss.server.voice_wake.transcribe_pcm`) and replies
 with ``{"type": "voiceSpeech", "text": ..., "speaker": ...,
 "language": ...}`` — ``language`` being the agent-reported tag of the
 spoken language (``null`` when unknown).
@@ -48,8 +48,8 @@ from unittest import IsolatedAsyncioTestCase
 from websockets.asyncio.client import ClientConnection, connect
 
 import kiss.agents.sorcar.persistence as th
-import kiss.agents.vscode.vscode_config as vc
-from kiss.agents.vscode.web_server import (
+import kiss.server.vscode_config as vc
+from kiss.server.web_server import (
     RemoteAccessServer,
     _generate_self_signed_cert,
 )

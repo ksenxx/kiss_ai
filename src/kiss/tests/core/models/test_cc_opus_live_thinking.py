@@ -17,8 +17,8 @@ import shutil
 
 import pytest
 
-from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.core.models.claude_code_model import ClaudeCodeModel
+from kiss.server.json_printer import JsonPrinter
 
 
 @pytest.mark.skipif(

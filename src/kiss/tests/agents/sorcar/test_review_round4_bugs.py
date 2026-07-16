@@ -180,7 +180,7 @@ def test_chat_sorcar_agent_has_per_instance_task_id_lock() -> None:
 def test_vscode_server_source_accepts_int_rebound_task_id() -> None:
     from pathlib import Path
 
-    from kiss.agents.vscode.server import _coerce_id
+    from kiss.server.server import _coerce_id
 
     src = Path("src/kiss/server/server.py").read_text()
     # The fixed code path must coerce int -> str rather than dropping
@@ -202,7 +202,7 @@ def test_vscode_server_source_accepts_int_rebound_task_id() -> None:
 def test_vscode_server_source_accepts_int_entry_id() -> None:
     from pathlib import Path
 
-    from kiss.agents.vscode.server import _coerce_id
+    from kiss.server.server import _coerce_id
 
     src = Path("src/kiss/server/server.py").read_text()
     assert 'entry_id = _coerce_id(entry.get("id"))' in src, (

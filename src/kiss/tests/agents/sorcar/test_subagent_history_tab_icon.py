@@ -37,7 +37,7 @@ from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.server import VSCodeServer
 
 _MAIN_JS = (
     Path(__file__).resolve().parents[4]

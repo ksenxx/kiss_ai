@@ -50,10 +50,10 @@ from kiss.agents.sorcar import persistence
 from kiss.agents.sorcar.persistence import _add_task
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-from kiss.agents.vscode.json_printer import JsonPrinter
-from kiss.agents.vscode.merge_flow import _MergeFlowMixin
-from kiss.agents.vscode.server import VSCodeServer
 from kiss.core.models.model_info import get_available_models
+from kiss.server.json_printer import JsonPrinter
+from kiss.server.merge_flow import _MergeFlowMixin
+from kiss.server.server import VSCodeServer
 
 
 def _run_git(repo: Path, *args: str) -> None:
@@ -533,7 +533,7 @@ def test_b3_racing_save_config_cannot_desync_live_and_persisted_work_dir(
     propagation, so B is parked at the lock and the final state is
     consistent everywhere.
     """
-    from kiss.agents.vscode.vscode_config import load_config
+    from kiss.server.vscode_config import load_config
 
     printer = _GatedWorkDirPrinter()
     server = VSCodeServer(printer=printer)

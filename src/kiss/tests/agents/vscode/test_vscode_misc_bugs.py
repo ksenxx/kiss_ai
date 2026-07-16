@@ -42,9 +42,9 @@ from typing import Any
 
 from kiss.agents.sorcar import persistence as th
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-from kiss.agents.vscode.diff_merge import _scan_files, _write_base_copy
-from kiss.agents.vscode.server import VSCodeServer
 from kiss.core.models.model_info import get_available_models
+from kiss.server.diff_merge import _scan_files, _write_base_copy
+from kiss.server.server import VSCodeServer
 
 
 class TestGitignoreRootAnchoredEntry(unittest.TestCase):

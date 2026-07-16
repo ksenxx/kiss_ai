@@ -31,7 +31,7 @@ from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
 def _make_server() -> Any:
     os.environ.setdefault("KISS_WORKDIR", "/tmp")
-    from kiss.agents.vscode.server import VSCodeServer
+    from kiss.server.server import VSCodeServer
 
     return VSCodeServer()
 

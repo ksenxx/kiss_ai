@@ -43,7 +43,7 @@ class TestConfigPersistence(unittest.TestCase):
     """custom_headers is persisted in config.json."""
 
     def setUp(self) -> None:
-        import kiss.agents.vscode.vscode_config as vc
+        import kiss.server.vscode_config as vc
 
         self._orig_dir = vc.CONFIG_DIR
         self._orig_path = vc.CONFIG_PATH
@@ -52,7 +52,7 @@ class TestConfigPersistence(unittest.TestCase):
         vc.CONFIG_PATH = Path(self._tmpdir) / "config.json"
 
     def tearDown(self) -> None:
-        import kiss.agents.vscode.vscode_config as vc
+        import kiss.server.vscode_config as vc
 
         vc.CONFIG_DIR = self._orig_dir
         vc.CONFIG_PATH = self._orig_path
@@ -61,25 +61,25 @@ class TestConfigPersistence(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_custom_headers_in_defaults(self) -> None:
-        from kiss.agents.vscode.vscode_config import DEFAULTS
+        from kiss.server.vscode_config import DEFAULTS
 
         assert "custom_headers" in DEFAULTS
 
     def test_save_and_load_custom_headers(self) -> None:
-        from kiss.agents.vscode.vscode_config import load_config, save_config
+        from kiss.server.vscode_config import load_config, save_config
 
         save_config({"custom_headers": "X-Custom:value1\nAuthorization:Bearer tok"})
         cfg = load_config()
         assert cfg["custom_headers"] == "X-Custom:value1\nAuthorization:Bearer tok"
 
     def test_empty_headers_by_default(self) -> None:
-        from kiss.agents.vscode.vscode_config import load_config
+        from kiss.server.vscode_config import load_config
 
         cfg = load_config()
         assert cfg["custom_headers"] == ""
 
     def test_preserves_other_keys(self) -> None:
-        from kiss.agents.vscode.vscode_config import load_config, save_config
+        from kiss.server.vscode_config import load_config, save_config
 
         save_config({"custom_headers": "X-Foo:bar", "max_budget": 200})
         save_config({"custom_headers": "X-Baz:qux"})
@@ -97,7 +97,7 @@ class TestCustomModelEntryIncludesHeaders(unittest.TestCase):
     """get_custom_model_entry includes extra_headers from custom_headers config."""
 
     def test_no_headers_when_empty(self) -> None:
-        from kiss.agents.vscode.vscode_config import get_custom_model_entry
+        from kiss.server.vscode_config import get_custom_model_entry
 
         entry = get_custom_model_entry({
             "custom_endpoint": "http://localhost:8080/v1",
@@ -107,7 +107,7 @@ class TestCustomModelEntryIncludesHeaders(unittest.TestCase):
         assert "extra_headers" not in entry or entry.get("extra_headers") == {}
 
     def test_headers_parsed_into_dict(self) -> None:
-        from kiss.agents.vscode.vscode_config import get_custom_model_entry
+        from kiss.server.vscode_config import get_custom_model_entry
 
         entry = get_custom_model_entry({
             "custom_endpoint": "http://localhost:8080/v1",
@@ -120,7 +120,7 @@ class TestCustomModelEntryIncludesHeaders(unittest.TestCase):
         }
 
     def test_no_headers_when_no_endpoint(self) -> None:
-        from kiss.agents.vscode.vscode_config import get_custom_model_entry
+        from kiss.server.vscode_config import get_custom_model_entry
 
         entry = get_custom_model_entry({
             "custom_endpoint": "",
@@ -129,7 +129,7 @@ class TestCustomModelEntryIncludesHeaders(unittest.TestCase):
         assert entry is None
 
     def test_malformed_header_lines_skipped(self) -> None:
-        from kiss.agents.vscode.vscode_config import get_custom_model_entry
+        from kiss.server.vscode_config import get_custom_model_entry
 
         entry = get_custom_model_entry({
             "custom_endpoint": "http://localhost:8080/v1",
@@ -211,7 +211,7 @@ class TestCmdSaveConfigHandlesHeaders(unittest.TestCase):
     """_cmd_save_config persists custom_headers and they appear in configData."""
 
     def setUp(self) -> None:
-        import kiss.agents.vscode.vscode_config as vc
+        import kiss.server.vscode_config as vc
         from kiss.core import config as config_module
 
         self._orig_dir = vc.CONFIG_DIR
@@ -228,7 +228,7 @@ class TestCmdSaveConfigHandlesHeaders(unittest.TestCase):
         config_module.DEFAULT_CONFIG = config_module.Config()
 
     def tearDown(self) -> None:
-        import kiss.agents.vscode.vscode_config as vc
+        import kiss.server.vscode_config as vc
         from kiss.core import config as config_module
 
         config_module.DEFAULT_CONFIG = self._orig_default_config
@@ -239,7 +239,7 @@ class TestCmdSaveConfigHandlesHeaders(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_save_config_persists_headers(self) -> None:
-        from kiss.agents.vscode.commands import _CommandsMixin
+        from kiss.server.commands import _CommandsMixin
 
         class FakePrinter:
             def __init__(self) -> None:
@@ -268,7 +268,7 @@ class TestCmdSaveConfigHandlesHeaders(unittest.TestCase):
             "apiKeys": {},
         })
 
-        from kiss.agents.vscode.vscode_config import load_config
+        from kiss.server.vscode_config import load_config
 
         cfg = load_config()
         assert cfg["custom_headers"] == "X-Test:123\nAuth:Bearer abc"

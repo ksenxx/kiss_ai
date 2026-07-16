@@ -31,14 +31,14 @@ from __future__ import annotations
 import math
 import unittest
 
-from kiss.agents.vscode import vscode_config
-from kiss.agents.vscode.vscode_config import (
+from kiss.core import config as config_module
+from kiss.server import vscode_config
+from kiss.server.vscode_config import (
     DEFAULTS,
     apply_config_to_env,
     load_config,
     sanitize_config,
 )
-from kiss.core import config as config_module
 
 
 class TestNonFiniteBudgetRejected(unittest.TestCase):

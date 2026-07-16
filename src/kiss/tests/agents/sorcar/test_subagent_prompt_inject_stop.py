@@ -44,9 +44,9 @@ import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent, _SubagentStopEvent
 from kiss.agents.sorcar.persistence import _add_task
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.agents.vscode.server import VSCodeServer
-from kiss.agents.vscode.web_server import WebPrinter
 from kiss.core.models.anthropic_model import AnthropicModel
+from kiss.server.server import VSCodeServer
+from kiss.server.web_server import WebPrinter
 
 
 @pytest.fixture()

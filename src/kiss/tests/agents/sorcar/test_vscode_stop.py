@@ -33,7 +33,7 @@ class TestVSCodeServerStop(unittest.TestCase):
     def test_stop_command_interrupts_running_task(self) -> None:
         """Dispatch a run command, then a stop command, and verify the task stops."""
         from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-        from kiss.agents.vscode.server import VSCodeServer
+        from kiss.server.server import VSCodeServer
 
         kiss_root = os.path.dirname(os.path.dirname(os.path.dirname(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -138,7 +138,7 @@ class TestForceStopMechanism(unittest.TestCase):
 
     def test_status_running_false_after_force_stop(self) -> None:
         """After force-stop, the finally block still broadcasts status:running:false."""
-        from kiss.agents.vscode.server import VSCodeServer
+        from kiss.server.server import VSCodeServer
 
         server = VSCodeServer()
         events: list[dict] = []

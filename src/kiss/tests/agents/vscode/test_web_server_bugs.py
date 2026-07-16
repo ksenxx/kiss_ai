@@ -32,7 +32,7 @@ from typing import Any
 from unittest import IsolatedAsyncioTestCase, TestCase
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.vscode.web_server import (
+from kiss.server.web_server import (
     RemoteAccessServer,
     _generate_self_signed_cert,
     _translate_webview_command,

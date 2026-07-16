@@ -34,7 +34,7 @@ from kiss.agents.sorcar.persistence import (
     _record_model_usage,
 )
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.server import VSCodeServer
 
 MAIN_JS = (
     Path(__file__).resolve().parents[3]
@@ -49,7 +49,7 @@ MAIN_JS = (
 def _isolate_db(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
     """Point persistence at a temp dir so tests don't touch real data."""
     import kiss.agents.sorcar.persistence as pm
-    import kiss.agents.vscode.vscode_config as vc
+    import kiss.server.vscode_config as vc
 
     _close_db()
     tmpdir = tempfile.mkdtemp()

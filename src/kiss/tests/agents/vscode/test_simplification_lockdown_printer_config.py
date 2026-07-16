@@ -5,8 +5,8 @@
 """Characterization (lockdown) tests for json_printer and vscode_config.
 
 Pins the CURRENT externally-observable behavior of
-``kiss.agents.vscode.json_printer.JsonPrinter`` and
-``kiss.agents.vscode.vscode_config`` so the planned simplifications
+``kiss.server.json_printer.JsonPrinter`` and
+``kiss.server.vscode_config`` so the planned simplifications
 (tmp/findings-6.md sections B1, B2, B3, C1, C2, A3) cannot silently
 change behavior:
 
@@ -310,7 +310,7 @@ class _ConfigDirTestCase(unittest.TestCase):
 
     def setUp(self) -> None:
         """Point the config module at an isolated temporary directory."""
-        import kiss.agents.vscode.vscode_config as vc
+        import kiss.server.vscode_config as vc
 
         self._orig_dir = vc.CONFIG_DIR
         self._orig_path = vc.CONFIG_PATH
@@ -320,7 +320,7 @@ class _ConfigDirTestCase(unittest.TestCase):
 
     def tearDown(self) -> None:
         """Restore the real config locations and remove the temp dir."""
-        import kiss.agents.vscode.vscode_config as vc
+        import kiss.server.vscode_config as vc
 
         vc.CONFIG_DIR = self._orig_dir
         vc.CONFIG_PATH = self._orig_path
@@ -332,7 +332,7 @@ class TestCustomHeaderParsingParity(_ConfigDirTestCase):
 
     def test_get_custom_model_entry_and_build_model_config_agree(self) -> None:
         """Saved headers yield the same extra_headers dict via both APIs."""
-        from kiss.agents.vscode.vscode_config import (
+        from kiss.server.vscode_config import (
             build_model_config,
             get_custom_model_entry,
             load_config,
@@ -356,7 +356,7 @@ class TestCustomHeaderParsingParity(_ConfigDirTestCase):
 
     def test_whitespace_is_stripped_identically(self) -> None:
         """Key/value whitespace stripping is the same on both paths."""
-        from kiss.agents.vscode.vscode_config import (
+        from kiss.server.vscode_config import (
             build_model_config,
             get_custom_model_entry,
         )
@@ -385,7 +385,7 @@ class TestConfigRoundTrip(_ConfigDirTestCase):
 
     def test_save_then_load_overlays_defaults(self) -> None:
         """A partial save round-trips, and every DEFAULTS key is present."""
-        from kiss.agents.vscode.vscode_config import DEFAULTS, load_config, save_config
+        from kiss.server.vscode_config import DEFAULTS, load_config, save_config
 
         save_config({"max_budget": 7})
         cfg = load_config()
@@ -398,8 +398,8 @@ class TestConfigRoundTrip(_ConfigDirTestCase):
 
     def test_corrupt_file_returns_defaults_without_raising(self) -> None:
         """Invalid JSON on disk falls back to pure DEFAULTS."""
-        import kiss.agents.vscode.vscode_config as vc
-        from kiss.agents.vscode.vscode_config import DEFAULTS, load_config
+        import kiss.server.vscode_config as vc
+        from kiss.server.vscode_config import DEFAULTS, load_config
 
         vc.CONFIG_PATH.write_text("{this is not json", encoding="utf-8")
 
@@ -408,8 +408,8 @@ class TestConfigRoundTrip(_ConfigDirTestCase):
 
     def test_save_preserves_unknown_disk_keys_and_drops_unknown_input(self) -> None:
         """Non-DEFAULTS keys on disk survive; non-DEFAULTS input keys don't."""
-        import kiss.agents.vscode.vscode_config as vc
-        from kiss.agents.vscode.vscode_config import load_config, save_config
+        import kiss.server.vscode_config as vc
+        from kiss.server.vscode_config import load_config, save_config
 
         vc.CONFIG_PATH.write_text(
             json.dumps({"email": "a@b.c", "max_budget": 3}), encoding="utf-8",

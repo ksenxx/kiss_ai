@@ -25,15 +25,15 @@ from prompt_toolkit.completion import CompleteEvent
 from prompt_toolkit.document import Document
 
 import kiss.agents.sorcar.persistence as th
-import kiss.agents.vscode.vscode_config as vc
+import kiss.server.vscode_config as vc
 from kiss.agents.sorcar.cli_prompt import PtkCompleter
 from kiss.agents.sorcar.cli_repl import (
     _TASK_DESC_WIDTH,
     CliCompleter,
     picker_ordered_models,
 )
-from kiss.agents.vscode.helpers import model_vendor
 from kiss.core.models.model_info import MODEL_INFO
+from kiss.server.helpers import model_vendor
 
 
 @pytest.fixture

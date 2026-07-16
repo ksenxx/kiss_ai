@@ -25,11 +25,11 @@ from kiss.agents.sorcar.useful_tools import (
     _truncate_output,
 )
 from kiss.agents.sorcar.web_use_tool import WebUseTool
-from kiss.agents.vscode.helpers import (
+from kiss.server.helpers import (
     clip_autocomplete_suggestion,
 )
-from kiss.agents.vscode.json_printer import JsonPrinter
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.json_printer import JsonPrinter
+from kiss.server.server import VSCodeServer
 
 
 def _git(tmpdir: str, *args: str) -> None:
@@ -219,7 +219,7 @@ class TestHelpersBranches:
 
     def test_generate_followup_text_failure(self) -> None:
         """generate_followup_text returns empty string on LLM failure (lines 104-106)."""
-        from kiss.agents.vscode.helpers import generate_followup_text
+        from kiss.server.helpers import generate_followup_text
         result = generate_followup_text("task", "result", "nonexistent-model-xyz")
         assert result == ""
 

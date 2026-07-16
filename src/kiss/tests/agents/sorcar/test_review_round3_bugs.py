@@ -279,7 +279,7 @@ def test_cli_printer_lowercases_event_taskid_before_super(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from kiss.agents.sorcar import cli_daemon_bridge, cli_printer
-    from kiss.agents.vscode.json_printer import JsonPrinter
+    from kiss.server.json_printer import JsonPrinter
 
     monkeypatch.setattr(
         cli_daemon_bridge, "send_event", lambda ev: None,
@@ -405,7 +405,7 @@ def test_task_runner_rejects_non_string_task_id() -> None:
     round 9); exercise its behaviour directly instead of asserting on
     source-code text.
     """
-    from kiss.agents.vscode.task_runner import _client_task_id_of
+    from kiss.server.task_runner import _client_task_id_of
 
     assert _client_task_id_of({"taskId": "abc123"}) == "abc123"
     assert _client_task_id_of({}) == ""
@@ -421,7 +421,7 @@ def test_task_runner_rejects_non_string_task_id() -> None:
 
 
 def test_server_accepts_legacy_int_parent_task_id() -> None:
-    from kiss.agents.vscode.server import _coerce_id
+    from kiss.server.server import _coerce_id
 
     src = Path(
         "src/kiss/server/server.py"

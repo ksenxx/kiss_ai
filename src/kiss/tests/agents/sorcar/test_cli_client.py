@@ -7,7 +7,7 @@
 The standalone REPL (:mod:`kiss.agents.sorcar.cli_repl`) was replaced
 by :mod:`kiss.agents.sorcar.cli_client`, a thin terminal client that
 drives an already-running ``sorcar web`` daemon — the same
-:class:`kiss.agents.vscode.web_server.RemoteAccessServer` that backs
+:class:`kiss.server.web_server.RemoteAccessServer` that backs
 the VS Code extension and the remote browser webapp.
 
 These tests spin up a real :class:`RemoteAccessServer` on a temporary
@@ -18,7 +18,7 @@ or test doubles:
 * ``/help`` / ``/commands`` / ``/skills`` / ``/skills <name>`` /
   ``/mcp`` / ``/cost`` / ``/model`` (no arg) round-trip through the
   new ``cliInfo`` server command added to
-  :meth:`kiss.agents.vscode.commands._CommandsMixin._cmd_cli_info`.
+  :meth:`kiss.server.commands._CommandsMixin._cmd_cli_info`.
 * ``/model list`` round-trips through the existing ``getModels``
   server command and the client renders the daemon's reply.
 * ``/model <name>`` sends ``selectModel`` and the daemon updates the
@@ -67,8 +67,8 @@ from kiss.agents.sorcar.cli_client import (
     run_client,
 )
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.agents.vscode.web_server import RemoteAccessServer
 from kiss.core.print_to_console import ConsolePrinter
+from kiss.server.web_server import RemoteAccessServer
 
 
 def _reset_cli_daemon_writer() -> None:

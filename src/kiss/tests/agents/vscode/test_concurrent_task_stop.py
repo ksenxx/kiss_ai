@@ -37,7 +37,7 @@ import unittest
 from typing import Any
 
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.agents.vscode.json_printer import JsonPrinter
+from kiss.server.json_printer import JsonPrinter
 
 
 class TestStreamStateIsolation(unittest.TestCase):
@@ -798,7 +798,7 @@ class TestCloseTabServer(unittest.TestCase):
         import os
 
         os.environ.setdefault("KISS_WORKDIR", "/tmp")
-        from kiss.agents.vscode.server import VSCodeServer
+        from kiss.server.server import VSCodeServer
         return VSCodeServer()
 
     def test_close_tab_removes_tab_state(self) -> None:

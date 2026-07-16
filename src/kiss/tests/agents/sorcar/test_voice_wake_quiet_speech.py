@@ -39,7 +39,7 @@ import unittest
 import wave
 from pathlib import Path
 
-from kiss.agents.vscode.voice_wake import (
+from kiss.server.voice_wake import (
     BLOCK_SIZE,
     DEFAULT_MODELS_DIR,
     MAX_LEADING_NOISE_SECONDS,

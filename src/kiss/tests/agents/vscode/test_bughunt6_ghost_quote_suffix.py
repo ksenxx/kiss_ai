@@ -38,8 +38,8 @@ from pathlib import Path
 from typing import Any
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.vscode.server import VSCodeServer
-from kiss.agents.vscode.task_runner import _RunningAgentState
+from kiss.server.server import VSCodeServer
+from kiss.server.task_runner import _RunningAgentState
 
 
 def _redirect_persistence(tmpdir: str) -> tuple[Any, Any, Any]:

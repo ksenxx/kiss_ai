@@ -56,8 +56,8 @@ from typing import Any
 import anthropic
 import pytest
 
-from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.core.models.anthropic_model import AnthropicModel
+from kiss.server.json_printer import JsonPrinter
 
 _FINISH_TOOL = {
     "name": "finish",

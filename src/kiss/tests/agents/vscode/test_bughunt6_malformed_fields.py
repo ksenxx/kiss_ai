@@ -55,7 +55,7 @@ import pytest
 
 from kiss.agents.sorcar.persistence import _close_db
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.server import VSCodeServer
 
 
 @pytest.fixture(autouse=True)
@@ -65,7 +65,7 @@ def _isolate_db(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
     payloads in these tests must not persist ``last_model``/config
     values into the process-shared KISS_HOME and pollute later tests."""
     import kiss.agents.sorcar.persistence as pm
-    import kiss.agents.vscode.vscode_config as vc
+    import kiss.server.vscode_config as vc
 
     _close_db()
     tmpdir = tempfile.mkdtemp()

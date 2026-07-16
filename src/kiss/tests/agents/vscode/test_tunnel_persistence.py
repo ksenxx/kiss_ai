@@ -5,7 +5,7 @@
 """Integration tests for cloudflared cross-restart adoption.
 
 Exercises the helpers added for the "stable quick-tunnel URL" feature
-in :mod:`kiss.agents.vscode.web_server`:
+in :mod:`kiss.server.web_server`:
 
 * :func:`_is_pid_alive` — process liveness check using ``os.kill(pid, 0)``.
 * :func:`_save_cloudflared_pidfile` / :func:`_load_cloudflared_pidfile`
@@ -35,8 +35,8 @@ import subprocess
 import threading
 import time
 
-from kiss.agents.vscode import web_server as ws
-from kiss.agents.vscode.vscode_config import (
+from kiss.server import web_server as ws
+from kiss.server.vscode_config import (
     CONFIG_PATH,
     load_config,
     save_config,

@@ -27,7 +27,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from kiss.agents.vscode.web_server import RemoteAccessServer
+from kiss.server.web_server import RemoteAccessServer
 
 
 def _make_server(tmpdir: str) -> RemoteAccessServer:

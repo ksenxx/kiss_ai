@@ -59,8 +59,8 @@ from kiss.agents.sorcar import cli_daemon_bridge
 from kiss.agents.sorcar import persistence as th
 from kiss.agents.sorcar.cli_client import CliClient, _submit_task
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.agents.vscode.web_server import RemoteAccessServer
 from kiss.core.print_to_console import ConsolePrinter
+from kiss.server.web_server import RemoteAccessServer
 
 
 def _reset_cli_daemon_writer() -> None:

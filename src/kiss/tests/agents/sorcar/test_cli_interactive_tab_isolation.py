@@ -5,10 +5,10 @@
 """End-to-end regression tests for cross-tab event isolation in the
 ``sorcar`` CLI interactive client.
 
-The daemon (:class:`~kiss.agents.vscode.web_server.RemoteAccessServer`)
+The daemon (:class:`~kiss.server.web_server.RemoteAccessServer`)
 fans every task event out to ALL connected WebSocket clients AND all
 local Unix-domain-socket writers via
-:meth:`~kiss.agents.vscode.web_server.WebPrinter._send_to_ws_clients`.
+:meth:`~kiss.server.web_server.WebPrinter._send_to_ws_clients`.
 The frontend (the chat webview in ``media/main.js``) filters incoming
 events client-side by ``tabId`` so that one VS Code window /
 browser-tab/ extension only renders panels for its own tab.

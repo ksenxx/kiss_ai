@@ -59,7 +59,7 @@ import time
 from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
-import kiss.agents.vscode.vscode_config as vc
+import kiss.server.vscode_config as vc
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 
