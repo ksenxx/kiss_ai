@@ -3114,7 +3114,22 @@ _WS_SHIM_JS = r"""
           data: {type: 'daemonStatus', connected: true}
         }));
         _showAuthModal().then(function(pwd) {
-          if (pwd === null || pwd === undefined) return;
+          if (pwd === null || pwd === undefined) {
+            // SECURITY — do NOT leave the app usable when the user
+            // dismisses the password prompt without authenticating.
+            // The ``auth_required`` branch above revealed ``#app`` so
+            // the modal (a child of #app) could render; once the modal
+            // is cancelled that reveal would otherwise expose the whole
+            // unauthenticated webapp, bypassing the remote-password
+            // check at the UI layer.  Re-gate by re-showing the loading
+            // overlay (``connected:false``).  The still-open, still-
+            // unauthenticated socket times out server-side and the
+            // ensuing reconnect re-prompts for the password.
+            window.dispatchEvent(new MessageEvent('message', {
+              data: {type: 'daemonStatus', connected: false}
+            }));
+            return;
+          }
           try { localStorage.setItem('sorcar-remote-pwd', pwd); } catch(e) {}
           if (_ws && _ws.readyState === WebSocket.OPEN) {
             _ws.send(JSON.stringify({type: 'auth', password: pwd}));
@@ -3122,6 +3137,14 @@ _WS_SHIM_JS = r"""
         });
         return;
       }
+      // SECURITY — never forward server data frames to the app before
+      // the connection is authenticated.  ``auth_ok`` / ``auth_required``
+      // are handled above; any other frame that arrives while
+      // ``_authenticated`` is false must be dropped so an unauthenticated
+      // client can never act on backend data (defense in depth — the
+      // server does not send data pre-auth, but a bug or a hostile proxy
+      // must not be able to bypass the remote-password gate this way).
+      if (!_authenticated) return;
       window.dispatchEvent(new MessageEvent('message', {data: msg}));
     };
 
