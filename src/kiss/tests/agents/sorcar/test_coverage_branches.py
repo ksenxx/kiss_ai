@@ -29,11 +29,11 @@ from kiss.agents.sorcar.useful_tools import (
 from kiss.agents.sorcar.web_use_tool import (
     WebUseTool,
 )
-from kiss.agents.vscode.json_printer import (
+from kiss.server.json_printer import (
     JsonPrinter,
     _coalesce_events,
 )
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.server import VSCodeServer
 
 
 class TestJsonPrinterBranches:

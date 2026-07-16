@@ -10,7 +10,7 @@ commit is created, so the commit is fully traceable: what was asked,
 and what the agent reported it did.
 
 These tests exercise the real
-:func:`~kiss.agents.vscode.helpers.generate_commit_message_from_diff`,
+:func:`~kiss.server.helpers.generate_commit_message_from_diff`,
 :func:`~kiss.agents.sorcar.sorcar_agent.auto_commit_changes`, and
 :meth:`~kiss.agents.sorcar.worktree_sorcar_agent.WorktreeSorcarAgent._auto_commit_worktree`
 paths against on-disk git repositories.  The LLM call inside the
@@ -30,7 +30,7 @@ from typing import Any
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
 from kiss.agents.sorcar.sorcar_agent import auto_commit_changes
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-from kiss.agents.vscode.helpers import (
+from kiss.server.helpers import (
     _append_task_result,
     generate_commit_message_from_diff,
 )

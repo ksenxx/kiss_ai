@@ -20,8 +20,8 @@ import tempfile
 from pathlib import Path
 
 from kiss.agents.sorcar import persistence as th
-from kiss.agents.vscode.helpers import rank_file_suggestions
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.helpers import rank_file_suggestions
+from kiss.server.server import VSCodeServer
 
 _SavedState = tuple[Path, "sqlite3.Connection | None", Path]
 

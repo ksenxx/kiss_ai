@@ -5,7 +5,7 @@
 """Bug-hunt 3: autocomplete must not echo-strip suffix suggestions.
 
 The ghost-text pipeline is purely local now: both call sites of
-:func:`kiss.agents.vscode.helpers.clip_autocomplete_suggestion` pass a
+:func:`kiss.server.helpers.clip_autocomplete_suggestion` pass a
 suggestion that is ALREADY the continuation suffix (never an LLM echo
 of the query):
 
@@ -45,7 +45,7 @@ from unittest import IsolatedAsyncioTestCase, TestCase
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.cli_repl import CliCompleter
-from kiss.agents.vscode.web_server import RemoteAccessServer
+from kiss.server.web_server import RemoteAccessServer
 
 
 def _redirect_persistence(tmpdir: str) -> tuple[Any, Any, Any]:
@@ -71,7 +71,7 @@ class TestGhostSuffixNotEchoStripped(IsolatedAsyncioTestCase):
 
         certfile = Path(self.tmpdir) / "cert.pem"
         keyfile = Path(self.tmpdir) / "key.pem"
-        from kiss.agents.vscode.web_server import _generate_self_signed_cert
+        from kiss.server.web_server import _generate_self_signed_cert
         _generate_self_signed_cert(certfile, keyfile)
 
         self.uds_path = Path(self.tmpdir) / "sorcar.sock"

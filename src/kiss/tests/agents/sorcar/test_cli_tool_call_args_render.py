@@ -7,7 +7,7 @@
 When the sorcar CLI runs in interactive mode it connects to the local
 ``sorcar web`` daemon over a Unix socket and receives newline-delimited
 JSON events.  Tool-call events are emitted by
-:class:`kiss.agents.vscode.json_printer.JsonPrinter._format_tool_call`
+:class:`kiss.server.json_printer.JsonPrinter._format_tool_call`
 as a *flat* dict whose payload keys (``path``, ``command``,
 ``description``, ``content``, ``old_string``, ``new_string``,
 ``extras``) sit at the top level — there is no ``input`` key.

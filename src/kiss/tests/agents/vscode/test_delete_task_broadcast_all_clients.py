@@ -34,8 +34,8 @@ from unittest import IsolatedAsyncioTestCase
 from websockets.asyncio.client import connect
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.vscode.vscode_config import CONFIG_PATH, save_config
-from kiss.agents.vscode.web_server import RemoteAccessServer
+from kiss.server.vscode_config import CONFIG_PATH, save_config
+from kiss.server.web_server import RemoteAccessServer
 
 
 def _find_free_port() -> int:

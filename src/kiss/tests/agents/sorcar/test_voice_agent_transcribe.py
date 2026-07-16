@@ -43,7 +43,7 @@ import unittest
 import wave
 from pathlib import Path
 
-from kiss.agents.vscode.voice_wake import (
+from kiss.server.voice_wake import (
     SAMPLE_RATE,
     parse_transcription_reply,
     transcribe_pcm,
@@ -372,7 +372,7 @@ class TestTranscribeAgentDegraded(unittest.TestCase):
         # empty result instead of raising or hanging.
         script = (
             "import json, math, struct\n"
-            "from kiss.agents.vscode.voice_wake import ("
+            "from kiss.server.voice_wake import ("
             "SAMPLE_RATE, transcribe_pcm)\n"
             "pcm = b''.join(struct.pack('<h', int(20000 * math.sin("
             "2 * math.pi * 440 * i / SAMPLE_RATE)))"
@@ -419,7 +419,7 @@ class TestListenerSpeechLanguage(unittest.TestCase):
             proc = subprocess.run(
                 [
                     "uv", "run", "python", "-m",
-                    "kiss.agents.vscode.voice_wake", "--wav", str(wav),
+                    "kiss.server.voice_wake", "--wav", str(wav),
                 ],
                 cwd=PROJECT_ROOT,
                 capture_output=True,

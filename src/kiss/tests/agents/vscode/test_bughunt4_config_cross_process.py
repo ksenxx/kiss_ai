@@ -43,7 +43,7 @@ while not os.path.exists(start_file):
     if time.time() > deadline:
         sys.exit(2)
     time.sleep(0.001)
-from kiss.agents.vscode.vscode_config import load_config, save_config
+from kiss.server.vscode_config import load_config, save_config
 for i in range(n):
     value = f"{key}-{i}"
     save_config({key: value})

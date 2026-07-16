@@ -517,7 +517,7 @@ def _start_live_server(
     Stores the bound ephemeral port in ``state['port']`` (or the
     startup exception in ``state['error']``) and sets *ready*.
     """
-    from kiss.agents.vscode.web_server import (
+    from kiss.server.web_server import (
         RemoteAccessServer,
         _generate_self_signed_cert,
     )

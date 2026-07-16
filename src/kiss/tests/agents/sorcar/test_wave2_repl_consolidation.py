@@ -9,7 +9,7 @@ previously duplicated code paths:
 
 * active-file identifier harvesting — shared between the VS Code
   daemon's ghost-text completion
-  (:meth:`~kiss.agents.vscode.autocomplete._AutocompleteMixin
+  (:meth:`~kiss.server.autocomplete._AutocompleteMixin
   ._active_file_identifier_matches`) and the CLI completer
   (:meth:`~kiss.agents.sorcar.cli_repl.CliCompleter
   ._active_file_suffix`);
@@ -17,7 +17,7 @@ previously duplicated code paths:
   :func:`~kiss.agents.sorcar.cli_repl.build_help_text` and used by
   both the standalone REPL and the daemon's ``cliInfo`` reply;
 * the model-picker ordering rule — single-sourced in
-  :func:`~kiss.agents.vscode.autocomplete
+  :func:`~kiss.server.autocomplete
   .ranked_function_calling_models` and used by both the daemon's
   ``getModels`` reply and the CLI's model completion;
 * the backslash line-continuation read loop — single-sourced in
@@ -42,7 +42,7 @@ from prompt_toolkit.completion import CompleteEvent
 from prompt_toolkit.document import Document
 
 import kiss.agents.sorcar.persistence as th
-import kiss.agents.vscode.vscode_config as vc
+import kiss.server.vscode_config as vc
 from kiss.agents.sorcar.cli_line_continuation import read_continuations
 from kiss.agents.sorcar.cli_prompt import PtkCompleter
 from kiss.agents.sorcar.cli_repl import (
@@ -52,14 +52,14 @@ from kiss.agents.sorcar.cli_repl import (
     build_help_text,
     picker_ordered_models,
 )
-from kiss.agents.vscode.autocomplete import (
+from kiss.server.autocomplete import (
     _AutocompleteMixin,
     identifier_prefix_matches,
     ranked_function_calling_models,
     read_active_file_head,
     trailing_identifier,
 )
-from kiss.agents.vscode.helpers import clip_autocomplete_suggestion
+from kiss.server.helpers import clip_autocomplete_suggestion
 
 
 @pytest.fixture
@@ -207,7 +207,7 @@ def test_help_text_contents(tmp_path: Path, kiss_db) -> None:
 
 def _make_recording_printer():
     """Return a JsonPrinter that also records every broadcast event."""
-    from kiss.agents.vscode.json_printer import JsonPrinter
+    from kiss.server.json_printer import JsonPrinter
 
     class _Recording(JsonPrinter):
         def __init__(self) -> None:
@@ -225,7 +225,7 @@ def test_daemon_help_reply_matches_shared_help_text(
     tmp_path: Path, kiss_db,
 ) -> None:
     """The daemon's ``cliInfo help`` reply is byte-identical to the body."""
-    from kiss.agents.vscode.server import VSCodeServer
+    from kiss.server.server import VSCodeServer
 
     printer = _make_recording_printer()
     server = VSCodeServer(printer=printer)
@@ -248,7 +248,7 @@ def test_model_picker_order_parity_daemon_vs_cli(
     tmp_path: Path, kiss_db,
 ) -> None:
     """Daemon ``getModels`` and CLI completion order models identically."""
-    from kiss.agents.vscode.server import VSCodeServer
+    from kiss.server.server import VSCodeServer
 
     ranked = ranked_function_calling_models()
 

@@ -21,15 +21,15 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.vscode.vscode_config import (
+from kiss.core import config as config_module
+from kiss.core.kiss_agent import KISSAgent
+from kiss.core.kiss_error import KISSError
+from kiss.server.vscode_config import (
     API_KEY_ENV_VARS,
     load_config,
     save_api_key_to_shell,
     save_config,
 )
-from kiss.core import config as config_module
-from kiss.core.kiss_agent import KISSAgent
-from kiss.core.kiss_error import KISSError
 
 
 @pytest.fixture(autouse=True)
@@ -278,10 +278,10 @@ class TestWebBrowserToggle:
         fake_home.mkdir()
         monkeypatch.setenv("HOME", str(fake_home))
         monkeypatch.setattr(
-            "kiss.agents.vscode.vscode_config.CONFIG_DIR", fake_home / ".kiss",
+            "kiss.server.vscode_config.CONFIG_DIR", fake_home / ".kiss",
         )
         monkeypatch.setattr(
-            "kiss.agents.vscode.vscode_config.CONFIG_PATH",
+            "kiss.server.vscode_config.CONFIG_PATH",
             fake_home / ".kiss" / "config.json",
         )
         save_config({"use_web_browser": False})
@@ -300,10 +300,10 @@ class TestApiKeySetupAndDeletion:
         fake_home.mkdir()
         monkeypatch.setenv("HOME", str(fake_home))
         monkeypatch.setattr(
-            "kiss.agents.vscode.vscode_config.CONFIG_DIR", fake_home / ".kiss",
+            "kiss.server.vscode_config.CONFIG_DIR", fake_home / ".kiss",
         )
         monkeypatch.setattr(
-            "kiss.agents.vscode.vscode_config.CONFIG_PATH",
+            "kiss.server.vscode_config.CONFIG_PATH",
             fake_home / ".kiss" / "config.json",
         )
         monkeypatch.setenv("SHELL", "/bin/zsh")
@@ -343,7 +343,7 @@ class TestApiKeySetupAndDeletion:
         after the key is removed from the env and not written to RC,
         it is effectively deleted.
         """
-        from kiss.agents.vscode.server import VSCodeServer
+        from kiss.server.server import VSCodeServer
 
         server = VSCodeServer()
 

@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.server import VSCodeServer
 
 
 def _make_server() -> tuple[VSCodeServer, list[dict[str, Any]]]:

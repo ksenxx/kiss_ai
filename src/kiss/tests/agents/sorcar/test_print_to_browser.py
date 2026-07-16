@@ -12,7 +12,7 @@ message inputs and real queue subscribers.
 import unittest
 from types import SimpleNamespace
 
-from kiss.agents.vscode.json_printer import (
+from kiss.server.json_printer import (
     _DISPLAY_EVENT_TYPES,
     JsonPrinter,
     _coalesce_events,

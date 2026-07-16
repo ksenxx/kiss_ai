@@ -17,9 +17,9 @@ import uuid
 from typing import Any
 
 import kiss.agents.sorcar.persistence as persistence
-from kiss.agents.vscode.commands import _parse_int
-from kiss.agents.vscode.json_printer import JsonPrinter
-from kiss.agents.vscode.server import VSCodeServer, _extra_for_replay
+from kiss.server.commands import _parse_int
+from kiss.server.json_printer import JsonPrinter
+from kiss.server.server import VSCodeServer, _extra_for_replay
 
 
 class _CapturePrinter(JsonPrinter):

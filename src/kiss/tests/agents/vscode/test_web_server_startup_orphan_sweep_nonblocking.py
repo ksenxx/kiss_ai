@@ -51,7 +51,7 @@ from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 
 import kiss.agents.sorcar.persistence as _persistence
-from kiss.agents.vscode.web_server import RemoteAccessServer
+from kiss.server.web_server import RemoteAccessServer
 
 _SENTINEL = "Agent Failed Abruptly"
 _RECOVERED = "Task terminated unexpectedly (process killed)"

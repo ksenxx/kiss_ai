@@ -28,7 +28,7 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-import kiss.agents.vscode.vscode_config as vc
+import kiss.server.vscode_config as vc
 
 # Distinct (key, value) pairs drawn from ``DEFAULTS`` so each writer
 # touches a different key with a non-default value.  ``save_config``

@@ -53,7 +53,7 @@ from kiss.agents.sorcar.worktree_sorcar_agent import (
     WorktreeSorcarAgent,
     _manual_merge_cmd,
 )
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.server import VSCodeServer
 
 
 def _make_repo(tmp_path: Path, name: str = "repo") -> Path:

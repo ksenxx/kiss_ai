@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import unittest
 
-from kiss.agents.vscode.web_server import MEDIA_DIR, _build_html
+from kiss.server.web_server import MEDIA_DIR, _build_html
 
 #: Every settings-panel input that holds an API key and must be masked.
 API_KEY_INPUT_IDS = [
