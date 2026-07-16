@@ -42,6 +42,7 @@ from typing import Any
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.cli_helpers import _build_run_kwargs
+from kiss.ui.cli.cli_printer import RecordingConsolePrinter
 
 
 def _finish_response(summary: str = "done") -> dict[str, Any]:
@@ -235,7 +236,12 @@ class TestCliPersistsEventsForChatWebview:
             work_dir=self.tmpdir,
             base_url=self.url,
         )
-        run_kwargs = _build_run_kwargs(args)
+        # The recording printer is injected by the UI-layer entry point
+        # (``kiss.ui.cli.sorcar_cli.main``) exactly like this — the
+        # sorcar-layer helper must not import the UI layer itself.
+        run_kwargs = _build_run_kwargs(
+            args, printer_factory=RecordingConsolePrinter,
+        )
         # ``model_config`` is built from ``--endpoint`` / ``--header``
         # by ``_build_run_kwargs``; the fake server expects a non-empty
         # api_key so add it without touching the CLI helper itself.

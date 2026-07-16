@@ -1667,7 +1667,7 @@ def run_client(
     """Run the interactive sorcar CLI as a client of ``sorcar web``.
 
     This is the entry point invoked by
-    :func:`worktree_sorcar_agent.main` in interactive mode (no
+    :func:`kiss.ui.cli.sorcar_cli.main` in interactive mode (no
     ``-t/--task`` / ``-f/--file``).  The on-screen behaviour — prompt
     panel, fast-completes, slash commands, streamed agent events,
     rich Result panel — runs locally while the actual execution

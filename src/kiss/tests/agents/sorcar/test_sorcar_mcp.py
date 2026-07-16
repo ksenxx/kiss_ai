@@ -579,13 +579,13 @@ def _subprocess_env(homes: Path) -> dict[str, str]:
 def test_sorcar_mcp_subcommand_subprocess(
     isolated_homes: Path, tmp_path: Path,
 ) -> None:
-    """``python -m ...worktree_sorcar_agent mcp`` dispatches to the CLI."""
+    """``python -m kiss.ui.cli.sorcar_cli mcp`` dispatches to the CLI."""
     project = isolated_homes / "project"
     save_mcp_server(_stdio_config(tmp_path), "user", str(project))
     proc = subprocess.run(
         [
             sys.executable, "-m",
-            "kiss.agents.sorcar.worktree_sorcar_agent", "mcp", "list",
+            "kiss.ui.cli.sorcar_cli", "mcp", "list",
         ],
         capture_output=True, text=True, timeout=120,
         cwd=str(project), env=_subprocess_env(isolated_homes),

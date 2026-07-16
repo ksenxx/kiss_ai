@@ -100,6 +100,16 @@ import zipfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+# The per-attempt audio API timeout policy is single-sourced in
+# ``kiss.core.speech_synthesis`` (core must not depend on the server
+# layer); the names are re-exported here for this module's historical
+# importers (translation worker, tests).
+from kiss.core.speech_synthesis import (  # noqa: F401 — re-exported
+    DEFAULT_AUDIO_TIMEOUT_SECONDS,
+    _env_timeout_seconds,
+    audio_timeout_seconds,
+)
+
 if TYPE_CHECKING:
     import sounddevice
 
@@ -286,7 +296,8 @@ DEFAULT_AUDIO_MODEL = "gpt-audio"
 # translation used to run on the audio loop, one stalled HTTPS call
 # left the listener deaf to "Sorcar" until the mic was restarted.
 # Overridable for tests via KISS_VOICE_AUDIO_TIMEOUT.
-DEFAULT_AUDIO_TIMEOUT_SECONDS = 60.0
+# (``DEFAULT_AUDIO_TIMEOUT_SECONDS`` is single-sourced in
+# ``kiss.core.speech_synthesis`` and re-exported here.)
 # Hard cap on model-download network inactivity (seconds), applied to
 # the connect and to EVERY socket read of the chunked download.  The
 # old ``urlretrieve`` call had no timeout at all, so a stalled HTTPS
@@ -549,36 +560,6 @@ def positive_finite_float(raw: str) -> float:
             "must be a positive finite number"
         )
     return value
-
-
-def _env_timeout_seconds(env_name: str, default: float) -> float:
-    """Return a positive finite timeout from an environment override.
-
-    Reads the *env_name* environment variable (used by tests to fail
-    fast against a stalled endpoint/server) and falls back to
-    *default*.  Junk, NaN, +/-inf and non-positive values fall back
-    too — an infinite timeout would defeat the hard-timeout policy
-    exactly like a missing one (it hangs the worker forever).
-    """
-    raw = os.environ.get(env_name, "")
-    try:
-        value = float(raw)
-    except ValueError:
-        return default
-    if not math.isfinite(value) or value <= 0:
-        return default
-    return value
-
-
-def audio_timeout_seconds() -> float:
-    """Return the per-attempt translation API timeout in seconds.
-
-    Reads the ``KISS_VOICE_AUDIO_TIMEOUT`` environment override and
-    falls back to :data:`DEFAULT_AUDIO_TIMEOUT_SECONDS`.
-    """
-    return _env_timeout_seconds(
-        "KISS_VOICE_AUDIO_TIMEOUT", DEFAULT_AUDIO_TIMEOUT_SECONDS,
-    )
 
 
 def download_timeout_seconds() -> float:

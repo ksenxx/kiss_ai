@@ -4692,7 +4692,7 @@ class TestReadVersionException(unittest.TestCase):
         """
         import kiss.server.web_server as ws_mod
 
-        vfile = Path(ws_mod.__file__).parent.parent / "_version.py"
+        vfile = Path(ws_mod.__file__).parent.parent / "core" / "_version.py"
         backup = vfile.read_text()
         vfile.rename(vfile.with_suffix(".py.bak"))
         saved_root = ws_mod._INSTALLED_EXTENSIONS_ROOT
@@ -5467,7 +5467,9 @@ class TestReadVersionNoMatch(unittest.TestCase):
         """
         import kiss.server.web_server as ws_mod
 
-        vfile = Path(__file__).parent.parent.parent.parent / "_version.py"
+        vfile = (
+            Path(__file__).parent.parent.parent.parent / "core" / "_version.py"
+        )
         original = vfile.read_text()
         saved_root = ws_mod._INSTALLED_EXTENSIONS_ROOT
         with tempfile.TemporaryDirectory() as empty_root:

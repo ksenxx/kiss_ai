@@ -85,7 +85,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.version]
-path = "src/kiss/_version.py"
+path = "src/kiss/core/_version.py"
 
 [tool.hatch.build.targets.sdist]
 # Keep the sdist small enough for PyPI's 100 MB per-file limit. The directories
@@ -345,7 +345,7 @@ Repository = "https://github.com/ksen/kiss"
 check = "kiss.scripts.check:main"
 generate-api-docs = "kiss.scripts.generate_api_docs:main"
 kiss-backfill-talk-audio = "kiss.scripts.backfill_talk_audio:main"
-sorcar = "kiss.agents.sorcar.worktree_sorcar_agent:main"
+sorcar = "kiss.ui.cli.sorcar_cli:main"
 kiss-slack = "kiss.agents.third_party_agents.slack_agent:main"
 kiss-gmail = "kiss.agents.third_party_agents.gmail_agent:main"
 kiss-whatsapp = "kiss.agents.third_party_agents.whatsapp_agent:main"
