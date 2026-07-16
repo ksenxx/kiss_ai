@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -47,6 +48,69 @@ from kiss.core.printer import parse_result_yaml
 MAX_TASKS = 10
 
 
+class _SubagentStopEvent(threading.Event):
+    """Per-sub-agent stop event chained to the parent task's stop event.
+
+    Each parallel sub-agent worker gets its own instance so the user
+    can stop ONLY that sub-agent's task (``VSCodeServer._stop_task``
+    resolves the sub-agent's ``_RunningAgentState.stop_event`` and
+    calls :meth:`set`, which flips just this event).  At the same time
+    a stop of the PARENT task must keep killing the whole fan-out, so
+    :meth:`is_set` and :meth:`wait` also observe the parent event —
+    every consumer (``JsonPrinter._check_stop``'s per-print poll, the
+    ``UsefulTools`` bash process-group killer's poll loop, and the
+    0.1 s ``stop.wait`` loops) sees the union of the two signals.
+    Nested ``run_parallel`` fan-outs chain transitively: the inner
+    event's parent is the outer sub-agent's event.
+    """
+
+    def __init__(self, parent: threading.Event | None = None) -> None:
+        """Create an unset event linked to *parent* (may be ``None``)."""
+        super().__init__()
+        self._parent_event = parent
+
+    def is_set(self) -> bool:
+        """True when this event OR any ancestor parent event is set.
+
+        Walks the parent chain ITERATIVELY: deeply nested
+        ``run_parallel`` fan-outs chain one linked event per level, so
+        a recursive walk could hit the interpreter recursion limit.
+        """
+        ev: threading.Event | None = self
+        while isinstance(ev, _SubagentStopEvent):
+            if threading.Event.is_set(ev):
+                return True
+            ev = ev._parent_event
+        return ev is not None and ev.is_set()
+
+    def wait(self, timeout: float | None = None) -> bool:
+        """Wait until this event or an ancestor is set.
+
+        Polls the parent chain on a short interval (0.05 s) so a
+        parent-task stop wakes waiters promptly even though the parent
+        event has no reference back to this child event.
+
+        Args:
+            timeout: Maximum seconds to wait; ``None`` waits forever.
+
+        Returns:
+            True when the event (or an ancestor) is set, else False
+            after *timeout* elapsed.
+        """
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            if self.is_set():
+                return True
+            slice_s = 0.05
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return self.is_set()
+                slice_s = min(slice_s, remaining)
+            if super().wait(slice_s):
+                return True
+
+
 def _dir_inside_worktree(work_dir: str, wt_dir: object) -> bool:
     """Return True when *work_dir* lies inside the agent's own worktree dir.
 
@@ -77,6 +141,43 @@ def _dir_inside_worktree(work_dir: str, wt_dir: object) -> bool:
         return Path(work_dir).resolve().is_relative_to(Path(str(wt_dir)).resolve())
     except (OSError, ValueError):
         return False
+
+
+def _extract_result_summary(result: str) -> str:
+    """Return the persistable summary text for a finished run's *result*.
+
+    Parses *result* as YAML and extracts its ``summary`` field for the
+    task-history record.  Handles every shape LLMs emit:
+
+    * dict with a string ``summary`` — returned as-is;
+    * dict with ``summary: null`` (or no ``summary`` key) — ``""``;
+    * dict with a list/mapping/scalar ``summary`` — its YAML text form
+      (passing the raw object to ``_save_task_result`` would raise
+      ``sqlite3.ProgrammingError``, destroying the task's successful
+      return value);
+    * valid YAML that is not a dict, or unparseable text — the raw
+      text capped at 500 characters (otherwise the task history would
+      record an empty result).
+
+    Args:
+        result: The raw string returned by the agent run.
+
+    Returns:
+        The summary text to persist (possibly empty, never ``None``).
+    """
+    try:
+        result_yaml = yaml.safe_load(result)
+        if isinstance(result_yaml, dict):
+            summary_val = result_yaml.get("summary", "")
+            if isinstance(summary_val, str):
+                return summary_val
+            if summary_val is None:
+                return ""
+            dumped: str = yaml.safe_dump(summary_val, sort_keys=False)
+            return dumped.strip()
+        return result[:500] if result else ""
+    except Exception:
+        return result[:500] if result else ""
 
 
 class ChatSorcarAgent(SorcarAgent):
@@ -123,8 +224,14 @@ class ChatSorcarAgent(SorcarAgent):
         return self._chat_id
 
     def new_chat(self) -> None:
-        """Reset to a new chat session (equivalent to VS Code 'Clear')."""
+        """Reset to a new chat session (equivalent to VS Code 'Clear').
+
+        Also drops any pending one-shot :meth:`resume_from_task_id`
+        seed: a brand-new chat must never have its first prompt
+        augmented with the previous task's parent-chain context.
+        """
         self._chat_id = ""
+        self._context_task_id = ""
 
     def resume_chat_by_id(self, chat_id: str) -> None:
         """Resume a chat session using a stable chat identifier.
@@ -394,6 +501,17 @@ class ChatSorcarAgent(SorcarAgent):
         model = self.model_name
         work_dir = self.work_dir
         chat_id = self._chat_id
+        # Cap every sub-agent to a fair share of THIS task's remaining
+        # budget (see :meth:`SorcarAgent._subagent_budget_share`) —
+        # without it each sub-agent would default to the full configured
+        # budget and a single sub-agent could spend the entire budget of
+        # the main task.  The share calculation also reserves one equal
+        # share for the parent to process results and finish.  Also forward
+        # the parent's ``model_config`` so
+        # sub-agents talk to the same provider endpoint (custom
+        # ``base_url``/``api_key`` routing).
+        budget_share = self._subagent_budget_share(len(tasks))
+        model_config = getattr(self, "model_config", None)
         # IMPORTANT: keep two ids strictly separate.
         #
         # ``persisted_parent_task_id`` is the REAL ``task_history.id``
@@ -474,13 +592,32 @@ class ChatSorcarAgent(SorcarAgent):
 
         def _run_single(args: tuple[int, str]) -> str:
             idx, task = args
+            # Give THIS sub-agent its own stop event, chained to the
+            # parent's: the frontend's Stop button on the sub-agent tab
+            # resolves to this event (via the ``_RunningAgentState``
+            # registered below) and stops ONLY this sub-agent, while a
+            # parent-task stop still propagates to every worker through
+            # the chained ``is_set()``.  Installed on the worker
+            # thread-local so ``JsonPrinter._check_stop`` (raises
+            # ``KeyboardInterrupt`` on the next print) and
+            # ``SorcarAgent.run`` (snapshots it into ``self._stop_event``
+            # for bash process-group kills) both observe it.
+            sub_stop_event = _SubagentStopEvent(parent_stop_event)
             tl = getattr(printer, "_thread_local", None) if printer else None
             if tl is not None:
-                tl.stop_event = parent_stop_event
+                tl.stop_event = sub_stop_event
             agent = ChatSorcarAgent(f"Parallel-{task[:40]}")
             if chat_id:
                 agent.resume_chat_by_id(chat_id)
             sub_tab_id = f"task-{parent_task_id}__sub_{idx}"
+            # Route mid-task prompt injection (``appendUserMessage``)
+            # to THIS sub-agent: ``_drain_pending_user_messages`` (the
+            # pre-step hook installed by ``SorcarAgent.perform_task``)
+            # drains ``pending_user_messages`` from the registry entry
+            # keyed by ``self._tab_id`` — without this the hook is
+            # never even installed and prompts injected on a running
+            # sub-agent tab would silently vanish.
+            agent._tab_id = sub_tab_id  # type: ignore[attr-defined]
             # Only persist the REAL parent_task_id; the synthetic
             # routing key (used for tab routing only) must NEVER
             # land in the task_history.parent_task_id column, where
@@ -527,7 +664,24 @@ class ChatSorcarAgent(SorcarAgent):
                 # (``parent_task_id is None`` vs ``parent_task_id == ""``).
                 parent_task_id=sub_persisted_parent,
                 is_task_active=True,
+                # Publish the per-sub-agent stop event so
+                # ``VSCodeServer._stop_task`` (directly by
+                # ``sub_tab_id``, or via the viewer-tab fallback
+                # ``_find_source_tab_for_viewer``) can stop ONLY this
+                # sub-agent's task.
+                stop_event=sub_stop_event,
             )
+            # Publish the pool worker thread so ``_stop_task``'s
+            # force-stop watchdog can inject a ``KeyboardInterrupt``
+            # into a sub-agent wedged in an uninterruptible LLM/API
+            # call (the cooperative event only fires on the next
+            # printer poll).  The watchdog's ownership guard (see
+            # ``_force_stop_thread``) re-checks — under
+            # ``_registry_lock`` — that this state still maps this
+            # thread before injecting, so ``ThreadPoolExecutor``
+            # thread reuse can never route the interrupt into a
+            # SIBLING task that later runs on the same worker thread.
+            sub_state.task_thread = threading.current_thread()
             # Route the insert through the locked helper so peer
             # parallel sub-agents and VS Code server iteration loops
             # never observe the dict mid-resize and never raise
@@ -540,11 +694,45 @@ class ChatSorcarAgent(SorcarAgent):
                     work_dir=work_dir,
                     printer=printer,
                     is_parallel=True,
+                    max_budget=budget_share,
+                    model_config=model_config,
                 )
                 return result
+            except KeyboardInterrupt:
+                # A cooperative stop reached this worker (raised by
+                # ``JsonPrinter._check_stop`` on the sub-agent's next
+                # print).  When the PARENT task is being stopped the
+                # interrupt must keep propagating so
+                # ``ThreadPoolExecutor.map`` re-raises it in the parent
+                # task thread and ``_TaskRunnerMixin._run_task`` can
+                # surface ``task_stopped`` — the pre-existing whole-tree
+                # stop path.  When only THIS sub-agent's own event was
+                # set (Stop clicked on the sub-agent's tab) the parent
+                # and the sibling sub-agents must keep running, so the
+                # interrupt is absorbed here and reported as this one
+                # task's failure result.
+                if parent_stop_event is not None and parent_stop_event.is_set():
+                    raise
+                stopped: str = yaml.dump(
+                    {
+                        "success": False,
+                        "summary": "Sub-agent task stopped by user.",
+                    },
+                    sort_keys=False,
+                )
+                return stopped
             except Exception as exc:
                 return _yaml_failure(exc)
             finally:
+                # Disown the pool worker thread FIRST (under the
+                # registry lock, which the force-stop watchdog's
+                # ownership guard also holds across its check+inject):
+                # once cleared, a pending ``_stop_task`` watchdog can
+                # no longer inject a ``KeyboardInterrupt`` into this
+                # thread — which is about to return to the pool and
+                # may pick up a SIBLING task.
+                with _RunningAgentState._registry_lock:
+                    sub_state.task_thread = None
                 sub_usage[idx] = _agent_usage(agent)
                 # Broadcast ``subagentDone`` so the frontend can stop
                 # the running indicator on the sub-agent tab.
@@ -832,32 +1020,7 @@ class ChatSorcarAgent(SorcarAgent):
         try:
             result = super().run(prompt_template=agent_prompt, **kwargs)
             result_raw = result if isinstance(result, str) else ""
-            try:
-                result_yaml = yaml.safe_load(result)
-                if isinstance(result_yaml, dict):
-                    summary_val = result_yaml.get("summary", "")
-                    if isinstance(summary_val, str):
-                        result_summary = summary_val
-                    elif summary_val is None:
-                        result_summary = ""
-                    else:
-                        # LLMs sometimes emit a YAML list/mapping under
-                        # ``summary``.  Persist its text form — passing
-                        # the raw object to ``_save_task_result`` would
-                        # raise sqlite3.ProgrammingError from the
-                        # ``finally`` block below, destroying the task's
-                        # successful return value.
-                        result_summary = yaml.safe_dump(
-                            summary_val, sort_keys=False,
-                        ).strip()
-                else:
-                    # Valid YAML but not a dict (plain string, list,
-                    # number): persist the raw text, consistent with
-                    # the parse-failure fallback below — otherwise the
-                    # task history records an empty result.
-                    result_summary = result[:500] if result else ""
-            except Exception:
-                result_summary = result[:500] if result else ""
+            result_summary = _extract_result_summary(result)
             return result
         except Exception:
             result_summary = "Task failed"

@@ -914,12 +914,18 @@
     } else if (isMerging) {
       showMergeToolbar(tab.id);
     }
-    // Set inputContainer visibility based on active bars and subagent tab status
+    // Set inputContainer visibility based on active bars and subagent tab
+    // status.  A sub-agent tab hides the input only once its sub-agent
+    // task is DONE: while the sub-agent is still RUNNING the input
+    // textbox and the buttons below it stay visible so the user can
+    // inject follow-up prompts into the running sub-agent
+    // (``sendMessage`` posts ``appendUserMessage`` with this tab's id)
+    // and stop ONLY the sub-agent's task via the Stop button.
     const hideInput =
       worktreeBar ||
       autocommitBar ||
       document.getElementById('merge-toolbar') ||
-      tab.isSubagentTab;
+      (tab.isSubagentTab && !tab.isRunning);
     if (hideInput) {
       if (inputContainer) inputContainer.style.display = 'none';
     } else {
@@ -2682,17 +2688,89 @@
   const _rpClosedSubagentTabs = new Set();
   let _rpSyncing = false;
 
+  /**
+   * The chat DOM root owned by tab *parentId*: the live ``#output``
+   * element for the active tab, the saved ``outputFragment`` for a
+   * background tab, or null when the tab is unknown / has no DOM yet.
+   */
+  function rpTaskDomRootForParent(parentId) {
+    if (parentId === activeTabId) return O;
+    const parentTab = getTab(parentId);
+    return parentTab ? parentTab.outputFragment : null;
+  }
+
+  /**
+   * The run_parallel panels of *parentId*'s CURRENT task DOM, oldest
+   * first.  Panels rendered inside an ``.adjacent-task`` history block
+   * belong to a different (long-gone) session: they must never own,
+   * steal, or defer a live fan-out's sub-agent tabs, so they are
+   * excluded here.
+   */
+  function rpDirectPanelsForParent(parentId) {
+    const root = rpTaskDomRootForParent(parentId);
+    if (!root || !root.querySelectorAll) return [];
+    return Array.from(root.querySelectorAll('.tc-run-parallel')).filter(
+      p => !(p.closest && p.closest('.adjacent-task')),
+    );
+  }
+
   /** Newest run_parallel panel in *parentId*'s chat DOM (or null). */
   function runParallelPanelForParent(parentId) {
-    let root = null;
-    if (parentId === activeTabId) {
-      root = O;
-    } else {
-      const parentTab = getTab(parentId);
-      root = parentTab ? parentTab.outputFragment : null;
+    const panels = rpDirectPanelsForParent(parentId);
+    return panels.length ? panels[panels.length - 1] : null;
+  }
+
+  /**
+   * Number of sub-agents a run_parallel call is expected to spawn,
+   * parsed from the tool_call's ``extras.tasks`` payload — a
+   * JSON-encoded list of task strings (json_printer stringifies every
+   * extra; raw arrays are tolerated for robustness).  Returns null
+   * when the count cannot be determined.
+   */
+  function rpExpectedTaskCount(rawTasks) {
+    if (Array.isArray(rawTasks)) return rawTasks.length;
+    if (typeof rawTasks !== 'string' || !rawTasks) return null;
+    try {
+      const parsed = JSON.parse(rawTasks);
+      return Array.isArray(parsed) ? parsed.length : null;
+    } catch (_e) {
+      return null;
     }
-    if (!root || !root.querySelectorAll) return null;
-    const panels = root.querySelectorAll('.tc-run-parallel');
+  }
+
+  /**
+   * The panel of *parentId* whose fan-out registry already contains
+   * sub-agent *taskId* (or null).  Lets a delayed ``openSubagentTab``
+   * re-attach to the run_parallel call that actually spawned the
+   * sub-agent instead of the newest panel of a LATER call.
+   */
+  function rpPanelOwningTask(parentId, taskId) {
+    if (taskId === undefined || taskId === null || taskId === '') return null;
+    for (const p of rpDirectPanelsForParent(parentId)) {
+      const entries = p._rpSubagents || [];
+      if (entries.some(en => String(en.taskId) === String(taskId))) return p;
+    }
+    return null;
+  }
+
+  /**
+   * Pick the panel of *parentId* that should own a sub-agent being
+   * (re)opened for *taskId*: the panel already registered for the
+   * task, else the oldest panel whose fan-out is still missing
+   * sub-agents (fresh history reopens deliver the persisted rows of
+   * sequential run_parallel calls in spawn order, so filling panels
+   * oldest-first reconstructs the per-call grouping), else the newest
+   * panel.
+   */
+  function rpPanelForNewSubagent(parentId, taskId) {
+    const owner = rpPanelOwningTask(parentId, taskId);
+    if (owner) return owner;
+    const panels = rpDirectPanelsForParent(parentId);
+    for (const p of panels) {
+      const expected = p._rpExpectedCount;
+      if (typeof expected !== 'number') continue;
+      if ((p._rpSubagents || []).length < expected) return p;
+    }
     return panels.length ? panels[panels.length - 1] : null;
   }
 
@@ -2730,33 +2808,47 @@
     return rpOwnerTabIdForContainer(root);
   }
 
-  /** True when *panelEl* is the newest run_parallel panel in its task DOM. */
-  function rpIsNewestRunParallelPanel(panelEl) {
-    let root = null;
-    if (panelEl.parentNode === O) root = O;
-    else {
-      root = panelEl.getRootNode ? panelEl.getRootNode() : null;
-      if (!root || !root.querySelectorAll) return true;
-    }
-    const panels = root.querySelectorAll('.tc-run-parallel');
-    return !panels.length || panels[panels.length - 1] === panelEl;
-  }
-
   /**
    * If a parent tab was replayed/re-rendered, the freshly-created
    * run_parallel panel element has lost the expando registry that
    * associated it with already-open sub-agent tabs.  Before collapsing
    * or syncing such a panel, adopt the open sub-agent tabs of the same
    * parent so the invariant machinery can close/reopen them normally.
+   *
+   * An agent may call run_parallel SEVERAL times: each call owns its
+   * own panel and its own fan-out of sub-agent tabs, so adoption must
+   * preserve the per-call grouping:
+   *   * a tab registered to a LIVE sibling panel belongs to a
+   *     different run_parallel call and is never stolen into this one
+   *     (stealing made collapsing panel #N close panel #M's tabs);
+   *   * a tab registered to a DETACHED panel (its element was replaced
+   *     by a replay/re-render) is adopted by the fresh panel of the
+   *     SAME call — matched by ``_rpCallIndex``, the per-task ordinal
+   *     of the run_parallel call that both render passes stamp;
+   *   * a tab never registered with any panel is adopted by the
+   *     newest panel only (the live fan-out that spawned it).
    */
   function rpAdoptOpenSubagents(panelEl, parentId) {
     if (!panelEl.classList.contains('tc-run-parallel') || !parentId) return;
-    if (!rpIsNewestRunParallelPanel(panelEl)) return;
+    const livePanels = new Set(rpDirectPanelsForParent(parentId));
+    // A panel that is not part of the parent's CURRENT task DOM (e.g.
+    // an adjacent-task history panel) owns no live fan-out.
+    if (!livePanels.has(panelEl)) return;
+    const newest = runParallelPanelForParent(parentId);
     const openChildren = tabs.filter(
       tab => tab.isSubagentTab && tab.parentTabId === parentId,
     );
     for (const tab of openChildren) {
       const previousPanel = _rpTabPanel.get(tab.id);
+      if (previousPanel) {
+        // Registered to a live panel (possibly this one): nothing to
+        // adopt.  Registered to a detached panel: adopt only into the
+        // fresh panel of the same run_parallel call.
+        if (livePanels.has(previousPanel)) continue;
+        if (previousPanel._rpCallIndex !== panelEl._rpCallIndex) continue;
+      } else if (panelEl !== newest) {
+        continue;
+      }
       const previousEntry = previousPanel
         ? (previousPanel._rpSubagents || []).find(en => en.tabId === tab.id)
         : null;
@@ -3275,6 +3367,19 @@
           c.classList.add('tc-run-parallel');
           if (ev.tabId !== undefined && ev.tabId !== null)
             c._rpParentTabId = ev.tabId;
+          // Per-task ordinal of this run_parallel call within its
+          // render stream (live, background, and replay streams each
+          // count from 1).  Lets rpAdoptOpenSubagents re-associate a
+          // replayed panel with the open sub-agent tabs of the SAME
+          // call when the agent made several run_parallel calls.
+          tState.runParallelCount = (tState.runParallelCount || 0) + 1;
+          c._rpCallIndex = tState.runParallelCount;
+          // Expected fan-out size (from the tool's ``tasks`` argument)
+          // so rpPanelForNewSubagent can re-group persisted sub-agent
+          // rows per call on a fresh history reopen.
+          c._rpExpectedCount = rpExpectedTaskCount(
+            ev.extras ? ev.extras.tasks : undefined,
+          );
         }
         let b = '';
         if (ev.path) {
@@ -4525,6 +4630,19 @@
         // window's running state.
         if (ev.tabId === undefined || ev.tabId === activeTabId) {
           setRunningState(ev.running);
+          // A sub-agent tab's prompt-injection surface (the input
+          // textbox and the buttons below it) exists ONLY while the
+          // sub-agent's task runs.  On any ``running:false`` for the
+          // active sub-agent tab, remove it immediately — a lifecycle
+          // fallback that enforces the rule even when the
+          // ``subagentDone`` broadcast is delayed or lost.  Mirrors
+          // the ``(tab.isSubagentTab && !tab.isRunning)`` rule in
+          // ``restoreTab``.
+          if (!ev.running) {
+            const stTab = getTab(activeTabId);
+            if (stTab && stTab.isSubagentTab && inputContainer)
+              inputContainer.style.display = 'none';
+          }
           // Refresh collapse-button-driven visibility so panels of the
           // now-running task become visible even while collapsed.  Needed
           // after resuming a running task from history: the prior
@@ -4750,11 +4868,6 @@
         }
         break;
       }
-      case 'ensureChat':
-        if (tabs.length === 0) {
-          createNewTab();
-        }
-        break;
       case 'showWelcome': {
         const swTabId = ev.tabId || activeTabId;
         const swTab = getTab(swTabId);
@@ -5024,7 +5137,7 @@
             // the toggles read AT THE TIME this task ran, not the
             // user's CURRENT global settings.  The live toggles in
             // this webview already mirror ``~/.kiss/config.json``
-            // (kept in sync via ``updateSetting`` / ``configData``);
+            // (kept in sync via ``configData``);
             // overwriting them with the loaded task's stale snapshot
             // would silently make the NEXT task submitted in this
             // tab run with the loaded task's old settings instead of
@@ -5119,61 +5232,6 @@
           /* ignored */
         }
         break;
-
-      case 'updateSetting': {
-        const sKey = ev.key;
-        const sVal = ev.value;
-        if (sKey === 'is_parallel') {
-          // Parallel-agents setting updated server-side (no UI toggle)
-        } else if (sKey === 'is_worktree' && worktreeToggleBtn) {
-          worktreeToggleBtn.checked = !!sVal;
-        } else if (sKey === 'model' && typeof sVal === 'string') {
-          // Update #model-name (not #model-btn.textContent, which would
-          // destroy the button's SVG icon).
-          if (modelName) modelName.textContent = sVal;
-          selectedModel = sVal;
-        } else if (sKey === 'max_budget') {
-          // Budget updated server-side; UI may show in config panel
-        } else if (sKey === 'use_web_browser') {
-          // Web browser setting updated server-side
-        } else if (sKey === 'demo_mode' && demoToggleBtn) {
-          demoMode = !!sVal;
-          demoToggleBtn.checked = demoMode;
-          // Demo mode turned off (possibly from another window):
-          // dismiss a finished demo's ended play-button UI.
-          if (!demoMode) clearDemoEndedUi();
-        } else if (sKey === 'auto_commit') {
-          // Auto-commit triggered server-side
-        } else if (sKey === 'auto_commit_mode' && autocommitToggleBtn) {
-          autocommitToggleBtn.checked = !!sVal;
-        } else if (sKey === 'custom_endpoint' && typeof sVal === 'string') {
-          const epEl = document.getElementById('cfg-custom-endpoint');
-          if (epEl) epEl.value = sVal;
-        } else if (sKey === 'custom_api_key' && sVal === true) {
-          // Custom API key updated server-side; mask in UI
-          const akEl = document.getElementById('cfg-custom-api-key');
-          if (akEl && !akEl.value) akEl.value = '••••••••';
-        } else if (sKey === 'custom_headers' && sVal === true) {
-          // Custom headers updated server-side
-        } else if (sKey.endsWith('_api_key') && sVal === true) {
-          // API key updated server-side; map param name to env var
-          const envMap = {
-            gemini_api_key: 'GEMINI_API_KEY',
-            openai_api_key: 'OPENAI_API_KEY',
-            anthropic_api_key: 'ANTHROPIC_API_KEY',
-            together_api_key: 'TOGETHER_API_KEY',
-            openrouter_api_key: 'OPENROUTER_API_KEY',
-            zai_api_key: 'ZAI_API_KEY',
-            moonshot_api_key: 'MOONSHOT_API_KEY',
-          };
-          const envVar = envMap[sKey];
-          if (envVar) {
-            const keyEl = document.getElementById('cfg-key-' + envVar);
-            if (keyEl && !keyEl.value) keyEl.value = '••••••••';
-          }
-        }
-        break;
-      }
 
       case 'inputHistory':
         histCache = ev.tasks || [];
@@ -5535,7 +5593,14 @@
         const subTaskId =
           ev.task_id === undefined || ev.task_id === null ? '' : ev.task_id;
         let rpPanel = _rpTabPanel.get(ev.tab_id) || null;
-        if (!rpPanel && parentId) rpPanel = runParallelPanelForParent(parentId);
+        if (!rpPanel && parentId) {
+          // No live mapping for this tab id: pick the run_parallel
+          // call that owns the sub-agent (matching registered taskId,
+          // else the oldest not-yet-full panel for history reopens,
+          // else the newest panel) — never blindly the newest, which
+          // would merge every call's fan-out into the last panel.
+          rpPanel = rpPanelForNewSubagent(parentId, subTaskId);
+        }
         // Idempotent: if a tab with the same id already exists, update
         // it in place rather than pushing a duplicate.  Defends against
         // accidental duplicate events from the backend.
@@ -5594,13 +5659,24 @@
         // If the backend converted the active tab into a sub-agent tab
         // (e.g. the user clicked a sub-agent row in the history panel,
         // which created a fresh chat tab that ``_replay_session`` then
-        // flips via ``openSubagentTab``), hide the input textbox + the
-        // buttons below it.  ``restoreTab`` already enforces this rule
-        // when *switching* tabs, but the tab-switch ran BEFORE
-        // ``isSubagentTab`` was set, so the input bar is still showing
-        // for the active tab at this point.
+        // flips via ``openSubagentTab``), sync the input textbox + the
+        // buttons below it to the sub-agent's running state:
+        //
+        //   * still RUNNING — keep the input VISIBLE so the user can
+        //     inject follow-up prompts into the live sub-agent and
+        //     stop ONLY the sub-agent's task;
+        //   * already DONE (``isDone`` history replay) — hide it, the
+        //     sub-agent accepts no further input.
+        //
+        // ``restoreTab`` enforces the same rule when *switching* tabs,
+        // but the tab-switch ran BEFORE ``isSubagentTab`` was set, so
+        // the input bar state is stale for the active tab at this
+        // point.
         if (subTab.id === activeTabId) {
-          if (inputContainer) inputContainer.style.display = 'none';
+          if (inputContainer) {
+            if (subTab.isRunning) inputContainer.style.display = '';
+            else inputContainer.style.display = 'none';
+          }
           // History-load case: the new tab was created and switched
           // to before this handler fired, so ``restoreTab`` initialised
           // the global running state from the brand-new tab's default
@@ -5632,8 +5708,15 @@
           // already completed — diverging from the fresh-launch path
           // where ``restoreTab(setRunningState(false))`` would
           // eventually run when the user clicks back to the tab.
+          // Also hide the input textbox + the buttons below it
+          // IMMEDIATELY: the sub-agent task just completed, so the
+          // prompt-injection surface must disappear at once (the
+          // ``closeTab`` below switches to an adjacent tab whose
+          // ``restoreTab`` then re-resolves the input visibility for
+          // that tab).
           if (doneTab.id === activeTabId) {
             setRunningState(false);
+            if (inputContainer) inputContainer.style.display = 'none';
           }
           // Close the sub-agent tab as soon as it finishes.
           // ``closeTab`` notifies the backend, runs the run_parallel
@@ -5935,27 +6018,25 @@
     renderTabBar();
   }
 
-  function addError(text) {
-    const div = mkEl('div', 'ev tr err');
-    div.innerHTML = '<strong>Error:</strong> ' + esc(text);
+  function addBanner(cls, label, text) {
+    const div = mkEl('div', 'ev tr ' + cls);
+    div.innerHTML = '<strong>' + label + '</strong> ' + esc(text);
     O.appendChild(div);
     sb();
+  }
+
+  function addError(text) {
+    addBanner('err', 'Error:', text);
   }
 
   /** Render an informational server notice (green-tinted banner). */
   function addNotice(text) {
-    const div = mkEl('div', 'ev tr note');
-    div.innerHTML = '<strong>Note:</strong> ' + esc(text);
-    O.appendChild(div);
-    sb();
+    addBanner('note', 'Note:', text);
   }
 
   /** Render a backend warning (amber-tinted banner). */
   function addWarning(text) {
-    const div = mkEl('div', 'ev tr warn');
-    div.innerHTML = '<strong>Warning:</strong> ' + esc(text);
-    O.appendChild(div);
-    sb();
+    addBanner('warn', 'Warning:', text);
   }
 
   // --- Remote URL (dynamic) ---
@@ -6066,6 +6147,17 @@
     '<line x1="12" y1="15" x2="12" y2="3"/>' +
     '</svg>';
 
+  // 12px variant of the same Feather download arrow, injected as the
+  // settings-panel Update-button badge by renderUpdateAvailableBadge.
+  const UPDATE_BADGE_SVG =
+    '<svg class="update-available-icon" width="12" height="12" ' +
+    'viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+    '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>' +
+    '<polyline points="7 10 12 15 17 10"/>' +
+    '<line x1="12" y1="15" x2="12" y2="3"/>' +
+    '</svg>';
+
   function renderUpdateAvailable(available, latest, current) {
     renderUpdateAvailableBadge(available, latest, current);
     renderUpdateAvailableNotification(available, latest, current);
@@ -6090,33 +6182,10 @@
           '— click to update'
         : 'A new version is available — click to update';
     btn.setAttribute('title', tip);
-    // Build an inline SVG download-arrow icon (matches the 12px
-    // visual weight of the autocommit button's circle icon).  Use
-    // namespaced createElementNS so the browser parses it as SVG
-    // rather than HTML.
-    const svgNs = 'http://www.w3.org/2000/svg';
-    const icon = document.createElementNS(svgNs, 'svg');
-    icon.setAttribute('class', 'update-available-icon');
-    icon.setAttribute('width', '12');
-    icon.setAttribute('height', '12');
-    icon.setAttribute('viewBox', '0 0 24 24');
-    icon.setAttribute('fill', 'none');
-    icon.setAttribute('stroke', 'currentColor');
-    icon.setAttribute('stroke-width', '2');
-    icon.setAttribute('stroke-linecap', 'round');
-    icon.setAttribute('stroke-linejoin', 'round');
-    // Download arrow path (Feather "download" icon).
-    const parts = [
-      ['path', {d: 'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4'}],
-      ['polyline', {points: '7 10 12 15 17 10'}],
-      ['line', {x1: '12', y1: '15', x2: '12', y2: '3'}],
-    ];
-    for (const [tag, attrs] of parts) {
-      const el = document.createElementNS(svgNs, tag);
-      for (const k of Object.keys(attrs)) el.setAttribute(k, attrs[k]);
-      icon.appendChild(el);
-    }
-    btn.insertBefore(icon, btn.firstChild);
+    // Inject the 12px Feather download-arrow badge icon (matches the
+    // visual weight of the autocommit button's circle icon) before
+    // the "Update" label.
+    btn.insertAdjacentHTML('afterbegin', UPDATE_BADGE_SVG);
   }
 
   /**
@@ -7972,12 +8041,38 @@
     btn.type = 'button';
     btn.className = 'sidebar-item-copy';
     btn.setAttribute('aria-label', 'Copy task to clipboard');
+    wireCopyButton(btn, text, false, false);
+    return btn;
+  }
+
+  /**
+   * Wire the shared copy-to-clipboard behavior onto an icon-only
+   * button: set the clipboard SVG icon and, on click, stop
+   * propagation (so the surrounding row's click handler does not
+   * fire), copy *text* via ``navigator.clipboard.writeText`` (falling
+   * back to ``fallbackCopyText`` when the async clipboard API is
+   * unavailable) and swap the icon for a green check mark for 1.5 s.
+   *
+   * @param {HTMLButtonElement} btn - the button to wire up.
+   * @param {*} text - payload to copy (stringified at click time).
+   * @param {boolean} retryFallback - when true, a rejected clipboard
+   *   write retries via ``fallbackCopyText`` before giving up.
+   * @param {boolean} resetFlashTimer - when true, a rapid second click
+   *   restarts the 1.5 s feedback window; false preserves the sidebar
+   *   row button's independent per-click timers.
+   */
+  function wireCopyButton(btn, text, retryFallback, resetFlashTimer) {
     btn.innerHTML = PANEL_COPY_SVG;
 
+    let flashTimer = 0;
     const flash = () => {
       btn.innerHTML = PANEL_CHECK_SVG;
       btn.classList.add('copied');
-      setTimeout(() => {
+      // Preserve the two builders' historical rapid-click behavior:
+      // id buttons reset their existing timer, while sidebar-row buttons
+      // leave each click's timer independently scheduled.
+      if (resetFlashTimer) clearTimeout(flashTimer);
+      flashTimer = setTimeout(() => {
         btn.innerHTML = PANEL_COPY_SVG;
         btn.classList.remove('copied');
       }, 1500);
@@ -7988,13 +8083,13 @@
       e.preventDefault();
       const payload = String(text == null ? '' : text);
       if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(payload).then(flash, () => {});
+        navigator.clipboard.writeText(payload).then(flash, () => {
+          if (retryFallback && fallbackCopyText(payload)) flash();
+        });
       } else if (fallbackCopyText(payload)) {
         flash();
       }
     });
-
-    return btn;
   }
 
   /**
@@ -8020,32 +8115,7 @@
     btn.className = 'ids-copy-btn ids-copy-' + kind;
     btn.dataset.tooltip = 'Copy ' + kind + ' id';
     btn.setAttribute('aria-label', 'Copy ' + kind + ' id to clipboard');
-    btn.innerHTML = PANEL_COPY_SVG;
-
-    let flashTimer = 0;
-    const flash = () => {
-      btn.innerHTML = PANEL_CHECK_SVG;
-      btn.classList.add('copied');
-      clearTimeout(flashTimer);
-      flashTimer = setTimeout(() => {
-        btn.innerHTML = PANEL_COPY_SVG;
-        btn.classList.remove('copied');
-      }, 1500);
-    };
-
-    btn.addEventListener('click', e => {
-      e.stopPropagation();
-      e.preventDefault();
-      const payload = String(idText == null ? '' : idText);
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(payload).then(flash, () => {
-          if (fallbackCopyText(payload)) flash();
-        });
-      } else if (fallbackCopyText(payload)) {
-        flash();
-      }
-    });
-
+    wireCopyButton(btn, idText, true, true);
     return btn;
   }
 
@@ -8950,14 +9020,23 @@
   }
 
   /**
+   * Toggle the 'open' class on a slide-up/slide-in panel and its
+   * backdrop overlay.  Shared by the Settings, Frequent-tasks, and
+   * Tricks panels below.
+   */
+  function setPanelOpen(panel, overlay, open) {
+    if (panel) panel.classList.toggle('open', open);
+    if (overlay) overlay.classList.toggle('open', open);
+  }
+
+  /**
    * Open the standalone Settings panel (slides in from the right) and
    * request the current config from the backend so the form is freshly
    * populated.
    */
   function openSettingsPanel() {
     if (!settingsPanel) return;
-    settingsPanel.classList.add('open');
-    if (settingsOverlay) settingsOverlay.classList.add('open');
+    setPanelOpen(settingsPanel, settingsOverlay, true);
     configFormPopulated = false;
     vscode.postMessage({type: 'getConfig'});
   }
@@ -8968,8 +9047,7 @@
    */
   function closeSettingsPanel() {
     saveSettingsIfPopulated();
-    if (settingsPanel) settingsPanel.classList.remove('open');
-    if (settingsOverlay) settingsOverlay.classList.remove('open');
+    setPanelOpen(settingsPanel, settingsOverlay, false);
   }
 
   /**
@@ -8978,15 +9056,13 @@
    */
   function openFrequentPanel() {
     if (!frequentPanel) return;
-    frequentPanel.classList.add('open');
-    if (frequentOverlay) frequentOverlay.classList.add('open');
+    setPanelOpen(frequentPanel, frequentOverlay, true);
     vscode.postMessage({type: 'getFrequentTasks', limit: 50});
   }
 
   /** Close the standalone Frequent tasks panel. */
   function closeFrequentPanel() {
-    if (frequentPanel) frequentPanel.classList.remove('open');
-    if (frequentOverlay) frequentOverlay.classList.remove('open');
+    setPanelOpen(frequentPanel, frequentOverlay, false);
   }
 
   /**
@@ -8996,15 +9072,13 @@
    */
   function openTricksPanel() {
     if (!tricksPanel) return;
-    tricksPanel.classList.add('open');
-    if (tricksOverlay) tricksOverlay.classList.add('open');
+    setPanelOpen(tricksPanel, tricksOverlay, true);
     renderTricks(window.__TRICKS__ || []);
   }
 
   /** Close the standalone Tricks panel. */
   function closeTricksPanel() {
-    if (tricksPanel) tricksPanel.classList.remove('open');
-    if (tricksOverlay) tricksOverlay.classList.remove('open');
+    setPanelOpen(tricksPanel, tricksOverlay, false);
   }
 
   /**

@@ -246,7 +246,6 @@ class TestRed7DeadCodeRemoved:
             "has_uncommitted_changes",
             "delete_branch",
             "branch_exists",
-            "load_original_branch",
             "save_original_branch",
             "save_baseline_commit",
             "copy_dirty_state",
@@ -257,8 +256,6 @@ class TestRed7DeadCodeRemoved:
             "ensure_excluded",
             "stage_all",
             "staged_diff",
-            "unstaged_files",
-            "staged_files",
         ):
             assert hasattr(GitWorktreeOps, name), (
                 f"Regression: still-used method {name!r} missing from GitWorktreeOps"

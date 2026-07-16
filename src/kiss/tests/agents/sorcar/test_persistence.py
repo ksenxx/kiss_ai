@@ -42,9 +42,9 @@ class TestTaskHistory:
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_prefix_match_task_empty_query(self):
+    def test_prefix_match_tasks_empty_query(self):
         th._add_task("anything")
-        assert th._prefix_match_task("") == ""
+        assert th._prefix_match_tasks("", limit=1) == []
 
 
 class TestChatEvents:

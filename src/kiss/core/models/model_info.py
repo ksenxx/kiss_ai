@@ -1172,5 +1172,5 @@ def get_max_context_length(model_name: str) -> int:
     """
     info = MODEL_INFO.get(model_name) or MODEL_INFO.get(_strip_provider_prefix(model_name))
     if info is None:
-        raise KeyError(f"Model '{model_name}' not found in MODEL_INFO")
+        raise KISSError(f"Model '{model_name}' not found in MODEL_INFO")
     return info.context_length

@@ -26,6 +26,7 @@ from kiss.agents.sorcar.persistence import (
     _record_model_usage,
 )
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.agents.vscode.helpers import tab_owns_answer_queue
 
 if TYPE_CHECKING:
     from kiss.agents.vscode.json_printer import JsonPrinter
@@ -50,6 +51,50 @@ def _kiss_home_is_default() -> bool:
         return Path(custom).resolve() == (Path.home() / ".kiss").resolve()
     except OSError:
         return False
+
+
+def _owner_task_id(state: _RunningAgentState) -> str:
+    """Return the persisted task id of *state*'s live agent, or ``""``.
+
+    Reads ``state.agent._last_task_id`` — the ``task_history`` row id
+    the agent allocated for its current run.  MUST be called while
+    holding :attr:`_RunningAgentState._registry_lock` (the server's
+    ``_state_lock``): task teardown replaces/clears ``state.agent``
+    under that lock, so capturing the id inside the same critical
+    section that queued a pending user message guarantees the id
+    belongs to the state the message was queued on (not a successor
+    task that re-armed the tab after the lock was released).
+
+    Returns ``""`` when the state has no agent yet or the agent has
+    not allocated its task row (the narrow window between
+    ``run()`` entry and ``_add_task``); callers then emit a transient
+    (unstamped) echo rather than mis-attributing the prompt to a
+    previous task.
+
+    Known accepted attribution nuances (by design):
+
+    * In a multi-``<task>`` run, a prompt queued BETWEEN two subtasks
+      is stamped with the subtask currently on screen (the one whose
+      id ``_last_task_id`` still names) even though the NEXT subtask's
+      pre-step drain consumes it — the echo lands in the trajectory
+      the user was looking at when they typed.
+    * If the whole task tears down between queueing and the echo
+      broadcast, the stamped echo may find its recording/persistence
+      already cleaned up and stay transient — in that interleaving the
+      queued message is never consumed by any agent either (teardown
+      clears ``pending_user_messages``), matching pre-fix semantics.
+
+    Args:
+        state: The running-agent state whose task id to resolve.
+
+    Returns:
+        The owning task id, or ``""`` when it cannot be determined.
+    """
+    agent = state.agent
+    task_id = (
+        getattr(agent, "_last_task_id", None) if agent is not None else None
+    )
+    return task_id if isinstance(task_id, str) else ""
 
 
 def _restart_kiss_web_daemon() -> bool:
@@ -110,8 +155,9 @@ def _restart_kiss_web_daemon() -> bool:
 def _parse_int(value: Any) -> int | None:
     """Parse a frontend-supplied JSON value as an int.
 
-    Mirrors ``_cmd_get_adjacent_task``'s guarded parse so malformed
-    payloads (e.g. ``"taskId": "abc"``) never raise out of a command
+    Guarded parse for int-typed command fields (e.g. the history
+    pager's ``offset`` / ``generation`` / ``limit``) so malformed
+    payloads (e.g. ``"offset": "abc"``) never raise out of a command
     handler — an escaping exception terminates the transport's whole
     receive loop and with it the client connection.
 
@@ -248,6 +294,7 @@ class _CommandsMixin:
             logger.debug("Ignoring run command without tabId")
             return
         inject_prompt: str | None = None
+        inject_task = ""
         thread: threading.Thread | None = None
         chat_id = ""
         with self._state_lock:
@@ -314,6 +361,15 @@ class _CommandsMixin:
                 ):
                     tab.pending_user_messages.append(prompt)
                     inject_prompt = prompt
+                    inject_task = _owner_task_id(tab)
+                    if not inject_task:
+                        # Task row not allocated yet (the created-but-
+                        # unstarted double-submit window): the echo
+                        # below is transient (no ``taskId`` stamp), so
+                        # ALSO queue the prompt for the drain hook,
+                        # which records + persists a durable copy once
+                        # the consuming task's id is known.
+                        tab.unattributed_prompt_echoes.append(prompt)
             else:
                 tab.stop_event = threading.Event()
                 tab.user_answer_queue = queue.Queue(maxsize=1)
@@ -365,14 +421,18 @@ class _CommandsMixin:
             # Busy tab: the run was routed into the running agent (or
             # ignored as blank).  Echo the injected follow-up so the user
             # sees their queued message in the chat surface, mirroring
-            # ``_cmd_append_user_message``.  Broadcast OUTSIDE the lock
-            # (network I/O) and never start a second task.
+            # ``_cmd_append_user_message`` — including the owning task
+            # id stamp (captured under the lock at queueing time) so
+            # the echoed prompt is recorded/persisted into the task's
+            # trajectory rather than vanishing on the next replay.
+            # When the task id is not known yet the echo is transient
+            # (no stamp) and a durable copy was deferred to the drain
+            # hook above.  Broadcast OUTSIDE the lock (network I/O)
+            # and never start a second task.
             if inject_prompt is not None:
-                self.printer.broadcast({
-                    "type": "prompt",
-                    "text": inject_prompt,
-                    "tabId": tab_id,
-                })
+                self._echo_injected_prompt(
+                    tab_id, inject_prompt, inject_task,
+                )
             return
         # Emit ``clear`` synchronously (outside the state lock) so the
         # extension layer's chat_id → tab_id index is populated before
@@ -679,27 +739,62 @@ class _CommandsMixin:
             state = _RunningAgentState.running_agent_states.get(tab_id)
             if state is None or state.user_answer_queue is None:
                 continue
-            # Task-ownership filter (mirrors
-            # ``task_runner._resolve_task_answer_queue`` / BUG-TR2-2):
-            # ``cleanup_task`` intentionally preserves subscriber sets
-            # of FINISHED tasks, so a peer that co-subscribed with
-            # ``ans_tab`` to an old, finished task may now be running a
-            # brand-new UNRELATED task — its live ``user_answer_queue``
-            # belongs to THAT task.  Delivering the stale answer there
-            # would answer the wrong question and dismiss the wrong
-            # task's askUser modal.  Skip peers whose live agent is
-            # actively running a task other than the shared one.
-            agent_task = (
-                self.printer._coerce_task_id(
-                    getattr(state.agent, "_last_task_id", None),
-                )
-                if state.agent is not None
-                else ""
-            )
-            if state.is_task_active and agent_task and agent_task != task_key:
+            # Task-ownership filter (BUG-TR2-2), shared with
+            # ``task_runner._resolve_task_answer_queue`` — see
+            # :func:`kiss.agents.vscode.helpers.tab_owns_answer_queue`.
+            # Skip peers whose live agent is actively running a task
+            # other than the shared one.
+            if not tab_owns_answer_queue(state, task_key):
                 continue
             return state.user_answer_queue
         return None
+
+    def _echo_injected_prompt(
+        self, tab_id: str, prompt: str, owner_task: str,
+    ) -> None:
+        """Broadcast a queued follow-up prompt back to the tab's viewers.
+
+        Emits a ``prompt`` event stamped with the originating
+        ``tabId`` — the tab whose transcript the user is looking at —
+        so the queued message appears in the chat surface immediately.
+
+        The echo is ALSO stamped with *owner_task* (the task whose
+        ``pending_user_messages`` queue
+        received the prompt) so the printer records it into the task's
+        in-memory recording and persists it into the task's ``events``
+        rows.  Without the stamp the echo is a transient targeted
+        broadcast (see ``WebPrinter.broadcast``): it renders once and
+        then vanishes from the trajectory on any ``task_events``
+        replay — which sub-agent tabs perform on every reopen/history
+        click — so an injected prompt would never show up in a
+        sub-agent's (or a reloaded main tab's) transcript.
+
+        When *owner_task* is empty (the task row is not allocated yet
+        — the narrow window between ``run()`` entry and ``_add_task``)
+        the echo is emitted WITHOUT the stamp so the user still sees
+        their message immediately; the caller ALSO queued the prompt
+        on ``_RunningAgentState.unattributed_prompt_echoes``, and the
+        drain hook (``SorcarAgent._drain_pending_user_messages``)
+        later records + persists a durable copy under the task that
+        actually consumed the message (a ``recordOnly`` broadcast — it
+        is never re-sent live, so no duplicate panel appears).
+
+        Args:
+            tab_id: The frontend tab id the user typed into.
+            prompt: The queued follow-up text.
+            owner_task: The owning task id captured under
+                ``_state_lock`` at queueing time (see
+                :func:`_owner_task_id`), or ``""`` when the task row
+                is not allocated yet.
+        """
+        echo: dict[str, Any] = {
+            "type": "prompt",
+            "text": prompt,
+            "tabId": tab_id,
+        }
+        if owner_task:
+            echo["taskId"] = owner_task
+        self.printer.broadcast(echo)
 
     def _cmd_append_user_message(self, cmd: dict[str, Any]) -> None:
         """Queue a user message to be injected into the running agent's context.
@@ -741,6 +836,7 @@ class _CommandsMixin:
             tab = _RunningAgentState.running_agent_states.get(tab_id)
             if tab is not None and tab.is_task_active:
                 tab.pending_user_messages.append(prompt)
+                owner = tab
             else:
                 # Viewer-tab fallback: a tab opened from the history
                 # sidebar while a task runs in ANOTHER tab carries no
@@ -770,14 +866,20 @@ class _CommandsMixin:
                     )
                     return
                 source.pending_user_messages.append(prompt)
+                owner = source
+            owner_task = _owner_task_id(owner)
+            if not owner_task:
+                # Task row not allocated yet (fast follow-up during
+                # ``run()`` startup): the echo below is transient
+                # (no ``taskId`` stamp), so ALSO queue the prompt for
+                # the drain hook, which records + persists a durable
+                # copy once the consuming task's id is known.
+                owner.unattributed_prompt_echoes.append(prompt)
         # Echo on the originating tab id — that's the tab whose
         # transcript the user is looking at, so the prompt panel must
         # appear there even when the live agent is owned by a peer.
-        self.printer.broadcast({
-            "type": "prompt",
-            "text": prompt,
-            "tabId": tab_id,
-        })
+        # Broadcast OUTSIDE the lock (network I/O).
+        self._echo_injected_prompt(tab_id, prompt, owner_task)
 
     def _cmd_resume_session(self, cmd: dict[str, Any]) -> None:
         """Replay a previous chat session.
@@ -834,7 +936,7 @@ class _CommandsMixin:
         if not isinstance(query, str):
             # A non-string query queued to the singleton autocomplete
             # worker killed the worker thread (AttributeError inside
-            # ``_prefix_match_task``); the worker is never restarted,
+            # ``_prefix_match_tasks``); the worker is never restarted,
             # so ghost text would die for the daemon's whole lifetime.
             query = ""
         active_file = cmd.get("activeFile")
@@ -1197,7 +1299,7 @@ class _CommandsMixin:
                 any subtype-specific arguments (``arg`` / ``name`` /
                 ``args`` / ``tabId`` / ``workDir``).
         """
-        from kiss.agents.sorcar.cli_repl import SLASH_COMMANDS
+        from kiss.agents.sorcar.cli_repl import build_help_text
         from kiss.agents.sorcar.custom_commands import (
             discover_commands,
             expand_command,
@@ -1215,29 +1317,9 @@ class _CommandsMixin:
         extra: dict[str, Any] = {}
 
         if subtype == "help":
-            lines = ["Commands:"]
-            for c, d in SLASH_COMMANDS.items():
-                lines.append(f"  {c:<10} {d}")
-            try:
-                custom = discover_commands(work_dir)
-            except Exception:  # pragma: no cover - discovery guard
-                logger.debug("custom command discovery failed", exc_info=True)
-                custom = {}
-            if custom:
-                lines.append("")
-                lines.append("Custom commands:")
-                lines.append(format_command_listing(custom))
-            lines.append("")
-            lines.append(
-                "Input fast-completes (Tab): @path mentions files, "
-                "/ completes commands, a command followed by a space "
-                "completes its argument options (e.g. /resume --task, "
-                "/model list, /skills <name>), a value-taking flag "
-                "completes its value (--task pops recent task ids, "
-                "--model pops model names), and typing a prefix of a "
-                "previous task suggests its completion.",
-            )
-            text = "\n".join(lines)
+            # Single-sourced with the standalone REPL's ``/help`` (see
+            # ``build_help_text``) so the two surfaces can never drift.
+            text = build_help_text(work_dir)
         elif subtype == "commands":
             try:
                 custom = discover_commands(work_dir)

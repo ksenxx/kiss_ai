@@ -45,15 +45,17 @@ from prompt_toolkit.layout.dimension import Dimension
 from kiss.agents.sorcar.cli_line_continuation import (
     ends_with_line_continuation,
 )
+from kiss.agents.sorcar.cli_panel import (
+    CSI_U_ENTER,
+    KEYBOARD_PROTO_DISABLE,
+    KEYBOARD_PROTO_ENABLE,
+    MODIFY_OTHER_KEYS_ENTER,
+)
+from kiss.agents.sorcar.cli_panel import CYAN as _CYAN
 from kiss.agents.sorcar.cli_panel import MIN_BODY_ROWS as _MIN_BODY_ROWS
+from kiss.agents.sorcar.cli_panel import RESET as _RESET
 from kiss.agents.sorcar.persistence import _load_file_usage
 from kiss.agents.vscode.helpers import rank_file_suggestions
-
-# ANSI styling that matches the framed input panel (kept local so this
-# module stays self-contained for the prompt_continuation callable).
-_ESC = "\x1b"
-_CYAN = f"{_ESC}[36m"
-_RESET = f"{_ESC}[0m"
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -84,30 +86,12 @@ _MODEL_CMD_RE = re.compile(r"^\s*/model\s+(.*)$")
 # the VS Code integrated terminal would all be indistinguishable from
 # plain Enter and submit the buffer.  We delete those entries from the
 # table so the raw escape sequence reaches the tuple key-bindings
-# registered further down, which insert a real newline.
-_MODIFY_OTHER_KEYS_ENTER = (
-    "\x1b[27;2;13~",   # Shift+Enter
-    "\x1b[27;3;13~",   # Alt+Enter
-    "\x1b[27;4;13~",   # Alt+Shift+Enter
-    "\x1b[27;5;13~",   # Ctrl+Enter
-    "\x1b[27;6;13~",   # Ctrl+Shift+Enter
-    "\x1b[27;7;13~",   # Ctrl+Alt+Enter
-    "\x1b[27;8;13~",   # Ctrl+Alt+Shift+Enter
-    # Meta-bit-set modifiers (``meta`` == Cmd on macOS in terminals
-    # that report it — iTerm2 with "Report modifiers using CSI u" or
-    # the modifyOtherKeys=2 equivalent, kitty/foot/WezTerm under the
-    # CSI-u keyboard protocol).  Cmd+Enter / Cmd+Shift+Enter / … must
-    # insert a newline (not autocomplete / not submit) the same way
-    # Shift+Enter does, so we cover every mod value 9..16.
-    "\x1b[27;9;13~",   # Cmd/Meta+Enter
-    "\x1b[27;10;13~",  # Cmd+Shift+Enter
-    "\x1b[27;11;13~",  # Cmd+Alt+Enter
-    "\x1b[27;12;13~",  # Cmd+Alt+Shift+Enter
-    "\x1b[27;13;13~",  # Cmd+Ctrl+Enter
-    "\x1b[27;14;13~",  # Cmd+Ctrl+Shift+Enter
-    "\x1b[27;15;13~",  # Cmd+Ctrl+Alt+Enter
-    "\x1b[27;16;13~",  # Cmd+Ctrl+Alt+Shift+Enter
-)
+# registered further down, which insert a real newline.  The canonical
+# table (modifiers 2..16, Shift through Cmd+Ctrl+Alt+Shift) lives in
+# :mod:`kiss.agents.sorcar.cli_panel` and is shared with
+# ``cli_steering._NEWLINE_AFTER_ESC`` so the two input paths can never
+# drift apart.
+_MODIFY_OTHER_KEYS_ENTER = MODIFY_OTHER_KEYS_ENTER
 
 
 def _unmap_enter_aliases() -> None:
@@ -375,15 +359,12 @@ for _seq in _MODIFY_OTHER_KEYS_ENTER:
 
 # kitty/CSI-u: ``ESC[13;<mod>u`` for Shift / Alt / Ctrl / Ctrl-Shift / …
 # and the Meta-bit-set combinations 9..16 (Cmd+Enter and friends on
-# macOS terminals that report the Meta modifier).  Two-digit modifier
-# values are split across two tuple keys because the prompt_toolkit
-# parser matches one byte at a time.
-for _mod in ("2", "3", "4", "5", "6", "7", "8"):
-    _bind_newline_sequence("escape", "[", "1", "3", ";", _mod, "u")
-for _two_digit in ("9", "10", "11", "12", "13", "14", "15", "16"):
-    _bind_newline_sequence(
-        "escape", "[", "1", "3", ";", *tuple(_two_digit), "u",
-    )
+# macOS terminals that report the Meta modifier).  ``_sequence_keys``
+# splits every byte after ESC into its own tuple key, so two-digit
+# modifier values naturally span two tuple keys as the prompt_toolkit
+# parser (which matches one byte at a time) requires.
+for _seq in CSI_U_ENTER:
+    _bind_newline_sequence(*_sequence_keys(_seq))
 
 
 def _prompt_continuation(
@@ -447,29 +428,19 @@ class PtkCompleter(Completer):
         """
         del complete_event  # All categories pop while typing.
         line = document.text_before_cursor
-        at = _AT_RE.search(line)
-        if at:
-            return self._at_mention_completions(at.group(1))
-        model_cmd = _MODEL_CMD_RE.match(line)
-        if model_cmd:
-            return self._model_completions(model_cmd.group(1))
-        # Left-strip only: a trailing space after a slash command
-        # (``/resume ``) switches from command-name completion to the
-        # command's argument options.
-        lstripped = line.lstrip()
-        if lstripped.startswith("/") and " " not in lstripped:
+        # The branch order (@-mention → /model → slash command → flag
+        # value → argument options → predictive) is single-sourced in
+        # ``CliCompleter.completion_branch``, shared with the readline
+        # menu.
+        kind, payload = self.cli.completion_branch(line)
+        if kind == "at":
+            return self._at_mention_completions(payload.group(1))
+        if kind == "model":
+            return self._model_completions(payload)
+        if kind == "slash":
             return self._slash_completions(line)
-        if lstripped.startswith("/"):
-            # A trailing value-taking flag (``--task `` / ``--model ``)
-            # completes the flag's VALUE; the branch is terminal (an
-            # empty candidate list must not fall back to the option
-            # menu, which would wrongly re-offer flags as the value).
-            value_matches = self.cli._flag_value_matches(line)
-            if value_matches is not None:
-                return self._slash_arg_completions(line, value_matches)
-            arg_matches = self.cli._slash_arg_matches(line)
-            if arg_matches:
-                return self._slash_arg_completions(line, arg_matches)
+        if kind in ("flag-value", "arg-options"):
+            return self._slash_arg_completions(line, payload)
         return self._predictive_completions(line)
 
     def _at_mention_completions(self, query: str) -> Iterable[Completion]:
@@ -671,7 +642,8 @@ class PtkLineReader:
             # into the buffer (see the bindings at module level — both
             # the xterm ``modifyOtherKeys`` and the kitty/CSI-u
             # encodings are covered); plain Enter still submits via
-            # the ``~completion_is_selected`` Enter binding above.
+            # the unfiltered Enter binding above, which first cancels
+            # any open completion menu (except the @-mention picker).
             # Without ``multiline=True`` prompt_toolkit would short-
             # circuit Enter to "accept-line" before our key bindings
             # ever ran, so the user could never type a newline.
@@ -746,13 +718,13 @@ class PtkLineReader:
             KeyboardInterrupt: On Ctrl+C.
         """
         output = self.session.output
-        output.write_raw(f"{_ESC}[>4;2m{_ESC}[>1u")
+        output.write_raw(KEYBOARD_PROTO_ENABLE)
         output.flush()
         try:
             return self.session.prompt(ANSI(prompt))
         finally:
             try:
-                output.write_raw(f"{_ESC}[>4;0m{_ESC}[<u")
+                output.write_raw(KEYBOARD_PROTO_DISABLE)
                 output.flush()
             except Exception:  # pragma: no cover - best-effort restore
                 logger.debug(

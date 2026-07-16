@@ -696,7 +696,9 @@ class TestClearChatDedup(unittest.TestCase):
 
     def _get_clear_chat_block(self) -> str:
         idx = self.js_src.index("case 'clearChat':")
-        end = self.js_src.index("case 'ensureChat':", idx)
+        # ``showWelcome`` is the case that follows ``clearChat`` (the
+        # dead ``ensureChat`` listener was removed — no producer).
+        end = self.js_src.index("case 'showWelcome':", idx)
         return self.js_src[idx:end]
 
     def test_clear_chat_checks_backend_chat_id(self) -> None:

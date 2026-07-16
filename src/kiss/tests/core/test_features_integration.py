@@ -27,8 +27,27 @@ from kiss.agents.vscode.vscode_config import (
     save_api_key_to_shell,
     save_config,
 )
+from kiss.core import config as config_module
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
+
+
+@pytest.fixture(autouse=True)
+def _restore_default_config():
+    """Restore the DEFAULT_CONFIG binding after every test.
+
+    ``save_config``/``save_api_key_to_shell`` trigger
+    ``vscode_config._refresh_config`` which rebinds
+    ``kiss.core.config.DEFAULT_CONFIG`` from the (test-redirected)
+    config file; without restoration the rebound object leaks into
+    later test modules (e.g. ``test_build_config_cli``) and breaks
+    their default-value assertions.
+    """
+    saved = config_module.DEFAULT_CONFIG
+    snapshot = saved.model_copy(deep=True).__dict__
+    yield
+    saved.__dict__.update(snapshot)
+    config_module.DEFAULT_CONFIG = saved
 
 
 def _finish_response(model: str = "gpt-4o-mini") -> dict:

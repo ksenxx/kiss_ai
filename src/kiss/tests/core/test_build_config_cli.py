@@ -24,6 +24,12 @@ class TestBuildConfigCLI(unittest.TestCase):
     def setUp(self) -> None:
         self.original_config = config_module.DEFAULT_CONFIG
         self.original_argv = sys.argv
+        # Earlier tests may have mutated the DEFAULT_CONFIG singleton
+        # (e.g. via ``apply_config_to_env``).  ``build_config`` with no
+        # CLI args intentionally preserves the current DEFAULT_CONFIG,
+        # so start each test from a fresh baseline to stay independent
+        # of test ordering.
+        config_module.DEFAULT_CONFIG = Config()
 
     def tearDown(self) -> None:
         sys.argv = self.original_argv

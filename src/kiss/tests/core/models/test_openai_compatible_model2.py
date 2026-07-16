@@ -5559,15 +5559,16 @@ class TestReviewBugReproductions22:
             [("echo", {"result": f"first {img}"})]
         )
 
-        assert m1._pending_tool_result_attachments, (
-            "sanity: attachment is only in memory"
-        )
+        assert any(
+            isinstance(item, dict)
+            and item.get("type") == "_kiss_pending_tool_result_attachment"
+            for item in m1.conversation
+        ), "sanity: attachment persisted as a durable conversation sentinel"
 
         m2 = OpenAICompatibleModel2("gpt-4o", base_url=capture_server, api_key="k")
         m2.initialize("restored")
         m2.conversation = list(m1.conversation)
         m2._pending_function_calls = []
-        m2._pending_tool_result_attachments = []
 
         m2.add_function_results_to_conversation_and_return(
             [("echo", {"result": "second"})]
@@ -6600,7 +6601,6 @@ class TestReviewBugReproductions27:
 
         before_conversation = list(m.conversation)
         before_pending = list(m._pending_function_calls)
-        before_attachments = list(m._pending_tool_result_attachments)
 
         with pytest.raises(KISSError):
             m.add_function_results_to_conversation_and_return(
@@ -6612,7 +6612,6 @@ class TestReviewBugReproductions27:
 
         assert m.conversation == before_conversation
         assert m._pending_function_calls == before_pending
-        assert m._pending_tool_result_attachments == before_attachments
 
 
 class TestReviewBugReproductions28:

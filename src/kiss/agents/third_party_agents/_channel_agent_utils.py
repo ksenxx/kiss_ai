@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import sys
 import threading
 import time as _time
@@ -18,15 +17,21 @@ from typing import Any
 
 import yaml
 
+from kiss.core.config import kiss_home
+
 logger = logging.getLogger(__name__)
 
+# Deliberately frozen at import time: channel agents build their
+# ``channel_dir`` constants from ``Path.home() / ".kiss"``, and
+# :class:`ChannelConfig` uses this same frozen base only to extract the
+# *relative* part of those dirs so :meth:`ChannelConfig.path` can rebase
+# them onto the lazily-resolved ``$KISS_HOME`` (see :func:`_kiss_home`).
 _DEFAULT_KISS_DIR = Path.home() / ".kiss"
 
 
 def _kiss_home() -> Path:
     """Return the KISS data directory, respecting the ``KISS_HOME`` env var."""
-    env = os.environ.get("KISS_HOME")
-    return Path(env) if env else _DEFAULT_KISS_DIR
+    return kiss_home()
 
 
 _NON_TOOL_METHODS = frozenset(

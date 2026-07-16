@@ -2,14 +2,14 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Regression: ``install.sh`` must survive the tool-upgrade questions.
+"""Regression: ``install.sh`` must survive the tool auto-upgrade path.
 
 Background — the bug
 ====================
 The Update button (VS Code extension and the remote webapp) runs
 ``install.sh``.  When the installed git was older than the repo's
-required version the script asked "Upgrade git ...? [Y/n]" and crashed
-under ``set -eo pipefail``:
+required version the script used to ask "Upgrade git ...? [Y/n]" and
+crashed under ``set -eo pipefail``:
 
 * with a pty but no usable input (terminal closed / EOF), the unguarded
   ``read ... </dev/tty`` returned non-zero and ``set -e`` killed the
@@ -22,11 +22,13 @@ under ``set -eo pipefail``:
   pipelines fail under ``pipefail`` and killed the script before it
   printed anything.
 
-These tests run the real ``install.sh`` inside a hermetic sandbox (stub
+The interactive prompt has since been removed entirely: an outdated
+tool is now upgraded unconditionally.  These tests run the real
+``install.sh`` inside a hermetic sandbox (stub
 ``git``/``brew``/``node``/``npm``/``code``/... binaries, throwaway
-``$HOME``) and assert the script gets *past* the git-upgrade question
-all the way to the extension build step (a stub ``npm run package``
-prints a marker and stops the run deterministically).
+``$HOME``) and assert the script gets *past* the git auto-upgrade all
+the way to the extension build step (a stub ``npm run package`` prints
+a marker and stops the run deterministically).
 """
 
 from __future__ import annotations
@@ -158,36 +160,36 @@ def run_install(sandbox: dict, use_pty: bool) -> subprocess.CompletedProcess:
     )
 
 
-def test_git_upgrade_question_without_tty_does_not_crash(tmp_path: Path) -> None:
+def test_git_auto_upgrade_without_tty_does_not_crash(tmp_path: Path) -> None:
     """Webapp update path: no tty, old git, failing brew — must proceed.
 
-    Previously the default-Yes answer ran ``upgrade_git`` which aborted
-    the whole update when Homebrew was missing from the daemon's PATH
-    or failed; now it must warn and continue to the build step.
+    An outdated git triggers an unconditional ``upgrade_git``; a missing
+    or failing Homebrew must not abort the update — the script must warn
+    and continue to the build step.
     """
     sandbox = make_sandbox(tmp_path)
     result = run_install(sandbox, use_pty=False)
     assert "older than the required version" in result.stdout, result.stdout
-    assert "defaulting to Yes" in result.stdout, result.stdout
+    assert "upgrading" in result.stdout, result.stdout
     assert NPM_MARKER in result.stdout, (
-        "install.sh died at the git-upgrade question instead of "
+        "install.sh died at the git auto-upgrade instead of "
         f"continuing to the build step:\n{result.stdout}"
     )
     assert result.returncode == NPM_EXIT, result.stdout
 
 
-def test_git_upgrade_question_with_eof_tty_does_not_crash(tmp_path: Path) -> None:
-    """Terminal update path with EOF input: ``read`` fails — must proceed.
+def test_git_auto_upgrade_with_eof_tty_does_not_crash(tmp_path: Path) -> None:
+    """Terminal update path with EOF input on a real pty — must proceed.
 
-    /dev/tty opens fine under ``script(1)`` but the pty input is at EOF,
-    so the unguarded ``read`` used to return non-zero and ``set -e``
-    silently killed the script right at the question.
+    /dev/tty opens fine under ``script(1)`` but the pty input is at EOF;
+    the auto-upgrade path must never read from the terminal, so the run
+    must reach the build step regardless.
     """
     sandbox = make_sandbox(tmp_path)
     result = run_install(sandbox, use_pty=True)
     assert "older than the required version" in result.stdout, result.stdout
     assert NPM_MARKER in result.stdout, (
-        "install.sh died at the git-upgrade question (EOF on /dev/tty) "
+        "install.sh died at the git auto-upgrade (EOF on /dev/tty) "
         f"instead of continuing to the build step:\n{result.stdout}"
     )
 
