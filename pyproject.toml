@@ -90,11 +90,12 @@ path = "src/kiss/_version.py"
 [tool.hatch.build.targets.sdist]
 # Keep the sdist small enough for PyPI's 100 MB per-file limit. The directories
 # below are demo media (assets/), academic write-ups (papers/), local dev state
-# (sorcar.db, sorcar_reported_frauds/, jobs/), and the built VSIX (which is
-# uploaded separately to the GitHub release). Stripping these brings the sdist
-# from ~110 MB down to a few MB without affecting `pip install` users — none of
-# this content is imported by the Python package and the README's relative
-# asset links wouldn't render on PyPI anyway.
+# (sorcar.db, sorcar_reported_frauds/, jobs/), agent worktrees (.kiss-worktrees/,
+# full repo copies that once ballooned the sdist past the limit), and the built
+# VSIX (which is uploaded separately to the GitHub release). Stripping these
+# keeps the sdist well under the limit without affecting `pip install` users —
+# none of this content is imported by the Python package and the README's
+# relative asset links wouldn't render on PyPI anyway.
 exclude = [
     "bin/",
     "assets/",
@@ -103,6 +104,7 @@ exclude = [
     "sorcar.db",
     "sorcar_reported_frauds/",
     "src/kiss/agents/vscode/kiss-sorcar.vsix",
+    ".kiss-worktrees/",
 ]
 
 [tool.hatch.build.targets.wheel]
