@@ -353,16 +353,19 @@ def test_vs_bug3_commands_reject_non_string_taskid() -> None:
 def test_vs_bug4_cli_task_envelopes_reject_non_string_taskid() -> None:
     """``cliTaskStart`` / ``cliTaskEnd`` must reject non-str payloads.
 
-    Functional repro: dispatch a bogus ``{"type": "cliTaskStart",
-    "taskId": ["evil"]}`` envelope; the daemon must NOT register the
-    task in ``_cli_running_tasks``.
+    Functional repro: both branches validate the ``taskId`` through the
+    shared ``_validated_cli_task_id`` helper, which must return ``""``
+    for missing, empty, or non-string payloads so the daemon never
+    registers a bogus task in ``_cli_running_tasks``.
     """
-    src = Path(
-        "src/kiss/agents/vscode/web_server.py"
-    ).read_text()
-    assert src.count(
-        'raw_id if isinstance(raw_id, str) and raw_id else ""'
-    ) >= 2
+    from kiss.agents.vscode.web_server import RemoteAccessServer
+
+    validate = RemoteAccessServer._validated_cli_task_id
+    assert validate({"type": "cliTaskStart", "taskId": ["evil"]}) == ""
+    assert validate({"type": "cliTaskEnd", "taskId": 123}) == ""
+    assert validate({"type": "cliTaskStart", "taskId": ""}) == ""
+    assert validate({"type": "cliTaskStart"}) == ""
+    assert validate({"type": "cliTaskEnd", "taskId": "abc123"}) == "abc123"
 
 
 # ---------------------------------------------------------------------------

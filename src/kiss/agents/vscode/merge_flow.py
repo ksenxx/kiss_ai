@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 from kiss.agents.sorcar.git_worktree import (
     GitWorktreeOps,
-    _split_rename_tail,
+    _porcelain_entries,
     _unquote_git_path,
     repo_lock,
 )
@@ -90,6 +90,11 @@ def _porcelain_paths(
     boundary (respecting quoting) instead of being emitted as one
     bogus ``"old -> new"`` path.
 
+    Thin wrapper over the shared
+    :func:`kiss.agents.sorcar.git_worktree._porcelain_entries` parser
+    (also backing ``GitWorktreeOps.copy_dirty_state``) so the porcelain
+    parsers cannot drift apart.
+
     Args:
         output: Raw stdout from a ``git status --porcelain`` command.
         rename_both_sides: When True, emit BOTH the old and the new
@@ -106,21 +111,10 @@ def _porcelain_paths(
         if path and path not in files:
             files.append(path)
 
-    for line in output.split("\n"):
-        if len(line) < 4:
-            continue
-        code = line[:2]
-        tail = line[3:]
-        if ("R" in code or "C" in code) and " -> " in tail:
-            # Rename/copy entry: split the RAW tail on the `` -> ``
-            # boundary (respecting quoting) first, then unquote each
-            # side exactly once.
-            old_raw, new_raw = _split_rename_tail(tail)
-            if rename_both_sides:
-                _add(_unquote_git_path(old_raw))
-            _add(_unquote_git_path(new_raw))
-        else:
-            _add(_unquote_git_path(tail))
+    for _code, old_name, new_name in _porcelain_entries(output):
+        if rename_both_sides and old_name is not None:
+            _add(old_name)
+        _add(new_name)
     return files
 
 
@@ -162,6 +156,9 @@ class _MergeFlowMixin:
         worktree state.  When the agent has been disposed (task ended
         and the tab released its reference) there is no worktree to
         operate on and ``None`` is returned.
+
+        The merge-flow call sites read ``tab.agent`` directly; the
+        only remaining caller is ``server.py`` (``_replay_session``).
 
         Returns:
             The agent stored on ``tab``, or ``None``.
@@ -668,7 +665,7 @@ class _MergeFlowMixin:
             tab = _RunningAgentState.running_agent_states.get(tab_id)
         if tab is None or not tab.use_worktree:
             return
-        wt_agent = self._ensure_wt_agent(tab)
+        wt_agent = tab.agent
         if wt_agent is None or not wt_agent._wt_pending:
             return
         changed = self._get_worktree_changed_files(tab_id)
@@ -752,7 +749,7 @@ class _MergeFlowMixin:
         tab = self._get_tab(tab_id)
         if not tab.use_worktree:
             return False
-        wt_agent = self._ensure_wt_agent(tab)
+        wt_agent = tab.agent
         if wt_agent is None:
             return False
         wt = wt_agent._wt
@@ -802,19 +799,16 @@ class _MergeFlowMixin:
         with self._state_lock:
             if self._any_non_wt_running():
                 return False
-        # Use the local quote/space-preserving parser rather than
-        # ``GitWorktreeOps.unstaged_files`` / ``staged_files``, whose
-        # whole-output ``strip()`` mangles leading/trailing-space
-        # filenames — a mangled name can never intersect ``wt_files``
-        # (parsed correctly above), so the conflict would be missed.
+        # ``_diff_name_only`` uses NUL-separated (``-z``) output, so
+        # leading/trailing-space filenames survive byte-exact and can
+        # intersect ``wt_files``.
         dirty: set[str] = set()
         for extra_flags in ((), ("--cached",)):
-            res = _git(
-                str(wt.repo_root), "diff", "--name-only",
-                "--no-renames", *extra_flags,
+            dirty.update(
+                GitWorktreeOps._diff_name_only(
+                    wt.repo_root, "--no-renames", *extra_flags,
+                )
             )
-            if res.returncode == 0:
-                dirty.update(_unquoted_name_lines(res.stdout))
         dirty.update(_capture_untracked(str(wt.repo_root)))
         return bool(dirty & wt_files)
 
@@ -869,7 +863,7 @@ class _MergeFlowMixin:
         tab = self._get_tab(tab_id)
         if not tab.use_worktree:
             return []
-        wt_agent = self._ensure_wt_agent(tab)
+        wt_agent = tab.agent
         if wt_agent is None or not wt_agent._original_branch:
             return []
         wt = wt_agent
@@ -997,7 +991,7 @@ class _MergeFlowMixin:
         tab = self._get_tab(tab_id)
         if not tab.use_worktree:
             return {"success": False, "message": "Worktree mode is not enabled"}
-        wt_agent = self._ensure_wt_agent(tab)
+        wt_agent = tab.agent
         if wt_agent is None or not wt_agent._wt_pending:
             return {
                 "success": False,

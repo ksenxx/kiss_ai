@@ -119,7 +119,11 @@ WAKE_ALIASES = [
 ]
 
 MODEL_NAME = "vosk-model-small-en-us-0.15"
-MODEL_ZIP_URL = f"https://alphacephei.com/vosk/models/{MODEL_NAME}.zip"
+# Official Vosk model mirror.  ``{}`` is the model name (which is
+# also the extracted directory and the remote zip's basename) — the
+# single source for the download-URL spelling used by
+# ``_ensure_downloaded_model``.
+MODEL_ZIP_URL_TEMPLATE = "https://alphacephei.com/vosk/models/{}.zip"
 # Vosk speaker-identification model: turns an utterance into a
 # 128-dim x-vector embedding; embeddings of the same voice are close
 # in cosine distance, different voices are far apart.
@@ -495,7 +499,6 @@ class SpeechCapture:
     END_SILENCE_SECONDS = 2.0  # trailing silence that ends the speech
     NO_SPEECH_TIMEOUT_SECONDS = 5.0  # silence after wake with no speech
     MAX_CAPTURE_SECONDS = 30.0  # hard cap on the captured utterance
-    RMS_THRESHOLD = SPEECH_RMS_THRESHOLD  # speech/silence RMS boundary
 
     def __init__(self) -> None:
         self._blocks: list[bytes] = []
@@ -508,7 +511,7 @@ class SpeechCapture:
         """Process one PCM block; see the class docstring for returns."""
         duration = len(data) / 2 / SAMPLE_RATE
         self._since_wake += duration
-        loud = block_rms(data) >= self.RMS_THRESHOLD
+        loud = block_rms(data) >= SPEECH_RMS_THRESHOLD
         if not self._speech_started:
             if not loud:
                 if self._since_wake >= self.NO_SPEECH_TIMEOUT_SECONDS:
@@ -548,42 +551,45 @@ def positive_finite_float(raw: str) -> float:
     return value
 
 
-def audio_timeout_seconds() -> float:
-    """Return the per-attempt translation API timeout in seconds.
+def _env_timeout_seconds(env_name: str, default: float) -> float:
+    """Return a positive finite timeout from an environment override.
 
-    Reads the ``KISS_VOICE_AUDIO_TIMEOUT`` environment override (used
-    by tests to fail fast against a stalled endpoint) and falls back
-    to :data:`DEFAULT_AUDIO_TIMEOUT_SECONDS`.
+    Reads the *env_name* environment variable (used by tests to fail
+    fast against a stalled endpoint/server) and falls back to
+    *default*.  Junk, NaN, +/-inf and non-positive values fall back
+    too — an infinite timeout would defeat the hard-timeout policy
+    exactly like a missing one (it hangs the worker forever).
     """
-    raw = os.environ.get("KISS_VOICE_AUDIO_TIMEOUT", "")
+    raw = os.environ.get(env_name, "")
     try:
         value = float(raw)
     except ValueError:
-        return DEFAULT_AUDIO_TIMEOUT_SECONDS
-    # NaN, +/-inf and non-positive values would defeat the hard
-    # timeout (an infinite timeout hangs the worker forever).
+        return default
     if not math.isfinite(value) or value <= 0:
-        return DEFAULT_AUDIO_TIMEOUT_SECONDS
+        return default
     return value
+
+
+def audio_timeout_seconds() -> float:
+    """Return the per-attempt translation API timeout in seconds.
+
+    Reads the ``KISS_VOICE_AUDIO_TIMEOUT`` environment override and
+    falls back to :data:`DEFAULT_AUDIO_TIMEOUT_SECONDS`.
+    """
+    return _env_timeout_seconds(
+        "KISS_VOICE_AUDIO_TIMEOUT", DEFAULT_AUDIO_TIMEOUT_SECONDS,
+    )
 
 
 def download_timeout_seconds() -> float:
     """Return the per-read model-download network timeout in seconds.
 
-    Reads the ``KISS_VOICE_DOWNLOAD_TIMEOUT`` environment override
-    (used by tests to fail fast against a stalled server) and falls
-    back to :data:`DEFAULT_DOWNLOAD_TIMEOUT_SECONDS`.  Junk, non-finite
-    and non-positive values fall back too — an infinite timeout would
-    defeat the hard-timeout policy exactly like a missing one.
+    Reads the ``KISS_VOICE_DOWNLOAD_TIMEOUT`` environment override and
+    falls back to :data:`DEFAULT_DOWNLOAD_TIMEOUT_SECONDS`.
     """
-    raw = os.environ.get("KISS_VOICE_DOWNLOAD_TIMEOUT", "")
-    try:
-        value = float(raw)
-    except ValueError:
-        return DEFAULT_DOWNLOAD_TIMEOUT_SECONDS
-    if not math.isfinite(value) or value <= 0:
-        return DEFAULT_DOWNLOAD_TIMEOUT_SECONDS
-    return value
+    return _env_timeout_seconds(
+        "KISS_VOICE_DOWNLOAD_TIMEOUT", DEFAULT_DOWNLOAD_TIMEOUT_SECONDS,
+    )
 
 
 def _download_url_to_file(url: str, dest: Path) -> None:
@@ -776,12 +782,12 @@ def transcribe_pcm(
         # proxy).  Passing base_url via model_config bypasses routing.
         base_url = os.environ.get("OPENAI_BASE_URL", "").strip()
         if base_url and audio_model.startswith("gpt-"):
-            from kiss.core.config import DEFAULT_CONFIG
+            from kiss.core import config as config_module
 
             model_config["base_url"] = base_url
             model_config["api_key"] = (
                 os.environ.get("OPENAI_API_KEY", "")
-                or DEFAULT_CONFIG.OPENAI_API_KEY
+                or config_module.DEFAULT_CONFIG.OPENAI_API_KEY
             )
         # The backend occasionally hallucinates a refusal instead of
         # transcribing (see looks_like_stt_refusal) — nondeterministic
@@ -818,26 +824,6 @@ def transcribe_pcm(
         return {"text": "", "language": None}
 
 
-def translate_pcm_to_english(
-    pcm: bytes,
-    audio_model: str = DEFAULT_AUDIO_MODEL,
-) -> str:
-    """Translate spoken audio into English text (see transcribe_pcm).
-
-    Backward-compatible text-only wrapper around
-    :func:`transcribe_pcm` for callers that do not need the language.
-
-    Args:
-        pcm: Raw 16kHz mono s16le PCM of the utterance.
-        audio_model: GPT audio-chat model name (default ``gpt-audio``).
-
-    Returns:
-        The English translation, or ``""`` when *pcm* is empty, no
-        words were recognized, or the agent call fails.
-    """
-    return str(transcribe_pcm(pcm, audio_model)["text"])
-
-
 # Guards stdout event lines: translations report from worker threads
 # while WAKE prints from the audio loop, and interleaved partial lines
 # would corrupt the supervisor protocol.
@@ -850,7 +836,7 @@ def emit(line: str) -> None:
         print(line, flush=True)
 
 
-class VoiceSession:
+class WakeSession:
     """Drives wake detection and post-wake speech translation.
 
     Feeds audio blocks to the wake detector until the wake word fires,
@@ -1043,7 +1029,7 @@ def _ensure_downloaded_model(
         if model_dir.is_dir():
             return model_dir
         if url is None:
-            url = f"https://alphacephei.com/vosk/models/{model_name}.zip"
+            url = MODEL_ZIP_URL_TEMPLATE.format(model_name)
         print(f"downloading {url} ...", file=sys.stderr, flush=True)
         tmp_zip = models_dir / f".{model_name}.{os.getpid()}.zip.tmp"
         extract_dir = models_dir / f".{model_name}.{os.getpid()}.extract"
@@ -1500,7 +1486,7 @@ class WakeDetector:
         return True
 
 
-def run_wav(session: VoiceSession, wav_path: Path) -> int:
+def run_wav(session: WakeSession, wav_path: Path) -> int:
     """Stream a WAV file through the session (test/offline mode).
 
     The file must be 16kHz mono 16-bit PCM — the same format the
@@ -1608,7 +1594,7 @@ def close_mic_stream(stream: sounddevice.RawInputStream) -> None:
 
 
 def run_mic(
-    session: VoiceSession,
+    session: WakeSession,
     watchdog_timeout: float = MIC_WATCHDOG_TIMEOUT_SECONDS,
 ) -> int:
     """Listen on the default microphone forever.
@@ -1723,7 +1709,7 @@ def main() -> int:
     args = parser.parse_args()
 
     detector = WakeDetector(ensure_model(args.models_dir), args.sensitivity)
-    session = VoiceSession(detector, args.audio_model, args.models_dir)
+    session = WakeSession(detector, args.audio_model, args.models_dir)
     if args.wav is not None:
         return run_wav(session, args.wav)
     return run_mic(session, args.mic_watchdog_timeout)

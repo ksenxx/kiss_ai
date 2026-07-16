@@ -217,7 +217,7 @@ const EVENTS_BY_TASK = {a1: eventsA, b1: eventsB};
  */
 function setupDemo(win, skipTaskIds) {
   const skip = skipTaskIds || [];
-  dispatch(win, {type: 'updateSetting', key: 'demo_mode', value: true});
+  dispatch(win, {type: 'configData', config: {demo_mode: true}, apiKeys: {}});
   dispatch(win, {
     type: 'history',
     offset: 0,

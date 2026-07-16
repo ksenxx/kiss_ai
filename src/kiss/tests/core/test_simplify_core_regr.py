@@ -13,26 +13,23 @@ pass, using only real objects (no mocks/patches/fakes).
 import io
 import sys
 import unittest
-from pathlib import Path
 from typing import Any, cast
 
 import yaml
 from pydantic import BaseModel
 
+from kiss.agents.obsolete.gepa.template_utils import escape_invalid_template_field_names
 from kiss.core import config as config_module
 from kiss.core.base import Base
 from kiss.core.config import Config, set_artifact_base_dir
 from kiss.core.config_builder import add_config, build_config
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.print_to_console import ConsolePrinter
+from kiss.core.printer import parse_result_yaml
 from kiss.core.relentless_agent import RelentlessAgent, _str_to_bool
 from kiss.core.relentless_agent import finish as relentless_finish
 from kiss.core.utils import (
-    add_prefix_to_each_line,
     config_to_dict,
-    escape_invalid_template_field_names,
-    is_subpath,
-    resolve_path,
 )
 from kiss.core.utils import (
     finish as utils_finish,
@@ -95,15 +92,31 @@ class ConfigBuilderRegression(unittest.TestCase):
 
 class UtilsRegression(unittest.TestCase):
     def test_finish_yaml_round_trip(self) -> None:
-        raw = utils_finish("failure", "my analysis", "my result")
+        raw = utils_finish(False, True, "my summary")
         data = yaml.safe_load(raw)
         self.assertEqual(
-            data, {"status": "failure", "analysis": "my analysis", "result": "my result"}
+            data, {"success": False, "is_continue": True, "summary": "my summary"}
         )
 
     def test_finish_defaults(self) -> None:
-        data = yaml.safe_load(utils_finish())
-        self.assertEqual(data["status"], "success")
+        data = yaml.safe_load(utils_finish(True))
+        self.assertEqual(
+            data, {"success": True, "is_continue": False, "summary": ""}
+        )
+
+    def test_finish_coerces_string_booleans(self) -> None:
+        data = yaml.safe_load(
+            utils_finish(cast(Any, "true"), cast(Any, "no"), "s")
+        )
+        self.assertEqual(data, {"success": True, "is_continue": False, "summary": "s"})
+
+    def test_finish_output_recognized_by_parse_result_yaml(self) -> None:
+        raw = utils_finish(True, False, "structured summary")
+        parsed = parse_result_yaml(raw)
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        self.assertEqual(parsed["summary"], "structured summary")
+        self.assertTrue(parsed["success"])
 
     def test_escape_keeps_valid_and_escapes_invalid(self) -> None:
         out = escape_invalid_template_field_names("hi {bad} {good}", {"good"})
@@ -124,20 +137,6 @@ class UtilsRegression(unittest.TestCase):
     def test_escape_doubles_literal_braces(self) -> None:
         out = escape_invalid_template_field_names("a {{lit}} {good}", {"good"})
         self.assertEqual(out.format(good="G"), "a {lit} G")
-
-    def test_add_prefix_to_each_line(self) -> None:
-        self.assertEqual(add_prefix_to_each_line("a\nb", "> "), "> a\n> b")
-
-    def test_resolve_path_relative_and_absolute(self) -> None:
-        base = Path.cwd()
-        self.assertEqual(resolve_path("x/y", str(base)), (base / "x/y").resolve())
-        abs_p = str((base / "z").resolve())
-        self.assertEqual(resolve_path(abs_p, "/nonexistent"), Path(abs_p))
-
-    def test_is_subpath(self) -> None:
-        base = Path.cwd().resolve()
-        self.assertTrue(is_subpath(base / "sub" / "f.txt", [base]))
-        self.assertFalse(is_subpath(Path("/"), [base / "sub"]))
 
     def test_config_to_dict_excludes_api_keys(self) -> None:
         d = config_to_dict()

@@ -35,10 +35,6 @@ from kiss.core.models.openai_compatible_model import (
 from kiss.core.utils import (
     finish as utils_finish,
 )
-from kiss.core.utils import (
-    is_subpath,
-    resolve_path,
-)
 
 
 class TestModelSchemaConversion(TestCase):
@@ -131,38 +127,6 @@ class TestUsefulTools(TestCase):
             result = tools.Write(path, "hello world")
             assert "Successfully" in result
             assert tools.Read(path) == "hello world"
-
-
-class TestMultiPrinter(TestCase):
-
-    def test_multi_printer_token_callback(self) -> None:
-        from kiss.agents.vscode.json_printer import JsonPrinter
-        from kiss.core.printer import MultiPrinter
-        p1 = JsonPrinter()
-        p2 = JsonPrinter()
-        # Recording is keyed by ``_thread_local.task_id``; without a
-        # task id, ``start_recording``/``stop_recording`` are no-ops.
-        p1._thread_local.task_id = "mp-test"
-        p2._thread_local.task_id = "mp-test"
-        mp = MultiPrinter([p1, p2])
-        p1.start_recording()
-        p2.start_recording()
-        mp.token_callback("tok")
-        events1 = p1.stop_recording()
-        events2 = p2.stop_recording()
-        assert len(events1) > 0
-        assert len(events2) > 0
-
-    def test_multi_printer_reset(self) -> None:
-        from kiss.agents.vscode.json_printer import JsonPrinter
-        from kiss.core.printer import MultiPrinter
-        p1 = JsonPrinter()
-        mp = MultiPrinter([p1])
-        with p1._bash_lock:
-            p1._bash_state.buffer.append("x")
-        mp.reset()
-        with p1._bash_lock:
-            assert len(p1._bash_state.buffer) == 0
 
 
 def _noop_callback(token: str) -> None:
@@ -694,21 +658,11 @@ class TestOpenAICompatibleModelEmbedding:
 
 class TestUtilsFunctionsExtra:
     def test_utils_finish(self) -> None:
-        result = utils_finish(status="success", analysis="good", result="42")
+        result = utils_finish(success=True, summary="42")
         payload = yaml.safe_load(result)
-        assert payload["status"] == "success"
-        assert payload["result"] == "42"
-
-    def test_resolve_path_relative(self) -> None:
-        result = resolve_path("foo/bar.txt", "/base")
-        assert result == Path("/base/foo/bar.txt").resolve()
-
-    def test_resolve_path_absolute(self) -> None:
-        result = resolve_path("/absolute/path.txt", "/base")
-        assert result == Path("/absolute/path.txt").resolve()
-
-    def test_is_subpath_false(self) -> None:
-        assert is_subpath(Path("/a/b/c"), [Path("/d/e")]) is False
+        assert payload["success"] is True
+        assert payload["is_continue"] is False
+        assert payload["summary"] == "42"
 
 
 if __name__ == "__main__":

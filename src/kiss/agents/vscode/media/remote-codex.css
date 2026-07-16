@@ -115,32 +115,37 @@ body.remote-chat #tab-status-bar .status-metric {
   color: #afafaf;
 }
 
-/* ── Task panel → rounded quoted card ────────────────── */
+/* ── Task panel → dark elevated user bubble ──────────────
+ * The pinned recent-task panel matches the rest of the dark
+ * Codex palette instead of the old bright #ececec card: same
+ * #212121 surface + inset white hairline as the composer
+ * (#input-container), light #ececec text, right-aligned. */
 body.remote-chat #task-panel {
   margin: 8px 16px 0;
   margin-left: auto;
   max-width: 90%;
-  border: none;
+  border: 1px solid rgb(255 255 255 / 10%);
   border-radius: 22px;
-  background: #ececec;
-  color: #0d0d0d;
+  background: #212121;
+  color: #ececec;
+  box-shadow: inset 0 0 1px rgb(255 255 255 / 20%);
   padding: 10px 38px 10px 16px;
 }
 
 body.remote-chat #task-panel-collapse-btn {
-  background: rgb(13 13 13 / 7%);
-  border-color: rgb(13 13 13 / 15%);
-  color: #565656;
+  background: rgb(255 255 255 / 6%);
+  border-color: rgb(255 255 255 / 15%);
+  color: #afafaf;
 }
 
 body.remote-chat #task-panel-collapse-btn:hover {
-  background: rgb(13 13 13 / 12%);
-  border-color: rgb(13 13 13 / 25%);
-  color: #0d0d0d;
+  background: rgb(255 255 255 / 12%);
+  border-color: rgb(255 255 255 / 25%);
+  color: #ececec;
 }
 
-body.remote-chat #task-panel-copy { color: #565656; }
-body.remote-chat #task-panel-copy:hover { color: #0d0d0d; }
+body.remote-chat #task-panel-copy { color: #8e8e8e; }
+body.remote-chat #task-panel-copy:hover { color: #ececec; }
 
 /* ── Output column (Codex thread) ────────────────────── */
 body.remote-chat #output {
@@ -186,7 +191,16 @@ body.remote-chat #input-footer {
   margin-top: 2px;
 }
 
-/* Composer controls: 36px circular buttons, hover white/15 */
+/* Composer controls: 36px circular buttons, hover white/15.
+   The -8px horizontal margins quarter the visible gap between the
+   composer buttons (burger menu, model pill, attach, promptlet, mic).
+   Each 36px circular button pads its 16px icon by 10px per side, so
+   adjacent icons historically sat ~21px apart (icon-icon) and ~11px
+   from the model pill's border.  Pulling the circles together by 8px
+   per inner edge shrinks those visible gaps to ~5px and ~3px — half of
+   the previous -5px halving — while keeping the full 36px touch
+   targets.  Outer edges stay put (see the #menu-btn / #voice-btn
+   overrides below) so row alignment is unchanged. */
 body.remote-chat #menu-btn,
 body.remote-chat #upload-btn,
 body.remote-chat #tricks-btn,
@@ -198,6 +212,8 @@ body.remote-chat #voice-btn {
   align-items: center;
   justify-content: center;
   padding: 0;
+  margin-left: -8px;
+  margin-right: -8px;
   background: transparent;
   border: none;
   border-radius: 50%;
@@ -217,22 +233,6 @@ body.remote-chat #tricks-btn.active,
 body.remote-chat #voice-btn.active {
   background: rgb(255 255 255 / 15%);
   color: #fff;
-}
-
-/* Quarter the visible gap between the composer buttons (burger menu,
-   model pill, attach, promptlet, mic).  Each 36px circular button
-   pads its 16px icon by 10px per side, so adjacent icons historically
-   sat ~21px apart (icon-icon) and ~11px from the model pill's border.
-   Pulling the circles together by 8px per inner edge shrinks those
-   visible gaps to ~5px and ~3px — half of the previous -5px halving —
-   while keeping the full 36px touch targets.  Outer edges stay put so
-   row alignment is unchanged. */
-body.remote-chat #menu-btn,
-body.remote-chat #upload-btn,
-body.remote-chat #tricks-btn,
-body.remote-chat #voice-btn {
-  margin-left: -8px;
-  margin-right: -8px;
 }
 
 body.remote-chat #menu-btn { margin-left: 0; }
@@ -602,9 +602,13 @@ body.remote-chat .tc-arg-name {
   color: #afafaf;
 }
 
-/* Quiet time footer + collapse preview, Codex-muted. */
+/* Quiet time footer + collapse preview, Codex-muted.  The footer is
+ * the last mono label left (main.css puts it in the editor's
+ * monospace font); render it in the same sans stack as every other
+ * panel label. */
 body.remote-chat .panel-time {
   color: #8e8e8e;
+  font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
 }
 
 body.remote-chat .collapse-preview {
@@ -737,6 +741,13 @@ body.remote-chat .md-body td {
 body.remote-chat #output pre,
 body.remote-chat #output code {
   font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
+}
+
+/* Thread-scroll placeholders render italic in main.css; every other
+ * panel text on the remote page is upright — match it. */
+body.remote-chat .adjacent-loader,
+body.remote-chat .adjacent-task-placeholder {
+  font-style: normal;
 }
 
 /* ── History rows: per-chat color on the left border ─────

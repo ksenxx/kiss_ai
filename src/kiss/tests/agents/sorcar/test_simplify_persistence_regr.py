@@ -288,9 +288,9 @@ class TestPrefixMatch(_TempDbTestBase):
         assert th._prefix_match_tasks("fix the") == [
             "fix the docs", "fix the bug",
         ]
-        assert th._prefix_match_task("fix the") == "fix the docs"
-        assert th._prefix_match_task("weird [*] ch") == "weird [*] chars?"
-        assert th._prefix_match_task("") == ""
+        assert th._prefix_match_tasks("fix the", limit=1) == ["fix the docs"]
+        assert th._prefix_match_tasks("weird [*] ch", limit=1) == ["weird [*] chars?"]
+        assert th._prefix_match_tasks("", limit=1) == []
         assert th._prefix_match_tasks("fix", limit=0) == []
 
 

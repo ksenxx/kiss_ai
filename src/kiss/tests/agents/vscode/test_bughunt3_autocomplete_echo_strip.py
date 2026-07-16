@@ -10,7 +10,7 @@ suggestion that is ALREADY the continuation suffix (never an LLM echo
 of the query):
 
 * ``_AutocompleteMixin._complete`` passes ``match[len(query):]`` or an
-  identifier suffix from ``_complete_from_active_file``;
+  identifier suffix from ``_active_file_identifier_matches``;
 * ``CliCompleter._active_file_suffix`` passes ``cand[len(partial):]``.
 
 ``clip_autocomplete_suggestion`` nevertheless kept a vestigial

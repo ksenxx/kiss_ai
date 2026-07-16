@@ -151,7 +151,8 @@ def get_run_simple_coding_agent(test_fn: Callable[[str], bool]) -> Callable[...,
         coding_agent = KISSAgent("SimpleCoding Agent")
         extra_instructions = (
             "\n\nYou **MUST** test your code with the test tool provided and fix the "
-            "bugs before returning the code."
+            "bugs before returning the code. When done, call "
+            'finish(success=True, summary="<the final code>").'
         )
         result = coding_agent.run(
             model_name=model_name,
@@ -160,6 +161,6 @@ def get_run_simple_coding_agent(test_fn: Callable[[str], bool]) -> Callable[...,
             tools=[test_fn, utils.finish],
         )
         result = yaml.safe_load(result)
-        return cast(str, cast(dict[str, Any], result)["result"])
+        return cast(str, cast(dict[str, Any], result)["summary"])
 
     return run_simple_coding_agent

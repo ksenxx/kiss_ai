@@ -19,9 +19,10 @@ A10 ``_save_last_model`` did ``load_config() -> mutate -> save_config``
     save.
 
 B1  The baseline commit SHA persisted to git config
-    (``branch.<b>.kiss-baseline``) by ``save_baseline_commit`` was
-    write-only: no reader existed anywhere.  A ``load_baseline_commit``
-    companion now round-trips the value.
+    (``branch.<b>.kiss-baseline``) by ``save_baseline_commit`` must
+    actually be persisted.  (The ``load_baseline_commit`` companion
+    reader was later removed as production-dead API; the test reads
+    the git config value directly.)
 
 C2  ``_RunningAgentState.register()`` silently overwrote an existing
     live state registered under the same ``tab_id``, orphaning the old
@@ -217,22 +218,26 @@ class TestA10SaveLastModelLostUpdate:
 
 
 class TestB1BaselineCommitRoundtrip:
-    """B1: the persisted baseline SHA must be readable, not write-only."""
+    """B1: the baseline SHA must actually be persisted to git config."""
 
-    def test_save_then_load_roundtrip(self, tmp_path: Path) -> None:
-        """``load_baseline_commit`` returns exactly what was saved."""
+    def test_save_persists_to_git_config(self, tmp_path: Path) -> None:
+        """``branch.<b>.kiss-baseline`` holds exactly what was saved."""
         repo = _init_repo(tmp_path)
         _git(repo, "branch", "kiss-wt-b1")
         sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
         assert GitWorktreeOps.save_baseline_commit(repo, "kiss-wt-b1", sha) is True
-        assert GitWorktreeOps.load_baseline_commit(repo, "kiss-wt-b1") == sha
+        stored = _git(repo, "config", "branch.kiss-wt-b1.kiss-baseline")
+        assert stored.stdout.strip() == sha
 
-    def test_load_returns_none_when_unset(self, tmp_path: Path) -> None:
-        """Branches without a stored baseline (or nonexistent) yield None."""
+    def test_config_unset_when_never_saved(self, tmp_path: Path) -> None:
+        """Branches without a stored baseline have no config key."""
         repo = _init_repo(tmp_path)
         _git(repo, "branch", "kiss-wt-empty")
-        assert GitWorktreeOps.load_baseline_commit(repo, "kiss-wt-empty") is None
-        assert GitWorktreeOps.load_baseline_commit(repo, "no/such/branch") is None
+        result = _git(
+            repo, "config", "branch.kiss-wt-empty.kiss-baseline", check=False
+        )
+        assert result.returncode != 0
+        assert result.stdout.strip() == ""
 
 
 class TestC2RegisterOverwriteWarning:
