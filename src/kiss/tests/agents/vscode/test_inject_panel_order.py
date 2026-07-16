@@ -6,7 +6,7 @@
 
 The Inject instruction panel (sidebar button in the VS Code chat
 webview) renders the strings returned by
-:func:`kiss.agents.vscode.tricks.read_tricks` (Python side, used by
+:func:`kiss.server.tricks.read_tricks` (Python side, used by
 the kiss-web daemon HTML builder).  The contract:
 
 1. ``~/.kiss/MY_INJECTION.md`` is auto-seeded on first read with the
@@ -36,12 +36,12 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.vscode.tricks import (
+from kiss.server.tricks import (
     DEFAULT_MY_INJECTION,
     MY_INJECTION_DEFAULT_BODY,
     read_tricks,
 )
-from kiss.agents.vscode.user_assets import kiss_home_dir
+from kiss.server.user_assets import kiss_home_dir
 
 
 @pytest.fixture
@@ -194,7 +194,7 @@ def test_web_server_read_tricks_uses_my_injection_first(
     """The daemon's tricks source returns MY_INJECTION first, then bundled.
 
     ``web_server`` builds its HTML from the public
-    :func:`kiss.agents.vscode.tricks.read_tricks`, which must yield
+    :func:`kiss.server.tricks.read_tricks`, which must yield
     the merged ordered list.
     """
     kiss_home.mkdir(parents=True, exist_ok=True)

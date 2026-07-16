@@ -32,7 +32,7 @@ import time
 import unittest
 from pathlib import Path
 
-from kiss.agents.vscode.web_server import RemoteAccessServer
+from kiss.server.web_server import RemoteAccessServer
 
 
 def _free_port() -> int:

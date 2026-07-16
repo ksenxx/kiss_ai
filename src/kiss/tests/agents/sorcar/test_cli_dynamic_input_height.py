@@ -259,7 +259,7 @@ def test_continuation_rows_carry_cyan_border_glyph(tmp_path: Path) -> None:
 def test_input_textbox_height_matches_buffer_line_count(tmp_path: Path) -> None:
     """Visible input rows == buffer line count (the chat-webview parity).
 
-    The chat-webview textarea (:mod:`kiss.agents.vscode`) grows by one
+    The chat-webview textarea (:mod:`kiss.server`) grows by one
     visible row per ``\\n`` in the model input — no more, no less.
     The CLI idle prompt must match that behaviour: a buffer with
     ``N`` lines renders exactly ``N`` visible input rows in the

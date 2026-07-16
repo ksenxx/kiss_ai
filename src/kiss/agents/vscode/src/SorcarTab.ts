@@ -110,7 +110,7 @@ function readMarkdownSections(markdownFile: string, heading: string): string[] {
  * The bundled file path honours the ``KISS_INJECTIONS_PATH``
  * environment variable (used by the test suite to pin a known set of
  * bundled tricks), matching the Python helper
- * :func:`kiss.agents.vscode.tricks._bundled_injections_path`.
+ * :func:`kiss.server.tricks._bundled_injections_path`.
  */
 export function getTricks(): string[] {
   const items: string[] = [];
@@ -167,7 +167,7 @@ function parseTipSections(text: string): string[] {
  *
  * The file path honours the ``KISS_TIPS_PATH`` environment variable
  * (used by the test suite to pin deterministic tips), matching the
- * Python helper ``kiss.agents.vscode.tips.read_tips``.  Returns ``[]``
+ * Python helper ``kiss.server.tips.read_tips``.  Returns ``[]``
  * when the file is missing or unreadable so the chat webview still
  * renders without a tips window.
  */

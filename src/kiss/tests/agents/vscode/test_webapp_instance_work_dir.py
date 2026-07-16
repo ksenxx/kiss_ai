@@ -43,9 +43,9 @@ from unittest import IsolatedAsyncioTestCase
 from websockets.asyncio.client import ClientConnection, connect
 
 import kiss.agents.sorcar.persistence as th
-import kiss.agents.vscode.vscode_config as vc
-from kiss.agents.vscode import web_server
-from kiss.agents.vscode.web_server import RemoteAccessServer
+import kiss.server.vscode_config as vc
+from kiss.server import web_server
+from kiss.server.web_server import RemoteAccessServer
 
 _SHIM_PRELUDE = """
 'use strict';
@@ -287,7 +287,7 @@ class TestWebappInstanceWorkDirOverWss(IsolatedAsyncioTestCase):
 
         certfile = Path(self.tmpdir) / "cert.pem"
         keyfile = Path(self.tmpdir) / "key.pem"
-        from kiss.agents.vscode.web_server import _generate_self_signed_cert
+        from kiss.server.web_server import _generate_self_signed_cert
         _generate_self_signed_cert(certfile, keyfile)
 
         self.port = _find_free_port()

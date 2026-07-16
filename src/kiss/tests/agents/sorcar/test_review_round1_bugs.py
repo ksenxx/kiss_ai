@@ -279,7 +279,7 @@ def test_vs_bug1_replay_uses_str_parent_task_id() -> None:
     post-refactor canonical contract) and the r3-vscode-H2 int
     fallback stringifies legacy ids rather than replacing the str path.
     """
-    from kiss.agents.vscode.server import _coerce_id
+    from kiss.server.server import _coerce_id
 
     src = Path(
         "src/kiss/server/server.py"
@@ -329,7 +329,7 @@ def test_vs_bug3_commands_reject_non_string_taskid() -> None:
     handlers now validate through the shared ``_opt_str`` guard, which
     rejects every non-string payload.
     """
-    from kiss.agents.vscode.commands import _opt_str
+    from kiss.server.commands import _opt_str
 
     src = Path(
         "src/kiss/server/commands.py"
@@ -358,7 +358,7 @@ def test_vs_bug4_cli_task_envelopes_reject_non_string_taskid() -> None:
     for missing, empty, or non-string payloads so the daemon never
     registers a bogus task in ``_cli_running_tasks``.
     """
-    from kiss.agents.vscode.web_server import RemoteAccessServer
+    from kiss.server.web_server import RemoteAccessServer
 
     validate = RemoteAccessServer._validated_cli_task_id
     assert validate({"type": "cliTaskStart", "taskId": ["evil"]}) == ""

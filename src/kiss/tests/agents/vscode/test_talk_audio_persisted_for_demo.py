@@ -32,7 +32,7 @@ from kiss.agents.sorcar.persistence import (
     _amend_last_talk_tool_call_audio,
     _flush_chat_events,
 )
-from kiss.agents.vscode.json_printer import JsonPrinter
+from kiss.server.json_printer import JsonPrinter
 
 
 class _PersistAgent:

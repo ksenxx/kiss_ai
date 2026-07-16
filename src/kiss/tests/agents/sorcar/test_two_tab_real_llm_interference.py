@@ -53,10 +53,10 @@ from pathlib import Path
 from typing import Any
 
 import kiss.agents.sorcar.persistence as ps
-import kiss.agents.vscode.vscode_config as vc
+import kiss.server.vscode_config as vc
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.agents.vscode.server import VSCodeServer
-from kiss.agents.vscode.web_server import WebPrinter
+from kiss.server.server import VSCodeServer
+from kiss.server.web_server import WebPrinter
 
 # Display events that belong to a single task's chat stream.  Any of
 # these broadcast without a ``tabId`` while two tabs run a task would

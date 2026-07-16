@@ -33,7 +33,7 @@ from pathlib import Path
 import pytest
 
 import kiss.agents.sorcar.persistence as th
-import kiss.agents.vscode.vscode_config as vc
+import kiss.server.vscode_config as vc
 from kiss.agents.sorcar.cli_repl import CliCompleter
 from kiss.agents.sorcar.cli_steering import _InputBox
 

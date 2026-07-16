@@ -46,14 +46,14 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.vscode.helpers import clean_llm_output
-from kiss.agents.vscode.user_assets import ensure_user_asset_from_default
-from kiss.agents.vscode.vscode_config import (
+from kiss.core import config as config_module
+from kiss.server.helpers import clean_llm_output
+from kiss.server.user_assets import ensure_user_asset_from_default
+from kiss.server.vscode_config import (
     DEFAULTS,
     apply_config_to_env,
     save_api_key_to_shell,
 )
-from kiss.core import config as config_module
 
 
 class TestCleanLlmOutputPairedQuotesOnly:

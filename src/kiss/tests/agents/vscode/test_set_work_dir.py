@@ -31,7 +31,7 @@ from typing import Any
 
 import pytest
 
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.server import VSCodeServer
 
 
 def _wait_for(predicate, timeout: float = 5.0) -> None:
@@ -224,7 +224,7 @@ def test_set_work_dir_syncs_web_printer_work_dir(
     printer's ``work_dir`` tracks the active folder and the next
     ``configData`` reports folder B.
     """
-    from kiss.agents.vscode.web_server import WebPrinter
+    from kiss.server.web_server import WebPrinter
 
     a, b = two_workspaces
     printer = WebPrinter()
@@ -257,6 +257,6 @@ def test_set_work_dir_registered_in_handlers() -> None:
     user-visible ``error`` event every time the extension pushes the
     current workspace folder.
     """
-    from kiss.agents.vscode.commands import _CommandsMixin
+    from kiss.server.commands import _CommandsMixin
 
     assert "setWorkDir" in _CommandsMixin._HANDLERS

@@ -37,11 +37,11 @@ import time
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.vscode.autocomplete import _AutocompleteMixin, _ghost_suffix
-from kiss.agents.vscode.diff_merge import _git, _scan_files
-from kiss.agents.vscode.json_printer import JsonPrinter
-from kiss.agents.vscode.merge_flow import _MergeFlowMixin
-from kiss.agents.vscode.vscode_config import DEFAULTS, sanitize_config
+from kiss.server.autocomplete import _AutocompleteMixin, _ghost_suffix
+from kiss.server.diff_merge import _git, _scan_files
+from kiss.server.json_printer import JsonPrinter
+from kiss.server.merge_flow import _MergeFlowMixin
+from kiss.server.vscode_config import DEFAULTS, sanitize_config
 
 
 def _run_git(repo: Path, *args: str) -> None:
@@ -207,7 +207,7 @@ class TestMainDirtyFilesNoStrip:
 
 class TestPorcelainPathsFallbackParser:
     def test_rename_split_and_spaces_preserved(self, tmp_path: Path) -> None:
-        from kiss.agents.vscode.merge_flow import _porcelain_paths
+        from kiss.server.merge_flow import _porcelain_paths
 
         repo = tmp_path / "repo"
         _make_repo(repo)
@@ -226,7 +226,7 @@ class TestPorcelainPathsFallbackParser:
         assert " padded .txt" in files
 
     def test_default_reports_new_side_only(self, tmp_path: Path) -> None:
-        from kiss.agents.vscode.merge_flow import _porcelain_paths
+        from kiss.server.merge_flow import _porcelain_paths
 
         repo = tmp_path / "repo"
         _make_repo(repo)
@@ -238,7 +238,7 @@ class TestPorcelainPathsFallbackParser:
         assert files == ["b.txt"]
 
     def test_quoted_path_unquoted_once(self, tmp_path: Path) -> None:
-        from kiss.agents.vscode.merge_flow import _porcelain_paths
+        from kiss.server.merge_flow import _porcelain_paths
 
         repo = tmp_path / "repo"
         _make_repo(repo)
@@ -257,7 +257,7 @@ class TestPorcelainPathsFallbackParser:
 
 class TestWriteBaseCopyNoBinaryParam:
     def test_crlf_text_bytes_preserved(self, tmp_path: Path) -> None:
-        from kiss.agents.vscode.diff_merge import _write_base_copy
+        from kiss.server.diff_merge import _write_base_copy
 
         repo = tmp_path / "repo"
         repo.mkdir()
@@ -274,7 +274,7 @@ class TestWriteBaseCopyNoBinaryParam:
         assert base.read_bytes() == committed
 
     def test_binary_bytes_preserved(self, tmp_path: Path) -> None:
-        from kiss.agents.vscode.diff_merge import _write_base_copy
+        from kiss.server.diff_merge import _write_base_copy
 
         repo = tmp_path / "repo"
         repo.mkdir()
@@ -291,7 +291,7 @@ class TestWriteBaseCopyNoBinaryParam:
         assert base.read_bytes() == committed
 
     def test_missing_blob_writes_empty_base(self, tmp_path: Path) -> None:
-        from kiss.agents.vscode.diff_merge import _write_base_copy
+        from kiss.server.diff_merge import _write_base_copy
 
         repo = tmp_path / "repo"
         repo.mkdir()

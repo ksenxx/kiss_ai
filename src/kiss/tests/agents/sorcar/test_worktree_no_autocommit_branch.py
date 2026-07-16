@@ -43,7 +43,7 @@ from typing import Any, cast
 
 import kiss.agents.sorcar.persistence as _persistence
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.server import VSCodeServer
 
 
 def _run_git(cwd: str, *args: str) -> subprocess.CompletedProcess[str]:

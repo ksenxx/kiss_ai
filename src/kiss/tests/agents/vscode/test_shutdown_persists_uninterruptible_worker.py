@@ -74,7 +74,7 @@ def _make_remote_server() -> Any:
     populated.
     """
     os.environ.setdefault("KISS_WORKDIR", "/tmp")
-    from kiss.agents.vscode.web_server import RemoteAccessServer
+    from kiss.server.web_server import RemoteAccessServer
 
     tmp = tempfile.mkdtemp(prefix="kiss-shutdown-uninterruptible-")
     return RemoteAccessServer(

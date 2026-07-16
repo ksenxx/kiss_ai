@@ -24,7 +24,7 @@ quotes are both removed regardless of order.
 
 from __future__ import annotations
 
-from kiss.agents.vscode.helpers import (
+from kiss.server.helpers import (
     clean_llm_output,
     clip_autocomplete_suggestion,
 )

@@ -15,7 +15,7 @@ Real audio, real speech models, real listener process, no mocks:
 
 - The macOS TTS engine speaks "Sorcar", then a sentence, then "Sorcar"
   again into one WAV file.
-- The real Python listener (``kiss.agents.vscode.voice_wake`` — the
+- The real Python listener (``kiss.server.voice_wake`` — the
   process the VS Code extension spawns) streams that WAV.
 - Its ``OPENAI_BASE_URL`` points at a local *stalling* HTTP server
   that accepts the translation request and never answers, emulating
@@ -198,7 +198,7 @@ class TestWakeWordSurvivesStalledTranscription(unittest.TestCase):
                 proc = subprocess.run(
                     [
                         "uv", "run", "python", "-m",
-                        "kiss.agents.vscode.voice_wake", "--wav", str(wav),
+                        "kiss.server.voice_wake", "--wav", str(wav),
                     ],
                     cwd=PROJECT_ROOT,
                     env=env,
@@ -283,7 +283,7 @@ class TestWakeCooldownSurvivesCapture(unittest.TestCase):
     """
 
     def test_wake_right_after_capture_with_continued_speech(self) -> None:
-        from kiss.agents.vscode.voice_wake import (
+        from kiss.server.voice_wake import (
             DEFAULT_MODELS_DIR,
             WakeDetector,
             WakeSession,
@@ -347,7 +347,7 @@ class TestWatchdogSilenceAdvancesSession(unittest.TestCase):
     """A dead mic gap is counted as silence, not a frozen session."""
 
     def test_dead_gap_closes_capture_and_expires_cooldown(self) -> None:
-        from kiss.agents.vscode.voice_wake import (
+        from kiss.server.voice_wake import (
             DEFAULT_MODELS_DIR,
             WakeDetector,
             WakeSession,
@@ -387,7 +387,7 @@ class TestAudioTimeoutOverride(unittest.TestCase):
     """KISS_VOICE_AUDIO_TIMEOUT accepts only finite positive values."""
 
     def _timeout_with(self, raw: str | None) -> float:
-        from kiss.agents.vscode.voice_wake import audio_timeout_seconds
+        from kiss.server.voice_wake import audio_timeout_seconds
 
         saved = os.environ.get("KISS_VOICE_AUDIO_TIMEOUT")
         if raw is None:
@@ -406,7 +406,7 @@ class TestAudioTimeoutOverride(unittest.TestCase):
         self.assertEqual(self._timeout_with("7.5"), 7.5)
 
     def test_invalid_values_fall_back_to_default(self) -> None:
-        from kiss.agents.vscode.voice_wake import (
+        from kiss.server.voice_wake import (
             DEFAULT_AUDIO_TIMEOUT_SECONDS,
         )
 

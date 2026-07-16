@@ -53,9 +53,9 @@ from kiss.agents.sorcar import persistence
 from kiss.agents.sorcar.persistence import _add_task
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-from kiss.agents.vscode.json_printer import JsonPrinter, _BashState
-from kiss.agents.vscode.server import VSCodeServer
 from kiss.core.models.model_info import get_available_models
+from kiss.server.json_printer import JsonPrinter, _BashState
+from kiss.server.server import VSCodeServer
 
 
 class _CapturePrinter(JsonPrinter):
@@ -441,7 +441,7 @@ def test_f13_save_config_work_dir_syncs_cache_and_printer(
 def test_f13_concurrent_save_config_is_serialised(tmp_path: Path) -> None:
     """Concurrent saveConfig commands must not lose each other's keys
     nor corrupt ``work_dir`` state (lock-protected read-modify-write)."""
-    from kiss.agents.vscode.vscode_config import load_config
+    from kiss.server.vscode_config import load_config
 
     printer = _WorkDirPrinter()
     server = VSCodeServer(printer=printer)
@@ -492,7 +492,7 @@ def _make_model_zip(src_dir: Path, model_name: str) -> Path:
 
 
 def test_f12_concurrent_model_download_is_safe(tmp_path: Path) -> None:
-    from kiss.agents.vscode.voice_wake import _ensure_downloaded_model
+    from kiss.server.voice_wake import _ensure_downloaded_model
 
     model_name = "vosk-model-test-w2f12"
     zip_path = _make_model_zip(tmp_path / "src", model_name)

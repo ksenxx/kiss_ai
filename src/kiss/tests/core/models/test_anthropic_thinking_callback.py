@@ -27,8 +27,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.core.models.anthropic_model import AnthropicModel
+from kiss.server.json_printer import JsonPrinter
 
 
 def _anthropic_sse_events() -> list[tuple[str, str]]:

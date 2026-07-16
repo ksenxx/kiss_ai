@@ -52,8 +52,8 @@ from typing import Any, cast
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.vscode.server import VSCodeServer
-from kiss.agents.vscode.web_server import WebPrinter
+from kiss.server.server import VSCodeServer
+from kiss.server.web_server import WebPrinter
 
 
 def _redirect_db(tmpdir: str) -> tuple:

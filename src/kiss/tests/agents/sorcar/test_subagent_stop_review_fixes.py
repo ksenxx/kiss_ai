@@ -43,8 +43,8 @@ from kiss.agents.sorcar.chat_sorcar_agent import (
     _SubagentStopEvent,
 )
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.agents.vscode.json_printer import JsonPrinter
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.json_printer import JsonPrinter
+from kiss.server.server import VSCodeServer
 
 
 def _clear_registry() -> None:

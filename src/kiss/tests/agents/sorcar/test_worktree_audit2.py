@@ -110,7 +110,7 @@ class TestBug5UseWorktreeNotRestored:
         """BUG-5: _replay_session doesn't parse persisted extra data to
         restore use_worktree, making pending worktrees invisible after restart.
         """
-        from kiss.agents.vscode.server import VSCodeServer
+        from kiss.server.server import VSCodeServer
 
         agent = WorktreeSorcarAgent("test")
         agent.run(prompt_template="task1", work_dir=str(self.repo))

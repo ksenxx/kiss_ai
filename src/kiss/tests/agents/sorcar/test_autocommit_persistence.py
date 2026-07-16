@@ -26,15 +26,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import kiss.agents.vscode.merge_flow as _merge_flow_module
+import kiss.server.merge_flow as _merge_flow_module
 from kiss.agents.sorcar.persistence import (
     _add_task,
     _get_db,
     _load_latest_chat_events_by_chat_id,
 )
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-from kiss.agents.vscode.json_printer import _DISPLAY_EVENT_TYPES
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.json_printer import _DISPLAY_EVENT_TYPES
+from kiss.server.server import VSCodeServer
 
 
 def _run_git(cwd: str, *args: str) -> subprocess.CompletedProcess[str]:

@@ -34,7 +34,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from kiss.agents.vscode import web_server
+from kiss.server import web_server
 
 MAIN_JS = (
     Path(__file__).parent.parent.parent.parent
@@ -145,7 +145,7 @@ def test_task_runner_persists_start_end_ts_to_extra():
     to "Done (…)" without a live ``task_done`` event.  The payload is
     built by :func:`build_task_extra_payload`, so verify the returned
     dict carries ``startTs`` and ``endTs`` end-to-end."""
-    from kiss.agents.vscode.task_runner import build_task_extra_payload
+    from kiss.server.task_runner import build_task_extra_payload
 
     payload = build_task_extra_payload(
         model="m",

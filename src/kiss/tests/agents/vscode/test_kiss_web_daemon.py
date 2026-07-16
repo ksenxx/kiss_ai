@@ -19,7 +19,7 @@ import ssl
 import urllib.request
 from unittest import IsolatedAsyncioTestCase
 
-from kiss.agents.vscode.web_server import (
+from kiss.server.web_server import (
     _URL_FILE,
     RemoteAccessServer,
     _remove_url_file,

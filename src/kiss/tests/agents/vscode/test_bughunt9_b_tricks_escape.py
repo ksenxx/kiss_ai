@@ -24,8 +24,8 @@ import tempfile
 from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 
-from kiss.agents.vscode.vscode_config import CONFIG_PATH, save_config
-from kiss.agents.vscode.web_server import RemoteAccessServer
+from kiss.server.vscode_config import CONFIG_PATH, save_config
+from kiss.server.web_server import RemoteAccessServer
 
 _TRICK_WITH_SCRIPT = 'Add </script><b>pwned</b> to the page. Then fix it.'
 

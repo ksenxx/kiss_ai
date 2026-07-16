@@ -188,7 +188,7 @@ set -eo pipefail
 # Capture the user's working directory *before* any `cd` so that VS Code can
 # later be launched with this directory as the workspace root.  The agents
 # spawned inside VS Code default their PWD to the workspace root (see
-# ``kiss.agents.vscode.server`` — ``os.getcwd()`` is the fallback when
+# ``kiss.server.server`` — ``os.getcwd()`` is the fallback when
 # ``KISS_WORKDIR`` is unset), so opening the workspace here makes the
 # agents' PWD match the user's original shell PWD.
 USER_PWD="$PWD"
@@ -1152,7 +1152,7 @@ exec > >(tee -a "$LOG_FILE") 2>&1
     # INJECTIONS.md is intentionally NOT copied into the user's kiss
     # home directory.  The bundled ``src/kiss/INJECTIONS.md`` is read
     # directly from the installed package at runtime by
-    # ``kiss.agents.vscode.tricks.read_tricks`` and ``getTricks`` in
+    # ``kiss.server.tricks.read_tricks`` and ``getTricks`` in
     # ``SorcarTab.ts``, so every extension upgrade automatically
     # delivers the latest bundled tricks without clobbering user
     # edits.  User-curated tricks live in ``~/.kiss/MY_INJECTION.md``
