@@ -5,7 +5,7 @@
 """Best-effort one-way bridge from the ``sorcar`` CLI to the daemon.
 
 The CLI agent loop runs in its own process and emits display events via
-:class:`~kiss.agents.sorcar.cli_printer.RecordingConsolePrinter`.  That
+:class:`~kiss.ui.cli.cli_printer.RecordingConsolePrinter`.  That
 printer records and persists every event to the chat DB but has no
 transport: a webview already open at the task's chat id therefore sees
 nothing until the next page reload replays from the DB.

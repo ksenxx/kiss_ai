@@ -70,7 +70,7 @@ def _install_no_op_run_with_steering(
         captured["kwargs"] = run_kwargs
         return "summary: ok\nsuccess: true\n"
 
-    import kiss.agents.sorcar.cli_steering as cli_steering
+    import kiss.ui.cli.cli_steering as cli_steering
 
     monkeypatch.setattr(cli_steering, "run_with_steering", fake_run)
     monkeypatch.setattr(
@@ -243,9 +243,9 @@ class TestInteractiveStillAcceptsAllFlags:
             return 0
 
         # ``run_client`` is imported lazily inside ``main`` from
-        # ``kiss.agents.sorcar.cli_client``; monkeypatch the module
+        # ``kiss.ui.cli.cli_client``; monkeypatch the module
         # attribute so the import-inside-main picks up the stub.
-        import kiss.agents.sorcar.cli_client as cli_client
+        import kiss.ui.cli.cli_client as cli_client
 
         monkeypatch.setattr(cli_client, "run_client", fake_run_client)
         monkeypatch.setattr(sys, "argv", ["sorcar", *flag_argv])

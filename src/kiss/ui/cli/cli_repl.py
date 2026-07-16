@@ -56,14 +56,14 @@ extension precisely:
   (``add``/``list``/``get``/``remove``/``auth``/``logout``/``debug``)
   lives in the ``sorcar mcp`` subcommand — see
   :mod:`kiss.agents.sorcar.mcp_servers` and
-  :mod:`kiss.agents.sorcar.mcp_cli`.
+  :mod:`kiss.ui.cli.mcp_cli`.
 * ``/model``-name fast completion — :func:`rank_model_suggestions` over
   the generation-capable models in
   :mod:`kiss.core.models.model_info` (preferring providers whose API key
   is configured), so ``/model <partial>`` completes to a real model name.
 
 On an interactive TTY the input line is read through
-:mod:`prompt_toolkit` (see :mod:`kiss.agents.sorcar.cli_prompt`): typing
+:mod:`prompt_toolkit` (see :mod:`kiss.ui.cli.cli_prompt`): typing
 ``@`` immediately pops the file/folder picker under the line, Up/Down
 navigate it, and Tab/Enter insert the highlighted ``./<path>``
 mention; the same live menu serves ``/`` commands and ``/model`` names,
@@ -629,7 +629,7 @@ class CliCompleter:
 
         Single source for the completion dispatch chain shared by the
         readline menu (:meth:`build_menu`) and the prompt_toolkit
-        dropdown (:meth:`~kiss.agents.sorcar.cli_prompt.PtkCompleter
+        dropdown (:meth:`~kiss.ui.cli.cli_prompt.PtkCompleter
         .get_completions`), so the branch order — ``@``-mention →
         ``/model`` → slash command → flag value → argument options →
         predictive — lives in exactly one place.
@@ -684,7 +684,7 @@ class CliCompleter:
         Same ordered candidates as :meth:`_build_matches` (which
         delegates here), but each candidate carries a separate menu
         row text so the anchored steering box (see
-        :class:`~kiss.agents.sorcar.cli_steering._InputBox`) can show
+        :class:`~kiss.ui.cli.cli_steering._InputBox`) can show
         rich rows while accepting inserts only the replacement:
 
         * ``--task`` values display ``<id>: <one-line task
@@ -998,9 +998,9 @@ def _read_line_ptk(reader: PtkLineReader, prompt: str) -> str | None:
 
     A line ending in an *unescaped* backslash continues on the next
     row, joined with real newlines, following the shared POSIX-shell
-    rule in :func:`~kiss.agents.sorcar.cli_line_continuation
+    rule in :func:`~kiss.ui.cli.cli_line_continuation
     .ends_with_line_continuation`.  The prompt_toolkit Enter binding
-    (:func:`~kiss.agents.sorcar.cli_prompt._submit_enter`) already
+    (:func:`~kiss.ui.cli.cli_prompt._submit_enter`) already
     applies the same rule in-buffer before ever submitting, so a
     submitted line can only end in an even (escaped-literal) number of
     backslashes — which must be returned verbatim, NOT treated as a
@@ -1048,7 +1048,7 @@ def _read_line(prompt: str, reader: PtkLineReader | None = None) -> str | None:
     readline/plain-:func:`input` path below is used.
 
     The idle prompt is drawn inside the very same rounded-border panel
-    that the steering box (:mod:`kiss.agents.sorcar.cli_steering`) uses
+    that the steering box (:mod:`kiss.ui.cli.cli_steering`) uses
     while a task runs, so the input dialog looks like one consistent
     panel whether the agent is idle or steering.  The panel's top border
     (with the idle title) is printed above the prompt, the ``│ ›`` body

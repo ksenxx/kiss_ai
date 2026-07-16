@@ -32,13 +32,13 @@ from __future__ import annotations
 import io
 import threading
 
-from kiss.agents.sorcar.cli_steering import (
+from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.ui.cli.cli_steering import (
     SteeringSession,
     _InputBox,
     _normalize_candidates,
 )
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 
 
 def _make_session(chat_id: str) -> tuple[SteeringSession, _RunningAgentState]:

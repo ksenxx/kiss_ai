@@ -6,7 +6,7 @@
 
 ``cli_repl._read_line_ptk`` and the steering box both follow the shared
 POSIX-shell continuation rule in
-:func:`kiss.agents.sorcar.cli_line_continuation.ends_with_line_continuation`:
+:func:`kiss.ui.cli.cli_line_continuation.ends_with_line_continuation`:
 an *even* number of trailing backslashes is an escaped literal ``\\``
 and must submit, and trailing spaces/tabs after a lone ``\\`` still
 count as a continuation.
@@ -46,7 +46,7 @@ _CHILD_CODE = """
 import os, sys
 os.environ["KISS_HOME"] = {kiss_home!r}
 os.environ["LC_ALL"] = "en_US.UTF-8"
-from kiss.agents.sorcar.cli_repl import _read_line
+from kiss.ui.cli.cli_repl import _read_line
 
 a = _read_line("> ")
 b = _read_line("> ")

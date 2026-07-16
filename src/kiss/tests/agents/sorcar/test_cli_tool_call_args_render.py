@@ -13,7 +13,7 @@ as a *flat* dict whose payload keys (``path``, ``command``,
 ``extras``) sit at the top level — there is no ``input`` key.
 
 The CLI side
-(:class:`kiss.agents.sorcar.cli_client._EventDispatcher._render`)
+(:class:`kiss.ui.cli.cli_client._EventDispatcher._render`)
 must turn that flat payload back into a ``tool_input`` dict so the
 shared :class:`kiss.core.print_to_console.ConsolePrinter` formatter can
 render the argument panel.  A regression where ``_render`` looked up
@@ -34,8 +34,8 @@ from typing import Any
 
 from rich.console import Console
 
-from kiss.agents.sorcar.cli_client import _EventDispatcher
 from kiss.core.print_to_console import ConsolePrinter
+from kiss.ui.cli.cli_client import _EventDispatcher
 
 
 def _make_dispatcher() -> tuple[_EventDispatcher, io.StringIO]:

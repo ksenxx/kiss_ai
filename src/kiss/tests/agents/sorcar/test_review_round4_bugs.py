@@ -118,7 +118,7 @@ def test_resolve_task_id_returns_real_id_on_valid_match(temp_db: Path) -> None: 
 # ---------------------------------------------------------------------------
 
 def test_cli_printer_forwards_empty_taskid_global_event_to_daemon(monkeypatch: pytest.MonkeyPatch) -> None:
-    from kiss.agents.sorcar import cli_daemon_bridge, cli_printer
+    from kiss.ui.cli import cli_daemon_bridge, cli_printer
 
     captured: list[dict[str, object]] = []
     monkeypatch.setattr(

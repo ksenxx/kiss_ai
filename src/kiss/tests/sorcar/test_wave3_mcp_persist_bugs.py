@@ -45,10 +45,10 @@ from typing import cast
 import pytest
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar.mcp_cli import run_mcp_cli
 from kiss.agents.sorcar.mcp_servers import MCPManager, MCPServerConfig
 from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.agents.sorcar.web_use_tool import WebUseTool
+from kiss.ui.cli.mcp_cli import run_mcp_cli
 
 # ---------------------------------------------------------------------------
 # A-F2: _stop_event_writer racing _start_event_writer

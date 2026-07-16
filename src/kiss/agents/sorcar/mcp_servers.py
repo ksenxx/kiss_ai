@@ -37,7 +37,7 @@ Implements MCP server management with Claude Code compatibility:
   the MCP SDK's OAuth 2.1 provider (dynamic client registration +
   PKCE).  Tokens are persisted per server under ``~/.kiss/mcp_auth/``
   by :class:`FileTokenStorage`; ``sorcar mcp auth <name>`` runs the
-  interactive browser flow (see :mod:`kiss.agents.sorcar.mcp_cli`),
+  interactive browser flow (see :mod:`kiss.ui.cli.mcp_cli`),
   while agent runs reuse the stored tokens and fail with a hint to
   run the auth command when interactive login would be required.
 

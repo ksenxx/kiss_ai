@@ -16,8 +16,8 @@ modifyOtherKeys / CSI-u bytes directly into the parser, which
 Terminal.app never emits.
 
 These tests drive the REAL production code paths — both
-:class:`~kiss.agents.sorcar.cli_prompt.PtkLineReader` and
-:class:`~kiss.agents.sorcar.cli_steering._InputBox` — through a fresh
+:class:`~kiss.ui.cli.cli_prompt.PtkLineReader` and
+:class:`~kiss.ui.cli.cli_steering._InputBox` — through a fresh
 forkpty (via :func:`pty_spawn` which internally uses
 :func:`pty.openpty` + :class:`subprocess.Popen`), so
 ``sys.stdin.isatty()`` / ``sys.stdout.isatty()`` return ``True`` in
@@ -46,8 +46,8 @@ _READER_CHILD = textwrap.dedent(
     import sys
     from pathlib import Path
 
-    from kiss.agents.sorcar.cli_prompt import PtkLineReader
-    from kiss.agents.sorcar.cli_repl import CliCompleter
+    from kiss.ui.cli.cli_prompt import PtkLineReader
+    from kiss.ui.cli.cli_repl import CliCompleter
 
     out_path = Path(os.environ["KISS_TEST_OUT"])
     hist_path = Path(os.environ["KISS_TEST_HIST"])
@@ -71,7 +71,7 @@ _STEERING_CHILD = textwrap.dedent(
     import threading
     from pathlib import Path
 
-    from kiss.agents.sorcar.cli_steering import _InputBox
+    from kiss.ui.cli.cli_steering import _InputBox
 
     out_path = Path(os.environ["KISS_TEST_OUT"])
     box = _InputBox(threading.RLock(), sys.stdout)

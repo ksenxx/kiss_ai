@@ -2146,7 +2146,7 @@ class WebPrinter(JsonPrinter):
         robotic Web Speech fallback is gone).  When the event carries
         a synthesized clip and a local webview tab is subscribed, the
         DAEMON therefore plays the clip natively on this machine's
-        speakers (:mod:`kiss.agents.sorcar.cli_talk`, ``afplay`` on
+        speakers (:mod:`kiss.ui.cli.cli_talk`, ``afplay`` on
         macOS) and stamps every same-machine copy (local UDS webviews
         AND CLI tabs) ``muted``.
 
@@ -2200,7 +2200,7 @@ class WebPrinter(JsonPrinter):
     def _play_talk_clip_locally(event: dict[str, Any]) -> bool:
         """Play a talk event's synthesized clip on this machine's speakers.
 
-        Uses the sorcar CLI's :class:`~kiss.agents.sorcar.cli_talk.
+        Uses the sorcar CLI's :class:`~kiss.ui.cli.cli_talk.
         TalkPlayer` singleton — a real audio-player child process
         (``afplay`` / ``mpg123`` / ``ffplay`` / ``mpv``, overridable
         via ``KISS_SORCAR_PLAY_CMD``) fed from a serialising queue
@@ -4259,7 +4259,7 @@ class RemoteAccessServer:
         The ``sorcar`` CLI's :class:`RecordingConsolePrinter` ships
         every display event over the daemon's UDS endpoint wrapped in
         a ``cliEvent`` envelope (see
-        :mod:`kiss.agents.sorcar.cli_daemon_bridge`).  The CLI process
+        :mod:`kiss.ui.cli.cli_daemon_bridge`).  The CLI process
         has ALREADY recorded the event into its per-task recording
         and persisted it to the chat DB via
         :meth:`JsonPrinter.broadcast`, so this method must NOT call
