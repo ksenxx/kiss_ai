@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -245,6 +246,136 @@ def _broadcast_subagent_done(printer: Any, tab_ids: list[str]) -> None:
             pass
 
 
+def _live_agent_usage(agent: Any) -> tuple[float, int, int]:
+    """Return live ``(budget, tokens, steps)`` for *agent*, including its
+    in-flight executor session.
+
+    :class:`~kiss.core.relentless_agent.RelentlessAgent` folds a session
+    executor's spend into the agent's totals only when the session ends,
+    so mid-session the live spend is visible only on
+    ``agent._current_executor``.
+    """
+    budget, tokens, steps = _agent_usage(agent)
+    executor = getattr(agent, "_current_executor", None)
+    if executor is not None:
+        budget += float(getattr(executor, "budget_used", 0.0) or 0.0)
+        tokens += int(getattr(executor, "total_tokens_used", 0) or 0)
+        steps += int(getattr(executor, "step_count", 0) or 0)
+    return budget, tokens, steps
+
+
+class _LiveUsageMonitor:
+    """Streams the parent task's live cumulative usage while parallel
+    sub-agents run.
+
+    Between the moment ``run_parallel`` blocks the parent's turn and the
+    moment :func:`_attribute_sub_usage` folds the finished sub-agents'
+    spend back into the parent, nothing else emits ``usage_info`` on the
+    PARENT task — the cost/tokens header (chat webview top bar, sorcar
+    CLI interactive) would otherwise show a stale figure that excludes
+    all live sub-agent spend until every sub-agent finished.  This
+    monitor polls every tracked sub-agent and broadcasts a parent-task
+    ``usage_info`` whenever the totals change, so the header always
+    reflects the agent plus all of its sub-agents at every turn.
+
+    The emitted values are RAW (session-relative), exactly like the
+    per-turn ``usage_info`` from ``KISSAgent``: the printer adds the
+    parent task's budget/tokens/steps offsets (the parent's cumulative
+    spend snapshotted at session start).  :meth:`stop` joins the polling
+    thread and is called BEFORE ``_attribute_sub_usage`` bumps those
+    offsets, so a late emission can never double-count sub-agent spend.
+    """
+
+    def __init__(self, parent: Any, printer: Any, interval: float = 1.0) -> None:
+        self._parent = parent
+        self._printer = printer
+        self._interval = interval
+        self._agents_lock = threading.Lock()
+        self._agents: list[Any] = []
+        self._done = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._last_emitted: tuple[str, int, int] | None = None
+        # Capture the parent's thread-local task id HERE, in the calling
+        # thread — the monitor thread must emit on the PARENT task's
+        # stream (broadcast tags events and resolves usage offsets by
+        # the emitting thread's task key).
+        thread_local = getattr(printer, "_thread_local", None) if printer else None
+        self._parent_task_id = (
+            getattr(thread_local, "task_id", "") if thread_local else ""
+        )
+
+    def track(self, agent: Any) -> None:
+        """Register a spawned sub-agent whose live spend should be polled."""
+        with self._agents_lock:
+            self._agents.append(agent)
+
+    def start(self) -> None:
+        """Start the polling thread (no-op without a printer)."""
+        if self._printer is None:
+            return
+        self._thread = threading.Thread(
+            target=self._loop, name="live-usage-monitor", daemon=True
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        """Stop and join the polling thread.
+
+        Joining guarantees no further emission can race with the
+        subsequent :func:`_attribute_sub_usage` offset bump (which would
+        double-count the sub-agents' spend in the displayed total).
+        """
+        self._done.set()
+        if self._thread is not None:
+            self._thread.join()
+            self._thread = None
+
+    def _loop(self) -> None:
+        thread_local = getattr(self._printer, "_thread_local", None)
+        if thread_local is not None:
+            thread_local.task_id = self._parent_task_id
+        while not self._done.wait(self._interval):
+            try:
+                self._emit()
+            except Exception:
+                logger.debug("Live usage emission failed", exc_info=True)
+
+    def _emit(self) -> None:
+        """Broadcast a parent-task ``usage_info`` when the totals changed."""
+        executor = getattr(self._parent, "_current_executor", None)
+        if executor is not None:
+            budget = float(getattr(executor, "budget_used", 0.0) or 0.0)
+            tokens = int(getattr(executor, "total_tokens_used", 0) or 0)
+            steps = int(getattr(executor, "step_count", 0) or 0)
+        else:
+            budget, tokens, steps = 0.0, 0, 0
+        with self._agents_lock:
+            agents = list(self._agents)
+        for sub in agents:
+            try:
+                sub_budget, sub_tokens, sub_steps = _live_agent_usage(sub)
+            except Exception:
+                # One misbehaving sub-agent must not blind the whole
+                # header to every other sub-agent's live spend.
+                logger.debug("Live usage poll failed", exc_info=True)
+                continue
+            budget += sub_budget
+            tokens += sub_tokens
+            steps += sub_steps
+        cost = f"${budget:.4f}"
+        snapshot = (cost, tokens, steps)
+        if snapshot == self._last_emitted:
+            return
+        self._last_emitted = snapshot
+        self._printer.print(
+            f"Tokens: {tokens:,}, Budget: {cost} (live, incl. parallel sub-agents), ",
+            type="usage_info",
+            total_tokens=tokens,
+            cost=cost,
+            total_steps=steps,
+        )
+
+
 def _attribute_sub_usage(agent: Any, budget: float, tokens: int, steps: int) -> None:
     """Attribute sub-agents' cost, tokens, and steps to the parent *agent*.
 
@@ -383,23 +514,35 @@ class SorcarAgent(RelentlessAgent):
             List of YAML result strings in the same order as *tasks*.
         """
         totals: dict[str, float] = {}
-        results = run_tasks_parallel(
-            tasks,
-            max_workers=max_workers,
-            model_name=self.model_name,
-            work_dir=self.work_dir,
-            printer=self.printer,
-            totals_out=totals,
-            # Cap every sub-agent to a fair share of THIS task's
-            # remaining budget — without it each sub-agent would default
-            # to the full configured budget and a single sub-agent could
-            # spend the entire budget of the main task.  One equal share
-            # remains reserved for the parent to process results and finish.
-            max_budget=self._subagent_budget_share(len(tasks)),
-            # Sub-agents must talk to the same provider endpoint as the
-            # parent (custom ``base_url``/``api_key`` routing).
-            model_config=getattr(self, "model_config", None),
-        )
+        # Live-stream the parent task's cumulative usage (parent session
+        # + all sub-agents) while the fan-out runs, so the cost/tokens
+        # header stays accurate at every turn instead of freezing until
+        # every sub-agent completes.  Stopped (joined) BEFORE
+        # ``_attribute_sub_usage`` bumps the printer offsets, so a late
+        # emission can never double-count the sub-agents' spend.
+        monitor = _LiveUsageMonitor(self, self.printer)
+        monitor.start()
+        try:
+            results = run_tasks_parallel(
+                tasks,
+                max_workers=max_workers,
+                model_name=self.model_name,
+                work_dir=self.work_dir,
+                printer=self.printer,
+                totals_out=totals,
+                usage_monitor=monitor,
+                # Cap every sub-agent to a fair share of THIS task's
+                # remaining budget — without it each sub-agent would default
+                # to the full configured budget and a single sub-agent could
+                # spend the entire budget of the main task.  One equal share
+                # remains reserved for the parent to process results and finish.
+                max_budget=self._subagent_budget_share(len(tasks)),
+                # Sub-agents must talk to the same provider endpoint as the
+                # parent (custom ``base_url``/``api_key`` routing).
+                model_config=getattr(self, "model_config", None),
+            )
+        finally:
+            monitor.stop()
         _attribute_sub_usage(
             self,
             float(totals.get("budget_used", 0.0)),
@@ -1076,6 +1219,7 @@ def run_tasks_parallel(
     totals_out: dict[str, float] | None = None,
     max_budget: float | None = None,
     model_config: dict[str, Any] | None = None,
+    usage_monitor: _LiveUsageMonitor | None = None,
 ) -> list[str]:
     """Execute multiple SorcarAgent tasks concurrently using threads.
 
@@ -1129,6 +1273,10 @@ def run_tasks_parallel(
             ``api_key`` routing) forwarded to each sub-agent's ``run``
             so sub-agents talk to the same provider endpoint as the
             parent.  ``None`` uses default provider routing.
+        usage_monitor: Optional :class:`_LiveUsageMonitor` that each
+            spawned sub-agent is registered with, so the parent task's
+            cost/tokens header can stream live aggregate usage while
+            the sub-agents run.  ``None`` disables live tracking.
 
     Returns:
         List of YAML result strings in the **same order** as *tasks*.
@@ -1190,6 +1338,8 @@ def run_tasks_parallel(
         # likewise ``""`` so the persisted payload shape matches the
         # chat path.
         agent._subagent_info = {"parent_task_id": "", "parent_tab_id": ""}
+        if usage_monitor is not None:
+            usage_monitor.track(agent)
         try:
             # ``is_parallel=True`` propagates the parallel capability so
             # sub-agents themselves get the ``run_parallel`` tool and

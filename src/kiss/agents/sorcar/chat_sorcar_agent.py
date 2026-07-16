@@ -41,6 +41,7 @@ from kiss.agents.sorcar.sorcar_agent import (
     _attribute_sub_usage,
     _broadcast_subagent_done,
     _coerce_tasks,
+    _LiveUsageMonitor,
     _yaml_failure,
 )
 from kiss.core.printer import parse_result_yaml
@@ -589,6 +590,10 @@ class ChatSorcarAgent(SorcarAgent):
         )
 
         sub_usage: list[tuple[float, int, int]] = [(0.0, 0, 0)] * len(tasks)
+        # Created HERE, in the parent task's thread, so the monitor
+        # captures the parent's thread-local ``task_id`` and its
+        # emissions land on the parent's event stream / usage offsets.
+        usage_monitor = _LiveUsageMonitor(self, printer)
 
         def _run_single(args: tuple[int, str]) -> str:
             idx, task = args
@@ -607,6 +612,7 @@ class ChatSorcarAgent(SorcarAgent):
             if tl is not None:
                 tl.stop_event = sub_stop_event
             agent = ChatSorcarAgent(f"Parallel-{task[:40]}")
+            usage_monitor.track(agent)
             if chat_id:
                 agent.resume_chat_by_id(chat_id)
             sub_tab_id = f"task-{parent_task_id}__sub_{idx}"
@@ -763,8 +769,18 @@ class ChatSorcarAgent(SorcarAgent):
                         pass
                 _RunningAgentState.unregister(sub_tab_id)
 
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            results = list(pool.map(_run_single, enumerate(tasks)))
+        # Live-stream the parent task's cumulative usage (parent session
+        # + all sub-agents) while the fan-out runs, so the cost/tokens
+        # header stays accurate at every turn instead of freezing until
+        # every sub-agent completes.  Stopped (joined) BEFORE
+        # ``_attribute_sub_usage`` bumps the printer offsets, so a late
+        # emission can never double-count the sub-agents' spend.
+        usage_monitor.start()
+        try:
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                results = list(pool.map(_run_single, enumerate(tasks)))
+        finally:
+            usage_monitor.stop()
 
         _attribute_sub_usage(
             self,
