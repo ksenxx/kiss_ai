@@ -358,9 +358,9 @@ def test_cli_printer_releases_lock_before_daemon_send(
 
 
 def test_cli_printer_imports_is_task_history_id_at_module_level() -> None:
-    src = Path(
-        "src/kiss/agents/sorcar/cli_printer.py"
-    ).read_text()
+    from kiss.ui.cli import cli_printer
+
+    src = Path(str(cli_printer.__file__)).read_text()
     # Find the module-level import.
     assert (
         "from kiss.agents.sorcar.persistence import is_task_history_id" in src
@@ -384,9 +384,9 @@ def test_cli_printer_imports_is_task_history_id_at_module_level() -> None:
 
 
 def test_cli_printer_running_task_ids_docstring_updated() -> None:
-    src = Path(
-        "src/kiss/agents/sorcar/cli_printer.py"
-    ).read_text()
+    from kiss.ui.cli import cli_printer
+
+    src = Path(str(cli_printer.__file__)).read_text()
     assert "Set of int" not in src
     assert "32-char lowercase-hex" in src
 
