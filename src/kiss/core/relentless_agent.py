@@ -376,10 +376,7 @@ class RelentlessAgent(Base):
                     trajectory_path = tmp_dir / f"trajectory_{session}.json"
                     trajectory_path.write_text(executor.get_trajectory(), encoding="utf-8")
                     _stop_ev = getattr(self.printer, "stop_event", None) if self.printer else None
-                    # Lazy import avoids the package cycle
-                    # relentless_agent -> sorcar.__init__ -> sorcar_agent ->
-                    # relentless_agent during a fresh direct import.
-                    from kiss.agents.sorcar.useful_tools import UsefulTools
+                    from kiss.core.useful_tools import UsefulTools
 
                     shell_tools = UsefulTools(stop_event=_stop_ev)
                     summarizer_budget = max(
@@ -650,7 +647,7 @@ class RelentlessAgent(Base):
         self.task_description = substitute_prompt_args(prompt_template, args)
 
         if self.docker_image:
-            from kiss.docker.docker_manager import DockerManager
+            from kiss.core.docker_manager import DockerManager
 
             with DockerManager(self.docker_image) as docker_mgr:
                 self.docker_manager = docker_mgr

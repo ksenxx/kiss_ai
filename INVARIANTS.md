@@ -240,6 +240,15 @@ ______________________________________________________________________
 - When the demo switches from one task to the next, the animation MUST be a
   continuation of the same chat (the welcome page MUST NOT be shown). (219)
 
+## Code layering
+
+- Code in `src/kiss/core/` MUST NOT depend on (import) any code outside
+  `src/kiss/core/`.
+- Code in `src/kiss/agents/sorcar/` MUST NOT depend on (import) any code
+  outside `src/kiss/agents/sorcar/` except code in `src/kiss/core/`.
+- Both rules cover lazy/conditional imports too and are enforced by
+  `src/kiss/tests/test_layering_invariants.py`.
+
 ## Other components
 
 - Papers that have been modified MUST always be rebuilt. (768)

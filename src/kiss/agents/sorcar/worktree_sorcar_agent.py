@@ -24,12 +24,6 @@ from typing import Any
 import yaml
 
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.agents.sorcar.cli_helpers import (
-    _build_arg_parser,
-    _build_run_kwargs,
-    _launch_work_dir,
-    print_outcome,
-)
 from kiss.agents.sorcar.git_worktree import (
     GitWorktree,
     GitWorktreeOps,
@@ -42,7 +36,6 @@ from kiss.agents.sorcar.persistence import _allocate_chat_id
 # module's globals at call time) so tests can monkeypatch
 # ``worktree_sorcar_agent._generate_commit_message``.
 from kiss.agents.sorcar.sorcar_agent import (
-    SorcarAgent,
     _generate_commit_message,
     auto_commit_changes,
 )
@@ -1328,82 +1321,7 @@ def _reject_interactive_only_flags(argv: list[str]) -> None:
     sys.exit(2)
 
 
-def main() -> None:
-    """Run the ``sorcar`` CLI.
-
-    Two modes:
-
-    * **Interactive** (no ``-t/--task`` / ``-f/--file``): a thin
-      terminal client of the local ``sorcar web`` daemon — see
-      :mod:`kiss.ui.cli.cli_client`.  The ``--worktree`` /
-      ``--no-worktree`` / ``--parallel`` / ``--no-parallel`` /
-      ``--auto-commit`` / ``--no-auto-commit`` flags are forwarded
-      to the daemon so each task can still run on an isolated git
-      worktree, with parallel sub-agents and auto-commit.
-      Chat-session control (new chat, resume) is driven from the
-      interactive client's slash commands rather than CLI flags.
-    * **Non-interactive** (``-t`` or ``-f`` supplied): runs a plain
-      :class:`~kiss.agents.sorcar.sorcar_agent.SorcarAgent` once on
-      the supplied task and exits.  No git worktree isolation, no
-      chat-session control — those features were always tied to the
-      removed ``-c/--chat-id`` / ``-l/--list-chat-id`` /
-      ``--cleanup`` / ``--use-chat`` / ``--use-worktree`` flag set.
-      ``--worktree`` / ``--no-worktree`` / ``--auto-commit`` /
-      ``--no-auto-commit`` are interactive-only and are rejected
-      when combined with ``-t`` / ``-f`` (see
-      :func:`_reject_interactive_only_flags`).  Display events from
-      the run are still streamed into the local chat DB via
-      :class:`RecordingConsolePrinter` so the run is replayable in
-      the chat webview; only the *chat session* surface (resume by
-      id) is unavailable.
-
-    ``sorcar mcp ...`` is dispatched to the MCP management subcommand
-    (:mod:`kiss.ui.cli.mcp_cli`) before normal argument parsing.
-    """
-    if len(sys.argv) > 1 and sys.argv[1] == "mcp":
-        from kiss.ui.cli.mcp_cli import run_mcp_cli
-
-        sys.exit(run_mcp_cli(sys.argv[2:], str(Path.cwd())))
-
-    parser = _build_arg_parser()
-    args = parser.parse_args()
-    work_dir = args.work_dir or _launch_work_dir()
-
-    interactive = args.task is None and args.file is None
-    if not interactive:
-        # Validate AFTER argparse (so ``-t``/``-f`` are decoded
-        # correctly) but BEFORE the agent is built / the LLM is
-        # contacted (so the user sees the error immediately and no
-        # budget is spent).
-        _reject_interactive_only_flags(sys.argv)
-    run_kwargs = _build_run_kwargs(args)
-
-    if interactive:
-        from kiss.ui.cli.cli_client import run_client
-
-        sys.exit(
-            run_client(
-                work_dir=run_kwargs.get("work_dir") or work_dir,
-                model_name=run_kwargs.get("model_name", ""),
-                active_file=run_kwargs.get("current_editor_file") or "",
-                use_worktree=bool(getattr(args, "worktree", True)),
-                use_parallel=bool(getattr(args, "parallel", True)),
-                # Fallback default matches the argparse default
-                # (``--auto-commit`` default=True in cli_helpers) and
-                # the sibling ``worktree``/``parallel`` fallbacks.
-                auto_commit=bool(getattr(args, "auto_commit", True)),
-            ),
-        )
-
-    # Non-interactive: plain SorcarAgent, no chat / no worktree.
-    from kiss.ui.cli.cli_steering import run_with_steering
-
-    agent: SorcarAgent = SorcarAgent("Sorcar Agent")
-    start_time = time.time()
-    result = run_with_steering(agent, run_kwargs)
-    elapsed = time.time() - start_time
-    print_outcome(agent, result, elapsed, run_kwargs.get("verbose", True))
-
-
-if __name__ == "__main__":
-    main()
+# NOTE: the ``sorcar`` console-script entry point (``main``) lives in
+# :mod:`kiss.ui.cli.sorcar_cli`: it dispatches into the UI layer
+# (cli_client / cli_steering / mcp_cli), which sorcar code must not
+# import (sorcar depends only on itself and ``kiss.core``).

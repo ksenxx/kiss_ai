@@ -53,6 +53,8 @@ from collections import deque
 from pathlib import Path
 from typing import Any
 
+from kiss.core.useful_tools import set_grep_hint_provider
+
 logger = logging.getLogger(__name__)
 
 # Storage lives under the worktree so each worktree has its own graph
@@ -1380,6 +1382,12 @@ def main(argv: list[str]) -> int:
         return 0
     print(f"unknown verb: {verb}", file=sys.stderr)
     return 2
+
+
+# Dependency inversion: ``kiss.core.useful_tools.intercept_grep_hint``
+# must not import sorcar, so the code-graph grep interception registers
+# itself with the core hook whenever this module is imported.
+set_grep_hint_provider(grep_hint)
 
 
 if __name__ == "__main__":  # pragma: no cover — exercised via subprocess
