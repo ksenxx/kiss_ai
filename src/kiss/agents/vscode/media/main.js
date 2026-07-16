@@ -520,6 +520,14 @@
   let attachments = [];
   let _scrollLock = false;
   let _noScroll = false;
+  // The scrollTop sb()'s own programmatic ``O.scrollTo`` landed on
+  // while its ``scroll`` event is still in flight (-1 = none).  The
+  // #output 'scroll' handler consumes it so the auto-scroller's own
+  // event is never mistaken for the user scrolling away from the end
+  // (which would engage ``_scrollLock``) — while a coalesced event
+  // showing a position BELOW this target still counts as the user
+  // scrolling up.
+  let _sbScrollTarget = -1;
   // When true (only during bulk replay in replayEventsInto), hlBlock defers
   // syntax highlighting: code blocks are tagged `needs-hl` instead of being
   // highlighted, so panels collapsed by collapseAllExceptResult() are only
@@ -885,6 +893,7 @@
     pendingPanel = tab.streamPendingPanel || false;
     stepCount = tab.streamStepCount || 0;
     _scrollLock = false;
+    _sbScrollTarget = -1;
     // Restore worktree bar
     if (worktreeBar && worktreeBar.parentNode)
       worktreeBar.parentNode.removeChild(worktreeBar);
@@ -2050,6 +2059,13 @@
       if (tab) tab.panelsExpandedMap[visibleTask] = expanded;
       updateCollapseButton(expanded);
       applyChevronState(expanded, visibleTask);
+      // "Uncollapse Chats" = the user wants to READ the expanded
+      // panels: same auto-scroll hold as expanding a single panel via
+      // its header (addCollapse), released when the user scrolls to
+      // the very end.  No hold when the expansion left the view at
+      // the end anyway (tailing must keep working at the end).
+      if (expanded && O.scrollHeight - O.scrollTop - O.clientHeight > 2)
+        _scrollLock = true;
     });
   }
 
@@ -2156,6 +2172,7 @@
     pendingPanel = false;
     stepCount = 0;
     _scrollLock = false;
+    _sbScrollTarget = -1;
   }
 
   function resetAdjacentState() {
@@ -2649,8 +2666,22 @@
       panelEl.classList.toggle('collapsed');
       if (panelEl.classList.contains('collapsed')) {
         panelEl.classList.remove('user-pinned');
+        // Collapsing while the (now shorter) content leaves the view
+        // at the very end releases the expansion hold below, so
+        // tailing resumes without an extra user scroll.
+        if (O.scrollHeight - O.scrollTop - O.clientHeight <= 2)
+          _scrollLock = false;
       } else {
         panelEl.classList.add('user-pinned');
+        // The user uncollapsed the panel to READ it: suspend the
+        // auto-scroll-to-end until they scroll back to the very end
+        // (released by the #output 'scroll' handler), otherwise the
+        // next streamed token scrolls the panel out of view.  Skip
+        // the hold when the expansion left the view at the very end
+        // anyway (nothing to hold — and tailing must keep working
+        // when the user is at the end).
+        if (O.scrollHeight - O.scrollTop - O.clientHeight > 2)
+          _scrollLock = true;
         // Highlight code that was deferred while this panel stayed collapsed.
         highlightPending(panelEl);
       }
@@ -3925,8 +3956,18 @@
       !(welcome && welcome.style.display !== 'none')
     ) {
       scrollRaf = requestAnimationFrame(() => {
-        O.scrollTo({top: O.scrollHeight, behavior: 'instant'});
         scrollRaf = 0;
+        // Re-check the suspension at execution time: the user may have
+        // scrolled up (engaging _scrollLock) or clicked a panel header
+        // (raising _noScroll) between scheduling and this frame.
+        if (_scrollLock || _noScroll) return;
+        // Remember where this programmatic scroll lands so its
+        // 'scroll' event is recognized — but only when the position
+        // will actually move (a no-op scrollTo fires no event, and a
+        // stale mark would swallow the user's next real scroll-up).
+        const sbTarget = O.scrollHeight - O.clientHeight;
+        if (O.scrollTop < sbTarget) _sbScrollTarget = sbTarget;
+        O.scrollTo({top: O.scrollHeight, behavior: 'instant'});
       });
     }
   }
@@ -4126,9 +4167,26 @@
   }
 
   O.addEventListener('scroll', () => {
-    if (_scrollLock) {
-      const atBottom = O.scrollTop + O.clientHeight >= O.scrollHeight - 150;
-      if (atBottom) _scrollLock = false;
+    // Engage/release the auto-scroll suspension from the scroll
+    // position itself.  Wheel events are NOT the only way to scroll:
+    // touch drags (the remote webapp on phones/tablets), scrollbar
+    // drags and keyboard scrolling fire only 'scroll' events, so the
+    // suspension must be driven here or those users get yanked back to
+    // the end on every streamed token.
+    const dist = O.scrollHeight - O.scrollTop - O.clientHeight;
+    // An event at/above the position sb()'s own scrollTo landed on is
+    // programmatic (possibly racing freshly-grown content).  A
+    // position BELOW that target means the user scrolled up before
+    // the event was delivered (engines coalesce scroll events).
+    const fromSb = _sbScrollTarget >= 0 && O.scrollTop >= _sbScrollTarget - 2;
+    _sbScrollTarget = -1;
+    if (dist <= 2) {
+      // The user is at the very end: tailing (re-)engages.
+      _scrollLock = false;
+    } else if (!fromSb) {
+      // A user-initiated scroll away from the end (touch, scrollbar,
+      // keys, wheel): hold the view until the user returns to the end.
+      _scrollLock = true;
     }
     updateVisibleTask();
   });
