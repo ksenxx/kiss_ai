@@ -401,16 +401,6 @@ if [ "$OS" = "Darwin" ] && ! command -v brew &>/dev/null; then
     fi
 fi
 
-# Returns 0 only if /dev/tty can actually be opened for reading.  A plain
-# `[ -r /dev/tty ]` test only inspects the permission bits, which pass even
-# inside a detached Docker container where the controlling terminal does not
-# exist and opening /dev/tty fails with ENXIO ("No such device or address").
-# Probing with a real open avoids that crash and lets prompts fall back to
-# their non-interactive default.
-can_read_tty() {
-    { : < /dev/tty; } 2>/dev/null
-}
-
 ensure_xcode_clt() {
     [ "$OS" = "Darwin" ] || return 0
 
@@ -447,22 +437,17 @@ ensure_xcode_clt() {
 
     echo "   Non-interactive install did not complete. Triggering GUI installer..."
     xcode-select --install 2>&1 || true
-    echo ""
-    echo "   A dialog has appeared to install the Xcode Command Line Tools."
-    echo "   Complete the installation in that dialog, then return to this terminal."
-    if can_read_tty; then
-        # `|| true`: `read` fails on EOF/EIO even when /dev/tty opened fine;
-        # under `set -e` that would abort the install instead of continuing.
-        read -n 1 -s -r -p "   Press any key to continue with the rest of installation..." </dev/tty || true
-    else
-        echo "   Non-interactive shell detected — continuing without waiting."
-    fi
-    echo ""
 
     if xcode-select -p &>/dev/null && [ -e "$(xcode-select -p)/usr/bin/git" ]; then
         echo "   Xcode Command Line Tools installed at $(xcode-select -p)"
     else
-        echo "   ERROR: Xcode Command Line Tools still not detected. Aborting."
+        # This script always runs detached from the controlling terminal
+        # (see the kiss-new-session-reexec block above), so it cannot wait
+        # for keyboard input while the user completes the GUI dialog.
+        # Exit-and-rerun matches the ``install_git`` fallback behaviour.
+        echo ""
+        echo "   A dialog has appeared to install the Xcode Command Line Tools."
+        echo "   Complete the installation in that dialog, then re-run this script."
         exit 1
     fi
 }
@@ -475,51 +460,35 @@ ensure_homebrew() {
         return 0
     fi
 
-    echo ""
-    echo "   Homebrew (https://brew.sh) is not installed."
-    echo "   Installing it will enable KISS Sorcar to install necessary tools on demand"
-    echo "   (e.g. git, cloudflared, and other runtime dependencies)."
-    echo ""
-
-    local REPLY_BREW=""
-    if can_read_tty; then
-        # `read` can fail (EOF/EIO) even when /dev/tty opened fine; fall back
-        # to the non-interactive default instead of dying under `set -e`.
-        read -r -p "   Install the latest Homebrew now? [Y/n] " REPLY_BREW </dev/tty || REPLY_BREW=""
-    else
-        echo "   Non-interactive shell detected — defaulting to Yes."
+    if [ -n "${KISS_NO_BREW:-}" ]; then
+        echo "   KISS_NO_BREW set — skipping Homebrew install. KISS Sorcar may not"
+        echo "   be able to install some tools on demand without it."
+        return 0
     fi
 
-    case "$REPLY_BREW" in
-        ""|y|Y|yes|YES|Yes)
-            echo "   Installing Homebrew..."
-            # `|| true`: a failed Homebrew bootstrap (no sudo, no network)
-            # must not abort the install — the check below prints a warning
-            # and the script continues without brew.
-            if can_read_tty; then
-                NONINTERACTIVE=1 /bin/bash -c \
-                    "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh || true)" </dev/tty || true
-            else
-                NONINTERACTIVE=1 /bin/bash -c \
-                    "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh || true)" || true
-            fi
-            # Make brew available in the current shell session.
-            if [ -x /opt/homebrew/bin/brew ]; then
-                eval "$(/opt/homebrew/bin/brew shellenv)"
-            elif [ -x /usr/local/bin/brew ]; then
-                eval "$(/usr/local/bin/brew shellenv)"
-            fi
-            if command -v brew &>/dev/null; then
-                echo "   Homebrew installed at $(command -v brew)"
-            else
-                echo "   WARNING: Homebrew install did not complete; continuing without it."
-            fi
-            ;;
-        *)
-            echo "   Skipping Homebrew install. KISS Sorcar may not be able to install"
-            echo "   some tools on demand without it."
-            ;;
-    esac
+    echo ""
+    echo "   Homebrew (https://brew.sh) is not installed."
+    echo "   Installing it enables KISS Sorcar to install necessary tools on demand"
+    echo "   (e.g. git, cloudflared, and other runtime dependencies)."
+    echo "   Set KISS_NO_BREW=1 to skip this step."
+    echo ""
+    echo "   Installing Homebrew..."
+    # `|| true`: a failed Homebrew bootstrap (no sudo, no network)
+    # must not abort the install — the check below prints a warning
+    # and the script continues without brew.
+    NONINTERACTIVE=1 /bin/bash -c \
+        "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh || true)" || true
+    # Make brew available in the current shell session.
+    if [ -x /opt/homebrew/bin/brew ]; then
+        eval "$(/opt/homebrew/bin/brew shellenv)"
+    elif [ -x /usr/local/bin/brew ]; then
+        eval "$(/usr/local/bin/brew shellenv)"
+    fi
+    if command -v brew &>/dev/null; then
+        echo "   Homebrew installed at $(command -v brew)"
+    else
+        echo "   WARNING: Homebrew install did not complete; continuing without it."
+    fi
 }
 
 install_git() {
@@ -755,43 +724,8 @@ version_gte() {
     return 0
 }
 
-# Ask the user whether to upgrade; abort if they decline.
-#   $1 – tool display name
-#   $2 – installed version
-#   $3 – required version
-prompt_upgrade_or_abort() {
-    local name="$1" current="$2" required="$3"
-    echo ""
-    echo "   $name $current is older than the required version $required."
-    local reply=""
-    if can_read_tty; then
-        # `read` can still fail even when /dev/tty opens successfully — EOF
-        # when the terminal feeding it closes, or EIO when the script runs
-        # detached from a usable terminal (e.g. the update button spawning
-        # install.sh).  Under `set -e` an unguarded failure killed the whole
-        # update right at this question with no error message; fall back to
-        # the non-interactive default (Yes) instead.
-        if ! read -r -p "   Upgrade $name to $required or later? [Y/n] " reply </dev/tty; then
-            reply=""
-            echo ""
-            echo "   No interactive input available — defaulting to Yes."
-        fi
-    else
-        echo "   Non-interactive shell detected — defaulting to Yes."
-    fi
-    case "$reply" in
-        ""|y|Y|yes|YES|Yes) return 0 ;;
-        *)
-            echo ""
-            echo "   ERROR: $name >= $required is required by this repository."
-            echo "   Please upgrade $name manually and re-run this script."
-            exit 1
-            ;;
-    esac
-}
-
 # ---------------------------------------------------------------------------
-# Upgrade helpers — invoked only when the user accepts the upgrade prompt
+# Upgrade helpers — invoked when the installed version is older than required
 # ---------------------------------------------------------------------------
 
 # Upgrade failures are deliberately non-fatal: a missing package manager or
@@ -1021,7 +955,7 @@ exec > >(tee -a "$LOG_FILE") 2>&1
     # would otherwise abort the script at this assignment.
     INSTALLED_GIT=$(git --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
     if [ -n "$REQUIRED_GIT_VERSION" ] && [ -n "$INSTALLED_GIT" ] && ! version_gte "$INSTALLED_GIT" "$REQUIRED_GIT_VERSION"; then
-        prompt_upgrade_or_abort "git" "$INSTALLED_GIT" "$REQUIRED_GIT_VERSION"
+        echo "   git $INSTALLED_GIT is older than the required version $REQUIRED_GIT_VERSION — upgrading..."
         upgrade_git
         INSTALLED_GIT=$(git --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
         if [ -n "$INSTALLED_GIT" ] && ! version_gte "$INSTALLED_GIT" "$REQUIRED_GIT_VERSION"; then
@@ -1039,7 +973,7 @@ exec > >(tee -a "$LOG_FILE") 2>&1
     if command -v uv &>/dev/null; then
         INSTALLED_UV=$(uv --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
         if [ -n "$REQUIRED_UV_VERSION" ] && [ -n "$INSTALLED_UV" ] && ! version_gte "$INSTALLED_UV" "$REQUIRED_UV_VERSION"; then
-            prompt_upgrade_or_abort "uv" "$INSTALLED_UV" "$REQUIRED_UV_VERSION"
+            echo "   uv $INSTALLED_UV is older than the required version $REQUIRED_UV_VERSION — upgrading..."
             upgrade_uv
             INSTALLED_UV=$(uv --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
         fi
@@ -1056,7 +990,7 @@ exec > >(tee -a "$LOG_FILE") 2>&1
     if command -v node &>/dev/null && command -v npm &>/dev/null && command -v npx &>/dev/null; then
         INSTALLED_NODE=$(node --version 2>/dev/null | sed 's/^v//' || true)
         if [ -n "$REQUIRED_NODE_VERSION" ] && [ -n "$INSTALLED_NODE" ] && ! version_gte "$INSTALLED_NODE" "$REQUIRED_NODE_VERSION"; then
-            prompt_upgrade_or_abort "Node.js" "$INSTALLED_NODE" "$REQUIRED_NODE_VERSION"
+            echo "   Node.js $INSTALLED_NODE is older than the required version $REQUIRED_NODE_VERSION — upgrading..."
             upgrade_node
             INSTALLED_NODE=$(node --version 2>/dev/null | sed 's/^v//' || true)
         fi
@@ -1077,7 +1011,7 @@ exec > >(tee -a "$LOG_FILE") 2>&1
     if [ -n "$CODE_CLI" ]; then
         INSTALLED_VSCODE=$("$CODE_CLI" --version 2>/dev/null | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1 || true)
         if [ -n "$REQUIRED_VSCODE_VERSION" ] && [ -n "$INSTALLED_VSCODE" ] && ! version_gte "$INSTALLED_VSCODE" "$REQUIRED_VSCODE_VERSION"; then
-            prompt_upgrade_or_abort "VS Code" "$INSTALLED_VSCODE" "$REQUIRED_VSCODE_VERSION"
+            echo "   VS Code $INSTALLED_VSCODE is older than the required version $REQUIRED_VSCODE_VERSION — upgrading..."
             upgrade_vscode
             INSTALLED_VSCODE=$("$CODE_CLI" --version 2>/dev/null | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1 || true)
         fi
