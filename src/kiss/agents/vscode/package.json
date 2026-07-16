@@ -253,7 +253,10 @@
     "check": "npm run typecheck && npm run lint && npm run test"
   },
   "overrides": {
-    "encoding-sniffer": "^1.0.2"
+    "encoding-sniffer": "^1.0.2",
+    "external-editor": {
+      "tmp": "^0.2.7"
+    }
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
