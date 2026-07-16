@@ -427,7 +427,7 @@ def _build_run_kwargs(args: argparse.Namespace) -> dict[str, Any]:
     # Rich panels to the terminal, so the same run is visible live in
     # the terminal and replayable later in the chat webview.
     if args.verbose:
-        from kiss.agents.sorcar.cli_printer import RecordingConsolePrinter
+        from kiss.ui.cli.cli_printer import RecordingConsolePrinter
 
         run_kwargs["printer"] = RecordingConsolePrinter()
     return run_kwargs

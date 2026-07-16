@@ -1361,7 +1361,7 @@ def main() -> None:
     (:mod:`kiss.agents.sorcar.mcp_cli`) before normal argument parsing.
     """
     if len(sys.argv) > 1 and sys.argv[1] == "mcp":
-        from kiss.agents.sorcar.mcp_cli import run_mcp_cli
+        from kiss.ui.cli.mcp_cli import run_mcp_cli
 
         sys.exit(run_mcp_cli(sys.argv[2:], str(Path.cwd())))
 
@@ -1379,7 +1379,7 @@ def main() -> None:
     run_kwargs = _build_run_kwargs(args)
 
     if interactive:
-        from kiss.agents.sorcar.cli_client import run_client
+        from kiss.ui.cli.cli_client import run_client
 
         sys.exit(
             run_client(
@@ -1396,7 +1396,7 @@ def main() -> None:
         )
 
     # Non-interactive: plain SorcarAgent, no chat / no worktree.
-    from kiss.agents.sorcar.cli_steering import run_with_steering
+    from kiss.ui.cli.cli_steering import run_with_steering
 
     agent: SorcarAgent = SorcarAgent("Sorcar Agent")
     start_time = time.time()
