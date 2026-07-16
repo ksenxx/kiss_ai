@@ -4,8 +4,8 @@
 # add your name here
 """End-to-end tests for the sorcar CLI client port.
 
-The standalone REPL (:mod:`kiss.agents.sorcar.cli_repl`) was replaced
-by :mod:`kiss.agents.sorcar.cli_client`, a thin terminal client that
+The standalone REPL (:mod:`kiss.ui.cli.cli_repl`) was replaced
+by :mod:`kiss.ui.cli.cli_client`, a thin terminal client that
 drives an already-running ``sorcar web`` daemon — the same
 :class:`kiss.server.web_server.RemoteAccessServer` that backs
 the VS Code extension and the remote browser webapp.
@@ -57,18 +57,18 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-from kiss.agents.sorcar import cli_daemon_bridge
 from kiss.agents.sorcar import persistence as th
-from kiss.agents.sorcar.cli_client import (
+from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.core.print_to_console import ConsolePrinter
+from kiss.server.web_server import RemoteAccessServer
+from kiss.ui.cli import cli_daemon_bridge
+from kiss.ui.cli.cli_client import (
     CliClient,
     _handle_client_slash,
     _request_cli_info,
     _request_models,
     run_client,
 )
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.core.print_to_console import ConsolePrinter
-from kiss.server.web_server import RemoteAccessServer
 
 
 def _reset_cli_daemon_writer() -> None:
@@ -515,7 +515,7 @@ class TestEventDispatcherRouting(unittest.TestCase):
     """Verify :class:`_EventDispatcher` routes by event type, without a server."""
 
     def setUp(self) -> None:
-        from kiss.agents.sorcar.cli_client import _EventDispatcher
+        from kiss.ui.cli.cli_client import _EventDispatcher
 
         self.printer = ConsolePrinter(file=open(os.devnull, "w"))
         self.disp = _EventDispatcher(self.printer)
@@ -586,7 +586,7 @@ class TestSubmitTaskBehaviour(CliClientBase):
         asserted on the inbound ``run`` command that the daemon
         actually received over the UDS.
         """
-        from kiss.agents.sorcar.cli_client import _submit_task
+        from kiss.ui.cli.cli_client import _submit_task
 
         before = len(self.harness.received_cmds)
         try:
@@ -624,7 +624,7 @@ class TestSubmitTaskBehaviour(CliClientBase):
 
     def test_submit_task_returns_when_daemon_disconnects(self) -> None:
         """``_submit_task`` must not wedge when the daemon goes away."""
-        from kiss.agents.sorcar.cli_client import _submit_task
+        from kiss.ui.cli.cli_client import _submit_task
 
         # Force the wait loop into "task active" so the disconnect
         # path is the only way out, then mark the connection closed.
@@ -682,7 +682,7 @@ class TestConnIdIsolation(unittest.TestCase):
 
     def test_cli_info_reply_routed_to_requesting_client_only(self) -> None:
         # Drain both queues so we can detect cross-talk.
-        from kiss.agents.sorcar.cli_client import _drain_queue
+        from kiss.ui.cli.cli_client import _drain_queue
 
         _drain_queue(self.client_a.dispatcher.cli_info_q)
         _drain_queue(self.client_b.dispatcher.cli_info_q)
@@ -710,7 +710,7 @@ class _TestRepl:
         import io as _io
         import threading as _t
 
-        from kiss.agents.sorcar.cli_steering import _InputBox
+        from kiss.ui.cli.cli_steering import _InputBox
 
         self.lock = _t.RLock()
         self.box = _InputBox(self.lock, _io.StringIO())
@@ -775,7 +775,7 @@ class TestSubmitTaskAnchored(CliClientBase):
         return t
 
     def test_run_command_carries_flags(self) -> None:
-        from kiss.agents.sorcar.cli_client import _submit_task_anchored
+        from kiss.ui.cli.cli_client import _submit_task_anchored
 
         repl = _TestRepl(script=[])
         before = len(self.harness.received_cmds)
@@ -809,7 +809,7 @@ class TestSubmitTaskAnchored(CliClientBase):
         self.assertTrue(run_cmd["autoCommit"])
 
     def test_submitted_lines_become_append_user_message(self) -> None:
-        from kiss.agents.sorcar.cli_client import _submit_task_anchored
+        from kiss.ui.cli.cli_client import _submit_task_anchored
 
         repl = _TestRepl(script=[
             ("submit", "follow up A"),
@@ -842,7 +842,7 @@ class TestSubmitTaskAnchored(CliClientBase):
         self.assertIn("follow up B", prompts)
 
     def test_abort_sends_stop_to_daemon(self) -> None:
-        from kiss.agents.sorcar.cli_client import _submit_task_anchored
+        from kiss.ui.cli.cli_client import _submit_task_anchored
 
         repl = _TestRepl(script=[("abort", None)])
         before = len(self.harness.received_cmds)
@@ -873,7 +873,7 @@ class TestSubmitTaskAnchored(CliClientBase):
 
     def test_ask_user_question_flips_title_and_routes_answer(self) -> None:
         """``askUser`` arrival flips the box, next submit goes as userAnswer."""
-        from kiss.agents.sorcar.cli_client import _submit_task_anchored
+        from kiss.ui.cli.cli_client import _submit_task_anchored
 
         # ``_submit_task_anchored`` drains ``ask_user_q`` at the top,
         # so the question must be enqueued AFTER the drain.  The
@@ -953,7 +953,7 @@ class TestSubmitTaskAnchored(CliClientBase):
 
     def test_daemon_disconnect_returns_promptly(self) -> None:
         """When the connection closes mid-task, the loop exits without wedge."""
-        from kiss.agents.sorcar.cli_client import _submit_task_anchored
+        from kiss.ui.cli.cli_client import _submit_task_anchored
 
         # Repl that just waits for is_done to flip.
         repl = _TestRepl(script=[])

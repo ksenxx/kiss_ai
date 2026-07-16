@@ -30,7 +30,7 @@ from typing import Any
 import pytest
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar.cli_repl import (
+from kiss.ui.cli.cli_repl import (
     SLASH_COMMANDS,
     CliCompleter,
 )
@@ -174,7 +174,7 @@ class _ScriptedUdsDaemon:
     """A minimal real UDS daemon speaking the sorcar newline-JSON protocol.
 
     The interactive CLI (``run_client`` in
-    :mod:`kiss.agents.sorcar.cli_client`) requires a connectable
+    :mod:`kiss.ui.cli.cli_client`) requires a connectable
     Unix-domain socket at ``$KISS_HOME/sorcar.sock``: it probes the
     socket (``_wait_for_socket``), connects, announces itself with
     ``setWorkDir`` then ``ready``, and on ``/exit`` sends ``closeTab``
@@ -344,7 +344,7 @@ def _read_line_over_pty(typed: str) -> tuple[str, str]:
     from kiss.tests.agents.sorcar._pty_helper import pty_spawn
 
     child_code = (
-        "from kiss.agents.sorcar.cli_repl import _PROMPT, _read_line\n"
+        "from kiss.ui.cli.cli_repl import _PROMPT, _read_line\n"
         "import sys\n"
         "line = _read_line(_PROMPT)\n"
         "sys.stdout.write(f'RESULT[{line}]\\n')\n"
@@ -386,7 +386,7 @@ def _gnu_readline_active() -> bool:
     GNU readline; the libedit/editline backend (stock macOS Python with
     no ``gnureadline`` wheel) cannot cycle, so the cycling tests skip.
     """
-    from kiss.agents.sorcar import cli_repl
+    from kiss.ui.cli import cli_repl
 
     rl = cli_repl.readline
     if rl is None:
@@ -427,7 +427,7 @@ def _complete_line_over_pty(
     child_code = (
         "import os, sys\n"
         "from pathlib import Path\n"
-        "from kiss.agents.sorcar.cli_repl import CliCompleter, _setup_readline\n"
+        "from kiss.ui.cli.cli_repl import CliCompleter, _setup_readline\n"
         f"c = CliCompleter({project!r})\n"
         "for i, m in enumerate(c._build_matches('@alpha')):\n"
         "    sys.stdout.write(f'CAND{i}[{m}]\\n')\n"

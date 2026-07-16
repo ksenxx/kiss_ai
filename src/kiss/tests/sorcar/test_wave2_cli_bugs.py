@@ -47,16 +47,16 @@ import weakref
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from kiss.agents.sorcar import cli_daemon_bridge
 from kiss.agents.sorcar import persistence as _persistence
 from kiss.agents.sorcar.cli_helpers import _build_arg_parser
-from kiss.agents.sorcar.cli_repl import (
+from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.ui.cli import cli_daemon_bridge
+from kiss.ui.cli.cli_repl import (
     _load_history_lines,
     _save_history_lines,
 )
-from kiss.agents.sorcar.cli_steering import SteeringSession, _InputBox
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.ui.cli.cli_steering import SteeringSession, _InputBox
 
 _REPO_SRC = str(Path(__file__).resolve().parents[3])
 
@@ -312,12 +312,12 @@ class TestF13HistoryFormats(unittest.TestCase):
         script = (
             "import sys\n"
             "from pathlib import Path\n"
-            "from kiss.agents.sorcar.cli_repl import (\n"
-            "    CliCompleter, _save_history, _setup_readline,\n"
-            ")\n"
             "# Use the SAME readline module cli_repl resolved (it\n"
             "# prefers the gnureadline wheel over the stdlib module).\n"
-            "from kiss.agents.sorcar import cli_repl\n"
+            "from kiss.ui.cli import cli_repl\n"
+            "from kiss.ui.cli.cli_repl import (\n"
+            "    CliCompleter, _save_history, _setup_readline,\n"
+            ")\n"
             "readline = cli_repl.readline\n"
             "if readline is None:\n"
             "    print('NO_READLINE'); raise SystemExit(0)\n"
@@ -372,8 +372,8 @@ class TestF19NoImportTimeGlobalMutation(unittest.TestCase):
     def test_import_leaves_ansi_sequences_intact(self) -> None:
         script = (
             "import json\n"
-            "import kiss.agents.sorcar.cli_prompt  # noqa: F401\n"
-            "import kiss.agents.sorcar.cli_client  # noqa: F401\n"
+            "import kiss.ui.cli.cli_client  # noqa: F401\n"
+            "import kiss.ui.cli.cli_prompt  # noqa: F401\n"
             "from prompt_toolkit.input.ansi_escape_sequences import (\n"
             "    ANSI_SEQUENCES,\n"
             ")\n"
@@ -399,8 +399,8 @@ class TestF19NoImportTimeGlobalMutation(unittest.TestCase):
         script = (
             "import sys, tempfile\n"
             "from pathlib import Path\n"
-            "from kiss.agents.sorcar.cli_repl import CliCompleter\n"
-            "from kiss.agents.sorcar.cli_prompt import PtkLineReader\n"
+            "from kiss.ui.cli.cli_prompt import PtkLineReader\n"
+            "from kiss.ui.cli.cli_repl import CliCompleter\n"
             "from prompt_toolkit.input.ansi_escape_sequences import (\n"
             "    ANSI_SEQUENCES,\n"
             ")\n"
@@ -479,7 +479,7 @@ class TestF21PrinterAtexitLeak(_PrinterTestBase):
     """F21: printers must be collectable; the exit safety net must stay."""
 
     def test_printer_is_garbage_collectable(self) -> None:
-        from kiss.agents.sorcar.cli_printer import RecordingConsolePrinter
+        from kiss.ui.cli.cli_printer import RecordingConsolePrinter
 
         printer = RecordingConsolePrinter()
         ref = weakref.ref(printer)
@@ -504,7 +504,7 @@ class TestF21PrinterAtexitLeak(_PrinterTestBase):
             "_p._KISS_DIR = kiss_dir\n"
             "_p._DB_PATH = kiss_dir / 'sorcar.db'\n"
             "_p._db_conn = None\n"
-            "from kiss.agents.sorcar.cli_printer import (\n"
+            "from kiss.ui.cli.cli_printer import (\n"
             "    RecordingConsolePrinter,\n"
             ")\n"
             "printer = RecordingConsolePrinter()\n"
@@ -535,7 +535,7 @@ class TestF22StartBeforeEvents(_PrinterTestBase):
     """F22: no task event may reach the daemon before its cliTaskStart."""
 
     def test_concurrent_first_broadcasts_ordered_after_start(self) -> None:
-        from kiss.agents.sorcar.cli_printer import RecordingConsolePrinter
+        from kiss.ui.cli.cli_printer import RecordingConsolePrinter
 
         printer = RecordingConsolePrinter()
         task_ids = [uuid.uuid4().hex for _ in range(15)]

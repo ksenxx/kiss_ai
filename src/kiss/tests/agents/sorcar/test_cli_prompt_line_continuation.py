@@ -5,7 +5,7 @@
 """End-to-end tests: backslash line-continuation in the initial task prompt.
 
 Drives a real :class:`prompt_toolkit.PromptSession` (through the
-:class:`~kiss.agents.sorcar.cli_prompt.PtkLineReader`) with a pipe
+:class:`~kiss.ui.cli.cli_prompt.PtkLineReader`) with a pipe
 input and asserts that ending a line with an unescaped ``\\`` before
 Enter inserts a newline into the buffer instead of submitting.  These
 tests exercise the same code path a user hits when typing their first
@@ -21,8 +21,8 @@ from prompt_toolkit.application import create_app_session
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 
-from kiss.agents.sorcar.cli_prompt import PtkLineReader
-from kiss.agents.sorcar.cli_repl import CliCompleter
+from kiss.ui.cli.cli_prompt import PtkLineReader
+from kiss.ui.cli.cli_repl import CliCompleter
 
 
 def _drive(

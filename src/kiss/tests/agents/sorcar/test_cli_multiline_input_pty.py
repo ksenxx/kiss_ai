@@ -54,8 +54,8 @@ _CHILD_SCRIPT = textwrap.dedent(
     import sys
     from pathlib import Path
 
-    from kiss.agents.sorcar.cli_prompt import PtkLineReader
-    from kiss.agents.sorcar.cli_repl import CliCompleter
+    from kiss.ui.cli.cli_prompt import PtkLineReader
+    from kiss.ui.cli.cli_repl import CliCompleter
 
     out_path = Path(os.environ["KISS_TEST_OUT"])
     hist_path = Path(os.environ["KISS_TEST_HIST"])

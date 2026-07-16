@@ -61,7 +61,7 @@ def test_cli_printer_forwards_only_listed_global_types(
     daemon UDS; only the explicit ``new_tab`` / ``tasks_updated``
     global system events should be forwarded.
     """
-    from kiss.agents.sorcar import cli_daemon_bridge, cli_printer
+    from kiss.ui.cli import cli_daemon_bridge, cli_printer
 
     captured: list[dict[str, object]] = []
     monkeypatch.setattr(

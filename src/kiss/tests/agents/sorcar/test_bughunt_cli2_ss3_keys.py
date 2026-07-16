@@ -4,7 +4,7 @@
 # add your name here
 """Bug-hunt test: SS3 key sequences must not type into the steering box.
 
-:meth:`kiss.agents.sorcar.cli_steering._InputBox.feed` swallows CSI
+:meth:`kiss.ui.cli.cli_steering._InputBox.feed` swallows CSI
 escape sequences (``ESC [ ...``) so arrow keys do not corrupt the edit
 buffer.  Terminals in application cursor mode (DECCKM — enabled by many
 full-screen programs and left on by some terminals) send arrows as SS3
@@ -24,7 +24,7 @@ import threading
 
 import pytest
 
-from kiss.agents.sorcar.cli_steering import _InputBox
+from kiss.ui.cli.cli_steering import _InputBox
 
 
 def _box() -> _InputBox:

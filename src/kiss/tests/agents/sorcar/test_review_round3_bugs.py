@@ -278,8 +278,8 @@ def test_migration_drop_table_inside_transaction() -> None:
 def test_cli_printer_lowercases_event_taskid_before_super(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from kiss.agents.sorcar import cli_daemon_bridge, cli_printer
     from kiss.server.json_printer import JsonPrinter
+    from kiss.ui.cli import cli_daemon_bridge, cli_printer
 
     monkeypatch.setattr(
         cli_daemon_bridge, "send_event", lambda ev: None,
@@ -316,7 +316,7 @@ def test_cli_printer_lowercases_event_taskid_before_super(
 def test_cli_printer_releases_lock_before_daemon_send(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from kiss.agents.sorcar import cli_daemon_bridge, cli_printer
+    from kiss.ui.cli import cli_daemon_bridge, cli_printer
 
     printer = cli_printer.RecordingConsolePrinter()
 

@@ -6,10 +6,10 @@
 
 The canonical modifier+Enter sequence tables (xterm modifyOtherKeys and
 kitty/CSI-u forms) and the extended-keyboard-protocol enable/disable
-pairs live in :mod:`kiss.agents.sorcar.cli_panel` and are consumed by
+pairs live in :mod:`kiss.ui.cli.cli_panel` and are consumed by
 both terminal input paths — the idle prompt's key bindings
-(:mod:`kiss.agents.sorcar.cli_prompt`) and the mid-task steering box
-(:mod:`kiss.agents.sorcar.cli_steering`).  These tests pin the exact
+(:mod:`kiss.ui.cli.cli_prompt`) and the mid-task steering box
+(:mod:`kiss.ui.cli.cli_steering`).  These tests pin the exact
 byte values and assert that every consumer sees the identical tables,
 so the two input paths can never drift apart.
 """
@@ -18,8 +18,8 @@ from __future__ import annotations
 
 import random
 
-from kiss.agents.sorcar import cli_panel, cli_prompt, cli_steering
-from kiss.agents.sorcar.cli_panel import (
+from kiss.ui.cli import cli_panel, cli_prompt, cli_steering
+from kiss.ui.cli.cli_panel import (
     CSI_U_ENTER,
     KEYBOARD_PROTO_DISABLE,
     KEYBOARD_PROTO_ENABLE,

@@ -4,12 +4,12 @@
 # add your name here
 """Bug-hunt pass #8: panel border lines must occupy exactly *cols* columns.
 
-:func:`kiss.agents.sorcar.cli_panel.panel_top` and
-:func:`~kiss.agents.sorcar.cli_panel.panel_bottom` document that the
+:func:`kiss.ui.cli.cli_panel.panel_top` and
+:func:`~kiss.ui.cli.cli_panel.panel_bottom` document that the
 returned border line is "clipped to *cols*" — i.e. the line occupies
 exactly ``cols`` terminal columns, matching the width-aware body rows
-built by :func:`~kiss.agents.sorcar.cli_panel._clip_pad` /
-:func:`~kiss.agents.sorcar.cli_panel.panel_body`.  The pre-fix code
+built by :func:`~kiss.ui.cli.cli_panel._clip_pad` /
+:func:`~kiss.ui.cli.cli_panel.panel_body`.  The pre-fix code
 measured the embedded title / status with ``len()`` (codepoints) and
 clipped with a codepoint slice, so a title or status containing
 East-Asian wide characters (CJK, emoji) produced a border line wider
@@ -19,7 +19,7 @@ steering box every redraw.
 
 from __future__ import annotations
 
-from kiss.agents.sorcar.cli_panel import (
+from kiss.ui.cli.cli_panel import (
     display_width,
     panel_bottom,
     panel_top,

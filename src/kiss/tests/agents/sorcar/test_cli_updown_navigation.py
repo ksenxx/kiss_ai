@@ -7,7 +7,7 @@
 Reproduces the user-reported gap where the Up and Down arrow keys did
 not move the cursor between lines of a multi-line buffer in the sorcar
 CLI REPL input box (the anchored
-:class:`~kiss.agents.sorcar.cli_steering._InputBox` used for both the
+:class:`~kiss.ui.cli.cli_steering._InputBox` used for both the
 idle prompt and mid-task steering).  The required behaviour matches the
 chat webview's input textbox (``media/main.js``):
 
@@ -30,7 +30,7 @@ import threading
 
 import pytest
 
-from kiss.agents.sorcar.cli_steering import _InputBox
+from kiss.ui.cli.cli_steering import _InputBox
 
 UP = b"\x1b[A"
 DOWN = b"\x1b[B"
