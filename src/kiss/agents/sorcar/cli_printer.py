@@ -140,7 +140,18 @@ class RecordingConsolePrinter(JsonPrinter):
                 and is_task_history_id(normed_event_tid)
             ):
                 event = {**event, "taskId": normed_event_tid}
+        # ``recordOnly`` (a durable copy of a prompt echo that was
+        # already rendered live at queueing time — see
+        # ``SorcarAgent._drain_pending_user_messages``): the base
+        # class strips the marker and records + persists, which is
+        # the marker's full contract.  Capture it BEFORE
+        # ``super().broadcast`` pops it so the daemon forward below
+        # is skipped — forwarding would render a duplicate prompt
+        # panel on every subscribed webview.
+        record_only = bool(event.get("recordOnly"))
         super().broadcast(event)
+        if record_only:
+            return
         # Mirror webview-style notification toasts on the terminal so
         # the in-process CLI (cli_repl) sees the same auto-commit
         # life-cycle / server-reset notifications a chat webview sees.

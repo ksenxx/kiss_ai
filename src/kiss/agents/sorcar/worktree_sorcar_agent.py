@@ -11,6 +11,7 @@ is never modified.  After the task the user chooses **merge** or
 
 from __future__ import annotations
 
+import enum
 import functools
 import logging
 import sys
@@ -48,6 +49,15 @@ from kiss.agents.sorcar.sorcar_agent import (
 from kiss.core.kiss_error import KISSError
 
 logger = logging.getLogger(__name__)
+
+
+class _WorktreeCleanupOutcome(enum.Enum):
+    """Outcome of :meth:`WorktreeSorcarAgent._commit_and_clean_worktree`."""
+
+    COMMITTED_AND_REMOVED = "committed_and_removed"
+    PRESERVED_NO_AUTOCOMMIT = "preserved_no_autocommit"
+    PRESERVED_COMMIT_FAILED = "preserved_commit_failed"
+
 
 # Result-specific middle lines for the manual-resolution command block
 # (see :func:`_merge_fix_steps`).
@@ -324,6 +334,66 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             logger.debug("autocommit notification broadcast failed", exc_info=True)
 
 
+    def _commit_and_clean_worktree(
+        self, wt: GitWorktree
+    ) -> tuple[_WorktreeCleanupOutcome, str]:
+        """Auto-commit *wt*'s changes, then remove the worktree and prune.
+
+        Shared engine of :meth:`_finalize_worktree` and
+        :meth:`_preserve_pending_worktree_for_review` — the exact
+        auto-commit → late-arriver-retry → preserve-or-remove sequence
+        previously duplicated in both.
+
+        After the LLM-driven auto-commit, a single-shot retry runs
+        :meth:`GitWorktreeOps.commit_all` with a generic message to
+        catch the very narrow remaining race where a file appears
+        between :func:`~kiss.agents.sorcar.sorcar_agent.auto_commit_changes`'s
+        second ``stage_all`` and its ``commit_staged`` call (e.g.
+        ``PROGRESS.md`` being rewritten, ``.DS_Store`` materializing
+        after an ``open`` of the report, an editor swap file
+        appearing).  ``commit_all`` is a no-op when nothing is
+        uncommitted, but skipping the call keeps the happy-path log
+        quiet.  Under ``auto_commit_enabled=False`` the retry never
+        force-commits: the worktree is preserved for manual review.
+
+        Args:
+            wt: The worktree to commit and clean up.
+
+        Returns:
+            A ``(outcome, leftover)`` pair.  ``leftover`` is the raw
+            ``git status --porcelain`` output when the outcome is
+            :attr:`_WorktreeCleanupOutcome.PRESERVED_COMMIT_FAILED`
+            (both auto-commit and the retry left uncommitted state —
+            e.g. a pre-commit hook rejection), otherwise ``""``.  The
+            worktree directory is removed and pruned only on
+            :attr:`_WorktreeCleanupOutcome.COMMITTED_AND_REMOVED`; the
+            preserved outcomes leave it in place so no work is lost.
+        """
+        if wt.wt_dir.exists():
+            self._auto_commit_worktree()
+            if GitWorktreeOps.has_uncommitted_changes(wt.wt_dir):
+                # ``auto_commit_enabled=False`` contract (see the
+                # attribute docstring in ``__init__``): never
+                # force-commit the user's reviewable changes under
+                # ``--no-auto-commit`` (``_auto_commit_worktree``
+                # no-ops when the flag is off, so EVERYTHING is still
+                # uncommitted here).
+                if not self.auto_commit_enabled:
+                    return _WorktreeCleanupOutcome.PRESERVED_NO_AUTOCOMMIT, ""
+                # Single-shot retry: closes the residual race window
+                # between ``auto_commit_changes``'s second
+                # ``stage_all`` and its ``commit_staged`` call.
+                GitWorktreeOps.commit_all(
+                    wt.wt_dir,
+                    "kiss: auto-commit late-arriving changes",
+                )
+            if GitWorktreeOps.has_uncommitted_changes(wt.wt_dir):
+                leftover = GitWorktreeOps.status_porcelain(wt.wt_dir)
+                return _WorktreeCleanupOutcome.PRESERVED_COMMIT_FAILED, leftover
+            GitWorktreeOps.remove(wt.repo_root, wt.wt_dir)
+        GitWorktreeOps.prune(wt.repo_root)
+        return _WorktreeCleanupOutcome.COMMITTED_AND_REMOVED, ""
+
     def _finalize_worktree(self) -> bool:
         """Auto-commit, remove worktree, prune.
 
@@ -351,48 +421,21 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         """
         assert self._wt is not None
         wt = self._wt
-        if wt.wt_dir.exists():
-            self._auto_commit_worktree()
-            if GitWorktreeOps.has_uncommitted_changes(wt.wt_dir):
-                # ``auto_commit_enabled=False`` contract (see the
-                # attribute docstring in ``__init__``): the worktree's
-                # uncommitted changes are preserved for manual review
-                # and this method returns False, keeping the worktree
-                # directory in place.  Without this gate the
-                # late-arriver retry below would commit the changes
-                # anyway (``_auto_commit_worktree`` no-ops when the
-                # flag is off, so EVERYTHING is still uncommitted
-                # here) and the worktree would be removed — exactly
-                # the behavior ``--no-auto-commit`` exists to prevent.
-                if not self.auto_commit_enabled:
-                    return False
-                # Single-shot retry: closes the residual race window
-                # between ``auto_commit_changes``'s second ``stage_all``
-                # and its ``commit_staged`` call.  ``commit_all`` is a
-                # no-op when nothing is uncommitted (its inner
-                # ``commit_staged`` short-circuits on an empty
-                # ``git diff --cached``), so it is safe to always invoke
-                # here — but skipping the call keeps the happy-path log
-                # quiet.
-                GitWorktreeOps.commit_all(
-                    wt.wt_dir,
-                    "kiss: auto-commit late-arriving changes",
-                )
-            if GitWorktreeOps.has_uncommitted_changes(wt.wt_dir):
-                leftover = GitWorktreeOps.status_porcelain(wt.wt_dir)
-                logger.warning(
-                    "Worktree has uncommitted changes after auto-commit "
-                    "and late-arriver retry (possible causes: a "
-                    "pre-commit hook rejected the commit, a real "
-                    "commit failure, or a concurrent write that "
-                    "outraced both staging passes); preserving %s\n"
-                    "git status --porcelain:\n%s",
-                    wt.wt_dir,
-                    leftover,
-                )
-                return False
-            GitWorktreeOps.remove(wt.repo_root, wt.wt_dir)
-        GitWorktreeOps.prune(wt.repo_root)
+        outcome, leftover = self._commit_and_clean_worktree(wt)
+        if outcome is _WorktreeCleanupOutcome.PRESERVED_NO_AUTOCOMMIT:
+            return False
+        if outcome is _WorktreeCleanupOutcome.PRESERVED_COMMIT_FAILED:
+            logger.warning(
+                "Worktree has uncommitted changes after auto-commit "
+                "and late-arriver retry (possible causes: a "
+                "pre-commit hook rejected the commit, a real "
+                "commit failure, or a concurrent write that "
+                "outraced both staging passes); preserving %s\n"
+                "git status --porcelain:\n%s",
+                wt.wt_dir,
+                leftover,
+            )
+            return False
         return True
 
     def _do_merge(
@@ -683,51 +726,34 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         if self._wt is None:
             return False
         wt = self._wt
-        if wt.wt_dir.exists():
-            # Capture any uncommitted partial work as a real commit
-            # so it survives the worktree directory removal.  Same
-            # late-arriver retry that ``_finalize_worktree`` uses,
-            # for the same reason (PROGRESS.md being rewritten, etc.).
-            self._auto_commit_worktree()
-            if GitWorktreeOps.has_uncommitted_changes(wt.wt_dir):
-                # ``auto_commit_enabled=False`` contract (same gate as
-                # ``_finalize_worktree``): never force-commit the
-                # user's reviewable changes under ``--no-auto-commit``.
-                # Preserve the worktree directory intact — the user
-                # can review/commit manually in ``wt_dir``.
-                if not self.auto_commit_enabled:
-                    logger.warning(
-                        "Auto-commit disabled (--no-auto-commit); "
-                        "preserving worktree '%s' with uncommitted "
-                        "changes for manual review at %s",
-                        wt.branch, wt.wt_dir,
-                    )
-                    self._wt = None
-                    self._pending_review = False
-                    return True
-                GitWorktreeOps.commit_all(
-                    wt.wt_dir,
-                    "kiss: auto-commit late-arriving changes",
-                )
-            if GitWorktreeOps.has_uncommitted_changes(wt.wt_dir):
-                # Same fallback as ``_finalize_worktree``: a
-                # pre-commit hook rejected the commit, or a real
-                # commit failure.  Preserve the worktree dir so no
-                # work is lost; the user can finish the commit
-                # manually with ``cd <wt_dir> && git commit``.
-                leftover = GitWorktreeOps.status_porcelain(wt.wt_dir)
-                logger.warning(
-                    "Worktree '%s' has uncommitted changes after "
-                    "preserve-for-review (likely a pre-commit hook "
-                    "rejection); preserving worktree directory %s\n"
-                    "git status --porcelain:\n%s",
-                    wt.branch, wt.wt_dir, leftover,
-                )
-                self._wt = None
-                self._pending_review = False
-                return True
-            GitWorktreeOps.remove(wt.repo_root, wt.wt_dir)
-        GitWorktreeOps.prune(wt.repo_root)
+        # Capture any uncommitted partial work as a real commit so it
+        # survives the worktree directory removal — the same
+        # auto-commit → late-arriver-retry → preserve-or-remove engine
+        # ``_finalize_worktree`` uses, for the same reasons
+        # (PROGRESS.md being rewritten, pre-commit hook rejections,
+        # the ``--no-auto-commit`` contract, etc.).
+        outcome, leftover = self._commit_and_clean_worktree(wt)
+        if outcome is _WorktreeCleanupOutcome.PRESERVED_NO_AUTOCOMMIT:
+            # Preserve the worktree directory intact — the user can
+            # review/commit manually in ``wt_dir``.
+            logger.warning(
+                "Auto-commit disabled (--no-auto-commit); "
+                "preserving worktree '%s' with uncommitted "
+                "changes for manual review at %s",
+                wt.branch, wt.wt_dir,
+            )
+        elif outcome is _WorktreeCleanupOutcome.PRESERVED_COMMIT_FAILED:
+            # A pre-commit hook rejected the commit, or a real commit
+            # failure.  The worktree dir is preserved so no work is
+            # lost; the user can finish the commit manually with
+            # ``cd <wt_dir> && git commit``.
+            logger.warning(
+                "Worktree '%s' has uncommitted changes after "
+                "preserve-for-review (likely a pre-commit hook "
+                "rejection); preserving worktree directory %s\n"
+                "git status --porcelain:\n%s",
+                wt.branch, wt.wt_dir, leftover,
+            )
         # Drop the in-memory worktree reference (the branch lives on
         # in git and is recoverable manually) and clear the
         # pending-review flag — future operations on this agent

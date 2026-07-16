@@ -174,7 +174,7 @@ function eventsFor(label) {
  * when the replay ends.
  */
 function startDemoFlow(win) {
-  dispatch(win, {type: 'updateSetting', key: 'demo_mode', value: true});
+  dispatch(win, {type: 'configData', config: {demo_mode: true}, apiKeys: {}});
   dispatch(win, {
     type: 'history',
     offset: 0,

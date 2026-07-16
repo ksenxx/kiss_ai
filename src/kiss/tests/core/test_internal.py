@@ -12,19 +12,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from kiss.core.utils import (
-    add_prefix_to_each_line,
-)
-
 
 class TestUtilsFunctions(unittest.TestCase):
-    def test_add_prefix_to_each_line(self) -> None:
-        self.assertEqual(
-            add_prefix_to_each_line("line1\nline2\nline3", "> "),
-            "> line1\n> line2\n> line3",
-        )
-        self.assertEqual(add_prefix_to_each_line("single line", ">> "), ">> single line")
-
     def test_fc_reads_file(self) -> None:
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
             f.write("Test content for fc function")

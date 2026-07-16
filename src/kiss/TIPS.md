@@ -6,7 +6,7 @@
 - Add the following text to your prompt:
 
 ```
-Use claude-fable-5 model for all tasks, including software development. Use gpt-5.6-sol (not codex) for a thorough review and debugging of the other model's work. Thoroughly check whether the other model has missed any code or wiring or introduced any bugs. No need to check if the models exist.
+Use 'claude-fable-5 model' for all tasks, including software development. Use 'gpt-5.6-sol' (not codex) for a thorough read-only review and debugging of the other model's work. Thoroughly check whether the other model has missed any code or wiring or introduced any bugs.  Use at most 20% of task budget in gpt-5.6-sol for reviewing and debugging. Use the model names literally without hallucinating new model names.
 ```
 
 # Tip
@@ -34,7 +34,8 @@ Please look at the commit messages at [https://github.com/ksenxx/kiss_ai/commits
 **Add the following text to your prompt:**
 
 ```
-Use the best model from ~/.kiss/MODEL_INFO.json for various subtasks. Search the internet extensively to figure out which model is best yet cheap for each sub-task. Here are some hints, but the internet has better knowledge: claude-fable-5 — best for SWE work, gpt-5.6-sol — best for reviewing, and openrouter/z-ai/glm-5.2 — for SWE tasks when budget is low, and gpt-5.5 for review when budget is low.  After the task completes, based on your experience and internet research, add a model routing strategy (as text) to ./ROUTING.md that reduces token cost while not degrading the quality of the work. 
+If ./ROUTING.md exists, use the instructions in the file for model routing.  Otherwise,
+Use the best model from ~/.kiss/MODEL_INFO.json for various subtasks. Search the internet extensively to figure out which model is best yet cheap for each sub-task. Here are some hints, but the internet has better knowledge: claude-fable-5 — best for SWE work, gpt-5.6-sol — best for reviewing, and openrouter/z-ai/glm-5.2 — for SWE tasks when budget is low, and gpt-5.5 for review when budget is low.  Irrespective of whether ./ROUTING.md exists or not, after the task completes, based on your experience in completing the task, create or update the model routing strategy (as text) in ./ROUTING.md that reduces token cost while not degrading the quality of the work.
 ```
 
 # Tip

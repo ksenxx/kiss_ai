@@ -73,12 +73,13 @@ What these tests assert
 =======================
 Each test below is an independent end-to-end behavioural check — no
 mocks, no patches.  Tests 3-5 spawn a real bash harness containing the
-verbatim re-exec block extracted from ``install.sh`` (between the
-``# BEGIN: kiss-new-session-reexec`` / ``# END:`` markers) followed by
-a long-running ``sleep`` and a post-sleep marker file; they then send
-SIGINT / SIGHUP / SIGTERM repeatedly to the harness's process group
-and verify the marker is still written.  Without the re-exec the
-unwrapped sleep dies on the first signal.
+verbatim re-exec block extracted from ``install.sh`` (the top-level
+``if [ -z "${_KISS_NEW_SESSION:-}" ] …`` guard up to, but excluding,
+``set -eo pipefail``) followed by a long-running ``sleep`` and a
+post-sleep marker file; they then send SIGINT / SIGHUP / SIGTERM
+repeatedly to the harness's process group and verify the marker is
+still written.  Without the re-exec the unwrapped sleep dies on the
+first signal.
 """
 
 from __future__ import annotations
@@ -95,8 +96,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[5]
 INSTALL_SCRIPT = REPO / "install.sh"
 
-_BEGIN_MARKER = "# BEGIN: kiss-new-session-reexec"
-_END_MARKER = "# END: kiss-new-session-reexec"
+_GUARD_PREFIX = 'if [ -z "${_KISS_NEW_SESSION:-}" ]'
+_SET_E_LINE = "set -eo pipefail"
 
 
 def _read_install_sh() -> str:
@@ -106,40 +107,18 @@ def _read_install_sh() -> str:
 
 
 def _extract_reexec_block() -> str:
-    """Return the verbatim re-exec block bracketed by the BEGIN/END markers.
+    """Return the verbatim re-exec block from the top of ``install.sh``.
 
-    The block is everything between the line containing ``BEGIN:
-    kiss-new-session-reexec`` and the line containing ``END:
-    kiss-new-session-reexec`` (exclusive of both marker lines).  Tests
-    paste this into a tmp ``harness.sh`` so they can exercise the
-    detachment behaviour without running the full installer.
+    The block starts at the top-level ``if [ -z "${_KISS_NEW_SESSION:-}"
+    ] …`` guard line and ends just before the ``set -eo pipefail`` line
+    (the first non-comment statement of the install body).  Tests paste
+    this into a tmp ``harness.sh`` so they can exercise the detachment
+    behaviour without running the full installer.
     """
     src = _read_install_sh()
-    begin_idx = src.index(_BEGIN_MARKER)
-    end_idx = src.index(_END_MARKER, begin_idx)
-    # Skip past the BEGIN marker line.
-    begin_eol = src.index("\n", begin_idx) + 1
-    return src[begin_eol:end_idx]
-
-
-def _comment_block_above_reexec() -> str:
-    """Return the narrative comment block immediately above the re-exec.
-
-    The comment block is the contiguous run of ``#``-prefixed lines that
-    ends at the BEGIN marker line.  It contains the rationale for
-    setsid / session / perl / Node.js and is what test 7 inspects.
-    """
-    src = _read_install_sh()
-    begin_idx = src.index(_BEGIN_MARKER)
-    # Walk backwards line-by-line collecting comment lines.
-    lines = src[:begin_idx].splitlines()
-    comment_lines: list[str] = []
-    for line in reversed(lines):
-        if line.lstrip().startswith("#") or line.strip() == "":
-            comment_lines.append(line)
-        else:
-            break
-    return "\n".join(reversed(comment_lines))
+    begin_idx = src.index(_GUARD_PREFIX)
+    end_idx = src.index(_SET_E_LINE, begin_idx)
+    return src[begin_idx:end_idx]
 
 
 def _spawn_harness(
@@ -256,20 +235,15 @@ def test_install_sh_reexecs_in_new_session_via_perl() -> None:
     """
     src = _read_install_sh()
 
-    # The two markers must both exist and appear before ``set -eo pipefail``.
-    assert _BEGIN_MARKER in src, (
-        f"install.sh missing the '{_BEGIN_MARKER}' marker; the new-session "
-        "re-exec block must be present at the top of the script so tests "
-        "can extract it verbatim into a harness."
+    # The guard must exist and appear before ``set -eo pipefail``.
+    assert _GUARD_PREFIX in src, (
+        f"install.sh missing the {_GUARD_PREFIX!r} guard; the new-session "
+        "re-exec block must be present at the top of the script so a "
+        "re-execd child does not fork again."
     )
-    assert _END_MARKER in src, (
-        f"install.sh missing the '{_END_MARKER}' marker; the re-exec block "
-        "must be bracketed by BEGIN/END comments for verbatim extraction."
-    )
-    begin_idx = src.index(_BEGIN_MARKER)
-    end_idx = src.index(_END_MARKER)
-    set_e_idx = src.index("set -eo pipefail")
-    assert begin_idx < end_idx < set_e_idx, (
+    begin_idx = src.index(_GUARD_PREFIX)
+    set_e_idx = src.index(_SET_E_LINE)
+    assert begin_idx < set_e_idx, (
         "the new-session re-exec block must precede `set -eo pipefail`; "
         "otherwise a signal arriving between `set -e` and the fork could "
         "still abort the install."
@@ -561,30 +535,34 @@ def test_install_sh_perl_fallback_when_unavailable(tmp_path: Path) -> None:
 
 
 def test_install_sh_explanatory_comment_present() -> None:
-    """The narrative comment above the re-exec must explain the fix.
+    """The re-exec block's comments must explain the fix.
 
     A future maintainer must not "simplify" install.sh by removing the
-    re-exec block.  The comment is the canonical rationale and must
-    mention every load-bearing concept: ``setsid``, ``session``,
-    ``perl``, and ``Node.js``.
+    re-exec block.  The comments embedded in the block are the
+    canonical rationale and must mention every load-bearing concept:
+    ``setsid``, ``session``, the controlling ``terminal``, and the
+    terminal-driven ``signal`` delivery it defeats.
     """
-    comment = _comment_block_above_reexec()
+    block = _extract_reexec_block()
+    comment = "\n".join(
+        line for line in block.splitlines() if line.lstrip().startswith("#")
+    )
     lowered = comment.lower()
     assert "setsid" in lowered, (
-        "the explanatory comment must mention `setsid` — the system "
+        "the re-exec block's comments must mention `setsid` — the system "
         "call that creates the new session without a controlling TTY."
     )
     assert "session" in lowered, (
-        "the explanatory comment must mention `session` — the POSIX "
+        "the re-exec block's comments must mention `session` — the POSIX "
         "abstraction that scopes terminal-driven signal delivery."
     )
-    assert "perl" in lowered, (
-        "the explanatory comment must mention `perl` — the helper used "
-        "to fork+setsid because direct `exec setsid` from bash would "
-        "EPERM (bash is the process-group leader)."
+    assert "terminal" in lowered, (
+        "the re-exec block's comments must mention the controlling "
+        "`terminal` — the reason the detached session cannot receive "
+        "SIGINT/SIGHUP from the VS Code PTY."
     )
-    assert "node.js" in lowered, (
-        "the explanatory comment must mention `Node.js` — the reason "
-        "the existing trap+SIG_IGN defences were insufficient (tsc runs "
-        "on Node, which does not always honour inherited SIG_IGN)."
+    assert "signal" in lowered, (
+        "the re-exec block's comments must mention `signal` — the "
+        "terminal-driven delivery (SIGINT/SIGHUP/SIGTERM) the new "
+        "session defeats."
     )

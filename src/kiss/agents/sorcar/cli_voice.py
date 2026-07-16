@@ -87,6 +87,45 @@ def listener_command() -> list[str]:
     return [sys.executable, "-m", "kiss.agents.vscode.voice_wake"]
 
 
+# How long a dead-listener final flush waits for the daemon reader
+# thread to queue the child's last SPEECH line before giving up.  One
+# shared constant for every flush site (the pump thread and the plain
+# capture loop) so the two paths handle the same race identically.
+_FINAL_FLUSH_TIMEOUT = 0.2
+
+# User-visible message printed when the wake-word listener child dies
+# unexpectedly — shared by the modal capture loop and the anchored
+# pump's ``on_dead`` so the two voice modes can never diverge.
+_LISTENER_DIED_MSG = (
+    "✗ voice: the wake-word listener exited "
+    "unexpectedly — leaving voice mode."
+)
+
+
+def _spawn_listener() -> VoiceListener | None:
+    """Spawn the wake-word listener child, printing an error on failure.
+
+    Shared by :func:`start_voice` (modal) and
+    :func:`start_voice_anchored` (background) so both entry points
+    handle a missing/broken listener command identically: the error is
+    printed and ``None`` is returned so the REPL stays usable.
+
+    Returns:
+        The started :class:`VoiceListener`, or ``None`` when the
+        listener process could not be spawned.
+    """
+    try:
+        listener = VoiceListener()
+        listener.start()
+    except (OSError, ValueError) as exc:
+        print(
+            f"{YELLOW}✗ voice: could not start the wake-word listener: "
+            f"{exc}{RESET}"
+        )
+        return None
+    return listener
+
+
 class VoiceListener:
     """Child wake-word listener process with a non-blocking line queue.
 
@@ -155,6 +194,24 @@ class VoiceListener:
             return self._lines.get_nowait()
         except queue.Empty:
             return None
+
+    def final_flush(self, timeout: float = _FINAL_FLUSH_TIMEOUT) -> str | None:
+        """Return the dead child's last buffered line, if any.
+
+        The child can exit a few milliseconds before the daemon reader
+        thread queues its final ``SPEECH`` line; this gives the reader
+        one short chance to flush before the caller declares failure.
+
+        Args:
+            timeout: Maximum seconds to wait for the reader thread.
+
+        Returns:
+            The next buffered protocol line, or ``None`` when none
+            arrives within *timeout*.
+        """
+        if self._thread is not None:
+            self._thread.join(timeout=timeout)
+        return self.poll_line()
 
     def alive(self) -> bool:
         """Return ``True`` while the listener child is still running."""
@@ -256,7 +313,9 @@ class VoicePump(threading.Thread):
 
     def run(self) -> None:
         """Pump protocol lines until stopped or the listener dies."""
-        show = self._show
+        show_listening, show_wake, show_transcribing = _show_callbacks(
+            self._show,
+        )
         self._show(LISTENING_TEXT, False)
         while not self._stop_evt.is_set():
             line = self._listener.poll_line()
@@ -264,21 +323,13 @@ class VoicePump(threading.Thread):
                 if self._listener.alive():
                     self._stop_evt.wait(0.05)
                     continue
-                # The child can exit a few milliseconds before the
-                # daemon reader thread queues its final SPEECH line;
-                # give the reader one short chance to flush.
-                if self._listener._thread is not None:
-                    self._listener._thread.join(timeout=0.2)
-                line = self._listener.poll_line()
+                line = self._listener.final_flush()
                 if line is None:
                     if not self._stop_evt.is_set():
                         self._on_dead()
                     return
             result = _handle_protocol_line(
-                line,
-                lambda: show(LISTENING_TEXT, False),
-                lambda: show(LISTENING_TEXT, True),
-                lambda: show(TRANSCRIBING_TEXT, True),
+                line, show_listening, show_wake, show_transcribing,
             )
             if result is not _NO_LINE_RESULT:
                 self._on_speech(str(result))
@@ -370,14 +421,8 @@ def start_voice(
         process could not be spawned (an error is printed and the
         REPL stays usable).
     """
-    try:
-        listener = VoiceListener()
-        listener.start()
-    except (OSError, ValueError) as exc:
-        print(
-            f"{YELLOW}✗ voice: could not start the wake-word listener: "
-            f"{exc}{RESET}"
-        )
+    listener = _spawn_listener()
+    if listener is None:
         return None
     print(
         f"{YELLOW}🎤 Voice mode: say the wake word, then speak your task "
@@ -450,6 +495,32 @@ def _handle_protocol_line(
     return _NO_LINE_RESULT
 
 
+def _show_callbacks(
+    show: Callable[[str, bool], None],
+) -> tuple[Callable[[], None], Callable[[], None], Callable[[], None]]:
+    """Build the indicator callbacks :func:`_handle_protocol_line` takes.
+
+    Args:
+        show: Renderer taking ``(text, blink)`` — the indicator text
+            and whether it should blink.
+
+    Returns:
+        The ``(show_listening, show_wake, show_transcribing)`` triple:
+        steady ``Listening ...``, blinking ``Listening ...`` (wake word
+        detected) and blinking ``Transcribing ...``.
+    """
+    def show_listening() -> None:
+        show(LISTENING_TEXT, False)
+
+    def show_wake() -> None:
+        show(LISTENING_TEXT, True)
+
+    def show_transcribing() -> None:
+        show(TRANSCRIBING_TEXT, True)
+
+    return show_listening, show_wake, show_transcribing
+
+
 def _capture_utterance(
     listener: VoiceListener,
     show_listening: Callable[[], None],
@@ -495,12 +566,7 @@ def _capture_utterance(
             if result is not _NO_LINE_RESULT:
                 return str(result)
         if not listener.alive():
-            # The process can exit a few milliseconds before the daemon
-            # reader thread has queued its final SPEECH line.  Give the
-            # pump one short chance to flush before declaring failure.
-            if listener._thread is not None:
-                listener._thread.join(timeout=0.05)
-            line = listener.poll_line()
+            line = listener.final_flush()
             if line is not None:
                 result = _handle_protocol_line(
                     line, show_listening, show_wake, show_transcribing,
@@ -508,10 +574,7 @@ def _capture_utterance(
                 if result is not _NO_LINE_RESULT:
                     return str(result)
                 continue
-            print(
-                f"{YELLOW}✗ voice: the wake-word listener exited "
-                f"unexpectedly — leaving voice mode.{RESET}"
-            )
+            print(f"{YELLOW}{_LISTENER_DIED_MSG}{RESET}")
             return None
         if fd is None:
             time.sleep(0.05)
@@ -568,14 +631,8 @@ def start_voice_anchored(box: _InputBox) -> VoiceSession | None:
         listener process could not be spawned (an error is printed and
         the REPL stays usable).
     """
-    try:
-        listener = VoiceListener()
-        listener.start()
-    except (OSError, ValueError) as exc:
-        print(
-            f"{YELLOW}✗ voice: could not start the wake-word listener: "
-            f"{exc}{RESET}"
-        )
+    listener = _spawn_listener()
+    if listener is None:
         return None
 
     def show(text: str, blink: bool) -> None:
@@ -587,10 +644,7 @@ def start_voice_anchored(box: _InputBox) -> VoiceSession | None:
     session = VoiceSession(listener)
 
     def on_dead() -> None:
-        print(
-            f"{YELLOW}✗ voice: the wake-word listener exited "
-            f"unexpectedly — leaving voice mode.{RESET}"
-        )
+        print(f"{YELLOW}{_LISTENER_DIED_MSG}{RESET}")
         show("", False)
         session.active = False
 
@@ -631,12 +685,7 @@ def read_voice_line_plain(listener: VoiceListener) -> str | None:
         style = (BLINK + RED) if blink else RED
         print(f"{style}{text}{RESET}", flush=True)
 
-    text = _capture_utterance(
-        listener,
-        lambda: show(LISTENING_TEXT, False),
-        lambda: show(LISTENING_TEXT, True),
-        lambda: show(TRANSCRIBING_TEXT, True),
-    )
+    text = _capture_utterance(listener, *_show_callbacks(show))
     if text is not None:
         print(f"{CYAN}🎤 {text}{RESET}")
     return text

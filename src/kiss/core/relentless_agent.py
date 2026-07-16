@@ -14,14 +14,14 @@ from typing import Any
 
 import yaml
 
-from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.core import config as config_module
 from kiss.core.base import Base
 from kiss.core.kiss_agent import KISSAgent
-from kiss.core.kiss_error import KISSError
+from kiss.core.kiss_error import BudgetExceededError, KISSError
 from kiss.core.models.model import Attachment
 from kiss.core.printer import Printer
-from kiss.core.utils import substitute_prompt_args
+from kiss.core.utils import _coerce_bool as _str_to_bool
+from kiss.core.utils import finish, substitute_prompt_args
 
 logger = logging.getLogger(__name__)
 
@@ -67,61 +67,8 @@ Read relevant portions of the file using your tools:
 - Analyze the trajectory file.
 - Return a precise chronologically-ordered list of things the agent did
   with the reason for doing that along with relevant code snippets.
-- Call finish(success=True, summary="detailed summary of work done so far").
+- Call finish(result="detailed summary of work done so far").
 """
-
-JUDGE_PROMPT = """
-# Task Requirements
-
-{task_description}
-
-# Claimed Result
-
-{executor_result}
-
-# Executor Trajectory
-
-The executor's trajectory is saved at: {trajectory_path}
-
-Read relevant portions of the trajectory file using your tools:
-- Read the first ~50 lines to understand the task and system instructions.
-- Read the last ~200 lines to see the most recent steps and outcomes.
-- Do NOT read the entire file; it may be very large.
-
-# Instructions
-
-You are a judge assessing whether the task was fully completed.
-- Work dir: {work_dir}
-- Use your tools to explore the work dir and verify actual outputs on disk.
-- Do NOT redo any work; only inspect and assess.
-- When done, call finish() with:
-  - success=true if every requirement is met, false otherwise
-  - summary: concise explanation of what is missing or why it passes
-"""
-
-def _str_to_bool(value: str | bool) -> bool:
-    """Coerce a string or bool to a Python bool.
-
-    Args:
-        value: A string ("true", "1", "yes" → True; anything else → False)
-            or an already-boolean value.
-
-    Returns:
-        The boolean interpretation of *value*.
-    """
-    if isinstance(value, str):
-        return value.lower() in ("true", "1", "yes")
-    return bool(value)
-
-
-def _result_yaml(success: bool, is_continue: bool, summary: str) -> str:
-    """Serialize a finish-style result payload (success/is_continue/summary) to YAML."""
-    result: str = yaml.dump(
-        {"success": success, "is_continue": is_continue, "summary": summary},
-        sort_keys=False,
-    )
-    return result
-
 
 def _prior_sessions_section(summaries: list[str]) -> str:
     """Join prior session summaries into "### Previous Session N" markdown sections."""
@@ -155,19 +102,6 @@ def _build_exhaustion_summary(summaries: list[str], banner: str) -> str:
     if not summaries:
         return banner
     return f"{_prior_sessions_section(summaries)}\n\n---\n\n{banner}"
-
-
-def finish(success: bool, is_continue: bool = False, summary: str = "") -> str:
-    """Finish execution with status and summary.
-
-    Args:
-        success: True if the agent has successfully completed the task, False otherwise
-        is_continue: True if the task is incomplete and should continue, False otherwise
-        summary: precise chronologically-ordered list of things the
-            agent did with the reason for doing that along with
-            relevant code snippets
-    """
-    return _result_yaml(_str_to_bool(success), _str_to_bool(is_continue), summary)
 
 
 class RelentlessAgent(Base):
@@ -222,6 +156,29 @@ class RelentlessAgent(Base):
         self.total_tokens_used += agent.total_tokens_used
         self.total_steps += agent.step_count
 
+    def _check_total_budget(self) -> None:
+        """Raise :class:`KISSError` when the task's cumulative spend exceeds max_budget.
+
+        Installed as :attr:`KISSAgent.budget_check_hook` on every
+        per-session executor, so the executor's ``_check_limits`` also
+        enforces the PARENT task's total budget.  ``self.budget_used``
+        holds the spend of prior sub-sessions plus any spend attributed
+        mid-session by parallel sub-agents (``_attribute_sub_usage``);
+        the live executor's own spend is added on top because it is only
+        folded into ``self.budget_used`` when its session ends.
+
+        Raises:
+            KISSError: If the cumulative spend exceeds ``self.max_budget``.
+        """
+        executor = self._current_executor
+        live = executor.budget_used if executor is not None else 0.0
+        total = self.budget_used + live
+        if total >= self.max_budget:
+            raise BudgetExceededError(
+                f"Agent {self.name} budget exceeded "
+                f"(${total:.4f} / ${self.max_budget:.2f})."
+            )
+
     def _docker_bash(self, command: str, description: str) -> str:
         if self.docker_manager is None:
             raise KISSError("Docker manager not initialized")
@@ -272,7 +229,7 @@ class RelentlessAgent(Base):
         for session in range(self.max_sub_sessions):
             remaining_budget = self.max_budget - self.budget_used
             if remaining_budget <= 0:
-                raise KISSError(
+                raise BudgetExceededError(
                     f"Agent {self.name} budget exhausted "
                     f"(${self.budget_used:.4f} / ${self.max_budget:.2f})."
                 )
@@ -295,6 +252,13 @@ class RelentlessAgent(Base):
             # drain) to the per-session inner executor — that's the
             # layer that actually calls the model.
             executor.pre_step_hook = getattr(self, "pre_step_hook", None)
+            # Enforce the parent task's TOTAL budget from inside the
+            # executor's step loop — the executor's own ``budget_used``
+            # never sees spend attributed to the parent mid-session by
+            # parallel sub-agents (``_attribute_sub_usage``), so without
+            # this hook the session would keep running long after the
+            # task's budget was exhausted.
+            executor.budget_check_hook = self._check_total_budget
             self._current_executor = executor
             try:
                 result = executor.run(
@@ -313,6 +277,15 @@ class RelentlessAgent(Base):
                     verbose=self.verbose,
                     attachments=attachments if session == 0 else None,
                 )
+            except BudgetExceededError:
+                # A budget limit is a hard stop.  Never launch the LLM
+                # trajectory summarizer here: doing so would make more
+                # paid model calls after the configured limit.  Account
+                # for the live executor exactly once, clear the pointer,
+                # and preserve the typed error for task-runner/UI handling.
+                self._current_executor = None
+                self._accumulate_usage(executor)
+                raise
             except Exception as exc:
                 logger.debug("Exception caught", exc_info=True)
                 if (
@@ -322,7 +295,7 @@ class RelentlessAgent(Base):
                 ):
                     self._current_executor = None
                     self._accumulate_usage(executor)
-                    error_result = _result_yaml(False, False, str(exc))
+                    error_result = finish(False, False, str(exc))
                     if self.printer:
                         self.printer.print(
                             error_result,
@@ -339,6 +312,11 @@ class RelentlessAgent(Base):
                     trajectory_path = tmp_dir / f"trajectory_{session}.json"
                     trajectory_path.write_text(executor.get_trajectory(), encoding="utf-8")
                     _stop_ev = getattr(self.printer, "stop_event", None) if self.printer else None
+                    # Lazy import avoids the package cycle
+                    # relentless_agent -> sorcar.__init__ -> sorcar_agent ->
+                    # relentless_agent during a fresh direct import.
+                    from kiss.agents.sorcar.useful_tools import UsefulTools
+
                     shell_tools = UsefulTools(stop_event=_stop_ev)
                     summarizer_budget = max(
                         0.01, self.max_budget - self.budget_used - executor.budget_used
@@ -410,7 +388,7 @@ class RelentlessAgent(Base):
                 finally:
                     if trajectory_path and trajectory_path.exists():  # pragma: no branch
                         trajectory_path.unlink()
-                result = _result_yaml(False, True, summary_text)
+                result = finish(False, True, summary_text)
 
             self._current_executor = None
             self._accumulate_usage(executor)
@@ -576,18 +554,18 @@ class RelentlessAgent(Base):
         """Run the agent with the provided tools.
 
         Args:
-            model_name: LLM model to use. Defaults to config value.
+            model_name: LLM model to use. Defaults to "claude-opus-4-6".
             prompt_template: Task prompt template with format placeholders.
             arguments: Dictionary of values to fill prompt_template placeholders.
             system_prompt: System-level instructions passed to the underlying LLM
                 via model_config. Defaults to empty string (no system instructions).
-            max_steps: Maximum steps per sub-session. Defaults to config value.
-            max_budget: Maximum budget in USD. Defaults to config value.
+            max_steps: Maximum steps per sub-session. Defaults to 100.
+            max_budget: Maximum budget in USD. Defaults to 200.0.
             model_config: Optional dictionary of additional model configuration
                 parameters (e.g. temperature, top_p). Defaults to None.
             work_dir: Working directory for the agent. Defaults to artifact_dir/kiss_workdir.
             printer: Printer instance for output display.
-            max_sub_sessions: Maximum continuation sub-sessions. Defaults to config value.
+            max_sub_sessions: Maximum continuation sub-sessions. Defaults to 10000.
             docker_image: Docker image name to run tools inside a container.
             verbose: Whether to print output to console. Defaults to True.
             tools: List of callable tools available to the agent during execution.

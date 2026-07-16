@@ -24,10 +24,12 @@ import os
 import tempfile
 from pathlib import Path
 
+from kiss.core.config import kiss_home
+
 
 def kiss_home_dir() -> Path:
     """Return ``~/.kiss/`` (or ``$KISS_HOME`` when set)."""
-    return Path(os.environ.get("KISS_HOME") or (Path.home() / ".kiss"))
+    return kiss_home()
 
 
 def ensure_user_asset_from_default(
