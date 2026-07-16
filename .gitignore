@@ -19,6 +19,7 @@ dist/
 *.vsix
 .coverage*
 .kiss.artifacts
+.kiss-worktrees/
 env.sh
 node_modules/
 src/kiss/agents/vscode/out/
