@@ -56,7 +56,7 @@ def _generate_commit_message(
     """Generate a commit message for staged changes using an LLM.
 
     Gets the staged diff and delegates to
-    :func:`~kiss.server.helpers.generate_commit_message_from_diff`.
+    :func:`~kiss.agents.sorcar.commit_message.generate_commit_message_from_diff`.
     When *user_prompt* is provided, it is forwarded so the user's
     task prompt is incorporated into the commit message.  When
     *task_result* is provided, the task's result summary is appended
@@ -72,8 +72,8 @@ def _generate_commit_message(
     Returns:
         A commit message string.
     """
+    from kiss.agents.sorcar.commit_message import generate_commit_message_from_diff
     from kiss.agents.sorcar.git_worktree import GitWorktreeOps
-    from kiss.server.helpers import generate_commit_message_from_diff
 
     diff_text = GitWorktreeOps.staged_diff(commit_dir)
     return generate_commit_message_from_diff(
@@ -161,11 +161,11 @@ def auto_commit_changes(
         )
         msg = "kiss: auto-commit agent changes"
         if user_prompt:
-            from kiss.server.helpers import _append_user_prompt
+            from kiss.agents.sorcar.commit_message import _append_user_prompt
 
             msg = _append_user_prompt(msg, user_prompt)
         if task_result:
-            from kiss.server.helpers import _append_task_result
+            from kiss.agents.sorcar.commit_message import _append_task_result
 
             msg = _append_task_result(msg, task_result)
     # Re-stage immediately before committing to capture any files
@@ -640,7 +640,7 @@ class SorcarAgent(RelentlessAgent):
             # on the device (the CLI terminal alone falls back to the
             # system TTS command).
             try:
-                from kiss.server.speech_synthesis import synthesize_talk_audio
+                from kiss.core.speech_synthesis import synthesize_talk_audio
 
                 synthesized = synthesize_talk_audio(text, language, emotion)
             except Exception:
@@ -667,7 +667,7 @@ class SorcarAgent(RelentlessAgent):
             return f"Spoke to the user in language {language!r}."
 
         if self.docker_manager:
-            from kiss.docker.docker_tools import DockerTools
+            from kiss.core.docker_tools import DockerTools
 
             docker_tools = DockerTools(self._docker_bash)
             code_graph_hints_seen: set[str] = set()
