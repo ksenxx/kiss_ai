@@ -17,7 +17,11 @@ import yaml
 from kiss.core import config as config_module
 from kiss.core.base import Base
 from kiss.core.kiss_agent import KISSAgent
-from kiss.core.kiss_error import BudgetExceededError, KISSError
+from kiss.core.kiss_error import (
+    BudgetExceededError,
+    ContextWindowExceededError,
+    KISSError,
+)
 from kiss.core.models.model import Attachment
 from kiss.core.printer import Printer
 from kiss.core.utils import _coerce_bool as _str_to_bool
@@ -69,6 +73,56 @@ Read relevant portions of the file using your tools:
   with the reason for doing that along with relevant code snippets.
 - Call finish(result="detailed summary of work done so far").
 """
+
+#: Maximum size (in characters, ~15K tokens) of the accumulated
+#: prior-attempt summaries embedded in ``CONTINUATION_PROMPT``.  Without a
+#: cap, every continuation session starts with ALL previous summaries and
+#: the prompt grows unboundedly — each successive session begins with less
+#: context headroom, making repeated context exhaustion progressively
+#: worse.
+MAX_PROGRESS_CHARS = 60_000
+
+
+def _capped_progress_text(summaries: list[str]) -> str:
+    """Join attempt summaries newest-last, keeping the total within ``MAX_PROGRESS_CHARS``.
+
+    The most recent summaries are the most relevant for continuing the
+    task, so older ones are dropped first.  When any are dropped, a note
+    stating how many were omitted is prepended.
+
+    Args:
+        summaries: All prior session summaries, oldest first.
+
+    Returns:
+        Markdown text of "### Attempt N" sections separated by
+        ``\\n\\n---\\n\\n``, at most ``MAX_PROGRESS_CHARS`` characters of
+        summary content, possibly preceded by an omission note.
+    """
+    separator = "\n\n---\n\n"
+    # Reserve room for the truncation note, the omission note, and the
+    # separators around them so the RETURNED text never exceeds
+    # ``MAX_PROGRESS_CHARS`` (a true hard cap).
+    budget = MAX_PROGRESS_CHARS - 200
+    sections = [f"### Attempt {i + 1}\n{s}" for i, s in enumerate(summaries)]
+    kept: list[str] = []
+    total = 0
+    for section in reversed(sections):
+        if len(section) > budget:
+            # Even the newest summary alone must not blow the
+            # continuation prompt (the whole point of the cap is that a
+            # fresh session starts with context headroom).
+            section = section[:budget] + "\n(...summary truncated.)"
+        cost = len(section) + len(separator)
+        if kept and total + cost > budget:
+            break
+        kept.append(section)
+        total += cost
+    kept.reverse()
+    omitted = len(sections) - len(kept)
+    if omitted > 0:
+        kept.insert(0, f"({omitted} earlier attempt summaries omitted.)")
+    return separator.join(kept)
+
 
 def _prior_sessions_section(summaries: list[str]) -> str:
     """Join prior session summaries into "### Previous Session N" markdown sections."""
@@ -288,9 +342,19 @@ class RelentlessAgent(Base):
                 raise
             except Exception as exc:
                 logger.debug("Exception caught", exc_info=True)
+                # A context-window overflow is always recoverable via the
+                # trajectory-summarizer/continuation path, even when it
+                # carries a ``__cause__`` (the provider's rejection is
+                # chained by ``KISSAgent._run_agentic_loop``).  Other
+                # chained or non-KISS errors stay terminal.  A first-step
+                # overflow still hard-fails: continuing would replay the
+                # same oversized prompt forever.
+                is_context_overflow = isinstance(exc, ContextWindowExceededError)
                 if (
-                    exc.__cause__ is not None
-                    or not isinstance(exc, KISSError)
+                    (
+                        not is_context_overflow
+                        and (exc.__cause__ is not None or not isinstance(exc, KISSError))
+                    )
                     or executor.step_count <= 1
                 ):
                     self._current_executor = None
@@ -445,12 +509,8 @@ class RelentlessAgent(Base):
             if summary:  # pragma: no branch
                 summaries.append(summary)
 
-                all_summaries = "\n\n---\n\n".join(
-                    f"### Attempt {i + 1}\n{s}"
-                    for i, s in enumerate(summaries)
-                )
                 progress_section = CONTINUATION_PROMPT.format(
-                    progress_text=all_summaries,
+                    progress_text=_capped_progress_text(summaries),
                     continuation_number=session + 1,
                 )
         # Sub-session budget exhausted without a terminal ``is_continue=False``
