@@ -393,9 +393,9 @@ def test_sorcar_bug1_cli_printer_normalizes_case() -> None:
     Reading the source guarantees the new ``.lower()`` is in place and
     the heuristic char-by-char check has been removed.
     """
-    src = Path(
-        "src/kiss/agents/sorcar/cli_printer.py"
-    ).read_text()
+    from kiss.ui.cli import cli_printer
+
+    src = Path(str(cli_printer.__file__)).read_text()
     # Heuristic gone.
     assert "0123456789abcdef" not in src
     # New contract in place.

@@ -1,0 +1,733 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
+"""prompt_toolkit input line for the sorcar REPL.
+
+Provides the interactive dropdown that :mod:`readline` cannot render:
+as soon as ``@`` is typed the file/folder picker pops up under the
+input line, Up/Down move through the candidates, and Tab (or Enter,
+in the file picker only) inserts the highlighted ``./<path>`` mention
+without submitting the line.  The same live menu serves ``/`` slash
+commands, ``/model <partial>`` model names, and whole-line predictive
+completion: whenever the typed prefix matches one or more prior tasks
+the menu pops with all of them so Up/Down + Tab can pick one without
+re-typing.  A single Tab press on an open menu accepts the
+highlighted candidate — or the first one when none is highlighted
+yet — and, on slash-command lines, immediately pops the next-level
+menu (command → argument options → flag values) so each level of the
+chain needs exactly one Tab; see :func:`_accept_completion_tab` and
+:func:`_accept_first_completion_tab`.  Outside the ``@``-mention file
+picker Enter never accepts a completion candidate — it always submits
+the text the user actually typed.
+
+The candidate lists come from the very same
+:class:`~kiss.agents.sorcar.cli_repl.CliCompleter` backend used by the
+readline fallback, so both input paths complete identically.
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+from typing import TYPE_CHECKING
+
+from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import Completer, Completion
+from prompt_toolkit.filters import completion_is_selected, has_completions
+from prompt_toolkit.formatted_text import ANSI
+from prompt_toolkit.history import FileHistory
+from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.layout.containers import Window
+from prompt_toolkit.layout.dimension import Dimension
+
+from kiss.agents.sorcar.persistence import _load_file_usage
+from kiss.server.helpers import rank_file_suggestions
+from kiss.ui.cli.cli_line_continuation import (
+    ends_with_line_continuation,
+)
+from kiss.ui.cli.cli_panel import (
+    CSI_U_ENTER,
+    KEYBOARD_PROTO_DISABLE,
+    KEYBOARD_PROTO_ENABLE,
+    MODIFY_OTHER_KEYS_ENTER,
+)
+from kiss.ui.cli.cli_panel import CYAN as _CYAN
+from kiss.ui.cli.cli_panel import MIN_BODY_ROWS as _MIN_BODY_ROWS
+from kiss.ui.cli.cli_panel import RESET as _RESET
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+    from pathlib import Path
+
+    from prompt_toolkit.buffer import Buffer
+    from prompt_toolkit.completion import CompleteEvent
+    from prompt_toolkit.document import Document
+    from prompt_toolkit.key_binding import KeyPressEvent
+
+    from kiss.ui.cli.cli_repl import CliCompleter
+
+logger = logging.getLogger(__name__)
+
+# Trailing ``@<partial-path>`` token that triggers the file/folder picker.
+_AT_RE = re.compile(r"@([^\s]*)$")
+# ``/model <partial>`` line whose partial model name is fast-completed.
+_MODEL_CMD_RE = re.compile(r"^\s*/model\s+(.*)$")
+
+# Modifier+Enter escape sequences emitted by terminals via either
+# xterm's ``modifyOtherKeys`` mode (``ESC[27;<mod>;13~``) or the
+# kitty/CSI-u keyboard protocol (``ESC[13;<mod>u``).  prompt_toolkit
+# pre-maps the modifyOtherKeys variants for modifiers 2/5/6 to
+# :data:`Keys.ControlM` in
+# :data:`prompt_toolkit.input.ansi_escape_sequences.ANSI_SEQUENCES`
+# *before* any key bindings run, so without :func:`_unmap_enter_aliases`
+# below Shift/Ctrl/Ctrl-Shift+Enter on iTerm2 / macOS Terminal.app /
+# the VS Code integrated terminal would all be indistinguishable from
+# plain Enter and submit the buffer.  We delete those entries from the
+# table so the raw escape sequence reaches the tuple key-bindings
+# registered further down, which insert a real newline.  The canonical
+# table (modifiers 2..16, Shift through Cmd+Ctrl+Alt+Shift) lives in
+# :mod:`kiss.agents.sorcar.cli_panel` and is shared with
+# ``cli_steering._NEWLINE_AFTER_ESC`` so the two input paths can never
+# drift apart.
+_MODIFY_OTHER_KEYS_ENTER = MODIFY_OTHER_KEYS_ENTER
+
+
+def _unmap_enter_aliases() -> None:
+    """Drop pre-mapped modifier+Enter aliases from prompt_toolkit's table.
+
+    Idempotent: deletes only the entries that map a modifier+Enter
+    modifyOtherKeys sequence to :data:`Keys.ControlM` so that our tuple
+    key-bindings below see the raw escape sequence and can insert a
+    newline.  Other ANSI sequences are left untouched.
+
+    ``ANSI_SEQUENCES`` is a process-global table shared by every
+    prompt_toolkit consumer, so this is deliberately NOT executed at
+    import time (w2 F19): merely importing this module (which the
+    daemon code paths do transitively) must not strip behaviour from
+    unrelated ``PromptSession`` instances in the same process.  The
+    call is made from :meth:`PtkLineReader.__init__` instead — the
+    moment sorcar actually owns the prompt.
+    """
+    for seq in _MODIFY_OTHER_KEYS_ENTER:
+        ANSI_SEQUENCES.pop(seq, None)
+
+
+_KEY_BINDINGS = KeyBindings()
+
+
+def _accept_and_chain(buf: Buffer) -> None:
+    """Close the completion menu, keep the completed text, and chain.
+
+    Chained completion on slash-command lines: accepting a candidate
+    on a ``/`` line immediately restarts completion so the next-level
+    menu pops without any further keystroke — Tab-completing ``/resume``
+    instantly shows its argument options (``--task`` / ``--limit``),
+    Tab-completing ``--task`` instantly shows the recent task ids
+    (each displayed as ``<id>: <one-line task description>``), and
+    Tab-completing ``--model`` instantly shows the model names in
+    model-picker order.  :meth:`~prompt_toolkit.buffer.Buffer
+    .start_completion` runs the same completer that
+    ``complete_while_typing`` uses, so the popped menu is identical to
+    the one the user would get by typing the trailing space by hand;
+    when the accepted candidate has no follow-up candidates (e.g.
+    ``/help ``) no menu appears.  Non-slash accepts (the ``@``-mention
+    file picker outside slash lines, predictive history) simply close
+    the menu.
+    """
+    buf.complete_state = None
+    if buf.document.text_before_cursor.lstrip().startswith("/"):
+        buf.start_completion(select_first=False)
+
+
+@_KEY_BINDINGS.add("tab", filter=completion_is_selected)
+def _accept_completion_tab(event: KeyPressEvent) -> None:
+    """Tab on a highlighted (Up/Down-navigated) completion confirms it.
+
+    The candidate's text is already in the buffer (navigation inserts
+    it), so accepting means closing the menu and chaining the
+    next-level menu on slash-command lines — see
+    :func:`_accept_and_chain`.  Enter confirms only in the
+    ``@``-mention file picker; for every other menu Enter submits the
+    typed text (see :func:`_submit_enter`).
+    """
+    _accept_and_chain(event.current_buffer)
+
+
+@_KEY_BINDINGS.add("tab", filter=has_completions & ~completion_is_selected)
+def _accept_first_completion_tab(event: KeyPressEvent) -> None:
+    """Tab on an open menu with NO highlighted candidate accepts the first.
+
+    This fixes the user-reported "chained completion does not work"
+    bug: prompt_toolkit's default Tab binding only *selected* the first
+    candidate (inserting its text into the buffer, so the command
+    looked autocompleted) while keeping the menu open — the next-level
+    argument menu popped only after a second, non-obvious Tab press.
+    One Tab must complete AND chain, so this binding inserts the first
+    candidate's text via
+    :meth:`~prompt_toolkit.buffer.Buffer.go_to_completion` (the same
+    non-``insert_text`` path candidate navigation uses, which does not
+    re-fire the ``complete_while_typing`` completer on non-slash
+    lines) and then accepts it — closing the menu and popping the
+    next-level menu on slash-command lines via
+    :func:`_accept_and_chain`.  Up/Down still navigate the menu first;
+    Tab then accepts the navigated candidate through
+    :func:`_accept_completion_tab` instead of the first one.
+
+    When the async completer has opened an (still) empty menu the
+    binding does nothing, matching the default behaviour.
+    """
+    buf = event.current_buffer
+    state = buf.complete_state
+    if state is None or not state.completions:
+        return
+    buf.go_to_completion(0)
+    _accept_and_chain(buf)
+
+
+@_KEY_BINDINGS.add("escape", filter=has_completions)
+def _dismiss_completion_escape(event: KeyPressEvent) -> None:
+    """ESC closes the open completion menu without submitting anything.
+
+    :meth:`~prompt_toolkit.buffer.Buffer.cancel_completion` restores
+    ``complete_state.original_document`` — the text the user actually
+    typed (undoing any candidate text a previous Up/Down navigation
+    inserted into the buffer) — and closes the dropdown.  The binding
+    is deliberately NOT eager, so multi-key escape sequences
+    (``escape enter`` = Alt+Enter newline, arrow keys, Shift+Enter
+    CSI-u sequences, ...) still match first; a lone ESC key press
+    fires after prompt_toolkit's input-flush timeout.
+    """
+    event.current_buffer.cancel_completion()
+
+
+@_KEY_BINDINGS.add("enter")
+def _submit_enter(event: KeyPressEvent) -> None:
+    """Enter submits the (possibly multi-line) buffer — never a completion.
+
+    Enter MUST NOT accept a highlighted autocomplete candidate, with
+    one exception: the ``@``-mention file picker, where Enter still
+    inserts the highlighted ``./<path>`` mention without submitting
+    (matching the VS Code webview picker).  For every other menu —
+    predictive history, slash commands, ``/model`` names — when the
+    completion menu is open (even with a candidate highlighted via
+    Up/Down navigation, which temporarily places the candidate's text
+    in the buffer), :meth:`~prompt_toolkit.buffer.Buffer.cancel_completion`
+    first restores ``complete_state.original_document`` — the text the
+    user actually typed — and closes the menu; only then is the typed
+    text submitted.  Tab accepts in every menu (see
+    :func:`_accept_completion_tab`).
+
+    The session runs with ``multiline=True`` so prompt_toolkit's
+    default Enter binding inserts a newline; we override that here so
+    Enter still means *submit* — matching the "type a task, then
+    Enter" hint in the framed input panel.  Newlines are entered via
+    the alternative bindings below (Alt+Enter, Ctrl+J, Shift+Enter).
+
+    Universal backslash line-continuation.  On terminals that cannot
+    disambiguate Shift+Enter from Enter (notably macOS Terminal.app),
+    ending the whole buffer with an unescaped ``\\`` (optionally
+    followed by trailing whitespace) makes this Enter insert a
+    newline instead of submitting — the same convention every POSIX
+    shell uses.  The check runs against ``buf.text`` (the entire
+    buffer) rather than only the text before the cursor so the rule
+    matches the steering box's :meth:`_InputBox.feed` implementation
+    exactly.  See
+    :func:`~kiss.agents.sorcar.cli_line_continuation.ends_with_line_continuation`.
+    """
+    buf = event.current_buffer
+    state = buf.complete_state
+    if (
+        state is not None
+        and state.current_completion is not None
+        and _AT_RE.search(state.original_document.text_before_cursor)
+    ):
+        # @-mention file picker: keep the completed ``./<path>``
+        # mention in the buffer and close the menu without submitting.
+        buf.complete_state = None
+        return
+    buf.cancel_completion()
+    cont, keep = ends_with_line_continuation(buf.text)
+    if cont:
+        buf.text = buf.text[:keep] + "\n"
+        buf.cursor_position = keep + 1
+        return
+    buf.validate_and_handle()
+
+
+def _insert_newline(event: KeyPressEvent) -> None:
+    """Cancel any open completion menu and insert a literal newline.
+
+    The cancel step is what distinguishes the modifier+Enter family
+    from plain Enter: when the user is navigating the live completion
+    dropdown (Up/Down highlights a candidate so
+    :attr:`~prompt_toolkit.buffer.Buffer.complete_state` holds a
+    selected completion and the buffer text shows the highlighted
+    candidate), pressing Shift / Alt / Option / Ctrl / Command+Enter
+    must **restore the originally-typed text** and add a newline — not
+    silently accept the autocomplete the user did not ask for.
+
+    :meth:`~prompt_toolkit.buffer.Buffer.cancel_completion` is the
+    documented prompt_toolkit entry point that calls
+    :meth:`~prompt_toolkit.buffer.Buffer.go_to_completion(None)`,
+    restoring ``complete_state.original_document``, and then clears
+    ``complete_state`` so the menu disappears.  Calling it on a buffer
+    without an open menu is a no-op (the ``if self.complete_state``
+    guard inside :meth:`cancel_completion`), so this helper is safe
+    for both the "menu open" and "no menu" code paths.
+    """
+    event.current_buffer.cancel_completion()
+    event.current_buffer.insert_text("\n")
+
+
+@_KEY_BINDINGS.add("escape", "enter")
+def _newline_alt_enter(event: KeyPressEvent) -> None:
+    """Alt+Enter (a.k.a. Meta+Enter / Esc+Enter) inserts a real newline.
+
+    This is the portable multi-line key — it works in every terminal
+    that delivers ``ESC <key>`` for Meta-modified keypresses (macOS
+    Terminal.app, iTerm2, gnome-terminal, xterm, …) without any
+    special keyboard-protocol opt-in.  Any open completion menu is
+    dismissed (restoring the originally-typed text) before the newline
+    is inserted, so Option+Enter never accepts a highlighted
+    autocomplete behind the user's back.
+    """
+    _insert_newline(event)
+
+
+@_KEY_BINDINGS.add("c-j")
+def _newline_ctrl_j(event: KeyPressEvent) -> None:
+    """Ctrl+J inserts a newline.
+
+    Ctrl+J transmits a literal Linefeed (``\\n``).  Many terminals
+    deliver this when the user presses Shift+Enter without a CSI-u /
+    modifyOtherKeys binding active, so Ctrl+J is a reliable
+    secondary multi-line key.  Like the other modifier+Enter
+    bindings, any open completion menu is dismissed first so the
+    highlighted completion is not accepted.
+    """
+    _insert_newline(event)
+
+
+# Modifier+Enter escape sequences delivered by modern terminals as
+# either the xterm ``modifyOtherKeys`` form ``ESC[27;<mod>;13~`` or the
+# kitty/CSI-u form ``ESC[13;<mod>u`` — with ``<mod>`` = 2 (Shift),
+# 3 (Alt), 4 (Alt+Shift), 5 (Ctrl), 6 (Ctrl+Shift), 7 (Ctrl+Alt),
+# 8 (Ctrl+Alt+Shift).  prompt_toolkit pre-maps the modifyOtherKeys
+# forms for 2/5/6 to :data:`Keys.ControlM` (plain Enter); the
+# :func:`_unmap_enter_aliases` call in ``PtkLineReader.__init__``
+# removes them before any key is parsed so the parser
+# falls back to per-character delivery and the tuple bindings below
+# match the raw escape sequence, inserting a real ``\n`` into the
+# buffer.  Every modifier+Enter combination would otherwise be
+# ambiguous with plain Enter on iTerm2 / macOS Terminal.app / the
+# VS Code integrated terminal — see the regression tests in
+# ``tests/agents/sorcar/test_cli_multiline_input.py``.
+
+
+def _bind_newline_sequence(*keys: str) -> None:
+    """Register *keys* as a multi-key binding that inserts ``\\n``.
+
+    Routes through :func:`_insert_newline` so the modifier+Enter
+    escape sequences also dismiss any open completion menu (restoring
+    the originally-typed text) before adding the newline — preventing
+    the user-reported bug where Shift/Alt/Ctrl+Enter silently accepted
+    the highlighted autocomplete instead of inserting a newline.
+    """
+
+    @_KEY_BINDINGS.add(*keys)
+    def _newline(event: KeyPressEvent) -> None:
+        _insert_newline(event)
+
+
+def _sequence_keys(seq: str) -> tuple[str, ...]:
+    """Split an escape sequence into the per-character tuple keys.
+
+    prompt_toolkit's :class:`KeyBindings` matches multi-character
+    escape sequences as a tuple of single-character / named keys; the
+    leading ``ESC`` is the symbolic ``"escape"`` key and every other
+    byte becomes its own one-character entry.
+    """
+    assert seq.startswith("\x1b"), seq
+    return ("escape", *tuple(seq[1:]))
+
+
+# xterm modifyOtherKeys: ``ESC[27;<mod>;13~`` for every supported modifier.
+for _seq in _MODIFY_OTHER_KEYS_ENTER:
+    _bind_newline_sequence(*_sequence_keys(_seq))
+
+# kitty/CSI-u: ``ESC[13;<mod>u`` for Shift / Alt / Ctrl / Ctrl-Shift / …
+# and the Meta-bit-set combinations 9..16 (Cmd+Enter and friends on
+# macOS terminals that report the Meta modifier).  ``_sequence_keys``
+# splits every byte after ESC into its own tuple key, so two-digit
+# modifier values naturally span two tuple keys as the prompt_toolkit
+# parser (which matches one byte at a time) requires.
+for _seq in CSI_U_ENTER:
+    _bind_newline_sequence(*_sequence_keys(_seq))
+
+
+def _prompt_continuation(
+    width: int, line_number: int, wrap_count: int,
+) -> ANSI:
+    """Render the left margin for wrapped / multi-line input rows.
+
+    The framed input panel paints a cyan ``│`` on its first row; for
+    every subsequent visual row (whether the user pressed
+    Alt+Enter/Shift+Enter or the line wrapped because of
+    ``wrap_lines=True``) prompt_toolkit calls this function, which
+    returns ``│`` + one space so the panel border stays continuous.
+
+    Args:
+        width: The first-line prompt's display width; unused — the
+            continuation line is the same fixed two columns.
+        line_number: Zero-based index of the current visual row;
+            unused.
+        wrap_count: Number of times the row was wrapped because of
+            ``wrap_lines=True``; unused.
+
+    Returns:
+        ANSI-styled ``│ `` so wrapped rows keep the panel left border.
+    """
+    del width, line_number, wrap_count
+    return ANSI(f"{_CYAN}│{_RESET} ")
+
+
+class PtkCompleter(Completer):
+    """prompt_toolkit adapter over the REPL's :class:`CliCompleter`.
+
+    Yields :class:`Completion` objects for the live dropdown:
+    ``@``-mention files/folders (shown as the bare path, inserted as
+    ``./<path> ``), slash commands with their help text, and
+    ``/model`` model names.  Whole-line predictive matches are offered
+    only when completion is explicitly requested with Tab.
+
+    Attributes:
+        cli: The shared backend that scans files and ranks candidates.
+    """
+
+    def __init__(self, cli_completer: CliCompleter) -> None:
+        self.cli = cli_completer
+
+    def get_completions(
+        self, document: Document, complete_event: CompleteEvent,
+    ) -> Iterable[Completion]:
+        """Yield the dropdown candidates for the current input state.
+
+        Args:
+            document: The input buffer; only text before the cursor is
+                considered, matching the readline completer.
+            complete_event: Distinguishes typing-triggered completion
+                from an explicit Tab press (unused: every category — the
+                ``@``-mention picker, slash commands, ``/model`` names,
+                and the whole-line predictive list — pops while typing
+                so Up/Down + Tab/Enter can pick a match).
+
+        Returns:
+            The completions to display, best match first.
+        """
+        del complete_event  # All categories pop while typing.
+        line = document.text_before_cursor
+        # The branch order (@-mention → /model → slash command → flag
+        # value → argument options → predictive) is single-sourced in
+        # ``CliCompleter.completion_branch``, shared with the readline
+        # menu.
+        kind, payload = self.cli.completion_branch(line)
+        if kind == "at":
+            return self._at_mention_completions(payload.group(1))
+        if kind == "model":
+            return self._model_completions(payload)
+        if kind == "slash":
+            return self._slash_completions(line)
+        if kind in ("flag-value", "arg-options"):
+            return self._slash_arg_completions(line, payload)
+        return self._predictive_completions(line)
+
+    def _at_mention_completions(self, query: str) -> Iterable[Completion]:
+        """Build the ``@``-mention picker entries for *query*.
+
+        Each entry displays the bare relative path (folders end in
+        ``/``) and inserts ``./<path> `` in place of the
+        ``@<query>`` token, exactly like the readline completer and the
+        VS Code extension.
+        """
+        usage = _load_file_usage()
+        ranked = rank_file_suggestions(self.cli._files(), query, usage)
+        for item in ranked:
+            path = item["text"]
+            if path.endswith("/"):
+                meta = "folder"
+            elif item["type"] == "frequent":
+                meta = "recent"
+            else:
+                meta = "file"
+            yield Completion(
+                f"./{path} ",
+                start_position=-(len(query) + 1),
+                display=path,
+                display_meta=meta,
+            )
+
+    def _model_completions(self, query: str) -> Iterable[Completion]:
+        """Build ``/model <name>`` entries for the partial *query*.
+
+        The ``list`` subcommand is offered first (whenever the partial
+        matches it) so ``/model `` pops the full argument space —
+        ``list`` plus every completable model name.
+        """
+        from kiss.core.models.model_info import rank_model_suggestions
+
+        if "list".startswith(query):
+            yield Completion(
+                "list",
+                start_position=-len(query),
+                display_meta="List all generation models",
+            )
+        for name in rank_model_suggestions(query):
+            yield Completion(name, start_position=-len(query))
+
+    def _slash_arg_completions(
+        self, line: str, matches: list[tuple[str, str, str]],
+    ) -> Iterable[Completion]:
+        """Build argument option / flag-value entries for a slash line.
+
+        Pops as soon as a slash command is followed by a space (e.g.
+        ``/resume `` shows ``--task`` / ``--limit``; ``/skills `` shows
+        the discovered skill names) and, one level deeper, as soon as a
+        value-taking flag is followed by a space (``/resume --task ``
+        shows the recent task ids as ``<id>: <description>``,
+        ``--model `` the model names in model-picker order).  Each
+        entry displays the given text with its help note and replaces
+        the whole line, exactly like the readline completer — so a
+        task-id candidate inserts only the bare id, never the colon or
+        the description shown in the menu.
+
+        Args:
+            line: The text before the cursor.
+            matches: ``(replacement, display, help)`` triples from
+                :meth:`CliCompleter._slash_arg_matches` or
+                :meth:`CliCompleter._flag_value_matches`.
+        """
+        for full, opt, meta in matches:
+            yield Completion(
+                full,
+                start_position=-len(line),
+                display=opt,
+                display_meta=meta,
+            )
+
+    def _slash_completions(self, line: str) -> Iterable[Completion]:
+        """Build slash-command entries (built-in first, then custom)."""
+        from kiss.ui.cli.cli_repl import SLASH_COMMANDS
+
+        for match in self.cli._slash_matches(line):
+            cmd = match.strip()
+            yield Completion(
+                match,
+                start_position=-len(line),
+                display=cmd,
+                display_meta=SLASH_COMMANDS.get(cmd, "custom command"),
+            )
+
+    def _predictive_completions(self, line: str) -> Iterable[Completion]:
+        """Build the whole-line predictive dropdown entries.
+
+        Each match replaces the entire typed line and is guaranteed by
+        :meth:`CliCompleter._predictive_matches` to start with *line*
+        (trick / identifier suggestions arrive already spliced onto the
+        typed head), so accepting one never erases text the user
+        already typed.  The suffix added by the completion is shown as
+        the display text (so the menu is not cluttered with the prefix
+        the user already typed), and the ``history`` meta marks where
+        the suggestion came from.
+        """
+        for cand in self.cli._predictive_matches(line):
+            suffix = cand[len(line):]
+            yield Completion(
+                cand,
+                start_position=-len(line),
+                display=suffix or cand,
+                display_meta="history",
+            )
+
+
+def _migrate_readline_history(history_path: Path, ptk_path: Path) -> None:
+    """Seed the prompt_toolkit history from the old readline history.
+
+    Runs once: when *ptk_path* does not exist yet but the readline
+    history at *history_path* does, its lines are rewritten in
+    :class:`FileHistory` format so Up-arrow history survives the
+    switch to prompt_toolkit.
+    """
+    if ptk_path.exists() or not history_path.exists():
+        return
+    try:
+        lines = history_path.read_text(encoding="utf-8").splitlines()
+        with ptk_path.open("w", encoding="utf-8") as fh:
+            for line in lines:
+                if line.strip():
+                    fh.write(f"\n# migrated-from-readline\n+{line}\n")
+    except OSError:  # pragma: no cover - disk/permission error
+        logger.debug("readline history migration failed", exc_info=True)
+
+
+def _enforce_min_input_height(
+    session: PromptSession[str], min_rows: int,
+) -> None:
+    """Pin the prompt_toolkit input window to at least *min_rows* rows.
+
+    :class:`PromptSession` builds its layout lazily and the input
+    :class:`~prompt_toolkit.layout.containers.Window` (wrapping the
+    default :class:`~prompt_toolkit.buffer.Buffer`'s control) defaults
+    to ``Dimension()`` — auto-sizing based on the buffer's line count.
+    A one-line buffer therefore paints a one-row input area, which
+    leaves the framed input dialog drawn around the prompt visually
+    cramped (the user only sees one line of typing space even though
+    the box's purpose is multi-line task input).
+
+    Walk the layout, find the Window whose control's buffer is the
+    session's default buffer, and replace its ``height`` with a
+    :class:`Dimension` whose ``min`` is *min_rows* so prompt_toolkit
+    reserves at least *min_rows* terminal rows for the input area on
+    every render — matching the steering box's
+    :data:`~kiss.agents.sorcar.cli_panel.MIN_BODY_ROWS` floor.
+    Buffers with more lines still grow the area dynamically because
+    ``Dimension(min=...)`` leaves ``preferred`` / ``max`` unconstrained.
+
+    Args:
+        session: The freshly constructed :class:`PromptSession`.
+        min_rows: Floor for the input area's row count.
+    """
+    target = session.default_buffer
+    for container in session.layout.walk():
+        if not isinstance(container, Window):
+            continue
+        control = container.content
+        if getattr(control, "buffer", None) is target:
+            container.height = Dimension(min=min_rows)
+            return
+
+
+class PtkLineReader:
+    """Reads REPL input lines with a live completion dropdown.
+
+    Wraps a :class:`PromptSession` configured so the menu pops while
+    typing (``@`` immediately shows the file/folder list), Up/Down
+    navigate it, and Tab confirms the highlighted entry via the
+    bindings in ``_KEY_BINDINGS`` (Enter also confirms, but only in
+    the ``@``-mention file picker — elsewhere Enter submits the typed
+    text).  History is persisted per working directory next to the
+    readline history file.
+    """
+
+    def __init__(self, completer: CliCompleter, history_path: Path) -> None:
+        # Strip prompt_toolkit's pre-mapped modifier+Enter aliases
+        # only now — when sorcar actually builds its own prompt — so
+        # merely importing this module can no longer mutate the
+        # process-global ``ANSI_SEQUENCES`` table out from under other
+        # prompt_toolkit consumers (w2 F19).  The input parser looks
+        # the table up at key-parse time, so unmapping here (before
+        # the first ``read``) is exactly as effective as the old
+        # import-time call.
+        _unmap_enter_aliases()
+        ptk_path = history_path.with_name(history_path.name + ".ptk")
+        _migrate_readline_history(history_path, ptk_path)
+        self.session: PromptSession[str] = PromptSession(
+            completer=PtkCompleter(completer),
+            complete_while_typing=True,
+            key_bindings=_KEY_BINDINGS,
+            history=FileHistory(str(ptk_path)),
+            # Multi-line input: Alt+Enter / Ctrl+J / Shift+Enter /
+            # Ctrl+Enter / Ctrl+Shift+Enter all insert a real ``\n``
+            # into the buffer (see the bindings at module level — both
+            # the xterm ``modifyOtherKeys`` and the kitty/CSI-u
+            # encodings are covered); plain Enter still submits via
+            # the unfiltered Enter binding above, which first cancels
+            # any open completion menu (except the @-mention picker).
+            # Without ``multiline=True`` prompt_toolkit would short-
+            # circuit Enter to "accept-line" before our key bindings
+            # ever ran, so the user could never type a newline.
+            multiline=True,
+            # Word-wrap long lines onto the next visual row instead of
+            # scrolling the input horizontally off-screen.  The
+            # framed panel paints a ``│`` on each visual row via
+            # :func:`_prompt_continuation`, so the box stays closed
+            # even when the typed task wraps.
+            wrap_lines=True,
+            prompt_continuation=_prompt_continuation,
+            # Reserve enough screen rows for the longest typing-triggered
+            # menu — currently the ``/`` slash-command list with every
+            # built-in command from :data:`SLASH_COMMANDS` (and a few
+            # custom commands).  prompt_toolkit's :class:`CompletionsMenu`
+            # caps its own height at 16 rows, so reserving the same number
+            # makes every slash command visible at once instead of being
+            # clipped to the previous default of 8 (which forced the user
+            # to scroll Up/Down to discover the rest).
+            reserve_space_for_menu=16,
+        )
+        _enforce_min_input_height(self.session, _MIN_BODY_ROWS)
+
+    def read(self, prompt: str) -> str:
+        """Read one line, rendering *prompt* (which may contain ANSI).
+
+        Opts into the terminal's extended-keyboard protocols for the
+        duration of the prompt so modifier+Enter chords (Shift+Enter,
+        Ctrl+Enter, Alt+Enter, Cmd+Enter and combinations) emit
+        *distinct* byte sequences the tuple key-bindings registered at
+        module load can match as newline-insert instead of a plain
+        Enter (submit).  Without these enable sequences most
+        terminals — iTerm2, macOS Terminal.app, the VS Code integrated
+        terminal, kitty / WezTerm / foot / ghostty (which ignore
+        modifyOtherKeys entirely in favour of the Kitty keyboard
+        protocol) — deliver Shift+Enter as a bare ``\\r``,
+        indistinguishable from plain Enter, and the whole multi-line
+        UX breaks:
+
+        * ``ESC[>4;2m``  — xterm ``modifyOtherKeys`` level 2.  Makes
+          Shift/Ctrl/Alt+Enter emit ``ESC[27;<m>;13~``.  Supported by
+          xterm, iTerm2, WezTerm, Alacritty and tmux (with
+          ``extended-keys always`` + ``extkeys`` feature).
+        * ``ESC[>1u``    — Kitty keyboard protocol, push flag 1
+          (disambiguate escape codes).  Makes Shift+Enter emit
+          ``ESC[13;<m>u``.  Supported by kitty, WezTerm, foot,
+          ghostty and (increasingly) other terminals.
+
+        These are the same two enable / disable pairs written by
+        :meth:`~kiss.agents.sorcar.cli_steering._InputBox.start` /
+        :meth:`~kiss.agents.sorcar.cli_steering._InputBox.stop` for
+        the mid-task steering box, so both the initial task prompt
+        and the running-task steering box behave identically on every
+        terminal.  Terminals that don't support one/both of these
+        silently ignore the CSI.  The matching disable sequences —
+        ``ESC[>4;0m`` (restore modifyOtherKeys level 0) and
+        ``ESC[<u`` (pop the Kitty keyboard flag entry we pushed) —
+        are written in the ``finally`` block on exit so a
+        subsequently-spawned child process does not inherit our mode
+        and we do not leak a stack entry into the shell.  All four
+        writes are no-ops on :class:`prompt_toolkit.output.DummyOutput`
+        (used by the pipe-based regression tests).
+
+        Args:
+            prompt: Prompt text, possibly containing SGR colour codes.
+
+        Returns:
+            The line typed by the user.
+
+        Raises:
+            EOFError: On Ctrl+D.
+            KeyboardInterrupt: On Ctrl+C.
+        """
+        output = self.session.output
+        output.write_raw(KEYBOARD_PROTO_ENABLE)
+        output.flush()
+        try:
+            return self.session.prompt(ANSI(prompt))
+        finally:
+            try:
+                output.write_raw(KEYBOARD_PROTO_DISABLE)
+                output.flush()
+            except Exception:  # pragma: no cover - best-effort restore
+                logger.debug(
+                    "failed to disable extended keyboard protocols",
+                    exc_info=True,
+                )

@@ -2220,7 +2220,7 @@ class WebPrinter(JsonPrinter):
         if not event.get("audioB64"):
             return False
         try:
-            from kiss.agents.sorcar import cli_talk
+            from kiss.ui.cli import cli_talk
 
             if cli_talk.player_command() is None:
                 return False
