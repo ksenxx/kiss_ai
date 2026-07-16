@@ -731,6 +731,15 @@
     "emb": true,
     "gen": false
   },
+  "gemini-omni-flash-preview": {
+    "context_length": 131072,
+    "input_price_per_1M": 0.0,
+    "output_price_per_1M": 0.0,
+    "fc": false,
+    "emb": true,
+    "gen": false,
+    "comment": "NEW: needs pricing"
+  },
   "glm-4-32b-0414-128k": {
     "context_length": 131072,
     "input_price_per_1M": 0.1,
@@ -2599,6 +2608,15 @@
     "emb": false,
     "gen": true
   },
+  "openrouter/meta/muse-spark-1.1": {
+    "context_length": 1048576,
+    "input_price_per_1M": 1.25,
+    "output_price_per_1M": 4.25,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW"
+  },
   "openrouter/microsoft/phi-4": {
     "context_length": 16384,
     "input_price_per_1M": 0.07,
@@ -2809,11 +2827,20 @@
   },
   "openrouter/moonshotai/kimi-k2.7-code": {
     "context_length": 262144,
-    "input_price_per_1M": 0.72,
-    "output_price_per_1M": 3.49,
+    "input_price_per_1M": 0.75,
+    "output_price_per_1M": 3.5,
     "fc": true,
     "emb": false,
     "gen": true
+  },
+  "openrouter/moonshotai/kimi-k3": {
+    "context_length": 1048576,
+    "input_price_per_1M": 3.0,
+    "output_price_per_1M": 15.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW"
   },
   "openrouter/morph/morph-v3-fast": {
     "context_length": 81920,
@@ -3516,7 +3543,7 @@
   },
   "openrouter/qwen/qwen3-14b": {
     "context_length": 131702,
-    "input_price_per_1M": 0.12,
+    "input_price_per_1M": 0.1,
     "output_price_per_1M": 0.24,
     "fc": false,
     "emb": false,
@@ -4102,7 +4129,7 @@
     "gen": true
   },
   "openrouter/z-ai/glm-4.7-flash": {
-    "context_length": 202752,
+    "context_length": 200000,
     "input_price_per_1M": 0.06,
     "output_price_per_1M": 0.4,
     "fc": true,
@@ -4135,8 +4162,8 @@
   },
   "openrouter/z-ai/glm-5.2": {
     "context_length": 1048576,
-    "input_price_per_1M": 0.969,
-    "output_price_per_1M": 3.045,
+    "input_price_per_1M": 0.924,
+    "output_price_per_1M": 2.904,
     "fc": true,
     "emb": false,
     "gen": true
@@ -4199,9 +4226,9 @@
     "gen": true
   },
   "openrouter/~moonshotai/kimi-latest": {
-    "context_length": 262144,
-    "input_price_per_1M": 0.66,
-    "output_price_per_1M": 3.41,
+    "context_length": 1048576,
+    "input_price_per_1M": 3.0,
+    "output_price_per_1M": 15.0,
     "fc": true,
     "emb": false,
     "gen": true
