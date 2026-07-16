@@ -37,8 +37,7 @@ MAIN_JS = (
 
 BROWSER_UI = (
     Path(__file__).resolve().parents[3]
-    / "agents"
-    / "vscode"
+    / "server"
     / "json_printer.py"
 )
 

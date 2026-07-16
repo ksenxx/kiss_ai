@@ -45,14 +45,12 @@ MAIN_JS = (
 )
 TASK_RUNNER = (
     Path(__file__).parent.parent.parent.parent
-    / "agents"
-    / "vscode"
+    / "server"
     / "task_runner.py"
 )
 SERVER_PY = (
     Path(__file__).parent.parent.parent.parent
-    / "agents"
-    / "vscode"
+    / "server"
     / "server.py"
 )
 

@@ -29,8 +29,8 @@ from unittest import IsolatedAsyncioTestCase
 import pytest
 from websockets.asyncio.client import connect
 
-from kiss.agents.vscode.vscode_config import CONFIG_PATH, save_config
-from kiss.agents.vscode.web_server import (
+from kiss.server.vscode_config import CONFIG_PATH, save_config
+from kiss.server.web_server import (
     _TUNNEL_UNHEALTHY_LIMIT_QUICK,
     _URL_FILE,
     TUNNEL_CHECK_INTERVAL,
@@ -2404,7 +2404,7 @@ class TestIpWatchdog(IsolatedAsyncioTestCase):
             except asyncio.CancelledError:
                 pass
 
-        import kiss.agents.vscode.web_server as ws_mod
+        import kiss.server.web_server as ws_mod
 
         original_interval = ws_mod.TUNNEL_CHECK_INTERVAL
         ws_mod.TUNNEL_CHECK_INTERVAL = 0
@@ -2417,7 +2417,7 @@ class TestIpWatchdog(IsolatedAsyncioTestCase):
 
     async def test_ip_watchdog_noop_when_unchanged(self) -> None:
         """When IPs haven't changed, the watchdog keeps running."""
-        import kiss.agents.vscode.web_server as ws_mod
+        import kiss.server.web_server as ws_mod
 
         self.server._last_ips = _get_local_ips()
         if self.server._watchdog_task is not None:
@@ -3756,7 +3756,7 @@ class TestWatchdogBranches(IsolatedAsyncioTestCase):
 
     async def test_watchdog_pings_connected_clients(self) -> None:
         """Watchdog pings connected WS clients."""
-        import kiss.agents.vscode.web_server as ws_mod
+        import kiss.server.web_server as ws_mod
 
         ws = await connect(
             f"wss://127.0.0.1:{self.port}/ws",
@@ -3800,7 +3800,7 @@ class TestWatchdogBranches(IsolatedAsyncioTestCase):
 
     async def test_watchdog_tunnel_check_exception_is_caught(self) -> None:
         """Watchdog catches exceptions during tunnel check."""
-        import kiss.agents.vscode.web_server as ws_mod
+        import kiss.server.web_server as ws_mod
 
         self.server.use_tunnel = True
         self.server._tunnel_proc = "not-a-process"  # type: ignore[assignment]
@@ -4316,7 +4316,7 @@ class TestAutoGenCertInCreateSslContext(unittest.TestCase):
 
     def test_auto_generates_when_tls_dir_empty(self) -> None:
         """When cert/key don't exist in TLS dir, auto-generates them."""
-        import kiss.agents.vscode.web_server as ws_mod
+        import kiss.server.web_server as ws_mod
 
         original_tls_dir = ws_mod._TLS_DIR
         with tempfile.TemporaryDirectory() as td:
@@ -4530,7 +4530,7 @@ class TestWatchdogWSPingException(IsolatedAsyncioTestCase):
 
     async def test_watchdog_handles_ws_ping_error(self) -> None:
         """Watchdog continues running when WS ping encounters errors."""
-        import kiss.agents.vscode.web_server as ws_mod
+        import kiss.server.web_server as ws_mod
 
         ws = await connect(
             f"wss://127.0.0.1:{self.port}/ws",
@@ -4588,7 +4588,7 @@ class TestWatchdogIPChangeDetection(IsolatedAsyncioTestCase):
 
     async def test_watchdog_detects_ip_change(self) -> None:
         """Watchdog returns (closing server) when IP changes."""
-        import kiss.agents.vscode.web_server as ws_mod
+        import kiss.server.web_server as ws_mod
 
         if self.server._watchdog_task is not None:
             self.server._watchdog_task.cancel()
@@ -4662,7 +4662,7 @@ class TestRemoveUrlFileOSError(unittest.TestCase):
 
     def test_remove_url_file_handles_oserror(self) -> None:
         """_remove_url_file does not raise when file path is problematic."""
-        import kiss.agents.vscode.web_server as ws_mod
+        import kiss.server.web_server as ws_mod
 
         # ``_URL_FILE`` is a lazy PEP 562 module attribute; restore by
         # deleting the pin so the module resolves it lazily again
@@ -4690,9 +4690,9 @@ class TestReadVersionException(unittest.TestCase):
         (otherwise the scanner would pick up the machine's real installed
         extension and mask the fallback).
         """
-        import kiss.agents.vscode.web_server as ws_mod
+        import kiss.server.web_server as ws_mod
 
-        vfile = Path(ws_mod.__file__).parent.parent.parent / "_version.py"
+        vfile = Path(ws_mod.__file__).parent.parent / "_version.py"
         backup = vfile.read_text()
         vfile.rename(vfile.with_suffix(".py.bak"))
         saved_root = ws_mod._INSTALLED_EXTENSIONS_ROOT
@@ -5465,7 +5465,7 @@ class TestReadVersionNoMatch(unittest.TestCase):
         (otherwise the scanner would pick up the machine's real installed
         extension and mask the fallback).
         """
-        import kiss.agents.vscode.web_server as ws_mod
+        import kiss.server.web_server as ws_mod
 
         vfile = Path(__file__).parent.parent.parent.parent / "_version.py"
         original = vfile.read_text()
@@ -6144,7 +6144,7 @@ class TestQuickTunnelFallbackMetricsHit(IsolatedAsyncioTestCase):
         os.chmod(cf, 0o755)
         os.environ["PATH"] = self._tmpdir + ":" + self._old_path
 
-        import kiss.agents.vscode.web_server as ws_mod
+        import kiss.server.web_server as ws_mod
 
         original_fn = ws_mod._discover_tunnel_url_from_metrics
 
@@ -6222,7 +6222,7 @@ class TestRemoveUrlFileReadOnly(unittest.TestCase):
 
     def test_remove_oserror_from_readonly_dir(self) -> None:
         """_remove_url_file swallows OSError from read-only directory."""
-        import kiss.agents.vscode.web_server as ws_mod
+        import kiss.server.web_server as ws_mod
 
         tmpdir = tempfile.mkdtemp()
         try:

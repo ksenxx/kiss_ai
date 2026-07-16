@@ -182,7 +182,7 @@ def test_vscode_server_source_accepts_int_rebound_task_id() -> None:
 
     from kiss.agents.vscode.server import _coerce_id
 
-    src = Path("src/kiss/agents/vscode/server.py").read_text()
+    src = Path("src/kiss/server/server.py").read_text()
     # The fixed code path must coerce int -> str rather than dropping
     # the rebound id to None; the coercion is centralised in
     # ``_coerce_id``.
@@ -204,7 +204,7 @@ def test_vscode_server_source_accepts_int_entry_id() -> None:
 
     from kiss.agents.vscode.server import _coerce_id
 
-    src = Path("src/kiss/agents/vscode/server.py").read_text()
+    src = Path("src/kiss/server/server.py").read_text()
     assert 'entry_id = _coerce_id(entry.get("id"))' in src, (
         "r4-vscode-H2: ``entry_id`` must accept int rows from legacy DBs"
     )

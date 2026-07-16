@@ -424,7 +424,7 @@ def test_server_accepts_legacy_int_parent_task_id() -> None:
     from kiss.agents.vscode.server import _coerce_id
 
     src = Path(
-        "src/kiss/agents/vscode/server.py"
+        "src/kiss/server/server.py"
     ).read_text()
     # Both the _replay_session subagent_info site and the _get_history
     # extra_obj path coerce through the shared ``_coerce_id`` helper,

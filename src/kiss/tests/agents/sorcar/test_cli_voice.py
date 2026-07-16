@@ -5,7 +5,7 @@
 """End-to-end tests for the ``/voice`` wake-word voice-chat REPL feature.
 
 The sorcar CLI REPL gains a ``/voice`` slash command that spawns the
-wake-word listener process (``python -m kiss.agents.vscode.voice_wake``)
+wake-word listener process (``python -m kiss.server.voice_wake``)
 and turns each recognised utterance into a submitted task, showing a
 blinking red ``Listening ...`` indicator inside the anchored input
 panel while waiting for speech.
@@ -296,7 +296,7 @@ class TestListenerCommand:
     def test_default_command(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("KISS_SORCAR_VOICE_CMD", raising=False)
         assert listener_command() == [
-            sys.executable, "-m", "kiss.agents.vscode.voice_wake",
+            sys.executable, "-m", "kiss.server.voice_wake",
         ]
 
     def test_env_override_with_quoted_args(
