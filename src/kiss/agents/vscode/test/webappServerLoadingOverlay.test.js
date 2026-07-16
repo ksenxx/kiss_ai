@@ -56,8 +56,7 @@ const PROJECT_ROOT = path.resolve(__dirname, '..');
 const WEB_SERVER_PY = path.resolve(
   PROJECT_ROOT,
   '..', '..',
-  'agents',
-  'vscode',
+  'server',
   'web_server.py',
 );
 const CHAT_HTML = path.join(PROJECT_ROOT, 'media', 'chat.html');

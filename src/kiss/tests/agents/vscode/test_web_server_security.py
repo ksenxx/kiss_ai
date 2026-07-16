@@ -46,9 +46,9 @@ from unittest import IsolatedAsyncioTestCase
 import pytest
 from websockets.asyncio.client import connect
 
-from kiss.agents.vscode import web_server as ws_mod
-from kiss.agents.vscode.vscode_config import CONFIG_PATH, save_config
-from kiss.agents.vscode.web_server import (
+from kiss.server import web_server as ws_mod
+from kiss.server.vscode_config import CONFIG_PATH, save_config
+from kiss.server.web_server import (
     RemoteAccessServer,
     _generate_self_signed_cert,
     _parse_quick_tunnel_url,

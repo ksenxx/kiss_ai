@@ -5,7 +5,7 @@
 """Wake-word voice chat for the sorcar CLI REPL (``/voice``).
 
 Typing ``/voice`` at the idle prompt spawns the wake-word listener
-process (``python -m kiss.agents.vscode.voice_wake``) and turns each
+process (``python -m kiss.server.voice_wake``) and turns each
 recognised utterance into a submitted REPL line, exactly as if the user
 had typed it and pressed Enter.  In the anchored REPL voice runs in the
 *background* (:class:`VoicePump`): the keyboard stays fully usable —
@@ -49,7 +49,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from kiss.agents.sorcar.cli_panel import BLINK, CYAN, RED, RESET, YELLOW
-from kiss.agents.vscode.voice_wake import speaker_prefixed_text
+from kiss.server.voice_wake import speaker_prefixed_text
 
 if TYPE_CHECKING:
     from kiss.agents.sorcar.cli_steering import _InputBox
@@ -75,7 +75,7 @@ def listener_command() -> list[str]:
 
     Honours the ``KISS_SORCAR_VOICE_CMD`` environment variable (parsed
     with :func:`shlex.split`, so quoted arguments survive) and falls
-    back to running :mod:`kiss.agents.vscode.voice_wake` with the
+    back to running :mod:`kiss.server.voice_wake` with the
     current interpreter.
 
     Returns:
@@ -84,7 +84,7 @@ def listener_command() -> list[str]:
     override = os.environ.get(_CMD_ENV, "").strip()
     if override:
         return shlex.split(override)
-    return [sys.executable, "-m", "kiss.agents.vscode.voice_wake"]
+    return [sys.executable, "-m", "kiss.server.voice_wake"]
 
 
 # How long a dead-listener final flush waits for the daemon reader
