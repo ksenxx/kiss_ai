@@ -745,7 +745,8 @@
     "output_price_per_1M": 2.2,
     "fc": true,
     "emb": false,
-    "gen": true
+    "gen": true,
+    "cache_read_price_per_1M": 0.11
   },
   "glm-4.5-air": {
     "context_length": 131072,
@@ -753,7 +754,8 @@
     "output_price_per_1M": 1.1,
     "fc": true,
     "emb": false,
-    "gen": true
+    "gen": true,
+    "cache_read_price_per_1M": 0.03
   },
   "glm-4.5-airx": {
     "context_length": 131072,
@@ -761,7 +763,8 @@
     "output_price_per_1M": 4.5,
     "fc": true,
     "emb": false,
-    "gen": true
+    "gen": true,
+    "cache_read_price_per_1M": 0.22
   },
   "glm-4.5-flash": {
     "context_length": 131072,
@@ -777,7 +780,8 @@
     "output_price_per_1M": 8.9,
     "fc": true,
     "emb": false,
-    "gen": true
+    "gen": true,
+    "cache_read_price_per_1M": 0.45
   },
   "glm-4.6": {
     "context_length": 204800,
@@ -785,7 +789,8 @@
     "output_price_per_1M": 2.2,
     "fc": true,
     "emb": false,
-    "gen": true
+    "gen": true,
+    "cache_read_price_per_1M": 0.11
   },
   "glm-4.7": {
     "context_length": 204800,

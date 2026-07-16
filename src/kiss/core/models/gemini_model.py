@@ -673,7 +673,15 @@ class GeminiModel(Model):
             thoughts_tokens = getattr(um, "thoughts_token_count", 0) or 0
             output_tokens += thoughts_tokens
             cached_tokens = getattr(um, "cached_content_token_count", 0) or 0
-            return max(prompt_tokens - cached_tokens, 0), output_tokens, cached_tokens, 0
+            # ``prompt_token_count`` INCLUDES the cached content (per the
+            # UsageMetadata reference), so cached tokens are subtracted and
+            # billed separately at the cache-read rate.  Server-side
+            # tool-use prompts (e.g. Google Search grounding) are reported
+            # separately in ``tool_use_prompt_token_count`` and billed as
+            # ordinary input tokens.
+            tool_use_tokens = getattr(um, "tool_use_prompt_token_count", 0) or 0
+            input_tokens = max(prompt_tokens - cached_tokens, 0) + tool_use_tokens
+            return input_tokens, output_tokens, cached_tokens, 0
         return 0, 0, 0, 0
 
     def get_embedding(  # pragma: no cover – API call

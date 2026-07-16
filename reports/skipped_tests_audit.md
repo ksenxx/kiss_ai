@@ -111,12 +111,13 @@ showed this skip fired for **everyone, always**, regardless of credentials:
 
 So the "environment-gated" skip was permanently hiding the fact that
 `GeminiModel.get_embedding()` with the default model has been broken since mid-January
-2026.
+2026\.
 
 Fix (test-first):
+
 1. Rewrote the test to call `m.get_embedding("Hello world")` (the production default)
    and removed the 404→skip guard — reproduced the failure (404 KISSError).
-2. Changed the production default in `gemini_model.py` from `text-embedding-004` to
+1. Changed the production default in `gemini_model.py` from `text-embedding-004` to
    `gemini-embedding-001` — test now passes and returns a real embedding.
    The test remains credential-gated by the class-level `@requires_gemini_api_key`,
    which is the correct gating; a future Google-side model retirement will now fail
