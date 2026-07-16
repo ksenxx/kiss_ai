@@ -147,7 +147,7 @@ class IntentVerdict:
     # ``total_votes=1`` recover the single-call behaviour.
     votes: int = 1
     total_votes: int = 1
-    per_sample: list["IntentVerdict"] = field(default_factory=list)
+    per_sample: list[IntentVerdict] = field(default_factory=list)
 
     def should_veto(self, tau: float = 0.5) -> bool:
         """Return ``True`` iff the judge's veto is confident enough to enforce.

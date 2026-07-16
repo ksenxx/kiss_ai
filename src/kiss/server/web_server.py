@@ -2701,7 +2701,10 @@ def _scan_installed_extension_versions(root: Path) -> list[str]:
 
     Scans direct children of ``root`` for the KISS Sorcar extension
     naming convention (``ksenxx.kiss-sorcar-<VERSION>``) and reads
-    each ``kiss_project/src/kiss/_version.py``.  Malformed / missing
+    each ``kiss_project/src/kiss/core/_version.py`` (the canonical
+    location since the version literal moved into ``kiss.core``),
+    falling back to the pre-move ``kiss_project/src/kiss/_version.py``
+    for extensions installed before the move.  Malformed / missing
     version files are silently skipped so a single broken sibling
     cannot mask an otherwise-valid newer install.
     """
@@ -2718,9 +2721,10 @@ def _scan_installed_extension_versions(root: Path) -> list[str]:
             continue
         if not entry.name.startswith(_EXTENSION_DIR_PREFIX):
             continue
-        v = _parse_version_py(
-            entry / "kiss_project" / "src" / "kiss" / "_version.py",
-        )
+        kiss_dir = entry / "kiss_project" / "src" / "kiss"
+        v = _parse_version_py(kiss_dir / "core" / "_version.py")
+        if not v:
+            v = _parse_version_py(kiss_dir / "_version.py")
         if v:
             out.append(v)
     return out
@@ -2761,9 +2765,11 @@ def _read_version() -> str:
             best_str = v
     if best_str:
         return best_str
-    # Fallback: developer / Docker / test-without-extdir install.
+    # Fallback: developer / Docker / test-without-extdir install.  The
+    # version literal is single-sourced in ``kiss/core/_version.py``
+    # (``kiss/_version.py`` is only an import shim without a literal).
     return _parse_version_py(
-        Path(__file__).parent.parent / "_version.py",
+        Path(__file__).parent.parent / "core" / "_version.py",
     )
 
 

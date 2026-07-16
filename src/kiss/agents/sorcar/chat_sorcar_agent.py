@@ -21,7 +21,6 @@ from typing import Any
 
 import yaml
 
-from kiss._version import __version__
 from kiss.agents.sorcar.git_worktree import strip_worktree_suffix
 from kiss.agents.sorcar.persistence import (
     _add_task,
@@ -44,6 +43,7 @@ from kiss.agents.sorcar.sorcar_agent import (
     _LiveUsageMonitor,
     _yaml_failure,
 )
+from kiss.core._version import __version__
 from kiss.core.printer import parse_result_yaml
 
 MAX_TASKS = 10

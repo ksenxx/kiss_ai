@@ -280,7 +280,7 @@ def test_main_no_task_enters_repl(tmp_path: Path) -> None:
     daemon = _ScriptedUdsDaemon(kiss_home / "sorcar.sock")
     try:
         proc = subprocess.run(
-            [sys.executable, "-m", "kiss.agents.sorcar.worktree_sorcar_agent",
+            [sys.executable, "-m", "kiss.ui.cli.sorcar_cli",
              "-w", str(tmp_path)],
             input="/exit\n",
             text=True,
@@ -313,7 +313,7 @@ def test_main_no_daemon_exits_with_clear_error(tmp_path: Path) -> None:
     env = dict(os.environ, KISS_HOME=str(kiss_home))
     env.pop("KISS_SORCAR_SOCK", None)
     proc = subprocess.run(
-        [sys.executable, "-m", "kiss.agents.sorcar.worktree_sorcar_agent",
+        [sys.executable, "-m", "kiss.ui.cli.sorcar_cli",
          "-w", str(tmp_path)],
         input="/exit\n",
         text=True,

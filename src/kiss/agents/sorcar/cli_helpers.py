@@ -13,14 +13,15 @@ from __future__ import annotations
 import argparse
 import datetime
 import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import yaml
 
-from kiss import __version__
 from kiss.agents.sorcar.persistence import _list_recent_chats
 from kiss.core import config as config_module
+from kiss.core._version import __version__
 from kiss.core.models.model_info import get_default_model
 
 if TYPE_CHECKING:
@@ -385,8 +386,24 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _build_run_kwargs(args: argparse.Namespace) -> dict[str, Any]:
-    """Build ``agent.run()`` keyword arguments from parsed CLI args."""
+def _build_run_kwargs(
+    args: argparse.Namespace,
+    printer_factory: Callable[[], Any] | None = None,
+) -> dict[str, Any]:
+    """Build ``agent.run()`` keyword arguments from parsed CLI args.
+
+    Args:
+        args: Parsed CLI arguments from :func:`_build_arg_parser`.
+        printer_factory: Zero-argument factory for the printer to
+            install when the CLI runs verbosely (callers outside the
+            sorcar layer pass
+            :class:`~kiss.ui.cli.cli_printer.RecordingConsolePrinter`;
+            sorcar itself must not import the UI layer, hence the
+            inverted dependency).  ``None`` installs no printer.
+
+    Returns:
+        Keyword arguments for ``agent.run()``.
+    """
     task_description = _resolve_task(args)
     work_dir = args.work_dir or _launch_work_dir()
     Path(work_dir).mkdir(parents=True, exist_ok=True)
@@ -426,10 +443,8 @@ def _build_run_kwargs(args: argparse.Namespace) -> dict[str, Any]:
     # both records every display event to the chat DB AND renders the
     # Rich panels to the terminal, so the same run is visible live in
     # the terminal and replayable later in the chat webview.
-    if args.verbose:
-        from kiss.ui.cli.cli_printer import RecordingConsolePrinter
-
-        run_kwargs["printer"] = RecordingConsolePrinter()
+    if args.verbose and printer_factory is not None:
+        run_kwargs["printer"] = printer_factory()
     return run_kwargs
 
 
