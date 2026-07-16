@@ -4207,7 +4207,10 @@
   // --- Usage metrics (tokens / budget) in header ---
   function updateUsageMetrics(text) {
     if (!statusTokens || !statusBudget) return;
-    const tm = text.match(/Tokens:\s*([\d,]+)\/[\d,]+/);
+    // New usage-string format: "Context: N/M tokens, Total tokens: T".
+    // Fall back to the legacy "Tokens: N/M" format for old replays.
+    const tm = text.match(/Context:\s*([\d,]+)\/[\d,]+/) ||
+               text.match(/Tokens:\s*([\d,]+)\/[\d,]+/);
     const bm = text.match(/Budget:\s*(\$[0-9.]+)\/\$[0-9.]+/);
     const sm = text.match(/Steps:\s*(\d+)\/\d+/);
     if (tm) statusTokens.textContent = 'Tokens: ' + tm[1];

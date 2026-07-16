@@ -22,7 +22,9 @@ from kiss.core.relentless_agent import (
 )
 from kiss.tests.conftest import requires_gemini_api_key
 
-TEST_MODEL = "gemini-2.0-flash"
+# gemini-2.0-flash was retired by Google (404 "no longer available");
+# use the current cheap flash model for real-call tests.
+TEST_MODEL = "gemini-2.5-flash"
 
 
 def _docker_available() -> bool:
