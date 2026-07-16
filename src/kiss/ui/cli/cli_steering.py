@@ -98,7 +98,7 @@ except ImportError:  # pragma: no cover - exercised only on Windows
     _HAVE_TERMIOS = False
 
 # Minimum height (rows) reserved at the bottom of the screen for the
-# input box: 1 top-border row + :data:`~kiss.agents.sorcar.cli_panel
+# input box: 1 top-border row + :data:`~kiss.ui.cli.cli_panel
 # .MIN_BODY_ROWS` body rows + 1 bottom-border row.  The *effective*
 # height grows when the edit buffer contains embedded newlines
 # (Shift+Enter / multi-line paste) — see :func:`_box_h_for`.  The
@@ -171,7 +171,7 @@ _PASTE_SEQ_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b.")
 # :meth:`_InputBox.feed` cannot mistake a CSI prefix for a bare CR / LF.
 #
 # The CSI tables are derived from the canonical full-sequence tuples in
-# :mod:`kiss.agents.sorcar.cli_panel` (shared with the cli_prompt key
+# :mod:`kiss.ui.cli.cli_panel` (shared with the cli_prompt key
 # bindings) by dropping the leading ESC byte, so the two input paths
 # can never drift apart.
 _NEWLINE_AFTER_ESC: tuple[str, ...] = (
@@ -1523,7 +1523,7 @@ class _InputBox:
                 # insert a newline into the buffer instead of
                 # submitting — the same convention every POSIX
                 # shell uses.  See
-                # :func:`~kiss.agents.sorcar.cli_line_continuation.ends_with_line_continuation`.
+                # :func:`~kiss.ui.cli.cli_line_continuation.ends_with_line_continuation`.
                 cont, keep = ends_with_line_continuation(self.buf)
                 if cont:
                     with self.lock:

@@ -5,14 +5,14 @@
 """Client-mode interactive CLI for ``sorcar``.
 
 This module replaces the standalone in-process REPL
-(:mod:`kiss.agents.sorcar.cli_repl`) with a thin WebSocket / UDS client
+(:mod:`kiss.ui.cli.cli_repl`) with a thin WebSocket / UDS client
 that drives an already-running ``sorcar web`` daemon — the same
 :class:`~kiss.server.web_server.RemoteAccessServer` that backs
 the VS Code extension and the remote browser webapp.  The CLI input
 panel, fast-completes (``@``-mentions, ``/`` slash commands, ``/model``
 names, predictive ghost text), readline history, and Rich-rendered
 output are preserved by re-using
-:class:`kiss.agents.sorcar.cli_repl.CliCompleter` for the completer and
+:class:`kiss.ui.cli.cli_repl.CliCompleter` for the completer and
 :class:`kiss.core.print_to_console.ConsolePrinter` for terminal
 rendering of streamed events received from the server.
 
@@ -175,7 +175,7 @@ class _EventDispatcher:
     All terminal output goes through the single
     :class:`ConsolePrinter` instance so the Rich panels and streamed
     token output match what the standalone REPL used to render via
-    :class:`kiss.agents.sorcar.cli_printer.RecordingConsolePrinter`.
+    :class:`kiss.ui.cli.cli_printer.RecordingConsolePrinter`.
     """
 
     def __init__(
@@ -1466,7 +1466,7 @@ def _run_repl_loop(
     through this very loop and be treated exactly like a typed line
     (blank → skip, exit words, slash commands, otherwise submitted as
     a task).  In the anchored REPL voice runs in the *background*
-    (:func:`~kiss.agents.sorcar.cli_voice.start_voice_anchored`):
+    (:func:`~kiss.ui.cli.cli_voice.start_voice_anchored`):
     *read_line* keeps reading the keyboard as usual — typing stays
     fully usable — while the session's pump injects recognised speech
     into the box so it arrives through *read_line* like typed input,
@@ -1486,9 +1486,9 @@ def _run_repl_loop(
             :class:`KeyboardInterrupt` when the user aborts the wait.
         voice_start: Zero-arg factory starting a voice session for
             ``/voice`` (the anchored REPL binds
-            :func:`~kiss.agents.sorcar.cli_voice.start_voice_anchored`
+            :func:`~kiss.ui.cli.cli_voice.start_voice_anchored`
             to its box); ``None`` falls back to the modal
-            :func:`~kiss.agents.sorcar.cli_voice.read_voice_line_plain`
+            :func:`~kiss.ui.cli.cli_voice.read_voice_line_plain`
             capture.
     """
     interrupt_armed = False

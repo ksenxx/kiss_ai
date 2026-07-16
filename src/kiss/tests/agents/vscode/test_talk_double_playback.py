@@ -42,8 +42,8 @@ from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar import cli_talk
 from kiss.server.web_server import RemoteAccessServer
+from kiss.ui.cli import cli_talk
 
 
 def _redirect_persistence(tmpdir: str) -> tuple[Path, object, Path]:

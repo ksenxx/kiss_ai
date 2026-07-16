@@ -28,7 +28,6 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.sorcar.mcp_cli import _OAuthCallbackServer, run_mcp_cli
 from kiss.agents.sorcar.mcp_servers import (
     FileTokenStorage,
     MCPManager,
@@ -43,6 +42,7 @@ from kiss.agents.sorcar.mcp_servers import (
     remove_mcp_server,
     save_mcp_server,
 )
+from kiss.ui.cli.mcp_cli import _OAuthCallbackServer, run_mcp_cli
 
 _SERVER_SCRIPT = '''
 from mcp.server.fastmcp import FastMCP

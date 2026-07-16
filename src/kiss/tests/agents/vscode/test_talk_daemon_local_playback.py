@@ -37,8 +37,8 @@ from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar import cli_talk
 from kiss.server.web_server import RemoteAccessServer
+from kiss.ui.cli import cli_talk
 
 # A tiny-but-real MP3-looking byte string; the fake player only copies
 # bytes, so any payload works — what matters is byte-exact delivery.

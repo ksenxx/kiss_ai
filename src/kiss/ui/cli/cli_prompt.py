@@ -22,7 +22,7 @@ picker Enter never accepts a completion candidate — it always submits
 the text the user actually typed.
 
 The candidate lists come from the very same
-:class:`~kiss.agents.sorcar.cli_repl.CliCompleter` backend used by the
+:class:`~kiss.ui.cli.cli_repl.CliCompleter` backend used by the
 readline fallback, so both input paths complete identically.
 """
 
@@ -88,7 +88,7 @@ _MODEL_CMD_RE = re.compile(r"^\s*/model\s+(.*)$")
 # table so the raw escape sequence reaches the tuple key-bindings
 # registered further down, which insert a real newline.  The canonical
 # table (modifiers 2..16, Shift through Cmd+Ctrl+Alt+Shift) lives in
-# :mod:`kiss.agents.sorcar.cli_panel` and is shared with
+# :mod:`kiss.ui.cli.cli_panel` and is shared with
 # ``cli_steering._NEWLINE_AFTER_ESC`` so the two input paths can never
 # drift apart.
 _MODIFY_OTHER_KEYS_ENTER = MODIFY_OTHER_KEYS_ENTER
@@ -234,7 +234,7 @@ def _submit_enter(event: KeyPressEvent) -> None:
     buffer) rather than only the text before the cursor so the rule
     matches the steering box's :meth:`_InputBox.feed` implementation
     exactly.  See
-    :func:`~kiss.agents.sorcar.cli_line_continuation.ends_with_line_continuation`.
+    :func:`~kiss.ui.cli.cli_line_continuation.ends_with_line_continuation`.
     """
     buf = event.current_buffer
     state = buf.complete_state
@@ -590,7 +590,7 @@ def _enforce_min_input_height(
     :class:`Dimension` whose ``min`` is *min_rows* so prompt_toolkit
     reserves at least *min_rows* terminal rows for the input area on
     every render — matching the steering box's
-    :data:`~kiss.agents.sorcar.cli_panel.MIN_BODY_ROWS` floor.
+    :data:`~kiss.ui.cli.cli_panel.MIN_BODY_ROWS` floor.
     Buffers with more lines still grow the area dynamically because
     ``Dimension(min=...)`` leaves ``preferred`` / ``max`` unconstrained.
 
@@ -693,8 +693,8 @@ class PtkLineReader:
           ghostty and (increasingly) other terminals.
 
         These are the same two enable / disable pairs written by
-        :meth:`~kiss.agents.sorcar.cli_steering._InputBox.start` /
-        :meth:`~kiss.agents.sorcar.cli_steering._InputBox.stop` for
+        :meth:`~kiss.ui.cli.cli_steering._InputBox.start` /
+        :meth:`~kiss.ui.cli.cli_steering._InputBox.stop` for
         the mid-task steering box, so both the initial task prompt
         and the running-task steering box behave identically on every
         terminal.  Terminals that don't support one/both of these

@@ -1335,7 +1335,7 @@ def main() -> None:
 
     * **Interactive** (no ``-t/--task`` / ``-f/--file``): a thin
       terminal client of the local ``sorcar web`` daemon — see
-      :mod:`kiss.agents.sorcar.cli_client`.  The ``--worktree`` /
+      :mod:`kiss.ui.cli.cli_client`.  The ``--worktree`` /
       ``--no-worktree`` / ``--parallel`` / ``--no-parallel`` /
       ``--auto-commit`` / ``--no-auto-commit`` flags are forwarded
       to the daemon so each task can still run on an isolated git
@@ -1358,7 +1358,7 @@ def main() -> None:
       id) is unavailable.
 
     ``sorcar mcp ...`` is dispatched to the MCP management subcommand
-    (:mod:`kiss.agents.sorcar.mcp_cli`) before normal argument parsing.
+    (:mod:`kiss.ui.cli.mcp_cli`) before normal argument parsing.
     """
     if len(sys.argv) > 1 and sys.argv[1] == "mcp":
         from kiss.ui.cli.mcp_cli import run_mcp_cli

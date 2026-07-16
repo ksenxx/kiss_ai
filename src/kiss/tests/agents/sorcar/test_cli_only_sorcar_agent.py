@@ -87,7 +87,7 @@ class TestNonInteractiveUsesPlainSorcarAgent:
             captured["kwargs"] = run_kwargs
             return "summary: ok\nsuccess: true\n"
 
-        import kiss.agents.sorcar.cli_steering as cli_steering
+        import kiss.ui.cli.cli_steering as cli_steering
 
         monkeypatch.setattr(cli_steering, "run_with_steering", fake_run)
         # ``print_outcome`` is a no-op in verbose mode, but explicitly
