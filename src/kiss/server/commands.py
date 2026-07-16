@@ -1299,12 +1299,12 @@ class _CommandsMixin:
                 any subtype-specific arguments (``arg`` / ``name`` /
                 ``args`` / ``tabId`` / ``workDir``).
         """
-        from kiss.agents.sorcar.cli_repl import build_help_text
         from kiss.agents.sorcar.custom_commands import (
             discover_commands,
             expand_command,
             format_command_listing,
         )
+        from kiss.ui.cli.cli_repl import build_help_text
 
         subtype = cmd.get("subtype", "")
         work_dir = cmd.get("workDir", "") or self.work_dir or "."
