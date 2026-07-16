@@ -23,7 +23,7 @@ class TestAPIKeyEnvVarsType:
 
     def test_api_key_env_vars_is_frozenset(self) -> None:
         """Verify API_KEY_ENV_VARS is a frozenset, not a dict."""
-        from kiss.agents.vscode.vscode_config import API_KEY_ENV_VARS
+        from kiss.server.vscode_config import API_KEY_ENV_VARS
 
         assert isinstance(API_KEY_ENV_VARS, frozenset), (
             f"API_KEY_ENV_VARS should be frozenset, got {type(API_KEY_ENV_VARS).__name__}"
@@ -31,7 +31,7 @@ class TestAPIKeyEnvVarsType:
 
     def test_api_key_env_vars_contains_expected_keys(self) -> None:
         """Verify all expected API key names are present."""
-        from kiss.agents.vscode.vscode_config import API_KEY_ENV_VARS
+        from kiss.server.vscode_config import API_KEY_ENV_VARS
 
         expected = {
             "GEMINI_API_KEY",
@@ -48,7 +48,7 @@ class TestAPIKeyEnvVarsType:
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Verify get_current_api_keys iterates correctly over frozenset."""
-        from kiss.agents.vscode import vscode_config
+        from kiss.server import vscode_config
 
         monkeypatch.setattr(vscode_config, "API_KEY_ENV_VARS", frozenset({"A", "B"}))
         monkeypatch.setenv("A", "val_a")
@@ -58,7 +58,7 @@ class TestAPIKeyEnvVarsType:
 
     def test_source_shell_env_works_with_frozenset(self) -> None:
         """Verify source_shell_env membership check works with frozenset."""
-        from kiss.agents.vscode.vscode_config import API_KEY_ENV_VARS
+        from kiss.server.vscode_config import API_KEY_ENV_VARS
 
         # The `k in API_KEY_ENV_VARS` check in source_shell_env must work
         assert "GEMINI_API_KEY" in API_KEY_ENV_VARS
@@ -70,7 +70,7 @@ class TestTimerFlushNoClosure:
 
     def test_timer_flush_is_method_not_closure(self) -> None:
         """Verify _timer_flush is a proper method on JsonPrinter."""
-        from kiss.agents.vscode.json_printer import JsonPrinter
+        from kiss.server.json_printer import JsonPrinter
 
         assert hasattr(JsonPrinter, "_timer_flush_for_task"), (
             "JsonPrinter should have _timer_flush_for_task method"
@@ -81,7 +81,7 @@ class TestTimerFlushNoClosure:
 
     def test_timer_flush_for_task_type_annotation(self) -> None:
         """Verify _timer_flush_for_task accepts str | None tab_id."""
-        from kiss.agents.vscode.json_printer import JsonPrinter
+        from kiss.server.json_printer import JsonPrinter
 
         hints = JsonPrinter._timer_flush_for_task.__annotations__
         # The task_id parameter should accept str | None
@@ -92,7 +92,7 @@ class TestTimerFlushNoClosure:
         _timer_flush_for_task (via functools.partial) instead of a closure."""
         from functools import partial as functools_partial
 
-        from kiss.agents.vscode.json_printer import JsonPrinter
+        from kiss.server.json_printer import JsonPrinter
 
         printer = JsonPrinter()
         events: list[dict] = []
@@ -139,7 +139,7 @@ class TestNoMisleadingReExportComment:
 
     def test_server_all_does_not_expose_diff_merge_names(self) -> None:
         """Verify __all__ in server.py does not list diff_merge symbols."""
-        from kiss.agents.vscode import server
+        from kiss.server import server
 
         public_names = getattr(server, "__all__", [])
         assert "_cleanup_merge_data" not in public_names

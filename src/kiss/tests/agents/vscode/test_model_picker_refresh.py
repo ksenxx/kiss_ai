@@ -30,7 +30,7 @@ from kiss.core import config as config_module
 
 def _make_server() -> Any:
     os.environ.setdefault("KISS_WORKDIR", "/tmp")
-    from kiss.agents.vscode.server import VSCodeServer
+    from kiss.server.server import VSCodeServer
 
     return VSCodeServer()
 
@@ -87,7 +87,7 @@ class TestModelPickerRefresh(TestCase):
         import tempfile
         from pathlib import Path
 
-        import kiss.agents.vscode.vscode_config as vc
+        import kiss.server.vscode_config as vc
 
         saved_kiss_model = os.environ.pop("KISS_MODEL", None)
         saved_config_dir, saved_config_path = vc.CONFIG_DIR, vc.CONFIG_PATH

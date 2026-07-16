@@ -69,7 +69,7 @@ from kiss.agents.sorcar.persistence import (
     _save_task_result,
 )
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.server import VSCodeServer
 
 # A token that is astronomically unlikely to appear in any other file
 # on disk or in any other test's persisted state — the assertion below

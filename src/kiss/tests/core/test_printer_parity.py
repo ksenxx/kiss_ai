@@ -13,8 +13,8 @@ Feeds identical print() calls to both printers and verifies:
 import io
 from types import SimpleNamespace
 
-from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.core.print_to_console import ConsolePrinter
+from kiss.server.json_printer import JsonPrinter
 
 
 def _make_printers():

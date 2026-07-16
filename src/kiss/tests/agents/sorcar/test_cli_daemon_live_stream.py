@@ -18,7 +18,7 @@ The CLI's :class:`~kiss.agents.sorcar.cli_printer.RecordingConsolePrinter`
 inherits :meth:`JsonPrinter.broadcast`, which records + persists each
 event but has NO transport: every event sits in the DB until the next
 page reload re-renders it.  Meanwhile the running daemon's
-:class:`~kiss.agents.vscode.web_server.WebPrinter` is the ONLY object
+:class:`~kiss.server.web_server.WebPrinter` is the ONLY object
 that fans events out over the WSS / UDS transports to connected
 webviews; the CLI process has no way to feed it.
 
@@ -60,7 +60,7 @@ from typing import Any
 
 from kiss.agents.sorcar import cli_daemon_bridge
 from kiss.agents.sorcar.cli_printer import RecordingConsolePrinter
-from kiss.agents.vscode.web_server import RemoteAccessServer
+from kiss.server.web_server import RemoteAccessServer
 
 
 def _reset_cli_daemon_writer() -> None:

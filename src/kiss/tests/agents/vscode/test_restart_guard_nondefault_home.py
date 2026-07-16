@@ -62,7 +62,7 @@ class TestRestartGuardNonDefaultHome(unittest.TestCase):
     operating on a non-default ``KISS_HOME`` (e.g. the test suite)."""
 
     def setUp(self) -> None:
-        import kiss.agents.vscode.vscode_config as vc
+        import kiss.server.vscode_config as vc
 
         self._tmpdir = tempfile.mkdtemp()
         self._orig_dir = vc.CONFIG_DIR
@@ -89,7 +89,7 @@ class TestRestartGuardNonDefaultHome(unittest.TestCase):
         os.environ["KISS_HOME"] = self._tmpdir
 
     def tearDown(self) -> None:
-        import kiss.agents.vscode.vscode_config as vc
+        import kiss.server.vscode_config as vc
 
         os.environ["PATH"] = self._orig_env_path
         if self._orig_kiss_home is None:
@@ -101,7 +101,7 @@ class TestRestartGuardNonDefaultHome(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _make_server(self) -> Any:
-        from kiss.agents.vscode.commands import _CommandsMixin
+        from kiss.server.commands import _CommandsMixin
 
         class FakeServer(_CommandsMixin):
             def __init__(self) -> None:
@@ -132,7 +132,7 @@ class TestRestartGuardNonDefaultHome(unittest.TestCase):
         ``_cmd_save_config`` SIGTERMed the live daemon that was running
         the agent which had launched the test.
         """
-        from kiss.agents.vscode.vscode_config import save_config
+        from kiss.server.vscode_config import save_config
 
         save_config({"remote_password": "old-secret"})
         server = self._make_server()
@@ -148,7 +148,7 @@ class TestRestartGuardNonDefaultHome(unittest.TestCase):
 
     def test_helper_skips_and_reports_under_custom_home(self) -> None:
         """``_restart_kiss_web_daemon`` returns False and spawns nothing."""
-        from kiss.agents.vscode.commands import _restart_kiss_web_daemon
+        from kiss.server.commands import _restart_kiss_web_daemon
 
         dispatched = _restart_kiss_web_daemon()
         assert dispatched is False, (
@@ -160,7 +160,7 @@ class TestRestartGuardNonDefaultHome(unittest.TestCase):
     def test_helper_restarts_under_default_home(self) -> None:
         """Control: with the default ``~/.kiss`` home the restart still
         dispatches (observed via the PATH stub, never the real daemon)."""
-        from kiss.agents.vscode.commands import _restart_kiss_web_daemon
+        from kiss.server.commands import _restart_kiss_web_daemon
 
         os.environ["KISS_HOME"] = str(Path.home() / ".kiss")
         dispatched = _restart_kiss_web_daemon()
@@ -171,7 +171,7 @@ class TestRestartGuardNonDefaultHome(unittest.TestCase):
 
     def test_helper_restarts_when_kiss_home_unset(self) -> None:
         """Control: an unset ``KISS_HOME`` means the default home."""
-        from kiss.agents.vscode.commands import _restart_kiss_web_daemon
+        from kiss.server.commands import _restart_kiss_web_daemon
 
         os.environ.pop("KISS_HOME", None)
         dispatched = _restart_kiss_web_daemon()

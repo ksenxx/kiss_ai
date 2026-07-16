@@ -21,9 +21,9 @@ import os
 import tempfile
 from typing import Any
 
-from kiss.agents.vscode.autocomplete import _AutocompleteMixin, _ghost_suffix
-from kiss.agents.vscode.json_printer import JsonPrinter, _coalesce_events
-from kiss.agents.vscode.vscode_config import (
+from kiss.server.autocomplete import _AutocompleteMixin, _ghost_suffix
+from kiss.server.json_printer import JsonPrinter, _coalesce_events
+from kiss.server.vscode_config import (
     build_model_config,
     get_custom_model_entry,
 )

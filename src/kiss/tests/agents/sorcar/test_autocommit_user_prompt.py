@@ -12,7 +12,7 @@ original task prompt so the commit is traceable to the request that
 produced it.
 
 These tests exercise the real
-:func:`~kiss.agents.vscode.helpers.generate_commit_message_from_diff`
+:func:`~kiss.server.helpers.generate_commit_message_from_diff`
 and
 :meth:`~kiss.agents.sorcar.worktree_sorcar_agent.WorktreeSorcarAgent._auto_commit_worktree`
 paths against on-disk git repositories.  The LLM call inside the
@@ -31,7 +31,7 @@ from typing import Any
 
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-from kiss.agents.vscode.helpers import (
+from kiss.server.helpers import (
     _append_user_prompt,
     generate_commit_message_from_diff,
 )

@@ -5,7 +5,7 @@
 /**
  * Resolve and lazily seed ``~/.kiss/<asset>`` markdown assets.
  *
- * TypeScript counterpart to ``kiss/agents/vscode/user_assets.py``.
+ * TypeScript counterpart to ``kiss/server/user_assets.py``.
  *
  * Two helpers:
  *
@@ -14,7 +14,7 @@
  *   for future package-seeded assets; no production caller currently
  *   uses it (``INJECTIONS.md`` is now read directly from the bundled
  *   package, never copied into ``~/.kiss/`` — see ``getTricks`` in
- *   ``SorcarTab.ts`` and ``kiss.agents.vscode.tricks.read_tricks``).
+ *   ``SorcarTab.ts`` and ``kiss.server.tricks.read_tricks``).
  *   At runtime user edits survive every read.
  *
  * * ``ensureUserAssetFromDefault(name, defaultContent)`` — seeds a user

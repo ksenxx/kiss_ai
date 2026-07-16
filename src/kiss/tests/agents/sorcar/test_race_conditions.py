@@ -7,7 +7,7 @@
 These tests deliberately interleave concurrent threads to reproduce
 specific race conditions identified in
 ``kiss.agents.sorcar.persistence`` and
-``kiss.agents.vscode.autocomplete``.
+``kiss.server.autocomplete``.
 
 Each test inserts a small ``random.uniform(0, 0.05)`` sleep at the
 suspected racing statement, then runs the involved threads many times
@@ -153,7 +153,7 @@ class TestAutocompleteWorkerDoubleSpawn:
     def test_double_spawn(self) -> None:
         import queue as queue_mod
 
-        from kiss.agents.vscode.autocomplete import _AutocompleteMixin
+        from kiss.server.autocomplete import _AutocompleteMixin
 
         # Build a bare instance carrying only the attributes touched
         # by ``_ensure_complete_worker``.

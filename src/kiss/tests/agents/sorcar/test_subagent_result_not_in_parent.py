@@ -46,7 +46,7 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import (
     _load_chat_events_by_task_id,
 )
-from kiss.agents.vscode.json_printer import JsonPrinter
+from kiss.server.json_printer import JsonPrinter
 
 # ---------------------------------------------------------------------------
 # Fake OpenAI server that returns run_parallel → finish

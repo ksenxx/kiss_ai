@@ -45,7 +45,7 @@ import unittest
 from typing import cast
 
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.agents.vscode.web_server import RemoteAccessServer
+from kiss.server.web_server import RemoteAccessServer
 
 
 class TestShutdownSignalRegistryRace(unittest.TestCase):

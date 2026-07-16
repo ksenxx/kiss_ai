@@ -11,7 +11,7 @@ the fix (env scrub + ``errors="surrogateescape"``) and pass after.
 import subprocess
 from pathlib import Path
 
-from kiss.agents.vscode.diff_merge import _git, _git_bytes
+from kiss.server.diff_merge import _git, _git_bytes
 
 
 def _make_repo(path: Path) -> None:

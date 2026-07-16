@@ -8,7 +8,7 @@ The process-global registry mapping frontend tab id →
 :class:`_RunningAgentState` is mutated by code in both
 ``kiss.agents.sorcar`` (parallel sub-agent spawning in
 ``ChatSorcarAgent._run_tasks_parallel``, worktree register /
-unregister in ``WorktreeSorcarAgent``) and ``kiss.agents.vscode``
+unregister in ``WorktreeSorcarAgent``) and ``kiss.server``
 (server tab lifecycle).  When those mutations were not serialised
 against the VS Code server's iteration loops, the iteration could
 observe the dict mid-resize and raise
@@ -36,7 +36,7 @@ import pytest
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.server import VSCodeServer
 
 
 @pytest.fixture(autouse=True)
@@ -238,7 +238,7 @@ class TestStateLockIsRegistryLock:
     The fix relies on this identity so that producers in
     ``kiss.agents.sorcar`` (which can only reach
     ``_RunningAgentState._registry_lock``) and consumers in
-    ``kiss.agents.vscode`` (which acquire ``self._state_lock``)
+    ``kiss.server`` (which acquire ``self._state_lock``)
     serialise against each other.  If a future refactor splits the
     two locks again, the registry-resize races come back.
     """

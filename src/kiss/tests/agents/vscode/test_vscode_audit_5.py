@@ -3,7 +3,7 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 """Integration tests confirming fixes for bugs and inconsistencies in
-``kiss.agents.vscode`` — audit round 5.
+``kiss.server`` — audit round 5.
 
 B1 fix: ``_await_user_response`` now acquires ``_state_lock`` before
     reading ``_running_agent_states``, consistent with the locking discipline.
@@ -21,7 +21,7 @@ import queue
 import threading
 import unittest
 
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.server import VSCodeServer
 
 
 def _make_server() -> tuple[VSCodeServer, list[dict]]:
