@@ -22,9 +22,9 @@ import pytest
 
 import kiss.agents.sorcar.persistence as persistence
 import kiss.agents.third_party_agents._channel_agent_utils as channel_utils
-import kiss.agents.vscode.user_assets as user_assets
-import kiss.agents.vscode.vscode_config as vscode_config
-import kiss.agents.vscode.web_server as web_server
+import kiss.server.user_assets as user_assets
+import kiss.server.vscode_config as vscode_config
+import kiss.server.web_server as web_server
 from kiss.core.config import kiss_home
 
 

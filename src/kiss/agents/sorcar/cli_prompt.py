@@ -55,7 +55,7 @@ from kiss.agents.sorcar.cli_panel import CYAN as _CYAN
 from kiss.agents.sorcar.cli_panel import MIN_BODY_ROWS as _MIN_BODY_ROWS
 from kiss.agents.sorcar.cli_panel import RESET as _RESET
 from kiss.agents.sorcar.persistence import _load_file_usage
-from kiss.agents.vscode.helpers import rank_file_suggestions
+from kiss.server.helpers import rank_file_suggestions
 
 if TYPE_CHECKING:
     from collections.abc import Iterable

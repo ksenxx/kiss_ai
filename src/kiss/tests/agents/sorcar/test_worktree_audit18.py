@@ -343,7 +343,7 @@ class TestRacePostTaskVsUserAction:
         """
         src = (
             Path(__file__).resolve().parents[3]
-            / "agents" / "vscode" / "task_runner.py"
+            / "server" / "task_runner.py"
         ).read_text()
 
         start = src.index("def _run_task_inner")

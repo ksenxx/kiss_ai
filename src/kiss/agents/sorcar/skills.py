@@ -278,7 +278,7 @@ def load_permission_rules(key: str) -> dict[str, str]:
         order.  Empty when the config or key is missing/malformed.
     """
     try:
-        from kiss.agents.vscode.vscode_config import load_config
+        from kiss.server.vscode_config import load_config
 
         raw = load_config().get(key)
     except Exception:

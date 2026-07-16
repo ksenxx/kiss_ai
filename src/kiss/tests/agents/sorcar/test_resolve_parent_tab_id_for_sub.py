@@ -142,7 +142,7 @@ class TestResolveParentTabIdForSub:
         observable."""
         server = VSCodeServer()
         with caplog.at_level(
-            logging.WARNING, logger="kiss.agents.vscode.server",
+            logging.WARNING, logger="kiss.server.server",
         ):
             out = server._resolve_parent_tab_id_for_sub(
                 parent_task_id="12345", chat_id="missing-chat",

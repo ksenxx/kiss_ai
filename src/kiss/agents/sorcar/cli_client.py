@@ -7,7 +7,7 @@
 This module replaces the standalone in-process REPL
 (:mod:`kiss.agents.sorcar.cli_repl`) with a thin WebSocket / UDS client
 that drives an already-running ``sorcar web`` daemon — the same
-:class:`~kiss.agents.vscode.web_server.RemoteAccessServer` that backs
+:class:`~kiss.server.web_server.RemoteAccessServer` that backs
 the VS Code extension and the remote browser webapp.  The CLI input
 panel, fast-completes (``@``-mentions, ``/`` slash commands, ``/model``
 names, predictive ghost text), readline history, and Rich-rendered
@@ -38,7 +38,7 @@ task prompts as ``run`` commands.  Incoming events (``text_delta``,
 
 Server-side commands required by this client beyond the existing
 webview surface are listed in
-:meth:`kiss.agents.vscode.commands._CommandsMixin._cmd_cli_info` —
+:meth:`kiss.server.commands._CommandsMixin._cmd_cli_info` —
 ``cliInfo`` with a ``subtype`` selector handles ``/help``,
 ``/commands``, ``/skills``, ``/mcp``, ``/cost`` and custom-command
 expansion.

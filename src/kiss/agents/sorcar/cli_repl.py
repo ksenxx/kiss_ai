@@ -108,18 +108,18 @@ from kiss.agents.sorcar.persistence import (
     _load_history,
     _prefix_match_tasks,
 )
-from kiss.agents.vscode.autocomplete import (
+from kiss.server.autocomplete import (
     identifier_prefix_matches,
     model_picker_sort_key,
     ranked_function_calling_models,
     read_active_file_head,
     trailing_identifier,
 )
-from kiss.agents.vscode.helpers import (
+from kiss.server.helpers import (
     clip_autocomplete_suggestion,
     rank_file_suggestions,
 )
-from kiss.agents.vscode.tricks import (
+from kiss.server.tricks import (
     current_sentence_partial,
     prefix_match_tricks,
 )
@@ -304,8 +304,8 @@ def picker_ordered_models(query: str) -> list[tuple[str, str]]:
         vendor display name otherwise.
     """
     from kiss.agents.sorcar.persistence import _load_model_usage
-    from kiss.agents.vscode.helpers import model_vendor
     from kiss.core.models.model_info import MODEL_INFO
+    from kiss.server.helpers import model_vendor
 
     names = ranked_function_calling_models()
     if not names:
@@ -360,7 +360,7 @@ class CliCompleter:
     def _files(self) -> list[str]:
         """Return the (lazily scanned, cached) project file list."""
         if self._file_cache is None:
-            from kiss.agents.vscode.diff_merge import _scan_files
+            from kiss.server.diff_merge import _scan_files
 
             try:
                 self._file_cache = _scan_files(self.work_dir)
@@ -583,7 +583,7 @@ class CliCompleter:
         """Complete the trailing identifier of *line* from the active file.
 
         Harvesting is shared with the VS Code daemon's ghost-text
-        completion (see :func:`~kiss.agents.vscode.autocomplete
+        completion (see :func:`~kiss.server.autocomplete
         .identifier_prefix_matches`); this CLI variant keeps only the
         single longest suffix, clipped for a one-line ghost.
         """
@@ -856,7 +856,7 @@ def build_help_text(work_dir: str) -> str:
     for *work_dir*, and the input fast-complete cheat sheet.  Single
     source for both the standalone REPL's :func:`_print_help` and the
     daemon's ``cliInfo`` ``help`` reply (``_cmd_cli_info`` in
-    :mod:`kiss.agents.vscode.commands`) so the two surfaces can never
+    :mod:`kiss.server.commands`) so the two surfaces can never
     drift.
 
     Args:
