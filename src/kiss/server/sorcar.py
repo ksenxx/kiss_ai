@@ -11,6 +11,7 @@ until it finishes::
 
     result = sorcar.run("Summarize README.md", work_dir="/path/to/repo")
     print(result.text, result.success, result.cost, result.tokens, result.steps)
+    print(result.chat_id, result.task_id)  # daemon chat session / task row ids
 
 The function speaks the daemon's newline-delimited JSON protocol over
 its Unix-domain socket (``$KISS_SORCAR_SOCK``, defaulting to
@@ -49,6 +50,12 @@ class TaskResult:
         cost: Budget consumed by the task in USD.
         tokens: Total LLM tokens consumed by the task.
         steps: Total agent steps taken by the task.
+        chat_id: The daemon chat session id the task ran on.  Reusable
+            to resume or inspect the chat later; ``""`` when the run
+            ended before the daemon assigned one.
+        task_id: The daemon's persisted ``task_history`` row id of the
+            run; ``""`` when the run ended before a row was allocated
+            (e.g. the daemon had no model configured).
     """
 
     text: str
@@ -56,6 +63,8 @@ class TaskResult:
     cost: float
     tokens: int
     steps: int
+    chat_id: str = ""
+    task_id: str = ""
 
 
 def _resolve_sock_path(sock_path: str | Path | None) -> Path:
@@ -96,12 +105,20 @@ def _parse_cost(value: Any) -> float:
     return 0.0
 
 
-def _to_task_result(event: dict[str, Any] | None) -> TaskResult:
+def _to_task_result(
+    event: dict[str, Any] | None,
+    chat_id: str = "",
+    task_id: str = "",
+) -> TaskResult:
     """Convert the final daemon ``result`` event into a :class:`TaskResult`.
 
     Args:
         event: The last ``result`` event received for the task's tab,
             or ``None`` when the task ended without one.
+        chat_id: The daemon chat session id observed on the run's
+            ``clear`` event (``""`` when none was seen).
+        task_id: The persisted ``task_history`` row id observed on the
+            run's event stream (``""`` when none was seen).
 
     Returns:
         The parsed :class:`TaskResult`.  The daemon enriches ``result``
@@ -110,7 +127,10 @@ def _to_task_result(event: dict[str, Any] | None) -> TaskResult:
         ``text`` when present.
     """
     if event is None:
-        return TaskResult(text="", success=False, cost=0.0, tokens=0, steps=0)
+        return TaskResult(
+            text="", success=False, cost=0.0, tokens=0, steps=0,
+            chat_id=chat_id, task_id=task_id,
+        )
     text = str(event.get("summary") or event.get("text") or "")
     return TaskResult(
         text=text,
@@ -118,6 +138,8 @@ def _to_task_result(event: dict[str, Any] | None) -> TaskResult:
         cost=_parse_cost(event.get("cost")),
         tokens=int(event.get("total_tokens", 0) or 0),
         steps=int(event.get("step_count", 0) or 0),
+        chat_id=chat_id,
+        task_id=task_id,
     )
 
 
@@ -150,7 +172,11 @@ def run(
 
     Returns:
         A :class:`TaskResult` with the result text, success flag, cost
-        (USD), total tokens, and step count of the task.
+        (USD), total tokens, step count, chat id, and task id of the
+        task.  ``chat_id`` is the daemon chat session id and
+        ``task_id`` the persisted ``task_history`` row id — both
+        usable later to look up or resume the run in the daemon's
+        history.
 
     Raises:
         ValueError: When *prompt* is empty or blank.
@@ -188,6 +214,8 @@ def run(
         sock.sendall(json.dumps(cmd).encode("utf-8") + b"\n")
         reader = sock.makefile("rb", buffering=_MAX_LINE_BYTES)
         result_event: dict[str, Any] | None = None
+        chat_id = ""
+        task_id = ""
         started = False
         while True:
             remaining = deadline - time.monotonic()
@@ -214,13 +242,25 @@ def run(
             if not isinstance(event, dict) or event.get("tabId") != tab_id:
                 continue
             etype = event.get("type")
+            if etype == "clear":
+                # ``_cmd_run`` stamps the launcher tab's ``clear``
+                # broadcast with the chat session id it minted (or
+                # reused) for this run.
+                chat_id = str(event.get("chat_id", "") or "") or chat_id
+            elif etype != "status" and event.get("taskId"):
+                # Task-stream events are fanned out with the persisted
+                # ``task_history`` row id injected as ``taskId``.
+                # ``status`` events are excluded: they echo the
+                # client-supplied correlation id from the ``run``
+                # command, not the daemon's row id.
+                task_id = str(event["taskId"])
             if etype == "result":
                 result_event = event
             elif etype == "status":
                 if event.get("running"):
                     started = True
                 elif started:
-                    return _to_task_result(result_event)
+                    return _to_task_result(result_event, chat_id, task_id)
     finally:
         try:
             sock.close()
