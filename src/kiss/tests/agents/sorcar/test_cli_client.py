@@ -59,6 +59,7 @@ from unittest.mock import patch
 
 from kiss.agents.sorcar import persistence as th
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.core import vscode_config
 from kiss.core.print_to_console import ConsolePrinter
 from kiss.server.web_server import RemoteAccessServer
 from kiss.ui.cli import cli_daemon_bridge
@@ -133,6 +134,19 @@ class _DaemonHarness:
         th._KISS_DIR = kiss_dir
         th._DB_PATH = kiss_dir / "sorcar.db"
         th._db_conn = None
+        # Isolate the JSON config store as well.  Commands handled by
+        # the daemon (e.g. ``selectModel`` -> ``_save_last_model``)
+        # persist user preferences via ``kiss.core.vscode_config``;
+        # without this override they would write ``last_model`` into
+        # the session-shared ``$KISS_HOME/config.json`` and leak the
+        # selection into unrelated tests (e.g. the model-picker
+        # refresh tests, which read the persisted ``last_model``).
+        self._saved_config_override = (
+            vars(vscode_config).get("CONFIG_DIR"),
+            vars(vscode_config).get("CONFIG_PATH"),
+        )
+        vscode_config.CONFIG_DIR = kiss_dir
+        vscode_config.CONFIG_PATH = kiss_dir / "config.json"
         self._saved_env = os.environ.get("KISS_SORCAR_SOCK")
         os.environ["KISS_SORCAR_SOCK"] = self.sock_path
         _reset_cli_daemon_writer()
@@ -231,6 +245,19 @@ class _DaemonHarness:
         # T5.1 round 3).
         _RunningAgentState.running_agent_states.clear()
         th._DB_PATH, th._db_conn, th._KISS_DIR = self._saved_persistence
+        # Restore the lazy CONFIG_DIR/CONFIG_PATH resolution (or a
+        # pre-existing explicit override) pinned in ``__init__``.
+        saved_dir, saved_path = self._saved_config_override
+        if saved_dir is None:
+            if "CONFIG_DIR" in vars(vscode_config):
+                delattr(vscode_config, "CONFIG_DIR")
+        else:
+            vscode_config.CONFIG_DIR = saved_dir
+        if saved_path is None:
+            if "CONFIG_PATH" in vars(vscode_config):
+                delattr(vscode_config, "CONFIG_PATH")
+        else:
+            vscode_config.CONFIG_PATH = saved_path
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def find_command(self, type_: str) -> dict[str, Any] | None:
@@ -268,6 +295,25 @@ class CliClientBase(unittest.TestCase):
                 self.harness.shutdown()
             finally:
                 self._devnull.close()
+
+
+class TestHarnessConfigIsolation(unittest.TestCase):
+    """Persisted user preferences written while a harness daemon is up
+    must land in the harness's own temp config, not the ambient
+    (session-shared) ``config.json`` — otherwise a ``selectModel``
+    round-trip in one test leaks ``last_model`` into every later test
+    that consults the persisted preference (e.g. the model-picker
+    refresh tests)."""
+
+    def test_save_last_model_does_not_leak_into_ambient_config(self) -> None:
+        before = th._load_last_model()
+        harness = _DaemonHarness()
+        try:
+            th._save_last_model("leaky-model-xyz")
+            self.assertEqual(th._load_last_model(), "leaky-model-xyz")
+        finally:
+            harness.shutdown()
+        self.assertEqual(th._load_last_model(), before)
 
 
 class TestCliInfoSlashCommands(CliClientBase):
