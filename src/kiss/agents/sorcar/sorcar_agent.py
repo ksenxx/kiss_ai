@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -30,9 +31,10 @@ from kiss.agents.sorcar.cli_helpers import (
 )
 from kiss.agents.sorcar.persistence import _load_last_model
 from kiss.agents.sorcar.skills import make_skill_tool
-from kiss.agents.sorcar.useful_tools import UsefulTools
+from kiss.agents.sorcar.useful_tools import UsefulTools, intercept_grep_hint
 from kiss.agents.sorcar.web_use_tool import WebUseTool
 from kiss.core.base import SYSTEM_PROMPT
+from kiss.core.kiss_error import BudgetExceededError
 from kiss.core.models.model import Attachment
 from kiss.core.models.model_info import (
     MODEL_INFO,
@@ -47,35 +49,44 @@ logger = logging.getLogger(__name__)
 
 
 def _generate_commit_message(
-    commit_dir: Path, user_prompt: str | None = None,
+    commit_dir: Path,
+    user_prompt: str | None = None,
+    task_result: str | None = None,
 ) -> str:
     """Generate a commit message for staged changes using an LLM.
 
     Gets the staged diff and delegates to
-    :func:`~kiss.agents.vscode.helpers.generate_commit_message_from_diff`.
+    :func:`~kiss.agents.sorcar.commit_message.generate_commit_message_from_diff`.
     When *user_prompt* is provided, it is forwarded so the user's
-    task prompt is incorporated into the commit message.
+    task prompt is incorporated into the commit message.  When
+    *task_result* is provided, the task's result summary is appended
+    to the commit message as well.
 
     Args:
         commit_dir: The directory containing staged changes.
         user_prompt: The user's task prompt that produced these
             staged changes, or ``None`` when not available.
+        task_result: The task's result summary, or ``None`` when
+            not available.
 
     Returns:
         A commit message string.
     """
+    from kiss.agents.sorcar.commit_message import generate_commit_message_from_diff
     from kiss.agents.sorcar.git_worktree import GitWorktreeOps
-    from kiss.agents.vscode.helpers import generate_commit_message_from_diff
 
     diff_text = GitWorktreeOps.staged_diff(commit_dir)
-    return generate_commit_message_from_diff(diff_text, user_prompt=user_prompt)
+    return generate_commit_message_from_diff(
+        diff_text, user_prompt=user_prompt, task_result=task_result,
+    )
 
 
 def auto_commit_changes(
     commit_dir: Path,
     user_prompt: str | None,
-    message_fn: Callable[[Path, str | None], str],
+    message_fn: Callable[[Path, str | None, str | None], str],
     notify_fn: Callable[[str, str], None] | None = None,
+    task_result: str | None = None,
 ) -> bool:
     """Stage all changes, generate a commit message, and commit.
 
@@ -102,7 +113,10 @@ def auto_commit_changes(
         user_prompt: The user's task prompt, woven into the commit
             message (or its fallback), or ``None`` when unavailable.
         message_fn: Callable producing a commit message from
-            ``(commit_dir, user_prompt)``.
+            ``(commit_dir, user_prompt, task_result)``.
+        task_result: The task's result summary, appended to the
+            commit message (or its fallback) under a ``Result:``
+            heading, or ``None`` when unavailable.
         notify_fn: Optional UI callback invoked at two life-cycle
             points so the chat webview can render toasts:
 
@@ -140,16 +154,20 @@ def auto_commit_changes(
         return False
     _safe_notify(notify_fn, "generating", "")
     try:
-        msg = message_fn(commit_dir, user_prompt)
+        msg = message_fn(commit_dir, user_prompt, task_result)
     except Exception:
         logger.debug(
             "LLM commit message generation failed; using fallback", exc_info=True,
         )
         msg = "kiss: auto-commit agent changes"
         if user_prompt:
-            from kiss.agents.vscode.helpers import _append_user_prompt
+            from kiss.agents.sorcar.commit_message import _append_user_prompt
 
             msg = _append_user_prompt(msg, user_prompt)
+        if task_result:
+            from kiss.agents.sorcar.commit_message import _append_task_result
+
+            msg = _append_task_result(msg, task_result)
     # Re-stage immediately before committing to capture any files
     # that materialized during the (typically slow) *message_fn*
     # call — see the docstring above for the production race this
@@ -228,6 +246,136 @@ def _broadcast_subagent_done(printer: Any, tab_ids: list[str]) -> None:
             pass
 
 
+def _live_agent_usage(agent: Any) -> tuple[float, int, int]:
+    """Return live ``(budget, tokens, steps)`` for *agent*, including its
+    in-flight executor session.
+
+    :class:`~kiss.core.relentless_agent.RelentlessAgent` folds a session
+    executor's spend into the agent's totals only when the session ends,
+    so mid-session the live spend is visible only on
+    ``agent._current_executor``.
+    """
+    budget, tokens, steps = _agent_usage(agent)
+    executor = getattr(agent, "_current_executor", None)
+    if executor is not None:
+        budget += float(getattr(executor, "budget_used", 0.0) or 0.0)
+        tokens += int(getattr(executor, "total_tokens_used", 0) or 0)
+        steps += int(getattr(executor, "step_count", 0) or 0)
+    return budget, tokens, steps
+
+
+class _LiveUsageMonitor:
+    """Streams the parent task's live cumulative usage while parallel
+    sub-agents run.
+
+    Between the moment ``run_parallel`` blocks the parent's turn and the
+    moment :func:`_attribute_sub_usage` folds the finished sub-agents'
+    spend back into the parent, nothing else emits ``usage_info`` on the
+    PARENT task — the cost/tokens header (chat webview top bar, sorcar
+    CLI interactive) would otherwise show a stale figure that excludes
+    all live sub-agent spend until every sub-agent finished.  This
+    monitor polls every tracked sub-agent and broadcasts a parent-task
+    ``usage_info`` whenever the totals change, so the header always
+    reflects the agent plus all of its sub-agents at every turn.
+
+    The emitted values are RAW (session-relative), exactly like the
+    per-turn ``usage_info`` from ``KISSAgent``: the printer adds the
+    parent task's budget/tokens/steps offsets (the parent's cumulative
+    spend snapshotted at session start).  :meth:`stop` joins the polling
+    thread and is called BEFORE ``_attribute_sub_usage`` bumps those
+    offsets, so a late emission can never double-count sub-agent spend.
+    """
+
+    def __init__(self, parent: Any, printer: Any, interval: float = 1.0) -> None:
+        self._parent = parent
+        self._printer = printer
+        self._interval = interval
+        self._agents_lock = threading.Lock()
+        self._agents: list[Any] = []
+        self._done = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._last_emitted: tuple[str, int, int] | None = None
+        # Capture the parent's thread-local task id HERE, in the calling
+        # thread — the monitor thread must emit on the PARENT task's
+        # stream (broadcast tags events and resolves usage offsets by
+        # the emitting thread's task key).
+        thread_local = getattr(printer, "_thread_local", None) if printer else None
+        self._parent_task_id = (
+            getattr(thread_local, "task_id", "") if thread_local else ""
+        )
+
+    def track(self, agent: Any) -> None:
+        """Register a spawned sub-agent whose live spend should be polled."""
+        with self._agents_lock:
+            self._agents.append(agent)
+
+    def start(self) -> None:
+        """Start the polling thread (no-op without a printer)."""
+        if self._printer is None:
+            return
+        self._thread = threading.Thread(
+            target=self._loop, name="live-usage-monitor", daemon=True
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        """Stop and join the polling thread.
+
+        Joining guarantees no further emission can race with the
+        subsequent :func:`_attribute_sub_usage` offset bump (which would
+        double-count the sub-agents' spend in the displayed total).
+        """
+        self._done.set()
+        if self._thread is not None:
+            self._thread.join()
+            self._thread = None
+
+    def _loop(self) -> None:
+        thread_local = getattr(self._printer, "_thread_local", None)
+        if thread_local is not None:
+            thread_local.task_id = self._parent_task_id
+        while not self._done.wait(self._interval):
+            try:
+                self._emit()
+            except Exception:
+                logger.debug("Live usage emission failed", exc_info=True)
+
+    def _emit(self) -> None:
+        """Broadcast a parent-task ``usage_info`` when the totals changed."""
+        executor = getattr(self._parent, "_current_executor", None)
+        if executor is not None:
+            budget = float(getattr(executor, "budget_used", 0.0) or 0.0)
+            tokens = int(getattr(executor, "total_tokens_used", 0) or 0)
+            steps = int(getattr(executor, "step_count", 0) or 0)
+        else:
+            budget, tokens, steps = 0.0, 0, 0
+        with self._agents_lock:
+            agents = list(self._agents)
+        for sub in agents:
+            try:
+                sub_budget, sub_tokens, sub_steps = _live_agent_usage(sub)
+            except Exception:
+                # One misbehaving sub-agent must not blind the whole
+                # header to every other sub-agent's live spend.
+                logger.debug("Live usage poll failed", exc_info=True)
+                continue
+            budget += sub_budget
+            tokens += sub_tokens
+            steps += sub_steps
+        cost = f"${budget:.4f}"
+        snapshot = (cost, tokens, steps)
+        if snapshot == self._last_emitted:
+            return
+        self._last_emitted = snapshot
+        self._printer.print(
+            f"Tokens: {tokens:,}, Budget: {cost} (live, incl. parallel sub-agents), ",
+            type="usage_info",
+            total_tokens=tokens,
+            cost=cost,
+            total_steps=steps,
+        )
+
+
 def _attribute_sub_usage(agent: Any, budget: float, tokens: int, steps: int) -> None:
     """Attribute sub-agents' cost, tokens, and steps to the parent *agent*.
 
@@ -300,6 +448,46 @@ class SorcarAgent(RelentlessAgent):
         self._use_web_tools: bool = True
         self._is_parallel: bool = False
 
+    def _subagent_budget_share(self, num_tasks: int) -> float | None:
+        """Return the ``max_budget`` each parallel sub-agent may spend.
+
+        Splits this task's REMAINING budget — ``max_budget`` minus the
+        spend already attributed to this agent minus the live executor
+        session's own spend — evenly across *num_tasks* sub-agents PLUS
+        one reserved parent share.  Reserving that share leaves the main
+        agent enough budget to process the results and finish; importantly,
+        even a one-item fan-out cannot consume the parent's entire remainder.
+
+        Args:
+            num_tasks: Number of parallel sub-agent tasks about to spawn.
+
+        Returns:
+            The per-sub-agent budget share in USD, or ``None`` when this
+            agent has no budget context yet (``run``/``_reset`` never
+            ran, e.g. direct ``_run_tasks_parallel`` invocations) — the
+            sub-agents then fall back to their default budget.
+
+        Raises:
+            KISSError: If the task has no remaining budget.
+        """
+        raw_max_budget = getattr(self, "max_budget", None)
+        if raw_max_budget is None:
+            return None
+        max_budget = float(raw_max_budget)
+        executor = getattr(self, "_current_executor", None)
+        live = executor.budget_used if executor is not None else 0.0
+        remaining = max_budget - float(getattr(self, "budget_used", 0.0) or 0.0) - live
+        if remaining <= 0:
+            raise BudgetExceededError(
+                f"Agent {self.name} has no remaining budget for parallel "
+                f"sub-agents (${max_budget - remaining:.4f} / "
+                f"${max_budget:.2f})."
+            )
+        # Keep one equal share for the parent to consume the sub-agent
+        # results and issue its terminal ``finish`` call.  With no tasks
+        # there is no fan-out and the full remainder stays with the parent.
+        return remaining if num_tasks <= 0 else remaining / (num_tasks + 1)
+
     def _run_tasks_parallel(
         self,
         tasks: list[str],
@@ -326,14 +514,35 @@ class SorcarAgent(RelentlessAgent):
             List of YAML result strings in the same order as *tasks*.
         """
         totals: dict[str, float] = {}
-        results = run_tasks_parallel(
-            tasks,
-            max_workers=max_workers,
-            model_name=self.model_name,
-            work_dir=self.work_dir,
-            printer=self.printer,
-            totals_out=totals,
-        )
+        # Live-stream the parent task's cumulative usage (parent session
+        # + all sub-agents) while the fan-out runs, so the cost/tokens
+        # header stays accurate at every turn instead of freezing until
+        # every sub-agent completes.  Stopped (joined) BEFORE
+        # ``_attribute_sub_usage`` bumps the printer offsets, so a late
+        # emission can never double-count the sub-agents' spend.
+        monitor = _LiveUsageMonitor(self, self.printer)
+        monitor.start()
+        try:
+            results = run_tasks_parallel(
+                tasks,
+                max_workers=max_workers,
+                model_name=self.model_name,
+                work_dir=self.work_dir,
+                printer=self.printer,
+                totals_out=totals,
+                usage_monitor=monitor,
+                # Cap every sub-agent to a fair share of THIS task's
+                # remaining budget — without it each sub-agent would default
+                # to the full configured budget and a single sub-agent could
+                # spend the entire budget of the main task.  One equal share
+                # remains reserved for the parent to process results and finish.
+                max_budget=self._subagent_budget_share(len(tasks)),
+                # Sub-agents must talk to the same provider endpoint as the
+                # parent (custom ``base_url``/``api_key`` routing).
+                model_config=getattr(self, "model_config", None),
+            )
+        finally:
+            monitor.stop()
         _attribute_sub_usage(
             self,
             float(totals.get("budget_used", 0.0)),
@@ -431,7 +640,7 @@ class SorcarAgent(RelentlessAgent):
             # on the device (the CLI terminal alone falls back to the
             # system TTS command).
             try:
-                from kiss.agents.vscode.speech_synthesis import synthesize_talk_audio
+                from kiss.core.speech_synthesis import synthesize_talk_audio
 
                 synthesized = synthesize_talk_audio(text, language, emotion)
             except Exception:
@@ -458,11 +667,22 @@ class SorcarAgent(RelentlessAgent):
             return f"Spoke to the user in language {language!r}."
 
         if self.docker_manager:
-            from kiss.docker.docker_tools import DockerTools
+            from kiss.core.docker_tools import DockerTools
 
             docker_tools = DockerTools(self._docker_bash)
+            code_graph_hints_seen: set[str] = set()
+
+            def Bash(command: str, description: str) -> str:  # noqa: N802
+                """Run a command in Docker, preferring a code-graph answer."""
+                hint = intercept_grep_hint(
+                    command, self.work_dir, code_graph_hints_seen,
+                )
+                if hint is not None:
+                    return hint
+                return self._docker_bash(command, description)
+
             tools: list = [
-                self._docker_bash, docker_tools.Read, docker_tools.Edit, docker_tools.Write,
+                Bash, docker_tools.Read, docker_tools.Edit, docker_tools.Write,
             ]
         else:
             useful_tools = UsefulTools(
@@ -679,6 +899,18 @@ class SorcarAgent(RelentlessAgent):
         skill_tool = make_skill_tool(self.work_dir or ".")
         if skill_tool is not None:
             tools.append(skill_tool)
+        # code_graph: local tree-sitter knowledge graph of the work dir
+        # (query/path/explain instead of grep).  Registered only when the
+        # optional tree-sitter grammars are importable; a failure here
+        # must never break agent startup.
+        try:
+            from kiss.agents.sorcar.code_graph import make_code_graph_tool
+
+            code_graph_tool = make_code_graph_tool(self.work_dir or ".")
+            if code_graph_tool is not None:
+                tools.append(code_graph_tool)
+        except Exception:
+            logger.warning("code_graph tool setup failed", exc_info=True)
         # MCP servers: every tool of every configured server becomes a
         # ``<server>_<tool>`` function (filtered by the
         # ``mcp_permissions`` wildcard rules).  A broken server is
@@ -884,6 +1116,18 @@ class SorcarAgent(RelentlessAgent):
         line.  The list is emptied on every drain so the same queued
         message is never injected twice.
 
+        Messages whose ``prompt`` echo could not be attributed to a
+        task id at queueing time (``unattributed_prompt_echoes`` —
+        the narrow window between ``run()`` entry and ``_add_task``)
+        get a durable copy HERE: a ``recordOnly`` broadcast from the
+        agent thread, where the printer's thread-local task id names
+        the task that actually consumed the message, so the echo is
+        recorded and persisted into the correct trajectory instead of
+        being lost on replay.  The copy is NOT re-sent live (the
+        command handler already emitted a transient echo at queueing
+        time — see ``_echo_injected_prompt`` — so a live re-send
+        would render a duplicate prompt panel).
+
         Args:
             model: The live model whose conversation receives the
                 queued user messages.
@@ -899,6 +1143,19 @@ class SorcarAgent(RelentlessAgent):
                 return
             queued = list(tab.pending_user_messages)
             tab.pending_user_messages.clear()
+            deferred = list(tab.unattributed_prompt_echoes)
+            tab.unattributed_prompt_echoes.clear()
+        if deferred:
+            broadcast = getattr(
+                getattr(self, "printer", None), "broadcast", None,
+            )
+            if broadcast is not None:
+                for msg in deferred:
+                    broadcast({
+                        "type": "prompt",
+                        "text": msg,
+                        "recordOnly": True,
+                    })
         for msg in queued:
             model.add_message_to_conversation(
                 "user",
@@ -960,6 +1217,9 @@ def run_tasks_parallel(
     work_dir: str | None = None,
     printer: Printer | None = None,
     totals_out: dict[str, float] | None = None,
+    max_budget: float | None = None,
+    model_config: dict[str, Any] | None = None,
+    usage_monitor: _LiveUsageMonitor | None = None,
 ) -> list[str]:
     """Execute multiple SorcarAgent tasks concurrently using threads.
 
@@ -995,6 +1255,28 @@ def run_tasks_parallel(
             verbatim to each sub-agent's ``run`` so live events
             continue to flow through the same channel.  The executor
             itself does not call any printer methods.
+        totals_out: Optional dict that receives the aggregated usage of
+            all sub-agents.  When provided, the summed spend across
+            every spawned agent is written into it under the keys
+            ``"budget_used"``, ``"total_tokens_used"`` and
+            ``"total_steps"`` so the caller can attribute sub-agent
+            usage back to the parent task (see
+            :func:`_attribute_sub_usage`).
+        max_budget: Per-sub-agent budget cap in USD, forwarded to each
+            sub-agent's ``run``.  Callers spawning sub-agents on behalf
+            of a parent task pass each child one share of the parent's
+            remaining budget and reserve one equal share for the parent
+            (see :meth:`SorcarAgent._subagent_budget_share`), so even a
+            one-child fan-out cannot spend the parent's whole remainder.
+            ``None`` uses the sub-agent's default (config value).
+        model_config: Model configuration (e.g. custom ``base_url`` /
+            ``api_key`` routing) forwarded to each sub-agent's ``run``
+            so sub-agents talk to the same provider endpoint as the
+            parent.  ``None`` uses default provider routing.
+        usage_monitor: Optional :class:`_LiveUsageMonitor` that each
+            spawned sub-agent is registered with, so the parent task's
+            cost/tokens header can stream live aggregate usage while
+            the sub-agents run.  ``None`` disables live tracking.
 
     Returns:
         List of YAML result strings in the **same order** as *tasks*.
@@ -1056,6 +1338,8 @@ def run_tasks_parallel(
         # likewise ``""`` so the persisted payload shape matches the
         # chat path.
         agent._subagent_info = {"parent_task_id": "", "parent_tab_id": ""}
+        if usage_monitor is not None:
+            usage_monitor.track(agent)
         try:
             # ``is_parallel=True`` propagates the parallel capability so
             # sub-agents themselves get the ``run_parallel`` tool and
@@ -1067,6 +1351,8 @@ def run_tasks_parallel(
                 work_dir=work_dir,
                 printer=printer,
                 is_parallel=True,
+                max_budget=max_budget,
+                model_config=model_config,
             )
             return result
         except Exception as exc:

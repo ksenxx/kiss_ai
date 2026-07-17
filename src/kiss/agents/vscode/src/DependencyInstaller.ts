@@ -1388,7 +1388,7 @@ function computeKissWebFingerprint(
  * ``INJECTIONS.md`` is **intentionally NOT copied** into
  * ``~/.kiss/``.  The bundled ``src/kiss/INJECTIONS.md`` is read
  * directly from the installed package at runtime by
- * ``kiss.agents.vscode.tricks.read_tricks`` (Python, daemon) and
+ * ``kiss.server.tricks.read_tricks`` (Python, daemon) and
  * ``getTricks`` in ``SorcarTab.ts`` (TypeScript, extension), so every
  * version upgrade automatically delivers the latest bundled tricks
  * without clobbering user edits.

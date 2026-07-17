@@ -46,7 +46,7 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import (
     _load_chat_events_by_task_id,
 )
-from kiss.agents.vscode.json_printer import JsonPrinter
+from kiss.server.json_printer import JsonPrinter
 
 # ---------------------------------------------------------------------------
 # Fake OpenAI server that returns run_parallel → finish
@@ -159,9 +159,18 @@ class _Handler(BaseHTTPRequestHandler):
         is_stream = req.get("stream", False)
         messages = req.get("messages", [])
 
-        # Detect whether this is a sub-agent or the parent.
-        msg_text = json.dumps(messages)
-        is_sub = "Compute" in msg_text and "run_parallel" not in msg_text
+        # Detect whether this is a sub-agent or the parent.  Sub-agent
+        # requests are identified by their TASK prompt (a user-role
+        # message containing "Compute").  Only user-role content is
+        # inspected: sub-agents inherit the parent's ``model_config``
+        # (budget-distribution fix), so their system prompt — which
+        # mentions run_parallel — also reaches this server, and a
+        # whole-conversation heuristic would misroute them into
+        # infinite nested run_parallel spawning.
+        user_text = " ".join(
+            str(m.get("content", "")) for m in messages if m.get("role") == "user"
+        )
+        is_sub = "Compute" in user_text
         # Also detect if run_parallel tool result is already present
         has_rp_result = any(
             m.get("role") == "tool" for m in messages

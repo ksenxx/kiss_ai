@@ -154,13 +154,15 @@ def clean_build_artifacts() -> None:
 def _sync_extension_version() -> None:
     """Sync VS Code extension version from _version.py into package.json.
 
-    Reads the canonical version from ``src/kiss/_version.py`` and updates
-    the ``version`` field in the extension's ``package.json`` if they differ.
+    Reads the canonical version from ``src/kiss/core/_version.py`` (the
+    single source of the version literal — ``src/kiss/_version.py`` is
+    only an import shim) and updates the ``version`` field in the
+    extension's ``package.json`` if they differ.
     """
     import json
 
     project_root = Path(__file__).parent.parent.parent.parent
-    version_file = project_root / "src" / "kiss" / "_version.py"
+    version_file = project_root / "src" / "kiss" / "core" / "_version.py"
     package_json = project_root / "src" / "kiss" / "agents" / "vscode" / "package.json"
 
     if not version_file.exists() or not package_json.exists():

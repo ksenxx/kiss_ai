@@ -43,8 +43,8 @@ from playwright.sync_api import sync_playwright
 from websockets.asyncio.client import connect
 
 import kiss.agents.sorcar.persistence as th
-import kiss.agents.vscode.vscode_config as vc
-from kiss.agents.vscode.web_server import (
+import kiss.server.vscode_config as vc
+from kiss.server.web_server import (
     RemoteAccessServer,
     _generate_self_signed_cert,
 )

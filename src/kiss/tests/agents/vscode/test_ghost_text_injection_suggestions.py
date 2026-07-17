@@ -6,7 +6,7 @@
 "trick" strings at the beginning of each sentence.
 
 The user's "Inject instruction" tricks come from two files merged by
-:func:`kiss.agents.vscode.tricks.read_tricks`:
+:func:`kiss.server.tricks.read_tricks`:
 
 * ``~/.kiss/MY_INJECTION.md`` — user-curated tricks, auto-seeded.
 * ``src/kiss/INJECTIONS.md`` — bundled tricks, read directly from the
@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from kiss.agents.sorcar import persistence as th
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.server import VSCodeServer
 
 _LONG_TRICK = (
     "Use claude-opus-4-7 model for all tasks including coding, "

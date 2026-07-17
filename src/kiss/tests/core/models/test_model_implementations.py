@@ -143,15 +143,10 @@ class TestGeminiModel:
     def test_get_embedding(self):
         m = model("gemini-3-flash-preview")
         m.initialize("test")
-        try:
-            embedding = m.get_embedding("Hello world", embedding_model="models/text-embedding-005")
-            assert isinstance(embedding, list)
-            assert len(embedding) > 0
-            assert isinstance(embedding[0], float)
-        except KISSError as e:
-            if "404" in str(e) or "NOT_FOUND" in str(e):
-                pytest.skip(f"Embedding model not available: {e}")
-            raise
+        embedding = m.get_embedding("Hello world")
+        assert isinstance(embedding, list)
+        assert len(embedding) > 0
+        assert isinstance(embedding[0], float)
 
 
 @requires_openai_api_key
@@ -308,7 +303,9 @@ class TestCachePricing:
 
     def test_undocumented_providers_have_no_cache_pricing(self):
         # Providers without a documented cache discount fall back to full input price.
-        for name in ("glm-4.6", "deepseek-ai/DeepSeek-V3-0324", "Qwen/Qwen3.6-Plus"):
+        # (glm-4.x/glm-5.x DO have documented cached-input pricing on docs.z.ai,
+        # but glm-4-32b-0414-128k is listed with no cached-input price.)
+        for name in ("glm-4-32b-0414-128k", "deepseek-ai/DeepSeek-V3-0324", "Qwen/Qwen3.6-Plus"):
             info = MODEL_INFO[name]
             assert info.cache_read_price_per_1M is None, f"{name} should not have cache pricing"
             assert info.cache_write_price_per_1M is None

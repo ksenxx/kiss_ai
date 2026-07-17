@@ -5,8 +5,8 @@
 """End-to-end regression tests locking behavior of code paths being simplified.
 
 Covers:
-- ``_AutocompleteMixin._complete_from_active_file`` and
-  ``_active_file_identifier_matches`` (autocomplete.py).
+- ``_AutocompleteMixin._active_file_identifier_matches``
+  (autocomplete.py).
 - ``get_custom_model_entry`` / ``build_model_config`` header parsing
   (vscode_config.py).
 - ``JsonPrinter`` cost/token/step offset arithmetic in ``result`` and
@@ -21,9 +21,9 @@ import os
 import tempfile
 from typing import Any
 
-from kiss.agents.vscode.autocomplete import _AutocompleteMixin, _ghost_suffix
-from kiss.agents.vscode.json_printer import JsonPrinter, _coalesce_events
-from kiss.agents.vscode.vscode_config import (
+from kiss.server.autocomplete import _AutocompleteMixin, _ghost_suffix
+from kiss.server.json_printer import JsonPrinter, _coalesce_events
+from kiss.server.vscode_config import (
     build_model_config,
     get_custom_model_entry,
 )
@@ -35,57 +35,6 @@ class _AC(_AutocompleteMixin):
 
 def _server() -> _AC:
     return _AC()
-
-
-class TestCompleteFromActiveFile:
-    def test_trailing_whitespace_returns_empty(self) -> None:
-        assert _server()._complete_from_active_file("hello ", "", "content") == ""
-
-    def test_trailing_punctuation_returns_empty(self) -> None:
-        assert _server()._complete_from_active_file("hi!", "", "hillside") == ""
-
-    def test_short_partial_returns_empty(self) -> None:
-        assert _server()._complete_from_active_file("a", "", "apple banana") == ""
-
-    def test_no_content_no_chat_returns_empty(self) -> None:
-        assert _server()._complete_from_active_file("calc", "", "") == ""
-
-    def test_longest_suffix_wins(self) -> None:
-        content = "calc calculate calculate_everything_now"
-        result = _server()._complete_from_active_file("calc", "", content)
-        assert result == "ulate_everything_now"
-
-    def test_dot_chain_completion(self) -> None:
-        content = "import os\nos.path.join(a, b)\n"
-        result = _server()._complete_from_active_file("use os.path.jo", "", content)
-        assert result == "in"
-
-    def test_reads_from_disk_when_no_snapshot(self) -> None:
-        with tempfile.NamedTemporaryFile(
-            "w", suffix=".py", delete=False,
-        ) as f:
-            f.write("def calculate_total():\n    pass\n")
-            path = f.name
-        try:
-            result = _server()._complete_from_active_file("calc", path, "")
-            assert result == "ulate_total"
-        finally:
-            os.unlink(path)
-
-    def test_nonexistent_file_returns_empty(self) -> None:
-        result = _server()._complete_from_active_file(
-            "test", "/nonexistent/no/such/file.py", "",
-        )
-        assert result == ""
-
-    def test_case_sensitive_prefix(self) -> None:
-        assert _server()._complete_from_active_file("Calc", "", "calculate") == ""
-
-    def test_empty_chat_id_short_circuits(self) -> None:
-        assert (
-            _server()._complete_from_active_file("calc", "", "calculate", "")
-            == "ulate"
-        )
 
 
 class TestActiveFileIdentifierMatches:
@@ -109,6 +58,18 @@ class TestActiveFileIdentifierMatches:
 
     def test_no_content_returns_empty_list(self) -> None:
         assert _server()._active_file_identifier_matches("calc", "", "") == []
+
+    def test_case_sensitive_prefix(self) -> None:
+        assert (
+            _server()._active_file_identifier_matches("Calc", "", "calculate")
+            == []
+        )
+
+    def test_nonexistent_file_returns_empty_list(self) -> None:
+        matches = _server()._active_file_identifier_matches(
+            "test", "/nonexistent/no/such/file.py", "",
+        )
+        assert matches == []
 
     def test_disk_fallback(self) -> None:
         with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:

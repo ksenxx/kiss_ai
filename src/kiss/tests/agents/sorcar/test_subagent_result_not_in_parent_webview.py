@@ -17,7 +17,7 @@ The reproduction wires together:
    parent which calls ``run_parallel`` to spawn three sub-agents
    (driven by a fake OpenAI HTTP server).
 2. A :class:`_FakeWebPrinter` that subclasses
-   :class:`kiss.agents.vscode.web_server.WebPrinter` and overrides
+   :class:`kiss.server.web_server.WebPrinter` and overrides
    :meth:`_send_to_ws_clients` to (a) capture every per-tab post-fan-out
    payload that would have been sent over the WebSocket, and (b) mimic
    the frontend's ``new_tab`` round-trip by allocating a fresh
@@ -49,7 +49,7 @@ from typing import Any
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.agents.vscode.web_server import WebPrinter
+from kiss.server.web_server import WebPrinter
 
 # ---------------------------------------------------------------------------
 # Fake OpenAI server: parent → run_parallel, sub-agents + parent's 2nd call → finish.
@@ -132,8 +132,17 @@ class _Handler(BaseHTTPRequestHandler):
             req = {}
         is_stream = bool(req.get("stream", False))
         messages = req.get("messages", [])
-        msg_text = json.dumps(messages)
-        is_sub = "Compute" in msg_text and "run_parallel" not in msg_text
+        # Sub-agent requests are identified by their TASK prompt (a
+        # user-role message containing "Compute").  Only user-role
+        # content is inspected: sub-agents inherit the parent's
+        # ``model_config`` (budget-distribution fix), so their system
+        # prompt — which mentions run_parallel — also reaches this
+        # server, and a whole-conversation heuristic would misroute
+        # them into infinite nested run_parallel spawning.
+        user_text = " ".join(
+            str(m.get("content", "")) for m in messages if m.get("role") == "user"
+        )
+        is_sub = "Compute" in user_text
         has_rp_result = any(m.get("role") == "tool" for m in messages)
         if is_sub:
             resp = _finish_response("SUB-RESULT")

@@ -55,10 +55,9 @@
 #    and may not respect inherited SIG_IGN — so ``tsc`` (which runs on Node)
 #    can still die on a stray SIGINT, npm returns non-zero, and ``set -e``
 #    aborts install.sh.
-# 3. Many child processes (``python3 scripts/check-kiss-web-active-tasks.py``,
-#    ``"$CODE_CLI" --install-extension``, ``xargs kill``) are NOT wrapped in
-#    ``run_with_heartbeat`` and therefore are NOT protected by the SIG_IGN
-#    subshell at all.
+# 3. Some child processes (e.g. ``"$CODE_CLI" --install-extension``) are
+#    NOT wrapped in ``run_with_heartbeat`` and therefore are NOT protected
+#    by the SIG_IGN subshell at all.
 #
 # Why ``setsid`` (a new session with no controlling TTY) is the bulletproof
 # answer
@@ -189,7 +188,7 @@ set -eo pipefail
 # Capture the user's working directory *before* any `cd` so that VS Code can
 # later be launched with this directory as the workspace root.  The agents
 # spawned inside VS Code default their PWD to the workspace root (see
-# ``kiss.agents.vscode.server`` — ``os.getcwd()`` is the fallback when
+# ``kiss.server.server`` — ``os.getcwd()`` is the fallback when
 # ``KISS_WORKDIR`` is unset), so opening the workspace here makes the
 # agents' PWD match the user's original shell PWD.
 USER_PWD="$PWD"
@@ -291,10 +290,9 @@ handle_interrupt() {
 # terminal and exit the underlying process".  Terminal disposal first
 # writes ``\x03`` (Ctrl+C) to the PTY (caught by ``handle_interrupt``
 # above) and then closes the PTY (SIGHUP).  Without this trap the SIGHUP
-# kills bash mid-step, leaving kiss-web alive on the *old* code path and
-# the ``.extension-updated`` marker unwritten — exactly the symptom
-# users see: an unexplained ``^C`` right after "Stopping old kiss-web
-# daemon (PIDs: ...)" with the install aborted before the marker write.
+# kills bash mid-step, leaving the ``.extension-updated`` marker
+# unwritten — exactly the symptom users see: an unexplained ``^C`` in
+# step [5/5] with the install aborted before the marker write.
 # ``2>/dev/null`` swallows EBADF/ENXIO from the closed PTY; ``|| true``
 # keeps ``set -e`` from killing the script if the re-route itself fails
 # (the script then continues writing into the dead PTY, which is no
@@ -403,16 +401,6 @@ if [ "$OS" = "Darwin" ] && ! command -v brew &>/dev/null; then
     fi
 fi
 
-# Returns 0 only if /dev/tty can actually be opened for reading.  A plain
-# `[ -r /dev/tty ]` test only inspects the permission bits, which pass even
-# inside a detached Docker container where the controlling terminal does not
-# exist and opening /dev/tty fails with ENXIO ("No such device or address").
-# Probing with a real open avoids that crash and lets prompts fall back to
-# their non-interactive default.
-can_read_tty() {
-    { : < /dev/tty; } 2>/dev/null
-}
-
 ensure_xcode_clt() {
     [ "$OS" = "Darwin" ] || return 0
 
@@ -449,22 +437,17 @@ ensure_xcode_clt() {
 
     echo "   Non-interactive install did not complete. Triggering GUI installer..."
     xcode-select --install 2>&1 || true
-    echo ""
-    echo "   A dialog has appeared to install the Xcode Command Line Tools."
-    echo "   Complete the installation in that dialog, then return to this terminal."
-    if can_read_tty; then
-        # `|| true`: `read` fails on EOF/EIO even when /dev/tty opened fine;
-        # under `set -e` that would abort the install instead of continuing.
-        read -n 1 -s -r -p "   Press any key to continue with the rest of installation..." </dev/tty || true
-    else
-        echo "   Non-interactive shell detected — continuing without waiting."
-    fi
-    echo ""
 
     if xcode-select -p &>/dev/null && [ -e "$(xcode-select -p)/usr/bin/git" ]; then
         echo "   Xcode Command Line Tools installed at $(xcode-select -p)"
     else
-        echo "   ERROR: Xcode Command Line Tools still not detected. Aborting."
+        # This script always runs detached from the controlling terminal
+        # (see the kiss-new-session-reexec block above), so it cannot wait
+        # for keyboard input while the user completes the GUI dialog.
+        # Exit-and-rerun matches the ``install_git`` fallback behaviour.
+        echo ""
+        echo "   A dialog has appeared to install the Xcode Command Line Tools."
+        echo "   Complete the installation in that dialog, then re-run this script."
         exit 1
     fi
 }
@@ -477,51 +460,35 @@ ensure_homebrew() {
         return 0
     fi
 
-    echo ""
-    echo "   Homebrew (https://brew.sh) is not installed."
-    echo "   Installing it will enable KISS Sorcar to install necessary tools on demand"
-    echo "   (e.g. git, cloudflared, and other runtime dependencies)."
-    echo ""
-
-    local REPLY_BREW=""
-    if can_read_tty; then
-        # `read` can fail (EOF/EIO) even when /dev/tty opened fine; fall back
-        # to the non-interactive default instead of dying under `set -e`.
-        read -r -p "   Install the latest Homebrew now? [Y/n] " REPLY_BREW </dev/tty || REPLY_BREW=""
-    else
-        echo "   Non-interactive shell detected — defaulting to Yes."
+    if [ -n "${KISS_NO_BREW:-}" ]; then
+        echo "   KISS_NO_BREW set — skipping Homebrew install. KISS Sorcar may not"
+        echo "   be able to install some tools on demand without it."
+        return 0
     fi
 
-    case "$REPLY_BREW" in
-        ""|y|Y|yes|YES|Yes)
-            echo "   Installing Homebrew..."
-            # `|| true`: a failed Homebrew bootstrap (no sudo, no network)
-            # must not abort the install — the check below prints a warning
-            # and the script continues without brew.
-            if can_read_tty; then
-                NONINTERACTIVE=1 /bin/bash -c \
-                    "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh || true)" </dev/tty || true
-            else
-                NONINTERACTIVE=1 /bin/bash -c \
-                    "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh || true)" || true
-            fi
-            # Make brew available in the current shell session.
-            if [ -x /opt/homebrew/bin/brew ]; then
-                eval "$(/opt/homebrew/bin/brew shellenv)"
-            elif [ -x /usr/local/bin/brew ]; then
-                eval "$(/usr/local/bin/brew shellenv)"
-            fi
-            if command -v brew &>/dev/null; then
-                echo "   Homebrew installed at $(command -v brew)"
-            else
-                echo "   WARNING: Homebrew install did not complete; continuing without it."
-            fi
-            ;;
-        *)
-            echo "   Skipping Homebrew install. KISS Sorcar may not be able to install"
-            echo "   some tools on demand without it."
-            ;;
-    esac
+    echo ""
+    echo "   Homebrew (https://brew.sh) is not installed."
+    echo "   Installing it enables KISS Sorcar to install necessary tools on demand"
+    echo "   (e.g. git, cloudflared, and other runtime dependencies)."
+    echo "   Set KISS_NO_BREW=1 to skip this step."
+    echo ""
+    echo "   Installing Homebrew..."
+    # `|| true`: a failed Homebrew bootstrap (no sudo, no network)
+    # must not abort the install — the check below prints a warning
+    # and the script continues without brew.
+    NONINTERACTIVE=1 /bin/bash -c \
+        "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh || true)" || true
+    # Make brew available in the current shell session.
+    if [ -x /opt/homebrew/bin/brew ]; then
+        eval "$(/opt/homebrew/bin/brew shellenv)"
+    elif [ -x /usr/local/bin/brew ]; then
+        eval "$(/usr/local/bin/brew shellenv)"
+    fi
+    if command -v brew &>/dev/null; then
+        echo "   Homebrew installed at $(command -v brew)"
+    else
+        echo "   WARNING: Homebrew install did not complete; continuing without it."
+    fi
 }
 
 install_git() {
@@ -757,43 +724,8 @@ version_gte() {
     return 0
 }
 
-# Ask the user whether to upgrade; abort if they decline.
-#   $1 – tool display name
-#   $2 – installed version
-#   $3 – required version
-prompt_upgrade_or_abort() {
-    local name="$1" current="$2" required="$3"
-    echo ""
-    echo "   $name $current is older than the required version $required."
-    local reply=""
-    if can_read_tty; then
-        # `read` can still fail even when /dev/tty opens successfully — EOF
-        # when the terminal feeding it closes, or EIO when the script runs
-        # detached from a usable terminal (e.g. the update button spawning
-        # install.sh).  Under `set -e` an unguarded failure killed the whole
-        # update right at this question with no error message; fall back to
-        # the non-interactive default (Yes) instead.
-        if ! read -r -p "   Upgrade $name to $required or later? [Y/n] " reply </dev/tty; then
-            reply=""
-            echo ""
-            echo "   No interactive input available — defaulting to Yes."
-        fi
-    else
-        echo "   Non-interactive shell detected — defaulting to Yes."
-    fi
-    case "$reply" in
-        ""|y|Y|yes|YES|Yes) return 0 ;;
-        *)
-            echo ""
-            echo "   ERROR: $name >= $required is required by this repository."
-            echo "   Please upgrade $name manually and re-run this script."
-            exit 1
-            ;;
-    esac
-}
-
 # ---------------------------------------------------------------------------
-# Upgrade helpers — invoked only when the user accepts the upgrade prompt
+# Upgrade helpers — invoked when the installed version is older than required
 # ---------------------------------------------------------------------------
 
 # Upgrade failures are deliberately non-fatal: a missing package manager or
@@ -982,9 +914,9 @@ update_repo() {
 # created").  In other words, the ``trap handle_interrupt INT TERM``
 # above had no effect inside the pipeline subshell — a stray ``\x03``
 # injected into the PTY by VS Code's terminal-disposal teardown killed
-# the subshell instantly, manifesting as an unexplained ``^C`` right
-# after "Stopping old kiss-web daemon (PIDs: ...)" with the install
-# aborted before the ``.extension-updated`` marker write.
+# the subshell instantly, manifesting as an unexplained ``^C`` in step
+# [5/5] with the install aborted before the ``.extension-updated``
+# marker write.
 #
 # ``exec > >(tee -a "$LOG_FILE") 2>&1`` keeps the install body running
 # in the outer (trap-handled) shell while still streaming output to
@@ -1023,7 +955,7 @@ exec > >(tee -a "$LOG_FILE") 2>&1
     # would otherwise abort the script at this assignment.
     INSTALLED_GIT=$(git --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
     if [ -n "$REQUIRED_GIT_VERSION" ] && [ -n "$INSTALLED_GIT" ] && ! version_gte "$INSTALLED_GIT" "$REQUIRED_GIT_VERSION"; then
-        prompt_upgrade_or_abort "git" "$INSTALLED_GIT" "$REQUIRED_GIT_VERSION"
+        echo "   git $INSTALLED_GIT is older than the required version $REQUIRED_GIT_VERSION — upgrading..."
         upgrade_git
         INSTALLED_GIT=$(git --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
         if [ -n "$INSTALLED_GIT" ] && ! version_gte "$INSTALLED_GIT" "$REQUIRED_GIT_VERSION"; then
@@ -1041,7 +973,7 @@ exec > >(tee -a "$LOG_FILE") 2>&1
     if command -v uv &>/dev/null; then
         INSTALLED_UV=$(uv --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
         if [ -n "$REQUIRED_UV_VERSION" ] && [ -n "$INSTALLED_UV" ] && ! version_gte "$INSTALLED_UV" "$REQUIRED_UV_VERSION"; then
-            prompt_upgrade_or_abort "uv" "$INSTALLED_UV" "$REQUIRED_UV_VERSION"
+            echo "   uv $INSTALLED_UV is older than the required version $REQUIRED_UV_VERSION — upgrading..."
             upgrade_uv
             INSTALLED_UV=$(uv --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
         fi
@@ -1058,7 +990,7 @@ exec > >(tee -a "$LOG_FILE") 2>&1
     if command -v node &>/dev/null && command -v npm &>/dev/null && command -v npx &>/dev/null; then
         INSTALLED_NODE=$(node --version 2>/dev/null | sed 's/^v//' || true)
         if [ -n "$REQUIRED_NODE_VERSION" ] && [ -n "$INSTALLED_NODE" ] && ! version_gte "$INSTALLED_NODE" "$REQUIRED_NODE_VERSION"; then
-            prompt_upgrade_or_abort "Node.js" "$INSTALLED_NODE" "$REQUIRED_NODE_VERSION"
+            echo "   Node.js $INSTALLED_NODE is older than the required version $REQUIRED_NODE_VERSION — upgrading..."
             upgrade_node
             INSTALLED_NODE=$(node --version 2>/dev/null | sed 's/^v//' || true)
         fi
@@ -1079,7 +1011,7 @@ exec > >(tee -a "$LOG_FILE") 2>&1
     if [ -n "$CODE_CLI" ]; then
         INSTALLED_VSCODE=$("$CODE_CLI" --version 2>/dev/null | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1 || true)
         if [ -n "$REQUIRED_VSCODE_VERSION" ] && [ -n "$INSTALLED_VSCODE" ] && ! version_gte "$INSTALLED_VSCODE" "$REQUIRED_VSCODE_VERSION"; then
-            prompt_upgrade_or_abort "VS Code" "$INSTALLED_VSCODE" "$REQUIRED_VSCODE_VERSION"
+            echo "   VS Code $INSTALLED_VSCODE is older than the required version $REQUIRED_VSCODE_VERSION — upgrading..."
             upgrade_vscode
             INSTALLED_VSCODE=$("$CODE_CLI" --version 2>/dev/null | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1 || true)
         fi
@@ -1152,16 +1084,13 @@ exec > >(tee -a "$LOG_FILE") 2>&1
     # user-opened terminal), ``--install-extension --force`` below makes
     # VS Code detect the on-disk extension update and reload — and that
     # reload can dispose (or simply stop rendering) the very terminal this
-    # script is printing to.  Users then see the output freeze — typically
-    # right at the "Stopping old kiss-web daemon (PIDs: ...)" line — with
-    # no prompt ever returning, and conclude the install hung.  It did not:
-    # the new-session (setsid) detachment at the top of this script keeps
-    # the install running, and the log (see ``$LOG_FILE``) shows it
-    # completing a few seconds later.  ``handle_hup`` cannot announce this
-    # either — the detached session has no controlling TTY, so no SIGHUP is
-    # ever delivered.  The only reliable channel to tell the user is this
-    # terminal, BEFORE it can die — hence the notice below must stay ahead
-    # of the ``--install-extension`` call.
+    # script is printing to.  The output then appears to freeze with no
+    # prompt ever returning, and users conclude the install hung.  It did
+    # not: the new-session (setsid) detachment at the top of this script
+    # keeps the install running, and the log (see ``$LOG_FILE``) shows it
+    # completing a few seconds later.  The only reliable channel to tell
+    # the user is this terminal, BEFORE it can die — hence the notice below
+    # must stay ahead of the ``--install-extension`` call.
     echo "   NOTE: VS Code may reload to pick up the update while this step runs."
     echo "         If this terminal stops updating (or never shows a prompt again),"
     echo "         the install is NOT stuck — it keeps running detached and"
@@ -1191,200 +1120,17 @@ exec > >(tee -a "$LOG_FILE") 2>&1
         exit 1
     fi
 
-    # Pre-build the freshly-installed extension's Python environment BEFORE
-    # stopping the old kiss-web daemon.  ``--install-extension --force``
-    # above replaced the extension directory INCLUDING ``kiss_project/.venv``,
-    # so the program the daemon supervisor respawns —
-    # ``<extension>/kiss_project/.venv/bin/kiss-web`` — no longer exists at
-    # this point.  Killing the daemon while that binary is missing strands
-    # the user without a server: launchd's ``KeepAlive`` (and systemd's
-    # ``Restart=always``) respawn attempts fail on the missing binary, the
-    # supervisor applies failure throttling, and the daemon only comes back
-    # ~90 s later once the extension's DependencyInstaller has run
-    # ``uv sync`` after the window reload — exactly the stuck
-    # "KISS Sorcar Server is starting ..." overlay users report.
-    # Recreating ``.venv`` here (fast: uv's cache is warm) makes the
-    # post-kill respawn succeed immediately, shrinking the outage to ~1-2 s.
-    EXT_VERSION=$(grep -m1 '"version"' "$PROJECT_DIR/src/kiss/agents/vscode/package.json" 2>/dev/null \
-        | sed 's/.*"version"[^"]*"\([^"]*\)".*/\1/' || true)
-    NEW_KISS_PROJECT=""
-    if [ -n "$EXT_VERSION" ]; then
-        for ext_root in \
-            "$HOME/.vscode/extensions" \
-            "$HOME/.vscode-insiders/extensions" \
-            "$HOME/.vscode-server/extensions" \
-            "$HOME/.local/share/code-server/extensions"; do
-            if [ -d "$ext_root/ksenxx.kiss-sorcar-$EXT_VERSION/kiss_project" ]; then
-                NEW_KISS_PROJECT="$ext_root/ksenxx.kiss-sorcar-$EXT_VERSION/kiss_project"
-                break
-            fi
-        done
-    fi
-    if [ -n "$NEW_KISS_PROJECT" ] && command -v uv &>/dev/null; then
-        echo "   Pre-building the new extension's Python environment (uv sync) so"
-        echo "   the kiss-web daemon can restart immediately..."
-        if uv sync --project "$NEW_KISS_PROJECT" >/dev/null 2>&1; then
-            echo "   Python environment ready: $NEW_KISS_PROJECT/.venv"
-        else
-            echo "   WARNING: uv sync failed; the VS Code extension will rebuild the"
-            echo "   environment and restart the kiss-web daemon after the reload."
-        fi
-    fi
-
-    # Stop the old kiss-web daemon BEFORE the extension auto-reloads.  The
-    # ``--install-extension --force`` above replaced the extension directory
-    # tree that the running daemon's bundled kiss_project (.venv/bin/kiss-web)
-    # was loaded from, so the live daemon is technically broken even while it
-    # is still listening (subsequent UDS requests can hit stale / missing
-    # module paths).  If we skip this, the marker write below triggers
-    # ``workbench.action.reloadWindow`` (~2 s later) and the freshly reloaded
-    # webview reconnects to the broken daemon — the chat view comes up blank.
-    #
-    # ``pkill -x kiss-web`` is unreliable on macOS — kiss-web is a Python
-    # shebang script so the kernel's ``comm`` field is the (15-char-truncated)
-    # interpreter path, NOT the literal name.  Kill by listening port instead.
-    # The macOS LaunchAgent / Linux systemd unit's ``KeepAlive`` respawns a
-    # clean daemon from the freshly-installed VSIX before the reload fires.
-    # Refuse to clobber a kiss-web daemon that is mid-task.  Without this
-    # guard the SIGTERM block below silently kills any in-flight agent run
-    # — the regression that turned task_history rows 3233/3234 into
-    # ``"Task interrupted by server restart/shutdown"``.  The check mirrors
-    # the bash-side guard in ``scripts/build-extension.sh`` and the
-    # ``daemonHasActiveTasks``-based guard in
-    # ``src/kiss/agents/vscode/src/DependencyInstaller.ts``.  Override with
-    # ``KISS_FORCE_RESTART=1`` for a knowingly destructive re-install.
-    if command -v python3 &>/dev/null; then
-        if ! python3 "$PROJECT_DIR/scripts/check-kiss-web-active-tasks.py"; then
-            if [ "${KISS_FORCE_RESTART:-}" = "1" ]; then
-                echo "   KISS_FORCE_RESTART=1 set; proceeding despite active tasks."
-            else
-                echo "   Aborting install.sh: kiss-web has in-flight tasks." >&2
-                echo "   Wait for them to finish, or rerun with KISS_FORCE_RESTART=1." >&2
-                exit 3
-            fi
-        fi
-    fi
-    # Only stop the old daemon when its supervisor (macOS LaunchAgent /
-    # Linux systemd user unit) can actually respawn kiss-web RIGHT NOW —
-    # i.e. the program its config points to exists and is executable.
-    # If it cannot (no supervisor config yet, config points into a removed
-    # extension directory, or the ``uv sync`` pre-build above was
-    # skipped/failed), killing the daemon would strand the user behind the
-    # "KISS Sorcar Server is starting ..." overlay for ~90 s (launchd
-    # failure-throttles the failing respawns) until the extension's
-    # DependencyInstaller rebuilds and restarts everything after the window
-    # reload.  Leaving the old daemon up is strictly better: it keeps
-    # serving, and the extension restarts it cleanly (fingerprint mismatch)
-    # once the new environment is ready.
-    KISS_SUPERVISOR_BIN=""
-    case "$(uname)" in
-        Darwin)
-            KISS_WEB_PLIST="$HOME/Library/LaunchAgents/com.kiss.web-server.plist"
-            if [ -f "$KISS_WEB_PLIST" ]; then
-                # First <string> after the ProgramArguments key = the daemon
-                # binary.  Plain text extraction — no PlistBuddy dependency.
-                KISS_SUPERVISOR_BIN=$(awk '/<key>ProgramArguments<\/key>/{f=1}
-                    f && /<string>/{sub(/.*<string>/,""); sub(/<\/string>.*/,""); print; exit}' \
-                    "$KISS_WEB_PLIST" 2>/dev/null || true)
-            fi
-            ;;
-        Linux)
-            KISS_WEB_UNIT="$HOME/.config/systemd/user/kiss-web.service"
-            if [ -f "$KISS_WEB_UNIT" ]; then
-                KISS_SUPERVISOR_BIN=$(grep -m1 '^ExecStart=' "$KISS_WEB_UNIT" 2>/dev/null \
-                    | sed 's/^ExecStart=//' || true)
-            fi
-            ;;
-    esac
-    if [ -z "$KISS_SUPERVISOR_BIN" ] || [ ! -x "$KISS_SUPERVISOR_BIN" ]; then
-        echo "   Skipping kiss-web daemon restart: its freshly-installed binary is"
-        echo "   not ready yet (supervisor program: ${KISS_SUPERVISOR_BIN:-<none>})."
-        echo "   The current daemon keeps serving; the VS Code extension will"
-        echo "   rebuild the environment and restart the daemon after the reload."
-    else
-    if command -v lsof &>/dev/null; then
-        # ``-sTCP:LISTEN`` matters: a bare ``lsof -ti :8787`` also matches
-        # CLIENT sockets connected to the daemon — cloudflared, browsers,
-        # even VS Code itself — and the ``kill``/``kill -9`` below must
-        # never touch those.  ``-nP`` skips DNS/port-name lookups so each
-        # call returns in milliseconds instead of multiple seconds on a
-        # loaded machine (the old form made this loop take over a minute
-        # while the user stared at a seemingly stuck terminal).
-        OLD_KISS_WEB_PIDS=$(lsof -nP -ti tcp:8787 -sTCP:LISTEN 2>/dev/null || true)
-        if [ -n "$OLD_KISS_WEB_PIDS" ]; then
-            echo "   Stopping old kiss-web daemon (PIDs: $OLD_KISS_WEB_PIDS)..."
-            echo "$OLD_KISS_WEB_PIDS" | xargs kill 2>/dev/null || true
-            for _ in 1 2 3 4 5 6 7 8 9 10; do
-                sleep 0.3
-                if ! lsof -nP -ti tcp:8787 -sTCP:LISTEN &>/dev/null; then break; fi
-            done
-            # Force-kill survivors (listeners only — never client sockets).
-            KISS_WEB_STRAGGLERS=$(lsof -nP -ti tcp:8787 -sTCP:LISTEN 2>/dev/null || true)
-            if [ -n "$KISS_WEB_STRAGGLERS" ]; then
-                echo "$KISS_WEB_STRAGGLERS" | xargs kill -9 2>/dev/null || true
-            fi
-            echo "   Old kiss-web daemon stopped."
-        fi
-    fi
-    # Remove the stale Unix-domain socket left behind by the now-dead daemon.
-    # The new daemon's ``_setup_server`` unlinks before binding, but pre-emptive
-    # cleanup avoids ENOENT/ECONNREFUSED reconnect-loop noise from the extension
-    # client that is mid-flight during the launchd/systemd respawn window.
-    rm -f "$HOME/.kiss/sorcar.sock"
-
-    # Defense-in-depth for the "KISS Sorcar Server is starting ..." hang
-    # reported after the Update button.  The lsof/kill block above is racy
-    # against launchd's ``KeepAlive`` (and systemd's ``Restart=always``):
-    # the supervisor can respawn a fresh kiss-web DURING the up-to-3 s
-    # wait loop, and its ``_setup_server`` binds a new
-    # ``~/.kiss/sorcar.sock`` BEFORE the ``rm -f`` above runs — so the
-    # rm deletes the freshly-respawned daemon's socket file out from
-    # under it.  The kernel-level listening socket survives the unlink
-    # (the open fd is independent of the directory entry), so the daemon
-    # stays "alive on port 8787" but is unreachable from the extension's
-    # ``AgentClient`` — every ``connect("$HOME/.kiss/sorcar.sock")`` from
-    # then on returns ENOENT until something kills the daemon again.
-    # Force a clean kickstart here so the supervisor brings up a fresh
-    # daemon whose ``_setup_server`` re-creates the UDS file.  Best-
-    # effort: a failure only forfeits the defense and falls back to the
-    # in-extension recovery (``restartKissWebDaemon``'s ``unreachable-uds``
-    # branch in ``daemonHealth.decideRestart``) — never aborts install.sh.
-    case "$(uname)" in
-        Darwin)
-            if command -v launchctl &>/dev/null; then
-                _kiss_uid=$(id -u 2>/dev/null || echo 0)
-                launchctl kickstart -k \
-                    "gui/${_kiss_uid}/com.kiss.web-server" \
-                    2>/dev/null || true
-                unset _kiss_uid
-            fi
-            ;;
-        Linux)
-            if command -v systemctl &>/dev/null; then
-                systemctl --user restart kiss-web 2>/dev/null || true
-            fi
-            ;;
-    esac
-
-    # Show the user the daemon actually coming back so the terminal never
-    # ends on "Stopping old kiss-web daemon..." — the line users kept
-    # reporting as a hang.  The wait is bounded and best-effort: the
-    # extension's own recovery path takes over after the window reload.
-    echo "   Waiting for the kiss-web daemon to come back up..."
-    KISS_DAEMON_WAIT_SECS="${KISS_DAEMON_WAIT_SECS:-15}"
-    _kiss_deadline=$(( $(date +%s) + KISS_DAEMON_WAIT_SECS ))
-    while [ "$(date +%s)" -lt "$_kiss_deadline" ]; do
-        if [ -S "$HOME/.kiss/sorcar.sock" ]; then break; fi
-        sleep 0.5
-    done
-    if [ -S "$HOME/.kiss/sorcar.sock" ]; then
-        echo "   kiss-web daemon is back up ($HOME/.kiss/sorcar.sock)."
-    else
-        echo "   kiss-web daemon not back within ${KISS_DAEMON_WAIT_SECS}s — the"
-        echo "   VS Code extension will finish restarting it after the reload."
-    fi
-    unset _kiss_deadline
-    fi
+    # The kiss-web daemon is deliberately NOT touched by this script — no
+    # kill, no socket cleanup, no launchctl/systemctl restart.  Restarting
+    # kiss-web is owned entirely by the VS Code extension: after the
+    # ``.extension-updated`` marker written below triggers the window
+    # reload, the extension's DependencyInstaller rebuilds the bundled
+    # Python environment (``uv sync``) and restarts the daemon itself
+    # (``restartKissWebDaemon`` — the fingerprint of the freshly installed
+    # extension never matches ``~/.kiss/.kiss-web.fingerprint``), deferring
+    # while tasks are in flight (``daemonHasActiveTasks``).  Until that
+    # restart the old daemon keeps serving, so running this script never
+    # clobbers in-flight agent runs.
 
     # MODEL_INFO.json is intentionally NOT copied into the user's kiss
     # home directory.  The bundled
@@ -1406,7 +1152,7 @@ exec > >(tee -a "$LOG_FILE") 2>&1
     # INJECTIONS.md is intentionally NOT copied into the user's kiss
     # home directory.  The bundled ``src/kiss/INJECTIONS.md`` is read
     # directly from the installed package at runtime by
-    # ``kiss.agents.vscode.tricks.read_tricks`` and ``getTricks`` in
+    # ``kiss.server.tricks.read_tricks`` and ``getTricks`` in
     # ``SorcarTab.ts``, so every extension upgrade automatically
     # delivers the latest bundled tricks without clobbering user
     # edits.  User-curated tricks live in ``~/.kiss/MY_INJECTION.md``

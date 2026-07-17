@@ -14,8 +14,8 @@ import json
 import subprocess
 from pathlib import Path
 
-from kiss.agents.vscode.diff_merge import _parse_diff_hunks, _prepare_merge_view
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.diff_merge import _parse_diff_hunks, _prepare_merge_view
+from kiss.server.server import VSCodeServer
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -42,8 +42,8 @@ def _make_repo(tmp_path: Path) -> Path:
 def test_autocomplete_survives_binary_active_file(tmp_path: Path) -> None:
     """A non-UTF-8 active file must not crash the autocomplete pipeline.
 
-    Bug: ``_complete_from_active_file`` reads the active editor file
-    from disk in text mode and catches only ``OSError``.  A binary
+    Bug: ``_active_file_identifier_matches`` reads the active editor
+    file from disk in text mode and catches only ``OSError``.  A binary
     (non-UTF-8) active file raises ``UnicodeDecodeError``, which
     propagates out of ``_complete`` and permanently kills the single
     ``_complete_worker_loop`` thread — autocomplete then stays dead for
@@ -54,10 +54,10 @@ def test_autocomplete_survives_binary_active_file(tmp_path: Path) -> None:
     binary_file.write_bytes(b"\xff\xfe\x00\x01\x80binary\x00data\xff")
     server = VSCodeServer()
 
-    # Must return a (possibly empty) suggestion, never raise.
-    result = server._complete_from_active_file("fo", str(binary_file), "")
+    # Must return a (possibly empty) match list, never raise.
+    matches = server._active_file_identifier_matches("fo", str(binary_file), "")
 
-    assert result == ""
+    assert matches == []
 
 
 def test_parse_diff_hunks_path_with_space_b_segment(tmp_path: Path) -> None:

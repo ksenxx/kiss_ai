@@ -385,7 +385,7 @@ def test_shape_responses_kwargs() -> None:
     assert kwargs["model"] == MODEL
     assert kwargs["input"] == msgs
     assert kwargs["instructions"] == "sys"
-    assert kwargs["reasoning"] == {"effort": "high"}
+    assert kwargs["reasoning"] == {"effort": "high", "summary": "auto"}
     assert kwargs["max_output_tokens"] == 5
     assert kwargs["text"] == {"format": {"type": "json_object"}}
     assert kwargs["temperature"] == 0.5

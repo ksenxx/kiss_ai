@@ -24,7 +24,7 @@ import time
 import unittest
 from pathlib import Path
 
-from kiss.agents.vscode import web_server as ws
+from kiss.server import web_server as ws
 
 
 def _make_server(tmp: str) -> ws.RemoteAccessServer:

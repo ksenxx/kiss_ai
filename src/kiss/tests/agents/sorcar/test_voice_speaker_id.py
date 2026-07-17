@@ -35,7 +35,7 @@ import wave
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.vscode.voice_wake import (
+from kiss.server.voice_wake import (
     SAMPLE_RATE,
     SpeakerRegistry,
 )
@@ -83,7 +83,7 @@ def _run_listener(
     """Run the real wake listener module against *wav*."""
     cmd = [
         "uv", "run", "python", "-m",
-        "kiss.agents.vscode.voice_wake", "--wav", str(wav),
+        "kiss.server.voice_wake", "--wav", str(wav),
     ]
     if models_dir is not None:
         cmd += ["--models-dir", str(models_dir)]
@@ -283,7 +283,7 @@ class TestSpeakerIdFromWav(unittest.TestCase):
         # is reported on stderr.  The wake model is reused from the
         # default cache (symlinked), while the spk model directory
         # exists but is empty, so SpkModel construction fails.
-        from kiss.agents.vscode.voice_wake import (
+        from kiss.server.voice_wake import (
             DEFAULT_MODELS_DIR,
             MODEL_NAME,
             SPK_MODEL_NAME,
@@ -320,7 +320,7 @@ class TestSpeakerIdentifierLocal(unittest.TestCase):
     """The real x-vector extractor, driven directly (local models only)."""
 
     def test_empty_pcm_yields_no_speaker(self) -> None:
-        from kiss.agents.vscode.voice_wake import (
+        from kiss.server.voice_wake import (
             DEFAULT_MODELS_DIR,
             SpeakerIdentifier,
         )

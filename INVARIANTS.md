@@ -27,9 +27,10 @@ ______________________________________________________________________
   until set again in the Settings panel. (1044)
 - The remote web server MUST remain responsive even after the MacBook lid is
   closed. (412)
-- The remote web server MUST run as a daemon (started by `install.sh`), MUST
-  auto-restart if killed, MUST survive machine reboots, and MUST run in the
-  `kiss_ai` directory. (379)
+- The remote web server MUST run as a daemon (started by the VS Code
+  extension's DependencyInstaller, never by `install.sh`), MUST auto-restart
+  if killed, MUST survive machine reboots, and MUST run in the `kiss_ai`
+  directory. (379)
 - `--tls` and `--tunnel` MUST be the default when `uv run kiss-web` is run. (377)
 - A single server MUST serve both the extension and remote web clients. (1749)
 - The remote webapp MUST be made as similar to the extension as possible and
@@ -204,6 +205,11 @@ ______________________________________________________________________
   running `kiss_web`. (1034, 1035)
 - `install.sh` MUST NOT refer to the Claude skills; downloading and bundling
   the skills is owned by `release.sh` and `scripts/build-extension.sh`. (676)
+- `install.sh` MUST only install the necessary software, build the VS Code
+  extension, and install it; it MUST NOT touch the kiss-web daemon (no kill,
+  no `~/.kiss/sorcar.sock` removal, no `launchctl`/`systemctl` restart).
+  Restarting kiss-web is owned by the extension's DependencyInstaller
+  (`restartKissWebDaemon`) during extension installation/activation.
 - `release.sh` MUST update the version number in `src/kiss/SYSTEM.md`,
   `README.md`, and every other file that uses the version number; the version
   number MUST have the format `yyyy.mm.minor`. (90, 91, 1176)
@@ -233,6 +239,15 @@ ______________________________________________________________________
   stop button MUST stop the demo and bring back the send button. (220)
 - When the demo switches from one task to the next, the animation MUST be a
   continuation of the same chat (the welcome page MUST NOT be shown). (219)
+
+## Code layering
+
+- Code in `src/kiss/core/` MUST NOT depend on (import) any code outside
+  `src/kiss/core/`.
+- Code in `src/kiss/agents/sorcar/` MUST NOT depend on (import) any code
+  outside `src/kiss/agents/sorcar/` except code in `src/kiss/core/`.
+- Both rules cover lazy/conditional imports too and are enforced by
+  `src/kiss/tests/test_layering_invariants.py`.
 
 ## Other components
 

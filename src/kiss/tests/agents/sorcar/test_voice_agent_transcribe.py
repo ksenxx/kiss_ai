@@ -43,11 +43,10 @@ import unittest
 import wave
 from pathlib import Path
 
-from kiss.agents.vscode.voice_wake import (
+from kiss.server.voice_wake import (
     SAMPLE_RATE,
     parse_transcription_reply,
     transcribe_pcm,
-    translate_pcm_to_english,
     trim_trailing_silence,
 )
 
@@ -351,11 +350,11 @@ class TestTranscribeAgentDirect(unittest.TestCase):
         self.assertNotIn("paris", text)
         self.assertEqual(result["language"], "en")
 
-    def test_translate_wrapper_returns_text_only(self) -> None:
+    def test_transcribe_text_field_is_plain_english(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             pcm = _tts_pcm(Path(tmp), "w", "Delete the temporary files.")
         self.assertIn(
-            "temporary files", translate_pcm_to_english(pcm).lower()
+            "temporary files", str(transcribe_pcm(pcm)["text"]).lower()
         )
 
 
@@ -373,7 +372,7 @@ class TestTranscribeAgentDegraded(unittest.TestCase):
         # empty result instead of raising or hanging.
         script = (
             "import json, math, struct\n"
-            "from kiss.agents.vscode.voice_wake import ("
+            "from kiss.server.voice_wake import ("
             "SAMPLE_RATE, transcribe_pcm)\n"
             "pcm = b''.join(struct.pack('<h', int(20000 * math.sin("
             "2 * math.pi * 440 * i / SAMPLE_RATE)))"
@@ -420,7 +419,7 @@ class TestListenerSpeechLanguage(unittest.TestCase):
             proc = subprocess.run(
                 [
                     "uv", "run", "python", "-m",
-                    "kiss.agents.vscode.voice_wake", "--wav", str(wav),
+                    "kiss.server.voice_wake", "--wav", str(wav),
                 ],
                 cwd=PROJECT_ROOT,
                 capture_output=True,

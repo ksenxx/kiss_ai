@@ -33,7 +33,7 @@ import time
 import unittest
 from pathlib import Path
 
-from kiss.agents.vscode import web_server as ws
+from kiss.server import web_server as ws
 
 
 class _MetricsHandler(http.server.BaseHTTPRequestHandler):
@@ -111,7 +111,7 @@ class TestAdoptDecline(unittest.TestCase):
         return proc
 
     def _write_pidfile(self, pid: int, metrics_port: int) -> None:
-        ws._CLOUDFLARED_PIDFILE.write_text(json.dumps({
+        ws._cloudflared_pidfile().write_text(json.dumps({
             "pid": pid,
             "metrics_port": metrics_port,
             "url": "https://saved.trycloudflare.com",
@@ -137,7 +137,7 @@ class TestAdoptDecline(unittest.TestCase):
             "declined cloudflared was left running (orphan process leak)",
         )
         self.assertFalse(
-            ws._CLOUDFLARED_PIDFILE.exists(),
+            ws._cloudflared_pidfile().exists(),
             "pidfile of the declined cloudflared was not unlinked",
         )
 

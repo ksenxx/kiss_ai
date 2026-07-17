@@ -5,7 +5,7 @@
 """Integration tests for additional VS Code race conditions.
 
 Each test deterministically forces an interleaving that exposes a real
-data race in ``kiss.agents.vscode``.  No mocks of production behaviour
+data race in ``kiss.server``.  No mocks of production behaviour
 are used — only ``threading.Barrier``-based scheduling control on the
 *queue object* the production code calls into.
 
@@ -31,8 +31,8 @@ import threading
 import unittest
 
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.agents.vscode.json_printer import JsonPrinter
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.json_printer import JsonPrinter
+from kiss.server.server import VSCodeServer
 
 
 class TestConcurrentUserAnswerWedge(unittest.TestCase):

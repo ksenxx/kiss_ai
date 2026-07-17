@@ -26,15 +26,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import kiss.agents.vscode.merge_flow as _merge_flow_module
+import kiss.server.merge_flow as _merge_flow_module
 from kiss.agents.sorcar.persistence import (
     _add_task,
     _get_db,
     _load_latest_chat_events_by_chat_id,
 )
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-from kiss.agents.vscode.json_printer import _DISPLAY_EVENT_TYPES
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.json_printer import _DISPLAY_EVENT_TYPES
+from kiss.server.server import VSCodeServer
 
 
 def _run_git(cwd: str, *args: str) -> subprocess.CompletedProcess[str]:
@@ -71,7 +71,11 @@ class TestAutocommitPersistence(unittest.TestCase):
         self._real_broadcast = self.server.printer.broadcast
         self.server.printer.broadcast = capture  # type: ignore[assignment]
 
-        def fake_compose(diff_text: str, user_prompt: str | None = None) -> str:
+        def fake_compose(
+            diff_text: str,
+            user_prompt: str | None = None,
+            task_result: str | None = None,
+        ) -> str:
             return "feat: autocommit persistence test"
 
         _merge_flow_module.generate_commit_message_from_diff = fake_compose  # type: ignore[assignment]

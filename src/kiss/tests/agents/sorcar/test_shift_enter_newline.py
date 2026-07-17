@@ -16,9 +16,9 @@ import io
 import sys
 import threading
 
-from kiss.agents.sorcar.cli_panel import clip_buf
-from kiss.agents.sorcar.cli_repl import _read_line
-from kiss.agents.sorcar.cli_steering import _InputBox
+from kiss.ui.cli.cli_panel import clip_buf
+from kiss.ui.cli.cli_repl import _read_line
+from kiss.ui.cli.cli_steering import _InputBox
 
 
 def _make_box() -> _InputBox:

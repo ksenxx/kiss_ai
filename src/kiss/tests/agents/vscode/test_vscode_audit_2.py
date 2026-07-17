@@ -3,7 +3,7 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 """Integration tests for bug fixes, redundancy acknowledgement, and
-consistency improvements in ``kiss.agents.vscode``.
+consistency improvements in ``kiss.server``.
 
 These tests assert the FIXED behavior — each test confirms the bug is
 resolved or the inconsistency is eliminated.
@@ -22,8 +22,8 @@ B8: ``_run_task`` now broadcasts ``status: running: False`` INSIDE
 
 Bugs acknowledged (not fixed — intentional)
 --------------------------------------------
-B4: ``_complete_from_active_file`` returns the LONGEST matching suffix.
-    This is intentional behavior per user feedback.
+B4: ``_active_file_identifier_matches`` ranks the LONGEST matching
+    identifier first. This is intentional behavior per user feedback.
 
 Redundancies acknowledged
 -------------------------
@@ -47,17 +47,17 @@ import threading
 import typing
 import unittest
 
-from kiss.agents.vscode.diff_merge import (
+from kiss.server.diff_merge import (
     _cleanup_merge_data,
     _merge_data_dir,
 )
-from kiss.agents.vscode.helpers import (
+from kiss.server.helpers import (
     clip_autocomplete_suggestion,
     model_vendor,
 )
-from kiss.agents.vscode.merge_flow import _MergeFlowMixin
-from kiss.agents.vscode.server import VSCodeServer
-from kiss.agents.vscode.task_runner import _TaskRunnerMixin
+from kiss.server.merge_flow import _MergeFlowMixin
+from kiss.server.server import VSCodeServer
+from kiss.server.task_runner import _TaskRunnerMixin
 
 
 def _make_server() -> tuple[VSCodeServer, list[dict]]:
@@ -76,9 +76,10 @@ def _make_server() -> tuple[VSCodeServer, list[dict]]:
     return server, events
 
 
-class TestCompleteFromActiveFileLongestMatch(unittest.TestCase):
-    """B4: ``_complete_from_active_file`` prefers the longest matching
-    suffix.  This is INTENTIONAL behavior — test confirms it still works.
+class TestActiveFileMatchesLongestFirst(unittest.TestCase):
+    """B4: ``_active_file_identifier_matches`` ranks the longest
+    matching identifier first.  This is INTENTIONAL behavior — test
+    confirms it still works.
     """
 
     def setUp(self) -> None:
@@ -89,13 +90,14 @@ class TestCompleteFromActiveFileLongestMatch(unittest.TestCase):
             "server_manager = create_manager()\n"
         )
 
-    def test_returns_longest_suffix(self) -> None:
-        """The function returns 'er_manager' (10 chars) — intentional."""
-        result = self.server._complete_from_active_file(
+    def test_returns_longest_match_first(self) -> None:
+        """The top match is 'server_manager' (longest) — intentional."""
+        matches = self.server._active_file_identifier_matches(
             "use serv", snapshot_content=self.content,
         )
-        assert result == "er_manager", (
-            f"B4 intentional: expected longest suffix 'er_manager', got {result!r}"
+        assert matches and matches[0] == "server_manager", (
+            f"B4 intentional: expected longest match 'server_manager' "
+            f"first, got {matches!r}"
         )
 
 
@@ -218,8 +220,9 @@ class TestFinishMergeEmptyTabIdGuard(unittest.TestCase):
 
 class TestClipAutocompleteSuggestionRedundant(unittest.TestCase):
     """R2 redundancy: ``clip_autocomplete_suggestion`` is applied to
-    the output of ``_complete_from_active_file`` but all its
-    transformations are no-ops for clean identifier suffixes.
+    identifier suffixes derived from
+    ``_active_file_identifier_matches`` but all its transformations
+    are no-ops for clean identifier suffixes.
     Kept for safety — these tests document the behavior.
     """
 

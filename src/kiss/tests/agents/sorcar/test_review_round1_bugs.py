@@ -279,10 +279,10 @@ def test_vs_bug1_replay_uses_str_parent_task_id() -> None:
     post-refactor canonical contract) and the r3-vscode-H2 int
     fallback stringifies legacy ids rather than replacing the str path.
     """
-    from kiss.agents.vscode.server import _coerce_id
+    from kiss.server.server import _coerce_id
 
     src = Path(
-        "src/kiss/agents/vscode/server.py"
+        "src/kiss/server/server.py"
     ).read_text()
     assert (
         'parent_tid = _coerce_id(subagent_info.get("parent_task_id"))' in src
@@ -308,7 +308,7 @@ def test_vs_bug2_shutdown_helper_accepts_uuid_strings() -> None:
     suite's daemon-shutdown tests.
     """
     src = Path(
-        "src/kiss/agents/vscode/web_server.py"
+        "src/kiss/server/web_server.py"
     ).read_text()
     assert "active_task_history_ids: set[int]" not in src
     assert "active_task_history_ids: set[str]" in src
@@ -329,10 +329,10 @@ def test_vs_bug3_commands_reject_non_string_taskid() -> None:
     handlers now validate through the shared ``_opt_str`` guard, which
     rejects every non-string payload.
     """
-    from kiss.agents.vscode.commands import _opt_str
+    from kiss.server.commands import _opt_str
 
     src = Path(
-        "src/kiss/agents/vscode/commands.py"
+        "src/kiss/server/commands.py"
     ).read_text()
     occurrences = src.count('task_id = _opt_str(cmd.get("taskId"))')
     assert occurrences == 4, (
@@ -353,16 +353,19 @@ def test_vs_bug3_commands_reject_non_string_taskid() -> None:
 def test_vs_bug4_cli_task_envelopes_reject_non_string_taskid() -> None:
     """``cliTaskStart`` / ``cliTaskEnd`` must reject non-str payloads.
 
-    Functional repro: dispatch a bogus ``{"type": "cliTaskStart",
-    "taskId": ["evil"]}`` envelope; the daemon must NOT register the
-    task in ``_cli_running_tasks``.
+    Functional repro: both branches validate the ``taskId`` through the
+    shared ``_validated_cli_task_id`` helper, which must return ``""``
+    for missing, empty, or non-string payloads so the daemon never
+    registers a bogus task in ``_cli_running_tasks``.
     """
-    src = Path(
-        "src/kiss/agents/vscode/web_server.py"
-    ).read_text()
-    assert src.count(
-        'raw_id if isinstance(raw_id, str) and raw_id else ""'
-    ) >= 2
+    from kiss.server.web_server import RemoteAccessServer
+
+    validate = RemoteAccessServer._validated_cli_task_id
+    assert validate({"type": "cliTaskStart", "taskId": ["evil"]}) == ""
+    assert validate({"type": "cliTaskEnd", "taskId": 123}) == ""
+    assert validate({"type": "cliTaskStart", "taskId": ""}) == ""
+    assert validate({"type": "cliTaskStart"}) == ""
+    assert validate({"type": "cliTaskEnd", "taskId": "abc123"}) == "abc123"
 
 
 # ---------------------------------------------------------------------------
@@ -390,9 +393,9 @@ def test_sorcar_bug1_cli_printer_normalizes_case() -> None:
     Reading the source guarantees the new ``.lower()`` is in place and
     the heuristic char-by-char check has been removed.
     """
-    src = Path(
-        "src/kiss/agents/sorcar/cli_printer.py"
-    ).read_text()
+    from kiss.ui.cli import cli_printer
+
+    src = Path(str(cli_printer.__file__)).read_text()
     # Heuristic gone.
     assert "0123456789abcdef" not in src
     # New contract in place.

@@ -5,7 +5,7 @@
 """Bughunt round 2: MCP tool wrappers, OAuth callback server, skills.
 
 End-to-end regression tests (no mocks) for genuine bugs found in
-``kiss.agents.sorcar.mcp_servers``, ``kiss.agents.sorcar.mcp_cli``, and
+``kiss.agents.sorcar.mcp_servers``, ``kiss.ui.cli.mcp_cli``, and
 ``kiss.agents.sorcar.skills``:
 
 1. ``make_mcp_tool_wrapper`` crashed with ``ValueError`` when an
@@ -34,7 +34,6 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from kiss.agents.sorcar.mcp_cli import _OAuthCallbackServer
 from kiss.agents.sorcar.mcp_servers import (
     MCPManager,
     MCPServerConfig,
@@ -50,6 +49,7 @@ from kiss.agents.sorcar.skills import (
 from kiss.tests.agents.sorcar.test_sorcar_mcp import (  # noqa: F401
     isolated_homes,
 )
+from kiss.ui.cli.mcp_cli import _OAuthCallbackServer
 
 # A real stdio MCP server (low-level API) whose tool schema uses a
 # hyphenated property name, a Python keyword, and lists an optional

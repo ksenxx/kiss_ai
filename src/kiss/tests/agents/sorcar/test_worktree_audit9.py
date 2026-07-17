@@ -29,8 +29,9 @@ BUG-44: `_new_chat` guard now checks `tab.agent._wt_pending` regardless
     of `tab.use_worktree`, so a tab that switched modes still gets the
     non-wt-running guard.
 
-INC-6: `_check_merge_conflict` now checks both `unstaged_files()` AND
-    `staged_files()` for dirty-file overlap.
+INC-6: `_check_merge_conflict` now checks both unstaged AND staged
+    files for dirty-file overlap (historically via the since-removed
+    `unstaged_files()`/`staged_files()` helpers).
 
 RED-5: The two consecutive `if not tab.use_worktree:` blocks in
     `_run_task_inner`'s finally are now a single block.
@@ -52,7 +53,7 @@ from kiss.agents.sorcar.worktree_sorcar_agent import (
     WorktreeSorcarAgent,
     _manual_merge_cmd,
 )
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.server import VSCodeServer
 
 
 def _make_repo(tmp_path: Path, name: str = "repo") -> Path:

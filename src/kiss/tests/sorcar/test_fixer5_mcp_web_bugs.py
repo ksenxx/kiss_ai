@@ -41,10 +41,10 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.sorcar.mcp_cli import _OAuthCallbackServer
 from kiss.agents.sorcar.mcp_servers import MCPManager, MCPServerConfig
 from kiss.agents.sorcar.skills import discover_skills, load_skill_content
 from kiss.agents.sorcar.web_use_tool import WebUseTool
+from kiss.ui.cli.mcp_cli import _OAuthCallbackServer
 
 _SERVER_SCRIPT = '''
 from mcp.server.fastmcp import FastMCP

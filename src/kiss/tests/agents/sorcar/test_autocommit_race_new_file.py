@@ -82,7 +82,11 @@ def test_auto_commit_picks_up_file_appearing_during_message_generation(
         # Pre-existing change the agent made before the auto-commit.
         (repo / "agent_report.txt").write_text("agent's output\n")
 
-        def racing_message_fn(commit_dir: Path, user_prompt: str | None) -> str:
+        def racing_message_fn(
+            commit_dir: Path,
+            user_prompt: str | None,
+            task_result: str | None = None,
+        ) -> str:
             """Stand-in for the LLM call that races with the worktree.
 
             Drops a new tracked file into the worktree *after*
@@ -132,7 +136,9 @@ def test_auto_commit_picks_up_file_appearing_when_message_fn_raises(
         (repo / "agent_report.txt").write_text("agent's output\n")
 
         def raising_message_fn(
-            commit_dir: Path, user_prompt: str | None,
+            commit_dir: Path,
+            user_prompt: str | None,
+            task_result: str | None = None,
         ) -> str:
             (commit_dir / "late_arriver.txt").write_text(
                 "appeared while LLM was failing\n",

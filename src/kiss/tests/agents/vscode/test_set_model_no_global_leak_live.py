@@ -35,12 +35,12 @@ from typing import Any
 
 import pytest
 
-import kiss.agents.vscode.vscode_config as vscode_config
+import kiss.server.vscode_config as vscode_config
 from kiss.agents.sorcar import persistence as sorcar_persistence
 from kiss.agents.sorcar.persistence import _load_last_model
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.agents.vscode.server import VSCodeServer
 from kiss.core.models.model_info import get_available_models
+from kiss.server.server import VSCodeServer
 from kiss.tests.conftest import (
     requires_anthropic_api_key,
     requires_gemini_api_key,

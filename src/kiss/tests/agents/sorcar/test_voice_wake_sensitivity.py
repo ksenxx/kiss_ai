@@ -8,7 +8,7 @@ Real audio (macOS TTS), real speech models, no mocks.  The sensitivity
 slider (0..100, default 85) must ACTUALLY change how eagerly the
 "Sorcar" wake word fires, in both listener implementations:
 
-- The Python listener (``kiss.agents.vscode.voice_wake``) used by the
+- The Python listener (``kiss.server.voice_wake``) used by the
   VS Code extension host accepts ``--sensitivity N``:
 
   * Spoken "Sorcar" wakes at the default sensitivity.
@@ -68,7 +68,7 @@ def _run_listener(
     return subprocess.run(
         [
             "uv", "run", "python", "-m",
-            "kiss.agents.vscode.voice_wake", "--wav", str(wav),
+            "kiss.server.voice_wake", "--wav", str(wav),
             *extra_args,
         ],
         cwd=PROJECT_ROOT,
@@ -197,7 +197,7 @@ class TestSensitivitySliderBrowser(unittest.TestCase):
     audio wakes the in-browser (remote webapp) listener."""
 
     def setUp(self) -> None:
-        from kiss.agents.vscode.web_server import RemoteAccessServer
+        from kiss.server.web_server import RemoteAccessServer
 
         self.tmpdir = Path(tempfile.mkdtemp())
         # Chromium loops the fake-capture file, so the same "hey there

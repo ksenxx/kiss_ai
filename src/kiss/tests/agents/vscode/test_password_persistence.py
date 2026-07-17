@@ -45,8 +45,8 @@ from unittest import IsolatedAsyncioTestCase
 
 from websockets.asyncio.client import connect
 
-from kiss.agents.vscode.vscode_config import CONFIG_PATH, save_config
-from kiss.agents.vscode.web_server import (
+from kiss.server.vscode_config import CONFIG_PATH, save_config
+from kiss.server.web_server import (
     _WS_SHIM_JS,
     RemoteAccessServer,
     _build_html,

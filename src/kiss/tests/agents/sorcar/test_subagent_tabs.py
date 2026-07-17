@@ -22,7 +22,7 @@ import threading
 
 import pytest
 
-from kiss.agents.vscode.json_printer import JsonPrinter
+from kiss.server.json_printer import JsonPrinter
 
 FAST_MODEL = "claude-haiku-4-5"
 

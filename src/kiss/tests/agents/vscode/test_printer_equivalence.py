@@ -32,8 +32,8 @@ from typing import Any
 
 from rich.console import Console
 
-from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.core.print_to_console import ConsolePrinter
+from kiss.server.json_printer import JsonPrinter
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 # Box-drawing characters that Rich uses for Panel borders; we strip

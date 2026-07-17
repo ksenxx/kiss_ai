@@ -13,14 +13,15 @@ from __future__ import annotations
 import argparse
 import datetime
 import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import yaml
 
-from kiss import __version__
 from kiss.agents.sorcar.persistence import _list_recent_chats
-from kiss.core.config import DEFAULT_CONFIG
+from kiss.core import config as config_module
+from kiss.core._version import __version__
 from kiss.core.models.model_info import get_default_model
 
 if TYPE_CHECKING:
@@ -31,13 +32,48 @@ can you find what the current weather is in San Francisco and summarize it?
 """
 
 
+def _parse_kv(
+    pairs: list[str],
+    sep: str,
+    error_fmt: str = "Invalid option {pair!r}: expected KEY{sep}VALUE",
+) -> tuple[tuple[str, str], ...]:
+    """Parse repeated ``KEY<sep>VALUE`` CLI options into tuples.
+
+    Shared by the ``sorcar mcp`` subcommand (``--env`` / ``--header``)
+    and the main CLI's ``--header`` flag so both apply the same strict
+    policy: an entry without the separator (or with an empty key) is
+    rejected loudly with :class:`SystemExit` instead of being silently
+    dropped.
+
+    Args:
+        pairs: The raw option values (e.g. ``["FOO=bar"]``).
+        sep: The key/value separator (``"="`` for env, ``":"`` for
+            headers).
+        error_fmt: ``str.format`` template for the rejection message,
+            given ``pair`` (the offending raw value) and ``sep``.
+
+    Returns:
+        The parsed ``(key, value)`` tuples.
+
+    Raises:
+        SystemExit: When an entry has no separator or an empty key.
+    """
+    out: list[tuple[str, str]] = []
+    for pair in pairs:
+        key, found, value = pair.partition(sep)
+        if not found or not key.strip():
+            raise SystemExit(error_fmt.format(pair=pair, sep=sep))
+        out.append((key.strip(), value.strip()))
+    return tuple(out)
+
+
 def _resolve_task(args: argparse.Namespace) -> str:
     """Determine the task description from parsed arguments.
 
     Priority: -f file > --task string > default task.
 
     Args:
-        args: Parsed argparse namespace with 'f' and 'task' attributes.
+        args: Parsed argparse namespace with 'file' and 'task' attributes.
 
     Returns:
         The task description string.
@@ -290,7 +326,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Custom HTTP header (format: 'Key:Value'). Can be used multiple times.",
     )
     parser.add_argument(
-        "-b", "--max_budget", type=float, default=DEFAULT_CONFIG.max_budget,
+        "-b", "--max_budget", type=float,
+        default=config_module.DEFAULT_CONFIG.max_budget,
         help="Maximum budget in USD",
     )
     parser.add_argument(
@@ -350,8 +387,24 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _build_run_kwargs(args: argparse.Namespace) -> dict[str, Any]:
-    """Build ``agent.run()`` keyword arguments from parsed CLI args."""
+def _build_run_kwargs(
+    args: argparse.Namespace,
+    printer_factory: Callable[[], Any] | None = None,
+) -> dict[str, Any]:
+    """Build ``agent.run()`` keyword arguments from parsed CLI args.
+
+    Args:
+        args: Parsed CLI arguments from :func:`_build_arg_parser`.
+        printer_factory: Zero-argument factory for the printer to
+            install when the CLI runs verbosely (callers outside the
+            sorcar layer pass
+            :class:`~kiss.ui.cli.cli_printer.RecordingConsolePrinter`;
+            sorcar itself must not import the UI layer, hence the
+            inverted dependency).  ``None`` installs no printer.
+
+    Returns:
+        Keyword arguments for ``agent.run()``.
+    """
     task_description = _resolve_task(args)
     work_dir = args.work_dir or _launch_work_dir()
     Path(work_dir).mkdir(parents=True, exist_ok=True)
@@ -360,21 +413,16 @@ def _build_run_kwargs(args: argparse.Namespace) -> dict[str, Any]:
     if args.endpoint:
         model_config["base_url"] = args.endpoint
     if args.header:
-        headers = {}
-        for h in args.header:
-            # Reject malformed headers loudly instead of silently
-            # dropping them (w3 C-3): a ``--header`` without a colon
-            # (or with an empty key) used to vanish without a message,
-            # surfacing later only as an opaque downstream auth/HTTP
-            # error.  Matches the strict policy of the sibling
-            # ``sorcar mcp`` CLI (``mcp_cli._parse_kv`` raises
-            # SystemExit for a separator-less ``--header``).
-            key, found, value = h.partition(":")
-            if not found or not key.strip():
-                raise SystemExit(
-                    f"Invalid --header {h!r}: expected 'Key:Value'"
-                )
-            headers[key.strip()] = value.strip()
+        # Reject malformed headers loudly instead of silently dropping
+        # them (w3 C-3): a ``--header`` without a colon (or with an
+        # empty key) used to vanish without a message, surfacing later
+        # only as an opaque downstream auth/HTTP error.  The same
+        # strict :func:`_parse_kv` backs the sibling ``sorcar mcp``
+        # CLI's ``--env`` / ``--header`` options.
+        headers = dict(_parse_kv(
+            args.header, ":",
+            error_fmt="Invalid --header {pair!r}: expected 'Key:Value'",
+        ))
         if headers:
             model_config["extra_headers"] = headers
 
@@ -396,10 +444,8 @@ def _build_run_kwargs(args: argparse.Namespace) -> dict[str, Any]:
     # both records every display event to the chat DB AND renders the
     # Rich panels to the terminal, so the same run is visible live in
     # the terminal and replayable later in the chat webview.
-    if args.verbose:
-        from kiss.agents.sorcar.cli_printer import RecordingConsolePrinter
-
-        run_kwargs["printer"] = RecordingConsolePrinter()
+    if args.verbose and printer_factory is not None:
+        run_kwargs["printer"] = printer_factory()
     return run_kwargs
 
 

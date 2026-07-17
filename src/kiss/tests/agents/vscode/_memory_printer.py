@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from kiss.agents.vscode.json_printer import JsonPrinter
+from kiss.server.json_printer import JsonPrinter
 
 
 class MemoryPrinter(JsonPrinter):

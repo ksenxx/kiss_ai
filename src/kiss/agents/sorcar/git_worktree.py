@@ -49,6 +49,69 @@ _REPO_SCOPED_GIT_ENV = (
 )
 
 
+# Canonical commit-message metadata block headings.  Single-sourced
+# here because :func:`_ensure_task_metadata`'s dedup detection depends
+# on byte-exact agreement with what the writers append — both this
+# module's stamping below and ``vscode/helpers._append_user_prompt`` /
+# ``_append_task_result`` (which import these constants) build blocks
+# as ``f"{HEADING}{text}"`` appended to an ``rstrip()``-ed message.
+USER_PROMPT_HEADING = "\n\nUser prompt:\n"
+TASK_RESULT_HEADING = "\n\nResult:\n"
+
+
+def _ensure_task_metadata(
+    message: str,
+    user_prompt: str | None,
+    task_result: str | None,
+) -> str:
+    """Ensure the CURRENT task prompt/result are the message's suffix.
+
+    Appends canonical ``User prompt:`` / ``Result:`` blocks carrying
+    the current values to *message* unless the message ALREADY ends
+    with those exact canonical blocks (the framework auto-commit path
+    appends the same blocks, so a branch-HEAD message it produced must
+    not be double-stamped).
+
+    Dedup is by exact current-value suffix — NEVER by heading
+    substring: a hand-written commit body that merely mentions
+    ``Result:``, a stale block from a previous task, or a prompt whose
+    own text contains ``Result:`` must not suppress stamping the
+    current values (gpt-5.6-sol review findings).  When the message
+    ends with only the current result block, the missing prompt block
+    is inserted before it to preserve canonical prompt-then-result
+    order.
+
+    Args:
+        message: The base commit message (subject + optional body).
+        user_prompt: The current task's prompt, or ``None``/empty.
+        task_result: The current task's result summary, or
+            ``None``/empty.
+
+    Returns:
+        The commit message ending with the canonical metadata blocks
+        for every non-empty current value.
+    """
+    msg = message.rstrip()
+    prompt = user_prompt.strip() if user_prompt else ""
+    result = task_result.strip() if task_result else ""
+    prompt_block = f"{USER_PROMPT_HEADING}{prompt}" if prompt else ""
+    result_block = f"{TASK_RESULT_HEADING}{result}" if result else ""
+    if prompt and result:
+        if msg.endswith(prompt_block + result_block):
+            return msg
+        if msg.endswith(prompt_block):
+            return msg + result_block
+        if msg.endswith(result_block):
+            base = msg[: -len(result_block)].rstrip()
+            return base + prompt_block + result_block
+        return msg + prompt_block + result_block
+    if prompt:
+        return msg if msg.endswith(prompt_block) else msg + prompt_block
+    if result:
+        return msg if msg.endswith(result_block) else msg + result_block
+    return msg
+
+
 def repo_lock(repo: Path) -> threading.RLock:
     """Return a per-repo re-entrant lock for multi-step git operations.
 
@@ -76,6 +139,13 @@ def repo_lock(repo: Path) -> threading.RLock:
         return _repo_locks[key]
 
 
+# Local git operations can legitimately be slow in very large repositories
+# (``add -A``, stash, merge/cherry-pick, and user pre-commit hooks).  Five
+# minutes matches the Bash tool's normal execution budget while still putting
+# a hard ceiling on a wedged hook or git process.
+_GIT_TIMEOUT_SECONDS: float = 300.0
+
+
 def _git(
     *args: str,
     cwd: str | Path,
@@ -86,6 +156,13 @@ def _git(
     enforces that every git invocation specifies a working directory
     (passed via ``git -C <cwd>``).  This prevents accidental git
     operations against the process's current working directory.
+
+    Always passes a timeout so a hung git process (e.g. waiting on a
+    credential-helper prompt or a network remote) cannot block the
+    agent thread forever — the same protection
+    ``vscode/diff_merge._git`` documents.  On expiry a synthesized
+    non-zero ``CompletedProcess`` (returncode 124, the timeout
+    convention) is returned so callers keep working.
 
     Args:
         *args: Git sub-command and arguments (without the leading ``git``).
@@ -117,14 +194,67 @@ def _git(
     # a strict decode would raise UnicodeDecodeError out of EVERY git
     # call.  Surrogate escapes round-trip through ``os.fsencode`` for
     # filesystem operations, matching :func:`_unquote_git_path`.
-    return subprocess.run(
+    # Use a fresh POSIX process group rather than ``subprocess.run``.
+    # Killing only the top-level git process on timeout is insufficient:
+    # a hung hook can keep the captured stdout/stderr pipes open, making
+    # ``run``'s post-timeout ``communicate()`` wait indefinitely even
+    # after git itself has died.
+    proc = subprocess.Popen(
         cmd,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
         encoding="utf-8",
         errors="surrogateescape",
         env=env,
+        start_new_session=os.name != "nt",
     )
+    try:
+        stdout, stderr = proc.communicate(timeout=_GIT_TIMEOUT_SECONDS)
+        return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+    except subprocess.TimeoutExpired as exc:
+        logger.warning("git %s timed out after %ss", args, _GIT_TIMEOUT_SECONDS)
+        if os.name != "nt":
+            try:
+                os.killpg(proc.pid, 9)
+            except ProcessLookupError:
+                pass
+        else:  # pragma: no cover - Windows CI is not available here
+            # ``Popen.kill`` does not terminate hook descendants on
+            # Windows; taskkill's /T switch closes the whole tree.
+            subprocess.run(  # noqa: S603, S607
+                ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+            if proc.poll() is None:
+                proc.kill()
+        try:
+            stdout, stderr = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:  # pragma: no cover - defensive
+            proc.kill()
+            stdout = (
+                exc.stdout.decode("utf-8", "surrogateescape")
+                if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+            )
+            stderr = (
+                exc.stderr.decode("utf-8", "surrogateescape")
+                if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+            )
+        # TimeoutExpired may expose bytes even for a text-mode process.
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode("utf-8", "surrogateescape")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode("utf-8", "surrogateescape")
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=124,  # convention: timeout
+            stdout=stdout or "",
+            stderr=stderr
+            or f"git {args[0] if args else ''} timed out"
+            f" after {_GIT_TIMEOUT_SECONDS}s",
+        )
 
 
 @dataclass(frozen=True)
@@ -302,6 +432,47 @@ def _split_rename_tail(tail: str) -> tuple[str, str]:
                 i += 1
     idx = tail.index(" -> ")
     return tail[:idx], tail[idx + 4 :]
+
+
+def _porcelain_entries(output: str) -> list[tuple[str, str | None, str]]:
+    """Parse ``git status --porcelain`` output into unquoted entries.
+
+    The single shared porcelain parser — used by
+    :meth:`GitWorktreeOps.copy_dirty_state` and (via
+    ``merge_flow._porcelain_paths``) by the VS Code merge flow — so
+    the parsers cannot drift apart.
+
+    The output is split on ``\\n`` only (NOT ``splitlines()``, which
+    would also split on a raw unicode line/paragraph-separator byte
+    sequence inside an unquoted filename) and the path tail
+    (``line[3:]``) is never ``strip()``-ed: space-adjacent filenames
+    are legal and git leaves them unquoted.  Rename/copy entries are
+    split on the `` -> `` boundary (respecting quoting) BEFORE each
+    side is unquoted exactly once.
+
+    Args:
+        output: Raw stdout from a ``git status --porcelain`` command.
+
+    Returns:
+        List of ``(code, old_name, new_name)`` tuples in output order:
+        ``code`` is the two-character status code, ``old_name`` is the
+        rename/copy source path (``None`` for non-rename entries), and
+        ``new_name`` is the entry's (current) path.
+    """
+    entries: list[tuple[str, str | None, str]] = []
+    for line in output.split("\n"):
+        if len(line) < 4:
+            continue
+        code = line[:2]
+        tail = line[3:]
+        if ("R" in code or "C" in code) and " -> " in tail:
+            old_raw, new_raw = _split_rename_tail(tail)
+            entries.append(
+                (code, _unquote_git_path(old_raw), _unquote_git_path(new_raw))
+            )
+        else:
+            entries.append((code, None, _unquote_git_path(tail)))
+    return entries
 
 
 class GitWorktreeOps:
@@ -613,7 +784,12 @@ class GitWorktreeOps:
         return result.returncode == 0
 
     @staticmethod
-    def _merge_commit_message(repo: Path, branch: str) -> str:
+    def _merge_commit_message(
+        repo: Path,
+        branch: str,
+        user_prompt: str | None = None,
+        task_result: str | None = None,
+    ) -> str:
         """Return the commit message to use for a squash-merge commit.
 
         When the agent has made at least one commit on *branch* (the
@@ -629,10 +805,31 @@ class GitWorktreeOps:
         error).  Never returns an empty string, because ``git commit``
         rejects empty messages.
 
+        When *user_prompt* / *task_result* are provided, they are
+        appended to the message under ``User prompt:`` / ``Result:``
+        headings — UNLESS the message already ends with those exact
+        canonical blocks carrying the CURRENT values (see
+        :func:`_ensure_task_metadata`).  This guarantees the final
+        commit on the user's original branch always records the task
+        description and its outcome even when the branch HEAD commit
+        was hand-written by the agent itself (production incident:
+        commit ``dd563a7c`` — the agent committed its own work with
+        its own message, the post-task auto-commit was a no-op, and
+        the squash-merge reused that message verbatim, losing both
+        blocks).  Dedup is by exact current-value suffix so the
+        framework auto-commit path (which already appends both
+        blocks) is never double-stamped, while incidental heading
+        text or stale blocks from a previous task can never suppress
+        the current values.
+
         Args:
             repo: Git repo root path (the working directory that will
                 run ``git log``).
             branch: The worktree branch whose HEAD message to read.
+            user_prompt: The user's task prompt to append, or ``None``
+                when unavailable.
+            task_result: The task's result summary to append, or
+                ``None`` when unavailable.
 
         Returns:
             A non-empty commit message string.
@@ -646,11 +843,16 @@ class GitWorktreeOps:
         result = _git("log", "-1", "--format=%B", branch, "--", cwd=repo)
         msg = result.stdout.rstrip()
         if result.returncode != 0 or not msg:
-            return f"kiss: merged from {branch}"
-        return msg
+            msg = f"kiss: merged from {branch}"
+        return _ensure_task_metadata(msg, user_prompt, task_result)
 
     @staticmethod
-    def _commit_staged_merge(repo: Path, branch: str) -> MergeResult:
+    def _commit_staged_merge(
+        repo: Path,
+        branch: str,
+        user_prompt: str | None = None,
+        task_result: str | None = None,
+    ) -> MergeResult:
         """Commit the staged result of a squash merge, if any.
 
         Shared tail of :meth:`squash_merge_branch` and
@@ -663,13 +865,20 @@ class GitWorktreeOps:
         Args:
             repo: Git repo root path.
             branch: The worktree branch the changes came from.
+            user_prompt: The user's task prompt, appended to the merge
+                commit message when not already present (see
+                :meth:`_merge_commit_message`), or ``None``.
+            task_result: The task's result summary, appended likewise,
+                or ``None``.
 
         Returns:
             :attr:`MergeResult.SUCCESS` or :attr:`MergeResult.MERGE_FAILED`.
         """
         diff = _git("diff", "--cached", "--quiet", cwd=repo)
         if diff.returncode != 0:
-            msg = GitWorktreeOps._merge_commit_message(repo, branch)
+            msg = GitWorktreeOps._merge_commit_message(
+                repo, branch, user_prompt=user_prompt, task_result=task_result,
+            )
             commit_result = _git("commit", "-m", msg, cwd=repo)
             if commit_result.returncode != 0:
                 logger.warning(
@@ -681,18 +890,29 @@ class GitWorktreeOps:
         return MergeResult.SUCCESS
 
     @staticmethod
-    def squash_merge_branch(repo: Path, branch: str) -> MergeResult:
+    def squash_merge_branch(
+        repo: Path,
+        branch: str,
+        user_prompt: str | None = None,
+        task_result: str | None = None,
+    ) -> MergeResult:
         """Squash-merge a branch and commit the result.
 
         Uses ``git merge --squash`` to apply all changes from *branch*,
         then commits the staged result using the HEAD commit message
-        of *branch* (see :meth:`_merge_commit_message`).
+        of *branch* (see :meth:`_merge_commit_message`) with the task
+        prompt and result appended when provided and not already
+        present in that message.
 
         On conflict, resets to a clean state with ``git reset --hard``.
 
         Args:
             repo: Git repo root path.
             branch: Branch to squash-merge.
+            user_prompt: The user's task prompt for the merge commit
+                message, or ``None``.
+            task_result: The task's result summary for the merge
+                commit message, or ``None``.
 
         Returns:
             :attr:`MergeResult.SUCCESS` or :attr:`MergeResult.CONFLICT`.
@@ -705,47 +925,25 @@ class GitWorktreeOps:
             )
             _git("reset", "--hard", "HEAD", cwd=repo)
             return MergeResult.CONFLICT
-        return GitWorktreeOps._commit_staged_merge(repo, branch)
+        return GitWorktreeOps._commit_staged_merge(
+            repo, branch, user_prompt=user_prompt, task_result=task_result,
+        )
 
     @staticmethod
     def _diff_name_only(repo: Path, *flags: str) -> list[str]:
-        """Return ``git diff --name-only`` output lines (empty on failure).
+        """Return ``git diff --name-only`` paths (empty on failure).
 
-        Paths are unquoted via :func:`_unquote_git_path`: even with
-        ``core.quotepath=false`` git C-quotes any path containing a
-        double-quote, backslash, or control character, and callers
-        compare these names against real on-disk paths.
+        Uses ``-z`` NUL-separated output and splits on NUL only, so
+        paths are returned byte-exact: no C-quoting to undo (git never
+        quotes ``-z`` output), no ``strip()``/``splitlines()`` that
+        would mangle filenames with leading/trailing spaces or raw
+        unicode line-separator sequences.  Callers compare these names
+        against real on-disk paths.
         """
-        result = _git("diff", "--name-only", *flags, cwd=repo)
+        result = _git("diff", "--name-only", "-z", *flags, cwd=repo)
         if result.returncode != 0:
             return []
-        return [_unquote_git_path(f) for f in result.stdout.strip().splitlines() if f]
-
-    @staticmethod
-    def unstaged_files(repo: Path) -> list[str]:
-        """List files with unstaged changes in the working tree.
-
-        Args:
-            repo: Git repo root path.
-
-        Returns:
-            List of files with uncommitted, unstaged modifications,
-            or an empty list if the command fails.
-        """
-        return GitWorktreeOps._diff_name_only(repo)
-
-    @staticmethod
-    def staged_files(repo: Path) -> list[str]:
-        """List files with staged (cached) changes in the index.
-
-        Args:
-            repo: Git repo root path.
-
-        Returns:
-            List of files staged for commit, or an empty list if the
-            command fails.
-        """
-        return GitWorktreeOps._diff_name_only(repo, "--cached")
+        return [f for f in result.stdout.split("\0") if f]
 
     @staticmethod
     def _remove_branch_config_section(repo: Path, branch: str) -> None:
@@ -896,12 +1094,6 @@ class GitWorktreeOps:
         _git("config", "merge.kiss-scratch.driver", "cp -f %B %A", cwd=repo)
 
     @staticmethod
-    def _load_branch_config(repo: Path, branch: str, key: str) -> str | None:
-        """Read ``branch.<branch>.<key>`` from git config (None if unset)."""
-        result = _git("config", f"branch.{branch}.{key}", cwd=repo)
-        return result.stdout.strip() or None
-
-    @staticmethod
     def _save_branch_config(
         repo: Path, branch: str, key: str, value: str, what: str,
     ) -> bool:
@@ -926,19 +1118,6 @@ class GitWorktreeOps:
             )
             return False
         return True
-
-    @staticmethod
-    def load_original_branch(repo: Path, branch: str) -> str | None:
-        """Load the original branch from git config.
-
-        Args:
-            repo: Git repo root path.
-            branch: The worktree branch name.
-
-        Returns:
-            The original branch name, or ``None`` if not stored.
-        """
-        return GitWorktreeOps._load_branch_config(repo, branch, "kiss-original")
 
     @staticmethod
     def save_original_branch(repo: Path, branch: str, original: str) -> bool:
@@ -981,24 +1160,6 @@ class GitWorktreeOps:
         )
 
     @staticmethod
-    def load_baseline_commit(repo: Path, branch: str) -> str | None:
-        """Load the baseline commit SHA from git config.
-
-        Companion reader for :meth:`save_baseline_commit` — recovers
-        the persisted ``branch.<branch>.kiss-baseline`` value (e.g.
-        after a crash between worktree creation and merge, when the
-        in-memory ``GitWorktree.baseline_commit`` is lost).
-
-        Args:
-            repo: Git repo root path.
-            branch: The worktree branch name.
-
-        Returns:
-            The baseline commit SHA, or ``None`` if not stored.
-        """
-        return GitWorktreeOps._load_branch_config(repo, branch, "kiss-baseline")
-
-    @staticmethod
     def _remove_path(path: Path) -> None:
         """Remove *path* whatever it is (symlink, dir, file, or absent).
 
@@ -1036,22 +1197,12 @@ class GitWorktreeOps:
             return False
 
         copied = False
-        for line in status.stdout.splitlines():
-            if len(line) < 4:
-                continue
-            code = line[:2]
-            tail = line[3:]
-            old_name: str | None = None
-            if ("R" in code or "C" in code) and " -> " in tail:
-                # Rename/copy entry: split the RAW tail on the
-                # ``" -> "`` boundary (respecting quoting) first, then
-                # unquote each side exactly once.
-                old_raw, new_raw = _split_rename_tail(tail)
-                old_name = _unquote_git_path(old_raw)
-                fname = _unquote_git_path(new_raw)
-            else:
-                fname = _unquote_git_path(tail)
-
+        # Parse via the shared :func:`_porcelain_entries` helper (the
+        # same parser backing merge_flow's ``_porcelain_paths``) so the
+        # baseline-seeding and merge-flow porcelain parsers cannot
+        # drift apart (split on ``\n`` only, no strip, quote-aware
+        # rename splitting).
+        for _code, old_name, fname in _porcelain_entries(status.stdout):
             src = repo / fname
             dst = wt_dir / fname
 
@@ -1146,6 +1297,8 @@ class GitWorktreeOps:
         repo: Path,
         branch: str,
         baseline: str,
+        user_prompt: str | None = None,
+        task_result: str | None = None,
     ) -> MergeResult:
         """Squash-merge only the agent's changes (after baseline) into HEAD.
 
@@ -1195,6 +1348,11 @@ class GitWorktreeOps:
             repo: Git repo root path.
             branch: The worktree branch to merge from.
             baseline: SHA of the baseline commit to diff against.
+            user_prompt: The user's task prompt for the merge commit
+                message (see :meth:`_merge_commit_message`), or
+                ``None``.
+            task_result: The task's result summary for the merge
+                commit message, or ``None``.
 
         Returns:
             :attr:`MergeResult.SUCCESS` or :attr:`MergeResult.CONFLICT`.
@@ -1234,7 +1392,9 @@ class GitWorktreeOps:
             _git("cherry-pick", "--abort", cwd=repo)
             return MergeResult.CONFLICT
 
-        return GitWorktreeOps._commit_staged_merge(repo, branch)
+        return GitWorktreeOps._commit_staged_merge(
+            repo, branch, user_prompt=user_prompt, task_result=task_result,
+        )
 
     @staticmethod
     def cleanup_partial(repo: Path, branch: str, wt_dir: Path) -> None:

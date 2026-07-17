@@ -45,8 +45,8 @@ import pytest
 
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-from kiss.agents.vscode.json_printer import JsonPrinter
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.json_printer import JsonPrinter
+from kiss.server.server import VSCodeServer
 
 
 class _CapturePrinter(JsonPrinter):
@@ -220,7 +220,7 @@ def test_f4_inline_bash_flush_not_emitted_after_reset() -> None:
 
 
 def test_f10_mic_block_size_falls_back_on_junk_env() -> None:
-    from kiss.agents.vscode.voice_wake import BLOCK_SIZE, mic_block_size
+    from kiss.server.voice_wake import BLOCK_SIZE, mic_block_size
 
     saved = os.environ.pop("KISS_VOICE_MIC_BLOCK_SIZE", None)
     try:
@@ -286,7 +286,7 @@ def test_f11_cooldown_suppressed_wake_resets_cleanly(tmp_path: Path) -> None:
     here; this test locks in the observable contract around the fixed
     code path instead.
     """
-    from kiss.agents.vscode.voice_wake import (
+    from kiss.server.voice_wake import (
         BLOCK_SIZE,
         COOLDOWN_SECONDS,
         DEFAULT_MODELS_DIR,

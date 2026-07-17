@@ -44,21 +44,25 @@ The template supports the placeholder syntax common to those tools:
 from __future__ import annotations
 
 import logging
-import os
 import re
 import shlex
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-import yaml
-
 from kiss.agents.sorcar.persistence import _default_kiss_dir
 
-logger = logging.getLogger(__name__)
+# Frontmatter parsing, whitespace normalization, and the
+# ``CLAUDE_CONFIG_DIR`` resolution are shared with skills.py so the
+# two Markdown-definition discovery paths can never drift.
+from kiss.agents.sorcar.skills import (
+    claude_config_dir,
+    collapse_whitespace,
+    parse_frontmatter,
+    truncate_listing_description,
+)
 
-# ``---\n<yaml>\n---`` frontmatter block at the very start of the file.
-_FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
+logger = logging.getLogger(__name__)
 # ``$ARGUMENTS`` placeholder (all arguments, verbatim).
 _ARGUMENTS_RE = re.compile(r"\$ARGUMENTS\b")
 # ``$1`` … ``$9`` positional-argument placeholders.
@@ -103,7 +107,9 @@ class CustomCommand:
         argument_hint: Optional hint for expected arguments (e.g.
             ``[issue-number]``), shown next to the name in listings.
         template: The prompt template (Markdown body after frontmatter).
-        source: ``"project"`` or ``"user"`` — where the file was found.
+        source: Where the file was found — ``"claude-user"``,
+            ``"user"``, ``"claude-project"``, or ``"project"`` (see
+            :func:`discover_commands` for the precedence order).
         path: Absolute path of the defining ``.md`` file.
     """
 
@@ -128,12 +134,10 @@ def project_commands_dir(work_dir: str) -> Path:
 def claude_user_commands_dir() -> Path:
     """Return Claude Code's user commands directory (``~/.claude/commands``).
 
-    Honours the ``CLAUDE_CONFIG_DIR`` environment variable, the same
-    override Claude Code itself uses for its ``~/.claude`` directory.
+    Honours the ``CLAUDE_CONFIG_DIR`` environment variable via
+    :func:`kiss.agents.sorcar.skills.claude_config_dir`.
     """
-    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
-    base = Path(config_dir) if config_dir else Path.home() / ".claude"
-    return base / "commands"
+    return claude_config_dir() / "commands"
 
 
 def claude_project_commands_dir(work_dir: str) -> Path:
@@ -147,30 +151,18 @@ def _parse_command_file(path: Path, root: Path, source: str) -> CustomCommand | 
     Args:
         path: The ``.md`` file to parse.
         root: The commands directory *path* lives under (for naming).
-        source: ``"user"`` or ``"project"``.
+        source: Discovery source label — ``"claude-user"``, ``"user"``,
+            ``"claude-project"``, or ``"project"`` (see
+            :func:`discover_commands`).
 
     Returns:
         The parsed command, or ``None`` when the file is unreadable or
         its template body is empty.
     """
-    try:
-        # utf-8-sig drops a leading BOM (common in Windows-authored
-        # files) that would otherwise defeat the \A frontmatter match.
-        text = path.read_text(encoding="utf-8-sig")
-    except OSError:
-        logger.debug("unreadable command file: %s", path, exc_info=True)
+    parsed = parse_frontmatter(path)
+    if parsed is None:
         return None
-    meta: dict[str, object] = {}
-    match = _FRONTMATTER_RE.match(text)
-    body = text
-    if match:
-        body = text[match.end():]
-        try:
-            loaded = yaml.safe_load(match.group(1))
-            if isinstance(loaded, dict):
-                meta = loaded
-        except yaml.YAMLError:
-            logger.debug("bad frontmatter in %s", path, exc_info=True)
+    meta, body = parsed
     body = body.strip()
     if not body:
         return None
@@ -181,8 +173,8 @@ def _parse_command_file(path: Path, root: Path, source: str) -> CustomCommand | 
     # same normalization as skills.py applies to skill descriptions.
     return CustomCommand(
         name=name,
-        description=" ".join(str(meta.get("description", "") or "").split()),
-        argument_hint=" ".join(str(meta.get("argument-hint", "") or "").split()),
+        description=collapse_whitespace(meta.get("description", "")),
+        argument_hint=collapse_whitespace(meta.get("argument-hint", "")),
         template=body,
         source=source,
         path=str(path),
@@ -362,9 +354,6 @@ def format_command_listing(commands: dict[str, CustomCommand]) -> str:
     lines = []
     for cmd in entries:
         invocation = f"/{cmd.name} {cmd.argument_hint}".rstrip()
-        desc = cmd.description or Path(cmd.path).name
-        if len(desc) > 100:
-            # format_skill_listing parity: keep the listing aligned.
-            desc = desc[:97] + "..."
+        desc = truncate_listing_description(cmd.description or Path(cmd.path).name)
         lines.append(f"  {invocation:<{width}}  ({cmd.source}) {desc}")
     return "\n".join(lines)

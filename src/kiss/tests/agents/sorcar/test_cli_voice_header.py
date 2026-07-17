@@ -34,14 +34,14 @@ from typing import Any
 
 import pytest
 
-from kiss.agents.sorcar.cli_steering import _InputBox
-from kiss.agents.sorcar.cli_voice import (
+from kiss.core.print_to_console import ConsolePrinter
+from kiss.ui.cli.cli_steering import _InputBox
+from kiss.ui.cli.cli_voice import (
     VoiceListener,
     read_voice_line_plain,
     start_voice,
     start_voice_anchored,
 )
-from kiss.core.print_to_console import ConsolePrinter
 
 CYAN = "\x1b[36m"
 RED = "\x1b[31m"
@@ -175,7 +175,7 @@ class TestHeaderIndicator:
         # The box's normal title follows the indicator on the same top
         # border (voice no longer swaps in a modal title — the box
         # stays fully typeable).
-        assert f"{RED}Listening ...{RESET}{CYAN} Dynamic steer" in rendered
+        assert f"{RED}Listening ...{RESET}{CYAN}Dynamic steer" in rendered
         # The body never shows the indicator (chevron row is buffer/placeholder).
         assert "› Listening" not in rendered
 

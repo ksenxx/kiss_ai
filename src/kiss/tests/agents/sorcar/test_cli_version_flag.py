@@ -11,7 +11,7 @@ a model, API keys, or any other argument.  Before the fix the flag
 fell through to normal argument parsing and errored.
 
 These tests drive the real CLI entry point
-(:func:`kiss.agents.sorcar.worktree_sorcar_agent.main`) with a
+(:func:`kiss.ui.cli.sorcar_cli.main`) with a
 monkeypatched ``sys.argv`` — no mocks of application code.
 """
 
@@ -22,7 +22,7 @@ import sys
 import pytest
 
 from kiss import __version__
-from kiss.agents.sorcar import worktree_sorcar_agent
+from kiss.ui.cli import sorcar_cli
 
 
 @pytest.mark.parametrize("flag", ["--version", "-V"])
@@ -34,7 +34,7 @@ def test_version_flag_prints_version_and_exits_zero(
     """``sorcar --version`` / ``sorcar -V`` prints the version and exits 0."""
     monkeypatch.setattr(sys, "argv", ["sorcar", flag])
     with pytest.raises(SystemExit) as excinfo:
-        worktree_sorcar_agent.main()
+        sorcar_cli.main()
     assert excinfo.value.code == 0
     captured = capsys.readouterr()
     assert captured.out == f"sorcar {__version__}\n"
@@ -50,7 +50,7 @@ def test_version_flag_wins_over_other_args(
         sys, "argv", ["sorcar", "--version", "-t", "some task", "--worktree"],
     )
     with pytest.raises(SystemExit) as excinfo:
-        worktree_sorcar_agent.main()
+        sorcar_cli.main()
     assert excinfo.value.code == 0
     captured = capsys.readouterr()
     assert captured.out == f"sorcar {__version__}\n"
@@ -71,7 +71,7 @@ def test_version_abbreviation_rejected(
     """``--vers`` is rejected because the parser sets allow_abbrev=False."""
     monkeypatch.setattr(sys, "argv", ["sorcar", "--vers"])
     with pytest.raises(SystemExit) as excinfo:
-        worktree_sorcar_agent.main()
+        sorcar_cli.main()
     assert excinfo.value.code == 2
     captured = capsys.readouterr()
     assert "sorcar" in captured.err

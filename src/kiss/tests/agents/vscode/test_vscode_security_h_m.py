@@ -43,7 +43,7 @@ class TestH3RcFilePermissionsAndQuoting(unittest.TestCase):
         )
         self._home_patch.start()
         # Patch Path.home() too because vscode_config uses it at module import.
-        from kiss.agents.vscode import vscode_config as vc
+        from kiss.server import vscode_config as vc
 
         self._vc = vc
         self._orig_rc_path = vc._shell_rc_path
@@ -119,7 +119,7 @@ class TestH9AutocompleteNonBlocking(unittest.TestCase):
     """``_get_files`` must return promptly without running a synchronous scan."""
 
     def test_get_files_does_not_block_on_empty_cache(self) -> None:
-        from kiss.agents.vscode import autocomplete as ac
+        from kiss.server import autocomplete as ac
 
         broadcasts: list[dict] = []
 
@@ -139,7 +139,7 @@ class TestH9AutocompleteNonBlocking(unittest.TestCase):
 
         srv = FakeServer()
         # Patch _scan_files to take a long time so a synchronous call would block.
-        from kiss.agents.vscode import diff_merge as dm
+        from kiss.server import diff_merge as dm
 
         slow_scan_started = threading.Event()
         slow_scan_done = threading.Event()
@@ -172,7 +172,7 @@ class TestM1GitHasTimeout(unittest.TestCase):
     """``_git`` must pass a ``timeout`` to ``subprocess.run``."""
 
     def test_git_invocation_carries_timeout(self) -> None:
-        from kiss.agents.vscode import diff_merge as dm
+        from kiss.server import diff_merge as dm
 
         captured: dict = {}
         real_run = subprocess.run
@@ -192,7 +192,7 @@ class TestM1GitHasTimeout(unittest.TestCase):
 
     def test_git_timeout_returns_completed_process_on_expiry(self) -> None:
         """A hanging git is reported as a normal (failed) CompletedProcess."""
-        from kiss.agents.vscode import diff_merge as dm
+        from kiss.server import diff_merge as dm
 
         # Use a real shell `sleep` to simulate a slow git.
         with mock.patch.object(
@@ -233,7 +233,7 @@ class TestM5AtomicSaveAndDecodeError(unittest.TestCase):
 
     def test_save_untracked_base_is_atomic_against_crash(self) -> None:
         """If copy fails partway, the OLD base copy must still be intact."""
-        from kiss.agents.vscode import diff_merge as dm
+        from kiss.server import diff_merge as dm
 
         # First save a known good base copy.
         dm._save_untracked_base(str(self.work), {"a.txt"}, tab_id="tab1")
@@ -269,7 +269,7 @@ class TestM5AtomicSaveAndDecodeError(unittest.TestCase):
 
     def test_diff_files_handles_unicode_decode_error(self) -> None:
         """Binary file should yield empty hunks, not raise UnicodeDecodeError."""
-        from kiss.agents.vscode import diff_merge as dm
+        from kiss.server import diff_merge as dm
 
         # UTF-16 encoded — read_text() with default UTF-8 raises UnicodeDecodeError.
         bin_path = self.work / "binary.dat"
@@ -299,7 +299,7 @@ class TestM4AwaitUserResponseEmptyQueue(unittest.TestCase):
     wait method must raise ``KeyboardInterrupt`` instead of looping forever."""
 
     def test_returns_promptly_when_queue_is_none(self) -> None:
-        from kiss.agents.vscode import task_runner as tr
+        from kiss.server import task_runner as tr
 
         class FakePrinter:
             class TL:
@@ -338,7 +338,7 @@ class TestH3PropertyFuzz(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.home = Path(self._tmp.name)
-        from kiss.agents.vscode import vscode_config as vc
+        from kiss.server import vscode_config as vc
 
         self._vc = vc
         self._orig = vc._shell_rc_path

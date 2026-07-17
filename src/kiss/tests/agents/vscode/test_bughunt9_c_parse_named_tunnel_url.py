@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import unittest
 
-from kiss.agents.vscode.web_server import _parse_named_tunnel_url
+from kiss.server.web_server import _parse_named_tunnel_url
 
 
 class TestParseNamedTunnelUrlRejectsBannerHosts(unittest.TestCase):

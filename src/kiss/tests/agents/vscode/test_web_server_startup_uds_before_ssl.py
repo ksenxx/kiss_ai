@@ -27,7 +27,7 @@ context at all — it stores the certfile/keyfile paths and defers the
 work.
 
 This is an end-to-end test: it monkey-patches
-``kiss.agents.vscode.web_server._create_ssl_context`` to add a
+``kiss.server.web_server._create_ssl_context`` to add a
 deterministic delay (mimicking a slow ``load_cert_chain`` or RSA
 keygen), starts a real ``RemoteAccessServer``, and requires the UDS
 listener to accept a real Unix-domain-socket connection well before
@@ -44,8 +44,8 @@ import time
 from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 
-import kiss.agents.vscode.web_server as _wsmod
-from kiss.agents.vscode.web_server import RemoteAccessServer
+import kiss.server.web_server as _wsmod
+from kiss.server.web_server import RemoteAccessServer
 
 # How long the artificially-slow SSL context build blocks for.  Chosen
 # to be well above realistic ``load_cert_chain`` + RSA keygen latency

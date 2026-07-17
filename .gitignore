@@ -19,6 +19,7 @@ dist/
 *.vsix
 .coverage*
 .kiss.artifacts
+.kiss-worktrees/
 env.sh
 node_modules/
 src/kiss/agents/vscode/out/
@@ -46,3 +47,4 @@ claude_skills/
 PROGRESS.md
 RECIPES.md
 SCRATCH.md
+PROGRESS.md

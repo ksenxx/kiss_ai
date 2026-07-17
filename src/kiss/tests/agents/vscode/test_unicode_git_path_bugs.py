@@ -21,8 +21,8 @@ from pathlib import Path
 from typing import Any
 
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps
-from kiss.agents.vscode.diff_merge import _prepare_merge_view
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.diff_merge import _prepare_merge_view
+from kiss.server.server import VSCodeServer
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -136,10 +136,11 @@ def test_autocommit_dirty_files_are_real_unicode_paths(tmp_path: Path) -> None:
 def test_worktree_changed_file_lists_are_real_unicode_paths(tmp_path: Path) -> None:
     """Worktree changed-file helpers must return real non-ASCII paths.
 
-    Reproduction: ``GitWorktreeOps.unstaged_files`` and ``staged_files``
-    directly split ``git diff --name-only`` output, which is C-quoted when
-    ``core.quotePath`` is true.  Callers such as worktree conflict checks
-    then compare escaped pseudo-paths against real filenames.
+    Reproduction: ``GitWorktreeOps._diff_name_only`` (historically
+    surfaced via the since-removed ``unstaged_files``/``staged_files``
+    wrappers) directly splits ``git diff --name-only`` output, which is
+    C-quoted when ``core.quotePath`` is true.  Callers then compare
+    escaped pseudo-paths against real filenames.
     """
     repo = _make_repo(tmp_path)
     filename = "café.txt"
@@ -148,10 +149,10 @@ def test_worktree_changed_file_lists_are_real_unicode_paths(tmp_path: Path) -> N
     _git(repo, "commit", "-m", "add unicode file")
 
     (repo / filename).write_text("unstaged change\n")
-    assert GitWorktreeOps.unstaged_files(repo) == [filename]
+    assert GitWorktreeOps._diff_name_only(repo) == [filename]
 
     _git(repo, "add", filename)
-    assert GitWorktreeOps.staged_files(repo) == [filename]
+    assert GitWorktreeOps._diff_name_only(repo, "--cached") == [filename]
 
 
 def test_copy_dirty_state_copies_staged_unicode_rename(tmp_path: Path) -> None:

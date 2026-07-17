@@ -34,7 +34,7 @@ import unittest
 
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.server import VSCodeServer
 
 
 def _make_server() -> tuple[VSCodeServer, list[dict]]:
@@ -210,7 +210,7 @@ class TestC2C3ReplayRequiresTabId(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        from kiss.agents.vscode import server as smod
+        from kiss.server import server as smod
         self._smod = smod
         self._orig_loader = smod._load_latest_chat_events_by_chat_id
 

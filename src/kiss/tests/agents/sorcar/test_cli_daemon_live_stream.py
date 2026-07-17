@@ -14,11 +14,11 @@ chat panel does not update live as the CLI emits each event.
 
 Root cause
 ----------
-The CLI's :class:`~kiss.agents.sorcar.cli_printer.RecordingConsolePrinter`
+The CLI's :class:`~kiss.ui.cli.cli_printer.RecordingConsolePrinter`
 inherits :meth:`JsonPrinter.broadcast`, which records + persists each
 event but has NO transport: every event sits in the DB until the next
 page reload re-renders it.  Meanwhile the running daemon's
-:class:`~kiss.agents.vscode.web_server.WebPrinter` is the ONLY object
+:class:`~kiss.server.web_server.WebPrinter` is the ONLY object
 that fans events out over the WSS / UDS transports to connected
 webviews; the CLI process has no way to feed it.
 
@@ -29,7 +29,7 @@ UDS endpoint (default ``~/.kiss/sorcar.sock``; override via
 ``KISS_SORCAR_SOCK``) and after each
 :meth:`RecordingConsolePrinter.broadcast` forwards the event in a
 ``{"type": "cliEvent", "event": ...}`` envelope (see
-:mod:`kiss.agents.sorcar.cli_daemon_bridge`).  The daemon dispatcher
+:mod:`kiss.ui.cli.cli_daemon_bridge`).  The daemon dispatcher
 short-circuits ``cliEvent`` to :meth:`RemoteAccessServer._relay_cli_event`
 which mirrors the tail of :meth:`WebPrinter.broadcast`: look up tabs
 subscribed to the event's task id and splice each ``tabId`` into the
@@ -58,9 +58,9 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar import cli_daemon_bridge
-from kiss.agents.sorcar.cli_printer import RecordingConsolePrinter
-from kiss.agents.vscode.web_server import RemoteAccessServer
+from kiss.server.web_server import RemoteAccessServer
+from kiss.ui.cli import cli_daemon_bridge
+from kiss.ui.cli.cli_printer import RecordingConsolePrinter
 
 
 def _reset_cli_daemon_writer() -> None:

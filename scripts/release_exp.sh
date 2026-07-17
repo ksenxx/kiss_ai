@@ -14,7 +14,9 @@ set -e
 # =============================================================================
 # Constants
 # =============================================================================
-VERSION_FILE="src/kiss/_version.py"
+# The version literal is single-sourced in src/kiss/core/_version.py
+# (src/kiss/_version.py is only an import shim without a literal).
+VERSION_FILE="src/kiss/core/_version.py"
 README_FILE="README.md"
 VSCODE_EXT_DIR="src/kiss/agents/vscode"
 

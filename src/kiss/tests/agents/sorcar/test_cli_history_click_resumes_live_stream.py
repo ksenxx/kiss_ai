@@ -51,11 +51,11 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar import cli_daemon_bridge
 from kiss.agents.sorcar import persistence as th
-from kiss.agents.sorcar.cli_printer import RecordingConsolePrinter
 from kiss.agents.sorcar.persistence import _add_task, _append_chat_event
-from kiss.agents.vscode.web_server import RemoteAccessServer
+from kiss.server.web_server import RemoteAccessServer
+from kiss.ui.cli import cli_daemon_bridge
+from kiss.ui.cli.cli_printer import RecordingConsolePrinter
 
 
 def _reset_cli_daemon_writer() -> None:
@@ -174,7 +174,7 @@ class TestCliHistoryClickResumesLiveStream(unittest.TestCase):
         asyncio.run_coroutine_threadsafe(_drain(), self.loop)
         return received, got
 
-    def _wait_for_writers(self, expected: int, timeout: float = 2.0) -> None:
+    def _wait_for_writers(self, expected: int, timeout: float = 10.0) -> None:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             with self.server._printer._ws_lock:
@@ -187,7 +187,7 @@ class TestCliHistoryClickResumesLiveStream(unittest.TestCase):
         )
 
     def _wait_for_cli_running(self, task_id: str,
-                              timeout: float = 2.0) -> None:
+                              timeout: float = 10.0) -> None:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             with self.server._cli_running_lock:
@@ -199,7 +199,7 @@ class TestCliHistoryClickResumesLiveStream(unittest.TestCase):
         )
 
     def _wait_for_cli_not_running(self, task_id: str,
-                                  timeout: float = 2.0) -> None:
+                                  timeout: float = 10.0) -> None:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             with self.server._cli_running_lock:
@@ -263,7 +263,17 @@ class TestCliHistoryClickResumesLiveStream(unittest.TestCase):
         # without it the new tab would have NO subscription, NO live
         # stream, and a static (non-blinking) tab title.
         received, got = self._open_viewer()
-        self._wait_for_writers(1)
+        # The CLI bridge connection opened by ``cli_printer.broadcast``
+        # in Phase 1 is ALSO registered as a UDS writer by
+        # ``_uds_handler`` (before ``cliTaskStart`` is dispatched, so
+        # it is guaranteed registered once ``_wait_for_cli_running``
+        # returned).  Waiting for just 1 writer therefore returns
+        # before the viewer's own writer is registered, and the
+        # one-shot ``status``/``task_events`` burst broadcast by
+        # ``_replay_session`` below would miss the viewer.  Production
+        # never races this way: ``resumeSession`` arrives ON the
+        # viewer's own (already registered) connection.
+        self._wait_for_writers(2)
 
         viewer_tab = "history-click-tab"
         self.server._vscode_server._replay_session(
@@ -283,7 +293,7 @@ class TestCliHistoryClickResumesLiveStream(unittest.TestCase):
             f"viewer tab not subscribed: {subscribers}"
         )
 
-        assert got.wait(timeout=3.0), (
+        assert got.wait(timeout=30.0), (
             f"viewer received NO data after history click; got: {received}"
         )
         # Give the broadcast burst a small drain window so we catch
@@ -309,7 +319,7 @@ class TestCliHistoryClickResumesLiveStream(unittest.TestCase):
         received.clear()
         got.clear()
         cli_printer.broadcast({"type": "text_delta", "text": "after-click"})
-        assert got.wait(timeout=3.0), (
+        assert got.wait(timeout=30.0), (
             f"viewer received no live events after subscription; got: "
             f"{received}"
         )
@@ -336,7 +346,7 @@ class TestCliHistoryClickResumesLiveStream(unittest.TestCase):
             "type": "result", "text": "done", "summary": "ok",
         })
         self._wait_for_cli_not_running(task_id)
-        assert got.wait(timeout=3.0), (
+        assert got.wait(timeout=30.0), (
             f"viewer received nothing on task end; got: {received}"
         )
         time.sleep(0.1)

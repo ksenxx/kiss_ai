@@ -7,7 +7,7 @@
 Terminals deliver key escape sequences atomically *most* of the time,
 but ``os.read`` gives no such guarantee — under load, over SSH, or with
 a small read buffer a CSI sequence can arrive split across two chunks.
-:meth:`kiss.agents.sorcar.cli_steering._InputBox.feed` used to parse
+:meth:`kiss.ui.cli.cli_steering._InputBox.feed` used to parse
 each chunk independently, so a split arrow key (``ESC`` then ``[A``)
 dropped the lone ``ESC`` and typed the literal ``[A`` into the steering
 buffer, and a split Shift+Enter (``ESC [13;2`` then ``u``) typed ``u``
@@ -21,7 +21,7 @@ import threading
 
 import pytest
 
-from kiss.agents.sorcar.cli_steering import _InputBox
+from kiss.ui.cli.cli_steering import _InputBox
 
 
 def _box() -> _InputBox:

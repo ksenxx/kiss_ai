@@ -37,8 +37,8 @@ from kiss.agents.sorcar.cli_helpers import (
 )
 from kiss.agents.sorcar.git_worktree import GitWorktree
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent, _generate_commit_message
-from kiss.agents.vscode.json_printer import JsonPrinter
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.json_printer import JsonPrinter
+from kiss.server.server import VSCodeServer
 
 _SavedState = tuple[Path, "sqlite3.Connection | None", Path]
 
