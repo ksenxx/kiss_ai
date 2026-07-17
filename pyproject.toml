@@ -150,9 +150,25 @@ gemini = [
     "google-genai>=0.30.0",
 ]
 
-# Dependencies for kiss.agents.sorcar (web tools)
+# Core + dependencies for kiss.agents.sorcar (web tools, MCP, code graph)
 sorcar = [
+    {include-group = "core"},
     "playwright>=1.40.0",
+    "mcp>=1.20.0",
+    "tree-sitter>=0.24.0",
+    "tree-sitter-language-pack>=1.10.0",
+]
+
+# Sorcar (which includes core) + dependencies for kiss.server
+server = [
+    {include-group = "sorcar"},   # transitively includes core
+    "websockets>=15.0",
+    "cryptography>=44.0.0",
+    "vosk==0.3.44",
+    "sounddevice>=0.5.0",
+    "flask>=3.0.0",               # needed: web_server.py top-level-imports kiss.viz_trajectory.server
+    "prompt_toolkit>=3.0.0",      # lazy: web_server.py/commands.py import kiss.ui.cli
+    "gnureadline>=8.0.0; sys_platform == 'darwin'",
 ]
 
 docker = [
