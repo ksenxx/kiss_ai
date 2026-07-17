@@ -8,8 +8,8 @@ import unittest
 
 import docker
 
-from kiss.docker.docker_manager import DockerManager
-from kiss.docker.docker_tools import DockerTools
+from kiss.core.docker_manager import DockerManager
+from kiss.core.docker_tools import DockerTools
 
 
 def is_docker_available() -> bool:

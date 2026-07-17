@@ -5,8 +5,8 @@
 """End-to-end regression: the sorcar idle input panel must show ≥3 body rows.
 
 The interactive ``sorcar`` REPL pins its rounded input panel at the
-bottom of the terminal via :class:`kiss.agents.sorcar.cli_steering
-.AnchoredRepl` (which wraps :class:`kiss.agents.sorcar.cli_steering
+bottom of the terminal via :class:`kiss.ui.cli.cli_steering
+.AnchoredRepl` (which wraps :class:`kiss.ui.cli.cli_steering
 ._InputBox`).  Previously the empty panel showed **one** body row
 between the top and bottom borders (the placeholder hint sat alone on
 that single row), so the user had no visual signal that they could type
@@ -23,7 +23,7 @@ The contract this module pins:
 * shrinking the buffer back below three lines collapses the panel
   back to the three-row minimum (dynamic adjustment downward);
 * the same minimum applies to the prompt_toolkit-based fallback
-  :class:`~kiss.agents.sorcar.cli_prompt.PtkLineReader` so the idle
+  :class:`~kiss.ui.cli.cli_prompt.PtkLineReader` so the idle
   prompt looks identical on both code paths.
 
 Tests run entirely in-memory (no real terminal): the panel renders
@@ -40,10 +40,10 @@ import threading
 
 from prompt_toolkit.layout.dimension import Dimension
 
-from kiss.agents.sorcar.cli_panel import PLACEHOLDER, panel_body
-from kiss.agents.sorcar.cli_prompt import PtkLineReader
-from kiss.agents.sorcar.cli_repl import CliCompleter
-from kiss.agents.sorcar.cli_steering import (
+from kiss.ui.cli.cli_panel import PLACEHOLDER, panel_body
+from kiss.ui.cli.cli_prompt import PtkLineReader
+from kiss.ui.cli.cli_repl import CliCompleter
+from kiss.ui.cli.cli_steering import (
     _BOX_H,
     _box_body_h,
     _box_h_for,

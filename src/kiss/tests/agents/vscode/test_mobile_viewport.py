@@ -23,7 +23,7 @@ def _read_css() -> str:
 
 
 def _build_html() -> str:
-    from kiss.agents.vscode.web_server import _build_html
+    from kiss.server.web_server import _build_html
 
     return _build_html()
 

@@ -11,7 +11,7 @@ substitute the ``{{TIPS_JSON}}`` / ``{{TIPS_SRC}}`` placeholders.
 
 Contract locked in here:
 
-* :func:`kiss.agents.vscode.tips.read_tips` parses the bundled
+* :func:`kiss.server.tips.read_tips` parses the bundled
   ``src/kiss/TIPS.md``: every line starting with ``# Tip`` starts a
   new tip whose body is the markdown text up to the next such line
   (or EOF), trimmed.  Empty bodies are skipped; a missing file yields
@@ -31,8 +31,8 @@ import re
 import unittest
 from pathlib import Path
 
-from kiss.agents.vscode import web_server
-from kiss.agents.vscode.tips import read_tips
+from kiss.server import web_server
+from kiss.server.tips import read_tips
 
 
 class TestReadTips(unittest.TestCase):

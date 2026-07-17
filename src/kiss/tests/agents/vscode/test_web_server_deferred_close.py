@@ -38,7 +38,7 @@ import pytest
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.agents.vscode.web_server import (
+from kiss.server.web_server import (
     _TAB_CLOSE_GRACE,
     RemoteAccessServer,
 )
@@ -71,14 +71,14 @@ class TestDeferredWebTabClose(IsolatedAsyncioTestCase):
         self.tmpdir = tempfile.mkdtemp()
         self.saved = _redirect_persistence(self.tmpdir)
         # Patch the grace window to something tiny so tests don't wait.
-        import kiss.agents.vscode.web_server as ws
+        import kiss.server.web_server as ws
 
         self._orig_grace = ws._TAB_CLOSE_GRACE
         ws._TAB_CLOSE_GRACE = 0.05
 
         certfile = Path(self.tmpdir) / "cert.pem"
         keyfile = Path(self.tmpdir) / "key.pem"
-        from kiss.agents.vscode.web_server import _generate_self_signed_cert
+        from kiss.server.web_server import _generate_self_signed_cert
         _generate_self_signed_cert(certfile, keyfile)
 
         self.server = RemoteAccessServer(
@@ -100,7 +100,7 @@ class TestDeferredWebTabClose(IsolatedAsyncioTestCase):
                 except Exception:
                     pass
             self.server._pending_tab_closes.clear()
-        import kiss.agents.vscode.web_server as ws
+        import kiss.server.web_server as ws
         ws._TAB_CLOSE_GRACE = self._orig_grace
 
         if th._db_conn is not None:
@@ -261,7 +261,7 @@ class TestDeferredWebTabClose(IsolatedAsyncioTestCase):
         # clear we instead invoke the same code path the resume uses.
         # Simpler: call resume_chat_by_id directly (what _replay_session
         # does after _get_tab) and then mirror the flag clear logic.
-        from kiss.agents.vscode.server import VSCodeServer
+        from kiss.server.server import VSCodeServer
         # Use the same `_state_lock`-guarded clear that
         # ``_replay_session`` now performs.
         assert isinstance(self.server._vscode_server, VSCodeServer)
@@ -292,7 +292,7 @@ class TestDeferredWebTabClose(IsolatedAsyncioTestCase):
         # is called for a chat with events, ``frontend_closed`` is
         # cleared.  We bypass the persistence layer by stubbing the
         # event loader.
-        import kiss.agents.vscode.server as srv
+        import kiss.server.server as srv
 
         orig_loader = srv._load_latest_chat_events_by_chat_id
 

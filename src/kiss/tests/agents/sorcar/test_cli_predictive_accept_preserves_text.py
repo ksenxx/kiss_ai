@@ -31,8 +31,8 @@ from prompt_toolkit.completion import CompleteEvent
 from prompt_toolkit.document import Document
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar.cli_prompt import PtkCompleter
-from kiss.agents.sorcar.cli_repl import CliCompleter
+from kiss.ui.cli.cli_prompt import PtkCompleter
+from kiss.ui.cli.cli_repl import CliCompleter
 
 _FAKE_INJECTIONS = (
     "## Trick\n"

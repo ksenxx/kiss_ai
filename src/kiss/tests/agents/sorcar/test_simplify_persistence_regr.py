@@ -34,7 +34,7 @@ from typing import Any
 import pytest
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar.cli_steering import (
+from kiss.ui.cli.cli_steering import (
     _box_body_h,
     _box_h_for,
     _box_top_row,
@@ -370,7 +370,7 @@ class TestAnchoredReplLoops:
     """End-to-end stdin pump loops driven through a real pipe."""
 
     def test_read_idle_line_submit(self) -> None:
-        from kiss.agents.sorcar.cli_steering import AnchoredRepl
+        from kiss.ui.cli.cli_steering import AnchoredRepl
         with _PipeStdin() as stdin:
             repl = AnchoredRepl()
             stdin.write(b"hello world\r")
@@ -379,7 +379,7 @@ class TestAnchoredReplLoops:
         assert repl.box.history[-1] == "hello world"
 
     def test_read_idle_line_eof(self) -> None:
-        from kiss.agents.sorcar.cli_steering import AnchoredRepl
+        from kiss.ui.cli.cli_steering import AnchoredRepl
         with _PipeStdin() as stdin:
             repl = AnchoredRepl()
             stdin.write(b"\x04")  # Ctrl+D on empty buffer
@@ -387,7 +387,7 @@ class TestAnchoredReplLoops:
         assert line is None
 
     def test_read_idle_line_stdin_closed(self) -> None:
-        from kiss.agents.sorcar.cli_steering import AnchoredRepl
+        from kiss.ui.cli.cli_steering import AnchoredRepl
         with _PipeStdin() as stdin:
             repl = AnchoredRepl()
             os.close(stdin._w)
@@ -396,7 +396,7 @@ class TestAnchoredReplLoops:
         assert line is None
 
     def test_run_steering_loop_submit_and_done(self) -> None:
-        from kiss.agents.sorcar.cli_steering import AnchoredRepl
+        from kiss.ui.cli.cli_steering import AnchoredRepl
         submitted: list[str] = []
         idle_calls: list[int] = []
 
@@ -423,8 +423,8 @@ class TestEventDispatcherRender:
     """Dispatcher renders real events through a real ConsolePrinter."""
 
     def _make(self) -> Any:
-        from kiss.agents.sorcar.cli_client import _EventDispatcher
         from kiss.core.print_to_console import ConsolePrinter
+        from kiss.ui.cli.cli_client import _EventDispatcher
         return _EventDispatcher(ConsolePrinter(), tab_id="tab1")
 
     def test_text_and_thinking_deltas(self, capsys: pytest.CaptureFixture[str]) -> None:
@@ -471,26 +471,26 @@ class TestClientDisconnectPaths:
     """Early-bail behavior when the daemon connection is gone."""
 
     def _client(self) -> Any:
-        from kiss.agents.sorcar.cli_client import CliClient
         from kiss.core.print_to_console import ConsolePrinter
+        from kiss.ui.cli.cli_client import CliClient
         c = CliClient(Path("/nonexistent.sock"), "/tmp", "tabX",
                       ConsolePrinter())
         c._closed.set()
         return c
 
     def test_request_cli_info_disconnected(self) -> None:
-        from kiss.agents.sorcar.cli_client import _request_cli_info
+        from kiss.ui.cli.cli_client import _request_cli_info
         reply = _request_cli_info(self._client(), "help")  # type: ignore[arg-type]
         assert reply["error"] is True
         assert "Daemon connection lost" in reply["errorMessage"]
         assert reply["subtype"] == "help"
 
     def test_request_models_disconnected(self) -> None:
-        from kiss.agents.sorcar.cli_client import _request_models
+        from kiss.ui.cli.cli_client import _request_models
         assert _request_models(self._client()) == []  # type: ignore[arg-type]
 
     def test_submit_task_disconnected(self, capsys: pytest.CaptureFixture[str]) -> None:
-        from kiss.agents.sorcar.cli_client import _submit_task
+        from kiss.ui.cli.cli_client import _submit_task
         client = self._client()
         _submit_task(client, "do it")  # type: ignore[arg-type]
         out = capsys.readouterr().out  # type: ignore[union-attr]

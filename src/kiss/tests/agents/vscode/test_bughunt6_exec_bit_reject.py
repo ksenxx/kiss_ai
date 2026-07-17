@@ -24,8 +24,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from kiss.agents.vscode.diff_merge import _prepare_merge_view
-from kiss.agents.vscode.web_server import _reject_all_hunks_in_file
+from kiss.server.diff_merge import _prepare_merge_view
+from kiss.server.web_server import _reject_all_hunks_in_file
 
 
 class TestExecBitReject(unittest.TestCase):

@@ -44,8 +44,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import anthropic
 import pytest
 
-from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.core.models.anthropic_model import AnthropicModel
+from kiss.server.json_printer import JsonPrinter
 
 
 def _two_block_events() -> list[tuple[str, str]]:

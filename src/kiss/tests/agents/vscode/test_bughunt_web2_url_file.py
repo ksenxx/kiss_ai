@@ -32,7 +32,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from kiss.agents.vscode.web_server import _read_url_from_file
+from kiss.server.web_server import _read_url_from_file
 
 
 class TestReadUrlFromFileNonDictJson:

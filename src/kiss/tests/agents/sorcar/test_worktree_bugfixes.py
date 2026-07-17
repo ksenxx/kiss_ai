@@ -439,7 +439,7 @@ class TestBug4ParseDiffHunksBaseRef:
             (wt_dir / "agent.py").write_text("# agent code\n")
             GitWorktreeOps.commit_all(wt_dir, "agent work")
 
-            from kiss.agents.vscode.diff_merge import _parse_diff_hunks
+            from kiss.server.diff_merge import _parse_diff_hunks
 
             hunks = _parse_diff_hunks(str(wt_dir))
             assert "agent.py" not in hunks
@@ -458,7 +458,7 @@ class TestBug4ParseDiffHunksBaseRef:
             (wt_dir / "agent.py").write_text("# agent code\n")
             GitWorktreeOps.commit_all(wt_dir, "agent work")
 
-            from kiss.agents.vscode.diff_merge import _parse_diff_hunks
+            from kiss.server.diff_merge import _parse_diff_hunks
 
             hunks = _parse_diff_hunks(str(wt_dir), base_ref=baseline)
             assert "agent.py" in hunks
@@ -478,7 +478,7 @@ class TestBug4ParseDiffHunksBaseRef:
 
             (wt_dir / "README.md").write_text("# uncommitted edit\n")
 
-            from kiss.agents.vscode.diff_merge import _parse_diff_hunks
+            from kiss.server.diff_merge import _parse_diff_hunks
 
             hunks = _parse_diff_hunks(str(wt_dir), base_ref=baseline)
             assert "committed.py" in hunks
@@ -496,7 +496,7 @@ class TestBug4ParseDiffHunksBaseRef:
             (wt_dir / "README.md").write_text("# Agent version\n")
             GitWorktreeOps.commit_all(wt_dir, "agent: update readme")
 
-            from kiss.agents.vscode.diff_merge import _prepare_merge_view
+            from kiss.server.diff_merge import _prepare_merge_view
 
             data_dir = str(Path(tmp) / "merge-data")
             Path(data_dir).mkdir()

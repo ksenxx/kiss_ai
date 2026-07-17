@@ -44,7 +44,7 @@ from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.third_party_agents._kiss_web_launcher import (
     run_agent_via_kiss_web,
 )
-from kiss.agents.vscode.web_server import RemoteAccessServer
+from kiss.server.web_server import RemoteAccessServer
 
 STUB_RESULT = "success: true\nsummary: remote webview stub done\n"
 

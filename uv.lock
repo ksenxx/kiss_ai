@@ -1515,8 +1515,32 @@ openai = [
     { name = "pyyaml" },
     { name = "rich" },
 ]
-sorcar = [
+server = [
+    { name = "cryptography" },
+    { name = "flask" },
+    { name = "gnureadline", marker = "sys_platform == 'darwin'" },
+    { name = "mcp" },
     { name = "playwright" },
+    { name = "prompt-toolkit" },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "pyyaml" },
+    { name = "rich" },
+    { name = "sounddevice" },
+    { name = "tree-sitter" },
+    { name = "tree-sitter-language-pack" },
+    { name = "vosk" },
+    { name = "websockets" },
+]
+sorcar = [
+    { name = "mcp" },
+    { name = "playwright" },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "pyyaml" },
+    { name = "rich" },
+    { name = "tree-sitter" },
+    { name = "tree-sitter-language-pack" },
 ]
 
 [package.metadata]
@@ -1590,7 +1614,33 @@ openai = [
     { name = "pyyaml", specifier = ">=6.0.0" },
     { name = "rich", specifier = ">=14.2.0" },
 ]
-sorcar = [{ name = "playwright", specifier = ">=1.40.0" }]
+server = [
+    { name = "cryptography", specifier = ">=44.0.0" },
+    { name = "flask", specifier = ">=3.0.0" },
+    { name = "gnureadline", marker = "sys_platform == 'darwin'", specifier = ">=8.0.0" },
+    { name = "mcp", specifier = ">=1.20.0" },
+    { name = "playwright", specifier = ">=1.40.0" },
+    { name = "prompt-toolkit", specifier = ">=3.0.0" },
+    { name = "pydantic", specifier = ">=2.0.0" },
+    { name = "pydantic-settings", specifier = ">=2.0.0" },
+    { name = "pyyaml", specifier = ">=6.0.0" },
+    { name = "rich", specifier = ">=14.2.0" },
+    { name = "sounddevice", specifier = ">=0.5.0" },
+    { name = "tree-sitter", specifier = ">=0.24.0" },
+    { name = "tree-sitter-language-pack", specifier = ">=1.10.0" },
+    { name = "vosk", specifier = "==0.3.44" },
+    { name = "websockets", specifier = ">=15.0" },
+]
+sorcar = [
+    { name = "mcp", specifier = ">=1.20.0" },
+    { name = "playwright", specifier = ">=1.40.0" },
+    { name = "pydantic", specifier = ">=2.0.0" },
+    { name = "pydantic-settings", specifier = ">=2.0.0" },
+    { name = "pyyaml", specifier = ">=6.0.0" },
+    { name = "rich", specifier = ">=14.2.0" },
+    { name = "tree-sitter", specifier = ">=0.24.0" },
+    { name = "tree-sitter-language-pack", specifier = ">=1.10.0" },
+]
 
 [[package]]
 name = "kubernetes"

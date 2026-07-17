@@ -28,8 +28,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import kiss.agents.vscode.merge_flow as _merge_flow_module
-from kiss.agents.vscode.server import VSCodeServer
+import kiss.server.merge_flow as _merge_flow_module
+from kiss.server.server import VSCodeServer
 
 
 def _run_git(cwd: str, *args: str) -> subprocess.CompletedProcess[str]:

@@ -45,7 +45,7 @@ dependencies = [
     "pydantic-settings>=2.0.0",
     "flask>=3.0.0",
     "playwright>=1.40.0",
-    # Local "Sorcar" wake-word listener (kiss.agents.vscode.voice_wake).
+    # Local "Sorcar" wake-word listener (kiss.server.voice_wake).
     # Pinned to 0.3.44: it is the newest release shipping macOS wheels
     # (0.3.45 only publishes Linux/Windows wheels).
     "vosk==0.3.44",
@@ -85,7 +85,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.version]
-path = "src/kiss/_version.py"
+path = "src/kiss/core/_version.py"
 
 [tool.hatch.build.targets.sdist]
 # Keep the sdist small enough for PyPI's 100 MB per-file limit. The directories
@@ -150,9 +150,25 @@ gemini = [
     "google-genai>=0.30.0",
 ]
 
-# Dependencies for kiss.agents.sorcar (web tools)
+# Core + dependencies for kiss.agents.sorcar (web tools, MCP, code graph)
 sorcar = [
+    {include-group = "core"},
     "playwright>=1.40.0",
+    "mcp>=1.20.0",
+    "tree-sitter>=0.24.0",
+    "tree-sitter-language-pack>=1.10.0",
+]
+
+# Sorcar (which includes core) + dependencies for kiss.server
+server = [
+    {include-group = "sorcar"},   # transitively includes core
+    "websockets>=15.0",
+    "cryptography>=44.0.0",
+    "vosk==0.3.44",
+    "sounddevice>=0.5.0",
+    "flask>=3.0.0",               # needed: web_server.py top-level-imports kiss.viz_trajectory.server
+    "prompt_toolkit>=3.0.0",      # lazy: web_server.py/commands.py import kiss.ui.cli
+    "gnureadline>=8.0.0; sys_platform == 'darwin'",
 ]
 
 docker = [
@@ -345,12 +361,12 @@ Repository = "https://github.com/ksen/kiss"
 check = "kiss.scripts.check:main"
 generate-api-docs = "kiss.scripts.generate_api_docs:main"
 kiss-backfill-talk-audio = "kiss.scripts.backfill_talk_audio:main"
-sorcar = "kiss.agents.sorcar.worktree_sorcar_agent:main"
+sorcar = "kiss.ui.cli.sorcar_cli:main"
 kiss-slack = "kiss.agents.third_party_agents.slack_agent:main"
 kiss-gmail = "kiss.agents.third_party_agents.gmail_agent:main"
 kiss-whatsapp = "kiss.agents.third_party_agents.whatsapp_agent:main"
 kiss-telegram = "kiss.agents.third_party_agents.telegram_agent:main"
-kiss-web = "kiss.agents.vscode.web_server:main"
+kiss-web = "kiss.server.web_server:main"
 kiss-discord = "kiss.agents.third_party_agents.discord_agent:main"
 kiss-gchat = "kiss.agents.third_party_agents.googlechat_agent:main"
 kiss-signal = "kiss.agents.third_party_agents.signal_agent:main"

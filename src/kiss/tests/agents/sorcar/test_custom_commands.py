@@ -18,12 +18,12 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.sorcar.cli_repl import CliCompleter
 from kiss.agents.sorcar.custom_commands import (
     discover_commands,
     expand_command,
     format_command_listing,
 )
+from kiss.ui.cli.cli_repl import CliCompleter
 
 
 @pytest.fixture

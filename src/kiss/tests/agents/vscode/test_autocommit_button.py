@@ -20,8 +20,8 @@ import threading
 import unittest
 from pathlib import Path
 
-from kiss.agents.vscode.commands import _CommandsMixin
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.commands import _CommandsMixin
+from kiss.server.server import VSCodeServer
 
 _VSCODE_DIR = Path(__file__).resolve().parents[3] / "agents" / "vscode"
 

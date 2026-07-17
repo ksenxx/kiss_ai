@@ -17,7 +17,7 @@ The reproduction wires together:
    parent which calls ``run_parallel`` to spawn three sub-agents
    (driven by a fake OpenAI HTTP server).
 2. A :class:`_FakeWebPrinter` that subclasses
-   :class:`kiss.agents.vscode.web_server.WebPrinter` and overrides
+   :class:`kiss.server.web_server.WebPrinter` and overrides
    :meth:`_send_to_ws_clients` to (a) capture every per-tab post-fan-out
    payload that would have been sent over the WebSocket, and (b) mimic
    the frontend's ``new_tab`` round-trip by allocating a fresh
@@ -49,7 +49,7 @@ from typing import Any
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.agents.vscode.web_server import WebPrinter
+from kiss.server.web_server import WebPrinter
 
 # ---------------------------------------------------------------------------
 # Fake OpenAI server: parent → run_parallel, sub-agents + parent's 2nd call → finish.

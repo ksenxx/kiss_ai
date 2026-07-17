@@ -11,7 +11,7 @@ The chat webview (``src/kiss/agents/vscode/media/voice.js``,
 wake-word listener identified the speaker as an integer number >= 1,
 and never submits blank speech.  The sorcar CLI voice mode MUST behave
 identically, through the shared :func:`speaker_prefixed_text` helper in
-:mod:`kiss.agents.vscode.voice_wake` (the module that also produces the
+:mod:`kiss.server.voice_wake` (the module that also produces the
 ``SPEECH`` payloads).
 
 Everything here is end-to-end in the established voice-test style: the
@@ -35,9 +35,9 @@ from typing import Any
 
 import pytest
 
-from kiss.agents.sorcar import cli_voice
-from kiss.agents.sorcar.cli_steering import AnchoredRepl
-from kiss.agents.vscode.voice_wake import speaker_prefixed_text
+from kiss.server.voice_wake import speaker_prefixed_text
+from kiss.ui.cli import cli_voice
+from kiss.ui.cli.cli_steering import AnchoredRepl
 
 
 def _speech_line(

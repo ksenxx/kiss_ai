@@ -7,7 +7,7 @@
 The chat webview's input textbox now shows ALL fast-complete options
 as a dropdown picker — the same UI the ``@``-mention file picker
 uses — instead of only the single inline ghost-text suggestion.  The
-:class:`kiss.agents.vscode.server.VSCodeServer` therefore broadcasts a
+:class:`kiss.server.server.VSCodeServer` therefore broadcasts a
 new ``completions`` event alongside the legacy ``ghost`` event:
 
     {"type": "completions",
@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from kiss.agents.sorcar import persistence as th
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.server import VSCodeServer
 
 _TRICK_REPRO = (
     "Reproduce the issue by writing end-to-end test. Then fix the issue."
@@ -251,7 +251,7 @@ class TestFastCompletePickerBackend:
 
     def test_completions_limit_respected(self) -> None:
         """No more than _COMPLETIONS_LIMIT items are emitted."""
-        from kiss.agents.vscode.autocomplete import _COMPLETIONS_LIMIT
+        from kiss.server.autocomplete import _COMPLETIONS_LIMIT
         server = VSCodeServer()
         for i in range(_COMPLETIONS_LIMIT + 10):
             th._add_task(f"fix the parser bug variant {i:03d}")

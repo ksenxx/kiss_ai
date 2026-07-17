@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import unittest
 
-from kiss.agents.vscode.helpers import clip_autocomplete_suggestion
+from kiss.server.helpers import clip_autocomplete_suggestion
 
 
 class TestCrlfGhostClipping(unittest.TestCase):

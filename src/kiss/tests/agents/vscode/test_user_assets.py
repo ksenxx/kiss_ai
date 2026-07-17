@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""End-to-end tests for ``kiss.agents.vscode.user_assets``.
+"""End-to-end tests for ``kiss.server.user_assets``.
 
 Locks in the **runtime** contract of the
 :func:`ensure_user_asset_from_default` helper used for
@@ -33,7 +33,7 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.vscode.user_assets import (
+from kiss.server.user_assets import (
     ensure_user_asset_from_default,
     kiss_home_dir,
 )

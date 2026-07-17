@@ -24,9 +24,10 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.vscode import helpers, vscode_config
 from kiss.core import config as config_module
+from kiss.core import vscode_config
 from kiss.core.models import model_info
+from kiss.server import helpers
 
 # ---------------------------------------------------------------------------
 # config.Config

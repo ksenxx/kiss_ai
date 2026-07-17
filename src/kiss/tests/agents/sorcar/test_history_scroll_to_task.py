@@ -14,7 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from kiss.agents.sorcar import persistence as th
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.server import VSCodeServer
 
 
 class TestResumeSessionWithTaskId:

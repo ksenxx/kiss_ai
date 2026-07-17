@@ -68,7 +68,7 @@ th._KISS_DIR = kiss_dir
 th._DB_PATH = kiss_dir / "sorcar.db"
 th._db_conn = None
 
-from kiss.agents.vscode.web_server import (
+from kiss.server.web_server import (
     RemoteAccessServer,
     _generate_self_signed_cert,
 )
@@ -155,7 +155,7 @@ worker.start()
 if BUSY_LOOP:
     import asyncio
 
-    import kiss.agents.vscode.web_server as web_server_mod
+    import kiss.server.web_server as web_server_mod
 
     # Keep the shutdown failsafe short so the test does not wait the
     # full production window when the loop is wedged.

@@ -32,13 +32,13 @@ import io
 import re
 import threading
 
-from kiss.agents.sorcar.cli_panel import (
+from kiss.ui.cli.cli_panel import (
     PLACEHOLDER,
     PROMPT_MARKER,
     body_cursor_col,
     panel_body,
 )
-from kiss.agents.sorcar.cli_steering import _InputBox
+from kiss.ui.cli.cli_steering import _InputBox
 
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 

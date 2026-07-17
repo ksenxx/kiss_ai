@@ -5,7 +5,7 @@
 """End-to-end tests for the ``/voice`` wake-word voice-chat REPL feature.
 
 The sorcar CLI REPL gains a ``/voice`` slash command that spawns the
-wake-word listener process (``python -m kiss.agents.vscode.voice_wake``)
+wake-word listener process (``python -m kiss.server.voice_wake``)
 and turns each recognised utterance into a submitted task, showing a
 blinking red ``Listening ...`` indicator inside the anchored input
 panel while waiting for speech.
@@ -34,18 +34,18 @@ from typing import Any
 
 import pytest
 
-from kiss.agents.sorcar.cli_client import CliClient, _run_repl_loop
-from kiss.agents.sorcar.cli_panel import body_cursor_col, panel_cols
-from kiss.agents.sorcar.cli_repl import SLASH_COMMANDS, CliCompleter
-from kiss.agents.sorcar.cli_steering import _InputBox
-from kiss.agents.sorcar.cli_voice import (
+from kiss.core.print_to_console import ConsolePrinter
+from kiss.ui.cli.cli_client import CliClient, _run_repl_loop
+from kiss.ui.cli.cli_panel import body_cursor_col, panel_cols
+from kiss.ui.cli.cli_repl import SLASH_COMMANDS, CliCompleter
+from kiss.ui.cli.cli_steering import _InputBox
+from kiss.ui.cli.cli_voice import (
     VoiceListener,
     listener_command,
     read_voice_line_plain,
     start_voice,
     start_voice_anchored,
 )
-from kiss.core.print_to_console import ConsolePrinter
 
 BLINK_RED = "\x1b[5m\x1b[31m"
 # Steady (pre-wake) header indicator style: a reset then red, with no
@@ -296,7 +296,7 @@ class TestListenerCommand:
     def test_default_command(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("KISS_SORCAR_VOICE_CMD", raising=False)
         assert listener_command() == [
-            sys.executable, "-m", "kiss.agents.vscode.voice_wake",
+            sys.executable, "-m", "kiss.server.voice_wake",
         ]
 
     def test_env_override_with_quoted_args(

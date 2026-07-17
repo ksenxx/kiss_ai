@@ -36,7 +36,7 @@ from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.vscode.web_server import (
+from kiss.server.web_server import (
     RemoteAccessServer,
     _generate_self_signed_cert,
 )

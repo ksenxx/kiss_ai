@@ -42,8 +42,8 @@ from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar import cli_talk
-from kiss.agents.vscode.web_server import RemoteAccessServer
+from kiss.server.web_server import RemoteAccessServer
+from kiss.ui.cli import cli_talk
 
 
 def _redirect_persistence(tmpdir: str) -> tuple[Path, object, Path]:
@@ -80,7 +80,7 @@ class TestTalkPlaybackArbitration(IsolatedAsyncioTestCase):
         self.saved = _redirect_persistence(self.tmpdir)
         certfile = Path(self.tmpdir) / "cert.pem"
         keyfile = Path(self.tmpdir) / "key.pem"
-        from kiss.agents.vscode.web_server import _generate_self_signed_cert
+        from kiss.server.web_server import _generate_self_signed_cert
 
         _generate_self_signed_cert(certfile, keyfile)
         self.uds_path = Path(self.tmpdir) / "sorcar.sock"

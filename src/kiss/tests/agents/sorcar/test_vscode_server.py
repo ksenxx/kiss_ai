@@ -21,8 +21,8 @@ import pytest
 
 from kiss.agents.sorcar.git_worktree import GitWorktree
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-from kiss.agents.vscode.helpers import model_vendor
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.helpers import model_vendor
+from kiss.server.server import VSCodeServer
 
 
 def _set_agent_wt(agent: object, repo: Path, branch: str, original: str) -> None:
@@ -639,8 +639,8 @@ class TestMergeSession(unittest.TestCase):
 
     def test_finish_merge_cleans_up_data_dir(self) -> None:
         """_finish_merge removes the merge data directory for the tab."""
-        import kiss.agents.vscode.diff_merge as dm
-        import kiss.agents.vscode.merge_flow as mf
+        import kiss.server.diff_merge as dm
+        import kiss.server.merge_flow as mf
 
         orig_dm = dm._merge_data_dir
         orig_mf = mf._merge_data_dir
@@ -679,8 +679,8 @@ class TestMergeSession(unittest.TestCase):
         self.server._start_merge_session(path, tab_id="mr-tab")
         self.events.clear()
 
-        import kiss.agents.vscode.diff_merge as dm
-        import kiss.agents.vscode.merge_flow as mf
+        import kiss.server.diff_merge as dm
+        import kiss.server.merge_flow as mf
 
         orig = dm._merge_data_dir
         dm._merge_data_dir = lambda tab_id="": self.merge_dir  # type: ignore[assignment]
@@ -732,7 +732,7 @@ class TestDiffFilesDeletionAtStart(unittest.TestCase):
 
     def test_start_deletion_cs_is_zero(self) -> None:
         """Deleting lines at the start must produce cs=0."""
-        from kiss.agents.vscode.diff_merge import _diff_files, _hunk_to_dict
+        from kiss.server.diff_merge import _diff_files, _hunk_to_dict
 
         base = self._write("base.txt", "A\nB\nC\nD\n")
         current = self._write("current.txt", "C\nD\n")
@@ -746,7 +746,7 @@ class TestDiffFilesDeletionAtStart(unittest.TestCase):
 
     def test_middle_deletion_cs_correct(self) -> None:
         """Deleting lines in the middle must produce correct cs."""
-        from kiss.agents.vscode.diff_merge import _diff_files, _hunk_to_dict
+        from kiss.server.diff_merge import _diff_files, _hunk_to_dict
 
         base = self._write("base.txt", "A\nB\nC\nD\n")
         current = self._write("current.txt", "A\nD\n")
@@ -757,7 +757,7 @@ class TestDiffFilesDeletionAtStart(unittest.TestCase):
 
     def test_delete_all_cs_is_zero(self) -> None:
         """Deleting all lines must produce cs=0."""
-        from kiss.agents.vscode.diff_merge import _diff_files, _hunk_to_dict
+        from kiss.server.diff_merge import _diff_files, _hunk_to_dict
 
         base = self._write("base.txt", "A\nB\n")
         current = self._write("current.txt", "")
@@ -768,7 +768,7 @@ class TestDiffFilesDeletionAtStart(unittest.TestCase):
 
     def test_start_deletion_single_line(self) -> None:
         """Deleting a single line at the start produces cs=0."""
-        from kiss.agents.vscode.diff_merge import _diff_files, _hunk_to_dict
+        from kiss.server.diff_merge import _diff_files, _hunk_to_dict
 
         base = self._write("base.txt", "A\nB\nC\n")
         current = self._write("current.txt", "B\nC\n")
@@ -780,7 +780,7 @@ class TestDiffFilesDeletionAtStart(unittest.TestCase):
 
     def test_end_deletion_cs_correct(self) -> None:
         """Deleting lines at the end produces correct cs."""
-        from kiss.agents.vscode.diff_merge import _diff_files, _hunk_to_dict
+        from kiss.server.diff_merge import _diff_files, _hunk_to_dict
 
         base = self._write("base.txt", "A\nB\nC\n")
         current = self._write("current.txt", "A\n")
@@ -791,7 +791,7 @@ class TestDiffFilesDeletionAtStart(unittest.TestCase):
 
     def test_multiple_hunks_including_start(self) -> None:
         """Multiple deletions including at the start all have correct cs."""
-        from kiss.agents.vscode.diff_merge import _diff_files, _hunk_to_dict
+        from kiss.server.diff_merge import _diff_files, _hunk_to_dict
 
         base = self._write("base.txt", "A\nB\nC\nD\nE\n")
         current = self._write("current.txt", "C\n")
@@ -802,7 +802,7 @@ class TestDiffFilesDeletionAtStart(unittest.TestCase):
 
     def test_start_insertion_cs_correct(self) -> None:
         """Inserting lines at the start produces cs=0."""
-        from kiss.agents.vscode.diff_merge import _diff_files, _hunk_to_dict
+        from kiss.server.diff_merge import _diff_files, _hunk_to_dict
 
         base = self._write("base.txt", "B\nC\n")
         current = self._write("current.txt", "A\nB\nC\n")
@@ -815,7 +815,7 @@ class TestDiffFilesDeletionAtStart(unittest.TestCase):
 
     def test_replacement_at_start(self) -> None:
         """Replacing lines at the start produces cs=0."""
-        from kiss.agents.vscode.diff_merge import _diff_files, _hunk_to_dict
+        from kiss.server.diff_merge import _diff_files, _hunk_to_dict
 
         base = self._write("base.txt", "A\nB\nC\n")
         current = self._write("current.txt", "X\nY\nC\n")

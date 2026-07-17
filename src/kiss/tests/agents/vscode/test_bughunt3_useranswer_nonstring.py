@@ -19,7 +19,7 @@ import unittest
 from typing import Any
 
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.server import VSCodeServer
 
 
 class TestUserAnswerNonString(unittest.TestCase):

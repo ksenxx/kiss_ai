@@ -24,8 +24,8 @@ import tempfile
 from pathlib import Path
 
 from kiss.agents.sorcar import persistence as th
-from kiss.agents.vscode.helpers import clip_autocomplete_suggestion
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.helpers import clip_autocomplete_suggestion
+from kiss.server.server import VSCodeServer
 
 
 class TestGhostTextNoExtraSpaces:

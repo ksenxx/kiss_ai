@@ -33,8 +33,9 @@ call-graph pass.  Edges are never invented.
 The module is deliberately standalone (stdlib + optional
 ``tree_sitter_language_pack``): the rest of Sorcar touches it through
 exactly two seams — ``make_code_graph_tool`` in the agent's tool list
-and ``grep_hint`` inside the Bash tool — both behind ``try/except`` so
-a missing tree-sitter install can never break the agent.
+and :func:`intercept_grep_hint` inside the agent's ``Bash`` wrappers —
+both behind ``try/except`` so a missing tree-sitter install can never
+break the agent.
 """
 
 from __future__ import annotations
@@ -1060,6 +1061,44 @@ def grep_hint(command: str, work_dir: str | None) -> str | None:
         "(consider the code_graph tool instead of grep):\n"
         f"{answer}\n[/code_graph]\n"
     )
+
+
+def intercept_grep_hint(
+    command: str, work_dir: str | None, seen: set[str],
+) -> str | None:
+    """Return a code-graph answer for a grep-like *command*, at most once.
+
+    Query-before-grep interception: when a built graph already knows the
+    identifier a grep/rg command searches for, the expensive grep is
+    denied and the graph answer is returned directly ("the deny message
+    IS the answer").  A broken graph can never affect Bash (the lookup
+    is wrapped in ``try/except``).  Each distinct hint is returned at
+    most once per *seen* set, so a repeated identical grep falls through
+    to the real command (the agent is explicitly seeking verification or
+    context the graph did not provide).
+
+    Shared by the plain and Docker ``Bash`` wrappers in
+    ``SorcarAgent._get_tools`` so the interception logic cannot drift
+    between the two.
+
+    Args:
+        command: The bash command about to be executed.
+        work_dir: Working directory used to locate the built graph.
+        seen: Mutable per-session dedupe set of already-returned hints.
+
+    Returns:
+        The hint string to return INSTEAD of running the command, or
+        ``None`` when the command should run normally.
+    """
+    hint = ""
+    try:
+        hint = grep_hint(command, work_dir) or ""
+    except Exception:
+        logger.debug("code_graph grep hint failed", exc_info=True)
+    if hint and hint not in seen:
+        seen.add(hint)
+        return hint
+    return None
 
 
 # ---------------------------------------------------------------------------

@@ -7,7 +7,7 @@
 Orphan-sweep join hook
 ----------------------
 
-Every :class:`kiss.agents.vscode.server.VSCodeServer` constructor
+Every :class:`kiss.server.server.VSCodeServer` constructor
 starts a daemon thread named ``orphan-task-sweep`` that runs SQL on a
 per-thread SQLite connection aliased into ``persistence._db_conn``.
 Many tests in this folder construct a ``VSCodeServer``, then in

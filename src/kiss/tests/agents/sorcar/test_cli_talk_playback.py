@@ -31,8 +31,8 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.sorcar import cli_talk
-from kiss.agents.sorcar.cli_printer import RecordingConsolePrinter
+from kiss.ui.cli import cli_talk
+from kiss.ui.cli.cli_printer import RecordingConsolePrinter
 
 # A tiny-but-real MP3-looking byte string; the fake player only copies
 # bytes, so any payload works — what matters is byte-exact delivery.
@@ -422,8 +422,8 @@ class TestDispatcherTalkPlayback:
     def _dispatcher(self, tab_id: str = "tab-1"):
         import io
 
-        from kiss.agents.sorcar.cli_client import _EventDispatcher
         from kiss.core.print_to_console import ConsolePrinter
+        from kiss.ui.cli.cli_client import _EventDispatcher
 
         return _EventDispatcher(ConsolePrinter(file=io.StringIO()), tab_id=tab_id)
 

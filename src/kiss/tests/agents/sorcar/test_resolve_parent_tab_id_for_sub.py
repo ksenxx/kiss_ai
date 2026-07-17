@@ -20,7 +20,7 @@ import logging
 import pytest
 
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.server import VSCodeServer
 
 
 def _clear_states() -> None:
@@ -142,7 +142,7 @@ class TestResolveParentTabIdForSub:
         observable."""
         server = VSCodeServer()
         with caplog.at_level(
-            logging.WARNING, logger="kiss.agents.vscode.server",
+            logging.WARNING, logger="kiss.server.server",
         ):
             out = server._resolve_parent_tab_id_for_sub(
                 parent_task_id="12345", chat_id="missing-chat",

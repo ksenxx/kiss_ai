@@ -39,7 +39,7 @@ Spec
 
 5. FIXED BEHAVIOR: the backend strips the four global-setting keys
    from the broadcast ``extra`` (see ``_extra_for_replay`` in
-   ``kiss/agents/vscode/server.py``).  The webview's live toggles
+   ``kiss/server/server.py``).  The webview's live toggles
    stay at the user's current global settings, and the follow-up
    ``submit`` in tab Y carries those settings to the next run.
 
@@ -60,7 +60,7 @@ from typing import Any, cast
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.server import VSCodeServer
 
 
 def _redirect_db(tmpdir: str) -> tuple:
@@ -580,12 +580,12 @@ class TestExtraForReplayUnit(unittest.TestCase):
     fixed to return ``""``."""
 
     def test_non_dict_json_returns_empty(self) -> None:
-        from kiss.agents.vscode.server import _extra_for_replay
+        from kiss.server.server import _extra_for_replay
         for malformed in ('[1,2,3]', '"x"', '42', 'null', 'true'):
             assert _extra_for_replay(malformed) == "", malformed
 
     def test_dict_with_stripped_keys_removes_them(self) -> None:
-        from kiss.agents.vscode.server import _extra_for_replay
+        from kiss.server.server import _extra_for_replay
         payload = json.dumps({
             "model": "claude-opus-4-6",
             "is_worktree": True,
@@ -605,7 +605,7 @@ class TestExtraForReplayUnit(unittest.TestCase):
         assert parsed["endTs"] == 2
 
     def test_dict_without_stripped_keys_passes_through(self) -> None:
-        from kiss.agents.vscode.server import _extra_for_replay
+        from kiss.server.server import _extra_for_replay
         payload = json.dumps({"work_dir": "/tmp/x", "startTs": 1})
         # The implementation returns the ORIGINAL string when no
         # stripped key was present (skips re-serialization).
@@ -613,14 +613,14 @@ class TestExtraForReplayUnit(unittest.TestCase):
         assert json.loads(out) == json.loads(payload)
 
     def test_empty_or_non_string_returns_empty(self) -> None:
-        from kiss.agents.vscode.server import _extra_for_replay
+        from kiss.server.server import _extra_for_replay
         assert _extra_for_replay("") == ""
         assert _extra_for_replay(None) == ""
         assert _extra_for_replay(123) == ""
         assert _extra_for_replay({"k": "v"}) == ""
 
     def test_invalid_json_returns_original(self) -> None:
-        from kiss.agents.vscode.server import _extra_for_replay
+        from kiss.server.server import _extra_for_replay
         assert _extra_for_replay("not-json") == "not-json"
 
 

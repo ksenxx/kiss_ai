@@ -18,8 +18,8 @@ pressed, the text is sent to the agent"):
     escape codes (Shift+Enter then emits ``ESC[13;2u``).
 
 * Both encodings are already recognised by
-  :data:`~kiss.agents.sorcar.cli_steering._NEWLINE_AFTER_ESC` and
-  handled by :meth:`~kiss.agents.sorcar.cli_steering._InputBox.feed`.
+  :data:`~kiss.ui.cli.cli_steering._NEWLINE_AFTER_ESC` and
+  handled by :meth:`~kiss.ui.cli.cli_steering._InputBox.feed`.
   What was missing was writing the enable sequences on entry and the
   matching disable sequences on exit.
 
@@ -54,7 +54,7 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.sorcar.cli_steering import _InputBox
+from kiss.ui.cli.cli_steering import _InputBox
 
 # ---------------------------------------------------------------------------
 # 1. start()/stop() emit the enable / disable CSI sequences
@@ -206,7 +206,7 @@ _DRIVER_SRC = textwrap.dedent(
     import threading
     from pathlib import Path
 
-    from kiss.agents.sorcar.cli_steering import _InputBox
+    from kiss.ui.cli.cli_steering import _InputBox
 
     OUT_FILE = Path(sys.argv[1])
     OUT_FILE.write_text("[]")

@@ -82,7 +82,7 @@ class TestCodexModelStuckBug:
         """End-to-end: submitting a task with codex/gpt-5.5 when the CLI is
         missing must broadcast a result event promptly, not hang."""
         import kiss.agents.sorcar.persistence as th
-        from kiss.agents.vscode.server import VSCodeServer
+        from kiss.server.server import VSCodeServer
 
         saved_path = os.environ.get("PATH", "")
         saved_candidates = codex_module._UI_CANDIDATE_PATHS

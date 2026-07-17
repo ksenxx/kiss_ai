@@ -16,8 +16,8 @@ because the agentic loop renders it again as a dedicated ``result`` panel.
 
 import io
 
-from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.core.print_to_console import ConsolePrinter
+from kiss.server.json_printer import JsonPrinter
 
 _TASK_COUNTER = 0
 

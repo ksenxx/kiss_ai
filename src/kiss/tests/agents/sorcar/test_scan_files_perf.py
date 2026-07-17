@@ -14,7 +14,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from kiss.agents.vscode.diff_merge import _scan_files
+from kiss.server.diff_merge import _scan_files
 
 
 class TestScanFilesPerformance:

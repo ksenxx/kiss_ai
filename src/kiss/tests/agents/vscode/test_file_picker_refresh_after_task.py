@@ -39,7 +39,7 @@ from typing import Any
 
 import pytest
 
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.server import VSCodeServer
 
 
 def _wait_for_files_event(

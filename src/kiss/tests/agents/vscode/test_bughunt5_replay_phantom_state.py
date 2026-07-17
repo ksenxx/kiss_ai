@@ -34,7 +34,7 @@ from typing import Any
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.server import VSCodeServer
 
 
 class TestReplayPhantomState(unittest.TestCase):

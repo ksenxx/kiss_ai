@@ -5,7 +5,7 @@
 """Unit tests for the universal backslash line-continuation helper.
 
 Covers every branch of
-:func:`kiss.agents.sorcar.cli_line_continuation.ends_with_line_continuation`:
+:func:`kiss.ui.cli.cli_line_continuation.ends_with_line_continuation`:
 empty buffer, no backslash, single trailing backslash, backslash
 followed by whitespace, escaped ``\\\\`` (even count → submit),
 odd counts of trailing backslashes (continuation with the even
@@ -14,7 +14,7 @@ literal count retained), and whitespace-only + backslash.
 
 from __future__ import annotations
 
-from kiss.agents.sorcar.cli_line_continuation import (
+from kiss.ui.cli.cli_line_continuation import (
     ends_with_line_continuation,
 )
 

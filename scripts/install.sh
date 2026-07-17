@@ -7,7 +7,7 @@ set -e
 
 # Capture the user's shell PWD *before* any ``cd`` so VS Code can later open
 # this directory as its workspace root.  Agents launched inside VS Code use
-# this as their PWD (see ``kiss.agents.vscode.server``).
+# this as their PWD (see ``kiss.server.server``).
 USER_PWD="$PWD"
 
 # Returns 0 only if git is actually runnable. On macOS, /usr/bin/git is a stub

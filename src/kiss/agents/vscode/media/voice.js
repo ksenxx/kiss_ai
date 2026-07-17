@@ -955,20 +955,20 @@
   /**
    * Whether wake-word listening should be on when the page loads.
    *
-   * VS Code webview mode: the mic defaults ON when VS Code launches —
-   * only an explicit user opt-out (stored '0', written by clicking the
-   * mic button off or by a listener error) keeps it off.  Browser mode
-   * (remote web app) never auto-starts: getUserMedia without a user
-   * gesture would fail or prompt unexpectedly, so it only restores an
-   * explicit opt-in (stored '1').
+   * The mic stays CLOSED by default: on a fresh install (no stored
+   * preference) listening is OFF in both webview and browser modes,
+   * so Sorcar never responds to the wake word until the user
+   * explicitly turns the mic on.  Only an explicit opt-in (stored
+   * '1', written by clicking the mic button on) restores listening
+   * across reloads.  Browser mode (remote web app) could never
+   * auto-start anyway: getUserMedia without a user gesture would
+   * fail or prompt unexpectedly.
    */
   function wasEnabled() {
     try {
-      const stored = localStorage.getItem(STORAGE_KEY);
-      if (cfg.mode === 'webview') return stored !== '0';
-      return stored === '1';
+      return localStorage.getItem(STORAGE_KEY) === '1';
     } catch (_e) {
-      return cfg.mode === 'webview';
+      return false;
     }
   }
 
@@ -1101,9 +1101,9 @@
   });
 
   setUi('off');
-  // Turn the mic on at load: in webview mode this runs when VS Code
-  // launches (with the Sorcar view open), so listening starts without
-  // a click unless the user explicitly opted out.
+  // Restore the mic at load only when the user explicitly opted in
+  // (stored '1'): the mic stays closed by default so a fresh install
+  // never responds to the wake word until the user turns it on.
   if (wasEnabled()) {
     setEnabled(true);
   }

@@ -37,8 +37,8 @@ from pathlib import Path
 
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-from kiss.agents.vscode.diff_merge import _capture_untracked, _prepare_merge_view
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.diff_merge import _capture_untracked, _prepare_merge_view
+from kiss.server.server import VSCodeServer
 
 
 def _git(cwd: str | Path, *args: str) -> str:

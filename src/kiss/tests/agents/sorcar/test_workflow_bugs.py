@@ -48,7 +48,7 @@ import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps, _git
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.server import VSCodeServer
 
 
 def _redirect_db(tmpdir: str) -> tuple:

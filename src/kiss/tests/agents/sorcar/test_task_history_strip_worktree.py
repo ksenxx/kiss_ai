@@ -185,10 +185,10 @@ class TestSaveTaskExtraEndToEnd(unittest.TestCase):
 
     def test_task_runner_payload_persists_stripped_work_dir(self) -> None:
         """Mirror the literal payload built in
-        ``kiss.agents.vscode.task_runner._run_task_inner`` and assert
+        ``kiss.server.task_runner._run_task_inner`` and assert
         that it persists the parent repo path (the fix must apply at
         the task_runner call site too)."""
-        from kiss.agents.vscode.task_runner import build_task_extra_payload
+        from kiss.server.task_runner import build_task_extra_payload
 
         task_id, _chat_id = _add_task("runner task", "")
         wt = "/repo/.kiss-worktrees/kiss_wt-XYZ-87654321"

@@ -41,7 +41,7 @@ import yaml
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sorcar_agent import run_tasks_parallel
-from kiss.agents.vscode.json_printer import JsonPrinter
+from kiss.server.json_printer import JsonPrinter
 
 # ---------------------------------------------------------------------------
 # Local OpenAI-compatible server that always returns a ``finish`` tool call

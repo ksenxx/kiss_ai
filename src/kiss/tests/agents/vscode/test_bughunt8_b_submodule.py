@@ -35,7 +35,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from kiss.agents.vscode.diff_merge import _prepare_merge_view
+from kiss.server.diff_merge import _prepare_merge_view
 
 
 def _git(cwd: str | Path, *args: str) -> str:
