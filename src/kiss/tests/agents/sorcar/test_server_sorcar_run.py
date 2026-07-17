@@ -17,11 +17,17 @@ real without any model API calls.
 from __future__ import annotations
 
 import asyncio
+import functools
+import inspect
+import json
 import shutil
+import socket
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
+import uuid
 from pathlib import Path
 from typing import Any, cast
 
@@ -304,6 +310,340 @@ class SorcarRunApiTest(unittest.TestCase):
         assert len(prompts_seen) == 2
         assert "remember the magic word xyzzy" in prompts_seen[1]
         assert "first answer marker" in prompts_seen[1]
+
+    def _raw_daemon_run(
+        self,
+        tools: Any,
+        pre_commands: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """Drive one raw ``run`` command over the UDS and wait for the end.
+
+        Bypasses :func:`kiss.server.sorcar.run` so malformed ``tools``
+        payloads (and stray ``toolResponse`` commands) can be sent
+        exactly as an arbitrary/buggy client would.
+
+        Args:
+            tools: Raw value for the ``run`` command's ``tools`` field.
+            pre_commands: Extra commands to send before the ``run``.
+        """
+        tab_id = f"raw-{uuid.uuid4().hex}"
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(60)
+        try:
+            sock.connect(self.sock_path)
+            for pre in pre_commands or []:
+                sock.sendall(json.dumps(pre).encode() + b"\n")
+            cmd = {
+                "type": "run",
+                "prompt": "raw client task",
+                "tabId": tab_id,
+                "taskId": uuid.uuid4().hex,
+                "workDir": self.repo,
+                "model": "",
+                "tools": tools,
+            }
+            sock.sendall(json.dumps(cmd).encode() + b"\n")
+            reader = sock.makefile("rb")
+            started = False
+            while True:
+                event = json.loads(reader.readline())
+                if event.get("tabId") != tab_id or event.get("type") != "status":
+                    continue
+                if event.get("running"):
+                    started = True
+                elif started:
+                    return
+        finally:
+            sock.close()
+
+    def test_tools_round_trip_end_to_end(self) -> None:
+        """Client tools are rebuilt as agent tools and proxied back.
+
+        The agent (daemon task thread) must see one proxy per client
+        tool with the original name, docstring, and signature; calling
+        a proxy must execute the caller's function in the client
+        process and return its ``str()``-ified result to the agent.
+        """
+        client_thread = threading.current_thread()
+        calls: list[tuple[str, str, threading.Thread]] = []
+
+        def get_temperature(city: str, unit: str = "C", *, note: str = "") -> str:
+            """Return the current temperature of a city.
+
+            Args:
+                city: Name of the city to look up.
+                unit: Temperature unit to report.
+                note: Optional note echoed back.
+            """
+            calls.append((city, unit, threading.current_thread()))
+            # Exceed the daemon proxy's 0.25 s poll interval so its
+            # ``queue.Empty`` → re-poll path is exercised for real.
+            time.sleep(0.4)
+            return f"21{unit} in {city}{note}"
+
+        def magic_number(seed: int, factor=2, opts=()) -> int:  # type: ignore[no-untyped-def]
+            return int(seed * factor + len(opts))
+
+        def tag(prefix: str = ">", *, label: str) -> str:
+            """Tag a label.
+
+            Args:
+                prefix: Prefix to prepend.
+                label: Label to tag.
+            """
+            return prefix + label
+
+        seen: dict[str, Any] = {}
+
+        def stub_run(self_agent: Any, **kwargs: Any) -> str:
+            proxies = {t.__name__: t for t in kwargs.get("tools") or []}
+            seen["names"] = sorted(proxies)
+            temp = proxies["get_temperature"]
+            seen["doc"] = inspect.getdoc(temp)
+            seen["signature"] = str(inspect.signature(temp))
+            seen["magic_doc"] = inspect.getdoc(proxies["magic_number"])
+            seen["magic_sig"] = str(inspect.signature(proxies["magic_number"]))
+            seen["tag_sig"] = str(inspect.signature(proxies["tag"]))
+            # Positional call, keyword call with the optional param,
+            # and an int-returning tool (round-trips as a string).
+            seen["r1"] = temp("Paris")
+            seen["r2"] = temp(city="Berlin", unit="F")
+            seen["r3"] = proxies["magic_number"](seed=20)
+            # Required keyword-only after an optional parameter — a
+            # legal Python signature the proxy must reproduce exactly.
+            seen["r4"] = proxies["tag"](label="urgent")
+            self_agent.total_tokens_used = 1
+            self_agent.budget_used = 0.001
+            self_agent.total_steps = 1
+            raw = "success: true\nis_continue: false\nsummary: tools ok\n"
+            kwargs["printer"].print(
+                raw, type="result", step_count=1, total_tokens=1, cost="$0.0010",
+            )
+            return raw
+
+        self._parent_class.run = stub_run
+        result = sorcar.run(
+            "use my tools",
+            work_dir=self.repo,
+            tools=[get_temperature, magic_number, tag],
+            sock_path=self.sock_path,
+            timeout=60,
+        )
+        assert result.success is True
+        assert result.text == "tools ok"
+        assert seen["names"] == ["get_temperature", "magic_number", "tag"]
+        # Name / docstring / signature fidelity (docstring parameter
+        # descriptions feed the model's tool schema).
+        assert seen["doc"] == inspect.getdoc(get_temperature)
+        # (The proxy preserves the keyword-only kind of ``note`` and
+        # carries no return annotation.)
+        assert seen["signature"] == "(city: str, unit: str = 'C', *, note: str = '')"
+        # A required keyword-only parameter after an optional one is a
+        # valid signature and must survive the round trip unchanged.
+        assert seen["tag_sig"] == "(prefix: str = '>', *, label: str)"
+        assert seen["r4"] == ">urgent"
+        # Undocumented tool gets a fallback docstring; an unannotated
+        # parameter degrades to ``str`` and a non-JSON-primitive
+        # default (``()``) is transmitted as ``None`` — the client
+        # function's real default still applies because omitted
+        # arguments are never forwarded.
+        assert seen["magic_doc"] == "Client tool magic_number."
+        assert seen["magic_sig"] == "(seed: int, factor: str = 2, opts: str = None)"
+        assert seen["r1"] == "21C in Paris"
+        assert seen["r2"] == "21F in Berlin"
+        assert seen["r3"] == "40"
+        # The tools genuinely ran in the CLIENT thread (inside
+        # ``sorcar.run``'s event loop), not on the daemon task thread.
+        assert [c[:2] for c in calls] == [("Paris", "C"), ("Berlin", "F")]
+        assert all(c[2] is client_thread for c in calls)
+
+    def test_tool_exception_returns_error_string(self) -> None:
+        """A raising client tool yields an ``Error: ...`` result string."""
+
+        def explode(reason: str) -> str:
+            """Blow up.
+
+            Args:
+                reason: Why to blow up.
+            """
+            raise RuntimeError(f"boom {reason}")
+
+        seen: dict[str, Any] = {}
+
+        def stub_run(self_agent: Any, **kwargs: Any) -> str:
+            (proxy,) = cast(list[Any], kwargs.get("tools"))
+            seen["result"] = proxy(reason="now")
+            self_agent.total_tokens_used = 1
+            self_agent.budget_used = 0.001
+            self_agent.total_steps = 1
+            raw = "success: true\nis_continue: false\nsummary: done\n"
+            kwargs["printer"].print(
+                raw, type="result", step_count=1, total_tokens=1, cost="$0.0010",
+            )
+            return raw
+
+        self._parent_class.run = stub_run
+        result = sorcar.run(
+            "use the exploding tool",
+            work_dir=self.repo,
+            tools=[explode],
+            sock_path=self.sock_path,
+            timeout=60,
+        )
+        assert result.success is True
+        assert seen["result"] == "Error: tool 'explode' failed: RuntimeError: boom now"
+
+    def test_stopped_task_cancels_pending_tool_call(self) -> None:
+        """A stopped task unblocks a pending proxy call with an error.
+
+        Also exercises the stale-``toolResponse`` drop: the client
+        still answers the broadcast ``toolRequest``, but by then the
+        pending entry is gone and the reply must be ignored.
+        """
+
+        def slow_tool(x: str) -> str:
+            """Echo.
+
+            Args:
+                x: Value to echo.
+            """
+            return x
+
+        seen: dict[str, Any] = {}
+
+        def stub_run(self_agent: Any, **kwargs: Any) -> str:
+            tab = _RunningAgentState.running_agent_states[self_agent._tab_id]
+            assert tab.stop_event is not None
+            tab.stop_event.set()
+            (proxy,) = cast(list[Any], kwargs.get("tools"))
+            seen["result"] = proxy(x="hi")
+            self_agent.total_tokens_used = 1
+            self_agent.budget_used = 0.001
+            self_agent.total_steps = 1
+            raw = "success: true\nis_continue: false\nsummary: done\n"
+            kwargs["printer"].print(
+                raw, type="result", step_count=1, total_tokens=1, cost="$0.0010",
+            )
+            return raw
+
+        self._parent_class.run = stub_run
+        result = sorcar.run(
+            "stop mid tool call",
+            work_dir=self.repo,
+            tools=[slow_tool],
+            sock_path=self.sock_path,
+            timeout=60,
+        )
+        # The proxy unblocked with the cancellation error instead of
+        # hanging, and the daemon reported the run as user-stopped.
+        assert seen["result"] == (
+            "Error: tool call 'slow_tool' was cancelled "
+            "because the task was stopped."
+        )
+        assert result.success is False
+        assert result.text == "Task stopped by user"
+
+    def test_malformed_tools_and_tool_responses_are_ignored(self) -> None:
+        """Malformed specs are skipped; bad ``toolResponse`` is harmless.
+
+        A hand-crafted client sends a ``run`` whose ``tools`` list
+        mixes malformed entries with two well-formed specs, preceded by
+        stray/malformed ``toolResponse`` commands.  The daemon must
+        build proxies only for the valid specs and stay alive.
+        """
+        seen: dict[str, Any] = {}
+
+        def stub_run(self_agent: Any, **kwargs: Any) -> str:
+            seen.setdefault("tool_names", []).append(
+                [t.__name__ for t in kwargs.get("tools") or []],
+            )
+            self_agent.total_tokens_used = 1
+            self_agent.budget_used = 0.001
+            self_agent.total_steps = 1
+            raw = "success: true\nis_continue: false\nsummary: done\n"
+            kwargs["printer"].print(
+                raw, type="result", step_count=1, total_tokens=1, cost="$0.0010",
+            )
+            return raw
+
+        self._parent_class.run = stub_run
+        self._raw_daemon_run(
+            tools=[
+                42,  # not a dict
+                {"name": "not an identifier"},  # invalid tool name
+                {"name": "dup_params", "params": [{"name": "x"}, {"name": "x"}]},
+                {"name": "bad_param", "params": [{"name": "1bad"}]},
+                # ``class`` passes ``isidentifier`` but is rejected by
+                # ``inspect.Parameter`` (reserved word).
+                {"name": "kw_param", "params": [{"name": "class"}]},
+                # Required parameter after an optional one with no
+                # keyword-only marker: invalid rebuilt signature.
+                {"name": "bad_order", "params": [{"name": "a", "default": 1},
+                                                 {"name": "b"}]},
+                {"name": "junk_params", "params": "junk", "description": ""},
+                {
+                    "name": "good",
+                    "description": "A good tool.",
+                    "params": [{"name": "a", "type": "int", "default": 1}],
+                },
+                # An unrecognized ``kind`` value degrades to a plain
+                # keyword-bindable parameter.
+                {
+                    "name": "odd_kind",
+                    "params": [{"name": "a", "kind": 42, "default": 0}],
+                },
+            ],
+            pre_commands=[
+                {"type": "toolResponse"},  # no callId
+                {"type": "toolResponse", "callId": 7, "result": "x"},
+                {"type": "toolResponse", "callId": "stale", "result": "x"},
+            ],
+        )
+        # Non-list ``tools`` field: every spec ignored, task still runs.
+        self._raw_daemon_run(tools="junk")
+        # Absent/null ``tools`` field (plain webview submits): no
+        # proxies, no warning.
+        self._raw_daemon_run(tools=None)
+        assert seen["tool_names"] == [["junk_params", "good", "odd_kind"], [], []]
+        # The daemon survived it all: a normal API run still works.
+        result = sorcar.run(
+            "still alive?",
+            work_dir=self.repo,
+            sock_path=self.sock_path,
+            timeout=60,
+        )
+        assert result.success is True
+
+    def test_invalid_tools_raise_value_error(self) -> None:
+        """Unsupported tool shapes are rejected before connecting."""
+
+        def dup(a: str) -> str:
+            """Dup.
+
+            Args:
+                a: A value.
+            """
+            return a
+
+        def star_args(*args: str) -> str:
+            """Star args."""
+            return ""
+
+        cases: list[Any] = [
+            [42],  # not callable
+            [lambda x: x],  # no valid __name__
+            [functools.partial(dup, a="x")],  # no __name__ at all
+            [dup, dup],  # duplicate tool name
+            [star_args],  # unsupported parameter kind
+        ]
+        for tools in cases:
+            with self.assertRaises(ValueError):
+                sorcar.run(
+                    "hello",
+                    tools=tools,
+                    sock_path=self.sock_path,
+                    timeout=5,
+                )
 
     def test_no_daemon_raises_connection_error(self) -> None:
         """A missing daemon socket raises a helpful ConnectionError."""

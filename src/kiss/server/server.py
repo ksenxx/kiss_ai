@@ -313,6 +313,12 @@ class VSCodeServer(
     # production servers never touch these class-level objects; only
     # non-``__init__`` instances see (and, for the dict, share) them.
     _tab_opened_task_ids: dict[str, str] = {}
+    # Pending client-proxied tool calls: ``callId`` → the single-slot
+    # queue the task thread's proxy tool blocks on (see
+    # ``_TaskRunnerMixin._remote_tool_call`` /
+    # ``_CommandsMixin._cmd_tool_response``).  Guarded by
+    # ``_state_lock``.
+    _pending_tool_calls: dict[str, queue.Queue[str]] = {}
     _cli_running_lookup: Callable[[str], bool] | None = None
     # Handle of the background orphan-task sweep thread started by
     # ``__init__``; ``None`` on instances built via ``object.__new__``
@@ -441,6 +447,9 @@ class VSCodeServer(
         # consumed the answer; old completed-task subscriber sets are
         # intentionally retained and must not receive unrelated close events.
         self._pending_user_answer_tasks: dict[int, str] = {}
+        # Pending client-proxied tool calls (``callId`` → single-slot
+        # result queue); see the class-level fallback above.
+        self._pending_tool_calls: dict[str, queue.Queue[str]] = {}
         persisted = _load_last_model()
         self._default_model = persisted or os.environ.get("KISS_MODEL", "") or get_default_model()
         # Share the lock that guards ``_RunningAgentState.running_agent_states``
