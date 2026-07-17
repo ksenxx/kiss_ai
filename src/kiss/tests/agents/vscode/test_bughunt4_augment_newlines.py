@@ -34,11 +34,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from kiss.agents.vscode.diff_merge import (
+from kiss.server.diff_merge import (
     _prepare_merge_view,
     _split_lines_keepends,
 )
-from kiss.agents.vscode.web_server import _augment_merge_data
+from kiss.server.web_server import _augment_merge_data
 
 CRLF_ORIGINAL = b"alpha\r\nbravo\r\ncharlie\r\n"
 CRLF_MODIFIED = b"alpha\r\nBRAVO-agent\r\ncharlie\r\n"

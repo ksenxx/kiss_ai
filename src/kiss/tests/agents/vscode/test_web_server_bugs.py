@@ -11,10 +11,10 @@
   only the UNRESOLVED hunks of a file; hunks the user already ACCEPTED
   must keep their content on disk (the old whole-file ``shutil.copy2``
   silently wiped them while still reporting them "accepted").
-* D3 (F5): ``_translate_webview_command`` must preserve the
-  ``connId``/``workDir`` stamps that ``_dispatch_client_command`` put
-  on a ``userActionDone`` command (the old code returned a fresh dict,
-  dropping both).
+* D3 (F5): ``_translate_webview_command`` no longer rewrites
+  ``userActionDone`` (the branch was dead — no client ever sends it;
+  ``media/main.js`` posts ``userAnswer`` directly), so the command
+  passes through unchanged with all dispatch stamps intact.
 
 No mocks/patches: a real :class:`RemoteAccessServer` (and its real
 :class:`VSCodeServer`) is constructed; merge actions run through the
@@ -32,7 +32,7 @@ from typing import Any
 from unittest import IsolatedAsyncioTestCase, TestCase
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.vscode.web_server import (
+from kiss.server.web_server import (
     RemoteAccessServer,
     _generate_self_signed_cert,
     _translate_webview_command,
@@ -246,28 +246,17 @@ class TestRejectFilePreservesAcceptedHunks(_ServerTestBase):
 
 
 class TestTranslateUserActionDone(TestCase):
-    """D3/F5: ``userActionDone`` translation must keep dispatch stamps."""
+    """``userActionDone`` has no producer; the dead rewrite was removed."""
 
-    def test_conn_id_and_work_dir_survive(self) -> None:
-        """The ``connId``/``workDir`` stamps from
-        ``_dispatch_client_command`` must survive the translation, like
-        they do in the sibling ``resumeSession`` branch."""
+    def test_user_action_done_passes_through_unchanged(self) -> None:
+        """No client sends ``userActionDone`` (``media/main.js`` posts
+        ``userAnswer`` directly), so ``_translate_webview_command`` no
+        longer rewrites it — the command passes through unchanged."""
         cmd = {
             "type": "userActionDone",
             "tabId": "t1",
             "connId": "conn-9",
             "workDir": "/some/work/dir",
         }
-        out = _translate_webview_command(cmd)
-        self.assertEqual(out["type"], "userAnswer")
-        self.assertEqual(out["answer"], "done")
-        self.assertEqual(out["tabId"], "t1")
-        self.assertEqual(out.get("connId"), "conn-9")
-        self.assertEqual(out.get("workDir"), "/some/work/dir")
-
-    def test_missing_tab_id_defaults_to_empty(self) -> None:
-        """A stampless command still gets ``tabId: ""`` like before."""
-        out = _translate_webview_command({"type": "userActionDone"})
-        self.assertEqual(out["type"], "userAnswer")
-        self.assertEqual(out["answer"], "done")
-        self.assertEqual(out["tabId"], "")
+        out = _translate_webview_command(dict(cmd))
+        self.assertEqual(out, cmd)

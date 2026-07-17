@@ -44,7 +44,7 @@ import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import _add_task
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.agents.vscode.json_printer import JsonPrinter
+from kiss.server.json_printer import JsonPrinter
 
 
 def _finish_response(model: str = "gpt-4o-mini") -> dict:

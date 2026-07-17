@@ -8,7 +8,7 @@
  * Extension webviews cannot capture the microphone (VS Code denies
  * ``getUserMedia`` for webview origins), so the always-on listener runs
  * here in the extension host instead: a local Python process
- * (``kiss.agents.vscode.voice_wake``) streams microphone audio into the
+ * (``kiss.server.voice_wake``) streams microphone audio into the
  * lightweight offline Vosk small English model and prints one line per
  * event on stdout:
  *
@@ -135,7 +135,7 @@ export class VoiceWakeService {
           'run',
           'python',
           '-m',
-          'kiss.agents.vscode.voice_wake',
+          'kiss.server.voice_wake',
           ...sensitivityArgs,
           ...extraListenerArgs(),
         ],

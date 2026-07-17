@@ -3,7 +3,7 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 """Integration tests confirming fixes for bugs, redundancies, and
-inconsistencies in ``kiss.agents.vscode`` — audit round 6.
+inconsistencies in ``kiss.server`` — audit round 6.
 
 B1 fix: ``save_config`` now preserves non-DEFAULTS keys (like ``email``)
     that were already stored in ``config.json``.  Previously, calling
@@ -33,13 +33,13 @@ from pathlib import Path
 from typing import Any
 from unittest import TestCase
 
-from kiss.agents.vscode.server import VSCodeServer
-from kiss.agents.vscode.vscode_config import (
+from kiss.core.models.model_info import get_fast_model
+from kiss.server.server import VSCodeServer
+from kiss.server.vscode_config import (
     CONFIG_PATH,
     load_config,
     save_config,
 )
-from kiss.core.models.model_info import get_fast_model
 
 
 def _make_server() -> tuple[VSCodeServer, list[dict]]:
@@ -72,7 +72,7 @@ class TestSaveConfigPreservesExtraKeys(TestCase):
         self._orig_path = str(CONFIG_PATH)
         self._tmpdir = tempfile.mkdtemp()
         self._tmp_config = Path(self._tmpdir) / "config.json"
-        import kiss.agents.vscode.vscode_config as mod
+        import kiss.server.vscode_config as mod
 
         self._mod = mod
         self._orig_config_path = mod.CONFIG_PATH

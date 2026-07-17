@@ -29,9 +29,9 @@ import unittest
 from typing import Any
 
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.agents.vscode.server import VSCodeServer
-from kiss.agents.vscode.vscode_config import DEFAULTS, apply_config_to_env
 from kiss.core import config as config_module
+from kiss.server.server import VSCodeServer
+from kiss.server.vscode_config import DEFAULTS, apply_config_to_env
 
 
 class TestJunkBudgetDoesNotRaise(unittest.TestCase):

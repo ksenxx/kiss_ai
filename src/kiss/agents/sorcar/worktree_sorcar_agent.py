@@ -11,6 +11,7 @@ is never modified.  After the task the user chooses **merge** or
 
 from __future__ import annotations
 
+import enum
 import functools
 import logging
 import sys
@@ -23,12 +24,6 @@ from typing import Any
 import yaml
 
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.agents.sorcar.cli_helpers import (
-    _build_arg_parser,
-    _build_run_kwargs,
-    _launch_work_dir,
-    print_outcome,
-)
 from kiss.agents.sorcar.git_worktree import (
     GitWorktree,
     GitWorktreeOps,
@@ -41,13 +36,21 @@ from kiss.agents.sorcar.persistence import _allocate_chat_id
 # module's globals at call time) so tests can monkeypatch
 # ``worktree_sorcar_agent._generate_commit_message``.
 from kiss.agents.sorcar.sorcar_agent import (
-    SorcarAgent,
     _generate_commit_message,
     auto_commit_changes,
 )
 from kiss.core.kiss_error import KISSError
 
 logger = logging.getLogger(__name__)
+
+
+class _WorktreeCleanupOutcome(enum.Enum):
+    """Outcome of :meth:`WorktreeSorcarAgent._commit_and_clean_worktree`."""
+
+    COMMITTED_AND_REMOVED = "committed_and_removed"
+    PRESERVED_NO_AUTOCOMMIT = "preserved_no_autocommit"
+    PRESERVED_COMMIT_FAILED = "preserved_commit_failed"
+
 
 # Result-specific middle lines for the manual-resolution command block
 # (see :func:`_merge_fix_steps`).
@@ -253,6 +256,7 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             notify_fn=functools.partial(
                 self._broadcast_commit_notification, commit_run_id,
             ),
+            task_result=getattr(self, "_last_result_summary", "") or None,
         )
 
     def _broadcast_commit_notification(
@@ -323,6 +327,66 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             logger.debug("autocommit notification broadcast failed", exc_info=True)
 
 
+    def _commit_and_clean_worktree(
+        self, wt: GitWorktree
+    ) -> tuple[_WorktreeCleanupOutcome, str]:
+        """Auto-commit *wt*'s changes, then remove the worktree and prune.
+
+        Shared engine of :meth:`_finalize_worktree` and
+        :meth:`_preserve_pending_worktree_for_review` — the exact
+        auto-commit → late-arriver-retry → preserve-or-remove sequence
+        previously duplicated in both.
+
+        After the LLM-driven auto-commit, a single-shot retry runs
+        :meth:`GitWorktreeOps.commit_all` with a generic message to
+        catch the very narrow remaining race where a file appears
+        between :func:`~kiss.agents.sorcar.sorcar_agent.auto_commit_changes`'s
+        second ``stage_all`` and its ``commit_staged`` call (e.g.
+        ``PROGRESS.md`` being rewritten, ``.DS_Store`` materializing
+        after an ``open`` of the report, an editor swap file
+        appearing).  ``commit_all`` is a no-op when nothing is
+        uncommitted, but skipping the call keeps the happy-path log
+        quiet.  Under ``auto_commit_enabled=False`` the retry never
+        force-commits: the worktree is preserved for manual review.
+
+        Args:
+            wt: The worktree to commit and clean up.
+
+        Returns:
+            A ``(outcome, leftover)`` pair.  ``leftover`` is the raw
+            ``git status --porcelain`` output when the outcome is
+            :attr:`_WorktreeCleanupOutcome.PRESERVED_COMMIT_FAILED`
+            (both auto-commit and the retry left uncommitted state —
+            e.g. a pre-commit hook rejection), otherwise ``""``.  The
+            worktree directory is removed and pruned only on
+            :attr:`_WorktreeCleanupOutcome.COMMITTED_AND_REMOVED`; the
+            preserved outcomes leave it in place so no work is lost.
+        """
+        if wt.wt_dir.exists():
+            self._auto_commit_worktree()
+            if GitWorktreeOps.has_uncommitted_changes(wt.wt_dir):
+                # ``auto_commit_enabled=False`` contract (see the
+                # attribute docstring in ``__init__``): never
+                # force-commit the user's reviewable changes under
+                # ``--no-auto-commit`` (``_auto_commit_worktree``
+                # no-ops when the flag is off, so EVERYTHING is still
+                # uncommitted here).
+                if not self.auto_commit_enabled:
+                    return _WorktreeCleanupOutcome.PRESERVED_NO_AUTOCOMMIT, ""
+                # Single-shot retry: closes the residual race window
+                # between ``auto_commit_changes``'s second
+                # ``stage_all`` and its ``commit_staged`` call.
+                GitWorktreeOps.commit_all(
+                    wt.wt_dir,
+                    "kiss: auto-commit late-arriving changes",
+                )
+            if GitWorktreeOps.has_uncommitted_changes(wt.wt_dir):
+                leftover = GitWorktreeOps.status_porcelain(wt.wt_dir)
+                return _WorktreeCleanupOutcome.PRESERVED_COMMIT_FAILED, leftover
+            GitWorktreeOps.remove(wt.repo_root, wt.wt_dir)
+        GitWorktreeOps.prune(wt.repo_root)
+        return _WorktreeCleanupOutcome.COMMITTED_AND_REMOVED, ""
+
     def _finalize_worktree(self) -> bool:
         """Auto-commit, remove worktree, prune.
 
@@ -350,48 +414,21 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         """
         assert self._wt is not None
         wt = self._wt
-        if wt.wt_dir.exists():
-            self._auto_commit_worktree()
-            if GitWorktreeOps.has_uncommitted_changes(wt.wt_dir):
-                # ``auto_commit_enabled=False`` contract (see the
-                # attribute docstring in ``__init__``): the worktree's
-                # uncommitted changes are preserved for manual review
-                # and this method returns False, keeping the worktree
-                # directory in place.  Without this gate the
-                # late-arriver retry below would commit the changes
-                # anyway (``_auto_commit_worktree`` no-ops when the
-                # flag is off, so EVERYTHING is still uncommitted
-                # here) and the worktree would be removed — exactly
-                # the behavior ``--no-auto-commit`` exists to prevent.
-                if not self.auto_commit_enabled:
-                    return False
-                # Single-shot retry: closes the residual race window
-                # between ``auto_commit_changes``'s second ``stage_all``
-                # and its ``commit_staged`` call.  ``commit_all`` is a
-                # no-op when nothing is uncommitted (its inner
-                # ``commit_staged`` short-circuits on an empty
-                # ``git diff --cached``), so it is safe to always invoke
-                # here — but skipping the call keeps the happy-path log
-                # quiet.
-                GitWorktreeOps.commit_all(
-                    wt.wt_dir,
-                    "kiss: auto-commit late-arriving changes",
-                )
-            if GitWorktreeOps.has_uncommitted_changes(wt.wt_dir):
-                leftover = GitWorktreeOps.status_porcelain(wt.wt_dir)
-                logger.warning(
-                    "Worktree has uncommitted changes after auto-commit "
-                    "and late-arriver retry (possible causes: a "
-                    "pre-commit hook rejected the commit, a real "
-                    "commit failure, or a concurrent write that "
-                    "outraced both staging passes); preserving %s\n"
-                    "git status --porcelain:\n%s",
-                    wt.wt_dir,
-                    leftover,
-                )
-                return False
-            GitWorktreeOps.remove(wt.repo_root, wt.wt_dir)
-        GitWorktreeOps.prune(wt.repo_root)
+        outcome, leftover = self._commit_and_clean_worktree(wt)
+        if outcome is _WorktreeCleanupOutcome.PRESERVED_NO_AUTOCOMMIT:
+            return False
+        if outcome is _WorktreeCleanupOutcome.PRESERVED_COMMIT_FAILED:
+            logger.warning(
+                "Worktree has uncommitted changes after auto-commit "
+                "and late-arriver retry (possible causes: a "
+                "pre-commit hook rejected the commit, a real "
+                "commit failure, or a concurrent write that "
+                "outraced both staging passes); preserving %s\n"
+                "git status --porcelain:\n%s",
+                wt.wt_dir,
+                leftover,
+            )
+            return False
         return True
 
     def _do_merge(
@@ -465,16 +502,30 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                         )
                     return (MergeResult.CHECKOUT_FAILED, stash_warning)
 
+            # Thread the recorded task prompt/result into the merge
+            # commit message so the final commit on the user's
+            # original branch ALWAYS records them — even when the
+            # agent hand-committed its own work in the worktree (so
+            # the post-task auto-commit was a no-op and the branch
+            # HEAD message carries neither block).  See
+            # ``GitWorktreeOps._merge_commit_message`` for the dedup
+            # contract (production incident: commit dd563a7c).
+            user_prompt = getattr(self, "_last_user_prompt", "") or None
+            task_result = getattr(self, "_last_result_summary", "") or None
             if wt.baseline_commit:
                 result = GitWorktreeOps.squash_merge_from_baseline(
                     wt.repo_root,
                     wt.branch,
                     wt.baseline_commit,
+                    user_prompt=user_prompt,
+                    task_result=task_result,
                 )
             else:
                 result = GitWorktreeOps.squash_merge_branch(
                     wt.repo_root,
                     wt.branch,
+                    user_prompt=user_prompt,
+                    task_result=task_result,
                 )
             if did_stash:
                 if result == MergeResult.SUCCESS:
@@ -668,51 +719,34 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         if self._wt is None:
             return False
         wt = self._wt
-        if wt.wt_dir.exists():
-            # Capture any uncommitted partial work as a real commit
-            # so it survives the worktree directory removal.  Same
-            # late-arriver retry that ``_finalize_worktree`` uses,
-            # for the same reason (PROGRESS.md being rewritten, etc.).
-            self._auto_commit_worktree()
-            if GitWorktreeOps.has_uncommitted_changes(wt.wt_dir):
-                # ``auto_commit_enabled=False`` contract (same gate as
-                # ``_finalize_worktree``): never force-commit the
-                # user's reviewable changes under ``--no-auto-commit``.
-                # Preserve the worktree directory intact — the user
-                # can review/commit manually in ``wt_dir``.
-                if not self.auto_commit_enabled:
-                    logger.warning(
-                        "Auto-commit disabled (--no-auto-commit); "
-                        "preserving worktree '%s' with uncommitted "
-                        "changes for manual review at %s",
-                        wt.branch, wt.wt_dir,
-                    )
-                    self._wt = None
-                    self._pending_review = False
-                    return True
-                GitWorktreeOps.commit_all(
-                    wt.wt_dir,
-                    "kiss: auto-commit late-arriving changes",
-                )
-            if GitWorktreeOps.has_uncommitted_changes(wt.wt_dir):
-                # Same fallback as ``_finalize_worktree``: a
-                # pre-commit hook rejected the commit, or a real
-                # commit failure.  Preserve the worktree dir so no
-                # work is lost; the user can finish the commit
-                # manually with ``cd <wt_dir> && git commit``.
-                leftover = GitWorktreeOps.status_porcelain(wt.wt_dir)
-                logger.warning(
-                    "Worktree '%s' has uncommitted changes after "
-                    "preserve-for-review (likely a pre-commit hook "
-                    "rejection); preserving worktree directory %s\n"
-                    "git status --porcelain:\n%s",
-                    wt.branch, wt.wt_dir, leftover,
-                )
-                self._wt = None
-                self._pending_review = False
-                return True
-            GitWorktreeOps.remove(wt.repo_root, wt.wt_dir)
-        GitWorktreeOps.prune(wt.repo_root)
+        # Capture any uncommitted partial work as a real commit so it
+        # survives the worktree directory removal — the same
+        # auto-commit → late-arriver-retry → preserve-or-remove engine
+        # ``_finalize_worktree`` uses, for the same reasons
+        # (PROGRESS.md being rewritten, pre-commit hook rejections,
+        # the ``--no-auto-commit`` contract, etc.).
+        outcome, leftover = self._commit_and_clean_worktree(wt)
+        if outcome is _WorktreeCleanupOutcome.PRESERVED_NO_AUTOCOMMIT:
+            # Preserve the worktree directory intact — the user can
+            # review/commit manually in ``wt_dir``.
+            logger.warning(
+                "Auto-commit disabled (--no-auto-commit); "
+                "preserving worktree '%s' with uncommitted "
+                "changes for manual review at %s",
+                wt.branch, wt.wt_dir,
+            )
+        elif outcome is _WorktreeCleanupOutcome.PRESERVED_COMMIT_FAILED:
+            # A pre-commit hook rejected the commit, or a real commit
+            # failure.  The worktree dir is preserved so no work is
+            # lost; the user can finish the commit manually with
+            # ``cd <wt_dir> && git commit``.
+            logger.warning(
+                "Worktree '%s' has uncommitted changes after "
+                "preserve-for-review (likely a pre-commit hook "
+                "rejection); preserving worktree directory %s\n"
+                "git status --porcelain:\n%s",
+                wt.branch, wt.wt_dir, leftover,
+            )
         # Drop the in-memory worktree reference (the branch lives on
         # in git and is recoverable manually) and clear the
         # pending-review flag — future operations on this agent
@@ -1287,82 +1321,7 @@ def _reject_interactive_only_flags(argv: list[str]) -> None:
     sys.exit(2)
 
 
-def main() -> None:
-    """Run the ``sorcar`` CLI.
-
-    Two modes:
-
-    * **Interactive** (no ``-t/--task`` / ``-f/--file``): a thin
-      terminal client of the local ``sorcar web`` daemon — see
-      :mod:`kiss.agents.sorcar.cli_client`.  The ``--worktree`` /
-      ``--no-worktree`` / ``--parallel`` / ``--no-parallel`` /
-      ``--auto-commit`` / ``--no-auto-commit`` flags are forwarded
-      to the daemon so each task can still run on an isolated git
-      worktree, with parallel sub-agents and auto-commit.
-      Chat-session control (new chat, resume) is driven from the
-      interactive client's slash commands rather than CLI flags.
-    * **Non-interactive** (``-t`` or ``-f`` supplied): runs a plain
-      :class:`~kiss.agents.sorcar.sorcar_agent.SorcarAgent` once on
-      the supplied task and exits.  No git worktree isolation, no
-      chat-session control — those features were always tied to the
-      removed ``-c/--chat-id`` / ``-l/--list-chat-id`` /
-      ``--cleanup`` / ``--use-chat`` / ``--use-worktree`` flag set.
-      ``--worktree`` / ``--no-worktree`` / ``--auto-commit`` /
-      ``--no-auto-commit`` are interactive-only and are rejected
-      when combined with ``-t`` / ``-f`` (see
-      :func:`_reject_interactive_only_flags`).  Display events from
-      the run are still streamed into the local chat DB via
-      :class:`RecordingConsolePrinter` so the run is replayable in
-      the chat webview; only the *chat session* surface (resume by
-      id) is unavailable.
-
-    ``sorcar mcp ...`` is dispatched to the MCP management subcommand
-    (:mod:`kiss.agents.sorcar.mcp_cli`) before normal argument parsing.
-    """
-    if len(sys.argv) > 1 and sys.argv[1] == "mcp":
-        from kiss.agents.sorcar.mcp_cli import run_mcp_cli
-
-        sys.exit(run_mcp_cli(sys.argv[2:], str(Path.cwd())))
-
-    parser = _build_arg_parser()
-    args = parser.parse_args()
-    work_dir = args.work_dir or _launch_work_dir()
-
-    interactive = args.task is None and args.file is None
-    if not interactive:
-        # Validate AFTER argparse (so ``-t``/``-f`` are decoded
-        # correctly) but BEFORE the agent is built / the LLM is
-        # contacted (so the user sees the error immediately and no
-        # budget is spent).
-        _reject_interactive_only_flags(sys.argv)
-    run_kwargs = _build_run_kwargs(args)
-
-    if interactive:
-        from kiss.agents.sorcar.cli_client import run_client
-
-        sys.exit(
-            run_client(
-                work_dir=run_kwargs.get("work_dir") or work_dir,
-                model_name=run_kwargs.get("model_name", ""),
-                active_file=run_kwargs.get("current_editor_file") or "",
-                use_worktree=bool(getattr(args, "worktree", True)),
-                use_parallel=bool(getattr(args, "parallel", True)),
-                # Fallback default matches the argparse default
-                # (``--auto-commit`` default=True in cli_helpers) and
-                # the sibling ``worktree``/``parallel`` fallbacks.
-                auto_commit=bool(getattr(args, "auto_commit", True)),
-            ),
-        )
-
-    # Non-interactive: plain SorcarAgent, no chat / no worktree.
-    from kiss.agents.sorcar.cli_steering import run_with_steering
-
-    agent: SorcarAgent = SorcarAgent("Sorcar Agent")
-    start_time = time.time()
-    result = run_with_steering(agent, run_kwargs)
-    elapsed = time.time() - start_time
-    print_outcome(agent, result, elapsed, run_kwargs.get("verbose", True))
-
-
-if __name__ == "__main__":
-    main()
+# NOTE: the ``sorcar`` console-script entry point (``main``) lives in
+# :mod:`kiss.ui.cli.sorcar_cli`: it dispatches into the UI layer
+# (cli_client / cli_steering / mcp_cli), which sorcar code must not
+# import (sorcar depends only on itself and ``kiss.core``).

@@ -51,7 +51,7 @@ import kiss.agents.sorcar.worktree_sorcar_agent as wt_module
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-from kiss.agents.vscode.json_printer import JsonPrinter
+from kiss.server.json_printer import JsonPrinter
 
 _PARENT_CLASS = cast(Any, SorcarAgent.__mro__[1])
 
@@ -239,7 +239,12 @@ class _IntruderCommitMessageFn:
     def __init__(self, agent: WorktreeSorcarAgent) -> None:
         self.agent = agent
 
-    def __call__(self, commit_dir: Path, user_prompt: str | None) -> str:
+    def __call__(
+        self,
+        commit_dir: Path,
+        user_prompt: str | None,
+        task_result: str | None = None,
+    ) -> str:
         self.agent._commit_run_id = "intruder-run-id"  # type: ignore[attr-defined]
         return "wave2 test commit"
 

@@ -118,7 +118,7 @@ def test_resolve_task_id_returns_real_id_on_valid_match(temp_db: Path) -> None: 
 # ---------------------------------------------------------------------------
 
 def test_cli_printer_forwards_empty_taskid_global_event_to_daemon(monkeypatch: pytest.MonkeyPatch) -> None:
-    from kiss.agents.sorcar import cli_daemon_bridge, cli_printer
+    from kiss.ui.cli import cli_daemon_bridge, cli_printer
 
     captured: list[dict[str, object]] = []
     monkeypatch.setattr(
@@ -180,9 +180,9 @@ def test_chat_sorcar_agent_has_per_instance_task_id_lock() -> None:
 def test_vscode_server_source_accepts_int_rebound_task_id() -> None:
     from pathlib import Path
 
-    from kiss.agents.vscode.server import _coerce_id
+    from kiss.server.server import _coerce_id
 
-    src = Path("src/kiss/agents/vscode/server.py").read_text()
+    src = Path("src/kiss/server/server.py").read_text()
     # The fixed code path must coerce int -> str rather than dropping
     # the rebound id to None; the coercion is centralised in
     # ``_coerce_id``.
@@ -202,9 +202,9 @@ def test_vscode_server_source_accepts_int_rebound_task_id() -> None:
 def test_vscode_server_source_accepts_int_entry_id() -> None:
     from pathlib import Path
 
-    from kiss.agents.vscode.server import _coerce_id
+    from kiss.server.server import _coerce_id
 
-    src = Path("src/kiss/agents/vscode/server.py").read_text()
+    src = Path("src/kiss/server/server.py").read_text()
     assert 'entry_id = _coerce_id(entry.get("id"))' in src, (
         "r4-vscode-H2: ``entry_id`` must accept int rows from legacy DBs"
     )

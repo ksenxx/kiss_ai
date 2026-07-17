@@ -16,7 +16,7 @@ Each test class targets one confirmed bug (see ``tmp/findings-1.md``):
 * **A3** — ``_save_task_extra`` blind-overwrote the ``extra`` JSON
   column, destroying the ``is_favorite`` flag that
   ``_set_task_favorite`` merge-updates.
-* **A4** — ``_prefix_match_task`` lacked the
+* **A4** — ``_prefix_match_tasks`` lacked the
   sub-agent exclusion filter used by ``_load_history`` /
   ``_search_history``, so their row indexing disagreed with the UI list
   and sub-agent internal task text leaked into autocomplete.
@@ -42,7 +42,7 @@ from kiss.agents.sorcar.persistence import (
     _load_chat_context_text,
     _load_chat_events_by_task_id,
     _load_history,
-    _prefix_match_task,
+    _prefix_match_tasks,
     _queue_chat_event,
     _save_task_extra,
     _save_task_result,
@@ -213,5 +213,5 @@ class TestA4SubagentFilterConsistency(_TempDbTestBase):
             extra={"subagent": {"parent_task_id": parent_id}},
         )
 
-        assert _prefix_match_task("subagent") == ""
-        assert _prefix_match_task("visible") == "visible parent task"
+        assert _prefix_match_tasks("subagent", limit=1) == []
+        assert _prefix_match_tasks("visible", limit=1) == ["visible parent task"]

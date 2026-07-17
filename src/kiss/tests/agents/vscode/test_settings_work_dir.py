@@ -38,8 +38,8 @@ from typing import Any
 from unittest import IsolatedAsyncioTestCase
 
 import kiss.agents.sorcar.persistence as th
-import kiss.agents.vscode.vscode_config as vc
-from kiss.agents.vscode.web_server import RemoteAccessServer
+import kiss.server.vscode_config as vc
+from kiss.server.web_server import RemoteAccessServer
 
 _VSCODE_DIR = Path(__file__).resolve().parents[3] / "agents" / "vscode"
 _MAIN_JS = _VSCODE_DIR / "media" / "main.js"
@@ -291,7 +291,7 @@ class TestWorkDirConfigRoundTrip(IsolatedAsyncioTestCase):
 
         certfile = Path(self.tmpdir) / "cert.pem"
         keyfile = Path(self.tmpdir) / "key.pem"
-        from kiss.agents.vscode.web_server import _generate_self_signed_cert
+        from kiss.server.web_server import _generate_self_signed_cert
         _generate_self_signed_cert(certfile, keyfile)
 
         self.uds_path = Path(self.tmpdir) / "sorcar.sock"

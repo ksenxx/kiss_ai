@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Bug-hunt integration tests for ``kiss.agents.vscode.web_server``.
+"""Bug-hunt integration tests for ``kiss.server.web_server``.
 
 Bug 1 — ``ready`` fan-out drops the per-connection ``workDir`` stamp.
 
@@ -51,8 +51,8 @@ from unittest import IsolatedAsyncioTestCase
 from websockets.asyncio.client import ClientConnection, connect
 
 import kiss.agents.sorcar.persistence as th
-import kiss.agents.vscode.vscode_config as vc
-from kiss.agents.vscode.web_server import (
+import kiss.server.vscode_config as vc
+from kiss.server.web_server import (
     RemoteAccessServer,
     _generate_self_signed_cert,
 )

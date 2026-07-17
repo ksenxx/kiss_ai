@@ -29,8 +29,8 @@ from unittest import IsolatedAsyncioTestCase
 import pytest
 from websockets.asyncio.client import connect
 
-from kiss.agents.vscode.vscode_config import CONFIG_PATH, save_config
-from kiss.agents.vscode.web_server import (
+from kiss.server.vscode_config import CONFIG_PATH, save_config
+from kiss.server.web_server import (
     _TUNNEL_UNHEALTHY_LIMIT_QUICK,
     _URL_FILE,
     TUNNEL_CHECK_INTERVAL,
@@ -356,11 +356,11 @@ console.log('OK');
 class TestTranslateWebviewCommand(unittest.TestCase):
     """Test the command translation from webview format to backend format."""
 
-    def test_user_action_done_translated(self) -> None:
-        """userActionDone becomes userAnswer with answer='done'."""
+    def test_user_action_done_passes_through(self) -> None:
+        """userActionDone has no producer; it is no longer rewritten."""
         result = _translate_webview_command({"type": "userActionDone"})
-        self.assertEqual(result["type"], "userAnswer")
-        self.assertEqual(result["answer"], "done")
+        self.assertEqual(result["type"], "userActionDone")
+        self.assertNotIn("answer", result)
 
     def test_resume_session_id_becomes_chat_id(self) -> None:
         """resumeSession 'id' field is renamed to 'chatId'."""
@@ -802,16 +802,17 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                     "submit command should be translated to run, not error",
                 )
 
-    async def test_ws_user_action_done(self) -> None:
-        """userActionDone is translated to userAnswer (no Unknown command error)."""
+    async def test_ws_user_action_done_is_unknown_command(self) -> None:
+        """userActionDone has no producer; the dead rewrite was removed
+        so it now surfaces as an Unknown command error."""
         async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
             await ws.send(json.dumps({"type": "userActionDone"}))
-            await ws.send(json.dumps({"type": "getModels"}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
-            self.assertEqual(resp["type"], "models")
+            self.assertEqual(resp["type"], "error")
+            self.assertIn("Unknown command: userActionDone", resp.get("text", ""))
 
     async def test_ws_resume_session_translates_id(self) -> None:
         """resumeSession translates the webview 'id' field to 'chatId'."""
@@ -1189,7 +1190,6 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                 {"type": "selectModel", "model": "gemini-2.5-pro", "tabId": "t"},
                 {"type": "newChat", "tabId": "all-t"},
                 {"type": "closeTab", "tabId": "all-t"},
-                {"type": "userActionDone"},
                 {"type": "userAnswer", "answer": "yes", "tabId": "t"},
                 {"type": "resumeSession", "id": 1, "tabId": "t"},
                 {"type": "stop", "tabId": "t"},
@@ -2404,7 +2404,7 @@ class TestIpWatchdog(IsolatedAsyncioTestCase):
             except asyncio.CancelledError:
                 pass
 
-        import kiss.agents.vscode.web_server as ws_mod
+        import kiss.server.web_server as ws_mod
 
         original_interval = ws_mod.TUNNEL_CHECK_INTERVAL
         ws_mod.TUNNEL_CHECK_INTERVAL = 0
@@ -2417,7 +2417,7 @@ class TestIpWatchdog(IsolatedAsyncioTestCase):
 
     async def test_ip_watchdog_noop_when_unchanged(self) -> None:
         """When IPs haven't changed, the watchdog keeps running."""
-        import kiss.agents.vscode.web_server as ws_mod
+        import kiss.server.web_server as ws_mod
 
         self.server._last_ips = _get_local_ips()
         if self.server._watchdog_task is not None:
@@ -3334,6 +3334,93 @@ class TestHandleReadyRestoredTabs(IsolatedAsyncioTestCase):
             self.assertIn("models", types)
             self.assertIn("focusInput", types)
 
+    async def test_ready_sends_tasks_updated_resync_nudge(self) -> None:
+        """Every ``ready`` gets a targeted ``tasks_updated`` nudge.
+
+        The start-time ``tasks_updated`` broadcast by
+        ``ChatSorcarAgent.run`` is a one-shot, never-persisted global
+        system event.  A remote client whose WebSocket was down when a
+        task started (mobile Safari kills the socket while the phone
+        is backgrounded) misses it forever — so ``_handle_ready`` must
+        nudge every (re)connecting client with ``tasks_updated`` so an
+        open History sidebar refetches and converges on the current
+        task list.
+        """
+        async with connect(
+            f"wss://127.0.0.1:{self.port}/ws",
+            ssl=_no_verify_ssl(),
+        ) as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+            self.assertEqual(resp["type"], "auth_ok")
+
+            await ws.send(json.dumps({"type": "ready", "tabId": "t1"}))
+            events: list[dict] = []
+            for _ in range(20):
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=2)
+                    events.append(json.loads(raw))
+                except TimeoutError:
+                    break
+            types = [e.get("type") for e in events]
+            self.assertIn(
+                "tasks_updated",
+                types,
+                "ready must trigger a targeted tasks_updated resync "
+                "nudge so a reconnecting client's open History sidebar "
+                f"refetches (got event types: {types})",
+            )
+
+    async def test_ready_nudge_targets_only_the_ready_client(self) -> None:
+        """The ready-time ``tasks_updated`` nudge is a TARGETED send.
+
+        A second authenticated client that never sends ``ready`` must
+        not receive the nudge — the resync hint is delivered directly
+        to the (re)connecting endpoint, not broadcast to everyone
+        (unrelated clients already heard the live broadcast or will
+        resync via their own ``ready``/reconnect).
+        """
+        async with (
+            connect(
+                f"wss://127.0.0.1:{self.port}/ws",
+                ssl=_no_verify_ssl(),
+            ) as ws_ready,
+            connect(
+                f"wss://127.0.0.1:{self.port}/ws",
+                ssl=_no_verify_ssl(),
+            ) as ws_other,
+        ):
+            for ws in (ws_ready, ws_other):
+                await ws.send(json.dumps({"type": "auth", "password": ""}))
+                resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+                self.assertEqual(resp["type"], "auth_ok")
+
+            await ws_ready.send(json.dumps({"type": "ready", "tabId": "t1"}))
+
+            ready_types: list[str] = []
+            for _ in range(20):
+                try:
+                    raw = await asyncio.wait_for(ws_ready.recv(), timeout=2)
+                    ready_types.append(json.loads(raw).get("type"))
+                except TimeoutError:
+                    break
+            self.assertIn("tasks_updated", ready_types)
+
+            other_types: list[str] = []
+            for _ in range(20):
+                try:
+                    raw = await asyncio.wait_for(ws_other.recv(), timeout=1)
+                    other_types.append(json.loads(raw).get("type"))
+                except TimeoutError:
+                    break
+            self.assertNotIn(
+                "tasks_updated",
+                other_types,
+                "the ready nudge must be targeted at the ready client "
+                "only, not broadcast to other connected clients "
+                f"(other client saw: {other_types})",
+            )
+
     async def test_ready_with_empty_restored_tabs(self) -> None:
         """ready command with empty restoredTabs doesn't crash."""
         async with connect(
@@ -3669,7 +3756,7 @@ class TestWatchdogBranches(IsolatedAsyncioTestCase):
 
     async def test_watchdog_pings_connected_clients(self) -> None:
         """Watchdog pings connected WS clients."""
-        import kiss.agents.vscode.web_server as ws_mod
+        import kiss.server.web_server as ws_mod
 
         ws = await connect(
             f"wss://127.0.0.1:{self.port}/ws",
@@ -3713,7 +3800,7 @@ class TestWatchdogBranches(IsolatedAsyncioTestCase):
 
     async def test_watchdog_tunnel_check_exception_is_caught(self) -> None:
         """Watchdog catches exceptions during tunnel check."""
-        import kiss.agents.vscode.web_server as ws_mod
+        import kiss.server.web_server as ws_mod
 
         self.server.use_tunnel = True
         self.server._tunnel_proc = "not-a-process"  # type: ignore[assignment]
@@ -4229,7 +4316,7 @@ class TestAutoGenCertInCreateSslContext(unittest.TestCase):
 
     def test_auto_generates_when_tls_dir_empty(self) -> None:
         """When cert/key don't exist in TLS dir, auto-generates them."""
-        import kiss.agents.vscode.web_server as ws_mod
+        import kiss.server.web_server as ws_mod
 
         original_tls_dir = ws_mod._TLS_DIR
         with tempfile.TemporaryDirectory() as td:
@@ -4443,7 +4530,7 @@ class TestWatchdogWSPingException(IsolatedAsyncioTestCase):
 
     async def test_watchdog_handles_ws_ping_error(self) -> None:
         """Watchdog continues running when WS ping encounters errors."""
-        import kiss.agents.vscode.web_server as ws_mod
+        import kiss.server.web_server as ws_mod
 
         ws = await connect(
             f"wss://127.0.0.1:{self.port}/ws",
@@ -4501,7 +4588,7 @@ class TestWatchdogIPChangeDetection(IsolatedAsyncioTestCase):
 
     async def test_watchdog_detects_ip_change(self) -> None:
         """Watchdog returns (closing server) when IP changes."""
-        import kiss.agents.vscode.web_server as ws_mod
+        import kiss.server.web_server as ws_mod
 
         if self.server._watchdog_task is not None:
             self.server._watchdog_task.cancel()
@@ -4575,14 +4662,21 @@ class TestRemoveUrlFileOSError(unittest.TestCase):
 
     def test_remove_url_file_handles_oserror(self) -> None:
         """_remove_url_file does not raise when file path is problematic."""
-        import kiss.agents.vscode.web_server as ws_mod
+        import kiss.server.web_server as ws_mod
 
-        original = ws_mod._URL_FILE
-        ws_mod._URL_FILE = Path("/nonexistent_dir_abc/remote-url.json")
-        try:
-            _remove_url_file(_URL_FILE)
-        finally:
-            ws_mod._URL_FILE = original
+        # ``_URL_FILE`` is a lazy PEP 562 module attribute; restore by
+        # deleting the pin so the module resolves it lazily again
+        # (re-assigning the computed value would freeze it forever).
+        # Passing an existing directory deterministically makes
+        # ``Path.unlink`` raise IsADirectoryError on every platform;
+        # the helper must swallow that OSError and leave it intact.
+        with tempfile.TemporaryDirectory() as td:
+            ws_mod._URL_FILE = Path(td)
+            try:
+                _remove_url_file(ws_mod._URL_FILE)
+                self.assertTrue(ws_mod._URL_FILE.is_dir())
+            finally:
+                del ws_mod._URL_FILE
 
 
 class TestReadVersionException(unittest.TestCase):
@@ -4596,9 +4690,9 @@ class TestReadVersionException(unittest.TestCase):
         (otherwise the scanner would pick up the machine's real installed
         extension and mask the fallback).
         """
-        import kiss.agents.vscode.web_server as ws_mod
+        import kiss.server.web_server as ws_mod
 
-        vfile = Path(ws_mod.__file__).parent.parent.parent / "_version.py"
+        vfile = Path(ws_mod.__file__).parent.parent / "core" / "_version.py"
         backup = vfile.read_text()
         vfile.rename(vfile.with_suffix(".py.bak"))
         saved_root = ws_mod._INSTALLED_EXTENSIONS_ROOT
@@ -5371,9 +5465,11 @@ class TestReadVersionNoMatch(unittest.TestCase):
         (otherwise the scanner would pick up the machine's real installed
         extension and mask the fallback).
         """
-        import kiss.agents.vscode.web_server as ws_mod
+        import kiss.server.web_server as ws_mod
 
-        vfile = Path(__file__).parent.parent.parent.parent / "_version.py"
+        vfile = (
+            Path(__file__).parent.parent.parent.parent / "core" / "_version.py"
+        )
         original = vfile.read_text()
         saved_root = ws_mod._INSTALLED_EXTENSIONS_ROOT
         with tempfile.TemporaryDirectory() as empty_root:
@@ -6050,7 +6146,7 @@ class TestQuickTunnelFallbackMetricsHit(IsolatedAsyncioTestCase):
         os.chmod(cf, 0o755)
         os.environ["PATH"] = self._tmpdir + ":" + self._old_path
 
-        import kiss.agents.vscode.web_server as ws_mod
+        import kiss.server.web_server as ws_mod
 
         original_fn = ws_mod._discover_tunnel_url_from_metrics
 
@@ -6128,7 +6224,7 @@ class TestRemoveUrlFileReadOnly(unittest.TestCase):
 
     def test_remove_oserror_from_readonly_dir(self) -> None:
         """_remove_url_file swallows OSError from read-only directory."""
-        import kiss.agents.vscode.web_server as ws_mod
+        import kiss.server.web_server as ws_mod
 
         tmpdir = tempfile.mkdtemp()
         try:
@@ -6136,15 +6232,20 @@ class TestRemoveUrlFileReadOnly(unittest.TestCase):
             fake_url_file.parent.mkdir(parents=True, exist_ok=True)
             fake_url_file.write_text('{"local":"https://localhost:8787"}')
 
-            old_url_file = ws_mod._URL_FILE
+            # ``_URL_FILE`` is a lazy PEP 562 module attribute; restore
+            # by deleting the pin so the module resolves it lazily again
+            # (re-assigning the computed value would freeze it forever).
             ws_mod._URL_FILE = fake_url_file  # type: ignore[misc]
 
             os.chmod(str(fake_url_file.parent), 0o444)
             try:
-                _remove_url_file(_URL_FILE)
+                _remove_url_file(ws_mod._URL_FILE)
+                # On normal POSIX users the read-only directory blocks
+                # unlink; privileged test users may still remove it, so
+                # the portable contract asserted here is no exception.
             finally:
                 os.chmod(str(fake_url_file.parent), 0o755)
-                ws_mod._URL_FILE = old_url_file  # type: ignore[misc]
+                del ws_mod._URL_FILE
         finally:
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)

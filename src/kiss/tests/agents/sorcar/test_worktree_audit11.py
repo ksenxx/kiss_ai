@@ -34,13 +34,13 @@ from pathlib import Path
 
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-from kiss.agents.vscode.diff_merge import (
+from kiss.server.diff_merge import (
     _capture_untracked,
     _parse_diff_hunks,
     _prepare_merge_view,
     _snapshot_files,
 )
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.server import VSCodeServer
 
 
 def _make_repo(tmp_path: Path, name: str = "repo") -> Path:

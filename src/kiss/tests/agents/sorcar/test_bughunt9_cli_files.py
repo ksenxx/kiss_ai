@@ -22,7 +22,7 @@ from __future__ import annotations
 import pytest
 
 from kiss.agents.sorcar.cli_helpers import _print_result
-from kiss.agents.sorcar.cli_repl import CliCompleter
+from kiss.ui.cli.cli_repl import CliCompleter
 
 
 @pytest.fixture()

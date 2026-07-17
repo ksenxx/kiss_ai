@@ -33,10 +33,10 @@ from io import StringIO
 from typing import Any
 from unittest.mock import patch
 
-from kiss.agents.sorcar.cli_client import _handle_client_slash
 from kiss.agents.sorcar.cli_helpers import _parse_resume_arg
 from kiss.agents.sorcar.persistence import _add_task, _save_task_result
 from kiss.tests.agents.sorcar.test_cli_client import CliClientBase
+from kiss.ui.cli.cli_client import _handle_client_slash
 
 
 class TestParseResumeArgTaskFlag(unittest.TestCase):

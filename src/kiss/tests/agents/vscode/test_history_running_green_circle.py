@@ -51,7 +51,7 @@ from playwright.sync_api import sync_playwright
 
 from kiss.agents.sorcar import persistence as th
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.server import VSCodeServer
 
 _MEDIA_DIR = (
     Path(__file__).resolve().parents[4]

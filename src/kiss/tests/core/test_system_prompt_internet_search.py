@@ -79,6 +79,12 @@ def test_current_info_task_triggers_internet_search(model_name: str) -> None:
         try:
             result = _run_task(model_name, task)
         except KISSError:
+            # The agent may exhaust max_steps/budget without calling
+            # finish (nondeterministic live-model behavior).  The policy
+            # under test is only that a search happened, so accept the
+            # run if ``go_to_url`` was called before the error.
+            if VISITED_URLS:
+                break
             if attempt == 1:
                 raise
             continue  # transient live-API failure; retry once

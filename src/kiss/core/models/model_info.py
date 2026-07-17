@@ -69,10 +69,12 @@ class ModelInfo:
         #:   its prefix-based default.
         self.extended_thinking = extended_thinking
         #: Tri-state override for ``thinking.type``.  ``True`` requests
-        #: ``{"type": "adaptive"}`` (required by Claude 4.6+ / fable /
-        #: sonnet-5 which reject ``"enabled"``); ``False`` forces
-        #: ``{"type": "enabled", "budget_tokens": ...}``; ``None`` falls
-        #: back to
+        #: ``{"type": "adaptive", "display": "summarized"}`` (required by
+        #: Claude 4.6+ / fable / sonnet-5 which reject ``"enabled"``;
+        #: ``display`` must be ``"summarized"`` because it defaults to
+        #: ``"omitted"``, which returns empty signature-only thinking);
+        #: ``False`` forces ``{"type": "enabled", "budget_tokens": ...}``;
+        #: ``None`` falls back to
         #: :func:`kiss.core.models.anthropic_model._uses_adaptive_thinking`.
         self.adaptive_thinking = adaptive_thinking
 
@@ -202,10 +204,14 @@ def _build_model_info_entry(entry: dict[str, Any]) -> ModelInfo:
       ``True`` forces on, ``False`` forces off, ``None`` defers to the
       adapter's prefix heuristic.
     * ``adaptive_thinking`` — tri-state override for whether Anthropic
-      thinking is requested with ``{"type": "adaptive"}`` (required by
-      Claude 4.6+ / fable / sonnet-5 which reject ``"enabled"``) instead
-      of ``{"type": "enabled", "budget_tokens": ...}``.  ``None`` defers
-      to :func:`kiss.core.models.anthropic_model._uses_adaptive_thinking`.
+      thinking is requested with
+      ``{"type": "adaptive", "display": "summarized"}`` (required by
+      Claude 4.6+ / fable / sonnet-5 which reject ``"enabled"``; the
+      explicit ``display: summarized`` is mandatory because the API
+      default ``"omitted"`` returns empty signature-only thinking)
+      instead of ``{"type": "enabled", "budget_tokens": ...}``.
+      ``None`` defers to
+      :func:`kiss.core.models.anthropic_model._uses_adaptive_thinking`.
     """
     return ModelInfo(
         context_length=entry["context_length"],
@@ -506,11 +512,34 @@ def _strip_xhigh_alias(bare: str) -> str:
     return bare
 
 
+def _openai_charges_cache_writes(bare: str) -> bool:
+    """Return True when the OpenAI model bills prompt-cache writes.
+
+    Cache writes are free on OpenAI models before the GPT-5.6 family.  For
+    GPT-5.6 models and later model families, cache writes are billed at
+    1.25x the uncached input token rate and reported in
+    ``prompt_tokens_details.cache_write_tokens`` (Chat Completions) /
+    ``input_tokens_details.cache_write_tokens`` (Responses).  Verified at
+    https://developers.openai.com/api/docs/guides/prompt-caching and the
+    OpenAI pricing page (gpt-5.6-sol $6.25, -terra $3.125, -luna $1.25
+    per MTok cache write = exactly 1.25x their input prices).  ``-pro``
+    variants publish no cache pricing, so they stay on free writes.
+
+    Args:
+        bare: An OpenAI model name without any provider prefix.
+
+    Returns:
+        True when cache-write tokens are billed at 1.25x the input price.
+    """
+    return bare.startswith("gpt-5.6") and "-pro" not in bare
+
+
 def _openai_cache_read_multiplier(bare: str) -> float:
     """Return the cached-input price multiplier for an OpenAI model.
 
     OpenAI bills prompt-cache reads at a per-model fraction of the base input
-    price (and never charges for cache writes). The multipliers below match
+    price (cache writes are free before the GPT-5.6 family; see
+    :func:`_openai_charges_cache_writes`). The multipliers below match
     OpenAI's published pricing: GPT-5.x is 0.10x when a cached-input price is
     published, GPT-4.1 and o3/o4-mini are 0.25x, while GPT-4o, GPT-4,
     GPT-3.5, o1 and o3-mini are 0.50x. GPT-5 ``pro`` variants currently show
@@ -597,7 +626,12 @@ def _apply_cache_pricing(name: str, info: ModelInfo) -> None:
     bare = _openai_bare_name(name)
     if bare is not None:
         info.cache_read_price_per_1M = inp * _openai_cache_read_multiplier(bare)
-        info.cache_write_price_per_1M = 0.0  # OpenAI does not charge for cache writes
+        if _openai_charges_cache_writes(bare):
+            # GPT-5.6+ model families bill cache writes at 1.25x input.
+            info.cache_write_price_per_1M = inp * 1.25
+        else:
+            # Models before the GPT-5.6 family have free cache writes.
+            info.cache_write_price_per_1M = 0.0
         return
     if name.startswith("gemini-"):
         info.cache_read_price_per_1M = inp * 0.1  # Gemini context cache read
@@ -620,6 +654,15 @@ def _apply_cache_pricing(name: str, info: ModelInfo) -> None:
         return
     if name.startswith(_QUARTER_CACHE_OPENROUTER_PREFIXES):
         info.cache_read_price_per_1M = inp * 0.25  # Moonshot / Grok cache read
+        info.cache_write_price_per_1M = 0.0
+        return
+    if name.startswith(("kimi-", "moonshot-")):
+        # Direct Moonshot API: cache hits are billed at 25% of the
+        # cache-miss (input) price for the K2.x family (K2.5: $0.15 hit
+        # vs $0.60 miss per MTok, per platform.kimi.ai pricing).  Newer
+        # families with a different ratio (e.g. K3 at 0.10x) must set an
+        # explicit ``cache_read_price_per_1M`` in MODEL_INFO.json.
+        info.cache_read_price_per_1M = inp * 0.25
         info.cache_write_price_per_1M = 0.0
         return
     # No documented cache discount: leave None (full input price fallback).
@@ -1034,32 +1077,56 @@ def get_most_expensive_model(fc_only: bool = True) -> str:
     return best_name
 
 
-def _openai_long_context_prices(model_name: str) -> tuple[int, float, float, float] | None:
-    """Return ``(threshold, input, output, cached)`` long-context prices if known."""
+def _openai_long_context_prices(
+    model_name: str,
+) -> tuple[int, float, float, float, float | None] | None:
+    """Return ``(threshold, input, output, cached, cache_write)`` long-context prices.
+
+    The last element is the long-context cache-write price per 1M tokens,
+    or ``None`` for models whose cache writes are free (pre-GPT-5.6
+    families).  Prices verified against the OpenAI pricing page
+    (https://developers.openai.com/api/docs/pricing).
+    """
     bare = _strip_provider_prefix(model_name)
     if bare.startswith(_OPENAI_OPENROUTER_PREFIXES):
         bare = bare.split("/", 2)[2]
     bare = _strip_xhigh_alias(bare)
+    if bare.startswith("gpt-5.6-sol"):
+        return 200_000, 10.00, 45.00, 1.00, 12.50
+    if bare.startswith("gpt-5.6-terra"):
+        return 200_000, 5.00, 22.50, 0.50, 6.25
+    if bare.startswith("gpt-5.6-luna"):
+        return 200_000, 2.00, 9.00, 0.20, 2.50
     if bare.startswith("gpt-5.5") and "-pro" not in bare:
-        return 200_000, 10.00, 45.00, 1.00
+        return 200_000, 10.00, 45.00, 1.00, None
     if (
         bare.startswith("gpt-5.4")
         and "-pro" not in bare
         and "-mini" not in bare
         and "-nano" not in bare
     ):
-        return 200_000, 5.00, 22.50, 0.50
+        return 200_000, 5.00, 22.50, 0.50, None
     return None
 
 
-def _gemini_long_context_prices(model_name: str) -> tuple[int, float, float, float] | None:
-    """Return ``(threshold, input, output, cached)`` long-context prices if known."""
+def _gemini_long_context_prices(
+    model_name: str,
+) -> tuple[int, float, float, float, float | None] | None:
+    """Return ``(threshold, input, output, cached, cache_write)`` long-context prices.
+
+    The last element is always ``None`` for Gemini (context-cache writes
+    are free; only storage-per-hour is billed, which KISS's implicit
+    caching never incurs).  Prices verified against
+    https://ai.google.dev/gemini-api/docs/pricing.
+    """
     bare = _strip_provider_prefix(model_name)
     if bare.startswith(_GOOGLE_OPENROUTER_PREFIXES):
         bare = bare.split("/", 2)[2]
     bare = _strip_xhigh_alias(bare)
+    if bare.startswith(("gemini-3-pro", "gemini-3.1-pro")):
+        return 200_000, 4.00, 18.00, 0.40, None
     if bare.startswith("gemini-2.5-pro"):
-        return 200_000, 2.50, 15.00, 0.25
+        return 200_000, 2.50, 15.00, 0.25, None
     return None
 
 
@@ -1123,7 +1190,9 @@ def calculate_cost(
         model_name
     )
     if long_prices is not None and total_tokens > long_prices[0]:
-        _, input_price, output_price, cr_price = long_prices
+        _, input_price, output_price, cr_price, long_cw_price = long_prices
+        if long_cw_price is not None:
+            cw_price = long_cw_price
     input_cost = num_input_tokens * input_price
     output_cost = num_output_tokens * output_price
     cache_read_cost = num_cache_read_tokens * cr_price
@@ -1166,5 +1235,5 @@ def get_max_context_length(model_name: str) -> int:
     """
     info = MODEL_INFO.get(model_name) or MODEL_INFO.get(_strip_provider_prefix(model_name))
     if info is None:
-        raise KeyError(f"Model '{model_name}' not found in MODEL_INFO")
+        raise KISSError(f"Model '{model_name}' not found in MODEL_INFO")
     return info.context_length
