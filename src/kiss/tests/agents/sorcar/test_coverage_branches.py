@@ -23,17 +23,17 @@ from types import SimpleNamespace
 import pytest
 
 from kiss.agents.sorcar import persistence as th
-from kiss.agents.sorcar.useful_tools import (
-    UsefulTools,
-)
 from kiss.agents.sorcar.web_use_tool import (
     WebUseTool,
 )
-from kiss.agents.vscode.json_printer import (
+from kiss.core.useful_tools import (
+    UsefulTools,
+)
+from kiss.server.json_printer import (
     JsonPrinter,
     _coalesce_events,
 )
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.server import VSCodeServer
 
 
 class TestJsonPrinterBranches:

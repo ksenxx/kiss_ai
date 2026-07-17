@@ -45,8 +45,9 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar import cli_voice
-from kiss.agents.sorcar.cli_client import (
+from kiss.core.print_to_console import ConsolePrinter
+from kiss.ui.cli import cli_voice
+from kiss.ui.cli.cli_client import (
     CliClient,
     _handle_client_slash,
     _request_cli_info,
@@ -54,8 +55,7 @@ from kiss.agents.sorcar.cli_client import (
     _submit_task,
     _submit_task_anchored,
 )
-from kiss.agents.sorcar.cli_steering import AnchoredRepl, _InputBox
-from kiss.core.print_to_console import ConsolePrinter
+from kiss.ui.cli.cli_steering import AnchoredRepl, _InputBox
 
 
 class _FakeDaemon:
@@ -504,7 +504,7 @@ class TestIdleReadLineFrame(unittest.TestCase):
         )
         code = (
             "import sys\n"
-            "from kiss.agents.sorcar.cli_repl import _read_line\n"
+            "from kiss.ui.cli.cli_repl import _read_line\n"
             "line = _read_line('> ')\n"
             "sys.stdout.write('GOT=' + repr(line) + '\\n')\n"
         )

@@ -17,12 +17,14 @@ import io
 import threading
 from typing import Any
 
-from kiss.agents.sorcar.cli_panel import (
+from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.ui.cli.cli_panel import (
     _term_size,
     body_cursor_col,
     panel_cols,
 )
-from kiss.agents.sorcar.cli_steering import (
+from kiss.ui.cli.cli_steering import (
     _BOX_H,
     AnchoredRepl,
     SteeringSession,
@@ -32,8 +34,6 @@ from kiss.agents.sorcar.cli_steering import (
     run_with_steering,
     supports_steering,
 )
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 
 
 class _RecordingModel:
@@ -694,7 +694,7 @@ class TestInputBoxCompletionMenuEdgeCases:
         assert box._menu_open is True
         # Force a tiny terminal: rows - _BOX_H - 1 == 0 → no room.
         monkeypatch.setattr(
-            "kiss.agents.sorcar.cli_steering._term_size",
+            "kiss.ui.cli.cli_steering._term_size",
             lambda: (_BOX_H + 1, 80),
         )
         assert box._menu_h() == 0
@@ -980,7 +980,7 @@ class TestRunSteeringLoop:
                 pass
 
     def test_loop_flips_title_to_steer_and_restores(self) -> None:
-        from kiss.agents.sorcar.cli_panel import IDLE_TITLE, STEER_TITLE
+        from kiss.ui.cli.cli_panel import IDLE_TITLE, STEER_TITLE
 
         repl = self._build_repl()
         repl.box.title = IDLE_TITLE
@@ -1056,7 +1056,7 @@ class TestConsolePrinterStdoutBypass:
     """Regression: agent output must not land inside the bottom input box.
 
     Reproduces the bug where ``ConsolePrinter`` captures ``sys.stdout``
-    in ``__init__`` (as :func:`kiss.agents.sorcar.cli_client.run_client`
+    in ``__init__`` (as :func:`kiss.ui.cli.cli_client.run_client`
     does at line ``printer = ConsolePrinter()`` BEFORE entering the
     :class:`AnchoredRepl` context that swaps ``sys.stdout`` to a
     :class:`_StdoutProxy`).  After the swap, direct ``self._file.write``

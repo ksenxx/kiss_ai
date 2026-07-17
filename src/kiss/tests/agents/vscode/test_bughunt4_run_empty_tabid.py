@@ -26,10 +26,10 @@ import unittest
 from pathlib import Path
 from typing import Any, cast
 
-import kiss.agents.vscode.server as _server_module
+import kiss.server.server as _server_module
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.server import VSCodeServer
 
 
 class TestRunEmptyTabId(unittest.TestCase):

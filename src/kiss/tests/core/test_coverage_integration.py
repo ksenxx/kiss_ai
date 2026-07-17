@@ -120,7 +120,7 @@ class TestTaskHistory(TestCase):
 
 class TestUsefulTools(TestCase):
     def test_write_and_read(self) -> None:
-        from kiss.agents.sorcar.useful_tools import UsefulTools
+        from kiss.core.useful_tools import UsefulTools
         tools = UsefulTools()
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, "test.txt")

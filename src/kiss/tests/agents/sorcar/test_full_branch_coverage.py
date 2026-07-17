@@ -21,7 +21,7 @@ import pytest
 
 from kiss.agents.sorcar import persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.server import VSCodeServer
 
 
 def _git(tmpdir: str, *args: str) -> None:

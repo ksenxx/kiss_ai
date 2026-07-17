@@ -85,10 +85,9 @@ async function makeVoice({mode = 'browser', storedSensitivity} = {}) {
   if (storedSensitivity !== undefined) {
     win.localStorage.setItem('kissVoiceSensitivity', storedSensitivity);
   }
-  if (mode === 'browser') {
-    // Browser mode never auto-starts; opt in like a returning user.
-    win.localStorage.setItem('kissVoiceEnabled', '1');
-  }
+  // The mic is closed by default (fresh install) in every mode; opt
+  // in like a returning user so the pipeline under test starts.
+  win.localStorage.setItem('kissVoiceEnabled', '1');
   win.__VOICE__ =
     mode === 'browser'
       ? {mode: 'browser', voskSrc: 'vosk.js', modelUrl: '/m.tar.gz'}

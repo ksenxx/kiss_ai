@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Tests that demonstrate unfixed race conditions in ``kiss.agents.vscode``.
+"""Tests that demonstrate unfixed race conditions in ``kiss.server``.
 
 Each test deterministically forces an interleaving that exposes a real
 data race between two or more threads.  These tests use synchronisation
@@ -21,8 +21,8 @@ import threading
 import time
 import unittest
 
-from kiss.agents.vscode.json_printer import JsonPrinter
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.json_printer import JsonPrinter
+from kiss.server.server import VSCodeServer
 
 
 class TestStaleBashBroadcastAfterReset(unittest.TestCase):

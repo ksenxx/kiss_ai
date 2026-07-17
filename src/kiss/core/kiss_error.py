@@ -34,6 +34,28 @@ class BudgetExceededError(KISSError):
     """
 
 
+class ContextWindowExceededError(KISSError):
+    """Raised when the conversation no longer fits the model's context window.
+
+    Raised in two places in ``KISSAgent``:
+
+    * proactively by ``_check_limits`` when the live conversation size
+      (``context_tokens_used``) reaches ``CONTEXT_LIMIT_FRACTION`` of the
+      model's maximum context length, and
+    * reactively by ``_run_agentic_loop`` when the provider rejects a
+      request with a context-overflow error (e.g. Anthropic's "Your input
+      exceeds the context window of this model" or OpenAI's
+      ``context_length_exceeded``).  Retrying such a request is pointless —
+      the retry handler would append yet another message, growing the
+      conversation further — so the loop converts it to this typed error
+      immediately instead of burning ``MAX_CONSECUTIVE_ERRORS`` retries.
+
+    A distinct type lets ``RelentlessAgent`` route the failure to its
+    trajectory-summarizer/continuation path (starting a fresh session with a
+    summary of progress) instead of hard-failing the whole task.
+    """
+
+
 class ModelRefusalError(KISSError):
     """Raised when a model refuses to answer for safety reasons.
 

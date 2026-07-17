@@ -25,7 +25,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from kiss.agents.vscode.web_server import RemoteAccessServer, _WebMergeState
+from kiss.server.web_server import RemoteAccessServer, _WebMergeState
 
 
 def _build_merge_data(work_dir: Path) -> dict:

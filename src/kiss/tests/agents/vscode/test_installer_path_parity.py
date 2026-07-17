@@ -35,7 +35,7 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.vscode.web_server import _find_install_script
+from kiss.server.web_server import _find_install_script
 
 _INSTALLER_PATH_JS = (
     Path(__file__).resolve().parents[3]

@@ -84,7 +84,7 @@ def _unpatch_super_run(original: Any) -> None:
 
 
 def _make_server(repo: Path) -> tuple:
-    from kiss.agents.vscode.server import VSCodeServer
+    from kiss.server.server import VSCodeServer
 
     server = VSCodeServer()
     events: list[dict] = []

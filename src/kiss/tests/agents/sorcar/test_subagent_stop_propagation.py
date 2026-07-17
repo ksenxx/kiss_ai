@@ -31,7 +31,7 @@ from typing import Any
 import pytest
 
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.agents.vscode.json_printer import JsonPrinter
+from kiss.server.json_printer import JsonPrinter
 
 
 class _RecordingPrinter(JsonPrinter):

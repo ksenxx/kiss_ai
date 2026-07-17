@@ -30,8 +30,8 @@ import time
 from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.vscode.server import VSCodeServer
-from kiss.agents.vscode.web_server import WebPrinter
+from kiss.server.server import VSCodeServer
+from kiss.server.web_server import WebPrinter
 
 
 def _redirect(tmpdir: str) -> tuple[Path, object, Path]:

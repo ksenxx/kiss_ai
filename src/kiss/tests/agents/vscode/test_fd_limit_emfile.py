@@ -13,7 +13,7 @@ import resource
 
 import pytest
 
-from kiss.agents.vscode.web_server import _raise_open_file_limit
+from kiss.server.web_server import _raise_open_file_limit
 
 
 @pytest.fixture()

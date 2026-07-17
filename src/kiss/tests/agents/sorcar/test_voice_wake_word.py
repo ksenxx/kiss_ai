@@ -8,7 +8,7 @@ Real audio, real speech models, no mocks:
 
 - ``test_wake_from_wav`` speaks "Sorcar" with the macOS TTS engine and
   streams the audio through the actual Python wake-word listener
-  (``kiss.agents.vscode.voice_wake``) used by the VS Code extension.
+  (``kiss.server.voice_wake``) used by the VS Code extension.
 
 - ``test_no_wake_from_alias_sentences`` speaks everyday sentences that
   contain wake-alias-sounding words ("soccer", "circa", "sir ... car",
@@ -36,8 +36,8 @@ import threading
 import unittest
 from pathlib import Path
 
-from kiss.agents.vscode.voice_wake import matches_wake, words_confident
-from kiss.agents.vscode.web_server import RemoteAccessServer
+from kiss.server.voice_wake import matches_wake, words_confident
+from kiss.server.web_server import RemoteAccessServer
 
 PROJECT_ROOT = Path(__file__).resolve().parents[5]
 
@@ -153,7 +153,7 @@ class TestVoiceWakeFromWav(unittest.TestCase):
             proc = subprocess.run(
                 [
                     "uv", "run", "python", "-m",
-                    "kiss.agents.vscode.voice_wake", "--wav", str(wav),
+                    "kiss.server.voice_wake", "--wav", str(wav),
                 ],
                 cwd=PROJECT_ROOT,
                 capture_output=True,
@@ -176,7 +176,7 @@ class TestNoFalseWakeFromWav(unittest.TestCase):
             proc = subprocess.run(
                 [
                     "uv", "run", "python", "-m",
-                    "kiss.agents.vscode.voice_wake", "--wav", str(wav),
+                    "kiss.server.voice_wake", "--wav", str(wav),
                 ],
                 cwd=PROJECT_ROOT,
                 capture_output=True,

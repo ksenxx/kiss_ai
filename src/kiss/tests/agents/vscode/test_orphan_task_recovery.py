@@ -43,7 +43,7 @@ from kiss.agents.sorcar import persistence as _persistence
 
 def _make_server() -> Any:
     os.environ.setdefault("KISS_WORKDIR", "/tmp")
-    from kiss.agents.vscode.server import VSCodeServer
+    from kiss.server.server import VSCodeServer
 
     server = VSCodeServer()
     # The sweep runs on a background thread (so daemon startup is
@@ -221,7 +221,7 @@ class TestOrphanTaskRecovery(TestCase):
         helper's pre-emptive persist) can write the truthful result.
         """
         os.environ.setdefault("KISS_WORKDIR", "/tmp")
-        from kiss.agents.vscode.server import VSCodeServer
+        from kiss.server.server import VSCodeServer
 
         server = VSCodeServer()
         fresh_id = _insert_sentinel_row(

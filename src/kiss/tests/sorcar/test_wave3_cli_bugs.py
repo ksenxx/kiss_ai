@@ -50,10 +50,10 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar.cli_client import CliClient, _submit_task
 from kiss.agents.sorcar.cli_helpers import _build_arg_parser, _build_run_kwargs
-from kiss.agents.sorcar.cli_steering import AnchoredRepl
 from kiss.core.print_to_console import ConsolePrinter
+from kiss.ui.cli.cli_client import CliClient, _submit_task
+from kiss.ui.cli.cli_steering import AnchoredRepl
 
 
 class _EnvelopeSink:
@@ -235,7 +235,7 @@ class TestW3F1UntaggedStatusDoesNotOrphanTask(unittest.TestCase):
 
 _F4_CHILD = r"""
 import gc, sys
-from kiss.agents.sorcar.cli_printer import RecordingConsolePrinter
+from kiss.ui.cli.cli_printer import RecordingConsolePrinter
 
 tid = sys.argv[1]
 printer = RecordingConsolePrinter()
@@ -326,7 +326,7 @@ class TestW3F6CtrlCSameChunkLineSurvives(unittest.TestCase):
 
 _C1_CHILD = r"""
 import gc
-from kiss.agents.sorcar import cli_daemon_bridge
+from kiss.ui.cli import cli_daemon_bridge
 
 for _ in range(20):
     cli_daemon_bridge.send_event({"type": "probe"})
@@ -380,7 +380,7 @@ class TestW3C3MalformedHeaderRejected(unittest.TestCase):
 
 
 _C5_CHILD = r"""
-from kiss.agents.sorcar import cli_client, cli_daemon_bridge
+from kiss.ui.cli import cli_client, cli_daemon_bridge
 
 print("CLIENTSOCK=" + str(cli_client._sock_path()), flush=True)
 print("BRIDGESOCK=" + str(cli_daemon_bridge._sock_path()), flush=True)

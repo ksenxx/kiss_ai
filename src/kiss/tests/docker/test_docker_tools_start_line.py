@@ -32,7 +32,7 @@ from pathlib import Path
 
 import pytest
 
-from kiss.docker.docker_tools import DockerTools
+from kiss.core.docker_tools import DockerTools
 
 
 def _host_bash(command: str, _description: str) -> str:

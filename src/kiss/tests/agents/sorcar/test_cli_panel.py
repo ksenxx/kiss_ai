@@ -14,7 +14,7 @@ from __future__ import annotations
 import io
 import threading
 
-from kiss.agents.sorcar.cli_panel import (
+from kiss.ui.cli.cli_panel import (
     BOLD,
     CYAN,
     DIM,
@@ -29,7 +29,7 @@ from kiss.agents.sorcar.cli_panel import (
     panel_bottom,
     panel_top,
 )
-from kiss.agents.sorcar.cli_steering import _InputBox
+from kiss.ui.cli.cli_steering import _InputBox
 
 
 class TestPanelBorders:

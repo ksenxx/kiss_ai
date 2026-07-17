@@ -44,7 +44,7 @@ import kiss.agents.sorcar.persistence as _persistence
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent, run_tasks_parallel
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-from kiss.agents.vscode.json_printer import JsonPrinter
+from kiss.server.json_printer import JsonPrinter
 
 _PARENT_CLASS = cast(Any, SorcarAgent.__mro__[1])
 

@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.sorcar.useful_tools import UsefulTools
+from kiss.core.useful_tools import UsefulTools
 
 
 @pytest.fixture()

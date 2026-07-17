@@ -61,7 +61,7 @@ def test_cli_printer_forwards_only_listed_global_types(
     daemon UDS; only the explicit ``new_tab`` / ``tasks_updated``
     global system events should be forwarded.
     """
-    from kiss.agents.sorcar import cli_daemon_bridge, cli_printer
+    from kiss.ui.cli import cli_daemon_bridge, cli_printer
 
     captured: list[dict[str, object]] = []
     monkeypatch.setattr(
@@ -240,7 +240,7 @@ def test_live_task_id_returns_str_or_none() -> None:
     flagged that an int slipping through breaks
     ``set[str]`` membership comparisons downstream.
     """
-    src = Path("src/kiss/agents/vscode/server.py").read_text()
+    src = Path("src/kiss/server/server.py").read_text()
     # Function signature
     assert "_live_task_id" in src
     # Strict-typed return contract.

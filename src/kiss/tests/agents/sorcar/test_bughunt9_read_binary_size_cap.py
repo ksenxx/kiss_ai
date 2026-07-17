@@ -18,8 +18,8 @@ round-tripping as inline attachments.
 import struct
 import zlib
 
-from kiss.agents.sorcar.useful_tools import _MAX_BINARY_READ_BYTES, UsefulTools
 from kiss.core.models.model import parse_binary_attachments
+from kiss.core.useful_tools import _MAX_BINARY_READ_BYTES, UsefulTools
 
 
 def _png_bytes(payload_size: int) -> bytes:

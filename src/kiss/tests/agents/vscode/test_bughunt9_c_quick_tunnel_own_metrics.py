@@ -33,7 +33,7 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.vscode import web_server as ws
+from kiss.server import web_server as ws
 
 _FAKE_CLOUDFLARED = """#!/bin/sh
 port=""

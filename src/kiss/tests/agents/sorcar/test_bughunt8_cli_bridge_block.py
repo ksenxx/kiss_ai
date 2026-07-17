@@ -4,7 +4,7 @@
 # add your name here
 """Bug-hunt pass #8: the CLI→daemon bridge must never block forever.
 
-:mod:`kiss.agents.sorcar.cli_daemon_bridge` documents itself as a
+:mod:`kiss.ui.cli.cli_daemon_bridge` documents itself as a
 *best-effort* one-way bridge: "Connection failures are absorbed
 silently (CLI must still work when no daemon is running)".  The
 pre-fix transport used a plain blocking ``socket.sendall`` with no
@@ -29,7 +29,7 @@ import tempfile
 import threading
 from pathlib import Path
 
-from kiss.agents.sorcar import cli_daemon_bridge
+from kiss.ui.cli import cli_daemon_bridge
 
 
 class TestBridgeNeverBlocksForever:

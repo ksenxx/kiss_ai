@@ -4,7 +4,7 @@
 # add your name here
 """Bug-hunt test: multi-byte UTF-8 split across reads must not be lost.
 
-:meth:`kiss.agents.sorcar.cli_steering._InputBox.feed` receives raw
+:meth:`kiss.ui.cli.cli_steering._InputBox.feed` receives raw
 ``os.read`` chunks.  A terminal paste (or a slow link) can split a
 multi-byte UTF-8 character across two reads.  ``feed`` used to call
 ``data.decode("utf-8", "ignore")`` per chunk, so both halves of the
@@ -19,7 +19,7 @@ import threading
 
 import pytest
 
-from kiss.agents.sorcar.cli_steering import _InputBox
+from kiss.ui.cli.cli_steering import _InputBox
 
 
 def _box() -> _InputBox:

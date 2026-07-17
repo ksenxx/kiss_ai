@@ -32,7 +32,7 @@ The parent simulates the user typing a three-line follow-up instruction
 into the bottom steering box.  Each line break is sent as the
 ``CSI 13;2u`` byte sequence — the kitty / xterm ``modifyOtherKeys``
 encoding of Shift+Enter that
-:meth:`~kiss.agents.sorcar.cli_steering._InputBox.feed` recognises (the
+:meth:`~kiss.ui.cli.cli_steering._InputBox.feed` recognises (the
 same encoding the matching unit test ``test_shift_enter_grows_the_box_live``
 uses).  After capturing the painted terminal frames from the master fd,
 the parent sends a plain ``\\r`` to submit, then asserts on:
@@ -85,8 +85,8 @@ _CHILD_SCRIPT = textwrap.dedent(
     import time
     from pathlib import Path
 
-    from kiss.agents.sorcar.cli_steering import run_with_steering
     from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+    from kiss.ui.cli.cli_steering import run_with_steering
 
 
     class _RecordingModel:

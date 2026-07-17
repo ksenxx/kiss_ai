@@ -37,8 +37,8 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.vscode import web_server as ws
-from kiss.agents.vscode.web_server import (
+from kiss.server import web_server as ws
+from kiss.server.web_server import (
     RemoteAccessServer,
     _resolve_tunnel_settings,
 )

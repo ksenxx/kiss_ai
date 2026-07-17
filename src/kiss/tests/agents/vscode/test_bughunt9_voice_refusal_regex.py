@@ -22,7 +22,7 @@ the whitespace inside the long-form branches:
 
 from __future__ import annotations
 
-from kiss.agents.vscode.voice_wake import looks_like_stt_refusal
+from kiss.server.voice_wake import looks_like_stt_refusal
 
 
 def test_contraction_ill_transcribe_is_flagged() -> None:

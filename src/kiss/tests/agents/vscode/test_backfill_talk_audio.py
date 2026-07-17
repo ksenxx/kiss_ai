@@ -27,12 +27,12 @@ from typing import Any
 
 from kiss.agents.sorcar import persistence as _persistence
 from kiss.agents.sorcar.persistence import _add_task, _flush_chat_events
-from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.scripts.backfill_talk_audio import (
     main,
     repair_silent_talk_calls,
     scan_talk_calls,
 )
+from kiss.server.json_printer import JsonPrinter
 
 
 def _fixed_clip_synth(

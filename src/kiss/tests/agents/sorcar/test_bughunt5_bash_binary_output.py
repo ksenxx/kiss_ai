@@ -19,7 +19,7 @@ output with latin-1 bytes).  Pre-fix behaviour:
 
 import subprocess
 
-from kiss.agents.sorcar.useful_tools import UsefulTools
+from kiss.core.useful_tools import UsefulTools
 
 
 def _has_bash() -> bool:

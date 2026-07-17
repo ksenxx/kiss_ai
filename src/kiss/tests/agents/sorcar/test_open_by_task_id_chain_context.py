@@ -38,7 +38,7 @@ import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import _load_task_chain_context
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.server import VSCodeServer
 
 
 def _redirect_db(tmpdir: str) -> tuple:
@@ -136,10 +136,17 @@ def _run_and_wait(server: VSCodeServer, tab_id: str, prompt: str,
         "model": "claude-fable-5", "workDir": work_dir,
         "tabId": tab_id,
     })
+    # ``_cmd_run`` stamps ``task_thread`` before returning, and the
+    # worker thread's outer ``finally`` (``_run_task``) resets it to
+    # None once the task finishes.  A near-instant run (e.g. one
+    # rejected by the ``is_merging`` merge-review guard) can complete
+    # before this thread reads the attribute, so ``None`` here means
+    # "already finished", not "never started" — only join a thread
+    # that is still registered.
     t = server._get_tab(tab_id).task_thread
-    assert t is not None
-    t.join(timeout=10)
-    assert not t.is_alive()
+    if t is not None:
+        t.join(timeout=10)
+        assert not t.is_alive()
 
 
 def _seed_chain(

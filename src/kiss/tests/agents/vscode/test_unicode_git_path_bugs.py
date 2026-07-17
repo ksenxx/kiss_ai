@@ -21,8 +21,8 @@ from pathlib import Path
 from typing import Any
 
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps
-from kiss.agents.vscode.diff_merge import _prepare_merge_view
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.diff_merge import _prepare_merge_view
+from kiss.server.server import VSCodeServer
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:

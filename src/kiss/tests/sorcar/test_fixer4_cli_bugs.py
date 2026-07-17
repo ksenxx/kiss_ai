@@ -52,9 +52,9 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar.cli_client import CliClient, _submit_task
-from kiss.agents.sorcar.cli_steering import AnchoredRepl
 from kiss.core.print_to_console import ConsolePrinter
+from kiss.ui.cli.cli_client import CliClient, _submit_task
+from kiss.ui.cli.cli_steering import AnchoredRepl
 
 
 class _ScriptedDaemon:
@@ -213,7 +213,7 @@ class TestF1FastFinishingTaskAcknowledged(unittest.TestCase):
 
 _F2_SCRIPT = r"""
 import sys, threading, time
-from kiss.agents.sorcar.cli_steering import _InputBox, _pump_stdin
+from kiss.ui.cli.cli_steering import _InputBox, _pump_stdin
 
 box = _InputBox(threading.RLock(), sys.stdout)  # never start()ed: no TTY use
 deadline = time.monotonic() + 0.8
@@ -303,8 +303,8 @@ class TestF3MultiLineChunkNotDropped(unittest.TestCase):
 _F9_CHILD = r"""
 import sys
 from pathlib import Path
-from kiss.agents.sorcar.cli_client import CliClient, _submit_task
 from kiss.core.print_to_console import ConsolePrinter
+from kiss.ui.cli.cli_client import CliClient, _submit_task
 
 sock = Path(sys.argv[1])
 work = sys.argv[2]

@@ -14,8 +14,8 @@ import json
 import subprocess
 from pathlib import Path
 
-from kiss.agents.vscode.diff_merge import _parse_diff_hunks, _prepare_merge_view
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.diff_merge import _parse_diff_hunks, _prepare_merge_view
+from kiss.server.server import VSCodeServer
 
 
 def _git(repo: Path, *args: str) -> None:

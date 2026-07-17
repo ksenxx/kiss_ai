@@ -4,7 +4,7 @@
 # add your name here
 """Bug-hunt integration tests for the sorcar CLI steering session.
 
-Reproduces a real bug in :mod:`kiss.agents.sorcar.cli_steering`: pressing
+Reproduces a real bug in :mod:`kiss.ui.cli.cli_steering`: pressing
 ``Ctrl+C`` while a task runs inside the anchored steering box aborted the
 *waiting* loop (``run_with_steering`` raised ``KeyboardInterrupt`` and the
 REPL printed "Task interrupted"), but the daemon worker thread kept
@@ -106,7 +106,7 @@ class SlowAgent:
         return "summary: done\\n"
 
 
-from kiss.agents.sorcar.cli_steering import run_with_steering
+from kiss.ui.cli.cli_steering import run_with_steering
 
 try:
     run_with_steering(SlowAgent(), {{}})

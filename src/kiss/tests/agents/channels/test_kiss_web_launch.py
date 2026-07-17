@@ -44,7 +44,7 @@ from kiss.agents.third_party_agents._kiss_web_launcher import (
     default_server,
     run_agent_via_kiss_web,
 )
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.server import VSCodeServer
 
 STUB_RESULT = "success: true\nsummary: stub summary done\n"
 

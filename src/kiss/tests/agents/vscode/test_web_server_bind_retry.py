@@ -35,8 +35,8 @@ import socket
 import tempfile
 from unittest import IsolatedAsyncioTestCase
 
-import kiss.agents.vscode.web_server as ws_mod
-from kiss.agents.vscode.web_server import RemoteAccessServer
+import kiss.server.web_server as ws_mod
+from kiss.server.web_server import RemoteAccessServer
 
 
 def _occupy_port() -> tuple[socket.socket, int]:

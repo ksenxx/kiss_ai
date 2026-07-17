@@ -11,8 +11,8 @@ Covers:
 * SHA256-cache incremental rebuilds (only changed files re-extracted,
   deleted files pruned),
 * ``query`` / ``path`` / ``explain`` output formats,
-* query-before-grep interception (``grep_hint``) and its integration
-  into ``UsefulTools.Bash``,
+* query-before-grep interception (``grep_hint`` / ``intercept_grep_hint``)
+  and its integration into the agent's plain and Docker ``Bash`` wrappers,
 * git post-commit hook install / append-preserving / uninstall and a
   real commit firing an incremental update,
 * the ``code_graph`` agent tool built by ``make_code_graph_tool``,
@@ -45,7 +45,16 @@ from kiss.agents.sorcar.code_graph import (
     make_code_graph_tool,
     uninstall_post_commit_hook,
 )
-from kiss.agents.sorcar.useful_tools import UsefulTools
+
+
+def _plain_bash(project: Path) -> Any:
+    """Return the non-Docker ``Bash`` tool exactly as SorcarAgent wires it."""
+    from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+
+    agent = SorcarAgent("t")
+    agent.work_dir = str(project)
+    agent._use_web_tools = False
+    return agent._get_tools()[0]
 
 PY_MAIN = '''\
 import os
@@ -493,8 +502,8 @@ class TestGrepHint:
         assert grep_hint("grep x short.py", str(tmp_path)) is None
 
     def test_bash_tool_intercepts_with_answer(self, project: Path, built: CodeGraph) -> None:
-        tools = UsefulTools(work_dir=str(project))
-        out = tools.Bash("grep -rn 'Application' .", "search")
+        bash = _plain_bash(project)
+        out = bash("grep -rn 'Application' .", "search")
         assert "[code_graph]" in out
         assert "NODE Application" in out
         # The expensive grep is denied: the interception response is the
@@ -504,11 +513,11 @@ class TestGrepHint:
     def test_repeated_identifier_grep_falls_through_for_verification(
         self, project: Path, built: CodeGraph
     ) -> None:
-        tools = UsefulTools(work_dir=str(project))
+        bash = _plain_bash(project)
         command = "grep -n 'Application' main.py"
 
-        first = tools.Bash(command, "initial graph lookup")
-        second = tools.Bash(command, "verify with grep")
+        first = bash(command, "initial graph lookup")
+        second = bash(command, "verify with grep")
 
         assert "[code_graph]" in first
         assert "[code_graph]" not in second
@@ -517,20 +526,31 @@ class TestGrepHint:
     def test_bash_tool_no_hint_for_other_commands(
         self, project: Path, built: CodeGraph
     ) -> None:
-        tools = UsefulTools(work_dir=str(project))
-        out = tools.Bash("echo hello_plain", "echo")
+        bash = _plain_bash(project)
+        out = bash("echo hello_plain", "echo")
         assert "[code_graph]" not in out
         assert "hello_plain" in out
-        unmatched = tools.Bash("grep -n 'Top level app' main.py", "literal search")
+        unmatched = bash("grep -n 'Top level app' main.py", "literal search")
         assert "[code_graph]" not in unmatched
         assert "Top level app" in unmatched
 
-    def test_bash_streaming_intercepts_before_spawn(
+    def test_bash_wrapper_intercepts_before_streaming(
         self, project: Path, built: CodeGraph
     ) -> None:
+        # The wrapper answers from the graph BEFORE UsefulTools.Bash (and
+        # thus before its subprocess-spawning streaming path) is entered:
+        # an intercepted command streams nothing to the printer.
+        from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+
         chunks: list[str] = []
-        tools = UsefulTools(work_dir=str(project), stream_callback=chunks.append)
-        out = tools.Bash("grep -rn 'Application' .", "search")
+        agent = SorcarAgent("t")
+        agent.work_dir = str(project)
+        agent._use_web_tools = False
+        agent.printer = SimpleNamespace(  # type: ignore[assignment]
+            print=lambda text, **kwargs: chunks.append(text)
+        )
+        bash = agent._get_tools()[0]
+        out = bash("grep -rn 'Application' .", "search")
         assert "[code_graph]" in out
         assert "NODE Application" in out
         assert "class Application" not in out

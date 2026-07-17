@@ -16,7 +16,7 @@ import time
 import unittest
 
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.server import VSCodeServer
 
 
 def _sleep_swallowing_kbi(seconds: float) -> None:
@@ -528,7 +528,7 @@ class TestRecordingIsolation(unittest.TestCase):
 
     def test_stop_recording_clears_state(self) -> None:
         """stop_recording removes the tab's recording entry."""
-        from kiss.agents.vscode.json_printer import JsonPrinter
+        from kiss.server.json_printer import JsonPrinter
 
         printer = JsonPrinter()
         printer._thread_local.task_id = "rec-1"

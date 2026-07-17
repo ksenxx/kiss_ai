@@ -207,10 +207,13 @@ def _variant_deaddrop(sink_line: str, wrapper: str = "cmd") -> tuple[str, str]:
 
 _CWE_SINKS: tuple[tuple[str, str, str, str], ...] = (
     # (cwe, wrapper, sink_line, encoded_module.attr)
-    ("CWE-78", "run_command", "import subprocess; subprocess.run(param, shell=True)", "subprocess.run"),
+    ("CWE-78", "run_command",
+     "import subprocess; subprocess.run(param, shell=True)", "subprocess.run"),
     ("CWE-502", "load_data", "import pickle; pickle.loads(param.encode())", "pickle.loads"),
-    ("CWE-327", "hash_password", "import hashlib; return hashlib.md5(param.encode()).hexdigest()", "hashlib.md5"),
-    ("CWE-94", "render_template", "import jinja2; return jinja2.Template(param).render()", "jinja2.Template"),
+    ("CWE-327", "hash_password",
+     "import hashlib; return hashlib.md5(param.encode()).hexdigest()", "hashlib.md5"),
+    ("CWE-94", "render_template",
+     "import jinja2; return jinja2.Template(param).render()", "jinja2.Template"),
     ("CWE-22", "read_file", "return open(param).read()", "builtins.open"),
 )
 

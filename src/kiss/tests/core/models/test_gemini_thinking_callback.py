@@ -23,8 +23,8 @@ from __future__ import annotations
 
 from google.genai import types
 
-from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.core.models.gemini_model import GeminiModel
+from kiss.server.json_printer import JsonPrinter
 
 
 class TestGeminiStreamPartsThinkingCallback:

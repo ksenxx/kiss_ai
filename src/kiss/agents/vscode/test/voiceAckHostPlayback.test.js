@@ -127,7 +127,7 @@ const sockPath = path.join(tmpHome, '.kiss', 'sorcar.sock');
 
 // A REAL scripted child process standing in for afplay: records its
 // argv (the mp3 path) — the KISS_SORCAR_PLAY_CMD override contract
-// shared with kiss.agents.sorcar.cli_talk.
+// shared with kiss.ui.cli.cli_talk.
 const recordFile = path.join(tmpHome, 'played.txt');
 const recorder = path.join(tmpHome, 'recorder.sh');
 fs.writeFileSync(

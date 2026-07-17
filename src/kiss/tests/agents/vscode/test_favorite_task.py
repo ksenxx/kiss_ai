@@ -22,7 +22,7 @@ import threading
 from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.server import VSCodeServer
 
 MAIN_JS = (
     Path(__file__).parent.parent.parent.parent

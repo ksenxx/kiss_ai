@@ -25,7 +25,7 @@ from harbor.agents.base import BaseAgent
 from harbor.environments.base import BaseEnvironment, ExecResult
 from harbor.models.agent.context import AgentContext
 
-from kiss._version import __version__
+from kiss.core._version import __version__
 
 _SKIP_PHRASES: tuple[str, ...] = (
     "CompCert C verified compiler",

@@ -66,7 +66,7 @@ class TestI2FindChannelReturnsName:
 class TestI6DocstringReferencesNonExistentParams:
     def test_open_docstring_does_not_reference_args(self) -> None:
         """open() takes no parameters, so its docstring shouldn't list Args."""
-        from kiss.docker.docker_manager import DockerManager
+        from kiss.core.docker_manager import DockerManager
 
         doc = inspect.getdoc(DockerManager.open) or ""
         sig = inspect.signature(DockerManager.open)

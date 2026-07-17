@@ -17,6 +17,7 @@ import logging
 import mimetypes
 import os
 import re
+import time
 import types as types_module
 import uuid
 from abc import ABC, abstractmethod
@@ -384,11 +385,35 @@ _AUDIO_MIME_TO_EXT: dict[str, str] = {
 }
 
 
+def _is_transient_transcription_error(exc: Exception) -> bool:
+    """Return True when a transcription failure is worth retrying.
+
+    Retryable: rate limits (429), connection/timeout errors, and
+    server-side 5xx responses.  Not retryable: authentication,
+    invalid-request, and other deterministic client errors.
+
+    Args:
+        exc: The exception raised by the OpenAI transcription call.
+
+    Returns:
+        True when the error is transient and the call may be retried.
+    """
+    import openai
+
+    if isinstance(exc, (openai.APIConnectionError, openai.APITimeoutError)):
+        return True
+    if isinstance(exc, openai.APIStatusError):
+        return exc.status_code == 429 or exc.status_code >= 500
+    return False
+
+
 def transcribe_audio(data: bytes, mime_type: str, api_key: str | None = None) -> str:
     """Transcribe audio bytes to text using OpenAI's Whisper API.
 
     This is used as a fallback for model providers that do not support audio
-    attachments natively (e.g. Anthropic).
+    attachments natively (e.g. Anthropic).  Transient API failures (rate
+    limits, connection errors, 5xx responses) are retried a couple of times
+    with a short backoff before giving up.
 
     Args:
         data: Raw audio file bytes.
@@ -411,16 +436,21 @@ def transcribe_audio(data: bytes, mime_type: str, api_key: str | None = None) ->
 
     ext = _AUDIO_MIME_TO_EXT.get(mime_type, ".mp3")
     client = OpenAI(api_key=key)
-    try:
-        transcript = client.audio.transcriptions.create(
-            model="whisper-1",
-            file=(f"audio{ext}", data, mime_type),
-            response_format="text",
-        )
-    except Exception as exc:
-        raise RuntimeError(f"Audio transcription failed: {exc}") from exc
-
-    return str(transcript).strip()
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        try:
+            transcript = client.audio.transcriptions.create(
+                model="whisper-1",
+                file=(f"audio{ext}", data, mime_type),
+                response_format="text",
+            )
+            return str(transcript).strip()
+        except Exception as exc:
+            if attempt < max_attempts and _is_transient_transcription_error(exc):
+                time.sleep(0.5 * attempt)
+                continue
+            raise RuntimeError(f"Audio transcription failed: {exc}") from exc
+    raise RuntimeError("Audio transcription failed")  # pragma: no cover - unreachable
 
 
 def flatten_content_to_text(content: Any) -> str:

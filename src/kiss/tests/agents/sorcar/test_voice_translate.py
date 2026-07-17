@@ -11,7 +11,7 @@ message), so the tests also pin down the dictation semantics:
 
 - ``test_translate_speech_after_wake`` speaks "Sorcar" followed by a
   sentence with the macOS TTS engine, streams the audio through the
-  actual wake-word listener (``kiss.agents.vscode.voice_wake``), and
+  actual wake-word listener (``kiss.server.voice_wake``), and
   asserts that the listener emits a ``SPEECH`` line whose payload is
   the GPT-translated English text.
 
@@ -44,7 +44,7 @@ import unittest
 import wave
 from pathlib import Path
 
-from kiss.agents.vscode.voice_wake import (
+from kiss.server.voice_wake import (
     BLOCK_SIZE,
     SAMPLE_RATE,
     SpeechCapture,
@@ -106,7 +106,7 @@ def _run_listener(wav: Path, env_overrides: dict[str, str] | None = None):
     return subprocess.run(
         [
             "uv", "run", "python", "-m",
-            "kiss.agents.vscode.voice_wake", "--wav", str(wav),
+            "kiss.server.voice_wake", "--wav", str(wav),
         ],
         cwd=PROJECT_ROOT,
         capture_output=True,

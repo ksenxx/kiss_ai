@@ -119,7 +119,7 @@ def test_file_injection_and_placeholders_still_work_together() -> None:
 
 _ENTER_LEAK_SCRIPT = r"""
 import sys
-from kiss.agents.sorcar.cli_steering import AnchoredRepl
+from kiss.ui.cli.cli_steering import AnchoredRepl
 
 orig_out, orig_err = sys.stdout, sys.stderr
 repl = AnchoredRepl()
