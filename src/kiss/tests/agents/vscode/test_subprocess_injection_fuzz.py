@@ -95,7 +95,7 @@ class TestFuzzSaveApiKeyRoundTripBash(unittest.TestCase):
             self.skipTest(f"{self.SHELL} not installed")
         self._tmp = tempfile.TemporaryDirectory()
         self.home = Path(self._tmp.name)
-        from kiss.server import vscode_config as vc
+        from kiss.core import vscode_config as vc
         self._vc = vc
         self._orig_rc = vc._shell_rc_path
         vc._shell_rc_path = lambda shell: self.home / self.RC_NAME  # type: ignore[assignment]
@@ -281,7 +281,7 @@ class TestFuzzSourceShellEnvPaths(unittest.TestCase):
         self._tmp.cleanup()
 
     def test_fuzz_rc_paths_with_metacharacters(self) -> None:
-        from kiss.server import vscode_config as vc
+        from kiss.core import vscode_config as vc
 
         rng = random.Random(0xCAFE)
         for _ in range(20):
@@ -403,7 +403,7 @@ class TestFuzzRcModeUnderRandomUmasks(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.home = Path(self._tmp.name)
-        from kiss.server import vscode_config as vc
+        from kiss.core import vscode_config as vc
         self._vc = vc
         self._orig_rc = vc._shell_rc_path
         vc._shell_rc_path = lambda shell: self.home / ".bashrc"  # type: ignore[assignment]
@@ -461,7 +461,7 @@ class TestKnownInjectionCorpus(unittest.TestCase):
             self.skipTest("bash required")
         self._tmp = tempfile.TemporaryDirectory()
         self.home = Path(self._tmp.name)
-        from kiss.server import vscode_config as vc
+        from kiss.core import vscode_config as vc
         self._vc = vc
         self._orig_rc = vc._shell_rc_path
         vc._shell_rc_path = lambda shell: self.home / ".bashrc"  # type: ignore[assignment]

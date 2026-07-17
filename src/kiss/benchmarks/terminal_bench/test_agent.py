@@ -11,13 +11,13 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from kiss._version import __version__
 from kiss.benchmarks.terminal_bench.agent import (
     _SKIP_PHRASES,
     SorcarHarborAgent,
     _get_wheel,
 )
 from kiss.benchmarks.terminal_bench.run import build_package
+from kiss.core._version import __version__
 
 
 @dataclass

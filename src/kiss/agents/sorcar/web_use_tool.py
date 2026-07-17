@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from kiss.agents.sorcar.persistence import _default_kiss_dir
-from kiss.agents.sorcar.useful_tools import _absolutize, _active_worktree_remap
+from kiss.core.useful_tools import _absolutize, _active_worktree_remap
 
 logger = logging.getLogger(__name__)
 

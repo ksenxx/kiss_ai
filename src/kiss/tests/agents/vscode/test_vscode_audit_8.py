@@ -23,7 +23,7 @@ class TestAPIKeyEnvVarsType:
 
     def test_api_key_env_vars_is_frozenset(self) -> None:
         """Verify API_KEY_ENV_VARS is a frozenset, not a dict."""
-        from kiss.server.vscode_config import API_KEY_ENV_VARS
+        from kiss.core.vscode_config import API_KEY_ENV_VARS
 
         assert isinstance(API_KEY_ENV_VARS, frozenset), (
             f"API_KEY_ENV_VARS should be frozenset, got {type(API_KEY_ENV_VARS).__name__}"
@@ -31,7 +31,7 @@ class TestAPIKeyEnvVarsType:
 
     def test_api_key_env_vars_contains_expected_keys(self) -> None:
         """Verify all expected API key names are present."""
-        from kiss.server.vscode_config import API_KEY_ENV_VARS
+        from kiss.core.vscode_config import API_KEY_ENV_VARS
 
         expected = {
             "GEMINI_API_KEY",
@@ -48,7 +48,7 @@ class TestAPIKeyEnvVarsType:
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Verify get_current_api_keys iterates correctly over frozenset."""
-        from kiss.server import vscode_config
+        from kiss.core import vscode_config
 
         monkeypatch.setattr(vscode_config, "API_KEY_ENV_VARS", frozenset({"A", "B"}))
         monkeypatch.setenv("A", "val_a")
@@ -58,7 +58,7 @@ class TestAPIKeyEnvVarsType:
 
     def test_source_shell_env_works_with_frozenset(self) -> None:
         """Verify source_shell_env membership check works with frozenset."""
-        from kiss.server.vscode_config import API_KEY_ENV_VARS
+        from kiss.core.vscode_config import API_KEY_ENV_VARS
 
         # The `k in API_KEY_ENV_VARS` check in source_shell_env must work
         assert "GEMINI_API_KEY" in API_KEY_ENV_VARS

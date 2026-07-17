@@ -53,7 +53,7 @@ from pathlib import Path
 from typing import Any
 
 import kiss.agents.sorcar.persistence as ps
-import kiss.server.vscode_config as vc
+import kiss.core.vscode_config as vc
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.server.server import VSCodeServer
 from kiss.server.web_server import WebPrinter

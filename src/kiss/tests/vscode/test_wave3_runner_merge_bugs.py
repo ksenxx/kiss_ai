@@ -533,7 +533,7 @@ def test_b3_racing_save_config_cannot_desync_live_and_persisted_work_dir(
     propagation, so B is parked at the lock and the final state is
     consistent everywhere.
     """
-    from kiss.server.vscode_config import load_config
+    from kiss.core.vscode_config import load_config
 
     printer = _GatedWorkDirPrinter()
     server = VSCodeServer(printer=printer)

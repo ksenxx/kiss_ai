@@ -62,7 +62,7 @@ class TestRestartGuardNonDefaultHome(unittest.TestCase):
     operating on a non-default ``KISS_HOME`` (e.g. the test suite)."""
 
     def setUp(self) -> None:
-        import kiss.server.vscode_config as vc
+        import kiss.core.vscode_config as vc
 
         self._tmpdir = tempfile.mkdtemp()
         self._orig_dir = vc.CONFIG_DIR
@@ -89,7 +89,7 @@ class TestRestartGuardNonDefaultHome(unittest.TestCase):
         os.environ["KISS_HOME"] = self._tmpdir
 
     def tearDown(self) -> None:
-        import kiss.server.vscode_config as vc
+        import kiss.core.vscode_config as vc
 
         os.environ["PATH"] = self._orig_env_path
         if self._orig_kiss_home is None:
@@ -132,7 +132,7 @@ class TestRestartGuardNonDefaultHome(unittest.TestCase):
         ``_cmd_save_config`` SIGTERMed the live daemon that was running
         the agent which had launched the test.
         """
-        from kiss.server.vscode_config import save_config
+        from kiss.core.vscode_config import save_config
 
         save_config({"remote_password": "old-secret"})
         server = self._make_server()

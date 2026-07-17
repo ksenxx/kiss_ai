@@ -23,7 +23,7 @@
 //
 // ``checkForExtensionUpdate`` actively queries PyPI on activation,
 // compares the result with the locally installed ``__version__``
-// shipped in ``kiss_project/src/kiss/_version.py``, and surfaces a
+// shipped in ``kiss_project/src/kiss/core/_version.py``, and surfaces a
 // chat-webview notification with a single "Update now" action when an
 // upgrade is available.  A cached result at
 // ``~/.kiss/.update-check.json`` rate-limits repeated checks so that
@@ -313,7 +313,7 @@ function writeCache(cachePath, data) {
  *   cooldownMs        Min ms between successful checks (default: 6 h).
  *   fetchTimeoutMs    HTTP timeout (default: 15 s).
  *   currentVersion    Override local version string.
- *   kissProjectPath   Where to look for src/kiss/_version.py.
+ *   kissProjectPath   Where to look for src/kiss/core/_version.py.
  *   fetchLatest       Override the PyPI fetcher (returns string|null).
  *   notify            Called with ({latest, current}) when an upgrade
  *                     is available; defaults to a no-op so the helper

@@ -43,7 +43,7 @@ class TestH3RcFilePermissionsAndQuoting(unittest.TestCase):
         )
         self._home_patch.start()
         # Patch Path.home() too because vscode_config uses it at module import.
-        from kiss.server import vscode_config as vc
+        from kiss.core import vscode_config as vc
 
         self._vc = vc
         self._orig_rc_path = vc._shell_rc_path
@@ -338,7 +338,7 @@ class TestH3PropertyFuzz(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.home = Path(self._tmp.name)
-        from kiss.server import vscode_config as vc
+        from kiss.core import vscode_config as vc
 
         self._vc = vc
         self._orig = vc._shell_rc_path

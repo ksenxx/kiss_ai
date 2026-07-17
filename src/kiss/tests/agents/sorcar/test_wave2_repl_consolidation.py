@@ -42,7 +42,7 @@ from prompt_toolkit.completion import CompleteEvent
 from prompt_toolkit.document import Document
 
 import kiss.agents.sorcar.persistence as th
-import kiss.server.vscode_config as vc
+import kiss.core.vscode_config as vc
 from kiss.server.autocomplete import (
     _AutocompleteMixin,
     identifier_prefix_matches,
