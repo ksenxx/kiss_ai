@@ -13,6 +13,9 @@ until it finishes::
     print(result.text, result.success, result.cost, result.tokens, result.steps)
     print(result.chat_id, result.task_id)  # daemon chat session / task row ids
 
+    # Continue the same chat (the agent sees the prior task as context):
+    follow_up = sorcar.run("Now fix the typos you found", chat_id=result.chat_id)
+
 The function speaks the daemon's newline-delimited JSON protocol over
 its Unix-domain socket (``$KISS_SORCAR_SOCK``, defaulting to
 ``$KISS_HOME/sorcar.sock``) — the same transport the VS Code extension
@@ -50,9 +53,10 @@ class TaskResult:
         cost: Budget consumed by the task in USD.
         tokens: Total LLM tokens consumed by the task.
         steps: Total agent steps taken by the task.
-        chat_id: The daemon chat session id the task ran on.  Reusable
-            to resume or inspect the chat later; ``""`` when the run
-            ended before the daemon assigned one.
+        chat_id: The daemon chat session id the task ran on.  Pass it
+            back as the ``chat_id`` argument of :func:`run` to
+            continue the chat, or use it to inspect the chat later;
+            ``""`` when the run ended before the daemon assigned one.
         task_id: The daemon's persisted ``task_history`` row id of the
             run; ``""`` when the run ended before a row was allocated
             (e.g. the daemon had no model configured).
@@ -148,6 +152,7 @@ def run(
     *,
     work_dir: str = "",
     model: str = "",
+    chat_id: str = "",
     use_worktree: bool = False,
     auto_commit: bool = False,
     timeout: float = 3600.0,
@@ -164,6 +169,11 @@ def run(
         work_dir: Working directory for the task; the daemon's current
             default is used when empty.
         model: Model name; the daemon's selected default when empty.
+        chat_id: Optional existing chat session id to continue.  Pass
+            the ``chat_id`` of a previous :class:`TaskResult` to run
+            this task in the same chat — the agent then sees the prior
+            tasks and results of that chat as context.  A new chat is
+            started when empty.
         use_worktree: Run the task in an isolated git worktree.
         auto_commit: Auto-commit the task's changes on success.
         timeout: Maximum seconds to wait for the task to finish.
@@ -206,6 +216,7 @@ def run(
             "prompt": prompt,
             "tabId": tab_id,
             "taskId": uuid.uuid4().hex,
+            "chatId": chat_id,
             "workDir": work_dir,
             "model": model,
             "useWorktree": use_worktree,
@@ -214,7 +225,11 @@ def run(
         sock.sendall(json.dumps(cmd).encode("utf-8") + b"\n")
         reader = sock.makefile("rb", buffering=_MAX_LINE_BYTES)
         result_event: dict[str, Any] | None = None
-        chat_id = ""
+        # ``chat_id`` (the parameter) doubles as the accumulator: when
+        # the caller passed an existing chat id the daemon continues
+        # that chat, so it is already the correct fallback; the run's
+        # ``clear`` event then confirms (or, for a new chat, supplies)
+        # the daemon-assigned id.
         task_id = ""
         started = False
         while True:

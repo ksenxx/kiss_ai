@@ -243,6 +243,68 @@ class SorcarRunApiTest(unittest.TestCase):
         assert result.chat_id
         assert _persistence._get_task_chat_id(result.task_id) == result.chat_id
 
+    def test_chat_id_continues_existing_chat(self) -> None:
+        """Passing ``chat_id`` runs the task on that chat with context.
+
+        The second run must (a) report the SAME ``chat_id`` it was
+        given, (b) persist its task row under that chat, and (c) build
+        its agent prompt from the first task's recorded task/result
+        pair — proving the daemon truly continued the chat rather than
+        minting a fresh session.
+        """
+        prompts_seen: list[str] = []
+
+        def stub_run(self_agent: Any, **kwargs: Any) -> str:
+            prompts_seen.append(str(kwargs.get("prompt_template", "")))
+            self_agent.total_tokens_used = 10
+            self_agent.budget_used = 0.001
+            self_agent.total_steps = 1
+            raw = (
+                "success: true\n"
+                "is_continue: false\n"
+                "summary: first answer marker\n"
+            )
+            printer = kwargs.get("printer") or getattr(
+                self_agent, "printer", None,
+            )
+            if printer is not None:
+                printer.print(
+                    raw,
+                    type="result",
+                    step_count=1,
+                    total_tokens=10,
+                    cost="$0.0010",
+                )
+            return raw
+
+        self._parent_class.run = stub_run
+        first = sorcar.run(
+            "remember the magic word xyzzy",
+            work_dir=self.repo,
+            sock_path=self.sock_path,
+            timeout=60,
+        )
+        assert first.success is True
+        assert first.chat_id
+        second = sorcar.run(
+            "what was the magic word?",
+            work_dir=self.repo,
+            chat_id=first.chat_id,
+            sock_path=self.sock_path,
+            timeout=60,
+        )
+        assert second.success is True
+        assert second.chat_id == first.chat_id
+        assert second.task_id and second.task_id != first.task_id
+        assert (
+            _persistence._get_task_chat_id(second.task_id) == first.chat_id
+        )
+        # The second agent's prompt embeds the first task and its
+        # result as prior chat context.
+        assert len(prompts_seen) == 2
+        assert "remember the magic word xyzzy" in prompts_seen[1]
+        assert "first answer marker" in prompts_seen[1]
+
     def test_no_daemon_raises_connection_error(self) -> None:
         """A missing daemon socket raises a helpful ConnectionError."""
         missing = str(Path(self.tmpdir) / "nowhere.sock")
