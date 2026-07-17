@@ -63,6 +63,11 @@ function makeWindow() {
   );
   const win = dom.window;
   win.__VOICE__ = {mode: 'webview'};
+  // The mic is closed by default (fresh install); these tests exercise
+  // the listening flow, so seed the explicit opt-in that auto-enables
+  // the mic at load.  Default-off behavior is locked in by
+  // voiceMicAutoOn.test.js and the persistence test below.
+  win.localStorage.setItem('kissVoiceEnabled', '1');
 
   const posted = [];
   win.addEventListener('kiss-voice-post', event => {
@@ -115,8 +120,8 @@ test('duplicate wake events within the cooldown fire only once', () => {
 
 test('clicking the toggle posts voiceToggle through the bridge', () => {
   const {win, posted} = makeWindow();
-  // Webview mode auto-enables the mic at load (fresh storage), so the
-  // first click turns it OFF and the second back ON.
+  // The seeded opt-in auto-enables the mic at load, so the first
+  // click turns it OFF and the second back ON.
   // Note: JSON comparison because jsdom detail objects come from
   // another realm (different Object prototype than the test's).
   assert.strictEqual(
@@ -137,22 +142,25 @@ test('clicking the toggle posts voiceToggle through the bridge', () => {
 });
 
 test('mic state persists in localStorage and is applied on load', () => {
-  // Webview mode auto-enables at load (mic on when VS Code launches);
-  // the first click therefore disables and persists the opt-out.
+  // The seeded opt-in auto-enables at load; the first click therefore
+  // disables and persists the opt-out.
   const first = makeWindow();
   first.win.document.getElementById('voice-btn').click();
   assert.strictEqual(
     first.win.localStorage.getItem('kissVoiceEnabled'),
     '0',
   );
-  // A brand-new window (fresh storage) MUST auto-enable.
+  // A window with a stored opt-in ('1') MUST auto-enable (makeWindow
+  // seeds the opt-in).
   const second = makeWindow();
   assert.strictEqual(
     JSON.stringify(second.posted),
     JSON.stringify([{type: 'voiceToggle', enabled: true, sensitivity: 85}]),
   );
-  // A window whose storage says the user opted out must stay off —
-  // seed the flag BEFORE voice.js executes.
+  // A brand-new window (fresh storage — first install) must stay OFF:
+  // the mic is closed by default so Sorcar never responds to the wake
+  // word until the user turns it on.  Build the dom manually so no
+  // opt-in is seeded.
   const dom = new JSDOM(
     '<!DOCTYPE html><html><body>' +
       '<button id="voice-btn"></button>' +
@@ -161,7 +169,6 @@ test('mic state persists in localStorage and is applied on load', () => {
     {runScripts: 'dangerously', url: 'https://localhost/'},
   );
   const win = dom.window;
-  win.localStorage.setItem('kissVoiceEnabled', '0');
   win.__VOICE__ = {mode: 'webview'};
   const posted = [];
   win.addEventListener('kiss-voice-post', e => posted.push(e.detail));
@@ -169,6 +176,23 @@ test('mic state persists in localStorage and is applied on load', () => {
   script.textContent = fs.readFileSync(VOICE_JS_PATH, 'utf-8');
   win.document.body.appendChild(script);
   assert.strictEqual(posted.length, 0);
+  // And a stored opt-out ('0') also stays off.
+  const dom2 = new JSDOM(
+    '<!DOCTYPE html><html><body>' +
+      '<button id="voice-btn"></button>' +
+      '<textarea id="task-input"></textarea>' +
+      '</body></html>',
+    {runScripts: 'dangerously', url: 'https://localhost/'},
+  );
+  const win2 = dom2.window;
+  win2.localStorage.setItem('kissVoiceEnabled', '0');
+  win2.__VOICE__ = {mode: 'webview'};
+  const posted2 = [];
+  win2.addEventListener('kiss-voice-post', e => posted2.push(e.detail));
+  const script2 = win2.document.createElement('script');
+  script2.textContent = fs.readFileSync(VOICE_JS_PATH, 'utf-8');
+  win2.document.body.appendChild(script2);
+  assert.strictEqual(posted2.length, 0);
 });
 
 test('voiceState messages drive the toggle UI classes', () => {
