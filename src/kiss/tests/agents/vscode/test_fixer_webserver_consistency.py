@@ -42,7 +42,7 @@ from typing import Any
 
 from kiss.agents.sorcar import persistence as th
 from kiss.agents.sorcar.persistence import _add_task, _append_chat_event
-from kiss.agents.vscode.web_server import (
+from kiss.server.web_server import (
     _MAX_LINE_BYTES,
     _MAX_PROMPT_BYTES,
     RemoteAccessServer,

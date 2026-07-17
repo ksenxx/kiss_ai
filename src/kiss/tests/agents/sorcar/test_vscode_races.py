@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Race condition tests for ``kiss.agents.vscode``.
+"""Race condition tests for ``kiss.server``.
 
 Each test first demonstrates a real data-race between two or more
 threads in the current code path.  After the matching lock fix is
@@ -20,7 +20,7 @@ from __future__ import annotations
 import threading
 import unittest
 
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.server import VSCodeServer
 
 # The historical ``TestBroadcastOrderingRace`` exercised the
 # ``_stdout_lock`` ordering guarantee inside the now-deleted
@@ -66,7 +66,7 @@ class TestFileCacheOverwriteRace(unittest.TestCase):
         t = threading.Thread(target=bg_refresh, daemon=True)
         t.start()
 
-        from kiss.agents.vscode import diff_merge
+        from kiss.server import diff_merge
 
         original_scan = diff_merge._scan_files
 

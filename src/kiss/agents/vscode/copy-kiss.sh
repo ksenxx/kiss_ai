@@ -15,7 +15,8 @@ DEST="$SCRIPT_DIR/kiss_project"
 if [ -n "${KISS_EXP_VERSION:-}" ]; then
     VERSION="$KISS_EXP_VERSION"
 else
-    VERSION=$(python3 -c "exec(open('$PROJECT_ROOT/src/kiss/_version.py').read()); print(__version__)")
+    # The version literal is single-sourced in src/kiss/core/_version.py.
+    VERSION=$(python3 -c "exec(open('$PROJECT_ROOT/src/kiss/core/_version.py').read()); print(__version__)")
 fi
 if [ -n "$VERSION" ]; then
     # Use python for portable JSON editing

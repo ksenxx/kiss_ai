@@ -3,7 +3,7 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 """Integration tests for bug fixes, redundancy acknowledgement, and
-consistency improvements in ``kiss.agents.vscode``.
+consistency improvements in ``kiss.server``.
 
 These tests assert the FIXED behavior — each test confirms the bug is
 resolved or the inconsistency is eliminated.
@@ -47,17 +47,17 @@ import threading
 import typing
 import unittest
 
-from kiss.agents.vscode.diff_merge import (
+from kiss.server.diff_merge import (
     _cleanup_merge_data,
     _merge_data_dir,
 )
-from kiss.agents.vscode.helpers import (
+from kiss.server.helpers import (
     clip_autocomplete_suggestion,
     model_vendor,
 )
-from kiss.agents.vscode.merge_flow import _MergeFlowMixin
-from kiss.agents.vscode.server import VSCodeServer
-from kiss.agents.vscode.task_runner import _TaskRunnerMixin
+from kiss.server.merge_flow import _MergeFlowMixin
+from kiss.server.server import VSCodeServer
+from kiss.server.task_runner import _TaskRunnerMixin
 
 
 def _make_server() -> tuple[VSCodeServer, list[dict]]:

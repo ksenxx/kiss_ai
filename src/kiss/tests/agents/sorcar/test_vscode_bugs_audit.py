@@ -3,7 +3,7 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 """Integration tests for bugs, redundancies, and inconsistencies in
-``kiss.agents.vscode`` — updated to verify the fixes.
+``kiss.server`` — updated to verify the fixes.
 
 Bugs
 ----
@@ -31,8 +31,8 @@ import unittest
 
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-from kiss.agents.vscode.diff_merge import _diff_files, _hunk_to_dict
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.diff_merge import _diff_files, _hunk_to_dict
+from kiss.server.server import VSCodeServer
 
 
 def _make_server() -> tuple[VSCodeServer, list[dict]]:

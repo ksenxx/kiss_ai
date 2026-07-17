@@ -23,10 +23,10 @@ import threading
 import unittest
 from pathlib import Path
 
-import kiss.agents.vscode.merge_flow as _merge_flow_module
+import kiss.server.merge_flow as _merge_flow_module
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.agents.vscode.server import VSCodeServer
-from kiss.agents.vscode.task_runner import _TaskRunnerMixin
+from kiss.server.server import VSCodeServer
+from kiss.server.task_runner import _TaskRunnerMixin
 
 
 def _git(cwd: str, *args: str) -> subprocess.CompletedProcess[str]:

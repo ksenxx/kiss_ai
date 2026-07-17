@@ -40,7 +40,7 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import (
     _load_chat_events_by_task_id,
 )
-from kiss.agents.vscode.json_printer import JsonPrinter
+from kiss.server.json_printer import JsonPrinter
 
 
 def _redirect(tmpdir: str) -> tuple:
@@ -105,7 +105,7 @@ class _StubAgent(ChatSorcarAgent):
                 "type": "text_delta",
                 "text": f"subagent-run-event-{prompt_template[:20]}",
             })
-        from kiss._version import __version__
+        from kiss.core._version import __version__
 
         extra_payload: dict[str, object] = {
             "model": self.model_name,

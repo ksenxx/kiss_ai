@@ -44,7 +44,7 @@ from websockets.datastructures import Headers
 from websockets.http11 import Request
 
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.agents.vscode.web_server import (
+from kiss.server.web_server import (
     RemoteAccessServer,
     _compare_versions,
     _get_local_ips,

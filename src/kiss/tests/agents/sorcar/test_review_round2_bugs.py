@@ -389,7 +389,7 @@ def test_run_tasks_parallel_does_not_persist_synthetic_parent(
 def test_cli_printer_normalises_event_task_id_to_lowercase(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from kiss.agents.sorcar import cli_daemon_bridge, cli_printer
+    from kiss.ui.cli import cli_daemon_bridge, cli_printer
 
     sent_events: list[dict[str, Any]] = []
     monkeypatch.setattr(
@@ -431,7 +431,7 @@ def test_cli_printer_normalises_event_task_id_to_lowercase(
 def test_cli_printer_emits_start_before_event_and_end_after(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from kiss.agents.sorcar import cli_daemon_bridge, cli_printer
+    from kiss.ui.cli import cli_daemon_bridge, cli_printer
 
     order: list[str] = []
     monkeypatch.setattr(

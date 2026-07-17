@@ -51,8 +51,8 @@ from typing import Any
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-from kiss.agents.vscode.server import VSCodeServer
 from kiss.core.models.model_info import get_available_models
+from kiss.server.server import VSCodeServer
 
 
 def _redirect_db(tmpdir: str) -> tuple:

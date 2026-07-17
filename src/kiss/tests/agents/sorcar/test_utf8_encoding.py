@@ -59,7 +59,7 @@ class TestUtf8Encoding:
         target = tmp_path / "unicode.txt"
         script = f"""
 import json
-from kiss.agents.sorcar.useful_tools import UsefulTools
+from kiss.core.useful_tools import UsefulTools
 
 text = json.loads({NON_ASCII_JSON!r})
 tools = UsefulTools(work_dir={str(tmp_path)!r})

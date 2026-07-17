@@ -4,7 +4,7 @@
 # add your name here
 """Bug-hunt 4: the steering box must handle bracketed paste as one block.
 
-Bug: :class:`kiss.agents.sorcar.cli_steering._InputBox` never enabled
+Bug: :class:`kiss.ui.cli.cli_steering._InputBox` never enabled
 bracketed-paste mode (``ESC[?2004h``) and treated the paste markers
 ``ESC[200~`` / ``ESC[201~`` as ordinary CSI sequences to swallow.  As a
 result pasting a multi-line instruction into the box submitted every
@@ -23,7 +23,7 @@ import threading
 
 import pytest
 
-from kiss.agents.sorcar.cli_steering import _InputBox
+from kiss.ui.cli.cli_steering import _InputBox
 
 
 def _make_box() -> _InputBox:

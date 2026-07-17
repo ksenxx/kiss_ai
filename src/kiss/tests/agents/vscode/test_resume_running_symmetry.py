@@ -43,7 +43,7 @@ from unittest.mock import patch
 import pytest
 
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.server import VSCodeServer
 
 MAIN_JS = (
     Path(__file__).parent.parent.parent.parent
@@ -176,7 +176,7 @@ class TestReplaySessionStatusBeforeTaskEvents:
         ) as mock_get_tab, patch.object(
             VSCodeServer, "_emit_pending_worktree",
         ), patch(
-            "kiss.agents.vscode.server._load_latest_chat_events_by_chat_id",
+            "kiss.server.server._load_latest_chat_events_by_chat_id",
             return_value=fake_result,
         ):
             class _StubTab:

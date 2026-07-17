@@ -39,7 +39,7 @@ from kiss.agents.sorcar.git_worktree import (
     _ensure_task_metadata,
     _porcelain_entries,
 )
-from kiss.agents.vscode.helpers import _append_task_result, _append_user_prompt
+from kiss.server.helpers import _append_task_result, _append_user_prompt
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:

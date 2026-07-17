@@ -4,7 +4,7 @@
 # add your name here
 """Bug-hunt 5: C1 control characters must not enter the steering buffer.
 
-Bug: :meth:`kiss.agents.sorcar.cli_steering._InputBox._append_paste`
+Bug: :meth:`kiss.ui.cli.cli_steering._InputBox._append_paste`
 documents that "other control characters are dropped so they cannot act
 as editing keys", and the typed-key path in :meth:`_InputBox.feed`
 guards with ``ch >= " "`` — but both checks only exclude the C0 range
@@ -27,8 +27,8 @@ import unicodedata
 
 import pytest
 
-from kiss.agents.sorcar.cli_panel import clip_buf
-from kiss.agents.sorcar.cli_steering import _InputBox
+from kiss.ui.cli.cli_panel import clip_buf
+from kiss.ui.cli.cli_steering import _InputBox
 
 
 def _make_box() -> _InputBox:

@@ -351,8 +351,8 @@ async function testLockReleasesWhenUserReturnsToBottom() {
     }),
   );
 
-  // User scrolls #output back to the bottom → 'scroll' handler
-  // releases _scrollLock (atBottom within 150px).
+  // User scrolls #output back to the very bottom → 'scroll' handler
+  // releases _scrollLock.
   O.scrollTop = O.scrollHeight - O.clientHeight;
   O.dispatchEvent(new win.Event('scroll'));
 

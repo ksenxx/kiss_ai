@@ -4,11 +4,11 @@
 # add your name here
 """End-to-end tests: the sorcar idle input textbox grows with line count.
 
-The interactive ``sorcar`` prompt (:func:`kiss.agents.sorcar.cli_repl
-._read_line_ptk`, backed by :class:`kiss.agents.sorcar.cli_prompt
+The interactive ``sorcar`` prompt (:func:`kiss.ui.cli.cli_repl
+._read_line_ptk`, backed by :class:`kiss.ui.cli.cli_prompt
 .PtkLineReader`) must render a multi-line user prompt as one visible
 terminal row per buffer line — exactly like the steering box's
-:func:`kiss.agents.sorcar.cli_panel.panel_body` (one row per ``\\n``)
+:func:`kiss.ui.cli.cli_panel.panel_body` (one row per ``\\n``)
 and like the chat-webview textarea (which grows with the content).
 
 These tests drive the real :class:`PromptSession` through a pipe input
@@ -19,7 +19,7 @@ the same way :mod:`test_cli_multiline_input` does, but capture the
 * a five-line buffer (entered via Alt+Enter or a bracketed paste)
   produces five distinct visible rows in the rendered output,
 * every continuation visual row starts with the cyan ``│ `` painted by
-  :func:`kiss.agents.sorcar.cli_prompt._prompt_continuation`,
+  :func:`kiss.ui.cli.cli_prompt._prompt_continuation`,
 * a single-line buffer renders no continuation rows (the panel
   shrinks back when there's only one line — chat-webview parity).
 
@@ -42,8 +42,8 @@ from prompt_toolkit.formatted_text import ANSI, to_formatted_text
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output.plain_text import PlainTextOutput
 
-from kiss.agents.sorcar.cli_prompt import PtkLineReader, _prompt_continuation
-from kiss.agents.sorcar.cli_repl import CliCompleter
+from kiss.ui.cli.cli_prompt import PtkLineReader, _prompt_continuation
+from kiss.ui.cli.cli_repl import CliCompleter
 
 # Fixed terminal geometry for the capturing output — wide enough that
 # the typed lines are never wrap-clipped (so each ``\\n`` becomes a
@@ -125,7 +125,7 @@ def _final_input_rows(rendered: str) -> list[str]:
 def _rows_starting_with_continuation(rows: list[str]) -> list[str]:
     """Return rendered rows that begin with the ``│ `` continuation prefix.
 
-    :func:`kiss.agents.sorcar.cli_prompt._prompt_continuation` paints
+    :func:`kiss.ui.cli.cli_prompt._prompt_continuation` paints
     the cyan ``│`` + space as the left margin of every continuation
     visual row; counting those rows gives the number of visible input
     rows past the first.
@@ -259,7 +259,7 @@ def test_continuation_rows_carry_cyan_border_glyph(tmp_path: Path) -> None:
 def test_input_textbox_height_matches_buffer_line_count(tmp_path: Path) -> None:
     """Visible input rows == buffer line count (the chat-webview parity).
 
-    The chat-webview textarea (:mod:`kiss.agents.vscode`) grows by one
+    The chat-webview textarea (:mod:`kiss.server`) grows by one
     visible row per ``\\n`` in the model input — no more, no less.
     The CLI idle prompt must match that behaviour: a buffer with
     ``N`` lines renders exactly ``N`` visible input rows in the

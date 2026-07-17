@@ -56,9 +56,9 @@ def _init_git_repo(path: Path) -> None:
     )
 
 
-def _find_bash_tool(tools: list[Any] | None) -> Any:
+def _find_tool(tools: list[Any] | None, name: str) -> Any:
     for tool in tools or []:
-        if getattr(tool, "__name__", None) == "Bash":
+        if getattr(tool, "__name__", None) == name:
             return tool
     return None
 
@@ -104,8 +104,12 @@ def test_worktree_disappears_mid_run_bash_falls_back(tmp_path, monkeypatch):
         self_kiss.total_tokens_used = 0
         self_kiss.budget_used = 0.0
 
-        bash_tool = _find_bash_tool(tools)
-        useful = getattr(bash_tool, "__self__", None) if bash_tool else None
+        bash_tool = _find_tool(tools, "Bash")
+        # ``Bash`` is a plain closure (grep-hint interception wrapper),
+        # so reach the shared ``UsefulTools`` instance through the
+        # still-bound ``Read`` tool.
+        read_tool = _find_tool(tools, "Read")
+        useful = getattr(read_tool, "__self__", None) if read_tool else None
         work_dir = useful.work_dir if useful else None
 
         if call_idx == 0:

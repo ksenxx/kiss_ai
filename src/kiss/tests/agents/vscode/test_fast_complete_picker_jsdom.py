@@ -15,7 +15,7 @@ The test exercises the dropdown picker that the chat input
 textbox uses to surface fast-complete suggestions while the user
 types — the same DOM that the ``@``-mention file picker reuses,
 but driven by the ``completions`` message from the backend's
-:class:`kiss.agents.vscode.autocomplete.Autocomplete` worker.
+:class:`kiss.server.autocomplete.Autocomplete` worker.
 
 Behaviours verified by the underlying JS test (see file for
 details):

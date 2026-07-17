@@ -25,7 +25,7 @@ import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps, _git
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.server import VSCodeServer
 
 
 def _agent(server: VSCodeServer, tab_id: str = "0") -> WorktreeSorcarAgent:

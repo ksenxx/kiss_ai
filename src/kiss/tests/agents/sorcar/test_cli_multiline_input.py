@@ -4,7 +4,7 @@
 # add your name here
 """Integration tests for multi-line input + word-wrap in the sorcar CLI.
 
-The interactive sorcar prompt (:mod:`kiss.agents.sorcar.cli_prompt`)
+The interactive sorcar prompt (:mod:`kiss.ui.cli.cli_prompt`)
 must let the user enter multi-line tasks directly in the input box and
 must word-wrap the visible text instead of letting it scroll
 horizontally off the panel.
@@ -33,8 +33,8 @@ from prompt_toolkit.formatted_text import ANSI, to_formatted_text
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 
-from kiss.agents.sorcar.cli_prompt import PtkLineReader, _prompt_continuation
-from kiss.agents.sorcar.cli_repl import CliCompleter
+from kiss.ui.cli.cli_prompt import PtkLineReader, _prompt_continuation
+from kiss.ui.cli.cli_repl import CliCompleter
 
 
 def _make_project_tree(tmp_path: Path) -> Path:
@@ -242,7 +242,7 @@ def test_unmap_enter_aliases_is_idempotent(tmp_path: Path) -> None:
         ANSI_SEQUENCES,
     )
 
-    from kiss.agents.sorcar.cli_prompt import (  # noqa: PLC0415
+    from kiss.ui.cli.cli_prompt import (  # noqa: PLC0415
         _MODIFY_OTHER_KEYS_ENTER,
         _unmap_enter_aliases,
     )

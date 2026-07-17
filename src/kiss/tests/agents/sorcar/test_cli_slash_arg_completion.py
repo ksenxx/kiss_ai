@@ -8,8 +8,8 @@ Typing a slash command followed by a space (e.g. ``/resume ``) must pop
 the command's argument options — ``--task`` / ``--limit`` for
 ``/resume``, ``list`` plus model names for ``/model``, and the
 discovered skill names for ``/skills`` — in both the readline
-(:class:`~kiss.agents.sorcar.cli_repl.CliCompleter`) and prompt_toolkit
-(:class:`~kiss.agents.sorcar.cli_prompt.PtkCompleter`) frontends.  The
+(:class:`~kiss.ui.cli.cli_repl.CliCompleter`) and prompt_toolkit
+(:class:`~kiss.ui.cli.cli_prompt.PtkCompleter`) frontends.  The
 completions run against the real filesystem, real skill discovery, and
 the real history database; no mocks are used.
 """
@@ -23,8 +23,8 @@ from prompt_toolkit.completion import CompleteEvent
 from prompt_toolkit.document import Document
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar.cli_prompt import PtkCompleter
-from kiss.agents.sorcar.cli_repl import CliCompleter
+from kiss.ui.cli.cli_prompt import PtkCompleter
+from kiss.ui.cli.cli_repl import CliCompleter
 
 
 @pytest.fixture

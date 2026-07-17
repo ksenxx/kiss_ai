@@ -7,8 +7,8 @@
 Instead of calling ``SorcarAgent.run`` directly, every agent in
 ``kiss/agents/third_party_agents/`` is launched through
 :func:`run_agent_via_kiss_web`, which drives
-:meth:`kiss.agents.vscode.commands._CommandsMixin._cmd_run` on a
-:class:`~kiss.agents.vscode.server.VSCodeServer`.  The launcher
+:meth:`kiss.server.commands._CommandsMixin._cmd_run` on a
+:class:`~kiss.server.server.VSCodeServer`.  The launcher
 pre-registers the agent instance in
 :attr:`_RunningAgentState.running_agent_states` (the *kiss-web
 registered agent* registry), so while the task runs it is
@@ -31,7 +31,7 @@ from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
 if TYPE_CHECKING:
-    from kiss.agents.vscode.server import VSCodeServer
+    from kiss.server.server import VSCodeServer
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +62,7 @@ def default_server() -> VSCodeServer:
     global _DEFAULT_SERVER
     with _DEFAULT_SERVER_LOCK:
         if _DEFAULT_SERVER is None:
-            from kiss.agents.vscode.server import VSCodeServer
+            from kiss.server.server import VSCodeServer
 
             _DEFAULT_SERVER = VSCodeServer()
         return _DEFAULT_SERVER

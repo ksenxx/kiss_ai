@@ -269,10 +269,15 @@ def test_config_roundtrip(info: dict) -> None:
     config_path_fn = getattr(mod, "_config_path", None)
     load_fn = getattr(mod, "_load_config", None)
     clear_fn = getattr(mod, "_clear_config", None)
-    if not config_path_fn or not load_fn or not clear_fn:
-        pytest.skip(f"No standard config functions in {info['module']}")
-
-    path = config_path_fn()
+    if config_path_fn and load_fn and clear_fn:
+        path = config_path_fn()
+    else:
+        config = getattr(mod, "_config", None)
+        if config is None:
+            pytest.skip(f"No standard config functions in {info['module']}")
+        path = config.path
+        load_fn = config.load
+        clear_fn = config.clear
     backup = None
     if path.exists():
         backup = path.read_text()

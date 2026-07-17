@@ -70,7 +70,7 @@ class TestMicWatchdog(unittest.TestCase):
         proc = subprocess.run(
             [
                 "uv", "run", "python", "-m",
-                "kiss.agents.vscode.voice_wake",
+                "kiss.server.voice_wake",
                 "--mic-watchdog-timeout", str(WATCHDOG_TIMEOUT_SECONDS),
             ],
             cwd=PROJECT_ROOT,
@@ -111,7 +111,7 @@ class TestMicWatchdogTimeoutArg(unittest.TestCase):
             proc = subprocess.run(
                 [
                     "uv", "run", "python", "-m",
-                    "kiss.agents.vscode.voice_wake",
+                    "kiss.server.voice_wake",
                     f"--mic-watchdog-timeout={raw}",
                 ],
                 cwd=PROJECT_ROOT,

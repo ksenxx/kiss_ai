@@ -23,18 +23,22 @@ export const MY_INJECTION_DEFAULT_BODY =
 export const DEFAULT_MY_INJECTION =
   '## Trick\n\n' + MY_INJECTION_DEFAULT_BODY + '\n';
 
-/** Read the KISS project version from ``_version.py`` on disk. */
+/** Read the KISS project version from ``_version.py`` on disk.
+ *
+ * The version literal is single-sourced in ``src/kiss/core/_version.py``.
+ */
 export function getVersion(): string {
+  const kissRoot = findKissProject();
+  if (!kissRoot) return '';
   try {
-    const kissRoot = findKissProject();
-    if (kissRoot) {
-      const versionFile = path.join(kissRoot, 'src', 'kiss', '_version.py');
-      const content = fs.readFileSync(versionFile, 'utf-8');
-      const match = content.match(/__version__\s*=\s*["']([^"']+)["']/);
-      if (match) return match[1];
-    }
+    const content = fs.readFileSync(
+      path.join(kissRoot, 'src', 'kiss', 'core', '_version.py'),
+      'utf-8',
+    );
+    const match = content.match(/__version__\s*=\s*["']([^"']+)["']/);
+    if (match) return match[1];
   } catch {
-    /* ignore */
+    /* version file unreadable */
   }
   return '';
 }
@@ -110,7 +114,7 @@ function readMarkdownSections(markdownFile: string, heading: string): string[] {
  * The bundled file path honours the ``KISS_INJECTIONS_PATH``
  * environment variable (used by the test suite to pin a known set of
  * bundled tricks), matching the Python helper
- * :func:`kiss.agents.vscode.tricks._bundled_injections_path`.
+ * :func:`kiss.server.tricks._bundled_injections_path`.
  */
 export function getTricks(): string[] {
   const items: string[] = [];
@@ -167,7 +171,7 @@ function parseTipSections(text: string): string[] {
  *
  * The file path honours the ``KISS_TIPS_PATH`` environment variable
  * (used by the test suite to pin deterministic tips), matching the
- * Python helper ``kiss.agents.vscode.tips.read_tips``.  Returns ``[]``
+ * Python helper ``kiss.server.tips.read_tips``.  Returns ``[]``
  * when the file is missing or unreadable so the chat webview still
  * renders without a tips window.
  */

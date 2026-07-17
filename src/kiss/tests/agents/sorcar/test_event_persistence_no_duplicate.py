@@ -27,7 +27,7 @@ from kiss.agents.sorcar.persistence import (
     _flush_chat_events,
     _load_chat_events_by_task_id,
 )
-from kiss.agents.vscode.json_printer import JsonPrinter
+from kiss.server.json_printer import JsonPrinter
 
 
 def _redirect(tmpdir: str) -> tuple:

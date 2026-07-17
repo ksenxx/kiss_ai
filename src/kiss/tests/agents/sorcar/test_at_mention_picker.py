@@ -5,7 +5,7 @@
 """Integration tests for the sorcar CLI ``@``-mention picker.
 
 Covers the prompt_toolkit dropdown added in
-:mod:`kiss.agents.sorcar.cli_prompt`: pressing ``@`` must immediately
+:mod:`kiss.ui.cli.cli_prompt`: pressing ``@`` must immediately
 offer the project's files and folders, Up/Down must navigate the menu,
 and Tab or Enter must insert the highlighted ``./<path>`` mention
 without submitting the line.  Outside the ``@``-mention file picker
@@ -26,8 +26,8 @@ from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 
 from kiss.agents.sorcar import persistence as th
-from kiss.agents.sorcar.cli_prompt import PtkCompleter, PtkLineReader
-from kiss.agents.sorcar.cli_repl import SLASH_COMMANDS, CliCompleter
+from kiss.ui.cli.cli_prompt import PtkCompleter, PtkLineReader
+from kiss.ui.cli.cli_repl import SLASH_COMMANDS, CliCompleter
 
 
 def _redirect(tmp_path: Path):

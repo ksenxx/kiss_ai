@@ -23,7 +23,7 @@
 //
 // ``checkForExtensionUpdate`` actively queries PyPI on activation,
 // compares the result with the locally installed ``__version__``
-// shipped in ``kiss_project/src/kiss/_version.py``, and surfaces a
+// shipped in ``kiss_project/src/kiss/core/_version.py``, and surfaces a
 // chat-webview notification with a single "Update now" action when an
 // upgrade is available.  A cached result at
 // ``~/.kiss/.update-check.json`` rate-limits repeated checks so that
@@ -146,9 +146,12 @@ function scanInstalledExtensionVersions(extensionsRoot) {
       continue;
     }
     if (!e.name.startsWith(EXTENSION_DIR_PREFIX)) continue;
-    const v = readVersionPy(
-      path.join(root, e.name, 'kiss_project', 'src', 'kiss', '_version.py'),
-    );
+    // Canonical location since the version literal moved into
+    // ``kiss.core``; the pre-move ``kiss/_version.py`` path is kept
+    // as a fallback for extensions installed before the move.
+    const kissDir = path.join(root, e.name, 'kiss_project', 'src', 'kiss');
+    const v = readVersionPy(path.join(kissDir, 'core', '_version.py')) ||
+        readVersionPy(path.join(kissDir, '_version.py'));
     if (v) versions.push(v);
   }
   return versions;
@@ -176,9 +179,11 @@ function resolveCurrentVersion(kissProjectPath, extensionsRoot) {
   }
   if (best) return best;
   if (kissProjectPath) {
-    const v = readVersionPy(
-      path.join(kissProjectPath, 'src', 'kiss', '_version.py'),
-    );
+    // Canonical location first (version literal lives in
+    // ``kiss/core/_version.py``); legacy path kept as a fallback.
+    const kissDir = path.join(kissProjectPath, 'src', 'kiss');
+    const v = readVersionPy(path.join(kissDir, 'core', '_version.py')) ||
+        readVersionPy(path.join(kissDir, '_version.py'));
     if (v) return v;
   }
   return null;
@@ -308,7 +313,7 @@ function writeCache(cachePath, data) {
  *   cooldownMs        Min ms between successful checks (default: 6 h).
  *   fetchTimeoutMs    HTTP timeout (default: 15 s).
  *   currentVersion    Override local version string.
- *   kissProjectPath   Where to look for src/kiss/_version.py.
+ *   kissProjectPath   Where to look for src/kiss/core/_version.py.
  *   fetchLatest       Override the PyPI fetcher (returns string|null).
  *   notify            Called with ({latest, current}) when an upgrade
  *                     is available; defaults to a no-op so the helper

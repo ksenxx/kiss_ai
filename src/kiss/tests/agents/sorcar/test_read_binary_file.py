@@ -21,9 +21,9 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.core.models.model import parse_binary_attachments
 from kiss.core.printer import truncate_result
+from kiss.core.useful_tools import UsefulTools
 
 # 1x1 transparent PNG — starts with the classic 0x89 PNG signature byte that
 # triggers the UTF-8 decode failure reported by the user.
