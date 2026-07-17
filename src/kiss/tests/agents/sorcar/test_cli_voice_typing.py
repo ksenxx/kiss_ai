@@ -39,10 +39,10 @@ from typing import Any
 
 import pytest
 
-from kiss.agents.sorcar import cli_voice
-from kiss.agents.sorcar.cli_client import CliClient, _run_repl_loop
-from kiss.agents.sorcar.cli_steering import AnchoredRepl
 from kiss.core.print_to_console import ConsolePrinter
+from kiss.ui.cli import cli_voice
+from kiss.ui.cli.cli_client import CliClient, _run_repl_loop
+from kiss.ui.cli.cli_steering import AnchoredRepl
 
 CYAN = "\x1b[36m"
 RED = "\x1b[31m"
@@ -443,7 +443,7 @@ class TestSteerHeaderIndicator:
         # Blinking after WAKE, with the STEER title following the
         # indicator on the same top border.
         assert (
-            f"{HDR_BLINK}Listening ...{RESET}{CYAN} Dynamic steer"
+            f"{HDR_BLINK}Listening ...{RESET}{CYAN}Dynamic steer"
             in rendered
         )
         assert HDR_BLINK + "Transcribing ..." in rendered

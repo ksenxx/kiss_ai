@@ -30,9 +30,9 @@ import threading
 import unittest
 from pathlib import Path
 
-import kiss.agents.vscode.merge_flow as _merge_flow_module
+import kiss.server.merge_flow as _merge_flow_module
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.server import VSCodeServer
 
 _VSCODE_DIR = Path(__file__).resolve().parents[3] / "agents" / "vscode"
 
@@ -98,8 +98,12 @@ class _AutocommitTaskHarness(unittest.TestCase):
         _init_repo(self.tmpdir)
         self.server, self.events = _make_server(self.tmpdir)
         self._orig_gen = _merge_flow_module.generate_commit_message_from_diff
-        def _stub(diff_text: str, user_prompt: str | None = None) -> str:
-            del diff_text, user_prompt
+        def _stub(
+            diff_text: str,
+            user_prompt: str | None = None,
+            task_result: str | None = None,
+        ) -> str:
+            del diff_text, user_prompt, task_result
             return "auto-commit-toggle-test"
 
         _merge_flow_module.generate_commit_message_from_diff = _stub

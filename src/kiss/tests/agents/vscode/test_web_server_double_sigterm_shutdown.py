@@ -47,7 +47,7 @@ _DRIVER = r"""
 import os, signal, subprocess, sys, time
 from pathlib import Path
 
-from kiss.agents.vscode.web_server import RemoteAccessServer
+from kiss.server.web_server import RemoteAccessServer
 
 url_file = sys.argv[1]
 uds_path = sys.argv[2]

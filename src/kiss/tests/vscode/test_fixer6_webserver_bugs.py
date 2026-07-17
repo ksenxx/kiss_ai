@@ -42,10 +42,10 @@ from pathlib import Path
 from typing import Any, cast
 
 import kiss.agents.sorcar.persistence as th
-import kiss.agents.vscode.web_server as ws_mod
+import kiss.server.web_server as ws_mod
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.agents.vscode.server import VSCodeServer
-from kiss.agents.vscode.web_server import RemoteAccessServer
+from kiss.server.server import VSCodeServer
+from kiss.server.web_server import RemoteAccessServer
 
 
 def _redirect_persistence(tmpdir: str) -> tuple[Any, Any, Any]:

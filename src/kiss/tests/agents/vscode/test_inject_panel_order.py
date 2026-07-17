@@ -6,7 +6,7 @@
 
 The Inject instruction panel (sidebar button in the VS Code chat
 webview) renders the strings returned by
-:func:`kiss.agents.vscode.tricks.read_tricks` (Python side, used by
+:func:`kiss.server.tricks.read_tricks` (Python side, used by
 the kiss-web daemon HTML builder).  The contract:
 
 1. ``~/.kiss/MY_INJECTION.md`` is auto-seeded on first read with the
@@ -36,13 +36,12 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.vscode.tricks import (
+from kiss.server.tricks import (
     DEFAULT_MY_INJECTION,
     MY_INJECTION_DEFAULT_BODY,
     read_tricks,
 )
-from kiss.agents.vscode.user_assets import kiss_home_dir
-from kiss.agents.vscode.web_server import _read_tricks
+from kiss.server.user_assets import kiss_home_dir
 
 
 @pytest.fixture
@@ -192,16 +191,17 @@ def test_read_tricks_handles_unreadable_my_injection_gracefully(
 def test_web_server_read_tricks_uses_my_injection_first(
     kiss_home: Path, bundled_injections: Path,
 ) -> None:
-    """``web_server._read_tricks`` returns MY_INJECTION first, then bundled.
+    """The daemon's tricks source returns MY_INJECTION first, then bundled.
 
-    Wraps the public :func:`kiss.agents.vscode.tricks.read_tricks` so
-    the HTML builder gets the merged ordered list.
+    ``web_server`` builds its HTML from the public
+    :func:`kiss.server.tricks.read_tricks`, which must yield
+    the merged ordered list.
     """
     kiss_home.mkdir(parents=True, exist_ok=True)
     (kiss_home / "MY_INJECTION.md").write_text(
         "## Trick\n\ndaemon-side user trick\n",
     )
-    tricks = _read_tricks()
+    tricks = read_tricks()
     assert tricks == [
         "daemon-side user trick",
         "bundled trick one",

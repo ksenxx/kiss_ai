@@ -17,12 +17,15 @@ import logging
 import mimetypes
 import os
 import re
+import time
 import types as types_module
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Union, get_args, get_origin
+
+from kiss.core.kiss_error import KISSError
 
 logger = logging.getLogger(__name__)
 
@@ -353,6 +356,22 @@ def parse_binary_attachments(text: str) -> tuple[str, list[Attachment]]:
     return "".join(out_parts), attachments
 
 
+def _tool_result_to_string(result_dict: dict[str, Any]) -> str:
+    """Return a provider-safe string for a tool result payload.
+
+    Structured values are JSON encoded consistently across the base,
+    Chat-Completions, and Responses implementations.  Values unsupported by
+    JSON fall back to ``str`` so attachment parsing always receives text.
+    """
+    raw_result = result_dict.get("result", str(result_dict))
+    if isinstance(raw_result, str):
+        return raw_result
+    try:
+        return json.dumps(raw_result, ensure_ascii=False)
+    except TypeError:
+        return str(raw_result)
+
+
 _AUDIO_MIME_TO_EXT: dict[str, str] = {
     "audio/mpeg": ".mp3",
     "audio/mp3": ".mp3",
@@ -366,11 +385,35 @@ _AUDIO_MIME_TO_EXT: dict[str, str] = {
 }
 
 
+def _is_transient_transcription_error(exc: Exception) -> bool:
+    """Return True when a transcription failure is worth retrying.
+
+    Retryable: rate limits (429), connection/timeout errors, and
+    server-side 5xx responses.  Not retryable: authentication,
+    invalid-request, and other deterministic client errors.
+
+    Args:
+        exc: The exception raised by the OpenAI transcription call.
+
+    Returns:
+        True when the error is transient and the call may be retried.
+    """
+    import openai
+
+    if isinstance(exc, (openai.APIConnectionError, openai.APITimeoutError)):
+        return True
+    if isinstance(exc, openai.APIStatusError):
+        return exc.status_code == 429 or exc.status_code >= 500
+    return False
+
+
 def transcribe_audio(data: bytes, mime_type: str, api_key: str | None = None) -> str:
     """Transcribe audio bytes to text using OpenAI's Whisper API.
 
     This is used as a fallback for model providers that do not support audio
-    attachments natively (e.g. Anthropic).
+    attachments natively (e.g. Anthropic).  Transient API failures (rate
+    limits, connection errors, 5xx responses) are retried a couple of times
+    with a short backoff before giving up.
 
     Args:
         data: Raw audio file bytes.
@@ -393,16 +436,21 @@ def transcribe_audio(data: bytes, mime_type: str, api_key: str | None = None) ->
 
     ext = _AUDIO_MIME_TO_EXT.get(mime_type, ".mp3")
     client = OpenAI(api_key=key)
-    try:
-        transcript = client.audio.transcriptions.create(
-            model="whisper-1",
-            file=(f"audio{ext}", data, mime_type),
-            response_format="text",
-        )
-    except Exception as exc:
-        raise RuntimeError(f"Audio transcription failed: {exc}") from exc
-
-    return str(transcript).strip()
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        try:
+            transcript = client.audio.transcriptions.create(
+                model="whisper-1",
+                file=(f"audio{ext}", data, mime_type),
+                response_format="text",
+            )
+            return str(transcript).strip()
+        except Exception as exc:
+            if attempt < max_attempts and _is_transient_transcription_error(exc):
+                time.sleep(0.5 * attempt)
+                continue
+            raise RuntimeError(f"Audio transcription failed: {exc}") from exc
+    raise RuntimeError("Audio transcription failed")  # pragma: no cover - unreachable
 
 
 def flatten_content_to_text(content: Any) -> str:
@@ -507,7 +555,8 @@ class Model(ABC):
     ) -> None:
         """Replace the last assistant message with one that includes tool calls.
 
-        Used by text-based tool calling paths (ClaudeCodeModel, OpenAIModel)
+        Used by text-based tool calling paths (ClaudeCodeModel, CodexModel,
+        OpenAICompatibleModel)
         where ``generate()`` already appended a plain assistant message and it
         needs to be upgraded to include parsed tool call metadata.
 
@@ -642,7 +691,7 @@ class Model(ABC):
         tool_calls = self._find_tool_call_ids_from_last_assistant()
 
         for i, (func_name, result_dict) in enumerate(function_results):
-            result_content = result_dict.get("result", str(result_dict))
+            result_content = _tool_result_to_string(result_dict)
             # Strip binary attachment payloads — the default OpenAI-style
             # ``role: tool`` message does not accept image content blocks,
             # so we drop the base64 bytes and keep only the placeholder
@@ -871,6 +920,96 @@ class Model(ABC):
             return type_mapping[python_type]
 
         return {"type": "string"}
+
+
+class CLITextModel(Model):
+    """Base class for the stateless CLI-backed models (Claude Code, Codex).
+
+    Both transports flatten the conversation into a single text prompt,
+    support tool calling only via the text-based ``tool_calls`` JSON
+    protocol, and cannot produce embeddings.  That shared plumbing lives
+    here; subclasses implement the subprocess invocation and stream
+    parsing.
+    """
+
+    # Concrete transports override both attributes so inherited methods
+    # preserve the exact class label and provider-module logger used before
+    # this plumbing moved into the shared base.  In particular, subclasses
+    # of ClaudeCodeModel/CodexModel must retain the concrete transport name
+    # rather than exposing their own subclass name in warnings/errors.
+    _cli_model_name = "CLITextModel"
+    _cli_logger = logger
+
+    def initialize(self, prompt: str, attachments: list[Attachment] | None = None) -> None:
+        """Initialize the conversation with an initial user prompt.
+
+        Args:
+            prompt: The initial user prompt.
+            attachments: Not supported — ignored with a warning if provided.
+        """
+        if attachments:  # pragma: no cover – attachments not used in practice
+            self._cli_logger.warning(
+                f"{self._cli_model_name} does not support attachments; "
+                "they will be ignored."
+            )
+        self.conversation = [{"role": "user", "content": prompt}]
+
+    def _conversation_as_dialogue(self) -> str:
+        """Render the conversation as a ``[User]/[Assistant]/[Tool Result]`` transcript.
+
+        The CLI transports are stateless across invocations, so multi-turn
+        conversations are flattened into a single text block.  Tool-result
+        messages (``role == "tool"``) are rendered as ``[Tool Result]: …``.
+
+        Returns:
+            The assembled transcript string.
+        """
+        parts: list[str] = []
+        for msg in self.conversation:
+            role = msg["role"]
+            content = flatten_content_to_text(msg.get("content", ""))
+            if role == "user":
+                parts.append(f"[User]: {content}")
+            elif role == "assistant":
+                parts.append(f"[Assistant]: {content}")
+            elif role == "tool":
+                parts.append(f"[Tool Result]: {content}")
+        return "\n\n".join(parts)
+
+    def _install_tools_prompt_in_system_instruction(
+        self, function_map: dict[str, Callable[..., Any]]
+    ) -> dict[str, Any]:
+        """Install a copied config containing the text-based tools prompt.
+
+        Returns the original config so callers can restore it in their own
+        ``finally`` block.  Keeping restoration at the call site is
+        intentional: Codex historically installed the config *before*
+        reading or replacing its stream callbacks, then restored the config
+        *before* those callbacks.  A context manager necessarily changes one
+        of those exception/order semantics because nested contexts unwind in
+        reverse order.
+
+        Args:
+            function_map: Dictionary mapping function names to callables.
+
+        Returns:
+            The original ``model_config`` object, unchanged.
+        """
+        tools_prompt = _build_text_based_tools_prompt(function_map)
+        original_config = self.model_config
+        config = dict(original_config)
+        original_system = config.get("system_instruction", "")
+        config["system_instruction"] = (original_system + "\n\n" + tools_prompt).strip()
+        self.model_config = config
+        return original_config
+
+    def get_embedding(self, text: str, embedding_model: str | None = None) -> list[float]:
+        """Not supported — the CLI transports do not provide embeddings.
+
+        Raises:
+            KISSError: Always.
+        """
+        raise KISSError(f"{self._cli_model_name} does not support embeddings.")
 
 
 def _build_text_based_tools_prompt(function_map: dict[str, Callable[..., Any]]) -> str:

@@ -29,8 +29,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
-from kiss.agents.vscode.server import VSCodeServer
-from kiss.agents.vscode.task_runner import _RunningAgentState
+from kiss.server.server import VSCodeServer
+from kiss.server.task_runner import _RunningAgentState
 
 
 class TestFilesEventCarriesPrefix(unittest.TestCase):

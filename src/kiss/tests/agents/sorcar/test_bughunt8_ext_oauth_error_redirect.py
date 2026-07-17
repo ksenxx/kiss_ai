@@ -24,7 +24,7 @@ import urllib.request
 
 import pytest
 
-from kiss.agents.sorcar.mcp_cli import _OAuthCallbackServer
+from kiss.ui.cli.mcp_cli import _OAuthCallbackServer
 
 
 def test_error_redirect_fails_fast_with_reason() -> None:

@@ -24,13 +24,13 @@ from kiss.agents.sorcar.git_worktree import (
 )
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-from kiss.agents.vscode.diff_merge import (
+from kiss.server.diff_merge import (
     _merge_data_dir,
     _parse_diff_hunks,
     _prepare_merge_view,
     _save_untracked_base,
 )
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.server import VSCodeServer
 
 
 def _redirect_db(tmpdir: str) -> tuple:

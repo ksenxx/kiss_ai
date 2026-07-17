@@ -4,8 +4,8 @@
 # add your name here
 """End-to-end regression tests for bughunt round 9 on the CLI client.
 
-Scope: :mod:`kiss.agents.sorcar.cli_client` and
-:mod:`kiss.agents.sorcar.cli_daemon_bridge` only.  Each test spins up
+Scope: :mod:`kiss.ui.cli.cli_client` and
+:mod:`kiss.ui.cli.cli_daemon_bridge` only.  Each test spins up
 (or reuses, via :class:`CliClientBase`) a REAL
 :class:`RemoteAccessServer` on a temporary Unix-domain socket — no
 mocks, patches, or fakes.
@@ -47,17 +47,17 @@ import time
 import uuid
 from pathlib import Path
 
-from kiss.agents.sorcar import cli_client as cli_client_mod
-from kiss.agents.sorcar import cli_daemon_bridge
-from kiss.agents.sorcar.cli_client import (
+from kiss.core.print_to_console import ConsolePrinter
+from kiss.tests.agents.sorcar.test_cli_client import CliClientBase
+from kiss.ui.cli import cli_client as cli_client_mod
+from kiss.ui.cli import cli_daemon_bridge
+from kiss.ui.cli.cli_client import (
     CliClient,
     _EventDispatcher,
     _handle_client_slash,
     _request_models,
     _run_repl_loop,
 )
-from kiss.core.print_to_console import ConsolePrinter
-from kiss.tests.agents.sorcar.test_cli_client import CliClientBase
 
 
 class TestCustomCommandUsesCallerSubmit(CliClientBase):

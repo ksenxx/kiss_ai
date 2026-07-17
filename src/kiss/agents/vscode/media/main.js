@@ -520,6 +520,14 @@
   let attachments = [];
   let _scrollLock = false;
   let _noScroll = false;
+  // The scrollTop sb()'s own programmatic ``O.scrollTo`` landed on
+  // while its ``scroll`` event is still in flight (-1 = none).  The
+  // #output 'scroll' handler consumes it so the auto-scroller's own
+  // event is never mistaken for the user scrolling away from the end
+  // (which would engage ``_scrollLock``) — while a coalesced event
+  // showing a position BELOW this target still counts as the user
+  // scrolling up.
+  let _sbScrollTarget = -1;
   // When true (only during bulk replay in replayEventsInto), hlBlock defers
   // syntax highlighting: code blocks are tagged `needs-hl` instead of being
   // highlighted, so panels collapsed by collapseAllExceptResult() are only
@@ -553,6 +561,9 @@
   let historyLoading = false;
   let historyHasMore = true;
   let historyGeneration = 0;
+  // True once the user has edited (or cleared) the History From/To
+  // date inputs; blocks the ``dateRange`` auto-fill on refreshes.
+  let historyDateRangeUserSet = false;
   // Session-scoped sets tracking the live running→completed
   // transition for the History panel's status dot.  The invariant:
   //   * A running row renders the pulsing green dot.
@@ -882,6 +893,7 @@
     pendingPanel = tab.streamPendingPanel || false;
     stepCount = tab.streamStepCount || 0;
     _scrollLock = false;
+    _sbScrollTarget = -1;
     // Restore worktree bar
     if (worktreeBar && worktreeBar.parentNode)
       worktreeBar.parentNode.removeChild(worktreeBar);
@@ -911,12 +923,18 @@
     } else if (isMerging) {
       showMergeToolbar(tab.id);
     }
-    // Set inputContainer visibility based on active bars and subagent tab status
+    // Set inputContainer visibility based on active bars and subagent tab
+    // status.  A sub-agent tab hides the input only once its sub-agent
+    // task is DONE: while the sub-agent is still RUNNING the input
+    // textbox and the buttons below it stay visible so the user can
+    // inject follow-up prompts into the running sub-agent
+    // (``sendMessage`` posts ``appendUserMessage`` with this tab's id)
+    // and stop ONLY the sub-agent's task via the Stop button.
     const hideInput =
       worktreeBar ||
       autocommitBar ||
       document.getElementById('merge-toolbar') ||
-      tab.isSubagentTab;
+      (tab.isSubagentTab && !tab.isRunning);
     if (hideInput) {
       if (inputContainer) inputContainer.style.display = 'none';
     } else {
@@ -2041,6 +2059,13 @@
       if (tab) tab.panelsExpandedMap[visibleTask] = expanded;
       updateCollapseButton(expanded);
       applyChevronState(expanded, visibleTask);
+      // "Uncollapse Chats" = the user wants to READ the expanded
+      // panels: same auto-scroll hold as expanding a single panel via
+      // its header (addCollapse), released when the user scrolls to
+      // the very end.  No hold when the expansion left the view at
+      // the end anyway (tailing must keep working at the end).
+      if (expanded && O.scrollHeight - O.scrollTop - O.clientHeight > 2)
+        _scrollLock = true;
     });
   }
 
@@ -2147,6 +2172,7 @@
     pendingPanel = false;
     stepCount = 0;
     _scrollLock = false;
+    _sbScrollTarget = -1;
   }
 
   function resetAdjacentState() {
@@ -2185,27 +2211,53 @@
     removeAdjacentLoader();
     adjacentLoading = false;
 
-    if (!task || !events || events.length === 0) {
+    // Only latch "no more tasks" when the backend genuinely found no
+    // adjacent row: it then replies with task:'' AND task_id:null.  A
+    // task that EXISTS (valid task_id) but has an empty/very-short
+    // trajectory (events:[]) must NOT block navigation past it —
+    // otherwise a single short task makes every task beyond it
+    // unreachable via overscroll.
+    const hasTaskId = taskId !== undefined && taskId !== null && taskId !== '';
+    if (!hasTaskId && !task) {
       if (direction === 'prev') noPrevTask = true;
       else noNextTask = true;
       return;
     }
 
+    // A persisted row may carry an empty title ('' is NOT NULL-safe in
+    // the schema).  Use a non-empty display label everywhere (dataset,
+    // header via updateVisibleTask, placeholder, chevron targeting) so
+    // an empty title neither hides the task header nor makes
+    // applyChevronState(…, '') fall through to ALL panels.
+    const taskLabel = task || '(untitled task)';
+
     // Create a container for the adjacent task
     const container = mkEl('div', 'adjacent-task');
-    container.dataset.task = task;
+    container.dataset.task = taskLabel;
     // Stamp the row id so a 'taskDeleted' broadcast from the backend
     // can locate and remove this exact block via
     //   .adjacent-task[data-task-id="<id>"]
-    if (taskId !== undefined && taskId !== null && taskId !== '')
-      container.dataset.taskId = String(taskId);
+    if (hasTaskId) container.dataset.taskId = String(taskId);
 
     // Replay events into the container (save/restore header metrics so
     // adjacent-task replay doesn't overwrite the current task's values)
     const savedTokens = statusTokens ? statusTokens.textContent : '';
     const savedBudget = statusBudget ? statusBudget.textContent : '';
     const savedSteps = statusSteps ? statusSteps.textContent : '';
-    replayEventsInto(container, events);
+    if (events && events.length > 0) {
+      replayEventsInto(container, events);
+    }
+    if (!container.firstChild) {
+      // The adjacent task exists but produced no visible output: either
+      // its trajectory is empty (events:[]) or every event was a
+      // non-rendering terminal marker (e.g. only task_done).  Render a
+      // visible placeholder so the user sees the task while scrolling
+      // past it, and so the container has nonzero height for the
+      // scroll-anchor math.
+      const ph = mkEl('div', 'adjacent-task-placeholder');
+      ph.textContent = taskLabel + ' — (no output recorded)';
+      container.appendChild(ph);
+    }
     // Capture the adjacent task's metrics before restoring the current ones
     container.dataset.metricTokens = statusTokens
       ? statusTokens.textContent
@@ -2224,15 +2276,13 @@
       O.insertBefore(container, O.firstChild);
       const newScrollHeight = O.scrollHeight;
       O.scrollTop += newScrollHeight - prevScrollHeight;
-      if (taskId !== undefined && taskId !== null && taskId !== '')
-        oldestLoadedTaskId = taskId;
+      if (hasTaskId) oldestLoadedTaskId = taskId;
     } else {
       O.appendChild(container);
-      if (taskId !== undefined && taskId !== null && taskId !== '')
-        newestLoadedTaskId = taskId;
+      if (hasTaskId) newestLoadedTaskId = taskId;
     }
     const tab = getTab(activeTabId);
-    if (tab) applyChevronState(!!tab.panelsExpandedMap[task], task);
+    if (tab) applyChevronState(!!tab.panelsExpandedMap[taskLabel], taskLabel);
   }
 
   function clearOutput() {
@@ -2616,8 +2666,22 @@
       panelEl.classList.toggle('collapsed');
       if (panelEl.classList.contains('collapsed')) {
         panelEl.classList.remove('user-pinned');
+        // Collapsing while the (now shorter) content leaves the view
+        // at the very end releases the expansion hold below, so
+        // tailing resumes without an extra user scroll.
+        if (O.scrollHeight - O.scrollTop - O.clientHeight <= 2)
+          _scrollLock = false;
       } else {
         panelEl.classList.add('user-pinned');
+        // The user uncollapsed the panel to READ it: suspend the
+        // auto-scroll-to-end until they scroll back to the very end
+        // (released by the #output 'scroll' handler), otherwise the
+        // next streamed token scrolls the panel out of view.  Skip
+        // the hold when the expansion left the view at the very end
+        // anyway (nothing to hold — and tailing must keep working
+        // when the user is at the end).
+        if (O.scrollHeight - O.scrollTop - O.clientHeight > 2)
+          _scrollLock = true;
         // Highlight code that was deferred while this panel stayed collapsed.
         highlightPending(panelEl);
       }
@@ -2655,17 +2719,89 @@
   const _rpClosedSubagentTabs = new Set();
   let _rpSyncing = false;
 
+  /**
+   * The chat DOM root owned by tab *parentId*: the live ``#output``
+   * element for the active tab, the saved ``outputFragment`` for a
+   * background tab, or null when the tab is unknown / has no DOM yet.
+   */
+  function rpTaskDomRootForParent(parentId) {
+    if (parentId === activeTabId) return O;
+    const parentTab = getTab(parentId);
+    return parentTab ? parentTab.outputFragment : null;
+  }
+
+  /**
+   * The run_parallel panels of *parentId*'s CURRENT task DOM, oldest
+   * first.  Panels rendered inside an ``.adjacent-task`` history block
+   * belong to a different (long-gone) session: they must never own,
+   * steal, or defer a live fan-out's sub-agent tabs, so they are
+   * excluded here.
+   */
+  function rpDirectPanelsForParent(parentId) {
+    const root = rpTaskDomRootForParent(parentId);
+    if (!root || !root.querySelectorAll) return [];
+    return Array.from(root.querySelectorAll('.tc-run-parallel')).filter(
+      p => !(p.closest && p.closest('.adjacent-task')),
+    );
+  }
+
   /** Newest run_parallel panel in *parentId*'s chat DOM (or null). */
   function runParallelPanelForParent(parentId) {
-    let root = null;
-    if (parentId === activeTabId) {
-      root = O;
-    } else {
-      const parentTab = getTab(parentId);
-      root = parentTab ? parentTab.outputFragment : null;
+    const panels = rpDirectPanelsForParent(parentId);
+    return panels.length ? panels[panels.length - 1] : null;
+  }
+
+  /**
+   * Number of sub-agents a run_parallel call is expected to spawn,
+   * parsed from the tool_call's ``extras.tasks`` payload — a
+   * JSON-encoded list of task strings (json_printer stringifies every
+   * extra; raw arrays are tolerated for robustness).  Returns null
+   * when the count cannot be determined.
+   */
+  function rpExpectedTaskCount(rawTasks) {
+    if (Array.isArray(rawTasks)) return rawTasks.length;
+    if (typeof rawTasks !== 'string' || !rawTasks) return null;
+    try {
+      const parsed = JSON.parse(rawTasks);
+      return Array.isArray(parsed) ? parsed.length : null;
+    } catch (_e) {
+      return null;
     }
-    if (!root || !root.querySelectorAll) return null;
-    const panels = root.querySelectorAll('.tc-run-parallel');
+  }
+
+  /**
+   * The panel of *parentId* whose fan-out registry already contains
+   * sub-agent *taskId* (or null).  Lets a delayed ``openSubagentTab``
+   * re-attach to the run_parallel call that actually spawned the
+   * sub-agent instead of the newest panel of a LATER call.
+   */
+  function rpPanelOwningTask(parentId, taskId) {
+    if (taskId === undefined || taskId === null || taskId === '') return null;
+    for (const p of rpDirectPanelsForParent(parentId)) {
+      const entries = p._rpSubagents || [];
+      if (entries.some(en => String(en.taskId) === String(taskId))) return p;
+    }
+    return null;
+  }
+
+  /**
+   * Pick the panel of *parentId* that should own a sub-agent being
+   * (re)opened for *taskId*: the panel already registered for the
+   * task, else the oldest panel whose fan-out is still missing
+   * sub-agents (fresh history reopens deliver the persisted rows of
+   * sequential run_parallel calls in spawn order, so filling panels
+   * oldest-first reconstructs the per-call grouping), else the newest
+   * panel.
+   */
+  function rpPanelForNewSubagent(parentId, taskId) {
+    const owner = rpPanelOwningTask(parentId, taskId);
+    if (owner) return owner;
+    const panels = rpDirectPanelsForParent(parentId);
+    for (const p of panels) {
+      const expected = p._rpExpectedCount;
+      if (typeof expected !== 'number') continue;
+      if ((p._rpSubagents || []).length < expected) return p;
+    }
     return panels.length ? panels[panels.length - 1] : null;
   }
 
@@ -2703,33 +2839,47 @@
     return rpOwnerTabIdForContainer(root);
   }
 
-  /** True when *panelEl* is the newest run_parallel panel in its task DOM. */
-  function rpIsNewestRunParallelPanel(panelEl) {
-    let root = null;
-    if (panelEl.parentNode === O) root = O;
-    else {
-      root = panelEl.getRootNode ? panelEl.getRootNode() : null;
-      if (!root || !root.querySelectorAll) return true;
-    }
-    const panels = root.querySelectorAll('.tc-run-parallel');
-    return !panels.length || panels[panels.length - 1] === panelEl;
-  }
-
   /**
    * If a parent tab was replayed/re-rendered, the freshly-created
    * run_parallel panel element has lost the expando registry that
    * associated it with already-open sub-agent tabs.  Before collapsing
    * or syncing such a panel, adopt the open sub-agent tabs of the same
    * parent so the invariant machinery can close/reopen them normally.
+   *
+   * An agent may call run_parallel SEVERAL times: each call owns its
+   * own panel and its own fan-out of sub-agent tabs, so adoption must
+   * preserve the per-call grouping:
+   *   * a tab registered to a LIVE sibling panel belongs to a
+   *     different run_parallel call and is never stolen into this one
+   *     (stealing made collapsing panel #N close panel #M's tabs);
+   *   * a tab registered to a DETACHED panel (its element was replaced
+   *     by a replay/re-render) is adopted by the fresh panel of the
+   *     SAME call — matched by ``_rpCallIndex``, the per-task ordinal
+   *     of the run_parallel call that both render passes stamp;
+   *   * a tab never registered with any panel is adopted by the
+   *     newest panel only (the live fan-out that spawned it).
    */
   function rpAdoptOpenSubagents(panelEl, parentId) {
     if (!panelEl.classList.contains('tc-run-parallel') || !parentId) return;
-    if (!rpIsNewestRunParallelPanel(panelEl)) return;
+    const livePanels = new Set(rpDirectPanelsForParent(parentId));
+    // A panel that is not part of the parent's CURRENT task DOM (e.g.
+    // an adjacent-task history panel) owns no live fan-out.
+    if (!livePanels.has(panelEl)) return;
+    const newest = runParallelPanelForParent(parentId);
     const openChildren = tabs.filter(
       tab => tab.isSubagentTab && tab.parentTabId === parentId,
     );
     for (const tab of openChildren) {
       const previousPanel = _rpTabPanel.get(tab.id);
+      if (previousPanel) {
+        // Registered to a live panel (possibly this one): nothing to
+        // adopt.  Registered to a detached panel: adopt only into the
+        // fresh panel of the same run_parallel call.
+        if (livePanels.has(previousPanel)) continue;
+        if (previousPanel._rpCallIndex !== panelEl._rpCallIndex) continue;
+      } else if (panelEl !== newest) {
+        continue;
+      }
       const previousEntry = previousPanel
         ? (previousPanel._rpSubagents || []).find(en => en.tabId === tab.id)
         : null;
@@ -2959,12 +3109,10 @@
     let rb = '';
     let rawBody = '';
     if (showStatus && ev.is_continue) {
-      rb +=
-        '<div style="color:var(--yellow);font-weight:700;font-size:var(--fs-xl);margin-bottom:10px">Status: Continue</div>';
+      rb += '<div class="rc-status">Status: Continue</div>';
       rawBody += 'Status: Continue\n\n';
     } else if (showStatus && ev.success === false) {
-      rb +=
-        '<div style="color:var(--red);font-weight:700;font-size:var(--fs-xl);margin-bottom:10px">Status: FAILED</div>';
+      rb += '<div class="rc-status rc-status-fail">Status: FAILED</div>';
       rawBody += 'Status: FAILED\n\n';
     }
     let usePre = true;
@@ -3250,6 +3398,19 @@
           c.classList.add('tc-run-parallel');
           if (ev.tabId !== undefined && ev.tabId !== null)
             c._rpParentTabId = ev.tabId;
+          // Per-task ordinal of this run_parallel call within its
+          // render stream (live, background, and replay streams each
+          // count from 1).  Lets rpAdoptOpenSubagents re-associate a
+          // replayed panel with the open sub-agent tabs of the SAME
+          // call when the agent made several run_parallel calls.
+          tState.runParallelCount = (tState.runParallelCount || 0) + 1;
+          c._rpCallIndex = tState.runParallelCount;
+          // Expected fan-out size (from the tool's ``tasks`` argument)
+          // so rpPanelForNewSubagent can re-group persisted sub-agent
+          // rows per call on a fresh history reopen.
+          c._rpExpectedCount = rpExpectedTaskCount(
+            ev.extras ? ev.extras.tasks : undefined,
+          );
         }
         let b = '';
         if (ev.path) {
@@ -3795,8 +3956,18 @@
       !(welcome && welcome.style.display !== 'none')
     ) {
       scrollRaf = requestAnimationFrame(() => {
-        O.scrollTo({top: O.scrollHeight, behavior: 'instant'});
         scrollRaf = 0;
+        // Re-check the suspension at execution time: the user may have
+        // scrolled up (engaging _scrollLock) or clicked a panel header
+        // (raising _noScroll) between scheduling and this frame.
+        if (_scrollLock || _noScroll) return;
+        // Remember where this programmatic scroll lands so its
+        // 'scroll' event is recognized — but only when the position
+        // will actually move (a no-op scrollTo fires no event, and a
+        // stale mark would swallow the user's next real scroll-up).
+        const sbTarget = O.scrollHeight - O.clientHeight;
+        if (O.scrollTop < sbTarget) _sbScrollTarget = sbTarget;
+        O.scrollTo({top: O.scrollHeight, behavior: 'instant'});
       });
     }
   }
@@ -3996,9 +4167,26 @@
   }
 
   O.addEventListener('scroll', () => {
-    if (_scrollLock) {
-      const atBottom = O.scrollTop + O.clientHeight >= O.scrollHeight - 150;
-      if (atBottom) _scrollLock = false;
+    // Engage/release the auto-scroll suspension from the scroll
+    // position itself.  Wheel events are NOT the only way to scroll:
+    // touch drags (the remote webapp on phones/tablets), scrollbar
+    // drags and keyboard scrolling fire only 'scroll' events, so the
+    // suspension must be driven here or those users get yanked back to
+    // the end on every streamed token.
+    const dist = O.scrollHeight - O.scrollTop - O.clientHeight;
+    // An event at/above the position sb()'s own scrollTo landed on is
+    // programmatic (possibly racing freshly-grown content).  A
+    // position BELOW that target means the user scrolled up before
+    // the event was delivered (engines coalesce scroll events).
+    const fromSb = _sbScrollTarget >= 0 && O.scrollTop >= _sbScrollTarget - 2;
+    _sbScrollTarget = -1;
+    if (dist <= 2) {
+      // The user is at the very end: tailing (re-)engages.
+      _scrollLock = false;
+    } else if (!fromSb) {
+      // A user-initiated scroll away from the end (touch, scrollbar,
+      // keys, wheel): hold the view until the user returns to the end.
+      _scrollLock = true;
     }
     updateVisibleTask();
   });
@@ -4077,7 +4265,11 @@
   // --- Usage metrics (tokens / budget) in header ---
   function updateUsageMetrics(text) {
     if (!statusTokens || !statusBudget) return;
-    const tm = text.match(/Tokens:\s*([\d,]+)\/[\d,]+/);
+    // New usage-string format: "Context: N/M tokens, Total tokens: T".
+    // Fall back to the legacy "Tokens: N/M" format for old replays.
+    const tm =
+      text.match(/Context:\s*([\d,]+)\/[\d,]+/) ||
+      text.match(/Tokens:\s*([\d,]+)\/[\d,]+/);
     const bm = text.match(/Budget:\s*(\$[0-9.]+)\/\$[0-9.]+/);
     const sm = text.match(/Steps:\s*(\d+)\/\d+/);
     if (tm) statusTokens.textContent = 'Tokens: ' + tm[1];
@@ -4421,6 +4613,35 @@
         // socket is connected.  Hide #app and show the loading overlay
         // until ``connected === true``, then reveal the regular tabs.
         setServerLoading(!ev.connected);
+        if (ev.connected) {
+          // Re-synchronise an OPEN History sidebar on every
+          // ``connected === true`` signal.  The start-time
+          // ``tasks_updated`` broadcast is a one-shot, never-persisted
+          // global system event, so a task started while this client
+          // could not hear it would otherwise stay invisible in the
+          // panel until the next unrelated refetch.  Paths covered:
+          //  - remote webapp, resumed/half-open socket: iOS Safari
+          //    suspends the page while backgrounded; when the server
+          //    KEPT the connection there is no close event, no reload
+          //    latch in the shim, and this dispatch is the only
+          //    resync trigger (authenticated closes instead reload
+          //    the page via the shim's ``_hadAuthThenClosed`` latch,
+          //    after which the ready-time ``tasks_updated`` nudge
+          //    from the server converges the fresh page);
+          //  - remote webapp, pre-auth ``auth_required`` dispatch:
+          //    the posted ``getHistory`` sits in the shim's pending
+          //    queue and is flushed after auth — harmless, the
+          //    generation guard drops any stale replies;
+          //  - VS Code webview: the extension posts
+          //    ``daemonStatus connected:true`` on daemon connect and
+          //    on webview ready, so an open sidebar converges after
+          //    extension-host reconnects too.
+          // ``refreshHistory()`` is a no-op while the sidebar is
+          // closed (opening it posts a fresh ``getHistory`` anyway)
+          // and bumps ``historyGeneration`` so replies to
+          // pre-disconnect requests are dropped.
+          refreshHistory();
+        }
         return;
       case 'notification':
         updateNotification(ev);
@@ -4471,6 +4692,19 @@
         // window's running state.
         if (ev.tabId === undefined || ev.tabId === activeTabId) {
           setRunningState(ev.running);
+          // A sub-agent tab's prompt-injection surface (the input
+          // textbox and the buttons below it) exists ONLY while the
+          // sub-agent's task runs.  On any ``running:false`` for the
+          // active sub-agent tab, remove it immediately — a lifecycle
+          // fallback that enforces the rule even when the
+          // ``subagentDone`` broadcast is delayed or lost.  Mirrors
+          // the ``(tab.isSubagentTab && !tab.isRunning)`` rule in
+          // ``restoreTab``.
+          if (!ev.running) {
+            const stTab = getTab(activeTabId);
+            if (stTab && stTab.isSubagentTab && inputContainer)
+              inputContainer.style.display = 'none';
+          }
           // Refresh collapse-button-driven visibility so panels of the
           // now-running task become visible even while collapsed.  Needed
           // after resuming a running task from history: the prior
@@ -4521,6 +4755,7 @@
         break;
       case 'history':
         renderHistory(ev.sessions || [], ev.offset || 0, ev.generation || 0);
+        autofillHistoryDateRange(ev.dateRange);
         break;
       case 'frequentTasks':
         renderFrequentTasks(ev.tasks || []);
@@ -4695,11 +4930,6 @@
         }
         break;
       }
-      case 'ensureChat':
-        if (tabs.length === 0) {
-          createNewTab();
-        }
-        break;
       case 'showWelcome': {
         const swTabId = ev.tabId || activeTabId;
         const swTab = getTab(swTabId);
@@ -4969,7 +5199,7 @@
             // the toggles read AT THE TIME this task ran, not the
             // user's CURRENT global settings.  The live toggles in
             // this webview already mirror ``~/.kiss/config.json``
-            // (kept in sync via ``updateSetting`` / ``configData``);
+            // (kept in sync via ``configData``);
             // overwriting them with the loaded task's stale snapshot
             // would silently make the NEXT task submitted in this
             // tab run with the loaded task's old settings instead of
@@ -5064,61 +5294,6 @@
           /* ignored */
         }
         break;
-
-      case 'updateSetting': {
-        const sKey = ev.key;
-        const sVal = ev.value;
-        if (sKey === 'is_parallel') {
-          // Parallel-agents setting updated server-side (no UI toggle)
-        } else if (sKey === 'is_worktree' && worktreeToggleBtn) {
-          worktreeToggleBtn.checked = !!sVal;
-        } else if (sKey === 'model' && typeof sVal === 'string') {
-          // Update #model-name (not #model-btn.textContent, which would
-          // destroy the button's SVG icon).
-          if (modelName) modelName.textContent = sVal;
-          selectedModel = sVal;
-        } else if (sKey === 'max_budget') {
-          // Budget updated server-side; UI may show in config panel
-        } else if (sKey === 'use_web_browser') {
-          // Web browser setting updated server-side
-        } else if (sKey === 'demo_mode' && demoToggleBtn) {
-          demoMode = !!sVal;
-          demoToggleBtn.checked = demoMode;
-          // Demo mode turned off (possibly from another window):
-          // dismiss a finished demo's ended play-button UI.
-          if (!demoMode) clearDemoEndedUi();
-        } else if (sKey === 'auto_commit') {
-          // Auto-commit triggered server-side
-        } else if (sKey === 'auto_commit_mode' && autocommitToggleBtn) {
-          autocommitToggleBtn.checked = !!sVal;
-        } else if (sKey === 'custom_endpoint' && typeof sVal === 'string') {
-          const epEl = document.getElementById('cfg-custom-endpoint');
-          if (epEl) epEl.value = sVal;
-        } else if (sKey === 'custom_api_key' && sVal === true) {
-          // Custom API key updated server-side; mask in UI
-          const akEl = document.getElementById('cfg-custom-api-key');
-          if (akEl && !akEl.value) akEl.value = '••••••••';
-        } else if (sKey === 'custom_headers' && sVal === true) {
-          // Custom headers updated server-side
-        } else if (sKey.endsWith('_api_key') && sVal === true) {
-          // API key updated server-side; map param name to env var
-          const envMap = {
-            gemini_api_key: 'GEMINI_API_KEY',
-            openai_api_key: 'OPENAI_API_KEY',
-            anthropic_api_key: 'ANTHROPIC_API_KEY',
-            together_api_key: 'TOGETHER_API_KEY',
-            openrouter_api_key: 'OPENROUTER_API_KEY',
-            zai_api_key: 'ZAI_API_KEY',
-            moonshot_api_key: 'MOONSHOT_API_KEY',
-          };
-          const envVar = envMap[sKey];
-          if (envVar) {
-            const keyEl = document.getElementById('cfg-key-' + envVar);
-            if (keyEl && !keyEl.value) keyEl.value = '••••••••';
-          }
-        }
-        break;
-      }
 
       case 'inputHistory':
         histCache = ev.tasks || [];
@@ -5480,7 +5655,14 @@
         const subTaskId =
           ev.task_id === undefined || ev.task_id === null ? '' : ev.task_id;
         let rpPanel = _rpTabPanel.get(ev.tab_id) || null;
-        if (!rpPanel && parentId) rpPanel = runParallelPanelForParent(parentId);
+        if (!rpPanel && parentId) {
+          // No live mapping for this tab id: pick the run_parallel
+          // call that owns the sub-agent (matching registered taskId,
+          // else the oldest not-yet-full panel for history reopens,
+          // else the newest panel) — never blindly the newest, which
+          // would merge every call's fan-out into the last panel.
+          rpPanel = rpPanelForNewSubagent(parentId, subTaskId);
+        }
         // Idempotent: if a tab with the same id already exists, update
         // it in place rather than pushing a duplicate.  Defends against
         // accidental duplicate events from the backend.
@@ -5539,13 +5721,24 @@
         // If the backend converted the active tab into a sub-agent tab
         // (e.g. the user clicked a sub-agent row in the history panel,
         // which created a fresh chat tab that ``_replay_session`` then
-        // flips via ``openSubagentTab``), hide the input textbox + the
-        // buttons below it.  ``restoreTab`` already enforces this rule
-        // when *switching* tabs, but the tab-switch ran BEFORE
-        // ``isSubagentTab`` was set, so the input bar is still showing
-        // for the active tab at this point.
+        // flips via ``openSubagentTab``), sync the input textbox + the
+        // buttons below it to the sub-agent's running state:
+        //
+        //   * still RUNNING — keep the input VISIBLE so the user can
+        //     inject follow-up prompts into the live sub-agent and
+        //     stop ONLY the sub-agent's task;
+        //   * already DONE (``isDone`` history replay) — hide it, the
+        //     sub-agent accepts no further input.
+        //
+        // ``restoreTab`` enforces the same rule when *switching* tabs,
+        // but the tab-switch ran BEFORE ``isSubagentTab`` was set, so
+        // the input bar state is stale for the active tab at this
+        // point.
         if (subTab.id === activeTabId) {
-          if (inputContainer) inputContainer.style.display = 'none';
+          if (inputContainer) {
+            if (subTab.isRunning) inputContainer.style.display = '';
+            else inputContainer.style.display = 'none';
+          }
           // History-load case: the new tab was created and switched
           // to before this handler fired, so ``restoreTab`` initialised
           // the global running state from the brand-new tab's default
@@ -5577,8 +5770,15 @@
           // already completed — diverging from the fresh-launch path
           // where ``restoreTab(setRunningState(false))`` would
           // eventually run when the user clicks back to the tab.
+          // Also hide the input textbox + the buttons below it
+          // IMMEDIATELY: the sub-agent task just completed, so the
+          // prompt-injection surface must disappear at once (the
+          // ``closeTab`` below switches to an adjacent tab whose
+          // ``restoreTab`` then re-resolves the input visibility for
+          // that tab).
           if (doneTab.id === activeTabId) {
             setRunningState(false);
+            if (inputContainer) inputContainer.style.display = 'none';
           }
           // Close the sub-agent tab as soon as it finishes.
           // ``closeTab`` notifies the backend, runs the run_parallel
@@ -5880,27 +6080,25 @@
     renderTabBar();
   }
 
-  function addError(text) {
-    const div = mkEl('div', 'ev tr err');
-    div.innerHTML = '<strong>Error:</strong> ' + esc(text);
+  function addBanner(cls, label, text) {
+    const div = mkEl('div', 'ev tr ' + cls);
+    div.innerHTML = '<strong>' + label + '</strong> ' + esc(text);
     O.appendChild(div);
     sb();
+  }
+
+  function addError(text) {
+    addBanner('err', 'Error:', text);
   }
 
   /** Render an informational server notice (green-tinted banner). */
   function addNotice(text) {
-    const div = mkEl('div', 'ev tr note');
-    div.innerHTML = '<strong>Note:</strong> ' + esc(text);
-    O.appendChild(div);
-    sb();
+    addBanner('note', 'Note:', text);
   }
 
   /** Render a backend warning (amber-tinted banner). */
   function addWarning(text) {
-    const div = mkEl('div', 'ev tr warn');
-    div.innerHTML = '<strong>Warning:</strong> ' + esc(text);
-    O.appendChild(div);
-    sb();
+    addBanner('warn', 'Warning:', text);
   }
 
   // --- Remote URL (dynamic) ---
@@ -6011,6 +6209,17 @@
     '<line x1="12" y1="15" x2="12" y2="3"/>' +
     '</svg>';
 
+  // 12px variant of the same Feather download arrow, injected as the
+  // settings-panel Update-button badge by renderUpdateAvailableBadge.
+  const UPDATE_BADGE_SVG =
+    '<svg class="update-available-icon" width="12" height="12" ' +
+    'viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+    '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>' +
+    '<polyline points="7 10 12 15 17 10"/>' +
+    '<line x1="12" y1="15" x2="12" y2="3"/>' +
+    '</svg>';
+
   function renderUpdateAvailable(available, latest, current) {
     renderUpdateAvailableBadge(available, latest, current);
     renderUpdateAvailableNotification(available, latest, current);
@@ -6035,33 +6244,10 @@
           '— click to update'
         : 'A new version is available — click to update';
     btn.setAttribute('title', tip);
-    // Build an inline SVG download-arrow icon (matches the 12px
-    // visual weight of the autocommit button's circle icon).  Use
-    // namespaced createElementNS so the browser parses it as SVG
-    // rather than HTML.
-    const svgNs = 'http://www.w3.org/2000/svg';
-    const icon = document.createElementNS(svgNs, 'svg');
-    icon.setAttribute('class', 'update-available-icon');
-    icon.setAttribute('width', '12');
-    icon.setAttribute('height', '12');
-    icon.setAttribute('viewBox', '0 0 24 24');
-    icon.setAttribute('fill', 'none');
-    icon.setAttribute('stroke', 'currentColor');
-    icon.setAttribute('stroke-width', '2');
-    icon.setAttribute('stroke-linecap', 'round');
-    icon.setAttribute('stroke-linejoin', 'round');
-    // Download arrow path (Feather "download" icon).
-    const parts = [
-      ['path', {d: 'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4'}],
-      ['polyline', {points: '7 10 12 15 17 10'}],
-      ['line', {x1: '12', y1: '15', x2: '12', y2: '3'}],
-    ];
-    for (const [tag, attrs] of parts) {
-      const el = document.createElementNS(svgNs, tag);
-      for (const k of Object.keys(attrs)) el.setAttribute(k, attrs[k]);
-      icon.appendChild(el);
-    }
-    btn.insertBefore(icon, btn.firstChild);
+    // Inject the 12px Feather download-arrow badge icon (matches the
+    // visual weight of the autocommit button's circle icon) before
+    // the "Update" label.
+    btn.insertAdjacentHTML('afterbegin', UPDATE_BADGE_SVG);
   }
 
   /**
@@ -7136,10 +7322,15 @@
     });
     function toggleHistorySidebar() {
       if (sidebar.classList.contains('open')) {
-        closeSidebar();
+        closeSidebar(true);
       } else {
         sidebar.classList.add('open');
-        sidebarOverlay.classList.add('open');
+        // No dark modal overlay while the sidebar is DOCKED on the
+        // remote desktop layout — the overlay is a mobile-drawer
+        // affordance only.
+        if (!document.body.classList.contains('remote-desktop')) {
+          sidebarOverlay.classList.add('open');
+        }
         resetHistoryPagination();
         vscode.postMessage({
           type: 'getHistory',
@@ -7151,8 +7342,150 @@
     if (menuBtn) {
       menuBtn.addEventListener('click', toggleHistorySidebar);
     }
-    sidebarClose.addEventListener('click', closeSidebar);
+    sidebarClose.addEventListener('click', () => closeSidebar(true));
     sidebarOverlay.addEventListener('click', closeSidebar);
+    // ── Remote-webapp DESKTOP layout ─────────────────────────────
+    // On desktop-wide browser windows the remote webapp docks the
+    // history sidebar persistently on the left (Codex / ChatGPT
+    // desktop layout).  The wiring is a no-op inside the VS Code
+    // extension webview (no body.remote-chat class) and in embedders
+    // without window.matchMedia.
+    if (
+      document.body.classList.contains('remote-chat') &&
+      typeof window.matchMedia === 'function'
+    ) {
+      const desktopMq = window.matchMedia('(min-width: 900px)');
+      const applyRemoteDesktop = () => {
+        if (desktopMq.matches) {
+          document.body.classList.add('remote-desktop');
+          if (!sidebar.classList.contains('open')) {
+            sidebar.classList.add('open');
+            resetHistoryPagination();
+            vscode.postMessage({
+              type: 'getHistory',
+              query: historySearch ? historySearch.value : '',
+              generation: historyGeneration,
+            });
+          }
+          sidebarOverlay.classList.remove('open');
+        } else {
+          document.body.classList.remove('remote-desktop');
+          sidebar.classList.remove('open');
+          sidebarOverlay.classList.remove('open');
+        }
+      };
+      if (typeof desktopMq.addEventListener === 'function') {
+        desktopMq.addEventListener('change', applyRemoteDesktop);
+      } else if (typeof desktopMq.addListener === 'function') {
+        desktopMq.addListener(applyRemoteDesktop);
+      }
+      applyRemoteDesktop();
+    }
+    // ── Docked-sidebar horizontal resize (remote desktop) ────────
+    // A 6px drag handle (#sidebar-resizer) on the docked sidebar's
+    // right edge resizes it via the --sidebar-w custom property that
+    // drives BOTH the sidebar width and #app's margin-left in
+    // remote-codex.css.  Pointer capture keeps fast drags from
+    // escaping the thin handle; ArrowLeft/ArrowRight implement the
+    // W3C window-splitter keyboard pattern; double-click resets.
+    // Inert outside the remote desktop layout (guards below) and in
+    // the VS Code extension webview (no body.remote-chat class).
+    const sidebarResizer = document.getElementById('sidebar-resizer');
+    if (document.body.classList.contains('remote-chat') && sidebarResizer) {
+      const SB_MIN = 220;
+      const SB_MAX = 600;
+      const SB_KEY = 'kiss-sidebar-w';
+      // Default: 1/4 of the browser screen, clamped to the resize
+      // range (matches the clamp(220px, 25vw, 600px) CSS fallback).
+      const sidebarDefaultW = () =>
+        Math.max(
+          SB_MIN,
+          Math.min(SB_MAX, Math.round(window.innerWidth * 0.25)),
+        );
+      const setSidebarW = px => {
+        const w = Math.max(SB_MIN, Math.min(SB_MAX, Math.round(px)));
+        document.documentElement.style.setProperty('--sidebar-w', w + 'px');
+        sidebarResizer.setAttribute('aria-valuenow', String(w));
+        return w;
+      };
+      sidebarResizer.setAttribute('aria-valuemin', String(SB_MIN));
+      sidebarResizer.setAttribute('aria-valuemax', String(SB_MAX));
+      sidebarResizer.setAttribute('aria-valuenow', String(sidebarDefaultW()));
+      let sidebarW = sidebarDefaultW();
+      let persisted = null;
+      try {
+        persisted = window.localStorage.getItem(SB_KEY);
+      } catch {
+        // localStorage unavailable — keep the default width.
+      }
+      if (persisted !== null && /^\d+$/.test(persisted)) {
+        sidebarW = setSidebarW(parseInt(persisted, 10));
+      }
+      const persistSidebarW = () => {
+        try {
+          window.localStorage.setItem(SB_KEY, String(sidebarW));
+        } catch {
+          // localStorage unavailable — width lasts this session only.
+        }
+      };
+      let sidebarResizing = false;
+      const endSidebarResize = e => {
+        if (!sidebarResizing) return;
+        sidebarResizing = false;
+        document.body.classList.remove('sidebar-resizing');
+        try {
+          if (
+            e.pointerId !== undefined &&
+            typeof sidebarResizer.releasePointerCapture === 'function'
+          ) {
+            sidebarResizer.releasePointerCapture(e.pointerId);
+          }
+        } catch {
+          // Pointer was not captured — nothing to release.
+        }
+        persistSidebarW();
+      };
+      sidebarResizer.addEventListener('pointerdown', e => {
+        if (e.button !== 0) return;
+        if (!document.body.classList.contains('remote-desktop')) return;
+        e.preventDefault();
+        sidebarResizing = true;
+        document.body.classList.add('sidebar-resizing');
+        try {
+          if (
+            e.pointerId !== undefined &&
+            typeof sidebarResizer.setPointerCapture === 'function'
+          ) {
+            sidebarResizer.setPointerCapture(e.pointerId);
+          }
+        } catch {
+          // Pointer capture unsupported — drags stay on the handle.
+        }
+      });
+      sidebarResizer.addEventListener('pointermove', e => {
+        if (!sidebarResizing) return;
+        if (!document.body.classList.contains('remote-desktop')) return;
+        sidebarW = setSidebarW(e.clientX);
+      });
+      sidebarResizer.addEventListener('pointerup', endSidebarResize);
+      sidebarResizer.addEventListener('pointercancel', endSidebarResize);
+      sidebarResizer.addEventListener('dblclick', () => {
+        if (!document.body.classList.contains('remote-desktop')) return;
+        sidebarW = setSidebarW(sidebarDefaultW());
+        try {
+          window.localStorage.removeItem(SB_KEY);
+        } catch {
+          // localStorage unavailable — nothing persisted anyway.
+        }
+      });
+      sidebarResizer.addEventListener('keydown', e => {
+        if (!document.body.classList.contains('remote-desktop')) return;
+        if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+        e.preventDefault();
+        sidebarW = setSidebarW(sidebarW + (e.key === 'ArrowRight' ? 16 : -16));
+        persistSidebarW();
+      });
+    }
     if (frequentTasksBtn) {
       frequentTasksBtn.addEventListener('click', () => {
         if (frequentPanel && frequentPanel.classList.contains('open')) {
@@ -7235,6 +7568,29 @@
     ].forEach(el => {
       if (el) el.addEventListener('change', applyHistoryFilterVisibility);
     });
+    // A ``change`` on a date input only ever comes from the USER
+    // (typing or the custom picker); the auto-fill writes ``.value``
+    // directly without dispatching events.  Once the user touches
+    // the range, later ``history`` refreshes must not overwrite it.
+    [hfFrom, hfTo].forEach(el => {
+      if (el) {
+        el.addEventListener('change', () => {
+          historyDateRangeUserSet = true;
+        });
+      }
+    });
+    const hfDateClear = document.getElementById('hf-date-clear');
+    if (hfDateClear) {
+      hfDateClear.addEventListener('click', e => {
+        e.stopPropagation();
+        if (hfFrom) hfFrom.value = '';
+        if (hfTo) hfTo.value = '';
+        // Clearing is a user decision: pin the empty range so the
+        // next history refresh does not re-fill it.
+        historyDateRangeUserSet = true;
+        applyHistoryFilterVisibility();
+      });
+    }
     // The calendar selector buttons sit next to each date textbox and
     // open a custom in-webview calendar popup.  The native
     // <input type=date> picker (showPicker / focus+click) is unreliable
@@ -7747,12 +8103,38 @@
     btn.type = 'button';
     btn.className = 'sidebar-item-copy';
     btn.setAttribute('aria-label', 'Copy task to clipboard');
+    wireCopyButton(btn, text, false, false);
+    return btn;
+  }
+
+  /**
+   * Wire the shared copy-to-clipboard behavior onto an icon-only
+   * button: set the clipboard SVG icon and, on click, stop
+   * propagation (so the surrounding row's click handler does not
+   * fire), copy *text* via ``navigator.clipboard.writeText`` (falling
+   * back to ``fallbackCopyText`` when the async clipboard API is
+   * unavailable) and swap the icon for a green check mark for 1.5 s.
+   *
+   * @param {HTMLButtonElement} btn - the button to wire up.
+   * @param {*} text - payload to copy (stringified at click time).
+   * @param {boolean} retryFallback - when true, a rejected clipboard
+   *   write retries via ``fallbackCopyText`` before giving up.
+   * @param {boolean} resetFlashTimer - when true, a rapid second click
+   *   restarts the 1.5 s feedback window; false preserves the sidebar
+   *   row button's independent per-click timers.
+   */
+  function wireCopyButton(btn, text, retryFallback, resetFlashTimer) {
     btn.innerHTML = PANEL_COPY_SVG;
 
+    let flashTimer = 0;
     const flash = () => {
       btn.innerHTML = PANEL_CHECK_SVG;
       btn.classList.add('copied');
-      setTimeout(() => {
+      // Preserve the two builders' historical rapid-click behavior:
+      // id buttons reset their existing timer, while sidebar-row buttons
+      // leave each click's timer independently scheduled.
+      if (resetFlashTimer) clearTimeout(flashTimer);
+      flashTimer = setTimeout(() => {
         btn.innerHTML = PANEL_COPY_SVG;
         btn.classList.remove('copied');
       }, 1500);
@@ -7763,12 +8145,39 @@
       e.preventDefault();
       const payload = String(text == null ? '' : text);
       if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(payload).then(flash, () => {});
+        navigator.clipboard.writeText(payload).then(flash, () => {
+          if (retryFallback && fallbackCopyText(payload)) flash();
+        });
       } else if (fallbackCopyText(payload)) {
         flash();
       }
     });
+  }
 
+  /**
+   * Build a tiny icon-only copy button for a single id (chat id or
+   * task id) on the History sidebar's per-row ids line.
+   *
+   * Clicking the button copies the raw *idText* string to the system
+   * clipboard via ``navigator.clipboard.writeText`` (falling back to
+   * ``fallbackCopyText`` when the async clipboard API is unavailable)
+   * and briefly swaps the clipboard icon for a green check mark.
+   * Click propagation is stopped so the surrounding history row's
+   * click handler (which reopens the chat) does not fire.
+   *
+   * @param {string} idText - the raw id string to copy.
+   * @param {string} kind - 'chat' or 'task'; used for the modifier
+   *   class (``ids-copy-chat`` / ``ids-copy-task``) and the aria/
+   *   tooltip labels.
+   * @returns {HTMLButtonElement}
+   */
+  function makeIdCopyButton(idText, kind) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'ids-copy-btn ids-copy-' + kind;
+    btn.dataset.tooltip = 'Copy ' + kind + ' id';
+    btn.setAttribute('aria-label', 'Copy ' + kind + ' id to clipboard');
+    wireCopyButton(btn, idText, true, true);
     return btn;
   }
 
@@ -7863,8 +8272,12 @@
       div.dataset.workDir = s.work_dir || '';
       const itemText = s.title || s.preview || 'Untitled';
       div.dataset.tooltip = s.preview || itemText;
-      div.style.backgroundColor = chatIdBgColor(String(s.id));
-      div.style.color = '#1a1a1a';
+      // Expose the per-chat color as a custom property instead of
+      // inline background/text colors: main.css paints the webview's
+      // pastel row from it, while remote-codex.css can restyle the
+      // remote page (neutral row, colored left border) — inline
+      // styles would beat every stylesheet.
+      div.style.setProperty('--task-color', chatIdBgColor(String(s.id)));
 
       if (s.is_running) {
         const runningDot = document.createElement('span');
@@ -8137,19 +8550,41 @@
         parentIdRaw === undefined || parentIdRaw === null
           ? ''
           : String(parentIdRaw);
-      const idParts = [];
-      if (chatId) idParts.push('chat ' + chatId);
-      if (taskIdStr) idParts.push('task ' + taskIdStr);
-      if (parentIdStr) idParts.push('parent ' + parentIdStr);
-      if (idParts.length > 0) {
+      // The line is built from text nodes plus (for the chat and
+      // task ids) a tiny icon-only copy button appended right after
+      // the id it copies.  The buttons contribute no text of their
+      // own, so the span's ``textContent`` keeps the exact
+      // ``chat <id> • task <id> • parent <id>`` format.
+      const idSegments = [];
+      if (chatId) {
+        idSegments.push({text: 'chat ' + chatId, copy: chatId, kind: 'chat'});
+      }
+      if (taskIdStr) {
+        idSegments.push({
+          text: 'task ' + taskIdStr,
+          copy: taskIdStr,
+          kind: 'task',
+        });
+      }
+      if (parentIdStr) {
+        idSegments.push({text: 'parent ' + parentIdStr});
+      }
+      if (idSegments.length > 0) {
         const idsSpan = document.createElement('span');
         idsSpan.className = 'running-item-ids';
-        const idsText = idParts.join(' • ');
-        idsSpan.textContent = idsText;
+        idSegments.forEach((seg, i) => {
+          if (i > 0) {
+            idsSpan.appendChild(document.createTextNode(' • '));
+          }
+          idsSpan.appendChild(document.createTextNode(seg.text));
+          if (seg.copy) {
+            idsSpan.appendChild(makeIdCopyButton(seg.copy, seg.kind));
+          }
+        });
         // Native HTML tooltip — useful when the combined line is
         // long enough to be clipped by overflow:hidden in the
         // sidebar.
-        idsSpan.title = idsText;
+        idsSpan.title = idSegments.map(seg => seg.text).join(' • ');
         info.appendChild(idsSpan);
       }
 
@@ -8226,6 +8661,54 @@
     if (sessions.length < 50) {
       historyHasMore = false;
     }
+    applyHistoryFilterVisibility();
+  }
+
+  /**
+   * Pre-fill the History From/To date inputs from the ``dateRange``
+   * payload of a ``history`` event (the first and last task
+   * timestamps in ~/.kiss/sorcar.db, epoch seconds).  Values are
+   * written as LOCAL calendar dates in the ``YYYY-MM-DD`` format
+   * the ``<input type=date>`` elements produce, mirroring how
+   * ``applyHistoryFilterVisibility`` interprets them (local
+   * midnight → 23:59), so the auto-filled [first, last] range never
+   * hides a row.  The fill is skipped once the user has edited or
+   * cleared the inputs (``historyDateRangeUserSet``).
+   *
+   * @param {{min: ?number, max: ?number}|undefined} range - the
+   *   ``dateRange`` payload. Missing payloads preserve the current
+   *   values for compatibility with older servers; explicit null
+   *   bounds clear untouched auto-filled values (the database is
+   *   empty).
+   */
+  function autofillHistoryDateRange(range) {
+    if (historyDateRangeUserSet || !range) return;
+    const hfFrom = document.getElementById('hf-from');
+    const hfTo = document.getElementById('hf-to');
+    if (!hfFrom || !hfTo) return;
+    // Explicit null bounds mean the database has no listable tasks.
+    // Clear a prior programmatic fill rather than showing stale dates.
+    if (range.min == null || range.max == null) {
+      hfFrom.value = '';
+      hfTo.value = '';
+      applyHistoryFilterVisibility();
+      return;
+    }
+    const isoOfSec = sec => {
+      const n = Number(sec);
+      if (!isFinite(n)) return '';
+      const d = new Date(n * 1000);
+      if (isNaN(d.getTime())) return '';
+      const p = x => (x < 10 ? '0' + x : '' + x);
+      return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+    };
+    const fromIso = isoOfSec(range.min);
+    const toIso = isoOfSec(range.max);
+    if (!fromIso || !toIso) return;
+    // Set .value directly (no change event) so this programmatic
+    // fill is never mistaken for a user edit.
+    hfFrom.value = fromIso;
+    hfTo.value = toIso;
     applyHistoryFilterVisibility();
   }
 
@@ -8421,6 +8904,25 @@
   }
 
   /**
+   * Canonicalize a work-directory string for the History Workspace
+   * filter's equality test.  This is deliberately lexical (the
+   * browser cannot call ``realpath``): strip trailing separators,
+   * normalize Windows ``\\`` to ``/``, and case-fold Windows paths.
+   * POSIX case remains significant.  Filesystem roots are preserved.
+   */
+  function normalizeHistoryWorkDir(p) {
+    if (typeof p !== 'string' || p === '') return '';
+    const isWindowsPath = /^[A-Za-z]:[\\/]/.test(p) || p.startsWith('\\\\');
+    let normalized = isWindowsPath ? p.replace(/\\/g, '/') : p;
+    // Keep POSIX "/" and Windows drive roots such as "C:/" intact.
+    const minLength = /^[A-Za-z]:\/$/.test(normalized) ? 3 : 1;
+    while (normalized.length > minLength && normalized.endsWith('/')) {
+      normalized = normalized.slice(0, -1);
+    }
+    return isWindowsPath ? normalized.toLowerCase() : normalized;
+  }
+
+  /**
    * Show/hide rows in the history sidebar based on the filter bar
    * state (Running / Errors / Completed / Favorite checkboxes and
    * From / To date inputs).  Reads ``data-category``,
@@ -8442,15 +8944,14 @@
     const showErrors = hfErrors.checked;
     const showCompleted = hfCompleted.checked;
     const onlyFavorite = hfFavorite && hfFavorite.checked;
-    // Workspace filter — when checked, only show rows whose
-    // ``data-work-dir`` (mirroring ``extra.work_dir`` set at task
-    // completion) equals the client's currently-configured work
-    // directory.  An empty client work_dir or an empty row work_dir
-    // both pass the filter so the user sees rows that pre-date the
-    // ``extra.work_dir`` persistence change and rows running in the
-    // "no folder open" state.
+    // Workspace filter — when checked, completed/error rows with a
+    // non-empty ``data-work-dir`` (mirroring persisted
+    // ``extra.work_dir``) must match the client's currently-configured
+    // work directory.  Running rows always pass this ONE filter; an
+    // empty client or row work_dir also passes for legacy/no-folder
+    // rows.  Category, date, and Favorite filters remain independent.
     const onlyWorkspace = hfWorkspace && hfWorkspace.checked;
-    const clientWorkDir = configWorkDir || '';
+    const normClientWorkDir = normalizeHistoryWorkDir(configWorkDir || '');
     // Date inputs are <input type=date> with value="YYYY-MM-DD".
     // Convert to local-midnight epoch seconds for inclusive bounds.
     let fromTs = -Infinity;
@@ -8474,24 +8975,34 @@
       else if (cat === 'completed') catOk = showCompleted;
       const dateOk = ts >= fromTs && ts <= toTs;
       const favOk = !onlyFavorite || row.dataset.favorite === '1';
-      const rowWorkDir = row.dataset.workDir || '';
-      // Workspace match honors the documented contract above: an
-      // empty client work_dir or an empty row work_dir BOTH pass so
-      // (a) freshly-started running tasks whose ``extra.work_dir``
-      //     hasn't been persisted yet still appear in History when
-      //     the user opens the burger menu in a real workspace, and
-      // (b) standalone web clients with no folder open ("client
-      //     work_dir empty") see every row.
-      // Without this, the strict ``rowWorkDir === clientWorkDir``
-      // test silently hides every running-task row whose work_dir
-      // hasn't been written yet — exactly the user-reported
-      // "task panel does not show up in History after burger open"
-      // regression.
+      const rowWorkDir = normalizeHistoryWorkDir(row.dataset.workDir || '');
+      // Workspace match honors the documented contract above:
+      // (a) RUNNING rows ALWAYS pass — ``ChatSorcarAgent.run``
+      //     persists ``extra.work_dir`` EARLY (at ``_add_task``), and
+      //     for worktree runs that path comes from
+      //     ``git rev-parse --show-toplevel`` which RESOLVES symlinks
+      //     (macOS ``/var`` → ``/private/var``), so a just-started
+      //     running row can carry a path VARIANT of the client's
+      //     configured workspace.  A strict comparison silently hid
+      //     the row — exactly the user-reported "task panel does not
+      //     show up in History as soon as kiss-web starts a task"
+      //     regression.  A live agent must never be invisible; the
+      //     Running category checkbox (not the Workspace filter) is
+      //     the control for running rows.
+      // (b) An empty client work_dir or an empty row work_dir BOTH
+      //     pass so legacy rows that pre-date the ``extra.work_dir``
+      //     persistence change and standalone web clients with no
+      //     folder open see every row.
+      // (c) Non-running rows compare via
+      //     ``normalizeHistoryWorkDir`` on both sides so trailing
+      //     separators and Windows slash/case variants do not cause
+      //     false mismatches.
       const wsOk =
         !onlyWorkspace ||
+        cat === 'running' ||
         rowWorkDir === '' ||
-        clientWorkDir === '' ||
-        rowWorkDir === clientWorkDir;
+        normClientWorkDir === '' ||
+        rowWorkDir === normClientWorkDir;
       if (catOk && dateOk && favOk && wsOk) {
         row.style.display = '';
         visible++;
@@ -8513,6 +9024,12 @@
       }
     } else if (placeholder) {
       placeholder.remove();
+    }
+    // The date-range clear "×" is only useful while a date is set.
+    const hfDateClear = document.getElementById('hf-date-clear');
+    if (hfDateClear) {
+      const hasDate = !!((hfFrom && hfFrom.value) || (hfTo && hfTo.value));
+      hfDateClear.style.display = hasDate ? '' : 'none';
     }
   }
 
@@ -8544,9 +9061,34 @@
     }
   }
 
-  function closeSidebar() {
+  /**
+   * Close the history sidebar drawer.
+   *
+   * On the remote-webapp DESKTOP layout (body.remote-desktop) the
+   * sidebar is DOCKED on the left, so implicit close paths (Escape,
+   * overlay click, history-row click) must keep it open — only an
+   * explicit user toggle (burger #menu-btn / #sidebar-close, which
+   * pass ``force=true``) hides the docked panel.
+   *
+   * @param {boolean} [force] hide the sidebar even while docked.
+   */
+  function closeSidebar(force) {
+    if (force !== true && document.body.classList.contains('remote-desktop')) {
+      sidebarOverlay.classList.remove('open');
+      return;
+    }
     sidebar.classList.remove('open');
     sidebarOverlay.classList.remove('open');
+  }
+
+  /**
+   * Toggle the 'open' class on a slide-up/slide-in panel and its
+   * backdrop overlay.  Shared by the Settings, Frequent-tasks, and
+   * Tricks panels below.
+   */
+  function setPanelOpen(panel, overlay, open) {
+    if (panel) panel.classList.toggle('open', open);
+    if (overlay) overlay.classList.toggle('open', open);
   }
 
   /**
@@ -8556,8 +9098,7 @@
    */
   function openSettingsPanel() {
     if (!settingsPanel) return;
-    settingsPanel.classList.add('open');
-    if (settingsOverlay) settingsOverlay.classList.add('open');
+    setPanelOpen(settingsPanel, settingsOverlay, true);
     configFormPopulated = false;
     vscode.postMessage({type: 'getConfig'});
   }
@@ -8568,8 +9109,7 @@
    */
   function closeSettingsPanel() {
     saveSettingsIfPopulated();
-    if (settingsPanel) settingsPanel.classList.remove('open');
-    if (settingsOverlay) settingsOverlay.classList.remove('open');
+    setPanelOpen(settingsPanel, settingsOverlay, false);
   }
 
   /**
@@ -8578,15 +9118,13 @@
    */
   function openFrequentPanel() {
     if (!frequentPanel) return;
-    frequentPanel.classList.add('open');
-    if (frequentOverlay) frequentOverlay.classList.add('open');
+    setPanelOpen(frequentPanel, frequentOverlay, true);
     vscode.postMessage({type: 'getFrequentTasks', limit: 50});
   }
 
   /** Close the standalone Frequent tasks panel. */
   function closeFrequentPanel() {
-    if (frequentPanel) frequentPanel.classList.remove('open');
-    if (frequentOverlay) frequentOverlay.classList.remove('open');
+    setPanelOpen(frequentPanel, frequentOverlay, false);
   }
 
   /**
@@ -8596,15 +9134,13 @@
    */
   function openTricksPanel() {
     if (!tricksPanel) return;
-    tricksPanel.classList.add('open');
-    if (tricksOverlay) tricksOverlay.classList.add('open');
+    setPanelOpen(tricksPanel, tricksOverlay, true);
     renderTricks(window.__TRICKS__ || []);
   }
 
   /** Close the standalone Tricks panel. */
   function closeTricksPanel() {
-    if (tricksPanel) tricksPanel.classList.remove('open');
-    if (tricksOverlay) tricksOverlay.classList.remove('open');
+    setPanelOpen(tricksPanel, tricksOverlay, false);
   }
 
   /**

@@ -26,7 +26,7 @@ from __future__ import annotations
 import re
 import unittest
 
-from kiss.agents.vscode import web_server
+from kiss.server import web_server
 
 
 class TestTipsSettingsButtonRemoteHtml(unittest.TestCase):

@@ -17,7 +17,7 @@ After this change the ``sorcar`` CLI must:
   ``--use-worktree``.
 
 The tests drive the real CLI plumbing (``_build_arg_parser`` and the
-``worktree_sorcar_agent.main`` entry point) end-to-end with the
+``kiss.ui.cli.sorcar_cli.main`` entry point) end-to-end with the
 ``run_with_steering`` call stubbed so the test does not need a live
 LLM, model, or git repo.
 """
@@ -34,6 +34,7 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.cli_helpers import _build_arg_parser
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.ui.cli import sorcar_cli
 
 _REMOVED_FLAGS: list[list[str]] = [
     ["-c", "abc"],
@@ -87,19 +88,19 @@ class TestNonInteractiveUsesPlainSorcarAgent:
             captured["kwargs"] = run_kwargs
             return "summary: ok\nsuccess: true\n"
 
-        import kiss.agents.sorcar.cli_steering as cli_steering
+        import kiss.ui.cli.cli_steering as cli_steering
 
         monkeypatch.setattr(cli_steering, "run_with_steering", fake_run)
         # ``print_outcome`` is a no-op in verbose mode, but explicitly
         # neuter it so the test doesn't depend on the printer state.
         monkeypatch.setattr(
-            worktree_sorcar_agent, "print_outcome",
+            sorcar_cli, "print_outcome",
             lambda *_a, **_kw: None,
         )
         monkeypatch.setattr(
             sys, "argv", ["sorcar", "-t", "noop task", *extra_argv],
         )
-        worktree_sorcar_agent.main()
+        sorcar_cli.main()
         agent = captured.get("agent")
         assert agent is not None, "run_with_steering was not invoked"
         assert isinstance(agent, SorcarAgent)

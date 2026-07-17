@@ -30,8 +30,8 @@ import random
 import threading
 import time
 
-from kiss.agents.vscode.json_printer import JsonPrinter
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.json_printer import JsonPrinter
+from kiss.server.server import VSCodeServer
 
 
 class _TimedWorkDirPrinter(JsonPrinter):

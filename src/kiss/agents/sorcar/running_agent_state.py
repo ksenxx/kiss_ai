@@ -128,6 +128,7 @@ class _RunningAgentState:
         "chat_id",
         "last_task_id",
         "last_user_prompt",
+        "last_result_summary",
         "task_history_id",
         "use_worktree",
         "use_parallel",
@@ -137,6 +138,7 @@ class _RunningAgentState:
         "task_thread",
         "user_answer_queue",
         "pending_user_messages",
+        "unattributed_prompt_echoes",
         "is_merging",
         "is_running_non_wt",
         "is_task_active",
@@ -156,6 +158,7 @@ class _RunningAgentState:
         is_subagent: bool = False,
         parent_task_id: str | None = None,
         is_task_active: bool = False,
+        stop_event: threading.Event | None = None,
     ) -> None:
         # ``agent`` is transient — the VS Code server flow leaves it
         # ``None`` until :meth:`_TaskRunnerMixin._run_task_inner`
@@ -188,6 +191,14 @@ class _RunningAgentState:
         # generated commit message can include the user's intent.
         # Empty string before the first task has run.
         self.last_user_prompt: str = ""
+        # Result summary of the most recently completed task on this
+        # tab.  Populated by :meth:`_TaskRunnerMixin._run_task_inner`
+        # after each agent run and read by post-task auto-commit hooks
+        # (:meth:`_MergeFlowMixin._handle_autocommit_action`) so the
+        # generated commit message can record the task's outcome.
+        # Reset to "" when a new task starts so a stale result never
+        # leaks into the next task's commit message.
+        self.last_result_summary: str = ""
         # In-flight task id within the current ``_run_task_inner``
         # iteration — used as the persistence target for the
         # ``task_done`` / ``task_stopped`` / ``task_error`` event,
@@ -204,7 +215,12 @@ class _RunningAgentState:
         # the original branch).
         self.auto_commit_mode: bool = True
         self.selected_model: str = default_model
-        self.stop_event: threading.Event | None = None
+        # Cooperative stop signal for the task running on this tab.
+        # ``None`` until a task starts (the VS Code task runner
+        # populates it per run).  Parallel sub-agent states pass their
+        # own per-sub-agent event via the constructor so ``_stop_task``
+        # can stop ONLY that sub-agent's task.
+        self.stop_event: threading.Event | None = stop_event
         self.task_thread: threading.Thread | None = None
         self.user_answer_queue: queue.Queue[str] | None = None
         # Prompts submitted by the user via the task-input textbox
@@ -219,6 +235,19 @@ class _RunningAgentState:
         # 's outer ``finally`` so pending messages never leak across
         # successive tasks on the same tab.
         self.pending_user_messages: list[str] = []
+        # Subset of :attr:`pending_user_messages` that could NOT be
+        # attributed to a task id at queueing time (the narrow window
+        # between a task's ``run()`` entry and its ``_add_task`` row
+        # allocation — e.g. a fast double-submit).  The live agent's
+        # drain hook (:meth:`kiss.agents.sorcar.sorcar_agent.
+        # SorcarAgent._drain_pending_user_messages`) broadcasts one
+        # durable ``prompt`` event per entry from the agent thread —
+        # where the printer's thread-local task id names the task that
+        # actually CONSUMED the message — so the echo lands in the
+        # correct trajectory instead of being lost on replay.  Mutated
+        # under :attr:`_registry_lock`, same as
+        # :attr:`pending_user_messages`.
+        self.unattributed_prompt_echoes: list[str] = []
         self.is_merging: bool = False
         self.is_running_non_wt: bool = False
         self.is_task_active: bool = is_task_active

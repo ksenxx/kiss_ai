@@ -18,7 +18,7 @@ silent-no-op flag in the same set; it has since been dropped from
 the sorcar parser entirely — see :mod:`test_cli_only_sorcar_agent`.)
 
 These tests reproduce that bug by driving the real CLI plumbing
-(``worktree_sorcar_agent.main``) with the listed flags and asserting
+(``kiss.ui.cli.sorcar_cli.main``) with the listed flags and asserting
 that the CLI now fails fast with a clear message.  In interactive
 mode (no ``-t``/``-f``) the same flags must still be accepted so the
 daemon-client path keeps working — that's exercised here too.
@@ -31,8 +31,8 @@ from typing import Any
 
 import pytest
 
-from kiss.agents.sorcar import worktree_sorcar_agent
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.ui.cli import sorcar_cli
 
 # Each entry: ``argv`` fragment that must trip a clear non-interactive
 # error and the substring the error message should mention.
@@ -70,11 +70,11 @@ def _install_no_op_run_with_steering(
         captured["kwargs"] = run_kwargs
         return "summary: ok\nsuccess: true\n"
 
-    import kiss.agents.sorcar.cli_steering as cli_steering
+    import kiss.ui.cli.cli_steering as cli_steering
 
     monkeypatch.setattr(cli_steering, "run_with_steering", fake_run)
     monkeypatch.setattr(
-        worktree_sorcar_agent, "print_outcome",
+        sorcar_cli, "print_outcome",
         lambda *_a, **_kw: None,
     )
     return captured
@@ -109,7 +109,7 @@ class TestNonInteractiveRejectsInteractiveOnlyFlags:
             ["sorcar", "-t", "noop task", *flag_argv],
         )
         with pytest.raises(SystemExit) as excinfo:
-            worktree_sorcar_agent.main()
+            sorcar_cli.main()
         # argparse-style failure: non-zero exit code.
         assert excinfo.value.code not in (0, None), (
             f"non-interactive mode silently accepted {flag_argv!r}; "
@@ -153,7 +153,7 @@ class TestNonInteractiveRejectsInteractiveOnlyFlags:
             ["sorcar", "-t", "noop task", *abbreviated_argv],
         )
         with pytest.raises(SystemExit) as excinfo:
-            worktree_sorcar_agent.main()
+            sorcar_cli.main()
         assert excinfo.value.code not in (0, None), (
             f"abbreviation {abbreviated_argv!r} slipped past the "
             f"non-interactive guard (exit code={excinfo.value.code!r})"
@@ -185,7 +185,7 @@ class TestNonInteractiveAcceptsValidFlags:
     ) -> None:
         captured = _install_no_op_run_with_steering(monkeypatch)
         monkeypatch.setattr(sys, "argv", ["sorcar", "-t", "noop task"])
-        worktree_sorcar_agent.main()
+        sorcar_cli.main()
         assert "agent" in captured
         assert type(captured["agent"]) is SorcarAgent
 
@@ -197,7 +197,7 @@ class TestNonInteractiveAcceptsValidFlags:
             sys, "argv",
             ["sorcar", "-t", "noop task", "--no-parallel"],
         )
-        worktree_sorcar_agent.main()
+        sorcar_cli.main()
         assert "agent" in captured
         # The plain SorcarAgent honours ``is_parallel`` directly,
         # so this must propagate to run_kwargs.
@@ -211,7 +211,7 @@ class TestNonInteractiveAcceptsValidFlags:
             sys, "argv",
             ["sorcar", "-t", "noop task", "--no-web"],
         )
-        worktree_sorcar_agent.main()
+        sorcar_cli.main()
         assert "agent" in captured
         assert captured["kwargs"].get("web_tools") is False
 
@@ -243,14 +243,14 @@ class TestInteractiveStillAcceptsAllFlags:
             return 0
 
         # ``run_client`` is imported lazily inside ``main`` from
-        # ``kiss.agents.sorcar.cli_client``; monkeypatch the module
+        # ``kiss.ui.cli.cli_client``; monkeypatch the module
         # attribute so the import-inside-main picks up the stub.
-        import kiss.agents.sorcar.cli_client as cli_client
+        import kiss.ui.cli.cli_client as cli_client
 
         monkeypatch.setattr(cli_client, "run_client", fake_run_client)
         monkeypatch.setattr(sys, "argv", ["sorcar", *flag_argv])
         with pytest.raises(SystemExit) as excinfo:
-            worktree_sorcar_agent.main()
+            sorcar_cli.main()
         # Interactive exit code is whatever ``run_client`` returned.
         assert excinfo.value.code == 0, (
             f"interactive mode rejected {flag_argv!r} (exit "

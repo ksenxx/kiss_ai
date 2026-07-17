@@ -24,20 +24,12 @@ from kiss.core.models.model import (
     TokenCallback,
     _build_text_based_tools_prompt,
     _parse_text_based_tool_calls,
+    _tool_result_to_string,
     parse_binary_attachments,
     responses_items_to_chat_messages,
 )
 
 logger = logging.getLogger(__name__)
-
-# Generated alias suffix produced by ``scripts/update_models.py`` to expose
-# the uncapped ``reasoning_effort="xhigh"`` level as its own catalog entry.
-# Both this module and ``OpenAICompatibleModel2`` strip it from the model
-# name they send to the provider so the alias routes to the same upstream
-# model id as the base entry while still carrying ``thinking="xhigh"`` in
-# ``MODEL_INFO``.
-_XHIGH_SUFFIX = "-xhigh"
-
 
 def _provider_model_name(model_name: str) -> str:
     """Return the upstream provider id for a KISS catalog ``model_name``.
@@ -64,15 +56,21 @@ def _provider_model_name(model_name: str) -> str:
         if model_name.startswith("openrouter/")
         else model_name
     )
-    return provider_name.removesuffix(_XHIGH_SUFFIX)
+    # Lazy import: avoid a circular import between this module and
+    # ``model_info`` (which imports ``OpenAICompatibleModel`` from this
+    # package via ``_openai_compatible``).  ``model_info`` owns the
+    # canonical ``-xhigh`` alias-stripping rule.
+    from kiss.core.models.model_info import _strip_xhigh_alias
+
+    return _strip_xhigh_alias(provider_name)
 
 
 def _model_thinking_level(model_name: str) -> str | None:
     """Return the default ``reasoning_effort`` level for *model_name*, if any.
 
     The level lives on ``MODEL_INFO[model_name].thinking`` and is set
-    per-model in ``model_info.py`` via the ``thinking="<level>"`` argument of
-    the ``_mi(...)`` helper (e.g. ``thinking="xhigh"`` for the gpt-5.5
+    per-model via the ``thinking`` key in ``MODEL_INFO.json`` /
+    ``~/.kiss/MY_MODELS.json`` (e.g. ``thinking="xhigh"`` for the gpt-5.5
     family).  Models not in ``MODEL_INFO`` (e.g. custom endpoints with
     arbitrary model names) return ``None`` so we never send an unsupported
     ``reasoning_effort`` to such providers.
@@ -171,6 +169,54 @@ def _extract_deepseek_reasoning(content: str) -> tuple[str, str]:
         final_answer = think_pattern.sub("", content).strip()
         return reasoning, final_answer
     return "", content
+
+
+def _delta_reasoning_text(delta: Any) -> str | None:
+    """Extract reasoning text from a Chat Completions streaming delta.
+
+    Providers expose reasoning on different delta fields:
+
+    * ``reasoning_content`` — DeepSeek-native (and vLLM-style) servers.
+    * ``reasoning`` — OpenRouter's normalized plain-string field (also
+      newer vLLM versions).
+    * ``reasoning_details`` — OpenRouter's structured list of
+      ``reasoning.text`` / ``reasoning.summary`` entries.
+
+    The plain string fields are preferred; ``reasoning_details`` is
+    consulted ONLY when both string fields are empty because OpenRouter
+    sends the same text in ``reasoning`` AND ``reasoning_details``
+    simultaneously — reading both would double-emit every thinking token.
+
+    Args:
+        delta: A streaming chunk's ``choices[0].delta`` object.
+
+    Returns:
+        The reasoning text for this delta, or None when the delta carries
+        no reasoning.
+    """
+    reasoning_content = getattr(delta, "reasoning_content", None)
+    if isinstance(reasoning_content, str) and reasoning_content:
+        return reasoning_content
+    reasoning = getattr(delta, "reasoning", None)
+    if isinstance(reasoning, str) and reasoning:
+        return reasoning
+    details = getattr(delta, "reasoning_details", None)
+    if not isinstance(details, list):
+        return None
+    texts: list[str] = []
+    for entry in details:
+        if isinstance(entry, dict):
+            entry_type = entry.get("type")
+            text = entry.get("text")
+            summary = entry.get("summary")
+        else:
+            entry_type = getattr(entry, "type", None)
+            text = getattr(entry, "text", None)
+            summary = getattr(entry, "summary", None)
+        value = text if entry_type == "reasoning.text" else summary
+        if isinstance(value, str) and value:
+            texts.append(value)
+    return "".join(texts) or None
 
 
 def _anthropic_media_block_to_openai_part(block: dict[str, Any]) -> dict[str, Any] | None:
@@ -273,7 +319,60 @@ def _merge_tools_prompt_into_content(content: Any, tools_prompt: str) -> Any:
     return str(content) + "\n" + tools_prompt
 
 
-class OpenAICompatibleModel(Model):
+class OpenAICompatibleBase(Model):
+    """Shared vendor-detection helpers for the OpenAI-compatible transports.
+
+    Both :class:`OpenAICompatibleModel` (Chat Completions) and
+    :class:`~kiss.core.models.openai_compatible_model2.OpenAICompatibleModel2`
+    (Responses) route the same model names to the same vendors, so the
+    DeepSeek-R1 / OpenRouter-Anthropic detection and the OpenRouter
+    prompt-cache request marker live here once.
+    """
+
+    #: Bare model id sent to the API (``openrouter/`` routing prefix stripped).
+    _api_model_name: str
+
+    def _is_deepseek_reasoning_model(self) -> bool:
+        """Check if this is a DeepSeek R1 reasoning model.
+
+        Uses ``_api_model_name`` (which strips the ``openrouter/`` routing
+        prefix) so that models accessed via OpenRouter are matched correctly.
+
+        Returns:
+            True if the API model name is in DEEPSEEK_REASONING_MODELS.
+        """
+        return self._api_model_name in DEEPSEEK_REASONING_MODELS
+
+    def _is_openrouter_anthropic(self) -> bool:
+        """Check if this is an OpenRouter Anthropic model (Claude via OpenRouter)."""
+        return self.model_name.startswith("openrouter/anthropic/")
+
+    def _apply_cache_control_for_openrouter_anthropic(self, kwargs: dict[str, Any]) -> None:
+        """Add top-level cache_control for OpenRouter Anthropic prompt caching.
+
+        Uses the same approach as AnthropicModel: a single top-level cache_control
+        that lets OpenRouter automatically place the breakpoint at the last cacheable
+        block and move it forward as the conversation grows.
+
+        Args:
+            kwargs: The request kwargs dict (``chat.completions.create`` or
+                ``responses.create``).  Mutated in place.
+        """
+        if not self._is_openrouter_anthropic():
+            return
+        if not self.model_config.get("enable_cache", True):
+            return
+        # Shallow-copy the caller-supplied ``extra_body`` dict (when present)
+        # before adding ``cache_control``.  Without this copy the nested dict
+        # in ``self.model_config["extra_body"]`` would be mutated in place —
+        # leaking the auto-injected cache marker into the caller's config.
+        existing = kwargs.get("extra_body")
+        extra_body = dict(existing) if isinstance(existing, dict) else {}
+        extra_body["cache_control"] = {"type": "ephemeral"}
+        kwargs["extra_body"] = extra_body
+
+
+class OpenAICompatibleModel(OpenAICompatibleBase):
     """A model that uses an OpenAI-compatible API with a custom base URL.
 
     This model can be used with any API that implements the OpenAI chat completions
@@ -325,7 +424,15 @@ class OpenAICompatibleModel(Model):
         # MODEL_INFO entry (e.g. ``"xhigh"`` for gpt-5.5).  Copy first so we
         # never mutate the caller's dict.  Caller-supplied values always win.
         thinking_level = _model_thinking_level(self.model_name)
-        if thinking_level is not None and "reasoning_effort" not in self.model_config:
+        reasoning_cfg = self.model_config.get("reasoning")
+        has_native_effort = (
+            isinstance(reasoning_cfg, dict) and "effort" in reasoning_cfg
+        )
+        if (
+            thinking_level is not None
+            and "reasoning_effort" not in self.model_config
+            and not has_native_effort
+        ):
             self.model_config = dict(self.model_config)
             self.model_config["reasoning_effort"] = thinking_level
         # Base64-encoded audio payload of the most recent ``generate()``
@@ -448,7 +555,7 @@ class OpenAICompatibleModel(Model):
         pending_attachments: list[Attachment] = []
 
         for i, (func_name, result_dict) in enumerate(function_results):
-            result_content = result_dict.get("result", str(result_dict))
+            result_content = _tool_result_to_string(result_dict)
             result_content, attachments = parse_binary_attachments(result_content)
             if self.usage_info_for_messages:
                 result_content = f"{result_content}\n\n{self.usage_info_for_messages}"
@@ -475,21 +582,6 @@ class OpenAICompatibleModel(Model):
                     }
                 )
                 self.conversation.append({"role": "user", "content": parts})
-
-    def _is_deepseek_reasoning_model(self) -> bool:
-        """Check if this is a DeepSeek R1 reasoning model.
-
-        Uses ``_api_model_name`` (which strips the ``openrouter/`` routing
-        prefix) so that models accessed via OpenRouter are matched correctly.
-
-        Returns:
-            True if the API model name is in DEEPSEEK_REASONING_MODELS.
-        """
-        return self._api_model_name in DEEPSEEK_REASONING_MODELS
-
-    def _is_openrouter_anthropic(self) -> bool:
-        """Check if this is an OpenRouter Anthropic model (Claude via OpenRouter)."""
-        return self.model_name.startswith("openrouter/anthropic/")
 
     @classmethod
     def _normalize_content_blocks(cls, content: Any) -> list[dict[str, Any]]:
@@ -676,19 +768,6 @@ class OpenAICompatibleModel(Model):
         msg_copy["content"] = blocks
         return [msg_copy]
 
-    def _apply_cache_control_for_openrouter_anthropic(self, kwargs: dict[str, Any]) -> None:
-        """Add top-level cache_control for OpenRouter Anthropic prompt caching.
-
-        Uses the same approach as AnthropicModel: a single top-level cache_control
-        that lets OpenRouter automatically place the breakpoint at the last cacheable
-        block and move it forward as the conversation grows.
-        """
-        if not self._is_openrouter_anthropic():
-            return
-        if not self.model_config.get("enable_cache", True):
-            return
-        kwargs.setdefault("extra_body", {})["cache_control"] = {"type": "ephemeral"}
-
     @staticmethod
     def _build_tool_call_lists(
         entries: list[tuple[str, str, str]],
@@ -822,7 +901,7 @@ class OpenAICompatibleModel(Model):
             if chunk.choices:
                 delta = chunk.choices[0].delta
                 if delta:
-                    reasoning = getattr(delta, "reasoning_content", None)
+                    reasoning = _delta_reasoning_text(delta)
                     if reasoning:
                         if not in_reasoning:
                             in_reasoning = True
@@ -982,7 +1061,7 @@ class OpenAICompatibleModel(Model):
                 if chunk.choices:
                     delta = chunk.choices[0].delta
                     if delta:
-                        reasoning = getattr(delta, "reasoning_content", None)
+                        reasoning = _delta_reasoning_text(delta)
                         if reasoning:
                             if not in_reasoning:
                                 in_reasoning = True

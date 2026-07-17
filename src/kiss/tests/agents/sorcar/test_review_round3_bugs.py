@@ -278,8 +278,8 @@ def test_migration_drop_table_inside_transaction() -> None:
 def test_cli_printer_lowercases_event_taskid_before_super(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from kiss.agents.sorcar import cli_daemon_bridge, cli_printer
-    from kiss.agents.vscode.json_printer import JsonPrinter
+    from kiss.server.json_printer import JsonPrinter
+    from kiss.ui.cli import cli_daemon_bridge, cli_printer
 
     monkeypatch.setattr(
         cli_daemon_bridge, "send_event", lambda ev: None,
@@ -316,7 +316,7 @@ def test_cli_printer_lowercases_event_taskid_before_super(
 def test_cli_printer_releases_lock_before_daemon_send(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from kiss.agents.sorcar import cli_daemon_bridge, cli_printer
+    from kiss.ui.cli import cli_daemon_bridge, cli_printer
 
     printer = cli_printer.RecordingConsolePrinter()
 
@@ -358,9 +358,9 @@ def test_cli_printer_releases_lock_before_daemon_send(
 
 
 def test_cli_printer_imports_is_task_history_id_at_module_level() -> None:
-    src = Path(
-        "src/kiss/agents/sorcar/cli_printer.py"
-    ).read_text()
+    from kiss.ui.cli import cli_printer
+
+    src = Path(str(cli_printer.__file__)).read_text()
     # Find the module-level import.
     assert (
         "from kiss.agents.sorcar.persistence import is_task_history_id" in src
@@ -384,9 +384,9 @@ def test_cli_printer_imports_is_task_history_id_at_module_level() -> None:
 
 
 def test_cli_printer_running_task_ids_docstring_updated() -> None:
-    src = Path(
-        "src/kiss/agents/sorcar/cli_printer.py"
-    ).read_text()
+    from kiss.ui.cli import cli_printer
+
+    src = Path(str(cli_printer.__file__)).read_text()
     assert "Set of int" not in src
     assert "32-char lowercase-hex" in src
 
@@ -405,7 +405,7 @@ def test_task_runner_rejects_non_string_task_id() -> None:
     round 9); exercise its behaviour directly instead of asserting on
     source-code text.
     """
-    from kiss.agents.vscode.task_runner import _client_task_id_of
+    from kiss.server.task_runner import _client_task_id_of
 
     assert _client_task_id_of({"taskId": "abc123"}) == "abc123"
     assert _client_task_id_of({}) == ""
@@ -421,10 +421,10 @@ def test_task_runner_rejects_non_string_task_id() -> None:
 
 
 def test_server_accepts_legacy_int_parent_task_id() -> None:
-    from kiss.agents.vscode.server import _coerce_id
+    from kiss.server.server import _coerce_id
 
     src = Path(
-        "src/kiss/agents/vscode/server.py"
+        "src/kiss/server/server.py"
     ).read_text()
     # Both the _replay_session subagent_info site and the _get_history
     # extra_obj path coerce through the shared ``_coerce_id`` helper,

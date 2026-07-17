@@ -5,7 +5,7 @@
 """Bug-hunt test: panel width math must use display columns, not len().
 
 CJK characters and emoji occupy two terminal columns each but count as a
-single code point.  :mod:`kiss.agents.sorcar.cli_panel` used plain
+single code point.  :mod:`kiss.ui.cli.cli_panel` used plain
 ``len()`` for clipping, padding and caret placement, so a buffer of wide
 characters rendered a body row wider than the panel — pushing the right
 border off the line — and parked the blinking caret in the wrong column.
@@ -17,7 +17,7 @@ import unicodedata
 
 import pytest
 
-from kiss.agents.sorcar.cli_panel import (
+from kiss.ui.cli.cli_panel import (
     body_cursor_col,
     clip_buf,
     panel_body,

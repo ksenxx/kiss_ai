@@ -5,7 +5,7 @@
 """Characterization (lockdown) tests for planned server simplifications.
 
 Pins the CURRENT externally-observable behavior of
-``kiss.agents.vscode.server`` and ``kiss.agents.vscode.merge_flow``
+``kiss.server.server`` and ``kiss.server.merge_flow``
 so the refactorings catalogued in ``tmp/findings-4.md`` cannot
 silently change semantics:
 
@@ -36,7 +36,7 @@ import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.server import VSCodeServer
 
 
 def _redirect(tmpdir: str):

@@ -3,7 +3,7 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 """Integration tests for bugs, redundancies, and inconsistencies in
-``kiss.agents.vscode`` — audit round 4 (post-fix).
+``kiss.server`` — audit round 4 (post-fix).
 
 Each test now asserts the **fix**, not the bug.  If a fix is reverted,
 the corresponding test will fail.
@@ -36,7 +36,7 @@ import threading
 import unittest
 
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.server import VSCodeServer
 
 
 def _make_server() -> tuple[VSCodeServer, list[dict]]:

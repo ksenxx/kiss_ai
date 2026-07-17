@@ -35,7 +35,7 @@ import unittest
 from typing import Any
 
 from kiss.agents.sorcar.useful_tools import UsefulTools
-from kiss.agents.vscode.json_printer import JsonPrinter
+from kiss.server.json_printer import JsonPrinter
 
 
 class _CapturingPrinter(JsonPrinter):

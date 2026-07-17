@@ -4,12 +4,12 @@
 # add your name here
 """Bug-hunt 2: escaped trailing backslashes survive the ptk idle prompt.
 
-Bug: :func:`kiss.agents.sorcar.cli_repl._read_line_ptk` re-applied a
+Bug: :func:`kiss.ui.cli.cli_repl._read_line_ptk` re-applied a
 naive ``line.endswith("\\")`` continuation loop on the text that
-:class:`~kiss.agents.sorcar.cli_prompt.PtkLineReader` returned.  The
+:class:`~kiss.ui.cli.cli_prompt.PtkLineReader` returned.  The
 prompt_toolkit Enter binding (``_submit_enter``) already implements the
 shared POSIX-shell continuation rule from
-:func:`kiss.agents.sorcar.cli_line_continuation.ends_with_line_continuation`:
+:func:`kiss.ui.cli.cli_line_continuation.ends_with_line_continuation`:
 an *odd* number of trailing backslashes continues in-buffer (the line
 is never submitted), while an *even* number is an escaped literal
 ``\\`` and Enter submits.  Consequently the only submitted lines that
@@ -38,8 +38,8 @@ from prompt_toolkit.application import create_app_session
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 
-from kiss.agents.sorcar.cli_prompt import PtkLineReader
-from kiss.agents.sorcar.cli_repl import CliCompleter, _read_line_ptk
+from kiss.ui.cli.cli_prompt import PtkLineReader
+from kiss.ui.cli.cli_repl import CliCompleter, _read_line_ptk
 
 
 def _drive_read_line(

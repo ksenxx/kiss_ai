@@ -21,14 +21,33 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.vscode.vscode_config import (
+from kiss.core import config as config_module
+from kiss.core.kiss_agent import KISSAgent
+from kiss.core.kiss_error import KISSError
+from kiss.server.vscode_config import (
     API_KEY_ENV_VARS,
     load_config,
     save_api_key_to_shell,
     save_config,
 )
-from kiss.core.kiss_agent import KISSAgent
-from kiss.core.kiss_error import KISSError
+
+
+@pytest.fixture(autouse=True)
+def _restore_default_config():
+    """Restore the DEFAULT_CONFIG binding after every test.
+
+    ``save_config``/``save_api_key_to_shell`` trigger
+    ``vscode_config._refresh_config`` which rebinds
+    ``kiss.core.config.DEFAULT_CONFIG`` from the (test-redirected)
+    config file; without restoration the rebound object leaks into
+    later test modules (e.g. ``test_build_config_cli``) and breaks
+    their default-value assertions.
+    """
+    saved = config_module.DEFAULT_CONFIG
+    snapshot = saved.model_copy(deep=True).__dict__
+    yield
+    saved.__dict__.update(snapshot)
+    config_module.DEFAULT_CONFIG = saved
 
 
 def _finish_response(model: str = "gpt-4o-mini") -> dict:
@@ -259,10 +278,10 @@ class TestWebBrowserToggle:
         fake_home.mkdir()
         monkeypatch.setenv("HOME", str(fake_home))
         monkeypatch.setattr(
-            "kiss.agents.vscode.vscode_config.CONFIG_DIR", fake_home / ".kiss",
+            "kiss.server.vscode_config.CONFIG_DIR", fake_home / ".kiss",
         )
         monkeypatch.setattr(
-            "kiss.agents.vscode.vscode_config.CONFIG_PATH",
+            "kiss.server.vscode_config.CONFIG_PATH",
             fake_home / ".kiss" / "config.json",
         )
         save_config({"use_web_browser": False})
@@ -281,10 +300,10 @@ class TestApiKeySetupAndDeletion:
         fake_home.mkdir()
         monkeypatch.setenv("HOME", str(fake_home))
         monkeypatch.setattr(
-            "kiss.agents.vscode.vscode_config.CONFIG_DIR", fake_home / ".kiss",
+            "kiss.server.vscode_config.CONFIG_DIR", fake_home / ".kiss",
         )
         monkeypatch.setattr(
-            "kiss.agents.vscode.vscode_config.CONFIG_PATH",
+            "kiss.server.vscode_config.CONFIG_PATH",
             fake_home / ".kiss" / "config.json",
         )
         monkeypatch.setenv("SHELL", "/bin/zsh")
@@ -324,7 +343,7 @@ class TestApiKeySetupAndDeletion:
         after the key is removed from the env and not written to RC,
         it is effectively deleted.
         """
-        from kiss.agents.vscode.server import VSCodeServer
+        from kiss.server.server import VSCodeServer
 
         server = VSCodeServer()
 

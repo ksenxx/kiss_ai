@@ -29,15 +29,18 @@ from collections.abc import Callable, Iterable
 from typing import Any
 
 from kiss.core.kiss_error import KISSError
+from kiss.core.models.model import Attachment as Attachment
 from kiss.core.models.model import (
-    Attachment,
-    Model,
+    CLITextModel,
     ThinkingCallback,
     TokenCallback,
-    _build_text_based_tools_prompt,
     _parse_text_based_tool_calls,
     _strip_text_based_tool_calls,
     flatten_content_to_text,
+)
+from kiss.core.models.model import Model as Model
+from kiss.core.models.model import (
+    _build_text_based_tools_prompt as _build_text_based_tools_prompt,
 )
 
 logger = logging.getLogger(__name__)
@@ -107,7 +110,7 @@ def _find_codex_cli() -> str:
     return path
 
 
-class CodexModel(Model):
+class CodexModel(CLITextModel):
     """A model that delegates to the OpenAI Codex CLI for LLM completions.
 
     Model names use the ``codex/`` prefix.  The part after the prefix is
@@ -120,6 +123,9 @@ class CodexModel(Model):
     are injected into the system prompt and the model's text output is
     parsed for JSON ``tool_calls`` blocks.  Embeddings are not available.
     """
+
+    _cli_model_name = "CodexModel"
+    _cli_logger = logger
 
     def __init__(
         self,
@@ -152,17 +158,6 @@ class CodexModel(Model):
             model_name[len("codex/"):] if model_name.startswith("codex/") else model_name
         )
 
-    def initialize(self, prompt: str, attachments: list[Attachment] | None = None) -> None:
-        """Initialize the conversation with an initial user prompt.
-
-        Args:
-            prompt: The initial user prompt.
-            attachments: Not supported — ignored with a warning if provided.
-        """
-        if attachments:  # pragma: no cover – attachments not used in practice
-            logger.warning("CodexModel does not support attachments; they will be ignored.")
-        self.conversation = [{"role": "user", "content": prompt}]
-
     def _build_prompt(self) -> str:
         """Build a single prompt string from the conversation history.
 
@@ -175,22 +170,13 @@ class CodexModel(Model):
         Returns:
             The assembled prompt string.
         """
-        parts: list[str] = []
         system_instruction = self.model_config.get("system_instruction")
-        if system_instruction:
-            parts.append(f"[System]: {system_instruction}")
-        if len(self.conversation) == 1 and not system_instruction:
+        if not system_instruction and len(self.conversation) == 1:
             return flatten_content_to_text(self.conversation[0]["content"])
-        for msg in self.conversation:
-            role = msg["role"]
-            content = flatten_content_to_text(msg.get("content", ""))
-            if role == "user":
-                parts.append(f"[User]: {content}")
-            elif role == "assistant":
-                parts.append(f"[Assistant]: {content}")
-            elif role == "tool":
-                parts.append(f"[Tool Result]: {content}")
-        return "\n\n".join(parts)
+        dialogue = self._conversation_as_dialogue()
+        if system_instruction:
+            return f"[System]: {system_instruction}\n\n{dialogue}"
+        return dialogue
 
     def _build_cli_args(self) -> list[str]:
         """Build the ``codex exec`` CLI argument list.
@@ -422,15 +408,7 @@ class CodexModel(Model):
         Returns:
             Tuple of ``(function_calls, content, response)``.
         """
-        tools_prompt = _build_text_based_tools_prompt(function_map)
-
-        original_config = self.model_config
-        config = dict(original_config)
-        original_system = config.get("system_instruction", "")
-        config["system_instruction"] = (
-            (original_system + "\n\n" + tools_prompt).strip()
-        )
-        self.model_config = config
+        original_config = self._install_tools_prompt_in_system_instruction(function_map)
 
         original_token_cb = self.token_callback
         original_thinking_cb = self.thinking_callback
@@ -502,11 +480,3 @@ class CodexModel(Model):
             cache_read,
             0,
         )
-
-    def get_embedding(self, text: str, embedding_model: str | None = None) -> list[float]:
-        """Not supported — Codex CLI does not provide embeddings.
-
-        Raises:
-            KISSError: Always.
-        """
-        raise KISSError("CodexModel does not support embeddings.")

@@ -16,8 +16,8 @@ tokens to be hidden.
 
 import json
 
-from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.core.models.claude_code_model import ClaudeCodeModel
+from kiss.server.json_printer import JsonPrinter
 
 
 def test_cc_model_streams_thinking_tokens_to_json_printer() -> None:

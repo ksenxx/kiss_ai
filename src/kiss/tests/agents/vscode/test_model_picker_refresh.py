@@ -30,7 +30,7 @@ from kiss.core import config as config_module
 
 def _make_server() -> Any:
     os.environ.setdefault("KISS_WORKDIR", "/tmp")
-    from kiss.agents.vscode.server import VSCodeServer
+    from kiss.server.server import VSCodeServer
 
     return VSCodeServer()
 
@@ -87,7 +87,7 @@ class TestModelPickerRefresh(TestCase):
         import tempfile
         from pathlib import Path
 
-        import kiss.agents.vscode.vscode_config as vc
+        import kiss.server.vscode_config as vc
 
         saved_kiss_model = os.environ.pop("KISS_MODEL", None)
         saved_config_dir, saved_config_path = vc.CONFIG_DIR, vc.CONFIG_PATH
@@ -149,9 +149,32 @@ class TestModelPickerRefresh(TestCase):
 
     def test_picker_keeps_valid_user_selection(self) -> None:
         """A model the user explicitly selected must not be overridden by
-        ``_get_models`` as long as it is still available."""
+        ``_get_models`` as long as it is still available.
+
+        ``_get_models`` deliberately re-adopts the *persisted*
+        ``last_model`` preference (see ``_refresh_default_model``), so a
+        real user selection is modelled the same way
+        ``_cmd_select_model`` records it: both the in-memory
+        ``_default_model`` AND the persisted ``last_model`` are set.
+        The config store is pointed at a fresh temp dir so a
+        ``last_model`` leaked into the session-shared config by earlier
+        tests (e.g. CLI-client ``selectModel`` round-trips) cannot
+        override this test's selection.
+        """
+        import shutil
+        import tempfile
+        from pathlib import Path
+
+        import kiss.server.vscode_config as vc
+        from kiss.agents.sorcar.persistence import _save_last_model
+
         saved = _clear_all_keys()
+        saved_config_dir = vc.__dict__.get("CONFIG_DIR")
+        saved_config_path = vc.__dict__.get("CONFIG_PATH")
+        tmpdir = tempfile.mkdtemp()
         try:
+            vc.CONFIG_DIR = Path(tmpdir)
+            vc.CONFIG_PATH = Path(tmpdir) / "config.json"
             os.environ["ANTHROPIC_API_KEY"] = "test-anthropic-key"
             config_module.DEFAULT_CONFIG = config_module.Config()
 
@@ -167,7 +190,10 @@ class TestModelPickerRefresh(TestCase):
 
             server.printer.broadcast = capture  # type: ignore[assignment]
 
+            # A real user selection (``_cmd_select_model``) updates the
+            # in-memory default AND persists it as ``last_model``.
             server._default_model = "claude-sonnet-4-5"
+            _save_last_model("claude-sonnet-4-5")
             server._get_models()
 
             with lock:
@@ -178,4 +204,13 @@ class TestModelPickerRefresh(TestCase):
                 f"valid user selection overridden: {ev['selected']!r}"
             )
         finally:
+            if saved_config_dir is None:
+                vc.__dict__.pop("CONFIG_DIR", None)
+            else:
+                vc.CONFIG_DIR = saved_config_dir
+            if saved_config_path is None:
+                vc.__dict__.pop("CONFIG_PATH", None)
+            else:
+                vc.CONFIG_PATH = saved_config_path
+            shutil.rmtree(tmpdir, ignore_errors=True)
             _restore_keys(saved)

@@ -28,7 +28,8 @@ BUG-36: Non-worktree post-task _prepare_and_start_merge diffs against
 
 BUG-37: Non-worktree agent's dirty files in the main repo cause
         _check_merge_conflict to report false-positive conflicts for
-        worktree merges — GitWorktreeOps.unstaged_files counts the
+        worktree merges — the main-repo dirty-file listing (at the
+        time, GitWorktreeOps.unstaged_files — since removed) counts the
         agent's in-progress writes as "user dirty state", and the
         overlap check triggers even though the dirty files are not
         the user's edits.
@@ -53,14 +54,14 @@ from kiss.agents.sorcar.git_worktree import (
     _git,
 )
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-from kiss.agents.vscode.diff_merge import (
+from kiss.server.diff_merge import (
     _capture_untracked,
     _merge_data_dir,
     _parse_diff_hunks,
     _prepare_merge_view,
     _snapshot_files,
 )
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.server import VSCodeServer
 
 
 def _redirect_db(tmpdir: str) -> tuple:
@@ -317,8 +318,9 @@ class TestBug36PostTaskDiffWrongHead:
 
 
 class TestBug37FalseConflictFromNonWorktreeAgent:
-    """BUG-37: _check_merge_conflict calls unstaged_files on the main
-    repo and checks overlap with worktree changes.  If a non-worktree
+    """BUG-37: _check_merge_conflict lists the main repo's dirty files
+    (historically via GitWorktreeOps.unstaged_files, since removed)
+    and checks overlap with worktree changes.  If a non-worktree
     agent has edited files that the worktree also changed, the overlap
     check reports a conflict even though the "dirty" files are another
     agent's work, not the user's manual edits.

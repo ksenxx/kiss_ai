@@ -22,7 +22,7 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from kiss.agents.vscode.web_server import (
+from kiss.server.web_server import (
     _fetch_last_ntfy_message,
     _post_url_to_message_board,
 )

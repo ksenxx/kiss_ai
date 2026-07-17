@@ -27,7 +27,7 @@ from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.vscode.web_server import RemoteAccessServer
+from kiss.server.web_server import RemoteAccessServer
 
 
 def _redirect_persistence(tmpdir: str) -> tuple[Path, object, Path]:
@@ -50,13 +50,13 @@ class TestUdsListener(IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
         self.saved = _redirect_persistence(self.tmpdir)
-        import kiss.agents.vscode.web_server as ws
+        import kiss.server.web_server as ws
         self._orig_grace = ws._TAB_CLOSE_GRACE
         ws._TAB_CLOSE_GRACE = 0.05
 
         certfile = Path(self.tmpdir) / "cert.pem"
         keyfile = Path(self.tmpdir) / "key.pem"
-        from kiss.agents.vscode.web_server import _generate_self_signed_cert
+        from kiss.server.web_server import _generate_self_signed_cert
         _generate_self_signed_cert(certfile, keyfile)
 
         self.uds_path = Path(self.tmpdir) / "sorcar.sock"
@@ -71,7 +71,7 @@ class TestUdsListener(IsolatedAsyncioTestCase):
         await self.server.start_async()
 
     async def asyncTearDown(self) -> None:
-        import kiss.agents.vscode.web_server as ws
+        import kiss.server.web_server as ws
         ws._TAB_CLOSE_GRACE = self._orig_grace
         await self.server.stop_async()
         if th._db_conn is not None:
@@ -359,7 +359,7 @@ class TestUdsListener(IsolatedAsyncioTestCase):
         # shared fixture.
         certfile = Path(self.tmpdir) / "cert2.pem"
         keyfile = Path(self.tmpdir) / "key2.pem"
-        from kiss.agents.vscode.web_server import _generate_self_signed_cert
+        from kiss.server.web_server import _generate_self_signed_cert
         _generate_self_signed_cert(certfile, keyfile)
         local_uds = Path(self.tmpdir) / "sorcar-extra.sock"
         srv = RemoteAccessServer(

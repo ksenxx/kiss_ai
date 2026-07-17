@@ -5,8 +5,8 @@
 """Bughunt-2 integration tests for the sorcar CLI client modules.
 
 Covers two genuine bugs found by auditing
-:mod:`kiss.agents.sorcar.cli_client` and
-:mod:`kiss.agents.sorcar.cli_daemon_bridge`:
+:mod:`kiss.ui.cli.cli_client` and
+:mod:`kiss.ui.cli.cli_daemon_bridge`:
 
 1. ``cli_client._request_models`` (used by ``/model list``) performed a
    single blind ``models_q.get(timeout=10)`` that ignored
@@ -37,9 +37,9 @@ import threading
 import time
 from pathlib import Path
 
-from kiss.agents.sorcar import cli_daemon_bridge
-from kiss.agents.sorcar.cli_client import CliClient, _request_models
 from kiss.core.print_to_console import ConsolePrinter
+from kiss.ui.cli import cli_daemon_bridge
+from kiss.ui.cli.cli_client import CliClient, _request_models
 
 
 def _make_closed_client(tmp_path: Path) -> CliClient:
