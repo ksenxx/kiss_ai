@@ -61,6 +61,9 @@ function makeWindow() {
   );
   const win = dom.window;
   win.__VOICE__ = {mode: 'webview'};
+  // The mic is closed by default (fresh install); seed the explicit
+  // opt-in so listening auto-enables for these flash-state tests.
+  win.localStorage.setItem('kissVoiceEnabled', '1');
 
   const script = win.document.createElement('script');
   script.textContent = fs.readFileSync(VOICE_JS_PATH, 'utf-8');
@@ -169,7 +172,7 @@ test('turning voice off locally clears the flash immediately', () => {
   // flash waiting for a host message that may never come.
   const win = makeWindow();
   const btn = win.document.getElementById('voice-btn');
-  // Webview mode auto-enables listening at load (mic on at launch).
+  // makeWindow seeds the opt-in, so listening auto-enables at load.
   sendHostMessage(win, {type: 'voiceWake'});
   sendHostMessage(win, {type: 'voiceTranscribing'});
   btn.click(); // disable listening
