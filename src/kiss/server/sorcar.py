@@ -1,0 +1,228 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
+"""Minimal synchronous client API for the local ``sorcar web`` daemon.
+
+Any process can launch a task on an already-running daemon and block
+until it finishes::
+
+    from kiss.server import sorcar
+
+    result = sorcar.run("Summarize README.md", work_dir="/path/to/repo")
+    print(result.text, result.success, result.cost, result.tokens, result.steps)
+
+The function speaks the daemon's newline-delimited JSON protocol over
+its Unix-domain socket (``$KISS_SORCAR_SOCK``, defaulting to
+``$KISS_HOME/sorcar.sock``) — the same transport the VS Code extension
+and the CLI client use — so no HTTP server, password, or extra
+dependency is involved.  POSIX file permissions (mode 0o600) on the
+socket restrict access to the owning user.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import socket
+import time
+import uuid
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from kiss.agents.sorcar.persistence import _default_kiss_dir
+
+# Read buffer limit for a single daemon event line.  The daemon emits
+# large single-line JSON events (e.g. ``system_prompt`` carrying the
+# full SYSTEM.md), so mirror the CLI client's generous 16 MiB cap.
+_MAX_LINE_BYTES = 16 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class TaskResult:
+    """Final outcome of one synchronous daemon task run.
+
+    Attributes:
+        text: Human-readable result summary produced by the agent.
+        success: Whether the agent reported the task as successful.
+        cost: Budget consumed by the task in USD.
+        tokens: Total LLM tokens consumed by the task.
+        steps: Total agent steps taken by the task.
+    """
+
+    text: str
+    success: bool
+    cost: float
+    tokens: int
+    steps: int
+
+
+def _resolve_sock_path(sock_path: str | Path | None) -> Path:
+    """Return the daemon UDS path to connect to.
+
+    Precedence: explicit *sock_path* argument, then the
+    ``KISS_SORCAR_SOCK`` environment variable, then the daemon's
+    default ``$KISS_HOME/sorcar.sock``.
+
+    Args:
+        sock_path: Optional explicit socket path override.
+
+    Returns:
+        The resolved Unix-domain socket path.
+    """
+    if sock_path:
+        return Path(sock_path)
+    env = os.environ.get("KISS_SORCAR_SOCK")
+    return Path(env) if env else _default_kiss_dir() / "sorcar.sock"
+
+
+def _parse_cost(value: Any) -> float:
+    """Parse a daemon cost field (``"$0.1234"``, ``"N/A"``, or a number).
+
+    Args:
+        value: The ``cost`` field of a daemon ``result`` event.
+
+    Returns:
+        The cost in USD; ``0.0`` when the field is absent or unparseable.
+    """
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip().lstrip("$"))
+        except ValueError:
+            return 0.0
+    return 0.0
+
+
+def _to_task_result(event: dict[str, Any] | None) -> TaskResult:
+    """Convert the final daemon ``result`` event into a :class:`TaskResult`.
+
+    Args:
+        event: The last ``result`` event received for the task's tab,
+            or ``None`` when the task ended without one.
+
+    Returns:
+        The parsed :class:`TaskResult`.  The daemon enriches ``result``
+        events with ``success`` / ``summary`` fields parsed from the
+        agent's YAML result; ``summary`` is preferred over the raw
+        ``text`` when present.
+    """
+    if event is None:
+        return TaskResult(text="", success=False, cost=0.0, tokens=0, steps=0)
+    text = str(event.get("summary") or event.get("text") or "")
+    return TaskResult(
+        text=text,
+        success=bool(event.get("success", False)),
+        cost=_parse_cost(event.get("cost")),
+        tokens=int(event.get("total_tokens", 0) or 0),
+        steps=int(event.get("step_count", 0) or 0),
+    )
+
+
+def run(
+    prompt: str,
+    *,
+    work_dir: str = "",
+    model: str = "",
+    use_worktree: bool = False,
+    auto_commit: bool = False,
+    timeout: float = 3600.0,
+    sock_path: str | Path | None = None,
+) -> TaskResult:
+    """Run *prompt* as a task on the local Sorcar daemon and block until done.
+
+    Connects to the ``sorcar web`` daemon's Unix-domain socket, sends
+    the same ``run`` command a chat webview would, streams the task's
+    events, and returns once the daemon reports the task finished.
+
+    Args:
+        prompt: The task instruction to run.
+        work_dir: Working directory for the task; the daemon's current
+            default is used when empty.
+        model: Model name; the daemon's selected default when empty.
+        use_worktree: Run the task in an isolated git worktree.
+        auto_commit: Auto-commit the task's changes on success.
+        timeout: Maximum seconds to wait for the task to finish.
+        sock_path: Daemon UDS path override (defaults to
+            ``$KISS_SORCAR_SOCK`` or ``$KISS_HOME/sorcar.sock``).
+
+    Returns:
+        A :class:`TaskResult` with the result text, success flag, cost
+        (USD), total tokens, and step count of the task.
+
+    Raises:
+        ValueError: When *prompt* is empty or blank.
+        ConnectionError: When no daemon is listening on the socket, or
+            the daemon drops the connection before the task finishes.
+        TimeoutError: When the task does not finish within *timeout*
+            seconds.  The client then disconnects, which asks the
+            daemon to close the task's tab.
+    """
+    if not prompt or not prompt.strip():
+        raise ValueError("prompt must be a non-empty string")
+    path = _resolve_sock_path(sock_path)
+    tab_id = f"api-{uuid.uuid4().hex}"
+    deadline = time.monotonic() + timeout
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        sock.settimeout(min(timeout, 10.0))
+        try:
+            sock.connect(str(path))
+        except OSError as exc:
+            raise ConnectionError(
+                f"Cannot connect to the sorcar daemon at {path}: {exc} "
+                f"— start it with `sorcar web`."
+            ) from exc
+        cmd = {
+            "type": "run",
+            "prompt": prompt,
+            "tabId": tab_id,
+            "taskId": uuid.uuid4().hex,
+            "workDir": work_dir,
+            "model": model,
+            "useWorktree": use_worktree,
+            "autoCommit": auto_commit,
+        }
+        sock.sendall(json.dumps(cmd).encode("utf-8") + b"\n")
+        reader = sock.makefile("rb", buffering=_MAX_LINE_BYTES)
+        result_event: dict[str, Any] | None = None
+        started = False
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"Task did not finish within {timeout} seconds"
+                )
+            sock.settimeout(remaining)
+            try:
+                line = reader.readline(_MAX_LINE_BYTES)
+            except TimeoutError:
+                raise TimeoutError(
+                    f"Task did not finish within {timeout} seconds"
+                ) from None
+            if not line:
+                raise ConnectionError(
+                    "The sorcar daemon closed the connection before the "
+                    "task finished"
+                )
+            try:
+                event = json.loads(line.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            if not isinstance(event, dict) or event.get("tabId") != tab_id:
+                continue
+            etype = event.get("type")
+            if etype == "result":
+                result_event = event
+            elif etype == "status":
+                if event.get("running"):
+                    started = True
+                elif started:
+                    return _to_task_result(result_event)
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
