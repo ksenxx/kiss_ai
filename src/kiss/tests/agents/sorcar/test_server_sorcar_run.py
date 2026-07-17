@@ -194,6 +194,11 @@ class SorcarRunApiTest(unittest.TestCase):
         assert result.tokens == 1234
         assert result.steps == 7
         assert abs(result.cost - 0.4567) < 1e-9
+        # The returned ids must identify the run in the daemon's
+        # persistence: the task row exists and belongs to the chat.
+        assert result.task_id
+        assert result.chat_id
+        assert _persistence._get_task_chat_id(result.task_id) == result.chat_id
 
     def test_failure_returns_not_success_with_metrics(self) -> None:
         """A failing agent yields ``success=False`` plus its usage.
@@ -234,6 +239,9 @@ class SorcarRunApiTest(unittest.TestCase):
         assert result.tokens == 55
         assert result.steps == 3
         assert abs(result.cost - 0.0123) < 1e-9
+        assert result.task_id
+        assert result.chat_id
+        assert _persistence._get_task_chat_id(result.task_id) == result.chat_id
 
     def test_no_daemon_raises_connection_error(self) -> None:
         """A missing daemon socket raises a helpful ConnectionError."""
