@@ -5259,6 +5259,52 @@
         }
         break;
       }
+      case 'openRunningTasks': {
+        // Remote-webapp page load: the web server's ``_handle_ready``
+        // reports every task currently running in the backend, sorted
+        // oldest-first.  Open one chat tab per running task that is
+        // not already visible in this window (dedupe by backend chat
+        // id — a restored tab may already show the chat) and post
+        // ``resumeSession`` so the backend replays the chat's events
+        // and re-subscribes the tab to the live stream (same flow as
+        // clicking the chat in the History sidebar).  Finally focus
+        // the tab running the LATEST task (the list's last entry).
+        // VS Code webviews never receive this message: only the web
+        // server sends it, and only to WSS (remote-web) clients.
+        const runningTasks = Array.isArray(ev.tasks) ? ev.tasks : [];
+        let focusTabId = '';
+        runningTasks.forEach(rt => {
+          if (!rt || !rt.chatId) return;
+          const rtChatId = String(rt.chatId);
+          const existing = getTabByBackendChatId(rtChatId);
+          if (existing) {
+            focusTabId = existing.id;
+            return;
+          }
+          createNewTab();
+          // Stamp the backend chat id eagerly (the replay's
+          // ``task_events`` would set it anyway) so a second
+          // ``openRunningTasks`` — or a history click — can never
+          // open the same chat in two tabs.
+          const rtTab = getTab(activeTabId);
+          if (rtTab) rtTab.backendChatId = rtChatId;
+          const rtTitle = String(rt.title || '').trim();
+          if (rtTitle) updateActiveTabTitle(rtTitle);
+          vscode.postMessage({
+            type: 'resumeSession',
+            id: rtChatId,
+            taskId: rt.taskId || '',
+            tabId: activeTabId,
+          });
+          focusTabId = activeTabId;
+        });
+        if (focusTabId && focusTabId !== activeTabId) {
+          switchToTab(focusTabId);
+        }
+        persistTabState();
+        break;
+      }
+
       case 'triggerStop':
         vscode.postMessage({type: 'stop', tabId: activeTabId});
         break;

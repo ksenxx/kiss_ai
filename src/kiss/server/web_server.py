@@ -1635,6 +1635,70 @@ def _snapshot_active_tabs() -> list[str]:
     return active_tabs
 
 
+def _snapshot_running_task_rows() -> list[dict[str, Any]]:
+    """Return one ``{chatId, taskId, title, startTs}`` dict per running chat.
+
+    Snapshots :attr:`_RunningAgentState.running_agent_states` (under its
+    registry lock — same discipline as :func:`_snapshot_active_tabs`)
+    and keeps only top-level running tasks:
+
+    * ``is_task_active`` must be true (a task is actually in flight);
+    * sub-agent states are skipped — their chats are reopened by the
+      parent tab's own ``resumeSession`` replay
+      (``_open_persisted_subagent_tabs``), so listing them here would
+      duplicate tabs on the client;
+    * states without a ``chat_id`` are skipped — there is nothing a
+      client-side ``resumeSession`` could resume yet;
+    * duplicate ``chat_id`` values are collapsed to one row (several
+      viewer tabs may share one live chat).
+
+    ``startTs`` is the ``task_history.start_ts`` of the in-flight task
+    (``0`` when the row is missing) and the result is sorted by it
+    ascending, so a client opening one tab per row in order naturally
+    ends focused on the tab running the LATEST task.  ``title`` is the
+    task's user prompt for an immediate tab label; the follow-up
+    ``resumeSession`` replay repaints the tab with the real events.
+    """
+    from kiss.agents.sorcar.persistence import _get_task_start_ts
+    from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+
+    try:
+        with _RunningAgentState._registry_lock:
+            states = list(_RunningAgentState.running_agent_states.values())
+    except Exception:
+        try:
+            states = list(_RunningAgentState.running_agent_states.values())
+        except Exception:
+            logger.debug(
+                "unlocked registry snapshot failed", exc_info=True,
+            )
+            states = []
+    rows: list[dict[str, Any]] = []
+    seen_chats: set[str] = set()
+    for state in states:
+        try:
+            if not state.is_task_active or state.is_subagent:
+                continue
+            chat_id = state.chat_id
+            if not chat_id or chat_id in seen_chats:
+                continue
+            task_id = str(state.task_history_id or state.last_task_id or "")
+            rows.append({
+                "chatId": chat_id,
+                "taskId": task_id,
+                "title": state.last_user_prompt or "",
+                "startTs": _get_task_start_ts(task_id),
+            })
+            seen_chats.add(chat_id)
+        except Exception:
+            logger.debug(
+                "skipping malformed state in running-task snapshot",
+                exc_info=True,
+            )
+    rows.sort(key=lambda r: r["startTs"])
+    return rows
+
+
 def _rss_mb() -> float:
     """Return this process's peak RSS in megabytes, or ``-1.0`` on failure.
 
@@ -4471,7 +4535,7 @@ class RemoteAccessServer:
                         if rt_id not in local_tabs:
                             local_tabs.add(rt_id)
                             self._printer.register_local_uds_tab(rt_id)
-            await self._handle_ready(cmd, endpoint)
+            await self._handle_ready(cmd, endpoint, is_uds=is_uds)
             return
         if cmd_type == "submit":
             await self._handle_submit(cmd)
@@ -5170,7 +5234,7 @@ class RemoteAccessServer:
         return cleaned
 
     async def _handle_ready(
-        self, cmd: dict[str, Any], websocket: Any,
+        self, cmd: dict[str, Any], websocket: Any, *, is_uds: bool = False,
     ) -> None:
         """Translate the webview ``ready`` command into backend commands.
 
@@ -5193,6 +5257,11 @@ class RemoteAccessServer:
                 stamped with the connection's ``connId`` by
                 :meth:`_dispatch_client_command`).
             websocket: The client connection (for direct replies).
+            is_uds: True when the ``ready`` arrived over the local UDS
+                (VS Code extension host / CLI) transport.  Only
+                remote-web (WSS) clients get the ``openRunningTasks``
+                push at the end — VS Code windows manage their own tab
+                restoration in the extension host.
         """
         tab_id = cmd.get("tabId", "")
         if not isinstance(tab_id, str):
@@ -5288,6 +5357,41 @@ class RemoteAccessServer:
                 seen_merge_tabs.add(rt_id)
         for merge_tab_id in merge_tabs_to_replay:
             await self._replay_merge_review(merge_tab_id, websocket)
+        # Finally, tell a freshly-opened REMOTE page about every task
+        # that is currently running in the backend so it can open one
+        # chat tab per running task and focus the tab running the
+        # LATEST one.  A brand-new browser session has no persisted
+        # ``restoredTabs`` (the shim's state lives in per-tab
+        # sessionStorage), so without this push running tasks are
+        # invisible until the user digs them out of the History
+        # sidebar.  The send is targeted at the connecting endpoint
+        # only, and the client dedupes by backend chat id, so a reload
+        # that DID restore the chat's tab never shows it twice.  UDS
+        # (VS Code / CLI) clients are exempt: the extension host owns
+        # their tab restoration.
+        if not is_uds:
+            try:
+                running_rows = await asyncio.to_thread(
+                    _snapshot_running_task_rows,
+                )
+            except Exception:
+                logger.debug(
+                    "running-task snapshot for ready failed", exc_info=True,
+                )
+                running_rows = []
+            if running_rows:
+                try:
+                    await self._endpoint_send(
+                        websocket,
+                        json.dumps({
+                            "type": "openRunningTasks",
+                            "tasks": running_rows,
+                        }),
+                    )
+                except Exception:
+                    logger.debug(
+                        "ready openRunningTasks send failed", exc_info=True,
+                    )
 
     async def _replay_merge_review(self, tab_id: str, websocket: Any) -> None:
         """Re-send an in-flight merge review to a reconnecting client.
