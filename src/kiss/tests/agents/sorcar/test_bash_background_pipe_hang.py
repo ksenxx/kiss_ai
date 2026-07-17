@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.sorcar.useful_tools import UsefulTools
+from kiss.core.useful_tools import UsefulTools
 
 pytestmark = pytest.mark.skipif(
     sys.platform == "win32", reason="POSIX shell/process-group semantics"

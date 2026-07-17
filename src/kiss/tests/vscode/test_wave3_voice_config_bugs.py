@@ -49,8 +49,8 @@ from typing import Any, cast
 
 import pytest
 
+import kiss.core.vscode_config as vc
 import kiss.server.voice_wake as voice_wake
-import kiss.server.vscode_config as vc
 
 # ---------------------------------------------------------------------------
 # D1 — model download must have a hard network timeout

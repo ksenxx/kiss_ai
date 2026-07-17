@@ -47,7 +47,7 @@ import pytest
 
 import kiss.agents.sorcar.mcp_servers as mcp_servers_module
 from kiss.agents.sorcar.mcp_servers import MCPManager, MCPServerConfig
-from kiss.agents.sorcar.useful_tools import UsefulTools
+from kiss.core.useful_tools import UsefulTools
 
 _SERVER_SCRIPT = '''
 from mcp.server.fastmcp import FastMCP

@@ -225,7 +225,7 @@ class TestUpdateAvailableSameVersion(_UpdateCheckTestBase):
     PYPI_VERSION = "0.0.0"  # Will be overridden below.
 
     async def asyncSetUp(self) -> None:
-        from kiss._version import __version__
+        from kiss.core._version import __version__
         # Pin the stub to the *current* installed version so the check
         # sees no upgrade is needed.
         type(self).PYPI_PAYLOAD = {"info": {"version": __version__}}
@@ -292,7 +292,8 @@ class TestUpdateAvailableUsesLatestInstalledExtension(_UpdateCheckTestBase):
     Fix
     ---
     The daemon now discovers the LATEST installed extension version by
-    scanning ``~/.vscode/extensions/ksenxx.kiss-sorcar-*/kiss_project/src/kiss/_version.py``
+    scanning ``~/.vscode/extensions/ksenxx.kiss-sorcar-*/kiss_project/src/kiss/core/_version.py``
+    (falling back to the pre-move layout)
     and returns the highest parseable version.  After the install the
     filesystem contains the NEW extension dir, so even a stale-old daemon
     reports ``current == NEW`` and broadcasts ``available: False`` —

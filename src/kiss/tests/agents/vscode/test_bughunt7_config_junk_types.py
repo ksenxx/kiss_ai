@@ -40,9 +40,9 @@ import unittest
 from typing import Any
 
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.server import vscode_config
+from kiss.core import vscode_config
+from kiss.core.vscode_config import load_config
 from kiss.server.server import VSCodeServer
-from kiss.server.vscode_config import load_config
 
 
 class _ConfigIsolationMixin(unittest.TestCase):

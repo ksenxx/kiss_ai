@@ -20,7 +20,7 @@ import unittest
 from typing import Any
 
 import kiss.agents.sorcar.persistence as _pm
-import kiss.server.vscode_config as _vc
+import kiss.core.vscode_config as _vc
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.server.server import VSCodeServer
 
