@@ -77,6 +77,16 @@ def get_jobs_root(base_dir: str | Path | None = None) -> Path:
     return _artifact_root(base_dir) / "jobs"
 
 
+def kiss_home() -> Path:
+    """Return the KISS home directory ($KISS_HOME or ~/.kiss).
+
+    Resolved lazily on every call so that ``KISS_HOME`` set after
+    module import (as the test suite's conftest does) is honored.
+    """
+    env = os.environ.get("KISS_HOME")
+    return Path(env) if env else Path.home() / ".kiss"
+
+
 def get_artifact_dir() -> str:
     """Return the active artifact directory, creating it lazily if needed."""
     global _artifact_dir
@@ -135,7 +145,13 @@ class Config(BaseModel):
     )
     max_budget: float = Field(
         default=200.0,
-        description="Maximum budget in USD for a single agent run",
+        description=(
+            "Maximum budget in USD for a single agent run. Only consumed as the "
+            "default for the Sorcar CLI's --max-budget option (and settable from "
+            "the VS Code settings); KISSAgent and RelentlessAgent do NOT consult "
+            "this field — they use their own defaults (10.0 and 200.0 USD "
+            "respectively) unless max_budget is passed to run() explicitly."
+        ),
     )
 
 

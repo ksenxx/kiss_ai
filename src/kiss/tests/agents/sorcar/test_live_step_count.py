@@ -22,8 +22,8 @@ from typing import Any
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-from kiss.agents.vscode.server import VSCodeServer
 from kiss.core.kiss_agent import KISSAgent
+from kiss.server.server import VSCodeServer
 
 # ---------------------------------------------------------------------------
 # Helpers

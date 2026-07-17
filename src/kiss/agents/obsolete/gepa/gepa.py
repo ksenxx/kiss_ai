@@ -29,11 +29,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-from kiss.core.kiss_agent import KISSAgent
-from kiss.core.utils import (
+from kiss.agents.obsolete.gepa.template_utils import (
     escape_invalid_template_field_names,
     get_template_field_names,
 )
+from kiss.core.kiss_agent import KISSAgent
 
 logger = logging.getLogger(__name__)
 

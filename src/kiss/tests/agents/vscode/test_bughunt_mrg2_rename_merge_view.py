@@ -30,7 +30,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from kiss.agents.vscode.diff_merge import (
+from kiss.server.diff_merge import (
     _capture_untracked,
     _parse_diff_hunks,
     _prepare_merge_view,

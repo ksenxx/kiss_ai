@@ -3,7 +3,7 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 """Integration tests for the twelve MEDIUM-severity robustness fixes
-in :mod:`kiss.agents.vscode.web_server`.
+in :mod:`kiss.server.web_server`.
 
 Each test exercises real network sockets, real subprocesses (where
 relevant), and the real production code paths — no mocks, no test
@@ -57,9 +57,9 @@ from unittest import IsolatedAsyncioTestCase
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
-from kiss.agents.vscode import web_server as ws_mod
-from kiss.agents.vscode.vscode_config import CONFIG_PATH, save_config
-from kiss.agents.vscode.web_server import (
+from kiss.server import web_server as ws_mod
+from kiss.server.vscode_config import CONFIG_PATH, save_config
+from kiss.server.web_server import (
     RemoteAccessServer,
     WebPrinter,
     _create_ssl_context,
@@ -477,7 +477,7 @@ class TestM6MergeStateCleanup(IsolatedAsyncioTestCase):
         the grace window to a few hundred milliseconds and verifies
         the eventual cleanup.
         """
-        import kiss.agents.vscode.web_server as ws_mod
+        import kiss.server.web_server as ws_mod
 
         orig_grace = ws_mod._TAB_CLOSE_GRACE
         ws_mod._TAB_CLOSE_GRACE = 0.1

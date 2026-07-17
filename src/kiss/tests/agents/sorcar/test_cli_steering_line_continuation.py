@@ -17,7 +17,7 @@ from __future__ import annotations
 import io
 import threading
 
-from kiss.agents.sorcar.cli_steering import _InputBox
+from kiss.ui.cli.cli_steering import _InputBox
 
 
 def _make_box() -> _InputBox:

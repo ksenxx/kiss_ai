@@ -3,7 +3,7 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 """Integration tests for bugs, redundancies, and inconsistencies in
-``kiss.agents.vscode`` — audit round 3.
+``kiss.server`` — audit round 3.
 
 Each test confirms the bug/inconsistency exists with BOTH a structural
 source assertion (``inspect.getsource`` pattern match) AND a behavioral
@@ -41,12 +41,12 @@ import unittest
 from pathlib import Path, PurePath
 
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.agents.vscode.diff_merge import (
+from kiss.server.diff_merge import (
     _merge_data_dir,
     _scan_files,
     _untracked_base_dir,
 )
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.server import VSCodeServer
 
 
 def _make_server() -> tuple[VSCodeServer, list[dict]]:

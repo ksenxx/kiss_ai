@@ -60,11 +60,11 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar import cli_daemon_bridge
 from kiss.agents.sorcar import persistence as th
-from kiss.agents.sorcar.cli_printer import RecordingConsolePrinter
 from kiss.agents.sorcar.persistence import _add_task, _append_chat_event
-from kiss.agents.vscode.web_server import RemoteAccessServer
+from kiss.server.web_server import RemoteAccessServer
+from kiss.ui.cli import cli_daemon_bridge
+from kiss.ui.cli.cli_printer import RecordingConsolePrinter
 
 
 def _reset_cli_daemon_writer() -> None:

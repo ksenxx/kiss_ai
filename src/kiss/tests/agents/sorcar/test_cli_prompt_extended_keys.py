@@ -7,11 +7,11 @@ protocols so Shift+Enter reliably inserts a newline on every terminal.
 
 Historical gap closed by this test file:
     Commit ``0e35b6e3`` fixed the Shift+Enter multi-line bug in the
-    mid-task steering box (:class:`~kiss.agents.sorcar.cli_steering._InputBox`)
+    mid-task steering box (:class:`~kiss.ui.cli.cli_steering._InputBox`)
     by pushing BOTH ``ESC[>4;2m`` (xterm modifyOtherKeys=2) AND
     ``ESC[>1u`` (Kitty keyboard protocol push flag 1) in
     :meth:`_InputBox.start`.  The initial task prompt reader
-    (:class:`~kiss.agents.sorcar.cli_prompt.PtkLineReader`) still
+    (:class:`~kiss.ui.cli.cli_prompt.PtkLineReader`) still
     wrote only ``ESC[>4;2m``, so on Kitty / foot / ghostty — terminals
     that ignore modifyOtherKeys=2 in favour of the Kitty keyboard
     protocol — the very first task prompt would still submit
@@ -37,8 +37,8 @@ from prompt_toolkit.application import create_app_session
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 
-from kiss.agents.sorcar.cli_prompt import PtkLineReader
-from kiss.agents.sorcar.cli_repl import CliCompleter
+from kiss.ui.cli.cli_prompt import PtkLineReader
+from kiss.ui.cli.cli_repl import CliCompleter
 
 
 class _CapturingOutput(DummyOutput):

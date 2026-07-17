@@ -55,7 +55,7 @@ def _make_remote_server() -> Any:
     production where a single server owns both.
     """
     os.environ.setdefault("KISS_WORKDIR", "/tmp")
-    from kiss.agents.vscode.web_server import RemoteAccessServer
+    from kiss.server.web_server import RemoteAccessServer
 
     tmp = tempfile.mkdtemp(prefix="kiss-interrupt-test-")
     return RemoteAccessServer(

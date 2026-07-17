@@ -95,7 +95,7 @@ class TestFuzzSaveApiKeyRoundTripBash(unittest.TestCase):
             self.skipTest(f"{self.SHELL} not installed")
         self._tmp = tempfile.TemporaryDirectory()
         self.home = Path(self._tmp.name)
-        from kiss.agents.vscode import vscode_config as vc
+        from kiss.server import vscode_config as vc
         self._vc = vc
         self._orig_rc = vc._shell_rc_path
         vc._shell_rc_path = lambda shell: self.home / self.RC_NAME  # type: ignore[assignment]
@@ -186,7 +186,7 @@ class TestFuzzGitCwdNoInjection(unittest.TestCase):
     shell commands."""
 
     def test_fuzz_cwd_paths_with_metacharacters(self) -> None:
-        from kiss.agents.vscode import diff_merge as dm
+        from kiss.server import diff_merge as dm
 
         rng = random.Random(0x617)
         marker = Path(tempfile.gettempdir()) / f"git-pwned-{os.getpid()}"
@@ -219,7 +219,7 @@ class TestFuzzGitCwdNoInjection(unittest.TestCase):
     def test_fuzz_args_are_passed_verbatim(self) -> None:
         """A fuzzed ``*args`` value must arrive at git unmangled (no
         shell expansion)."""
-        from kiss.agents.vscode import diff_merge as dm
+        from kiss.server import diff_merge as dm
 
         captured: list[list[str]] = []
         real_run = subprocess.run
@@ -261,6 +261,14 @@ class TestFuzzSourceShellEnvPaths(unittest.TestCase):
         if not shutil.which("bash"):
             self.skipTest("bash required")
         self._tmp = tempfile.TemporaryDirectory()
+        # ``source_shell_env`` imports every ``export`` in the sourced
+        # RC into ``os.environ`` — including the sentinel
+        # ``OPENAI_API_KEY=present`` planted below.  Snapshot/restore
+        # the environment so the sentinel does not leak into later
+        # tests (it made live OpenAI calls fail 401 with "Incorrect
+        # API key provided: present").
+        self._env_patch = mock.patch.dict(os.environ)
+        self._env_patch.start()
         self._marker = (Path(tempfile.gettempdir())
                         / f"source-pwned-{os.getpid()}")
         if self._marker.exists():
@@ -269,10 +277,11 @@ class TestFuzzSourceShellEnvPaths(unittest.TestCase):
     def tearDown(self) -> None:
         if self._marker.exists():
             self._marker.unlink()
+        self._env_patch.stop()
         self._tmp.cleanup()
 
     def test_fuzz_rc_paths_with_metacharacters(self) -> None:
-        from kiss.agents.vscode import vscode_config as vc
+        from kiss.server import vscode_config as vc
 
         rng = random.Random(0xCAFE)
         for _ in range(20):
@@ -337,7 +346,7 @@ class TestFuzzAutocompletePrefix(unittest.TestCase):
     every shell metachar — must complete without side effects."""
 
     def test_fuzz_prefix_metachars(self) -> None:
-        from kiss.agents.vscode import autocomplete as ac
+        from kiss.server import autocomplete as ac
 
         broadcasts: list[dict] = []
 
@@ -394,7 +403,7 @@ class TestFuzzRcModeUnderRandomUmasks(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.home = Path(self._tmp.name)
-        from kiss.agents.vscode import vscode_config as vc
+        from kiss.server import vscode_config as vc
         self._vc = vc
         self._orig_rc = vc._shell_rc_path
         vc._shell_rc_path = lambda shell: self.home / ".bashrc"  # type: ignore[assignment]
@@ -452,13 +461,23 @@ class TestKnownInjectionCorpus(unittest.TestCase):
             self.skipTest("bash required")
         self._tmp = tempfile.TemporaryDirectory()
         self.home = Path(self._tmp.name)
-        from kiss.agents.vscode import vscode_config as vc
+        from kiss.server import vscode_config as vc
         self._vc = vc
         self._orig_rc = vc._shell_rc_path
         vc._shell_rc_path = lambda shell: self.home / ".bashrc"  # type: ignore[assignment]
         self._refresh_patch = mock.patch.object(vc, "_refresh_config",
                                                 lambda: None)
         self._refresh_patch.start()
+        # ``save_api_key_to_shell`` exports the saved value into
+        # ``os.environ[key_name]``.  Snapshot/restore the environment
+        # (as the sibling fuzz classes do) so the last injection
+        # payload does not leak into ``OPENAI_API_KEY`` for the rest of
+        # the pytest process — that leak made every later live OpenAI
+        # call (e.g. audio transcription in test_multimodal) fail 401.
+        self._env_patch = mock.patch.dict(
+            os.environ,
+            {"HOME": str(self.home), "SHELL": "/bin/bash"})
+        self._env_patch.start()
         self._marker = (Path(tempfile.gettempdir())
                         / f"corpus-pwned-{os.getpid()}")
         if self._marker.exists():
@@ -469,6 +488,7 @@ class TestKnownInjectionCorpus(unittest.TestCase):
             self._marker.unlink()
         self._vc._shell_rc_path = self._orig_rc  # type: ignore[assignment]
         self._refresh_patch.stop()
+        self._env_patch.stop()
         self._tmp.cleanup()
 
     def test_known_payloads(self) -> None:

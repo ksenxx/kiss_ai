@@ -13,7 +13,7 @@ from typing import Any
 
 from anthropic import Anthropic
 
-from kiss.core.kiss_error import KISSError
+from kiss.core.kiss_error import KISSError, ModelRefusalError
 from kiss.core.models.model import (
     Attachment,
     Model,
@@ -268,11 +268,12 @@ def _attachments_to_blocks(attachments: list[Attachment]) -> list[dict[str, Any]
                 blocks.append(
                     {"type": "text", "text": f"[Audio transcription]\n{text}"}
                 )
-            except Exception:
+            except Exception as exc:
                 logger.warning(
                     "Anthropic does not support %s attachments and "
-                    "automatic transcription failed; skipping.",
+                    "automatic transcription failed (%s); skipping.",
                     att.mime_type,
+                    exc,
                 )
         else:
             logger.warning(
@@ -628,7 +629,14 @@ class AnthropicModel(Model):
             if not user_set_max_tokens:
                 max_tokens = 65536 if self.model_name.startswith("claude-opus-4") else 64000
             if _uses_adaptive_thinking(self.model_name):
-                kwargs["thinking"] = {"type": "adaptive"}
+                # ``display`` defaults to "omitted" on adaptive-thinking
+                # models (fable-5, mythos-5, sonnet-5, opus-4-7/4-8): the
+                # API then returns thinking blocks with an EMPTY ``thinking``
+                # field (encrypted signature only) and emits no
+                # ``thinking_delta`` stream events, so no thinking tokens
+                # are ever revealed to the user.  Request the readable
+                # summary explicitly.
+                kwargs["thinking"] = {"type": "adaptive", "display": "summarized"}
             else:
                 # The API requires ``max_tokens > budget_tokens`` and
                 # ``budget_tokens >= 1024``.  Cap the budget below the
@@ -676,17 +684,17 @@ class AnthropicModel(Model):
             kwargs["system"] = system_instruction
         if tools:
             kwargs["tools"] = tools
-            thinking = kwargs.get("thinking") or {}
-            thinking_type = thinking.get("type") if isinstance(thinking, dict) else None
-            if "tool_choice" not in kwargs and thinking_type != "enabled":
+            if "tool_choice" not in kwargs and "thinking" not in kwargs:
                 # KISSAgent's ReAct loop requires every agentic turn to
-                # produce a tool call (``finish`` is always present).  Claude's
-                # default ``tool_choice=auto`` can otherwise yield a
-                # reasoning-only / empty-text turn that KISS has to retry and,
-                # for thinking-first models like fable-5, may eventually abort.
-                # Anthropic rejects forced tool use with
-                # ``thinking.type=enabled``; adaptive-thinking and non-thinking
-                # requests accept ``any``.
+                # produce a tool call (``finish`` is always present), so
+                # non-thinking models force ``tool_choice=any`` to prevent
+                # tool-less turns.  When thinking is active (``enabled`` or
+                # ``adaptive``) tool use only supports ``tool_choice``
+                # ``auto``/``none``: ``enabled`` rejects forced tool use with
+                # a 400, and adaptive models (fable-5, sonnet-5, opus-4-7/4-8)
+                # silently DISABLE thinking for the request ("graceful
+                # thinking degradation") — the response then contains only
+                # ``tool_use`` blocks and no thinking is ever revealed.
                 kwargs["tool_choice"] = {"type": "any"}
 
         if enable_cache:
@@ -747,6 +755,34 @@ class AnthropicModel(Model):
                                 thinking_started = False
             return stream.get_final_message()
 
+    def _raise_on_refusal(self, response: Any) -> None:
+        """Raise :class:`ModelRefusalError` when the model refused the request.
+
+        Adaptive-thinking Claude models (fable-5 in production, task
+        ``daa89a7e``/``c3cd9c95`` in ``~/.kiss/sorcar.db``) can return
+        ``stop_reason="refusal"`` with an EMPTY ``content`` list when their
+        safety layer declines an otherwise benign prompt (observed on
+        security-research text that opus-4-8 answers normally).  Without
+        this check the empty turn propagated as ``("", [])``, KISSAgent
+        burned a useless "MUST have at least one function call" retry (a
+        refusal is deterministic for identical content), and the eventual
+        fallback swap was misreported as "repeated empty responses" — a
+        misleading adapter-bug diagnosis.
+
+        Args:
+            response: The raw Anthropic response message.
+
+        Raises:
+            ModelRefusalError: When ``response.stop_reason`` is ``"refusal"``.
+        """
+        if getattr(response, "stop_reason", None) == "refusal":
+            raise ModelRefusalError(
+                f"Model {self.model_name} refused the request for safety "
+                f'reasons (stop_reason="refusal", empty response). Retrying '
+                f"the identical request will keep failing; rephrase the "
+                f"prompt or use a different model."
+            )
+
     def generate(self) -> tuple[str, Any]:  # pragma: no cover – API call
         """Generates content from the current conversation.
 
@@ -755,6 +791,7 @@ class AnthropicModel(Model):
         """
         kwargs = self._build_create_kwargs()
         response = self._create_message(kwargs)
+        self._raise_on_refusal(response)
 
         blocks = self._normalize_content_blocks(getattr(response, "content", None))
         content = self._extract_text_from_blocks(blocks)
@@ -780,6 +817,7 @@ class AnthropicModel(Model):
         tools = self._build_anthropic_tools_schema(resolved)
         kwargs = self._build_create_kwargs(tools=tools or None)
         response = self._create_message(kwargs)
+        self._raise_on_refusal(response)
 
         stop_reason = getattr(response, "stop_reason", None)
         blocks = self._normalize_content_blocks(getattr(response, "content", None))

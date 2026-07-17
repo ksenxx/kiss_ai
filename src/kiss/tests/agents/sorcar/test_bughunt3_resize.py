@@ -4,7 +4,7 @@
 # add your name here
 """Bug-hunt test: the steering box must re-anchor after a terminal resize.
 
-:meth:`kiss.agents.sorcar.cli_steering._InputBox.start` sets the DECSTBM
+:meth:`kiss.ui.cli.cli_steering._InputBox.start` sets the DECSTBM
 scroll region (``ESC[1;{rows - BOX_H}r``) once for the rows measured at
 start-up.  When the terminal is resized the box rows are recomputed on
 every redraw, but the scroll region was never re-emitted — so after a
@@ -19,7 +19,7 @@ import threading
 
 import pytest
 
-from kiss.agents.sorcar.cli_steering import _BOX_H, _InputBox
+from kiss.ui.cli.cli_steering import _BOX_H, _InputBox
 
 
 def _active_box() -> _InputBox:

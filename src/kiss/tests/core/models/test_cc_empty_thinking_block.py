@@ -17,8 +17,8 @@ If the block ends with only signature deltas, suppress both boundaries.
 
 import json
 
-from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.core.models.claude_code_model import ClaudeCodeModel
+from kiss.server.json_printer import JsonPrinter
 
 
 class TestEmptyThinkingBlockSuppressed:

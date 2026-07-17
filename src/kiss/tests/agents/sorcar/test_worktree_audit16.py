@@ -16,8 +16,10 @@ BUG-68: ``_finish_merge`` and ``_run_task_inner``'s post-task cleanup
     ``worktree_done`` so the user knows the branch is pending and
     can take manual action.
 
-BUG-70: ``_check_merge_conflict`` only checks ``unstaged_files`` and
-    ``staged_files`` of the main repo but not **untracked** files.
+BUG-70: ``_check_merge_conflict`` only checks the unstaged and staged
+    files of the main repo (historically via the since-removed
+    ``unstaged_files``/``staged_files`` helpers) but not **untracked**
+    files.
     When an agent creates a file in the worktree with the same path
     as an untracked file in the main repo, the auto-merge flow will
     fail:
@@ -48,7 +50,7 @@ import pytest
 
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.server import VSCodeServer
 
 
 def _make_repo(path: Path) -> Path:

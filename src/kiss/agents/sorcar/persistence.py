@@ -33,6 +33,8 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
+from kiss.core.config import kiss_home
+
 logger = logging.getLogger(__name__)
 
 
@@ -156,8 +158,7 @@ def _invalidate_chat_context_cache(chat_id: str = "") -> None:
 
 def _default_kiss_dir() -> Path:
     """Return the KISS data directory, respecting ``KISS_HOME`` env var."""
-    env = os.environ.get("KISS_HOME")
-    return Path(env) if env else Path.home() / ".kiss"
+    return kiss_home()
 
 
 _KISS_DIR = _default_kiss_dir()
@@ -1068,7 +1069,11 @@ def _add_task(
         parent_task_id = _coerce_parent_task_id(flat_parent)
     with _rw_lock.write_lock():
         if chat_id == "":
-            chat_id = uuid.uuid4().hex
+            # Mint through the SAME :func:`_allocate_chat_id` helper the
+            # agents use so the mint paths can never drift (e.g. if the
+            # helper ever gains reservation / collision-check side
+            # effects).
+            chat_id = _allocate_chat_id()
         task_id = uuid.uuid4().hex
         db.execute(
             "INSERT INTO task_history (id, timestamp, task, chat_id, result, "
@@ -1272,20 +1277,27 @@ def _load_history(limit: int = 0, offset: int = 0) -> list[_HistoryEntry]:
         return [_history_row_to_dict(r) for r in rows]
 
 
-def _prefix_match_task(query: str) -> str:
-    """Find the most recent task starting with *query* (case-sensitive).
+def _history_date_range() -> tuple[float | None, float | None]:
+    """Return the first and last task timestamps in the history.
 
-    Uses a SQL ``GLOB`` query for case-sensitive prefix matching,
-    avoiding the need to load many rows into Python for prefix scanning.
-
-    Args:
-        query: The prefix string to match against task text.
+    Computes ``(MIN(timestamp), MAX(timestamp))`` over the same row
+    set the History sidebar lists (i.e. excluding sub-agent rows) so
+    the sidebar's From/To date inputs can be pre-filled with the
+    first and last task dates.  Thread-safe.
 
     Returns:
-        The full task string of the most recent match, or ``""`` if none.
+        ``(min_ts, max_ts)`` in epoch seconds, or ``(None, None)``
+        when no listable rows exist.
     """
-    matches = _prefix_match_tasks(query, limit=1)
-    return matches[0] if matches else ""
+    with _rw_lock.read_lock():
+        db = _get_db()
+        row = db.execute(
+            "SELECT MIN(timestamp) AS mn, MAX(timestamp) AS mx "
+            f"FROM task_history WHERE {_HISTORY_NOT_SUBAGENT}"
+        ).fetchone()
+    if row is None or row["mn"] is None or row["mx"] is None:
+        return (None, None)
+    return (float(row["mn"]), float(row["mx"]))
 
 
 def _prefix_match_tasks(query: str, limit: int = 8) -> list[str]:
@@ -2364,24 +2376,26 @@ def _list_recent_chats(limit: int = 10) -> list[dict[str, object]]:
             tasks = db.execute(
                 "SELECT id, task, result, timestamp, parent_task_id "
                 "FROM task_history "
-                "WHERE chat_id = ? ORDER BY timestamp ASC, rowid ASC",
+                f"WHERE chat_id = ? AND {_HISTORY_NOT_SUBAGENT} "
+                "ORDER BY timestamp ASC, rowid ASC",
                 (cid,),
             ).fetchall()
             # Surface both the row's own ``task_id`` (``id`` column)
             # and its ``parent_task_id`` so callers — chiefly the CLI
             # ``/resume`` listing — can display per-task identity and
-            # the sub-agent parent relationship.  Sub-agent rows
-            # remain hidden so the resume picker stays focused on
-            # the user-driven tasks; consequently every returned
-            # ``parent_task_id`` is the empty string here, but the
-            # key is always present for a stable schema.
+            # the sub-agent parent relationship.  Sub-agent rows are
+            # excluded by the shared ``_HISTORY_NOT_SUBAGENT`` SQL
+            # predicate (same classifier as every other reader) so the
+            # resume picker stays focused on the user-driven tasks;
+            # consequently every returned ``parent_task_id`` is the
+            # empty string here, but the key is always present for a
+            # stable schema.
             task_dicts = [
                 {"task": t["task"], "result": t["result"],
                  "timestamp": t["timestamp"],
                  "task_id": t["id"],
                  "parent_task_id": t["parent_task_id"] or ""}
                 for t in tasks
-                if not (t["parent_task_id"])
             ]
             if not task_dicts:
                 continue
@@ -2486,19 +2500,22 @@ def _load_latest_chat_events_by_chat_id(
         return None
     with _rw_lock.read_lock():
         db = _get_db()
-        rows = db.execute(
+        # Sub-agent rows are excluded by the shared
+        # ``_HISTORY_NOT_SUBAGENT`` SQL predicate — the same
+        # classifier every other history/chat reader uses — so only
+        # the single newest real row is fetched.
+        row = db.execute(
             _HISTORY_SELECT
-            + "WHERE chat_id = ? ORDER BY timestamp DESC, rowid DESC",
+            + f"WHERE chat_id = ? AND {_HISTORY_NOT_SUBAGENT} "
+            "ORDER BY timestamp DESC, rowid DESC LIMIT 1",
             (chat_id,),
-        ).fetchall()
-        for row in rows:
-            if row["parent_task_id"]:
-                continue
-            return _events_session_dict(
-                db, str(row["id"]), row["task"], chat_id,
-                _row_to_extra_json(row),
-            )
-        return None
+        ).fetchone()
+        if row is None:
+            return None
+        return _events_session_dict(
+            db, str(row["id"]), row["task"], chat_id,
+            _row_to_extra_json(row),
+        )
 
 
 def _load_chat_events_by_task_id(
@@ -2543,21 +2560,23 @@ def _load_subagent_rows_by_parent_task_id(
     sub-agent tab so the loaded view mirrors the live execution
     layout.
 
-    A sub-agent row is identified by ``task_history.extra`` parsing
-    to a JSON object containing
-    ``{"subagent": {"parent_task_id": <parent_task_id>}}`` — exactly
-    the shape written by
-    :meth:`ChatSorcarAgent._run_tasks_parallel`'s worker thread.
+    A sub-agent row is identified by its ``parent_task_id`` column
+    matching *parent_task_id* — the dedicated column written by
+    :meth:`ChatSorcarAgent._run_tasks_parallel`'s worker thread (the
+    ``extra`` payload's ``subagent`` object is synthesized back from
+    this column by :func:`_row_to_extra_json`).
 
     Args:
-        parent_task_id: Primary key of the parent ``task_history`` row.
+        parent_task_id: Primary key (32-hex UUID TEXT id) of the
+            parent ``task_history`` row.
 
     Returns:
-        List of dicts ordered by ``task_history.id`` ASC (the order in
-        which the parent enqueued sub-agents).  Each dict has
-        ``task_id`` (int), ``task`` (str), ``chat_id`` (str),
-        ``events`` (list of event dicts), and ``extra`` (str, the raw
-        JSON column).  Empty list when no sub-agent rows exist.
+        List of dicts ordered by ``rowid`` ASC (the order in which
+        the parent enqueued sub-agents).  Each dict has ``task_id``
+        (str, the row's UUID TEXT id), ``task`` (str), ``chat_id``
+        (str), ``events`` (list of event dicts), and ``extra`` (str,
+        JSON metadata synthesized by :func:`_row_to_extra_json`).
+        Empty list when no sub-agent rows exist.
     """
     if not isinstance(parent_task_id, str) or not parent_task_id:
         return []
@@ -2661,9 +2680,10 @@ def _get_adjacent_task_by_chat_id(
 def _load_chat_context(chat_id: str) -> list[_HistoryEntry]:
     """Load all tasks and results for a chat session in chronological order.
 
-    Sub-agent rows (those whose ``extra`` column carries a
-    ``subagent`` key — set by :class:`ChatSorcarAgent._run_tasks_parallel`
-    on every worker thread's task row) are filtered out.  Sub-agent
+    Sub-agent rows (those with a non-empty ``parent_task_id`` column —
+    set by :class:`ChatSorcarAgent._run_tasks_parallel`
+    on every worker thread's task row) are filtered out via the shared
+    ``_HISTORY_NOT_SUBAGENT`` SQL predicate.  Sub-agent
     tasks/results are an internal implementation detail of the
     parent's ``run_parallel`` tool call; surfacing them in the chat
     context would (a) pollute the LLM's "Previous tasks and results"
@@ -2685,16 +2705,12 @@ def _load_chat_context(chat_id: str) -> list[_HistoryEntry]:
     with _rw_lock.read_lock():
         db = _get_db()
         rows = db.execute(
-            "SELECT task, result, parent_task_id FROM task_history "
-            "WHERE chat_id = ? ORDER BY timestamp ASC, rowid ASC",
+            "SELECT task, result FROM task_history "
+            f"WHERE chat_id = ? AND {_HISTORY_NOT_SUBAGENT} "
+            "ORDER BY timestamp ASC, rowid ASC",
             (chat_id,),
         ).fetchall()
-        entries: list[_HistoryEntry] = []
-        for r in rows:
-            if r["parent_task_id"]:
-                continue
-            entries.append({"task": r["task"], "result": r["result"]})
-        return entries
+        return [{"task": r["task"], "result": r["result"]} for r in rows]
 
 
 def _load_task_chain_context(task_id: str) -> list[_HistoryEntry]:
@@ -2816,7 +2832,7 @@ def _load_last_model() -> str:
     in the SQLite ``model_usage`` table, which now tracks only per-model
     usage counts.
     """
-    from kiss.agents.vscode.vscode_config import load_config
+    from kiss.core.vscode_config import load_config
 
     return str(load_config().get("last_model", "") or "")
 
@@ -2836,7 +2852,7 @@ def _save_last_model(model: str) -> None:
     Args:
         model: The model name to save as the last-selected model.
     """
-    from kiss.agents.vscode.vscode_config import save_config
+    from kiss.core.vscode_config import save_config
 
     save_config({"last_model": model})
 

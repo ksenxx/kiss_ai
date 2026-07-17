@@ -5,7 +5,7 @@
 """Integration tests for the IP-change watchdog debounce.
 
 These tests reproduce the spurious-restart bug in
-:meth:`kiss.agents.vscode.web_server.RemoteAccessServer._watchdog`
+:meth:`kiss.server.web_server.RemoteAccessServer._watchdog`
 and verify the debounce fix.
 
 Background
@@ -44,9 +44,9 @@ import socket
 import tempfile
 from unittest import IsolatedAsyncioTestCase
 
-import kiss.agents.vscode.web_server as ws_mod
-from kiss.agents.vscode.vscode_config import CONFIG_PATH, save_config
-from kiss.agents.vscode.web_server import RemoteAccessServer
+import kiss.server.web_server as ws_mod
+from kiss.server.vscode_config import CONFIG_PATH, save_config
+from kiss.server.web_server import RemoteAccessServer
 
 
 def _find_free_port() -> int:

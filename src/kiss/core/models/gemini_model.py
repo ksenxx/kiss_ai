@@ -501,8 +501,11 @@ class GeminiModel(Model):
         thinking_config = self.model_config.get("thinking_config")
         if thinking_config is None:
             thinking_config = types.ThinkingConfig(include_thoughts=True)
+        max_output_tokens = self.model_config.get("max_tokens")
+        if max_output_tokens is None:
+            max_output_tokens = self.model_config.get("max_completion_tokens")
         return types.GenerateContentConfig(
-            max_output_tokens=self.model_config.get("max_tokens"),
+            max_output_tokens=max_output_tokens,
             temperature=self.model_config.get("temperature"),
             top_p=self.model_config.get("top_p"),
             stop_sequences=self.model_config.get("stop"),
@@ -670,7 +673,15 @@ class GeminiModel(Model):
             thoughts_tokens = getattr(um, "thoughts_token_count", 0) or 0
             output_tokens += thoughts_tokens
             cached_tokens = getattr(um, "cached_content_token_count", 0) or 0
-            return max(prompt_tokens - cached_tokens, 0), output_tokens, cached_tokens, 0
+            # ``prompt_token_count`` INCLUDES the cached content (per the
+            # UsageMetadata reference), so cached tokens are subtracted and
+            # billed separately at the cache-read rate.  Server-side
+            # tool-use prompts (e.g. Google Search grounding) are reported
+            # separately in ``tool_use_prompt_token_count`` and billed as
+            # ordinary input tokens.
+            tool_use_tokens = getattr(um, "tool_use_prompt_token_count", 0) or 0
+            input_tokens = max(prompt_tokens - cached_tokens, 0) + tool_use_tokens
+            return input_tokens, output_tokens, cached_tokens, 0
         return 0, 0, 0, 0
 
     def get_embedding(  # pragma: no cover – API call
@@ -680,7 +691,7 @@ class GeminiModel(Model):
 
         Args:
             text: The text to generate an embedding for.
-            embedding_model: Optional model name. Defaults to "text-embedding-004".
+            embedding_model: Optional model name. Defaults to "gemini-embedding-001".
 
         Returns:
             list[float]: The embedding vector as a list of floats.
@@ -688,7 +699,7 @@ class GeminiModel(Model):
         Raises:
             KISSError: If embedding generation fails.
         """
-        model_to_use = embedding_model or "text-embedding-004"
+        model_to_use = embedding_model or "gemini-embedding-001"
         try:
             response = self.client.models.embed_content(model=model_to_use, contents=text)
             return list(response.embeddings[0].values)
