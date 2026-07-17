@@ -305,6 +305,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     the interactive-only set.
     """
     parser = argparse.ArgumentParser(
+        prog="sorcar",
         description="Run SorcarAgent demo",
         allow_abbrev=False,
     )
