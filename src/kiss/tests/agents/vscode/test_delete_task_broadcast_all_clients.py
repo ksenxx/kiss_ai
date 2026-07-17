@@ -34,7 +34,7 @@ from unittest import IsolatedAsyncioTestCase
 from websockets.asyncio.client import connect
 
 import kiss.agents.sorcar.persistence as th
-from kiss.server.vscode_config import CONFIG_PATH, save_config
+from kiss.core.vscode_config import CONFIG_PATH, save_config
 from kiss.server.web_server import RemoteAccessServer
 
 

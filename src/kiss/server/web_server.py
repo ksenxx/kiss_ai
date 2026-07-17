@@ -76,6 +76,7 @@ from websockets.datastructures import Headers
 from websockets.http11 import Request, Response
 
 from kiss.core.config import get_jobs_root, kiss_home
+from kiss.core.vscode_config import load_config, source_shell_env
 from kiss.server.diff_merge import _read_lines_preserved as _read_lines_preserved
 from kiss.server.json_printer import GLOBAL_EVENT_TYPES, JsonPrinter
 from kiss.server.server import VSCodeServer, broadcast_to_conn
@@ -87,7 +88,6 @@ from kiss.server.voice_wake import (
     SpeakerIdentifier,
     transcribe_pcm,
 )
-from kiss.server.vscode_config import load_config, source_shell_env
 from kiss.server.web_merge import (
     _apply_exec_bit,  # noqa: F401  (re-exported for external tests)
     _hunk_unresolved,
@@ -287,7 +287,7 @@ _PYPI_LATEST_URL = "https://pypi.org/pypi/kiss-agent-framework/json"
 #
 # The fix: :func:`_read_version` now returns the *highest* ``__version__``
 # it can find under ``<extensions_root>/ksenxx.kiss-sorcar-*/kiss_project/
-# src/kiss/_version.py``.  Once the install unpacks the new extension
+# src/kiss/core/_version.py``.  Once the install unpacks the new extension
 # dir the answer flips to the fresh version even if the daemon binary
 # is still the stale one, so the daemon broadcasts ``available: False``
 # and ``renderUpdateAvailableNotification`` (media/main.js) dismisses
@@ -519,7 +519,7 @@ def _url_file_path() -> Path:
 
     Assigning ``web_server._URL_FILE`` is a supported test override,
     matching the lazy ``CONFIG_DIR`` / ``CONFIG_PATH`` attributes in
-    :mod:`kiss.server.vscode_config`.  The override must be
+    :mod:`kiss.core.vscode_config`.  The override must be
     consulted here (rather than only exposed through ``__getattr__``)
     because production consumers such as :class:`RemoteAccessServer`
     call this accessor directly.
@@ -2745,8 +2745,8 @@ def _read_version() -> str:
     with the same NEW-version text the user just clicked.
 
     Fix: pick the newest ``__version__`` found under
-    ``<extensions_root>/ksenxx.kiss-sorcar-*/kiss_project/src/kiss/_version.py``
-    so a freshly-installed extension dominates the answer even when
+    ``<extensions_root>/ksenxx.kiss-sorcar-*/kiss_project/src/kiss/core/
+    _version.py`` so a freshly-installed extension dominates the answer even when
     the running daemon is still the stale one.  Falls back to the
     bundled ``_version.py`` for developer / Docker installs where the
     extension dir does not exist.
@@ -2766,8 +2766,7 @@ def _read_version() -> str:
     if best_str:
         return best_str
     # Fallback: developer / Docker / test-without-extdir install.  The
-    # version literal is single-sourced in ``kiss/core/_version.py``
-    # (``kiss/_version.py`` is only an import shim without a literal).
+    # version literal is single-sourced in ``kiss/core/_version.py``.
     return _parse_version_py(
         Path(__file__).parent.parent / "core" / "_version.py",
     )

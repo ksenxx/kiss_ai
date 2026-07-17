@@ -11,7 +11,7 @@ import docker
 import pytest
 import requests
 
-from kiss.docker.docker_manager import DockerManager
+from kiss.core.docker_manager import DockerManager
 
 
 def is_docker_available() -> bool:

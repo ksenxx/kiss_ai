@@ -40,7 +40,7 @@ from pathlib import Path
 import pytest
 
 import kiss.server.web_server as ws_mod
-from kiss.server.vscode_config import CONFIG_PATH, save_config
+from kiss.core.vscode_config import CONFIG_PATH, save_config
 from kiss.server.web_server import (
     _TUNNEL_BACKOFF_INITIAL,
     _TUNNEL_BACKOFF_MAX,

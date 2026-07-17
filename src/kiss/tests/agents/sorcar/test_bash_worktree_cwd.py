@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.sorcar.useful_tools import UsefulTools, _clean_env
+from kiss.core.useful_tools import UsefulTools, _clean_env
 
 
 def _init_git_repo(path: Path) -> None:

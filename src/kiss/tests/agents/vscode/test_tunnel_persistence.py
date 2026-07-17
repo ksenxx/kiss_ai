@@ -35,12 +35,12 @@ import subprocess
 import threading
 import time
 
-from kiss.server import web_server as ws
-from kiss.server.vscode_config import (
+from kiss.core.vscode_config import (
     CONFIG_PATH,
     load_config,
     save_config,
 )
+from kiss.server import web_server as ws
 
 # ---------------------------------------------------------------------------
 # _is_pid_alive

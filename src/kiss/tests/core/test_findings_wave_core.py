@@ -23,11 +23,11 @@ from typing import Any
 
 import yaml
 
-from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.printer import parse_result_yaml
 from kiss.core.relentless_agent import SUMMARIZER_PROMPT
 from kiss.core.relentless_agent import finish as relentless_finish
+from kiss.core.useful_tools import UsefulTools
 from kiss.core.utils import finish as utils_finish
 
 

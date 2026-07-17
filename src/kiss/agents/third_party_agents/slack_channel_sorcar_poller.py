@@ -61,7 +61,7 @@ from kiss.agents.third_party_agents._kiss_web_launcher import (
 )
 from kiss.agents.third_party_agents.slack_agent import _load_token
 from kiss.core.models.model_info import get_available_models
-from kiss.server.vscode_config import load_config, source_shell_env
+from kiss.core.vscode_config import load_config, source_shell_env
 
 STATE_DIR = Path.home() / ".kiss" / "slack_channel_sorcar_poller"
 STATE_FILE = STATE_DIR / "state.json"

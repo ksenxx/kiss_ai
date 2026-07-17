@@ -34,7 +34,7 @@ import threading
 import unittest
 from typing import Any
 
-from kiss.agents.sorcar.useful_tools import UsefulTools
+from kiss.core.useful_tools import UsefulTools
 from kiss.server.json_printer import JsonPrinter
 
 

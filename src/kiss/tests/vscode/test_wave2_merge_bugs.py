@@ -43,10 +43,10 @@ import pytest
 
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.core.vscode_config import source_shell_env
 from kiss.server.diff_merge import _prepare_merge_view, _scan_files
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.merge_flow import _MergeFlowMixin
-from kiss.server.vscode_config import source_shell_env
 
 
 def _run_git(repo: Path, *args: str) -> None:

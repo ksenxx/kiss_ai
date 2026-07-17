@@ -47,7 +47,7 @@ from typing import Any
 import pytest
 import yaml
 
-import kiss.server.vscode_config as vscode_config
+import kiss.core.vscode_config as vscode_config
 from kiss.agents.sorcar import persistence as sorcar_persistence
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.models.anthropic_model import AnthropicModel

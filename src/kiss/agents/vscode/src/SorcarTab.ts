@@ -25,24 +25,20 @@ export const DEFAULT_MY_INJECTION =
 
 /** Read the KISS project version from ``_version.py`` on disk.
  *
- * The version literal is single-sourced in ``src/kiss/core/_version.py``
- * (canonical since the move into ``kiss.core``); the pre-move
- * ``src/kiss/_version.py`` path is kept as a fallback for old checkouts.
+ * The version literal is single-sourced in ``src/kiss/core/_version.py``.
  */
 export function getVersion(): string {
   const kissRoot = findKissProject();
   if (!kissRoot) return '';
-  for (const rel of [
-    ['src', 'kiss', 'core', '_version.py'],
-    ['src', 'kiss', '_version.py'],
-  ]) {
-    try {
-      const content = fs.readFileSync(path.join(kissRoot, ...rel), 'utf-8');
-      const match = content.match(/__version__\s*=\s*["']([^"']+)["']/);
-      if (match) return match[1];
-    } catch {
-      /* try next path */
-    }
+  try {
+    const content = fs.readFileSync(
+      path.join(kissRoot, 'src', 'kiss', 'core', '_version.py'),
+      'utf-8',
+    );
+    const match = content.match(/__version__\s*=\s*["']([^"']+)["']/);
+    if (match) return match[1];
+  } catch {
+    /* version file unreadable */
   }
   return '';
 }

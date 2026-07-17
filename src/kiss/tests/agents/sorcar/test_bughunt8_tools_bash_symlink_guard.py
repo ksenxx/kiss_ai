@@ -19,7 +19,7 @@ inconsistent code path.
 
 from pathlib import Path
 
-from kiss.agents.sorcar.useful_tools import UsefulTools, _bash_parent_repo_guard
+from kiss.core.useful_tools import UsefulTools, _bash_parent_repo_guard
 
 
 def _make_symlinked_repo(tmp_path: Path) -> tuple[Path, Path]:

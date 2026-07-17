@@ -20,11 +20,11 @@ from pathlib import Path
 
 from kiss.agents.sorcar import persistence as th
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.sorcar.useful_tools import (
+from kiss.agents.sorcar.web_use_tool import WebUseTool
+from kiss.core.useful_tools import (
     _stop_monitor,
     _truncate_output,
 )
-from kiss.agents.sorcar.web_use_tool import WebUseTool
 from kiss.server.helpers import (
     clip_autocomplete_suggestion,
 )

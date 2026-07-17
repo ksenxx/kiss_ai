@@ -22,8 +22,8 @@ from unittest import IsolatedAsyncioTestCase
 
 import yaml
 
+from kiss.core.vscode_config import CONFIG_PATH, save_config
 from kiss.server import web_server
-from kiss.server.vscode_config import CONFIG_PATH, save_config
 from kiss.server.web_server import RemoteAccessServer
 
 

@@ -39,7 +39,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass
 
 from kiss.agents.sorcar import persistence as _persistence
-from kiss.server.speech_synthesis import synthesize_talk_audio
+from kiss.core.speech_synthesis import synthesize_talk_audio
 
 # Rough length cap for text previews in the human-readable report.
 _PREVIEW_CHARS = 60

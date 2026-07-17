@@ -26,8 +26,8 @@ import pytest
 
 from kiss.agents.sorcar.persistence import _close_db
 from kiss.core import config as config_module
+from kiss.core.vscode_config import load_config, save_config
 from kiss.server.server import VSCodeServer
-from kiss.server.vscode_config import load_config, save_config
 
 _API_KEY_NAMES = (
     "ANTHROPIC_API_KEY",
@@ -44,7 +44,7 @@ _API_KEY_NAMES = (
 def _isolated_state(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
     """Redirect config/database state and restore API-key environment."""
     import kiss.agents.sorcar.persistence as pm
-    import kiss.server.vscode_config as vc
+    import kiss.core.vscode_config as vc
 
     saved_env = {name: os.environ.get(name) for name in _API_KEY_NAMES}
     saved_default_config = config_module.DEFAULT_CONFIG

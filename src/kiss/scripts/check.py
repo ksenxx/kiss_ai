@@ -155,9 +155,8 @@ def _sync_extension_version() -> None:
     """Sync VS Code extension version from _version.py into package.json.
 
     Reads the canonical version from ``src/kiss/core/_version.py`` (the
-    single source of the version literal — ``src/kiss/_version.py`` is
-    only an import shim) and updates the ``version`` field in the
-    extension's ``package.json`` if they differ.
+    single source of the version literal) and updates the ``version``
+    field in the extension's ``package.json`` if they differ.
     """
     import json
 

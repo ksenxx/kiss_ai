@@ -29,8 +29,8 @@ from kiss.agents.sorcar.git_worktree import (
 )
 from kiss.agents.sorcar.persistence import _append_chat_event
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.agents.sorcar.useful_tools import _stale_worktree_fallback
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.core.useful_tools import _stale_worktree_fallback
 from kiss.server.diff_merge import (
     _capture_untracked,
     _cleanup_merge_data,

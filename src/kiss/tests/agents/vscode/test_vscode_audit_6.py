@@ -34,12 +34,12 @@ from typing import Any
 from unittest import TestCase
 
 from kiss.core.models.model_info import get_fast_model
-from kiss.server.server import VSCodeServer
-from kiss.server.vscode_config import (
+from kiss.core.vscode_config import (
     CONFIG_PATH,
     load_config,
     save_config,
 )
+from kiss.server.server import VSCodeServer
 
 
 def _make_server() -> tuple[VSCodeServer, list[dict]]:
@@ -72,7 +72,7 @@ class TestSaveConfigPreservesExtraKeys(TestCase):
         self._orig_path = str(CONFIG_PATH)
         self._tmpdir = tempfile.mkdtemp()
         self._tmp_config = Path(self._tmpdir) / "config.json"
-        import kiss.server.vscode_config as mod
+        import kiss.core.vscode_config as mod
 
         self._mod = mod
         self._orig_config_path = mod.CONFIG_PATH

@@ -4,14 +4,14 @@
     {
       "id": "callers_kill_process_group",
       "category": "structure",
-      "prompt": "In the file src/kiss/agents/sorcar/useful_tools.py, which functions or methods contain calls to _kill_process_group? List every distinct enclosing function/method name.",
+      "prompt": "In the file src/kiss/core/useful_tools.py, which functions or methods contain calls to _kill_process_group? List every distinct enclosing function/method name.",
       "gold_facts": ["_stop_monitor", "Bash", "_bash_streaming"]
     },
     {
       "id": "where_class_useful_tools",
       "category": "structure",
       "prompt": "In which file is the class UsefulTools defined? Give the path relative to the repo root.",
-      "gold_facts": ["src/kiss/agents/sorcar/useful_tools.py"]
+      "gold_facts": ["src/kiss/core/useful_tools.py"]
     },
     {
       "id": "where_class_kissagent",
@@ -35,12 +35,12 @@
       "id": "where_docker_manager",
       "category": "structure",
       "prompt": "In which file is the class DockerManager defined? Give the path relative to the repo root.",
-      "gold_facts": ["src/kiss/docker/docker_manager.py"]
+      "gold_facts": ["src/kiss/core/docker_manager.py"]
     },
     {
       "id": "callers_format_bash_result",
       "category": "structure",
-      "prompt": "In src/kiss/agents/sorcar/useful_tools.py, which methods call the module-level helper _format_bash_result? List the distinct enclosing method names.",
+      "prompt": "In src/kiss/core/useful_tools.py, which methods call the module-level helper _format_bash_result? List the distinct enclosing method names.",
       "gold_facts": ["Bash", "_bash_streaming"]
     },
     {
@@ -64,7 +64,7 @@
     {
       "id": "guard_wiring",
       "category": "structure",
-      "prompt": "In src/kiss/agents/sorcar/useful_tools.py there is a module-level function _bash_parent_repo_guard. Which method calls it?",
+      "prompt": "In src/kiss/core/useful_tools.py there is a module-level function _bash_parent_repo_guard. Which method calls it?",
       "gold_facts": ["Bash"]
     },
     {

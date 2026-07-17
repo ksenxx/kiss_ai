@@ -441,7 +441,7 @@ def test_f13_save_config_work_dir_syncs_cache_and_printer(
 def test_f13_concurrent_save_config_is_serialised(tmp_path: Path) -> None:
     """Concurrent saveConfig commands must not lose each other's keys
     nor corrupt ``work_dir`` state (lock-protected read-modify-write)."""
-    from kiss.server.vscode_config import load_config
+    from kiss.core.vscode_config import load_config
 
     printer = _WorkDirPrinter()
     server = VSCodeServer(printer=printer)

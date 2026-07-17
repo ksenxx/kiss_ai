@@ -57,8 +57,8 @@ def test_version_flag_wins_over_other_args(
 
 
 def test_version_string_matches_kiss_version_module() -> None:
-    """``kiss.__version__`` re-exports ``kiss._version.__version__``."""
-    from kiss._version import __version__ as raw_version
+    """``kiss.__version__`` re-exports ``kiss.core._version.__version__``."""
+    from kiss.core._version import __version__ as raw_version
 
     assert __version__ == raw_version
     assert __version__  # non-empty

@@ -37,11 +37,11 @@ import time
 from pathlib import Path
 from typing import Any
 
+from kiss.core.vscode_config import DEFAULTS, sanitize_config
 from kiss.server.autocomplete import _AutocompleteMixin, _ghost_suffix
 from kiss.server.diff_merge import _git, _scan_files
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.merge_flow import _MergeFlowMixin
-from kiss.server.vscode_config import DEFAULTS, sanitize_config
 
 
 def _run_git(repo: Path, *args: str) -> None:
