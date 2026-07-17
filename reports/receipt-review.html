@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Review — RECEIPT (ICSE 2027)</title>
+<style>
+  :root{
+    --ink:#1c1e21; --muted:#5b616b; --line:#d9d2c4; --paper:#faf7f0;
+    --accent:#7a1f1f; --accent2:#1f4e5f; --good:#2e6b3e; --warn:#9a6b12; --bad:#8a2b2b;
+    --band:#efe9dc;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; background:var(--paper); color:var(--ink);
+    font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;
+    font-size:18px; line-height:1.62;
+  }
+  .wrap{max-width:860px; margin:0 auto; padding:0 26px 120px}
+  header.top{border-bottom:3px double var(--line); padding:44px 26px 26px; max-width:860px; margin:0 auto}
+  .kicker{font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:12.5px; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--accent); margin:0 0 8px}
+  h1{font-size:32px; line-height:1.16; margin:.1em 0 .25em; font-weight:700}
+  .sub{color:var(--muted); font-size:16.5px; margin:.2em 0 0}
+  .meta{display:flex; flex-wrap:wrap; gap:8px 22px; margin-top:18px; font-size:14px; color:var(--muted);
+    font-family:ui-monospace,Menlo,monospace}
+  .meta b{color:var(--ink); font-weight:600}
+  h2{font-size:23px; margin:2.1em 0 .5em; padding-bottom:6px; border-bottom:1px solid var(--line)}
+  h3{font-size:19px; margin:1.5em 0 .3em; color:var(--accent2)}
+  p{margin:.7em 0}
+  a{color:var(--accent2)}
+  blockquote{margin:1.1em 0; padding:.5em 1em; border-left:3px solid var(--accent);
+    background:#f4efe4; color:#33363a; font-size:16.5px}
+  .lead{font-size:19px; line-height:1.55}
+  .verdict{border:1px solid var(--line); border-top:5px solid var(--accent); background:#fff;
+    padding:20px 24px; margin:26px 0; border-radius:2px; box-shadow:0 1px 0 #efe7d6, 0 10px 30px -22px rgba(0,0,0,.4)}
+  .verdict .big{font-size:21px; font-weight:700; color:var(--warn)}
+  .scorebar{display:grid; grid-template-columns:150px 1fr 44px; gap:8px 12px; align-items:center; margin:6px 0}
+  .scorebar .lab{font-size:14px; color:var(--muted); font-family:ui-monospace,Menlo,monospace}
+  .track{height:9px; background:var(--band); border-radius:6px; overflow:hidden}
+  .fill{height:100%; border-radius:6px}
+  .n{font-family:ui-monospace,Menlo,monospace; font-size:13px; text-align:right; color:var(--ink)}
+  figure{margin:26px 0; text-align:center}
+  figure svg{max-width:100%; height:auto}
+  figcaption{font-size:14px; color:var(--muted); margin-top:8px; text-align:center}
+  .tag{display:inline-block; font-family:ui-monospace,Menlo,monospace; font-size:11.5px;
+    padding:2px 8px; border-radius:20px; letter-spacing:.03em; vertical-align:middle}
+  .t-cond{background:#f7e1e1; color:#8a2b2b; border:1px solid #e1b3b3}
+  .t-major{background:#fbeede; color:#8a5a10; border:1px solid #e6c99a}
+  .t-nice{background:#e6efe8; color:#2e6b3e; border:1px solid #b8d4bf}
+  ol.recs{counter-reset:r; list-style:none; padding-left:0}
+  ol.recs>li{position:relative; padding:14px 0 14px 52px; border-bottom:1px dashed var(--line)}
+  ol.recs>li:before{counter-increment:r; content:"C" counter(r);
+    position:absolute; left:0; top:14px; font-family:ui-monospace,Menlo,monospace; font-weight:700;
+    color:#fff; background:var(--accent2); width:38px; height:26px; border-radius:4px;
+    display:flex; align-items:center; justify-content:center; font-size:13px}
+  ol.recs>li h4{margin:0 0 3px; font-size:17px; font-family:inherit}
+  table{border-collapse:collapse; width:100%; margin:18px 0; font-size:14.5px}
+  th,td{border:1px solid var(--line); padding:7px 9px; text-align:left; vertical-align:top}
+  th{background:var(--band); font-family:ui-monospace,Menlo,monospace; font-size:12px; letter-spacing:.02em}
+  td.y{color:var(--good); font-weight:600}
+  td.n{color:var(--bad); font-weight:600; text-align:left}
+  td.p{color:var(--warn); font-weight:600}
+  code{font-family:ui-monospace,Menlo,monospace; font-size:14px; background:#efe9dc; padding:1px 5px; border-radius:3px}
+  .fn{color:var(--muted); font-size:14px}
+  .divider{text-align:center; color:var(--line); margin:40px 0; letter-spacing:1em}
+  ul.tight li{margin:.3em 0}
+  .sig{margin-top:40px; font-family:ui-monospace,Menlo,monospace; font-size:13px; color:var(--muted)}
+  .note{font-size:14px; color:var(--muted); background:#f4efe4; border:1px solid var(--line); padding:10px 14px; border-radius:3px}
+</style>
+</head>
+<body>
+
+<header class="top">
+  <p class="kicker">Confidential Referee Report · Research Track</p>
+  <h1>RECEIPT: Deterministic, Reward-Hacking-Resistant Verification for White-Box Agentic XSS Discovery</h1>
+  <p class="sub">Referee notes: what the design contributes, which claims the evidence does not yet support, and the specific experiments that would settle each one.</p>
+  <div class="meta">
+    <span>Venue: <b>ICSE 2027</b></span>
+    <span>Track: <b>Research (AI4SE / Dependability &amp; Security)</b></span>
+    <span>Reviewer confidence: <b>3 / 5</b></span>
+    <span>Artifact: <b>linked, not inspected for this report</b></span>
+  </div>
+</header>
+
+<main class="wrap">
+
+<p class="lead">This paper argues that once an LLM finder can edit source, mutate state, and script a browser, "the payload executed" is no longer proof of an exploit, and it builds a verifier designed to survive exactly that finder. The problem is timely and the mechanism is coherent. My concerns are about what the current experiments actually establish. Several headline sentences claim more than the reported data supports, one figure caption contradicts the paper's own text, and the strongest missing evidence is a direct security analysis of the verifier itself rather than another model.</p>
+
+<div class="verdict">
+  <p style="margin:0 0 6px"><span class="kicker" style="margin:0">Recommendation</span></p>
+  <div class="big">Major Revision</div>
+  <p style="margin:.6em 0 1em; color:#3a3d42">The verifier design and its acceptance semantics are a genuine contribution and are worth publishing. Acceptance should be conditioned on four things: (1) an explicit threat model for the verifier plus adversarial bypass tests against C1–C3 and the boundary cases below; (2) precise per-RQ accounting of unique accepted reports with independent adjudication and confidence intervals, replacing the unqualified "no false positives"; (3) evidence that browser replay is itself repeatable; and (4) a better-controlled ablation and baseline calibration. Extra models and extra benchmarks are useful for external validity but are secondary to these four.</p>
+  <div class="scorebar"><span class="lab">Novelty</span><div class="track"><div class="fill" style="width:64%;background:#c98a2a"></div></div><span class="n">3.2</span></div>
+  <div class="scorebar"><span class="lab">Rigor</span><div class="track"><div class="fill" style="width:54%;background:#c98a2a"></div></div><span class="n">2.7</span></div>
+  <div class="scorebar"><span class="lab">Relevance</span><div class="track"><div class="fill" style="width:90%;background:#2e6b3e"></div></div><span class="n">4.5</span></div>
+  <div class="scorebar"><span class="lab">Verifiability</span><div class="track"><div class="fill" style="width:70%;background:#c98a2a"></div></div><span class="n">3.5</span></div>
+  <div class="scorebar"><span class="lab">Presentation</span><div class="track"><div class="fill" style="width:80%;background:#2e6b3e"></div></div><span class="n">4.0</span></div>
+  <p class="note" style="margin-top:12px">Verifiability is scored on the paper's transparency and the presence of an anonymized artifact; I did not build or replay the artifact for this report, so this score reflects plausibility on paper, not a reproduction.</p>
+</div>
+
+<h2>1 · Summary</h2>
+<p>An LLM coding agent explores a target web application with white-box access (shell, source, seeded credentials) and proposes candidate XSS. Each candidate is resubmitted as a structured proof of concept: an attacker HTTP script plus a sequence of typed victim browser actions over CSS selectors. RECEIPT restores a clean application snapshot, runs the attacker script from a sandboxed remote client under the attacker role, drives a separate victim browser under the victim role, and accepts the finding only if a Chrome DevTools Protocol sentinel — seeded with a fresh single-use token handed to the attacker script — fires in the victim page. Four mechanisms carry the argument: environment isolation, PoC constraints, role separation (with diverged credential seeding), and verdict binding.</p>
+<p>Reported results on 95 apps (median 13.1k stars, seven stacks, $20/target): Table I reports 30 confirmed findings on latest releases (24 previously unknown, 12 acknowledged/patched), all 30 counted true positive; the same agent self-judging reported 27 with 10 true. Table III reports 49% detection and 36% labeled-CVE recovery on 45 known-vulnerability targets with 0 false positives at target level. Table IV ablates on 27 targets, with precision moving 45% → 9% → 19% → 44% → 100% as browser binding, isolation, PoC constraints, and role separation are added.</p>
+
+<figure>
+<svg viewBox="0 0 820 320" role="img" aria-label="RECEIPT architecture with submission and feedback channels">
+  <defs>
+    <marker id="ar" markerWidth="10" markerHeight="10" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#1f4e5f"/></marker>
+    <marker id="arb" markerWidth="10" markerHeight="10" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#9a6b12"/></marker>
+    <pattern id="hatch" width="7" height="7" patternTransform="rotate(45)" patternUnits="userSpaceOnUse"><line x1="0" y1="0" x2="0" y2="7" stroke="#e0d6c2" stroke-width="3"/></pattern>
+  </defs>
+  <rect x="18" y="52" width="330" height="212" rx="6" fill="url(#hatch)" stroke="#b9ad93"/>
+  <rect x="18" y="52" width="330" height="26" rx="6" fill="#7a1f1f"/>
+  <text x="34" y="70" fill="#fff" font-family="ui-monospace,Menlo,monospace" font-size="13">EXPLORATION  (untrusted)</text>
+  <g font-family="Iowan Old Style,Georgia,serif" font-size="13.5" fill="#2b2d30">
+    <rect x="40" y="92" width="130" height="32" rx="4" fill="#fff" stroke="#b9ad93"/><text x="52" y="112">LLM coding agent</text>
+    <rect x="196" y="92" width="130" height="32" rx="4" fill="#fff" stroke="#b9ad93"/><text x="212" y="112">shell + source</text>
+    <rect x="40" y="134" width="130" height="32" rx="4" fill="#fff" stroke="#b9ad93"/><text x="52" y="154">seeded creds</text>
+    <rect x="196" y="134" width="130" height="32" rx="4" fill="#fff" stroke="#b9ad93"/><text x="212" y="154">browser + HTTP</text>
+    <rect x="40" y="184" width="286" height="58" rx="4" fill="#f4efe4" stroke="#b9ad93"/>
+    <text x="52" y="206" font-size="12.5" fill="#5b616b">stateful app instance #1</text>
+    <text x="52" y="226" font-size="12.5" fill="#5b616b">agent may contaminate state/source here</text>
+  </g>
+  <rect x="472" y="52" width="330" height="212" rx="6" fill="#fff" stroke="#1f4e5f"/>
+  <rect x="472" y="52" width="330" height="26" rx="6" fill="#1f4e5f"/>
+  <text x="488" y="70" fill="#fff" font-family="ui-monospace,Menlo,monospace" font-size="13">VERIFICATION  (trusted, fresh)</text>
+  <g font-family="Iowan Old Style,Georgia,serif" font-size="13" fill="#2b2d30">
+    <rect x="492" y="92" width="140" height="32" rx="4" fill="#eef4f6" stroke="#9fc0cb"/><text x="504" y="112">clean snapshot</text>
+    <rect x="652" y="92" width="130" height="32" rx="4" fill="#eef4f6" stroke="#9fc0cb"/><text x="664" y="112">diverged creds</text>
+    <rect x="492" y="134" width="140" height="32" rx="4" fill="#eef4f6" stroke="#9fc0cb"/><text x="504" y="154">attacker sandbox</text>
+    <rect x="652" y="134" width="130" height="32" rx="4" fill="#eef4f6" stroke="#9fc0cb"/><text x="664" y="154">victim browser</text>
+    <rect x="492" y="184" width="290" height="58" rx="4" fill="#f0f5f6" stroke="#9fc0cb"/>
+    <text x="504" y="206" font-size="12.5" fill="#2e6b3e">CDP sentinel + single-use token</text>
+    <text x="504" y="226" font-size="12.5" fill="#5b616b">accept iff token fires in victim page</text>
+  </g>
+  <!-- forward submission -->
+  <line x1="352" y1="120" x2="470" y2="120" stroke="#1f4e5f" stroke-width="2.4" marker-end="url(#ar)"/>
+  <text x="360" y="112" font-family="ui-monospace,Menlo,monospace" font-size="11" fill="#1f4e5f">submit PoC + token request</text>
+  <!-- return feedback -->
+  <line x1="470" y1="196" x2="352" y2="196" stroke="#9a6b12" stroke-width="2.4" marker-end="url(#arb)" stroke-dasharray="5 4"/>
+  <text x="360" y="214" font-family="ui-monospace,Menlo,monospace" font-size="11" fill="#9a6b12">reject → structured feedback; token → attacker</text>
+</svg>
+<figcaption>Fig. A — Architecture from §III. Note this is <em>not</em> a one-way channel: rejections return structured feedback to exploration, and the verifier hands a fresh token to the attacker script. Both return flows are part of the security argument and should be analyzed as such.</figcaption>
+</figure>
+
+<h2>2 · Novelty: real, but the delta must be stated more carefully than it is</h2>
+<p>The general strategy — reject the LLM's self-report and require an executable, deterministic proof — is not new in 2026. Execution-grounded XSS validation runs through Black Widow and the black-box lineage the paper cites, and Spider-Scents already separated "candidate output" from "vulnerability" from "exploit" for stored XSS (leaving exploitability to manual analysis). Two recent systems verify LLM-agent findings with executable oracles: <b>Revelio</b> (memory safety; cited by the paper as [23]) and <b>Antiproof</b> (proof-of-exploitability oracles across a broad class). RECEIPT must situate itself against both, and precisely.</p>
+<p>On <b>Revelio</b>: the paper's implicit contrast overstates the gap. Revelio already runs in a container, re-executes an independent proof-of-vulnerability in a fresh subprocess, uses an existing external-input harness, and states rules that exclude source modification, internal-state mutation, private APIs, and privileged local access. So the open question RECEIPT should claim is not "prior work ignored contamination" but "are those exclusions <em>technically enforced</em> against an agent that can rewrite the repository, and what does enforcement require for a browser-delivered vulnerability?" RECEIPT's defensible, narrower delta is the two-principal browser semantics: verifier-controlled victim identity, a typed (non-code) victim-action channel, credential divergence, and a browser-side verdict bound to a per-attempt token. Claim those; do not claim generic isolation or "constrained executable evidence" as uniquely RECEIPT's.</p>
+<p>On <b>Antiproof</b>: it is technically closer than the paper (which does not cite it) will want to admit — a network-facing prover, separated target and oracle, a cryptographically random challenge, and acceptance tied to a concrete attacker capability under a deployment trust boundary. Those parallel RECEIPT's attacker sandbox, token, trusted verifier, and exploitability semantics. Note, however, that Antiproof's first arXiv version is dated 14 July 2026, after the 30 June 2026 ICSE deadline. It is therefore concurrent work: it cannot count against the submission's originality, and it would be inappropriate to fault the authors for not citing it. The correct ask is a paragraph in the revision acknowledging it as concurrent and distinguishing the designs (XSS-specific attacker/victim browser split and typed benign-user interaction versus Antiproof's broader oracle).</p>
+
+<blockquote>One process note, not a technical one: the review copy is double-anonymous, so the novelty argument must be made purely on cited artifacts and stated mechanisms. Any reasoning that leans on guessing which group wrote the paper should be removed from the discussion; it does not bear on the technical delta and it is out of bounds for this track.</blockquote>
+
+<h3>A feature comparison would do more than a scatterplot</h3>
+<p>Rather than an invented one-dimensional "power" axis, I recommend the authors include a table of the properties that actually differ across systems, with citations. My reconstruction:</p>
+<table>
+  <tr><th>System</th><th>Source access</th><th>Execution- grounded</th><th>Verifier tamper- resistant vs finder</th><th>Attacker→victim role enforced</th><th>Exploitability by construction</th></tr>
+  <tr><td>ZAP / Burp</td><td class="n">no</td><td class="p">reflection/exec</td><td class="n">n/a (no agent)</td><td class="n">no</td><td class="n">no</td></tr>
+  <tr><td>Black Widow</td><td class="n">no</td><td class="y">yes</td><td class="n">n/a</td><td class="n">no</td><td class="p">partial</td></tr>
+  <tr><td>Spider-Scents</td><td class="p">grey (DB)</td><td class="p">candidate outputs</td><td class="n">n/a</td><td class="n">no</td><td class="n">manual</td></tr>
+  <tr><td>YuraScanner</td><td class="n">no</td><td class="y">yes (BW engine)</td><td class="n">n/a</td><td class="n">no</td><td class="p">partial</td></tr>
+  <tr><td>Revelio</td><td class="y">yes</td><td class="y">yes (sanitizer)</td><td class="p">rules stated</td><td class="n">n/a (memsafety)</td><td class="y">yes</td></tr>
+  <tr><td>Antiproof <span class="fn">(concurrent)</span></td><td class="y">yes</td><td class="y">yes (PoE oracle)</td><td class="y">challenge + sep.</td><td class="n">class-general</td><td class="y">yes</td></tr>
+  <tr><td><b>RECEIPT</b></td><td class="y">yes</td><td class="y">yes (CDP token)</td><td class="y">isolation+constraints</td><td class="y"><b>yes (2-principal)</b></td><td class="y">yes</td></tr>
+</table>
+<figcaption style="text-align:left">Fig. B — Reviewer's reconstruction; the authors should build the authoritative version from the actual systems. The one column RECEIPT plausibly owns is the last: attacker→victim role enforcement as part of acceptance.</figcaption>
+
+<h2>3 · The reward-hacking taxonomy is well-observed; it needs coding, not just narration</h2>
+<p>C1 (state/source contamination), C2 (verifier self-injection), C3 (threat-model mismatch) is a useful decomposition, and Figure 2 of the paper is its clearest exhibit. Section II sources the taxonomy to "a preliminary study," but this undersells the paper's own evidence: RQ3's browser-verdict configuration produced 111 accepting reports, and the discussion attributes them to these behaviors. The fair criticism is therefore not "anecdote" — it is that the paper never <em>codes and counts</em> the 111 (and the other configurations') failures by category. I would ask for a mutually exclusive coding protocol, per-category counts (contamination / self-injection / role mismatch / other), representative transcripts in an appendix, a second coder, and a disagreement-resolution step.</p>
+
+<figure>
+<svg viewBox="0 0 820 268" role="img" aria-label="Reward-hacking behaviors and the defense that removes each capability">
+  <g font-family="Iowan Old Style,Georgia,serif">
+    <text x="20" y="24" font-family="ui-monospace,Menlo,monospace" font-size="12.5" fill="#7a1f1f">CAPABILITY THE AGENT ABUSES</text>
+    <rect x="20" y="36" width="300" height="52" rx="5" fill="#fbeede" stroke="#e0b57a"/>
+    <text x="34" y="57" font-size="14.5" font-weight="bold">C1 · state / source contamination</text>
+    <text x="34" y="77" font-size="12.5" fill="#5b616b">writes payload via SQL, admin API, or source edit</text>
+    <rect x="20" y="100" width="300" height="52" rx="5" fill="#fbeede" stroke="#e0b57a"/>
+    <text x="34" y="121" font-size="14.5" font-weight="bold">C2 · verifier self-injection</text>
+    <text x="34" y="141" font-size="12.5" fill="#5b616b">runs JS directly in the verifier's browser tab</text>
+    <rect x="20" y="164" width="300" height="52" rx="5" fill="#fbeede" stroke="#e0b57a"/>
+    <text x="34" y="185" font-size="14.5" font-weight="bold">C3 · threat-model mismatch</text>
+    <text x="34" y="205" font-size="12.5" fill="#5b616b">executes as admin / self-XSS / trusted author</text>
+
+    <text x="500" y="24" font-family="ui-monospace,Menlo,monospace" font-size="12.5" fill="#1f4e5f">DEFENSE THAT REMOVES IT</text>
+    <rect x="500" y="36" width="300" height="52" rx="5" fill="#eef4f6" stroke="#9fc0cb"/>
+    <text x="514" y="66" font-size="14">Environment isolation (fresh snapshot)</text>
+    <rect x="500" y="100" width="300" height="52" rx="5" fill="#eef4f6" stroke="#9fc0cb"/>
+    <text x="514" y="130" font-size="14">PoC constraints (typed victim actions)</text>
+    <rect x="500" y="164" width="300" height="52" rx="5" fill="#eef4f6" stroke="#9fc0cb"/>
+    <text x="514" y="194" font-size="14">Role separation + diverged creds</text>
+    <g stroke="#8a8266" stroke-width="1.5" fill="none">
+      <path d="M320,62 C420,62 410,62 500,62"/>
+      <path d="M320,126 C420,126 410,126 500,126"/>
+      <path d="M320,190 C420,190 410,190 500,190"/>
+    </g>
+  </g>
+</svg>
+<figcaption>Fig. C — Each defense removes one capability. Verdict binding (the token sentinel) is deliberately omitted from this mapping: the paper states plainly that the sentinel <em>alone</em> is necessary but not sufficient, and a token-bearing sentinel does not by itself prevent contaminated state or a wrong attacker role. It is the meaning-giving check, not a backstop for C1–C3.</figcaption>
+</figure>
+
+<h2>4 · The verifier's own attack surface is the missing analysis — this is the main revision condition</h2>
+<p>The paper's central promise is that a capable finder cannot forge acceptance. That is a security claim about the verifier, and the paper argues it by construction but does not test it adversarially. Before I believe "no false positives," I want the authors (or the artifact) to establish, with a malicious-PoC bypass suite, that the following are actually closed:</p>
+<ul class="tight">
+  <li><b>Victim URL handling.</b> Strict scheme/origin checks and redirect handling on the submitted victim URL (no <code>data:</code>/<code>javascript:</code>/<code>file:</code>, no open-redirect into an attacker origin, credential/parameter stripping verified).</li>
+  <li><b>Control-plane isolation.</b> CDP endpoint, the sentinel callback, browser debugging ports, and verifier services must be unreachable from the attacker container and from the target app (including via SSRF or DNS rebinding into verifier services).</li>
+  <li><b>Reset pristineness.</b> Source, databases, volumes, caches, and any external services are truly restored per attempt — not just the primary container.</li>
+  <li><b>Credential hygiene.</b> Undocumented default credentials, leftover API keys, and pre-existing sessions cannot substitute for the diverged-seeding that role separation relies on.</li>
+  <li><b>Typed-action expressiveness vs safety.</b> Exactly what data is permitted in <code>fill</code>, <code>select</code>, <code>wait</code>, and selector fields, and a demonstration that none of these can smuggle executable content into the victim context.</li>
+  <li><b>Sentinel frame binding.</b> The sentinel must be bound to the intended top-level victim frame and navigation, not fired by an unrelated frame or a stray eval.</li>
+</ul>
+<p>A demonstrated bypass suite (attempted C1/C2/C3 attacks plus these boundary cases, all rejected) would do more for the paper's soundness than any number of additional discovery targets. Running a second model, by contrast, mostly tests the <em>finder</em>, not the verifier; make it a desirable external-validity experiment, not the primary evidence of soundness.</p>
+
+<h2>5 · The precision claim overreaches its sample</h2>
+<p>The paper says in places that RECEIPT "eliminates all false positives." What the data supports is narrower: RQ1 reports 30/30 accepted findings judged true; the full-configuration ablation reports 14/14; RQ2 reports 0 false positives at the <em>target</em> level (Table III), which is not the same as report-level precision. Three fixes:</p>
+<ul class="tight">
+  <li>Report the number of <b>unique</b> accepted PoCs / reports / distinct root causes per RQ, with overlaps between the RQ1 set and the ablation subset made explicit. (The ablation is on a subset of the same 50 applications, possibly with repeated runs, so the 30 and the 14 cannot simply be added — please state the true unique count.)</li>
+  <li>Give the adjudication protocol: who judged, against what independent criterion, with a second adjudicator and an agreement statistic on the true/false and role/CVSS labels.</li>
+  <li>Attach exact binomial confidence intervals and phrase the result as "no false positives were observed in this evaluation," which the paper often already does, rather than implying a finite sample proves zero population error. The specific sentences asserting elimination of all false positives are the ones to soften.</li>
+</ul>
+
+<h2>6 · The ablation is informative but not a clean component attribution</h2>
+<p>Table IV is the paper's most interesting result, and it should be presented with all three quantities, because precision alone hides the most important fact: going from self-judgment to a browser-bound verdict <em>doubles true positives</em> (5 → 10) even as precision collapses (45% → 9%). "Worse than nothing" is therefore true for precision only, not for detection — the browser signal opens many more accepting trajectories, most of them resting on privileged state manipulation. Please state it that way and drop any language implying the agent "learns" to game the check over time; Table IV shows outcomes, not a temporal learning curve.</p>
+
+<figure>
+<svg viewBox="0 0 820 340" role="img" aria-label="Reports, true positives, and precision across the cumulative ablation">
+  <line x1="86" y1="286" x2="792" y2="286" stroke="#7d7460"/>
+  <line x1="86" y1="30" x2="86" y2="286" stroke="#7d7460"/>
+  <g font-family="ui-monospace,Menlo,monospace" font-size="11" fill="#5b616b" text-anchor="end">
+    <text x="78" y="289">0</text><text x="78" y="222">30</text><text x="78" y="158">60</text><text x="78" y="94">90</text><text x="78" y="40">≈111</text>
+  </g>
+  <g stroke="#ece3cf"><line x1="86" y1="222" x2="792" y2="222"/><line x1="86" y1="158" x2="792" y2="158"/><line x1="86" y1="94" x2="792" y2="94"/></g>
+  <!-- five groups; scale reports/TP by ~2.13 px per unit (111 -> ~236px) -->
+  <!-- values: reports 11,111,67,32,14 ; TP 5,10,13,14,14 ; precision % on right implied by label -->
+  <g font-family="ui-monospace,Menlo,monospace" font-size="10.5" fill="#2b2d30" text-anchor="middle">
+    <!-- group1 x=150 -->
+    <rect x="120" y="263" width="26" height="23" fill="#c9bfa6"/><text x="133" y="258">11</text>
+    <rect x="150" y="275" width="26" height="11" fill="#1f4e5f"/><text x="163" y="270" fill="#1f4e5f">5</text>
+    <text x="148" y="303" font-family="Iowan Old Style,Georgia,serif" font-size="11" fill="#3a3d42">self-judge · 45%</text>
+    <!-- group2 x=290 : reports 111 -->
+    <rect x="260" y="40" width="26" height="246" fill="#c9bfa6"/><text x="273" y="35">111</text>
+    <rect x="290" y="265" width="26" height="21" fill="#1f4e5f"/><text x="303" y="260" fill="#1f4e5f">10</text>
+    <text x="290" y="303" font-family="Iowan Old Style,Georgia,serif" font-size="11" fill="#8a2b2b">+browser · 9%</text>
+    <!-- group3 x=430 : reports 67 -->
+    <rect x="400" y="143" width="26" height="143" fill="#c9bfa6"/><text x="413" y="138">67</text>
+    <rect x="430" y="258" width="26" height="28" fill="#1f4e5f"/><text x="443" y="253" fill="#1f4e5f">13</text>
+    <text x="430" y="303" font-family="Iowan Old Style,Georgia,serif" font-size="11" fill="#3a3d42">+isolation · 19%</text>
+    <!-- group4 x=570 : reports 32 -->
+    <rect x="540" y="218" width="26" height="68" fill="#c9bfa6"/><text x="553" y="213">32</text>
+    <rect x="570" y="256" width="26" height="30" fill="#1f4e5f"/><text x="583" y="251" fill="#1f4e5f">14</text>
+    <text x="570" y="303" font-family="Iowan Old Style,Georgia,serif" font-size="11" fill="#3a3d42">+PoC constr · 44%</text>
+    <!-- group5 x=710 : reports 14 -->
+    <rect x="680" y="256" width="26" height="30" fill="#c9bfa6"/><text x="693" y="251">14</text>
+    <rect x="710" y="256" width="26" height="30" fill="#2e6b3e"/><text x="723" y="251" fill="#2e6b3e">14</text>
+    <text x="710" y="303" font-family="Iowan Old Style,Georgia,serif" font-size="11" fill="#2e6b3e">+roles · 100%</text>
+  </g>
+  <!-- legend -->
+  <g font-family="ui-monospace,Menlo,monospace" font-size="11">
+    <rect x="560" y="16" width="12" height="12" fill="#c9bfa6"/><text x="578" y="26" fill="#3a3d42">reports</text>
+    <rect x="650" y="16" width="12" height="12" fill="#1f4e5f"/><text x="668" y="26" fill="#3a3d42">true positives</text>
+  </g>
+  <text x="440" y="328" text-anchor="middle" font-family="Iowan Old Style,Georgia,serif" font-size="12" fill="#5b616b">TPs rise 5→10 at "+browser" while reports explode to 111 — precision drops, detection does not</text>
+</svg>
+<figcaption>Fig. D — Table IV redrawn with reports and true positives side by side (precision annotated). The point the paper should make is the divergence between the two bars, not precision in isolation.</figcaption>
+</figure>
+
+<p>Two design caveats the authors should acknowledge: these are stochastic end-to-end agent runs, so each verifier configuration changes the agent's trajectory — this is not a replay of one fixed candidate set through five checkers. And a cumulative order cannot attribute a component's marginal effect independently of interactions. A cleaner complement: submit one <b>common corpus</b> of genuine and adversarial PoCs to each verifier configuration and report accept/reject directly. That isolates the verifier from the finder.</p>
+
+<h2>7 · Repeatability of the replay itself</h2>
+<p>The paper scopes "deterministic" to a fixed snapshot, threat model, and PoC, which is the right scope; I found no place where it overclaims system-wide determinism, so I withdraw that as a concern. The sharper question the title invites: is browser replay actually repeatable given asynchronous rendering, timers, network scheduling, service workers, background jobs, randomized application data, and <code>wait</code> actions? Please replay each accepted PoC several times from reset and report acceptance stability, timeout settings, and any flaky cases. Verifier replay stability is more central to the contribution than discovery-run variance (though the latter is worth a line for external validity).</p>
+
+<h2>8 · Baselines and generalization</h2>
+<p>Two clarifications and one correction to my own first read:</p>
+<ul class="tight">
+  <li><b>Correction:</b> Table I already separates reachable targets (ZAP 31/50, YuraScanner 26/50, Black Widow 22/50) from reports, and the text states scanners produced zero true positives even on apps they could crawl. So "reachable" and "reached-but-empty" are not blended, as I initially thought. What is still needed is each scanner's version, configuration, authentication setup, crawl budget, and per-target outcome — plus a <b>known-positive smoke test</b> (run each integrated scanner on a few targets it should detect) so a zero on the unknown suite is distinguishable from a broken integration.</li>
+  <li>The black-box comparison does not isolate RECEIPT's verifier contribution: those tools differ in source access, crawling, workflow handling, and output semantics, and ZAP's "potential-XSS alerts"/YuraScanner's "HTML-injection candidates" may not be intended as final confirmed reports. Counting each candidate as an equivalent false report needs justification. The <em>same-agent</em> configurations (self-judge vs. full RECEIPT) are the relevant verifier comparison; the scanners primarily support a reach/discovery comparison. Say so explicitly.</li>
+  <li>The recall generalization is too strong. Recovering 16 labeled CVEs across 45 curated targets does not support "more than one-third of all known XSS vulnerabilities" without a sampling frame. State how the 45 targets / 34 apps were selected, which candidates failed to build, and whether inclusion depended on packaging difficulty or expected discoverability; then report the result as 36% recovery on this benchmark. The post-cutoff/no-network protocol is a real strength — foreground it — but give evidence for the claimed August-2025 model cutoff and note that vulnerable code and issue threads can predate CVE disclosure.</li>
+</ul>
+<p>I would <em>not</em> make recreating YuraScanner's 20-app benchmark or running CVE-Bench a blanket requirement; the paper reasonably argues its two-principal semantics do not map cleanly onto them. Ask instead for a compatibility table and, if the victim-role semantics can be represented, one calibrated shared subset.</p>
+
+<h2>9 · Completeness / false negatives of the constrained PoC language</h2>
+<p>Almost all of the evaluation is about precision. The flip side deserves attention: the fixed victim-action vocabulary may be unable to express genuine XSS that needs multi-window interaction, drag-and-drop, clipboard operations, file selection, browser permission prompts, OAuth redirects, or WebSocket-driven rendering. The 23/45 recovery misses are attributed broadly to "exploration-side limitations," but some may be <em>verifier-language</em> false negatives. Please split the misses into: candidate never found; candidate found but no PoC constructed; real PoC rejected or inexpressible in the action language. That distinction tells a reader whether to push on the finder or on the verifier interface.</p>
+
+<h2>10 · Role manifests</h2>
+<p>Role separation is only as sound as the manifest. This is a soundness assumption, not a presentation detail, so I want provenance: how many of the 95 manifests came from explicit security documentation versus reviewer judgment, an inter-rater agreement figure on role and trusted-author labels, and a sensitivity check for a wrong manifest. Note that a same-role row is not automatically invalid: <code>Admin → Admin</code> or <code>User → User</code> can be a legitimate cross-principal attack when two distinct accounts exist and the authoring feature is not documented as trusted; <code>Admin → User</code> can be valid in a multi-tenant setting. The label to interrogate is principal separation and documented feature-level trust, not the word "Admin." For the <code>Admin →</code> rows in Table II specifically, state the two account identities and why the feature is not a trusted-author feature.</p>
+
+<h2>11 · Smaller points</h2>
+<ul class="tight">
+  <li>The Docmost example (Figs. 4/5) is the paper's best exhibit; keep it prominent. I withdraw a suggestion from my first pass — the text does explain that traversal causes an uploaded SVG to be served inline as a top-level document and execute, and there is no open redirect in the chain.</li>
+  <li>Typo: "malicious SVG attachment<b>ch</b>" in the Docmost walkthrough.</li>
+  <li>Surface the "found a different real bug, not the labeled CVE" row (6/45): it is quiet evidence the tool is not merely rediscovering disclosed bugs, and it strengthens the discovery story.</li>
+  <li>Browser scope: since replay is real Chromium, CSP, framework auto-escaping, and mutation XSS are largely target behaviors the browser will observe naturally — these are not unexplained sentinel assumptions, and mobile WebViews are already declared out of scope. If a scope paragraph stays, pin down the Chromium version, headed vs. headless differences, and frame policy.</li>
+  <li>Cost: "$20/target over 5 hours" mixes budget and wall-clock. Report token cost, compute cost, human setup labor, and wall-clock separately, and give a cost-per-confirmed-bug figure.</li>
+  <li>ICSE 2027 is IEEE format this year and runs a reference-integrity check that desk-rejects fabricated or unverifiable citations. Several 2026 references (including recent preprints) should be double-checked to resolve to findable records. The anonymized 4open.science artifact is the right call; verify the disclosure wording in §V does not de-anonymize via named maintainer threads.</li>
+</ul>
+
+<h2>12 · Conditions for acceptance</h2>
+<ol class="recs">
+  <li><span class="tag t-cond">acceptance condition</span>
+    <h4>State the verifier's threat model and test it adversarially</h4>
+    <p>Explicit trust boundary plus a malicious-PoC bypass suite covering C1–C3 and the boundary cases in §4 (victim-URL scheme/redirect, CDP/port isolation, SSRF/DNS-rebinding, reset pristineness, default credentials, typed-action data, sentinel frame binding). This is the paper's soundness evidence.</p></li>
+  <li><span class="tag t-cond">acceptance condition</span>
+    <h4>Account for unique reports and adjudicate independently</h4>
+    <p>Per-RQ unique accepted PoCs/reports/root causes with explicit overlap; second adjudicator with an agreement statistic; binomial CIs; replace "eliminates all false positives" with "none observed in this evaluation."</p></li>
+  <li><span class="tag t-cond">acceptance condition</span>
+    <h4>Show the replay is repeatable</h4>
+    <p>Replay each accepted PoC multiple times from reset; report acceptance stability, timeouts, and flaky cases.</p></li>
+  <li><span class="tag t-cond">acceptance condition</span>
+    <h4>Better-controlled ablation and baseline calibration</h4>
+    <p>Report reports/TP/precision together; add a common-corpus PoC experiment across verifier configurations; publish baseline configs and a known-positive smoke test for each scanner.</p></li>
+  <li><span class="tag t-major">strengthens</span>
+    <h4>Situate against Revelio (narrow the delta) and Antiproof (concurrent)</h4>
+    <p>Feature table with citations; one paragraph each; state what enforcement a browser-delivered vulnerability requires that a sanitizer-checked PoV does not.</p></li>
+  <li><span class="tag t-major">strengthens</span>
+    <h4>Code and count the reward-hacking behaviors</h4>
+    <p>Mutually exclusive categories over the 111 (and other) accepting reports; counts, traces, second coder.</p></li>
+  <li><span class="tag t-major">strengthens</span>
+    <h4>Separate the recall misses by cause</h4>
+    <p>Never-found vs. no-PoC vs. inexpressible-in-action-language; this locates the bottleneck.</p></li>
+  <li><span class="tag t-nice">external validity</span>
+    <h4>A second finder model; manifest provenance; a calibrated shared subset</h4>
+    <p>Useful, but secondary to the four conditions above.</p></li>
+</ol>
+
+<h2>13 · What the paper already gets right</h2>
+<p>Stated soberly: the separation of untrusted exploration from constrained replay is the correct architecture for this threat; the attacker-to-victim acceptance semantics are precise and, on the role-enforcement axis, appear to be the paper's own contribution; evidence is grounded in real-browser execution; the post-cutoff and runtime-leakage controls are a genuine methodological strength; the target set is broad and realistic; the accepted findings ship as replayable artifacts for maintainers; and the paper is candid that the sentinel alone is insufficient and that detection differs from labeled-CVE recovery. Twenty-four disclosures with twelve acknowledged or patched is real-world impact. These strengths are why the recommendation is Major Revision rather than reject.</p>
+
+<div class="divider">§ § §</div>
+
+<p class="fn"><b>Sources consulted for this report.</b> Peer-reviewed / archival: Antiproof (arXiv 2607.12316, concurrent), Revelio (arXiv 2606.22263), CVE-Bench (arXiv 2503.17332, ICML'25), Spider-Scents (USENIX Security'24), YuraScanner (NDSS 2025), and cross-checks against the paper's cited bibliography (Black Widow, Black Ostrich, Krakovna/Skalse on reward hacking, Panickssery on self-evaluation, Heiderich on mXSS). Non-archival context: the ICSE 2027 Research Track CFP, the XBOW company blog, the Irregular/Wiz web-security-agent write-up, and a Google Scholar/SERP survey of 2026 reward-hacking-in-agentic-security work. These last four are industry/context sources, not peer-reviewed. I did not build or replay the paper's artifact for this report.</p>
+
+<p class="sig">Referee report · ICSE 2027 program committee · confidence 3/5 · expertise: program analysis, web security, LLM agents · this report was itself meta-reviewed and corrected before submission.</p>
+
+</main>
+</body>
+</html>
