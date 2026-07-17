@@ -261,6 +261,14 @@ class TestFuzzSourceShellEnvPaths(unittest.TestCase):
         if not shutil.which("bash"):
             self.skipTest("bash required")
         self._tmp = tempfile.TemporaryDirectory()
+        # ``source_shell_env`` imports every ``export`` in the sourced
+        # RC into ``os.environ`` — including the sentinel
+        # ``OPENAI_API_KEY=present`` planted below.  Snapshot/restore
+        # the environment so the sentinel does not leak into later
+        # tests (it made live OpenAI calls fail 401 with "Incorrect
+        # API key provided: present").
+        self._env_patch = mock.patch.dict(os.environ)
+        self._env_patch.start()
         self._marker = (Path(tempfile.gettempdir())
                         / f"source-pwned-{os.getpid()}")
         if self._marker.exists():
@@ -269,6 +277,7 @@ class TestFuzzSourceShellEnvPaths(unittest.TestCase):
     def tearDown(self) -> None:
         if self._marker.exists():
             self._marker.unlink()
+        self._env_patch.stop()
         self._tmp.cleanup()
 
     def test_fuzz_rc_paths_with_metacharacters(self) -> None:
@@ -459,6 +468,16 @@ class TestKnownInjectionCorpus(unittest.TestCase):
         self._refresh_patch = mock.patch.object(vc, "_refresh_config",
                                                 lambda: None)
         self._refresh_patch.start()
+        # ``save_api_key_to_shell`` exports the saved value into
+        # ``os.environ[key_name]``.  Snapshot/restore the environment
+        # (as the sibling fuzz classes do) so the last injection
+        # payload does not leak into ``OPENAI_API_KEY`` for the rest of
+        # the pytest process — that leak made every later live OpenAI
+        # call (e.g. audio transcription in test_multimodal) fail 401.
+        self._env_patch = mock.patch.dict(
+            os.environ,
+            {"HOME": str(self.home), "SHELL": "/bin/bash"})
+        self._env_patch.start()
         self._marker = (Path(tempfile.gettempdir())
                         / f"corpus-pwned-{os.getpid()}")
         if self._marker.exists():
@@ -469,6 +488,7 @@ class TestKnownInjectionCorpus(unittest.TestCase):
             self._marker.unlink()
         self._vc._shell_rc_path = self._orig_rc  # type: ignore[assignment]
         self._refresh_patch.stop()
+        self._env_patch.stop()
         self._tmp.cleanup()
 
     def test_known_payloads(self) -> None:

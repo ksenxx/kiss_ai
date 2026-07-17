@@ -223,6 +223,100 @@ class TestTranscribeAudio(unittest.TestCase):
         with pytest.raises(RuntimeError, match="transcription failed"):
             transcribe_audio(b"\xff\xfb\x90\x00", "audio/mpeg", api_key="sk-invalid-key")
 
+    def _run_against_local_server(self, handler_cls: type) -> tuple[str | None, int]:
+        """Run transcribe_audio against a real local HTTP endpoint.
+
+        Starts *handler_cls* on an ephemeral port, points the OpenAI
+        client at it via ``OPENAI_BASE_URL``, and calls
+        ``transcribe_audio``.  Returns ``(result_or_None, request_count)``;
+        ``result`` is None when a ``RuntimeError`` was raised.
+        """
+        import threading
+        from http.server import ThreadingHTTPServer
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        old_base = os.environ.get("OPENAI_BASE_URL")
+        os.environ["OPENAI_BASE_URL"] = f"http://127.0.0.1:{server.server_address[1]}/v1"
+        try:
+            try:
+                result: str | None = transcribe_audio(
+                    b"\xff\xfb\x90\x00", "audio/mpeg", api_key="sk-test"
+                )
+            except RuntimeError:
+                result = None
+        finally:
+            if old_base is None:
+                os.environ.pop("OPENAI_BASE_URL", None)
+            else:
+                os.environ["OPENAI_BASE_URL"] = old_base
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+        return result, handler_cls.request_count  # type: ignore[attr-defined]
+
+    def test_transient_rate_limit_retried_until_success(self) -> None:
+        """429 responses are retried (beyond the SDK's own retries) and the
+        call eventually succeeds once the endpoint recovers."""
+        from http.server import BaseHTTPRequestHandler
+
+        class Handler(BaseHTTPRequestHandler):
+            request_count = 0
+
+            def do_POST(self) -> None:  # noqa: N802 - http.server API
+                self.rfile.read(int(self.headers.get("Content-Length", 0) or 0))
+                Handler.request_count += 1
+                # The OpenAI SDK itself retries twice (3 requests per
+                # attempt), so fail the first 4 requests to force the
+                # application-level retry loop to perform a 2nd attempt.
+                if Handler.request_count <= 4:
+                    body = b'{"error": {"message": "rate limited", "type": "rate_limit_error"}}'
+                    self.send_response(429)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Retry-After", "0")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                body = b"hello from whisper"
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, format: str, *args: object) -> None:
+                pass
+
+        result, count = self._run_against_local_server(Handler)
+        assert result == "hello from whisper"
+        assert count >= 5
+
+    def test_auth_error_not_retried(self) -> None:
+        """A deterministic 401 fails immediately without any retry."""
+        from http.server import BaseHTTPRequestHandler
+
+        class Handler(BaseHTTPRequestHandler):
+            request_count = 0
+
+            def do_POST(self) -> None:  # noqa: N802 - http.server API
+                self.rfile.read(int(self.headers.get("Content-Length", 0) or 0))
+                Handler.request_count += 1
+                body = b'{"error": {"message": "bad key", "type": "invalid_request_error"}}'
+                self.send_response(401)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, format: str, *args: object) -> None:
+                pass
+
+        result, count = self._run_against_local_server(Handler)
+        assert result is None
+        assert count == 1
+
     def test_mime_to_ext_mapping(self) -> None:
         from kiss.core.models.model import _AUDIO_MIME_TO_EXT
 
