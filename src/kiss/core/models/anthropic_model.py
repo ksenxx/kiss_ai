@@ -268,11 +268,12 @@ def _attachments_to_blocks(attachments: list[Attachment]) -> list[dict[str, Any]
                 blocks.append(
                     {"type": "text", "text": f"[Audio transcription]\n{text}"}
                 )
-            except Exception:
+            except Exception as exc:
                 logger.warning(
                     "Anthropic does not support %s attachments and "
-                    "automatic transcription failed; skipping.",
+                    "automatic transcription failed (%s); skipping.",
                     att.mime_type,
+                    exc,
                 )
         else:
             logger.warning(
