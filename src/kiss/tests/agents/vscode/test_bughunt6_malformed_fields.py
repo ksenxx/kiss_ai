@@ -65,7 +65,7 @@ def _isolate_db(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
     payloads in these tests must not persist ``last_model``/config
     values into the process-shared KISS_HOME and pollute later tests."""
     import kiss.agents.sorcar.persistence as pm
-    import kiss.server.vscode_config as vc
+    import kiss.core.vscode_config as vc
 
     _close_db()
     tmpdir = tempfile.mkdtemp()

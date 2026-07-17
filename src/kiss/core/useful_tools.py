@@ -27,28 +27,6 @@ from kiss.core.models.model import (
 
 logger = logging.getLogger(__name__)
 
-# Grep-hint provider hook.  The code-graph grep interception lives in
-# ``kiss.agents.sorcar.code_graph`` (which registers itself here at
-# import time via :func:`set_grep_hint_provider`); core must not import
-# sorcar, so the dependency is inverted through this module-level
-# callable.  When no provider is registered (pure-core usage), grep
-# commands simply run normally.
-_grep_hint_provider: Callable[[str, str | None], str | None] | None = None
-
-
-def set_grep_hint_provider(
-    provider: Callable[[str, str | None], str | None],
-) -> None:
-    """Register the grep-hint provider used by :func:`intercept_grep_hint`.
-
-    Args:
-        provider: Callable ``(command, work_dir) -> hint | None`` that
-            returns an inline answer for a grep-like command, or
-            ``None`` when the command should run normally.
-    """
-    global _grep_hint_provider
-    _grep_hint_provider = provider
-
 # Largest supported binary the Read tool will embed inline as a base64
 # attachment.  The text path is bounded by ``max_lines``; without this
 # cap the binary path would ``read_bytes()`` an arbitrarily large file
@@ -437,44 +415,6 @@ def _format_bash_result(returncode: int, output: str, max_output_chars: int) -> 
     return _truncate_output(output, max_output_chars)
 
 
-def intercept_grep_hint(
-    command: str, work_dir: str | None, seen: set[str],
-) -> str | None:
-    """Return a code-graph answer for a grep-like *command*, at most once.
-
-    Query-before-grep interception (code_graph feature): when a built
-    graph already knows the identifier a grep/rg command searches for,
-    the expensive grep is denied and the graph answer is returned
-    directly ("the deny message IS the answer").  A missing/broken
-    code_graph module can never affect Bash (lazy try/except import).
-    Each distinct hint is returned at most once per *seen* set, so a
-    repeated identical grep falls through to the real command.
-
-    Shared by :meth:`UsefulTools.Bash` and the Docker ``Bash`` wrapper
-    in ``SorcarAgent._get_tools`` so the interception logic cannot
-    drift between the two.
-
-    Args:
-        command: The bash command about to be executed.
-        work_dir: Working directory used to locate the built graph.
-        seen: Mutable per-session dedupe set of already-returned hints.
-
-    Returns:
-        The hint string to return INSTEAD of running the command, or
-        ``None`` when the command should run normally.
-    """
-    hint = ""
-    try:
-        if _grep_hint_provider is not None:
-            hint = _grep_hint_provider(command, work_dir) or ""
-    except Exception:
-        logger.debug("code_graph grep hint failed", exc_info=True)
-    if hint and hint not in seen:
-        seen.add(hint)
-        return hint
-    return None
-
-
 def _kill_process_group(process: subprocess.Popen) -> None:
     """Kill a subprocess and all its children.
 
@@ -546,11 +486,6 @@ class UsefulTools:
         self.stream_callback = stream_callback
         self.stop_event = stop_event
         self.work_dir = work_dir
-        # A graph answer replaces the first grep for an identifier.  If the
-        # agent asks again, it is explicitly seeking verification or context
-        # the graph did not provide, so let the real command run rather than
-        # trapping it in a repeated deny-message loop.
-        self._code_graph_hints_seen: set[str] = set()
 
     def _spawn(self, command: str) -> subprocess.Popen:
         """Launch *command* with the shared Popen configuration.
@@ -941,12 +876,6 @@ class UsefulTools:
         guard = _bash_parent_repo_guard(command, self.work_dir)
         if guard is not None:
             return guard
-
-        hint = intercept_grep_hint(
-            command, self.work_dir, self._code_graph_hints_seen,
-        )
-        if hint is not None:
-            return hint
 
         if self.stream_callback:
             return self._bash_streaming(command, timeout_seconds, max_output_chars)

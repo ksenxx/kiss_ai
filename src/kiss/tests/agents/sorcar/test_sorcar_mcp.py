@@ -101,7 +101,7 @@ def mcp_permission_rules() -> object:
     session-level ``KISS_HOME`` set by conftest.py, so in-process
     permission tests must write there (and restore afterwards).
     """
-    from kiss.server.vscode_config import CONFIG_PATH
+    from kiss.core.vscode_config import CONFIG_PATH
 
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     original = CONFIG_PATH.read_text() if CONFIG_PATH.exists() else None

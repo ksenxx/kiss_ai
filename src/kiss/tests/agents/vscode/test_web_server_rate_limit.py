@@ -47,8 +47,8 @@ from unittest import IsolatedAsyncioTestCase
 
 import pytest
 
+from kiss.core.vscode_config import CONFIG_PATH, save_config
 from kiss.server import web_server as ws_mod
-from kiss.server.vscode_config import CONFIG_PATH, save_config
 from kiss.server.web_server import (
     RemoteAccessServer,
     _is_rate_limit_line,

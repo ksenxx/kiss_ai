@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from kiss.server.vscode_config import (
+from kiss.core.vscode_config import (
     API_KEY_ENV_VARS,
     DEFAULTS,
     _get_user_shell,
@@ -49,10 +49,10 @@ def _isolate_config(
     fake_home.mkdir()
     monkeypatch.setenv("HOME", str(fake_home))
     monkeypatch.setattr(
-        "kiss.server.vscode_config.CONFIG_DIR", fake_home / ".kiss"
+        "kiss.core.vscode_config.CONFIG_DIR", fake_home / ".kiss"
     )
     monkeypatch.setattr(
-        "kiss.server.vscode_config.CONFIG_PATH",
+        "kiss.core.vscode_config.CONFIG_PATH",
         fake_home / ".kiss" / "config.json",
     )
     for key in API_KEY_ENV_VARS:
@@ -455,7 +455,7 @@ class TestSourceShellEnv:
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
         # Force ``_resolve_shell_path`` to return None by stubbing the
         # fallback list to a path that does not exist.
-        from kiss.server import vscode_config as vc
+        from kiss.core import vscode_config as vc
         monkeypatch.setattr(
             vc, "_SHELL_FALLBACK_PATHS",
             {"zsh": (str(tmp_path / "no-such-zsh"),)},
@@ -683,7 +683,7 @@ class TestGetCurrentApiKeys:
 
     def test_returns_keys_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Keys present in os.environ are returned."""
-        from kiss.server.vscode_config import get_current_api_keys
+        from kiss.core.vscode_config import get_current_api_keys
 
         monkeypatch.setenv("GEMINI_API_KEY", "gem-from-env")
         monkeypatch.setenv("OPENAI_API_KEY", "oai-from-env")
@@ -695,7 +695,7 @@ class TestGetCurrentApiKeys:
 
     def test_returns_empty_when_no_keys(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """All keys empty when none are set."""
-        from kiss.server.vscode_config import get_current_api_keys
+        from kiss.core.vscode_config import get_current_api_keys
 
         for k in API_KEY_ENV_VARS:
             monkeypatch.delenv(k, raising=False)
@@ -705,7 +705,7 @@ class TestGetCurrentApiKeys:
 
     def test_all_keys_present(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """All expected API key names are included in the result."""
-        from kiss.server.vscode_config import get_current_api_keys
+        from kiss.core.vscode_config import get_current_api_keys
 
         keys = get_current_api_keys()
         assert set(keys.keys()) == API_KEY_ENV_VARS
@@ -791,7 +791,7 @@ class TestSaveConfigAtomicity:
         """
         import threading
 
-        from kiss.server import vscode_config as vc
+        from kiss.core import vscode_config as vc
 
         # Seed config.json with a valid value (the autouse fixture
         # already redirected CONFIG_PATH to a tmp dir).

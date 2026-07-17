@@ -49,7 +49,7 @@ class TestSaveConfigDaemonRestart(unittest.TestCase):
     """_cmd_save_config restarts the daemon only on a real password change."""
 
     def setUp(self) -> None:
-        import kiss.server.vscode_config as vc
+        import kiss.core.vscode_config as vc
 
         self._tmpdir = tempfile.mkdtemp()
         self._orig_dir = vc.CONFIG_DIR
@@ -82,7 +82,7 @@ class TestSaveConfigDaemonRestart(unittest.TestCase):
         os.environ["KISS_HOME"] = str(Path.home() / ".kiss")
 
     def tearDown(self) -> None:
-        import kiss.server.vscode_config as vc
+        import kiss.core.vscode_config as vc
 
         os.environ["PATH"] = self._orig_env_path
         if self._orig_kiss_home is None:
@@ -128,7 +128,7 @@ class TestSaveConfigDaemonRestart(unittest.TestCase):
         previously saved password is posted back verbatim.  Pre-fix this
         kickstarted the daemon and interrupted in-flight tasks.
         """
-        from kiss.server.vscode_config import save_config
+        from kiss.core.vscode_config import save_config
 
         save_config({"remote_password": "hunter2"})
         server = self._make_server()
@@ -139,7 +139,7 @@ class TestSaveConfigDaemonRestart(unittest.TestCase):
 
     def test_changed_password_restarts_daemon(self) -> None:
         """A genuinely new password must still restart the daemon."""
-        from kiss.server.vscode_config import save_config
+        from kiss.core.vscode_config import save_config
 
         save_config({"remote_password": "old-secret"})
         server = self._make_server()
@@ -158,7 +158,7 @@ class TestSaveConfigDaemonRestart(unittest.TestCase):
 
     def test_empty_password_does_not_restart_daemon(self) -> None:
         """Saving a config without a password never restarts the daemon."""
-        from kiss.server.vscode_config import save_config
+        from kiss.core.vscode_config import save_config
 
         save_config({"remote_password": "hunter2"})
         server = self._make_server()
@@ -169,7 +169,7 @@ class TestSaveConfigDaemonRestart(unittest.TestCase):
 
     def test_unchanged_password_still_persists_other_fields(self) -> None:
         """The no-restart path must not skip persisting the rest of the form."""
-        from kiss.server.vscode_config import load_config, save_config
+        from kiss.core.vscode_config import load_config, save_config
 
         save_config({"remote_password": "hunter2", "max_budget": 100})
         server = self._make_server()

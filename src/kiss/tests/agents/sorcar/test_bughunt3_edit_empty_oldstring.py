@@ -18,7 +18,7 @@ error and leave the file untouched.
 
 from pathlib import Path
 
-from kiss.agents.sorcar.useful_tools import UsefulTools
+from kiss.core.useful_tools import UsefulTools
 
 
 def test_edit_empty_old_string_replace_all_does_not_corrupt(tmp_path: Path) -> None:

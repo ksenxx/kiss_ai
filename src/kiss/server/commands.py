@@ -1089,7 +1089,7 @@ class _CommandsMixin:
         directory that will actually be used by *this* instance, not
         whichever folder another instance persisted last.
         """
-        from kiss.server.vscode_config import get_current_api_keys, load_config
+        from kiss.core.vscode_config import get_current_api_keys, load_config
 
         cfg = load_config()
         if cmd.get("workDir"):
@@ -1129,7 +1129,7 @@ class _CommandsMixin:
         restarts), nor interleave ``apply_config_to_env`` with a
         half-merged config.
         """
-        from kiss.server.vscode_config import (
+        from kiss.core.vscode_config import (
             apply_config_to_env,
             load_config,
             sanitize_config,

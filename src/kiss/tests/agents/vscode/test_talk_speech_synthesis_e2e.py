@@ -6,7 +6,7 @@
 
 Calls the real OpenAI default GPT audio model (``gpt-audio-1.5``, no
 mocks) and checks
-that :func:`kiss.server.speech_synthesis.synthesize_talk_audio`
+that :func:`kiss.core.speech_synthesis.synthesize_talk_audio`
 returns base64 MP3 audio whose decoded bytes carry a valid MP3 stream
 header, plus the degradation contract (empty text / bad model → None).
 """
@@ -16,7 +16,7 @@ import os
 
 import pytest
 
-from kiss.server.speech_synthesis import synthesize_talk_audio
+from kiss.core.speech_synthesis import synthesize_talk_audio
 
 requires_openai = pytest.mark.skipif(
     not os.environ.get("OPENAI_API_KEY"),

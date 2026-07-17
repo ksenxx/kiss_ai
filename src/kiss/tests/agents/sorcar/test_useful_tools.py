@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.sorcar.useful_tools import (
+from kiss.core.useful_tools import (
     UsefulTools,
     _truncate_output,
 )

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import os
@@ -29,9 +30,9 @@ from kiss.agents.sorcar.cli_helpers import (
 from kiss.agents.sorcar.cli_helpers import (
     cli_ask_user_question as cli_ask_user_question,
 )
+from kiss.agents.sorcar.code_graph import intercept_grep_hint
 from kiss.agents.sorcar.persistence import _load_last_model
 from kiss.agents.sorcar.skills import make_skill_tool
-from kiss.agents.sorcar.useful_tools import UsefulTools, intercept_grep_hint
 from kiss.agents.sorcar.web_use_tool import WebUseTool
 from kiss.core.base import SYSTEM_PROMPT
 from kiss.core.kiss_error import BudgetExceededError
@@ -44,6 +45,7 @@ from kiss.core.models.model_info import (
 from kiss.core.models.model_info import model as _model_factory
 from kiss.core.printer import Printer
 from kiss.core.relentless_agent import RelentlessAgent
+from kiss.core.useful_tools import UsefulTools
 
 logger = logging.getLogger(__name__)
 
@@ -432,6 +434,46 @@ def _attachment_parts(attachments: list[Attachment]) -> list[str]:
     return parts
 
 
+def _make_plain_bash_tool(
+    agent: SorcarAgent, useful_tools: UsefulTools,
+) -> Callable[..., str]:
+    """Build the non-Docker ``Bash`` tool with query-before-grep interception.
+
+    The returned function answers grep-like commands from the built code
+    graph (via :func:`intercept_grep_hint`, at most once per distinct
+    hint) and otherwise delegates to :meth:`UsefulTools.Bash`.
+
+    Args:
+        agent: The owning agent (``agent.work_dir`` locates the graph).
+        useful_tools: The tool collection executing real commands.
+
+    Returns:
+        The ``Bash`` tool function to register with the model.
+    """
+    hints_seen: set[str] = set()
+
+    # ``wraps`` copies the delegate's name, docstring, and (crucially)
+    # its concrete parameter annotations, so the model-visible tool
+    # schema is byte-identical to registering ``useful_tools.Bash``
+    # directly (this module's postponed annotations would otherwise
+    # degrade ``timeout_seconds``/``max_output_chars`` to strings).
+    @functools.wraps(useful_tools.Bash)
+    def Bash(  # noqa: N802
+        command: str,
+        description: str,
+        timeout_seconds: float = 300,
+        max_output_chars: int = 50000,
+    ) -> str:
+        hint = intercept_grep_hint(command, agent.work_dir, hints_seen)
+        if hint is not None:
+            return hint
+        return useful_tools.Bash(
+            command, description, timeout_seconds, max_output_chars,
+        )
+
+    return Bash
+
+
 class SorcarAgent(RelentlessAgent):
     """Agent with both coding tools and browser automation for web + code tasks."""
 
@@ -690,7 +732,10 @@ class SorcarAgent(RelentlessAgent):
                 stop_event=getattr(self, "_stop_event", None),
                 work_dir=self.work_dir,
             )
-            tools = [useful_tools.Bash, useful_tools.Read, useful_tools.Edit, useful_tools.Write]
+            tools = [
+                _make_plain_bash_tool(self, useful_tools),
+                useful_tools.Read, useful_tools.Edit, useful_tools.Write,
+            ]
         if self._use_web_tools and self.web_use_tool is None:
             if getattr(self, "_subagent_info", None) is not None:
                 # Parallel sub-agents must never share (or escalate) the

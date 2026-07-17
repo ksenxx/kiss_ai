@@ -26,7 +26,7 @@ from typing import Any
 
 import pytest
 
-import kiss.server.vscode_config as vscode_config
+import kiss.core.vscode_config as vscode_config
 from kiss.agents.sorcar import persistence as sorcar_persistence
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.models.model_info import model as model_factory

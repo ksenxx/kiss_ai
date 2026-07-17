@@ -16,7 +16,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from kiss.agents.sorcar.useful_tools import UsefulTools
+from kiss.core.useful_tools import UsefulTools
 
 
 class TestEditCrlfPreservation(unittest.TestCase):

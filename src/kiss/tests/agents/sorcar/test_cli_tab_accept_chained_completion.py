@@ -41,7 +41,7 @@ from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 
 import kiss.agents.sorcar.persistence as th
-import kiss.server.vscode_config as vc
+import kiss.core.vscode_config as vc
 from kiss.ui.cli.cli_prompt import PtkLineReader
 from kiss.ui.cli.cli_repl import CliCompleter
 

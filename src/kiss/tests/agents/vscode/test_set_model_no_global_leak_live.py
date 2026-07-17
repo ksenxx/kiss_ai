@@ -35,7 +35,7 @@ from typing import Any
 
 import pytest
 
-import kiss.server.vscode_config as vscode_config
+import kiss.core.vscode_config as vscode_config
 from kiss.agents.sorcar import persistence as sorcar_persistence
 from kiss.agents.sorcar.persistence import _load_last_model
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState

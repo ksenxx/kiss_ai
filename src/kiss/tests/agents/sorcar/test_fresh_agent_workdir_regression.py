@@ -30,7 +30,7 @@ from __future__ import annotations
 import os
 
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.sorcar.useful_tools import UsefulTools
+from kiss.core.useful_tools import UsefulTools
 
 
 class TestFreshAgentBashTool:

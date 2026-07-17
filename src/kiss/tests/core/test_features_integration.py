@@ -24,7 +24,7 @@ import pytest
 from kiss.core import config as config_module
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
-from kiss.server.vscode_config import (
+from kiss.core.vscode_config import (
     API_KEY_ENV_VARS,
     load_config,
     save_api_key_to_shell,
@@ -278,10 +278,10 @@ class TestWebBrowserToggle:
         fake_home.mkdir()
         monkeypatch.setenv("HOME", str(fake_home))
         monkeypatch.setattr(
-            "kiss.server.vscode_config.CONFIG_DIR", fake_home / ".kiss",
+            "kiss.core.vscode_config.CONFIG_DIR", fake_home / ".kiss",
         )
         monkeypatch.setattr(
-            "kiss.server.vscode_config.CONFIG_PATH",
+            "kiss.core.vscode_config.CONFIG_PATH",
             fake_home / ".kiss" / "config.json",
         )
         save_config({"use_web_browser": False})
@@ -300,10 +300,10 @@ class TestApiKeySetupAndDeletion:
         fake_home.mkdir()
         monkeypatch.setenv("HOME", str(fake_home))
         monkeypatch.setattr(
-            "kiss.server.vscode_config.CONFIG_DIR", fake_home / ".kiss",
+            "kiss.core.vscode_config.CONFIG_DIR", fake_home / ".kiss",
         )
         monkeypatch.setattr(
-            "kiss.server.vscode_config.CONFIG_PATH",
+            "kiss.core.vscode_config.CONFIG_PATH",
             fake_home / ".kiss" / "config.json",
         )
         monkeypatch.setenv("SHELL", "/bin/zsh")

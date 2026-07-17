@@ -881,7 +881,7 @@ class _TaskRunnerMixin:
             # to the task once the id exists.
             tab.task_history_id = None
             subtasks = parse_task_tags(prompt)
-            from kiss.server.vscode_config import (
+            from kiss.core.vscode_config import (
                 build_model_config,
                 load_config,
             )
@@ -1278,7 +1278,7 @@ class _TaskRunnerMixin:
                     tab.task_history_id,
                     result_summary[:200],
                 )
-                from kiss._version import __version__
+                from kiss.core._version import __version__
 
                 # Persist agent start / end timestamps (ms since epoch)
                 # so a later history load can flip the "Running …"
@@ -1553,7 +1553,7 @@ class _TaskRunnerMixin:
             sub_steps_base: Agent step counter before the subtask.
         """
         try:
-            from kiss._version import __version__
+            from kiss.core._version import __version__
 
             _append_chat_event(
                 {"type": "task_done"},

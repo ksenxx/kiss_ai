@@ -38,7 +38,7 @@ from typing import Any
 from unittest import IsolatedAsyncioTestCase
 
 import kiss.agents.sorcar.persistence as th
-import kiss.server.vscode_config as vc
+import kiss.core.vscode_config as vc
 from kiss.server.web_server import RemoteAccessServer
 
 _VSCODE_DIR = Path(__file__).resolve().parents[3] / "agents" / "vscode"

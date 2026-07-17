@@ -21,6 +21,7 @@ An individual arm can be resumed with ``--arm baseline`` or ``--arm treatment``.
 """
 
 import argparse
+import functools
 import json
 import re
 import shutil
@@ -30,9 +31,13 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar.code_graph import build_graph, make_code_graph_tool
-from kiss.agents.sorcar.useful_tools import UsefulTools
+from kiss.agents.sorcar.code_graph import (
+    build_graph,
+    intercept_grep_hint,
+    make_code_graph_tool,
+)
 from kiss.core.kiss_agent import KISSAgent
+from kiss.core.useful_tools import UsefulTools
 
 EVAL_DIR = Path(__file__).resolve().parent
 REPO_ROOT = EVAL_DIR.parent.parent
@@ -133,11 +138,43 @@ def validate_corpora() -> None:
         raise RuntimeError(f"treatment corpus has no graph: {treatment_graph} missing")
 
 
+def _graph_aware_bash(useful: UsefulTools, corpus: str) -> Callable[..., Any]:
+    """Wrap ``useful.Bash`` with the production query-before-grep interception.
+
+    Mirrors ``SorcarAgent``'s Bash wrapper wiring: when a built graph knows
+    the identifier a grep-like command searches for, the graph answer is
+    returned inline (counted by ``transcript_stats``).  The baseline arm
+    has no graph, so every command naturally falls through to real Bash.
+
+    Args:
+        useful: The tool collection executing real commands.
+        corpus: The sealed corpus directory (graph location).
+
+    Returns:
+        The ``Bash`` tool function to register with the model.
+    """
+    hints_seen: set[str] = set()
+
+    @functools.wraps(useful.Bash)
+    def Bash(  # noqa: N802
+        command: str,
+        description: str,
+        timeout_seconds: float = 300,
+        max_output_chars: int = 50000,
+    ) -> str:
+        hint = intercept_grep_hint(command, corpus, hints_seen)
+        if hint is not None:
+            return hint
+        return useful.Bash(command, description, timeout_seconds, max_output_chars)
+
+    return Bash
+
+
 def run_one(arm: str, task: dict[str, Any], trial: int) -> dict[str, Any]:
     """Run one arm/task/trial cell and return its complete measurement."""
     corpus = str(CORPUS[arm])
     useful = UsefulTools(work_dir=corpus)
-    tools: list[Callable[..., Any]] = [useful.Bash, useful.Read]
+    tools: list[Callable[..., Any]] = [_graph_aware_bash(useful, corpus), useful.Read]
     if arm == "treatment":
         code_graph_tool = make_code_graph_tool(corpus)
         if code_graph_tool is None:

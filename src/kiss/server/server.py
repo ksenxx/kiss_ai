@@ -768,7 +768,7 @@ class VSCodeServer(
                 }
             )
 
-        from kiss.server.vscode_config import get_custom_model_entry, load_config
+        from kiss.core.vscode_config import get_custom_model_entry, load_config
 
         cfg = load_config()
         custom = get_custom_model_entry(cfg)

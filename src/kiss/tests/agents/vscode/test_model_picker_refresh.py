@@ -87,7 +87,7 @@ class TestModelPickerRefresh(TestCase):
         import tempfile
         from pathlib import Path
 
-        import kiss.server.vscode_config as vc
+        import kiss.core.vscode_config as vc
 
         saved_kiss_model = os.environ.pop("KISS_MODEL", None)
         saved_config_dir, saved_config_path = vc.CONFIG_DIR, vc.CONFIG_PATH
@@ -165,12 +165,12 @@ class TestModelPickerRefresh(TestCase):
         import tempfile
         from pathlib import Path
 
-        import kiss.server.vscode_config as vc
+        import kiss.core.vscode_config as vc
         from kiss.agents.sorcar.persistence import _save_last_model
 
         saved = _clear_all_keys()
-        saved_config_dir = vc.__dict__.get("CONFIG_DIR")
-        saved_config_path = vc.__dict__.get("CONFIG_PATH")
+        saved_config_dir = vars(vc).get("CONFIG_DIR")
+        saved_config_path = vars(vc).get("CONFIG_PATH")
         tmpdir = tempfile.mkdtemp()
         try:
             vc.CONFIG_DIR = Path(tmpdir)
@@ -205,11 +205,13 @@ class TestModelPickerRefresh(TestCase):
             )
         finally:
             if saved_config_dir is None:
-                vc.__dict__.pop("CONFIG_DIR", None)
+                if "CONFIG_DIR" in vars(vc):
+                    del vc.CONFIG_DIR
             else:
                 vc.CONFIG_DIR = saved_config_dir
             if saved_config_path is None:
-                vc.__dict__.pop("CONFIG_PATH", None)
+                if "CONFIG_PATH" in vars(vc):
+                    del vc.CONFIG_PATH
             else:
                 vc.CONFIG_PATH = saved_config_path
             shutil.rmtree(tmpdir, ignore_errors=True)

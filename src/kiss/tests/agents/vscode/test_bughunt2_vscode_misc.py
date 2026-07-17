@@ -32,8 +32,8 @@ import math
 import unittest
 
 from kiss.core import config as config_module
-from kiss.server import vscode_config
-from kiss.server.vscode_config import (
+from kiss.core import vscode_config
+from kiss.core.vscode_config import (
     DEFAULTS,
     apply_config_to_env,
     load_config,

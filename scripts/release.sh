@@ -35,8 +35,7 @@ export GH_NO_UPDATE_NOTIFIER=1
 PUBLIC_REMOTE="public"
 PUBLIC_REPO_URL="https://github.com/ksenxx/kiss_ai.git"
 PUBLIC_REPO_SSH="git@github.com:ksenxx/kiss_ai.git"
-# The version literal is single-sourced in src/kiss/core/_version.py
-# (src/kiss/_version.py is only an import shim without a literal).
+# The version literal is single-sourced in src/kiss/core/_version.py.
 VERSION_FILE="src/kiss/core/_version.py"
 README_FILE="README.md"
 SYSTEM_FILE="src/kiss/SYSTEM.md"
