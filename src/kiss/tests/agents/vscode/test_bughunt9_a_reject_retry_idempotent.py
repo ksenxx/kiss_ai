@@ -34,7 +34,7 @@ from typing import Any
 from unittest import IsolatedAsyncioTestCase
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.vscode.web_server import RemoteAccessServer
+from kiss.server.web_server import RemoteAccessServer
 
 # Soft file-size limit during the faulted first attempt.  Must be
 # comfortably larger than every incidental file the process may touch

@@ -4,7 +4,7 @@
 # add your name here
 """Bug-hunt 6: worker stderr output must not corrupt the steering box.
 
-Bug: :meth:`kiss.agents.sorcar.cli_steering.SteeringSession.run` swaps
+Bug: :meth:`kiss.ui.cli.cli_steering.SteeringSession.run` swaps
 only ``sys.stdout`` for the lock-guarded :class:`_StdoutProxy`, so
 every console write lands in the DECSTBM scroll region above the box
 via the ``ESC 8`` (restore output cursor) / ``ESC 7`` (re-save) dance.
@@ -97,7 +97,7 @@ class NoisyAgent:
         return "summary: done\\n"
 
 
-from kiss.agents.sorcar.cli_steering import run_with_steering
+from kiss.ui.cli.cli_steering import run_with_steering
 
 run_with_steering(NoisyAgent(), {{}})
 sys.stdout.write("RESTORED:" + str(sys.stderr is real_stderr) + "\\n")

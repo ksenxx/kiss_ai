@@ -6,7 +6,7 @@
 
 Reproduces the user-reported bug where the Left and Right arrow keys
 did not move the cursor in the sorcar CLI REPL input box (the anchored
-:class:`~kiss.agents.sorcar.cli_steering._InputBox` used for both the
+:class:`~kiss.ui.cli.cli_steering._InputBox` used for both the
 idle prompt and mid-task steering), so text typed earlier could not be
 edited.  Keystrokes are fed as the raw bytes a real terminal emits and
 the resulting edit buffer / submitted line is asserted — no mocks.
@@ -19,13 +19,13 @@ import threading
 
 import pytest
 
-from kiss.agents.sorcar.cli_panel import (
+from kiss.ui.cli.cli_panel import (
     PROMPT_MARKER,
     body_cursor_col,
     display_width,
     panel_body,
 )
-from kiss.agents.sorcar.cli_steering import _InputBox
+from kiss.ui.cli.cli_steering import _InputBox
 
 LEFT = b"\x1b[D"
 RIGHT = b"\x1b[C"

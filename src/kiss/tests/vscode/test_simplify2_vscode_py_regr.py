@@ -31,7 +31,7 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.vscode.web_server import (
+from kiss.server.web_server import (
     RemoteAccessServer,
     _apply_exec_bit,
     _hunk_unresolved,

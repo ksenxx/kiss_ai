@@ -37,8 +37,7 @@ MAIN_JS = (
 
 BROWSER_UI = (
     Path(__file__).resolve().parents[3]
-    / "agents"
-    / "vscode"
+    / "server"
     / "json_printer.py"
 )
 
@@ -146,7 +145,7 @@ def test_noncore_tool_result_is_broadcast() -> None:
     ``result`` panel).  This test pins the new behaviour so any future
     "suppress non-core tools" regression fails loudly.
     """
-    from kiss.agents.vscode.json_printer import JsonPrinter
+    from kiss.server.json_printer import JsonPrinter
 
     printer = JsonPrinter()
     printer._thread_local.task_id = "t1"
@@ -167,7 +166,7 @@ def test_noncore_tool_result_is_broadcast() -> None:
 
 def test_core_tool_result_is_broadcast() -> None:
     """Verify that tool_result for core tools IS broadcast."""
-    from kiss.agents.vscode.json_printer import JsonPrinter
+    from kiss.server.json_printer import JsonPrinter
 
     printer = JsonPrinter()
     printer._thread_local.task_id = "t1"
@@ -197,7 +196,7 @@ def test_thinking_after_noncore_tool_gets_panel_events() -> None:
     ``pendingPanel`` is set ``true`` on the tool_call itself (the
     invariant pinned by the tests above).
     """
-    from kiss.agents.vscode.json_printer import JsonPrinter
+    from kiss.server.json_printer import JsonPrinter
 
     printer = JsonPrinter()
     printer._thread_local.task_id = "t1"

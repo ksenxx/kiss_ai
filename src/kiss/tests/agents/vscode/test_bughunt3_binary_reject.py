@@ -27,8 +27,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from kiss.agents.vscode.diff_merge import _prepare_merge_view
-from kiss.agents.vscode.web_server import _reject_all_hunks_in_file
+from kiss.server.diff_merge import _prepare_merge_view
+from kiss.server.web_server import _reject_all_hunks_in_file
 
 ORIGINAL = b"\x00\x89PNG original bytes \x00\x01\x02"
 MODIFIED = b"\x00\x89PNG agent-modified bytes \xff\xfe"

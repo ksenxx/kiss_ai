@@ -13,9 +13,9 @@ worktree auto-commit pipeline as well as server-reset messages such
 as "Restarting the KISS Sorcar web server…".
 
 Pre-fix the sorcar CLI (both the legacy in-process path that uses
-:class:`~kiss.agents.sorcar.cli_printer.RecordingConsolePrinter` and
+:class:`~kiss.ui.cli.cli_printer.RecordingConsolePrinter` and
 the newer interactive client
-:class:`~kiss.agents.sorcar.cli_client.CliClient` whose dispatcher
+:class:`~kiss.ui.cli.cli_client.CliClient` whose dispatcher
 routes streamed display events through
 :meth:`_EventDispatcher._render`) silently dropped every notification
 event — they were treated as "frontend-only / merge / setTaskText /
@@ -37,9 +37,9 @@ from __future__ import annotations
 import io
 import unittest
 
-from kiss.agents.sorcar.cli_client import _EventDispatcher
-from kiss.agents.sorcar.cli_printer import RecordingConsolePrinter
 from kiss.core.print_to_console import ConsolePrinter
+from kiss.ui.cli.cli_client import _EventDispatcher
+from kiss.ui.cli.cli_printer import RecordingConsolePrinter
 
 
 class TestEventDispatcherRendersNotifications(unittest.TestCase):
@@ -166,7 +166,7 @@ class TestRecordingConsolePrinterRendersNotificationsLocally(
     the daemon.
 
     This is the path taken by the legacy in-process CLI
-    (:mod:`kiss.agents.sorcar.cli_repl` and the worktree auto-commit
+    (:mod:`kiss.ui.cli.cli_repl` and the worktree auto-commit
     pipeline calling ``self.printer.broadcast({...})`` directly from
     :class:`~kiss.agents.sorcar.worktree_sorcar_agent.WorktreeSorcarAgent`).
     Pre-fix the ``broadcast`` override only recorded and forwarded the

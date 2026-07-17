@@ -652,7 +652,11 @@ def channel_main(
         agent = agent_cls(workspace=workspace)
     else:
         agent = agent_cls()
-    run_kwargs = _build_run_kwargs(args)
+    # ``cli_helpers`` (sorcar layer) must not import the UI layer, so
+    # the recording printer used for verbose runs is injected here.
+    from kiss.ui.cli.cli_printer import RecordingConsolePrinter
+
+    run_kwargs = _build_run_kwargs(args, printer_factory=RecordingConsolePrinter)
 
     # Interactive mode launches the agent as a kiss-web registered
     # agent via ``_cmd_run`` (see ``run_agent_via_kiss_web``) so the

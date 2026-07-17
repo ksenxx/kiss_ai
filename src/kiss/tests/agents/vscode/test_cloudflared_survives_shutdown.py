@@ -38,7 +38,7 @@ import time
 import unittest
 from pathlib import Path
 
-from kiss.agents.vscode.web_server import RemoteAccessServer
+from kiss.server.web_server import RemoteAccessServer
 
 
 def _child_is_alive(pid: int) -> bool:
@@ -141,7 +141,7 @@ _DRIVER = r"""
 import os, signal, sys, time
 from pathlib import Path
 
-from kiss.agents.vscode.web_server import RemoteAccessServer
+from kiss.server.web_server import RemoteAccessServer
 
 cloudflared_pid_file = sys.argv[1]
 

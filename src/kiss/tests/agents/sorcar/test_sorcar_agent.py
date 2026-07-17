@@ -17,8 +17,8 @@ from kiss.agents.sorcar.sorcar_agent import (
     cli_ask_user_question,
 )
 from kiss.agents.sorcar.web_use_tool import WebUseTool
-from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.core.models.model import Attachment
+from kiss.server.json_printer import JsonPrinter
 
 
 class TestPromptConstruction:

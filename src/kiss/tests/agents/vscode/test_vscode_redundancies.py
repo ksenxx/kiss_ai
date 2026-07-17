@@ -34,7 +34,7 @@ class TestCmdRunUsesGetTab:
 
     def test_get_tab_creates_tab_for_new_id(self) -> None:
         """_get_tab must create a new _RunningAgentState when tab_id is unknown."""
-        from kiss.agents.vscode.server import VSCodeServer
+        from kiss.server.server import VSCodeServer
 
         server = VSCodeServer.__new__(VSCodeServer)
         _RunningAgentState.running_agent_states.clear()
@@ -47,7 +47,7 @@ class TestCmdRunUsesGetTab:
 
     def test_get_tab_returns_existing_tab(self) -> None:
         """_get_tab must return the same object for repeated calls."""
-        from kiss.agents.vscode.server import VSCodeServer
+        from kiss.server.server import VSCodeServer
 
         server = VSCodeServer.__new__(VSCodeServer)
         _RunningAgentState.running_agent_states.clear()

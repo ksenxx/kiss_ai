@@ -31,8 +31,8 @@ from threading import Thread
 from unittest import IsolatedAsyncioTestCase
 
 import kiss.agents.sorcar.persistence as th
-import kiss.agents.vscode.web_server as ws
-from kiss.agents.vscode.web_server import RemoteAccessServer
+import kiss.server.web_server as ws
+from kiss.server.web_server import RemoteAccessServer
 
 
 def _redirect_persistence(tmpdir: str) -> tuple[Path, object, Path]:
@@ -123,7 +123,7 @@ class _UpdateCheckTestBase(IsolatedAsyncioTestCase):
 
         certfile = Path(self.tmpdir) / "cert.pem"
         keyfile = Path(self.tmpdir) / "key.pem"
-        from kiss.agents.vscode.web_server import _generate_self_signed_cert
+        from kiss.server.web_server import _generate_self_signed_cert
         _generate_self_signed_cert(certfile, keyfile)
 
         self.uds_path = Path(self.tmpdir) / "sorcar.sock"
@@ -225,7 +225,7 @@ class TestUpdateAvailableSameVersion(_UpdateCheckTestBase):
     PYPI_VERSION = "0.0.0"  # Will be overridden below.
 
     async def asyncSetUp(self) -> None:
-        from kiss._version import __version__
+        from kiss.core._version import __version__
         # Pin the stub to the *current* installed version so the check
         # sees no upgrade is needed.
         type(self).PYPI_PAYLOAD = {"info": {"version": __version__}}
@@ -292,7 +292,8 @@ class TestUpdateAvailableUsesLatestInstalledExtension(_UpdateCheckTestBase):
     Fix
     ---
     The daemon now discovers the LATEST installed extension version by
-    scanning ``~/.vscode/extensions/ksenxx.kiss-sorcar-*/kiss_project/src/kiss/_version.py``
+    scanning ``~/.vscode/extensions/ksenxx.kiss-sorcar-*/kiss_project/src/kiss/core/_version.py``
+    (falling back to the pre-move layout)
     and returns the highest parseable version.  After the install the
     filesystem contains the NEW extension dir, so even a stale-old daemon
     reports ``current == NEW`` and broadcasts ``available: False`` —

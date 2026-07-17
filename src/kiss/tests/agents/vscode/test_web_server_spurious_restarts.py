@@ -5,7 +5,7 @@
 """Integration tests covering the remaining spurious-restart paths.
 
 These tests reproduce and verify the fix for four residual paths in
-:mod:`kiss.agents.vscode.web_server` that earlier code reviews flagged
+:mod:`kiss.server.web_server` that earlier code reviews flagged
 as still capable of triggering an unnecessary server / cloudflared
 restart, even after the IP-watchdog debounce was hardened:
 
@@ -46,8 +46,8 @@ import time
 import unittest
 from unittest import IsolatedAsyncioTestCase
 
-import kiss.agents.vscode.web_server as ws_mod
-from kiss.agents.vscode.web_server import (
+import kiss.server.web_server as ws_mod
+from kiss.server.web_server import (
     _IP_CHANGE_DEBOUNCE_TICKS,
     _TUNNEL_FORCE_RESTART_COOLDOWN_INITIAL,
     _TUNNEL_FORCE_RESTART_COOLDOWN_MAX,

@@ -14,7 +14,7 @@
 // voice.js now posts `{type: 'voiceAck'}` and the extension host plays
 // the clip natively on this machine's speakers — the same strategy the
 // kiss-web daemon uses for agent `talk` clips
-// (kiss.agents.sorcar.cli_talk / web_server._play_talk_clip_locally).
+// (kiss.ui.cli.cli_talk / web_server._play_talk_clip_locally).
 //
 // Player resolution mirrors cli_talk.player_command(): the
 // KISS_SORCAR_PLAY_CMD environment override (shell-split; the audio

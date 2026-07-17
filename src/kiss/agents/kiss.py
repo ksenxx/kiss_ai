@@ -13,8 +13,8 @@ from typing import Any, cast
 import yaml
 
 import kiss.core.utils as utils
+from kiss.core.docker_manager import DockerManager
 from kiss.core.kiss_agent import KISSAgent
-from kiss.docker.docker_manager import DockerManager
 
 prompt_template_refiner = """
 ## Role ##

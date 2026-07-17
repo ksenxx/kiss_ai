@@ -26,12 +26,12 @@ from __future__ import annotations
 import unittest
 import uuid
 
-from kiss.agents.vscode.diff_merge import (
+from kiss.core import config as config_module
+from kiss.server.diff_merge import (
     _cleanup_merge_data,
     _merge_data_dir,
     _untracked_base_dir,
 )
-from kiss.core import config as config_module
 
 
 class TestMergeDataDirTraversal(unittest.TestCase):

@@ -40,7 +40,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from kiss.agents.sorcar.cli_client import (
+from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.core.print_to_console import ConsolePrinter
+from kiss.tests.agents.sorcar.test_cli_client import (
+    CliClientBase,
+    _DaemonHarness,
+)
+from kiss.ui.cli.cli_client import (
     CliClient,
     _EventDispatcher,
     _handle_client_slash,
@@ -48,12 +54,6 @@ from kiss.agents.sorcar.cli_client import (
     _request_cli_info,
     _request_models,
     _submit_task,
-)
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.core.print_to_console import ConsolePrinter
-from kiss.tests.agents.sorcar.test_cli_client import (
-    CliClientBase,
-    _DaemonHarness,
 )
 
 

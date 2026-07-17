@@ -247,7 +247,10 @@ def run_ablation(
     results.append(_score(corpus, l3_blk, "L3_provenance"))
     for tau in taus:
         l4_blk = [v.should_veto(tau) for v in verdicts]
-        combined = [a or b or c or d for a, b, c, d in zip(l1_blk, l2_blk, l3_blk, l4_blk, strict=True)]
+        combined = [
+            a or b or c or d
+            for a, b, c, d in zip(l1_blk, l2_blk, l3_blk, l4_blk, strict=True)
+        ]
         results.append(_score(corpus, l4_blk, f"L4_judge_tau={tau:.1f}"))
         results.append(_score(corpus, combined, f"Combined_tau={tau:.1f}"))
 

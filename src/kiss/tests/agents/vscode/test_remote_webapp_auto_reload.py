@@ -6,7 +6,7 @@
 reconnects after a server restart / network blip.
 
 Today the WebSocket shim injected into the remote webapp page (see
-``_WS_SHIM_JS`` in ``src/kiss/agents/vscode/web_server.py``) handles a
+``_WS_SHIM_JS`` in ``src/kiss/server/web_server.py``) handles a
 dropped socket like this:
 
 * ``onclose``  → dispatches ``daemonStatus connected:false`` so
@@ -52,7 +52,7 @@ from pathlib import Path
 import pytest
 from playwright.sync_api import sync_playwright
 
-from kiss.agents.vscode.web_server import _WS_SHIM_JS
+from kiss.server.web_server import _WS_SHIM_JS
 
 _MEDIA_DIR = (
     Path(__file__).resolve().parents[4]

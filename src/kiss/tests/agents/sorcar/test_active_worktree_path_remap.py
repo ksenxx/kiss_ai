@@ -40,7 +40,7 @@ from pathlib import Path
 import pytest
 
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps
-from kiss.agents.sorcar.useful_tools import UsefulTools
+from kiss.core.useful_tools import UsefulTools
 
 
 def _run(*args: str, cwd: Path) -> None:

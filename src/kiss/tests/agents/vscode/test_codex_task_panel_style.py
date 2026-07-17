@@ -51,7 +51,9 @@ MEDIA_DIR = (
 CODEX_CSS = MEDIA_DIR / "remote-codex.css"
 MAIN_CSS = MEDIA_DIR / "main.css"
 MAIN_JS = MEDIA_DIR / "main.js"
-WEB_SERVER_PY = MEDIA_DIR.parent / "web_server.py"
+WEB_SERVER_PY = (
+    Path(__file__).resolve().parents[3] / "server" / "web_server.py"
+)
 
 
 def _find_rule(css: str, selector: str) -> str:
@@ -515,7 +517,7 @@ def _start_live_server(
     Stores the bound ephemeral port in ``state['port']`` (or the
     startup exception in ``state['error']``) and sets *ready*.
     """
-    from kiss.agents.vscode.web_server import (
+    from kiss.server.web_server import (
         RemoteAccessServer,
         _generate_self_signed_cert,
     )

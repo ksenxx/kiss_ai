@@ -5,7 +5,7 @@
 """Characterization (lockdown) tests for ``web_server.py`` simplifications.
 
 Pins the CURRENT externally-observable behavior of
-:mod:`kiss.agents.vscode.web_server` so planned simplifications (see
+:mod:`kiss.server.web_server` so planned simplifications (see
 ``tmp/findings-5.md``, sections A2/A3/A6, B3/B5, F1-F3 and the listed
 coverage gaps) cannot silently change it:
 
@@ -43,7 +43,7 @@ import unittest
 from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 
-from kiss.agents.vscode.web_server import (
+from kiss.server.web_server import (
     MEDIA_DIR,
     RemoteAccessServer,
     _compare_versions,

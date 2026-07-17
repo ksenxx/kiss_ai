@@ -21,7 +21,7 @@ import threading
 
 import pytest
 
-from kiss.agents.sorcar.cli_steering import _InputBox
+from kiss.ui.cli.cli_steering import _InputBox
 
 # Any CSI sequence whose row parameter is zero or negative is invalid.
 _BAD_ROW = re.compile(r"\x1b\[(?:1;)?(?:0|-\d+)[rH;]|\x1b\[-\d+")

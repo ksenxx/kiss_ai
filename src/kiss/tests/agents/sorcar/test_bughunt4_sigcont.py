@@ -4,7 +4,7 @@
 # add your name here
 """Bug-hunt 4: the steering box must restore itself after SIGCONT.
 
-Bug: :class:`kiss.agents.sorcar.cli_steering._InputBox` installed no
+Bug: :class:`kiss.ui.cli.cli_steering._InputBox` installed no
 ``SIGCONT`` handler.  When the user suspends the CLI (Ctrl+Z) and
 resumes it (``fg``), the raw terminal mode, bracketed-paste mode and
 the DECSTBM scroll region were never re-asserted and the box was not
@@ -29,7 +29,7 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.sorcar.cli_steering import _BOX_H
+from kiss.ui.cli.cli_steering import _BOX_H
 
 pytestmark = pytest.mark.skipif(
     not hasattr(os, "fork"), reason="requires a POSIX pty",
@@ -87,7 +87,7 @@ class QuietSlowAgent:
         return "summary: done\\n"
 
 
-from kiss.agents.sorcar.cli_steering import run_with_steering
+from kiss.ui.cli.cli_steering import run_with_steering
 
 try:
     run_with_steering(QuietSlowAgent(), {{}})

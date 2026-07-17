@@ -4,7 +4,7 @@
 # add your name here
 """Restarting the cloudflared tunnel must never restart the WSS server.
 
-When :mod:`kiss.agents.vscode.web_server` restarts the ``cloudflared``
+When :mod:`kiss.server.web_server` restarts the ``cloudflared``
 tunnel — whether because the tunnel subprocess died, because the
 Cloudflare edge deregistered it (``readyConnections == 0``), or because
 :meth:`RemoteAccessServer._restart_tunnel_url` is invoked directly — it
@@ -29,8 +29,8 @@ import time
 from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 
-import kiss.agents.vscode.web_server as ws_mod
-from kiss.agents.vscode.web_server import (
+import kiss.server.web_server as ws_mod
+from kiss.server.web_server import (
     _TUNNEL_STARTUP_GRACE,
     _TUNNEL_UNHEALTHY_LIMIT_QUICK,
     RemoteAccessServer,

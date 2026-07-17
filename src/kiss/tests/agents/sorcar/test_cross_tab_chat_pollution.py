@@ -45,8 +45,8 @@ import json
 import threading
 from typing import Any
 
-from kiss.agents.vscode.server import VSCodeServer
-from kiss.agents.vscode.web_server import WebPrinter
+from kiss.server.server import VSCodeServer
+from kiss.server.web_server import WebPrinter
 
 # Content/panel event types that belong to a single task's chat stream.
 # If any of these is broadcast without a ``tabId`` while two tabs are

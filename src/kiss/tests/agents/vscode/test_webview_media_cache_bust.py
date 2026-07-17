@@ -23,8 +23,8 @@ from websockets.asyncio.server import ServerConnection
 from websockets.datastructures import Headers
 from websockets.http11 import Request
 
-from kiss.agents.vscode import web_server
-from kiss.agents.vscode.web_server import RemoteAccessServer
+from kiss.server import web_server
+from kiss.server.web_server import RemoteAccessServer
 
 
 def _asset_hash(name: str) -> str:

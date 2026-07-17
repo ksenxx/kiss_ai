@@ -93,7 +93,7 @@ class FloodingAgent:
         return "summary: done\\n"
 
 
-from kiss.agents.sorcar.cli_steering import run_with_steering
+from kiss.ui.cli.cli_steering import run_with_steering
 
 try:
     run_with_steering(FloodingAgent(), {{}})

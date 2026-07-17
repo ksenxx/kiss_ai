@@ -47,8 +47,8 @@ from pathlib import Path
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-from kiss.agents.vscode.json_printer import JsonPrinter
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.json_printer import JsonPrinter
+from kiss.server.server import VSCodeServer
 
 
 def _redirect(tmpdir: str) -> tuple[Path, object, Path]:

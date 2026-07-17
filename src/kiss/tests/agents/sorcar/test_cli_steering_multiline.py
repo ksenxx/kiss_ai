@@ -11,7 +11,7 @@ prompt" (Shift+Enter, Alt+Enter, Ctrl+J, Cmd+Enter, plus every Shift /
 Alt / Ctrl / Cmd combination via xterm modifyOtherKeys and CSI-u).
 
 These tests exercise the real key-parsing path in
-:meth:`kiss.agents.sorcar.cli_steering._InputBox.feed` plus the raw-mode
+:meth:`kiss.ui.cli.cli_steering._InputBox.feed` plus the raw-mode
 termios setup in :meth:`_InputBox.start` (the kernel must not rewrite
 incoming CR to LF, or the two would arrive indistinguishably).
 """
@@ -27,7 +27,7 @@ import threading
 
 import pytest
 
-from kiss.agents.sorcar.cli_steering import _NEWLINE_AFTER_ESC, _InputBox
+from kiss.ui.cli.cli_steering import _NEWLINE_AFTER_ESC, _InputBox
 
 
 def _make_box() -> _InputBox:

@@ -63,6 +63,9 @@ function makeWebview() {
   };
 
   win.__VOICE__ = {mode: 'webview'};
+  // The mic is closed by default (fresh install); seed the explicit
+  // opt-in so wake-word listening auto-enables for these tests.
+  win.localStorage.setItem('kissVoiceEnabled', '1');
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
   win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
   win.eval(fs.readFileSync(path.join(MEDIA, 'voice.js'), 'utf8'));

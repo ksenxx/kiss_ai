@@ -40,7 +40,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from kiss.agents.vscode.web_server import RemoteAccessServer, _WebMergeState
+from kiss.server.web_server import RemoteAccessServer, _WebMergeState
 
 
 class _CoordExecutor(ThreadPoolExecutor):

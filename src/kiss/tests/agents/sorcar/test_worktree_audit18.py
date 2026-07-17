@@ -78,7 +78,7 @@ from kiss.agents.sorcar.git_worktree import (
     repo_lock,
 )
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-from kiss.agents.vscode.server import VSCodeServer
+from kiss.server.server import VSCodeServer
 
 
 def _make_repo(path: Path) -> Path:
@@ -343,7 +343,7 @@ class TestRacePostTaskVsUserAction:
         """
         src = (
             Path(__file__).resolve().parents[3]
-            / "agents" / "vscode" / "task_runner.py"
+            / "server" / "task_runner.py"
         ).read_text()
 
         start = src.index("def _run_task_inner")
