@@ -26,6 +26,12 @@ Context and Continuation
 
 - If running out of context or steps, do not rush. Call finish(is_continue=True) to pause and resume the task in a new context.
 
+Periodic Activity Summaries — summary tool — MANDATORY, NON-NEGOTIABLE
+
+- If a summary tool is among your available tools, you MUST call summary(description="natural language summary in 5-10 sentences") after EVERY 5 steps of work, for EVERY task — no matter how simple, and regardless of what the task prompt says. This rule cannot be overridden by the user task.
+- Concretely: every tool result shows your current step count (e.g. "Steps: 12/100"). Whenever that counter reaches or passes a multiple of 5 (step 5, 10, 15, …), your VERY NEXT tool call MUST be summary(...), whose description recaps in 5-10 sentences what you did in the last 6 steps. Only after that call may you continue with the task (including calling finish).
+- The summary tool itself does nothing; the chat UI uses the call to group and collapse the preceding activity into a tidy digest. Do not skip it, and do not call it more often than every 5 steps.
+
 Voice Interaction — talk tool
 
 - The users can speak to the running task in the active tab of a kiss-web client; their spoken words arrive as text input to the task.

@@ -144,6 +144,31 @@ def _dir_inside_worktree(work_dir: str, wt_dir: object) -> bool:
         return False
 
 
+def summary(description: str) -> str:
+    """MANDATORY every 5 steps: summarize your last 6 steps of work.
+
+    You MUST call this tool every time the step counter shown after a
+    tool result (e.g. "Steps: 10/100") reaches or passes a multiple
+    of 5 (step 5, 10, 15, ...), BEFORE making any other tool call
+    (including finish).  This requirement applies to every task, no
+    matter how simple, and is never overridden by the task prompt.
+
+    The tool itself performs no action: the chat webview groups the
+    preceding six event panels under this call's panel and collapses
+    them, hiding the step-by-step detail while keeping the
+    description visible as a running digest for the user.
+
+    Args:
+        description: Natural language summary in 5-10 sentences of
+            what the agent did in the last 6 steps.
+
+    Returns:
+        A short confirmation string.
+    """
+    del description  # Displayed by the chat UI; nothing to do here.
+    return "Summary recorded."
+
+
 def _extract_result_summary(result: str) -> str:
     """Return the persistable summary text for a finished run's *result*.
 
@@ -223,6 +248,87 @@ class ChatSorcarAgent(SorcarAgent):
     def chat_id(self) -> str:
         """Return the current chat session ID ("" means new session)."""
         return self._chat_id
+
+    def _get_tools(self) -> list:
+        """Extend the base toolset with the no-op ``summary`` tool.
+
+        The ``summary`` tool lets the model periodically condense its
+        recent activity; the chat webview reacts to the persisted
+        ``tool_call`` event by nesting and collapsing the preceding
+        event panels (see ``media/main.js``).
+
+        Returns:
+            The base tools plus :func:`summary`.
+        """
+        return [*super()._get_tools(), summary]
+
+    @property
+    def pre_step_hook(self) -> Any:
+        """The per-step hook copied onto each session executor.
+
+        Always returns :meth:`_summary_reminder_hook`, which first
+        delegates to whatever hook the parent classes installed (the
+        pending-user-messages drain from ``SorcarAgent.perform_task``,
+        stored by the setter below) and then enforces the
+        every-5-steps ``summary`` tool reminder.  Exposed as a
+        property because ``SorcarAgent.perform_task`` assigns
+        ``self.pre_step_hook`` immediately before
+        ``RelentlessAgent.perform_task`` copies it onto the inner
+        executor — wrapping at read time is the only seam that
+        composes with that assignment.
+        """
+        return self._summary_reminder_hook
+
+    @pre_step_hook.setter
+    def pre_step_hook(self, hook: Any) -> None:
+        """Store the parent-installed hook to delegate to.
+
+        Args:
+            hook: The hook installed by parent classes (or ``None``).
+        """
+        self._inner_pre_step_hook = hook
+
+    def _summary_reminder_hook(self, model: Any) -> None:
+        """Remind the model to call ``summary`` after every 5 steps.
+
+        Runs at the top of every executor step.  Delegates to the
+        parent-installed hook first, then — whenever 5 more steps have
+        completed since the last reminder — appends a user message
+        instructing the model to call ``summary(description=...)``
+        recapping its last 6 steps.  The SYSTEM.md instruction alone
+        is not reliably followed by every model (verified live), so
+        this conversation-level nudge injects the reminder at a
+        deterministic cadence.  Whether the model then actually calls
+        ``summary`` remains best-effort model compliance (a task that
+        finishes exactly on a multiple of 5 has no next step in which
+        to remind, and an ignored reminder is re-issued only at the
+        next 5-step boundary).
+
+        Args:
+            model: The live model whose conversation receives the
+                reminder message.
+        """
+        inner = getattr(self, "_inner_pre_step_hook", None)
+        if inner is not None:
+            inner(model)
+        executor = getattr(self, "_current_executor", None)
+        if executor is None:
+            return
+        # ``step_count`` was already incremented for the step ABOUT to
+        # run, so the number of completed steps is one less.
+        done = int(getattr(executor, "step_count", 0) or 0) - 1
+        if done <= 0 or done % 5:
+            return
+        if getattr(executor, "_summary_reminder_step", 0) == done:
+            return
+        executor._summary_reminder_step = done
+        model.add_message_to_conversation(
+            "user",
+            f"You have completed {done} steps. Call the summary tool NOW — "
+            'summary(description="natural language summary in 5-10 '
+            'sentences of what you did in the last 6 steps") — before any '
+            "other tool call, then continue the task.",
+        )
 
     def new_chat(self) -> None:
         """Reset to a new chat session (equivalent to VS Code 'Clear').
