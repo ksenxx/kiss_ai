@@ -357,6 +357,15 @@ _TUNNEL_FORCE_RESTART_COOLDOWN_MAX = 3600
 # minimum cool-down.
 _TUNNEL_FORCE_RESTART_RESET_AFTER_HEALTHY = 600
 
+# Fail-fast window (seconds) used by ``_spawn_cloudflared``: after
+# spawning, wait up to this long for the child to exit so a bind
+# collision (TOCTOU on the pre-picked metrics port) is detected and
+# retried with a fresh port.  Healthy cloudflared takes seconds to
+# start, so it never exits within this window.  Module-level so tests
+# can widen the window on heavily loaded machines where even a
+# fail-fast child may take longer than 1s to exec and exit.
+_SPAWN_FAILFAST_WINDOW = 1.0
+
 # Substrings (case-insensitive) in cloudflared's stderr that indicate
 # trycloudflare.com is rate-limiting the local egress IP.  Matching is
 # done line-by-line via :func:`_is_rate_limit_line`.
@@ -5891,15 +5900,16 @@ class RemoteAccessServer:
             )
             # Give cloudflared a brief moment to fail-fast on a bind
             # collision.  Healthy cloudflared takes seconds to start
-            # so it will not have exited within 1s.  ``wait`` (rather
-            # than a fixed ``sleep`` + ``poll``) returns as soon as a
-            # fail-fast child exits — typically a few ms — and also
-            # reaps it, while tolerating up to 1s of scheduling delay
-            # under heavy machine load (a loaded box can take >250ms
-            # just to exec and exit the child, which used to
-            # misclassify a doomed spawn as healthy).
+            # so it will not have exited within the window.  ``wait``
+            # (rather than a fixed ``sleep`` + ``poll``) returns as
+            # soon as a fail-fast child exits — typically a few ms —
+            # and also reaps it, while tolerating scheduling delay up
+            # to :data:`_SPAWN_FAILFAST_WINDOW` under heavy machine
+            # load (a loaded box can take >250ms just to exec and
+            # exit the child, which used to misclassify a doomed
+            # spawn as healthy).
             try:
-                proc.wait(timeout=1.0)
+                proc.wait(timeout=_SPAWN_FAILFAST_WINDOW)
             except subprocess.TimeoutExpired:
                 pass
             if proc.poll() is None:
