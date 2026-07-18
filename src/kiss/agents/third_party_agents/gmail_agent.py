@@ -1043,25 +1043,21 @@ class GmailAgent(BaseChannelAgent, SorcarAgent):
         )
     """
 
+    channel_system_prompt = (
+        "\n\n## Gmail Authentication\n"
+        "If credentials.json is missing, call start_gmail_browser_setup() to open "
+        "Google Cloud Console, then use browser tools to create OAuth credentials "
+        "autonomously. If credentials.json exists, call authenticate_gmail() directly. "
+        "Use ask_user_question() if you need user help with Google account login screens. "
+        "Do NOT instruct the user to do these steps manually."
+    )
+
     def __init__(self) -> None:
         super().__init__("Gmail Agent")
         self._backend = GmailChannelBackend()
         creds = _load_credentials()
         if creds:  # pragma: no branch
             self._backend._service = _build_service(creds)
-
-    def run(self, **kwargs: Any) -> str:  # type: ignore[override]
-        """Run with Gmail-specific system prompt encouraging browser-based auth."""
-        channel_prompt = (
-            "\n\n## Gmail Authentication\n"
-            "If credentials.json is missing, call start_gmail_browser_setup() to open "
-            "Google Cloud Console, then use browser tools to create OAuth credentials "
-            "autonomously. If credentials.json exists, call authenticate_gmail() directly. "
-            "Use ask_user_question() if you need user help with Google account login screens. "
-            "Do NOT instruct the user to do these steps manually."
-        )
-        kwargs["system_prompt"] = (kwargs.get("system_prompt") or "") + channel_prompt
-        return super().run(**kwargs)
 
     def _is_authenticated(self) -> bool:
         """Return True if the backend is authenticated."""

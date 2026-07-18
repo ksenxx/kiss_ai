@@ -891,12 +891,25 @@ class _TaskRunnerMixin:
             _cfg_budget = float(_vcfg.get("max_budget", 100))
             _cfg_web = _vcfg.get("use_web_browser", True)
             _model_config = build_model_config(_vcfg)
-            _agent_budget = getattr(tab.agent, "_max_budget_override", None)
-            _agent_web = getattr(tab.agent, "_web_tools_override", None)
-            _agent_model_config = getattr(
-                tab.agent,
-                "_model_config_override",
-                None,
+            # Per-task overrides supplied by API clients
+            # (``kiss.server.sorcar.run(max_budget=..., ...)``, used by
+            # the third-party agent launcher).  The fields come from
+            # outside the daemon process, so they are validated and
+            # ignored when malformed; ``None`` means "no override".
+            _raw_budget = cmd.get("maxBudget")
+            _agent_budget = (
+                float(_raw_budget)
+                if isinstance(_raw_budget, (int, float))
+                and not isinstance(_raw_budget, bool)
+                else None
+            )
+            _raw_web = cmd.get("webTools")
+            _agent_web = _raw_web if isinstance(_raw_web, bool) else None
+            _raw_model_config = cmd.get("modelConfig")
+            _agent_model_config = (
+                _raw_model_config
+                if isinstance(_raw_model_config, dict)
+                else None
             )
 
             # Invoked by ``ChatSorcarAgent.run`` the moment the run's
