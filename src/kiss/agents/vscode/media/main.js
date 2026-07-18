@@ -3441,8 +3441,9 @@
           );
         }
         // ``summary`` tool: the agent periodically (every ~5 steps)
-        // summarizes its recent activity.  The panel adopts the
-        // preceding (up to) 6 top-level event panels as sub-panels
+        // summarizes its recent activity.  The panel adopts ALL the
+        // top-level event panels emitted since the previous summary
+        // panel — or since the beginning of the task — as sub-panels
         // and collapses, hiding the detail while its ``description``
         // stays fully visible (see the
         // ``.tc.tc-summary.collapsed > .tc-summary-desc`` CSS rule).
@@ -3519,15 +3520,20 @@
         addCollapse(c, hdr);
         target.appendChild(c);
         if (isSummary) {
-          // Adopt the last (up to) 6 top-level event panels as
-          // sub-panels of this summary panel, preserving their order.
-          // Never cross into the user's prompt, a system prompt, a
-          // previous task's history block, or a result panel.
+          // Adopt ALL the top-level event panels emitted since the
+          // previous summary panel (or since the beginning of the
+          // task) as sub-panels of this summary panel, preserving
+          // their order — the digest recaps exactly "what you did
+          // after the last call to the 'summary' tool" (SYSTEM.md).
+          // Never cross into an earlier summary panel, the user's
+          // prompt, a system prompt, a previous task's history
+          // block, or a result panel.
           const sub = mkEl('div', 'summary-sub');
           const adopt = [];
           let sib = c.previousElementSibling;
-          while (sib && adopt.length < 6) {
+          while (sib) {
             if (
+              sib.classList.contains('tc-summary') ||
               sib.classList.contains('prompt') ||
               sib.classList.contains('system-prompt') ||
               sib.classList.contains('adjacent-task') ||
