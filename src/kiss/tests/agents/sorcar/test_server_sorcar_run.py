@@ -311,16 +311,23 @@ class SorcarRunApiTest(unittest.TestCase):
         assert "remember the magic word xyzzy" in prompts_seen[1]
         assert "first answer marker" in prompts_seen[1]
 
-    def _raw_daemon_run(self, tools_file: Any) -> None:
+    def _raw_daemon_run(
+        self,
+        tools_file: Any,
+        extra_cmd: dict[str, Any] | None = None,
+    ) -> None:
         """Drive one raw ``run`` command over the UDS and wait for the end.
 
         Bypasses :func:`kiss.server.sorcar.run` so malformed
-        ``toolsFile`` payloads can be sent exactly as an
-        arbitrary/buggy client would.
+        ``toolsFile`` payloads (or other malformed command fields via
+        *extra_cmd*) can be sent exactly as an arbitrary/buggy client
+        would.
 
         Args:
             tools_file: Raw value for the ``run`` command's
                 ``toolsFile`` field.
+            extra_cmd: Additional raw fields merged into the ``run``
+                command.
         """
         tab_id = f"raw-{uuid.uuid4().hex}"
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -335,6 +342,7 @@ class SorcarRunApiTest(unittest.TestCase):
                 "workDir": self.repo,
                 "model": "",
                 "toolsFile": tools_file,
+                **(extra_cmd or {}),
             }
             sock.sendall(json.dumps(cmd).encode() + b"\n")
             reader = sock.makefile("rb")
@@ -836,6 +844,77 @@ class SorcarRunApiTest(unittest.TestCase):
                     sock_path=missing_sock,
                     timeout=5,
                 )
+
+    def test_per_task_overrides_forwarded(self) -> None:
+        """``max_budget`` / ``model_config`` / ``web_tools`` /
+        ``is_parallel`` reach the daemon-built agent."""
+        seen: dict[str, Any] = {}
+
+        def stub_run(self_agent: Any, **kwargs: Any) -> str:
+            seen["max_budget"] = kwargs.get("max_budget")
+            seen["model_config"] = kwargs.get("model_config")
+            seen["web_tools"] = getattr(self_agent, "_use_web_tools", None)
+            seen["is_parallel"] = getattr(self_agent, "_is_parallel", None)
+            raw = "success: true\nis_continue: false\nsummary: ok\n"
+            printer = kwargs.get("printer")
+            if printer is not None:
+                printer.print(
+                    raw, type="result", step_count=1,
+                    total_tokens=1, cost="$0.0001",
+                )
+            return raw
+
+        self._parent_class.run = stub_run
+        result = sorcar.run(
+            "apply overrides",
+            work_dir=self.repo,
+            sock_path=self.sock_path,
+            timeout=60,
+            max_budget=2.5,
+            model_config={"base_url": "http://localhost:9999/v1"},
+            web_tools=False,
+            is_parallel=True,
+        )
+        assert result.success is True
+        assert seen["max_budget"] == 2.5
+        assert seen["model_config"] == {
+            "base_url": "http://localhost:9999/v1",
+        }
+        assert seen["web_tools"] is False
+        assert seen["is_parallel"] is True
+
+    def test_malformed_override_fields_ignored(self) -> None:
+        """Malformed override fields fall back to the daemon config.
+
+        The daemon treats the ``run`` command as untrusted input: a
+        boolean ``maxBudget``, a non-dict ``modelConfig``, and a
+        non-boolean ``webTools`` are ignored rather than applied or
+        crashing the task thread.
+        """
+        seen: dict[str, Any] = {}
+
+        def stub_run(self_agent: Any, **kwargs: Any) -> str:
+            seen["max_budget"] = kwargs.get("max_budget")
+            seen["model_config"] = kwargs.get("model_config")
+            seen["web_tools"] = getattr(self_agent, "_use_web_tools", None)
+            return "success: true\nis_continue: false\nsummary: ok\n"
+
+        self._parent_class.run = stub_run
+        self._raw_daemon_run(
+            "",
+            extra_cmd={
+                "maxBudget": True,
+                "modelConfig": "junk",
+                "webTools": "yes",
+            },
+        )
+        assert isinstance(seen["max_budget"], float)
+        assert seen["max_budget"] > 0, "config default budget must apply"
+        assert seen["model_config"] is None or isinstance(
+            seen["model_config"], dict,
+        ), "malformed modelConfig must not reach the agent"
+        assert seen["model_config"] != "junk"
+        assert seen["web_tools"] is True, "config default web tools apply"
 
     def test_no_daemon_raises_connection_error(self) -> None:
         """A missing daemon socket raises a helpful ConnectionError."""

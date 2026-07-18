@@ -866,6 +866,14 @@ class SlackAgent(BaseChannelAgent, SorcarAgent):
         )
     """
 
+    channel_system_prompt = (
+        "\n\n## Slack Authentication\n"
+        "If authentication is needed, call start_slack_browser_auth() to open "
+        "the Slack API portal, then use browser tools to create an app, configure "
+        "OAuth scopes, install it to a workspace, and copy the xoxb- bot token. "
+        "Complete these steps autonomously — do NOT instruct the user to do them manually."
+    )
+
     def __init__(self, workspace: str = "default") -> None:
         super().__init__("Slack Agent")
         self._workspace = workspace
@@ -873,18 +881,6 @@ class SlackAgent(BaseChannelAgent, SorcarAgent):
         token = _load_token(workspace)
         if token:
             self._backend._client = WebClient(token=token, retry_handlers=[])
-
-    def run(self, **kwargs: Any) -> str:  # type: ignore[override]
-        """Run with Slack-specific system prompt encouraging browser-based auth."""
-        channel_prompt = (
-            "\n\n## Slack Authentication\n"
-            "If authentication is needed, call start_slack_browser_auth() to open "
-            "the Slack API portal, then use browser tools to create an app, configure "
-            "OAuth scopes, install it to a workspace, and copy the xoxb- bot token. "
-            "Complete these steps autonomously — do NOT instruct the user to do them manually."
-        )
-        kwargs["system_prompt"] = (kwargs.get("system_prompt") or "") + channel_prompt
-        return super().run(**kwargs)
 
     def _is_authenticated(self) -> bool:
         """Return True if a Slack client is configured."""
