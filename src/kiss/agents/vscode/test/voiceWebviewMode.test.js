@@ -126,18 +126,18 @@ test('clicking the toggle posts voiceToggle through the bridge', () => {
   // another realm (different Object prototype than the test's).
   assert.strictEqual(
     JSON.stringify(posted),
-    JSON.stringify([{type: 'voiceToggle', enabled: true, sensitivity: 85}]),
+    JSON.stringify([{type: 'voiceToggle', enabled: true, sensitivity: 80}]),
   );
   const btn = win.document.getElementById('voice-btn');
   btn.click();
   assert.strictEqual(
     JSON.stringify(posted[1]),
-    JSON.stringify({type: 'voiceToggle', enabled: false, sensitivity: 85}),
+    JSON.stringify({type: 'voiceToggle', enabled: false, sensitivity: 80}),
   );
   btn.click();
   assert.strictEqual(
     JSON.stringify(posted[2]),
-    JSON.stringify({type: 'voiceToggle', enabled: true, sensitivity: 85}),
+    JSON.stringify({type: 'voiceToggle', enabled: true, sensitivity: 80}),
   );
 });
 
@@ -155,7 +155,7 @@ test('mic state persists in localStorage and is applied on load', () => {
   const second = makeWindow();
   assert.strictEqual(
     JSON.stringify(second.posted),
-    JSON.stringify([{type: 'voiceToggle', enabled: true, sensitivity: 85}]),
+    JSON.stringify([{type: 'voiceToggle', enabled: true, sensitivity: 80}]),
   );
   // A brand-new window (fresh storage — first install) must stay OFF:
   // the mic is closed by default so Sorcar never responds to the wake

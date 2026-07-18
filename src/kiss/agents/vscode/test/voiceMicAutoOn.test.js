@@ -82,7 +82,7 @@ test('webview mode: explicit opt-in (stored "1") auto-enables on load', () => {
   const {win, posted} = makeWindow('webview', '1');
   assert.strictEqual(
     JSON.stringify(posted),
-    JSON.stringify([{type: 'voiceToggle', enabled: true, sensitivity: 85}]),
+    JSON.stringify([{type: 'voiceToggle', enabled: true, sensitivity: 80}]),
   );
   const btn = win.document.getElementById('voice-btn');
   assert.ok(btn.classList.contains('voice-loading'));
@@ -101,7 +101,7 @@ test('webview mode: turning the mic on is remembered for next launch', () => {
   btn.click(); // off by default at load, so the first click enables
   assert.strictEqual(
     JSON.stringify(first.posted[0]),
-    JSON.stringify({type: 'voiceToggle', enabled: true, sensitivity: 85}),
+    JSON.stringify({type: 'voiceToggle', enabled: true, sensitivity: 80}),
   );
   assert.strictEqual(
     first.win.localStorage.getItem('kissVoiceEnabled'),
@@ -111,7 +111,7 @@ test('webview mode: turning the mic on is remembered for next launch', () => {
   const second = makeWindow('webview', '1');
   assert.strictEqual(
     JSON.stringify(second.posted),
-    JSON.stringify([{type: 'voiceToggle', enabled: true, sensitivity: 85}]),
+    JSON.stringify([{type: 'voiceToggle', enabled: true, sensitivity: 80}]),
   );
 });
 
@@ -121,7 +121,7 @@ test('webview mode: turning the mic off is remembered for next launch', () => {
   btn.click(); // auto-enabled at load (opt-in), so the first click disables
   assert.strictEqual(
     JSON.stringify(first.posted[1]),
-    JSON.stringify({type: 'voiceToggle', enabled: false, sensitivity: 85}),
+    JSON.stringify({type: 'voiceToggle', enabled: false, sensitivity: 80}),
   );
   assert.strictEqual(
     first.win.localStorage.getItem('kissVoiceEnabled'),
