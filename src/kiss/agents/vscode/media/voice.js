@@ -76,10 +76,10 @@
   // utterances that merely END with an alias ("hey there Sorcar"
   // decodes to "[unk] sore car", measured live).  Sensitivity 50
   // reproduces the historical gates (conf 0.4, pause 200ms); the
-  // default 85 is deliberately more sensitive (conf 0.12, pause at
+  // default 80 is deliberately more sensitive (conf 0.16, pause at
   // the 100ms floor, trailing-alias matching enabled).  Mirrors
   // kiss/agents/vscode/voice_wake.py.
-  const DEFAULT_SENSITIVITY = 85;
+  const DEFAULT_SENSITIVITY = 80;
   const TRAILING_ALIAS_SENSITIVITY = 75;
   const SENSITIVITY_KEY = 'kissVoiceSensitivity';
 
