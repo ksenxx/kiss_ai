@@ -1999,6 +1999,26 @@
           p.classList.remove('chv-hidden');
           continue;
         }
+        // ``summary`` digest panels must stay visible while collapsed
+        // — the whole point of the summary tool is that its
+        // description remains readable after everything else is
+        // tucked away (history replay, tab restore, "Collapse Chats").
+        // Panels adopted inside a summary's .summary-sub are already
+        // hidden by the summary's own .collapsed state; marking them
+        // chv-hidden here would keep them invisible even after the
+        // user manually expands the summary.
+        if (p.classList.contains('tc-summary')) {
+          p.classList.remove('chv-hidden');
+          // Restore the digest state — unless the user explicitly
+          // expanded this summary to read it (user-pinned).
+          if (!p.classList.contains('user-pinned'))
+            p.classList.add('collapsed');
+          continue;
+        }
+        if (p.closest('.summary-sub')) {
+          p.classList.remove('chv-hidden');
+          continue;
+        }
         p.classList.add('chv-hidden');
         // A "Collapse Chats" pass that hides a run_parallel panel
         // must not leave the fan-out's sub-agent tabs open: a hidden
@@ -2631,6 +2651,14 @@
   function collapsePreview(panelEl) {
     const prev = panelEl.querySelector('.collapse-preview');
     if (!prev) return;
+    // ``summary`` tool panels keep their description fully visible
+    // below the header even while collapsed (see the
+    // ``.tc.tc-summary.collapsed > .tc-summary-desc`` CSS rule) —
+    // never duplicate it, truncated, into the header preview.
+    if (panelEl.classList.contains('tc-summary')) {
+      prev.textContent = '';
+      return;
+    }
     if (!panelEl.classList.contains('collapsed')) {
       prev.textContent = '';
       return;
@@ -3412,6 +3440,14 @@
             ev.extras ? ev.extras.tasks : undefined,
           );
         }
+        // ``summary`` tool: the agent periodically (every ~5 steps)
+        // summarizes its recent activity.  The panel adopts the
+        // preceding (up to) 6 top-level event panels as sub-panels
+        // and collapses, hiding the detail while its ``description``
+        // stays fully visible (see the
+        // ``.tc.tc-summary.collapsed > .tc-summary-desc`` CSS rule).
+        const isSummary = ev.name === 'summary';
+        if (isSummary) c.classList.add('tc-summary');
         let b = '';
         if (ev.path) {
           const ep = esc(ev.path).replace(/"/g, '&quot;');
@@ -3422,7 +3458,7 @@
             esc(ev.path) +
             '</span></div>';
         }
-        if (ev.description)
+        if (ev.description && !isSummary)
           b +=
             '<div class="tc-arg"><span class="tc-arg-name">description:</span> ' +
             esc(ev.description) +
@@ -3469,9 +3505,50 @@
         tcBody.innerHTML =
           b || '<em style="color:var(--dim)">No arguments</em>';
         c.appendChild(hdr);
-        c.appendChild(tcBody);
+        if (isSummary) {
+          // The description lives in its own DIRECT child (not in the
+          // generic ``.tc-b`` body) so the collapsed-state stylesheet
+          // can keep exactly it visible while everything else hides.
+          const sd = mkEl('div', 'tc-summary-desc');
+          sd.textContent = ev.description || '';
+          sd.dataset.rawText = ev.description || '';
+          c.appendChild(sd);
+        } else {
+          c.appendChild(tcBody);
+        }
         addCollapse(c, hdr);
         target.appendChild(c);
+        if (isSummary) {
+          // Adopt the last (up to) 6 top-level event panels as
+          // sub-panels of this summary panel, preserving their order.
+          // Never cross into the user's prompt, a system prompt, a
+          // previous task's history block, or a result panel.
+          const sub = mkEl('div', 'summary-sub');
+          const adopt = [];
+          let sib = c.previousElementSibling;
+          while (sib && adopt.length < 6) {
+            if (
+              sib.classList.contains('prompt') ||
+              sib.classList.contains('system-prompt') ||
+              sib.classList.contains('adjacent-task') ||
+              sib.classList.contains('rc')
+            )
+              break;
+            // Only event panels are adoptable; anything else (the
+            // #welcome block, sticky bars, …) is a hard boundary.
+            if (
+              !sib.classList.contains('ev') &&
+              !sib.classList.contains('llm-panel')
+            )
+              break;
+            adopt.push(sib);
+            sib = sib.previousElementSibling;
+          }
+          for (let ai = adopt.length - 1; ai >= 0; ai--)
+            sub.appendChild(adopt[ai]);
+          c.appendChild(sub);
+          c.classList.add('collapsed');
+        }
         tState.lastToolCallEl = c;
         stampPanelStart(c);
         if (ev.command) {

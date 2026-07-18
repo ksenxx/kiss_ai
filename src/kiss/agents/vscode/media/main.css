@@ -794,6 +794,33 @@ body.remote-chat #welcome-config { display: none !important; }
 .tc-h.tc-h-bash:hover { color: var(--fg); }
 .tc.collapsed > :not(.tc-h, .panel-copy-btn) { display: none; }
 
+/* ``summary`` tool panels (see the ``case 'tool_call':`` summary
+   branch in main.js): the agent's periodic activity summary adopts
+   the preceding event panels into ``.summary-sub`` and collapses.
+   The description must stay FULLY visible while collapsed — it is a
+   direct child ``.tc-summary-desc`` exempted from the generic
+   ``.tc.collapsed`` hide rule above — while the adopted sub-panels
+   hide with everything else. */
+.tc-summary-desc {
+  padding: 6px 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--fg);
+}
+.tc.tc-summary.collapsed > .tc-summary-desc { display: block; }
+
+/* The header's one-line ellipsised preview would duplicate (and
+   truncate) the always-visible description — keep it off.  Direct
+   child combinators only: tool panels ADOPTED into a summary must
+   keep their own previews when individually collapsed. */
+.tc-summary > .tc-h > .collapse-preview { display: none; }
+
+.summary-sub {
+  margin: 4px 8px 6px 16px;
+  padding-left: 10px;
+  border-left: 2px solid color-mix(in srgb, var(--orange) 35%, transparent);
+}
+
 .tp {
   font-size: var(--fs-md); color: var(--cyan);
   font-family: var(--vscode-editor-font-family, monospace);
