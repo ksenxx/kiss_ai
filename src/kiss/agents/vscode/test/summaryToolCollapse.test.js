@@ -5,18 +5,21 @@
 //
 // End-to-end tests: the chat webview's handling of the agent's no-op
 // ``summary`` tool.  When a ``summary`` tool_call event renders, the
-// webview must (a) move the previous (up to) 6 top-level event panels
-// into the summary panel as sub-panels, (b) collapse the summary
-// panel, and (c) keep the ``description`` argument FULLY visible
-// while the panel is collapsed (no ellipsis truncation).
+// webview must (a) move ALL the top-level event panels emitted since
+// the previous ``summary`` panel — or since the beginning of the
+// task — into the summary panel as sub-panels (SYSTEM.md: the digest
+// "recaps what you did after the last call to the 'summary' tool"),
+// (b) collapse the summary panel, and (c) keep the ``description``
+// argument FULLY visible while the panel is collapsed (no ellipsis
+// truncation).
 //
 // The tests exercise the real ``media/main.js`` against the real
 // ``media/chat.html`` in jsdom (same harness as
 // ``bashHeaderCyan.test.js``), covering the live streaming path, the
 // history replay path (``task_events``), boundary conditions
-// (.prompt / .system-prompt / .adjacent-task / fewer than 6 panels),
-// chained summaries, the collapse toggle, the tool_result routing,
-// and the CSS visibility contract.
+// (.prompt / .system-prompt / .adjacent-task / an earlier
+// .tc-summary), sequential summaries, the collapse toggle, the
+// tool_result routing, and the CSS visibility contract.
 //
 // Run directly with ``node``:
 //
@@ -156,7 +159,7 @@ function testDescriptionIsDirectChildWithFullText() {
   console.log('  ok - full description rendered in .tc-summary-desc');
 }
 
-function testNestsExactlySixMostRecentPanelsInOrder() {
+function testNestsAllPanelsBackToPromptInOrder() {
   const {win} = makeWebview();
   send(win, {type: 'prompt', text: 'go'});
   // 7 tool panels + 1 Thoughts (llm) panel = 8 top-level event panels.
@@ -165,7 +168,7 @@ function testNestsExactlySixMostRecentPanelsInOrder() {
   send(win, {type: 'thinking_delta', text: 'pondering...'});
   send(win, {type: 'thinking_end'});
   const before = topLevel(win);
-  const expectNested = before.slice(-6);
+  const expectNested = before.slice(1); // everything after the prompt
   send(win, {type: 'tool_call', name: 'summary', description: DESC});
   const p = summaryPanels(win)[0];
   const sub = p.querySelector(':scope > .summary-sub');
@@ -173,10 +176,12 @@ function testNestsExactlySixMostRecentPanelsInOrder() {
   const nested = Array.from(sub.children);
   assert.strictEqual(
     nested.length,
-    6,
-    'exactly the last 6 event panels must nest — got ' + nested.length,
+    8,
+    'ALL 8 event panels since the beginning must nest (not just the ' +
+      'last 6) — got ' +
+      nested.length,
   );
-  for (let i = 0; i < 6; i++) {
+  for (let i = 0; i < expectNested.length; i++) {
     assert.strictEqual(
       nested[i],
       expectNested[i],
@@ -187,20 +192,20 @@ function testNestsExactlySixMostRecentPanelsInOrder() {
     nested.some(el => el.classList.contains('llm-panel')),
     'Thoughts (llm-panel) panels count as event panels and must nest',
   );
-  // The older panels (prompt + first 2 tool panels) stay top-level.
+  // Only the prompt and the summary panel stay top-level.
   const after = topLevel(win);
   assert.strictEqual(
     after.length,
-    4,
-    'top level must be: prompt + 2 old panels + summary panel',
+    2,
+    'top level must be: prompt + summary panel',
   );
   assert.ok(after[0].classList.contains('prompt'), 'prompt stays first');
-  assert.strictEqual(after[3], p, 'summary panel is the last child');
+  assert.strictEqual(after[1], p, 'summary panel is the last child');
   win.close();
-  console.log('  ok - exactly the last 6 panels nest, original order kept');
+  console.log('  ok - ALL panels back to the prompt nest, order kept');
 }
 
-function testFewerThanSixStopsAtPromptBoundary() {
+function testStopsAtPromptBoundary() {
   const {win} = makeWebview();
   send(win, {type: 'prompt', text: 'go'});
   sendToolPanels(win, 3);
@@ -374,7 +379,12 @@ function testHeaderClickTogglesAndKeepsChildren() {
   console.log('  ok - header click toggles collapse, children preserved');
 }
 
-function testChainedSummariesNestEarlierSummary() {
+function testSecondSummaryStopsAtEarlierSummaryBoundary() {
+  // SYSTEM.md: each summary recaps "what you did after the last call
+  // to the 'summary' tool" — so a later summary must adopt ONLY the
+  // panels emitted after the previous summary, and the previous
+  // summary panel itself must stay a top-level sibling (a boundary),
+  // never be swallowed.
   const {win} = makeWebview();
   send(win, {type: 'prompt', text: 'go'});
   sendToolPanels(win, 8);
@@ -387,20 +397,83 @@ function testChainedSummariesNestEarlierSummary() {
   const second = panels.filter(
     x => x.querySelector(':scope > .tc-summary-desc').textContent.startsWith('second'),
   )[0];
+  const first = panels.filter(x => x !== second)[0];
   const nested = Array.from(
     second.querySelector(':scope > .summary-sub').children,
   );
-  const first = panels.filter(x => x !== second)[0];
-  assert.ok(
-    nested.indexOf(first) !== -1,
-    'a later summary must nest the earlier summary panel (hierarchy)',
+  assert.strictEqual(
+    nested.length,
+    2,
+    'the second summary must adopt exactly the 2 panels emitted after ' +
+      'the first summary — got ' +
+      nested.length,
   );
   assert.ok(
-    first.querySelector(':scope > .summary-sub').children.length === 6,
-    'the earlier summary keeps its own 6 nested panels',
+    nested.indexOf(first) === -1,
+    'a later summary must NOT swallow the earlier summary panel',
+  );
+  assert.strictEqual(
+    first.parentElement,
+    output(win),
+    'the earlier summary panel stays a top-level sibling',
+  );
+  assert.strictEqual(
+    first.querySelector(':scope > .summary-sub').children.length,
+    8,
+    'the earlier summary keeps its own 8 nested panels',
+  );
+  // Top level: prompt + first summary + second summary.
+  const after = topLevel(win);
+  assert.strictEqual(after.length, 3, 'prompt + two summary digests');
+  win.close();
+  console.log('  ok - a later summary stops at the earlier summary');
+}
+
+function testSummaryImmediatelyAfterSummaryNestsNothing() {
+  const {win} = makeWebview();
+  send(win, {type: 'prompt', text: 'go'});
+  sendToolPanels(win, 3);
+  send(win, {type: 'tool_call', name: 'summary', description: 'first'});
+  send(win, {type: 'tool_result', name: 'summary', content: 'Summary recorded.'});
+  send(win, {type: 'tool_call', name: 'summary', description: 'second'});
+  const panels = summaryPanels(win);
+  assert.strictEqual(panels.length, 2);
+  const second = panels[1];
+  assert.strictEqual(
+    second.querySelector(':scope > .summary-sub').children.length,
+    0,
+    'a summary right after another summary nests nothing',
+  );
+  assert.ok(second.classList.contains('collapsed'), 'still collapses');
+  win.close();
+  console.log('  ok - back-to-back summaries nest nothing');
+}
+
+function testManyPanelsBetweenSummariesAllNest() {
+  // More than 6 panels between two summaries: the old 6-panel cap
+  // would leave 3 panels stranded at top level.
+  const {win} = makeWebview();
+  send(win, {type: 'prompt', text: 'go'});
+  sendToolPanels(win, 2);
+  send(win, {type: 'tool_call', name: 'summary', description: 'first'});
+  send(win, {type: 'tool_result', name: 'summary', content: 'Summary recorded.'});
+  sendToolPanels(win, 9, 200);
+  send(win, {type: 'tool_call', name: 'summary', description: 'second'});
+  const panels = summaryPanels(win);
+  const second = panels[1];
+  assert.strictEqual(
+    second.querySelector(':scope > .summary-sub').children.length,
+    9,
+    'ALL 9 panels since the previous summary must nest',
+  );
+  const after = topLevel(win);
+  assert.strictEqual(
+    after.length,
+    3,
+    'no stranded panels: prompt + first summary + second summary',
   );
   win.close();
-  console.log('  ok - chained summaries nest hierarchically');
+  console.log('  ok - all 9 panels between summaries nest (no 6 cap)');
 }
 
 function testToolResultLandsInsideCollapsedSummaryPanel() {
@@ -478,8 +551,8 @@ function testReplayPathNestsAndCollapses() {
   const nested = p.querySelector(':scope > .summary-sub').children;
   assert.strictEqual(
     nested.length,
-    6,
-    'replay nests the last 6 panels exactly like the live stream',
+    7,
+    'replay nests ALL panels since the beginning, like the live stream',
   );
   assert.strictEqual(
     p.querySelector(':scope > .tc-summary-desc').textContent,
@@ -591,7 +664,7 @@ function testAdoptedPanelsRevealAfterManualExpandPostReplay() {
   );
   assert.ok(!p.classList.contains('collapsed'), 'header click expands');
   const nested = Array.from(p.querySelector(':scope > .summary-sub').children);
-  assert.strictEqual(nested.length, 6);
+  assert.strictEqual(nested.length, 7);
   for (const el of nested) {
     assert.ok(
       !el.classList.contains('chv-hidden'),
@@ -646,6 +719,60 @@ function testAdoptedPanelKeepsOwnCollapsePreview() {
   console.log('  ok - adopted panel keeps its own collapse preview');
 }
 
+function testReplayWithTwoSummariesSegmentsCorrectly() {
+  // History replay must reproduce the live segmentation: each summary
+  // adopts exactly its own segment, boundaries included.
+  const {win} = makeWebview();
+  const events = [{type: 'prompt', text: 'replayed task'}];
+  for (let i = 0; i < 8; i++) {
+    events.push({type: 'tool_call', name: 'Read', path: '/tmp/a' + i});
+    events.push({type: 'tool_result', name: 'Read', content: 'x' + i});
+  }
+  events.push({type: 'tool_call', name: 'summary', description: 'first'});
+  events.push({
+    type: 'tool_result',
+    name: 'summary',
+    content: 'Summary recorded.',
+  });
+  for (let i = 0; i < 3; i++) {
+    events.push({type: 'tool_call', name: 'Read', path: '/tmp/b' + i});
+    events.push({type: 'tool_result', name: 'Read', content: 'y' + i});
+  }
+  events.push({type: 'tool_call', name: 'summary', description: 'second'});
+  events.push({
+    type: 'tool_result',
+    name: 'summary',
+    content: 'Summary recorded.',
+  });
+  events.push({type: 'result', text: 'done', summary: 'done', success: true});
+  send(win, {
+    type: 'task_events',
+    task: 'replayed task',
+    task_id: 43,
+    events: events,
+  });
+  const panels = summaryPanels(win);
+  assert.strictEqual(panels.length, 2, 'both summaries replay');
+  const first = panels[0];
+  const second = panels[1];
+  assert.strictEqual(
+    first.querySelector(':scope > .summary-sub').children.length,
+    8,
+    'first replayed summary adopts its full 8-panel segment',
+  );
+  assert.strictEqual(
+    second.querySelector(':scope > .summary-sub').children.length,
+    3,
+    'second replayed summary adopts only the 3 panels after the first',
+  );
+  assert.ok(
+    !second.contains(first),
+    'the second replayed summary must not swallow the first',
+  );
+  win.close();
+  console.log('  ok - replay with two summaries segments correctly');
+}
+
 function testRcResultPanelIsBoundary() {
   const {win} = makeWebview();
   send(win, {type: 'prompt', text: 'go'});
@@ -696,8 +823,8 @@ function testAdjacentTaskAloneIsBoundary() {
 function runTests() {
   testSummaryPanelCreatedAndCollapsed();
   testDescriptionIsDirectChildWithFullText();
-  testNestsExactlySixMostRecentPanelsInOrder();
-  testFewerThanSixStopsAtPromptBoundary();
+  testNestsAllPanelsBackToPromptInOrder();
+  testStopsAtPromptBoundary();
   testAdjacentTaskAndSystemPromptAreBoundaries();
   testWelcomeBlockNeverAdopted();
   testNoPrecedingPanels();
@@ -705,20 +832,23 @@ function runTests() {
   testDescriptionFullyVisibleWhileCollapsedViaCss();
   testCollapsePreviewSuppressedForSummary();
   testHeaderClickTogglesAndKeepsChildren();
-  testChainedSummariesNestEarlierSummary();
+  testSecondSummaryStopsAtEarlierSummaryBoundary();
+  testSummaryImmediatelyAfterSummaryNestsNothing();
+  testManyPanelsBetweenSummariesAllNest();
   testToolResultLandsInsideCollapsedSummaryPanel();
   testNonSummaryToolCallUnaffected();
   testReplayPathNestsAndCollapses();
   testReplayedSummaryStaysVisibleDespiteChevronCollapse();
   testAdoptedPanelsRevealAfterManualExpandPostReplay();
   testAdoptedPanelKeepsOwnCollapsePreview();
+  testReplayWithTwoSummariesSegmentsCorrectly();
   testRcResultPanelIsBoundary();
   testAdjacentTaskAloneIsBoundary();
 }
 
 try {
   runTests();
-  console.log('\n20 passed, 0 failed');
+  console.log('\n23 passed, 0 failed');
   process.exit(0);
 } catch (err) {
   console.error('FAIL:', err && err.stack ? err.stack : err);
