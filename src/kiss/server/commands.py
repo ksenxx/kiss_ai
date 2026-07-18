@@ -214,7 +214,6 @@ class _CommandsMixin:
         _file_cache: dict[str, list[str]]
         _tab_chat_views: dict[str, str]
         _pending_user_answer_tasks: dict[int, str]
-        _pending_tool_calls: dict[str, queue.Queue[str]]
 
         def _get_tab(self, tab_id: str) -> _RunningAgentState: ...
         def _run_task(self, cmd: dict[str, Any]) -> None: ...
@@ -484,32 +483,6 @@ class _CommandsMixin:
     def _cmd_stop(self, cmd: dict[str, Any]) -> None:
         """Stop a running task."""
         self._stop_task(cmd.get("tabId", ""))
-
-    def _cmd_tool_response(self, cmd: dict[str, Any]) -> None:
-        """Resolve a pending client-proxied tool call with its result.
-
-        Counterpart of :meth:`_TaskRunnerMixin._remote_tool_call`: an
-        API client (``kiss.server.sorcar.run``) that executed a
-        ``toolRequest`` locally replies with this command.  The pending
-        entry is popped under ``_state_lock`` so a duplicate or stale
-        ``callId`` (e.g. the task was stopped while the client was
-        still computing) is silently ignored rather than corrupting a
-        later call, and a malformed payload can never kill the client
-        connection's receive loop.
-
-        Args:
-            cmd: The command payload (``callId``, ``result``).
-        """
-        call_id = cmd.get("callId")
-        if not isinstance(call_id, str) or not call_id:
-            return
-        with self._state_lock:
-            pending = self._pending_tool_calls.pop(call_id, None)
-        if pending is None:
-            return
-        # Single-slot queue with exactly one producer (this pop wins
-        # the race for the callId), so the put can never block.
-        pending.put(str(cmd.get("result", "")))
 
     def _cmd_get_models(self, cmd: dict[str, Any]) -> None:
         """Send available models list to the requesting connection only."""
@@ -1573,7 +1546,6 @@ class _CommandsMixin:
     _HANDLERS: dict[str, Any] = {
         "run": _cmd_run,
         "stop": _cmd_stop,
-        "toolResponse": _cmd_tool_response,
         "getModels": _cmd_get_models,
         "selectModel": _cmd_select_model,
         "getHistory": _cmd_get_history,
