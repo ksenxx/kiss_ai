@@ -16,23 +16,26 @@ until it finishes::
     # Continue the same chat (the agent sees the prior task as context):
     follow_up = sorcar.run("Now fix the typos you found", chat_id=result.chat_id)
 
-Caller-supplied tools become agent tools: pass plain named functions
-(with type-annotated parameters and Google-style docstrings) via
-``tools=[...]`` and the daemon-side agent can call them like any of its
-built-in tools.  Each invocation is proxied back over the socket and
-executed **in the calling process**, so tools may close over local
-state::
+Caller-supplied tools become agent tools: pass the path of a Python
+file via ``tools="/path/to/my_tools.py"`` and the daemon imports the
+file and registers every top-level public function that is suitable as
+a tool (plain synchronous functions with keyword-bindable,
+type-annotated parameters and Google-style docstrings).  The client
+never serializes Python functions — the daemon loads the file itself,
+so the tools execute **in the daemon process** like native agent
+tools::
 
+    # my_tools.py
     def get_temperature(city: str) -> str:
         \"\"\"Return the current temperature of a city.
 
         Args:
             city: Name of the city to look up.
         \"\"\"
-        return lookup_local_sensor(city)
+        return lookup_sensor(city)
 
     result = sorcar.run("What's the temperature in Paris?",
-                        tools=[get_temperature])
+                        tools="my_tools.py")
 
 The function speaks the daemon's newline-delimited JSON protocol over
 its Unix-domain socket (``$KISS_SORCAR_SOCK``, defaulting to
@@ -49,13 +52,12 @@ import os
 import socket
 import time
 import uuid
-from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from kiss.agents.sorcar.persistence import _default_kiss_dir
-from kiss.server.remote_tools import tool_specs
+from kiss.server.tools_file import resolve_tools_file
 
 # Read buffer limit for a single daemon event line.  The daemon emits
 # large single-line JSON events (e.g. ``system_prompt`` carrying the
@@ -167,47 +169,13 @@ def _to_task_result(
     )
 
 
-def _answer_tool_request(
-    sock: socket.socket,
-    event: dict[str, Any],
-    tool_map: dict[str, Callable[..., Any]],
-) -> None:
-    """Execute one daemon-requested client tool and reply with its result.
-
-    Runs the local callable named by the ``toolRequest`` *event* with
-    the arguments the agent supplied and sends a ``toolResponse``
-    command carrying ``str(result)`` back to the daemon.  Any exception
-    raised by the tool (or an unknown tool name) is converted into an
-    ``"Error: ..."`` result string so the agent can react to the
-    failure instead of the run crashing.
-
-    Args:
-        sock: The connected daemon socket to reply on.
-        event: The ``toolRequest`` event (``callId``, ``name``,
-            ``arguments``).
-        tool_map: The caller's tools keyed by ``__name__``.
-    """
-    name = str(event.get("name", ""))
-    arguments = event.get("arguments")
-    try:
-        result = str(tool_map[name](**(arguments or {})))
-    except Exception as exc:
-        result = f"Error: tool {name!r} failed: {exc.__class__.__name__}: {exc}"
-    response = {
-        "type": "toolResponse",
-        "callId": str(event.get("callId", "")),
-        "result": result,
-    }
-    sock.sendall(json.dumps(response).encode("utf-8") + b"\n")
-
-
 def run(
     prompt: str,
     *,
     work_dir: str = "",
     model: str = "",
     chat_id: str = "",
-    tools: Sequence[Callable[..., Any]] | None = None,
+    tools: str | Path | None = None,
     use_worktree: bool = False,
     auto_commit: bool = False,
     timeout: float = 3600.0,
@@ -229,15 +197,18 @@ def run(
             this task in the same chat — the agent then sees the prior
             tasks and results of that chat as context.  A new chat is
             started when empty.
-        tools: Optional extra tools for the agent.  Each entry must be
-            a plain named function; its name, docstring (Google-style
-            ``Args:`` section for parameter descriptions), and
-            annotated parameters (``str``/``int``/``float``/``bool``;
-            anything else degrades to ``str``) define the tool schema
-            the agent sees.  When the agent calls a tool, the callable
-            runs **in this process** with the agent's arguments and
-            its ``str()``-ified return value (or ``"Error: ..."`` when
-            it raises) is sent back to the agent.
+        tools: Optional path to a Python file supplying extra tools
+            for the agent.  The daemon imports the file and registers
+            every top-level public function that is suitable as a tool
+            (plain synchronous functions whose parameters are all
+            keyword-bindable; ``*args``/``**kwargs``/positional-only
+            parameters and coroutine/generator functions are skipped).
+            Each function's name, docstring (Google-style ``Args:``
+            section for parameter descriptions), and annotated
+            parameters define the tool schema the agent sees, exactly
+            like a native tool.  The functions are never serialized by
+            the client — they run **in the daemon process**.  The path
+            is resolved against this process's working directory.
         use_worktree: Run the task in an isolated git worktree.
         auto_commit: Auto-commit the task's changes on success.
         timeout: Maximum seconds to wait for the task to finish.
@@ -253,9 +224,9 @@ def run(
         history.
 
     Raises:
-        ValueError: When *prompt* is empty or blank, or when an entry
-            of *tools* is not a plain named function with a schema-
-            expressible signature (see :func:`~kiss.server.remote_tools.tool_specs`).
+        ValueError: When *prompt* is empty or blank, or when *tools*
+            is not the path of an existing Python (``.py``) file (see
+            :func:`~kiss.server.tools_file.resolve_tools_file`).
         ConnectionError: When no daemon is listening on the socket, or
             the daemon drops the connection before the task finishes.
         TimeoutError: When the task does not finish within *timeout*
@@ -264,10 +235,7 @@ def run(
     """
     if not prompt or not prompt.strip():
         raise ValueError("prompt must be a non-empty string")
-    specs = tool_specs(tools or [])
-    tool_map: dict[str, Callable[..., Any]] = {
-        spec["name"]: func for spec, func in zip(specs, tools or [], strict=True)
-    }
+    tools_file = resolve_tools_file(tools)
     path = _resolve_sock_path(sock_path)
     tab_id = f"api-{uuid.uuid4().hex}"
     deadline = time.monotonic() + timeout
@@ -289,7 +257,7 @@ def run(
             "chatId": chat_id,
             "workDir": work_dir,
             "model": model,
-            "tools": specs,
+            "toolsFile": tools_file,
             "useWorktree": use_worktree,
             "autoCommit": auto_commit,
         }
@@ -328,12 +296,7 @@ def run(
             if not isinstance(event, dict) or event.get("tabId") != tab_id:
                 continue
             etype = event.get("type")
-            if etype == "toolRequest":
-                # The agent invoked one of the caller's tools: run it
-                # locally and reply so the agent (blocked in the
-                # daemon) can continue.
-                _answer_tool_request(sock, event, tool_map)
-            elif etype == "clear":
+            if etype == "clear":
                 # ``_cmd_run`` stamps the launcher tab's ``clear``
                 # broadcast with the chat session id it minted (or
                 # reused) for this run.
