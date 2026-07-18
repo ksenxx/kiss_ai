@@ -21,6 +21,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Generator
+from pathlib import Path
 
 import pytest
 
@@ -52,11 +53,12 @@ def _isolated_state(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
     tmpdir = tempfile.mkdtemp()
     monkeypatch.setattr(pm, "_KISS_DIR", type(pm._KISS_DIR)(tmpdir))
     monkeypatch.setattr(pm, "_DB_PATH", type(pm._DB_PATH)(os.path.join(tmpdir, "sorcar.db")))
-    monkeypatch.setattr(vc, "CONFIG_DIR", type(vc.CONFIG_DIR)(tmpdir))
-    monkeypatch.setattr(
-        vc,
-        "CONFIG_PATH",
-        type(vc.CONFIG_PATH)(os.path.join(tmpdir, "config.json")),
+    # ``CONFIG_DIR``/``CONFIG_PATH`` are PEP 562 lazy attributes;
+    # ``setattr`` would pin the computed (stale tmp) Path at teardown.
+    # ``setitem`` deletes the pin instead, restoring lazy resolution.
+    monkeypatch.setitem(vars(vc), "CONFIG_DIR", Path(tmpdir))
+    monkeypatch.setitem(
+        vars(vc), "CONFIG_PATH", Path(tmpdir) / "config.json",
     )
     try:
         yield
