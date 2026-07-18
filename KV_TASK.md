@@ -1,13 +1,15 @@
 # TASK — High-throughput, production-grade Key-Value store (YCSB-A, larger-than-memory)
 
 ## Goal
+
 Implement a **production-grade** key-value store — a real, deployable store like **Redis / RocksDB /
-FASTER** that runs the workload below on the fixed hardware and is 2X 
-FASTER than ~0.93 Mops/s  by 2at an 8 GiB memory budget. The engine 
+FASTER** that runs the workload below on the fixed hardware and is 2X
+FASTER than ~0.93 Mops/s by 2at an 8 GiB memory budget. The engine
 MUST **stay genuinely prod-grade** (a fast number that isn't correct/durable/robust does not
 count). What "prod-grade" requires is specified under **"Durability / prod-grade"** below.
 
 ## Workload (fixed — the harness drives it; do not modify the harness)
+
 - **YCSB-A**, workload id **0**: each op is 50% Read / 50% blind Upsert (unseeded RNG; 50/50 in
   expectation over ~1e8 ops, not a fixed schedule).
 - **Access distribution:** Zipfian theta = 0.95 over the keyspace (small hot set dominates).
@@ -21,11 +23,12 @@ count). What "prod-grade" requires is specified under **"Durability / prod-grade
   existing keys only — the keyspace stays exactly 250M (no growth during RUN).
 
 ## Metric (exact)
+
 - **Score = throughput over a fixed 30.0-second steady-clock window** (kRunSeconds=30):
   ops accumulated in the window divided by the window length = **Mops/s**. It is fixed-TIME, not
   fixed-ops (the run trace holds 250M keys; at these rates the window consumes far fewer — no wrap).
 - **Reported number = median of 3 runs**, drop_caches before each; a run that exits non-zero, OOMs,
-  or hangs scores 0 (not retried). run.sh ENFORCES StoreRSS <= 8 GiB (over-budget = score 0), wraps
+  or hangs scores 0 (not retried). run.sh ENFORCES StoreRSS \<= 8 GiB (over-budget = score 0), wraps
   each run in a timeout (hang = score 0), and parses the harness "Total:" line (emitted on stderr,
   captured via 2>&1).
 - **Baseline to beat: FASTER ~= 0.93 Mops/s** at this exact setting.
@@ -37,6 +40,7 @@ benchmark (`build.sh` / `run.sh` / `validate.sh`), and the task even forbids net
 only relevant if you choose to *provision* a machine matching the reference node below.
 
 **Reference node** (what the FASTER 0.93 baseline and our runs used):
+
 - **GCP `n2-standard-64`** — 2× Intel Xeon (Cascade Lake) @ 2.80 GHz, **64 vCPU** (2 sockets × 16
   cores × 2 threads), **251 GB RAM**, 2 NUMA nodes (node0 = CPUs `0-15,32-47`, ~128 GB).
 - **16 worker threads pinned to NUMA node 0** via `numactl --cpunodebind=0 --membind=0` **plus 1
@@ -48,6 +52,7 @@ only relevant if you choose to *provision* a machine matching the reference node
   `-O3 -march=native -DNDEBUG -flto=auto -std=c++17`, pthread only, no external deps.
 
 **Provision a matching GCP node** (optional; uses *your own* gcloud — the task itself needs none):
+
 ```
 gcloud compute instances create kv-bench --zone=<zone> \
   --machine-type=n2-standard-64 \
@@ -67,12 +72,13 @@ RAM** (harness ~10 GB working set + the 8 GiB engine budget) + g++ 11+. On non-i
 absolute Mops differ, but the multiplier vs FASTER (measured on the same box) is what carries.
 
 ## Boundaries (all defined — nothing open)
+
 - **Memory:** engine **data budget = 8 GiB** (8,589,934,592 bytes, passed as mem_budget_bytes).
-  Your store's resident data (reported as StoreRSS) MUST stay <= 8 GiB — runs over budget are
+  Your store's resident data (reported as StoreRSS) MUST stay \<= 8 GiB — runs over budget are
   rejected. The whole process runs in a cgroup **MemoryMax = 14 GiB + MemorySwapMax = 0** (the extra
   ~6 GiB covers the harness's ~5 GiB key/checksum arrays + IO buffers; **no swap** — exceeding = OOM-kill).
 - **Larger-than-memory:** ~25 GB of data (250M x 100B) >> 8 GiB, so you MUST spill to SSD and cache a hot subset.
-- **Init:** the harness calls **only** InitExtended(hash_table_size = 1<<27, log_size_bytes = 16 GiB,
+- **Init:** the harness calls **only** InitExtended(hash_table_size = 1\<<27, log_size_bytes = 16 GiB,
   mem_budget_bytes = 8 GiB, storage_path = <spill>). The first two are **non-binding hints** — do NOT
   allocate 16 GiB of RAM for the "log"; only mem_budget_bytes constrains RAM.
 - **Storage:** use only the provided spill dir on md0; O_DIRECT expected (512B / 4KB aligned).
@@ -93,20 +99,23 @@ absolute Mops differ, but the multiplier vs FASTER (measured on the same box) is
   precomputing from the traces offline; regenerating/compressing values; returning wrong bytes.
 
 ## Interface (implement this; header in include/kvstore_interface.h)
-- "extern IKVStore* create_kvstore();" returns your engine.
-- Keys uint64; values GenValue{ uint8 data[<=4096]; uint32 size; }.
+
+- "extern IKVStore\* create_kvstore();" returns your engine.
+- Keys uint64; values GenValue{ uint8 data[\<=4096]; uint32 size; }.
 - Implement InitExtended, StartSession/StopSession, Refresh, Read (sync),
   ReadAsync + CompletePending (async pipelined reads — depth 256; BOTH sync and async are allowed
   and exploiting device queue depth is legitimate engineering), Upsert. RMW/Delete/Checkpoint may be
   stubs. Honor the ReadSlot contract exactly: fill out + status, THEN done.store(1, release).
 
 ## How to build & run
-- ./build.sh    — compiles harness + baseline/*.cc into kvstore_bench (only include/ on -I; never uses "..").
-- ./run.sh      — the SCORED median-of-3 run; prints median Mops/s + StoreRSS.
+
+- ./build.sh — compiles harness + baseline/\*.cc into kvstore_bench (only include/ on -I; never uses "..").
+- ./run.sh — the SCORED median-of-3 run; prints median Mops/s + StoreRSS.
 - ./validate.sh — the separate untimed correctness/integrity run (exit 0 = correct).
 
 ## You provide / we provide
+
 - **Provided (fixed, do not modify):** include/kvstore_interface.h, harness/benchmark_harness.cc,
-  traces/{load,run}_250M.dat, build.sh, run.sh, validate.sh, this TASK.md.
+  traces/{load,run}\_250M.dat, build.sh, run.sh, validate.sh, this TASK.md.
 - **You provide:** your engine sources in baseline/*.cc (defining create_kvstore()), self-contained,
-  C++17 + pthread only, nothing named kv_*.h.
+  C++17 + pthread only, nothing named kv\_*.h.
