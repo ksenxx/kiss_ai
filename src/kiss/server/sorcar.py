@@ -178,6 +178,10 @@ def run(
     tools: str | Path | None = None,
     use_worktree: bool = False,
     auto_commit: bool = False,
+    max_budget: float | None = None,
+    model_config: dict[str, Any] | None = None,
+    web_tools: bool | None = None,
+    is_parallel: bool = False,
     timeout: float = 3600.0,
     sock_path: str | Path | None = None,
 ) -> TaskResult:
@@ -211,6 +215,14 @@ def run(
             is resolved against this process's working directory.
         use_worktree: Run the task in an isolated git worktree.
         auto_commit: Auto-commit the task's changes on success.
+        max_budget: Per-task budget override in USD; ``None`` uses the
+            daemon's configured default.
+        model_config: Per-task model configuration override (custom
+            endpoint / headers); ``None`` uses the daemon's configured
+            model endpoint.  Must be JSON-serializable.
+        web_tools: Per-task browser-tool enablement override; ``None``
+            uses the daemon's configured default.
+        is_parallel: Whether the agent may spawn parallel sub-agents.
         timeout: Maximum seconds to wait for the task to finish.
         sock_path: Daemon UDS path override (defaults to
             ``$KISS_SORCAR_SOCK`` or ``$KISS_HOME/sorcar.sock``).
@@ -260,6 +272,10 @@ def run(
             "toolsFile": tools_file,
             "useWorktree": use_worktree,
             "autoCommit": auto_commit,
+            "maxBudget": max_budget,
+            "modelConfig": model_config,
+            "webTools": web_tools,
+            "useParallel": is_parallel,
         }
         sock.sendall(json.dumps(cmd).encode("utf-8") + b"\n")
         reader = sock.makefile("rb", buffering=_MAX_LINE_BYTES)

@@ -507,24 +507,20 @@ class DiscordAgent(BaseChannelAgent, SorcarAgent):
         result = agent.run(prompt_template="List all channels in my server")
     """
 
+    channel_system_prompt = (
+        "\n\n## Discord Authentication\n"
+        "If authentication is needed, call start_discord_browser_auth() to open "
+        "the Discord Developer Portal, then use browser tools to create an app, "
+        "add a bot, and copy the bot token. Complete these steps autonomously — "
+        "do NOT instruct the user to do them manually."
+    )
+
     def __init__(self) -> None:
         super().__init__("Discord Agent")
         self._backend = DiscordChannelBackend()
         cfg = _config.load()
         if cfg:  # pragma: no branch
             self._backend._bot_token = cfg["bot_token"]
-
-    def run(self, **kwargs: Any) -> str:  # type: ignore[override]
-        """Run with Discord-specific system prompt encouraging browser-based auth."""
-        channel_prompt = (
-            "\n\n## Discord Authentication\n"
-            "If authentication is needed, call start_discord_browser_auth() to open "
-            "the Discord Developer Portal, then use browser tools to create an app, "
-            "add a bot, and copy the bot token. Complete these steps autonomously — "
-            "do NOT instruct the user to do them manually."
-        )
-        kwargs["system_prompt"] = (kwargs.get("system_prompt") or "") + channel_prompt
-        return super().run(**kwargs)
 
     def _is_authenticated(self) -> bool:
         """Return True if the backend is authenticated."""
