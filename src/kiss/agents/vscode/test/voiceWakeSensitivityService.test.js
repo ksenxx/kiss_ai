@@ -16,7 +16,7 @@
 //   1. start(50): low sensitivity keeps strict whole-utterance
 //      matching -> the audio must NOT wake (fails if start() never
 //      passes --sensitivity, because the eager default would wake).
-//   2. start() with no sensitivity: the default (85) accepts a
+//   2. start() with no sensitivity: the default (80) accepts a
 //      trailing alias -> the same audio must WAKE the listener.
 //
 // Run directly with ``node test/voiceWakeSensitivityService.test.js``
@@ -135,7 +135,7 @@ async function main() {
   let failed = 0;
 
   // 1. Low sensitivity: the service passes --sensitivity 50 and the
-  //    trailing-alias audio stays rejected (the eager default of 85
+  //    trailing-alias audio stays rejected (the eager default of 80
   //    would wake, so this proves --sensitivity forwarding).
   const strict = await runService(50);
   try {
@@ -155,12 +155,12 @@ async function main() {
     console.log(`  \u2717 ${e.message}`);
   }
 
-  // 2. Default sensitivity (85): the same audio must wake.
+  // 2. Default sensitivity (80): the same audio must wake.
   const eager = await runService(undefined);
   try {
     assert.ok(
       eager.wakes.length >= 1,
-      'the default sensitivity (85) must accept "hey there Sorcar"; ' +
+      'the default sensitivity (80) must accept "hey there Sorcar"; ' +
         `states=${JSON.stringify(eager.states)}`,
     );
     console.log(
