@@ -21,7 +21,6 @@ import queue
 import re
 import threading
 import time
-import uuid
 from collections.abc import Callable
 from contextlib import nullcontext, suppress
 from functools import partial
@@ -63,7 +62,7 @@ from kiss.server.diff_merge import (
 # ``TestM4AwaitUserResponseEmptyQueue``).
 from kiss.server.helpers import tab_owns_answer_queue
 from kiss.server.json_printer import JsonPrinter
-from kiss.server.remote_tools import build_proxy_tools
+from kiss.server.tools_file import load_tools_file
 
 logger = logging.getLogger(__name__)
 
@@ -214,7 +213,6 @@ class _TaskRunnerMixin:
         _tab_chat_views: dict[str, str]
         _tab_opened_task_ids: dict[str, str]
         _pending_user_answer_tasks: dict[int, str]
-        _pending_tool_calls: dict[str, queue.Queue[str]]
 
         def _get_tab(self, tab_id: str) -> _RunningAgentState: ...
         def _any_non_wt_running(self) -> bool: ...
@@ -915,14 +913,12 @@ class _TaskRunnerMixin:
             )
 
             # Extra tools supplied by an API client
-            # (``kiss.server.sorcar.run(tools=...)``): rebuild each
-            # transmitted spec into a daemon-side proxy that forwards
-            # its invocations back to the client over the socket (see
-            # ``kiss.server.remote_tools`` / ``_remote_tool_call``).
-            remote_tools = build_proxy_tools(
-                cmd.get("tools"),
-                partial(self._remote_tool_call, tab),
-            )
+            # (``kiss.server.sorcar.run(tools="/path/to/file.py")``):
+            # import the client-named Python file HERE, in the daemon,
+            # and register its top-level public functions as native
+            # agent tools (see ``kiss.server.tools_file``).  The
+            # client never serializes functions.
+            client_tools = load_tools_file(cmd.get("toolsFile"))
 
             for subtask_index, task_prompt in enumerate(subtasks):
                 # Record the raw user prompt so the post-task
@@ -974,7 +970,7 @@ class _TaskRunnerMixin:
                             if _agent_model_config is not None
                             else _model_config
                         ),
-                        tools=remote_tools,
+                        tools=client_tools,
                         _skip_persistence=True,
                         _subscribe_tab_id=tab_id,
                         _on_task_id_allocated=on_task_id_allocated,
@@ -2128,65 +2124,6 @@ class _TaskRunnerMixin:
                     continue
                 return tab.user_answer_queue
         return None
-
-    def _remote_tool_call(
-        self,
-        tab: _RunningAgentState,
-        name: str,
-        arguments: dict[str, Any],
-    ) -> str:
-        """Forward one agent tool invocation to the launching API client.
-
-        Runs on the task thread as the body of a client-tool proxy
-        (see :func:`kiss.server.remote_tools.build_proxy_tools`).
-        Registers a single-slot result queue under a fresh ``callId``,
-        broadcasts a ``toolRequest`` event (the printer fans one
-        tab-stamped copy out to every subscribed viewer — including the
-        API client that supplied the tool), and blocks until
-        :meth:`_CommandsMixin._cmd_tool_response` delivers the client's
-        result.  ``tab.stop_event`` is polled while waiting so a
-        stopped task (user stop, client disconnect → deferred
-        ``closeTab``) unblocks promptly instead of hanging forever.
-
-        Args:
-            tab: The running tab state owning this task (bound at
-                proxy-build time in ``_run_task_inner``).
-            name: The client tool's name.
-            arguments: The arguments the agent supplied (only those it
-                actually passed — omitted optional parameters keep the
-                client function's own defaults).
-
-        Returns:
-            The client's result string, or an ``"Error: ..."`` message
-            when the task was stopped before the result arrived.
-        """
-        call_id = uuid.uuid4().hex
-        pending: queue.Queue[str] = queue.Queue(maxsize=1)
-        with self._state_lock:
-            self._pending_tool_calls[call_id] = pending
-        try:
-            self.printer.broadcast(
-                {
-                    "type": "toolRequest",
-                    "callId": call_id,
-                    "name": name,
-                    "arguments": arguments,
-                }
-            )
-            while True:
-                stop = tab.stop_event
-                if stop is not None and stop.is_set():
-                    return (
-                        f"Error: tool call {name!r} was cancelled "
-                        "because the task was stopped."
-                    )
-                try:
-                    return pending.get(timeout=0.25)
-                except queue.Empty:
-                    continue
-        finally:
-            with self._state_lock:
-                self._pending_tool_calls.pop(call_id, None)
 
     def _ask_user_question(self, question: str) -> str:
         """Callback for agent questions."""
