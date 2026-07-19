@@ -878,7 +878,15 @@
       // background-tab handlers ('taskExecuted', 'setTaskText',
       // 'openSubagentTab') from raw event fields, so this restore path
       // must defensively trim too.  See test_task_panel_no_trailing_newlines.py.
-      taskPanelText.textContent = (tab.taskPanelHTML || '').trim();
+      const restoredTask = (tab.taskPanelHTML || '').trim();
+      taskPanelText.textContent = restoredTask;
+      // Keep the full-task hover tooltip in sync across tab switches
+      // — a stale attribute would show ANOTHER tab's task on hover.
+      if (restoredTask) {
+        taskPanelText.setAttribute('data-tooltip', restoredTask);
+      } else {
+        taskPanelText.removeAttribute('data-tooltip');
+      }
       if (tab.taskPanelVisible) taskPanel.classList.add('visible');
       else taskPanel.classList.remove('visible');
     }
@@ -2032,9 +2040,13 @@
     const t = (text || '').trim();
     if (t) {
       taskPanelText.textContent = t;
+      // Hovering the (height-clamped / ellipsized) task text pops the
+      // shared custom tooltip with the ENTIRE task text.
+      taskPanelText.setAttribute('data-tooltip', t);
       taskPanel.classList.add('visible');
     } else {
       taskPanelText.textContent = '';
+      taskPanelText.removeAttribute('data-tooltip');
       taskPanel.classList.remove('visible');
     }
   }
@@ -2619,6 +2631,14 @@
     clearTimeout(tooltipTimer);
     tooltipTimer = setTimeout(() => {
       tooltipEl.textContent = target.dataset.tooltip;
+      // The pinned task text's tooltip renders at the SAME font size
+      // as the task text itself (main.css pins .task-panel-tooltip to
+      // var(--vscode-editor-font-size), the #task-panel declaration);
+      // every other tooltip keeps the small --fs-sm label size.
+      tooltipEl.classList.toggle(
+        'task-panel-tooltip',
+        target.id === 'task-panel-text',
+      );
       const rect = target.getBoundingClientRect();
       tooltipEl.style.left = rect.left + 'px';
       tooltipEl.style.top = rect.bottom + 4 + 'px';
