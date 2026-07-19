@@ -163,14 +163,16 @@ body.remote-chat #input-area {
   padding: 4px 12px calc(10px + env(safe-area-inset-bottom, 0px));
 }
 
+/* The composer panel (textbox + buttons) spans the FULL chat webview
+   width — same as the chat thread — with only #input-area's gutter
+   padding as inset.  No max-width cap: an earlier 90% cap left the
+   panel visibly narrower than the chat column. */
 body.remote-chat #input-container {
   background: #212121;
   border: 1px solid transparent;
   border-radius: 28px;
   box-shadow: inset 0 0 1px rgb(255 255 255 / 20%);
   padding: 10px 14px 8px;
-  max-width: 90%;
-  margin: 0 auto;
 }
 
 body.remote-chat #input-container:focus-within {

@@ -737,8 +737,10 @@ def test_sidebar_defaults_to_quarter_screen() -> None:
 
 
 def test_chat_column_spans_ninety_percent() -> None:
-    """Chat panels, the pinned task panel, and the composer all span
-    90% of the chat webview column (no more 768px / 85% / 75% caps)."""
+    """Chat panels and the pinned task panel span 90% of the chat
+    webview column (no more 768px / 85% / 75% caps), while the composer
+    (input textbox + buttons) spans the FULL chat webview width with no
+    max-width cap at all."""
     css = _read_codex_css()
     panels = re.search(
         r"body\.remote-chat #output > \*:not\(#welcome\)\s*\{([^}]*)\}",
@@ -755,9 +757,14 @@ def test_chat_column_spans_ninety_percent() -> None:
     composer = re.search(
         r"body\.remote-chat #input-container\s*\{([^}]*)\}", css
     )
-    assert composer and re.search(
-        r"max-width:\s*90%", composer.group(1)
-    ), "the composer must span 90% of the chat webview"
+    assert composer, "remote composer rule missing"
+    assert "max-width" not in composer.group(1), (
+        "the composer must have NO width cap so the panel with the "
+        "input textbox and buttons is as wide as the chat webview"
+    )
+    assert "margin: 0 auto" not in composer.group(1), (
+        "the composer must not be a centered narrow column"
+    )
     assert "768px" not in composer.group(1)
 
 
