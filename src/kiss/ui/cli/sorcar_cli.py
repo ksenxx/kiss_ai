@@ -95,7 +95,11 @@ def main() -> None:
             run_client(
                 work_dir=run_kwargs.get("work_dir") or work_dir,
                 model_name=run_kwargs.get("model_name", ""),
-                active_file=run_kwargs.get("current_editor_file") or "",
+                # ``_build_run_kwargs`` has no active-editor concept
+                # (the CLI has no such flag); the identifier-suffix
+                # predictive completion is a VS Code-extension-only
+                # feature, so the completer runs without a file here.
+                active_file="",
                 use_worktree=bool(getattr(args, "worktree", True)),
                 use_parallel=bool(getattr(args, "parallel", True)),
                 # Fallback default matches the argparse default
