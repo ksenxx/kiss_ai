@@ -5,12 +5,12 @@
 //
 // Architecture
 // ────────────
-//  * Disk tier: a single O_DIRECT "slot file" in the spill directory. Every
-//    key is assigned a fixed 128-byte slot the first time it is inserted
-//    (positions handed out by an atomic counter, so the load phase writes the
-//    file strictly sequentially through per-thread 1 MiB chunk buffers).
-//    Updates are written back in place (4 KiB page read-modify-write), so the
-//    store never grows the file during steady state — no GC needed, no leaks.
+//  * Disk tier: a single O_DIRECT "slot file" in the spill directory,
+//    written as an APPEND-ONLY log of 128-byte slots: first inserts and all
+//    write-backs stage into per-session 1 MiB chunk buffers landed
+//    sequentially. Landed pages are immutable (except Delete's slot
+//    tombstoning). The log has no GC — like FASTER, compaction is an
+//    offline concern (documented limitation).
 //  * Position index: an open-addressing fingerprint hash index (like
 //    FASTER's hash table) mapping ARBITRARY uint64 keys to slot positions.
 //    Each 8-byte word packs [fp32 | position+1]; buckets of 8 words (one
@@ -34,11 +34,11 @@
 //
 // Correctness invariants
 // ──────────────────────
-//  * A key's bytes on disk are only ever changed by flushing that key's own
-//    cache entry; flushes of *other* keys in the same 4 KiB page rewrite the
-//    page with freshly-read content and are serialized by a page lock stripe,
-//    so concurrent page RMWs never lose updates, and un-locked reads of a
-//    page can never observe wrong bytes for a key that is absent from cache.
+//  * The slot file is an append-only log: sessions own disjoint page-aligned
+//    extents and a landed page is never appended to again (partial flushes
+//    continue at the next page boundary), so ordinary flushes never rewrite
+//    landed bytes. The only in-place page writer is Delete's slot
+//    tombstoning, serialized by a page lock stripe.
 //  * Dirty entries created by the sequential-load path ("BUFFERED") are
 //    pinned in cache until their chunk buffer has landed on disk, so a
 //    stale chunk write can never clobber a newer flushed value and reads
@@ -63,6 +63,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <cerrno>
@@ -119,9 +120,33 @@ enum : uint8_t { S_EMPTY = 0, S_CLEAN = 1, S_DIRTY = 2, S_BUFFERED = 3,
 // Entry.recent flag bits.
 enum : uint8_t {
     R_RECENT = 1,   // CLOCK second-chance bit (cleared by aging sweeps)
-    R_UNVER  = 2,   // pos1 came from an unverified fingerprint match; the
-                    // flush path verifies the slot key before overwriting
 };
+
+// Relaxed-atomic byte with plain-byte syntax. Cleaner threads peek entry
+// state/recency WITHOUT the set lock (a hint only; the locked rescan
+// decides); mixing plain and atomic accesses to one byte is formally a data
+// race, so every access to these two fields goes through this type. All ops
+// are relaxed — on x86 this compiles to exactly the same MOVs as a plain
+// uint8_t (no LOCK prefixes), so the hot path is unchanged.
+struct RelaxedU8 {
+    std::atomic<uint8_t> v;
+    RelaxedU8() = default;
+    RelaxedU8(const RelaxedU8& o) {
+        v.store(o.v.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    }
+    RelaxedU8& operator=(const RelaxedU8& o) {
+        v.store(o.v.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        return *this;
+    }
+    RelaxedU8& operator=(uint8_t x) {
+        v.store(x, std::memory_order_relaxed);
+        return *this;
+    }
+    operator uint8_t() const { return v.load(std::memory_order_relaxed); }
+    RelaxedU8& operator|=(uint8_t x) { return *this = (uint8_t)((uint8_t)*this | x); }
+    RelaxedU8& operator&=(uint8_t x) { return *this = (uint8_t)((uint8_t)*this & x); }
+};
+static_assert(sizeof(RelaxedU8) == 1, "RelaxedU8 must be one byte");
 
 struct Entry {
     uint64_t key;
@@ -130,8 +155,8 @@ struct Entry {
                       // (32-bit so in-flight-flush ABA needs 2^32 same-key
                       // updates during one I/O — days, not seconds)
     uint8_t  size;    // value size in bytes (<= kInlineMax)
-    uint8_t  state;
-    uint8_t  recent;  // flag bits (R_RECENT | R_UNVER)
+    RelaxedU8 state;  // peeked unlocked by cleaners (see RelaxedU8)
+    RelaxedU8 recent; // flag bits (R_RECENT)
     uint8_t  data[kInlineMax];
 };
 static_assert(sizeof(Entry) == kEntryBytes, "Entry must be 120 bytes");
@@ -153,6 +178,13 @@ static inline uint64_t mix64(uint64_t x) {
     x ^= x >> 27; x *= 0x94d049bb133111ebULL;
     x ^= x >> 31;
     return x;
+}
+
+// Single-writer counter increment: relaxed load + relaxed store (plain MOVs);
+// concurrent readers use relaxed loads. Not fetch_add — no lock prefix needed
+// because each counter has exactly one writer thread.
+static inline void bump(std::atomic<uint64_t>& c) {
+    c.store(c.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
 }
 
 // ── Fingerprint position index ───────────────────────────────────────────────
@@ -192,10 +224,8 @@ struct HashIndex {
         const uint64_t fp = h & 0xFFFFFFFF00000000ULL;
         while (scanned < nwords) {
             uint64_t w = words[it].load(std::memory_order_acquire);
-            uint64_t cur = it;
             it = (it + 1) & (nwords - 1);
             scanned++;
-            (void)cur;
             if (w == 0) return 0;                       // end of probe chain
             if ((w & 0xFFFFFFFF00000000ULL) == fp) {
                 uint32_t pos1 = (uint32_t)w;
@@ -253,26 +283,8 @@ struct HashIndex {
         return false;
     }
 
-    // Tombstone the word holding (h -> pos1). Used only by Delete.
-    bool erase(uint64_t h, uint32_t pos1) {
-        const uint64_t v = pack(h, pos1);
-        uint64_t it = start_of(h);
-        for (uint64_t scanned = 0; scanned < nwords; ++scanned) {
-            uint64_t w = words[it].load(std::memory_order_acquire);
-            if (w == 0) return false;
-            if (w == v) {
-                uint64_t tomb = w & 0xFFFFFFFF00000000ULL;  // pos1 -> 0
-                if (tomb == 0) tomb = 1ULL << 32;           // never store word 0
-                if (words[it].compare_exchange_strong(w, tomb,
-                                                      std::memory_order_acq_rel)) {
-                    count.fetch_sub(1, std::memory_order_relaxed);
-                    return true;
-                }
-            }
-            it = (it + 1) & (nwords - 1);
-        }
-        return false;
-    }
+    // (No erase method: Delete keeps index words — they route same-fp
+    // chains — and poisons the slots instead; see HydraStore::Delete.)
 };
 
 // Aligned buffer helper (O_DIRECT requires 4 KiB-aligned buffers).
@@ -346,6 +358,8 @@ struct Uring {
     size_t sq_mm_len = 0, cq_mm_len = 0, sqe_mm_len = 0;
     unsigned pending = 0;   // prepped but not yet submitted
 
+    ~Uring() { destroy(); }   // RAII: rings leaked fds/mappings otherwise
+
     bool init(unsigned entries) {
         io_uring_params p{};
         fd = sys_io_uring_setup(entries, &p);
@@ -411,12 +425,19 @@ struct Uring {
     void enter(bool wait) {
         unsigned subs = pending;
         pending = 0;
+        int spins = 0;
         for (;;) {
             int r = sys_io_uring_enter(fd, subs, wait ? 1 : 0,
                                        wait ? IORING_ENTER_GETEVENTS : 0);
             if (r < 0) {
-                if (errno == EINTR || errno == EAGAIN || errno == EBUSY)
-                    continue;   // nothing consumed: retry with the same count
+                if (errno == EINTR || errno == EAGAIN || errno == EBUSY) {
+                    // Nothing consumed: retry with the same count, backing
+                    // off so a persistent EAGAIN/EBUSY (kernel memory
+                    // pressure) does not become a hard busy-loop.
+                    if (++spins > 64) std::this_thread::yield();
+                    else cpu_relax();
+                    continue;
+                }
                 fprintf(stderr, "hydra: io_uring_enter failed (errno=%d)\n",
                         errno);
                 abort();
@@ -446,8 +467,9 @@ struct Session {
 
     // sequential-load chunk buffer (lazy)
     uint8_t* chunk_buf = nullptr;
-    uint64_t chunk_base = 0;     // first slot position of the chunk
-    uint32_t chunk_fill = 0;     // slots used
+    uint64_t chunk_base = 0;     // next slot position of the chunk
+    uint32_t chunk_fill = 0;     // slots used since base
+    uint32_t chunk_cap = 0;      // slots remaining in the reserved extent
     bool     chunk_active = false;  // extent reserved (survives failed insert)
     struct ChunkRec {          // one staged slot in the chunk
         uint64_t key;
@@ -466,10 +488,12 @@ struct Session {
     // scratch page for read-modify-write flushes
     uint8_t* rmw_buf = nullptr;
 
-    // stats
-    uint64_t read_hits = 0, read_misses = 0;
-    uint64_t rmw_hits = 0, rmw_misses = 0;
-    uint64_t evictions = 0;
+    // stats — written only by the owning thread via bump() (a relaxed atomic
+    // store compiling to a plain MOV), read concurrently by GetCacheStats
+    // with relaxed loads: race-free, zero hot-path cost.
+    std::atomic<uint64_t> read_hits{0}, read_misses{0};
+    std::atomic<uint64_t> rmw_hits{0}, rmw_misses{0};
+    std::atomic<uint64_t> evictions{0};
 
     ~Session() {
         free(chunk_buf);
@@ -480,7 +504,7 @@ struct Session {
 
 class HydraStore final : public IKVStore {
 public:
-    HydraStore() = default;
+    HydraStore() : gen_(0) {}   // gen_ assigned in InitExtended (g_store_gen)
     ~HydraStore() override;
 
     void Init(size_t hash_table_size, size_t log_size_bytes) override {
@@ -524,17 +548,14 @@ private:
     bool stage_flush(uint64_t s, int w, Session* se);
     // Disk-verified index lookup (reads candidate slots); 0 = absent.
     uint32_t verified_lookup(uint64_t key, Session* se);
+    // Overwrite a landed slot's size field with an unmatchable value so no
+    // read can ever match it again (prev chain stays intact). Delete-only.
+    void tombstone_slot(uint64_t position, Session* se);
     void flush_chunk(Session* se);
+    void flush_partials(Session* se);  // land a partially-filled chunk
     // Doorkeeper admission filter (two-generation bitmaps).
     bool dk_seen_and_mark(uint64_t h);
-    bool dk_peek(uint64_t h) const;          // seen? (no mark)
     void dk_maybe_rotate();
-    // Co-admit a doorkeeper-known neighbor slot from a fetched miss page.
-    void admit_neighbor(uint64_t key, uint32_t p1, const uint8_t* data,
-                        uint16_t size, Session* se);
-    // Scan the other slots of a fetched 4 KiB page and co-admit known keys.
-    void admit_page_neighbors(const uint8_t* page_buf, uint64_t page,
-                              uint64_t served_key, Session* se);
     void ensure_chunk(Session* se);
     bool read_page(uint64_t page, uint8_t* buf);             // O_DIRECT pread
     void cleaner_main(int id);
@@ -552,6 +573,7 @@ private:
         uint64_t  it = 0;            // index candidate iterator
         uint64_t  scanned = 0;
         uint32_t  cur = 0;           // chain slot position+1 being read
+        uint32_t  hops = 0;          // chain-walk bound (defensive)
         uint64_t  page = 0;          // page currently in buf (in flight)
         uint8_t*  buf = nullptr;     // fixed 4 KiB aligned buffer
         uint32_t  best_p1 = 0;       // highest-position verified match so far
@@ -574,6 +596,7 @@ private:
         std::unordered_map<uint64_t, std::string> map;
     };
     OverflowShard& shard(uint64_t key) { return overflow_[mix64(key) % kOverflowShards]; }
+    bool overflow_contains(uint64_t key);
     bool overflow_get(uint64_t key, GenValue& out);
     void overflow_put(uint64_t key, const uint8_t* data, size_t size);
     bool overflow_erase(uint64_t key);
@@ -583,6 +606,7 @@ private:
     bool     disk_mode_ = false;
     int      fd_ = -1;
     std::string dir_;
+    uint64_t gen_ = 0;             // unique per-instance id (TLS validation)
 
     uint64_t nsets_ = 0;
     Entry*   entries_ = nullptr;         // nsets_ * kAssoc
@@ -591,6 +615,14 @@ private:
 
     HashIndex index_;                        // key -> position+1
     std::atomic<uint64_t> next_slot_{0};     // slot allocator
+    // Staging tokens: every staged chunk record (BUFFERED insert or FLUSHING
+    // write-back) stamps the entry's ver with a fresh globally unique token,
+    // so a flush record's pin-ownership check (key+state+pos1+ver) can never
+    // be satisfied by a DIFFERENT staging — e.g. a post-delete reinsert of
+    // the same key in another cache way (per-way counters could collide
+    // there). False ownership now needs a full 2^32 token wrap while a
+    // record is parked AND matching key/pos1 (documented residual).
+    std::atomic<uint32_t> stage_ver_{1};
 
     // Doorkeeper: one-hit-wonder read admissions are filtered through two
     // rotating bitmap generations (frequency >= 2 required to cache a read
@@ -605,12 +637,43 @@ private:
 
     std::atomic<uint64_t> flush_epoch_{0};   // invalidates session page bufs
     std::atomic<uint64_t> occupancy_{0};
-    std::atomic<uint64_t> dirty_count_{0};
     std::atomic<uint64_t> key_mismatch_{0};
+
+    // Deleted-key registry. Delete() marks the key BEFORE its cache sweep;
+    // admissions and flush landings re-check it under the SAME set lock the
+    // sweep uses, so every staged/in-flight copy of a deleted key is either
+    // (a) staged before the sweep's lock acquisition — the sweep sees the
+    // pin and erases/waits — or (b) staged after — the stager observes the
+    // mark (release/acquire through set_locks_) and skips. Zero cost while
+    // no key was ever deleted: one relaxed-MOV load. A mark persists until
+    // the key is re-upserted (Upsert/RMW unmark first), which also keeps
+    // Delete() idempotent: a second Delete of the same key returns false.
+    std::mutex del_mu_;
+    std::unordered_set<uint64_t> del_set_;
+    std::atomic<uint64_t> del_active_{0};    // == del_set_.size()
+
+    bool is_deleted(uint64_t key) {
+        if (del_active_.load(std::memory_order_acquire) == 0) return false;
+        std::lock_guard<std::mutex> g(del_mu_);
+        return del_set_.count(key) != 0;
+    }
+    bool del_mark(uint64_t key) {    // true iff key was not already marked
+        std::lock_guard<std::mutex> g(del_mu_);
+        bool fresh = del_set_.insert(key).second;
+        del_active_.store(del_set_.size(), std::memory_order_release);
+        return fresh;
+    }
+    void del_unmark(uint64_t key) {
+        if (del_active_.load(std::memory_order_acquire) == 0) return;
+        std::lock_guard<std::mutex> g(del_mu_);
+        del_set_.erase(key);
+        del_active_.store(del_set_.size(), std::memory_order_release);
+    }
 
     // sessions
     mutable std::mutex sess_mu_;
     std::vector<std::unique_ptr<Session>> sessions_;
+    std::vector<Session*> free_sess_;        // drained, reusable sessions
 
     // async read I/O pool
     struct IoReq { ReadSlot* slot; Session* sess; };
@@ -626,18 +689,31 @@ private:
 };
 
 // ── thread-local session registry ────────────────────────────────────────────
+// A raw `tls_owner == this` check would break if a store is destroyed and a
+// new one is allocated at the same address (stale tls_sess -> use-after-free).
+// Each store instance gets a globally unique generation id; the cached session
+// is valid only if both the pointer AND the generation match.
+static std::atomic<uint64_t> g_store_gen{1};
 static thread_local HydraStore* tls_owner = nullptr;
+static thread_local uint64_t    tls_gen = 0;
 static thread_local Session*    tls_sess = nullptr;
 
 Session* HydraStore::session() {
-    if (tls_owner == this && tls_sess) return tls_sess;
-    auto se = std::make_unique<Session>();
-    Session* raw = se.get();
+    if (tls_owner == this && tls_gen == gen_ && tls_sess) return tls_sess;
+    auto se = std::make_unique<Session>();   // may be discarded if reusing
+    Session* raw = nullptr;
     {
         std::lock_guard<std::mutex> lk(sess_mu_);
-        sessions_.push_back(std::move(se));
+        if (!free_sess_.empty()) {           // reuse a drained session
+            raw = free_sess_.back();
+            free_sess_.pop_back();
+        } else {
+            raw = se.get();
+            sessions_.push_back(std::move(se));
+        }
     }
     tls_owner = this;
+    tls_gen = gen_;
     tls_sess = raw;
     return raw;
 }
@@ -646,9 +722,17 @@ void HydraStore::StartSession() { (void)session(); }
 
 void HydraStore::StopSession() {
     Session* se = session();
-    if (se->chunk_buf && se->chunk_fill > 0) flush_chunk(se);
+    // Drain async reads FIRST (their completions never touch our chunk —
+    // io threads use their own sessions — but draining first keeps the
+    // "session is quiescent when recycled" invariant simple), then land any
+    // partial chunk so staged (pinned) entries unpin.
     while (se->outstanding.load(std::memory_order_acquire) != 0)
         std::this_thread::yield();
+    flush_partials(se);
+    {   // recycle: unbounded phases/Checkpoints must not leak sessions
+        std::lock_guard<std::mutex> lk(sess_mu_);
+        free_sess_.push_back(se);
+    }
     tls_sess = nullptr;   // thread may be reused for a different phase
     tls_owner = nullptr;
 }
@@ -656,6 +740,7 @@ void HydraStore::StopSession() {
 // ── Init ─────────────────────────────────────────────────────────────────────
 void HydraStore::InitExtended(size_t, size_t, size_t mem_budget_bytes,
                               const char* storage_path) {
+    gen_ = g_store_gen.fetch_add(1, std::memory_order_relaxed);
     mem_budget_ = mem_budget_bytes ? mem_budget_bytes : (8ULL << 30);
     disk_mode_ = storage_path && storage_path[0];
 
@@ -714,8 +799,10 @@ void HydraStore::InitExtended(size_t, size_t, size_t mem_budget_bytes,
 
     if (disk_mode_) {
 #ifdef HYDRA_HAVE_URING
-        use_uring_ = true;
-        for (int i = 0; i < kIoThreads; ++i) {
+        // HYDRA_NO_URING: test-only knob to exercise the synchronous pread
+        // fallback pool on kernels that do have io_uring. Default: off.
+        use_uring_ = (getenv("HYDRA_NO_URING") == nullptr);
+        for (int i = 0; use_uring_ && i < kIoThreads; ++i) {
             rings_[i] = std::make_unique<Uring>();
             if (!rings_[i]->init(kRingDepth)) { use_uring_ = false; break; }
         }
@@ -789,7 +876,7 @@ uint32_t HydraStore::verified_lookup(uint64_t key, Session* se) {
     uint64_t it = index_.start_of(h), scanned = 0;
     uint32_t p1, best = 0;
     while ((p1 = index_.next_candidate(h, it, scanned)) != 0) {
-        uint32_t cur = p1;
+        uint32_t cur = p1, hops = 0;
         while (cur != 0) {
             uint64_t page = (uint64_t)(cur - 1) / kSlotsPerPage;
             read_page(page, se->page_buf);
@@ -801,12 +888,39 @@ uint32_t HydraStore::verified_lookup(uint64_t key, Session* se) {
             memcpy(&sz1, slot + 8, 4);
             memcpy(&prev, slot + 12, 4);
             if (sz1 == 0) break;
-            if (skey == key) { if (cur > best) best = cur; break; }
-            if (prev >= cur) break;   // positions strictly decrease
+            // Size must be plausible for a match: Delete tombstones a slot
+            // by setting an out-of-range size, which must never match again.
+            if (skey == key && (uint64_t)(sz1 - 1) <= kSlotDataMax) {
+                if (cur > best) best = cur;
+                break;
+            }
+            // Chains are TEMPORAL (prepend-only), not position-ordered:
+            // pre-reserved extents mean a newer slot can have a lower
+            // position. Bound the walk defensively against corrupt loops.
+            if (prev == cur || ++hops > (1u << 20)) break;
             cur = prev;               // fp collision: walk the version chain
         }
     }
     return best;
+}
+
+// Tombstone a landed slot in place: rewrite its 4 KiB page with the slot's
+// size field set out of range, so no read/lookup can match the slot again,
+// while its prev pointer keeps older chain links traversable for OTHER keys.
+// Landed pages are never rewritten by the log-append flush path, so the only
+// writers of a landed page are Delete calls, serialized by the page lock.
+void HydraStore::tombstone_slot(uint64_t position, Session* se) {
+    if (!se->rmw_buf) se->rmw_buf = alloc_aligned(kPageBytes);
+    uint64_t page = position / kSlotsPerPage;
+    SpinLock& pl = page_locks_[page % kPageLockCount];
+    pl.lock();
+    read_page(page, se->rmw_buf);
+    uint8_t* slot = se->rmw_buf + (position % kSlotsPerPage) * kSlotBytes;
+    uint32_t sz1 = 0xFFFFFFFFu;   // size 0xFFFFFFFE: unmatchable, non-zero
+    memcpy(slot + 8, &sz1, 4);
+    xpwrite(fd_, se->rmw_buf, kPageBytes, (off_t)(page * kPageBytes));
+    pl.unlock();
+    flush_epoch_.fetch_add(1, std::memory_order_relaxed);
 }
 
 // Log-append flush staging: copy the DIRTY entry's bytes into the session's
@@ -834,10 +948,11 @@ bool HydraStore::stage_flush(uint64_t s, int w, Session* se) {
     memcpy(slot + 16, e.data, e.size);
     memset(slot + 16 + e.size, 0, kSlotDataMax - e.size);
     se->chunk_fill++;
+    e.ver = stage_ver_.fetch_add(1, std::memory_order_relaxed);  // unique pin
     se->chunk_meta.push_back(
         Session::ChunkRec{e.key, e.ver, e.pos1, (uint32_t)position + 1});
     e.state = S_FLUSHING;
-    return se->chunk_fill == kChunkSlots;
+    return se->chunk_fill == se->chunk_cap;
 }
 // ── Load-phase sequential chunk writer ───────────────────────────────────────
 void HydraStore::ensure_chunk(Session* se) {
@@ -847,9 +962,14 @@ void HydraStore::ensure_chunk(Session* se) {
     }
     if (se->chunk_fill == 0 && !se->chunk_active) {
         se->chunk_base = next_slot_.fetch_add(kChunkSlots, std::memory_order_relaxed);
+        se->chunk_cap = kChunkSlots;
         se->chunk_meta.clear();
-        se->chunk_active = true;   // extent stays reserved until flushed
+        se->chunk_active = true;   // extent stays reserved until fully consumed
     }
+}
+
+void HydraStore::flush_partials(Session* se) {
+    if (se->chunk_buf && se->chunk_fill > 0) flush_chunk(se);
 }
 
 void HydraStore::flush_chunk(Session* se) {
@@ -863,50 +983,97 @@ void HydraStore::flush_chunk(Session* se) {
     // The chunk is durable: publish flushed positions and unpin entries.
     //  - first inserts (old_p1 == 0): index word was inserted at stage time;
     //    BUFFERED -> CLEAN (or DIRTY if re-upserted since staging).
-    //  - flush records: move the index word old_p1 -> new_p1, then
-    //    FLUSHING -> CLEAN (or DIRTY if the value changed while in flight;
-    //    pos1 is refreshed either way — position is a key property).
+    //  - flush records: land under the PIN-OWNERSHIP protocol below.
     for (auto& rec : se->chunk_meta) {
-        bool indexed = true;
-        if (rec.old_p1 != 0) {
-            if (!index_.update(mix64(rec.key), rec.old_p1, rec.new_p1)) {
-                // A fingerprint alias stole this key's head word (two keys
-                // with equal fp+bucket adopted one word; the other key's
-                // flush moved it). Give this key its OWN index word; readers
-                // resolve multi-word matches by taking the highest-position
-                // (= newest, since the log only appends) verified match.
-                indexed = index_.insert(mix64(rec.key), rec.new_p1);
-                // If even insert failed (index at capacity) the entry stays
-                // dirty below and will be retried; never serve stale bytes.
-            }
-        }
         uint64_t s = set_of(rec.key);
+        // Warm the index bucket and the set's ways before taking the lock:
+        // the landing does its index CAS under the set lock, and an
+        // in-lock DRAM miss would lengthen every contender's spin.
+        __builtin_prefetch(&index_.words[index_.start_of(mix64(rec.key))]);
+        __builtin_prefetch(set_base(s));
         set_locks_[s].lock();
         Entry* base = set_base(s);
+        Entry* own = nullptr;
         for (size_t w = 0; w < kAssoc; ++w) {
             Entry& e = base[w];
-            if (e.state == S_EMPTY || e.key != rec.key) continue;
-            if (rec.old_p1 == 0) {
-                if (e.state != S_BUFFERED) break;
-            } else {
-                if (e.state != S_FLUSHING) break;
-                if (!indexed) { e.state = S_DIRTY; break; }   // retry later
-                e.pos1 = rec.new_p1;
-            }
-            if (e.ver == rec.ver) {
-                e.state = S_CLEAN;
-                dirty_count_.fetch_sub(1, std::memory_order_relaxed);
-            } else {
-                e.state = S_DIRTY;   // newer value needs another flush
-            }
-            break;
+            if (e.state != S_EMPTY && e.key == rec.key) { own = &e; break; }
         }
+        if (rec.old_p1 == 0) {
+            // First insert: its index word was inserted at stage time, and
+            // Delete waits for BUFFERED pins, so the pin is still present.
+            if (own && own->state == S_BUFFERED) {
+                if (own->ver == rec.ver) {
+                    own->state = S_CLEAN;
+                } else {
+                    own->state = S_DIRTY;   // newer value needs another flush
+                }
+            }
+            set_locks_[s].unlock();
+            continue;
+        }
+        // Flush record: land it ONLY while we still own the pin — the exact
+        // staging we made must still be in the cache (same key, S_FLUSHING,
+        // same version, same source position). Otherwise the record is
+        // ABANDONED and its slot stays unreachable:
+        //  - Delete erased the pin: linking would resurrect the old bytes
+        //    (even after a later reinsert unmarked the key);
+        //  - re-upserted mid-flight (ver moved): the newer bytes go back to
+        //    DIRTY below and reflush from old_p1.
+        // The index CAS runs UNDER the set lock so it serializes with
+        // Delete's sweep (mark -> sweep -> tombstone all under/after this
+        // same lock). ver is a per-way monotonic 32-bit counter, so a false
+        // ownership match needs a 2^32 wrap while this record is parked
+        // (documented residual risk, same class as FASTER's ABA guards).
+        if (!own || own->state != S_FLUSHING || own->pos1 != rec.old_p1) {
+            set_locks_[s].unlock();
+            continue;
+        }
+        if (own->ver != rec.ver) {          // re-upserted while in flight
+            own->state = S_DIRTY;           // reflush newer bytes from old_p1
+            set_locks_[s].unlock();
+            continue;
+        }
+        if (!index_.update(mix64(rec.key), rec.old_p1, rec.new_p1)) {
+            // A same-fp key's flush replaced our head word (the shared-chain
+            // protocol: fp-group members share one word, whoever lands last
+            // owns the head, older versions hang off the prev chain in
+            // TEMPORAL prepend order). Do NOT insert a second root: slot
+            // positions are not version-ordered across sessions (extents
+            // are pre-reserved), so a reader could not tell which root is
+            // newer. Re-point the entry at the current head and retry: the
+            // next flush prepends our value in front of the whole chain.
+            uint32_t holder = index_.first_candidate(mix64(rec.key));
+            if (holder != 0) {
+                own->pos1 = holder;         // chain through the new head
+                own->state = S_DIRTY;       // retry via cleaner/victim path
+            } else {
+                // No head word at all (defensive: Delete keeps words, so
+                // this should not happen). Drop the staged copy.
+                own->state = S_EMPTY;
+                occupancy_.fetch_sub(1, std::memory_order_relaxed);
+            }
+            set_locks_[s].unlock();
+            continue;
+        }
+        own->pos1 = rec.new_p1;
+        own->state = S_CLEAN;       // ver==rec.ver checked above
         set_locks_[s].unlock();
     }
     flush_epoch_.fetch_add(1, std::memory_order_relaxed);
+    // Continue inside the reserved extent at the next PAGE boundary (landed
+    // pages are immutable): a partial flush no longer abandons up to 8191
+    // reserved slots, which would burn the 32-bit position space ~8000x
+    // faster than actual writes.
+    uint32_t consumed = (uint32_t)(len / kSlotBytes);
+    if (consumed < se->chunk_cap) {
+        se->chunk_base += consumed;
+        se->chunk_cap -= consumed;
+    } else {
+        se->chunk_cap = 0;
+        se->chunk_active = false;
+    }
     se->chunk_fill = 0;
     se->chunk_meta.clear();
-    se->chunk_active = false;
 }
 
 // ── Victim selection (called with set s locked) ──────────────────────────────
@@ -947,7 +1114,7 @@ int HydraStore::find_victim(uint64_t s, Session* se) {
     }
     if (clean_old >= 0 || clean_any >= 0) {
         int v = clean_old >= 0 ? clean_old : clean_any;
-        se->evictions++;
+        bump(se->evictions);
         occupancy_.fetch_sub(1, std::memory_order_relaxed);
         return v;
     }
@@ -955,7 +1122,8 @@ int HydraStore::find_victim(uint64_t s, Session* se) {
     if (d >= 0) {
         // Sync-assist: stage the dirty victim into our flush chunk (it
         // becomes S_FLUSHING/pinned; evictable once the chunk lands).
-        // Cheap: a memcpy, no inline disk RMW.
+        // Cheap: a memcpy, no inline disk RMW. (stage_flush can refuse on
+        // position-space exhaustion; the entry then just stays DIRTY.)
         bool full = stage_flush(s, d, se);
         if (full) {
             set_locks_[s].unlock();
@@ -977,7 +1145,7 @@ int HydraStore::find_victim(uint64_t s, Session* se) {
     }
     int v = po >= 0 ? po : pa;
     if (v >= 0) {
-        se->evictions++;
+        bump(se->evictions);
         occupancy_.fetch_sub(1, std::memory_order_relaxed);
         return v;
     }
@@ -986,13 +1154,19 @@ int HydraStore::find_victim(uint64_t s, Session* se) {
     // protected way exists. Flush our own chunk to unpin ours, then have
     // the caller retry; other threads' flushes will unpin the rest.
     set_locks_[s].unlock();
-    if (se->chunk_fill > 0) flush_chunk(se);
+    flush_partials(se);
     std::this_thread::yield();
     set_locks_[s].lock();
     return -1;
 }
 
 // ── Overflow (rare path) ─────────────────────────────────────────────────────
+bool HydraStore::overflow_contains(uint64_t key) {
+    OverflowShard& sh = shard(key);
+    std::lock_guard<std::mutex> lk(sh.mu);
+    return sh.map.find(key) != sh.map.end();
+}
+
 bool HydraStore::overflow_get(uint64_t key, GenValue& out) {
     if (overflow_count_.load(std::memory_order_relaxed) == 0) return false;
     OverflowShard& sh = shard(key);
@@ -1042,15 +1216,6 @@ bool HydraStore::dk_seen_and_mark(uint64_t h) {
         dk_marks_.fetch_add(1, std::memory_order_relaxed);
     }
     return seen;
-}
-
-bool HydraStore::dk_peek(uint64_t h) const {
-    if (!dk_bits_[0]) return true;
-    uint64_t bit = (h * 0x9E3779B97F4A7C15ULL) & dk_mask_;
-    uint64_t word = bit >> 6, mask = 1ULL << (bit & 63);
-    int cur = dk_cur_.load(std::memory_order_relaxed);
-    return (dk_bits_[cur][word].load(std::memory_order_relaxed) & mask) ||
-           (dk_bits_[cur ^ 1][word].load(std::memory_order_relaxed) & mask);
 }
 
 void HydraStore::dk_maybe_rotate() {
@@ -1130,11 +1295,11 @@ OpStatus HydraStore::miss_read(uint64_t key, GenValue& out, Session* se) {
     // Probe the fingerprint index; verify every candidate against the exact
     // key stored in its on-disk slot, following the prev-version chain on a
     // mismatch (fingerprint collisions park older keys behind newer ones).
-    // A key may be reachable through MULTIPLE candidate words (alias repair
-    // in flush_chunk inserts a fresh word when a head is stolen), so take
-    // the match with the HIGHEST position — the log only appends, so higher
-    // position == newer version. Within one chain the first match is the
-    // newest (versions are prepended).
+    // A key may be reachable through MULTIPLE candidate words (two same-fp
+    // same-bucket keys can each have inserted their own root), so take the
+    // match with the HIGHEST position across candidates. Within one chain
+    // the FIRST match is the newest (versions are prepended in temporal
+    // order).
     uint64_t h = mix64(key);
     uint64_t itc = index_.start_of(h), scanned = 0;
     uint32_t p1;
@@ -1142,7 +1307,7 @@ OpStatus HydraStore::miss_read(uint64_t key, GenValue& out, Session* se) {
     uint16_t best_sz = 0;
     uint8_t best_data[kSlotDataMax];
     while ((p1 = index_.next_candidate(h, itc, scanned)) != 0) {
-        uint32_t cur = p1;
+        uint32_t cur = p1, hops = 0;
         while (cur != 0) {
             uint32_t position = cur - 1;
             uint64_t page = (uint64_t)position / kSlotsPerPage;
@@ -1176,7 +1341,9 @@ OpStatus HydraStore::miss_read(uint64_t key, GenValue& out, Session* se) {
                 break;   // newest match within this chain
             }
             key_mismatch_.fetch_add(1, std::memory_order_relaxed);
-            if (prev >= cur) break;   // positions strictly decrease: corrupt
+            // Chains are TEMPORAL (prepend-only), not position-ordered.
+            // Bound the walk defensively against corrupt loops.
+            if (prev == cur || ++hops > (1u << 20)) break;
             cur = prev;               // walk the version chain
         }
     }
@@ -1205,6 +1372,11 @@ void HydraStore::admit_read(uint64_t key, uint32_t p1, const uint8_t* data,
                             uint16_t size, Session* se) {
     if (!dk_seen_and_mark(mix64(key))) return;
     uint64_t s = set_of(key);
+    // Warm the two cache lines the locked section will touch (the index
+    // bucket of the linearizability gate below and the set's first way)
+    // BEFORE acquiring the lock, so the DRAM misses happen unlocked.
+    __builtin_prefetch(&index_.words[index_.start_of(mix64(key))]);
+    __builtin_prefetch(set_base(s));
     set_locks_[s].lock();
     Entry* base = set_base(s);
     int victim = -1;
@@ -1229,8 +1401,37 @@ void HydraStore::admit_read(uint64_t key, uint32_t p1, const uint8_t* data,
         }
     }
     if (!present && victim >= 0) {
+        // Linearizability gate: verify UNDER THE SET LOCK that p1 is still
+        // the key's newest indexed position. A concurrent upsert can land a
+        // newer slot (index word rewritten old->new) and drop its cache
+        // entry while our disk read was in flight; admitting the older
+        // bytes as CLEAN would then serve stale data until eviction. The
+        // stale case is exactly "p1 no longer among the candidates, or a
+        // higher-position candidate exists". (A same-fp alias of another
+        // key with a higher position only causes a skipped admission —
+        // harmless and astronomically rare.)
+        uint64_t h = mix64(key);
+        uint64_t it = index_.start_of(h), scanned = 0;
+        uint32_t c, maxc = 0;
+        bool indexed = false;
+        while ((c = index_.next_candidate(h, it, scanned)) != 0) {
+            if (c == p1) indexed = true;
+            if (c > maxc) maxc = c;
+        }
+        if (!indexed || maxc != p1) { set_locks_[s].unlock(); return; }
+        // Deleted-key + overflow gates, both under the set lock: a Delete
+        // or oversized Upsert concurrent with our disk read makes these
+        // bytes non-authoritative (TOCTOU-safe here, racy anywhere else:
+        // Delete's sweep and this admission serialize on set_locks_[s], so
+        // whichever runs second sees the other's effect).
+        if (is_deleted(key) ||
+            (overflow_count_.load(std::memory_order_relaxed) != 0 &&
+             overflow_contains(key))) {
+            set_locks_[s].unlock();
+            return;
+        }
         Entry& e = base[victim];
-        if (e.state == S_CLEAN) { se->evictions++; occupancy_.fetch_sub(1, std::memory_order_relaxed); }
+        if (e.state == S_CLEAN) { bump(se->evictions); occupancy_.fetch_sub(1, std::memory_order_relaxed); }
         e.key = key;
         e.pos1 = p1;
         e.ver = e.ver + 1;
@@ -1243,84 +1444,33 @@ void HydraStore::admit_read(uint64_t key, uint32_t p1, const uint8_t* data,
     set_locks_[s].unlock();
 }
 
-// [DISABLED — kept for reference; see admit_read note] Speculative
-// co-admission of a neighbor slot from a fetched miss page.
-// Non-blocking and probation-confined; inserted cold (recent=0) so an
-// unhit neighbor is the very next victim. No aging side effects.
-void HydraStore::admit_neighbor(uint64_t key, uint32_t p1, const uint8_t* data,
-                                uint16_t size, Session* se) {
-    uint64_t s = set_of(key);
-    set_locks_[s].lock();
-    Entry* base = set_base(s);
-    int victim = -1;
-    for (int w = 0; w < (int)kAssoc; ++w) {
-        Entry& e = base[w];
-        if (e.state != S_EMPTY && e.key == key) { set_locks_[s].unlock(); return; }
-        if (e.state == S_EMPTY) { if (victim < 0) victim = w; }
-        else if (w < (int)kProbationWays &&
-                 e.state == S_CLEAN && !(e.recent & R_RECENT) && victim < 0) victim = w;
-    }
-    if (victim >= 0) {
-        Entry& e = base[victim];
-        if (e.state == S_CLEAN) { se->evictions++; occupancy_.fetch_sub(1, std::memory_order_relaxed); }
-        e.key = key;
-        e.pos1 = p1;
-        e.ver = e.ver + 1;
-        e.size = (uint8_t)size;
-        e.state = S_CLEAN;
-        e.recent = 0;
-        memcpy(e.data, data, size);
-        occupancy_.fetch_add(1, std::memory_order_relaxed);
-    }
-    set_locks_[s].unlock();
-}
-
-// Every 4 KiB miss read hauls in 32 slots; the 31 non-requested ones are
-// free candidates. Co-admit those the doorkeeper has already observed
-// (frequency >= 1) after verifying via the index that the slot is the
-// key's NEWEST landed version (a newer in-cache version is caught by the
-// present-check in admit_neighbor). This multiplies the cache's
-// observation->admission rate per IO, which is what bounds the hit rate in
-// a cold 30 s window. Purely history-driven: no workload assumptions.
-void HydraStore::admit_page_neighbors(const uint8_t* page_buf, uint64_t page,
-                                      uint64_t served_key, Session* se) {
-    for (size_t i = 0; i < kSlotsPerPage; ++i) {
-        const uint8_t* sp = page_buf + i * kSlotBytes;
-        uint64_t skey; uint32_t sz1;
-        memcpy(&skey, sp, 8);
-        memcpy(&sz1, sp + 8, 4);
-        if (sz1 == 0 || (size_t)(sz1 - 1) > kInlineMax) continue;
-        if (skey == served_key) continue;
-        uint64_t h = mix64(skey);
-        if (!dk_peek(h)) continue;              // never observed: skip
-        uint32_t pos1 = (uint32_t)(page * kSlotsPerPage + i) + 1;
-        uint64_t it = index_.start_of(h), scanned = 0;
-        uint32_t c;
-        bool newest = false;
-        while ((c = index_.next_candidate(h, it, scanned)) != 0)
-            if (c == pos1) { newest = true; break; }
-        if (!newest) continue;                  // superseded on disk: stale
-        admit_neighbor(skey, pos1, sp + 16, (uint16_t)(sz1 - 1), se);
-    }
-}
-
 bool HydraStore::Read(uint64_t key, GenValue& out) {
     Session* se = session();
-    if (cache_probe(key, out)) { se->read_hits++; return true; }
-    se->read_misses++;
+    // Delete monotonicity: a read that starts after Delete(key) returned
+    // must never find the key (until re-upserted), even if a stale copy is
+    // still landing. Free when no key was ever deleted (one relaxed load).
+    if (is_deleted(key)) { bump(se->read_misses); return false; }
+    if (cache_probe(key, out)) { bump(se->read_hits); return true; }
+    bump(se->read_misses);
     if (!disk_mode_) return overflow_get(key, out);
     return miss_read(key, out, se) == OpStatus::Ok;
 }
 
 OpStatus HydraStore::ReadAsync(ReadSlot* slot) {
     Session* se = session();
+    if (is_deleted(slot->key)) {   // see Read(): delete monotonicity
+        bump(se->read_misses);
+        slot->status = OpStatus::NotFound;
+        slot->done.store(1, std::memory_order_release);
+        return OpStatus::NotFound;
+    }
     if (cache_probe(slot->key, slot->out)) {
-        se->read_hits++;
+        bump(se->read_hits);
         slot->status = OpStatus::Ok;
         slot->done.store(1, std::memory_order_release);
         return OpStatus::Ok;
     }
-    se->read_misses++;
+    bump(se->read_misses);
     if (!disk_mode_) {
         bool ok = overflow_get(slot->key, slot->out);
         slot->status = ok ? OpStatus::Ok : OpStatus::NotFound;
@@ -1340,7 +1490,7 @@ OpStatus HydraStore::ReadAsync(ReadSlot* slot) {
 void HydraStore::CompletePending(bool wait) {
     Session* se = session();
     if (wait) {
-        if (se->chunk_buf && se->chunk_fill > 0) flush_chunk(se);
+        flush_partials(se);
         while (se->outstanding.load(std::memory_order_acquire) != 0)
             std::this_thread::yield();
     }
@@ -1390,6 +1540,7 @@ bool HydraStore::uring_start(MissOp& op, uint32_t oi, Uring& ring,
     op.h = mix64(slot->key);
     op.it = index_.start_of(op.h);
     op.scanned = 0;
+    op.hops = 0;
     op.best_p1 = 0;
     op.best_sz = 0;
     uint32_t p1 = index_.next_candidate(op.h, op.it, op.scanned);
@@ -1444,6 +1595,7 @@ bool HydraStore::uring_advance(MissOp& op, uint32_t oi, Uring& ring, int res,
                 return false;
             }
             op.cur = p1;
+            op.hops = 0;   // hop bound is per candidate chain
         }
         uint32_t position = op.cur - 1;
         uint64_t page = (uint64_t)position / kSlotsPerPage;
@@ -1479,7 +1631,9 @@ bool HydraStore::uring_advance(MissOp& op, uint32_t oi, Uring& ring, int res,
             continue;
         }
         key_mismatch_.fetch_add(1, std::memory_order_relaxed);
-        if (prev >= op.cur) { op.cur = 0; continue; }   // positions strictly decrease
+        // Chains are TEMPORAL (prepend-only), not position-ordered.
+        // Bound the walk defensively against corrupt loops.
+        if (prev == op.cur || ++op.hops > (1u << 20)) { op.cur = 0; continue; }
         op.cur = prev;   // walk the version chain
     }
 }
@@ -1555,13 +1709,14 @@ void HydraStore::upsert_inline(uint64_t key, const uint8_t* data, uint16_t size)
                 memcpy(e.data, data, size);
                 bool again = (e.recent & R_RECENT) != 0;
                 e.recent |= R_RECENT;
-                if (e.state == S_CLEAN) {
-                    e.state = S_DIRTY;
-                    dirty_count_.fetch_add(1, std::memory_order_relaxed);
-                }
+                if (e.state == S_CLEAN) e.state = S_DIRTY;
                 if (again && w < kProbationWays) promote_way(s, (int)w);
-                set_locks_[s].unlock();
+                // Under the set lock: an unlocked erase could delete a NEWER
+                // oversized value published in between (lock order set->
+                // overflow is shared with the oversized Upsert path).
                 if (overflow_count_.load(std::memory_order_relaxed)) overflow_erase(key);
+                del_unmark(key);   // publish-then-unmark under the set lock
+                set_locks_[s].unlock();
                 return;
             }
         }
@@ -1591,8 +1746,9 @@ void HydraStore::upsert_inline(uint64_t key, const uint8_t* data, uint16_t size)
                 // occupancy for a non-empty clean victim).
                 if (e.state != S_EMPTY)
                     occupancy_.fetch_add(1, std::memory_order_relaxed);
-                set_locks_[s].unlock();
                 overflow_put(key, data, size);
+                del_unmark(key);   // publish-then-unmark under the set lock
+                set_locks_[s].unlock();
                 return;
             }
             uint8_t* slot = se->chunk_buf + (size_t)se->chunk_fill * kSlotBytes;
@@ -1614,31 +1770,47 @@ void HydraStore::upsert_inline(uint64_t key, const uint8_t* data, uint16_t size)
         }
         e.key = key;
         e.pos1 = p1;
-        e.ver = e.ver + 1;
+        // BUFFERED entries are pins referenced by a chunk record: stamp a
+        // globally unique staging token (see stage_ver_). Plain dirty
+        // entries just bump their way-local version.
+        e.ver = (new_state == S_BUFFERED)
+                    ? stage_ver_.fetch_add(1, std::memory_order_relaxed)
+                    : e.ver + 1;
         e.size = (uint8_t)size;
         e.state = new_state;
         e.recent = flags;
         memcpy(e.data, data, size);
         occupancy_.fetch_add(1, std::memory_order_relaxed);
-        dirty_count_.fetch_add(1, std::memory_order_relaxed);
         if (new_state == S_BUFFERED)
             se->chunk_meta.push_back(Session::ChunkRec{key, e.ver, 0, p1});
-        bool full = (se->chunk_buf && se->chunk_fill == kChunkSlots);
-        set_locks_[s].unlock();
+        bool full = (se->chunk_active && se->chunk_fill == se->chunk_cap);
         if (overflow_count_.load(std::memory_order_relaxed)) overflow_erase(key);
+        del_unmark(key);   // publish-then-unmark, all under the set lock
+        set_locks_[s].unlock();
         if (full) flush_chunk(se);
         return;
     }
 }
 
 void HydraStore::Upsert(uint64_t key, const GenValue& value) {
-    if (!disk_mode_) { overflow_put(key, value.data, value.size); return; }
+    // Re-inserting a deleted key: the mark is cleared AT THE PUBLICATION
+    // POINT, under the key's set lock (upsert_inline / the oversized path
+    // below), never earlier — an early unmark would let an in-flight
+    // admission of pre-delete bytes slip through the is_deleted gate while
+    // the new value is not yet visible. (del_unmark is a no-op fast path
+    // while the registry is empty.)
+    if (!disk_mode_) {
+        overflow_put(key, value.data, value.size);
+        del_unmark(key);
+        return;
+    }
     if (value.size > kInlineMax) {
         // Drop any stale inline cache entry so reads see the overflow value.
         // A BUFFERED entry stays pinned until its chunk lands (removing it
         // early would let the stale chunk write escape its cancellation), so
         // wait for the landing first — rare path, bounded by chunk flush.
         uint64_t s = set_of(key);
+        int spins = 0;
         for (;;) {
             bool buffered = false;
             set_locks_[s].lock();
@@ -1647,8 +1819,6 @@ void HydraStore::Upsert(uint64_t key, const GenValue& value) {
                 Entry& e = base[w];
                 if (e.state != S_EMPTY && e.key == key) {
                     if (e.state == S_BUFFERED || e.state == S_FLUSHING) { buffered = true; break; }
-                    if (e.state == S_DIRTY)
-                        dirty_count_.fetch_sub(1, std::memory_order_relaxed);
                     e.state = S_EMPTY;
                     occupancy_.fetch_sub(1, std::memory_order_relaxed);
                     break;
@@ -1657,10 +1827,17 @@ void HydraStore::Upsert(uint64_t key, const GenValue& value) {
             if (!buffered) break;
             set_locks_[s].unlock();
             Session* se = session();
-            if (se->chunk_buf && se->chunk_fill > 0) flush_chunk(se);
-            std::this_thread::yield();
+            flush_partials(se);
+            // The pin may belong to ANOTHER session's in-flight chunk; wait
+            // politely (bounded by that chunk's landing) instead of burning
+            // a core. Rare path — never taken by inline-sized workloads.
+            if (++spins > 100)
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            else
+                std::this_thread::yield();
         }
         overflow_put(key, value.data, value.size);
+        del_unmark(key);   // publish-then-unmark under the set lock
         set_locks_[s].unlock();
         return;
     }
@@ -1674,31 +1851,47 @@ void HydraStore::RMW(uint64_t key, const uint8_t* mod_data, size_t mod_size) {
     l.lock();
     Session* se = session();
     GenValue cur;
-    bool found = cache_probe(key, cur);
-    if (!found && disk_mode_) found = miss_read(key, cur, se) == OpStatus::Ok;
-    if (!found) found = overflow_get(key, cur);
+    bool found = false;
+    if (!is_deleted(key)) {   // deleted key: RMW sees "absent" (insert)
+        found = cache_probe(key, cur);
+        if (!found && disk_mode_) found = miss_read(key, cur, se) == OpStatus::Ok;
+        if (!found) found = overflow_get(key, cur);
+    }
     GenValue nv;
     nv.size = (uint32_t)std::min<size_t>(mod_size, GenValue::kMaxSize);
     memcpy(nv.data, mod_data, nv.size);
     if (found) {
-        se->rmw_hits++;
+        bump(se->rmw_hits);
         uint64_t a = 0, b = 0;
         if (cur.size >= 8) memcpy(&a, cur.data, 8);
         if (nv.size >= 8) { memcpy(&b, nv.data, 8); a += b; memcpy(nv.data, &a, 8); }
     } else {
-        se->rmw_misses++;
+        bump(se->rmw_misses);
     }
     Upsert(key, nv);
     l.unlock();
 }
 
 bool HydraStore::Delete(uint64_t key) {
+    if (!disk_mode_) return overflow_erase(key);
+    // Mark FIRST. Every admission path and every flush landing re-checks
+    // the registry / pin ownership under the key's set lock, so any copy
+    // staged after our sweep below sees the mark and is skipped/dropped,
+    // and any copy staged before is visible to the sweep. Reads that start
+    // after Delete returns observe the mark and report NotFound even while
+    // a stale copy is still somewhere in flight.
+    bool newly = del_mark(key);
     bool existed = overflow_erase(key);
-    if (!disk_mode_) return existed;
     uint64_t s = set_of(key);
-    // Never remove a BUFFERED (pinned) entry: wait for its chunk to land so
-    // the index unlink below can verify the slot and no stale chunk write
-    // can resurrect the key. Rare path; Delete is unused by workload id 0.
+    // Sweep the cache. CLEAN/DIRTY entries are erased outright. FLUSHING
+    // entries (staged in some session's in-flight chunk) are erased too:
+    // their landing re-checks pin ownership under this same lock and never
+    // links the staged slot — waiting for the landing instead could stall
+    // on another session's parked partial chunk. BUFFERED entries must land
+    // first: their index word already points at the reserved slot, so the
+    // slot has to become readable before verified_lookup below can poison
+    // it on disk.
+    int spins = 0;
     for (;;) {
         bool buffered = false;
         set_locks_[s].lock();
@@ -1706,9 +1899,7 @@ bool HydraStore::Delete(uint64_t key) {
         for (size_t w = 0; w < kAssoc; ++w) {
             Entry& e = base[w];
             if (e.state != S_EMPTY && e.key == key) {
-                if (e.state == S_BUFFERED || e.state == S_FLUSHING) { buffered = true; break; }
-                if (e.state == S_DIRTY)
-                    dirty_count_.fetch_sub(1, std::memory_order_relaxed);
+                if (e.state == S_BUFFERED) { buffered = true; break; }
                 e.state = S_EMPTY;
                 occupancy_.fetch_sub(1, std::memory_order_relaxed);
                 existed = true;
@@ -1717,16 +1908,49 @@ bool HydraStore::Delete(uint64_t key) {
         }
         set_locks_[s].unlock();
         if (!buffered) break;
-        Session* se = session();
-        if (se->chunk_buf && se->chunk_fill > 0) flush_chunk(se);
-        std::this_thread::yield();
+        flush_partials(session());
+        // Pin may belong to another session's chunk; back off politely.
+        if (++spins > 100)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        else
+            std::this_thread::yield();
     }
-    // Unlink from the index (verified: reads candidate slots from disk).
-    // The old slot itself is leaked (Delete is unused by this workload);
-    // a production compactor would reclaim it.
-    uint32_t p1 = verified_lookup(key, session());
-    if (p1 != 0 && index_.erase(mix64(key), p1)) existed = true;
-    return existed;
+    // Unlink EVERY on-disk version of the key. Alias repair (historic) and
+    // prev chains hanging off OTHER keys' words can reach our slots —
+    // erasing a single index word would let a later read resurrect an older
+    // version. Loop: verified_lookup returns the newest still-matching
+    // slot; tombstone it on disk (unmatchable size, chain intact). The
+    // index word is KEPT: it routes same-fp chains for other keys.
+    // Terminates because each pass permanently unmatches one slot. Slot
+    // bytes are leaked until a compactor runs (log GC is out of scope, as
+    // in FASTER's manual Log.Compact).
+    Session* se = session();
+    uint32_t p1;
+    while ((p1 = verified_lookup(key, se)) != 0) {
+        // Re-check the mark UNDER THE SET LOCK before each tombstone: a
+        // concurrent Upsert republishes the key and unmarks it under this
+        // same lock, and its relanded slot would otherwise be poisoned here
+        // ("present until eviction, then absent" — non-linearizable). Once
+        // the mark is gone, every remaining older on-disk version is
+        // shadowed by the reinsert's chain prepend, so stopping is safe.
+        // Holding the set lock across the (rare) tombstone I/O also blocks
+        // a landing from publishing a new slot mid-poison (landings take
+        // this lock). Lock order set -> page is unique to this path.
+        set_locks_[s].lock();
+        if (!is_deleted(key)) { set_locks_[s].unlock(); break; }
+        tombstone_slot((uint64_t)p1 - 1, se);
+        set_locks_[s].unlock();
+        existed = true;
+    }
+    // Nothing existed anywhere (absent-key delete): drop the mark again so
+    // the registry cannot grow without bound under absent-delete churn.
+    // Safe: we erased no value, so there is no stale copy to hide; any
+    // concurrent Upsert's value is legitimately visible (Upsert-after-
+    // Delete unmarks anyway).
+    if (newly && !existed) del_unmark(key);
+    // Idempotence: a second Delete with no re-insert in between returns
+    // false even if it swept up residue of the first one.
+    return newly && existed;
 }
 
 // ── Cleaner: keep sets stocked with clean victims ────────────────────────────
@@ -1751,8 +1975,8 @@ void HydraStore::cleaner_main(int id) {
             // same keys forever (each flush lands already-stale bytes).
             bool maybe = false;
             for (size_t w = 0; w < kProbationWays; ++w) {
-                uint8_t st = __atomic_load_n(&base[w].state, __ATOMIC_RELAXED);
-                uint8_t rc = __atomic_load_n(&base[w].recent, __ATOMIC_RELAXED);
+                uint8_t st = base[w].state;    // RelaxedU8: race-free peek
+                uint8_t rc = base[w].recent;
                 if (st == S_DIRTY && !(rc & R_RECENT)) { maybe = true; break; }
             }
             if (!maybe) continue;
@@ -1772,7 +1996,7 @@ void HydraStore::cleaner_main(int id) {
             if (full) flush_chunk(se);
         }
         // Land partial chunks so staged (pinned) entries unpin promptly.
-        if (se->chunk_fill > 0) flush_chunk(se);
+        flush_partials(se);
         if (id == 0) dk_maybe_rotate();
         // Pacing: cleaners are an optimization only — find_victim's
         // sync-assist staging bounds eviction latency — so cap background
@@ -1785,6 +2009,10 @@ void HydraStore::cleaner_main(int id) {
 // ── Checkpoint: flush all dirty entries, then fdatasync ─────────────────────
 void HydraStore::Checkpoint() {
     if (!disk_mode_) return;
+    // Land the CALLER's partial chunk first: its own completed Upserts may
+    // still sit BUFFERED in RAM. (Other sessions' partials land at their own
+    // flush/StopSession — single-owner chunks cannot be stolen.)
+    flush_partials(session());
     std::vector<std::thread> ts;
     uint64_t stripe = (nsets_ + kCheckpointThreads - 1) / kCheckpointThreads;
     for (int t = 0; t < kCheckpointThreads; ++t) {
@@ -1802,11 +2030,15 @@ void HydraStore::Checkpoint() {
                     if (full) flush_chunk(se);
                 }
             }
-            if (se->chunk_buf && se->chunk_fill > 0) flush_chunk(se);
+            StopSession();   // flush partials + recycle the session
         });
     }
     for (auto& t : ts) t.join();
-    fdatasync(fd_);
+    while (fdatasync(fd_) < 0) {
+        if (errno == EINTR) continue;
+        fprintf(stderr, "hydra: fdatasync failed (errno=%d)\n", errno);
+        abort();   // fail-stop: never report durability that does not exist
+    }
 }
 
 CacheStats HydraStore::GetCacheStats() const {
@@ -1814,11 +2046,11 @@ CacheStats HydraStore::GetCacheStats() const {
     {
         std::lock_guard<std::mutex> lk(sess_mu_);
         for (auto& se : sessions_) {
-            cs.read_hits += se->read_hits;
-            cs.read_misses += se->read_misses;
-            cs.rmw_hits += se->rmw_hits;
-            cs.rmw_misses += se->rmw_misses;
-            cs.evictions += se->evictions;
+            cs.read_hits += se->read_hits.load(std::memory_order_relaxed);
+            cs.read_misses += se->read_misses.load(std::memory_order_relaxed);
+            cs.rmw_hits += se->rmw_hits.load(std::memory_order_relaxed);
+            cs.rmw_misses += se->rmw_misses.load(std::memory_order_relaxed);
+            cs.evictions += se->evictions.load(std::memory_order_relaxed);
         }
     }
     cs.hot_bytes = occupancy_.load() * kEntryBytes;
