@@ -65,42 +65,41 @@
   }
 
   /**
-   * Render (create or refresh) the ``.panel-time`` footer for ``el``
-   * using its ``data-start-ms`` stamp.  Shared by the live 1-second
-   * ticker and by ``finalizePanelTime`` so the in-progress footer and
-   * the final footer use identical anchoring/formatting logic.
+   * Render (create or refresh) the "time spent" label of ``el``'s
+   * bottom footer bar using its ``data-start-ms`` stamp.  Shared by
+   * the live 1-second ticker and by ``finalizePanelTime`` so the
+   * in-progress label and the final label use identical
+   * anchoring/formatting logic.
+   *
+   * The footer bar (``div.panel-time``, obtained via
+   * ``PanelCopy.ensurePanelFoot``) is shared with the event-timestamp
+   * badge (``span.panel-ts``, left side); the elapsed time renders in
+   * its own right-aligned ``span.panel-elapsed``.
    *
    * No-op if the panel was never stamped (e.g. replayed events) so the
    * historical view stays clean.
    */
+  // panelts-coverage:start
   function _renderPanelTime(el) {
     if (!el) return;
     const startMs = Number(el.dataset.startMs || 0);
     if (!startMs) return;
     const ms = Date.now() - startMs;
-    let footer = null;
-    // Find an existing direct-child footer (avoid matching footers
-    // inside nested panels).
-    for (let i = el.children.length - 1; i >= 0; i--) {
-      const c = el.children[i];
-      if (c.classList && c.classList.contains('panel-time')) {
-        footer = c;
-        break;
-      }
+    const footer = window.PanelCopy.ensurePanelFoot(el);
+    // Keep the footer anchored as the LAST child so it always renders
+    // visually at the bottom of the panel, even when later content
+    // (e.g. a tool_result bash-panel) is appended after the initial
+    // finalisation.
+    if (footer !== el.lastElementChild) el.appendChild(footer);
+    let span = footer.querySelector(':scope > .panel-elapsed');
+    if (!span) {
+      span = document.createElement('span');
+      span.className = 'panel-elapsed';
+      footer.appendChild(span);
     }
-    if (!footer) {
-      footer = document.createElement('div');
-      footer.className = 'panel-time';
-      el.appendChild(footer);
-    } else if (footer !== el.lastElementChild) {
-      // Keep the footer anchored as the LAST child so it always
-      // renders visually at the bottom of the panel, even when later
-      // content (e.g. a tool_result bash-panel) is appended after the
-      // initial finalisation.
-      el.appendChild(footer);
-    }
-    footer.textContent = fmtElapsedMs(ms);
+    span.textContent = fmtElapsedMs(ms);
   }
+  // panelts-coverage:end
 
   /**
    * Start the shared 1-second interval that re-renders the
@@ -745,7 +744,8 @@
   /**
    * Create a fresh collapsible 'Thoughts' llm-panel.  *ts* (optional,
    * ms since epoch) is the timestamp of the event that opened the
-   * panel; it renders as the title row's compact time badge.
+   * panel; it renders as the compact time badge at the left of the
+   * panel's bottom footer bar.
    */
   function mkThoughtsPanel(ts) {
     const panel = mkEl('div', 'llm-panel');
@@ -2812,7 +2812,8 @@
         node.classList.contains('panel-copy-btn') ||
         node.classList.contains('collapse-chv') ||
         node.classList.contains('collapse-preview') ||
-        node.classList.contains('panel-ts')
+        node.classList.contains('panel-ts') ||
+        node.classList.contains('panel-time')
       )
         return '';
     }
@@ -2900,8 +2901,10 @@
       }, 0);
     });
     addCopyButton(panelEl);
-    // Compact event-time badge in the title row, left of the Copy
-    // button (only when the rendered event carried a ``ts`` stamp).
+    // Compact event-time badge at the LEFT of the panel's bottom
+    // footer bar — the same bar whose right side shows the "time
+    // spent" label (only when the rendered event carried a ``ts``
+    // stamp).
     addPanelTimestamp(panelEl, ts);
   }
 
