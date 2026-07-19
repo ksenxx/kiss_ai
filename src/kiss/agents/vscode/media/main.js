@@ -7902,8 +7902,8 @@
     // Both the VS Code extension webview and the remote web chat load
     // this file, so a single wiring covers both views.  The
     // collapsed/expanded choice persists across reloads via
-    // localStorage; the panel defaults to expanded so the filter
-    // buttons and dates are visible whenever it is uncollapsed.
+    // localStorage; the panel defaults to COLLAPSED to keep the
+    // History sidebar compact until the user expands it.
     const historyFiltersToggle = document.getElementById(
       'history-filters-toggle',
     );
@@ -7918,12 +7918,12 @@
         );
         historyFiltersToggle.classList.toggle('expanded', expanded);
       };
-      let filtersCollapsed = false;
+      let filtersCollapsed = true;
       try {
         filtersCollapsed =
-          window.localStorage.getItem(HISTORY_FILTERS_COLLAPSED_KEY) === '1';
+          window.localStorage.getItem(HISTORY_FILTERS_COLLAPSED_KEY) !== '0';
       } catch {
-        // localStorage unavailable — start expanded.
+        // localStorage unavailable — start collapsed.
       }
       setHistoryFiltersExpanded(!filtersCollapsed);
       historyFiltersToggle.addEventListener('click', () => {
