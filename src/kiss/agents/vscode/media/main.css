@@ -2668,6 +2668,15 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 }
 #custom-tooltip.visible { opacity: 1; }
 
+/* The pinned task text's tooltip (hover on #task-panel-text) shows the
+   ENTIRE task at the SAME font size as the task text: the identical
+   var(--vscode-editor-font-size) declaration #task-panel uses, so the
+   two computed sizes match in the VS Code webview AND on the remote
+   web app (which serves this same stylesheet). */
+#custom-tooltip.task-panel-tooltip {
+  font-size: var(--vscode-editor-font-size);
+}
+
 /* ── Worktree action bar ────────────────────────────── */
 .wt-bar {
   display: flex; flex-direction: column; gap: 10px; padding: 10px 12px;
