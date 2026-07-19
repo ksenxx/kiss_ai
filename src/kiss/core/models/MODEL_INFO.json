@@ -2376,8 +2376,8 @@
   },
   "openrouter/google/gemma-3-27b-it": {
     "context_length": 131072,
-    "input_price_per_1M": 0.08,
-    "output_price_per_1M": 0.45,
+    "input_price_per_1M": 0.1,
+    "output_price_per_1M": 0.3,
     "fc": false,
     "emb": false,
     "gen": true
@@ -2400,8 +2400,8 @@
   },
   "openrouter/google/gemma-4-26b-a4b-it": {
     "context_length": 262144,
-    "input_price_per_1M": 0.1,
-    "output_price_per_1M": 0.3,
+    "input_price_per_1M": 0.07,
+    "output_price_per_1M": 0.34,
     "fc": true,
     "emb": false,
     "gen": true
@@ -2530,8 +2530,8 @@
   },
   "openrouter/mancer/weaver": {
     "context_length": 8000,
-    "input_price_per_1M": 0.75,
-    "output_price_per_1M": 1.0,
+    "input_price_per_1M": 0.5,
+    "output_price_per_1M": 0.75,
     "fc": false,
     "emb": false,
     "gen": true
@@ -2552,14 +2552,6 @@
     "emb": false,
     "gen": true
   },
-  "openrouter/meta-llama/llama-3.2-11b-vision-instruct": {
-    "context_length": 131072,
-    "input_price_per_1M": 0.345,
-    "output_price_per_1M": 0.345,
-    "fc": false,
-    "emb": false,
-    "gen": true
-  },
   "openrouter/meta-llama/llama-3.2-1b-instruct": {
     "context_length": 131072,
     "input_price_per_1M": 0.03,
@@ -2571,7 +2563,7 @@
   "openrouter/meta-llama/llama-3.2-3b-instruct": {
     "context_length": 131072,
     "input_price_per_1M": 0.051,
-    "output_price_per_1M": 0.33,
+    "output_price_per_1M": 0.335,
     "fc": false,
     "emb": false,
     "gen": true
@@ -2724,7 +2716,7 @@
   "openrouter/mistralai/mistral-nemo": {
     "context_length": 131072,
     "input_price_per_1M": 0.02,
-    "output_price_per_1M": 0.04,
+    "output_price_per_1M": 0.03,
     "fc": false,
     "emb": false,
     "gen": true
@@ -2819,16 +2811,16 @@
   },
   "openrouter/moonshotai/kimi-k2.6": {
     "context_length": 262144,
-    "input_price_per_1M": 0.95,
-    "output_price_per_1M": 4.0,
+    "input_price_per_1M": 0.684,
+    "output_price_per_1M": 3.42,
     "fc": true,
     "emb": false,
     "gen": true
   },
   "openrouter/moonshotai/kimi-k2.7-code": {
     "context_length": 262144,
-    "input_price_per_1M": 0.75,
-    "output_price_per_1M": 3.5,
+    "input_price_per_1M": 0.85,
+    "output_price_per_1M": 3.8,
     "fc": true,
     "emb": false,
     "gen": true
@@ -2905,14 +2897,6 @@
     "input_price_per_1M": 0.13,
     "output_price_per_1M": 0.4,
     "fc": false,
-    "emb": false,
-    "gen": true
-  },
-  "openrouter/nvidia/llama-3.3-nemotron-super-49b-v1.5": {
-    "context_length": 131072,
-    "input_price_per_1M": 0.4,
-    "output_price_per_1M": 0.4,
-    "fc": true,
     "emb": false,
     "gen": true
   },
@@ -3543,8 +3527,8 @@
   },
   "openrouter/qwen/qwen3-14b": {
     "context_length": 131702,
-    "input_price_per_1M": 0.1,
-    "output_price_per_1M": 0.24,
+    "input_price_per_1M": 0.227,
+    "output_price_per_1M": 0.91,
     "fc": false,
     "emb": false,
     "gen": true
@@ -3575,8 +3559,8 @@
   },
   "openrouter/qwen/qwen3-30b-a3b": {
     "context_length": 131072,
-    "input_price_per_1M": 0.12,
-    "output_price_per_1M": 0.5,
+    "input_price_per_1M": 0.13,
+    "output_price_per_1M": 0.52,
     "fc": false,
     "emb": false,
     "gen": true
@@ -3751,8 +3735,8 @@
   },
   "openrouter/qwen/qwen3.5-27b": {
     "context_length": 262144,
-    "input_price_per_1M": 0.195,
-    "output_price_per_1M": 1.56,
+    "input_price_per_1M": 0.26,
+    "output_price_per_1M": 2.6,
     "fc": true,
     "emb": false,
     "gen": true
@@ -3767,8 +3751,8 @@
   },
   "openrouter/qwen/qwen3.5-397b-a17b": {
     "context_length": 262144,
-    "input_price_per_1M": 0.45,
-    "output_price_per_1M": 3.0,
+    "input_price_per_1M": 0.39,
+    "output_price_per_1M": 2.34,
     "fc": true,
     "emb": false,
     "gen": true
@@ -3999,6 +3983,15 @@
     "emb": false,
     "gen": true
   },
+  "openrouter/thinkingmachines/inkling": {
+    "context_length": 1048576,
+    "input_price_per_1M": 1.0,
+    "output_price_per_1M": 4.05,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW"
+  },
   "openrouter/undi95/remm-slerp-l2-13b": {
     "context_length": 6144,
     "input_price_per_1M": 0.45,
@@ -4162,8 +4155,8 @@
   },
   "openrouter/z-ai/glm-5.2": {
     "context_length": 1048576,
-    "input_price_per_1M": 0.924,
-    "output_price_per_1M": 2.904,
+    "input_price_per_1M": 0.28,
+    "output_price_per_1M": 0.88,
     "fc": true,
     "emb": false,
     "gen": true
