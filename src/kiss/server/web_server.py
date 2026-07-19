@@ -48,6 +48,7 @@ import hashlib
 import ipaddress
 import json
 import logging
+import math
 import mimetypes
 import os
 import platform
@@ -78,7 +79,11 @@ from websockets.http11 import Request, Response
 from kiss.core.config import get_jobs_root, kiss_home
 from kiss.core.vscode_config import load_config, source_shell_env
 from kiss.server.diff_merge import _read_lines_preserved as _read_lines_preserved
-from kiss.server.json_printer import GLOBAL_EVENT_TYPES, JsonPrinter
+from kiss.server.json_printer import (
+    GLOBAL_EVENT_TYPES,
+    JsonPrinter,
+    stamp_event_ts,
+)
 from kiss.server.server import VSCodeServer, broadcast_to_conn
 from kiss.server.tips import read_tips
 from kiss.server.tricks import read_tricks
@@ -623,6 +628,63 @@ def _rate_limit_backoff_seconds() -> int:
     """
     jitter = secrets.randbelow(_TUNNEL_RATE_LIMIT_JITTER + 1)
     return _TUNNEL_RATE_LIMIT_BACKOFF + jitter
+
+
+def _is_loopback_ip(ip: str) -> bool:
+    """Return True when *ip* is an IPv4/IPv6 loopback address.
+
+    A loopback TCP peer on the public WSS port is the local
+    ``cloudflared`` tunnel relaying a remote visitor (or another
+    process on this host).  IPv6-mapped IPv4 loopback
+    (``::ffff:127.0.0.1``) counts too.  A malformed / empty string is
+    not loopback.
+
+    Args:
+        ip: A textual IP address (no port).
+
+    Returns:
+        True when *ip* parses to a loopback address.
+    """
+    try:
+        parsed = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    mapped = getattr(parsed, "ipv4_mapped", None)
+    if mapped is not None:
+        parsed = mapped
+    return parsed.is_loopback
+
+
+def _forwarded_client_ip(websocket: ServerConnection) -> str:
+    """Return the real client IP forwarded by cloudflared, or ``""``.
+
+    cloudflared sets ``Cf-Connecting-Ip`` to the origin visitor's IP on
+    the WebSocket upgrade request; ``X-Forwarded-For`` (whose first hop
+    is the original client) is used as a fallback.  The returned value
+    must be treated as trusted **only** for loopback TCP peers (see
+    :meth:`RemoteAccessServer._client_ip`).
+
+    Args:
+        websocket: The server connection whose upgrade request headers
+            are inspected.
+
+    Returns:
+        The forwarded client IP as a string, or ``""`` when no usable
+        header is present.
+    """
+    request = getattr(websocket, "request", None)
+    headers = getattr(request, "headers", None)
+    if headers is None:
+        return ""
+    cf_ip = str(headers.get("Cf-Connecting-Ip") or "").strip()
+    if cf_ip:
+        return cf_ip
+    xff = str(headers.get("X-Forwarded-For") or "")
+    first = xff.split(",")[0].strip()
+    if first:
+        return first
+    return ""
+
 
 _HEAD_200 = (
     b"HTTP/1.1 200 OK\r\n"
@@ -2025,6 +2087,12 @@ class WebPrinter(JsonPrinter):
         Args:
             event: The event dictionary to emit.
         """
+        # Stamp the wall-clock emission time (ms since epoch) before
+        # any transport / recording / persistence path so the chat
+        # webview's per-panel timestamp badge agrees everywhere (live,
+        # replay, extension, remote web app).  Pre-stamped events
+        # (e.g. replayed copies) keep their original ``ts``.
+        stamp_event_ts(event)
         conn_id = event.pop("connId", "")
         record_only = bool(event.pop("recordOnly", False))
         if event.get("type") == "configData":
@@ -3018,6 +3086,30 @@ _WS_SHIM_JS = r"""
       : 'KISS Sorcar Server is starting ...';
   }
 
+  // Non-zero while the server has told us (via an ``auth_locked``
+  // frame) that this source IP is rate-limited after too many failed
+  // logins.  Holds the retry delay in milliseconds; consumed by the
+  // ``onclose`` handler so the follow-up reconnect waits out the
+  // lockout instead of hammering the server on the fast backoff, and
+  // so the overlay keeps showing the lockout explanation rather than
+  // the generic "starting ..." label.
+  var _lockedRetryMs = 0;
+
+  /**
+   * Replace the overlay text with the auth-lockout explanation.
+   *
+   * Shown when the server answers the handshake with ``auth_locked``:
+   * without this the user would stare at a promptless "KISS Sorcar
+   * Server is starting ..." spinner with no hint that the remote
+   * password rate-limit is what is keeping the password modal away.
+   */
+  function _showLockedMsg(secs) {
+    var msg = document.getElementById('kiss-server-loading-msg');
+    if (!msg) return;
+    msg.textContent = 'Too many failed login attempts. ' +
+      'Asking for the password again in ' + secs + 's ...';
+  }
+
   // Apply the reconnect label immediately on script start when the
   // sessionStorage flag survives from the prior page instance.  Without
   // this the user would briefly see "Server is starting ..." after
@@ -3245,6 +3337,27 @@ _WS_SHIM_JS = r"""
         });
         return;
       }
+      if (msg.type === 'auth_locked') {
+        // The server refused the handshake because this source IP is
+        // rate-limited after too many failed logins (behind the
+        // cloudflared tunnel EVERY visitor shares one loopback IP, so
+        // this can be someone else's guesses).  The server closes the
+        // socket right after this frame.  Explain the wait on the
+        // overlay and remember the retry delay so ``onclose`` waits
+        // out the lockout instead of reconnecting on the fast backoff
+        // — the eventual reconnect gets ``auth_required`` again and
+        // the password modal finally appears.
+        var secs = Math.ceil(Number(msg.retry_after));
+        if (!(secs > 0)) secs = 60;
+        _lockedRetryMs = secs * 1000;
+        _showLockedMsg(secs);
+        // Re-gate the app while we wait (idempotent when the loading
+        // overlay is already up, e.g. on a fresh page load).
+        window.dispatchEvent(new MessageEvent('message', {
+          data: {type: 'daemonStatus', connected: false}
+        }));
+        return;
+      }
       // SECURITY — never forward server data frames to the app before
       // the connection is authenticated.  ``auth_ok`` / ``auth_required``
       // are handled above; any other frame that arrives while
@@ -3274,6 +3387,27 @@ _WS_SHIM_JS = r"""
         _setReconnectingFlag(true);
       }
       _authenticated = false;
+      if (_lockedRetryMs > 0) {
+        // This close follows an ``auth_locked`` frame: the server is
+        // rate-limiting this IP after too many failed logins.  Keep
+        // the lockout explanation on the overlay (do NOT overwrite it
+        // with the generic label below) and hold off reconnecting
+        // until the server-provided lockout expiry — the fast backoff
+        // would only harvest more silent refusals.  The wake-up
+        // listeners may still reconnect earlier; the server then just
+        // re-sends ``auth_locked`` with a fresher ``retry_after``.
+        var lockedDelay = _lockedRetryMs;
+        _lockedRetryMs = 0;
+        window.dispatchEvent(new MessageEvent('message', {
+          data: {type: 'daemonStatus', connected: false}
+        }));
+        try { clearTimeout(_reconnectTimer); } catch (e) {}
+        _reconnectTimer = setTimeout(function () {
+          _reconnectTimer = null;
+          connect();
+        }, lockedDelay);
+        return;
+      }
       // Switch the overlay text BEFORE re-revealing it: once we have
       // had at least one successful handshake (current page or any
       // previous one, latched via sessionStorage) every overlay
@@ -3970,20 +4104,49 @@ class RemoteAccessServer:
         return secrets.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
 
     def _client_ip(self, websocket: ServerConnection) -> str:
-        """Return the source IP of *websocket*, or ``"?"`` if unknown."""
-        addr = getattr(websocket, "remote_address", None)
-        if addr and len(addr) >= 1:
-            return str(addr[0])
-        return "?"
+        """Return the rate-limit bucket key (source IP) of *websocket*.
 
-    def _is_auth_locked(self, ip: str) -> bool:
-        """Return True if *ip* is currently rate-limited.
+        The public WSS port is reached through the local ``cloudflared``
+        tunnel, which connects over **loopback**.  Using the raw TCP
+        peer address as the rate-limit key would therefore collapse
+        *every* tunnel visitor onto a single ``127.0.0.1`` bucket, so a
+        single bad actor's failed guesses (or one user fat-fingering the
+        password) would trip the brute-force lockout for **everyone** —
+        after which new visitors are refused with ``auth_locked`` and
+        never shown the password prompt at all ("the remote webapp
+        doesn't ask for a password").
+
+        To key the lockout on the *real* client instead, when the direct
+        TCP peer is loopback we trust the client IP that cloudflared
+        forwards in the upgrade request headers (``Cf-Connecting-Ip``,
+        falling back to the first hop of ``X-Forwarded-For``).  The
+        header is honoured **only** for loopback peers — a non-loopback
+        peer connecting directly (bypassing cloudflared) could otherwise
+        spoof the header to evade or poison the lockout — so direct
+        connections always fall back to their real TCP address.
+
+        Returns:
+            A stable per-client string used as the rate-limit key, or
+            ``"?"`` when the peer address is unknown.
+        """
+        addr = getattr(websocket, "remote_address", None)
+        peer_ip = str(addr[0]) if addr and len(addr) >= 1 else ""
+        if peer_ip and _is_loopback_ip(peer_ip):
+            forwarded = _forwarded_client_ip(websocket)
+            if forwarded:
+                return forwarded
+        return peer_ip or "?"
+
+    def _auth_lock_remaining(self, ip: str) -> float:
+        """Return the seconds left in *ip*'s rate-limit lock (0.0 if none).
 
         An IP becomes locked once it has accumulated
         :data:`_AUTH_FAIL_MAX` failures within the most recent
         :data:`_AUTH_FAIL_WINDOW` seconds.  The lock persists until
         :data:`_AUTH_LOCKOUT` seconds have elapsed since the last
-        recorded failure.
+        recorded failure; the returned value is the time remaining
+        until that expiry, so callers can tell a locked-out client
+        exactly when to retry.
         """
         now = time.monotonic()
         fails = self._auth_failures.get(ip, [])
@@ -4000,8 +4163,16 @@ class RemoteAccessServer:
         else:
             self._auth_failures.pop(ip, None)
         if len(fails) < _AUTH_FAIL_MAX:
-            return False
-        return (now - fails[-1]) <= _AUTH_LOCKOUT
+            return 0.0
+        return max(0.0, _AUTH_LOCKOUT - (now - fails[-1]))
+
+    def _is_auth_locked(self, ip: str) -> bool:
+        """Return True if *ip* is currently rate-limited.
+
+        Thin wrapper over :meth:`_auth_lock_remaining` kept for
+        callers/tests that only need the boolean answer.
+        """
+        return self._auth_lock_remaining(ip) > 0.0
 
     def _record_auth_failure(self, ip: str) -> None:
         """Record a failed authentication attempt from *ip*.
@@ -4037,9 +4208,26 @@ class RemoteAccessServer:
         cloudflared tunnel when no password is configured.
         """
         ip = self._client_ip(websocket)
-        if self._is_auth_locked(ip):
+        lock_remaining = self._auth_lock_remaining(ip)
+        if lock_remaining > 0.0:
+            # Tell the client WHY it is being refused before closing.
+            # Closing silently used to leave the webapp's shim staring
+            # at its loading overlay forever — the password modal only
+            # appears on ``auth_required``, so a locked-out visitor was
+            # never asked for a password at all.  Every visitor on the
+            # public cloudflared tunnel shares one loopback source IP,
+            # so one user's wrong guesses locked everyone into that
+            # promptless spinner.  The ``auth_locked`` frame lets the
+            # shim show "Too many failed login attempts" and retry
+            # (and re-prompt) once ``retry_after`` seconds elapse.  No
+            # password sent on this socket is ever examined, so the
+            # brute-force protection is fully preserved.
             logger.warning("Auth rate-limit hit for %s; closing socket", ip)
             try:
+                await websocket.send(json.dumps({
+                    "type": "auth_locked",
+                    "retry_after": math.ceil(lock_remaining),
+                }))
                 await websocket.close()
             except Exception:
                 pass
@@ -4065,7 +4253,26 @@ class RemoteAccessServer:
                     # close without counting it as a failed login.
                     await websocket.close()
                     return False
-                self._record_auth_failure(ip)
+                # Only a NON-EMPTY wrong password guess counts toward the
+                # brute-force lockout.  The ``_WS_SHIM_JS`` shim run by
+                # every fresh page-load unconditionally sends an ``auth``
+                # frame carrying the password from ``localStorage`` —
+                # which is the empty string on any device that has never
+                # logged in (a new phone, an incognito window, cleared
+                # storage).  That benign empty-password probe MUST NOT be
+                # penalised: because :meth:`_client_ip` collapses every
+                # visitor arriving through the public cloudflared tunnel
+                # to the single shared loopback IP, counting the probe let
+                # only ``_AUTH_FAIL_MAX`` normal page loads rate-limit
+                # *everyone* — after which this method closes new sockets
+                # silently (never sending ``auth_required``), so the
+                # webapp's password modal never appears and, from the
+                # user's view, "the remote webapp doesn't ask for a
+                # password".  Skipping the empty probe keeps the prompt
+                # flowing to legitimate visitors while genuine brute-force
+                # attempts (non-empty guesses) are still locked out.
+                if client_pw:
+                    self._record_auth_failure(ip)
                 if not is_retry:
                     await websocket.send(json.dumps({"type": "auth_required"}))
             await websocket.send(
