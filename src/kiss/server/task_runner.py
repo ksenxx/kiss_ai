@@ -62,6 +62,7 @@ from kiss.server.diff_merge import (
 # ``TestM4AwaitUserResponseEmptyQueue``).
 from kiss.server.helpers import tab_owns_answer_queue
 from kiss.server.json_printer import JsonPrinter
+from kiss.server.tools_file import load_tools_file
 
 logger = logging.getLogger(__name__)
 
@@ -890,12 +891,25 @@ class _TaskRunnerMixin:
             _cfg_budget = float(_vcfg.get("max_budget", 100))
             _cfg_web = _vcfg.get("use_web_browser", True)
             _model_config = build_model_config(_vcfg)
-            _agent_budget = getattr(tab.agent, "_max_budget_override", None)
-            _agent_web = getattr(tab.agent, "_web_tools_override", None)
-            _agent_model_config = getattr(
-                tab.agent,
-                "_model_config_override",
-                None,
+            # Per-task overrides supplied by API clients
+            # (``kiss.server.sorcar.run(max_budget=..., ...)``, used by
+            # the third-party agent launcher).  The fields come from
+            # outside the daemon process, so they are validated and
+            # ignored when malformed; ``None`` means "no override".
+            _raw_budget = cmd.get("maxBudget")
+            _agent_budget = (
+                float(_raw_budget)
+                if isinstance(_raw_budget, (int, float))
+                and not isinstance(_raw_budget, bool)
+                else None
+            )
+            _raw_web = cmd.get("webTools")
+            _agent_web = _raw_web if isinstance(_raw_web, bool) else None
+            _raw_model_config = cmd.get("modelConfig")
+            _agent_model_config = (
+                _raw_model_config
+                if isinstance(_raw_model_config, dict)
+                else None
             )
 
             # Invoked by ``ChatSorcarAgent.run`` the moment the run's
@@ -910,6 +924,14 @@ class _TaskRunnerMixin:
                 start_ms=start_ms,
                 client_task_id=_client_task_id_of(cmd),
             )
+
+            # Extra tools supplied by an API client
+            # (``kiss.server.sorcar.run(tools="/path/to/file.py")``):
+            # import the client-named Python file HERE, in the daemon,
+            # and register its top-level public functions as native
+            # agent tools (see ``kiss.server.tools_file``).  The
+            # client never serializes functions.
+            client_tools = load_tools_file(cmd.get("toolsFile"))
 
             for subtask_index, task_prompt in enumerate(subtasks):
                 # Record the raw user prompt so the post-task
@@ -961,6 +983,7 @@ class _TaskRunnerMixin:
                             if _agent_model_config is not None
                             else _model_config
                         ),
+                        tools=client_tools,
                         _skip_persistence=True,
                         _subscribe_tab_id=tab_id,
                         _on_task_id_allocated=on_task_id_allocated,

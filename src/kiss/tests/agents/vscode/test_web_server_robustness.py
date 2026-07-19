@@ -370,6 +370,20 @@ class TestM5SpawnRetriesOnImmediateExit(IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self._snap = _ConfigSnapshot().__enter__()
         save_config({"remote_password": ""})
+        # Widen the production fail-fast window
+        # (``proc.wait(timeout=_SPAWN_FAILFAST_WINDOW)`` in
+        # ``_spawn_cloudflared``) for the duration of this test.  On a
+        # heavily loaded machine (e.g. several pytest processes running
+        # in parallel) even the fail-fast fake below can take longer
+        # than the default 1s to exec and exit; the production code
+        # would then misclassify the doomed first spawn as healthy,
+        # skip the retry, and this test would flakily observe an
+        # invocation count of 0.  The healthy second invocation blocks
+        # ``wait`` for the full window, so keep it modest.
+        import kiss.server.web_server as ws_mod
+
+        self._orig_failfast_window = ws_mod._SPAWN_FAILFAST_WINDOW
+        ws_mod._SPAWN_FAILFAST_WINDOW = 10.0
         self._tmpdir = tempfile.mkdtemp()
         self._counter_file = os.path.join(self._tmpdir, "counter")
         Path(self._counter_file).write_text("0")
@@ -378,8 +392,8 @@ class TestM5SpawnRetriesOnImmediateExit(IsolatedAsyncioTestCase):
         # test is robust against argv differences.  Implemented as a
         # /bin/bash script because bash startup has very low and
         # consistent latency, ensuring the first invocation reliably
-        # exits within the production code's 1s fail-fast window
-        # (``proc.wait(timeout=1.0)``) in ``_spawn_cloudflared``.
+        # exits within the (widened) fail-fast window of
+        # ``_spawn_cloudflared``.
         cf = os.path.join(self._tmpdir, "cloudflared")
         Path(cf).write_text(
             "#!/bin/bash\n"
@@ -407,6 +421,9 @@ class TestM5SpawnRetriesOnImmediateExit(IsolatedAsyncioTestCase):
         await self.server.start_async()
 
     async def asyncTearDown(self) -> None:
+        import kiss.server.web_server as ws_mod
+
+        ws_mod._SPAWN_FAILFAST_WINDOW = self._orig_failfast_window
         os.environ["PATH"] = self._old_path
         proc = self.server._tunnel_proc
         if proc is not None:
@@ -423,10 +440,10 @@ class TestM5SpawnRetriesOnImmediateExit(IsolatedAsyncioTestCase):
 
     async def test_spawn_retries_on_immediate_exit(self) -> None:
         """First spawn exits with rc=7, second succeeds; final proc is alive."""
-        # The production fail-fast window is ``proc.wait(timeout=1.0)``:
-        # it returns as soon as the first (failing) fake exits and
-        # tolerates bash startup latency well within the 1s budget, so
-        # no timing hooks are needed here.
+        # The production fail-fast window (widened to 10s in
+        # ``asyncSetUp``) returns as soon as the first (failing) fake
+        # exits and tolerates bash startup latency even on a heavily
+        # loaded machine.
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(
             None, self.server._spawn_cloudflared,
