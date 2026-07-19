@@ -114,6 +114,9 @@
           <input type="text" id="history-search" placeholder="Search history...">
           <button class="search-clear-btn" id="history-search-clear" style="display:none;">&times;</button>
         </div>
+        <div id="history-filters-panel" class="history-filters-panel">
+          <button type="button" id="history-filters-toggle" class="history-filters-toggle" aria-expanded="true" aria-controls="history-filters-body"><svg class="history-filters-chevron" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg><span class="history-filters-title">Filters</span></button>
+          <div id="history-filters-body" class="history-filters-body">
         <div class="history-filter-bar">
           <div class="history-filter-chips" role="group" aria-label="Filter tasks by status">
             <label class="hf-chip hf-chip-running" title="Show running tasks">
@@ -137,6 +140,8 @@
             <span class="hf-daterange-sep" aria-hidden="true">&#8594;</span>
             <span class="history-filter-date-group"><label for="hf-to" class="history-filter-date-lbl">To</label><input type="date" id="hf-to" class="history-filter-date" title="To date" aria-label="To date"><button type="button" id="hf-to-btn" class="history-filter-date-btn" title="Pick To date" aria-label="Pick To date"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="1.75" y="2.75" width="12.5" height="11.5" rx="1.5"/><path d="M1.75 6.25h12.5M5 1v3M11 1v3"/></svg></button></span>
             <button type="button" id="hf-date-clear" class="hf-date-clear" title="Clear date range" aria-label="Clear date range" style="display:none;">&times;</button>
+          </div>
+        </div>
           </div>
         </div>
         <div id="history-list">

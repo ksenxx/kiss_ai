@@ -695,6 +695,133 @@ async function run() {
     window.close();
   }
 
+  // ---------------------------------------------------------------
+  // Rate-limit lockout (``auth_locked``): the server refuses a locked
+  // IP with an explanation instead of a silent close.  The shim must
+  // (a) show WHY on the overlay, (b) keep that label across the
+  // ensuing close (not overwrite it with "starting ..."), (c) skip the
+  // fast reconnect backoff and wait out ``retry_after``, and (d)
+  // re-prompt for the password on the post-lockout reconnect.
+  // Previously the silent close left every tunnel visitor staring at
+  // a promptless spinner forever ("the webapp doesn't ask for a
+  // password").
+  // ---------------------------------------------------------------
+  {
+    const dom = buildDom();
+    const {window} = dom;
+    const sockets = [];
+    installFakeWebSocket(window, sockets);
+    wireOverlayContract(window);
+    evalShim(window, shimJs);
+    const sock = sockets[0];
+    sock.fireOpen();
+
+    const overlay = window.document.getElementById('kiss-server-loading');
+    const app = window.document.getElementById('app');
+    const msgEl = window.document.getElementById('kiss-server-loading-msg');
+
+    sock.fireMessage({type: 'auth_locked', retry_after: 1});
+    try {
+      assert.strictEqual(
+        msgEl.textContent,
+        'Too many failed login attempts. ' +
+          'Asking for the password again in 1s ...',
+        'auth_locked must explain the lockout on the overlay',
+      );
+      assert.ok(isVisible(overlay), 'overlay shown while locked');
+      assert.ok(!isVisible(app), 'app stays gated while locked');
+      ok('auth_locked relabels the overlay with the lockout explanation');
+    } catch (err) {
+      fail('auth_locked overlay explanation missing', err);
+    }
+
+    // The server closes right after auth_locked.  Sabotage
+    // clearTimeout so the locked path's defensive catch is exercised
+    // (hostile/broken environments must not break the delayed retry).
+    window.clearTimeout = function () {
+      throw new Error('clearTimeout blocked');
+    };
+    sock.fireClose();
+    try {
+      assert.strictEqual(
+        msgEl.textContent,
+        'Too many failed login attempts. ' +
+          'Asking for the password again in 1s ...',
+        'the close after auth_locked must not overwrite the explanation',
+      );
+      assert.ok(isVisible(overlay), 'overlay stays shown after the close');
+      ok('the lockout label survives the server closing the socket');
+    } catch (err) {
+      fail('lockout label overwritten by the close handler', err);
+    }
+
+    // No reconnect on the fast backoff (250ms): the shim must wait
+    // out the server-provided lockout (1s) before retrying.
+    await sleep(400);
+    try {
+      assert.strictEqual(
+        sockets.length, 1,
+        'locked shim must NOT reconnect on the fast backoff',
+      );
+      ok('locked shim skips the fast reconnect backoff');
+    } catch (err) {
+      fail('locked shim reconnected too early', err);
+    }
+    await sleep(900);
+    try {
+      assert.strictEqual(
+        sockets.length, 2,
+        'shim must reconnect once retry_after has elapsed',
+      );
+      ok('shim reconnects after the lockout expires');
+    } catch (err) {
+      fail('post-lockout reconnect missing', err);
+    }
+
+    // The post-lockout handshake finally re-prompts for the password.
+    const s1 = sockets[1];
+    s1.fireOpen();
+    s1.fireMessage({type: 'auth_required'});
+    const modal = window.document.getElementById('auth-modal');
+    try {
+      assert.ok(isVisible(modal), 'password modal opens after the lockout');
+      ok('the password prompt appears on the post-lockout reconnect');
+    } catch (err) {
+      fail('no password prompt after the lockout expired', err);
+    }
+    window.close();
+  }
+
+  // ---------------------------------------------------------------
+  // auth_locked hardening: a missing/invalid ``retry_after`` falls
+  // back to 60s, and a DOM without the overlay message node makes the
+  // lockout label a harmless no-op.
+  // ---------------------------------------------------------------
+  {
+    const dom = buildDom({noModal: true});
+    const {window} = dom;
+    const sockets = [];
+    installFakeWebSocket(window, sockets);
+    wireOverlayContract(window);
+    evalShim(window, shimJs);
+    const sock = sockets[0];
+    sock.fireOpen();
+    // No retry_after at all -> Number(undefined) is NaN -> 60s default.
+    sock.fireMessage({type: 'auth_locked'});
+    sock.fireClose();
+    await sleep(400);
+    try {
+      assert.strictEqual(
+        sockets.length, 1,
+        'invalid retry_after must default to 60s, not instant retry',
+      );
+      ok('missing retry_after defaults to a 60s wait; no msg node is fine');
+    } catch (err) {
+      fail('invalid retry_after handling broken', err);
+    }
+    window.close();
+  }
+
   console.log('\nAll remotePasswordBypass tests passed.');
 }
 
