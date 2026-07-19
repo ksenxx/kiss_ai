@@ -7,8 +7,10 @@
 //
 // REQUIREMENT: every event panel in the chat webview (tool_call,
 // tool_result error, tool output, Result, Prompt, System Prompt,
-// Thoughts) must show a human-readable COMPACT timestamp of the event
-// (its ``ts`` field, ms since epoch) at the LEFT of the panel's
+// Thoughts) must show a human-readable timestamp of the event — its
+// FULL DATE plus a SECONDS-precision time of day
+// ("Mar 5, 2021 2:07:33 PM") — from the event's ``ts`` field (ms
+// since epoch) at the LEFT of the panel's
 // BOTTOM footer bar — the same ``div.panel-time`` bar whose RIGHT
 // side shows the right-aligned "time spent" label
 // (``span.panel-elapsed``) — in both the VS Code extension webview
@@ -24,9 +26,8 @@
 //     Copy button's clipboard payload or the collapsed header
 //     preview;
 //   * events without a ``ts`` render no badge (old persisted rows);
-//   * replayed ``task_events`` show the ORIGINAL event time (with a
-//     date part when the event is from another day / year) at the
-//     bottom of the panel, with the bar re-anchored below content
+//   * replayed ``task_events`` show the ORIGINAL event date + time at
+//     the bottom of the panel, with the bar re-anchored below content
 //     appended after it;
 //   * the badge is idempotent (one per panel) and survives the
 //     early-prompt in-place replacement.
@@ -171,39 +172,31 @@ function flushMicrotasks() {
 }
 
 /**
- * The compact label the badge must show for ``ts``.  Mirrors the
- * documented contract: time-of-day for a same-day event, "Mon D" +
- * time for another day of the current year, "Mon D, YYYY" + time
- * otherwise (all in the user's locale).
+ * The label the badge must show for ``ts``.  Mirrors the documented
+ * contract: EVERY event carries its full date ("Mon D, YYYY") and a
+ * seconds-precision time of day, in the user's locale.
  */
-function expectedLabel(ts, now) {
+function expectedLabel(ts) {
   const d = new Date(ts);
-  const n = now instanceof Date ? now : new Date();
-  const time = d.toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'});
-  if (
-    d.getFullYear() === n.getFullYear() &&
-    d.getMonth() === n.getMonth() &&
-    d.getDate() === n.getDate()
-  )
-    return time;
-  const day = d.toLocaleDateString([], {month: 'short', day: 'numeric'});
-  if (d.getFullYear() === n.getFullYear()) return day + ' ' + time;
-  return (
-    d.toLocaleDateString([], {
-      month: 'short',
-      day: 'numeric',
-      year: 'numeric',
-    }) +
-    ' ' +
-    time
-  );
+  const day = d.toLocaleDateString([], {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  });
+  const time = d.toLocaleTimeString([], {
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+  return day + ' ' + time;
 }
 
 /**
  * Assert that ``panel`` carries exactly one bottom footer bar
  * (direct-child ``.panel-time``, anchored as the panel's LAST child)
- * whose FIRST child is a ``.panel-ts`` badge showing ``ts``'s compact
- * label — i.e. the timestamp renders at the bottom-LEFT of the panel,
+ * whose FIRST child is a ``.panel-ts`` badge showing ``ts``'s full
+ * date + seconds-precision time label — i.e. the timestamp renders
+ * at the bottom-LEFT of the panel,
  * in the same bar as the "time spent" label, NOT in the title row.
  */
 function assertBadge(panel, ts, what) {
@@ -409,7 +402,7 @@ async function run() {
   // -------------------------------------------------------------------
   // 1. Extension webview: every event panel shows its badge.
   // -------------------------------------------------------------------
-  await test('extension webview: every event panel shows the compact timestamp at the LEFT of its bottom time-spent bar', async () => {
+  await test('extension webview: every event panel shows the date + seconds timestamp at the LEFT of its bottom time-spent bar', async () => {
     const wv = makeWebview();
     await runFullTranscript(wv, 'extension');
     wv.win.close();
@@ -418,7 +411,7 @@ async function run() {
   // -------------------------------------------------------------------
   // 2. Remote web app: same wiring, same badges.
   // -------------------------------------------------------------------
-  await test('remote web app: every event panel shows the compact timestamp at the LEFT of its bottom time-spent bar', async () => {
+  await test('remote web app: every event panel shows the date + seconds timestamp at the LEFT of its bottom time-spent bar', async () => {
     const wv = makeWebview({remote: true});
     assert.ok(
       wv.win.document.body.classList.contains('remote-chat'),
@@ -696,34 +689,35 @@ async function run() {
   });
 
   // -------------------------------------------------------------------
-  // 8. formatEventTs: compact-format edge cases (shared helper).
+  // 8. formatEventTs: date + seconds format edge cases (shared helper).
   // -------------------------------------------------------------------
-  await test('formatEventTs formats same-day / same-year / other-year / invalid', () => {
+  await test('formatEventTs always formats full date + seconds-precision time', () => {
     const wv = makeWebview();
     const {PanelCopy} = wv.win;
     assert.strictEqual(typeof PanelCopy.formatEventTs, 'function');
-    const now = new Date(2026, 5, 15, 10, 0); // Jun 15 2026 10:00
-    const sameDay = new Date(2026, 5, 15, 9, 5).getTime();
-    const sameYear = new Date(2026, 0, 2, 23, 59).getTime();
-    const otherYear = new Date(2024, 11, 31, 0, 30).getTime();
+    const sameDay = new Date(2026, 5, 15, 9, 5, 42).getTime();
+    const sameYear = new Date(2026, 0, 2, 23, 59, 7).getTime();
+    const otherYear = new Date(2024, 11, 31, 0, 30, 59).getTime();
     assert.strictEqual(
-      PanelCopy.formatEventTs(sameDay, now),
-      expectedLabel(sameDay, now),
+      PanelCopy.formatEventTs(sameDay),
+      expectedLabel(sameDay),
     );
     assert.strictEqual(
-      PanelCopy.formatEventTs(sameYear, now),
-      expectedLabel(sameYear, now),
+      PanelCopy.formatEventTs(sameYear),
+      expectedLabel(sameYear),
     );
     assert.strictEqual(
-      PanelCopy.formatEventTs(otherYear, now),
-      expectedLabel(otherYear, now),
+      PanelCopy.formatEventTs(otherYear),
+      expectedLabel(otherYear),
     );
-    // Same-day labels are pure time-of-day (no date part).
-    assert.ok(!/2026/.test(PanelCopy.formatEventTs(sameDay, now)));
-    // Same-year labels carry a date but no year.
-    assert.ok(!/2026/.test(PanelCopy.formatEventTs(sameYear, now)));
-    // Other-year labels carry the year.
-    assert.ok(/2024/.test(PanelCopy.formatEventTs(otherYear, now)));
+    // EVERY label carries the full date (year included) — even for a
+    // recent same-day event — and the seconds of the time of day.
+    assert.ok(/2026/.test(PanelCopy.formatEventTs(sameDay)));
+    assert.ok(/:05:42/.test(PanelCopy.formatEventTs(sameDay)));
+    assert.ok(/2026/.test(PanelCopy.formatEventTs(sameYear)));
+    assert.ok(/:59:07/.test(PanelCopy.formatEventTs(sameYear)));
+    assert.ok(/2024/.test(PanelCopy.formatEventTs(otherYear)));
+    assert.ok(/:30:59/.test(PanelCopy.formatEventTs(otherYear)));
     // Invalid / missing / non-positive inputs render nothing.
     assert.strictEqual(PanelCopy.formatEventTs(undefined), '');
     assert.strictEqual(PanelCopy.formatEventTs(null), '');

@@ -744,7 +744,7 @@
   /**
    * Create a fresh collapsible 'Thoughts' llm-panel.  *ts* (optional,
    * ms since epoch) is the timestamp of the event that opened the
-   * panel; it renders as the compact time badge at the left of the
+   * panel; it renders as the date + seconds time badge at the left of the
    * panel's bottom footer bar.
    */
   function mkThoughtsPanel(ts) {
