@@ -48,6 +48,7 @@ import hashlib
 import ipaddress
 import json
 import logging
+import math
 import mimetypes
 import os
 import platform
@@ -3018,6 +3019,30 @@ _WS_SHIM_JS = r"""
       : 'KISS Sorcar Server is starting ...';
   }
 
+  // Non-zero while the server has told us (via an ``auth_locked``
+  // frame) that this source IP is rate-limited after too many failed
+  // logins.  Holds the retry delay in milliseconds; consumed by the
+  // ``onclose`` handler so the follow-up reconnect waits out the
+  // lockout instead of hammering the server on the fast backoff, and
+  // so the overlay keeps showing the lockout explanation rather than
+  // the generic "starting ..." label.
+  var _lockedRetryMs = 0;
+
+  /**
+   * Replace the overlay text with the auth-lockout explanation.
+   *
+   * Shown when the server answers the handshake with ``auth_locked``:
+   * without this the user would stare at a promptless "KISS Sorcar
+   * Server is starting ..." spinner with no hint that the remote
+   * password rate-limit is what is keeping the password modal away.
+   */
+  function _showLockedMsg(secs) {
+    var msg = document.getElementById('kiss-server-loading-msg');
+    if (!msg) return;
+    msg.textContent = 'Too many failed login attempts. ' +
+      'Asking for the password again in ' + secs + 's ...';
+  }
+
   // Apply the reconnect label immediately on script start when the
   // sessionStorage flag survives from the prior page instance.  Without
   // this the user would briefly see "Server is starting ..." after
@@ -3245,6 +3270,27 @@ _WS_SHIM_JS = r"""
         });
         return;
       }
+      if (msg.type === 'auth_locked') {
+        // The server refused the handshake because this source IP is
+        // rate-limited after too many failed logins (behind the
+        // cloudflared tunnel EVERY visitor shares one loopback IP, so
+        // this can be someone else's guesses).  The server closes the
+        // socket right after this frame.  Explain the wait on the
+        // overlay and remember the retry delay so ``onclose`` waits
+        // out the lockout instead of reconnecting on the fast backoff
+        // — the eventual reconnect gets ``auth_required`` again and
+        // the password modal finally appears.
+        var secs = Math.ceil(Number(msg.retry_after));
+        if (!(secs > 0)) secs = 60;
+        _lockedRetryMs = secs * 1000;
+        _showLockedMsg(secs);
+        // Re-gate the app while we wait (idempotent when the loading
+        // overlay is already up, e.g. on a fresh page load).
+        window.dispatchEvent(new MessageEvent('message', {
+          data: {type: 'daemonStatus', connected: false}
+        }));
+        return;
+      }
       // SECURITY — never forward server data frames to the app before
       // the connection is authenticated.  ``auth_ok`` / ``auth_required``
       // are handled above; any other frame that arrives while
@@ -3274,6 +3320,27 @@ _WS_SHIM_JS = r"""
         _setReconnectingFlag(true);
       }
       _authenticated = false;
+      if (_lockedRetryMs > 0) {
+        // This close follows an ``auth_locked`` frame: the server is
+        // rate-limiting this IP after too many failed logins.  Keep
+        // the lockout explanation on the overlay (do NOT overwrite it
+        // with the generic label below) and hold off reconnecting
+        // until the server-provided lockout expiry — the fast backoff
+        // would only harvest more silent refusals.  The wake-up
+        // listeners may still reconnect earlier; the server then just
+        // re-sends ``auth_locked`` with a fresher ``retry_after``.
+        var lockedDelay = _lockedRetryMs;
+        _lockedRetryMs = 0;
+        window.dispatchEvent(new MessageEvent('message', {
+          data: {type: 'daemonStatus', connected: false}
+        }));
+        try { clearTimeout(_reconnectTimer); } catch (e) {}
+        _reconnectTimer = setTimeout(function () {
+          _reconnectTimer = null;
+          connect();
+        }, lockedDelay);
+        return;
+      }
       // Switch the overlay text BEFORE re-revealing it: once we have
       // had at least one successful handshake (current page or any
       // previous one, latched via sessionStorage) every overlay
@@ -3976,14 +4043,16 @@ class RemoteAccessServer:
             return str(addr[0])
         return "?"
 
-    def _is_auth_locked(self, ip: str) -> bool:
-        """Return True if *ip* is currently rate-limited.
+    def _auth_lock_remaining(self, ip: str) -> float:
+        """Return the seconds left in *ip*'s rate-limit lock (0.0 if none).
 
         An IP becomes locked once it has accumulated
         :data:`_AUTH_FAIL_MAX` failures within the most recent
         :data:`_AUTH_FAIL_WINDOW` seconds.  The lock persists until
         :data:`_AUTH_LOCKOUT` seconds have elapsed since the last
-        recorded failure.
+        recorded failure; the returned value is the time remaining
+        until that expiry, so callers can tell a locked-out client
+        exactly when to retry.
         """
         now = time.monotonic()
         fails = self._auth_failures.get(ip, [])
@@ -4000,8 +4069,16 @@ class RemoteAccessServer:
         else:
             self._auth_failures.pop(ip, None)
         if len(fails) < _AUTH_FAIL_MAX:
-            return False
-        return (now - fails[-1]) <= _AUTH_LOCKOUT
+            return 0.0
+        return max(0.0, _AUTH_LOCKOUT - (now - fails[-1]))
+
+    def _is_auth_locked(self, ip: str) -> bool:
+        """Return True if *ip* is currently rate-limited.
+
+        Thin wrapper over :meth:`_auth_lock_remaining` kept for
+        callers/tests that only need the boolean answer.
+        """
+        return self._auth_lock_remaining(ip) > 0.0
 
     def _record_auth_failure(self, ip: str) -> None:
         """Record a failed authentication attempt from *ip*.
@@ -4037,9 +4114,26 @@ class RemoteAccessServer:
         cloudflared tunnel when no password is configured.
         """
         ip = self._client_ip(websocket)
-        if self._is_auth_locked(ip):
+        lock_remaining = self._auth_lock_remaining(ip)
+        if lock_remaining > 0.0:
+            # Tell the client WHY it is being refused before closing.
+            # Closing silently used to leave the webapp's shim staring
+            # at its loading overlay forever — the password modal only
+            # appears on ``auth_required``, so a locked-out visitor was
+            # never asked for a password at all.  Every visitor on the
+            # public cloudflared tunnel shares one loopback source IP,
+            # so one user's wrong guesses locked everyone into that
+            # promptless spinner.  The ``auth_locked`` frame lets the
+            # shim show "Too many failed login attempts" and retry
+            # (and re-prompt) once ``retry_after`` seconds elapse.  No
+            # password sent on this socket is ever examined, so the
+            # brute-force protection is fully preserved.
             logger.warning("Auth rate-limit hit for %s; closing socket", ip)
             try:
+                await websocket.send(json.dumps({
+                    "type": "auth_locked",
+                    "retry_after": math.ceil(lock_remaining),
+                }))
                 await websocket.close()
             except Exception:
                 pass

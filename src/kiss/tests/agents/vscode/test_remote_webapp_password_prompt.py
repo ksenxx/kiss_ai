@@ -33,6 +33,25 @@ password?"):
     ``auth_required`` (and therefore the password prompt), while genuine
     brute-force attempts (non-empty guesses) are still locked out.
 
+Second reported bug ("it still does not ask for a password"):
+
+    Even with empty probes exempted, the lockout itself still hid the
+    prompt: once :data:`_AUTH_FAIL_MAX` NON-EMPTY wrong guesses landed
+    on the shared tunnel IP (one user mistyping, or stale cached
+    passwords replayed by other devices), :meth:`_authenticate_ws`
+    closed every new socket *silently* for :data:`_AUTH_LOCKOUT`
+    seconds.  The shim's password modal only appears on
+    ``auth_required``, so every visitor — including ones who never
+    typed anything wrong — just saw the loading overlay spin forever.
+
+    The fix: a locked connection is now told WHY before the close via
+    ``{"type": "auth_locked", "retry_after": <seconds>}``.  The shim
+    renders "Too many failed login attempts ..." on the overlay and
+    reconnects after ``retry_after`` seconds, at which point the
+    normal ``auth_required`` handshake re-prompts for the password.
+    No password sent on a locked socket is ever examined, so the
+    brute-force protection is unchanged.
+
 These tests drive real WSS handshakes against a live
 ``RemoteAccessServer`` (no mocks), exactly like
 ``test_password_persistence.py``.
@@ -41,6 +60,7 @@ These tests drive real WSS handshakes against a live
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import socket
 import ssl
@@ -53,6 +73,7 @@ from websockets.asyncio.client import connect
 from kiss.core.vscode_config import CONFIG_PATH, save_config
 from kiss.server.web_server import (
     _AUTH_FAIL_MAX,
+    _AUTH_LOCKOUT,
     RemoteAccessServer,
 )
 
@@ -114,13 +135,20 @@ class TestRemoteWebappAlwaysPrompts(IsolatedAsyncioTestCase):
 
         Simulates a single fresh page-load: one WS connection, one
         ``auth`` frame, read the first reply.  Returns the server's
-        message ``type`` (``"auth_ok"`` / ``"auth_required"`` / ...), or
-        ``None`` when the server closed the socket without replying
-        (the silent-lockout path that hides the password prompt).
+        message ``type`` (``"auth_ok"`` / ``"auth_required"`` /
+        ``"auth_locked"`` / ...), or ``None`` when the server closed
+        the socket without replying at all (the silent-close path that
+        hides the password prompt).  A locked server sends
+        ``auth_locked`` and closes immediately — possibly before our
+        ``send`` completes — so a send failure alone must not hide the
+        already-buffered reply.
         """
         try:
             async with await self._ws_connect() as ws:
-                await ws.send(json.dumps({"type": "auth", "password": password}))
+                with contextlib.suppress(Exception):
+                    await ws.send(
+                        json.dumps({"type": "auth", "password": password})
+                    )
                 raw = await asyncio.wait_for(ws.recv(), timeout=5)
                 msg = json.loads(raw)
                 return str(msg.get("type"))
@@ -173,8 +201,9 @@ class TestRemoteWebappAlwaysPrompts(IsolatedAsyncioTestCase):
 
         The fix must not weaken brute-force protection: a burst of
         NON-EMPTY wrong passwords beyond :data:`_AUTH_FAIL_MAX` must
-        eventually be refused with a silent close (``None``), not an
-        endless supply of ``auth_required`` prompts.
+        eventually be refused with an ``auth_locked`` frame (whose
+        password is never examined), not an endless supply of
+        ``auth_required`` prompts.
         """
         # The first few wrong guesses are answered with auth_required.
         first = await self._probe("wrong-guess-0")
@@ -186,13 +215,13 @@ class TestRemoteWebappAlwaysPrompts(IsolatedAsyncioTestCase):
         got_locked = False
         for i in range(1, _AUTH_FAIL_MAX * 3):
             reply = await self._probe(f"wrong-guess-{i}")
-            if reply is None:
+            if reply == "auth_locked":
                 got_locked = True
                 break
         self.assertTrue(
             got_locked,
             "A sustained burst of NON-EMPTY wrong passwords must "
-            "eventually lock the IP (silent close), preserving "
+            "eventually lock the IP (auth_locked refusal), preserving "
             "brute-force protection.",
         )
 
@@ -253,13 +282,19 @@ class TestRemoteWebappAlwaysPrompts(IsolatedAsyncioTestCase):
         # The malformed frame must not have locked the IP.
         self.assertEqual(await self._probe(""), "auth_required")
 
-    async def test_connect_while_locked_is_closed_silently(self) -> None:
-        """Once genuinely locked, a new connection is closed with no reply.
+    async def test_connect_while_locked_gets_auth_locked_then_close(self) -> None:
+        """A locked visitor is told why and when to retry, then closed.
 
-        After ``_AUTH_FAIL_MAX`` non-empty wrong guesses the shared IP is
-        locked; the very next connection must be closed by the top-of-
-        method lock check WITHOUT any ``auth_required`` (silent close).
-        This is the brute-force protection the fix deliberately keeps.
+        Reproduces the second reported bug: after ``_AUTH_FAIL_MAX``
+        non-empty wrong guesses the shared IP is locked, and the old
+        behaviour closed the very next connection SILENTLY — the shim
+        never received the ``auth_required`` that triggers its password
+        modal, so the webapp spun forever without asking for a
+        password.  The fix requires the top-of-method lock check to
+        send ``{"type": "auth_locked", "retry_after": <seconds>}``
+        BEFORE closing, so the shim can explain the lockout and
+        re-prompt once it expires.  The lockout itself (no password on
+        this socket is ever examined) is deliberately preserved.
         """
         for i in range(_AUTH_FAIL_MAX):
             self.assertEqual(
@@ -268,11 +303,32 @@ class TestRemoteWebappAlwaysPrompts(IsolatedAsyncioTestCase):
                 f"Setup guess #{i} must be processed (auth_required) so the "
                 "lockout is driven by genuine recorded non-empty failures.",
             )
-        # The IP is now locked: a fresh connection gets no reply at all.
-        self.assertIsNone(
-            await self._probe("still-locked"),
-            "A locked IP must be closed silently (no auth_required).",
-        )
+        # The IP is now locked: the next connection is refused, but no
+        # longer silently — it must carry the auth_locked explanation.
+        # The server sends it and closes without ever reading from the
+        # socket, so our auth frame may fail to send (the CORRECT
+        # password below is deliberately never examined).
+        async with await self._ws_connect() as ws:
+            with contextlib.suppress(Exception):
+                await ws.send(
+                    json.dumps({"type": "auth", "password": _PASSWORD})
+                )
+            raw = await asyncio.wait_for(ws.recv(), timeout=5)
+            msg = json.loads(raw)
+            self.assertEqual(
+                msg.get("type"),
+                "auth_locked",
+                "A locked IP must be refused with an explicit auth_locked "
+                "frame (silent close hides the password prompt forever).",
+            )
+            retry_after = msg.get("retry_after")
+            self.assertIsInstance(retry_after, int)
+            self.assertGreater(retry_after, 0)
+            self.assertLessEqual(retry_after, int(_AUTH_LOCKOUT))
+            # Even the CORRECT password sent on a locked socket is never
+            # examined: the server closes right after auth_locked.
+            with self.assertRaises(Exception):
+                await asyncio.wait_for(ws.recv(), timeout=5)
 
     async def test_non_auth_first_message_closes_without_penalty(self) -> None:
         """A non-``auth`` first frame closes but never counts as a failure.
