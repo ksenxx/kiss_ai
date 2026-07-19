@@ -1747,6 +1747,10 @@
       chatId: activeTabId,
       taskDrawerCollapsed: taskDrawerCollapsed,
       inputDrawerCollapsed: inputDrawerCollapsed,
+      // Marks the drawer booleans as written by a build that knows
+      // the mobile collapsed default (see the seeding block below):
+      // only blobs carrying this version may override that default.
+      drawersVersion: DRAWERS_VERSION,
     });
   }
 
@@ -1761,13 +1765,51 @@
   // The drawer-coverage markers delimit the feature code measured by
   // test/drawerPanels.coverage.js (100% line coverage enforced).
   // drawer-coverage:start
-  let taskDrawerCollapsed = false;
-  let inputDrawerCollapsed = false;
+  /**
+   * True when this page is the remote web app (body.remote-chat)
+   * running on a mobile device — a phone or tablet.  Checks the UA
+   * Client Hints mobile flag first (Chromium), then the classic
+   * user-agent tokens, and finally catches iPadOS Safari, which
+   * masquerades as desktop "Macintosh" but exposes a multi-touch
+   * screen.  The VS Code extension webview (no body.remote-chat
+   * class) is never treated as mobile.
+   */
+  function isMobileRemoteWebApp() {
+    if (!document.body.classList.contains('remote-chat')) return false;
+    const uaData = navigator.userAgentData;
+    if (uaData && uaData.mobile === true) return true;
+    const ua = navigator.userAgent || '';
+    if (/Android|iPhone|iPad|iPod|Mobile|IEMobile|Opera Mini/i.test(ua)) {
+      return true;
+    }
+    return /Macintosh/i.test(ua) && navigator.maxTouchPoints > 1;
+  }
+
+  // On a mobile device the remote web app OPENS with both drawers
+  // COLLAPSED — the pinned task panel and the composer (input textbox
+  // + buttons panel) tuck into slim bars so the small screen is spent
+  // on the chat events area.  The user's own persisted toggle choice
+  // still wins below, but ONLY when the saved blob carries
+  // ``drawersVersion`` >= DRAWERS_VERSION: older builds auto-persisted
+  // ``taskDrawerCollapsed:false`` on every boot (never a user choice),
+  // so on mobile a legacy blob must not resurrect the expanded
+  // drawers.  On desktop the default never changed, so legacy values
+  // restore as before.
+  const DRAWERS_VERSION = 2;
+  const mobileDrawerDefault = isMobileRemoteWebApp();
+  let taskDrawerCollapsed = mobileDrawerDefault;
+  let inputDrawerCollapsed = mobileDrawerDefault;
   {
-    const _savedDrawers = vscode.getState();
-    if (_savedDrawers) {
-      taskDrawerCollapsed = !!_savedDrawers.taskDrawerCollapsed;
-      inputDrawerCollapsed = !!_savedDrawers.inputDrawerCollapsed;
+    const _saved = vscode.getState();
+    const _drawersTrusted =
+      _saved &&
+      typeof _saved === 'object' &&
+      (!mobileDrawerDefault || _saved.drawersVersion >= DRAWERS_VERSION);
+    if (_drawersTrusted && 'taskDrawerCollapsed' in _saved) {
+      taskDrawerCollapsed = !!_saved.taskDrawerCollapsed;
+    }
+    if (_drawersTrusted && 'inputDrawerCollapsed' in _saved) {
+      inputDrawerCollapsed = !!_saved.inputDrawerCollapsed;
     }
   }
   // drawer-coverage:end
