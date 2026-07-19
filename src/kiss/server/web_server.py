@@ -4065,7 +4065,26 @@ class RemoteAccessServer:
                     # close without counting it as a failed login.
                     await websocket.close()
                     return False
-                self._record_auth_failure(ip)
+                # Only a NON-EMPTY wrong password guess counts toward the
+                # brute-force lockout.  The ``_WS_SHIM_JS`` shim run by
+                # every fresh page-load unconditionally sends an ``auth``
+                # frame carrying the password from ``localStorage`` —
+                # which is the empty string on any device that has never
+                # logged in (a new phone, an incognito window, cleared
+                # storage).  That benign empty-password probe MUST NOT be
+                # penalised: because :meth:`_client_ip` collapses every
+                # visitor arriving through the public cloudflared tunnel
+                # to the single shared loopback IP, counting the probe let
+                # only ``_AUTH_FAIL_MAX`` normal page loads rate-limit
+                # *everyone* — after which this method closes new sockets
+                # silently (never sending ``auth_required``), so the
+                # webapp's password modal never appears and, from the
+                # user's view, "the remote webapp doesn't ask for a
+                # password".  Skipping the empty probe keeps the prompt
+                # flowing to legitimate visitors while genuine brute-force
+                # attempts (non-empty guesses) are still locked out.
+                if client_pw:
+                    self._record_auth_failure(ip)
                 if not is_retry:
                     await websocket.send(json.dumps({"type": "auth_required"}))
             await websocket.send(
