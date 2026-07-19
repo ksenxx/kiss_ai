@@ -61,6 +61,23 @@ _DISPLAY_EVENT_TYPES = frozenset({
 })
 
 
+def stamp_event_ts(event: dict[str, Any]) -> None:
+    """Stamp *event* with its wall-clock emission time, in place.
+
+    Adds a ``ts`` field (ms since the epoch) when the event does not
+    already carry one, so live transports, in-memory recordings, and
+    the persisted DB rows all agree on WHEN the event happened and the
+    chat webview (extension and remote web app alike) can render the
+    compact per-panel timestamp badge — including on replays, which
+    keep the original stamp.
+
+    Args:
+        event: The event dictionary to stamp (mutated in place).
+    """
+    if "ts" not in event:
+        event["ts"] = int(time.time() * 1000)
+
+
 def _coalesce_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Merge consecutive delta events of the same type to reduce storage size.
 
@@ -613,6 +630,7 @@ class JsonPrinter(Printer):
         Args:
             event: The event dictionary to broadcast.
         """
+        stamp_event_ts(event)
         event.pop("recordOnly", None)
         if event.get("type") in GLOBAL_EVENT_TYPES:
             # Global system broadcast (e.g. ``taskDeleted``): its

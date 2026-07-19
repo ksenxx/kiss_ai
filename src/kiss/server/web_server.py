@@ -79,7 +79,11 @@ from websockets.http11 import Request, Response
 from kiss.core.config import get_jobs_root, kiss_home
 from kiss.core.vscode_config import load_config, source_shell_env
 from kiss.server.diff_merge import _read_lines_preserved as _read_lines_preserved
-from kiss.server.json_printer import GLOBAL_EVENT_TYPES, JsonPrinter
+from kiss.server.json_printer import (
+    GLOBAL_EVENT_TYPES,
+    JsonPrinter,
+    stamp_event_ts,
+)
 from kiss.server.server import VSCodeServer, broadcast_to_conn
 from kiss.server.tips import read_tips
 from kiss.server.tricks import read_tricks
@@ -2083,6 +2087,12 @@ class WebPrinter(JsonPrinter):
         Args:
             event: The event dictionary to emit.
         """
+        # Stamp the wall-clock emission time (ms since epoch) before
+        # any transport / recording / persistence path so the chat
+        # webview's per-panel timestamp badge agrees everywhere (live,
+        # replay, extension, remote web app).  Pre-stamped events
+        # (e.g. replayed copies) keep their original ``ts``.
+        stamp_event_ts(event)
         conn_id = event.pop("connId", "")
         record_only = bool(event.pop("recordOnly", False))
         if event.get("type") == "configData":

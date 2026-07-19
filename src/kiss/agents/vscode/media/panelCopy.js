@@ -38,7 +38,12 @@
 
   // CSS classes for purely visual sub-nodes that must not leak into the
   // clipboard payload.
-  const SKIP_CLASSES = ['panel-copy-btn', 'collapse-chv', 'collapse-preview'];
+  const SKIP_CLASSES = [
+    'panel-copy-btn',
+    'collapse-chv',
+    'collapse-preview',
+    'panel-ts',
+  ];
 
   function shouldSkip(el) {
     if (!el || !el.classList) return false;
@@ -164,10 +169,100 @@
     panelEl.appendChild(btn);
   }
 
+  // panelts-coverage:start
+  /**
+   * Format an event timestamp (ms since epoch) as a compact
+   * human-readable label in the user's locale.
+   *
+   * Rules: a same-day event shows only its time of day ("2:07 PM");
+   * an event from another day of the current year prefixes the date
+   * ("Mar 5 2:07 PM"); an event from another year also carries the
+   * year ("Mar 5, 2021 2:07 PM").  Invalid / missing / non-positive
+   * inputs format as the empty string so callers can skip the badge.
+   *
+   * @param {number} ts - event time in ms since the epoch.
+   * @param {Date} [now] - "current" time anchor (defaults to
+   *   ``new Date()``); injectable for deterministic tests.
+   * @returns {string} the compact label, or '' when *ts* is unusable.
+   */
+  function formatEventTs(ts, now) {
+    const n = Number(ts);
+    if (!isFinite(n) || n <= 0) return '';
+    const d = new Date(n);
+    // A finite ms value can still overflow the ECMAScript Date range
+    // (±8.64e15); such a Date formats as "Invalid Date" — skip it.
+    if (!isFinite(d.getTime())) return '';
+    // Duck-type the anchor (not ``instanceof Date``): a Date created
+    // in another realm (jsdom test host, iframe) must still be usable.
+    const anchor =
+      now && typeof now.getFullYear === 'function' ? now : new Date();
+    const time = d.toLocaleTimeString([], {
+      hour: 'numeric',
+      minute: '2-digit',
+    });
+    if (
+      d.getFullYear() === anchor.getFullYear() &&
+      d.getMonth() === anchor.getMonth() &&
+      d.getDate() === anchor.getDate()
+    ) {
+      return time;
+    }
+    if (d.getFullYear() === anchor.getFullYear()) {
+      const day = d.toLocaleDateString([], {month: 'short', day: 'numeric'});
+      return day + ' ' + time;
+    }
+    const dayYear = d.toLocaleDateString([], {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+    });
+    return dayYear + ' ' + time;
+  }
+
+  /**
+   * Attach a compact event-timestamp badge to a chat panel's title row.
+   *
+   * The badge (``span.panel-ts``) is a direct child of ``panelEl``,
+   * inserted immediately BEFORE the panel's Copy button so it renders
+   * to the button's left (both are absolutely anchored to the panel's
+   * top-right corner by ``main.css``).  Its full ``toLocaleString``
+   * form is exposed as a hover tooltip.  ``panel-ts`` is in
+   * ``SKIP_CLASSES`` so the badge never leaks into the clipboard
+   * payload.
+   *
+   * Idempotent: a panel keeps its FIRST badge; later calls return it
+   * unchanged.  Returns ``null`` (and adds nothing) when *panelEl* is
+   * falsy or *ts* does not format to a label.
+   *
+   * @param {HTMLElement} panelEl - panel container to stamp.
+   * @param {number} ts - event time in ms since the epoch.
+   * @returns {HTMLElement|null} the badge element, or null.
+   */
+  function addPanelTimestamp(panelEl, ts) {
+    if (!panelEl) return null;
+    const label = formatEventTs(ts);
+    if (!label) return null;
+    const existing = panelEl.querySelector(':scope > .panel-ts');
+    if (existing) return existing;
+    panelEl.classList.add('copyable');
+    const doc = panelEl.ownerDocument || document;
+    const span = doc.createElement('span');
+    span.className = 'panel-ts';
+    span.textContent = label;
+    span.title = new Date(Number(ts)).toLocaleString();
+    const btn = panelEl.querySelector(':scope > .panel-copy-btn');
+    if (btn) panelEl.insertBefore(span, btn);
+    else panelEl.appendChild(span);
+    return span;
+  }
+  // panelts-coverage:end
+
   const api = {
     getRawText: getRawText,
     addCopyButton: addCopyButton,
     normalise: normalise,
+    formatEventTs: formatEventTs,
+    addPanelTimestamp: addPanelTimestamp,
     PANEL_COPY_SVG: PANEL_COPY_SVG,
     PANEL_CHECK_SVG: PANEL_CHECK_SVG,
   };
