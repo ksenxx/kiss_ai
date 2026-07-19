@@ -718,12 +718,40 @@
     tabs.splice(insertAt, 0, subTab);
   }
 
-  /** Create a fresh collapsible 'Thoughts' llm-panel. */
-  function mkThoughtsPanel() {
+  /**
+   * Backfill ``ev.ts`` (ms since epoch) from the persistence layer's
+   * ``_timestamp`` field (seconds float; the ``events.timestamp`` DB
+   * column injected on every replayed event row) so panels replayed
+   * from rows persisted BEFORE events carried a ``ts`` stamp still
+   * show their real event time.  Events with a ``ts`` keep it; junk
+   * ``_timestamp`` values (non-number / non-positive / beyond the
+   * ECMAScript Date range) are ignored.  Returns *ev*.
+   */
+  // panelts-coverage:start
+  function normalizeEventTs(ev) {
+    if (
+      ev &&
+      ev.ts == null &&
+      typeof ev._timestamp === 'number' &&
+      ev._timestamp > 0 &&
+      ev._timestamp <= 8.64e12
+    ) {
+      ev.ts = Math.round(ev._timestamp * 1000);
+    }
+    return ev;
+  }
+  // panelts-coverage:end
+
+  /**
+   * Create a fresh collapsible 'Thoughts' llm-panel.  *ts* (optional,
+   * ms since epoch) is the timestamp of the event that opened the
+   * panel; it renders as the title row's compact time badge.
+   */
+  function mkThoughtsPanel(ts) {
     const panel = mkEl('div', 'llm-panel');
     const hdr = mkEl('div', 'llm-panel-hdr');
     hdr.textContent = 'Thoughts';
-    addCollapse(panel, hdr);
+    addCollapse(panel, hdr, ts);
     panel.appendChild(hdr);
     stampPanelStart(panel);
     return panel;
@@ -2763,7 +2791,8 @@
       if (
         node.classList.contains('panel-copy-btn') ||
         node.classList.contains('collapse-chv') ||
-        node.classList.contains('collapse-preview')
+        node.classList.contains('collapse-preview') ||
+        node.classList.contains('panel-ts')
       )
         return '';
     }
@@ -2807,7 +2836,7 @@
     prev.textContent = txt;
   }
 
-  function addCollapse(panelEl, headerEl) {
+  function addCollapse(panelEl, headerEl, ts) {
     panelEl.classList.add('collapsible');
     const chv = mkEl('span', 'collapse-chv');
     chv.textContent = '\u25BE';
@@ -2851,6 +2880,9 @@
       }, 0);
     });
     addCopyButton(panelEl);
+    // Compact event-time badge in the title row, left of the Copy
+    // button (only when the rendered event carried a ``ts`` stamp).
+    addPanelTimestamp(panelEl, ts);
   }
 
   // --- run_parallel panel ⇔ sub-agent tabs invariant ---
@@ -3183,6 +3215,7 @@
   // Panel Copy button + raw-text walker live in media/panelCopy.js so
   // they can be loaded both in the webview and from a Node + jsdom test.
   const addCopyButton = window.PanelCopy.addCopyButton;
+  const addPanelTimestamp = window.PanelCopy.addPanelTimestamp;
   const PANEL_COPY_SVG = window.PanelCopy.PANEL_COPY_SVG;
   const PANEL_CHECK_SVG = window.PanelCopy.PANEL_CHECK_SVG;
 
@@ -3309,6 +3342,7 @@
       '</div>';
     hlBlock(rc);
     addCopyButton(rc);
+    addPanelTimestamp(rc, ev.ts);
     const rcBody = rc.querySelector('.rc-body');
     if (rcBody) linkifyFilePaths(rcBody);
     return rc;
@@ -3646,7 +3680,7 @@
         } else {
           c.appendChild(tcBody);
         }
-        addCollapse(c, hdr);
+        addCollapse(c, hdr, ev.ts);
         target.appendChild(c);
         if (isSummary) {
           // Adopt ALL the top-level event panels emitted since the
@@ -3691,6 +3725,7 @@
           const bpContent = mkEl('div', 'bash-panel-content');
           bp.appendChild(bpContent);
           addCopyButton(bp);
+          addPanelTimestamp(bp, ev.ts);
           c.appendChild(bp);
           tState.bashPanel = bpContent;
         }
@@ -3736,7 +3771,7 @@
             '</div>';
           // Raw tool-result error text for the Copy button.
           r.dataset.rawText = 'FAILED\n' + (ev.content || '');
-          addCollapse(r, r.querySelector('.rl'));
+          addCollapse(r, r.querySelector('.rl'), ev.ts);
           resultTarget.appendChild(r);
           const trBody = r.querySelector('.tr-content');
           if (trBody) linkifyFilePaths(trBody);
@@ -3747,6 +3782,7 @@
           linkifyFilePaths(opContent);
           op.appendChild(opContent);
           addCopyButton(op);
+          addPanelTimestamp(op, ev.ts);
           resultTarget.appendChild(op);
         }
         break;
@@ -3847,7 +3883,7 @@
         // Preserve the raw markdown so the panel Copy button reproduces
         // the original markdown rather than the rendered HTML.
         el.dataset.rawText = ev.text || '';
-        addCollapse(el, el.querySelector('.' + cls + '-h'));
+        addCollapse(el, el.querySelector('.' + cls + '-h'), ev.ts);
         hlBlock(el);
         if (fresh) target.appendChild(el);
         const bodyEl = el.querySelector('.' + cls + '-body');
@@ -3900,6 +3936,7 @@
   }
 
   function processOutputEvent(ev) {
+    normalizeEventTs(ev);
     const t = ev.type;
     if (t === 'tool_call') {
       lastToolName = ev.name || '';
@@ -3939,7 +3976,7 @@
       (t === 'thinking_start' || t === 'text_delta')
     ) {
       updateStepCount(stepCount + 1);
-      llmPanel = mkThoughtsPanel();
+      llmPanel = mkThoughtsPanel(ev.ts);
       O.appendChild(llmPanel);
       collapseOlderPanels();
       llmPanelState = mkS();
@@ -3968,7 +4005,7 @@
     // PROVISIONAL: streamed thinking/text tokens confirm it (above),
     // while another tool call discards it again.
     if (t === 'tool_result' && lastToolName !== 'finish' && !llmPanel) {
-      llmPanel = mkThoughtsPanel();
+      llmPanel = mkThoughtsPanel(ev.ts);
       llmPanel._provisional = true;
       O.appendChild(llmPanel);
       collapseOlderPanels();
@@ -4022,6 +4059,7 @@
    * and streaming state so panels are built even when the tab is not visible.
    */
   function processOutputEventForBgTab(ev, tab) {
+    normalizeEventTs(ev);
     const t = ev.type;
 
     if (!tab.outputFragment)
@@ -4072,7 +4110,7 @@
     ) {
       bgStepCount++;
       tab.statusStepsText = 'Steps: ' + bgStepCount;
-      bgLlmPanel = mkThoughtsPanel();
+      bgLlmPanel = mkThoughtsPanel(ev.ts);
       tab.outputFragment.appendChild(bgLlmPanel);
       bgLlmPanelState = mkS();
       bgPendingPanel = false;
@@ -4120,7 +4158,7 @@
       // (mirrors processOutputEvent) so the waiting-for-model time is
       // visible in the panel footer when the user switches to the tab.
       if (t === 'tool_result' && bgLastToolName !== 'finish' && !bgLlmPanel) {
-        bgLlmPanel = mkThoughtsPanel();
+        bgLlmPanel = mkThoughtsPanel(ev.ts);
         bgLlmPanel._provisional = true;
         tab.outputFragment.appendChild(bgLlmPanel);
         bgLlmPanelState = mkS();
@@ -6591,6 +6629,7 @@
     _deferHighlight = true;
     try {
       events.forEach(ev => {
+        normalizeEventTs(ev);
         const t = ev.type;
         if (
           t === 'task_done' ||
@@ -6625,7 +6664,7 @@
           rPendingPanel = true;
         }
         if (rPendingPanel && (t === 'thinking_start' || t === 'text_delta')) {
-          rLlmPanel = mkThoughtsPanel();
+          rLlmPanel = mkThoughtsPanel(ev.ts);
           container.appendChild(rLlmPanel);
           rLlmPanelState = mkS();
           rPendingPanel = false;

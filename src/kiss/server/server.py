@@ -198,7 +198,23 @@ def _coalesced_replay_events(events: object) -> list[dict[str, Any]]:
     """
     if not isinstance(events, list):
         return []
-    return _coalesce_events(cast("list[dict[str, Any]]", events))
+    evs = cast("list[dict[str, Any]]", events)
+    # Legacy rows persisted before events carried a ``ts`` stamp (see
+    # ``stamp_event_ts`` in json_printer.py) still know WHEN they
+    # happened: the loaders inject the ``events.timestamp`` DB column
+    # (seconds float) as ``_timestamp``.  Backfill ``ts`` from it so
+    # the webview's per-panel time badge also renders for replays of
+    # old tasks.  Events that already carry ``ts`` keep it; junk
+    # ``_timestamp`` values (TEXT/BLOB/NaN/non-positive — see the
+    # data-forensics tests) are ignored.
+    for ev in evs:
+        if "ts" not in ev:
+            legacy = ev.get("_timestamp")
+            # NaN fails ``> 0``; the upper bound is the ECMAScript
+            # Date range (±8.64e15 ms) so the frontend can format it.
+            if isinstance(legacy, (int, float)) and 0 < legacy <= 8.64e12:
+                ev["ts"] = int(legacy * 1000)
+    return _coalesce_events(evs)
 
 
 def _live_task_id(tab: _RunningAgentState) -> str | None:

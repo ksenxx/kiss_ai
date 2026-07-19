@@ -320,6 +320,14 @@ class TestFanoutSingleSerialization:
                 (json.loads(line) for line in received),
                 key=lambda d: str(d.get("tabId")),
             )
+            # ``broadcast`` stamps the event's emission time (``ts``,
+            # ms since epoch — see ``stamp_event_ts``) once, BEFORE
+            # serialization, so both fan-out copies must carry the
+            # identical stamp.
+            ts_a = decoded[0].pop("ts")
+            ts_b = decoded[1].pop("ts")
+            assert isinstance(ts_a, int) and ts_a > 0
+            assert ts_b == ts_a
             expected_base = {
                 "type": "text_delta",
                 "text": 'uni\u00e7ode "quoted" \\ back\nslash',

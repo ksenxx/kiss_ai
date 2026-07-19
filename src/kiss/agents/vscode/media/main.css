@@ -847,7 +847,7 @@ body.remote-chat #welcome-config { display: none !important; }
   background: color-mix(in srgb, var(--cyan) 8%, transparent); color: var(--cyan);
 }
 .tc-h.tc-h-bash:hover { color: var(--fg); }
-.tc.collapsed > :not(.tc-h, .panel-copy-btn) { display: none; }
+.tc.collapsed > :not(.tc-h, .panel-copy-btn, .panel-ts) { display: none; }
 
 /* ``summary`` tool panels (see the ``case 'tool_call':`` summary
    branch in main.js): the agent's periodic activity summary adopts
@@ -2739,7 +2739,7 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
   display: flex; align-items: center; padding-bottom: 4px;
 }
 .llm-panel-hdr:hover { color: var(--fg); }
-.llm-panel.collapsed > :not(.llm-panel-hdr, .panel-copy-btn) { display: none; }
+.llm-panel.collapsed > :not(.llm-panel-hdr, .panel-copy-btn, .panel-ts) { display: none; }
 
 /* Per-panel "time spent" footer — appended as the LAST child of every
    .llm-panel and .tc tool-call panel by finalizePanelTime().  Sits
@@ -2781,6 +2781,21 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 }
 
 .panel-copy-btn.copied { color: var(--green); }
+
+/* Compact event-time badge (span.panel-ts, added by panelCopy.js's
+   addPanelTimestamp) — anchored in the panel's title row immediately
+   to the LEFT of the Copy button (right offset clears the button's
+   6px inset + ~28px footprint).  pointer-events: none keeps the
+   header's collapse click-through intact. */
+.panel-ts {
+  position: absolute; top: 8px; right: 38px; z-index: 5;
+  font-size: var(--fs-sm);
+  color: var(--dim);
+  font-family: var(--vscode-editor-font-family, monospace);
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0.75;
+}
 
 .system-prompt.collapsed .system-prompt-body,
 .prompt.collapsed .prompt-body { display: none; }
