@@ -242,6 +242,16 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
    */
   private _ownTabs: Set<string> = new Set();
   private _webviewHasFocus: boolean = false;
+  /**
+   * True once the CURRENT webview's script has posted its ``ready``
+   * message (i.e. ``media/main.js`` is loaded and its window message
+   * listener is installed).  Reset to false on every (re)resolve and
+   * on dispose of the active webview.  ``submitTask`` waits on this
+   * flag so an ``insertAndSubmit`` posted right after a cold sidebar
+   * open cannot be dropped by a webview whose script has not yet
+   * attached its message listener.
+   */
+  private _webviewReady: boolean = false;
 
   // Host-side "Sorcar" wake-word listener (webviews cannot capture the
   // microphone, so the extension host runs it and forwards wake events).
@@ -715,6 +725,9 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     _token: vscode.CancellationToken,
   ): void {
     this._view = webviewView;
+    // The fresh webview's script has not run yet — its ``ready``
+    // message (posted by main.js init()) flips this back to true.
+    this._webviewReady = false;
     setWebviewNotificationPoster(message =>
       this._sendToWebview(message as ToWebviewMessage),
     );
@@ -795,6 +808,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       if (this._view === webviewView) {
         this._view = undefined;
         this._disposed = true;
+        this._webviewReady = false;
         setWebviewNotificationPoster(undefined);
         // Stop the microphone listener: with the webview gone there is
         // nowhere to type the wake word, and holding the mic open from
@@ -1120,6 +1134,9 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     }
     switch (message.type) {
       case 'ready': {
+        // The webview script is loaded and its message listener is
+        // installed — host→webview messages can no longer be dropped.
+        this._webviewReady = true;
         const readyTabId = message.tabId;
         if (readyTabId) this._activeTabId = readyTabId;
         const client = this._getClient();
@@ -1665,11 +1682,37 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     });
   }
 
-  /** Submit a task programmatically (e.g. from runSelection command). */
-  public submitTask(prompt: string): void {
-    if (!prompt.trim()) return;
+  /**
+   * Submit a task programmatically (e.g. from the runSelection
+   * Cmd+E / Ctrl+E command).
+   *
+   * Pastes ``prompt`` into the chat webview's input textbox and
+   * submits it through the webview's normal send path, so the active
+   * tab id, selected model, worktree/auto-commit toggles and
+   * running-task steering (``appendUserMessage``) all behave exactly
+   * like the user typing the text and pressing Send.  When the sidebar
+   * webview is not yet resolved, ``focusChatInput()`` opens and
+   * resolves it first.  Only if the webview cannot be resolved at all
+   * does this fall back to starting the task directly, so the
+   * selection is never silently dropped.
+   */
+  public async submitTask(prompt: string): Promise<void> {
+    const text = prompt.trim();
+    if (!text) return;
+    await this.focusChatInput();
+    // A freshly-resolved webview may not have loaded main.js yet — a
+    // message posted before its window listener is installed would be
+    // silently dropped.  Wait (bounded, 15 × 200ms) for the webview's
+    // ``ready`` handshake before sending.
+    for (let i = 0; i < 15 && this._view && !this._webviewReady; i++) {
+      await new Promise(r => setTimeout(r, 200));
+    }
+    if (this._view && this._webviewReady) {
+      this._sendToWebview({type: 'insertAndSubmit', text});
+      return;
+    }
     this._startTask(
-      prompt.trim(),
+      text,
       this._selectedModel,
       this._getVisibleEditorFile() || undefined,
     );
