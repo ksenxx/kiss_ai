@@ -1,10 +1,14 @@
 #!/bin/bash
 # Build + run the full HydraKV e2e test matrix (opt / buffered-fd / no-uring /
 # ASAN+UBSAN / TSAN / coverage). Exit prints per-phase status lines.
+# Defaults match this directory's layout (hydra.cc + kvstore_interface.h here).
+# On the benchmark server's task/tests/ layout, override with:
+#   HYDRA_INCLUDE_DIR=../include HYDRA_ENGINE=../baseline/hydra.cc HYDRA_TEST_DIR=<fast-disk-dir> ./run_all_tests.sh
 cd "$(dirname "$0")" || exit 1
-I=../include; E=../baseline/hydra.cc; T=test_hydra.cc
-P=/mnt/ssd/ksen/kv_spill/hydra_tests
-S=/dev/shm/hydra_tests
+I=${HYDRA_INCLUDE_DIR:-.}; E=${HYDRA_ENGINE:-hydra.cc}; T=test_hydra.cc
+P=${HYDRA_TEST_DIR:-${TMPDIR:-/tmp}/hydra_tests}
+S=${HYDRA_SHM_DIR:-/dev/shm/hydra_tests}
+mkdir -p "$P" || exit 1
 
 echo "=== BUILD sanitizer/coverage binaries"
 g++ -O2 -g -std=c++17 -pthread -I$I $E $T -o test_opt 2>&1 | grep -v Wunused-result
