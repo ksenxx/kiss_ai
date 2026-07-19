@@ -114,7 +114,7 @@ const fileExists = fs.existsSync;
  *   binPath: string,
  *   sockPath: string,
  *   port: number,
- *   restart?: (() => void) | null,
+ *   restart?: (() => void | Promise<void>) | null,
  *   log?: (msg: string) => void,
  *   timeoutMs?: number,
  *   pollIntervalMs?: number,
@@ -127,7 +127,8 @@ const fileExists = fs.existsSync;
  *   - ``port``: the daemon's TCP (WSS) port, e.g. 8787.
  *   - ``restart``: callback that re-issues the full daemon (re)start
  *     sequence (bootout/bootstrap/kickstart, systemd restart, or a
- *     direct spawn).  Exceptions are caught and logged; ``null`` /
+ *     direct spawn).  May be async — a returned promise is awaited.
+ *     Exceptions/rejections are caught and logged; ``null`` /
  *     omitted disables re-restarts (poll-only mode).
  *   - ``log``: diagnostic sink (defaults to a no-op).
  *   - ``timeoutMs`` / ``pollIntervalMs`` / ``restartEveryMs`` /
@@ -232,7 +233,11 @@ async function verifyDaemonStartup(opts) {
           `restart (attempt ${restarts})`,
       );
       try {
-        restart();
+        // ``restart`` may be synchronous (legacy) or async (the
+        // drain-aware macLaunchd sequence).  Awaiting the returned
+        // promise keeps async failures out of the unhandled-rejection
+        // path and stops the poll loop from probing mid-restart.
+        await restart();
       } catch (err) {
         log(
           'kiss-web re-restart attempt failed: ' +
