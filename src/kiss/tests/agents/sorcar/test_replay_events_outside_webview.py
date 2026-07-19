@@ -72,8 +72,14 @@ class _CannedModelAgent(SorcarAgent):
         return _CANNED_RESULT
 
 
-class _OfflineChatAgent(ChatSorcarAgent, _CannedModelAgent):
+class _OfflineChatAgent(ChatSorcarAgent, _CannedModelAgent):  # pyright: ignore[reportIncompatibleVariableOverride]
     """Runs the real ``ChatSorcarAgent.run`` bookkeeping.
+
+    The ``pyright: ignore`` covers the ``pre_step_hook`` diamond:
+    ``ChatSorcarAgent`` deliberately narrows the plain attribute into a
+    property (the summary-reminder composition seam), which pyright
+    flags when combined with ``_CannedModelAgent``'s inherited plain
+    attribute in this multiple-inheritance MRO.
 
     Its MRO is ``[_OfflineChatAgent, ChatSorcarAgent, _CannedModelAgent,
     SorcarAgent, ...]`` so the ``super().run()`` call inside

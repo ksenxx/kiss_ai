@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from typing import Any, cast
@@ -96,15 +97,40 @@ class TestTaskEndEventOrdering(unittest.TestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _run_and_wait(self, prompt: str) -> None:
+        # Count the completion (``status running:false``) events seen so
+        # far so we can wait for THIS run's completion without racing.
+        with self.lock:
+            before = sum(
+                1 for e in self.events
+                if e.get("type") == "status" and e.get("running") is False
+            )
         self.server._handle_command({
             "type": "run", "prompt": prompt,
             "model": "claude-opus-4-6", "workDir": self.tmpdir,
             "tabId": "0",
         })
+        # The patched agent returns almost instantly, so the worker
+        # thread's ``finally`` can already have reset ``tab.task_thread``
+        # to None by the time we read it here — asserting it is non-None
+        # is a race.  Join the handle only if it is still present, then
+        # wait on the broadcast ``status running:false`` event, which is
+        # the authoritative signal that the run finished regardless of
+        # scheduling.
         t = self.server._get_tab("0").task_thread
-        assert t is not None
-        t.join(timeout=10)
-        assert not t.is_alive()
+        if t is not None:
+            t.join(timeout=10)
+            assert not t.is_alive()
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            with self.lock:
+                done = sum(
+                    1 for e in self.events
+                    if e.get("type") == "status" and e.get("running") is False
+                )
+            if done > before:
+                return
+            time.sleep(0.01)
+        raise AssertionError(f"task {prompt!r} did not complete in time")
 
     def test_second_task_after_new_chat_completes(self) -> None:
         """Running a task after newChat should not hang."""

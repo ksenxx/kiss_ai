@@ -397,13 +397,25 @@ class _CommandsMixin:
                 # minting a fresh session and orphaning the prior
                 # conversation.
                 #
+                # An explicit ``chatId`` on the ``run`` command (sent
+                # by API clients such as ``kiss.server.sorcar.run`` to
+                # continue an existing chat from a fresh tab) takes
+                # precedence over both fallbacks below — the caller
+                # named the exact chat to continue, so neither a stale
+                # ``_tab_chat_views`` entry nor a fresh mint may
+                # override it.  A tab that already has ``tab.chat_id``
+                # set (resumed via ``_replay_session``) keeps it.
+                #
                 # Otherwise allocate a fresh chat id.  ``tab_id`` (the
                 # frontend routing key) and ``chat_id`` (the persistence
                 # key) are kept orthogonal: every run gets its own chat
                 # id, regardless of which tab launched it.
                 if not tab.chat_id:
+                    requested_chat_id = cmd.get("chatId", "")
                     resumed_chat_id = self._tab_chat_views.get(tab_id, "")
-                    if resumed_chat_id:
+                    if isinstance(requested_chat_id, str) and requested_chat_id:
+                        tab.chat_id = requested_chat_id
+                    elif resumed_chat_id:
                         tab.chat_id = resumed_chat_id
                     else:
                         tab.chat_id = uuid.uuid4().hex

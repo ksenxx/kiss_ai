@@ -163,12 +163,12 @@ SPEECH_RMS_THRESHOLD = 0.01
 # SUFFIX_MATCH_SENSITIVITY, additionally accepts utterances that END
 # with an alias ("hey there Sorcar" decodes to "[unk] sore car",
 # measured live).  Sensitivity 50 reproduces the historical gates
-# (conf 0.4, pause 0.2s); the default of 85 is deliberately more
-# sensitive (conf 0.12, pause at the 0.1s floor, trailing-alias
+# (conf 0.4, pause 0.2s); the default of 80 is deliberately more
+# sensitive (conf 0.16, pause at the 0.1s floor, trailing-alias
 # matching enabled).  Exact whole-utterance matching is never relaxed
 # into substring matching: mid-utterance aliases
 # ("[unk] sir car [unk]") stay rejected at every sensitivity.
-DEFAULT_SENSITIVITY = 85
+DEFAULT_SENSITIVITY = 80
 SUFFIX_MATCH_SENSITIVITY = 75
 # Floor for the sensitivity-scaled pause gate: without any pause a
 # partial result would fire mid-word during continuous speech.
@@ -240,7 +240,7 @@ def sensitivity_wake_pause_seconds(sensitivity: int) -> float:
     """Return the post-alias pause gate (seconds) for a sensitivity.
 
     Linear map 0.4s -> MIN_WAKE_PAUSE_SECONDS: sensitivity 50 gives
-    the historical 0.2s, and the default 85 maps to 0.06s but is
+    the historical 0.2s, and the default 80 maps to 0.08s but is
     floored at MIN_WAKE_PAUSE_SECONDS (0.1s).  The floor keeps
     continuous speech from firing mid-utterance at high sensitivity.
     """

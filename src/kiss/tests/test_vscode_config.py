@@ -48,12 +48,18 @@ def _isolate_config(
     fake_home = tmp_path / "home"
     fake_home.mkdir()
     monkeypatch.setenv("HOME", str(fake_home))
-    monkeypatch.setattr(
-        "kiss.core.vscode_config.CONFIG_DIR", fake_home / ".kiss"
-    )
-    monkeypatch.setattr(
-        "kiss.core.vscode_config.CONFIG_PATH",
-        fake_home / ".kiss" / "config.json",
+    # ``CONFIG_DIR``/``CONFIG_PATH`` are PEP 562 *lazy* attributes of
+    # ``vscode_config`` — ``monkeypatch.setattr`` would record the
+    # lazily-computed Path as the "old value" and restore it at
+    # teardown as a permanent module-dict pin pointing into this
+    # test's (soon stale) tmp home, polluting every later test in the
+    # process.  ``setitem`` on the module dict instead *deletes* the
+    # pin at teardown, restoring lazy resolution.
+    import kiss.core.vscode_config as _vc
+
+    monkeypatch.setitem(vars(_vc), "CONFIG_DIR", fake_home / ".kiss")
+    monkeypatch.setitem(
+        vars(_vc), "CONFIG_PATH", fake_home / ".kiss" / "config.json",
     )
     for key in API_KEY_ENV_VARS:
         val = os.environ.get(key)

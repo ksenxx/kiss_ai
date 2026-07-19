@@ -2,45 +2,68 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Launch third-party agents as kiss-web registered agents.
+"""Launch third-party agents through the ``kiss.server.sorcar.run`` API.
 
-Instead of calling ``SorcarAgent.run`` directly, every agent in
-``kiss/agents/third_party_agents/`` is launched through
-:func:`run_agent_via_kiss_web`, which drives
-:meth:`kiss.server.commands._CommandsMixin._cmd_run` on a
-:class:`~kiss.server.server.VSCodeServer`.  The launcher
-pre-registers the agent instance in
-:attr:`_RunningAgentState.running_agent_states` (the *kiss-web
-registered agent* registry), so while the task runs it is
-discoverable, openable and interactable from any connected remote
-webview — exactly like a task started from the chat UI.
+Every agent in ``kiss/agents/third_party_agents/`` is launched through
+:func:`run_agent_via_kiss_web`, which is implemented on top of the
+public synchronous client API :func:`kiss.server.sorcar.run`: the
+launcher connects to a kiss-web daemon's Unix-domain socket, submits
+the documented ``run`` command, and blocks until the daemon reports
+the task finished.  The task therefore executes with the full kiss-web
+lifecycle — live event broadcasts to every connected webview,
+follow-up message injection, stop support, chat persistence — exactly
+like a task started from the chat UI.
+
+The agent's live channel tools (authentication closures, authenticated
+backend bound methods, per-message ``reply`` closures) are supplied
+through the API's ``tools=`` *file path* contract via
+:mod:`._api_tools_bridge`: the launcher generates a real tools file
+whose top-level wrappers dispatch back to the live callables, which
+works because the daemon the launcher talks to runs in this same
+process (see :func:`_ensure_api_server`).
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import tempfile
 import threading
-import uuid
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, cast
 
 import yaml
 
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.agents.third_party_agents._api_tools_bridge import (
+    register_tools,
+    release_tools,
+)
 
 if TYPE_CHECKING:
-    from kiss.server.server import VSCodeServer
+    from kiss.server.web_server import RemoteAccessServer
 
 logger = logging.getLogger(__name__)
 
-# Process-global lazily-created server used when the caller does not
-# provide one (CLI channel agents, cron pollers).  Guarded by
-# ``_DEFAULT_SERVER_LOCK`` so concurrent first launches build exactly
-# one server.
-_DEFAULT_SERVER: VSCodeServer | None = None
-_DEFAULT_SERVER_LOCK = threading.Lock()
+# Effectively-unbounded wait used when the caller passes no timeout —
+# ``kiss.server.sorcar.run`` requires a finite deadline.
+_NO_TIMEOUT_SECONDS = 10 * 365 * 24 * 3600.0
+
+# Process-global lazily-started in-process daemon serving the API's
+# Unix-domain socket for third-party launches in processes that do not
+# already run a ``kiss-web`` daemon (channel CLIs, cron pollers).
+# Guarded by ``_API_SERVER_LOCK`` so concurrent first launches build
+# exactly one server.
+_API_SERVER: RemoteAccessServer | None = None
+_API_SERVER_SOCK: str = ""
+_API_SERVER_LOCK = threading.Lock()
+
+# Test / embedding seam: when set, launches that do not pass an
+# explicit ``sock_path`` connect to this socket instead of starting
+# the process-global in-process daemon.
+_SOCK_PATH_OVERRIDE: str | None = None
 
 
 def _failure_yaml(exc: BaseException) -> str:
@@ -49,38 +72,96 @@ def _failure_yaml(exc: BaseException) -> str:
     return str(yaml.safe_dump({"success": False, "summary": summary}, sort_keys=False))
 
 
-def default_server() -> VSCodeServer:
-    """Return the process-global :class:`VSCodeServer`, creating it lazily.
+def _ensure_api_server() -> str:
+    """Start the process-global in-process daemon; return its UDS path.
 
-    The server hosts ``_cmd_run`` / the running-agent registry for
-    third-party launches in processes that do not already run a
-    ``kiss-web`` daemon (channel CLIs, cron pollers).
+    Creates one :class:`~kiss.server.web_server.RemoteAccessServer` —
+    the production daemon class — serving only a private Unix-domain
+    socket (mode 0o600 in a private temp directory) on a dedicated
+    asyncio loop thread.  The launcher's ``sorcar.run`` calls connect
+    to this socket.  The daemon MUST live in this process: the live
+    tool callables bridged by :mod:`._api_tools_bridge` are reachable
+    only through this process's registry.
 
     Returns:
-        The cached process-global ``VSCodeServer`` instance.
+        The Unix-domain socket path of the in-process daemon.
     """
-    global _DEFAULT_SERVER
-    with _DEFAULT_SERVER_LOCK:
-        if _DEFAULT_SERVER is None:
-            from kiss.server.server import VSCodeServer
+    global _API_SERVER, _API_SERVER_SOCK
+    with _API_SERVER_LOCK:
+        if _API_SERVER is None:
+            from kiss.server.web_server import RemoteAccessServer
 
-            _DEFAULT_SERVER = VSCodeServer()
-        return _DEFAULT_SERVER
+            sock_dir = tempfile.mkdtemp(prefix="kiss-tp-api-")
+            sock_path = str(Path(sock_dir) / "sorcar.sock")
+            loop = asyncio.new_event_loop()
+            threading.Thread(
+                target=loop.run_forever,
+                name="kiss-tp-api-server",
+                daemon=True,
+            ).start()
+            server = RemoteAccessServer(uds_path=sock_path)
+            server._printer._loop = loop
+            server._loop = loop
+            asyncio.run_coroutine_threadsafe(
+                asyncio.start_unix_server(
+                    server._uds_handler, path=sock_path,
+                ),
+                loop,
+            ).result(timeout=30)
+            _API_SERVER = server
+            _API_SERVER_SOCK = sock_path
+        return _API_SERVER_SOCK
+
+
+def _collect_live_tools(
+    agent: Any,
+    extra_tools: list[Callable[..., Any]] | None,
+) -> list[Callable[..., Any]]:
+    """Assemble the live channel tools to bridge into the task.
+
+    Mirrors ``BaseChannelAgent._get_tools``'s channel-specific portion:
+    authentication tools first, then — only when the channel backend is
+    authenticated — the backend's tool methods, then any launcher-
+    supplied extra tools (e.g. ``ChannelRunner``'s per-message
+    ``reply`` closure).  The daemon-built agent supplies the standard
+    SorcarAgent tools itself.
+
+    Args:
+        agent: The third-party agent instance.
+        extra_tools: Extra tool callables from the launcher's caller.
+
+    Returns:
+        The live callables to expose to the daemon task.
+    """
+    collected: list[Callable[..., Any]] = []
+    get_auth_tools = getattr(agent, "_get_auth_tools", None)
+    if callable(get_auth_tools):
+        collected.extend(
+            cast("list[Callable[..., Any]]", get_auth_tools() or []),
+        )
+    is_authenticated = getattr(agent, "_is_authenticated", None)
+    backend = getattr(agent, "_backend", None)
+    if callable(is_authenticated) and backend is not None and is_authenticated():
+        collected.extend(backend.get_tool_methods() or [])
+    collected.extend(extra_tools or [])
+    return collected
 
 
 class KissWebChatSorcarAgent(ChatSorcarAgent):
-    """Chat-session agent that records its run result for the launcher.
+    """Chat-session carrier agent for API launches.
 
-    ``_cmd_run``'s task runner discards the YAML string returned by
-    ``agent.run`` (it only broadcasts / persists the summary), so the
-    launcher reads :attr:`last_run_result` off the agent instance
-    after the task thread finishes.
+    API launches execute on a daemon-built agent, so this instance
+    never runs itself; it carries the chat id across launches (the
+    pollers call :meth:`resume_chat_by_id` before launching and read
+    :attr:`chat_id` after) and records the launcher's YAML result in
+    :attr:`last_run_result`.  Running it directly still works and
+    records its result the same way.
     """
 
     last_run_result: str = ""
 
     def run(self, prompt_template: str = "", **kwargs: Any) -> str:  # type: ignore[override]
-        """Run the chat agent and record the returned YAML result.
+        """Run the chat agent directly and record the returned YAML result.
 
         Args:
             prompt_template: The task prompt.
@@ -99,12 +180,12 @@ class KissWebChatSorcarAgent(ChatSorcarAgent):
 
 
 class KissWebWorktreeSorcarAgent(WorktreeSorcarAgent):
-    """Worktree agent that records its run result for the launcher."""
+    """Worktree carrier agent for API launches (see the chat variant)."""
 
     last_run_result: str = ""
 
     def run(self, prompt_template: str = "", **kwargs: Any) -> str:  # type: ignore[override]
-        """Run the worktree agent and record the returned YAML result.
+        """Run the worktree agent directly and record the returned YAML result.
 
         Args:
             prompt_template: The task prompt.
@@ -134,122 +215,127 @@ def run_agent_via_kiss_web(
     model_config: dict[str, Any] | None = None,
     web_tools: bool | None = None,
     is_parallel: bool = False,
-    server: VSCodeServer | None = None,
     timeout: float | None = None,
+    sock_path: str | None = None,
 ) -> str:
-    """Launch *agent* as a kiss-web registered agent via ``_cmd_run``.
+    """Launch *agent*'s task through :func:`kiss.server.sorcar.run`.
 
-    Pre-registers a :class:`_RunningAgentState` whose ``agent`` slot
-    holds *agent* (the documented injection point honoured by
-    ``_TaskRunnerMixin._run_task_inner``), then submits a ``run``
-    command through :meth:`VSCodeServer._cmd_run`.  The task executes
-    on ``_cmd_run``'s background worker thread with full kiss-web
-    lifecycle: live event broadcasts to every connected webview,
-    ``pending_user_messages`` follow-up injection, stop support, and
-    registry-based discovery.  Blocks until the task thread finishes
-    (or *timeout* elapses) and returns the agent's YAML result.
+    Bridges the agent's live channel tools into a generated tools file
+    (:func:`~._api_tools_bridge.register_tools`), appends the agent's
+    ``channel_system_prompt`` guidance to the prompt (the API carries
+    no system prompt), and submits the task to the in-process kiss-web
+    daemon over its Unix-domain socket.  Blocks until the daemon
+    reports the task finished (or *timeout* elapses) and returns the
+    task's YAML result.
+
+    The passed *agent* instance is never executed — the daemon builds
+    its own chat agent.  The instance serves as the carrier of channel
+    tools and chat identity: the launcher propagates the daemon chat
+    id onto it (so pollers can resume the conversation), records the
+    YAML result in ``agent.last_run_result``, and copies the task's
+    cost / token / step totals onto the instance for CLI run stats.
 
     Args:
-        agent: The third-party agent instance to run.  Extra run-time
-            kwargs injected by the task runner are absorbed by
-            ``BaseChannelAgent.run`` (channel agents) or natively by
-            ``ChatSorcarAgent.run`` (poller agents).
+        agent: The third-party agent instance supplying channel tools,
+            ``channel_system_prompt`` guidance, and the chat id to
+            continue (``agent.chat_id`` for
+            :class:`~kiss.agents.sorcar.chat_sorcar_agent.ChatSorcarAgent`
+            derivatives).
         prompt_template: The task prompt.
-        model_name: LLM model name; empty selects the server default.
+        model_name: LLM model name; empty selects the daemon default.
         work_dir: Working directory for the run.
         max_budget: Per-task budget override in USD; ``None`` uses the
             kiss-web config default.
-        tools: Extra tool callables merged into the agent's run tools
-            (stashed on ``agent._extra_run_tools``; consumed by
-            ``BaseChannelAgent.run``).
-        use_worktree: Run inside an isolated git worktree (only
-            meaningful for :class:`WorktreeSorcarAgent`-derived
-            agents).
+        tools: Extra live tool callables bridged into the task's tools
+            (e.g. ``ChannelRunner``'s per-message ``reply`` closure).
+        use_worktree: Run the task in an isolated git worktree.
         model_config: Per-task model configuration override (custom
             endpoint / headers), matching ``SorcarAgent.run``.
         web_tools: Per-task browser-tool enablement override. ``None``
             uses the kiss-web config default.
         is_parallel: Whether the agent may spawn parallel sub-agents.
-        server: The :class:`VSCodeServer` to launch on.  ``None`` uses
-            the process-global :func:`default_server`.
-        timeout: Max seconds to wait for the task thread; ``None``
-            waits indefinitely.  On timeout the task keeps running in
-            the background and ``""`` is returned.
+        timeout: Max seconds to wait for the task; ``None`` waits
+            indefinitely.  On timeout the task keeps running in the
+            daemon and ``""`` is returned.
+        sock_path: Daemon UDS path override.  ``None`` uses the
+            process-global in-process daemon
+            (:func:`_ensure_api_server`).
 
     Returns:
-        The YAML result string recorded by the agent
-        (``last_run_result``), or ``""`` when unavailable (timeout, or
-        a failure before the agent's run recorded a result).
+        YAML string with 'success' and 'summary' keys, or ``""`` when
+        the task did not finish within *timeout*.
+
+    Raises:
+        ValueError: When a live tool cannot be expressed through the
+            API's tools-file contract (see
+            :func:`~._api_tools_bridge.register_tools`).
+        ConnectionError: When the daemon socket cannot be reached.
     """
-    srv = server if server is not None else default_server()
+    from kiss.server import sorcar
 
-    agent._extra_run_tools = list(tools) if tools else []
-    # Always overwrite per-run overrides so reusing an agent instance
-    # cannot leak a prior launch's budget / endpoint / web-tools
-    # settings into the next launch.
-    agent._max_budget_override = max_budget
-    agent._model_config_override = dict(model_config) if model_config is not None else None
-    agent._web_tools_override = web_tools
-
-    tab_id = f"tp-{uuid.uuid4().hex}"
-    with srv._state_lock:
-        state = _RunningAgentState(tab_id, srv._default_model)
-        state.agent = agent
-        state.auto_commit_mode = False
-        # Preserve a chat id the agent already carries (a poller
-        # resuming a chat via ``resume_chat_by_id``).  ``_cmd_run``
-        # mints a fresh uuid only when ``state.chat_id`` is empty, and
-        # the task runner then syncs ``tab.chat_id`` onto
-        # ``agent._chat_id`` — so without this the resumed chat id
-        # would be clobbered by the minted one.
-        state.chat_id = str(
-            getattr(agent, "chat_id", "") or getattr(agent, "_chat_id", "") or "",
-        )
-        _RunningAgentState.register(tab_id, state)
-
+    prompt = prompt_template + str(
+        getattr(agent, "channel_system_prompt", "") or "",
+    )
+    if not prompt.strip():
+        result_yaml = str(yaml.safe_dump(
+            {"success": False, "summary": "Task failed: empty prompt"},
+            sort_keys=False,
+        ))
+        agent.last_run_result = result_yaml
+        return result_yaml
+    chat_id = str(
+        getattr(agent, "chat_id", "") or getattr(agent, "_chat_id", "") or "",
+    )
+    live_tools = _collect_live_tools(agent, tools)
+    token = ""
+    tools_path: str | None = None
+    if live_tools:
+        token, tools_path = register_tools(live_tools)
+    sock = sock_path or _SOCK_PATH_OVERRIDE or _ensure_api_server()
     try:
-        srv._cmd_run(
-            {
-                "type": "run",
-                "tabId": tab_id,
-                "prompt": prompt_template,
-                "model": model_name,
-                "workDir": work_dir,
-                "useWorktree": use_worktree,
-                "autoCommit": False,
-                "useParallel": is_parallel,
-            }
-        )
-    except BaseException:
-        with srv._state_lock:
-            state.frontend_closed = True
-        srv._dispose_if_closed(tab_id)
-        raise
+        try:
+            result = sorcar.run(
+                prompt,
+                work_dir=work_dir,
+                model=model_name,
+                chat_id=chat_id,
+                tools=tools_path,
+                use_worktree=use_worktree,
+                max_budget=max_budget,
+                model_config=model_config,
+                web_tools=web_tools,
+                is_parallel=is_parallel,
+                timeout=timeout if timeout is not None else _NO_TIMEOUT_SECONDS,
+                sock_path=sock,
+            )
+        except TimeoutError:
+            logger.warning(
+                "kiss-web API launch timed out after %.1fs; the task "
+                "keeps running in the daemon",
+                timeout or 0.0,
+            )
+            return ""
+    finally:
+        if token:
+            release_tools(token)
 
-    with srv._state_lock:
-        thread = state.task_thread
-    # ``_cmd_run`` always sets ``task_thread`` before returning (it
-    # rolls the assignment back only on the raise path handled above),
-    # so the thread is guaranteed to exist here.
-    assert thread is not None
-    thread.join(timeout=timeout)
-    if thread.is_alive():
-        logger.warning(
-            "kiss-web launch timed out after %.1fs (tab %s); the "
-            "task keeps running in the background",
-            timeout or 0.0,
-            tab_id,
-        )
-        # Mark for deferred disposal once the task finishes.
-        with srv._state_lock:
-            state.frontend_closed = True
-        return ""
-
-    result = str(getattr(agent, "last_run_result", "") or "")
-
-    # Dispose the launcher-owned registry entry now that the task is
-    # over — mirrors the frontend closing its tab.
-    with srv._state_lock:
-        state.frontend_closed = True
-    srv._dispose_if_closed(tab_id)
-    return result
+    # A task whose agent crashed abruptly ends without a terminal
+    # ``result`` event (that event is normally emitted by the agent's
+    # own failure contract), so ``result.text`` can be empty; channel
+    # runners relay the summary to users, so never leave it blank.
+    summary = result.text or ("" if result.success else "Task failed")
+    result_yaml = str(yaml.safe_dump(
+        {"success": result.success, "summary": summary},
+        sort_keys=False,
+    ))
+    # Propagate the run's identity and usage onto the carrier
+    # instance: pollers read ``agent.chat_id`` to resume the
+    # conversation and CLI entry points print
+    # ``budget_used`` / ``total_tokens_used`` run stats.
+    if result.chat_id and hasattr(agent, "_chat_id"):
+        agent._chat_id = result.chat_id
+    agent.last_run_result = result_yaml
+    agent.budget_used = result.cost
+    agent.total_tokens_used = result.tokens
+    agent.total_steps = result.steps
+    return result_yaml
