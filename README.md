@@ -2,7 +2,7 @@
 
 ![KISS Framework](assets/KISS-Sorcar.png)
 
-[![Version](https://img.shields.io/badge/version-2026.7.25-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
+[![Version](https://img.shields.io/badge/version-2026.7.26-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.13-blue?style=flat-square)](https://www.python.org/)
 [![Website](https://img.shields.io/badge/website-kisssorcar.github.io-1976d2?style=flat-square)](https://kisssorcar.github.io/)
@@ -61,7 +61,7 @@ ______________________________________________________________________
 | **Multiple models from multiple vendors in the same task** | ✅ Mix OpenAI, Anthropic, Gemini, Together, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, and Codex CLI | ❌ Anthropic Claude models only | ❌ One model per task |
 | **Primary focus** | ✅ **Quality** — rigorous review, end-to-end tests | Speed and developer ergonomics | Speed |
 | **Core Agents # LoC** | **~2850** | Unknown | Unknown |
-| **Models in bundled catalog** | 533 across 9 provider categories | Claude family only | Subset chosen by Cursor |
+| **Models in bundled catalog** | 532 across 9 provider categories | Claude family only | Subset chosen by Cursor |
 | **Bring your own API key / endpoint** | ✅ Yes — keys stay on your machine | ✅ Anthropic key | ⚠️ Routed through Cursor backend |
 | **Open source** | ✅ Apache-2.0 | ❌ Proprietary | ❌ Proprietary |
 | **Price** | Free framework; pay only your chosen model provider | Subscription / API usage | Subscription |
@@ -221,7 +221,7 @@ These agents live in `src/kiss/agents/third_party_agents/`.
 
 ## 🤖 Models Supported
 
-KISS Sorcar ships a catalog of **533 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json).
+KISS Sorcar ships a catalog of **532 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json).
 
 | Provider category | Catalog entries |
 |---|---:|
@@ -231,13 +231,13 @@ KISS Sorcar ships a catalog of **533 models** across **9 provider categories**, 
 | Together AI | 79 |
 | Z.AI | 8 |
 | Moonshot AI | 6 |
-| OpenRouter | 305 |
+| OpenRouter | 304 |
 | Claude Code CLI (`cc/*`) | 3 |
 | Codex CLI (`codex/*`) | 9 |
 
 Current catalog capability totals:
 
-- **516** generation-capable models
+- **515** generation-capable models
 - **363** function-calling-capable models
 - **8** embedding models
 
@@ -377,6 +377,7 @@ Full model list:
 - `gemini-embedding-001`
 - `gemini-embedding-2`
 - `gemini-embedding-2-preview`
+- `gemini-omni-flash-preview`
 - `google/gemma-2-27b-it`
 - `google/gemma-3n-E4B-it`
 - `google/gemma-4-31B-it`
@@ -495,7 +496,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>OpenRouter (305)</strong></summary>
+<summary><strong>OpenRouter (304)</strong></summary>
 
 - `openrouter/ai21/jamba-large-1.7`
 - `openrouter/aion-labs/aion-2.0`
@@ -525,7 +526,6 @@ Full model list:
 - `openrouter/anthropic/claude-sonnet-4.5`
 - `openrouter/anthropic/claude-sonnet-4.6`
 - `openrouter/anthropic/claude-sonnet-5`
-- `openrouter/arcee-ai/coder-large`
 - `openrouter/arcee-ai/trinity-large-thinking`
 - `openrouter/arcee-ai/virtuoso-large`
 - `openrouter/baidu/ernie-4.5-vl-424b-a47b`
@@ -586,17 +586,19 @@ Full model list:
 - `openrouter/inclusionai/ring-2.6-1t`
 - `openrouter/inflection/inflection-3-pi`
 - `openrouter/inflection/inflection-3-productivity`
+- `openrouter/kwaipilot/kat-coder-air-v2.5`
 - `openrouter/kwaipilot/kat-coder-pro-v2`
+- `openrouter/kwaipilot/kat-coder-pro-v2.5`
 - `openrouter/mancer/weaver`
 - `openrouter/meta-llama/llama-3.1-70b-instruct`
 - `openrouter/meta-llama/llama-3.1-8b-instruct`
-- `openrouter/meta-llama/llama-3.2-11b-vision-instruct`
 - `openrouter/meta-llama/llama-3.2-1b-instruct`
 - `openrouter/meta-llama/llama-3.2-3b-instruct`
 - `openrouter/meta-llama/llama-3.3-70b-instruct`
 - `openrouter/meta-llama/llama-4-maverick`
 - `openrouter/meta-llama/llama-4-scout`
 - `openrouter/meta-llama/llama-guard-4-12b`
+- `openrouter/meta/muse-spark-1.1`
 - `openrouter/microsoft/phi-4`
 - `openrouter/microsoft/wizardlm-2-8x22b`
 - `openrouter/mistralai/codestral-2508`
@@ -624,6 +626,7 @@ Full model list:
 - `openrouter/moonshotai/kimi-k2.5`
 - `openrouter/moonshotai/kimi-k2.6`
 - `openrouter/moonshotai/kimi-k2.7-code`
+- `openrouter/moonshotai/kimi-k3`
 - `openrouter/morph/morph-v3-fast`
 - `openrouter/morph/morph-v3-large`
 - `openrouter/nex-agi/nex-n2-mini`
@@ -632,7 +635,6 @@ Full model list:
 - `openrouter/nousresearch/hermes-3-llama-3.1-70b`
 - `openrouter/nousresearch/hermes-4-405b`
 - `openrouter/nousresearch/hermes-4-70b`
-- `openrouter/nvidia/llama-3.3-nemotron-super-49b-v1.5`
 - `openrouter/nvidia/nemotron-3-nano-30b-a3b`
 - `openrouter/nvidia/nemotron-3-super-120b-a12b`
 - `openrouter/nvidia/nemotron-3-ultra-550b-a55b`
@@ -755,7 +757,6 @@ Full model list:
 - `openrouter/relace/relace-search`
 - `openrouter/sakana/fugu-ultra`
 - `openrouter/sao10k/l3-lunaris-8b`
-- `openrouter/sao10k/l3.1-70b-hanami-x1`
 - `openrouter/sao10k/l3.1-euryale-70b`
 - `openrouter/sao10k/l3.3-euryale-70b`
 - `openrouter/stepfun/step-3.5-flash`
@@ -767,6 +768,7 @@ Full model list:
 - `openrouter/thedrummer/rocinante-12b`
 - `openrouter/thedrummer/skyfall-36b-v2`
 - `openrouter/thedrummer/unslopnemo-12b`
+- `openrouter/thinkingmachines/inkling`
 - `openrouter/undi95/remm-slerp-l2-13b`
 - `openrouter/upstage/solar-pro-3`
 - `openrouter/writer/palmyra-x5`
