@@ -2785,7 +2785,7 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 
 /* Per-panel bottom footer bar — kept as the LAST child of every event
    panel (ensurePanelFoot in panelCopy.js).  A dim flex row whose LEFT
-   side holds the compact event-timestamp badge (span.panel-ts) and
+   side holds the date + seconds event-timestamp badge (span.panel-ts) and
    whose RIGHT side holds the "time spent" label (span.panel-elapsed,
    written by finalizePanelTime / the live 1-second ticker).
    Collapsing a panel hides this bar via the existing
