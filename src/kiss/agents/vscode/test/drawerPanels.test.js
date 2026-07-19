@@ -67,10 +67,24 @@ let persistedState;
  * @param {boolean} [opts.stripDrawerButtons=false] remove the drawer
  *     toggle buttons from the HTML before boot (an embedder serving a
  *     stale cached chat.html) — main.js must still boot cleanly.
+ * @param {string} [opts.userAgent] navigator.userAgent for the window
+ *     (jsdom's userAgent option) — simulates a phone/tablet browser.
+ * @param {object} [opts.userAgentData] value installed as
+ *     navigator.userAgentData before main.js boots (UA-CH hint, e.g.
+ *     {mobile: true} as Chrome for Android exposes it).
+ * @param {number} [opts.maxTouchPoints] value installed as
+ *     navigator.maxTouchPoints before main.js boots (iPadOS Safari
+ *     masquerades as "Macintosh" but reports a multi-touch screen).
  * @returns {{win: object, posted: Array}}
  */
 function makeWebview(opts) {
-  const {remote = false, stripDrawerButtons = false} = opts || {};
+  const {
+    remote = false,
+    stripDrawerButtons = false,
+    userAgent,
+    userAgentData,
+    maxTouchPoints,
+  } = opts || {};
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
   html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
   html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
@@ -93,6 +107,27 @@ function makeWebview(opts) {
   win.Element.prototype.scrollIntoView = function () {};
   win.Element.prototype.scrollTo = function () {};
   win.HTMLElement.prototype.scrollTo = function () {};
+  // Overridden directly on the navigator (rather than through jsdom's
+  // ``resources: {userAgent}`` setting) so the harness never enables
+  // automatic subresource fetching.
+  if (userAgent) {
+    Object.defineProperty(win.navigator, 'userAgent', {
+      value: userAgent,
+      configurable: true,
+    });
+  }
+  if (userAgentData !== undefined) {
+    Object.defineProperty(win.navigator, 'userAgentData', {
+      value: userAgentData,
+      configurable: true,
+    });
+  }
+  if (maxTouchPoints !== undefined) {
+    Object.defineProperty(win.navigator, 'maxTouchPoints', {
+      value: maxTouchPoints,
+      configurable: true,
+    });
+  }
 
   // Attach the REAL stylesheet cascade so getComputedStyle resolves
   // the drawer rules exactly as a browser would.
@@ -644,6 +679,284 @@ function testMissingDrawerButtonsGracefulBoot() {
   win.close();
 }
 
+// ── Mobile device simulation: real browser UA strings ───────────────
+const UA_IPHONE =
+  'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) ' +
+  'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 ' +
+  'Mobile/15E148 Safari/604.1';
+const UA_ANDROID =
+  'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 ' +
+  '(KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36';
+const UA_IPAD_MASQUERADE =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) ' +
+  'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15';
+const UA_DESKTOP =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+  '(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
+
+/** Assert both drawers are (not) collapsed, with matching toggles. */
+function assertDrawers(win, collapsed, why) {
+  const d = win.document;
+  assert.strictEqual(
+    d.getElementById('task-panel').classList.contains('drawer-collapsed'),
+    collapsed,
+    `task drawer must ${collapsed ? '' : 'NOT '}be collapsed: ${why}`,
+  );
+  assert.strictEqual(
+    d.getElementById('input-area').classList.contains('drawer-collapsed'),
+    collapsed,
+    `input drawer must ${collapsed ? '' : 'NOT '}be collapsed: ${why}`,
+  );
+  assertBtnState(win, 'task-panel-drawer-btn', !collapsed);
+  assertBtnState(win, 'input-drawer-btn', !collapsed);
+}
+
+// ── 13. Mobile remote web app: drawers OPEN COLLAPSED ───────────────
+// Opening the remote web app on a phone/tablet must start with the
+// pinned task panel AND the composer (input textbox + buttons panel)
+// tucked into their slim drawers so the small screen is spent on the
+// chat events area.
+function testMobileRemoteOpensCollapsed() {
+  for (const [name, ua] of [
+    ['iPhone Safari', UA_IPHONE],
+    ['Android Chrome', UA_ANDROID],
+  ]) {
+    persistedState = undefined;
+    const {win, posted} = makeWebview({remote: true, userAgent: ua});
+    showTaskPanel(win, posted);
+    const d = win.document;
+    assertDrawers(win, true, `${name} remote web app must open collapsed`);
+    // The input textbox and the buttons panel both live inside the
+    // hidden #input-container, so the collapsed drawer tucks them away.
+    const container = d.getElementById('input-container');
+    assert.ok(
+      container.contains(d.getElementById('task-input')),
+      'the input textbox must live inside the collapsed composer',
+    );
+    assert.ok(
+      container.contains(d.getElementById('input-footer')),
+      'the buttons panel must live inside the collapsed composer',
+    );
+    assert.strictEqual(
+      cs(win, 'input-container').display,
+      'none',
+      `${name}: the composer must be hidden on open`,
+    );
+    assert.strictEqual(
+      cs(win, 'task-panel-text').whiteSpace,
+      'nowrap',
+      `${name}: the task text must be clamped to the slim drawer`,
+    );
+    assert.strictEqual(
+      cs(win, 'output').flexGrow,
+      '1',
+      `${name}: #output must absorb the freed space`,
+    );
+    win.close();
+  }
+}
+
+// ── 14. Desktop remote web app: drawers still open EXPANDED ─────────
+function testDesktopRemoteOpensExpanded() {
+  persistedState = undefined;
+  const {win, posted} = makeWebview({remote: true, userAgent: UA_DESKTOP});
+  showTaskPanel(win, posted);
+  assertDrawers(win, false, 'desktop remote web app keeps the old default');
+  assert.notStrictEqual(
+    cs(win, 'input-container').display,
+    'none',
+    'desktop remote: the composer must stay visible on open',
+  );
+  win.close();
+}
+
+// ── 15. UA-Client-Hints: navigator.userAgentData.mobile drives it ───
+function testUserAgentDataMobileRemote() {
+  persistedState = undefined;
+  const wvMobile = makeWebview({
+    remote: true,
+    userAgent: UA_DESKTOP,
+    userAgentData: {mobile: true},
+  });
+  assertDrawers(
+    wvMobile.win,
+    true,
+    'userAgentData.mobile=true must open the remote drawers collapsed',
+  );
+  wvMobile.win.close();
+
+  persistedState = undefined;
+  const wvDesktop = makeWebview({
+    remote: true,
+    userAgent: UA_DESKTOP,
+    userAgentData: {mobile: false},
+  });
+  assertDrawers(
+    wvDesktop.win,
+    false,
+    'userAgentData.mobile=false must keep the remote drawers expanded',
+  );
+  wvDesktop.win.close();
+}
+
+// ── 16. iPadOS Safari masquerading as desktop "Macintosh" ───────────
+function testIpadMasqueradeRemote() {
+  persistedState = undefined;
+  const wvIpad = makeWebview({
+    remote: true,
+    userAgent: UA_IPAD_MASQUERADE,
+    maxTouchPoints: 5,
+  });
+  assertDrawers(
+    wvIpad.win,
+    true,
+    'Macintosh UA with a multi-touch screen is an iPad — collapse',
+  );
+  wvIpad.win.close();
+
+  persistedState = undefined;
+  const wvMac = makeWebview({
+    remote: true,
+    userAgent: UA_IPAD_MASQUERADE,
+    maxTouchPoints: 0,
+  });
+  assertDrawers(
+    wvMac.win,
+    false,
+    'Macintosh UA without touch is a real Mac — stay expanded',
+  );
+  wvMac.win.close();
+}
+
+// ── 17. VS Code webview is never treated as mobile ──────────────────
+function testMobileUaVscodeWebviewUnaffected() {
+  persistedState = undefined;
+  const {win, posted} = makeWebview({remote: false, userAgent: UA_IPHONE});
+  showTaskPanel(win, posted);
+  assertDrawers(
+    win,
+    false,
+    'the extension webview (no body.remote-chat) keeps expanded defaults',
+  );
+  win.close();
+}
+
+// ── 18. Mobile default yields to the user's persisted choice ────────
+function testMobileUserChoicePersists() {
+  // First mobile visit: opens collapsed, the user expands both drawers.
+  persistedState = undefined;
+  const wv1 = makeWebview({remote: true, userAgent: UA_IPHONE});
+  showTaskPanel(wv1.win, wv1.posted);
+  assertDrawers(wv1.win, true, 'first mobile visit must open collapsed');
+  click(wv1.win, 'task-panel-drawer-btn');
+  click(wv1.win, 'input-drawer-btn');
+  assertDrawers(wv1.win, false, 'the user expanded both drawers');
+  wv1.win.close();
+
+  // Reload on the same device: the expanded choice must win over the
+  // mobile collapsed default.
+  const wv2 = makeWebview({remote: true, userAgent: UA_IPHONE});
+  showTaskPanel(wv2.win, wv2.posted);
+  assertDrawers(
+    wv2.win,
+    false,
+    'a reload must restore the user-expanded drawers on mobile',
+  );
+  wv2.win.close();
+
+  // And the mobile collapsed default itself persists across reloads.
+  persistedState = undefined;
+  const wv3 = makeWebview({remote: true, userAgent: UA_ANDROID});
+  wv3.win.close();
+  const wv4 = makeWebview({remote: true, userAgent: UA_ANDROID});
+  assertDrawers(
+    wv4.win,
+    true,
+    'an untouched mobile session must stay collapsed after a reload',
+  );
+  wv4.win.close();
+}
+
+// ── 19. Legacy persisted blobs migrate to the mobile default ────────
+// Builds without the mobile default auto-persisted
+// ``taskDrawerCollapsed: false`` on every boot — never a user choice.
+// A mobile session upgraded in place (sessionStorage survives the
+// reload) must therefore IGNORE legacy drawer booleans and open
+// collapsed; only blobs written by this build (drawersVersion) may
+// override the mobile default.
+function testLegacyStateMigratesOnMobile() {
+  // Legacy blob: tabs + auto-persisted expanded drawers, no version.
+  persistedState = {
+    tabs: [{title: 'old chat', chatId: 'tab-1'}],
+    activeTabIndex: 0,
+    chatId: 'tab-1',
+    taskDrawerCollapsed: false,
+    inputDrawerCollapsed: false,
+  };
+  const wv = makeWebview({remote: true, userAgent: UA_IPHONE});
+  assertDrawers(
+    wv.win,
+    true,
+    'a legacy (unversioned) blob must not resurrect expanded drawers ' +
+      'on mobile',
+  );
+  wv.win.close();
+
+  // The same legacy blob on desktop keeps restoring as before.
+  persistedState = {
+    tabs: [{title: 'old chat', chatId: 'tab-1'}],
+    activeTabIndex: 0,
+    chatId: 'tab-1',
+    taskDrawerCollapsed: true,
+    inputDrawerCollapsed: true,
+  };
+  const wvDesk = makeWebview({remote: true, userAgent: UA_DESKTOP});
+  assertDrawers(
+    wvDesk.win,
+    true,
+    'desktop must keep restoring legacy drawer values (no regression)',
+  );
+  wvDesk.win.close();
+
+  // A current-version blob with explicit expanded drawers restores
+  // expanded even on mobile (the user's choice).
+  persistedState = {
+    tabs: [{title: 'old chat', chatId: 'tab-1'}],
+    activeTabIndex: 0,
+    chatId: 'tab-1',
+    taskDrawerCollapsed: false,
+    inputDrawerCollapsed: false,
+    drawersVersion: 2,
+  };
+  const wvNew = makeWebview({remote: true, userAgent: UA_IPHONE});
+  assertDrawers(
+    wvNew.win,
+    false,
+    'a versioned blob with expanded drawers must restore expanded ' +
+      'on mobile (user choice wins)',
+  );
+  wvNew.win.close();
+}
+
+// ── 20. Malformed persisted state never breaks the boot ─────────────
+function testMalformedStateGracefulBoot() {
+  for (const bad of ['garbage', 42, true]) {
+    persistedState = bad;
+    const {win, posted} = makeWebview({remote: true, userAgent: UA_IPHONE});
+    assert.ok(
+      posted.some(m => m.type === 'ready'),
+      `main.js must boot with a ${typeof bad} persisted state`,
+    );
+    assertDrawers(
+      win,
+      true,
+      `a malformed (${typeof bad}) blob must fall back to the mobile ` +
+        'collapsed default',
+    );
+    win.close();
+  }
+}
+
 function runTests() {
   const tests = [
     testDefaultsExpanded,
@@ -658,6 +971,14 @@ function runTests() {
     testDrawerButtonsLoseFocusAfterClick,
     testRemoteCollapsedPadding,
     testMissingDrawerButtonsGracefulBoot,
+    testMobileRemoteOpensCollapsed,
+    testDesktopRemoteOpensExpanded,
+    testUserAgentDataMobileRemote,
+    testIpadMasqueradeRemote,
+    testMobileUaVscodeWebviewUnaffected,
+    testMobileUserChoicePersists,
+    testLegacyStateMigratesOnMobile,
+    testMalformedStateGracefulBoot,
   ];
   for (const t of tests) {
     t();
