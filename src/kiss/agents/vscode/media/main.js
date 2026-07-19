@@ -5837,6 +5837,19 @@
         }
         focusInputWithRetry();
         break;
+      case 'insertAndSubmit':
+        // Cmd+E / Ctrl+E (kissSorcar.runSelection): paste the editor
+        // selection into the chat input textbox and submit it through
+        // the normal send path — a fresh ``submit`` for an idle tab, or
+        // an ``appendUserMessage`` steering instruction for a running
+        // agent — exactly like typing the text and pressing Send.
+        if (ev.text) {
+          inp.value = ev.text;
+          inp.dispatchEvent(new Event('input', {bubbles: true}));
+          focusInputWithRetry();
+          sendMessage();
+        }
+        break;
       case 'focusInput':
         focusInputWithRetry();
         break;
