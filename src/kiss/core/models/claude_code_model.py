@@ -16,8 +16,11 @@ for DeepSeek R1 in :mod:`kiss.core.models.openai_compatible_model`.
 
 import json
 import logging
+import queue
 import shutil
 import subprocess
+import threading
+import time
 from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 
@@ -49,6 +52,10 @@ def _claude_code_cache_creation_tokens(usage: dict[str, Any]) -> tuple[int, int]
             cache_creation.get("ephemeral_1h_input_tokens", 0) or 0,
         )
     return 0, usage.get("cache_creation_input_tokens", 0) or 0
+
+
+class _StreamReadTimeoutError(Exception):
+    """Internal sentinel: the CLI stdout stream stalled past the deadline."""
 
 
 def _find_claude_cli() -> str:
@@ -278,9 +285,53 @@ class ClaudeCodeModel(CLITextModel):
 
         self._stopped_for_tool_calls = False
         assert proc.stdout is not None
-        content, result_json = self._parse_stream_events(
-            proc.stdout, stop_on_tool_calls=stop_on_tool_calls
-        )
+
+        # Enforce the timeout on the ENTIRE stream read, not just the
+        # final proc.wait(): without a deadline, a hung or stalled
+        # ``claude`` CLI blocks the agent forever regardless of the
+        # configured timeout.  A daemon reader thread drains stdout into
+        # a queue while THIS thread consumes the queue with a deadline
+        # and runs the event parsing — the token/thinking callbacks must
+        # execute on the calling thread because printers attribute
+        # events by thread-local ``task_id`` (see the identical
+        # constraint in ``UsefulTools._bash_streaming``).
+        stdout = proc.stdout
+        out_queue: queue.Queue[str | None] = queue.Queue()
+
+        def _drain_stdout() -> None:
+            try:
+                for line in stdout:
+                    out_queue.put(line)
+            finally:
+                # EOF sentinel — also emitted when readline raises so
+                # the consumer can never wait on a dead reader.
+                out_queue.put(None)
+
+        threading.Thread(target=_drain_stdout, daemon=True).start()
+        deadline = time.monotonic() + timeout
+
+        def _lines_until_deadline() -> Iterator[str]:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise _StreamReadTimeoutError()
+                try:
+                    line = out_queue.get(timeout=remaining)
+                except queue.Empty:
+                    raise _StreamReadTimeoutError() from None
+                if line is None:
+                    return
+                yield line
+
+        try:
+            content, result_json = self._parse_stream_events(
+                _lines_until_deadline(), stop_on_tool_calls=stop_on_tool_calls
+            )
+        except _StreamReadTimeoutError:
+            proc.kill()
+            raise KISSError(
+                f"Claude Code CLI timed out after {timeout}s"
+            ) from None
 
         if self._stopped_for_tool_calls and proc.poll() is None:
             proc.terminate()

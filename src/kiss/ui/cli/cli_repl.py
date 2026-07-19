@@ -1172,43 +1172,110 @@ def _read_line(prompt: str, reader: PtkLineReader | None = None) -> str | None:
     return line
 
 
+# First line of anchored-history files written by
+# :func:`_save_history_lines`.  Entries under this header are stored
+# one per physical line with ``\\`` and newlines escaped (``\\\\`` /
+# ``\\n``), so a multi-line entry (Shift+Enter in the anchored box)
+# survives the save/load round trip as ONE history entry instead of
+# fragmenting into one bogus entry per physical line.  Files without
+# the header are legacy plain-lines files and are loaded verbatim
+# (no unescaping — a legacy ``C:\\new`` must never be mangled).
+_ANCHORED_HISTORY_HEADER = "#sorcar-history-v2"
+
+
+def _escape_history_entry(entry: str) -> str:
+    """Encode one history entry onto a single physical line.
+
+    Backslashes are doubled first so the escape is unambiguous, then
+    embedded newlines become the two-character sequence ``\\n``.
+
+    Args:
+        entry: The raw (possibly multi-line) history entry.
+
+    Returns:
+        The single-line encoded form.
+    """
+    return entry.replace("\\", "\\\\").replace("\n", "\\n")
+
+
+def _unescape_history_entry(line: str) -> str:
+    """Decode one :func:`_escape_history_entry`-encoded line.
+
+    Args:
+        line: The encoded single-line form.
+
+    Returns:
+        The original entry, with ``\\n`` restored to newlines and
+        ``\\\\`` to single backslashes.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if ch == "\\" and i + 1 < len(line):
+            nxt = line[i + 1]
+            if nxt == "n":
+                out.append("\n")
+                i += 2
+                continue
+            if nxt == "\\":
+                out.append("\\")
+                i += 2
+                continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def _load_history_lines(path: Path) -> list[str]:
-    """Return the saved input lines for the anchored REPL, oldest first.
+    """Return the saved input entries for the anchored REPL, oldest first.
+
+    Files opening with :data:`_ANCHORED_HISTORY_HEADER` store one
+    escaped entry per line (see :func:`_escape_history_entry`) so
+    multi-line entries round-trip intact.  Legacy files (no header)
+    are loaded verbatim, one entry per physical line.
 
     Args:
         path: Persistence path; non-existent / unreadable files yield
             an empty history (best effort).
 
     Returns:
-        The history lines (without trailing newlines).
+        The history entries (each possibly multi-line).
     """
     if not path.exists():
         return []
     try:
-        return [
-            ln
-            for ln in path.read_text(encoding="utf-8").splitlines()
-            # Skip libedit's ``_HiStOrY_V2_`` header: before w2 F13
-            # the readline backend wrote its own format to this same
-            # file, so a legacy file may still open with the header.
-            if ln and ln != "_HiStOrY_V2_"
-        ]
+        raw = path.read_text(encoding="utf-8").splitlines()
     except OSError:
         return []
+    if raw and raw[0] == _ANCHORED_HISTORY_HEADER:
+        return [_unescape_history_entry(ln) for ln in raw[1:] if ln]
+    return [
+        ln
+        for ln in raw
+        # Skip libedit's ``_HiStOrY_V2_`` header: before w2 F13
+        # the readline backend wrote its own format to this same
+        # file, so a legacy file may still open with the header.
+        if ln and ln != "_HiStOrY_V2_"
+    ]
 
 
 def _save_history_lines(path: Path, history: list[str]) -> None:
-    """Persist the anchored REPL's input history (last 1000 lines).
+    """Persist the anchored REPL's input history (last 1000 entries).
+
+    Each entry is escaped onto a single physical line (see
+    :func:`_escape_history_entry`) under the
+    :data:`_ANCHORED_HISTORY_HEADER` marker, so multi-line entries
+    (Shift+Enter input) reload as one entry instead of fragmenting.
 
     Args:
         path: Destination file; parent directories are created as needed.
-        history: Lines to persist (oldest first).
+        history: Entries to persist (oldest first).
     """
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        text = "\n".join(history[-1000:])
-        if history:
-            text += "\n"
-        path.write_text(text, encoding="utf-8")
+        lines = [_ANCHORED_HISTORY_HEADER]
+        lines.extend(_escape_history_entry(entry) for entry in history[-1000:])
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     except OSError:  # pragma: no cover - disk/permission error
         logger.debug("could not save anchored history", exc_info=True)

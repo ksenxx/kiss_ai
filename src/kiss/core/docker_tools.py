@@ -51,7 +51,12 @@ class DockerTools:
         cmd = (
             f'FILE={path}\n'
             f'if [ ! -f "$FILE" ]; then echo "Error: File not found: $FILE"; exit 1; fi\n'
-            f'TOTAL=$(wc -l < "$FILE")\n'
+            # ``wc -l`` counts newline characters, not lines — a file whose
+            # last line lacks a trailing newline would be undercounted by
+            # one, producing a bogus "past EOF" error for its real last
+            # line and a wrong truncated-lines count.  ``awk END{print NR}``
+            # counts the final unterminated line too.
+            f'TOTAL=$(awk \'END{{print NR}}\' "$FILE")\n'
             f'START={start_line}\n'
             f'MAX={max_lines}\n'
             f'if [ "$START" -gt "$TOTAL" ] && [ "$TOTAL" -gt 0 ]; then\n'

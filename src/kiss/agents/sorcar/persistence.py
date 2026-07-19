@@ -494,16 +494,20 @@ def _is_failed_result(result: str) -> bool:
     * ``Task stopped by user`` — an explicit user cancellation.  It is
       not a successful completion, so the history sidebar should mark
       it with the same red status dot used for failed runs.
-    * ``Task interrupted by server restart/shutdown`` — a graceful
-      daemon/server shutdown cancellation.  It is likewise an
-      incomplete task outcome rather than a success.
+    * ``Task interrupted*`` — an interrupted run.  Covers both the
+      bare ``Task interrupted`` marker persisted by
+      ``ChatSorcarAgent.run``'s ``except BaseException`` handler (a
+      ``KeyboardInterrupt`` reaching a CLI / sub-agent / channel-agent
+      run) and ``Task interrupted by server restart/shutdown`` (a
+      graceful daemon/server shutdown cancellation).  Both are
+      incomplete task outcomes rather than successes.
     """
     return (
         result.startswith("Task failed")
         or result == "Agent Failed Abruptly"
         or result == "Task terminated unexpectedly (process killed)"
         or result == "Task stopped by user"
-        or result == "Task interrupted by server restart/shutdown"
+        or result.startswith("Task interrupted")
     )
 
 
