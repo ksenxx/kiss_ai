@@ -1572,6 +1572,8 @@
     '.chat-tab-close',
     '#input-clear-btn',
     '.search-clear-btn',
+    '#task-panel-drawer-btn',
+    '#input-drawer-btn',
   ].join(', ');
   document.addEventListener(
     'click',
@@ -1743,8 +1745,74 @@
       tabs: serialized,
       activeTabIndex: activeIdx,
       chatId: activeTabId,
+      taskDrawerCollapsed: taskDrawerCollapsed,
+      inputDrawerCollapsed: inputDrawerCollapsed,
+      // Marks the drawer booleans as written by a build that knows
+      // the mobile collapsed default (see the seeding block below):
+      // only blobs carrying this version may override that default.
+      drawersVersion: DRAWERS_VERSION,
     });
   }
+
+  // ── Drawer widgets: pinned task panel + input panel ─────────────
+  // Each panel is a drawer (see chat.html/main.css): collapsing it
+  // hands the freed height to the flex:1 events area (#output).  The
+  // two booleans ride in the same vscode.setState blob as the tabs
+  // (persistTabState above) so a webview dispose/reopen restores the
+  // drawers.  Seeded HERE — before the tab-restore IIFE below, whose
+  // makeTab/renderTabBar calls persistTabState and would otherwise
+  // overwrite the saved values with the defaults.
+  // The drawer-coverage markers delimit the feature code measured by
+  // test/drawerPanels.coverage.js (100% line coverage enforced).
+  // drawer-coverage:start
+  /**
+   * True when this page is the remote web app (body.remote-chat)
+   * running on a mobile device — a phone or tablet.  Checks the UA
+   * Client Hints mobile flag first (Chromium), then the classic
+   * user-agent tokens, and finally catches iPadOS Safari, which
+   * masquerades as desktop "Macintosh" but exposes a multi-touch
+   * screen.  The VS Code extension webview (no body.remote-chat
+   * class) is never treated as mobile.
+   */
+  function isMobileRemoteWebApp() {
+    if (!document.body.classList.contains('remote-chat')) return false;
+    const uaData = navigator.userAgentData;
+    if (uaData && uaData.mobile === true) return true;
+    const ua = navigator.userAgent || '';
+    if (/Android|iPhone|iPad|iPod|Mobile|IEMobile|Opera Mini/i.test(ua)) {
+      return true;
+    }
+    return /Macintosh/i.test(ua) && navigator.maxTouchPoints > 1;
+  }
+
+  // On a mobile device the remote web app OPENS with both drawers
+  // COLLAPSED — the pinned task panel and the composer (input textbox
+  // + buttons panel) tuck into slim bars so the small screen is spent
+  // on the chat events area.  The user's own persisted toggle choice
+  // still wins below, but ONLY when the saved blob carries
+  // ``drawersVersion`` >= DRAWERS_VERSION: older builds auto-persisted
+  // ``taskDrawerCollapsed:false`` on every boot (never a user choice),
+  // so on mobile a legacy blob must not resurrect the expanded
+  // drawers.  On desktop the default never changed, so legacy values
+  // restore as before.
+  const DRAWERS_VERSION = 2;
+  const mobileDrawerDefault = isMobileRemoteWebApp();
+  let taskDrawerCollapsed = mobileDrawerDefault;
+  let inputDrawerCollapsed = mobileDrawerDefault;
+  {
+    const _saved = vscode.getState();
+    const _drawersTrusted =
+      _saved &&
+      typeof _saved === 'object' &&
+      (!mobileDrawerDefault || _saved.drawersVersion >= DRAWERS_VERSION);
+    if (_drawersTrusted && 'taskDrawerCollapsed' in _saved) {
+      taskDrawerCollapsed = !!_saved.taskDrawerCollapsed;
+    }
+    if (_drawersTrusted && 'inputDrawerCollapsed' in _saved) {
+      inputDrawerCollapsed = !!_saved.inputDrawerCollapsed;
+    }
+  }
+  // drawer-coverage:end
 
   // Initialize tabs — restore from saved state if available, else create one default tab
   // Race-fix: seed the closure-scoped ``selectedModel`` from the DOM
@@ -1893,6 +1961,9 @@
     'task-panel-collapse-label',
   );
   const taskPanelCopy = document.getElementById('task-panel-copy');
+  const taskPanelDrawerBtn = document.getElementById('task-panel-drawer-btn');
+  const inputDrawerBtn = document.getElementById('input-drawer-btn');
+  const inputAreaEl = document.getElementById('input-area');
   const statusTokens = document.getElementById('status-tokens');
   const statusBudget = document.getElementById('status-budget');
   const statusSteps = document.getElementById('status-steps');
@@ -1999,6 +2070,26 @@
           p.classList.remove('chv-hidden');
           continue;
         }
+        // ``summary`` digest panels must stay visible while collapsed
+        // — the whole point of the summary tool is that its
+        // description remains readable after everything else is
+        // tucked away (history replay, tab restore, "Collapse Chats").
+        // Panels adopted inside a summary's .summary-sub are already
+        // hidden by the summary's own .collapsed state; marking them
+        // chv-hidden here would keep them invisible even after the
+        // user manually expands the summary.
+        if (p.classList.contains('tc-summary')) {
+          p.classList.remove('chv-hidden');
+          // Restore the digest state — unless the user explicitly
+          // expanded this summary to read it (user-pinned).
+          if (!p.classList.contains('user-pinned'))
+            p.classList.add('collapsed');
+          continue;
+        }
+        if (p.closest('.summary-sub')) {
+          p.classList.remove('chv-hidden');
+          continue;
+        }
         p.classList.add('chv-hidden');
         // A "Collapse Chats" pass that hides a run_parallel panel
         // must not leave the fan-out's sub-agent tabs open: a hidden
@@ -2068,6 +2159,64 @@
         _scrollLock = true;
     });
   }
+
+  /**
+   * Apply the current drawer state (module vars ``taskDrawerCollapsed``
+   * / ``inputDrawerCollapsed``) to the pinned task panel and the input
+   * (composer) panel.  A collapsed drawer carries the
+   * ``drawer-collapsed`` class — CSS tucks its contents into a slim
+   * bar so the flex:1 events area (#output) absorbs the freed height —
+   * and its toggle flips aria-expanded plus the action it offers in
+   * aria-label/data-tooltip.
+   */
+  // drawer-coverage:start
+  function applyDrawerState() {
+    if (taskPanel && taskPanelDrawerBtn) {
+      taskPanel.classList.toggle('drawer-collapsed', taskDrawerCollapsed);
+      taskPanelDrawerBtn.setAttribute(
+        'aria-expanded',
+        taskDrawerCollapsed ? 'false' : 'true',
+      );
+      const taskLabel = taskDrawerCollapsed
+        ? 'Expand task panel'
+        : 'Collapse task panel';
+      taskPanelDrawerBtn.setAttribute('aria-label', taskLabel);
+      taskPanelDrawerBtn.setAttribute('data-tooltip', taskLabel);
+    }
+    if (inputAreaEl && inputDrawerBtn) {
+      inputAreaEl.classList.toggle('drawer-collapsed', inputDrawerCollapsed);
+      inputDrawerBtn.setAttribute(
+        'aria-expanded',
+        inputDrawerCollapsed ? 'false' : 'true',
+      );
+      const inputLabel = inputDrawerCollapsed
+        ? 'Expand input panel'
+        : 'Collapse input panel';
+      inputDrawerBtn.setAttribute('aria-label', inputLabel);
+      inputDrawerBtn.setAttribute('data-tooltip', inputLabel);
+    }
+  }
+
+  if (taskPanelDrawerBtn) {
+    taskPanelDrawerBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      taskDrawerCollapsed = !taskDrawerCollapsed;
+      applyDrawerState();
+      persistTabState();
+    });
+  }
+  if (inputDrawerBtn) {
+    inputDrawerBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      inputDrawerCollapsed = !inputDrawerCollapsed;
+      applyDrawerState();
+      persistTabState();
+    });
+  }
+  // Restore the persisted drawer state on load (webview reopen /
+  // remote web app reconnect).
+  applyDrawerState();
+  // drawer-coverage:end
 
   /**
    * Copy *text* via a temporary textarea + ``document.execCommand('copy')``
@@ -2631,6 +2780,14 @@
   function collapsePreview(panelEl) {
     const prev = panelEl.querySelector('.collapse-preview');
     if (!prev) return;
+    // ``summary`` tool panels keep their description fully visible
+    // below the header even while collapsed (see the
+    // ``.tc.tc-summary.collapsed > .tc-summary-desc`` CSS rule) —
+    // never duplicate it, truncated, into the header preview.
+    if (panelEl.classList.contains('tc-summary')) {
+      prev.textContent = '';
+      return;
+    }
     if (!panelEl.classList.contains('collapsed')) {
       prev.textContent = '';
       return;
@@ -3412,6 +3569,15 @@
             ev.extras ? ev.extras.tasks : undefined,
           );
         }
+        // ``summary`` tool: the agent periodically (every ~5 steps)
+        // summarizes its recent activity.  The panel adopts ALL the
+        // top-level event panels emitted since the previous summary
+        // panel — or since the beginning of the task — as sub-panels
+        // and collapses, hiding the detail while its ``description``
+        // stays fully visible (see the
+        // ``.tc.tc-summary.collapsed > .tc-summary-desc`` CSS rule).
+        const isSummary = ev.name === 'summary';
+        if (isSummary) c.classList.add('tc-summary');
         let b = '';
         if (ev.path) {
           const ep = esc(ev.path).replace(/"/g, '&quot;');
@@ -3422,7 +3588,7 @@
             esc(ev.path) +
             '</span></div>';
         }
-        if (ev.description)
+        if (ev.description && !isSummary)
           b +=
             '<div class="tc-arg"><span class="tc-arg-name">description:</span> ' +
             esc(ev.description) +
@@ -3469,9 +3635,55 @@
         tcBody.innerHTML =
           b || '<em style="color:var(--dim)">No arguments</em>';
         c.appendChild(hdr);
-        c.appendChild(tcBody);
+        if (isSummary) {
+          // The description lives in its own DIRECT child (not in the
+          // generic ``.tc-b`` body) so the collapsed-state stylesheet
+          // can keep exactly it visible while everything else hides.
+          const sd = mkEl('div', 'tc-summary-desc');
+          sd.textContent = ev.description || '';
+          sd.dataset.rawText = ev.description || '';
+          c.appendChild(sd);
+        } else {
+          c.appendChild(tcBody);
+        }
         addCollapse(c, hdr);
         target.appendChild(c);
+        if (isSummary) {
+          // Adopt ALL the top-level event panels emitted since the
+          // previous summary panel (or since the beginning of the
+          // task) as sub-panels of this summary panel, preserving
+          // their order — the digest recaps exactly "what you did
+          // after the last call to the 'summary' tool" (SYSTEM.md).
+          // Never cross into an earlier summary panel, the user's
+          // prompt, a system prompt, a previous task's history
+          // block, or a result panel.
+          const sub = mkEl('div', 'summary-sub');
+          const adopt = [];
+          let sib = c.previousElementSibling;
+          while (sib) {
+            if (
+              sib.classList.contains('tc-summary') ||
+              sib.classList.contains('prompt') ||
+              sib.classList.contains('system-prompt') ||
+              sib.classList.contains('adjacent-task') ||
+              sib.classList.contains('rc')
+            )
+              break;
+            // Only event panels are adoptable; anything else (the
+            // #welcome block, sticky bars, …) is a hard boundary.
+            if (
+              !sib.classList.contains('ev') &&
+              !sib.classList.contains('llm-panel')
+            )
+              break;
+            adopt.push(sib);
+            sib = sib.previousElementSibling;
+          }
+          for (let ai = adopt.length - 1; ai >= 0; ai--)
+            sub.appendChild(adopt[ai]);
+          c.appendChild(sub);
+          c.classList.add('collapsed');
+        }
         tState.lastToolCallEl = c;
         stampPanelStart(c);
         if (ev.command) {
@@ -5259,6 +5471,52 @@
         }
         break;
       }
+      case 'openRunningTasks': {
+        // Remote-webapp page load: the web server's ``_handle_ready``
+        // reports every task currently running in the backend, sorted
+        // oldest-first.  Open one chat tab per running task that is
+        // not already visible in this window (dedupe by backend chat
+        // id — a restored tab may already show the chat) and post
+        // ``resumeSession`` so the backend replays the chat's events
+        // and re-subscribes the tab to the live stream (same flow as
+        // clicking the chat in the History sidebar).  Finally focus
+        // the tab running the LATEST task (the list's last entry).
+        // VS Code webviews never receive this message: only the web
+        // server sends it, and only to WSS (remote-web) clients.
+        const runningTasks = Array.isArray(ev.tasks) ? ev.tasks : [];
+        let focusTabId = '';
+        runningTasks.forEach(rt => {
+          if (!rt || !rt.chatId) return;
+          const rtChatId = String(rt.chatId);
+          const existing = getTabByBackendChatId(rtChatId);
+          if (existing) {
+            focusTabId = existing.id;
+            return;
+          }
+          createNewTab();
+          // Stamp the backend chat id eagerly (the replay's
+          // ``task_events`` would set it anyway) so a second
+          // ``openRunningTasks`` — or a history click — can never
+          // open the same chat in two tabs.
+          const rtTab = getTab(activeTabId);
+          if (rtTab) rtTab.backendChatId = rtChatId;
+          const rtTitle = String(rt.title || '').trim();
+          if (rtTitle) updateActiveTabTitle(rtTitle);
+          vscode.postMessage({
+            type: 'resumeSession',
+            id: rtChatId,
+            taskId: rt.taskId || '',
+            tabId: activeTabId,
+          });
+          focusTabId = activeTabId;
+        });
+        if (focusTabId && focusTabId !== activeTabId) {
+          switchToTab(focusTabId);
+        }
+        persistTabState();
+        break;
+      }
+
       case 'triggerStop':
         vscode.postMessage({type: 'stop', tabId: activeTabId});
         break;

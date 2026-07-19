@@ -1141,6 +1141,27 @@ def _get_task_chat_id(task_id: str) -> str:
         return str(row["chat_id"]) if row and row["chat_id"] else ""
 
 
+def _get_task_start_ts(task_id: str) -> int:
+    """Return the ``start_ts`` of the task with the given row id, or 0.
+
+    Args:
+        task_id: The primary key of the task_history row.
+
+    Returns:
+        The task's recorded start timestamp (epoch seconds), or ``0``
+        when the row is missing, its ``start_ts`` column is empty, or
+        *task_id* is ``""``.
+    """
+    if not task_id:
+        return 0
+    with _rw_lock.read_lock():
+        db = _get_db()
+        row = db.execute(
+            "SELECT start_ts FROM task_history WHERE id = ?", (task_id,),
+        ).fetchone()
+        return _safe_int(row["start_ts"], 0) if row else 0
+
+
 def _chat_has_tasks(chat_id: str) -> bool:
     """Return True if the given chat_id has at least one task row.
 

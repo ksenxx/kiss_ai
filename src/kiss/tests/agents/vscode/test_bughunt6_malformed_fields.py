@@ -49,6 +49,7 @@ import threading
 import time
 import unittest
 from collections.abc import Generator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -74,8 +75,11 @@ def _isolate_db(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
         pm, "_DB_PATH", type(pm._DB_PATH)(os.path.join(tmpdir, "sorcar.db")),
     )
     cfg_path = os.path.join(tmpdir, "config.json")
-    monkeypatch.setattr(vc, "CONFIG_DIR", type(vc.CONFIG_DIR)(tmpdir))
-    monkeypatch.setattr(vc, "CONFIG_PATH", type(vc.CONFIG_PATH)(cfg_path))
+    # ``CONFIG_DIR``/``CONFIG_PATH`` are PEP 562 lazy attributes;
+    # ``setattr`` would pin the computed (stale tmp) Path at teardown.
+    # ``setitem`` deletes the pin instead, restoring lazy resolution.
+    monkeypatch.setitem(vars(vc), "CONFIG_DIR", Path(tmpdir))
+    monkeypatch.setitem(vars(vc), "CONFIG_PATH", Path(cfg_path))
     yield
     _close_db()
 
