@@ -129,7 +129,10 @@ body.remote-chat #task-panel {
   background: #212121;
   color: #ececec;
   box-shadow: inset 0 0 1px rgb(255 255 255 / 20%);
-  padding: 10px 38px 10px 16px;
+
+  /* 58px right inset fits the two floating icons (drawer chevron +
+     copy) side by side without covering the task text. */
+  padding: 10px 58px 10px 16px;
 }
 
 body.remote-chat #task-panel-collapse-btn {
@@ -146,6 +149,39 @@ body.remote-chat #task-panel-collapse-btn:hover {
 
 body.remote-chat #task-panel-copy { color: #8e8e8e; }
 body.remote-chat #task-panel-copy:hover { color: #ececec; }
+
+/* Drawer toggles under the dark Codex skin: same muted-grey icon
+   palette as #task-panel-copy; the input handle matches the composer
+   card surface so it reads as part of the drawer it controls. */
+body.remote-chat #task-panel-drawer-btn { color: #8e8e8e; }
+body.remote-chat #task-panel-drawer-btn:hover { color: #ececec; }
+
+body.remote-chat #input-drawer-btn {
+  background: #212121;
+  border-color: rgb(255 255 255 / 15%);
+  color: #afafaf;
+}
+
+body.remote-chat #input-drawer-btn:hover {
+  color: #ececec;
+  border-color: rgb(255 255 255 / 30%);
+}
+
+/* Collapsed drawers under the remote skin: the remote base rules
+   above set shorthand ``padding`` with higher specificity than
+   main.css's ``.drawer-collapsed`` longhands, so the slim collapsed
+   heights must be restated here.  The input drawer keeps the
+   safe-area bottom inset so the handle stays reachable above the
+   iOS home indicator. */
+body.remote-chat #task-panel.drawer-collapsed {
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+
+body.remote-chat #input-area.drawer-collapsed {
+  padding-top: 10px;
+  padding-bottom: calc(2px + env(safe-area-inset-bottom, 0px));
+}
 
 /* ── Output column (Codex thread) ────────────────────── */
 body.remote-chat #output {
