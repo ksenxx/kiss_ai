@@ -625,6 +625,63 @@ def _rate_limit_backoff_seconds() -> int:
     jitter = secrets.randbelow(_TUNNEL_RATE_LIMIT_JITTER + 1)
     return _TUNNEL_RATE_LIMIT_BACKOFF + jitter
 
+
+def _is_loopback_ip(ip: str) -> bool:
+    """Return True when *ip* is an IPv4/IPv6 loopback address.
+
+    A loopback TCP peer on the public WSS port is the local
+    ``cloudflared`` tunnel relaying a remote visitor (or another
+    process on this host).  IPv6-mapped IPv4 loopback
+    (``::ffff:127.0.0.1``) counts too.  A malformed / empty string is
+    not loopback.
+
+    Args:
+        ip: A textual IP address (no port).
+
+    Returns:
+        True when *ip* parses to a loopback address.
+    """
+    try:
+        parsed = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    mapped = getattr(parsed, "ipv4_mapped", None)
+    if mapped is not None:
+        parsed = mapped
+    return parsed.is_loopback
+
+
+def _forwarded_client_ip(websocket: ServerConnection) -> str:
+    """Return the real client IP forwarded by cloudflared, or ``""``.
+
+    cloudflared sets ``Cf-Connecting-Ip`` to the origin visitor's IP on
+    the WebSocket upgrade request; ``X-Forwarded-For`` (whose first hop
+    is the original client) is used as a fallback.  The returned value
+    must be treated as trusted **only** for loopback TCP peers (see
+    :meth:`RemoteAccessServer._client_ip`).
+
+    Args:
+        websocket: The server connection whose upgrade request headers
+            are inspected.
+
+    Returns:
+        The forwarded client IP as a string, or ``""`` when no usable
+        header is present.
+    """
+    request = getattr(websocket, "request", None)
+    headers = getattr(request, "headers", None)
+    if headers is None:
+        return ""
+    cf_ip = str(headers.get("Cf-Connecting-Ip") or "").strip()
+    if cf_ip:
+        return cf_ip
+    xff = str(headers.get("X-Forwarded-For") or "")
+    first = xff.split(",")[0].strip()
+    if first:
+        return first
+    return ""
+
+
 _HEAD_200 = (
     b"HTTP/1.1 200 OK\r\n"
     b"Content-Length: 0\r\n"
@@ -4037,11 +4094,38 @@ class RemoteAccessServer:
         return secrets.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
 
     def _client_ip(self, websocket: ServerConnection) -> str:
-        """Return the source IP of *websocket*, or ``"?"`` if unknown."""
+        """Return the rate-limit bucket key (source IP) of *websocket*.
+
+        The public WSS port is reached through the local ``cloudflared``
+        tunnel, which connects over **loopback**.  Using the raw TCP
+        peer address as the rate-limit key would therefore collapse
+        *every* tunnel visitor onto a single ``127.0.0.1`` bucket, so a
+        single bad actor's failed guesses (or one user fat-fingering the
+        password) would trip the brute-force lockout for **everyone** —
+        after which new visitors are refused with ``auth_locked`` and
+        never shown the password prompt at all ("the remote webapp
+        doesn't ask for a password").
+
+        To key the lockout on the *real* client instead, when the direct
+        TCP peer is loopback we trust the client IP that cloudflared
+        forwards in the upgrade request headers (``Cf-Connecting-Ip``,
+        falling back to the first hop of ``X-Forwarded-For``).  The
+        header is honoured **only** for loopback peers — a non-loopback
+        peer connecting directly (bypassing cloudflared) could otherwise
+        spoof the header to evade or poison the lockout — so direct
+        connections always fall back to their real TCP address.
+
+        Returns:
+            A stable per-client string used as the rate-limit key, or
+            ``"?"`` when the peer address is unknown.
+        """
         addr = getattr(websocket, "remote_address", None)
-        if addr and len(addr) >= 1:
-            return str(addr[0])
-        return "?"
+        peer_ip = str(addr[0]) if addr and len(addr) >= 1 else ""
+        if peer_ip and _is_loopback_ip(peer_ip):
+            forwarded = _forwarded_client_ip(websocket)
+            if forwarded:
+                return forwarded
+        return peer_ip or "?"
 
     def _auth_lock_remaining(self, ip: str) -> float:
         """Return the seconds left in *ip*'s rate-limit lock (0.0 if none).
