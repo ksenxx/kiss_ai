@@ -290,7 +290,9 @@ class ChatSorcarAgent(SorcarAgent):
         return self._summary_tool_guard
 
     @tool_call_guard.setter
-    def tool_call_guard(self, guard: Any) -> None:
+    def tool_call_guard(  # pyright: ignore[reportIncompatibleVariableOverride]
+        self, guard: Any
+    ) -> None:
         """Store the parent-installed guard to delegate to.
 
         Args:

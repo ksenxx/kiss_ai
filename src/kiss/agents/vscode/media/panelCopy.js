@@ -172,52 +172,37 @@
 
   // panelts-coverage:start
   /**
-   * Format an event timestamp (ms since epoch) as a compact
-   * human-readable label in the user's locale.
+   * Format an event timestamp (ms since epoch) as a human-readable
+   * label in the user's locale.
    *
-   * Rules: a same-day event shows only its time of day ("2:07 PM");
-   * an event from another day of the current year prefixes the date
-   * ("Mar 5 2:07 PM"); an event from another year also carries the
-   * year ("Mar 5, 2021 2:07 PM").  Invalid / missing / non-positive
-   * inputs format as the empty string so callers can skip the badge.
+   * Every label carries the FULL date and a seconds-precision time
+   * of day ("Mar 5, 2021 2:07:33 PM") so an event's exact moment is
+   * always visible, even for same-day events.  Invalid / missing /
+   * non-positive inputs format as the empty string so callers can
+   * skip the badge.
    *
    * @param {number} ts - event time in ms since the epoch.
-   * @param {Date} [now] - "current" time anchor (defaults to
-   *   ``new Date()``); injectable for deterministic tests.
-   * @returns {string} the compact label, or '' when *ts* is unusable.
+   * @returns {string} the "date time" label, or '' when *ts* is
+   *   unusable.
    */
-  function formatEventTs(ts, now) {
+  function formatEventTs(ts) {
     const n = Number(ts);
     if (!isFinite(n) || n <= 0) return '';
     const d = new Date(n);
     // A finite ms value can still overflow the ECMAScript Date range
     // (±8.64e15); such a Date formats as "Invalid Date" — skip it.
     if (!isFinite(d.getTime())) return '';
-    // Duck-type the anchor (not ``instanceof Date``): a Date created
-    // in another realm (jsdom test host, iframe) must still be usable.
-    const anchor =
-      now && typeof now.getFullYear === 'function' ? now : new Date();
-    const time = d.toLocaleTimeString([], {
-      hour: 'numeric',
-      minute: '2-digit',
-    });
-    if (
-      d.getFullYear() === anchor.getFullYear() &&
-      d.getMonth() === anchor.getMonth() &&
-      d.getDate() === anchor.getDate()
-    ) {
-      return time;
-    }
-    if (d.getFullYear() === anchor.getFullYear()) {
-      const day = d.toLocaleDateString([], {month: 'short', day: 'numeric'});
-      return day + ' ' + time;
-    }
-    const dayYear = d.toLocaleDateString([], {
+    const day = d.toLocaleDateString([], {
       month: 'short',
       day: 'numeric',
       year: 'numeric',
     });
-    return dayYear + ' ' + time;
+    const time = d.toLocaleTimeString([], {
+      hour: 'numeric',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+    return day + ' ' + time;
   }
 
   /**
@@ -273,7 +258,7 @@
   }
 
   /**
-   * Attach a compact event-timestamp badge to a chat panel's bottom
+   * Attach a date + seconds event-timestamp badge to a chat panel's bottom
    * footer bar.
    *
    * The badge (``span.panel-ts``) is inserted as the FIRST child of
