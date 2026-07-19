@@ -278,6 +278,59 @@ async function main() {
   );
 
   // -----------------------------------------------------------------
+  // 2b. Async restart callbacks (the drain-aware macLaunchd sequence)
+  //     are awaited: a rejecting first attempt is caught and logged —
+  //     not an unhandled rejection — and a later async attempt that
+  //     brings up a REAL daemon leads to success.
+  // -----------------------------------------------------------------
+  await test(
+    'async restart callback: rejection is logged, later attempt succeeds',
+    async () => {
+      const port = await freeTcpPort();
+      const bin = makeKissWebBin('async-restart');
+      const sockPath = path.join(tmpRoot, 'async-restart.sock');
+      let daemon = null;
+      let calls = 0;
+      let spawned = false;
+      const logs = [];
+      const res = await verifyDaemonStartup({
+        binPath: bin,
+        sockPath,
+        port,
+        restart: async () => {
+          calls += 1;
+          await new Promise(resolve => setTimeout(resolve, 50));
+          if (calls === 1) {
+            throw new Error('bootstrap still draining');
+          }
+          if (!spawned) {
+            spawned = true;
+            daemon = await startFakeDaemon(port, sockPath);
+          }
+        },
+        log: msg => logs.push(msg),
+        timeoutMs: 10_000,
+        pollIntervalMs: 25,
+        restartEveryMs: 50,
+        probeTimeoutMs: 200,
+      });
+      assert.strictEqual(res.ok, true);
+      assert.strictEqual(res.reason, 'alive');
+      assert.ok(calls >= 2, `calls=${calls}`);
+      assert.ok(
+        logs.some(
+          m =>
+            m.includes('re-restart attempt failed') &&
+            m.includes('bootstrap still draining'),
+        ),
+        `the rejected async restart must be logged, got: ${JSON.stringify(logs)}`,
+      );
+      assert.ok(daemon, 'real daemon must have been started');
+      await daemon.close();
+    },
+  );
+
+  // -----------------------------------------------------------------
   // 3. Venv-wipe race healed: the kiss-web binary has been deleted by
   //    a concurrent ``code --install-extension --force``.  While it is
   //    missing the verifier must NOT invoke restart (launchd cannot
