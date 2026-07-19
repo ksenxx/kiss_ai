@@ -274,6 +274,8 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   private _onCommitMessage = new vscode.EventEmitter<{
     message: string;
     error?: string;
+    /** Requesting tab ('' = the SCM flow); scopes waiters per tab. */
+    tabId?: string;
   }>();
   public readonly onCommitMessage = this._onCommitMessage.event;
   private _commitPendingTabs: Set<string> = new Set();
@@ -348,6 +350,22 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     resolveMap: Map<string, () => void>,
     timeoutMs: number | undefined = 120_000,
   ): void {
+    // A previous action for this tab may still be pending (e.g. its
+    // result never arrived and the user retried).  Overwriting its
+    // resolver below would orphan the old progress promise FOREVER:
+    // the safety timeout compares map identity (``resolveMap.get(tabId)
+    // === resolve``) before resolving, so once the entry is replaced
+    // neither the completion event nor the timeout can ever close the
+    // superseded toast.  Resolve it now so its notification is closed
+    // before the replacement dialog is registered.
+    if (tabId !== undefined) {
+      const prev = resolveMap.get(tabId);
+      if (prev) {
+        resolveMap.delete(tabId);
+        progressMap.delete(tabId);
+        prev();
+      }
+    }
     withWebviewNotificationProgress(
       {
         location: vscode.ProgressLocation.Notification,
@@ -549,7 +567,11 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         msg.config.work_dir = this._getWorkDir();
       }
       if (msg.type === 'commitMessage' && this._isOwnTab(msg.tabId)) {
-        this._onCommitMessage.fire({message: msg.message, error: msg.error});
+        this._onCommitMessage.fire({
+          message: msg.message,
+          error: msg.error,
+          tabId: msg.tabId ?? '',
+        });
       }
       if (msg.type === 'models' && msg.selected) {
         this._selectedModel = msg.selected;
@@ -709,7 +731,11 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
             this._isOwnTab(statusTabId) &&
             this._commitPendingTabs.has(statusTabId ?? '')
           ) {
-            this._onCommitMessage.fire({message: '', error: 'Process stopped'});
+            this._onCommitMessage.fire({
+              message: '',
+              error: 'Process stopped',
+              tabId: statusTabId ?? '',
+            });
           }
         }
       }
@@ -937,11 +963,17 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     }
     const tunnelActive = !!tunnel;
     const url = tunnel || local || '';
-    const key = `${tunnelActive ? '1' : '0'}|${url}`;
+    // The dedup key must cover EVERYTHING the message carries — the
+    // ntfy URL included.  ``~/.kiss/ntfy_topic`` is written by the
+    // daemon after startup, typically AFTER the first ``remote_url``
+    // send; with a URL-only key the 10 s watcher saw an unchanged URL,
+    // deduped, and the webview never learned the ntfy link until the
+    // whole webview was reloaded.
+    const ntfyUrl = this._getNtfyUrl();
+    const key = `${tunnelActive ? '1' : '0'}|${url}|${ntfyUrl}`;
     if (key === this._lastSentUrl) return;
     this._lastSentUrl = key;
     const msg: ToWebviewMessage = {type: 'remote_url', url, tunnelActive};
-    const ntfyUrl = this._getNtfyUrl();
     if (ntfyUrl) {
       msg.ntfyUrl = ntfyUrl;
     }
@@ -1870,7 +1902,17 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         clearTimeout(timer);
         resolve();
       };
-      const disposable = this._onCommitMessage.event(() => done());
+      // Only resolve on the reply for THIS tab's request.  The daemon
+      // stamps every ``commitMessage`` with the requesting tabId, so a
+      // reply (or "Process stopped" abort) for one tab must not settle
+      // another tab's pending generation — resolving on ANY event
+      // deleted the wrong ``_commitPendingTabs`` entry and reported
+      // completion for a generation that was still in flight.  Events
+      // fired without a tabId (legacy) keep resolving the '' (SCM)
+      // waiter.
+      const disposable = this._onCommitMessage.event(ev => {
+        if ((ev.tabId ?? '') === tabId) done();
+      });
       token?.onCancellationRequested(() => done());
       const timer = setTimeout(done, 30_000);
     });

@@ -1146,7 +1146,19 @@ class _InputBox:
         """
         if self.completer_fn is None:
             return False
-        repls, displays = _normalize_candidates(self.completer_fn(self.buf))
+        try:
+            raw = self.completer_fn(self.buf)
+        except Exception:  # noqa: BLE001 - completer must not break editing
+            # Same resilience contract as :meth:`_refresh_typing_menu`:
+            # a raising completer must never propagate out of
+            # :meth:`feed` — that would crash the whole stdin pump
+            # (and with it the REPL) on a mere Tab press while the
+            # typing path survived the very same failure.
+            logger.debug(
+                "completer raised during Tab completion", exc_info=True,
+            )
+            return False
+        repls, displays = _normalize_candidates(raw)
         if not repls:
             return False
         replaced = False

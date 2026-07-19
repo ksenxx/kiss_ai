@@ -337,7 +337,11 @@ class KISSAgent(Base):
         if not self.is_agentic:
             return
 
-        tools = tools or []
+        # Copy the caller's list: appending ``self.finish`` to the passed-in
+        # list object would mutate the caller's data, and a second agent
+        # reusing the same list would register the FIRST agent's bound
+        # ``finish`` instead of its own.
+        tools = list(tools or [])
         tool_names = {getattr(tool, "__name__", None) for tool in tools}
 
         if "finish" not in tool_names:
