@@ -174,6 +174,10 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     sidebarView!.onCommitMessage(ev => {
+      // This handler owns the SCM input box, whose generations run
+      // under tabId '' — a commit message generated for a chat tab
+      // must not clobber the SCM box (or wipe its countdown).
+      if ((ev.tabId ?? '') !== '') return;
       const countdownWasRunning = stopCommitCountdown !== undefined;
       stopCommitCountdown?.();
       if (ev.error) {
