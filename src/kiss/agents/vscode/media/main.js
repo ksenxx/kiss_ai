@@ -7876,6 +7876,50 @@
         });
       }
     });
+    // Collapsible "Filters" panel — the filter chips and the From/To
+    // date range live inside #history-filters-body, shown/hidden by
+    // the #history-filters-toggle disclosure button in chat.html.
+    // Both the VS Code extension webview and the remote web chat load
+    // this file, so a single wiring covers both views.  The
+    // collapsed/expanded choice persists across reloads via
+    // localStorage; the panel defaults to expanded so the filter
+    // buttons and dates are visible whenever it is uncollapsed.
+    const historyFiltersToggle = document.getElementById(
+      'history-filters-toggle',
+    );
+    const historyFiltersBody = document.getElementById('history-filters-body');
+    const HISTORY_FILTERS_COLLAPSED_KEY = 'kissSorcar.historyFiltersCollapsed';
+    if (historyFiltersToggle && historyFiltersBody) {
+      const setHistoryFiltersExpanded = expanded => {
+        historyFiltersBody.hidden = !expanded;
+        historyFiltersToggle.setAttribute(
+          'aria-expanded',
+          expanded ? 'true' : 'false',
+        );
+        historyFiltersToggle.classList.toggle('expanded', expanded);
+      };
+      let filtersCollapsed = false;
+      try {
+        filtersCollapsed =
+          window.localStorage.getItem(HISTORY_FILTERS_COLLAPSED_KEY) === '1';
+      } catch {
+        // localStorage unavailable — start expanded.
+      }
+      setHistoryFiltersExpanded(!filtersCollapsed);
+      historyFiltersToggle.addEventListener('click', () => {
+        const nowCollapsed =
+          historyFiltersToggle.getAttribute('aria-expanded') === 'true';
+        setHistoryFiltersExpanded(!nowCollapsed);
+        try {
+          window.localStorage.setItem(
+            HISTORY_FILTERS_COLLAPSED_KEY,
+            nowCollapsed ? '1' : '0',
+          );
+        } catch {
+          // localStorage unavailable — choice lasts this session only.
+        }
+      });
+    }
     const hfDateClear = document.getElementById('hf-date-clear');
     if (hfDateClear) {
       hfDateClear.addEventListener('click', e => {
