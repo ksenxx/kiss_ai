@@ -557,7 +557,10 @@ body {
   position: relative;
   flex-shrink: 0;
   margin: 8px 10px 0;
-  padding: 8px 32px 8px 12px;
+
+  /* 52px right inset fits the two floating icons (drawer chevron +
+     copy) side by side without covering the task text. */
+  padding: 8px 52px 8px 12px;
   border: 2px solid rgb(255 200 0 / 50%);
   border-radius: 8px;
   background: color-mix(in srgb, var(--accent) 4%, transparent);
@@ -628,6 +631,58 @@ body {
 #task-panel-copy * { user-select: none; }
 #task-panel-copy:hover { color: var(--fg); }
 #task-panel-copy.copied { color: var(--green); }
+
+/* ── Drawer widgets (task panel + input panel) ────────
+ * Each pinned panel is a drawer: a chevron toggle tucks its contents
+ * away into a slim bar and hands the freed height to the chat events
+ * area (#output — the flex:1 child of the #app column).  The toggles
+ * flip aria-expanded; the chevron rotates to always point where the
+ * drawer will move on click. */
+#task-panel-drawer-btn {
+  position: absolute;
+  right: 28px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  color: var(--dim);
+  cursor: pointer;
+  padding: 0;
+
+  /* 24x24 minimum hit target (WCAG 2.2 §2.5.8) — the icon inside
+     stays 1em; the box gives fingers something to land on. */
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s;
+  user-select: none;
+}
+#task-panel-drawer-btn * { user-select: none; }
+#task-panel-drawer-btn:hover { color: var(--fg); }
+
+#task-panel-drawer-btn:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+#task-panel-drawer-btn svg { transition: transform 0.2s ease; }
+#task-panel-drawer-btn[aria-expanded="false"] svg { transform: rotate(180deg); }
+
+/* Collapsed task drawer: a slim bar with the task clamped to one
+   ellipsized line; the Collapse/Uncollapse Chats row is tucked away. */
+#task-panel.drawer-collapsed {
+  padding-top: 4px;
+  padding-bottom: 4px;
+}
+
+#task-panel.drawer-collapsed #task-panel-text {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+#task-panel.drawer-collapsed #task-panel-collapse-btn { display: none; }
 
 /* ── Output Area ────────────────────────────────────── */
 #output {
@@ -1076,6 +1131,57 @@ body.remote-chat #welcome-config { display: none !important; }
   flex-shrink: 0; padding: 0 12px 12px; padding-top: 10px;
   border-top: 1px solid var(--border); background: var(--bg2);
   position: relative;
+}
+
+/* Input panel drawer handle: a small pill floating on the top border
+   of #input-area, always reachable to collapse/expand the composer. */
+#input-drawer-btn {
+  position: absolute;
+  top: -13px;
+  right: 24px;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  /* 40x24 pill: at least the 24px WCAG 2.2 minimum hit target in
+     both axes so the handle is comfortably tappable on phones. */
+  width: 40px;
+  height: 24px;
+  padding: 0;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--dim);
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s, border-color 0.15s;
+  user-select: none;
+}
+#input-drawer-btn * { user-select: none; }
+
+#input-drawer-btn:hover {
+  color: var(--fg);
+  border-color: color-mix(in srgb, var(--fg) 30%, transparent);
+}
+
+#input-drawer-btn:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+#input-drawer-btn svg { transition: transform 0.2s ease; }
+#input-drawer-btn[aria-expanded="false"] svg { transform: rotate(180deg); }
+
+/* Collapsed input drawer: hide EVERY child of #input-area except the
+   handle itself — including the inline-styled #autocomplete popover
+   and any merge/worktree action bar inserted by main.js (both toggle
+   inline display, hence the !important) — so the freed height goes to
+   the flex:1 events area (#output). */
+#input-area.drawer-collapsed > :not(#input-drawer-btn) { display: none !important; }
+
+#input-area.drawer-collapsed {
+  min-height: 12px;
+  padding-top: 12px;
+  padding-bottom: 2px;
 }
 #file-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
 #file-chips:empty { display: none; margin-bottom: 0; }

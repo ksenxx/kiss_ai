@@ -1572,6 +1572,8 @@
     '.chat-tab-close',
     '#input-clear-btn',
     '.search-clear-btn',
+    '#task-panel-drawer-btn',
+    '#input-drawer-btn',
   ].join(', ');
   document.addEventListener(
     'click',
@@ -1743,8 +1745,32 @@
       tabs: serialized,
       activeTabIndex: activeIdx,
       chatId: activeTabId,
+      taskDrawerCollapsed: taskDrawerCollapsed,
+      inputDrawerCollapsed: inputDrawerCollapsed,
     });
   }
+
+  // ── Drawer widgets: pinned task panel + input panel ─────────────
+  // Each panel is a drawer (see chat.html/main.css): collapsing it
+  // hands the freed height to the flex:1 events area (#output).  The
+  // two booleans ride in the same vscode.setState blob as the tabs
+  // (persistTabState above) so a webview dispose/reopen restores the
+  // drawers.  Seeded HERE — before the tab-restore IIFE below, whose
+  // makeTab/renderTabBar calls persistTabState and would otherwise
+  // overwrite the saved values with the defaults.
+  // The drawer-coverage markers delimit the feature code measured by
+  // test/drawerPanels.coverage.js (100% line coverage enforced).
+  // drawer-coverage:start
+  let taskDrawerCollapsed = false;
+  let inputDrawerCollapsed = false;
+  {
+    const _savedDrawers = vscode.getState();
+    if (_savedDrawers) {
+      taskDrawerCollapsed = !!_savedDrawers.taskDrawerCollapsed;
+      inputDrawerCollapsed = !!_savedDrawers.inputDrawerCollapsed;
+    }
+  }
+  // drawer-coverage:end
 
   // Initialize tabs — restore from saved state if available, else create one default tab
   // Race-fix: seed the closure-scoped ``selectedModel`` from the DOM
@@ -1893,6 +1919,9 @@
     'task-panel-collapse-label',
   );
   const taskPanelCopy = document.getElementById('task-panel-copy');
+  const taskPanelDrawerBtn = document.getElementById('task-panel-drawer-btn');
+  const inputDrawerBtn = document.getElementById('input-drawer-btn');
+  const inputAreaEl = document.getElementById('input-area');
   const statusTokens = document.getElementById('status-tokens');
   const statusBudget = document.getElementById('status-budget');
   const statusSteps = document.getElementById('status-steps');
@@ -2088,6 +2117,64 @@
         _scrollLock = true;
     });
   }
+
+  /**
+   * Apply the current drawer state (module vars ``taskDrawerCollapsed``
+   * / ``inputDrawerCollapsed``) to the pinned task panel and the input
+   * (composer) panel.  A collapsed drawer carries the
+   * ``drawer-collapsed`` class — CSS tucks its contents into a slim
+   * bar so the flex:1 events area (#output) absorbs the freed height —
+   * and its toggle flips aria-expanded plus the action it offers in
+   * aria-label/data-tooltip.
+   */
+  // drawer-coverage:start
+  function applyDrawerState() {
+    if (taskPanel && taskPanelDrawerBtn) {
+      taskPanel.classList.toggle('drawer-collapsed', taskDrawerCollapsed);
+      taskPanelDrawerBtn.setAttribute(
+        'aria-expanded',
+        taskDrawerCollapsed ? 'false' : 'true',
+      );
+      const taskLabel = taskDrawerCollapsed
+        ? 'Expand task panel'
+        : 'Collapse task panel';
+      taskPanelDrawerBtn.setAttribute('aria-label', taskLabel);
+      taskPanelDrawerBtn.setAttribute('data-tooltip', taskLabel);
+    }
+    if (inputAreaEl && inputDrawerBtn) {
+      inputAreaEl.classList.toggle('drawer-collapsed', inputDrawerCollapsed);
+      inputDrawerBtn.setAttribute(
+        'aria-expanded',
+        inputDrawerCollapsed ? 'false' : 'true',
+      );
+      const inputLabel = inputDrawerCollapsed
+        ? 'Expand input panel'
+        : 'Collapse input panel';
+      inputDrawerBtn.setAttribute('aria-label', inputLabel);
+      inputDrawerBtn.setAttribute('data-tooltip', inputLabel);
+    }
+  }
+
+  if (taskPanelDrawerBtn) {
+    taskPanelDrawerBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      taskDrawerCollapsed = !taskDrawerCollapsed;
+      applyDrawerState();
+      persistTabState();
+    });
+  }
+  if (inputDrawerBtn) {
+    inputDrawerBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      inputDrawerCollapsed = !inputDrawerCollapsed;
+      applyDrawerState();
+      persistTabState();
+    });
+  }
+  // Restore the persisted drawer state on load (webview reopen /
+  // remote web app reconnect).
+  applyDrawerState();
+  // drawer-coverage:end
 
   /**
    * Copy *text* via a temporary textarea + ``document.execCommand('copy')``
